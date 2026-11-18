@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "dev.ccord.copy-message-id",
+  "name": "Copy Message ID",
+  "version": "1.0.0",
+  "api": 1,
+  "main": "main.lua",
+  "description": "Adds Copy Message ID to the message context menu.",
+  "permissions": ["ui.contextMenu", "clipboard.write"],
+  "limits": {"memory_bytes": 8388608, "instructions": 2000000}
+}

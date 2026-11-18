@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "dev.ccord.starter-example",
+  "name": "Starter Example",
+  "version": "1.0.0",
+  "api": 1,
+  "main": "main.lua",
+  "description": "Starter template showing Safe APIs (require, storage, commands, contextMenu, time, log).",
+  "license": "MIT",
+  "permissions": []
+}

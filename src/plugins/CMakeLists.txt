@@ -1,0 +1,6 @@
+ccord_find_zlib()
+add_library(ccord_plugins STATIC plugins.c manifest.c zip.c)
+add_library(ccord::plugins ALIAS ccord_plugins)
+target_include_directories(ccord_plugins PUBLIC include)
+target_link_libraries(ccord_plugins PUBLIC ccord_core ccord_model ccord_store ccord_session ccord_ipc ZLIB::ZLIB)
+ccord_strict_warnings(ccord_plugins)
