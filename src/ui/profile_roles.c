@@ -1,0 +1,453 @@
+// SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
+// Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
+// Adding and removing a member's roles from the profile popout and the full profile.
+//
+// The role block already draws the member's roles (ui_draw_member_role_pills). This file adds, for a viewer who may
+// hand the role out (ccord_store_can_edit_role(..., assign = true)):
+//   - an x that replaces the colour dot of a removable role pill while the pointer is over it;
+//   - a '+' pill that ends the list and opens a small searchable list of the roles the member lacks and the viewer may
+//     give.
+// Both send the same admin request as Server Settings > Members (ccord_admin_add/remove_member_role through
+// ui_admin_submit); the pills follow the store, so nothing is changed locally. Hit rectangles are rebuilt on every
+// real draw (ui_profile_roles_begin_frame) so a closed surface leaves none behind.
+#include <ctype.h>
+#include <string.h>
+
+#include <ccord/core/alloc.h>
+
+#include "ui_internal.h"
+#include "ui_style.h"
+
+#define M(name) (ui->theme->m.name)
+#define COL(name) (ui->theme->c.name)
+
+#define PR_VISIBLE_ROWS 6u
+#define PR_LIST_W 220.0f
+#define PR_PLUS_W 28.0f
+#define PR_PILL_H 20.0f
+#define PR_X_W 18.0f   // the left part of a pill (where the colour dot sits) is the remove target
+
+struct ui_profile_roles {
+  struct {
+    ccord_rect rect, x_rect;
+    ccord_id role, guild, user;
+    bool removable, x_shown;
+  } pills[UI_PROFILE_ROLES_MAX];
+  size_t npills;
+  ccord_rect clip;   // the visible part of the surface drawing the block; hits outside it do not exist
+  ccord_rect plus;   // the + pill of the last draw (w == 0: none)
+  ccord_id plus_guild, plus_user;
+
+  bool open;
+  ccord_id guild, user;
+  ccord_text_edit filter;
+  bool filter_ready;
+  size_t sel;          // index among the filtered rows
+  size_t scroll;       // first visible row
+  bool swallow_up;     // a mouse-down was consumed: its mouse-up is too
+  ccord_rect box, input;
+  ccord_rect rows[PR_VISIBLE_ROWS];
+  ccord_id row_roles[PR_VISIBLE_ROWS];
+  size_t nrows;        // rows drawn
+  size_t nmatches;     // roles passing the filter
+  ccord_id match_ids[64];
+};
+
+static struct ui_profile_roles *pr_get(ccord_ui *ui, bool create)
+{
+  if (!ui->prof_roles && create) {
+    ui->prof_roles = ccord_calloc(1, sizeof *ui->prof_roles);
+    if (ui->prof_roles) {
+      ccord_text_edit_init(&ui->prof_roles->filter, 48u);
+      ui->prof_roles->filter_ready = true;
+    }
+  }
+  return ui->prof_roles;
+}
+
+void ui_profile_roles_destroy(ccord_ui *ui)
+{
+  ui_clan_popover_destroy(ui);
+  if (!ui || !ui->prof_roles) return;
+  if (ui->prof_roles->filter_ready) ccord_text_edit_free(&ui->prof_roles->filter);
+  ccord_free(ui->prof_roles);
+  ui->prof_roles = nullptr;
+}
+
+// ---- rules --------------------------------------------------------------------------------------------------------
+
+static bool pr_surface_open(const ccord_ui *ui)
+{
+  return ui->member_popover_open || ui->modal_kind == UI_MODAL_USER_PROFILE;
+}
+
+static bool pr_holds(const ccord_id *ids, size_t n, ccord_id role)
+{
+  for (size_t i = 0; i < n; i++) {
+    if (ids[i] == role) return true;
+  }
+  return false;
+}
+
+// A role the viewer may hand out or take away: a real, unmanaged, non-@everyone role the store's hierarchy allows.
+static bool pr_role_allowed(const ccord_ui *ui, ccord_id guild, const ccord_role *rl)
+{
+  if (!rl || rl->id == CCORD_ID_NONE || rl->id == guild || rl->managed || !rl->name || !rl->name[0]) return false;
+  ccord_id self = ccord_store_self_id(ui->d.store);
+  if (self == CCORD_ID_NONE) return false;
+  return ccord_store_can_edit_role(ui->d.store, guild, self, rl->id, true) == CCORD_PERM_ALLOWED;
+}
+
+bool ui_profile_roles_can_remove(const ccord_ui *ui, ccord_id guild, ccord_id role)
+{
+  if (!ui || !ui->d.store || guild == CCORD_ID_NONE || guild == CCORD_DM_GUILD_ID) return false;
+  return pr_role_allowed(ui, guild, ccord_store_role(ui->d.store, guild, role));
+}
+
+// The roles that could be added to `user`, filtered by `needle` (case-insensitive substring; empty = all). Fills up
+// to `cap` ids in `out` (nullable) and returns the full count.
+static size_t pr_assignable(const ccord_ui *ui, ccord_id guild, ccord_id user, const char *needle, ccord_id *out, size_t cap)
+{
+  const ccord_id *held = nullptr;
+  size_t nheld = 0;
+  if (!ccord_store_member_roles(ui->d.store, guild, user, &held, &nheld)) return 0;
+  size_t nroles = 0;
+  const ccord_role *roles = ccord_store_roles(ui->d.store, guild, &nroles);
+  size_t n = 0, nl = needle ? strlen(needle) : 0;
+  for (size_t i = 0; i < nroles; i++) {
+    const ccord_role *rl = &roles[i];
+    if (!pr_role_allowed(ui, guild, rl) || pr_holds(held, nheld, rl->id)) continue;
+    if (nl > 0) {
+      bool hit = false;
+      size_t len = strlen(rl->name);
+      for (size_t k = 0; !hit && k + nl <= len; k++) {
+        size_t j = 0;
+        while (j < nl && tolower((unsigned char)rl->name[k + j]) == tolower((unsigned char)needle[j])) j++;
+        hit = (j == nl);
+      }
+      if (!hit) continue;
+    }
+    if (out && n < cap) out[n] = rl->id;
+    n++;
+  }
+  return n;
+}
+
+bool ui_profile_roles_can_add(const ccord_ui *ui, ccord_id guild, ccord_id user)
+{
+  if (!ui || !ui->d.store || guild == CCORD_ID_NONE || guild == CCORD_DM_GUILD_ID || user == CCORD_ID_NONE) return false;
+  return pr_assignable(ui, guild, user, nullptr, nullptr, 0) > 0;
+}
+
+// ---- requests -----------------------------------------------------------------------------------------------------
+
+static void pr_change(ccord_ui *ui, ccord_id guild, ccord_id user, ccord_id role, bool add)
+{
+  ccord_admin_request req;
+  ccord_error err;
+  ccord_status st = add ? ccord_admin_add_member_role(&req, guild, user, role, nullptr, &err)
+                        : ccord_admin_remove_member_role(&req, guild, user, role, nullptr, &err);
+  if (st != CCORD_OK) {
+    ui_notice(ui, "Couldn't %s: %s", add ? "give the role" : "remove the role", err.message);
+    return;
+  }
+  ui_admin_submit(ui, &req);
+}
+
+// ---- drawing: pills -----------------------------------------------------------------------------------------------
+
+void ui_profile_roles_begin_frame(ccord_ui *ui)
+{
+  ui_clan_popover_begin_frame(ui);
+  struct ui_profile_roles *pr = ui->prof_roles;
+  if (!pr) return;
+  pr->npills = 0;
+  pr->plus = (ccord_rect){0};
+  pr->clip = (ccord_rect){0, 0, 1.0e6f, 1.0e6f};
+  pr->nrows = 0;
+}
+
+void ui_profile_roles_set_clip(ccord_ui *ui, ccord_rect clip)
+{
+  struct ui_profile_roles *pr = pr_get(ui, true);
+  if (pr) pr->clip = clip;
+}
+
+static ccord_rect pr_clip_rect(const struct ui_profile_roles *pr, ccord_rect a)
+{
+  float x0 = a.x > pr->clip.x ? a.x : pr->clip.x, y0 = a.y > pr->clip.y ? a.y : pr->clip.y;
+  float x1 = a.x + a.w < pr->clip.x + pr->clip.w ? a.x + a.w : pr->clip.x + pr->clip.w;
+  float y1 = a.y + a.h < pr->clip.y + pr->clip.h ? a.y + a.h : pr->clip.y + pr->clip.h;
+  if (x1 <= x0 || y1 <= y0) return (ccord_rect){0};
+  return (ccord_rect){x0, y0, x1 - x0, y1 - y0};
+}
+
+void ui_profile_roles_pill_overlay(ccord_ui *ui, ccord_renderer *r, ccord_id guild, ccord_id user, ccord_id role,
+                                   ccord_rect pill)
+{
+  struct ui_profile_roles *pr = pr_get(ui, true);
+  if (!pr || pr->npills >= UI_PROFILE_ROLES_MAX) return;
+  bool removable = ui_profile_roles_can_remove(ui, guild, role);
+  ccord_rect xr = pr_clip_rect(pr, (ccord_rect){pill.x, pill.y, PR_X_W, pill.h});
+  bool hover = removable && ui->mouse_in && !pr->open && ui_in_rect(ui->mx, ui->my, pr_clip_rect(pr, pill));
+  size_t i = pr->npills++;
+  pr->pills[i].rect = pill;
+  pr->pills[i].x_rect = removable ? xr : (ccord_rect){0};
+  pr->pills[i].role = role;
+  pr->pills[i].guild = guild;
+  pr->pills[i].user = user;
+  pr->pills[i].removable = removable;
+  pr->pills[i].x_shown = hover;
+  if (!hover) return;
+  float cx = pill.x + 9.0f, cy = pill.y + PR_PILL_H * 0.5f;
+  ccord_draw_circle(r, cx, cy, 6.5f, COL(bg_tertiary));
+  ccord_color c = COL(text_normal);
+  ccord_draw_line(r, (ccord_vec2){cx - 3.0f, cy - 3.0f}, (ccord_vec2){cx + 3.0f, cy + 3.0f}, 1.6f, c);
+  ccord_draw_line(r, (ccord_vec2){cx - 3.0f, cy + 3.0f}, (ccord_vec2){cx + 3.0f, cy - 3.0f}, 1.6f, c);
+}
+
+float ui_profile_roles_plus_width(void) { return PR_PLUS_W; }
+
+void ui_profile_roles_plus_draw(ccord_ui *ui, ccord_renderer *r, ccord_id guild, ccord_id user, ccord_rect pill)
+{
+  struct ui_profile_roles *pr = pr_get(ui, true);
+  if (!pr) return;
+  pr->plus = pill;
+  pr->plus_guild = guild;
+  pr->plus_user = user;
+  bool hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, pr_clip_rect(pr, pill));
+  bool active = pr->open && pr->guild == guild && pr->user == user;
+  ccord_draw_rrect(r, pill, 4.0f, (hover || active) ? COL(bg_item_hover) : COL(bg_tertiary));
+  float cx = pill.x + pill.w * 0.5f, cy = pill.y + pill.h * 0.5f;
+  ccord_color c = COL(text_header);
+  ccord_draw_line(r, (ccord_vec2){cx - 4.0f, cy}, (ccord_vec2){cx + 4.0f, cy}, 1.6f, c);
+  ccord_draw_line(r, (ccord_vec2){cx, cy - 4.0f}, (ccord_vec2){cx, cy + 4.0f}, 1.6f, c);
+}
+
+// ---- drawing: the list --------------------------------------------------------------------------------------------
+
+static void pr_close(ccord_ui *ui)
+{
+  struct ui_profile_roles *pr = ui->prof_roles;
+  if (!pr || !pr->open) return;
+  pr->open = false;
+  pr->nrows = 0;
+  pr->box = (ccord_rect){0};
+  ui->dirty = true;
+}
+
+static void pr_open(ccord_ui *ui, ccord_id guild, ccord_id user)
+{
+  struct ui_profile_roles *pr = pr_get(ui, true);
+  if (!pr) return;
+  pr->open = true;
+  pr->guild = guild;
+  pr->user = user;
+  pr->sel = 0;
+  pr->scroll = 0;
+  ccord_text_edit_clear(&pr->filter);
+  ui->dirty = true;
+}
+
+void ui_profile_roles_draw(ccord_ui *ui, ccord_renderer *r)
+{
+  struct ui_profile_roles *pr = ui ? ui->prof_roles : nullptr;
+  if (!pr || !pr->open) {
+    ui_clan_popover_draw(ui, r);
+    return;
+  }
+  if (!pr_surface_open(ui) || pr->plus.w <= 0.0f || pr->plus_guild != pr->guild || pr->plus_user != pr->user) {
+    pr_close(ui);   // the block is no longer on screen (or lost its permission)
+    return;
+  }
+  ccord_id *ids = pr->match_ids;
+  const char *needle = ccord_text_edit_cstr(&pr->filter);
+  pr->nmatches = pr_assignable(ui, pr->guild, pr->user, needle, ids, 64);
+  if (pr->nmatches > 64) pr->nmatches = 64;
+  if (pr->nmatches == 0 && needle[0] == '\0') {
+    pr_close(ui);
+    return;
+  }
+  if (pr->sel >= pr->nmatches) pr->sel = pr->nmatches ? pr->nmatches - 1u : 0;
+  if (pr->sel < pr->scroll) pr->scroll = pr->sel;
+  if (pr->sel >= pr->scroll + PR_VISIBLE_ROWS) pr->scroll = pr->sel + 1u - PR_VISIBLE_ROWS;
+
+  uis_tokens t = uis_tokens_of(ui);
+  size_t shown = pr->nmatches > PR_VISIBLE_ROWS ? PR_VISIBLE_ROWS : pr->nmatches;
+  if (shown == 0) shown = 1;   // the "No roles match" row
+  float in_h = 30.0f, pad = t.menu_pad;
+  float h = pad + in_h + 4.0f + (float)shown * t.menu_row_h + pad;
+  float x = pr->plus.x, y = pr->plus.y + pr->plus.h + 4.0f;
+  float ww = (float)ui->win_w, wh = (float)ui->win_h;
+  if (y + h > wh - 8.0f) y = pr->plus.y - 4.0f - h;
+  if (y < 8.0f) y = 8.0f;
+  if (x + PR_LIST_W > ww - 8.0f) x = ww - 8.0f - PR_LIST_W;
+  if (x < 8.0f) x = 8.0f;
+  pr->box = (ccord_rect){x, y, PR_LIST_W, h};
+  pr->input = (ccord_rect){x + pad, y + pad, PR_LIST_W - 2.0f * pad, in_h};
+
+  ui_popup_begin(ui, r, "profroles", 0, UI_POPUP_MS, 6.0f);
+  uis_popover_frame(ui, r, pr->box);
+  (void)uis_input(ui, r, pr->input, &pr->filter, "Search roles", (uis_state){.focused = true}, false, "profrolesq", 0);
+  float ry = pr->input.y + in_h + 4.0f;
+  pr->nrows = 0;
+  if (pr->nmatches == 0) {
+    ccord_text_style ms = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(text_muted));
+    const char *msg = "No roles match";
+    ccord_vec2 mt = ccord_text_measure(r, msg, strlen(msg), &ms, 0.0f);
+    ccord_text_draw(r, msg, strlen(msg), x + pad + 8.0f, ry + (t.menu_row_h - mt.y) * 0.5f, &ms, 0.0f);
+  }
+  for (size_t k = 0; k < shown && pr->scroll + k < pr->nmatches; k++) {
+    const ccord_role *rl = ccord_store_role(ui->d.store, pr->guild, ids[pr->scroll + k]);
+    if (!rl) continue;
+    ccord_rect row = {x + pad, ry + (float)k * t.menu_row_h, PR_LIST_W - 2.0f * pad, t.menu_row_h};
+    bool hv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, row);
+    uis_menu_row(ui, r, row, rl->name, (uis_state){.hover = hv || pr->scroll + k == pr->sel}, false, false, false,
+                 "profrolesrow", rl->id);
+    ccord_color rc = rl->color != 0 ? ui_rgb_color(rl->color) : COL(text_secondary);
+    ccord_draw_circle(r, row.x + row.w - 14.0f, row.y + row.h * 0.5f, 4.5f, rc);
+    pr->rows[pr->nrows] = row;
+    pr->row_roles[pr->nrows] = rl->id;
+    pr->nrows++;
+  }
+  ui_popup_end(r);
+  ui_clan_popover_draw(ui, r);
+}
+
+// ---- input --------------------------------------------------------------------------------------------------------
+
+static void pr_pick(ccord_ui *ui, ccord_id role)
+{
+  struct ui_profile_roles *pr = ui->prof_roles;
+  ccord_id g = pr->guild, u = pr->user;
+  pr_close(ui);
+  pr_change(ui, g, u, role, true);
+}
+
+bool ui_profile_roles_input(ccord_ui *ui, const ccord_input_event *ev)
+{
+  struct ui_profile_roles *pr = ui ? ui->prof_roles : nullptr;
+  if (!pr || !ev) return false;
+  bool surface = pr_surface_open(ui);
+  if (pr->open && !surface) pr_close(ui);
+  if (!pr->open && !surface) return false;
+
+  if (ev->type == CCORD_IN_MOUSE_UP && ev->button == 1 && pr->swallow_up) {
+    pr->swallow_up = false;
+    return true;
+  }
+  if (!pr->open) {
+    if (ev->type != CCORD_IN_MOUSE_DOWN || ev->button != 1) return false;
+    for (size_t i = 0; i < pr->npills; i++) {
+      if (pr->pills[i].removable && ui_in_rect(ev->x, ev->y, pr->pills[i].x_rect)) {
+        pr->swallow_up = true;
+        pr_change(ui, pr->pills[i].guild, pr->pills[i].user, pr->pills[i].role, false);
+        ui->dirty = true;
+        return true;
+      }
+    }
+    if (pr->plus.w > 0.0f && ui_in_rect(ev->x, ev->y, pr_clip_rect(pr, pr->plus))) {
+      pr->swallow_up = true;
+      pr_open(ui, pr->plus_guild, pr->plus_user);
+      return true;
+    }
+    return false;
+  }
+
+  switch (ev->type) {
+    case CCORD_IN_MOUSE_MOVE:
+      for (size_t k = 0; k < pr->nrows; k++) {
+        if (ui_in_rect(ev->x, ev->y, pr->rows[k]) && pr->sel != pr->scroll + k) {
+          pr->sel = pr->scroll + k;
+          ui->dirty = true;
+        }
+      }
+      return false;
+    case CCORD_IN_MOUSE_DOWN:
+      if (ev->button != 1) return true;
+      pr->swallow_up = true;
+      for (size_t k = 0; k < pr->nrows; k++) {
+        if (ui_in_rect(ev->x, ev->y, pr->rows[k])) {
+          pr_pick(ui, pr->row_roles[k]);
+          return true;
+        }
+      }
+      if (ui_in_rect(ev->x, ev->y, pr->box)) return true;   // the search field or the list's padding
+      pr_close(ui);   // outside (the + itself toggles): no request
+      return true;
+    case CCORD_IN_WHEEL:
+      if (ui_in_rect(ui->mx, ui->my, pr->box)) {
+        if (ev->wheel < 0.0f && pr->scroll + PR_VISIBLE_ROWS < pr->nmatches) pr->scroll++;
+        else if (ev->wheel > 0.0f && pr->scroll > 0) pr->scroll--;
+        ui->dirty = true;
+        return true;
+      }
+      return false;
+    case CCORD_IN_KEY_DOWN: {
+      bool ctrl = (ev->mods & (CCORD_MOD_CTRL | CCORD_MOD_SUPER)) != 0;
+      switch (ev->key) {
+        case CCORD_KEY_ESCAPE: pr_close(ui); break;
+        case CCORD_KEY_RETURN:
+          if (pr->nmatches > 0 && pr->sel < pr->nmatches) {
+            pr_pick(ui, pr->match_ids[pr->sel]);
+          }
+          break;
+        case CCORD_KEY_DOWN:
+          if (pr->sel + 1u < pr->nmatches) pr->sel++;
+          ui->dirty = true;
+          break;
+        case CCORD_KEY_UP:
+          if (pr->sel > 0) pr->sel--;
+          ui->dirty = true;
+          break;
+        case CCORD_KEY_BACKSPACE:
+          if (ctrl) ccord_text_edit_backspace_word(&pr->filter);
+          else ccord_text_edit_backspace(&pr->filter);
+          pr->sel = 0;
+          pr->scroll = 0;
+          ui->dirty = true;
+          break;
+        default: break;
+      }
+      return true;
+    }
+    case CCORD_IN_TEXT: {
+      ccord_error err;
+      (void)ccord_text_edit_insert(&pr->filter, ev->text, strlen(ev->text), &err);
+      pr->sel = 0;
+      pr->scroll = 0;
+      ui->dirty = true;
+      return true;
+    }
+    default: return false;
+  }
+}
+
+// ---- inspection (slices) ------------------------------------------------------------------------------------------
+
+void ui_profile_roles_debug_get(const ccord_ui *ui, ui_profile_roles_debug *out)
+{
+  if (!out) return;
+  *out = (ui_profile_roles_debug){0};
+  const struct ui_profile_roles *pr = ui ? ui->prof_roles : nullptr;
+  if (!pr) return;
+  out->plus = pr->plus;
+  out->open = pr->open;
+  out->box = pr->box;
+  out->input = pr->input;
+  out->npills = pr->npills;
+  for (size_t i = 0; i < pr->npills && i < UI_PROFILE_ROLES_MAX; i++) {
+    out->pills[i].rect = pr->pills[i].rect;
+    out->pills[i].x_rect = pr->pills[i].x_rect;
+    out->pills[i].role = pr->pills[i].role;
+    out->pills[i].removable = pr->pills[i].removable;
+    out->pills[i].x_shown = pr->pills[i].x_shown;
+  }
+  out->nrows = pr->nrows;
+  for (size_t k = 0; k < pr->nrows; k++) {
+    out->rows[k] = pr->rows[k];
+    out->row_roles[k] = pr->row_roles[k];
+  }
+  out->nmatches = pr->nmatches;
+  for (size_t k = 0; k < pr->nmatches && k < 64; k++) out->match_ids[k] = pr->match_ids[k];
+}
