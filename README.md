@@ -122,6 +122,25 @@ See the [Plugin Developer Guide](docs/plugin-api/README.md), [Plugin API Referen
 
 ---
 
+## File Locations
+
+| Purpose | Default Location |
+|---|---|
+| Active auth token (`0600`) | `$XDG_CONFIG_HOME/ccord/token` (`~/.config/ccord/token`) |
+| Multi-account keyring (`0600`) | `$XDG_CONFIG_HOME/ccord/accounts.ini` & `tokens/` |
+| Settings (`settings.ini`) | `$XDG_DATA_HOME/ccord/settings.ini` (`~/.local/share/ccord/settings.ini`, or `--data-dir`) |
+| Installed extensions | `$XDG_DATA_HOME/ccord/plugins/installed/` |
+| Extension storage | `$XDG_DATA_HOME/ccord/plugins/<plugin_id>/storage.json` |
+| Warm-start & scheduled message data | `$XDG_DATA_HOME/ccord/accounts/<user_id>/` |
+| Media & API disk cache | `$XDG_CACHE_HOME/ccord/` (`~/.cache/ccord/` — `media/` and `api/`) |
+| Single-instance control socket | `$XDG_RUNTIME_DIR/ccord/control.sock` |
+| Rich Presence IPC socket | `$XDG_RUNTIME_DIR/discord-ipc-0` |
+| Installed binaries | `<prefix>/bin/ccord`, `<prefix>/bin/ccord-plugin-host` |
+| Installed themes, fonts & bundled extensions | `<prefix>/share/ccord/{themes,fonts,extensions}/` (or `$CCORD_ASSET_DIR`) |
+| Desktop launcher & icons | `<prefix>/share/applications/C-Cord.desktop`, `<prefix>/share/icons/hicolor/` |
+
+---
+
 ## Developer Information
 
 ### Architecture & Documentation
