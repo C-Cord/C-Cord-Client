@@ -1,0 +1,75 @@
+name: CI
+
+"on":
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-test:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: normal
+            build_dir: build
+            cmake_args: ""
+          - name: asan-ubsan
+            build_dir: build-asan
+            cmake_args: "-DCCORD_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug"
+          - name: release-install
+            build_dir: build-release
+            cmake_args: "-DCCORD_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/tmp/ccord-stage"
+    env:
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel cmake ninja git nodejs python \
+            sdl3 sdl3_ttf ffmpeg pipewire libpng libjpeg-turbo libwebp \
+            opus libsodium curl openssl nlohmann-json glib2 speexdsp dbus \
+            libx11 libxext libxcomposite libxrandr libxfixes
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Configure (${{ matrix.name }})
+        run: |
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            VER="${GITHUB_REF_NAME}"
+          else
+            VER="0.1.0+${GITHUB_SHA::7}"
+          fi
+          cmake -S . -B ${{ matrix.build_dir }} -G Ninja \
+            -DCCORD_WERROR=ON \
+            -DCCORD_VERSION="${VER}" \
+            ${{ matrix.cmake_args }}
+      - name: Build (${{ matrix.name }})
+        run: cmake --build ${{ matrix.build_dir }} --parallel "$(nproc)"
+      - name: Test (${{ matrix.name }})
+        run: |
+          if [ "${{ matrix.name }}" = "release-install" ]; then
+            cmake --install ${{ matrix.build_dir }}
+            /tmp/ccord-stage/bin/ccord --version
+            (cd /tmp && /tmp/ccord-stage/bin/ccord --headless --mock --data-dir /tmp/stage-data --screenshot /tmp/stage-shot.png)
+            test -s /tmp/stage-shot.png
+          else
+            ctest --test-dir ${{ matrix.build_dir }} --output-on-failure
+          fi
