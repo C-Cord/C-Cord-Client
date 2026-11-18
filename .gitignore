@@ -1,0 +1,62 @@
+# Build trees and CMake output (in-source and out-of-source)
+build*/
+/Testing/
+/CMakeFiles/
+/CMakeCache.txt
+/cmake_install.cmake
+/CTestTestfile.cmake
+/compile_commands.json
+/c23probe.c
+
+# Local tool state (agent transcripts, sqlite catalogs, editor settings)
+/.internal/
+.relo/
+.vscode/
+.idea/
+.clangd/
+.cache/
+*.swp
+*.swo
+*~
+
+# Local secrets and session state (anchored so they cannot match source directories)
+/token
+*.token
+/token.json
+/session.json
+/credentials.json
+/auth.json
+/.env
+/.env.*
+*.session
+
+# Crash dumps and logs
+*.log
+/core
+/core.*
+*.core
+/vgcore.*
+*.stackdump
+
+# Sanitizer, coverage and fuzz scratch
+/asan.*
+/ubsan.*
+/lsan.*
+/sanitizer.*
+*.gcda
+*.gcno
+*.gcov
+*.profraw
+*.profdata
+/coverage/
+/gcov/
+/fuzz-corpus/
+/fuzz-out/
+/crash-*
+/hang-*
+/leak-*
+/timeout-*
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]

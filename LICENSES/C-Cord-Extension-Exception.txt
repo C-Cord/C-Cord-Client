@@ -1,0 +1,55 @@
+C-Cord Extension Exception to the GNU Affero General Public License v3.0
+=========================================================================
+
+Additional Permission under GNU AGPL version 3 section 7:
+
+As a special exception to the terms and conditions of the GNU Affero General
+Public License version 3.0 ("AGPL-3.0"), the copyright holders of C-Cord grant
+you permission to create, package (including as `.cce` / `.zip` archives),
+run, and distribute independent C-Cord Extensions ("Extensions") under any
+license of your choosing—including permissive open-source licenses or
+proprietary/closed-source licenses—without being required to license those
+Extensions under the AGPL-3.0. You are also granted permission to combine such
+Extensions with C-Cord through the documented out-of-process Plugin API and to
+distribute the resulting combination, provided that C-Cord itself remains
+subject to the AGPL-3.0 and ALL of the following conditions are met:
+
+1. Out-of-Process Plugin API Boundary Only
+   The Extension consists solely of Lua scripts, a `plugin.json` manifest, and
+   Extension-specific assets (such as data files or Extension UI content) that
+   interact with C-Cord exclusively through the documented C-Cord Plugin API
+   (`docs/plugin-api/README.md` and `docs/plugin-api/api-reference.md`, as
+   provided with the applicable version of C-Cord) across the out-of-process
+   `ccord-plugin-host` IPC boundary. Extension-specific assets do not include
+   C-Cord native libraries, executable components derived from C-Cord, or
+   components that circumvent the documented Plugin API or its permission model.
+
+2. No Linking or Incorporation of C-Cord Native Code
+   The Extension does not copy, incorporate, derive from, or statically or
+   dynamically link against C-Cord's C or C++ source code, header files, object
+   files, static libraries, shared libraries, or native executable components
+   (other than copying or adapting `extensions/starter-example/`, which is
+   separately licensed under the MIT License and remains subject to that
+   license's notice requirements).
+
+3. C-Cord Modifications Remain Under AGPL-3.0
+   This exception applies strictly to independent Extensions. Any modification
+   to C-Cord itself—including `ccord`, `ccord-plugin-host`, the plugin manager,
+   the IPC protocol, or any native module—remains fully subject to the
+   AGPL-3.0. In particular, you may not modify C-Cord or `ccord-plugin-host` to
+   bypass the Plugin API or permission model and claim the modified host code
+   as an Extension under this exception.
+
+4. Combined Distributions
+   If you distribute C-Cord together with one or more Extensions, C-Cord itself
+   must still be distributed in full compliance with the AGPL-3.0 (including
+   making C-Cord's complete corresponding source code available), while the
+   independent Extensions may remain under their respective licenses.
+
+5. Copyright Authorization
+   This additional permission applies only to C-Cord code for which the
+   copyright holders have authorized this exception.
+
+If you modify C-Cord, you may extend this exception to your version of C-Cord,
+but you are not obligated to do so. If you do not wish to do so, delete this
+exception statement from your version in accordance with AGPL-3.0 section 7.
