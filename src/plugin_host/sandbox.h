@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
+// Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
+#pragma once
+// Host-private sandbox: one Lua 5.5 state per plugin. Not installed; only ccord-plugin-host and its tests include this.
+#include <ccord/core/arena.h>
+#include <ccord/core/error.h>
+#include <ccord/core/json.h>
+#include <ccord/core/log.h>
+#include <ccord/ipc/perm.h>
+
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct ccord_sandbox ccord_sandbox;
+
+typedef enum ccord_sandbox_limit {
+  CCORD_SB_LIMIT_NONE,
+  CCORD_SB_LIMIT_INSTRUCTIONS,   // only when a non-zero cap is explicitly configured
+  CCORD_SB_LIMIT_MEMORY,         // only when a non-zero cap is explicitly configured
+  CCORD_SB_LIMIT_UNDECLARED,     // undeclared Class 2 / Class 3 API called -> fatal
+} ccord_sandbox_limit;
+
+// How the sandbox talks to the main process. The IPC implementation is in main.c; tests pass fakes.
+typedef struct ccord_sandbox_services {
+  void *ud;
+  void (*request)(void *ud, const char *method, const char *params_json);   // fire and forget
+  // Optional synchronous IPC request-response (used by store.*, clipboard.read, fs.*, etc.).
+  bool (*request_sync)(void *ud, const char *method, const char *params_json, ccord_arena *arena,
+                       const ccord_json **out_result, char *err_buf, size_t err_cap);
+  void (*log)(void *ud, ccord_log_level level, const char *text);
+} ccord_sandbox_services;
+
+typedef struct ccord_sandbox_config {
+  const char *plugin_id, *plugin_name, *plugin_version, *plugin_dir;
+  ccord_perm_set perms;
+  uint64_t memory_bytes;      // 0 -> unlimited
+  uint64_t instructions;      // 0 -> unlimited
+} ccord_sandbox_config;
+
+ccord_sandbox *ccord_sandbox_create(const ccord_sandbox_config *cfg, const ccord_sandbox_services *svc, ccord_error *err);
+void ccord_sandbox_destroy(ccord_sandbox *sb);
+
+// Installs cached storage values before load.
+[[nodiscard]] ccord_status ccord_sandbox_seed_storage(ccord_sandbox *sb, const ccord_json *obj, ccord_error *err);
+// Compiles text-only main.lua and runs its top level once (registers handlers). Lua errors -> CCORD_ERR_INVALID.
+[[nodiscard]] ccord_status ccord_sandbox_load(ccord_sandbox *sb, const char *src, size_t len, ccord_error *err);
+// Calls every handler of `event` with `data` as a table. Handler errors are logged, not returned.
+[[nodiscard]] ccord_status ccord_sandbox_emit(ccord_sandbox *sb, const char *event, const ccord_json *data, ccord_error *err);
+// Calls the action of a context menu item registered by this plugin with the context table.
+[[nodiscard]] ccord_status ccord_sandbox_menu_invoke(ccord_sandbox *sb, const char *item_id, const ccord_json *ctx, ccord_error *err);
+// Calls the on_event handler of a UI panel mounted by this plugin with the event table.
+[[nodiscard]] ccord_status ccord_sandbox_panel_event(ccord_sandbox *sb, const char *panel_id, const ccord_json *ev, ccord_error *err);
+// Calls a registered command. *out_text is a ccord_free-able copy of the returned string, or nullptr when nothing was returned.
+[[nodiscard]] ccord_status ccord_sandbox_command_run(ccord_sandbox *sb, const char *name, const char *args, const ccord_json *ctx,
+                                                     char **out_text, ccord_error *err);
+// Fires any due time.after / time.every callbacks.
+[[nodiscard]] ccord_status ccord_sandbox_tick(ccord_sandbox *sb, uint64_t now_ms, ccord_error *err);
+// Sticky: only set if an explicit non-zero limit was configured and hit.
+ccord_sandbox_limit ccord_sandbox_limit_hit(const ccord_sandbox *sb);
