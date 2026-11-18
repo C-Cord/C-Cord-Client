@@ -1,0 +1,11 @@
+add_library(ccord_rpc STATIC activity.c game_detect.c rpc.c)
+add_library(ccord::rpc ALIAS ccord_rpc)
+target_include_directories(ccord_rpc PUBLIC include)
+target_link_libraries(ccord_rpc PUBLIC ccord_core)
+ccord_strict_warnings(ccord_rpc)
+
+if(CCORD_BUILD_TESTS)
+  ccord_add_test(NAME test_rpc_activity SOURCES tests/test_rpc_activity.c LIBS ccord_rpc LABELS unit)
+  ccord_add_test(NAME test_game_detect SOURCES tests/test_game_detect.c LIBS ccord_rpc LABELS unit)
+  ccord_add_test(NAME test_rpc SOURCES tests/test_rpc.c LIBS ccord_rpc LABELS unit)
+endif()
