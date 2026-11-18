@@ -1,0 +1,32 @@
+// SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
+// Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
+#pragma once
+#include <ccord/core/config.h>
+typedef enum ccord_key : uint8_t {
+  CCORD_KEY_UNKNOWN, CCORD_KEY_RETURN, CCORD_KEY_ESCAPE, CCORD_KEY_BACKSPACE, CCORD_KEY_DELETE, CCORD_KEY_TAB,
+  CCORD_KEY_LEFT, CCORD_KEY_RIGHT, CCORD_KEY_UP, CCORD_KEY_DOWN, CCORD_KEY_HOME, CCORD_KEY_END,
+  CCORD_KEY_PAGEUP, CCORD_KEY_PAGEDOWN, CCORD_KEY_A, CCORD_KEY_C, CCORD_KEY_V, CCORD_KEY_X,
+  CCORD_KEY_Z, CCORD_KEY_Y, CCORD_KEY_B, CCORD_KEY_I, CCORD_KEY_U, CCORD_KEY_S, CCORD_KEY_E,
+  CCORD_KEY_F, CCORD_KEY_K, CCORD_KEY_P, CCORD_KEY_G, CCORD_KEY_M, CCORD_KEY_D, CCORD_KEY_T, CCORD_KEY_L,
+  CCORD_KEY_SLASH, CCORD_KEY_Q
+} ccord_key;
+enum { CCORD_MOD_SHIFT = 1, CCORD_MOD_CTRL = 2, CCORD_MOD_ALT = 4, CCORD_MOD_SUPER = 8 };
+typedef enum ccord_input_type : uint8_t {
+  CCORD_IN_NONE, CCORD_IN_QUIT, CCORD_IN_RESIZE, CCORD_IN_FOCUS, CCORD_IN_MOUSE_MOVE, CCORD_IN_MOUSE_DOWN,
+  CCORD_IN_MOUSE_UP, CCORD_IN_MOUSE_LEAVE, CCORD_IN_WHEEL, CCORD_IN_KEY_DOWN, CCORD_IN_TEXT
+} ccord_input_type;
+typedef struct ccord_input_event {
+  ccord_input_type type;
+  uint8_t button;      // 1 left, 2 middle, 3 right, 4 back (X1), 5 forward (X2)
+  uint8_t clicks;      // 1 single, 2 double
+  uint8_t mods;        // CCORD_MOD_* bit set
+  ccord_key key;
+  float x, y;          // MOUSE_*: logical px. RESIZE: x=width y=height (logical px). WHEEL: x,y = pointer pos
+  float wheel;         // WHEEL: positive = scroll content up (towards older messages), in "notches" (1.0 = one notch)
+  bool focused;        // FOCUS
+  char text[32];       // TEXT: UTF-8, NUL-terminated, valid. IME_PREEDIT: composition string (empty = clear).
+                       // HOTKEY: shortcut id. DROP_FILE: 31-byte path preview.
+  int32_t ime_start;   // IME_PREEDIT: cursor offset within text, in codepoints (0 when unset)
+  int32_t ime_length;  // IME_PREEDIT: selection length within text, in codepoints (0 when none)
+} ccord_input_event;
+typedef enum ccord_cursor_kind : uint8_t { CCORD_CURSOR_DEFAULT, CCORD_CURSOR_POINTER, CCORD_CURSOR_TEXT } ccord_cursor_kind;
