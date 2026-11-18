@@ -1,0 +1,104 @@
+# C-Cord light theme ("Warm Stone"). Keys are strict: every key listed here must be present exactly once.
+# Warm stone outer chrome and soft paper workspace sheet; layout metrics and fonts match c-cord-dark.
+
+[meta]
+id = c-cord-light
+name = Warm Stone
+
+[colors]
+bg_primary = #faf9f6
+bg_secondary = #f1f0ec
+bg_tertiary = #e8e6e1
+bg_floating = #ffffff
+bg_input = #eeede8
+bg_user_panel = #eae8e3
+bg_message_hover = #f3f2ee
+bg_item_hover = #e4e2dc
+bg_item_selected = #d8d5ce
+bg_guild_idle = #f5f4f0
+divider = #dcd9d0
+border_subtle = #dcd9d0
+scrollbar_thumb = #c2bfb6
+scrollbar_track = #f1f0ec
+text_normal = #27272a
+text_muted = #71717a
+text_header = #18181b
+text_secondary = #52525b
+text_link = #4350c8
+text_on_brand = #ffffff
+text_placeholder = #8e8e98
+text_interactive_hover = #18181b
+text_interactive_active = #09090b
+brand = #4f5bd5
+brand_hover = #414cb8
+status_online = #2d9450
+status_idle = #c98a18
+status_dnd = #d9383d
+status_offline = #71717a
+danger = #d9383d
+mention_bg = #4f5bd526
+selection = #4f5bd54d
+caret = #18181b
+pill = #18181b
+overlay = #18181b66
+avatar_0 = #4f5bd5
+avatar_1 = #2d8a6d
+avatar_2 = #b87e22
+avatar_3 = #9e4b7a
+avatar_4 = #bf4949
+avatar_5 = #3f7e9c
+
+[metrics]
+server_list_width = 60
+channel_list_width = 236
+member_list_width = 232
+header_height = 44
+user_panel_height = 52
+guild_icon_size = 40
+guild_icon_gap = 6
+guild_icon_radius = 11
+guild_icon_radius_active = 8
+pill_width = 3
+pill_height_hover = 14
+pill_height_active = 22
+channel_item_height = 32
+channel_item_margin_x = 8
+channel_item_pad_x = 8
+channel_item_radius = 6
+category_height = 30
+avatar_size = 38
+avatar_size_small = 24
+member_item_height = 42
+member_group_height = 30
+status_dot_size = 10
+message_pad_x = 16
+message_text_x = 68
+message_group_gap = 16
+message_line_gap = 2
+message_merge_ms = 420000
+line_height_factor = 1.375
+composer_margin_x = 16
+composer_margin_bottom = 18
+composer_min_height = 44
+composer_max_height = 300
+composer_radius = 8
+composer_pad_x = 16
+composer_pad_y = 11
+scrollbar_width = 8
+scrollbar_min_thumb = 40
+context_menu_min_width = 188
+context_menu_item_height = 32
+context_menu_radius = 6
+context_menu_pad = 6
+settings_sidebar_width = 218
+hover_anim_ms = 120
+min_window_width = 640
+min_window_height = 400
+hide_members_below_width = 1000
+font_size_base = 16
+font_size_small = 14
+font_size_large = 20
+
+[fonts]
+font_regular = fonts/NotoSans-Regular.ttf
+font_bold = fonts/NotoSans-Bold.ttf

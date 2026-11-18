@@ -1,0 +1,104 @@
+# C-Cord default dark theme ("Matte Graphite"). Keys are strict: every key listed here must be present exactly once.
+# Neutral matte chrome and warm-graphite inset workspace sheet with restrained semantic accents.
+
+[meta]
+id = c-cord-dark
+name = Matte Graphite
+
+[colors]
+bg_primary = #24242a
+bg_secondary = #1e1e23
+bg_tertiary = #141417
+bg_floating = #2a2a31
+bg_input = #2c2c34
+bg_user_panel = #18181c
+bg_message_hover = #28282f
+bg_item_hover = #282830
+bg_item_selected = #32323c
+bg_guild_idle = #202026
+divider = #2e2e37
+border_subtle = #2d2d36
+scrollbar_thumb = #363641
+scrollbar_track = #1e1e23
+text_normal = #d4d4d8
+text_muted = #868692
+text_header = #ededef
+text_secondary = #a1a1aa
+text_link = #7c8af6
+text_on_brand = #ffffff
+text_placeholder = #5e5e6a
+text_interactive_hover = #e4e4e7
+text_interactive_active = #f4f4f6
+brand = #6e7bf2
+brand_hover = #5a67de
+status_online = #3ba55d
+status_idle = #d99b26
+status_dnd = #e5484d
+status_offline = #6e6e7a
+danger = #e5484d
+mention_bg = #6e7bf229
+selection = #6e7bf259
+caret = #ededef
+pill = #ededef
+overlay = #000000cc
+avatar_0 = #5c6bc0
+avatar_1 = #2e8b6e
+avatar_2 = #c4882b
+avatar_3 = #a85584
+avatar_4 = #c95252
+avatar_5 = #4a89a8
+
+[metrics]
+server_list_width = 60
+channel_list_width = 236
+member_list_width = 232
+header_height = 44
+user_panel_height = 52
+guild_icon_size = 40
+guild_icon_gap = 6
+guild_icon_radius = 11
+guild_icon_radius_active = 8
+pill_width = 3
+pill_height_hover = 14
+pill_height_active = 22
+channel_item_height = 32
+channel_item_margin_x = 8
+channel_item_pad_x = 8
+channel_item_radius = 6
+category_height = 30
+avatar_size = 38
+avatar_size_small = 24
+member_item_height = 42
+member_group_height = 30
+status_dot_size = 10
+message_pad_x = 16
+message_text_x = 68
+message_group_gap = 16
+message_line_gap = 2
+message_merge_ms = 420000
+line_height_factor = 1.375
+composer_margin_x = 16
+composer_margin_bottom = 18
+composer_min_height = 44
+composer_max_height = 300
+composer_radius = 8
+composer_pad_x = 16
+composer_pad_y = 11
+scrollbar_width = 8
+scrollbar_min_thumb = 40
+context_menu_min_width = 188
+context_menu_item_height = 32
+context_menu_radius = 6
+context_menu_pad = 6
+settings_sidebar_width = 218
+hover_anim_ms = 120
+min_window_width = 640
+min_window_height = 400
+hide_members_below_width = 1000
+font_size_base = 16
+font_size_small = 14
+font_size_large = 20
+
+[fonts]
+font_regular = fonts/NotoSans-Regular.ttf
+font_bold = fonts/NotoSans-Bold.ttf

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=C-Cord
+GenericName=Chat Client
+Comment=Lightweight native Discord client
+Exec=ccord %u
+Icon=C-Cord
+Terminal=false
+Categories=Network;InstantMessaging;Chat;
+MimeType=x-scheme-handler/discord;x-scheme-handler/ccord;
+StartupWMClass=C-Cord
+StartupNotify=true

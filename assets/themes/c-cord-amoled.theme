@@ -1,0 +1,104 @@
+# C-Cord AMOLED theme ("Obsidian"): pure-black backgrounds for OLED screens. Keys are strict: every key must be present exactly once.
+# Neutral high-contrast obsidian surfaces and layout metrics matching Matte Graphite.
+
+[meta]
+id = c-cord-amoled
+name = Obsidian
+
+[colors]
+bg_primary = #000000
+bg_secondary = #08080a
+bg_tertiary = #000000
+bg_floating = #121216
+bg_input = #141419
+bg_user_panel = #000000
+bg_message_hover = #0d0d11
+bg_item_hover = #18181e
+bg_item_selected = #22222a
+bg_guild_idle = #0e0e12
+divider = #1f1f26
+border_subtle = #1b1b22
+scrollbar_thumb = #24242d
+scrollbar_track = #08080a
+text_normal = #d8d8dc
+text_muted = #868692
+text_header = #f2f2f5
+text_secondary = #a1a1aa
+text_link = #8592f8
+text_on_brand = #ffffff
+text_placeholder = #5c5c68
+text_interactive_hover = #e8e8ec
+text_interactive_active = #ffffff
+brand = #7c86f7
+brand_hover = #6974e6
+status_online = #3ba55d
+status_idle = #d99b26
+status_dnd = #e5484d
+status_offline = #6e6e7a
+danger = #e5484d
+mention_bg = #7c86f729
+selection = #7c86f759
+caret = #f2f2f5
+pill = #f2f2f5
+overlay = #000000cc
+avatar_0 = #5c6bc0
+avatar_1 = #2e8b6e
+avatar_2 = #c4882b
+avatar_3 = #a85584
+avatar_4 = #c95252
+avatar_5 = #4a89a8
+
+[metrics]
+server_list_width = 60
+channel_list_width = 236
+member_list_width = 232
+header_height = 44
+user_panel_height = 52
+guild_icon_size = 40
+guild_icon_gap = 6
+guild_icon_radius = 11
+guild_icon_radius_active = 8
+pill_width = 3
+pill_height_hover = 14
+pill_height_active = 22
+channel_item_height = 32
+channel_item_margin_x = 8
+channel_item_pad_x = 8
+channel_item_radius = 6
+category_height = 30
+avatar_size = 38
+avatar_size_small = 24
+member_item_height = 42
+member_group_height = 30
+status_dot_size = 10
+message_pad_x = 16
+message_text_x = 68
+message_group_gap = 16
+message_line_gap = 2
+message_merge_ms = 420000
+line_height_factor = 1.375
+composer_margin_x = 16
+composer_margin_bottom = 18
+composer_min_height = 44
+composer_max_height = 300
+composer_radius = 8
+composer_pad_x = 16
+composer_pad_y = 11
+scrollbar_width = 8
+scrollbar_min_thumb = 40
+context_menu_min_width = 188
+context_menu_item_height = 32
+context_menu_radius = 6
+context_menu_pad = 6
+settings_sidebar_width = 218
+hover_anim_ms = 120
+min_window_width = 640
+min_window_height = 400
+hide_members_below_width = 1000
+font_size_base = 16
+font_size_small = 14
+font_size_large = 20
+
+[fonts]
+font_regular = fonts/NotoSans-Regular.ttf
+font_bold = fonts/NotoSans-Bold.ttf
