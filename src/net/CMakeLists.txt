@@ -1,4 +1,4 @@
-set(CCORD_NET_SOURCES mock_transport.c discord_proto.c governor.c gateway_pace.c voice_reconnect.c admin.c profile_edit.c app_lookup.c rtp_h264.c voice_audio.c voice_dsp.c voice_dave.c detectable.c)
+set(CCORD_NET_SOURCES mock_transport.c discord_proto.c governor.c gateway_pace.c voice_reconnect.c admin.c profile_edit.c app_lookup.c rtp_h264.c voice_audio.c voice_dsp.c voice_dave.c detectable.c http_fetch.c)
 if(CCORD_LIVE_ACCOUNT)
   include(CCordDeps)
   ccord_find_curl()
@@ -25,6 +25,7 @@ endif()
 if(CCORD_LIVE_ACCOUNT)
   # detectable.c fetches /applications/detectable through the live REST queue.
   set_source_files_properties(detectable.c PROPERTIES COMPILE_DEFINITIONS CCORD_DETECTABLE_LIVE=1)
+  set_source_files_properties(http_fetch.c PROPERTIES COMPILE_DEFINITIONS CCORD_HTTP_FETCH_LIVE=1)
 endif()
 add_library(ccord_net STATIC ${CCORD_NET_SOURCES})
 add_library(ccord::net ALIAS ccord_net)

@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _GNU_SOURCE
 #include <ccord/plugins/plugins.h>
+#include "catalog.h"
 #include "zip.h"
 
 #include <ccord/core/alloc.h>
@@ -123,6 +124,7 @@ struct ccord_plugins {
   size_t nsearch;
   plugin *plugins;
   size_t nplugins, capplugins;
+  ccord_catalog *catalog;
   ccord_sub_id sub;
   uint64_t now_ms;
 };
@@ -241,13 +243,24 @@ static bool valid_plain_text(const char *s, size_t n, size_t max)
 
 static void publish_state(ccord_plugins *m, plugin *p)
 {
+  ccord_catalog_local_overlay ov = {0};
+  bool has_ov = m->catalog && ccord_catalog_query_overlay(m->catalog, p->m.id, p->m.version, p->consented_perms, &ov);
+  ccord_plugin_tier tier = p->is_bundled ? CCORD_TIER_OFFICIAL : (has_ov ? ov.tier : CCORD_TIER_UNKNOWN);
   ccord_plugin_info info = {
     .id = p->m.id, .name = p->m.name, .version = p->m.version,
     .description = p->m.description,
     .permissions = p->perm_str,
     .risk_class = (uint8_t)ccord_perm_max_class(p->m.perms),
+    .tier = tier,
+    .is_bundled = p->is_bundled,
+    .auto_update = has_ov ? ov.auto_update : true,
     .enabled = p->enabled,
     .consent_granted = p->consent_granted,
+    .update_needs_review = has_ov ? ov.update_needs_review : false,
+    .update_version = has_ov ? ov.update_version : "",
+    .warning_sev = has_ov ? ov.warning_sev : CCORD_WARN_NONE,
+    .warning_title = has_ov ? ov.warning_title : "",
+    .warning_message = has_ov ? ov.warning_message : "",
     .state = p->state, .error = p->error,
   };
   ccord_error err = {0};
@@ -1784,6 +1797,7 @@ void ccord_plugins_pump(ccord_plugins *m, uint64_t now_ms)
     }
     if (p->storage_enabled && p->dirty && now_ms - p->last_save_ms >= SAVE_INTERVAL_MS) storage_save(m, p, now_ms);
   }
+  if (m->catalog) ccord_catalog_pump(m->catalog, now_ms);
 }
 
 // ---------------------------------------------------------------- spawn and discovery
@@ -2176,6 +2190,8 @@ void ccord_plugins_shutdown(ccord_plugins *m)
 void ccord_plugins_destroy(ccord_plugins *m)
 {
   if (!m) return;
+  ccord_catalog_destroy(m->catalog);
+  m->catalog = nullptr;
   ccord_plugins_shutdown(m);
   for (size_t i = 0; i < m->nplugins; i++) {
     plugin *p = &m->plugins[i];
@@ -2382,6 +2398,94 @@ static bool cb_import_pkg(void *ud, const char *pkg, char *eb, size_t ec)
   return ccord_plugins_import_package(ud, pkg, eb, ec);
 }
 
+bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, size_t err_cap)
+{
+  if (!m || !id || !id[0]) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "invalid plugin id");
+    return false;
+  }
+  plugin *p = find_owner(m, id);
+  if (!p) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "plugin not found");
+    return false;
+  }
+  if (p->is_bundled || strncmp(p->m.id, "dev.ccord.", 10) == 0) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "cannot uninstall bundled extension");
+    return false;
+  }
+  stop_host(m, p);
+  ccord_contrib_remove_owner(m->contrib, p->m.id);
+  (void)ccord_contrib_remove_plugin(m->contrib, p->m.id);
+
+  if (m->has_data_dir) {
+    char inst_dir[PBUF + 128];
+    snprintf(inst_dir, sizeof inst_dir, "%s/plugins/installed/%s", m->data_dir, p->m.id);
+    struct stat st;
+    if (lstat(inst_dir, &st) == 0) rm_dir_recursive(inst_dir);
+  }
+  for (size_t k = 0; k < p->nitems; k++) ccord_free(p->items[k].json);
+  ccord_free(p->items);
+  ccord_free(p->source);
+  p->used = false;
+  p->items = nullptr;
+  p->nitems = 0;
+  p->source = nullptr;
+  p->source_len = 0;
+  consent_save(m);
+  if (m->catalog) ccord_catalog_on_uninstalled(m->catalog, id);
+  return true;
+}
+
+static bool cb_uninstall(void *ud, const char *id, char *eb, size_t ec)
+{
+  return ccord_plugins_uninstall(ud, id, eb, ec);
+}
+
+static void cb_cat_refresh(void *ud) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_refresh(m->catalog); }
+static void cb_cat_install(void *ud, const char *id) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_install(m->catalog, id); }
+static void cb_cat_set_prefs(void *ud, const ccord_catalog_prefs *pr) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_set_prefs(m->catalog, pr); }
+static void cb_cat_set_auto(void *ud, const char *id, bool on) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_set_plugin_auto_update(m->catalog, id, on); }
+static void cb_cat_run_auto(void *ud) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_run_auto_updates(m->catalog); }
+
+static bool cat_get_local_plugin(void *ud, const char *id, char *ver_out, size_t ver_cap,
+                                 uint64_t *consented_perms_out, bool *is_bundled_out)
+{
+  ccord_plugins *m = ud;
+  plugin *p = find_owner(m, id);
+  if (!p) return false;
+  set_text(ver_out, ver_cap, p->m.version);
+  if (consented_perms_out) *consented_perms_out = p->consented_perms;
+  if (is_bundled_out) *is_bundled_out = p->is_bundled;
+  return true;
+}
+
+static void cat_revoke_plugin(void *ud, const char *id, const char *reason)
+{
+  ccord_plugins *m = ud;
+  plugin *p = find_owner(m, id);
+  if (!p) return;
+  stop_host(m, p);
+  p->enabled = false;
+  p->state = CCORD_PLUGIN_FAILED;
+  set_text(p->error, sizeof p->error, reason ? reason : "Revoked by C-Cord moderators");
+  consent_save(m);
+  publish_state(m, p);
+}
+
+static void cat_sync_installed_info(void *ud)
+{
+  ccord_plugins *m = ud;
+  for (size_t i = 0; i < m->nplugins; i++) {
+    if (m->plugins[i].used) publish_state(m, &m->plugins[i]);
+  }
+}
+
+static void cat_toast(void *ud, const char *msg, uint8_t level)
+{
+  ccord_plugins *m = ud;
+  if (m->toast_show) m->toast_show(m->toast_ud, msg, level);
+}
+
 ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error *err)
 {
   if (!cfg || !cfg->bus || !cfg->store || !cfg->contrib || !cfg->host_exe) {
@@ -2433,8 +2537,23 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     .plugin_reload = on_plugin_reload,
     .plugin_export_cce = cb_export_cce,
     .plugin_import_package = cb_import_pkg,
+    .plugin_uninstall = cb_uninstall,
+    .catalog_refresh = cb_cat_refresh,
+    .catalog_install = cb_cat_install,
+    .catalog_set_prefs = cb_cat_set_prefs,
+    .catalog_set_plugin_auto_update = cb_cat_set_auto,
+    .catalog_run_auto_updates = cb_cat_run_auto,
   };
   ccord_contrib_set_handlers(m->contrib, &h);
+  ccord_catalog_host_cbs ccbs = {
+    .ud = m,
+    .get_local_plugin = cat_get_local_plugin,
+    .import_verified_cce = cb_import_pkg,
+    .revoke_plugin = cat_revoke_plugin,
+    .sync_installed_info = cat_sync_installed_info,
+    .toast = cat_toast,
+  };
+  m->catalog = ccord_catalog_create(m->has_data_dir ? m->data_dir : nullptr, m->contrib, &cfg->catalog_http, &ccbs);
   m->sub = ccord_bus_subscribe(m->bus, CCORD_EVT_ANY, on_bus_event, m);
   if (m->sub == 0) {
     ccord_error_set(err, CCORD_ERR_NOMEM, "plugins: bus subscription failed");

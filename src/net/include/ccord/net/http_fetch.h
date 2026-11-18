@@ -1,0 +1,27 @@
+// SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
+// Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
+#pragma once
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct ccord_http_get_result {
+  long status_code;
+  char *body;          // owned (ccord_free), null-terminated when present
+  size_t body_len;
+  char etag[128];
+  bool not_modified;
+  char error[256];
+} ccord_http_get_result;
+
+// HTTPS-only GET with strict TLS 1.2/1.3 verification, host allowlisting, and optional If-None-Match ETag.
+// Returns true on 200 OK or 304 Not Modified (in which case out->not_modified is true and out->body is nullptr).
+bool ccord_http_get(const char *url, const char *if_none_match, size_t max_bytes, ccord_http_get_result *out);
+void ccord_http_get_result_free(ccord_http_get_result *r);
+
+// HTTPS-only streaming file download to dest_path with strict TLS and size cap.
+bool ccord_http_download_file(const char *url, const char *dest_path, size_t max_bytes, char *err_buf, size_t err_cap);
+
+// Returns true when url is HTTPS and targets an allowlisted catalog / GitHub release host.
+bool ccord_http_url_allowed(const char *url);

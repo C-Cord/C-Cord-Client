@@ -7,6 +7,15 @@
 #include <ccord/session/session.h>
 #include <ccord/store/store.h>
 typedef struct ccord_plugins ccord_plugins;
+typedef struct ccord_catalog_http {
+  void *ud;
+  bool (*get)(void *ud, const char *url, const char *if_none_match, size_t max_bytes,
+              char **out_body, size_t *out_len, char *out_etag, size_t etag_cap,
+              bool *out_not_modified, char *err_buf, size_t err_cap);
+  bool (*download_file)(void *ud, const char *url, const char *dest_path, size_t max_bytes,
+                        char *err_buf, size_t err_cap);
+} ccord_catalog_http;
+
 typedef struct ccord_plugins_config {
   const char *host_exe;                          // path of ccord-plugin-host
   const char *const *search_dirs; size_t search_dir_count;   // each child dir with plugin.json is a plugin
@@ -16,6 +25,7 @@ typedef struct ccord_plugins_config {
   void *clipboard_ud;
   void (*toast_show)(void *ud, const char *utf8, uint8_t level); // optional UI toast callback
   void *toast_ud;
+  ccord_catalog_http catalog_http;               // optional HTTPS fetcher for decentralized plugin catalog
 } ccord_plugins_config;
 ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error *err);   // registers contrib handlers + bus subscriptions
 void ccord_plugins_destroy(ccord_plugins *p);                        // = shutdown + free
@@ -25,3 +35,4 @@ void ccord_plugins_shutdown(ccord_plugins *p);                        // send sh
 int ccord_plugins_host_pid(const ccord_plugins *p, const char *owner);            // child pid of the running host, or -1 (diagnostics and tests)
 bool ccord_plugins_import_package(ccord_plugins *p, const char *pkg_path, char *err_buf, size_t err_cap);
 bool ccord_plugins_export_cce(ccord_plugins *p, const char *id, const char *dest_path, char *err_buf, size_t err_cap);
+bool ccord_plugins_uninstall(ccord_plugins *p, const char *id, char *err_buf, size_t err_cap);

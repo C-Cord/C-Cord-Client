@@ -35,6 +35,10 @@ struct ccord_contrib {
   uint64_t next_panel_rev;
   plugin_slot *plugins;
   size_t nplugins, capplugins;
+  ccord_catalog_entry *catalog;
+  size_t ncatalog;
+  ccord_catalog_status catalog_status;
+  ccord_catalog_prefs catalog_prefs;
   ccord_contrib_handlers handlers;
   ccord_contrib_ui_hooks ui_hooks;
   uint64_t revision;
@@ -75,7 +79,29 @@ static void free_plugin_info(ccord_plugin_info *info)
   free_str(info->version);
   free_str(info->description);
   free_str(info->permissions);
+  free_str(info->update_version);
+  free_str(info->warning_title);
+  free_str(info->warning_message);
   free_str(info->error);
+}
+
+static void free_catalog_entry(ccord_catalog_entry *e)
+{
+  free_str(e->id);
+  free_str(e->name);
+  free_str(e->description);
+  free_str(e->license);
+  free_str(e->author);
+  free_str(e->repo);
+  free_str(e->repo_url);
+  free_str(e->version);
+  free_str(e->download_url);
+  free_str(e->sha256);
+  free_str(e->permissions);
+  free_str(e->changelog);
+  free_str(e->warning_title);
+  free_str(e->warning_message);
+  free_str(e->installed_version);
 }
 
 static void free_plugin(plugin_slot *p)
@@ -112,6 +138,10 @@ ccord_contrib *ccord_contrib_create(ccord_error *err)
   ccord_error_clear(err);
   ccord_contrib *c = ccord_calloc(1, sizeof *c);
   if (!c) ccord_error_set(err, CCORD_ERR_NOMEM, "contrib: out of memory");
+  else {
+    c->catalog_prefs.auto_update_enabled = false;
+    c->catalog_prefs.auto_update_min_tier = 2;
+  }
   return c;
 }
 
@@ -122,10 +152,12 @@ void ccord_contrib_destroy(ccord_contrib *c)
   for (size_t i = 0; i < c->ncmds; i++) free_cmd(&c->cmds[i]);
   for (size_t i = 0; i < c->npanels; i++) free_panel(&c->panels[i]);
   for (size_t i = 0; i < c->nplugins; i++) free_plugin(&c->plugins[i]);
+  for (size_t i = 0; i < c->ncatalog; i++) free_catalog_entry(&c->catalog[i]);
   ccord_free(c->menus);
   ccord_free(c->cmds);
   ccord_free(c->panels);
   ccord_free(c->plugins);
+  ccord_free(c->catalog);
   ccord_free(c);
 }
 
@@ -294,11 +326,20 @@ ccord_status ccord_contrib_set_plugin(ccord_contrib *c, const ccord_plugin_info 
     .description = ccord_strdup(info->description ? info->description : ""),
     .permissions = ccord_strdup(info->permissions ? info->permissions : ""),
     .risk_class = info->risk_class,
+    .tier = info->tier,
+    .is_bundled = info->is_bundled,
+    .auto_update = info->auto_update,
     .enabled = info->enabled,
     .consent_granted = info->consent_granted,
+    .update_needs_review = info->update_needs_review,
+    .update_version = ccord_strdup(info->update_version ? info->update_version : ""),
+    .warning_sev = info->warning_sev,
+    .warning_title = ccord_strdup(info->warning_title ? info->warning_title : ""),
+    .warning_message = ccord_strdup(info->warning_message ? info->warning_message : ""),
     .state = info->state, .error = ccord_strdup(info->error ? info->error : ""),
   };
-  if (!fresh.id || !fresh.name || !fresh.version || !fresh.description || !fresh.permissions || !fresh.error) {
+  if (!fresh.id || !fresh.name || !fresh.version || !fresh.description || !fresh.permissions ||
+      !fresh.update_version || !fresh.warning_title || !fresh.warning_message || !fresh.error) {
     free_plugin_info(&fresh);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "contrib: out of memory");
   }
@@ -324,6 +365,81 @@ ccord_status ccord_contrib_set_plugin(ccord_contrib *c, const ccord_plugin_info 
   c->nplugins++;
   c->revision++;
   return CCORD_OK;
+}
+
+bool ccord_contrib_remove_plugin(ccord_contrib *c, const char *id)
+{
+  if (!c || !id) return false;
+  for (size_t i = 0; i < c->nplugins; i++) {
+    if (strcmp(c->plugins[i].info.id, id) == 0) {
+      free_plugin(&c->plugins[i]);
+      memmove(&c->plugins[i], &c->plugins[i + 1], (c->nplugins - i - 1) * sizeof c->plugins[0]);
+      c->nplugins--;
+      c->revision++;
+      return true;
+    }
+  }
+  return false;
+}
+
+void ccord_contrib_set_catalog(ccord_contrib *c, const ccord_catalog_entry *entries, size_t count,
+                               const ccord_catalog_status *status, const ccord_catalog_prefs *prefs)
+{
+  if (!c) return;
+  if (entries || count == 0) {
+    for (size_t i = 0; i < c->ncatalog; i++) free_catalog_entry(&c->catalog[i]);
+    ccord_free(c->catalog);
+    c->catalog = nullptr;
+    c->ncatalog = 0;
+    if (count > 0) {
+      ccord_catalog_entry *arr = ccord_calloc(count, sizeof *arr);
+      if (arr) {
+        size_t ok = 0;
+        for (size_t i = 0; i < count; i++) {
+          const ccord_catalog_entry *s = &entries[i];
+          ccord_catalog_entry d = {
+            .id = ccord_strdup(s->id ? s->id : ""),
+            .name = ccord_strdup(s->name ? s->name : ""),
+            .description = ccord_strdup(s->description ? s->description : ""),
+            .license = ccord_strdup(s->license ? s->license : ""),
+            .author = ccord_strdup(s->author ? s->author : ""),
+            .repo = ccord_strdup(s->repo ? s->repo : ""),
+            .repo_url = ccord_strdup(s->repo_url ? s->repo_url : ""),
+            .version = ccord_strdup(s->version ? s->version : ""),
+            .download_url = ccord_strdup(s->download_url ? s->download_url : ""),
+            .sha256 = ccord_strdup(s->sha256 ? s->sha256 : ""),
+            .permissions = ccord_strdup(s->permissions ? s->permissions : ""),
+            .changelog = ccord_strdup(s->changelog ? s->changelog : ""),
+            .size_bytes = s->size_bytes,
+            .api_class = s->api_class ? s->api_class : 1,
+            .tier = s->tier,
+            .warning_sev = s->warning_sev,
+            .warning_title = ccord_strdup(s->warning_title ? s->warning_title : ""),
+            .warning_message = ccord_strdup(s->warning_message ? s->warning_message : ""),
+            .installed = s->installed,
+            .bundled = s->bundled,
+            .installing = s->installing,
+            .update_available = s->update_available,
+            .update_needs_review = s->update_needs_review,
+            .auto_update = s->auto_update,
+            .installed_version = ccord_strdup(s->installed_version ? s->installed_version : ""),
+          };
+          if (!d.id || !d.name || !d.description || !d.license || !d.author || !d.repo ||
+              !d.repo_url || !d.version || !d.download_url || !d.sha256 || !d.permissions ||
+              !d.changelog || !d.warning_title || !d.warning_message || !d.installed_version) {
+            free_catalog_entry(&d);
+            break;
+          }
+          arr[ok++] = d;
+        }
+        c->catalog = arr;
+        c->ncatalog = ok;
+      }
+    }
+  }
+  if (status) c->catalog_status = *status;
+  if (prefs) c->catalog_prefs = *prefs;
+  c->revision++;
 }
 
 void ccord_contrib_remove_owner(ccord_contrib *c, const char *owner)
@@ -442,6 +558,36 @@ const ccord_plugin_info *ccord_contrib_plugin_at(const ccord_contrib *c, size_t 
 {
   if (!c || i >= c->nplugins) return nullptr;
   return &c->plugins[i].info;
+}
+
+size_t ccord_contrib_catalog_count(const ccord_contrib *c)
+{
+  return c ? c->ncatalog : 0;
+}
+
+const ccord_catalog_entry *ccord_contrib_catalog_at(const ccord_contrib *c, size_t i)
+{
+  if (!c || i >= c->ncatalog) return nullptr;
+  return &c->catalog[i];
+}
+
+const ccord_catalog_entry *ccord_contrib_catalog_find(const ccord_contrib *c, const char *id)
+{
+  if (!c || !id) return nullptr;
+  for (size_t i = 0; i < c->ncatalog; i++) {
+    if (strcmp(c->catalog[i].id, id) == 0) return &c->catalog[i];
+  }
+  return nullptr;
+}
+
+const ccord_catalog_status *ccord_contrib_catalog_status(const ccord_contrib *c)
+{
+  return c ? &c->catalog_status : nullptr;
+}
+
+const ccord_catalog_prefs *ccord_contrib_catalog_prefs(const ccord_contrib *c)
+{
+  return c ? &c->catalog_prefs : nullptr;
 }
 
 static const ccord_menu_contribution *find_menu(const ccord_contrib *c, const char *owner, const char *item_id)
@@ -596,6 +742,42 @@ bool ccord_contrib_plugin_import_package(ccord_contrib *c, const char *pkg_path,
     return false;
   }
   return c->handlers.plugin_import_package(c->handlers.ud, pkg_path, err_buf, err_cap);
+}
+
+bool ccord_contrib_plugin_uninstall(ccord_contrib *c, const char *id, char *err_buf, size_t err_cap)
+{
+  if (!c || !id || !c->handlers.plugin_uninstall) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "uninstall not supported");
+    return false;
+  }
+  return c->handlers.plugin_uninstall(c->handlers.ud, id, err_buf, err_cap);
+}
+
+void ccord_contrib_catalog_refresh(ccord_contrib *c)
+{
+  if (c && c->handlers.catalog_refresh) c->handlers.catalog_refresh(c->handlers.ud);
+}
+
+void ccord_contrib_catalog_install(ccord_contrib *c, const char *id)
+{
+  if (c && id && c->handlers.catalog_install) c->handlers.catalog_install(c->handlers.ud, id);
+}
+
+void ccord_contrib_catalog_set_prefs(ccord_contrib *c, const ccord_catalog_prefs *prefs)
+{
+  if (c && prefs && c->handlers.catalog_set_prefs) c->handlers.catalog_set_prefs(c->handlers.ud, prefs);
+}
+
+void ccord_contrib_catalog_set_plugin_auto_update(ccord_contrib *c, const char *id, bool enabled)
+{
+  if (c && id && c->handlers.catalog_set_plugin_auto_update) {
+    c->handlers.catalog_set_plugin_auto_update(c->handlers.ud, id, enabled);
+  }
+}
+
+void ccord_contrib_catalog_run_auto_updates(ccord_contrib *c)
+{
+  if (c && c->handlers.catalog_run_auto_updates) c->handlers.catalog_run_auto_updates(c->handlers.ud);
 }
 
 bool ccord_contrib_ui_navigate(ccord_contrib *c, ccord_id guild_id, ccord_id channel_id, ccord_id parent_id,

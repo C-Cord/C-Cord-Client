@@ -22,6 +22,7 @@
 #include <ccord/model/contrib.h>
 #include <ccord/net/admin.h>
 #include <ccord/net/governor.h>
+#include <ccord/net/http_fetch.h>
 #include <ccord/net/mock_transport.h>
 #include <ccord/net/voice_dsp.h>
 #if CCORD_LIVE_ACCOUNT
@@ -854,6 +855,33 @@ static void plugin_clipboard(void *ud, const char *utf8)
 }
 
 // Starts the plugin manager: discovers extensions, spawns one host process each. Failures are logged and shown in Settings.
+static bool catalog_http_get_adapter(void *ud, const char *url, const char *if_none_match, size_t max_bytes,
+                                     char **out_body, size_t *out_len, char *out_etag, size_t etag_cap,
+                                     bool *out_not_modified, char *err_buf, size_t err_cap)
+{
+  (void)ud;
+  ccord_http_get_result r = {0};
+  bool ok = ccord_http_get(url, if_none_match, max_bytes, &r);
+  if (out_etag && etag_cap) snprintf(out_etag, etag_cap, "%s", r.etag);
+  if (out_not_modified) *out_not_modified = r.not_modified;
+  if (!ok) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "%s", r.error);
+    ccord_http_get_result_free(&r);
+    return false;
+  }
+  if (out_body) *out_body = r.body;
+  else ccord_http_get_result_free(&r);
+  if (out_len) *out_len = r.body_len;
+  return true;
+}
+
+static bool catalog_http_download_adapter(void *ud, const char *url, const char *dest_path, size_t max_bytes,
+                                          char *err_buf, size_t err_cap)
+{
+  (void)ud;
+  return ccord_http_download_file(url, dest_path, max_bytes, err_buf, err_cap);
+}
+
 static void plugins_start(app *a)
 {
   if (a->plugins || !a->opt) return;
@@ -887,6 +915,13 @@ static void plugins_start(app *a)
     .bus = a->bus, .store = a->store, .session = a->session, .contrib = a->contrib,
     .clipboard_write = plugin_clipboard, .clipboard_ud = a,
   };
+  if (!a->virtual_clock) {
+    pcfg.catalog_http = (ccord_catalog_http){
+      .ud = a,
+      .get = catalog_http_get_adapter,
+      .download_file = catalog_http_download_adapter,
+    };
+  }
   ccord_error err = {0};
   a->plugins = ccord_plugins_create(&pcfg, &err);
   if (!a->plugins) {

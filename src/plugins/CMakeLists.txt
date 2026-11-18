@@ -1,6 +1,11 @@
 ccord_find_zlib()
-add_library(ccord_plugins STATIC plugins.c manifest.c zip.c)
+find_package(Threads REQUIRED)
+add_library(ccord_plugins STATIC plugins.c manifest.c zip.c catalog.c)
 add_library(ccord::plugins ALIAS ccord_plugins)
 target_include_directories(ccord_plugins PUBLIC include)
-target_link_libraries(ccord_plugins PUBLIC ccord_core ccord_model ccord_store ccord_session ccord_ipc ZLIB::ZLIB)
+target_link_libraries(ccord_plugins PUBLIC ccord_core ccord_model ccord_store ccord_session ccord_ipc ZLIB::ZLIB Threads::Threads)
 ccord_strict_warnings(ccord_plugins)
+
+if(CCORD_BUILD_TESTS)
+  ccord_add_test(NAME test_plugin_catalog SOURCES tests/test_plugin_catalog.c LIBS ccord_plugins LABELS unit)
+endif()
