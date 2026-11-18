@@ -81,7 +81,7 @@ ccord
 ```
 
 - **First launch (no saved token):** Opens the Login Screen.
-- **Live Discord session:** `ccord --live` connects using your saved token (`$XDG_CONFIG_HOME/ccord/token`).
+- **Live Discord session:** `ccord --live` connects using your saved token (`~/.config/ccord/token`).
 - **Offline preview mode:** `ccord --mock` opens the deterministic offline demo workspace shown in the screenshots above.
 - **Tray / single-instance controls:** `--start-minimized`, `--show`, `--toggle-mic`, `--toggle-deafen`, `--quit`.
 
@@ -122,22 +122,20 @@ See the [Plugin Developer Guide](docs/plugin-api/README.md), [Plugin API Referen
 
 ---
 
-## File Locations
+## Where Files Are Stored
 
-| Purpose | Default Location |
+| What | Where it lives |
 |---|---|
-| Active auth token (`0600`) | `$XDG_CONFIG_HOME/ccord/token` (`~/.config/ccord/token`) |
-| Multi-account keyring (`0600`) | `$XDG_CONFIG_HOME/ccord/accounts.ini` & `tokens/` |
-| Settings (`settings.ini`) | `$XDG_DATA_HOME/ccord/settings.ini` (`~/.local/share/ccord/settings.ini`, or `--data-dir`) |
-| Installed extensions | `$XDG_DATA_HOME/ccord/plugins/installed/` |
-| Extension storage | `$XDG_DATA_HOME/ccord/plugins/<plugin_id>/storage.json` |
-| Warm-start & scheduled message data | `$XDG_DATA_HOME/ccord/accounts/<user_id>/` |
-| Media & API disk cache | `$XDG_CACHE_HOME/ccord/` (`~/.cache/ccord/` — `media/` and `api/`) |
-| Single-instance control socket | `$XDG_RUNTIME_DIR/ccord/control.sock` |
-| Rich Presence IPC socket | `$XDG_RUNTIME_DIR/discord-ipc-0` |
-| Installed binaries | `<prefix>/bin/ccord`, `<prefix>/bin/ccord-plugin-host` |
-| Installed themes, fonts & bundled extensions | `<prefix>/share/ccord/{themes,fonts,extensions}/` (or `$CCORD_ASSET_DIR`) |
-| Desktop launcher & icons | `<prefix>/share/applications/C-Cord.desktop`, `<prefix>/share/icons/hicolor/` |
+| Login token & saved accounts (`0600`) | `~/.config/ccord/token`, `~/.config/ccord/accounts.ini`, `~/.config/ccord/tokens/` |
+| App settings (`settings.ini`) | `~/.local/share/ccord/settings.ini` (override folder with `--data-dir`) |
+| Installed extensions & plugin data | `~/.local/share/ccord/plugins/installed/` & `~/.local/share/ccord/plugins/<id>/storage.json` |
+| Cached chats & scheduled messages | `~/.local/share/ccord/accounts/<user_id>/` |
+| Media & API cache | `~/.cache/ccord/` (`media/` and `api/`) |
+| Runtime sockets (single-instance & Rich Presence) | `/run/user/$UID/ccord/control.sock` & `/run/user/$UID/discord-ipc-0` |
+| Installed program & assets (with `/usr/local` prefix) | `/usr/local/bin/ccord`, `/usr/local/bin/ccord-plugin-host`, `/usr/local/share/ccord/` |
+| Desktop shortcut & app icons | `/usr/local/share/applications/C-Cord.desktop`, `/usr/local/share/icons/hicolor/` |
+
+*Standard Linux XDG environment variables (`$XDG_CONFIG_HOME`, `$XDG_DATA_HOME`, `$XDG_CACHE_HOME`, `$XDG_RUNTIME_DIR`) are respected if set; install paths follow your `CMAKE_INSTALL_PREFIX`.*
 
 ---
 
