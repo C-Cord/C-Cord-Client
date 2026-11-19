@@ -17,12 +17,14 @@
 #define CONTRIB_PANEL_JSON_MAX (256u * 1024u)
 
 #define CONTRIB_LOG_CAP 500u
+#define CONTRIB_LOG_INIT_CAP 16u
 
 typedef struct plugin_slot {
   ccord_plugin_info info; // every string is owned
-  ccord_plugin_log_entry logs[CONTRIB_LOG_CAP];
-  size_t log_head;        // next write index
-  size_t log_count;       // <= CONTRIB_LOG_CAP
+  ccord_plugin_log_entry *logs; // lazy ring buffer, allocated on first log (16 -> 64 -> 256 -> 500)
+  size_t log_cap;         // <= CONTRIB_LOG_CAP
+  size_t log_head;        // next write index (< log_cap when log_cap > 0)
+  size_t log_count;       // <= log_cap
 } plugin_slot;
 
 struct ccord_contrib {
@@ -108,15 +110,25 @@ static void free_catalog_entry(ccord_catalog_entry *e)
   free_str(e->installed_version);
 }
 
+static void free_plugin_logs(plugin_slot *p)
+{
+  if (p->logs && p->log_cap > 0) {
+    for (size_t i = 0; i < p->log_count; i++) {
+      size_t idx = (p->log_head + p->log_cap - p->log_count + i) % p->log_cap;
+      free_str(p->logs[idx].message);
+    }
+    ccord_free(p->logs);
+  }
+  p->logs = nullptr;
+  p->log_cap = 0;
+  p->log_head = 0;
+  p->log_count = 0;
+}
+
 static void free_plugin(plugin_slot *p)
 {
   free_plugin_info(&p->info);
-  for (size_t i = 0; i < p->log_count; i++) {
-    size_t idx = (p->log_head + CONTRIB_LOG_CAP - p->log_count + i) % CONTRIB_LOG_CAP;
-    free_str(p->logs[idx].message);
-  }
-  p->log_head = 0;
-  p->log_count = 0;
+  free_plugin_logs(p);
 }
 
 static bool text_ok(const char *s, size_t max, bool allow_empty)
@@ -732,6 +744,19 @@ void ccord_contrib_add_plugin_log(ccord_contrib *c, const char *owner, uint64_t 
 {
   plugin_slot *p = find_plugin_slot(c, owner);
   if (!p || !message) return;
+  if (p->log_count == p->log_cap && p->log_cap < CONTRIB_LOG_CAP) {
+    size_t ncap = p->log_cap ? p->log_cap * 4u : CONTRIB_LOG_INIT_CAP;
+    if (ncap > CONTRIB_LOG_CAP) ncap = CONTRIB_LOG_CAP;
+    ccord_plugin_log_entry *g = ccord_realloc_array(p->logs, ncap, sizeof *g);
+    if (!g) return;
+    // Before reaching CONTRIB_LOG_CAP the ring has never overwritten entries, so indices [0..log_count-1]
+    // are already contiguous in chronological order and log_head resumes at log_count.
+    p->logs = g;
+    p->log_head = p->log_count;
+    p->log_cap = ncap;
+  }
+  char *msg_copy = ccord_strdup(message);
+  if (!msg_copy) return;
   if (p->log_count == CONTRIB_LOG_CAP) {
     free_str(p->logs[p->log_head].message);
   } else {
@@ -740,9 +765,9 @@ void ccord_contrib_add_plugin_log(ccord_contrib *c, const char *owner, uint64_t 
   p->logs[p->log_head] = (ccord_plugin_log_entry){
     .timestamp_ms = timestamp_ms,
     .level = level,
-    .message = ccord_strdup(message),
+    .message = msg_copy,
   };
-  p->log_head = (p->log_head + 1) % CONTRIB_LOG_CAP;
+  p->log_head = (p->log_head + 1u) % p->log_cap;
   c->revision++;
 }
 
@@ -750,12 +775,7 @@ void ccord_contrib_clear_plugin_log(ccord_contrib *c, const char *owner)
 {
   plugin_slot *p = find_plugin_slot(c, owner);
   if (!p) return;
-  for (size_t i = 0; i < p->log_count; i++) {
-    size_t idx = (p->log_head + CONTRIB_LOG_CAP - p->log_count + i) % CONTRIB_LOG_CAP;
-    free_str(p->logs[idx].message);
-  }
-  p->log_head = 0;
-  p->log_count = 0;
+  free_plugin_logs(p);
   c->revision++;
 }
 
@@ -768,18 +788,18 @@ size_t ccord_contrib_plugin_log_count(const ccord_contrib *c, const char *owner)
 const ccord_plugin_log_entry *ccord_contrib_plugin_log_at(const ccord_contrib *c, const char *owner, size_t i)
 {
   plugin_slot *p = find_plugin_slot(c, owner);
-  if (!p || i >= p->log_count) return nullptr;
-  size_t idx = (p->log_head + CONTRIB_LOG_CAP - p->log_count + i) % CONTRIB_LOG_CAP;
+  if (!p || !p->logs || p->log_cap == 0 || i >= p->log_count) return nullptr;
+  size_t idx = (p->log_head + p->log_cap - p->log_count + i) % p->log_cap;
   return &p->logs[idx];
 }
 
 size_t ccord_contrib_plugin_error_count(const ccord_contrib *c, const char *owner)
 {
   plugin_slot *p = find_plugin_slot(c, owner);
-  if (!p) return 0;
+  if (!p || !p->logs || p->log_cap == 0) return 0;
   size_t n = 0;
   for (size_t i = 0; i < p->log_count; i++) {
-    size_t idx = (p->log_head + CONTRIB_LOG_CAP - p->log_count + i) % CONTRIB_LOG_CAP;
+    size_t idx = (p->log_head + p->log_cap - p->log_count + i) % p->log_cap;
     if (p->logs[idx].level >= 2) n++;
   }
   return n;
