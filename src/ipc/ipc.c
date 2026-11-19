@@ -12,7 +12,10 @@
 #include <string.h>
 
 #define IPC_MAX_PAYLOAD ((size_t)1u << 20)
-#define IPC_READ_CHUNK ((size_t)64u << 10)
+#define IPC_INIT_IN_CAP ((size_t)4096u)
+#define IPC_MAX_IN_CAP (IPC_MAX_PAYLOAD + 4u)
+#define IPC_READ_CHUNK_MAX ((size_t)64u << 10)
+#define IPC_SHRINK_THRESHOLD ((size_t)32768u)
 #define IPC_OUT_CAP ((size_t)1u << 20)
 #define IPC_MAX_METHOD 64u
 
@@ -187,11 +190,44 @@ static ccord_ipc_read parse_buffered(ccord_ipc *ipc, ccord_arena *arena, ccord_i
   const char *payload = ipc->in + ipc->in_off + 4;
   ipc->in_off += 4 + (size_t)n;
   memset(msg, 0, sizeof *msg);
-  if (decode_envelope(payload, n, arena, msg, err) != CCORD_OK) return CCORD_IPC_READ_ERROR;
+  ccord_status dec = decode_envelope(payload, n, arena, msg, err);
+  if (ipc->in_off == ipc->in_len) {
+    ipc->in_len = 0;
+    ipc->in_off = 0;
+    if (ipc->in_cap > IPC_SHRINK_THRESHOLD) {
+      ccord_free(ipc->in);
+      ipc->in = nullptr;
+      ipc->in_cap = 0;
+    }
+  }
+  if (dec != CCORD_OK) return CCORD_IPC_READ_ERROR;
   return CCORD_IPC_READ_MSG;
 }
 
-// Compacts consumed bytes and reads one chunk. Sets ipc->eof on peer close.
+// Ensures ipc->in has capacity >= need (up to IPC_MAX_IN_CAP), starting at 4 KiB and growing geometrically.
+static ccord_status ensure_in_cap(ccord_ipc *ipc, size_t need, ccord_error *err)
+{
+  if (need > IPC_MAX_IN_CAP) need = IPC_MAX_IN_CAP;
+  if (ipc->in_cap >= need) return CCORD_OK;
+  size_t cap = ipc->in_cap ? ipc->in_cap : IPC_INIT_IN_CAP;
+  while (cap < need) {
+    if (cap >= IPC_MAX_IN_CAP / 2u) {
+      cap = IPC_MAX_IN_CAP;
+      break;
+    }
+    cap *= 2u;
+  }
+  char *np = ccord_realloc(ipc->in, cap);
+  if (!np) {
+    fail(err, CCORD_ERR_NOMEM, "ipc: out of memory");
+    return CCORD_ERR_NOMEM;
+  }
+  ipc->in = np;
+  ipc->in_cap = cap;
+  return CCORD_OK;
+}
+
+// Compacts consumed bytes and reads available data (up to one full frame). Sets ipc->eof on peer close.
 static ccord_status fill(ccord_ipc *ipc, ccord_error *err)
 {
   if (ipc->in_off > 0) {
@@ -200,31 +236,34 @@ static ccord_status fill(ccord_ipc *ipc, ccord_error *err)
     ipc->in_len = rest;
     ipc->in_off = 0;
   }
-  if (ipc->in_cap - ipc->in_len < IPC_READ_CHUNK) {
-    size_t need = ipc->in_len + IPC_READ_CHUNK;
-    size_t cap = ipc->in_cap ? ipc->in_cap : 2 * IPC_READ_CHUNK;
-    while (cap < need) cap *= 2;
-    char *np = ccord_realloc(ipc->in, cap);
-    if (!np) {
-      fail(err, CCORD_ERR_NOMEM, "ipc: out of memory");
-      return CCORD_ERR_NOMEM;
+  for (;;) {
+    size_t need = ipc->in_len == ipc->in_cap ? (ipc->in_cap ? ipc->in_cap + 1u : IPC_INIT_IN_CAP) : ipc->in_cap;
+    if (ipc->in_len >= 4) {
+      uint32_t flen = le32((const unsigned char *)ipc->in);
+      if (flen == 0 || flen > IPC_MAX_PAYLOAD) return CCORD_OK;   // parse_buffered will reject
+      size_t frame_total = 4u + (size_t)flen;
+      if (ipc->in_len >= frame_total) return CCORD_OK;
+      if (frame_total > need) need = frame_total;
     }
-    ipc->in = np;
-    ipc->in_cap = cap;
+    if (ensure_in_cap(ipc, need, err) != CCORD_OK) return CCORD_ERR_NOMEM;
+    size_t room = ipc->in_cap - ipc->in_len;
+    if (room == 0) return CCORD_OK;
+    size_t chunk = room > IPC_READ_CHUNK_MAX ? IPC_READ_CHUNK_MAX : room;
+    bool would_block = false;
+    ptrdiff_t n = ccord_sock_recv(ipc->fd, ipc->in + ipc->in_len, chunk, &would_block);
+    if (n > 0) {
+      ipc->in_len += (size_t)n;
+      if ((size_t)n < chunk) return CCORD_OK;
+      continue;
+    }
+    if (n == 0) {
+      ipc->eof = true;
+      return CCORD_OK;
+    }
+    if (would_block) return CCORD_OK;
+    ccord_error_set(err, CCORD_ERR_IO, "ipc: recv failed");
+    return CCORD_ERR_IO;
   }
-  bool would_block = false;
-  ptrdiff_t n = ccord_sock_recv(ipc->fd, ipc->in + ipc->in_len, IPC_READ_CHUNK, &would_block);
-  if (n > 0) {
-    ipc->in_len += (size_t)n;
-    return CCORD_OK;
-  }
-  if (n == 0) {
-    ipc->eof = true;
-    return CCORD_OK;
-  }
-  if (would_block) return CCORD_OK;
-  ccord_error_set(err, CCORD_ERR_IO, "ipc: recv failed");
-  return CCORD_ERR_IO;
 }
 
 ccord_ipc_read ccord_ipc_try_read(ccord_ipc *ipc, ccord_arena *arena, ccord_ipc_msg *msg, ccord_error *err)
@@ -414,5 +453,10 @@ ccord_status ccord_ipc_flush(ccord_ipc *ipc, int timeout_ms, ccord_error *err)
   }
   ipc->out_len = 0;
   ipc->out_off = 0;
+  if (ipc->out_cap > IPC_SHRINK_THRESHOLD) {
+    ccord_free(ipc->out);
+    ipc->out = nullptr;
+    ipc->out_cap = 0;
+  }
   return CCORD_OK;
 }
