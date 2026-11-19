@@ -338,7 +338,10 @@ jobs:
         run: |
           sed -i "s/-DCCORD_BUILD_TESTS=OFF/-DCCORD_BUILD_TESTS=OFF\n      - -DCCORD_VERSION=${VER}/" packaging/flatpak/org.ccord.CCord.yml
           flatpak-builder --user --force-clean --state-dir=/tmp/fp-state --default-branch=stable --repo=/tmp/fp-repo /tmp/fp-build packaging/flatpak/org.ccord.CCord.yml
-          flatpak build-update-repo --generate-static-deltas /tmp/fp-repo
+          # Generate a single-part, zero-fallback static delta for the app so 100% of app files live in delta/0
+          # (no large fallback .filez fetches from c-cord.org) and index it into the summary.
+          ostree --repo=/tmp/fp-repo static-delta generate --empty --min-fallback-size=0 --max-chunk-size=128 --to=app/org.ccord.CCord/x86_64/stable
+          flatpak build-update-repo /tmp/fp-repo
 
           mkdir -p out/assets
           # 1. Standalone single-file bundle
@@ -349,16 +352,38 @@ jobs:
           APP_DELTA_DIR=$(python3 -c 'import base64,sys; b=base64.b64encode(bytes.fromhex(sys.argv[1].strip())).decode().rstrip("=").replace("/","_"); print(f"{b[:2]}/{b[2:]}")' "$APP_COMMIT")
           DELTA_PART="/tmp/fp-repo/deltas/${APP_DELTA_DIR}/0"
           echo "Flatpak app commit=${APP_COMMIT} delta=${APP_DELTA_DIR}"
+          ostree --repo=/tmp/fp-repo static-delta show "$APP_COMMIT" | head -n 20
           ls -lh "/tmp/fp-repo/deltas/${APP_DELTA_DIR}/"
           test -f "$DELTA_PART"
           test ! -f "/tmp/fp-repo/deltas/${APP_DELTA_DIR}/1"
           cp "$DELTA_PART" "out/assets/ccord-flatpak-delta-0.bin"
-          # Pack lightweight OSTree metadata without the heavy delta/0 payload or raw .filez objects
-          tar \
-            --exclude="./deltas/${APP_DELTA_DIR}/0" \
-            --exclude="deltas/${APP_DELTA_DIR}/0" \
-            --exclude='*.filez' \
-            -czf "out/assets/ccord-flatpak-repo.tar.gz" -C /tmp/fp-repo .
+
+          # Pack lightweight OSTree metadata without the heavy app delta/0 or app .filez objects (keep tiny appstream objects).
+          rm -rf /tmp/fp-repo-meta
+          cp -a /tmp/fp-repo /tmp/fp-repo-meta
+          rm -f "/tmp/fp-repo-meta/deltas/${APP_DELTA_DIR}/0"
+          python3 - <<'PY'
+          import os, subprocess
+          repo = "/tmp/fp-repo-meta"
+          keep = set()
+          for ref in ("appstream/x86_64", "appstream2/x86_64"):
+              out = subprocess.check_output(["ostree", f"--repo={repo}", "ls", "-RC", ref], text=True)
+              for line in out.splitlines():
+                  parts = line.split()
+                  if len(parts) >= 5 and parts[0][0] in ("-", "l"):
+                      keep.add(parts[4])
+          removed = 0
+          for root, _, files in os.walk(os.path.join(repo, "objects")):
+              prefix = os.path.basename(root)
+              for fn in files:
+                  if fn.endswith(".filez"):
+                      oid = prefix + fn[:-6]
+                      if oid not in keep:
+                          os.remove(os.path.join(root, fn))
+                          removed += 1
+          print(f"Pruned {removed} app .filez objects; kept {len(keep)} appstream objects")
+          PY
+          tar -czf "out/assets/ccord-flatpak-repo.tar.gz" -C /tmp/fp-repo-meta .
           ls -lh out/assets/
       - uses: actions/upload-artifact@v4
         with:

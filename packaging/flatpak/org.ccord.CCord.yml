@@ -5,6 +5,7 @@ sdk: org.freedesktop.Sdk
 default-branch: stable
 command: ccord
 build-options:
+  strip: true
   no-debuginfo: true
 cleanup:
   - /include
