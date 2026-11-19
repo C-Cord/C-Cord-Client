@@ -107,9 +107,7 @@ size_t ccord_audio_devices_list(bool capture, ccord_audio_device_info *out, size
   size_t n = 0;
   if (ids && count > 0) {
     for (int i = 0; i < count && n < max; ++i) {
-      char idbuf[64];
-      snprintf(idbuf, sizeof idbuf, "%u", (unsigned)ids[i]);
-      ccord_devices_copy_utf8(out[n].id, sizeof out[n].id, idbuf);
+      snprintf(out[n].id, sizeof out[n].id, "%u", (unsigned)ids[i]);
       const char *name = SDL_GetAudioDeviceName(ids[i]);
       ccord_devices_copy_utf8(out[n].name, sizeof out[n].name, name ? name : "Audio device");
       out[n].is_default = def_name && name && strcmp(def_name, name) == 0;
@@ -195,7 +193,7 @@ bool ccord_audio_devices_handle_event(const SDL_Event *e)
   bool added = e->type == SDL_EVENT_AUDIO_DEVICE_ADDED;
   bool capture = e->adevice.recording;
   SDL_AudioDeviceID which = e->adevice.which;
-  if (!added) {
+  if (!added && s_registry_mutex) {
     registry_lock();
     for (ccord_audio *a = s_registry; a; a = a->hotplug_next) {
       if (!a->stream || a->capture != capture) continue;

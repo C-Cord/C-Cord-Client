@@ -49,6 +49,12 @@ static const int k_tray_sizes[CCORD_DESKTOP_TRAY_PIXMAPS] = {22, 24, 32, 48};
 #define TRAY_PIXMAP_PIXELS (22 * 22 + 24 * 24 + 32 * 32 + 48 * 48)
 #define TRAY_PIXMAP_BYTES (TRAY_PIXMAP_PIXELS * 4)
 
+// Lazily allocated and rendered tray pixmaps (saves 17.5 KiB + startup render when no tray queries IconPixmap).
+typedef struct desktop_pixmaps {
+  uint8_t *data;   // TRAY_PIXMAP_BYTES, ARGB32 network byte order (allocated on first read)
+  bool dirty;
+} desktop_pixmaps;
+
 struct ccord_desktop {
   int refs;                        // async calls hold a ref so callbacks never see a freed object
   bool dead;                       // set by destroy; callbacks skip state updates
@@ -60,7 +66,8 @@ struct ccord_desktop {
   uint32_t badge_count;            // number on the tray icon (mentions + unread DMs)
   int icon_key;                    // identifies the rendered picture: 0 read, 1 dot, 1 + n for n = 1..100 (100 = "99+")
   uint32_t new_icon_emits;
-  uint8_t pixmaps[TRAY_PIXMAP_BYTES];   // IconPixmap images, ARGB32 network byte order
+  desktop_pixmaps *pix;            // mutable pointer to pix_storage for lazy render via const getter
+  desktop_pixmaps pix_storage;
   ccord_desktop_hotkey_fn hotkey_fn;
   void *hotkey_ud;
   ccord_desktop_shortcut_state_fn state_fn;
@@ -125,16 +132,23 @@ static int icon_key_for(uint32_t count, bool has_unread)
   return has_unread ? 1 : 0;
 }
 
-// Renders every size for the current key; ARGB32 network byte order is the bytes A, R, G, B per pixel.
-static void render_icons(ccord_desktop *d)
+// Renders every size for the current key on demand; ARGB32 network byte order is the bytes A, R, G, B per pixel.
+static bool ensure_icons(const ccord_desktop *d)
 {
+  desktop_pixmaps *px = d->pix;
+  if (!px) return false;
+  if (px->data && !px->dirty) return true;
+  if (!px->data) {
+    px->data = ccord_malloc(TRAY_PIXMAP_BYTES);
+    if (!px->data) return false;
+  }
   uint8_t rgba[48 * 48 * 4];
   int count = d->icon_key >= 2 ? d->icon_key - 1 : 0;
   bool dot = d->icon_key == 1;
   for (size_t i = 0; i < CCORD_DESKTOP_TRAY_PIXMAPS; i++) {
     int sz = k_tray_sizes[i];
     size_t n = (size_t)sz * (size_t)sz;
-    uint8_t *dst = d->pixmaps + pixmap_offset(i);
+    uint8_t *dst = px->data + pixmap_offset(i);
     if (!ccord_tray_icon_rgba(sz, count, dot, rgba, sizeof rgba)) {
       memset(dst, 0, n * 4u);
       continue;
@@ -146,6 +160,8 @@ static void render_icons(ccord_desktop *d)
       dst[k * 4 + 3] = rgba[k * 4 + 2];
     }
   }
+  px->dirty = false;
+  return true;
 }
 
 static void copy_utf8_prefix(char *dst, size_t cap, const char *src)
@@ -175,6 +191,7 @@ static void desktop_unref(ccord_desktop *d)
   if (d->cancellable) g_object_unref(d->cancellable);
   if (d->bus) g_object_unref(d->bus);
 #endif
+  if (d->pix) ccord_free(d->pix->data);
   ccord_free(d);
 }
 
@@ -397,10 +414,12 @@ static GVariant *sni_get_property(GDBusConnection *connection, const gchar *send
   if (strcmp(property_name, "IconPixmap") == 0) {
     GVariantBuilder pix;
     g_variant_builder_init(&pix, G_VARIANT_TYPE("a(iiay)"));
-    for (size_t i = 0; i < CCORD_DESKTOP_TRAY_PIXMAPS; i++) {
-      size_t bytes = (size_t)k_tray_sizes[i] * (size_t)k_tray_sizes[i] * 4u;
-      GVariant *data = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, d->pixmaps + pixmap_offset(i), bytes, 1);
-      g_variant_builder_add(&pix, "(ii@ay)", (gint32)k_tray_sizes[i], (gint32)k_tray_sizes[i], data);
+    if (ensure_icons(d)) {
+      for (size_t i = 0; i < CCORD_DESKTOP_TRAY_PIXMAPS; i++) {
+        size_t bytes = (size_t)k_tray_sizes[i] * (size_t)k_tray_sizes[i] * 4u;
+        GVariant *data = g_variant_new_fixed_array(G_VARIANT_TYPE_BYTE, d->pix->data + pixmap_offset(i), bytes, 1);
+        g_variant_builder_add(&pix, "(ii@ay)", (gint32)k_tray_sizes[i], (gint32)k_tray_sizes[i], data);
+      }
     }
     return g_variant_ref_sink(g_variant_builder_end(&pix));
   }
@@ -1032,7 +1051,8 @@ ccord_desktop *ccord_desktop_create(const char *app_id, bool offline)
   ccord_desktop *d = ccord_calloc(1, sizeof *d);
   if (!d) return nullptr;
   d->refs = 1;
-  render_icons(d);   // icon_key 0: the plain logo until a badge arrives
+  d->pix = &d->pix_storage;
+  d->pix->dirty = true;   // icon_key 0: rendered lazily on first IconPixmap / tray_pixmap read
   copy_utf8_prefix(d->app_id, sizeof d->app_id, app_id && app_id[0] ? app_id : "ccord");
 #if CCORD_HAVE_PORTAL
   if (offline) return d;  // headless: no bus probing, sink + honest false capabilities
@@ -1242,7 +1262,7 @@ void ccord_desktop_set_badge(ccord_desktop *d, uint32_t unread, uint32_t mention
   bool icon = key != d->icon_key;
   if (icon) {
     d->icon_key = key;
-    render_icons(d);
+    d->pix->dirty = true;
     d->new_icon_emits++;
   }
 #if CCORD_HAVE_PORTAL
@@ -1254,10 +1274,10 @@ void ccord_desktop_set_badge(ccord_desktop *d, uint32_t unread, uint32_t mention
 
 bool ccord_desktop_tray_pixmap(const ccord_desktop *d, size_t index, int *w, int *h, const uint8_t **argb)
 {
-  if (!d || index >= CCORD_DESKTOP_TRAY_PIXMAPS) return false;
+  if (!d || index >= CCORD_DESKTOP_TRAY_PIXMAPS || !ensure_icons(d)) return false;
   if (w) *w = k_tray_sizes[index];
   if (h) *h = k_tray_sizes[index];
-  if (argb) *argb = d->pixmaps + pixmap_offset(index);
+  if (argb) *argb = d->pix->data + pixmap_offset(index);
   return true;
 }
 

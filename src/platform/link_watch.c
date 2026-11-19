@@ -53,7 +53,6 @@ struct ccord_linkwatch {
   bool seeding;
   route_key routes[ROUTE_SET_MAX];
   size_t n_routes;
-  alignas(8) unsigned char buf[NL_BUF];
 };
 
 void ccord_linkwatch_feed_clocks(ccord_linkwatch *w, uint64_t boottime_ms, uint64_t monotonic_ms)
@@ -270,21 +269,24 @@ void ccord_linkwatch_sample(ccord_linkwatch *w)
   }
 #endif
 #if LINKWATCH_HAVE_NETLINK
-  for (unsigned i = 0; w->fd >= 0 && i < NL_READS_PER_SAMPLE; i++) {
-    ssize_t n = recv(w->fd, w->buf, sizeof w->buf, MSG_DONTWAIT);
-    if (n > 0) {
-      ccord_linkwatch_feed_netlink(w, w->buf, (size_t)n);
-      continue;
+  if (w->fd >= 0) {
+    alignas(8) unsigned char buf[NL_BUF];
+    for (unsigned i = 0; i < NL_READS_PER_SAMPLE; i++) {
+      ssize_t n = recv(w->fd, buf, sizeof buf, MSG_DONTWAIT);
+      if (n > 0) {
+        ccord_linkwatch_feed_netlink(w, buf, (size_t)n);
+        continue;
+      }
+      if (n < 0 && errno == ENOBUFS) {
+        // Receive buffer overrun during a burst: the set may be stale. Report one change and re-seed.
+        w->pending_changed = true;
+        ccord_linkwatch_begin_seed(w);
+        request_dump(w);
+        continue;
+      }
+      if (n < 0 && errno == EINTR) continue;
+      break;   // EAGAIN (nothing pending), EOF or a hard error: never spin
     }
-    if (n < 0 && errno == ENOBUFS) {
-      // Receive buffer overrun during a burst: the set may be stale. Report one change and re-seed.
-      w->pending_changed = true;
-      ccord_linkwatch_begin_seed(w);
-      request_dump(w);
-      continue;
-    }
-    if (n < 0 && errno == EINTR) continue;
-    break;   // EAGAIN (nothing pending), EOF or a hard error: never spin
   }
 #endif
 }
