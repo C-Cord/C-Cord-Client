@@ -132,6 +132,14 @@ def c_ascii(s):
     return '"' + s + '"'
 
 
+def c_strtab_byte(x):
+    if x == 0:
+        return "0"
+    if 0x20 <= x < 0x7F and chr(x) not in "'\\":
+        return "'%c'" % x
+    return "'\\x%02x'" % x
+
+
 def tone_of(cps):
     """Returns tone index 1..5 if ALL tone modifiers in the sequence are the same tone, 0 if none, -1 mixed."""
     ts = [c for c in cps if c in TONES]
@@ -285,6 +293,47 @@ def emit(bases, spellings, claimed, out_path):
     w("// (joypixels, iamcal, github). Pins + licences: scripts/gen_emoji_data.py, assets/LICENSES.md.")
     w('#include "emoji_data.h"')
     w("")
+
+    # Single packed NUL-terminated string table in .rodata so private lookup tables hold uint32_t offsets
+    # instead of pointers (zero PIE dynamic relocations; shared read-only pages).
+    strtab = bytearray()
+    strtab_off = {}
+
+    def intern_bytes(b):
+        assert b"\x00" not in b
+        off = strtab_off.get(b)
+        if off is not None:
+            return off
+        off = len(strtab)
+        strtab_off[b] = off
+        strtab.extend(b)
+        strtab.append(0)
+        return off
+
+    keys = sorted(claimed.items(), key=lambda kv: kv[0].encode("ascii"))
+    for k, _ in keys:
+        assert len(k) < 200
+        intern_bytes(k.encode("ascii"))
+    sp = sorted(spellings.items(), key=lambda kv: kv[0])
+    for b, _ in sp:
+        assert len(b) < 255
+        intern_bytes(b)
+    toned = [e for e in bases if e["has_tones"]]
+    for e in toned:
+        for t in e["tones"]:
+            intern_bytes(t)
+    for e in bases:
+        intern_bytes(to_utf8(e["cps"]))
+        intern_bytes(e["name_sc"].encode("ascii"))
+        for al in e["aliases"]:
+            intern_bytes(al.encode("ascii"))
+
+    w("const char ccord_emoji_strtab[] = {")
+    for i in range(0, len(strtab), 24):
+        w("    " + ", ".join(c_strtab_byte(x) for x in strtab[i:i + 24]) + ",")
+    w("};")
+    w("")
+
     # alias pool
     pool = []
     alias_off = {}
@@ -295,7 +344,10 @@ def emit(bases, spellings, claimed, out_path):
             pool.append(None)
     w("static const char *const k_aliases[] = {")
     for n in pool:
-        w("    " + ("nullptr" if n is None else c_ascii(n)) + ",")
+        if n is None:
+            w("    nullptr,")
+        else:
+            w("    ccord_emoji_strtab + %d," % strtab_off[n.encode("ascii")])
     if not pool:
         w("    nullptr,")
     w("};")
@@ -303,8 +355,10 @@ def emit(bases, spellings, claimed, out_path):
     w("const ccord_emoji_entry ccord_emoji_data[] = {")
     for e in bases:
         al = f"&k_aliases[{alias_off[e['idx']]}]" if e["idx"] in alias_off else "nullptr"
-        w("    {%s, %s, %s, %s, (ccord_emoji_category)%d, %s}," % (
-            c_string(to_utf8(e["cps"])), c_ascii(e["name_sc"]), al, c_text(e["name"]), e["cat"],
+        uoff = strtab_off[to_utf8(e["cps"])]
+        noff = strtab_off[e["name_sc"].encode("ascii")]
+        w("    {ccord_emoji_strtab + %d, ccord_emoji_strtab + %d, %s, %s, (ccord_emoji_category)%d, %s}," % (
+            uoff, noff, al, c_text(e["name"]), e["cat"],
             "true" if e["has_tones"] else "false"))
     w("};")
     w("const size_t ccord_emoji_data_count = %d;" % len(bases))
@@ -315,32 +369,26 @@ def emit(bases, spellings, claimed, out_path):
     w("const uint16_t ccord_emoji_cat_start[CCORD_EMOJI_CATEGORY_COUNT + 1] = {%s};" %
       ", ".join(str(s) for s in starts))
     w("")
-    toned = [e for e in bases if e["has_tones"]]
     w("const ccord_emoji_tone_set ccord_emoji_tone_sets[] = {")
     for e in toned:
-        w("    {%d, {%s}}," % (e["idx"], ", ".join(c_string(t) for t in e["tones"])))
+        w("    {%d, {%s}}," % (e["idx"], ", ".join(str(strtab_off[t]) for t in e["tones"])))
     w("};")
     w("const size_t ccord_emoji_tone_set_count = %d;" % len(toned))
     w("")
-    keys = sorted(claimed.items(), key=lambda kv: kv[0].encode("ascii"))
-    for k, _ in keys:
-        assert len(k) < 200
     w("const ccord_emoji_sc_key ccord_emoji_sc_index[] = {")
     for k, idx in keys:
-        w("    {%s, %d, %d}," % (c_ascii(k), idx, len(k)))
+        w("    {%d, %d, %d}," % (strtab_off[k.encode("ascii")], idx, len(k)))
     w("};")
     w("const size_t ccord_emoji_sc_index_count = %d;" % len(keys))
     w("")
-    sp = sorted(spellings.items(), key=lambda kv: kv[0])
     w("const ccord_emoji_utf8_key ccord_emoji_utf8_index[] = {")
     for b, (idx, tone) in sp:
-        assert len(b) < 255
-        w("    {%s, %d, %d, %d}," % (c_string(b), idx, tone, len(b)))
+        w("    {%d, %d, %d, %d}," % (strtab_off[b], idx, tone, len(b)))
     w("};")
     w("const size_t ccord_emoji_utf8_index_count = %d;" % len(sp))
     w("")
     data = "\n".join(L)
-    with open(out_path, "w", encoding="ascii", newline="\n") as f:
+    with open(out_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(data)
     return len(keys), len(sp)
 

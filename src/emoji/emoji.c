@@ -8,7 +8,7 @@
 
 enum {
   MAX_NAME = 64,          // longest shortcode / query we are willing to look at
-  MAX_ENTRIES = 4096,     // upper bound for the stack scratch arrays (checked against the generated count)
+  FAST_CAP = 128,         // per-tier stack bucket capacity for single-pass search/complete
   TIER_NONE = 0xFF,
 };
 
@@ -62,7 +62,7 @@ size_t ccord_emoji_with_tone(const ccord_emoji_entry *e, int tone, char *out, si
   if (tone >= 1 && tone <= 5 && e->has_skin_tones && e >= ccord_emoji_data &&
       e < ccord_emoji_data + ccord_emoji_data_count) {
     const ccord_emoji_tone_set *ts = find_tone_set((size_t)(e - ccord_emoji_data));
-    if (ts) src = ts->utf8[tone - 1];
+    if (ts) src = ccord_emoji_strtab + ts->utf8_off[tone - 1];
   }
   size_t n = strlen(src);
   if (n + 1 > cap) {
@@ -104,7 +104,7 @@ static size_t sc_lower_bound(const char *s, size_t len)
   while (lo < hi) {
     size_t mid = lo + (hi - lo) / 2;
     const ccord_emoji_sc_key *k = &ccord_emoji_sc_index[mid];
-    if (cmp_bytes(k->key, k->len, s, len) < 0) lo = mid + 1;
+    if (cmp_bytes(ccord_emoji_strtab + k->key_off, k->len, s, len) < 0) lo = mid + 1;
     else hi = mid;
   }
   return lo;
@@ -118,7 +118,7 @@ const ccord_emoji_entry *ccord_emoji_find_shortcode(const char *name, size_t len
   size_t i = sc_lower_bound(buf, n);
   if (i < ccord_emoji_sc_index_count) {
     const ccord_emoji_sc_key *k = &ccord_emoji_sc_index[i];
-    if (cmp_bytes(k->key, k->len, buf, n) == 0) return &ccord_emoji_data[k->entry];
+    if (cmp_bytes(ccord_emoji_strtab + k->key_off, k->len, buf, n) == 0) return &ccord_emoji_data[k->entry];
   }
   return nullptr;
 }
@@ -130,7 +130,7 @@ const ccord_emoji_entry *ccord_emoji_find_utf8(const char *s, size_t len, int *o
   while (lo < hi) {
     size_t mid = lo + (hi - lo) / 2;
     const ccord_emoji_utf8_key *k = &ccord_emoji_utf8_index[mid];
-    int c = cmp_bytes(k->utf8, k->len, s, len);
+    int c = cmp_bytes(ccord_emoji_strtab + k->utf8_off, k->len, s, len);
     if (c == 0) {
       if (out_tone) *out_tone = k->tone;
       return &ccord_emoji_data[k->entry];
@@ -166,23 +166,23 @@ static bool ci_substr(const char *hay, size_t hlen, const char *nd, size_t nlen)
 }
 
 // Tiers: 0 exact name/alias, 1 prefix of name, 2 prefix of alias, 3 substring of name/alias, 4 substring of CLDR name.
-static unsigned entry_tier(const ccord_emoji_entry *e, const char *q, size_t ql)
+static unsigned entry_tier(const ccord_emoji_entry *e, const char *q, size_t ql, unsigned max_tier)
 {
   size_t nlen = strlen(e->name);
   unsigned best = TIER_NONE;
   if (nlen == ql && ci_prefix(e->name, nlen, q, ql)) return 0;
-  if (ci_prefix(e->name, nlen, q, ql)) best = 1;
-  else if (ci_substr(e->name, nlen, q, ql)) best = 3;
+  if (max_tier >= 1 && ci_prefix(e->name, nlen, q, ql)) best = 1;
+  else if (max_tier >= 3 && ci_substr(e->name, nlen, q, ql)) best = 3;
   if (e->aliases) {
     for (const char *const *a = e->aliases; *a; a++) {
       size_t alen = strlen(*a);
       if (alen == ql && ci_prefix(*a, alen, q, ql)) return 0;
-      if (best > 2 && ci_prefix(*a, alen, q, ql)) best = 2;
-      else if (best > 3 && ci_substr(*a, alen, q, ql)) best = 3;
+      if (max_tier >= 2 && best > 2 && ci_prefix(*a, alen, q, ql)) best = 2;
+      else if (max_tier >= 3 && best > 3 && ci_substr(*a, alen, q, ql)) best = 3;
     }
   }
-  if (best == TIER_NONE && ci_substr(e->cldr_name, strlen(e->cldr_name), q, ql)) best = 4;
-  return best;
+  if (best == TIER_NONE && max_tier >= 4 && ci_substr(e->cldr_name, strlen(e->cldr_name), q, ql)) best = 4;
+  return best <= max_tier ? best : TIER_NONE;
 }
 
 static bool query_prepare(const char *q, size_t ql, char *buf, size_t *outlen)
@@ -196,41 +196,179 @@ static bool query_prepare(const char *q, size_t ql, char *buf, size_t *outlen)
   return normalise(q, ql, buf, outlen);
 }
 
-// Emits indices in (tier, dataset order) order from the per-entry tier array.
-static size_t emit_ranked(const uint8_t *tier, unsigned ntiers, size_t *out_idx, size_t cap)
+static bool str_has_prefix(const char *s, const char *q, size_t ql)
 {
-  size_t n = 0;
-  for (unsigned t = 0; t < ntiers && n < cap; t++)
-    for (size_t i = 0; i < ccord_emoji_data_count && n < cap; i++)
-      if (tier[i] == t) out_idx[n++] = i;
-  return n;
+  for (size_t i = 0; i < ql; i++) {
+    if (s[i] != q[i]) return false;
+  }
+  return true;
+}
+
+// Inserts `val` into sorted ascending `arr[0..*n)` capped at `cap` (deduplicating).
+static void insert_sorted_u16(uint16_t *arr, size_t *n, size_t cap, uint16_t val)
+{
+  if (cap == 0) return;
+  size_t cnt = *n;
+  if (cnt > cap) cnt = cap;
+  if (cnt == cap && val >= arr[cnt - 1u]) {
+    *n = cnt;
+    return;
+  }
+  size_t lo = 0, hi = cnt;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    if (arr[mid] < val) lo = mid + 1u;
+    else hi = mid;
+  }
+  if (lo < cnt && arr[lo] == val) {
+    *n = cnt;
+    return;
+  }
+  size_t new_cnt = cnt < cap ? cnt + 1u : cap;
+  for (size_t j = new_cnt - 1u; j > lo; j--) arr[j] = arr[j - 1u];
+  arr[lo] = val;
+  *n = new_cnt;
+}
+
+static void insert_sorted_sz(size_t *arr, size_t *n, size_t cap, size_t val)
+{
+  if (cap == 0) return;
+  size_t cnt = *n;
+  if (cnt == cap && val >= arr[cnt - 1u]) return;
+  size_t lo = 0, hi = cnt;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    if (arr[mid] < val) lo = mid + 1u;
+    else hi = mid;
+  }
+  if (lo < cnt && arr[lo] == val) return;
+  size_t new_cnt = cnt < cap ? cnt + 1u : cap;
+  for (size_t j = new_cnt - 1u; j > lo; j--) arr[j] = arr[j - 1u];
+  arr[lo] = val;
+  *n = new_cnt;
 }
 
 size_t ccord_emoji_search(const char *query, size_t qlen, size_t *out_idx, size_t cap)
 {
   char q[MAX_NAME];
   size_t ql;
-  if (!out_idx || cap == 0 || ccord_emoji_data_count > MAX_ENTRIES || !query_prepare(query, qlen, q, &ql)) return 0;
-  uint8_t tier[MAX_ENTRIES];
-  for (size_t i = 0; i < ccord_emoji_data_count; i++) tier[i] = (uint8_t)entry_tier(&ccord_emoji_data[i], q, ql);
-  return emit_ranked(tier, 5, out_idx, cap);
+  if (!out_idx || cap == 0 || !query_prepare(query, qlen, q, &ql)) return 0;
+  size_t want = cap < ccord_emoji_data_count ? cap : ccord_emoji_data_count;
+  if (want <= FAST_CAP) {
+    uint16_t buckets[5][FAST_CAP];
+    size_t counts[5] = {0};
+    unsigned max_tier = 4;
+    bool done = false;
+    for (size_t i = 0; i < ccord_emoji_data_count && !done; i++) {
+      unsigned t = entry_tier(&ccord_emoji_data[i], q, ql, max_tier);
+      if (t > max_tier) continue;
+      buckets[t][counts[t]++] = (uint16_t)i;
+      size_t acc = 0;
+      for (unsigned nt = 0; nt <= max_tier; nt++) {
+        acc += counts[nt];
+        if (acc >= want) {
+          if (nt == 0) done = true;
+          else max_tier = nt - 1u;
+          break;
+        }
+      }
+    }
+    size_t n = 0;
+    for (unsigned t = 0; t < 5 && n < want; t++)
+      for (size_t k = 0; k < counts[t] && n < want; k++) out_idx[n++] = buckets[t][k];
+    return n;
+  }
+  size_t n = 0;
+  for (unsigned target = 0; target < 5 && n < want; target++) {
+    for (size_t i = 0; i < ccord_emoji_data_count && n < want; i++) {
+      if (entry_tier(&ccord_emoji_data[i], q, ql, target) == target) out_idx[n++] = i;
+    }
+  }
+  return n;
 }
 
 size_t ccord_emoji_complete(const char *prefix, size_t plen, size_t *out_idx, size_t cap)
 {
   char q[MAX_NAME];
   size_t ql;
-  if (!out_idx || cap == 0 || ccord_emoji_data_count > MAX_ENTRIES || !query_prepare(prefix, plen, q, &ql)) return 0;
-  uint8_t tier[MAX_ENTRIES];
-  memset(tier, TIER_NONE, ccord_emoji_data_count);
-  for (size_t i = sc_lower_bound(q, ql); i < ccord_emoji_sc_index_count; i++) {
-    const ccord_emoji_sc_key *k = &ccord_emoji_sc_index[i];
-    if (k->len < ql || memcmp(k->key, q, ql) != 0) break;
-    const ccord_emoji_entry *e = &ccord_emoji_data[k->entry];
-    uint8_t t = k->len == ql ? 0 : (strcmp(e->name, k->key) == 0 ? 1 : 2);
-    if (t < tier[k->entry]) tier[k->entry] = t;
+  if (!out_idx || cap == 0 || !query_prepare(prefix, plen, q, &ql)) return 0;
+  size_t want = cap < ccord_emoji_data_count ? cap : ccord_emoji_data_count;
+  size_t start = sc_lower_bound(q, ql);
+
+  bool has_exact = false;
+  uint16_t exact_entry = 0;
+  size_t i0 = start;
+  if (i0 < ccord_emoji_sc_index_count) {
+    const ccord_emoji_sc_key *k = &ccord_emoji_sc_index[i0];
+    if (k->len == ql && memcmp(ccord_emoji_strtab + k->key_off, q, ql) == 0) {
+      has_exact = true;
+      exact_entry = k->entry;
+      i0++;
+    }
   }
-  return emit_ranked(tier, 3, out_idx, cap);
+  size_t cap1 = want - (has_exact ? 1u : 0u);
+  if (cap1 == 0) {
+    if (has_exact) {
+      out_idx[0] = exact_entry;
+      return 1;
+    }
+    return 0;
+  }
+
+  if (want <= FAST_CAP) {
+    uint16_t t1[FAST_CAP];
+    uint16_t t2[FAST_CAP];
+    size_t n1 = 0, n2 = 0;
+    for (size_t i = i0; i < ccord_emoji_sc_index_count; i++) {
+      const ccord_emoji_sc_key *k = &ccord_emoji_sc_index[i];
+      const char *key = ccord_emoji_strtab + k->key_off;
+      if (k->len < ql || memcmp(key, q, ql) != 0) break;
+      if (has_exact && k->entry == exact_entry) continue;
+      const ccord_emoji_entry *e = &ccord_emoji_data[k->entry];
+      if (e->name == key || strcmp(e->name, key) == 0) {
+        insert_sorted_u16(t1, &n1, cap1, k->entry);
+      } else if (n1 < cap1 && !str_has_prefix(e->name, q, ql)) {
+        insert_sorted_u16(t2, &n2, cap1 - n1, k->entry);
+      }
+    }
+    size_t n = 0;
+    if (has_exact) out_idx[n++] = exact_entry;
+    for (size_t k = 0; k < n1 && n < want; k++) out_idx[n++] = t1[k];
+    for (size_t k = 0; k < n2 && n < want; k++) out_idx[n++] = t2[k];
+    return n;
+  }
+
+  size_t n = 0;
+  if (has_exact) out_idx[n++] = exact_entry;
+  size_t n1 = 0;
+  size_t end = i0;
+  for (size_t i = i0; i < ccord_emoji_sc_index_count; i++) {
+    const ccord_emoji_sc_key *k = &ccord_emoji_sc_index[i];
+    const char *key = ccord_emoji_strtab + k->key_off;
+    if (k->len < ql || memcmp(key, q, ql) != 0) break;
+    end = i + 1u;
+    if (has_exact && k->entry == exact_entry) continue;
+    const ccord_emoji_entry *e = &ccord_emoji_data[k->entry];
+    if (e->name == key || strcmp(e->name, key) == 0) {
+      insert_sorted_sz(out_idx + n, &n1, cap1, k->entry);
+    }
+  }
+  n += n1;
+  if (n < want) {
+    size_t cap2 = want - n;
+    size_t n2 = 0;
+    for (size_t i = i0; i < end; i++) {
+      const ccord_emoji_sc_key *k = &ccord_emoji_sc_index[i];
+      const char *key = ccord_emoji_strtab + k->key_off;
+      if (has_exact && k->entry == exact_entry) continue;
+      const ccord_emoji_entry *e = &ccord_emoji_data[k->entry];
+      if (e->name != key && strcmp(e->name, key) != 0 && !str_has_prefix(e->name, q, ql)) {
+        insert_sorted_sz(out_idx + n, &n2, cap2, k->entry);
+      }
+    }
+    n += n2;
+  }
+  return n;
 }
 
 // ---- shortcode replacement -------------------------------------------------------------------------------------
