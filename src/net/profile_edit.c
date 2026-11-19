@@ -476,6 +476,7 @@ typedef struct mock_state {
   bool fail_armed;
   long fail_http;
   char *fail_body;
+  size_t pending_count;
   mock_pending pending[MOCK_MAX_PENDING];
 } mock_state;
 
@@ -650,6 +651,7 @@ static ccord_status rest_patch(ccord_profile_rest *r, const char *path, const ch
   ccord_free(m->last_body);
   m->last_body = ccord_strdup(body);
   slot->used = true;
+  m->pending_count++;
   slot->cb = cb;
   slot->ud = ud;
   if (m->fail_armed) {
@@ -665,10 +667,11 @@ static ccord_status rest_patch(ccord_profile_rest *r, const char *path, const ch
   return CCORD_OK;
 }
 
-static void mock_deliver(mock_pending *p, ccord_status st)
+static void mock_deliver(mock_state *m, mock_pending *p, ccord_status st)
 {
   mock_pending done = *p;
   memset(p, 0, sizeof *p);
+  if (m->pending_count > 0) m->pending_count--;
   if (done.cb) done.cb(done.ud, st, st == CCORD_OK ? done.http : 0, done.body ? done.body : "", done.body ? strlen(done.body) : 0);
   ccord_free(done.body);
 }
@@ -678,14 +681,16 @@ void ccord_profile_rest_pump(ccord_profile_rest *r, uint64_t now_ms)
   if (!r) return;
   if (!r->is_mock) {
 #ifdef CCORD_PROFILE_LIVE
+    if (!r->queue || ccord_rest_queue_pending(r->queue) == 0) return;
     ccord_rest_queue_pump(r->queue, now_ms);
 #else
     (void)now_ms;
 #endif
     return;
   }
-  for (size_t i = 0; i < MOCK_MAX_PENDING; i++) {
-    if (r->mock->pending[i].used) mock_deliver(&r->mock->pending[i], CCORD_OK);
+  if (!r->mock || r->mock->pending_count == 0) return;
+  for (size_t i = 0; i < MOCK_MAX_PENDING && r->mock->pending_count > 0; i++) {
+    if (r->mock->pending[i].used) mock_deliver(r->mock, &r->mock->pending[i], CCORD_OK);
   }
 }
 
@@ -693,8 +698,8 @@ void ccord_profile_rest_destroy(ccord_profile_rest *r)
 {
   if (!r) return;
   if (r->is_mock) {
-    for (size_t i = 0; i < MOCK_MAX_PENDING; i++) {
-      if (r->mock->pending[i].used) mock_deliver(&r->mock->pending[i], CCORD_ERR_IO);
+    for (size_t i = 0; i < MOCK_MAX_PENDING && r->mock->pending_count > 0; i++) {
+      if (r->mock->pending[i].used) mock_deliver(r->mock, &r->mock->pending[i], CCORD_ERR_IO);
     }
     ccord_free(r->mock->last_body);
     ccord_free(r->mock->fail_body);
@@ -741,9 +746,7 @@ static void job_on_http(void *ud, ccord_status st, long http, const char *body, 
     job_finish(job);
     return;
   }
-  ccord_profile_edit_result tmp = job->res;
-  bool ok = ccord_profile_edit_parse_answer(rq->fields, http, body, len, &tmp);
-  job->res = tmp;
+  bool ok = ccord_profile_edit_parse_answer(rq->fields, http, body, len, &job->res);
   if (!ok) {
     if (st != CCORD_OK && job->res.status == CCORD_OK) job->res.status = st;
     job_finish(job);

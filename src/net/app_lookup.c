@@ -38,7 +38,8 @@ ccord_status ccord_app_lookup_parse(const char *body, size_t len, const char *cl
   if (!body || !client_id || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "app_lookup: missing argument");
   memset(out, 0, sizeof *out);
   ccord_arena arena;
-  ccord_arena_init(&arena, 0);
+  size_t hint = len > 16384u ? 16384u : (len + 512u < 2048u ? 2048u : len + 512u);
+  ccord_arena_init(&arena, hint);
   ccord_error perr;
   const ccord_json *j = ccord_json_parse(&arena, body, len, nullptr, &perr);
   ccord_status st = CCORD_OK;
@@ -94,6 +95,7 @@ static ccord_status mock_get(void *ctx, const char *client_id, ccord_app_lookup_
 
 static void mock_deliver(mock_ctx *m, bool fail)
 {
+  if (!m || m->count == 0) return;
   mock_pending batch[MOCK_PENDING_MAX];
   size_t n = m->count;
   memcpy(batch, m->pending, n * sizeof batch[0]);
@@ -114,7 +116,9 @@ static void mock_deliver(mock_ctx *m, bool fail)
 static void mock_pump(void *ctx, uint64_t now_ms)
 {
   (void)now_ms;
-  mock_deliver(ctx, false);
+  mock_ctx *m = ctx;
+  if (!m || m->count == 0) return;
+  mock_deliver(m, false);
 }
 
 static void mock_destroy(void *ctx)
@@ -159,6 +163,11 @@ static ccord_status rest_get(void *ctx, const char *client_id, ccord_app_lookup_
   rest_ctx *r = ctx;
   ccord_error_clear(err);
   if (!valid_snowflake(client_id) || !done) return ccord_error_set(err, CCORD_ERR_INVALID, "app_lookup: bad client id");
+  if (!r->queue) {
+    ccord_rest_config cfg = {.timeout_ms = 10000u, .max_response_bytes = 64u * 1024u};   // no token: the endpoint is public
+    r->queue = ccord_rest_queue_create(&cfg, err);
+    if (!r->queue) return err && err->code != CCORD_OK ? err->code : CCORD_ERR_IO;
+  }
   rest_job *job = ccord_calloc(1, sizeof *job);
   if (!job) return ccord_error_set(err, CCORD_ERR_NOMEM, "app_lookup: out of memory");
   snprintf(job->client_id, sizeof job->client_id, "%s", client_id);
@@ -167,18 +176,36 @@ static ccord_status rest_get(void *ctx, const char *client_id, ccord_app_lookup_
   char path[64];
   (void)snprintf(path, sizeof path, "/oauth2/applications/%s/rpc", client_id);   // digits only: no escaping needed
   ccord_status st = ccord_rest_queue_add(r->queue, CCORD_REST_GET, path, nullptr, rest_cb, job, err);
-  if (st != CCORD_OK) ccord_free(job);   // a failed add never calls the callback
+  if (st != CCORD_OK) {
+    ccord_free(job);   // a failed add never calls the callback
+    if (ccord_rest_queue_pending(r->queue) == 0) {
+      ccord_rest_queue_destroy(r->queue);
+      r->queue = nullptr;
+    }
+  }
   return st;
 }
 
 static void rest_pump(void *ctx, uint64_t now_ms)
 {
-  ccord_rest_queue_pump(((rest_ctx *)ctx)->queue, now_ms);
+  rest_ctx *r = ctx;
+  if (!r || !r->queue) return;
+  if (ccord_rest_queue_pending(r->queue) == 0) {
+    ccord_rest_queue_destroy(r->queue);
+    r->queue = nullptr;
+    return;
+  }
+  ccord_rest_queue_pump(r->queue, now_ms);
+  if (ccord_rest_queue_pending(r->queue) == 0) {
+    ccord_rest_queue_destroy(r->queue);
+    r->queue = nullptr;
+  }
 }
 
 static void rest_destroy(void *ctx)
 {
   rest_ctx *r = ctx;
+  if (!r) return;
   ccord_rest_queue_destroy(r->queue);   // fails every pending job through rest_cb
   ccord_free(r);
 }
@@ -189,13 +216,6 @@ ccord_app_lookup_source ccord_app_lookup_rest_source(void)
 #if defined(CCORD_APP_LOOKUP_REST)
   rest_ctx *r = ccord_calloc(1, sizeof *r);
   if (!r) return (ccord_app_lookup_source){0};
-  ccord_rest_config cfg = {.timeout_ms = 10000u, .max_response_bytes = 64u * 1024u};   // no token: the endpoint is public
-  ccord_error err;
-  r->queue = ccord_rest_queue_create(&cfg, &err);
-  if (!r->queue) {
-    ccord_free(r);
-    return (ccord_app_lookup_source){0};
-  }
   return (ccord_app_lookup_source){.get = rest_get, .pump = rest_pump, .destroy = rest_destroy, .ctx = r};
 #else
   return (ccord_app_lookup_source){0};

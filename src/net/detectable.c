@@ -40,6 +40,7 @@ const char *ccord_detectable_fixture(size_t *len)
 struct ccord_detectable {
   ccord_detectable_config cfg;
   char *cache_dir;              // owned copy, or nullptr
+  char *cache_file;             // precomputed "<cache_dir>/<CCORD_DETECTABLE_CACHE_FILE>", or nullptr
   uint32_t retry_min_ms, retry_max_ms;
   uint32_t backoff_ms;          // current backoff step (0 = no failure outstanding)
   uint64_t next_ms;             // earliest time the next decision is made
@@ -54,6 +55,22 @@ struct ccord_detectable {
   ccord_rest_queue *q;
 #endif
 };
+
+static char *alloc_cache_path(const char *dir, const char *suffix)
+{
+  size_t dlen = strlen(dir);
+  size_t flen = sizeof CCORD_DETECTABLE_CACHE_FILE - 1u;
+  size_t slen = suffix ? strlen(suffix) : 0u;
+  size_t total = dlen + 1u + flen + slen + 1u;
+  char *out = ccord_malloc(total);
+  if (!out) return nullptr;
+  memcpy(out, dir, dlen);
+  out[dlen] = '/';
+  memcpy(out + dlen + 1u, CCORD_DETECTABLE_CACHE_FILE, flen);
+  if (slen > 0) memcpy(out + dlen + 1u + flen, suffix, slen);
+  out[total - 1u] = '\0';
+  return out;
+}
 
 ccord_detectable *ccord_detectable_create(const ccord_detectable_config *cfg, ccord_error *err)
 {
@@ -70,7 +87,10 @@ ccord_detectable *ccord_detectable_create(const ccord_detectable_config *cfg, cc
   d->cfg = *cfg;
   if (cfg->cache_dir && cfg->cache_dir[0] != '\0') {
     d->cache_dir = ccord_strndup(cfg->cache_dir, strlen(cfg->cache_dir));
-    if (!d->cache_dir) {
+    d->cache_file = d->cache_dir ? alloc_cache_path(d->cache_dir, nullptr) : nullptr;
+    if (!d->cache_dir || !d->cache_file) {
+      ccord_free(d->cache_file);
+      ccord_free(d->cache_dir);
       ccord_free(d);
       (void)ccord_error_set(err, CCORD_ERR_NOMEM, "detectable: out of memory");
       return nullptr;
@@ -89,13 +109,9 @@ void ccord_detectable_destroy(ccord_detectable *d)
 #if CCORD_DETECTABLE_LIVE
   ccord_rest_queue_destroy(d->q);   // callbacks of requests still running are dropped, never delivered
 #endif
+  ccord_free(d->cache_file);
   ccord_free(d->cache_dir);
   ccord_free(d);
-}
-
-static void cache_path(const ccord_detectable *d, char *out, size_t cap)
-{
-  (void)snprintf(out, cap, "%s/%s", d->cache_dir, CCORD_DETECTABLE_CACHE_FILE);
 }
 
 // Failure (or rejected body): keep the cache, retry after the next backoff step.
@@ -151,6 +167,10 @@ static void start_request(ccord_detectable *d, uint64_t now_ms)
                          : ccord_error_set(&err, CCORD_ERR_IO, "detectable: no REST queue");
   if (st != CCORD_OK) {
     CCORD_LOG_W("detectable: request not started: %s", err.message);
+    if (d->q && ccord_rest_queue_pending(d->q) == 0) {
+      ccord_rest_queue_destroy(d->q);
+      d->q = nullptr;
+    }
     schedule_retry(d, now_ms);
     return;
   }
@@ -163,9 +183,19 @@ static void start_request(ccord_detectable *d, uint64_t now_ms)
 void ccord_detectable_poll(ccord_detectable *d, uint64_t now_ms, int64_t now_unix_s, bool enabled)
 {
   if (!d) return;
+  if (!d->inflight && (!enabled || d->awaiting || (d->started && now_ms < d->next_ms))) {
+    return;
+  }
   d->now_ms = now_ms;
 #if CCORD_DETECTABLE_LIVE
-  if (d->q && d->inflight) ccord_rest_queue_pump(d->q, now_ms);
+  if (d->q && d->inflight) {
+    ccord_rest_queue_pump(d->q, now_ms);
+    // Tear down the dedicated CURLM + sockets once the 24h fetch finishes; recreated lazily on next refresh.
+    if (!d->inflight && ccord_rest_queue_pending(d->q) == 0) {
+      ccord_rest_queue_destroy(d->q);
+      d->q = nullptr;
+    }
+  }
 #endif
   if (!enabled || d->inflight || d->awaiting) return;
   if (!d->started) {
@@ -176,11 +206,9 @@ void ccord_detectable_poll(ccord_detectable *d, uint64_t now_ms, int64_t now_uni
   // Is the cache fresh enough to skip the request?
   bool fresh = false;
   if (d->backoff_ms == 0) {
-    if (d->cache_dir) {
-      char p[4096];
+    if (d->cache_file) {
       struct stat sb;
-      cache_path(d, p, sizeof p);
-      if (stat(p, &sb) == 0 && S_ISREG(sb.st_mode)) {
+      if (stat(d->cache_file, &sb) == 0 && S_ISREG(sb.st_mode)) {
         int64_t age = now_unix_s - (int64_t)sb.st_mtime;
         fresh = age < CCORD_DETECTABLE_REFRESH_S;   // a clock set back (negative age) also counts as fresh
       }
@@ -227,15 +255,21 @@ char *ccord_detectable_cache_read(const char *dir, size_t *len, int64_t *mtime_s
     (void)ccord_error_set(err, CCORD_ERR_INVALID, "detectable: no cache dir");
     return nullptr;
   }
-  char p[4096];
-  (void)snprintf(p, sizeof p, "%s/%s", dir, CCORD_DETECTABLE_CACHE_FILE);
+  char *p = alloc_cache_path(dir, nullptr);
+  if (!p) {
+    (void)ccord_error_set(err, CCORD_ERR_NOMEM, "detectable: out of memory");
+    return nullptr;
+  }
   FILE *f = fopen(p, "rb");
   if (!f) {
+    ccord_free(p);
     (void)ccord_error_set(err, CCORD_ERR_NOT_FOUND, "detectable: no cache file");
     return nullptr;
   }
   struct stat sb;
-  if (stat(p, &sb) != 0 || sb.st_size <= 0 ||
+  int st_rc = stat(p, &sb);
+  ccord_free(p);
+  if (st_rc != 0 || sb.st_size <= 0 ||
       (uint64_t)sb.st_size > CCORD_DETECTABLE_MAX_BYTES) {
     fclose(f);
     (void)ccord_error_set(err, CCORD_ERR_RANGE, "detectable: cache file empty or too large");
@@ -265,17 +299,29 @@ ccord_status ccord_detectable_cache_write(const char *dir, const char *body, siz
 {
   ccord_error_clear(err);
   if (!dir || dir[0] == '\0' || !body || len == 0) return ccord_error_set(err, CCORD_ERR_INVALID, "detectable: bad cache write");
-  char p[4096], tmp[4112];
-  (void)snprintf(p, sizeof p, "%s/%s", dir, CCORD_DETECTABLE_CACHE_FILE);
-  (void)snprintf(tmp, sizeof tmp, "%s.tmp", p);
+  char *p = alloc_cache_path(dir, nullptr);
+  char *tmp = p ? alloc_cache_path(dir, ".tmp") : nullptr;
+  if (!p || !tmp) {
+    ccord_free(tmp);
+    ccord_free(p);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "detectable: out of memory");
+  }
   FILE *f = fopen(tmp, "wb");
-  if (!f) return ccord_error_set(err, CCORD_ERR_IO, "detectable: cannot create the cache file");
+  if (!f) {
+    ccord_free(tmp);
+    ccord_free(p);
+    return ccord_error_set(err, CCORD_ERR_IO, "detectable: cannot create the cache file");
+  }
   bool ok = fwrite(body, 1, len, f) == len;
   ok = (fflush(f) == 0) && ok;
   ok = (fclose(f) == 0) && ok;
   if (!ok || !ccord_file_rename_replace(tmp, p)) {
     (void)ccord_file_unlink(tmp);
+    ccord_free(tmp);
+    ccord_free(p);
     return ccord_error_set(err, CCORD_ERR_IO, "detectable: cannot write the cache file");
   }
+  ccord_free(tmp);
+  ccord_free(p);
   return CCORD_OK;
 }
