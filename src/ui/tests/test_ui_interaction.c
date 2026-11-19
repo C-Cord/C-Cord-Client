@@ -12293,6 +12293,111 @@ static void test_reading_overlays_immediate_focus_and_utf8_notify(void)
   ccord_platform_set_window_focused(F.platform, true);
 }
 
+static void test_dm_and_substring_mention_autocomplete(void)
+{
+  ccord_error err;
+  // 1. Guild substring matching & mention pill rendering in the composer.
+  CT_CHECK(ccord_session_select_guild(F.session, 2001, &err) == CCORD_OK);
+  CT_CHECK(ccord_session_select_channel(F.session, 3111, &err) == CCORD_OK);
+  frame(4);
+  clear_composer_input();
+  type_text("@jor");
+  frame(2);
+  CT_CHECK(dbg().autocomplete_open && dbg().autocomplete_count > 0);
+  CT_CHECK(autocomplete_has("Bjorn"));
+  ccord_rect cbox = ui_composer_box(F.ui);
+  ccord_rect ac = dbg().autocomplete_rect;
+  CT_CHECK(ac.w > 0.0f && ac.h > 0.0f && ac.y + ac.h <= cbox.y);
+  key(CCORD_KEY_TAB, 0);
+  frame(2);
+  CT_CHECK(!dbg().autocomplete_open);
+  CT_CHECK(strcmp(ccord_ui_composer_text(F.ui), "@Bjorn ") == 0);
+  ui_cf_trace_piece tr[64];
+  size_t ntr = ui_composer_format_trace(tr, 64);
+  bool has_mention_pill = false;
+  for (size_t i = 0; i < ntr; i++) {
+    if ((tr[i].flags & UI_CF_MENTION) && tr[i].has_bg) has_mention_pill = true;
+  }
+  CT_CHECK(has_mention_pill);
+
+  // Switching channel closes open autocomplete.
+  type_text("@Ad");
+  frame(1);
+  CT_CHECK(dbg().autocomplete_open);
+  CT_CHECK(ccord_session_select_channel(F.session, 3113, &err) == CCORD_OK);
+  frame(2);
+  CT_CHECK(!dbg().autocomplete_open);
+  clear_composer_input();
+
+  // 2. 1-on-1 DM @mention autocomplete, completion, composer pill, and serialization.
+  ccord_user dm_u = {.id = 919101u, .name = "Zelda", .handle = "zelda_h", .presence = CCORD_PRESENCE_ONLINE};
+  CT_CHECK(ccord_store_upsert_user(F.store, &dm_u, &err) == CCORD_OK);
+  ccord_channel dm1 = {
+    .id = 919201u, .guild_id = CCORD_DM_GUILD_ID, .kind = CCORD_CHANNEL_TEXT,
+    .name = "Zelda", .topic = "", .user_id = dm_u.id,
+  };
+  CT_CHECK(ccord_store_upsert_channel(F.store, &dm1, &err) == CCORD_OK);
+  F.ui->dm_friends_view = false;
+  F.ui->dm_requests_view = false;
+  CT_CHECK(ccord_store_select_guild(F.store, CCORD_DM_GUILD_ID, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_select_channel(F.store, dm1.id, &err) == CCORD_OK);
+  frame(3);
+  clear_composer_input();
+  type_text("hi @");
+  frame(2);
+  CT_CHECK(dbg().autocomplete_open && dbg().autocomplete_count >= 1);
+  CT_CHECK(autocomplete_has("Zelda"));
+  type_text("el");   // substring match on "Zelda"
+  frame(1);
+  CT_CHECK(dbg().autocomplete_open && autocomplete_has("Zelda"));
+  key(CCORD_KEY_TAB, 0);
+  frame(2);
+  CT_CHECK(!dbg().autocomplete_open);
+  CT_CHECK(strcmp(ccord_ui_composer_text(F.ui), "hi @Zelda ") == 0);
+  ntr = ui_composer_format_trace(tr, 64);
+  bool dm_pill = false;
+  for (size_t i = 0; i < ntr; i++) {
+    if ((tr[i].flags & UI_CF_MENTION) && tr[i].has_bg) dm_pill = true;
+  }
+  CT_CHECK(dm_pill);
+  char dm_ser[128];
+  size_t dm_slen = ccord_ui_serialize_mentions(F.store, CCORD_DM_GUILD_ID,
+                                               ccord_ui_composer_text(F.ui), strlen(ccord_ui_composer_text(F.ui)),
+                                               dm_ser, sizeof dm_ser);
+  CT_CHECK(dm_slen > 0 && strcmp(dm_ser, "hi <@919101> ") == 0);
+  clear_composer_input();
+
+  // 3. Group DM @mention autocomplete across all recipients.
+  ccord_user g_u1 = {.id = 919102u, .name = "Marley", .handle = "marley_g", .presence = CCORD_PRESENCE_ONLINE};
+  ccord_user g_u2 = {.id = 919103u, .name = "Nadia", .handle = "nadia_g", .presence = CCORD_PRESENCE_ONLINE};
+  CT_CHECK(ccord_store_upsert_user(F.store, &g_u1, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_upsert_user(F.store, &g_u2, &err) == CCORD_OK);
+  ccord_channel gdm = {
+    .id = 919202u, .guild_id = CCORD_DM_GUILD_ID, .kind = CCORD_CHANNEL_TEXT,
+    .discord_type = CCORD_DISCORD_CHANNEL_GROUP_DM, .name = "Group", .topic = "",
+    .user_id = CCORD_ID_NONE, .recipient_ids = {g_u1.id, g_u2.id}, .recipient_count = 2,
+  };
+  CT_CHECK(ccord_store_upsert_channel(F.store, &gdm, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_select_channel(F.store, gdm.id, &err) == CCORD_OK);
+  frame(3);
+  type_text("@");
+  frame(2);
+  CT_CHECK(dbg().autocomplete_open && autocomplete_has("Marley") && autocomplete_has("Nadia"));
+  type_text("adi");
+  frame(1);
+  CT_CHECK(dbg().autocomplete_open && autocomplete_has("Nadia") && !autocomplete_has("Marley"));
+  key(CCORD_KEY_RETURN, 0);
+  frame(2);
+  CT_CHECK(!dbg().autocomplete_open && strcmp(ccord_ui_composer_text(F.ui), "@Nadia ") == 0);
+  clear_composer_input();
+
+  CT_CHECK(ccord_store_delete_channel(F.store, gdm.id, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_delete_channel(F.store, dm1.id, &err) == CCORD_OK);
+  CT_CHECK(ccord_session_select_guild(F.session, 2001, &err) == CCORD_OK);
+  CT_CHECK(ccord_session_select_channel(F.session, 3111, &err) == CCORD_OK);
+  frame(2);
+}
+
 int main(int argc, char **argv)
 {
   if (!setup(argc > 0 ? argv[0] : "test_ui_interaction")) {
@@ -12384,6 +12489,7 @@ int main(int argc, char **argv)
   test_plugin_nav_hooks_menus_and_aux_events();
   test_chat_message_vs_profile_right_click_and_admin_tools();
   test_reading_overlays_immediate_focus_and_utf8_notify();
+  test_dm_and_substring_mention_autocomplete();
   ccord_ui_destroy(F.ui);
   ccord_render_destroy(F.renderer);
   ccord_platform_destroy(F.platform);

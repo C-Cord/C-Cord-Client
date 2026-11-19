@@ -1668,6 +1668,7 @@ void ui_upload_debug_get(const ccord_ui *ui, ui_upload_debug *out);
 enum {
   UI_CF_BOLD = 1 << 0, UI_CF_ITALIC = 1 << 1, UI_CF_UNDER = 1 << 2, UI_CF_STRIKE = 1 << 3, UI_CF_CODE = 1 << 4,
   UI_CF_SPOILER = 1 << 5, UI_CF_MARKER = 1 << 6, UI_CF_BLOCK = 1 << 7, UI_CF_QUOTE = 1 << 8,
+  UI_CF_MENTION = 1 << 9,
 };
 typedef struct ui_cf_trace_piece {   // one piece as the last ui_composer_format_draw painted it
   size_t start, len;
@@ -1718,6 +1719,7 @@ void ui_draw_emoji_picker(ccord_ui *ui, ccord_renderer *r);
 void ui_draw_autocomplete(ccord_ui *ui, ccord_renderer *r);
 void ui_update_autocomplete(ccord_ui *ui);
 bool ui_accept_autocomplete(ccord_ui *ui, size_t index);
+size_t ui_composer_match_mention(const ccord_ui *ui, const char *line, size_t line_len, size_t pos);
 void ui_draw_member_popover(ccord_ui *ui, ccord_renderer *r);
 bool ui_member_popover_handle(ccord_ui *ui, const ccord_input_event *ev);
 size_t ui_message_clean_body(const ccord_ui *ui, const ccord_message *m, char *out, size_t cap);
@@ -1755,6 +1757,7 @@ typedef struct ui_md_token {
   bool underline;
   bool strikethrough;
   bool spoiler;
+  bool literal_span;   // composer: matched as a link/URL/angle-tag span (not a plain @mention)
   ui_md_style style;
 } ui_md_token;
 typedef struct ui_md_iter {

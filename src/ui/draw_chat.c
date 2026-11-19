@@ -444,6 +444,7 @@ bool ui_md_next(ui_md_iter *it, ui_md_token *out)
       out->underline = it->underline;
       out->strikethrough = it->strikethrough;
       out->spoiler = it->spoiler;
+      out->literal_span = true;
       out->text = p;
       out->len = (size_t)(next_p - p);
       out->style = md_state_style(it);
@@ -5769,6 +5770,7 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
     ui->pending_select_mode = 0;
     ui->caret_epoch_ms = ui->now_ms;
     ui->caret_on = true;
+    ui_update_autocomplete(ui);
   }
   float total = len ? ui_composer_format_height(ui, r, text, len, wrap) : lh;
   if (ui->pending_vert_move != 0) {
@@ -5897,6 +5899,157 @@ static void check_user_cand(const char *src, size_t rem, const char *cand, ccord
   snprintf(best_tag, 32, "<@%llu>", (unsigned long long)uid);
 }
 
+static bool can_mention_everyone_in(const ccord_store *store, ccord_id guild_id, ccord_id channel_id,
+                                    int64_t now_unix_ms)
+{
+  if (!store || guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) return false;
+  ccord_id self = ccord_store_self_id(store);
+  if (self == CCORD_ID_NONE || !ccord_store_permissions_exact(store, guild_id, self)) return true;
+  uint64_t p = ccord_store_permissions(store, guild_id, channel_id, self, now_unix_ms);
+  return ccord_perm_has(p, CCORD_PERM_MENTION_EVERYONE);
+}
+
+static bool has_at_mention_boundary_before(const char *in, size_t i)
+{
+  if (i == 0) return true;
+  char prev = in[i - 1u];
+  return !isalnum((unsigned char)prev) && prev != '_' && prev != '.' && prev != '/' && prev != ':' &&
+         prev != '@' && prev != '<';
+}
+
+static void check_user_obj_cand(const char *src, size_t rem, const ccord_user *u,
+                                size_t *best_len, char best_tag[static 32])
+{
+  if (!u) return;
+  check_user_cand(src, rem, u->name, u->id, best_len, best_tag);
+  check_user_cand(src, rem, u->handle, u->id, best_len, best_tag);
+}
+
+// Matches a `@user`, `@role`, `@everyone`, `@here`, or `#channel` mention at `in[i]`.
+// Returns the matched raw byte length (including `@`/`#`) or 0 if none. Writes `<@id>` / `<@&id>` / `<#id>` /
+// `@everyone` / `@here` into `tag_out` when non-null.
+static size_t match_mention_at(const ccord_store *store, ccord_id guild_id, const ccord_channel *active_ch,
+                               bool gate_perms, int64_t now_unix_ms,
+                               const char *in, size_t in_len, size_t i, char tag_out[32])
+{
+  if (!store || !in || i >= in_len) return 0;
+  if (in[i] == '@' && has_at_mention_boundary_before(in, i)) {
+    const char *src = in + i + 1u;
+    size_t rem = in_len - (i + 1u);
+    bool in_guild = guild_id != CCORD_ID_NONE && guild_id != CCORD_DM_GUILD_ID;
+    bool can_everyone = !gate_perms || (in_guild && active_ch &&
+                                        can_mention_everyone_in(store, guild_id, active_ch->id, now_unix_ms));
+    if (can_everyone && (!gate_perms || in_guild)) {
+      if (rem >= 8u && strncmp(src, "everyone", 8u) == 0 && (rem == 8u || is_mention_boundary(src[8u]))) {
+        if (tag_out) snprintf(tag_out, 32, "@everyone");
+        return 9u;
+      }
+      if (rem >= 4u && strncmp(src, "here", 4u) == 0 && (rem == 4u || is_mention_boundary(src[4u]))) {
+        if (tag_out) snprintf(tag_out, 32, "@here");
+        return 5u;
+      }
+    }
+    size_t best_len = 0;
+    char best_tag[32] = {0};
+    if (in_guild) {
+      size_t mc = ccord_store_member_count(store, guild_id);
+      for (size_t k = 0; k < mc; k++) {
+        const ccord_member *m = ccord_store_member_at(store, guild_id, k);
+        if (!m) continue;
+        const ccord_user *u = ccord_store_user(store, m->user_id);
+        if (m->nick[0] != '\0') check_user_cand(src, rem, m->nick, m->user_id, &best_len, best_tag);
+        check_user_obj_cand(src, rem, u, &best_len, best_tag);
+      }
+    }
+    if (guild_id == CCORD_DM_GUILD_ID) {
+      ccord_id self_id = ccord_store_self_id(store);
+      check_user_obj_cand(src, rem, ccord_store_user(store, self_id), &best_len, best_tag);
+      if (active_ch) {
+        if (active_ch->user_id != CCORD_ID_NONE) {
+          check_user_obj_cand(src, rem, ccord_store_user(store, active_ch->user_id), &best_len, best_tag);
+        }
+        for (uint16_t r = 0; r < active_ch->recipient_count && r < CCORD_MAX_DM_RECIPIENTS; r++) {
+          check_user_obj_cand(src, rem, ccord_store_user(store, active_ch->recipient_ids[r]), &best_len, best_tag);
+        }
+      } else {
+        size_t dmc = ccord_store_channel_count(store, CCORD_DM_GUILD_ID);
+        for (size_t d = 0; d < dmc; d++) {
+          const ccord_channel *dc = ccord_store_channel_at(store, CCORD_DM_GUILD_ID, d);
+          if (!dc) continue;
+          if (dc->user_id != CCORD_ID_NONE) {
+            check_user_obj_cand(src, rem, ccord_store_user(store, dc->user_id), &best_len, best_tag);
+          }
+          for (uint16_t r = 0; r < dc->recipient_count && r < CCORD_MAX_DM_RECIPIENTS; r++) {
+            check_user_obj_cand(src, rem, ccord_store_user(store, dc->recipient_ids[r]), &best_len, best_tag);
+          }
+        }
+      }
+    }
+    if (active_ch) {
+      size_t msg_c = ccord_store_message_count(store, active_ch->id);
+      for (size_t k = 0; k < msg_c; k++) {
+        const ccord_message *msg = ccord_store_message_at(store, active_ch->id, k);
+        if (msg && msg->author_id != CCORD_ID_NONE) {
+          check_user_obj_cand(src, rem, ccord_store_user(store, msg->author_id), &best_len, best_tag);
+        }
+      }
+    }
+    if (in_guild) {
+      size_t rc = 0;
+      const ccord_role *roles = ccord_store_roles(store, guild_id, &rc);
+      for (size_t k = 0; k < rc; k++) {
+        const ccord_role *rl = &roles[k];
+        if (rl->id == guild_id || !rl->name || rl->name[0] == '\0') continue;
+        if (gate_perms && !rl->mentionable && !can_everyone) continue;
+        size_t rlen = strlen(rl->name);
+        if (rlen == 0 || rlen > rem || rlen <= best_len) continue;
+        if (strncasecmp(src, rl->name, rlen) != 0) continue;
+        if (rlen < rem && !is_mention_boundary(src[rlen])) continue;
+        best_len = rlen;
+        snprintf(best_tag, sizeof best_tag, "<@&%llu>", (unsigned long long)rl->id);
+      }
+    }
+    if (best_len > 0) {
+      if (tag_out) memcpy(tag_out, best_tag, sizeof best_tag);
+      return 1u + best_len;
+    }
+    return 0;
+  }
+  if (in[i] == '#' && guild_id != CCORD_ID_NONE && guild_id != CCORD_DM_GUILD_ID &&
+      (i == 0 || (!isalnum((unsigned char)in[i - 1u]) && in[i - 1u] != '_' &&
+                  in[i - 1u] != '&' && in[i - 1u] != '<' && in[i - 1u] != '#'))) {
+    const char *src = in + i + 1u;
+    size_t rem = in_len - (i + 1u);
+    size_t best_len = 0;
+    char best_tag[32] = {0};
+    size_t cc = ccord_store_channel_count(store, guild_id);
+    for (size_t k = 0; k < cc; k++) {
+      const ccord_channel *c = ccord_store_channel_at(store, guild_id, k);
+      if (!c || c->kind == CCORD_CHANNEL_CATEGORY || !c->name || c->name[0] == '\0') continue;
+      size_t clen = strlen(c->name);
+      if (clen == 0 || clen > rem || clen <= best_len) continue;
+      if (strncasecmp(src, c->name, clen) != 0) continue;
+      if (clen < rem && (!is_mention_boundary(src[clen]) || src[clen] == '-')) continue;
+      best_len = clen;
+      snprintf(best_tag, sizeof best_tag, "<#%llu>", (unsigned long long)c->id);
+    }
+    if (best_len > 0) {
+      if (tag_out) memcpy(tag_out, best_tag, sizeof best_tag);
+      return 1u + best_len;
+    }
+  }
+  return 0;
+}
+
+size_t ui_composer_match_mention(const ccord_ui *ui, const char *line, size_t line_len, size_t pos)
+{
+  if (!ui || !ui->d.store || !line || pos >= line_len) return 0;
+  const ccord_channel *ch = ui_selected_channel(ui);
+  if (!ch || !ui_channel_has_chat(ch)) return 0;
+  ccord_id gid = ch->guild_id != CCORD_ID_NONE ? ch->guild_id : ccord_store_selected_guild(ui->d.store);
+  return match_mention_at(ui->d.store, gid, ch, true, ui->now_unix_ms, line, line_len, pos, nullptr);
+}
+
 size_t ccord_ui_serialize_mentions(const ccord_store *store, ccord_id guild_id,
                                    const char *in, size_t in_len, char *out, size_t out_cap)
 {
@@ -5955,104 +6108,13 @@ size_t ccord_ui_serialize_mentions(const ccord_store *store, ccord_id guild_id,
       i = j;
       continue;
     }
-    // 5. @user / @role
-    if (in[i] == '@' && (i == 0 || (!isalnum((unsigned char)in[i - 1u]) && in[i - 1u] != '_' &&
-                                    in[i - 1u] != '.' && in[i - 1u] != '/' && in[i - 1u] != ':' &&
-                                    in[i - 1u] != '@'))) {
-      const char *src = in + i + 1u;
-      size_t rem = in_len - (i + 1u);
-      if (rem >= 8u && strncmp(src, "everyone", 8u) == 0 && (rem == 8u || is_mention_boundary(src[8u]))) {
-        ser_append(out, out_cap, &w, "@everyone", 9u);
-        i += 9u;
-        continue;
-      }
-      if (rem >= 4u && strncmp(src, "here", 4u) == 0 && (rem == 4u || is_mention_boundary(src[4u]))) {
-        ser_append(out, out_cap, &w, "@here", 5u);
-        i += 5u;
-        continue;
-      }
-      size_t best_len = 0;
-      char best_tag[32] = {0};
-      size_t mc = ccord_store_member_count(store, guild_id);
-      for (size_t k = 0; k < mc; k++) {
-        const ccord_member *m = ccord_store_member_at(store, guild_id, k);
-        if (!m) continue;
-        const ccord_user *u = ccord_store_user(store, m->user_id);
-        if (m->nick[0] != '\0') check_user_cand(src, rem, m->nick, m->user_id, &best_len, best_tag);
-        if (u) {
-          check_user_cand(src, rem, u->name, u->id, &best_len, best_tag);
-          check_user_cand(src, rem, u->handle, u->id, &best_len, best_tag);
-        }
-      }
-      if (guild_id == CCORD_DM_GUILD_ID) {
-        ccord_id self_id = ccord_store_self_id(store);
-        const ccord_user *su = ccord_store_user(store, self_id);
-        if (su) {
-          check_user_cand(src, rem, su->name, su->id, &best_len, best_tag);
-          check_user_cand(src, rem, su->handle, su->id, &best_len, best_tag);
-        }
-        size_t dmc = ccord_store_channel_count(store, CCORD_DM_GUILD_ID);
-        for (size_t d = 0; d < dmc; d++) {
-          const ccord_channel *dc = ccord_store_channel_at(store, CCORD_DM_GUILD_ID, d);
-          if (!dc) continue;
-          if (dc->user_id != CCORD_ID_NONE) {
-            const ccord_user *du = ccord_store_user(store, dc->user_id);
-            if (du) {
-              check_user_cand(src, rem, du->name, du->id, &best_len, best_tag);
-              check_user_cand(src, rem, du->handle, du->id, &best_len, best_tag);
-            }
-          }
-          for (uint16_t r = 0; r < dc->recipient_count && r < CCORD_MAX_DM_RECIPIENTS; r++) {
-            const ccord_user *ru = ccord_store_user(store, dc->recipient_ids[r]);
-            if (ru) {
-              check_user_cand(src, rem, ru->name, ru->id, &best_len, best_tag);
-              check_user_cand(src, rem, ru->handle, ru->id, &best_len, best_tag);
-            }
-          }
-        }
-      }
-      if (guild_id != CCORD_ID_NONE && guild_id != CCORD_DM_GUILD_ID) {
-        size_t rc = 0;
-        const ccord_role *roles = ccord_store_roles(store, guild_id, &rc);
-        for (size_t k = 0; k < rc; k++) {
-          const ccord_role *rl = &roles[k];
-          if (rl->id == guild_id || !rl->name || rl->name[0] == '\0') continue;
-          size_t rlen = strlen(rl->name);
-          if (rlen == 0 || rlen > rem || rlen <= best_len) continue;
-          if (strncasecmp(src, rl->name, rlen) != 0) continue;
-          if (rlen < rem && !is_mention_boundary(src[rlen])) continue;
-          best_len = rlen;
-          snprintf(best_tag, sizeof best_tag, "<@&%llu>", (unsigned long long)rl->id);
-        }
-      }
-      if (best_len > 0) {
-        ser_append(out, out_cap, &w, best_tag, strlen(best_tag));
-        i += 1u + best_len;
-        continue;
-      }
-    }
-    // 6. #channel
-    if (in[i] == '#' && guild_id != CCORD_ID_NONE && guild_id != CCORD_DM_GUILD_ID &&
-        (i == 0 || (!isalnum((unsigned char)in[i - 1u]) && in[i - 1u] != '_' &&
-                    in[i - 1u] != '&' && in[i - 1u] != '<' && in[i - 1u] != '#'))) {
-      const char *src = in + i + 1u;
-      size_t rem = in_len - (i + 1u);
-      size_t best_len = 0;
-      char best_tag[32] = {0};
-      size_t cc = ccord_store_channel_count(store, guild_id);
-      for (size_t k = 0; k < cc; k++) {
-        const ccord_channel *c = ccord_store_channel_at(store, guild_id, k);
-        if (!c || c->kind == CCORD_CHANNEL_CATEGORY || !c->name || c->name[0] == '\0') continue;
-        size_t clen = strlen(c->name);
-        if (clen == 0 || clen > rem || clen <= best_len) continue;
-        if (strncasecmp(src, c->name, clen) != 0) continue;
-        if (clen < rem && (!is_mention_boundary(src[clen]) || src[clen] == '-')) continue;
-        best_len = clen;
-        snprintf(best_tag, sizeof best_tag, "<#%llu>", (unsigned long long)c->id);
-      }
-      if (best_len > 0) {
-        ser_append(out, out_cap, &w, best_tag, strlen(best_tag));
-        i += 1u + best_len;
+    // 5. @user / @role / @everyone / @here & 6. #channel
+    if (in[i] == '@' || in[i] == '#') {
+      char tag[32] = {0};
+      size_t mlen = match_mention_at(store, guild_id, nullptr, false, 0, in, in_len, i, tag);
+      if (mlen > 0) {
+        ser_append(out, out_cap, &w, tag, strlen(tag));
+        i += mlen;
         continue;
       }
     }
@@ -6711,6 +6773,8 @@ void ui_send_composer(ccord_ui *ui)
     ui->reply_ping_rect = (ccord_rect){0, 0, 0, 0};
     ccord_text_edit_clear(&ui->edit);
     ui_clear_channel_draft(ui, ch->id);
+    ui->autocomplete_open = false;
+    ui->nautocomplete = 0;
     ui_record_slowmode_sent(ui, ch);
     ui_dismiss_new_marker(ui, false);
     ui->msg_scroll_vel = 0.0f;
@@ -6730,6 +6794,8 @@ void ui_send_composer(ccord_ui *ui)
     ui->reply_ping_rect = (ccord_rect){0, 0, 0, 0};
     ccord_text_edit_clear(&ui->edit);
     ui_clear_channel_draft(ui, ch->id);
+    ui->autocomplete_open = false;
+    ui->nautocomplete = 0;
     ui_record_slowmode_sent(ui, ch);
     ui_dismiss_new_marker(ui, false);
     ui->msg_scroll_vel = 0.0f;
@@ -6744,6 +6810,8 @@ void ui_send_composer(ccord_ui *ui)
   }
   ccord_text_edit_clear(&ui->edit);
   ui_clear_channel_draft(ui, ch->id);
+  ui->autocomplete_open = false;
+  ui->nautocomplete = 0;
   ui_record_slowmode_sent(ui, ch);
   ui_dismiss_new_marker(ui, false);
   ui->msg_scroll_vel = 0.0f;
@@ -10368,11 +10436,138 @@ static void ui_schedule_slash_autocomplete(ccord_ui *ui, const ccord_channel *ch
   ui->slash_auto_due_ms = due != 0 ? due : 1u;
 }
 
+static bool substr_ci(const char *hay, const char *needle, size_t nlen);
+
+static bool id_in_list(const ccord_id *ids, size_t n, ccord_id id)
+{
+  for (size_t i = 0; i < n; i++) {
+    if (ids[i] == id) return true;
+  }
+  return false;
+}
+
+static bool ac_text_match(const char *s, const char *q, size_t qlen, bool prefix_only)
+{
+  if (!s || !s[0]) return false;
+  if (qlen == 0) return true;
+  return prefix_only ? ascii_prefix_ci(s, q, qlen) : substr_ci(s, q, qlen);
+}
+
+static void add_user_autocomplete(ccord_ui *ui, const ccord_member *m, const ccord_user *u,
+                                  ccord_id seen_uids[static UI_AUTOCOMPLETE_MAX], size_t *nseen,
+                                  const char *query, size_t qlen, bool prefix_only)
+{
+  if (!ui || !u || ui->nautocomplete >= UI_AUTOCOMPLETE_MAX) return;
+  const char *ins_name = (u->name && u->name[0]) ? u->name : ((u->handle && u->handle[0]) ? u->handle : nullptr);
+  if (!ins_name) return;
+  if (id_in_list(seen_uids, *nseen, u->id)) return;
+  bool match = (qlen == 0) || ac_text_match(u->name, query, qlen, prefix_only) ||
+               ac_text_match(u->handle, query, qlen, prefix_only) ||
+               (m && ac_text_match(m->nick, query, qlen, prefix_only));
+  if (!match) return;
+  seen_uids[(*nseen)++] = u->id;
+  ui_autocomplete_item *it = &ui->autocomplete_items[ui->nautocomplete++];
+  if (m && m->nick[0]) {
+    snprintf(it->display, sizeof it->display, "@%.40s (%.40s)", m->nick, ins_name);
+  } else if (u->name && u->name[0] && u->handle && u->handle[0] && strcasecmp(u->name, u->handle) != 0) {
+    snprintf(it->display, sizeof it->display, "@%.40s (@%.38s)", u->name, u->handle);
+  } else {
+    snprintf(it->display, sizeof it->display, "@%.80s", ins_name);
+  }
+  snprintf(it->insert, sizeof it->insert, "@%s ", ins_name);
+}
+
+static void collect_at_autocomplete(ccord_ui *ui, const ccord_channel *ch, ccord_id gid,
+                                    const char *query, size_t qlen)
+{
+  ccord_id seen_uids[UI_AUTOCOMPLETE_MAX] = {0};
+  size_t nseen_u = 0;
+  ccord_id seen_rids[UI_AUTOCOMPLETE_MAX] = {0};
+  size_t nseen_r = 0;
+  bool added_everyone = false, added_here = false;
+  bool in_guild = gid != CCORD_ID_NONE && gid != CCORD_DM_GUILD_ID;
+  bool can_everyone = in_guild && can_mention_everyone_in(ui->d.store, gid, ch->id, ui->now_unix_ms);
+  size_t passes = qlen > 0 ? 2u : 1u;
+
+  for (size_t pass = 0; pass < passes && ui->nautocomplete < UI_AUTOCOMPLETE_MAX; pass++) {
+    bool prefix_only = (pass == 0);
+    if (in_guild) {
+      size_t mc = ccord_store_member_count(ui->d.store, gid);
+      for (size_t i = 0; i < mc && ui->nautocomplete < UI_AUTOCOMPLETE_MAX; i++) {
+        const ccord_member *m = ccord_store_member_at(ui->d.store, gid, i);
+        const ccord_user *u = m ? ccord_store_user(ui->d.store, m->user_id) : nullptr;
+        add_user_autocomplete(ui, m, u, seen_uids, &nseen_u, query, qlen, prefix_only);
+      }
+      size_t msg_c = ccord_store_message_count(ui->d.store, ch->id);
+      for (size_t i = msg_c; i > 0 && ui->nautocomplete < UI_AUTOCOMPLETE_MAX; i--) {
+        const ccord_message *msg = ccord_store_message_at(ui->d.store, ch->id, i - 1u);
+        if (!msg || msg->author_id == CCORD_ID_NONE) continue;
+        const ccord_member *m = ccord_store_find_member(ui->d.store, gid, msg->author_id);
+        const ccord_user *u = ccord_store_user(ui->d.store, msg->author_id);
+        add_user_autocomplete(ui, m, u, seen_uids, &nseen_u, query, qlen, prefix_only);
+      }
+    } else if (gid == CCORD_DM_GUILD_ID) {
+      if (ch->user_id != CCORD_ID_NONE) {
+        add_user_autocomplete(ui, nullptr, ccord_store_user(ui->d.store, ch->user_id),
+                              seen_uids, &nseen_u, query, qlen, prefix_only);
+      }
+      for (uint16_t r = 0; r < ch->recipient_count && r < CCORD_MAX_DM_RECIPIENTS &&
+                           ui->nautocomplete < UI_AUTOCOMPLETE_MAX; r++) {
+        add_user_autocomplete(ui, nullptr, ccord_store_user(ui->d.store, ch->recipient_ids[r]),
+                              seen_uids, &nseen_u, query, qlen, prefix_only);
+      }
+      size_t msg_c = ccord_store_message_count(ui->d.store, ch->id);
+      for (size_t i = msg_c; i > 0 && ui->nautocomplete < UI_AUTOCOMPLETE_MAX; i--) {
+        const ccord_message *msg = ccord_store_message_at(ui->d.store, ch->id, i - 1u);
+        if (!msg || msg->author_id == CCORD_ID_NONE) continue;
+        add_user_autocomplete(ui, nullptr, ccord_store_user(ui->d.store, msg->author_id),
+                              seen_uids, &nseen_u, query, qlen, prefix_only);
+      }
+      ccord_id self_id = ccord_store_self_id(ui->d.store);
+      if (self_id != CCORD_ID_NONE) {
+        add_user_autocomplete(ui, nullptr, ccord_store_user(ui->d.store, self_id),
+                              seen_uids, &nseen_u, query, qlen, prefix_only);
+      }
+    }
+    if (in_guild) {
+      size_t rc = 0;
+      const ccord_role *roles = ccord_store_roles(ui->d.store, gid, &rc);
+      for (size_t i = 0; i < rc && ui->nautocomplete < UI_AUTOCOMPLETE_MAX; i++) {
+        const ccord_role *rl = &roles[i];
+        if (rl->id == gid || !rl->name || !rl->name[0]) continue;
+        if (!rl->mentionable && !can_everyone) continue;
+        if (id_in_list(seen_rids, nseen_r, rl->id)) continue;
+        if (!ac_text_match(rl->name, query, qlen, prefix_only)) continue;
+        seen_rids[nseen_r++] = rl->id;
+        ui_autocomplete_item *it = &ui->autocomplete_items[ui->nautocomplete++];
+        snprintf(it->display, sizeof it->display, "@%.72s (role)", rl->name);
+        snprintf(it->insert, sizeof it->insert, "@%s ", rl->name);
+      }
+      if (can_everyone) {
+        if (!added_everyone && ui->nautocomplete < UI_AUTOCOMPLETE_MAX &&
+            ac_text_match("everyone", query, qlen, prefix_only)) {
+          added_everyone = true;
+          ui_autocomplete_item *it = &ui->autocomplete_items[ui->nautocomplete++];
+          snprintf(it->display, sizeof it->display, "@everyone");
+          snprintf(it->insert, sizeof it->insert, "@everyone ");
+        }
+        if (!added_here && ui->nautocomplete < UI_AUTOCOMPLETE_MAX &&
+            ac_text_match("here", query, qlen, prefix_only)) {
+          added_here = true;
+          ui_autocomplete_item *it = &ui->autocomplete_items[ui->nautocomplete++];
+          snprintf(it->display, sizeof it->display, "@here");
+          snprintf(it->insert, sizeof it->insert, "@here ");
+        }
+      }
+    }
+  }
+}
+
 void ui_update_autocomplete(ccord_ui *ui)
 {
   ui->autocomplete_open = false;
   ui->nautocomplete = 0;
-  if (!ui || ui->settings_open || ui->menu.open || ui->edit.len == 0 || ui->edit.caret == 0) {
+  if (!ui || !ui->d.store || ui->settings_open || ui->menu.open || ui->edit.len == 0 || ui->edit.caret == 0) {
     if (ui) ui->slash_auto_due_ms = 0;
     return;
   }
@@ -10381,7 +10576,11 @@ void ui_update_autocomplete(ccord_ui *ui)
   size_t caret = ui->edit.caret;
   if (caret > ui->edit.len) caret = ui->edit.len;
   const ccord_channel *ch = ui_selected_channel(ui);
-  ccord_id gid = ccord_store_selected_guild(ui->d.store);
+  if (!ch || !ui_channel_has_chat(ch)) {
+    ui->slash_auto_due_ms = 0;
+    return;
+  }
+  ccord_id gid = ch->guild_id != CCORD_ID_NONE ? ch->guild_id : ccord_store_selected_guild(ui->d.store);
 
   // Slash command & option picker when composer starts with '/'
   if (text[0] == '/' && ui->editing_message == CCORD_ID_NONE && ui->staged_file_count == 0 &&
@@ -10563,7 +10762,13 @@ void ui_update_autocomplete(ccord_ui *ui)
   }
   char trig = text[start];
   if (trig != '@' && trig != '#' && trig != ':') return;
-  if (start > 0 && text[start - 1] != ' ' && text[start - 1] != '\n' && text[start - 1] != '\t') return;
+  if (start > 0) {
+    if (trig == '@') {
+      if (!has_at_mention_boundary_before(text, start)) return;
+    } else if (text[start - 1] != ' ' && text[start - 1] != '\n' && text[start - 1] != '\t') {
+      return;
+    }
+  }
 
   const char *query = text + start + 1;
   size_t qlen = caret - (start + 1);
@@ -10573,56 +10778,7 @@ void ui_update_autocomplete(ccord_ui *ui)
   }
 
   if (trig == '@') {
-    size_t mc = ccord_store_member_count(ui->d.store, gid);
-    for (size_t i = 0; i < mc && ui->nautocomplete < UI_AUTOCOMPLETE_MAX; i++) {
-      const ccord_member *m = ccord_store_member_at(ui->d.store, gid, i);
-      const ccord_user *u = m ? ccord_store_user(ui->d.store, m->user_id) : nullptr;
-      if (!u || !u->name) continue;
-      bool match = (qlen == 0) || ascii_prefix_ci(u->name, query, qlen) ||
-                   (u->handle && u->handle[0] && ascii_prefix_ci(u->handle, query, qlen)) ||
-                   (m->nick[0] && ascii_prefix_ci(m->nick, query, qlen));
-      if (!match) continue;
-      ui_autocomplete_item *it = &ui->autocomplete_items[ui->nautocomplete++];
-      if (m->nick[0]) {
-        snprintf(it->display, sizeof it->display, "@%.40s (%.40s)", m->nick, u->name);
-      } else {
-        snprintf(it->display, sizeof it->display, "@%.80s", u->name);
-      }
-      snprintf(it->insert, sizeof it->insert, "@%s ", u->name);
-    }
-    if (gid != CCORD_ID_NONE && gid != CCORD_DM_GUILD_ID) {
-      bool can_everyone = true;
-      if (ui->d.store && ch) {
-        ccord_id self = ccord_store_self_id(ui->d.store);
-        if (ccord_store_permissions_exact(ui->d.store, gid, self)) {
-          uint64_t p = ccord_store_permissions(ui->d.store, gid, ch->id, self, ui->now_unix_ms);
-          can_everyone = ccord_perm_has(p, CCORD_PERM_MENTION_EVERYONE);
-        }
-      }
-      size_t rc = 0;
-      const ccord_role *roles = ui->d.store ? ccord_store_roles(ui->d.store, gid, &rc) : nullptr;
-      for (size_t i = 0; i < rc && ui->nautocomplete < UI_AUTOCOMPLETE_MAX; i++) {
-        const ccord_role *rl = &roles[i];
-        if (rl->id == gid || !rl->name || !rl->name[0]) continue;
-        if (!rl->mentionable && !can_everyone) continue;
-        if (qlen > 0 && !ascii_prefix_ci(rl->name, query, qlen)) continue;
-        ui_autocomplete_item *it = &ui->autocomplete_items[ui->nautocomplete++];
-        snprintf(it->display, sizeof it->display, "@%.72s (role)", rl->name);
-        snprintf(it->insert, sizeof it->insert, "@%s ", rl->name);
-      }
-      if (can_everyone) {
-        if (ui->nautocomplete < UI_AUTOCOMPLETE_MAX && (qlen == 0 || ascii_prefix_ci("everyone", query, qlen))) {
-          ui_autocomplete_item *it = &ui->autocomplete_items[ui->nautocomplete++];
-          snprintf(it->display, sizeof it->display, "@everyone");
-          snprintf(it->insert, sizeof it->insert, "@everyone ");
-        }
-        if (ui->nautocomplete < UI_AUTOCOMPLETE_MAX && (qlen == 0 || ascii_prefix_ci("here", query, qlen))) {
-          ui_autocomplete_item *it = &ui->autocomplete_items[ui->nautocomplete++];
-          snprintf(it->display, sizeof it->display, "@here");
-          snprintf(it->insert, sizeof it->insert, "@here ");
-        }
-      }
-    }
+    collect_at_autocomplete(ui, ch, gid, query, qlen);
   } else if (trig == '#') {
     size_t cc = ccord_store_channel_count(ui->d.store, gid);
     for (size_t i = 0; i < cc && ui->nautocomplete < UI_AUTOCOMPLETE_MAX; i++) {
@@ -10745,13 +10901,15 @@ void ui_draw_autocomplete(ccord_ui *ui, ccord_renderer *r)
   float h = (float)ui->nautocomplete * row_h + 12.0f;
   float max_w = ui->autocomplete_trigger == '/' ? 380.0f : 280.0f;
   float w = clampf(cbox.w, 180.0f, max_w);
-  ccord_rect pop = {cbox.x, cbox.y - h - 6.0f, w, h};
+  ccord_rect pop = {cbox.x, fmaxf(cbox.y - h - 6.0f, 6.0f), w, h};
   ui->autocomplete_rect = pop;
   uis_popover_frame(ui, r, pop);
   ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_normal));
   for (size_t i = 0; i < ui->nautocomplete; i++) {
     ccord_rect rr = {pop.x + 6.0f, pop.y + 6.0f + (float)i * row_h, pop.w - 12.0f, row_h};
-    uis_list_row_fill(ui, r, rr, (uis_state){.selected = i == ui->autocomplete_sel}, "autocrow", (uint64_t)i);
+    bool hover = ui->mouse_in && !ui->menu.open && !ui->settings_open && ui_in_rect(ui->mx, ui->my, rr);
+    uis_list_row_fill(ui, r, rr, (uis_state){.selected = i == ui->autocomplete_sel, .hover = hover},
+                      "autocrow", (uint64_t)i);
     ccord_text_draw_ellipsis(r, ui->autocomplete_items[i].display, strlen(ui->autocomplete_items[i].display),
                              rr.x + 8.0f, rr.y + (rr.h - ui_line_h(ui, st.size)) * 0.5f, rr.w - 16.0f, &st);
   }

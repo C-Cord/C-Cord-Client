@@ -2122,6 +2122,9 @@ void ui_sync_messages(ccord_ui *ui)
     ui->chat_sel_len = 0;
     ui->chat_sel_buf[0] = '\0';
     ui->select_open = false;
+    ui->autocomplete_open = false;
+    ui->nautocomplete = 0;
+    ui->slash_auto_due_ms = 0;
     ccord_vlist_reset_bottom(&ui->vlist);
     ccord_vlist_invalidate_all(&ui->vlist);
     ui->typing_channel = CCORD_ID_NONE;
@@ -6092,6 +6095,7 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
         if (!composer_accepts_text(ui) || ui_composer_lock_reason(ui)) break;
         if (ccord_text_edit_insert(&ui->edit, "\n", 1, &err) != CCORD_OK) ui_notice(ui, "%s", err.message);
         else ui_send_typing(ui);
+        ui_update_autocomplete(ui);
       } else {
         ui_send_composer(ui);
       }
@@ -6116,9 +6120,11 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
       break;
     case CCORD_KEY_HOME:
       ccord_text_edit_move(&ui->edit, ctrl ? -2 : -4, shift);
+      ui_update_autocomplete(ui);
       break;
     case CCORD_KEY_END:
       ccord_text_edit_move(&ui->edit, ctrl ? 2 : 4, shift);
+      ui_update_autocomplete(ui);
       break;
     case CCORD_KEY_UP:
       if (ui->edit.len == 0 && ui->editing_message == CCORD_ID_NONE && !ctrl && !shift) {
@@ -8625,7 +8631,9 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
                      UI_MODAL_CLOSE_MS, 6.0f, ui_draw_reactions_popover);
   draw_overlay_popup(ui, r, UI_OVL_PICKER, "emoji", ui->emoji_picker_open, &ui->emoji_picker_open, UI_POPUP_MS,
                      UI_POPUP_CLOSE_MS, 8.0f, ui_draw_emoji_picker);
-  draw_popup(ui, r, ui->autocomplete_open && ui->nautocomplete > 0, "autoc", 90, 4.0f, ui_draw_autocomplete);
+  bool autoc_show = ui->autocomplete_open && ui->nautocomplete > 0 && !ui->settings_open && !ui->menu.open &&
+                    !ui->discovery_open && !ui_forum_is_active(ui) && composer_accepts_text(ui);
+  draw_popup(ui, r, autoc_show, "autoc", 90, 4.0f, ui_draw_autocomplete);
   draw_overlay_popup(ui, r, UI_OVL_MEMBER_POPOVER, "mpop", ui->member_popover_open, &ui->member_popover_open, UI_POPUP_MS,
                      UI_POPUP_CLOSE_MS, 6.0f, ui_draw_member_popover);
   ui_menu_draw(ui, r);

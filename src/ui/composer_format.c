@@ -52,10 +52,13 @@ static struct {
   size_t len;
   float wrap, size;
   float probe[5];
-  ccord_color colors[6];
+  ccord_color colors[7];
+  uint64_t store_rev;
+  ccord_id channel_id;
   float pitch, fh;
   char text[CF_MAX_TEXT + 1];
   uint16_t fl[CF_MAX_TEXT];
+  bool lit_span[CF_MAX_TEXT];
   cf_ll ll[CF_MAX_TEXT + 2];
   size_t nll;
   cf_piece pieces[CF_MAX_PIECES];
@@ -88,7 +91,7 @@ static uint16_t cf_state_flags(const ui_md_iter *it)
 
 // Per-byte flags for one logical line [a, b): token bytes carry the style of the span, the bytes between tokens
 // (the markers the tokenizer swallowed) carry the span style plus UI_CF_MARKER.
-static void cf_style_line(size_t a, size_t b, uint16_t extra)
+static void cf_style_line(const ccord_ui *ui, size_t a, size_t b, uint16_t extra)
 {
   if (b <= a) return;
   ui_md_iter it;
@@ -102,16 +105,46 @@ static void cf_style_line(size_t a, size_t b, uint16_t extra)
     if (ts < prev_end || te > b || te < ts) break;   // never happens for plain text; keeps a bad token from corrupting flags
     uint16_t st = cf_state_flags(&it);
     for (size_t k = prev_end; k < ts; k++) G.fl[k] = (uint16_t)(extra | UI_CF_MARKER | prev_state | st);
-    for (size_t k = ts; k < te; k++) G.fl[k] = (uint16_t)(extra | st);
+    for (size_t k = ts; k < te; k++) {
+      G.fl[k] = (uint16_t)(extra | st);
+      if (tok.literal_span) G.lit_span[k] = true;
+    }
     prev_end = te;
     prev_state = st;
   }
   uint16_t st = (uint16_t)(prev_state | cf_state_flags(&it));
   for (size_t k = prev_end; k < b; k++) G.fl[k] = (uint16_t)(extra | UI_CF_MARKER | st);
+
+  if (ui && ui->d.store) {
+    for (size_t i = a; i < b;) {
+      if ((G.fl[i] & (UI_CF_CODE | UI_CF_MARKER | UI_CF_BLOCK)) || G.lit_span[i]) {
+        i++;
+        continue;
+      }
+      if (G.text[i] == '@' || G.text[i] == '#') {
+        size_t mlen = ui_composer_match_mention(ui, G.text + a, b - a, i - a);
+        if (mlen > 0 && i + mlen <= b) {
+          bool clean = true;
+          for (size_t k = i; k < i + mlen; k++) {
+            if ((G.fl[k] & (UI_CF_CODE | UI_CF_MARKER | UI_CF_BLOCK)) || G.lit_span[k]) {
+              clean = false;
+              break;
+            }
+          }
+          if (clean) {
+            for (size_t k = i; k < i + mlen; k++) G.fl[k] |= UI_CF_MENTION;
+            i += mlen;
+            continue;
+          }
+        }
+      }
+      i++;
+    }
+  }
 }
 
 // Blocks: fenced code (needs a closing fence), `> ` quotes and `>>> ` multi-line quotes; everything else is inline.
-static void cf_block_pass(const char *t, size_t len)
+static void cf_block_pass(const ccord_ui *ui, const char *t, size_t len)
 {
   G.nll = 0;
   bool fenced = false, quote_multi = false;
@@ -176,7 +209,7 @@ static void cf_block_pass(const char *t, size_t len)
       size_t from = pos;
       uint16_t extra = kind == CF_QUOTE_LINE ? UI_CF_QUOTE : 0u;
       for (; from < pos + prefix; from++) G.fl[from] = (uint16_t)(UI_CF_QUOTE | UI_CF_MARKER);
-      cf_style_line(from, end, extra);
+      cf_style_line(ui, from, end, extra);
     }
     if (end >= len) break;
     pos = end + 1;
@@ -196,6 +229,10 @@ static ccord_text_style cf_piece_style(const ccord_ui *ui, uint16_t fl)
   } else {
     if (fl & UI_CF_BOLD) font = CCORD_FONT_BOLD;
     if (fl & UI_CF_ITALIC) col = ui_mix(col, COL(text_secondary), (fl & UI_CF_BOLD) ? 0.25f : 0.35f);
+    if (fl & UI_CF_MENTION) {
+      font = CCORD_FONT_BOLD;
+      col = COL(text_link);
+    }
   }
   if (fl & UI_CF_MARKER) col = COL(text_muted);
   return ui_style(ui, font, size, col);
@@ -242,7 +279,8 @@ static void cf_layout(ccord_ui *ui, ccord_renderer *r, const char *t, size_t len
   G.passes++;
   G.nll = G.npieces = G.nvl = 0;
   memset(G.fl, 0, len * sizeof G.fl[0]);
-  cf_block_pass(t, len);
+  memset(G.lit_span, 0, len * sizeof G.lit_span[0]);
+  cf_block_pass(ui, t, len);
   for (size_t li = 0; li < G.nll; li++) {
     const cf_ll *ll = &G.ll[li];
     float indent = ll->kind == CF_QUOTE_LINE ? CF_QUOTE_INDENT : 0.0f;
@@ -346,9 +384,12 @@ static void cf_ensure(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
   if (pitch < 1.0f) pitch = fh;
   float probe[5] = {ccord_text_measure(r, "Mg", 2, &reg, 0.0f).x, ccord_text_measure(r, "Mg", 2, &bold, 0.0f).x,
                     ccord_text_measure(r, "Mg", 2, &code, 0.0f).x, fh, pitch};
-  ccord_color colors[6] = {COL(text_normal), COL(text_secondary), COL(text_header), COL(text_muted), COL(bg_tertiary),
-                           COL(brand)};
-  if (G.valid && G.len == len && G.wrap == wrap && G.size == size && memcmp(G.probe, probe, sizeof probe) == 0 &&
+  ccord_color colors[7] = {COL(text_normal), COL(text_secondary), COL(text_header), COL(text_muted), COL(bg_tertiary),
+                           COL(brand), COL(text_link)};
+  uint64_t store_rev = ui->d.store ? ccord_store_revision(ui->d.store) : 0;
+  ccord_id channel_id = ui->d.store ? ccord_store_selected_channel(ui->d.store) : CCORD_ID_NONE;
+  if (G.valid && G.len == len && G.wrap == wrap && G.size == size && G.store_rev == store_rev &&
+      G.channel_id == channel_id && memcmp(G.probe, probe, sizeof probe) == 0 &&
       memcmp(G.colors, colors, sizeof colors) == 0 && memcmp(G.text, text, len) == 0) {
     return;
   }
@@ -357,6 +398,8 @@ static void cf_ensure(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
   G.len = len;
   G.wrap = wrap;
   G.size = size;
+  G.store_rev = store_rev;
+  G.channel_id = channel_id;
   memcpy(G.probe, probe, sizeof probe);
   memcpy(G.colors, colors, sizeof colors);
   G.fh = fh;
@@ -460,6 +503,10 @@ static ccord_color cf_piece_bg(const ccord_ui *ui, uint16_t fl, bool *has)
     *has = true;
     return COL(bg_tertiary);
   }
+  if (fl & UI_CF_MENTION) {
+    *has = true;
+    return ui_alpha(COL(brand), 0.22f);
+  }
   if (fl & UI_CF_SPOILER) {
     *has = true;
     return ui_mix(COL(bg_tertiary), COL(brand), 0.18f);
@@ -502,11 +549,11 @@ void ui_composer_format_draw(ccord_ui *ui, ccord_renderer *r, const char *text, 
     const cf_vline *v = &G.vl[vi];
     float ly = (float)vi * lh;
     if (ly + lh < view_top || ly > view_bottom) continue;
-    // Backgrounds of inline code and spoilers, merged over consecutive pieces so no seams show.
+    // Backgrounds of inline code, mentions and spoilers, merged over consecutive pieces so no seams show.
     for (size_t k = 0; k < v->count;) {
       bool has = false;
       ccord_color bg = cf_piece_bg(ui, G.pieces[v->first + k].flags, &has);
-      uint16_t kind_flags = G.pieces[v->first + k].flags & (UI_CF_CODE | UI_CF_SPOILER);
+      uint16_t kind_flags = G.pieces[v->first + k].flags & (UI_CF_CODE | UI_CF_SPOILER | UI_CF_MENTION);
       if (!has) {
         k++;
         continue;
@@ -514,7 +561,7 @@ void ui_composer_format_draw(ccord_ui *ui, ccord_renderer *r, const char *text, 
       size_t m = k;
       while (m + 1 < v->count) {
         const cf_piece *nx = &G.pieces[v->first + m + 1];
-        if ((nx->flags & (UI_CF_CODE | UI_CF_SPOILER)) != kind_flags) break;
+        if ((nx->flags & (UI_CF_CODE | UI_CF_SPOILER | UI_CF_MENTION)) != kind_flags) break;
         m++;
       }
       const cf_piece *p0 = &G.pieces[v->first + k], *p1 = &G.pieces[v->first + m];
@@ -524,7 +571,7 @@ void ui_composer_format_draw(ccord_ui *ui, ccord_renderer *r, const char *text, 
     for (size_t k = 0; k < v->count; k++) {
       const cf_piece *p = &G.pieces[v->first + k];
       ccord_text_style st = p->st;
-      if ((p->flags & UI_CF_SPOILER) && !(p->flags & UI_CF_MARKER)) st.color = COL(text_normal);   // readable on the tint
+      if ((p->flags & UI_CF_SPOILER) && !(p->flags & (UI_CF_MARKER | UI_CF_MENTION))) st.color = COL(text_normal);   // readable on the tint
       if (!cf_space(G.text[p->start])) ccord_text_draw(r, G.text + p->start, p->len, x + p->x, y + ly, &st, 0.0f);
       if (!(p->flags & UI_CF_MARKER)) {
         if (p->flags & UI_CF_UNDER) ccord_draw_rect(r, (ccord_rect){x + p->x, y + ly + lh - 2.0f, p->w, 1.0f}, st.color);
