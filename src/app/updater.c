@@ -320,7 +320,7 @@ static void ensure_dir_exists(const char *path)
 #endif
 }
 
-#if !CCORD_OS_WINDOWS
+#if CCORD_OS_LINUX
 static bool copy_file_bytes(const char *src, const char *dst)
 {
   FILE *in = fopen(src, "rb");
