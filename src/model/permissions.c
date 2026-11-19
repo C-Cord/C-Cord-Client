@@ -6,6 +6,64 @@
 
 #define PERM_SEND_DEPENDENTS (CCORD_PERM_SEND_TTS_MESSAGES | CCORD_PERM_MENTION_EVERYONE | CCORD_PERM_EMBED_LINKS | CCORD_PERM_ATTACH_FILES)
 
+// Stack-allocated open-addressed hash set for member role IDs (CCORD_MAX_ROLES_PER_GUILD == 250 <= 256).
+// Only instantiated when a member holds > 8 roles so common small-role checks avoid touching 4 KiB of stack.
+#define ROLE_SET_CAP 512u
+#define ROLE_SET_MAX 256u
+#define ROLE_SET_MIN_ROLES 8u
+
+typedef struct role_id_set {
+  ccord_id slots[ROLE_SET_CAP];
+  size_t mask;
+  bool has_zero;
+} role_id_set;
+
+static inline size_t hash_role_id(ccord_id id, size_t mask)
+{
+  uint64_t h = id ^ (id >> 30);
+  h *= 0xbf58476d1ce4e5b9ULL;
+  h ^= h >> 27;
+  return (size_t)h & mask;
+}
+
+static void role_id_set_build(role_id_set *s, const ccord_id *ids, size_t n)
+{
+  size_t cap = 32u;
+  while (cap < n * 2u && cap < ROLE_SET_CAP) cap <<= 1u;
+  memset(s->slots, 0, cap * sizeof s->slots[0]);
+  s->mask = cap - 1u;
+  s->has_zero = false;
+  for (size_t i = 0; i < n; i++) {
+    ccord_id id = ids[i];
+    if (id == 0) {
+      s->has_zero = true;
+      continue;
+    }
+    size_t slot = hash_role_id(id, s->mask);
+    for (;;) {
+      ccord_id cur = s->slots[slot];
+      if (cur == 0) {
+        s->slots[slot] = id;
+        break;
+      }
+      if (cur == id) break;
+      slot = (slot + 1u) & s->mask;
+    }
+  }
+}
+
+static inline bool role_id_set_contains(const role_id_set *s, ccord_id id)
+{
+  if (id == 0) return s->has_zero;
+  size_t slot = hash_role_id(id, s->mask);
+  for (;;) {
+    ccord_id cur = s->slots[slot];
+    if (cur == 0) return false;
+    if (cur == id) return true;
+    slot = (slot + 1u) & s->mask;
+  }
+}
+
 static const ccord_role *find_role(const ccord_role *roles, size_t nroles, ccord_id id)
 {
   for (size_t i = 0; i < nroles; i++) {
@@ -22,55 +80,119 @@ static bool holds_role(const ccord_id *member_roles, size_t n, ccord_id id)
   return false;
 }
 
+static uint64_t perm_guild_hashed(ccord_id guild_id, const ccord_role *roles, size_t nroles,
+                                  const ccord_id *member_roles, size_t nmember_roles)
+{
+  role_id_set mset;
+  role_id_set_build(&mset, member_roles, nmember_roles);
+  uint64_t perms = 0;
+  for (size_t i = 0; i < nroles; i++) {
+    ccord_id rid = roles[i].id;
+    if (rid == guild_id || role_id_set_contains(&mset, rid)) {
+      perms |= roles[i].permissions;
+      if ((perms & CCORD_PERM_ADMINISTRATOR) != 0) return CCORD_PERM_ALL;
+    }
+  }
+  return perms;
+}
+
 uint64_t ccord_perm_guild(ccord_id guild_id, ccord_id owner_id, ccord_id user_id,
                           const ccord_role *roles, size_t nroles,
                           const ccord_id *member_roles, size_t nmember_roles)
 {
   if (owner_id != CCORD_ID_NONE && owner_id == user_id) return CCORD_PERM_ALL;
+  if (!roles || nroles == 0) return 0;
+  if (!member_roles || nmember_roles == 0) {
+    const ccord_role *everyone = find_role(roles, nroles, guild_id);
+    uint64_t perms = everyone ? everyone->permissions : 0;
+    return (perms & CCORD_PERM_ADMINISTRATOR) != 0 ? CCORD_PERM_ALL : perms;
+  }
+  if (nmember_roles > ROLE_SET_MIN_ROLES && nmember_roles <= ROLE_SET_MAX && nroles > ROLE_SET_MIN_ROLES) {
+    return perm_guild_hashed(guild_id, roles, nroles, member_roles, nmember_roles);
+  }
   uint64_t perms = 0;
-  const ccord_role *everyone = roles ? find_role(roles, nroles, guild_id) : nullptr;
-  if (everyone) perms |= everyone->permissions;
-  if (roles && member_roles) {
-    for (size_t i = 0; i < nmember_roles; i++) {
-      const ccord_role *r = find_role(roles, nroles, member_roles[i]);
-      if (r) perms |= r->permissions;
+  for (size_t i = 0; i < nroles; i++) {
+    ccord_id rid = roles[i].id;
+    if (rid == guild_id || holds_role(member_roles, nmember_roles, rid)) {
+      perms |= roles[i].permissions;
+      if ((perms & CCORD_PERM_ADMINISTRATOR) != 0) return CCORD_PERM_ALL;
     }
   }
-  return (perms & CCORD_PERM_ADMINISTRATOR) != 0 ? CCORD_PERM_ALL : perms;
+  return perms;
+}
+
+static uint64_t apply_overwrites_hashed(uint64_t perms, ccord_id guild_id, ccord_id user_id,
+                                        const ccord_id *member_roles, size_t role_count,
+                                        const ccord_overwrite *overwrites, size_t overwrite_count)
+{
+  role_id_set mset;
+  role_id_set_build(&mset, member_roles, role_count);
+  uint64_t ev_allow = 0, ev_deny = 0;
+  uint64_t role_allow = 0, role_deny = 0;
+  uint64_t mem_allow = 0, mem_deny = 0;
+  for (size_t i = 0; i < overwrite_count; i++) {
+    const ccord_overwrite *ow = &overwrites[i];
+    if (ow->kind == CCORD_OVERWRITE_ROLE) {
+      if (ow->id == guild_id) {
+        ev_deny |= ow->deny;
+        ev_allow = (ev_allow & ~ow->deny) | ow->allow;
+      } else if (role_id_set_contains(&mset, ow->id)) {
+        role_allow |= ow->allow;
+        role_deny |= ow->deny;
+      }
+    } else if (ow->kind == CCORD_OVERWRITE_MEMBER && ow->id == user_id) {
+      mem_deny |= ow->deny;
+      mem_allow = (mem_allow & ~ow->deny) | ow->allow;
+    }
+  }
+  // 1. @everyone, 2. combined member roles (deny then allow), 3. member
+  perms = (perms & ~ev_deny) | ev_allow;
+  perms = (perms & ~role_deny) | role_allow;
+  perms = (perms & ~mem_deny) | mem_allow;
+  return perms;
+}
+
+static uint64_t apply_overwrites_linear(uint64_t perms, ccord_id guild_id, ccord_id user_id,
+                                        const ccord_id *member_roles, size_t role_count,
+                                        const ccord_overwrite *overwrites, size_t overwrite_count)
+{
+  uint64_t ev_allow = 0, ev_deny = 0;
+  uint64_t role_allow = 0, role_deny = 0;
+  uint64_t mem_allow = 0, mem_deny = 0;
+  for (size_t i = 0; i < overwrite_count; i++) {
+    const ccord_overwrite *ow = &overwrites[i];
+    if (ow->kind == CCORD_OVERWRITE_ROLE) {
+      if (ow->id == guild_id) {
+        ev_deny |= ow->deny;
+        ev_allow = (ev_allow & ~ow->deny) | ow->allow;
+      } else if (member_roles && holds_role(member_roles, role_count, ow->id)) {
+        role_allow |= ow->allow;
+        role_deny |= ow->deny;
+      }
+    } else if (ow->kind == CCORD_OVERWRITE_MEMBER && ow->id == user_id) {
+      mem_deny |= ow->deny;
+      mem_allow = (mem_allow & ~ow->deny) | ow->allow;
+    }
+  }
+  // 1. @everyone, 2. combined member roles (deny then allow), 3. member
+  perms = (perms & ~ev_deny) | ev_allow;
+  perms = (perms & ~role_deny) | role_allow;
+  perms = (perms & ~mem_deny) | mem_allow;
+  return perms;
 }
 
 uint64_t ccord_perm_channel_ex(uint64_t guild_perms, ccord_id guild_id, ccord_id user_id,
-                              const ccord_id *member_roles, size_t role_count,
-                              const ccord_overwrite *overwrites, size_t overwrite_count,
-                              bool in_thread)
+                               const ccord_id *member_roles, size_t role_count,
+                               const ccord_overwrite *overwrites, size_t overwrite_count,
+                               bool in_thread)
 {
   if ((guild_perms & CCORD_PERM_ADMINISTRATOR) != 0) return CCORD_PERM_ALL;
   uint64_t perms = guild_perms;
-  if (overwrites) {
-    // 1. @everyone
-    for (size_t i = 0; i < overwrite_count; i++) {
-      if (overwrites[i].kind == CCORD_OVERWRITE_ROLE && overwrites[i].id == guild_id) {
-        perms &= ~overwrites[i].deny;
-        perms |= overwrites[i].allow;
-      }
-    }
-    // 2. the member's roles, combined: every deny first, then every allow
-    uint64_t allow = 0, deny = 0;
-    for (size_t i = 0; i < overwrite_count; i++) {
-      if (overwrites[i].kind == CCORD_OVERWRITE_ROLE && overwrites[i].id != guild_id &&
-          member_roles && holds_role(member_roles, role_count, overwrites[i].id)) {
-        allow |= overwrites[i].allow;
-        deny |= overwrites[i].deny;
-      }
-    }
-    perms &= ~deny;
-    perms |= allow;
-    // 3. the member
-    for (size_t i = 0; i < overwrite_count; i++) {
-      if (overwrites[i].kind == CCORD_OVERWRITE_MEMBER && overwrites[i].id == user_id) {
-        perms &= ~overwrites[i].deny;
-        perms |= overwrites[i].allow;
-      }
+  if (overwrites && overwrite_count > 0) {
+    if (member_roles && role_count > ROLE_SET_MIN_ROLES && role_count <= ROLE_SET_MAX && overwrite_count > 4u) {
+      perms = apply_overwrites_hashed(perms, guild_id, user_id, member_roles, role_count, overwrites, overwrite_count);
+    } else {
+      perms = apply_overwrites_linear(perms, guild_id, user_id, member_roles, role_count, overwrites, overwrite_count);
     }
   }
   if ((perms & CCORD_PERM_VIEW_CHANNEL) == 0) return 0;
@@ -103,18 +225,37 @@ bool ccord_perm_outranks(const ccord_role *a, const ccord_role *b)
   return a->id < b->id;
 }
 
+static const ccord_role *perm_top_role_hashed(ccord_id guild_id, const ccord_role *roles, size_t nroles,
+                                              const ccord_id *member_roles, size_t nmember_roles)
+{
+  role_id_set mset;
+  role_id_set_build(&mset, member_roles, nmember_roles);
+  const ccord_role *top = nullptr;
+  const ccord_role *everyone = nullptr;
+  for (size_t i = 0; i < nroles; i++) {
+    const ccord_role *r = &roles[i];
+    if (r->id == guild_id && !everyone) everyone = r;
+    if (role_id_set_contains(&mset, r->id) && ccord_perm_outranks(r, top)) top = r;
+  }
+  return top ? top : everyone;
+}
+
 const ccord_role *ccord_perm_top_role(ccord_id guild_id, const ccord_role *roles, size_t nroles,
                                       const ccord_id *member_roles, size_t nmember_roles)
 {
-  if (!roles) return nullptr;
-  const ccord_role *top = nullptr;
-  if (member_roles) {
-    for (size_t i = 0; i < nmember_roles; i++) {
-      const ccord_role *r = find_role(roles, nroles, member_roles[i]);
-      if (r && ccord_perm_outranks(r, top)) top = r;
-    }
+  if (!roles || nroles == 0) return nullptr;
+  if (!member_roles || nmember_roles == 0) return find_role(roles, nroles, guild_id);
+  if (nmember_roles > ROLE_SET_MIN_ROLES && nmember_roles <= ROLE_SET_MAX && nroles > ROLE_SET_MIN_ROLES) {
+    return perm_top_role_hashed(guild_id, roles, nroles, member_roles, nmember_roles);
   }
-  return top ? top : find_role(roles, nroles, guild_id);
+  const ccord_role *top = nullptr;
+  const ccord_role *everyone = nullptr;
+  for (size_t i = 0; i < nroles; i++) {
+    const ccord_role *r = &roles[i];
+    if (r->id == guild_id && !everyone) everyone = r;
+    if (holds_role(member_roles, nmember_roles, r->id) && ccord_perm_outranks(r, top)) top = r;
+  }
+  return top ? top : everyone;
 }
 
 ccord_perm_verdict ccord_perm_can_act_on(ccord_perm_action action, ccord_id guild_id, ccord_id owner_id,
