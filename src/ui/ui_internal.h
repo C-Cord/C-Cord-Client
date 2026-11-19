@@ -1484,6 +1484,7 @@ void ui_member_look_of(const ccord_ui *ui, ccord_id guild, const ccord_member *m
 bool ui_in_rect(float x, float y, ccord_rect r);
 ccord_rect ui_rect(ccord_layout_rect r);
 void ui_open_settings(ccord_ui *ui, bool open);
+bool ui_open_plugin_install_prompt(ccord_ui *ui, const char *plugin_id);
 ccord_rect ui_settings_rect(const ccord_ui *ui, bool plugins_tab);   // plugins_tab: the tab button; else the Extensions switch row
 const ccord_channel *ui_selected_channel(const ccord_ui *ui);
 // Text, voice and stage channels carry a timeline + composer (a voice channel's own "Text Chat"); categories do not.

@@ -1396,11 +1396,11 @@ static ccord_color plugin_api_class_color(const ccord_ui *ui, uint8_t api_class)
 static void plugin_subtab_rects(const sgeom *g, ccord_rect *tab_inst, ccord_rect *tab_disc,
                                 ccord_rect *tab_upd, ccord_rect *btn_sync)
 {
-  float x = g->content.x, y = g->content.y + 80.0f, w = g->content.w;
-  *tab_inst = (ccord_rect){x, y, 114.0f, UIS_H_BTN_SM};
-  *tab_disc = (ccord_rect){x + 122.0f, y, 108.0f, UIS_H_BTN_SM};
-  *tab_upd  = (ccord_rect){x + 238.0f, y, 116.0f, UIS_H_BTN_SM};
-  *btn_sync = (ccord_rect){x + w - 110.0f, y, 110.0f, UIS_H_BTN_SM};
+  float x = g->content.x, y = g->content.y + 84.0f, w = g->content.w;
+  *tab_inst = (ccord_rect){x, y, 118.0f, UIS_H_BTN_SM};
+  *tab_disc = (ccord_rect){x + 126.0f, y, 108.0f, UIS_H_BTN_SM};
+  *tab_upd  = (ccord_rect){x + 242.0f, y, 116.0f, UIS_H_BTN_SM};
+  *btn_sync = (ccord_rect){x + w - 128.0f, y, 128.0f, UIS_H_BTN_SM};
 }
 
 static float plugin_card_layout(const sgeom *g, size_t idx, const ccord_plugin_info *p, float y, plugin_card_rects *out)
@@ -1414,13 +1414,13 @@ static float plugin_card_layout(const sgeom *g, size_t idx, const ccord_plugin_i
   float x = g->content.x, w = g->content.w;
   float by = y + h - 34.0f;
   out->card = (ccord_rect){x, y, w, h};
-  out->btn_toggle = (ccord_rect){x + 14.0f, by, p->state == CCORD_PLUGIN_NEEDS_CONSENT ? 114.0f : 74.0f, UIS_H_BTN_SM};
+  out->btn_toggle = (ccord_rect){x + 14.0f, by, p->state == CCORD_PLUGIN_NEEDS_CONSENT ? 120.0f : 84.0f, UIS_H_BTN_SM};
   float bx = out->btn_toggle.x + out->btn_toggle.w + 6.0f;
-  out->btn_log = (ccord_rect){bx, by, 96.0f, UIS_H_BTN_SM};
+  out->btn_log = (ccord_rect){bx, by, 108.0f, UIS_H_BTN_SM};
   bx += out->btn_log.w + 6.0f;
-  out->btn_reload = (ccord_rect){bx, by, 66.0f, UIS_H_BTN_SM};
+  out->btn_reload = (ccord_rect){bx, by, 78.0f, UIS_H_BTN_SM};
   bx += out->btn_reload.w + 6.0f;
-  out->btn_export = (ccord_rect){bx, by, 86.0f, UIS_H_BTN_SM};
+  out->btn_export = (ccord_rect){bx, by, 106.0f, UIS_H_BTN_SM};
   bx += out->btn_export.w + 6.0f;
   if (has_upd && bx + 106.0f <= x + w - 14.0f) {
     out->btn_update = (ccord_rect){bx, by, 106.0f, UIS_H_BTN_SM};
@@ -1428,9 +1428,9 @@ static float plugin_card_layout(const sgeom *g, size_t idx, const ccord_plugin_i
   }
   if (!p->is_bundled) {
     float rx = x + w - 14.0f;
-    if (rx - 78.0f >= bx) {
-      rx -= 78.0f;
-      out->btn_uninstall = (ccord_rect){rx, by, 78.0f, UIS_H_BTN_SM};
+    if (rx - 92.0f >= bx) {
+      rx -= 92.0f;
+      out->btn_uninstall = (ccord_rect){rx, by, 92.0f, UIS_H_BTN_SM};
       rx -= 6.0f;
     }
     if (rx - 94.0f >= bx) {
@@ -1755,10 +1755,17 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       }
       if (s_plugin_detail_id[0]) {
         const ccord_catalog_entry *e = ccord_contrib_catalog_find(ui->d.contrib, s_plugin_detail_id);
-        if (!e) { s_plugin_detail_id[0] = '\0'; return true; }
         if (ui_in_rect(x, y, (ccord_rect){px, py, 86.0f, UIS_H_BTN_SM})) {
           s_plugin_detail_id[0] = '\0';
           return true;
+        }
+        if (!e) {
+          ccord_rect box = {px, py + 34.0f, pw, 128.0f};
+          if (ui_in_rect(x, y, (ccord_rect){box.x + 16.0f, box.y + box.h - 44.0f, 120.0f, UIS_H_BTN})) {
+            ccord_contrib_catalog_refresh(ui->d.contrib);
+            return true;
+          }
+          return false;
         }
         ccord_rect box = {px, py + 34.0f, pw, 286.0f};
         if (!e->bundled && !e->installing && (!e->installed || e->update_available)) {
@@ -2831,11 +2838,27 @@ static void draw_plugins(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
     }
   }
 
-  // Inline Catalog Plugin Detail view
+  // Inline Catalog Plugin Detail view (also used by ccord://plugins/install/<id> deep links)
   if (s_plugin_detail_id[0]) {
     const ccord_catalog_entry *e = ccord_contrib_catalog_find(ui->d.contrib, s_plugin_detail_id);
-    if (!e) { s_plugin_detail_id[0] = '\0'; }
-    else {
+    if (!e) {
+      draw_button(ui, r, (ccord_rect){x, y, 86.0f, UIS_H_BTN_SM}, "Back", false);
+      ccord_rect box = {x, y + 34.0f, w, 128.0f};
+      uis_card(ui, r, box);
+      char hdr[128];
+      if (!cst || !cst->has_loaded || cst->syncing) {
+        snprintf(hdr, sizeof hdr, "Loading %s from catalog...", s_plugin_detail_id);
+      } else {
+        snprintf(hdr, sizeof hdr, "Plugin not found in catalog: %s", s_plugin_detail_id);
+      }
+      ccord_text_draw_ellipsis(r, hdr, strlen(hdr), box.x + 16.0f, box.y + 18.0f, box.w - 32.0f, &ns);
+      const char *sub = (!cst || !cst->has_loaded || cst->syncing)
+                            ? "Fetching verified metadata and SHA-256 digest before prompting for install."
+                            : "Try refreshing the catalog, or verify the plugin ID on plugins.c-cord.org.";
+      ccord_text_draw_ellipsis(r, sub, strlen(sub), box.x + 16.0f, box.y + 46.0f, box.w - 32.0f, &ms);
+      draw_button(ui, r, (ccord_rect){box.x + 16.0f, box.y + box.h - 44.0f, 120.0f, UIS_H_BTN}, "Refresh", true);
+      return;
+    } else {
       draw_button(ui, r, (ccord_rect){x, y, 86.0f, UIS_H_BTN_SM}, "Back", false);
       ccord_rect box = {x, y + 34.0f, w, 286.0f};
       uis_card(ui, r, box);
@@ -3680,6 +3703,34 @@ void ccord_ui_open_account_settings(ccord_ui *ui)
   } else if (!ui->account_view.signed_in && ui->account_focus_field == 0) {
     ui->account_focus_field = 2;   // focus Email field by default
   }
+}
+
+bool ui_open_plugin_install_prompt(ccord_ui *ui, const char *plugin_id)
+{
+  if (!ui || !plugin_id || !plugin_id[0]) return false;
+  size_t len = strlen(plugin_id);
+  if (len == 0 || len > 64) return false;
+  if (!((plugin_id[0] >= 'a' && plugin_id[0] <= 'z') || (plugin_id[0] >= '0' && plugin_id[0] <= '9'))) return false;
+  for (size_t i = 0; i < len; i++) {
+    char c = plugin_id[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+    if (!ok) return false;
+    if (c == '.' && i + 1 < len && plugin_id[i + 1] == '.') return false;
+  }
+  settings_init_defaults(ui);
+  ui_open_settings(ui, true);
+  ui->settings_page = SP_PLUGINS;
+  ui->settings_category = k_pages[SP_PLUGINS].category;
+  s_plugin_subtab = 1;
+  s_plugin_log_id[0] = '\0';
+  s_plugin_consent_id[0] = '\0';
+  snprintf(s_plugin_detail_id, sizeof s_plugin_detail_id, "%s", plugin_id);
+  if (ui->d.contrib && !ccord_contrib_catalog_find(ui->d.contrib, plugin_id)) {
+    ccord_contrib_catalog_refresh(ui->d.contrib);
+  }
+  ui_notice(ui, "Review plugin before installing: %.48s", plugin_id);
+  ui->dirty = true;
+  return true;
 }
 
 void ccord_ui_set_login_tab(ccord_ui *ui, int tab)

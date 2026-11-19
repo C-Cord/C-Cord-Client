@@ -11478,6 +11478,14 @@ static void test_invite_preview_cards_and_url_opener(void)
   key(CCORD_KEY_ESCAPE, 0);
   frame(2);
 
+  // 2b. Opening a ccord://plugins/install/<id> deep link opens Settings -> Plugins review prompt without spawning a browser.
+  CT_CHECK(ccord_ui_open_url(F.ui, "ccord://plugins/install/org.ccord.example-plugin"));
+  frame(4);
+  CT_CHECK(F.open_url_calls == urls_before);
+  CT_CHECK(dbg().settings_open);
+  key(CCORD_KEY_ESCAPE, 0);
+  frame(2);
+
   // 3. Clicking a clan tag with an unknown/unavailable guild settles out of loading instead of staying stuck on "Loading server...".
   CT_CHECK(ccord_session_select_guild(F.session, g, &err) == CCORD_OK);
   CT_CHECK(ccord_session_select_channel(F.session, ch_id, &err) == CCORD_OK);

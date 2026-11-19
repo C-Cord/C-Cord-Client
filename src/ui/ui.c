@@ -4216,9 +4216,40 @@ static bool ui_open_invite_url(ccord_ui *ui, const char *url)
   return true;
 }
 
+// Handles deep links of the form ccord://plugins/install/<id> or ccord://plugin/<id>.
+// Never installs silently: always opens Settings -> Plugins with the review & install prompt.
+static bool ui_open_ccord_plugin_url(ccord_ui *ui, const char *url)
+{
+  if (!ui || !url) return false;
+  static const char *const k_prefixes[] = {
+    "ccord://plugins/install/",
+    "ccord://plugin/",
+  };
+  const char *rest = nullptr;
+  for (size_t i = 0; i < sizeof k_prefixes / sizeof k_prefixes[0]; i++) {
+    size_t plen = strlen(k_prefixes[i]);
+    if (strncasecmp(url, k_prefixes[i], plen) == 0) {
+      rest = url + plen;
+      break;
+    }
+  }
+  if (!rest || !rest[0]) return false;
+  char id[65];
+  size_t n = 0;
+  while (rest[n] && rest[n] != '/' && rest[n] != '?' && rest[n] != '#') {
+    if (n + 1 >= sizeof id) return false;
+    char c = rest[n];
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    id[n++] = c;
+  }
+  id[n] = '\0';
+  return ui_open_plugin_install_prompt(ui, id);
+}
+
 bool ui_open_url(ccord_ui *ui, const char *url, const char *label)
 {
   if (!ui || !url || !url[0]) return false;
+  if (ui_open_ccord_plugin_url(ui, url)) return true;
   if (ui_open_invite_url(ui, url)) return true;
   const char *target = url;
   const char *target_label = label;
