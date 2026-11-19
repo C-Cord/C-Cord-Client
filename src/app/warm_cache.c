@@ -108,14 +108,38 @@ bool ccord_warm_pref_enabled(const char *data_dir)
   if (snprintf(path, sizeof path, "%s/settings.ini", data_dir) >= (int)sizeof path) return true;
   FILE *f = fopen(path, "rb");
   if (!f) return true;
-  char buf[65536];
-  size_t n = fread(buf, 1, sizeof buf, f);
-  bool eof = feof(f) != 0;
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return true;
+  }
+  long sz = ftell(f);
+  if (sz < 0 || sz > 65536 || fseek(f, 0, SEEK_SET) != 0) {
+    fclose(f);
+    return true;   // an oversize or unreadable settings file keeps the default
+  }
+  size_t cap = (size_t)sz;
+  if (cap == 0) {
+    fclose(f);
+    return true;
+  }
+  char *buf = ccord_malloc(cap + 1u);
+  if (!buf) {
+    fclose(f);
+    return true;
+  }
+  size_t n = fread(buf, 1, cap, f);
+  int extra = fgetc(f);
   fclose(f);
-  if (!eof) return true;   // an oversize or unreadable settings file keeps the default
+  if (extra != EOF) {
+    ccord_free(buf);
+    return true;
+  }
+  buf[n] = '\0';
   pref_state st = {.enabled = true};
   ccord_error e;
-  if (ccord_ini_parse(buf, n, pref_visit, &st, &e) != CCORD_OK) return true;
+  ccord_status st_parse = ccord_ini_parse(buf, n, pref_visit, &st, &e);
+  ccord_free(buf);
+  if (st_parse != CCORD_OK) return true;
   return st.enabled;
 }
 
@@ -600,9 +624,13 @@ bool ccord_warm_state_path(const ccord_warm *w, char *out, size_t cap)
   return w && w->enabled && out && cap && state_path(w, out, cap);
 }
 
-// Wraps `body` with the header line "CCWARM 1 <sha256 hex> <length>\n".
-static char *wrap_with_header(const char *body, size_t len, size_t *out_len)
+// Formats the header line "CCWARM 1 <sha256 hex> <length>\n" directly into the reserved
+// WARM_HEADER_MAX prefix of `buf`, avoiding a second multi-megabyte allocation and memcpy.
+static const char *wrap_with_header_inplace(ccord_buf *buf, size_t *out_len)
 {
+  if (!buf || !buf->data || buf->len < WARM_HEADER_MAX) return nullptr;
+  const char *body = buf->data + WARM_HEADER_MAX;
+  size_t len = buf->len - WARM_HEADER_MAX;
   unsigned char d[32];
   ccord_sha256(body, len, d);
   char hex[65];
@@ -610,18 +638,15 @@ static char *wrap_with_header(const char *body, size_t len, size_t *out_len)
   char head[WARM_HEADER_MAX];
   int hn = snprintf(head, sizeof head, WARM_MAGIC " %u %s %zu\n", CCORD_WARM_FORMAT_VERSION, hex, len);
   if (hn <= 0 || (size_t)hn >= sizeof head) return nullptr;
-  char *all = ccord_malloc((size_t)hn + len + 1);
-  if (!all) return nullptr;
-  memcpy(all, head, (size_t)hn);
-  memcpy(all + hn, body, len);
-  all[(size_t)hn + len] = '\0';
+  char *start = buf->data + (WARM_HEADER_MAX - (size_t)hn);
+  memcpy(start, head, (size_t)hn);
   *out_len = (size_t)hn + len;
-  return all;
+  return start;
 }
 
-// Verifies the header of `text` (length `n`): magic, version == `want_version` (0 = any, reported), sha256 and length.
-// On success *body / *body_len point into `text`.
-static bool parse_header(const char *text, size_t n, unsigned *version, const char **body, size_t *body_len)
+// Parses the header line "CCWARM <ver> <64 hex> <blen>\n" without hashing the body.
+static bool parse_header_line(const char *text, size_t n, unsigned *version, char hex[65], size_t *hdr_len,
+                              size_t *body_len)
 {
   const char *nl = memchr(text, '\n', n < WARM_HEADER_MAX ? n : WARM_HEADER_MAX);
   if (!nl) return false;
@@ -630,23 +655,25 @@ static bool parse_header(const char *text, size_t n, unsigned *version, const ch
   if (hl >= sizeof head) return false;
   memcpy(head, text, hl);
   head[hl] = '\0';
-  char magic[8], hex[80];
+  char magic[8], hex_in[80];
   unsigned ver = 0;
   size_t blen = 0;
-  if (sscanf(head, "%7s %u %79s %zu", magic, &ver, hex, &blen) != 4) return false;
-  if (strcmp(magic, WARM_MAGIC) != 0 || strlen(hex) != 64) return false;
-  const char *b = nl + 1;
-  size_t have = n - hl - 1;
-  if (blen != have) return false;
-  unsigned char d[32];
-  ccord_sha256(b, blen, d);
-  char got[65];
-  to_hex(d, 32, got);
-  if (strcmp(got, hex) != 0) return false;
-  if (version) *version = ver;
-  *body = b;
+  if (sscanf(head, "%7s %u %79s %zu", magic, &ver, hex_in, &blen) != 4) return false;
+  if (strcmp(magic, WARM_MAGIC) != 0 || strlen(hex_in) != 64) return false;
+  memcpy(hex, hex_in, 65);
+  *version = ver;
+  *hdr_len = hl + 1;
   *body_len = blen;
   return true;
+}
+
+static bool verify_body_sha256(const char *body, size_t blen, const char hex[65])
+{
+  unsigned char d[32];
+  ccord_sha256(body, blen, d);
+  char got[65];
+  to_hex(d, 32, got);
+  return strcmp(got, hex) == 0;
 }
 
 static ccord_json_limits warm_limits(void)
@@ -657,19 +684,35 @@ static ccord_json_limits warm_limits(void)
 bool ccord_warm_verify_file(const char *path, int64_t *saved_ms, size_t *body_len, size_t max_bytes)
 {
   if (!path) return false;
+  size_t cap = max_bytes ? max_bytes : CCORD_WARM_MAX_FILE_BYTES + WARM_HEADER_MAX;
+  // Validate the short magic/version/length header before allocating & hashing the full file.
+  FILE *pf = fopen(path, "rb");
+  if (!pf) return false;
+  char peek[WARM_HEADER_MAX];
+  size_t pn = fread(peek, 1, sizeof peek, pf);
+  fclose(pf);
+  unsigned pver = 0;
+  char phex[65];
+  size_t phl = 0, pbl = 0;
+  if (!parse_header_line(peek, pn, &pver, phex, &phl, &pbl) || pver != CCORD_WARM_FORMAT_VERSION ||
+      pbl > cap || phl > cap - pbl) {
+    return false;
+  }
+
   ccord_error e;
   size_t n = 0;
-  char *text = ccord_file_read_max(path, max_bytes ? max_bytes : CCORD_WARM_MAX_FILE_BYTES + WARM_HEADER_MAX, &n, &e);
+  char *text = ccord_file_read_max(path, cap, &n, &e);
   if (!text) return false;
-  const char *body = nullptr;
-  size_t bl = 0;
   unsigned ver = 0;
-  bool ok = parse_header(text, n, &ver, &body, &bl) && ver == CCORD_WARM_FORMAT_VERSION;
+  char hex[65];
+  size_t hl = 0, bl = 0;
+  bool ok = parse_header_line(text, n, &ver, hex, &hl, &bl) && ver == CCORD_WARM_FORMAT_VERSION &&
+            n >= hl && bl == n - hl && verify_body_sha256(text + hl, bl, hex);
   if (ok && saved_ms) {
     ccord_arena a;
     ccord_arena_init(&a, 0);
     ccord_json_limits lim = warm_limits();
-    const ccord_json *root = ccord_json_parse(&a, body, bl, &lim, &e);
+    const ccord_json *root = ccord_json_parse(&a, text + hl, bl, &lim, &e);
     int64_t v = 0;
     ok = root && ccord_json_int64(ccord_json_get(root, "saved_ms"), &v);
     *saved_ms = v;
@@ -778,34 +821,42 @@ ccord_status ccord_warm_save(ccord_warm *w, const ccord_store *store, bool sync,
   if (w->bound_self != CCORD_ID_NONE && w->bound_self != self) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "warm: the signed-in account changed; not saving into this cache");
   }
+  if (w->max_bytes <= WARM_HEADER_MAX) {
+    return ccord_error_set(err, CCORD_ERR_RANGE, "warm: state does not fit the cache limit");
+  }
   uint64_t t0 = ccord_clock_ms();
+  static const char k_hdr_pad[WARM_HEADER_MAX] = {0};
   ccord_buf buf;
-  ccord_buf_init(&buf, w->max_bytes - WARM_HEADER_MAX);
-  ccord_status st = build_state(w, store, false, &buf);
+  ccord_buf_init(&buf, w->max_bytes);
+  ccord_status st = ccord_buf_append(&buf, k_hdr_pad, WARM_HEADER_MAX);
+  if (st == CCORD_OK) st = build_state(w, store, false, &buf);
   if (st == CCORD_ERR_RANGE) {   // too big: drop members, overwrites and most users, and say so
     ccord_buf_free(&buf);
-    ccord_buf_init(&buf, w->max_bytes - WARM_HEADER_MAX);
-    st = build_state(w, store, true, &buf);
+    ccord_buf_init(&buf, w->max_bytes);
+    st = ccord_buf_append(&buf, k_hdr_pad, WARM_HEADER_MAX);
+    if (st == CCORD_OK) st = build_state(w, store, true, &buf);
   }
-  if (st != CCORD_OK) {
+  if (st != CCORD_OK || buf.len < WARM_HEADER_MAX) {
     ccord_buf_free(&buf);
-    return ccord_error_set(err, st, "warm: state does not fit the cache limit");
+    return ccord_error_set(err, st == CCORD_OK ? CCORD_ERR_INTERNAL : st, "warm: state does not fit the cache limit");
   }
-  size_t blen = buf.len, flen = 0;
-  char *file = wrap_with_header(buf.data, blen, &flen);
-  ccord_buf_free(&buf);
-  if (!file) return ccord_error_set(err, CCORD_ERR_NOMEM, "warm: out of memory");
+  size_t flen = 0;
+  const char *file = wrap_with_header_inplace(&buf, &flen);
+  if (!file) {
+    ccord_buf_free(&buf);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "warm: out of memory");
+  }
 
   char wdir[1200], hdir[1300], path[1300], meta[1300];
   if (snprintf(wdir, sizeof wdir, "%s/warm", w->dir) >= (int)sizeof wdir ||
       snprintf(hdir, sizeof hdir, "%s/warm/history", w->dir) >= (int)sizeof hdir ||
       !state_path(w, path, sizeof path) || !join_path(meta, sizeof meta, w->dir, "meta.json")) {
-    ccord_free(file);
+    ccord_buf_free(&buf);
     return ccord_error_set(err, CCORD_ERR_RANGE, "warm: path too long");
   }
   st = ccord_mkdir_p(hdir, 0700, err);
   if (st == CCORD_OK) st = ccord_file_write_atomic(path, file, flen, 0600, sync, err);
-  ccord_free(file);
+  ccord_buf_free(&buf);
   if (st != CCORD_OK) return st;
   char mj[160];
   int mn = snprintf(mj, sizeof mj, "{\"user_id\":\"%" PRIu64 "\",\"saved_ms\":%" PRId64 "}", (uint64_t)self,
@@ -918,13 +969,11 @@ void ccord_warm_forget_user(const char *data_dir, ccord_id user_id)
 
 // ------------------------------------------------------------------------------------------------ load
 
-static const char *r_str(ccord_arena *a, const ccord_json *o, const char *k)
+// Returns the NUL-terminated string directly from the JSON parse arena (no extra copy).
+static const char *r_str(const ccord_json *o, const char *k)
 {
-  size_t n = 0;
-  const char *s = ccord_json_string(ccord_json_get(o, k), &n);
-  if (!s) return "";
-  char *d = ccord_arena_strndup(a, s, n);
-  return d ? d : "";
+  const char *s = ccord_json_string(ccord_json_get(o, k), nullptr);
+  return s ? s : "";
 }
 
 static uint64_t r_u64(const ccord_json *o, const char *k)
@@ -957,10 +1006,14 @@ static bool r_bool(const ccord_json *o, const char *k)
   return ccord_json_bool(ccord_json_get(o, k), false);
 }
 
-// Copies `s` into a fixed buffer, cutting at a UTF-8 boundary.
-static void copy_inline(char *dst, size_t cap, const char *s)
+// Copies `s` (length `n`) into a fixed buffer, cutting at a UTF-8 boundary.
+static void copy_inline_n(char *dst, size_t cap, const char *s, size_t n)
 {
-  size_t n = strlen(s);
+  if (cap == 0) return;
+  if (!s) {
+    dst[0] = '\0';
+    return;
+  }
   if (n >= cap) {
     n = cap - 1;
     while (n > 0 && ((unsigned char)s[n] & 0xC0u) == 0x80u) n--;
@@ -969,47 +1022,50 @@ static void copy_inline(char *dst, size_t cap, const char *s)
   dst[n] = '\0';
 }
 
-static void read_inline(char *dst, size_t cap, ccord_arena *a, const ccord_json *o, const char *k)
+// Copies a JSON string directly into a fixed buffer without any intermediate arena copy.
+static void read_inline(char *dst, size_t cap, const ccord_json *o, const char *k)
 {
-  copy_inline(dst, cap, r_str(a, o, k));
+  size_t n = 0;
+  const char *s = ccord_json_string(ccord_json_get(o, k), &n);
+  copy_inline_n(dst, cap, s, n);
 }
 
-static void load_user(ccord_arena *a, const ccord_json *j, ccord_user *u)
+static void load_user(const ccord_json *j, ccord_user *u)
 {
   memset(u, 0, sizeof *u);
   u->id = r_u64(j, "id");
-  u->name = r_str(a, j, "name");
-  u->handle = r_str(a, j, "handle");
+  u->name = r_str(j, "name");
+  u->handle = r_str(j, "handle");
   u->status_text = "";
-  u->avatar_url = r_str(a, j, "avatar");
-  u->banner_url = r_str(a, j, "banner");
+  u->avatar_url = r_str(j, "avatar");
+  u->banner_url = r_str(j, "banner");
   u->accent_color = (uint32_t)r_u64(j, "accent") & 0xFFFFFFu;
   u->has_accent_color = r_bool(j, "has_accent");
-  u->bio = r_str(a, j, "bio");
-  u->pronouns = r_str(a, j, "pronouns");
+  u->bio = r_str(j, "bio");
+  u->pronouns = r_str(j, "pronouns");
   u->presence = CCORD_PRESENCE_OFFLINE;
   u->is_bot = r_bool(j, "bot");
   u->avatar_palette = (uint8_t)r_u64(j, "palette");
-  read_inline(u->clan_tag, sizeof u->clan_tag, a, j, "clan");
+  read_inline(u->clan_tag, sizeof u->clan_tag, j, "clan");
   u->clan_guild_id = r_u64(j, "clan_guild");
-  read_inline(u->clan_badge, sizeof u->clan_badge, a, j, "clan_badge");
-  read_inline(u->custom_status_emoji, sizeof u->custom_status_emoji, a, j, "cs_emoji");
-  read_inline(u->custom_status_text, sizeof u->custom_status_text, a, j, "cs_text");
+  read_inline(u->clan_badge, sizeof u->clan_badge, j, "clan_badge");
+  read_inline(u->custom_status_emoji, sizeof u->custom_status_emoji, j, "cs_emoji");
+  read_inline(u->custom_status_text, sizeof u->custom_status_text, j, "cs_text");
   u->custom_status_expires_ms = r_i64(j, "cs_expires");
 }
 
-static void load_guild(ccord_arena *a, const ccord_json *j, ccord_guild *g)
+static void load_guild(const ccord_json *j, ccord_guild *g)
 {
   memset(g, 0, sizeof *g);
   g->id = r_u64(j, "id");
-  g->name = r_str(a, j, "name");
-  g->icon_url = r_str(a, j, "icon");
+  g->name = r_str(j, "name");
+  g->icon_url = r_str(j, "icon");
   g->owner_id = r_u64(j, "owner");
   g->self_permissions = r_u64(j, "perms");
   g->folder_id = r_u64(j, "folder_id");
-  read_inline(g->folder_name, sizeof g->folder_name, a, j, "folder_name");
+  read_inline(g->folder_name, sizeof g->folder_name, j, "folder_name");
   g->folder_color = (uint32_t)r_u64(j, "folder_color");
-  read_inline(g->banner_url, sizeof g->banner_url, a, j, "banner");
+  read_inline(g->banner_url, sizeof g->banner_url, j, "banner");
   g->system_channel_id = r_u64(j, "sys_channel");
   g->system_channel_flags = (uint32_t)r_u64(j, "sys_flags") & CCORD_SYSCHAN_KNOWN_MASK;
   g->default_message_notifications = (uint8_t)r_u64(j, "dmn");
@@ -1019,7 +1075,7 @@ static void load_guild(ccord_arena *a, const ccord_json *j, ccord_guild *g)
   g->explicit_content_filter = (uint8_t)r_u64(j, "ecf");
   g->premium_tier = (uint8_t)r_u64(j, "tier");
   g->premium_subscription_count = (uint32_t)r_u64(j, "boosts");
-  read_inline(g->vanity_url_code, sizeof g->vanity_url_code, a, j, "vanity");
+  read_inline(g->vanity_url_code, sizeof g->vanity_url_code, j, "vanity");
   g->rules_channel_id = r_u64(j, "rules_channel");
   g->public_updates_channel_id = r_u64(j, "updates_channel");
   g->feature_community = r_bool(j, "f_community");
@@ -1031,22 +1087,22 @@ static void load_guild(ccord_arena *a, const ccord_json *j, ccord_guild *g)
   g->dms_disabled_until_ms = r_i64(j, "dm_until");
 }
 
-static void load_channel(ccord_arena *a, const ccord_json *j, ccord_channel *c)
+static void load_channel(const ccord_json *j, ccord_channel *c)
 {
   memset(c, 0, sizeof *c);
   c->id = r_u64(j, "id");
   c->guild_id = r_u64(j, "guild");
   c->parent_id = r_u64(j, "parent");
   c->kind = (ccord_channel_kind)r_u64(j, "kind");
-  c->name = r_str(a, j, "name");
-  c->topic = r_str(a, j, "topic");
+  c->name = r_str(j, "name");
+  c->topic = r_str(j, "topic");
   c->position = (int32_t)r_i64(j, "pos");
   c->last_message_id = r_u64(j, "last_msg");
   c->last_read_id = r_u64(j, "last_read");
   c->unread_count = (uint32_t)r_u64(j, "unread");
   c->mention_count = (uint32_t)r_u64(j, "mentions");
   c->user_id = r_u64(j, "user");
-  c->icon_url = r_str(a, j, "icon");
+  c->icon_url = r_str(j, "icon");
   c->discord_type = (uint8_t)r_u64(j, "dtype");
   c->recipient_count = (uint16_t)r_u64(j, "nrec");
   const ccord_json *rec = ccord_json_get(j, "rec");
@@ -1068,15 +1124,15 @@ static void load_channel(ccord_arena *a, const ccord_json *j, ccord_channel *c)
   c->default_auto_archive_duration = (uint32_t)r_u64(j, "auto_archive");
 }
 
-static void load_member(ccord_arena *a, const ccord_json *j, ccord_member *m)
+static void load_member(const ccord_json *j, ccord_member *m)
 {
   memset(m, 0, sizeof *m);
   m->guild_id = r_u64(j, "guild");
   m->user_id = r_u64(j, "user");
-  m->role_name = r_str(a, j, "role_name");
+  m->role_name = r_str(j, "role_name");
   m->role_color = (uint32_t)r_u64(j, "role_color");
   m->role_rank = (uint8_t)r_u64(j, "role_rank");
-  read_inline(m->nick, sizeof m->nick, a, j, "nick");
+  read_inline(m->nick, sizeof m->nick, j, "nick");
   m->permissions = r_u64(j, "perms");
   m->timeout_until_ms = r_i64(j, "timeout");
   m->joined_at_ms = r_i64(j, "joined");
@@ -1103,8 +1159,10 @@ static void drop_file(const char *path, const char *why)
 }
 
 // Applies everything after the snapshot (roles, overwrites, notify, settings). Failures are logged, never fatal.
-static void apply_extras(ccord_arena *a, const ccord_json *root, ccord_store *store)
+static void apply_extras(const ccord_json *root, ccord_store *store)
 {
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, 32u << 10);
   ccord_error e;
   const ccord_json *roles = ccord_json_get(root, "roles");
   for (size_t i = 0, n = ccord_json_array_len(roles); i < n; i++) {
@@ -1113,11 +1171,14 @@ static void apply_extras(ccord_arena *a, const ccord_json *root, ccord_store *st
     const ccord_json *list = ccord_json_get(e_j, "list");
     size_t nr = ccord_json_array_len(list);
     if (g == CCORD_ID_NONE || nr == 0 || nr > CCORD_MAX_ROLES_PER_GUILD) continue;
-    ccord_role *rs = arena_array(a, nr, sizeof *rs, _Alignof(ccord_role));
-    if (!rs) return;
+    ccord_role *rs = arena_array(&scratch, nr, sizeof *rs, _Alignof(ccord_role));
+    if (!rs) {
+      ccord_arena_free(&scratch);
+      return;
+    }
     for (size_t k = 0; k < nr; k++) {
       const ccord_json *rj = ccord_json_array_at(list, k);
-      rs[k] = (ccord_role){.id = r_u64(rj, "id"), .guild_id = g, .name = r_str(a, rj, "name"),
+      rs[k] = (ccord_role){.id = r_u64(rj, "id"), .guild_id = g, .name = r_str(rj, "name"),
                            .color = (uint32_t)r_u64(rj, "color") & 0xFFFFFFu, .position = (int32_t)r_i64(rj, "pos"),
                            .permissions = r_u64(rj, "perms"), .hoist = r_bool(rj, "hoist"),
                            .mentionable = r_bool(rj, "mentionable"), .managed = r_bool(rj, "managed")};
@@ -1130,8 +1191,11 @@ static void apply_extras(ccord_arena *a, const ccord_json *root, ccord_store *st
     const ccord_json *ids = ccord_json_get(mj, "roles");
     size_t ni = ccord_json_array_len(ids);
     if (ni > CCORD_MAX_ROLES_PER_GUILD) continue;
-    ccord_id *rid = arena_array(a, ni, sizeof *rid, _Alignof(ccord_id));
-    if (!rid) return;
+    ccord_id *rid = arena_array(&scratch, ni, sizeof *rid, _Alignof(ccord_id));
+    if (!rid) {
+      ccord_arena_free(&scratch);
+      return;
+    }
     size_t kept = 0;
     for (size_t k = 0; k < ni; k++) {
       size_t sl = 0;
@@ -1147,8 +1211,11 @@ static void apply_extras(ccord_arena *a, const ccord_json *root, ccord_store *st
     const ccord_json *items = ccord_json_get(oj, "items");
     size_t ni = ccord_json_array_len(items);
     if (ni == 0 || ni > CCORD_MAX_OVERWRITES_PER_CHANNEL) continue;
-    ccord_overwrite *ow = arena_array(a, ni, sizeof *ow, _Alignof(ccord_overwrite));
-    if (!ow) return;
+    ccord_overwrite *ow = arena_array(&scratch, ni, sizeof *ow, _Alignof(ccord_overwrite));
+    if (!ow) {
+      ccord_arena_free(&scratch);
+      return;
+    }
     for (size_t k = 0; k < ni; k++) {
       const ccord_json *ij = ccord_json_array_at(items, k);
       ow[k] = (ccord_overwrite){.id = r_u64(ij, "id"),
@@ -1164,8 +1231,11 @@ static void apply_extras(ccord_arena *a, const ccord_json *root, ccord_store *st
     const ccord_json *rows = ccord_json_get(nj, "rows");
     size_t nr = ccord_json_array_len(rows);
     if (g == CCORD_ID_NONE || nr == 0 || nr > CCORD_MAX_CHANNELS_PER_GUILD + 1) continue;
-    ccord_notify_scope *rs = arena_array(a, nr, sizeof *rs, _Alignof(ccord_notify_scope));
-    if (!rs) return;
+    ccord_notify_scope *rs = arena_array(&scratch, nr, sizeof *rs, _Alignof(ccord_notify_scope));
+    if (!rs) {
+      ccord_arena_free(&scratch);
+      return;
+    }
     for (size_t k = 0; k < nr; k++) {
       const ccord_json *rj = ccord_json_array_at(rows, k);
       uint64_t level = r_u64(rj, "level");
@@ -1194,9 +1264,10 @@ static void apply_extras(ccord_arena *a, const ccord_json *root, ccord_store *st
     us.stream_notifications_enabled = r_bool(usj, "stream_n");
     us.message_display_compact = r_bool(usj, "compact");
     us.animate_stickers = (uint8_t)r_u64(usj, "stickers");
-    read_inline(us.locale, sizeof us.locale, a, usj, "locale");
+    read_inline(us.locale, sizeof us.locale, usj, "locale");
     (void)ccord_store_set_user_settings(store, &us, &e);
   }
+  ccord_arena_free(&scratch);
 }
 
 // Reads every warm/history/<id>.json whose channel exists; returns how many pages were seeded.
@@ -1275,10 +1346,10 @@ ccord_status ccord_warm_load(ccord_warm *w, ccord_store *store, ccord_session *s
     drop_file(path, e.message);
     return CCORD_OK;
   }
-  const char *body = nullptr;
-  size_t blen = 0;
   unsigned ver = 0;
-  if (!parse_header(text, n, &ver, &body, &blen)) {
+  char hex[65];
+  size_t hl = 0, blen = 0;
+  if (!parse_header_line(text, n, &ver, hex, &hl, &blen) || n < hl || blen != n - hl) {
     ccord_free(text);
     drop_file(path, "bad header, length or checksum");
     return CCORD_OK;
@@ -1288,10 +1359,17 @@ ccord_status ccord_warm_load(ccord_warm *w, ccord_store *store, ccord_session *s
     drop_file(path, "other format version");
     return CCORD_OK;
   }
-  ccord_arena a;
-  ccord_arena_init(&a, 256u << 10);
+  if (!verify_body_sha256(text + hl, blen, hex)) {
+    ccord_free(text);
+    drop_file(path, "bad header, length or checksum");
+    return CCORD_OK;
+  }
+  ccord_arena parse_a;
+  ccord_arena_init(&parse_a, 256u << 10);
   ccord_json_limits lim = warm_limits();
-  const ccord_json *root = ccord_json_parse(&a, body, blen, &lim, &e);
+  const ccord_json *root = ccord_json_parse(&parse_a, text + hl, blen, &lim, &e);
+  // ccord_json_parse copies all strings into parse_a; drop the raw file buffer immediately.
+  ccord_free(text);
   const char *why = nullptr;
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) why = "unreadable body";
   else if (r_u64(root, "v") != CCORD_WARM_FORMAT_VERSION) why = "other codec version";
@@ -1301,8 +1379,7 @@ ccord_status ccord_warm_load(ccord_warm *w, ccord_store *store, ccord_session *s
     if (!fp || strcmp(fp, w->fp) != 0) why = "belongs to another account";
   }
   if (why) {
-    ccord_arena_free(&a);
-    ccord_free(text);
+    ccord_arena_free(&parse_a);
     drop_file(path, why);
     return CCORD_OK;
   }
@@ -1312,6 +1389,8 @@ ccord_status ccord_warm_load(ccord_warm *w, ccord_store *store, ccord_session *s
                    *jrs = ccord_json_get(root, "relationships");
   size_t nu = ccord_json_array_len(jus), ng = ccord_json_array_len(jgs), nc = ccord_json_array_len(jcs),
          nm = ccord_json_array_len(jms), nr = ccord_json_array_len(jrs);
+  ccord_arena snap_a;
+  ccord_arena_init(&snap_a, 64u << 10);
   ccord_user *users = nullptr;
   ccord_guild *guilds = nullptr;
   ccord_channel *chans = nullptr;
@@ -1320,23 +1399,23 @@ ccord_status ccord_warm_load(ccord_warm *w, ccord_store *store, ccord_session *s
   if (nu > WARM_MAX_LOAD_USERS || ng > CCORD_MAX_GUILDS || nc > (size_t)CCORD_MAX_GUILDS * CCORD_MAX_CHANNELS_PER_GUILD ||
       nm > CCORD_MAX_MEMBERS_PER_GUILD || nr > CCORD_MAX_RELATIONSHIPS) {
     why = "too many entries";
-  } else if (!(users = arena_array(&a, nu, sizeof *users, _Alignof(ccord_user))) ||
-             !(guilds = arena_array(&a, ng, sizeof *guilds, _Alignof(ccord_guild))) ||
-             !(chans = arena_array(&a, nc, sizeof *chans, _Alignof(ccord_channel))) ||
-             !(members = arena_array(&a, nm, sizeof *members, _Alignof(ccord_member))) ||
-             !(rels = arena_array(&a, nr, sizeof *rels, _Alignof(ccord_relationship)))) {
+  } else if (!(users = arena_array(&snap_a, nu, sizeof *users, _Alignof(ccord_user))) ||
+             !(guilds = arena_array(&snap_a, ng, sizeof *guilds, _Alignof(ccord_guild))) ||
+             !(chans = arena_array(&snap_a, nc, sizeof *chans, _Alignof(ccord_channel))) ||
+             !(members = arena_array(&snap_a, nm, sizeof *members, _Alignof(ccord_member))) ||
+             !(rels = arena_array(&snap_a, nr, sizeof *rels, _Alignof(ccord_relationship)))) {
     why = "out of memory";
   }
   if (why) {
-    ccord_arena_free(&a);
-    ccord_free(text);
+    ccord_arena_free(&snap_a);
+    ccord_arena_free(&parse_a);
     drop_file(path, why);
     return CCORD_OK;
   }
-  for (size_t i = 0; i < nu; i++) load_user(&a, ccord_json_array_at(jus, i), &users[i]);
-  for (size_t i = 0; i < ng; i++) load_guild(&a, ccord_json_array_at(jgs, i), &guilds[i]);
-  for (size_t i = 0; i < nc; i++) load_channel(&a, ccord_json_array_at(jcs, i), &chans[i]);
-  for (size_t i = 0; i < nm; i++) load_member(&a, ccord_json_array_at(jms, i), &members[i]);
+  for (size_t i = 0; i < nu; i++) load_user(ccord_json_array_at(jus, i), &users[i]);
+  for (size_t i = 0; i < ng; i++) load_guild(ccord_json_array_at(jgs, i), &guilds[i]);
+  for (size_t i = 0; i < nc; i++) load_channel(ccord_json_array_at(jcs, i), &chans[i]);
+  for (size_t i = 0; i < nm; i++) load_member(ccord_json_array_at(jms, i), &members[i]);
   size_t kept_rel = 0;
   for (size_t i = 0; i < nr; i++) {
     const ccord_json *rj = ccord_json_array_at(jrs, i);
@@ -1348,21 +1427,21 @@ ccord_status ccord_warm_load(ccord_warm *w, ccord_store *store, ccord_session *s
                          .guild_count = ng, .channels = chans, .channel_count = nc, .members = members,
                          .member_count = nm, .relationships = rels, .relationship_count = kept_rel};
   ccord_error serr;
-  if (ccord_store_set_snapshot_ex(store, &snap, false, &serr) != CCORD_OK) {
-    ccord_arena_free(&a);
-    ccord_free(text);
+  ccord_status snap_st = ccord_store_set_snapshot_ex(store, &snap, false, &serr);
+  ccord_arena_free(&snap_a);
+  if (snap_st != CCORD_OK) {
+    ccord_arena_free(&parse_a);
     drop_file(path, serr.message);
     return CCORD_OK;
   }
   // The snapshot is in: from here on a failure leaves a usable (if thinner) store, so the file is kept.
-  apply_extras(&a, root, store);
+  apply_extras(root, store);
   ccord_id sel_g = r_u64(root, "sel_guild"), sel_c = r_u64(root, "sel_channel");
   if (sel_g != CCORD_ID_NONE) (void)ccord_store_select_guild(store, sel_g, &e);
   if (sel_c != CCORD_ID_NONE && ccord_store_channel(store, sel_c)) (void)ccord_store_select_channel(store, sel_c, &e);
   res.saved_ms = r_i64(root, "saved_ms");
   res.self_id = snap.self_id;
-  ccord_arena_free(&a);
-  ccord_free(text);
+  ccord_arena_free(&parse_a);
 
   res.history_channels = load_history(w, store);
   res.sel_guild = ccord_store_selected_guild(store);
