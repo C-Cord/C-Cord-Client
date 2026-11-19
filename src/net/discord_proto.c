@@ -133,18 +133,30 @@ typedef struct vec {
   size_t n, cap;
 } vec;
 
+static ccord_status vec_reserve(vec *v, size_t need, size_t esz, ccord_error *err)
+{
+  if (need > CCORD_PROTO_MAX_ITEMS)
+    return ccord_error_set(err, CCORD_ERR_RANGE, "settings proto: more than %u items in a collection",
+                           CCORD_PROTO_MAX_ITEMS);
+  if (need <= v->cap) return CCORD_OK;
+  size_t cap = v->cap ? v->cap : 16u;
+  while (cap < need) cap *= 2u;
+  if (cap > CCORD_PROTO_MAX_ITEMS) cap = CCORD_PROTO_MAX_ITEMS;
+  void *np = ccord_realloc_array(v->p, cap, esz);
+  if (!np) return ccord_error_set(err, CCORD_ERR_NOMEM, "settings proto: out of memory");
+  v->p = np;
+  v->cap = cap;
+  return CCORD_OK;
+}
+
 static ccord_status vec_push(vec *v, size_t esz, const void *e, ccord_error *err)
 {
   if (v->n >= CCORD_PROTO_MAX_ITEMS)
     return ccord_error_set(err, CCORD_ERR_RANGE, "settings proto: more than %u items in a collection",
                            CCORD_PROTO_MAX_ITEMS);
   if (v->n == v->cap) {
-    size_t cap = v->cap ? v->cap * 2 : 16;
-    if (cap > CCORD_PROTO_MAX_ITEMS) cap = CCORD_PROTO_MAX_ITEMS;
-    void *np = ccord_realloc_array(v->p, cap, esz);
-    if (!np) return ccord_error_set(err, CCORD_ERR_NOMEM, "settings proto: out of memory");
-    v->p = np;
-    v->cap = cap;
+    ccord_status st = vec_reserve(v, v->n + 1u, esz, err);
+    if (st != CCORD_OK) return st;
   }
   memcpy((char *)v->p + v->n * esz, e, esz);
   v->n++;
@@ -268,13 +280,21 @@ static ccord_status parse_fav_stickers(slice msg, pctx *c, ccord_error *err)
       if (st != CCORD_OK) return st;
     } else if (f.wt == 2) {  // packed
       if (f.data.n % 8 != 0) return bad(err, "packed fixed64 length not a multiple of 8");
+      size_t add = f.data.n / 8u;
+      if (add == 0) continue;
+      if (add > CCORD_PROTO_MAX_ITEMS - c->fav_stickers.n)
+        return ccord_error_set(err, CCORD_ERR_RANGE, "settings proto: more than %u items in a collection",
+                               CCORD_PROTO_MAX_ITEMS);
+      st = vec_reserve(&c->fav_stickers, c->fav_stickers.n + add, sizeof(uint64_t), err);
+      if (st != CCORD_OK) return st;
       slice p = f.data;
-      while (p.n > 0) {
+      uint64_t *dst = (uint64_t *)c->fav_stickers.p + c->fav_stickers.n;
+      for (size_t i = 0; i < add; i++) {
         uint64_t id = 0;
         if (!read_fixed(&p, 8, &id)) return bad(err, "truncated packed fixed64");
-        st = vec_push(&c->fav_stickers, sizeof id, &id, err);
-        if (st != CCORD_OK) return st;
+        dst[i] = id;
       }
+      c->fav_stickers.n += add;
     }
   }
   return CCORD_OK;
@@ -620,6 +640,16 @@ static ccord_status enc_status(ccord_status st, ccord_error *err)
   return st;
 }
 
+static size_t pb_varint_len(uint64_t v)
+{
+  size_t n = 1u;
+  while (v >= 0x80u) {
+    v >>= 7u;
+    n++;
+  }
+  return n;
+}
+
 static ccord_status pb_varint(ccord_buf *b, uint64_t v)
 {
   uint8_t t[10];
@@ -690,61 +720,93 @@ static ccord_status encode_settings(const ccord_proto_gif *gifs, size_t count, c
     if (st != CCORD_OK) return enc_status(st, err);
   }
 
-  ccord_buf container, value, entry;
-  ccord_buf_init(&container, 0);
-  ccord_buf_init(&value, 0);
-  ccord_buf_init(&entry, 0);
-  ccord_status st = CCORD_OK;
+  size_t container_len = 0;
+  for (size_t i = 0; i < count; i++) {
+    const ccord_proto_gif *g = &gifs[i];
+    size_t ulen = strlen(g->url);
+    size_t slen = strlen(g->src);
+    size_t val_len = (1u + pb_varint_len(g->format)) + (1u + pb_varint_len(slen) + slen) +
+                     (1u + pb_varint_len(g->width)) + (1u + pb_varint_len(g->height)) +
+                     (1u + pb_varint_len(g->order));
+    size_t ent_len = (1u + pb_varint_len(ulen) + ulen) + (1u + pb_varint_len(val_len) + val_len);
+    container_len += 1u + pb_varint_len(ent_len) + ent_len;
+  }
+
+  ccord_status st = pb_varint(out, ((uint64_t)2u << 3u) | 2u);
+  if (st == CCORD_OK) st = pb_varint(out, container_len);
   for (size_t i = 0; i < count && st == CCORD_OK; i++) {
     const ccord_proto_gif *g = &gifs[i];
-    ccord_buf_clear(&value);
-    ccord_buf_clear(&entry);
-    st = pb_u(&value, 1, g->format);
-    if (st == CCORD_OK) st = pb_bytes(&value, 2, g->src, strlen(g->src));
-    if (st == CCORD_OK) st = pb_u(&value, 3, g->width);
-    if (st == CCORD_OK) st = pb_u(&value, 4, g->height);
-    if (st == CCORD_OK) st = pb_u(&value, 5, g->order);
-    if (st == CCORD_OK) st = pb_bytes(&entry, 1, g->url, strlen(g->url));
-    if (st == CCORD_OK) st = pb_bytes(&entry, 2, value.data ? value.data : "", value.len);
-    if (st == CCORD_OK) st = pb_bytes(&container, 1, entry.data ? entry.data : "", entry.len);
+    size_t ulen = strlen(g->url);
+    size_t slen = strlen(g->src);
+    size_t val_len = (1u + pb_varint_len(g->format)) + (1u + pb_varint_len(slen) + slen) +
+                     (1u + pb_varint_len(g->width)) + (1u + pb_varint_len(g->height)) +
+                     (1u + pb_varint_len(g->order));
+    size_t ent_len = (1u + pb_varint_len(ulen) + ulen) + (1u + pb_varint_len(val_len) + val_len);
+    st = pb_varint(out, ((uint64_t)1u << 3u) | 2u);
+    if (st == CCORD_OK) st = pb_varint(out, ent_len);
+    if (st == CCORD_OK) st = pb_bytes(out, 1, g->url, ulen);
+    if (st == CCORD_OK) st = pb_varint(out, ((uint64_t)2u << 3u) | 2u);
+    if (st == CCORD_OK) st = pb_varint(out, val_len);
+    if (st == CCORD_OK) st = pb_u(out, 1, g->format);
+    if (st == CCORD_OK) st = pb_bytes(out, 2, g->src, slen);
+    if (st == CCORD_OK) st = pb_u(out, 3, g->width);
+    if (st == CCORD_OK) st = pb_u(out, 4, g->height);
+    if (st == CCORD_OK) st = pb_u(out, 5, g->order);
   }
-  if (st == CCORD_OK) st = pb_bytes(out, 2, container.data ? container.data : "", container.len);
-  ccord_buf_free(&container);
-  ccord_buf_free(&value);
-  ccord_buf_free(&entry);
   return st == CCORD_OK ? CCORD_OK : enc_status(st, err);
+}
+
+static ccord_status b64_encode_wrap(const uint8_t *data, size_t len, const char *prefix, size_t prefix_len,
+                                    const char *suffix, size_t suffix_len, char **out, ccord_error *err)
+{
+  static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  *out = nullptr;
+  size_t groups = len / 3u;
+  size_t rem = len % 3u;
+  size_t extra = prefix_len + suffix_len + 1u;
+  if (groups > (SIZE_MAX - extra - 4u) / 4u)
+    return ccord_error_set(err, CCORD_ERR_RANGE, "settings proto: encoded output too large");
+  size_t b64_len = (groups + (rem ? 1u : 0u)) * 4u;
+  char *s = ccord_malloc(b64_len + extra);
+  if (!s) return ccord_error_set(err, CCORD_ERR_NOMEM, "settings proto: out of memory");
+  size_t k = 0;
+  if (prefix_len) {
+    memcpy(s, prefix, prefix_len);
+    k += prefix_len;
+  }
+  size_t i = 0;
+  for (; i + 2u < len; i += 3u) {
+    uint32_t v = ((uint32_t)data[i] << 16u) | ((uint32_t)data[i + 1u] << 8u) | (uint32_t)data[i + 2u];
+    s[k++] = tbl[(v >> 18u) & 63u];
+    s[k++] = tbl[(v >> 12u) & 63u];
+    s[k++] = tbl[(v >> 6u) & 63u];
+    s[k++] = tbl[v & 63u];
+  }
+  if (rem == 1u) {
+    uint32_t v = (uint32_t)data[i] << 16u;
+    s[k++] = tbl[(v >> 18u) & 63u];
+    s[k++] = tbl[(v >> 12u) & 63u];
+    s[k++] = '=';
+    s[k++] = '=';
+  } else if (rem == 2u) {
+    uint32_t v = ((uint32_t)data[i] << 16u) | ((uint32_t)data[i + 1u] << 8u);
+    s[k++] = tbl[(v >> 18u) & 63u];
+    s[k++] = tbl[(v >> 12u) & 63u];
+    s[k++] = tbl[(v >> 6u) & 63u];
+    s[k++] = '=';
+  }
+  if (suffix_len) {
+    memcpy(s + k, suffix, suffix_len);
+    k += suffix_len;
+  }
+  s[k] = '\0';
+  *out = s;
+  return CCORD_OK;
 }
 
 static ccord_status b64_encode_alloc(const uint8_t *data, size_t len, char **out, ccord_error *err)
 {
-  static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  *out = nullptr;
-  ccord_buf b;
-  ccord_buf_init(&b, 0);
-  ccord_status st = CCORD_OK;
-  size_t i = 0;
-  for (; i + 2 < len && st == CCORD_OK; i += 3) {
-    uint32_t v = ((uint32_t)data[i] << 16u) | ((uint32_t)data[i + 1] << 8u) | data[i + 2];
-    char q[4] = {tbl[(v >> 18u) & 63u], tbl[(v >> 12u) & 63u], tbl[(v >> 6u) & 63u], tbl[v & 63u]};
-    st = ccord_buf_append(&b, q, sizeof q);
-  }
-  if (st == CCORD_OK && len - i == 1) {
-    uint32_t v = (uint32_t)data[i] << 16u;
-    char q[4] = {tbl[(v >> 18u) & 63u], tbl[(v >> 12u) & 63u], '=', '='};
-    st = ccord_buf_append(&b, q, sizeof q);
-  } else if (st == CCORD_OK && len - i == 2) {
-    uint32_t v = ((uint32_t)data[i] << 16u) | ((uint32_t)data[i + 1] << 8u);
-    char q[4] = {tbl[(v >> 18u) & 63u], tbl[(v >> 12u) & 63u], tbl[(v >> 6u) & 63u], '='};
-    st = ccord_buf_append(&b, q, sizeof q);
-  }
-  if (st != CCORD_OK) {
-    ccord_buf_free(&b);
-    return enc_status(st, err);
-  }
-  char *s = ccord_buf_take(&b, nullptr);
-  if (!s) return ccord_error_set(err, CCORD_ERR_NOMEM, "settings proto: out of memory");
-  *out = s;
-  return CCORD_OK;
+  return b64_encode_wrap(data, len, "", 0, "", 0, out, err);
 }
 
 static ccord_status encode_b64(const ccord_proto_gif *gifs, size_t count, const uint8_t *existing, size_t existing_len,
@@ -762,24 +824,18 @@ static ccord_status encode_b64(const ccord_proto_gif *gifs, size_t count, const 
 static ccord_status encode_json(const ccord_proto_gif *gifs, size_t count, const uint8_t *existing,
                                 size_t existing_len, char **out, ccord_error *err)
 {
+  static const char prefix[] = "{\"settings\":\"";
+  static const char suffix[] = "\"}";
   *out = nullptr;
-  char *b64 = nullptr;
-  ccord_status st = encode_b64(gifs, count, existing, existing_len, &b64, err);
-  if (st != CCORD_OK) return st;
-  ccord_buf b;
-  ccord_buf_init(&b, 0);
-  st = ccord_buf_append_str(&b, "{\"settings\":\"");
-  if (st == CCORD_OK) st = ccord_buf_append_str(&b, b64);
-  if (st == CCORD_OK) st = ccord_buf_append_str(&b, "\"}");
-  ccord_free(b64);
-  if (st != CCORD_OK) {
-    ccord_buf_free(&b);
-    return enc_status(st, err);
+  ccord_buf raw;
+  ccord_buf_init(&raw, 0);
+  ccord_status st = encode_settings(gifs, count, existing, existing_len, &raw, err);
+  if (st == CCORD_OK) {
+    st = b64_encode_wrap((const uint8_t *)raw.data, raw.len, prefix, sizeof prefix - 1u, suffix,
+                         sizeof suffix - 1u, out, err);
   }
-  char *s = ccord_buf_take(&b, nullptr);
-  if (!s) return ccord_error_set(err, CCORD_ERR_NOMEM, "settings proto: out of memory");
-  *out = s;
-  return CCORD_OK;
+  ccord_buf_free(&raw);
+  return st;
 }
 
 ccord_status ccord_user_expressions_encode_gifs(const ccord_proto_gif *gifs, size_t count, const uint8_t *existing,
@@ -970,11 +1026,10 @@ static ccord_status pb_string(ccord_buf *b, uint32_t field, const char *s, bool 
 {
   size_t n = strlen(s);
   if (!wrap) return n ? pb_bytes(b, field, s, n) : CCORD_OK;
-  ccord_buf inner;
-  ccord_buf_init(&inner, 0);
-  ccord_status st = n ? pb_bytes(&inner, 1, s, n) : CCORD_OK;
-  if (st == CCORD_OK) st = pb_bytes(b, field, inner.data ? inner.data : "", inner.len);
-  ccord_buf_free(&inner);
+  size_t inner_len = n ? (1u + pb_varint_len(n) + n) : 0u;
+  ccord_status st = pb_varint(b, ((uint64_t)field << 3u) | 2u);
+  if (st == CCORD_OK) st = pb_varint(b, inner_len);
+  if (st == CCORD_OK && n) st = pb_bytes(b, 1, s, n);
   return st;
 }
 
