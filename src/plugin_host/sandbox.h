@@ -8,6 +8,7 @@
 #include <ccord/core/log.h>
 #include <ccord/ipc/perm.h>
 
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -20,11 +21,31 @@ typedef enum ccord_sandbox_limit {
   CCORD_SB_LIMIT_UNDECLARED,     // undeclared Class 2 / Class 3 API called -> fatal
 } ccord_sandbox_limit;
 
+// Static platform/OS metadata injected at sandbox creation for Class 1 `platform.*` queries.
+typedef struct ccord_sandbox_platform_info {
+  char os[24];            // "linux", "macos", "windows", "android"
+  char arch[24];          // "arm64", "x86_64", etc.
+  char form_factor[16];   // "desktop", "phone", "tablet"
+  bool is_mobile;
+  bool touch;
+  int android_api_level;
+  uint64_t capabilities;  // CCORD_CAP_* bitmask
+} ccord_sandbox_platform_info;
+
+// Live viewport/safe-area/keyboard/orientation metrics pushed from main -> plugin host.
+typedef struct ccord_sandbox_platform_state {
+  float safe_top, safe_right, safe_bottom, safe_left;
+  float viewport_w, viewport_h, viewport_scale;
+  float keyboard_height;
+  bool keyboard_visible;
+  bool landscape;
+} ccord_sandbox_platform_state;
+
 // How the sandbox talks to the main process. The IPC implementation is in main.c; tests pass fakes.
 typedef struct ccord_sandbox_services {
   void *ud;
   void (*request)(void *ud, const char *method, const char *params_json);   // fire and forget
-  // Optional synchronous IPC request-response (used by store.*, clipboard.read, fs.*, etc.).
+  // Optional synchronous IPC request-response (used by store.*, clipboard.read, ui.haptics.*, ui.share.*, etc.).
   bool (*request_sync)(void *ud, const char *method, const char *params_json, ccord_arena *arena,
                        const ccord_json **out_result, char *err_buf, size_t err_cap);
   void (*log)(void *ud, ccord_log_level level, const char *text);
@@ -35,10 +56,18 @@ typedef struct ccord_sandbox_config {
   ccord_perm_set perms;
   uint64_t memory_bytes;      // 0 -> unlimited
   uint64_t instructions;      // 0 -> unlimited
+  bool has_platform;
+  ccord_sandbox_platform_info platform;
+  ccord_sandbox_platform_state platform_state;
 } ccord_sandbox_config;
 
 ccord_sandbox *ccord_sandbox_create(const ccord_sandbox_config *cfg, const ccord_sandbox_services *svc, ccord_error *err);
 void ccord_sandbox_destroy(ccord_sandbox *sb);
+
+// Updates live platform metrics (safe area, viewport, keyboard, orientation) visible to `platform.*()`.
+void ccord_sandbox_set_platform_state(ccord_sandbox *sb, const ccord_sandbox_platform_state *st);
+// Optional cooperative cancellation flag checked periodically by the Lua VM hook (in-process worker thread mode).
+void ccord_sandbox_set_cancel_flag(ccord_sandbox *sb, const _Atomic bool *cancel);
 
 // Installs cached storage values before load.
 [[nodiscard]] ccord_status ccord_sandbox_seed_storage(ccord_sandbox *sb, const ccord_json *obj, ccord_error *err);

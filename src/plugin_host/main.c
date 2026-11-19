@@ -42,6 +42,7 @@ typedef struct host {
   uint32_t next_id;
   bool stop;
   int exit_code;
+  const _Atomic bool *cancel;
 } host;
 
 static const char *safe_text(const char *s)
@@ -170,6 +171,37 @@ static bool limit_stop(host *h)
   return true;
 }
 
+static float num_of(const ccord_json *obj, const char *key, float fallback)
+{
+  const ccord_json *j = obj ? ccord_json_get(obj, key) : nullptr;
+  return j ? (float)ccord_json_number(j, (double)fallback) : fallback;
+}
+
+static void parse_platform_state(const ccord_json *obj, ccord_sandbox_platform_state *st)
+{
+  if (!obj || !st || ccord_json_type_of(obj) != CCORD_JSON_OBJECT) return;
+  st->safe_top = num_of(obj, "safe_top", st->safe_top);
+  st->safe_right = num_of(obj, "safe_right", st->safe_right);
+  st->safe_bottom = num_of(obj, "safe_bottom", st->safe_bottom);
+  st->safe_left = num_of(obj, "safe_left", st->safe_left);
+  st->viewport_w = num_of(obj, "viewport_w", st->viewport_w);
+  st->viewport_h = num_of(obj, "viewport_h", st->viewport_h);
+  st->viewport_scale = num_of(obj, "viewport_scale", st->viewport_scale > 0.0f ? st->viewport_scale : 1.0f);
+  st->keyboard_height = num_of(obj, "keyboard_height", st->keyboard_height);
+  const ccord_json *kv = ccord_json_get(obj, "keyboard_visible");
+  if (kv) st->keyboard_visible = ccord_json_bool(kv, st->keyboard_visible);
+  const ccord_json *ls = ccord_json_get(obj, "landscape");
+  if (ls) st->landscape = ccord_json_bool(ls, st->landscape);
+}
+
+static void handle_platform_state(host *h, const ccord_ipc_msg *msg)
+{
+  if (!h->sb || !msg->params) return;
+  ccord_sandbox_platform_state st = {.viewport_scale = 1.0f};
+  parse_platform_state(msg->params, &st);
+  ccord_sandbox_set_platform_state(h->sb, &st);
+}
+
 static void handle_init(host *h, const ccord_ipc_msg *msg)
 {
   const ccord_json *p = msg->params;
@@ -200,10 +232,34 @@ static void handle_init(host *h, const ccord_ipc_msg *msg)
     .plugin_id = id, .plugin_name = name, .plugin_version = version, .plugin_dir = dir,
     .perms = perms, .memory_bytes = 0, .instructions = 0,
   };
+  const ccord_json *plat = p ? ccord_json_get(p, "platform") : nullptr;
+  if (plat && ccord_json_type_of(plat) == CCORD_JSON_OBJECT) {
+    cfg.has_platform = true;
+    size_t tl = 0;
+    const char *os = str_of(plat, "os", &tl);
+    const char *arch = str_of(plat, "arch", &tl);
+    const char *ff = str_of(plat, "form_factor", &tl);
+    if (os) snprintf(cfg.platform.os, sizeof cfg.platform.os, "%s", os);
+    if (arch) snprintf(cfg.platform.arch, sizeof cfg.platform.arch, "%s", arch);
+    if (ff) snprintf(cfg.platform.form_factor, sizeof cfg.platform.form_factor, "%s", ff);
+    cfg.platform.is_mobile = ccord_json_bool(ccord_json_get(plat, "is_mobile"), false);
+    cfg.platform.touch = ccord_json_bool(ccord_json_get(plat, "touch"), cfg.platform.is_mobile);
+    int64_t api_lvl = 0;
+    if (ccord_json_get(plat, "android_api_level") && ccord_json_int64(ccord_json_get(plat, "android_api_level"), &api_lvl)) {
+      cfg.platform.android_api_level = (int)api_lvl;
+    }
+    int64_t caps = 0;
+    if (ccord_json_get(plat, "capabilities_mask") && ccord_json_int64(ccord_json_get(plat, "capabilities_mask"), &caps)) {
+      cfg.platform.capabilities = (uint64_t)caps;
+    }
+    cfg.platform_state.viewport_scale = 1.0f;
+    parse_platform_state(ccord_json_get(plat, "state"), &cfg.platform_state);
+  }
   ccord_sandbox_services svc = {.ud = h, .request = svc_request, .request_sync = svc_request_sync, .log = svc_log};
   ccord_error err = {0};
   h->sb = ccord_sandbox_create(&cfg, &svc, &err);
   if (!h->sb) { reply_error(h, msg->id, "invalid_argument", err.message); return; }
+  if (h->cancel) ccord_sandbox_set_cancel_flag(h->sb, h->cancel);
 
   const ccord_json *storage = ccord_json_get(p, "storage");
   if (storage && ccord_sandbox_seed_storage(h->sb, storage, &err) != CCORD_OK) {
@@ -301,6 +357,7 @@ static void dispatch(host *h, const ccord_ipc_msg *msg)
       if (strcmp(msg->method, "event") == 0) handle_event(h, msg);
       else if (strcmp(msg->method, "menu.invoke") == 0) handle_menu(h, msg);
       else if (strcmp(msg->method, "panel.event") == 0) handle_panel_event(h, msg);
+      else if (strcmp(msg->method, "platform.state") == 0) handle_platform_state(h, msg);
       else if (strcmp(msg->method, "shutdown") == 0) h->stop = true;
       return;
     case CCORD_IPC_RES:
@@ -314,9 +371,13 @@ static int run_loop(host *h)
   ccord_arena arena;
   ccord_arena_init(&arena, 0);
   while (!h->stop) {
+    if (h->cancel && atomic_load_explicit(h->cancel, memory_order_relaxed)) {
+      h->stop = true;
+      break;
+    }
     unsigned events = CCORD_POLL_IN;
     if (ccord_ipc_has_pending_output(h->ipc)) events |= CCORD_POLL_OUT;
-    if (ccord_sock_poll1(ccord_ipc_fd(h->ipc), events, 100) < 0) fatal(h, EXIT_INTERNAL);
+    if (ccord_sock_poll1(ccord_ipc_fd(h->ipc), events, 50) < 0) fatal(h, EXIT_INTERNAL);
     for (;;) {
       ccord_ipc_msg msg;
       ccord_error err = {0};
@@ -382,6 +443,20 @@ static void send_hello(host *h)
 }
 
 #ifdef CCORD_EMBEDDED_PLUGIN_HOST
+int ccord_plugin_host_run_fd(ccord_socket_t fd, const _Atomic bool *cancel);
+int ccord_plugin_host_run_fd(ccord_socket_t fd, const _Atomic bool *cancel)
+{
+  host h = {.ipc = nullptr, .sb = nullptr, .next_id = 1, .stop = false, .exit_code = 0, .cancel = cancel};
+  ccord_error err = {0};
+  h.ipc = ccord_ipc_open(fd, &err);
+  if (!h.ipc) return EXIT_INTERNAL;
+  send_hello(&h);
+  int code = run_loop(&h);
+  ccord_sandbox_destroy(h.sb);
+  ccord_ipc_close(h.ipc);
+  return code;
+}
+
 int ccord_plugin_host_main(int argc, char **argv);
 int ccord_plugin_host_main(int argc, char **argv)
 #else

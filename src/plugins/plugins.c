@@ -34,8 +34,10 @@
 #else
 #include <fcntl.h>
 #include <signal.h>
+#if !CCORD_OS_ANDROID
 #include <spawn.h>
 #include <sys/wait.h>
+#endif
 #include <unistd.h>
 #endif
 
@@ -67,6 +69,13 @@
 #define EVB_VOICE_STATE      (1u << 15)
 #define EVB_APP_READY        (1u << 16)
 #define EVB_CONNECTION_STATE (1u << 17)
+#define EVB_APP_QUIT         (1u << 18)
+#define EVB_APP_LIFECYCLE    (1u << 19)
+#define EVB_PLAT_ORIENTATION (1u << 20)
+#define EVB_PLAT_KEYBOARD    (1u << 21)
+#define EVB_PLAT_SAFE_AREA   (1u << 22)
+#define EVB_VOICE_SERVER     (1u << 23)
+#define EVB_STREAM_STATE     (1u << 24)
 
 typedef enum pend_kind { PEND_NONE = 0, PEND_INIT, PEND_PING, PEND_CMD } pend_kind;
 
@@ -97,9 +106,16 @@ typedef struct plugin {
 #if CCORD_OS_WINDOWS
   HANDLE proc;
   HANDLE job;
-#else
+#elif !CCORD_OS_ANDROID
   pid_t pid;
 #endif
+  bool in_process;
+  ccord_thread *worker;
+  _Atomic bool cancel;
+  _Atomic bool thread_exited;
+  _Atomic int thread_exit_code;
+  ccord_socket_t thread_fd;
+  int (*thread_host_fn)(ccord_socket_t fd, const _Atomic bool *cancel);
   bool reaped;
   ccord_ipc *ipc;
   bool hello_seen;
@@ -127,6 +143,18 @@ struct ccord_plugins {
   void *clipboard_ud;
   void (*toast_show)(void *ud, const char *utf8, uint8_t level);
   void *toast_ud;
+  bool in_process;
+  int (*in_process_host_fn)(ccord_socket_t fd, const _Atomic bool *cancel);
+  char plat_os[24];
+  char plat_arch[24];
+  char plat_form_factor[16];
+  bool plat_is_mobile;
+  bool plat_touch;
+  int plat_android_api_level;
+  uint64_t plat_capabilities;
+  uint32_t plat_bit;
+  ccord_plugin_platform_state plat_state;
+  ccord_plugin_platform_ops plat_ops;
   char host_exe[CCORD_PATH_MAX];
   char data_dir[CCORD_PATH_MAX];
   bool has_data_dir;
@@ -283,8 +311,11 @@ static void format_exit_code(int code, char *out, size_t cap)
 
 static bool host_is_running(const plugin *p)
 {
+  if (p->in_process) return p->worker != nullptr && !p->reaped;
 #if CCORD_OS_WINDOWS
   return p->proc != nullptr && !p->reaped;
+#elif CCORD_OS_ANDROID
+  return false;
 #else
   return p->pid > 0 && !p->reaped;
 #endif
@@ -293,6 +324,17 @@ static bool host_is_running(const plugin *p)
 static void kill_host_process(plugin *p)
 {
   if (!host_is_running(p)) return;
+  if (p->in_process) {
+    atomic_store_explicit(&p->cancel, true, memory_order_release);
+    if (p->ipc) {
+      ccord_ipc_close(p->ipc);
+      p->ipc = nullptr;
+    }
+    ccord_thread_join(p->worker);
+    p->worker = nullptr;
+    p->reaped = true;
+    return;
+  }
 #if CCORD_OS_WINDOWS
   (void)TerminateProcess(p->proc, 1);
   (void)WaitForSingleObject(p->proc, 2000);
@@ -302,7 +344,7 @@ static void kill_host_process(plugin *p)
     CloseHandle(p->job);
     p->job = nullptr;
   }
-#else
+#elif !CCORD_OS_ANDROID
   (void)kill(p->pid, SIGKILL);
   int st = 0;
   while (waitpid(p->pid, &st, 0) < 0 && errno == EINTR) {
@@ -315,6 +357,21 @@ static void kill_host_process(plugin *p)
 static bool reap_wait(plugin *p, uint32_t wait_ms, char *out, size_t cap)
 {
   if (!host_is_running(p)) return true;
+  if (p->in_process) {
+    uint32_t waited = 0;
+    for (;;) {
+      if (atomic_load_explicit(&p->thread_exited, memory_order_acquire)) {
+        ccord_thread_join(p->worker);
+        p->worker = nullptr;
+        p->reaped = true;
+        format_exit_code(atomic_load_explicit(&p->thread_exit_code, memory_order_relaxed), out, cap);
+        return true;
+      }
+      if (waited >= wait_ms) return false;
+      ccord_sleep_ms(5);
+      waited += 5;
+    }
+  }
 #if CCORD_OS_WINDOWS
   DWORD wr = WaitForSingleObject(p->proc, (DWORD)wait_ms);
   if (wr == WAIT_TIMEOUT) return false;
@@ -328,6 +385,10 @@ static bool reap_wait(plugin *p, uint32_t wait_ms, char *out, size_t cap)
     p->job = nullptr;
   }
   p->reaped = true;
+  return true;
+#elif CCORD_OS_ANDROID
+  p->reaped = true;
+  set_text(out, cap, "host ended");
   return true;
 #else
   uint32_t waited = 0;
@@ -630,11 +691,16 @@ static bool event_bit_for(const char *name, uint32_t *bit, ccord_perm *perm)
 {
   // Class 1 (Safe) events
   if (strcmp(name, "app.ready") == 0) { *bit = EVB_APP_READY; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
+  if (strcmp(name, "app.quit") == 0) { *bit = EVB_APP_QUIT; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
+  if (strcmp(name, "app.lifecycle") == 0) { *bit = EVB_APP_LIFECYCLE; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
   if (strcmp(name, "connection.state") == 0) { *bit = EVB_CONNECTION_STATE; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
   if (strcmp(name, "guild.select") == 0) { *bit = EVB_GUILD; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
   if (strcmp(name, "channel.select") == 0) { *bit = EVB_CHANNEL; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
   if (strcmp(name, "view.select") == 0) { *bit = EVB_VIEW_SELECT; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
   if (strcmp(name, "navigation.aux_open") == 0) { *bit = EVB_NAV_AUX; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
+  if (strcmp(name, "platform.orientation") == 0) { *bit = EVB_PLAT_ORIENTATION; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
+  if (strcmp(name, "platform.keyboard") == 0) { *bit = EVB_PLAT_KEYBOARD; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
+  if (strcmp(name, "platform.safe_area") == 0) { *bit = EVB_PLAT_SAFE_AREA; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
 
   // Class 2 (Unsafe) events
   if (strcmp(name, "message.create") == 0) { *bit = EVB_MESSAGE; *perm = CCORD_PERM_EVENTS_MESSAGES; return true; }
@@ -645,6 +711,8 @@ static bool event_bit_for(const char *name, uint32_t *bit, ccord_perm *perm)
   if (strcmp(name, "typing.start") == 0) { *bit = EVB_TYPING_START; *perm = CCORD_PERM_EVENTS_MESSAGES; return true; }
   if (strcmp(name, "presence.update") == 0) { *bit = EVB_PRESENCE_UPDATE; *perm = CCORD_PERM_EVENTS_PRESENCE; return true; }
   if (strcmp(name, "voice.state") == 0) { *bit = EVB_VOICE_STATE; *perm = CCORD_PERM_EVENTS_VOICE; return true; }
+  if (strcmp(name, "voice.server") == 0) { *bit = EVB_VOICE_SERVER; *perm = CCORD_PERM_EVENTS_VOICE; return true; }
+  if (strcmp(name, "stream.state") == 0) { *bit = EVB_STREAM_STATE; *perm = CCORD_PERM_EVENTS_VOICE; return true; }
   if (strcmp(name, "channel.upsert") == 0) { *bit = EVB_CHANNEL_UPSERT; *perm = CCORD_PERM_EVENTS_CHANNELS; return true; }
   if (strcmp(name, "channel.delete") == 0) { *bit = EVB_CHANNEL_DELETE; *perm = CCORD_PERM_EVENTS_CHANNELS; return true; }
   if (strcmp(name, "guilds.loaded") == 0) { *bit = EVB_GUILDS_LOADED; *perm = CCORD_PERM_EVENTS_CHANNELS; return true; }
@@ -1316,6 +1384,104 @@ static void handle_request(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg
     return;
   }
 
+  // Class 1 (Safe) mobile UX APIs: gracefully report performed=false when unsupported on desktop.
+  if (strcmp(method, "ui.haptics.impact") == 0) {
+    size_t sl = 0;
+    const char *style = str_param(params, "style", &sl);
+    int code = 0;
+    if (style && strcmp(style, "medium") == 0) code = 1;
+    else if (style && strcmp(style, "heavy") == 0) code = 2;
+    else if (style && strcmp(style, "selection") == 0) code = 3;
+    bool ok = m->plat_ops.haptic_impact && m->plat_ops.haptic_impact(m->plat_ops.ud, code);
+    reply_ok(m, p, id, ok ? "{\"performed\":true}" : "{\"performed\":false}");
+    return;
+  }
+  if (strcmp(method, "ui.haptics.notify") == 0) {
+    size_t kl = 0;
+    const char *kind = str_param(params, "kind", &kl);
+    int code = 0;
+    if (kind && strcmp(kind, "warning") == 0) code = 1;
+    else if (kind && strcmp(kind, "error") == 0) code = 2;
+    bool ok = m->plat_ops.haptic_notify && m->plat_ops.haptic_notify(m->plat_ops.ud, code);
+    reply_ok(m, p, id, ok ? "{\"performed\":true}" : "{\"performed\":false}");
+    return;
+  }
+  if (strcmp(method, "ui.share.text") == 0) {
+    size_t tl = 0, xl = 0;
+    const char *title = str_param(params, "title", &tl);
+    const char *text = str_param(params, "text", &xl);
+    if (!text || xl == 0 || xl > MAX_CLIPBOARD_BYTES) {
+      reply_err(m, p, id, "invalid_argument", "share text invalid");
+      return;
+    }
+    bool ok = m->plat_ops.share_text && m->plat_ops.share_text(m->plat_ops.ud, title ? title : "", text);
+    reply_ok(m, p, id, ok ? "{\"performed\":true}" : "{\"performed\":false}");
+    return;
+  }
+  if (strcmp(method, "ui.keyboard.dismiss") == 0) {
+    if (m->plat_ops.keyboard_dismiss) m->plat_ops.keyboard_dismiss(m->plat_ops.ud);
+    reply_ok(m, p, id, nullptr);
+    return;
+  }
+  if (strcmp(method, "ui.mobile.keep_screen_on") == 0) {
+    bool enabled = ccord_json_bool(ccord_json_get(params, "enabled"), false);
+    bool ok = m->plat_ops.keep_screen_on && m->plat_ops.keep_screen_on(m->plat_ops.ud, enabled);
+    reply_ok(m, p, id, ok ? "{\"performed\":true}" : "{\"performed\":false}");
+    return;
+  }
+  if (strcmp(method, "ui.mobile.set_orientation") == 0) {
+    size_t ml = 0;
+    const char *mode = str_param(params, "mode", &ml);
+    int code = 0;
+    if (mode && strcmp(mode, "portrait") == 0) code = 1;
+    else if (mode && strcmp(mode, "landscape") == 0) code = 2;
+    bool ok = m->plat_ops.set_orientation && m->plat_ops.set_orientation(m->plat_ops.ud, code);
+    reply_ok(m, p, id, ok ? "{\"performed\":true}" : "{\"performed\":false}");
+    return;
+  }
+
+  // Class 2 / Class 3 system & clipboard bridges.
+  if (strcmp(method, "clipboard.read") == 0) {
+    if (!has_perm(p, CCORD_PERM_CLIPBOARD_READ)) { fail_plugin(m, p, "undeclared restricted API called: clipboard.read"); return; }
+    char *txt = m->plat_ops.clipboard_read ? m->plat_ops.clipboard_read(m->plat_ops.ud) : nullptr;
+    if (!txt) {
+      reply_ok(m, p, id, "{\"text\":null}");
+      return;
+    }
+    ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "text"); ccord_jw_string(&w, txt, strlen(txt));
+    ccord_jw_end_object(&w);
+    ccord_free(txt);
+    if (ccord_jw_ok(&w)) reply_ok(m, p, id, ccord_buf_cstr(&b));
+    else reply_err(m, p, id, "internal", "clipboard text encode failed");
+    ccord_buf_free(&b);
+    return;
+  }
+  if (strcmp(method, "system.open_url") == 0) {
+    if (!has_perm(p, CCORD_PERM_SYSTEM_OPEN)) { fail_plugin(m, p, "undeclared restricted API called: system.open"); return; }
+    size_t ul = 0;
+    const char *url = str_param(params, "url", &ul);
+    if (!url || (strncmp(url, "https://", 8) != 0 && strncmp(url, "http://", 7) != 0)) {
+      reply_err(m, p, id, "invalid_argument", "only http:// and https:// URLs allowed");
+      return;
+    }
+    if (m->plat_ops.open_url) (void)m->plat_ops.open_url(m->plat_ops.ud, url);
+    reply_ok(m, p, id, nullptr);
+    return;
+  }
+  if (strcmp(method, "system.notify") == 0) {
+    if (!has_perm(p, CCORD_PERM_SYSTEM_NOTIFY)) { fail_plugin(m, p, "undeclared restricted API called: system.notify"); return; }
+    size_t tl = 0, bl = 0, tagl = 0;
+    const char *title = str_param(params, "title", &tl);
+    const char *body = str_param(params, "body", &bl);
+    const char *tag = str_param(params, "tag", &tagl);
+    bool silent = ccord_json_bool(ccord_json_get(params, "silent"), false);
+    if (m->plat_ops.notify) (void)m->plat_ops.notify(m->plat_ops.ud, title ? title : "", body ? body : "", tag, silent);
+    reply_ok(m, p, id, nullptr);
+    return;
+  }
+
   reply_err(m, p, id, "unsupported", "unknown method");
 }
 
@@ -1356,6 +1522,29 @@ static void handle_hello(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg)
   ccord_jw_end_array(&w);
   ccord_jw_key(&w, "source"); ccord_jw_string(&w, p->source, p->source_len);
   ccord_jw_key(&w, "api"); ccord_jw_int(&w, CCORD_PLUGIN_API_VERSION);
+  ccord_jw_key(&w, "platform");
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "os"); ccord_jw_cstr(&w, m->plat_os);
+  ccord_jw_key(&w, "arch"); ccord_jw_cstr(&w, m->plat_arch);
+  ccord_jw_key(&w, "form_factor"); ccord_jw_cstr(&w, m->plat_form_factor);
+  ccord_jw_key(&w, "is_mobile"); ccord_jw_bool(&w, m->plat_is_mobile);
+  ccord_jw_key(&w, "touch"); ccord_jw_bool(&w, m->plat_touch);
+  ccord_jw_key(&w, "android_api_level"); ccord_jw_int(&w, m->plat_android_api_level);
+  ccord_jw_key(&w, "capabilities_mask"); ccord_jw_int(&w, (int64_t)m->plat_capabilities);
+  ccord_jw_key(&w, "state");
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "safe_top"); ccord_jw_int(&w, (int64_t)m->plat_state.safe_top);
+  ccord_jw_key(&w, "safe_right"); ccord_jw_int(&w, (int64_t)m->plat_state.safe_right);
+  ccord_jw_key(&w, "safe_bottom"); ccord_jw_int(&w, (int64_t)m->plat_state.safe_bottom);
+  ccord_jw_key(&w, "safe_left"); ccord_jw_int(&w, (int64_t)m->plat_state.safe_left);
+  ccord_jw_key(&w, "viewport_w"); ccord_jw_int(&w, (int64_t)m->plat_state.viewport_w);
+  ccord_jw_key(&w, "viewport_h"); ccord_jw_int(&w, (int64_t)m->plat_state.viewport_h);
+  ccord_jw_key(&w, "viewport_scale"); ccord_jw_int(&w, (int64_t)(m->plat_state.viewport_scale > 0.0f ? m->plat_state.viewport_scale : 1.0f));
+  ccord_jw_key(&w, "keyboard_height"); ccord_jw_int(&w, (int64_t)m->plat_state.keyboard_height);
+  ccord_jw_key(&w, "keyboard_visible"); ccord_jw_bool(&w, m->plat_state.keyboard_visible);
+  ccord_jw_key(&w, "landscape"); ccord_jw_bool(&w, m->plat_state.landscape);
+  ccord_jw_end_object(&w);
+  ccord_jw_end_object(&w);
   if (p->nitems > 0) {
     ccord_arena ar;
     ccord_arena_init(&ar, 0);
@@ -1822,6 +2011,21 @@ void ccord_plugins_pump(ccord_plugins *m, uint64_t now_ms)
 
 // ---------------------------------------------------------------- spawn and discovery
 
+static void plugin_worker_entry(void *arg)
+{
+  plugin *p = (plugin *)arg;
+  int code = 70;
+  if (p && p->thread_host_fn) {
+    code = p->thread_host_fn(p->thread_fd, &p->cancel);
+  } else if (p && p->thread_fd != CCORD_INVALID_SOCKET) {
+    ccord_sock_close(p->thread_fd);
+  }
+  if (p) {
+    atomic_store_explicit(&p->thread_exit_code, code, memory_order_relaxed);
+    atomic_store_explicit(&p->thread_exited, true, memory_order_release);
+  }
+}
+
 static ccord_status spawn_host(ccord_plugins *m, plugin *p, ccord_error *err)
 {
   ccord_socket_t sv[2] = {CCORD_INVALID_SOCKET, CCORD_INVALID_SOCKET};
@@ -1829,7 +2033,42 @@ static ccord_status spawn_host(ccord_plugins *m, plugin *p, ccord_error *err)
     ccord_error_set(err, CCORD_ERR_IO, "socket pair failed");
     return CCORD_ERR_IO;
   }
-#if CCORD_OS_WINDOWS
+  if (m->in_process) {
+    if (!m->in_process_host_fn) {
+      ccord_sock_close(sv[0]);
+      ccord_sock_close(sv[1]);
+      ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "in-process plugin host callback missing");
+      return CCORD_ERR_UNSUPPORTED;
+    }
+    p->in_process = true;
+    p->thread_fd = sv[1];
+    p->thread_host_fn = m->in_process_host_fn;
+    atomic_store_explicit(&p->cancel, false, memory_order_relaxed);
+    atomic_store_explicit(&p->thread_exited, false, memory_order_relaxed);
+    atomic_store_explicit(&p->thread_exit_code, 0, memory_order_relaxed);
+    p->reaped = false;
+    p->worker = ccord_thread_create(plugin_worker_entry, p);
+    if (!p->worker) {
+      ccord_sock_close(sv[0]);
+      ccord_sock_close(sv[1]);
+      p->reaped = true;
+      ccord_error_set(err, CCORD_ERR_IO, "failed to create plugin worker thread");
+      return CCORD_ERR_IO;
+    }
+    p->ipc = ccord_ipc_open(sv[0], err);
+    if (!p->ipc) {
+      kill_host_process(p);
+      return err->code ? err->code : CCORD_ERR_INTERNAL;
+    }
+    return CCORD_OK;
+  }
+  p->in_process = false;
+#if CCORD_OS_ANDROID
+  ccord_sock_close(sv[0]);
+  ccord_sock_close(sv[1]);
+  ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "Android requires in-process plugin worker mode");
+  return CCORD_ERR_UNSUPPORTED;
+#elif CCORD_OS_WINDOWS
   if (!SetHandleInformation((HANDLE)sv[1], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
     ccord_sock_close(sv[0]);
     ccord_sock_close(sv[1]);
@@ -1970,7 +2209,7 @@ static plugin *new_record(ccord_plugins *m)
   memset(p, 0, sizeof *p);
   p->used = true;
   p->enabled = true;
-#if !CCORD_OS_WINDOWS
+#if !CCORD_OS_WINDOWS && !CCORD_OS_ANDROID
   p->pid = -1;
 #endif
   p->next_id = 1;
@@ -2123,6 +2362,13 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
   if (st != CCORD_OK) {
     record_failed(m, dir_name, err.message);
     ccord_contrib_add_plugin_log(m->contrib, dir_name, m->now_ms, (uint8_t)CCORD_LOG_ERROR, err.message);
+    return;
+  }
+  char compat_why[160] = "";
+  if (!ccord_manifest_supports(&man, m->plat_bit, m->plat_capabilities, compat_why, sizeof compat_why)) {
+    CCORD_LOG_I("extensions: skipping %s (%s)", man.id, compat_why);
+    record_failed(m, man.id, compat_why);
+    ccord_contrib_add_plugin_log(m->contrib, man.id, m->now_ms, (uint8_t)CCORD_LOG_INFO, compat_why);
     return;
   }
   for (size_t i = 0; i < m->nplugins; i++) {
@@ -2560,8 +2806,10 @@ static void cat_toast(void *ud, const char *msg, uint8_t level)
 
 ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error *err)
 {
-  if (!cfg || !cfg->bus || !cfg->store || !cfg->contrib || !cfg->host_exe) {
-    ccord_error_set(err, CCORD_ERR_INVALID, "plugins: bus, store, contrib and host_exe are required");
+  if (!cfg || !cfg->bus || !cfg->store || !cfg->contrib ||
+      (!cfg->in_process && !cfg->host_exe) ||
+      (cfg->in_process && !cfg->in_process_host_fn)) {
+    ccord_error_set(err, CCORD_ERR_INVALID, "plugins: bus, store, contrib and host_exe (or in_process_host_fn) are required");
     return nullptr;
   }
   if (cfg->search_dir_count > MAX_SEARCH) {
@@ -2581,12 +2829,48 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
   m->clipboard_ud = cfg->clipboard_ud;
   m->toast_show = cfg->toast_show;
   m->toast_ud = cfg->toast_ud;
-  if (strlen(cfg->host_exe) >= sizeof m->host_exe) {
-    ccord_error_set(err, CCORD_ERR_RANGE, "plugins: host path too long");
-    ccord_free(m);
-    return nullptr;
+  m->in_process = cfg->in_process;
+  m->in_process_host_fn = cfg->in_process_host_fn;
+  m->plat_ops = cfg->platform_ops;
+  m->plat_bit = ccord_platform_current_bit();
+  if (cfg->has_platform_info) {
+    snprintf(m->plat_os, sizeof m->plat_os, "%s",
+             (cfg->platform_info.os && cfg->platform_info.os[0]) ? cfg->platform_info.os : ccord_os_name());
+    snprintf(m->plat_arch, sizeof m->plat_arch, "%s",
+             (cfg->platform_info.arch && cfg->platform_info.arch[0]) ? cfg->platform_info.arch : ccord_os_arch());
+    snprintf(m->plat_form_factor, sizeof m->plat_form_factor, "%s",
+             (cfg->platform_info.form_factor && cfg->platform_info.form_factor[0])
+               ? cfg->platform_info.form_factor
+               : (cfg->platform_info.is_mobile ? "phone" : "desktop"));
+    m->plat_is_mobile = cfg->platform_info.is_mobile;
+    m->plat_touch = cfg->platform_info.touch;
+    m->plat_android_api_level = cfg->platform_info.android_api_level;
+    m->plat_capabilities = cfg->platform_info.capabilities;
+    m->plat_state = cfg->platform_state;
+    if (strcmp(m->plat_os, "android") == 0) m->plat_bit = CCORD_PLAT_ANDROID;
+    else if (strcmp(m->plat_os, "macos") == 0) m->plat_bit = CCORD_PLAT_MACOS;
+    else if (strcmp(m->plat_os, "windows") == 0) m->plat_bit = CCORD_PLAT_WINDOWS;
+    else if (strcmp(m->plat_os, "linux") == 0) m->plat_bit = CCORD_PLAT_LINUX;
+  } else {
+    snprintf(m->plat_os, sizeof m->plat_os, "%s", ccord_os_name());
+    snprintf(m->plat_arch, sizeof m->plat_arch, "%s", ccord_os_arch());
+    m->plat_is_mobile = ccord_os_is_mobile();
+    snprintf(m->plat_form_factor, sizeof m->plat_form_factor, "%s", m->plat_is_mobile ? "phone" : "desktop");
+    m->plat_touch = m->plat_is_mobile;
+    m->plat_android_api_level = ccord_os_android_api_level();
+    m->plat_capabilities = CCORD_CAP_PANELS | (m->plat_is_mobile ? (CCORD_CAP_TOUCH | CCORD_CAP_HAPTICS | CCORD_CAP_SHARE | CCORD_CAP_SAFE_AREA | CCORD_CAP_KEYBOARD_CONTROL | CCORD_CAP_ORIENTATION_CONTROL | CCORD_CAP_KEEP_SCREEN_ON | CCORD_CAP_NOTIFICATIONS)
+                                                                 : (CCORD_CAP_HOVER | CCORD_CAP_NOTIFICATIONS | CCORD_CAP_TRAY | CCORD_CAP_GLOBAL_SHORTCUTS | CCORD_CAP_SCREEN_CAPTURE | CCORD_CAP_RPC | CCORD_CAP_KEEP_SCREEN_ON));
+    m->plat_state.viewport_scale = 1.0f;
+    m->plat_state.landscape = !m->plat_is_mobile;
   }
-  snprintf(m->host_exe, sizeof m->host_exe, "%s", cfg->host_exe);
+  if (cfg->host_exe) {
+    if (strlen(cfg->host_exe) >= sizeof m->host_exe) {
+      ccord_error_set(err, CCORD_ERR_RANGE, "plugins: host path too long");
+      ccord_free(m);
+      return nullptr;
+    }
+    snprintf(m->host_exe, sizeof m->host_exe, "%s", cfg->host_exe);
+  }
   if (cfg->data_dir) {
     int dr = snprintf(m->data_dir, sizeof m->data_dir, "%s", cfg->data_dir);
     m->has_data_dir = dr >= 0 && (size_t)dr < sizeof m->data_dir;
@@ -2642,12 +2926,88 @@ int ccord_plugins_host_pid(const ccord_plugins *m, const char *owner)
     const plugin *p = &m->plugins[i];
     if (p->used && strcmp(p->m.id, owner) == 0) {
       if (!p->ipc || !host_is_running(p)) return -1;
+      if (p->in_process) return (int)ccord_os_pid();
 #if CCORD_OS_WINDOWS
       return (int)GetProcessId(p->proc);
+#elif CCORD_OS_ANDROID
+      return (int)ccord_os_pid();
 #else
       return (int)p->pid;
 #endif
     }
   }
   return -1;
+}
+
+static void broadcast_event_json(ccord_plugins *m, uint32_t bit, const char *name, const char *data_json)
+{
+  if (!m || !name || !data_json) return;
+  char payload[512];
+  int n = snprintf(payload, sizeof payload, "{\"name\":\"%s\",\"data\":%s}", name, data_json);
+  if (n <= 0 || (size_t)n >= sizeof payload) return;
+  for (size_t i = 0; i < m->nplugins; i++) {
+    plugin *p = &m->plugins[i];
+    if (!p->used || p->state != CCORD_PLUGIN_READY || !p->ipc) continue;
+    if ((p->subs & bit) == 0) continue;
+    ccord_error err = {0};
+    (void)ccord_ipc_send_notify(p->ipc, "event", payload, &err);
+  }
+}
+
+void ccord_plugins_update_platform_state(ccord_plugins *m, const ccord_plugin_platform_state *st)
+{
+  if (!m || !st) return;
+  ccord_plugin_platform_state prev = m->plat_state;
+  m->plat_state = *st;
+
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "safe_top"); ccord_jw_int(&w, (int64_t)st->safe_top);
+  ccord_jw_key(&w, "safe_right"); ccord_jw_int(&w, (int64_t)st->safe_right);
+  ccord_jw_key(&w, "safe_bottom"); ccord_jw_int(&w, (int64_t)st->safe_bottom);
+  ccord_jw_key(&w, "safe_left"); ccord_jw_int(&w, (int64_t)st->safe_left);
+  ccord_jw_key(&w, "viewport_w"); ccord_jw_int(&w, (int64_t)st->viewport_w);
+  ccord_jw_key(&w, "viewport_h"); ccord_jw_int(&w, (int64_t)st->viewport_h);
+  ccord_jw_key(&w, "viewport_scale"); ccord_jw_int(&w, (int64_t)(st->viewport_scale > 0.0f ? st->viewport_scale : 1.0f));
+  ccord_jw_key(&w, "keyboard_height"); ccord_jw_int(&w, (int64_t)st->keyboard_height);
+  ccord_jw_key(&w, "keyboard_visible"); ccord_jw_bool(&w, st->keyboard_visible);
+  ccord_jw_key(&w, "landscape"); ccord_jw_bool(&w, st->landscape);
+  ccord_jw_end_object(&w);
+  if (ccord_jw_ok(&w)) {
+    for (size_t i = 0; i < m->nplugins; i++) {
+      plugin *p = &m->plugins[i];
+      if (!p->used || p->state != CCORD_PLUGIN_READY || !p->ipc) continue;
+      ccord_error err = {0};
+      (void)ccord_ipc_send_notify(p->ipc, "platform.state", ccord_buf_cstr(&b), &err);
+    }
+  }
+  ccord_buf_free(&b);
+
+  if (prev.landscape != st->landscape) {
+    char dj[160];
+    snprintf(dj, sizeof dj, "{\"orientation\":\"%s\",\"width\":%d,\"height\":%d}",
+             st->landscape ? "landscape" : "portrait", (int)st->viewport_w, (int)st->viewport_h);
+    broadcast_event_json(m, EVB_PLAT_ORIENTATION, "platform.orientation", dj);
+  }
+  if (prev.keyboard_visible != st->keyboard_visible || prev.keyboard_height != st->keyboard_height) {
+    char dj[128];
+    snprintf(dj, sizeof dj, "{\"visible\":%s,\"height\":%d}",
+             st->keyboard_visible ? "true" : "false", (int)st->keyboard_height);
+    broadcast_event_json(m, EVB_PLAT_KEYBOARD, "platform.keyboard", dj);
+  }
+  if (prev.safe_top != st->safe_top || prev.safe_right != st->safe_right ||
+      prev.safe_bottom != st->safe_bottom || prev.safe_left != st->safe_left) {
+    char dj[160];
+    snprintf(dj, sizeof dj, "{\"top\":%d,\"right\":%d,\"bottom\":%d,\"left\":%d}",
+             (int)st->safe_top, (int)st->safe_right, (int)st->safe_bottom, (int)st->safe_left);
+    broadcast_event_json(m, EVB_PLAT_SAFE_AREA, "platform.safe_area", dj);
+  }
+}
+
+void ccord_plugins_dispatch_lifecycle(ccord_plugins *m, const char *state)
+{
+  if (!m || !state || !state[0]) return;
+  char dj[96];
+  snprintf(dj, sizeof dj, "{\"state\":\"%.32s\"}", state);
+  broadcast_event_json(m, EVB_APP_LIFECYCLE, "app.lifecycle", dj);
 }

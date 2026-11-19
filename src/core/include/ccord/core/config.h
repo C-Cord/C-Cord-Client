@@ -9,7 +9,7 @@ static_assert(__STDC_VERSION__ >= 202000L, "C-Cord requires C23");
 #ifndef CCORD_VERSION_STRING
 #define CCORD_VERSION_STRING "0.1.0"
 #endif
-#define CCORD_PLUGIN_API_VERSION 1
+#define CCORD_PLUGIN_API_VERSION 2
 #define CCORD_IPC_PROTO_VERSION 1
 #define CCORD_LUA_EXPECTED_RELEASE "Lua 5.5.1"
 #if defined(__has_c_attribute)

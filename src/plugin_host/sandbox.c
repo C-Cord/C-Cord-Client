@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
+#define _POSIX_C_SOURCE 200809L
 #include "sandbox.h"
 
 #include <ccord/core/alloc.h>
@@ -56,6 +57,9 @@ struct ccord_sandbox {
   sb_timer *timers;
   size_t ntimers, captimers;
   uint64_t next_timer_id;
+  ccord_sandbox_platform_info plat_info;
+  ccord_sandbox_platform_state plat_state;
+  const _Atomic bool *cancel;
 };
 
 // ---------------------------------------------------------------- allocator and hook
@@ -93,12 +97,48 @@ static void count_hook(lua_State *L, lua_Debug *ar)
 {
   (void)ar;
   ccord_sandbox *sb = sb_of(L);
-  sb->budget -= SB_HOOK_STEP;
-  if (sb->limit == CCORD_SB_LIMIT_MEMORY) luaL_error(L, "memory limit exceeded");
-  if (sb->budget < 0) {
-    if (sb->limit == CCORD_SB_LIMIT_NONE) sb->limit = CCORD_SB_LIMIT_INSTRUCTIONS;
-    luaL_error(L, "instruction limit exceeded");
+  if (sb->cancel && atomic_load_explicit(sb->cancel, memory_order_relaxed)) {
+    luaL_error(L, "plugin host stopped");
   }
+  if (sb->limit == CCORD_SB_LIMIT_MEMORY) luaL_error(L, "memory limit exceeded");
+  if (sb->insn_per_call > 0) {
+    sb->budget -= SB_HOOK_STEP;
+    if (sb->budget < 0) {
+      if (sb->limit == CCORD_SB_LIMIT_NONE) sb->limit = CCORD_SB_LIMIT_INSTRUCTIONS;
+      luaL_error(L, "instruction limit exceeded");
+    }
+  }
+}
+
+void ccord_sandbox_set_platform_state(ccord_sandbox *sb, const ccord_sandbox_platform_state *st)
+{
+  if (!sb || !st) return;
+  sb->plat_state = *st;
+}
+
+void ccord_sandbox_set_cancel_flag(ccord_sandbox *sb, const _Atomic bool *cancel)
+{
+  if (!sb) return;
+  sb->cancel = cancel;
+  if (sb->L && cancel && sb->insn_per_call == 0) {
+    lua_sethook(sb->L, count_hook, LUA_MASKCOUNT, 10000);
+  }
+}
+
+static const char *sb_errno_str(int errnum, char *buf, size_t cap)
+{
+  if (!buf || cap == 0) return "I/O error";
+#if CCORD_OS_WINDOWS
+  if (strerror_s(buf, cap, errnum) == 0) return buf;
+  snprintf(buf, cap, "error %d", errnum);
+  return buf;
+#elif defined(_GNU_SOURCE) && !defined(__ANDROID__) && defined(__GLIBC__)
+  return strerror_r(errnum, buf, cap);
+#else
+  if (strerror_r(errnum, buf, cap) == 0) return buf;
+  snprintf(buf, cap, "error %d", errnum);
+  return buf;
+#endif
 }
 
 ccord_sandbox_limit ccord_sandbox_limit_hit(const ccord_sandbox *sb)
@@ -368,9 +408,11 @@ static void make_readonly(lua_State *L)
 static bool event_perm_for(const char *name, size_t n, ccord_perm *perm)
 {
   // Class 1 (Safe) events
-  if (eq(name, n, "app.ready") || eq(name, n, "app.quit") || eq(name, n, "connection.state") ||
-      eq(name, n, "channel.select") || eq(name, n, "guild.select") ||
-      eq(name, n, "view.select") || eq(name, n, "navigation.aux_open")) {
+  if (eq(name, n, "app.ready") || eq(name, n, "app.quit") || eq(name, n, "app.lifecycle") ||
+      eq(name, n, "connection.state") || eq(name, n, "channel.select") || eq(name, n, "guild.select") ||
+      eq(name, n, "view.select") || eq(name, n, "navigation.aux_open") ||
+      eq(name, n, "platform.orientation") || eq(name, n, "platform.keyboard") ||
+      eq(name, n, "platform.safe_area")) {
     *perm = CCORD_PERM_EVENTS_NAVIGATION;
     return true;
   }
@@ -1516,7 +1558,7 @@ static int api_fs_read(lua_State *L)
     return 2;
   }
   FILE *f = fopen(path, "rb");
-  if (!f) { lua_pushnil(L); lua_pushstring(L, strerror(errno)); return 2; }
+  if (!f) { char eb[128]; lua_pushnil(L); lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb)); return 2; }
   fseek(f, 0, SEEK_END);
   long sz = ftell(f);
   fseek(f, 0, SEEK_SET);
@@ -1545,7 +1587,7 @@ static int api_fs_list(lua_State *L)
   if (!check_perm(L, sb, CCORD_PERM_FS_READ, "fs.list")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
   ccord_dir *d = ccord_dir_open(path);
-  if (!d) { lua_pushnil(L); lua_pushstring(L, strerror(errno)); return 2; }
+  if (!d) { char eb[128]; lua_pushnil(L); lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb)); return 2; }
   lua_newtable(L);
   lua_Integer i = 0;
   char name[256];
@@ -1565,7 +1607,7 @@ static int api_fs_write_impl(lua_State *L, const char *api, const char *mode)
   size_t n = 0;
   const char *data = luaL_checklstring(L, 2, &n);
   FILE *f = fopen(path, mode);
-  if (!f) { lua_pushnil(L); lua_pushstring(L, strerror(errno)); return 2; }
+  if (!f) { char eb[128]; lua_pushnil(L); lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb)); return 2; }
   size_t wr = fwrite(data, 1, n, f);
   fclose(f);
   if (wr != n) { lua_pushnil(L); lua_pushliteral(L, "short write"); return 2; }
@@ -1592,7 +1634,7 @@ static int api_fs_remove(lua_State *L)
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_FS_WRITE, "fs.remove")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
-  if (remove(path) != 0) { lua_pushnil(L); lua_pushstring(L, strerror(errno)); return 2; }
+  if (remove(path) != 0) { char eb[128]; lua_pushnil(L); lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb)); return 2; }
   lua_pushboolean(L, 1);
   return 1;
 }
@@ -1645,16 +1687,244 @@ static int api_system_notify(lua_State *L)
   if (!check_perm(L, sb, CCORD_PERM_SYSTEM_NOTIFY, "system.notify")) return push_undeclared(L);
   const char *title = luaL_checkstring(L, 1);
   const char *body = luaL_optstring(L, 2, "");
+  const char *tag = nullptr;
+  bool silent = false;
+  if (lua_istable(L, 3)) {
+    if (lua_getfield(L, 3, "tag") == LUA_TSTRING) tag = lua_tostring(L, -1);
+    lua_pop(L, 1);
+    if (lua_getfield(L, 3, "silent") == LUA_TBOOLEAN) silent = lua_toboolean(L, -1) != 0;
+    lua_pop(L, 1);
+  }
   ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w);
   ccord_jw_key(&w, "title"); ccord_jw_cstr(&w, title);
   ccord_jw_key(&w, "body"); ccord_jw_cstr(&w, body);
+  if (tag && tag[0]) { ccord_jw_key(&w, "tag"); ccord_jw_cstr(&w, tag); }
+  if (silent) { ccord_jw_key(&w, "silent"); ccord_jw_bool(&w, true); }
   ccord_jw_end_object(&w);
   if (ccord_jw_ok(&w)) sb_request(sb, "system.notify", ccord_buf_cstr(&b));
   ccord_buf_free(&b);
   lua_pushboolean(L, 1);
   return 1;
 }
+
+// ---- Class 1 (Safe) Cross-Platform & Mobile APIs (`platform.*`, `ui.haptics.*`, `ui.share.*`, `ui.keyboard.*`, `ui.mobile.*`) ----
+
+typedef struct sb_cap_def {
+  const char *name;
+  uint64_t bit;
+} sb_cap_def;
+
+static const sb_cap_def k_sb_caps[] = {
+  {"touch",               1ull << 0},
+  {"haptics",             1ull << 1},
+  {"share",               1ull << 2},
+  {"notifications",       1ull << 3},
+  {"tray",                1ull << 4},
+  {"global_shortcuts",    1ull << 5},
+  {"screen_capture",      1ull << 6},
+  {"rpc",                 1ull << 7},
+  {"hover",               1ull << 8},
+  {"safe_area",           1ull << 9},
+  {"keyboard_control",    1ull << 10},
+  {"orientation_control", 1ull << 11},
+  {"keep_screen_on",      1ull << 12},
+  {"panels",              1ull << 13},
+};
+
+static int api_platform_has(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  const char *cap = luaL_checkstring(L, 1);
+  bool ok = false;
+  for (size_t i = 0; i < sizeof k_sb_caps / sizeof k_sb_caps[0]; i++) {
+    if (strcmp(cap, k_sb_caps[i].name) == 0) {
+      ok = (sb->plat_info.capabilities & k_sb_caps[i].bit) != 0;
+      break;
+    }
+  }
+  lua_pushboolean(L, ok ? 1 : 0);
+  return 1;
+}
+
+static int api_platform_safe_area(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  lua_newtable(L);
+  lua_pushnumber(L, (lua_Number)sb->plat_state.safe_top);    lua_setfield(L, -2, "top");
+  lua_pushnumber(L, (lua_Number)sb->plat_state.safe_right);  lua_setfield(L, -2, "right");
+  lua_pushnumber(L, (lua_Number)sb->plat_state.safe_bottom); lua_setfield(L, -2, "bottom");
+  lua_pushnumber(L, (lua_Number)sb->plat_state.safe_left);   lua_setfield(L, -2, "left");
+  return 1;
+}
+
+static int api_platform_orientation(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  lua_pushstring(L, sb->plat_state.landscape ? "landscape" : "portrait");
+  return 1;
+}
+
+static int api_platform_keyboard(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  lua_newtable(L);
+  lua_pushboolean(L, sb->plat_state.keyboard_visible ? 1 : 0); lua_setfield(L, -2, "visible");
+  lua_pushnumber(L, (lua_Number)sb->plat_state.keyboard_height); lua_setfield(L, -2, "height");
+  return 1;
+}
+
+static int api_platform_viewport(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  lua_newtable(L);
+  lua_pushnumber(L, (lua_Number)sb->plat_state.viewport_w); lua_setfield(L, -2, "width");
+  lua_pushnumber(L, (lua_Number)sb->plat_state.viewport_h); lua_setfield(L, -2, "height");
+  lua_pushnumber(L, (lua_Number)(sb->plat_state.viewport_scale > 0.0f ? sb->plat_state.viewport_scale : 1.0f));
+  lua_setfield(L, -2, "scale");
+  return 1;
+}
+
+static int sb_bool_sync(lua_State *L, ccord_sandbox *sb, const char *method, const char *params_json)
+{
+  if (!sb->svc.request_sync) {
+    sb_request(sb, method, params_json);
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+  ccord_arena ar;
+  ccord_arena_init(&ar, 0);
+  const ccord_json *res = nullptr;
+  char ebuf[128] = "";
+  bool ok = sb->svc.request_sync(sb->svc.ud, method, params_json, &ar, &res, ebuf, sizeof ebuf);
+  bool performed = false;
+  if (ok && res) {
+    const ccord_json *v = ccord_json_get(res, "performed");
+    performed = v ? ccord_json_bool(v, true) : true;
+  }
+  ccord_arena_free(&ar);
+  lua_pushboolean(L, performed ? 1 : 0);
+  return 1;
+}
+
+static int api_ui_haptics_impact(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  const char *style = luaL_optstring(L, 1, "light");
+  if (strcmp(style, "light") != 0 && strcmp(style, "medium") != 0 &&
+      strcmp(style, "heavy") != 0 && strcmp(style, "selection") != 0) {
+    return luaL_error(L, "ui.haptics.impact: style must be light|medium|heavy|selection");
+  }
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "style"); ccord_jw_cstr(&w, style);
+  ccord_jw_end_object(&w);
+  int ret = sb_bool_sync(L, sb, "ui.haptics.impact", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  return ret;
+}
+
+static int api_ui_haptics_notify(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  const char *kind = luaL_optstring(L, 1, "success");
+  if (strcmp(kind, "success") != 0 && strcmp(kind, "warning") != 0 && strcmp(kind, "error") != 0) {
+    return luaL_error(L, "ui.haptics.notify: kind must be success|warning|error");
+  }
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "kind"); ccord_jw_cstr(&w, kind);
+  ccord_jw_end_object(&w);
+  int ret = sb_bool_sync(L, sb, "ui.haptics.notify", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  return ret;
+}
+
+static int api_ui_share_text(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  size_t n = 0;
+  const char *text = luaL_checklstring(L, 1, &n);
+  if (n == 0 || n > 65536u) return luaL_error(L, "ui.share.text: text must be 1..65536 bytes");
+  const char *title = luaL_optstring(L, 2, "");
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "title"); ccord_jw_cstr(&w, title);
+  ccord_jw_key(&w, "text"); ccord_jw_string(&w, text, n);
+  ccord_jw_end_object(&w);
+  int ret = sb_bool_sync(L, sb, "ui.share.text", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  return ret;
+}
+
+static int api_ui_share_url(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  size_t n = 0;
+  const char *url = luaL_checklstring(L, 1, &n);
+  if (strncmp(url, "https://", 8) != 0 && strncmp(url, "http://", 7) != 0) {
+    return luaL_error(L, "ui.share.url: only http:// and https:// URLs allowed");
+  }
+  const char *title = luaL_optstring(L, 2, "");
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "title"); ccord_jw_cstr(&w, title);
+  ccord_jw_key(&w, "text"); ccord_jw_string(&w, url, n);
+  ccord_jw_end_object(&w);
+  int ret = sb_bool_sync(L, sb, "ui.share.text", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  return ret;
+}
+
+static int api_ui_keyboard_dismiss(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  sb_request(sb, "ui.keyboard.dismiss", "{}");
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+static int api_ui_mobile_keep_screen_on(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  bool on = lua_toboolean(L, 1) != 0;
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "enabled"); ccord_jw_bool(&w, on);
+  ccord_jw_end_object(&w);
+  int ret = sb_bool_sync(L, sb, "ui.mobile.keep_screen_on", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  return ret;
+}
+
+static int api_ui_mobile_set_orientation(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  const char *mode = luaL_checkstring(L, 1);
+  if (strcmp(mode, "auto") != 0 && strcmp(mode, "portrait") != 0 && strcmp(mode, "landscape") != 0) {
+    return luaL_error(L, "ui.mobile.set_orientation: mode must be auto|portrait|landscape");
+  }
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "mode"); ccord_jw_cstr(&w, mode);
+  ccord_jw_end_object(&w);
+  int ret = sb_bool_sync(L, sb, "ui.mobile.set_orientation", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  return ret;
+}
+
+static const luaL_Reg k_haptics[] = {
+  {"impact", api_ui_haptics_impact}, {"notify", api_ui_haptics_notify}, {nullptr, nullptr}};
+static const luaL_Reg k_share[] = {
+  {"text", api_ui_share_text}, {"url", api_ui_share_url}, {nullptr, nullptr}};
+static const luaL_Reg k_keyboard[] = {
+  {"dismiss", api_ui_keyboard_dismiss}, {nullptr, nullptr}};
+static const luaL_Reg k_mobile[] = {
+  {"keep_screen_on", api_ui_mobile_keep_screen_on}, {"set_orientation", api_ui_mobile_set_orientation}, {nullptr, nullptr}};
+static const luaL_Reg k_platform_fns[] = {
+  {"has", api_platform_has}, {"safe_area", api_platform_safe_area},
+  {"orientation", api_platform_orientation}, {"keyboard", api_platform_keyboard},
+  {"viewport", api_platform_viewport}, {nullptr, nullptr}};
 
 // ---------------------------------------------------------------- library setup
 
@@ -1754,7 +2024,40 @@ static int open_all(lua_State *L)
   lua_setfield(L, -2, "panel");
   lua_newtable(L); luaL_setfuncs(L, k_toast, 0); make_readonly(L);
   lua_setfield(L, -2, "toast");
+  lua_newtable(L); luaL_setfuncs(L, k_haptics, 0); make_readonly(L);
+  lua_setfield(L, -2, "haptics");
+  lua_newtable(L); luaL_setfuncs(L, k_share, 0); make_readonly(L);
+  lua_setfield(L, -2, "share");
+  lua_newtable(L); luaL_setfuncs(L, k_keyboard, 0); make_readonly(L);
+  lua_setfield(L, -2, "keyboard");
+  lua_newtable(L); luaL_setfuncs(L, k_mobile, 0); make_readonly(L);
+  lua_setfield(L, -2, "mobile");
   make_readonly(L); lua_setglobal(L, "ui");
+
+  // Class 1 (Safe) `platform` table: OS detection, form factor, capabilities, safe area & keyboard metrics.
+  lua_newtable(L);
+  luaL_setfuncs(L, k_platform_fns, 0);
+  lua_pushstring(L, sb->plat_info.os);          lua_setfield(L, -2, "os");
+  lua_pushstring(L, sb->plat_info.arch);        lua_setfield(L, -2, "arch");
+  lua_pushstring(L, sb->plat_info.form_factor); lua_setfield(L, -2, "form_factor");
+  lua_pushboolean(L, sb->plat_info.is_mobile ? 1 : 0);  lua_setfield(L, -2, "is_mobile");
+  lua_pushboolean(L, sb->plat_info.is_mobile ? 0 : 1);  lua_setfield(L, -2, "is_desktop");
+  lua_pushboolean(L, strcmp(sb->plat_info.os, "android") == 0 ? 1 : 0); lua_setfield(L, -2, "is_android");
+  lua_pushboolean(L, strcmp(sb->plat_info.os, "linux") == 0 ? 1 : 0);   lua_setfield(L, -2, "is_linux");
+  lua_pushboolean(L, strcmp(sb->plat_info.os, "macos") == 0 ? 1 : 0);   lua_setfield(L, -2, "is_macos");
+  lua_pushboolean(L, strcmp(sb->plat_info.os, "windows") == 0 ? 1 : 0); lua_setfield(L, -2, "is_windows");
+  lua_pushboolean(L, sb->plat_info.touch ? 1 : 0);      lua_setfield(L, -2, "touch");
+  lua_pushinteger(L, CCORD_PLUGIN_API_VERSION);         lua_setfield(L, -2, "api_version");
+  lua_pushinteger(L, sb->plat_info.android_api_level);  lua_setfield(L, -2, "android_api_level");
+  lua_newtable(L);
+  for (size_t i = 0; i < sizeof k_sb_caps / sizeof k_sb_caps[0]; i++) {
+    lua_pushboolean(L, (sb->plat_info.capabilities & k_sb_caps[i].bit) != 0 ? 1 : 0);
+    lua_setfield(L, -2, k_sb_caps[i].name);
+  }
+  make_readonly(L);
+  lua_setfield(L, -2, "capabilities");
+  make_readonly(L);
+  lua_setglobal(L, "platform");
 
   reg_ro(L, "clipboard", k_clipboard);
   reg_ro(L, "storage", k_storage);
@@ -1801,6 +2104,27 @@ ccord_sandbox *ccord_sandbox_create(const ccord_sandbox_config *cfg, const ccord
   snprintf(sb->name, sizeof sb->name, "%s", cfg->plugin_name);
   snprintf(sb->version, sizeof sb->version, "%s", cfg->plugin_version);
   if (cfg->plugin_dir) snprintf(sb->dir, sizeof sb->dir, "%s", cfg->plugin_dir);
+  if (cfg->has_platform) {
+    sb->plat_info = cfg->platform;
+    sb->plat_state = cfg->platform_state;
+  } else {
+    snprintf(sb->plat_info.os, sizeof sb->plat_info.os, "%s", ccord_os_name());
+    snprintf(sb->plat_info.arch, sizeof sb->plat_info.arch, "%s", ccord_os_arch());
+    sb->plat_info.is_mobile = ccord_os_is_mobile();
+    snprintf(sb->plat_info.form_factor, sizeof sb->plat_info.form_factor, "%s",
+             sb->plat_info.is_mobile ? "phone" : "desktop");
+    sb->plat_info.touch = sb->plat_info.is_mobile;
+    sb->plat_info.android_api_level = ccord_os_android_api_level();
+    sb->plat_info.capabilities = (1ull << 13);  // panels
+    sb->plat_state.viewport_scale = 1.0f;
+    sb->plat_state.landscape = !sb->plat_info.is_mobile;
+  }
+  if (!sb->plat_info.os[0]) snprintf(sb->plat_info.os, sizeof sb->plat_info.os, "%s", ccord_os_name());
+  if (!sb->plat_info.arch[0]) snprintf(sb->plat_info.arch, sizeof sb->plat_info.arch, "%s", ccord_os_arch());
+  if (!sb->plat_info.form_factor[0]) {
+    snprintf(sb->plat_info.form_factor, sizeof sb->plat_info.form_factor, "%s",
+             sb->plat_info.is_mobile ? "phone" : "desktop");
+  }
   sb->mem_limit = (size_t)cfg->memory_bytes;
   sb->insn_per_call = cfg->instructions;
   sb->budget = (int64_t)cfg->instructions;

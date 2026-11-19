@@ -1,6 +1,6 @@
 # C-Cord Plugin Developer Guide
 
-C-Cord extensions are Lua 5.5 plugins that run in an isolated out-of-process host (`ccord-plugin-host`) with **no artificial memory, instruction, storage, or plugin-count limits**.
+C-Cord extensions are Lua 5.5 plugins that run in an isolated sandboxed host — an out-of-process helper (`ccord-plugin-host`) on desktop and a sandboxed in-process worker thread over an IPC socketpair on Android — with **no artificial memory, instruction, storage, or plugin-count limits**.
 
 ---
 
@@ -20,13 +20,43 @@ C-Cord extensions are Lua 5.5 plugins that run in an isolated out-of-process hos
      "id": "com.example.my-plugin",
      "name": "My Plugin",
      "version": "1.0.0",
-     "api": 1,
+     "api": 2,
      "main": "main.lua",
-     "description": "A minimal C-Cord extension.",
+     "description": "A minimal cross-platform C-Cord extension.",
+     "platforms": ["desktop", "android"],
+     "requires_capabilities": [],
      "permissions": []
    }
    ```
+   - `api`: `1` or `2` (API v1 plugins continue to work unchanged on desktop and Android; use `2` if your plugin declares `"platforms"` or `"requires_capabilities"`, or relies on API v2 features).
+   - `platforms` *(optional)*: Array of `"linux"`, `"macos"`, `"windows"`, `"android"`, `"desktop"`, `"mobile"`, or `"all"`. Omit to run everywhere.
+   - `requires_capabilities` *(optional)*: Array of capability names (e.g., `"haptics"`, `"share"`, `"tray"`, `"global_shortcuts"`). If the host lacks a required capability, the plugin is skipped cleanly instead of failing at runtime.
 3. See [extensions/starter-example/](../../extensions/starter-example/) for a working template.
+
+### Writing Cross-Platform Plugins (Desktop + Android)
+Use the safe Class 1 `platform` global (no permission required) to branch on OS, form factor, or capability:
+```lua
+if platform.is_mobile then
+  events.on("platform.keyboard", function(kb)
+    log.debug("Soft keyboard height: " .. tostring(kb.height))
+  end)
+end
+
+if platform.has("haptics") then
+  ui.haptics.impact("light")
+end
+
+if platform.has("share") then
+  ui.contextMenu.add({
+    id = "share-msg",
+    label = "Share Message",
+    target = "message",
+    action = function(ctx)
+      ui.share.text(ctx.content or "", "Shared from C-Cord")
+    end,
+  })
+end
+```
 
 ---
 
@@ -37,7 +67,7 @@ C-Cord divides all plugin APIs into three security classes:
 1. **Class 1 — Safe APIs**
    - Available to every plugin automatically **without** declaring them in `plugin.json`.
    - No risk warning prompt is shown to the user.
-   - Includes `plugin`, `log`, `events` (navigation & lifecycle), `ui.contextMenu`, `ui.toast`, `commands`, `storage`, `clipboard.write`, `json`, `time`, `crypto`, `encoding`, `markdown`, and plugin-scoped `require()`.
+   - Includes `plugin`, `platform`, `log`, `events` (navigation, platform & lifecycle), `ui.contextMenu`, `ui.toast`, `ui.haptics`, `ui.share`, `ui.keyboard`, `ui.mobile`, `commands`, `storage`, `clipboard.write`, `json`, `time`, `crypto`, `encoding`, `markdown`, and plugin-scoped `require()`.
 
 2. **Class 2 — Unsafe APIs (C-Cord Internal)**
    - Lower-level C-Cord APIs (custom UI panels via `ui.panel.*`, reading `store.*`, reading message events, sending/editing/deleting messages, voice control, presence, navigation, hooks, raw gateway).

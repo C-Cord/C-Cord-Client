@@ -5,9 +5,11 @@
 
 #include <ccord/core/arena.h>
 #include <ccord/core/json.h>
+#include <ccord/core/os.h>
 #include <ccord/core/utf8.h>
 #include <ccord/core/config.h>
 
+#include <stdio.h>
 #include <string.h>
 
 #define MANIFEST_MAX_BYTES (1u << 20)
@@ -159,14 +161,154 @@ static ccord_status parse_permissions(const ccord_json *arr, ccord_manifest *out
   return CCORD_OK;
 }
 
+typedef struct cap_entry {
+  const char *name;
+  uint64_t bit;
+} cap_entry;
+
+static const cap_entry k_caps[] = {
+  {"touch", CCORD_CAP_TOUCH},
+  {"haptics", CCORD_CAP_HAPTICS},
+  {"share", CCORD_CAP_SHARE},
+  {"notifications", CCORD_CAP_NOTIFICATIONS},
+  {"tray", CCORD_CAP_TRAY},
+  {"global_shortcuts", CCORD_CAP_GLOBAL_SHORTCUTS},
+  {"screen_capture", CCORD_CAP_SCREEN_CAPTURE},
+  {"rpc", CCORD_CAP_RPC},
+  {"hover", CCORD_CAP_HOVER},
+  {"safe_area", CCORD_CAP_SAFE_AREA},
+  {"keyboard_control", CCORD_CAP_KEYBOARD_CONTROL},
+  {"orientation_control", CCORD_CAP_ORIENTATION_CONTROL},
+  {"keep_screen_on", CCORD_CAP_KEEP_SCREEN_ON},
+  {"panels", CCORD_CAP_PANELS},
+};
+
+uint32_t ccord_platform_current_bit(void)
+{
+#if CCORD_OS_WINDOWS
+  return CCORD_PLAT_WINDOWS;
+#elif CCORD_OS_MACOS
+  return CCORD_PLAT_MACOS;
+#elif CCORD_OS_ANDROID
+  return CCORD_PLAT_ANDROID;
+#else
+  return CCORD_PLAT_LINUX;
+#endif
+}
+
+bool ccord_cap_from_name(const char *name, uint64_t *out_bit)
+{
+  if (!name) return false;
+  for (size_t i = 0; i < sizeof k_caps / sizeof k_caps[0]; i++) {
+    if (strcmp(name, k_caps[i].name) == 0) {
+      if (out_bit) *out_bit = k_caps[i].bit;
+      return true;
+    }
+  }
+  return false;
+}
+
+const char *ccord_cap_name(uint64_t bit)
+{
+  for (size_t i = 0; i < sizeof k_caps / sizeof k_caps[0]; i++) {
+    if (k_caps[i].bit == bit) return k_caps[i].name;
+  }
+  return nullptr;
+}
+
+bool ccord_manifest_supports(const ccord_manifest *m, uint32_t plat_bit, uint64_t avail_caps,
+                             char *reason_out, size_t reason_cap)
+{
+  if (reason_out && reason_cap > 0) reason_out[0] = '\0';
+  if (!m) return false;
+  uint32_t plats = m->platforms ? m->platforms : CCORD_PLAT_ALL;
+  if ((plats & plat_bit) == 0) {
+    if (reason_out && reason_cap > 0) {
+      const char *pname = plat_bit == CCORD_PLAT_ANDROID ? "android"
+                        : plat_bit == CCORD_PLAT_MACOS   ? "macos"
+                        : plat_bit == CCORD_PLAT_WINDOWS ? "windows"
+                        : plat_bit == CCORD_PLAT_LINUX   ? "linux"
+                                                         : ccord_os_name();
+      snprintf(reason_out, reason_cap, "not supported on platform '%s'", pname);
+    }
+    return false;
+  }
+  uint64_t missing = m->required_caps & ~avail_caps;
+  if (missing != 0) {
+    if (reason_out && reason_cap > 0) {
+      const char *cname = "capability";
+      for (size_t i = 0; i < sizeof k_caps / sizeof k_caps[0]; i++) {
+        if (missing & k_caps[i].bit) { cname = k_caps[i].name; break; }
+      }
+      snprintf(reason_out, reason_cap, "requires unavailable capability '%s'", cname);
+    }
+    return false;
+  }
+  return true;
+}
+
+static ccord_status parse_platforms(const ccord_json *arr, ccord_manifest *out, ccord_error *err)
+{
+  if (ccord_json_type_of(arr) != CCORD_JSON_ARRAY) {
+    return bad(err, CCORD_ERR_PARSE, "plugin.json: 'platforms' must be an array");
+  }
+  size_t n = ccord_json_array_len(arr);
+  if (n == 0) {
+    out->platforms = CCORD_PLAT_ALL;
+    return CCORD_OK;
+  }
+  uint32_t mask = 0;
+  for (size_t i = 0; i < n; i++) {
+    size_t sl = 0;
+    const char *s = ccord_json_string(ccord_json_array_at(arr, i), &sl);
+    if (!s || sl == 0) return bad(err, CCORD_ERR_PARSE, "plugin.json: platform entry must be a string");
+    if (strcmp(s, "linux") == 0) mask |= CCORD_PLAT_LINUX;
+    else if (strcmp(s, "macos") == 0 || strcmp(s, "darwin") == 0) mask |= CCORD_PLAT_MACOS;
+    else if (strcmp(s, "windows") == 0) mask |= CCORD_PLAT_WINDOWS;
+    else if (strcmp(s, "android") == 0) mask |= CCORD_PLAT_ANDROID;
+    else if (strcmp(s, "desktop") == 0) mask |= CCORD_PLAT_DESKTOP;
+    else if (strcmp(s, "mobile") == 0) mask |= CCORD_PLAT_MOBILE;
+    else if (strcmp(s, "all") == 0) mask |= CCORD_PLAT_ALL;
+    else {
+      ccord_error_set(err, CCORD_ERR_INVALID, "plugin.json: unknown platform '%.32s'", s);
+      return CCORD_ERR_INVALID;
+    }
+  }
+  out->platforms = mask;
+  return CCORD_OK;
+}
+
+static ccord_status parse_required_caps(const ccord_json *arr, ccord_manifest *out, ccord_error *err)
+{
+  if (ccord_json_type_of(arr) != CCORD_JSON_ARRAY) {
+    return bad(err, CCORD_ERR_PARSE, "plugin.json: 'requires_capabilities' must be an array");
+  }
+  size_t n = ccord_json_array_len(arr);
+  uint64_t mask = 0;
+  for (size_t i = 0; i < n; i++) {
+    size_t sl = 0;
+    const char *s = ccord_json_string(ccord_json_array_at(arr, i), &sl);
+    uint64_t bit = 0;
+    if (!s || sl == 0 || !ccord_cap_from_name(s, &bit)) {
+      ccord_error_set(err, CCORD_ERR_INVALID, "plugin.json: unknown capability '%.32s'", s ? s : "");
+      return CCORD_ERR_INVALID;
+    }
+    mask |= bit;
+  }
+  out->required_caps = mask;
+  return CCORD_OK;
+}
+
 ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *out, ccord_error *err)
 {
   if (!out) return bad(err, CCORD_ERR_INVALID, "plugin.json: null output");
   memset(out, 0, sizeof *out);
+  out->platforms = CCORD_PLAT_ALL;
   if (!json || len == 0 || len > MANIFEST_MAX_BYTES) return bad(err, CCORD_ERR_RANGE, "plugin.json: size must be 1..16 KiB");
 
   static const char *const top_keys[] = {
-    "schema", "id", "name", "version", "api", "main", "description", "license", "permissions", "limits",
+    "schema", "id", "name", "version", "api", "main", "description", "license",
+    "permissions", "limits", "platforms", "requires_capabilities",
   };
   ccord_arena arena;
   ccord_arena_init(&arena, 0);
@@ -198,8 +340,8 @@ ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *
   out->schema_version = (uint32_t)iv;
   if ((st = get_int(root, "api", &iv, &present, err)) != CCORD_OK) goto done;
   if (!present) { st = bad(err, CCORD_ERR_PARSE, "plugin.json: missing 'api'"); goto done; }
-  if (iv != CCORD_PLUGIN_API_VERSION) {
-    ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "plugin needs API %lld, host provides %d", (long long)iv, CCORD_PLUGIN_API_VERSION);
+  if (iv < 1 || iv > CCORD_PLUGIN_API_VERSION) {
+    ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "plugin needs API %lld, host provides 1..%d", (long long)iv, CCORD_PLUGIN_API_VERSION);
     st = CCORD_ERR_UNSUPPORTED;
     goto done;
   }
@@ -235,6 +377,14 @@ ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *
   const ccord_json *limits = ccord_json_get(root, "limits");
   if (limits) {
     if ((st = parse_limits(limits, out, err)) != CCORD_OK) goto done;
+  }
+  const ccord_json *plats = ccord_json_get(root, "platforms");
+  if (plats) {
+    if ((st = parse_platforms(plats, out, err)) != CCORD_OK) goto done;
+  }
+  const ccord_json *req_caps = ccord_json_get(root, "requires_capabilities");
+  if (req_caps) {
+    if ((st = parse_required_caps(req_caps, out, err)) != CCORD_OK) goto done;
   }
   out->memory_bytes = 0;
   out->instructions = 0;

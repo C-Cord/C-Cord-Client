@@ -1,6 +1,16 @@
-# C-Cord Plugin API Reference (API v1)
+# C-Cord Plugin API Reference (API v2)
 
 All API tables are read-only. Standard Lua 5.5 libraries `base`, `table`, `string`, `math`, `utf8`, and `coroutine` are available (`os`, `io`, `package`, `debug`, `load`, `dofile`, `loadfile`, `print` are removed).
+
+---
+
+## Manifest Compatibility Fields (`plugin.json`)
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `"api"` | `integer` | required | Target API version (`1` or `2`). |
+| `"platforms"` | `string[]` | `["all"]` | Allowed targets: `"linux"`, `"macos"`, `"windows"`, `"android"`, `"desktop"`, `"mobile"`, `"all"`. Plugins incompatible with the current OS are skipped cleanly. |
+| `"requires_capabilities"` | `string[]` | `[]` | Runtime capabilities required to load: `"touch"`, `"haptics"`, `"share"`, `"notifications"`, `"tray"`, `"global_shortcuts"`, `"screen_capture"`, `"rpc"`, `"hover"`, `"safe_area"`, `"keyboard_control"`, `"orientation_control"`, `"keep_screen_on"`, `"panels"`. |
 
 ---
 
@@ -12,6 +22,23 @@ Read-only metadata table:
 - `plugin.name` (`string`)
 - `plugin.version` (`string`)
 - `plugin.dir` (`string`) — absolute path to the plugin directory.
+
+### `platform`
+Read-only OS, form-factor, capability, and viewport inspection table (safe Class 1 — available without requesting `system.info`):
+- `platform.os` (`string`) — `"linux"`, `"macos"`, `"windows"`, or `"android"`.
+- `platform.arch` (`string`) — `"x86_64"`, `"arm64"`, etc.
+- `platform.form_factor` (`string`) — `"desktop"`, `"phone"`, or `"tablet"`.
+- `platform.is_mobile` (`boolean`) / `platform.is_desktop` (`boolean`)
+- `platform.is_android` (`boolean`) / `platform.is_linux` (`boolean`) / `platform.is_macos` (`boolean`) / `platform.is_windows` (`boolean`)
+- `platform.touch` (`boolean`) — `true` on touch-capable / mobile devices.
+- `platform.api_version` (`integer`) — Plugin API version supported by the host (`2`).
+- `platform.android_api_level` (`integer`) — Android SDK API level (e.g. `34`, `35`), or `0` on desktop.
+- `platform.capabilities` (`table`) — read-only map of capability name → `boolean`.
+- `platform.has(capability_name)` → `boolean` — checks whether a capability (e.g. `"haptics"`, `"share"`, `"tray"`, `"global_shortcuts"`, `"rpc"`, `"touch"`, `"safe_area"`) is supported at runtime.
+- `platform.safe_area()` → `{ top, right, bottom, left }` — current logical-pixel safe-area insets (notches, status bar, gesture bar).
+- `platform.orientation()` → `"portrait"` | `"landscape"`
+- `platform.keyboard()` → `{ visible, height }` — soft-keyboard visibility and logical-pixel occlusion height.
+- `platform.viewport()` → `{ width, height, scale }` — logical viewport size and display scale factor.
 
 ### `require(module_name)`
 Loads and caches `<plugin.dir>/<module_name>.lua` (dots are converted to `/`). Path traversal (`..`) is blocked.
@@ -29,6 +56,10 @@ Writes to both the C-Cord log and the plugin's in-UI **Debug Log**.
 - Safe events:
   - `"app.ready"`
   - `"app.quit"`
+  - `"app.lifecycle"` — `{ state }` (`"foreground"`, `"background"`, `"low_memory"`) — emitted on mobile/desktop app lifecycle transitions.
+  - `"platform.orientation"` — `{ orientation, width, height }` (`"portrait"` | `"landscape"`).
+  - `"platform.keyboard"` — `{ visible, height }` — emitted when the mobile soft keyboard opens, resizes, or closes.
+  - `"platform.safe_area"` — `{ top, right, bottom, left }` — emitted when system bars or display cutout insets change.
   - `"connection.state"`
   - `"guild.select"` — `{ guild_id, name, is_dm }`
   - `"channel.select"` — `{ guild_id, channel_id, parent_id?, name, display_name, kind, unread_count, mention_count }`
@@ -43,6 +74,23 @@ Writes to both the C-Cord log and the plugin's in-UI **Debug Log**.
 
 ### `ui.toast`
 - `ui.toast.show(text, level?)` — `level` is `"info"`, `"warn"`, or `"error"`.
+
+### `ui.haptics`
+Native tactile feedback (no-op returning `false` on devices without haptics):
+- `ui.haptics.impact(style?)` → `boolean` — `style` is `"light"` (default), `"medium"`, `"heavy"`, or `"selection"`.
+- `ui.haptics.notify(kind?)` → `boolean` — `kind` is `"success"` (default), `"warning"`, or `"error"`.
+
+### `ui.share`
+Native OS share sheet (Android `ACTION_SEND`; returns `false` on platforms without a native share sheet):
+- `ui.share.text(text, title?)` → `boolean` — shares UTF-8 text (1..65536 bytes).
+- `ui.share.url(url, title?)` → `boolean` — shares an `http://` or `https://` URL.
+
+### `ui.keyboard`
+- `ui.keyboard.dismiss()` → `boolean` — hides the on-screen soft keyboard if open.
+
+### `ui.mobile`
+- `ui.mobile.keep_screen_on(enabled)` → `boolean` — requests keeping the device screen awake (e.g., during calls or media viewing).
+- `ui.mobile.set_orientation(mode)` → `boolean` — sets preferred screen orientation: `"auto"`, `"portrait"`, or `"landscape"`.
 
 ### `commands`
 - `commands.register(name, description, fn)`
