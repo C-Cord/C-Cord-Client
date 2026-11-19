@@ -887,7 +887,7 @@ static void plugins_start(app *a)
   char probe[1100];
   snprintf(bundled, sizeof bundled, "%s", CCORD_EXTENSIONS_DIR);   // bundled extensions shipped in the repo
   snprintf(probe, sizeof probe, "%s/copy-message-id/plugin.json", bundled);
-  if (access(probe, R_OK) != 0) {
+  if (!ccord_path_is_file(probe)) {
     const char *ddir = ccord_paths_data_dir();
     if (ddir && ddir[0] && (size_t)snprintf(bundled, sizeof bundled, "%s/bundled_extensions", ddir) < sizeof bundled) {
       (void)ccord_embedded_materialize_extensions(bundled);
@@ -3706,7 +3706,7 @@ int main(int argc, char **argv)
                    (opt.screenshot != nullptr && (!opt.token_file || live_token_available(opt.token_file))));
   a.live = use_live;
   a.mock = use_mock;
-  ccord_capture_set_own_pid((int)getpid());
+  ccord_capture_set_own_pid((int)ccord_os_pid());
   if (use_mock || opt.headless || verify_live) {
     ccord_capture_set_fake(true);
   }

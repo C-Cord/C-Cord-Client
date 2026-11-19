@@ -63,7 +63,7 @@ set_target_properties(ccord_mlspp PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIR
                                              POSITION_INDEPENDENT_CODE ON)
 target_compile_definitions(ccord_mlspp PUBLIC WITH_OPENSSL3 DISABLE_GREASE)
 target_include_directories(ccord_mlspp SYSTEM PUBLIC ${mlspp_includes})
-target_compile_options(ccord_mlspp PRIVATE -w)
+target_compile_options(ccord_mlspp PRIVATE -w -include ctime)
 target_link_libraries(ccord_mlspp PRIVATE nlohmann_json::nlohmann_json PUBLIC OpenSSL::Crypto)
 
 # libdave's private src/ tree has its own mls/session.h, so it must not leak into mlspp's include path.
