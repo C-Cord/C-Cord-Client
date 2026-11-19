@@ -18,8 +18,19 @@ static size_t max_sz(size_t a, size_t b)
   return a > b ? a : b;
 }
 
-static void free_stack(ccord_text_undo_entry *stk, size_t *len)
+enum {
+  UNDO_OP_NONE = 0,
+  UNDO_OP_INSERT = 1,
+  UNDO_OP_BACKSPACE = 2,
+  UNDO_OP_DELETE = 3,
+};
+
+static void clear_stack(ccord_text_undo_entry *stk, size_t *len)
 {
+  if (!stk) {
+    *len = 0;
+    return;
+  }
   for (size_t i = 0; i < *len; i++) {
     ccord_free(stk[i].data);
     stk[i] = (ccord_text_undo_entry){0};
@@ -27,24 +38,42 @@ static void free_stack(ccord_text_undo_entry *stk, size_t *len)
   *len = 0;
 }
 
-static void push_entry(ccord_text_undo_entry *stk, size_t *len, const ccord_text_edit *t)
+static void release_stack(ccord_text_undo_entry **stk, size_t *len, size_t *cap)
+{
+  clear_stack(*stk, len);
+  ccord_free(*stk);
+  *stk = nullptr;
+  *cap = 0;
+}
+
+static void push_entry(ccord_text_undo_entry **stk, size_t *len, size_t *cap, const ccord_text_edit *t)
 {
   const char *src = t->data ? t->data : "";
   // Deduplicate identical consecutive snapshots
-  if (*len > 0) {
-    const ccord_text_undo_entry *top = &stk[*len - 1];
+  if (*len > 0 && *stk) {
+    const ccord_text_undo_entry *top = &(*stk)[*len - 1];
     if (top->len == t->len && memcmp(top->data ? top->data : "", src, t->len) == 0) {
       return;
     }
   }
+  if (*len == *cap && *cap < CCORD_TEXT_UNDO_CAP) {
+    size_t ncap = *cap ? *cap * 2u : 4u;
+    if (ncap > CCORD_TEXT_UNDO_CAP) ncap = CCORD_TEXT_UNDO_CAP;
+    ccord_text_undo_entry *n = ccord_realloc_array(*stk, ncap, sizeof *n);
+    if (!n) return;   // best-effort under OOM
+    for (size_t i = *cap; i < ncap; i++) n[i] = (ccord_text_undo_entry){0};
+    *stk = n;
+    *cap = ncap;
+  }
+  if (!*stk) return;
   char *copy = ccord_strndup(src, t->len);
   if (!copy) return;   // best-effort under OOM
   if (*len == CCORD_TEXT_UNDO_CAP) {
-    ccord_free(stk[0].data);
-    memmove(&stk[0], &stk[1], (CCORD_TEXT_UNDO_CAP - 1u) * sizeof stk[0]);
+    ccord_free((*stk)[0].data);
+    memmove(&(*stk)[0], &(*stk)[1], (CCORD_TEXT_UNDO_CAP - 1u) * sizeof (*stk)[0]);
     (*len)--;
   }
-  stk[*len] = (ccord_text_undo_entry){
+  (*stk)[*len] = (ccord_text_undo_entry){
     .data = copy,
     .len = t->len,
     .caret = t->caret,
@@ -55,8 +84,8 @@ static void push_entry(ccord_text_undo_entry *stk, size_t *len, const ccord_text
 
 static void record_undo(ccord_text_edit *t)
 {
-  push_entry(t->undo, &t->undo_len, t);
-  free_stack(t->redo, &t->redo_len);
+  push_entry(&t->undo, &t->undo_len, &t->undo_cap, t);
+  clear_stack(t->redo, &t->redo_len);
 }
 
 void ccord_text_edit_init(ccord_text_edit *t, size_t max_bytes)
@@ -67,8 +96,8 @@ void ccord_text_edit_init(ccord_text_edit *t, size_t max_bytes)
 void ccord_text_edit_free(ccord_text_edit *t)
 {
   if (!t) return;
-  free_stack(t->undo, &t->undo_len);
-  free_stack(t->redo, &t->redo_len);
+  release_stack(&t->undo, &t->undo_len, &t->undo_cap);
+  release_stack(&t->redo, &t->redo_len, &t->redo_cap);
   ccord_free(t->data);
   size_t max = t->max_bytes;
   ccord_text_edit_init(t, max);
@@ -77,11 +106,13 @@ void ccord_text_edit_free(ccord_text_edit *t)
 void ccord_text_edit_clear(ccord_text_edit *t)
 {
   if (!t) return;
-  free_stack(t->undo, &t->undo_len);
-  free_stack(t->redo, &t->redo_len);
+  release_stack(&t->undo, &t->undo_len, &t->undo_cap);
+  release_stack(&t->redo, &t->redo_len, &t->redo_cap);
   t->len = 0;
   t->caret = 0;
   t->anchor = 0;
+  t->last_undo_op = UNDO_OP_NONE;
+  t->last_undo_caret = 0;
   if (t->data) t->data[0] = '\0';
 }
 
@@ -182,7 +213,13 @@ ccord_status ccord_text_edit_insert(ccord_text_edit *t, const char *utf8, size_t
     t->data = n;
     t->cap = ncap;
   }
-  record_undo(t);
+  bool single_cp = (sel == 0 && ccord_utf8_next(utf8, len, 0) == len &&
+                    utf8[0] != ' ' && utf8[0] != '\t' && utf8[0] != '\n' && utf8[0] != '\r');
+  if (single_cp && t->last_undo_op == UNDO_OP_INSERT && t->caret == t->last_undo_caret && t->undo_len > 0) {
+    clear_stack(t->redo, &t->redo_len);
+  } else {
+    record_undo(t);
+  }
   erase_selection(t);
   memmove(t->data + t->caret + len, t->data + t->caret, t->len - t->caret);
   memcpy(t->data + t->caret, utf8, len);
@@ -190,6 +227,12 @@ ccord_status ccord_text_edit_insert(ccord_text_edit *t, const char *utf8, size_t
   t->data[t->len] = '\0';
   t->caret += len;
   t->anchor = t->caret;
+  if (single_cp) {
+    t->last_undo_op = UNDO_OP_INSERT;
+    t->last_undo_caret = t->caret;
+  } else {
+    t->last_undo_op = UNDO_OP_NONE;
+  }
   return CCORD_OK;
 }
 
@@ -259,6 +302,7 @@ ccord_status ccord_text_edit_wrap_selection(ccord_text_edit *t, const char *pref
     t->cap = ncap;
   }
   record_undo(t);
+  t->last_undo_op = UNDO_OP_NONE;
   // Move tail after `to` by plen + slen
   memmove(t->data + to + add_len, t->data + to, t->len - to);
   // Move selected slice `[from, to)` right by plen
@@ -278,10 +322,17 @@ void ccord_text_edit_backspace(ccord_text_edit *t)
 {
   if (has_selection(t)) {
     record_undo(t);
+    t->last_undo_op = UNDO_OP_NONE;
     erase_selection(t);
   } else if (t->caret > 0) {
-    record_undo(t);
+    if (t->last_undo_op == UNDO_OP_BACKSPACE && t->caret == t->last_undo_caret && t->undo_len > 0) {
+      clear_stack(t->redo, &t->redo_len);
+    } else {
+      record_undo(t);
+    }
     erase_range(t, ccord_utf8_prev(t->data, t->caret), t->caret);
+    t->last_undo_op = UNDO_OP_BACKSPACE;
+    t->last_undo_caret = t->caret;
   }
 }
 
@@ -289,10 +340,17 @@ void ccord_text_edit_delete(ccord_text_edit *t)
 {
   if (has_selection(t)) {
     record_undo(t);
+    t->last_undo_op = UNDO_OP_NONE;
     erase_selection(t);
   } else if (t->caret < t->len) {
-    record_undo(t);
+    if (t->last_undo_op == UNDO_OP_DELETE && t->caret == t->last_undo_caret && t->undo_len > 0) {
+      clear_stack(t->redo, &t->redo_len);
+    } else {
+      record_undo(t);
+    }
     erase_range(t, t->caret, ccord_utf8_next(t->data, t->len, t->caret));
+    t->last_undo_op = UNDO_OP_DELETE;
+    t->last_undo_caret = t->caret;
   }
 }
 
@@ -301,9 +359,11 @@ void ccord_text_edit_backspace_word(ccord_text_edit *t)
   if (!t) return;
   if (has_selection(t)) {
     record_undo(t);
+    t->last_undo_op = UNDO_OP_NONE;
     erase_selection(t);
   } else if (t->caret > 0) {
     record_undo(t);
+    t->last_undo_op = UNDO_OP_NONE;
     erase_range(t, prev_word_pos(t, t->caret), t->caret);
   }
 }
@@ -313,15 +373,18 @@ void ccord_text_edit_delete_word(ccord_text_edit *t)
   if (!t) return;
   if (has_selection(t)) {
     record_undo(t);
+    t->last_undo_op = UNDO_OP_NONE;
     erase_selection(t);
   } else if (t->caret < t->len) {
     record_undo(t);
+    t->last_undo_op = UNDO_OP_NONE;
     erase_range(t, t->caret, next_word_pos(t, t->caret));
   }
 }
 
 void ccord_text_edit_move(ccord_text_edit *t, int dir, bool extend)
 {
+  t->last_undo_op = UNDO_OP_NONE;
   size_t pos = t->caret;
   if (!extend && has_selection(t) && (dir == -1 || dir == 1 || dir == -3 || dir == 3)) {
     // Collapsing a selection with an arrow key jumps to the matching edge.
@@ -349,6 +412,7 @@ void ccord_text_edit_move(ccord_text_edit *t, int dir, bool extend)
 
 void ccord_text_edit_select_all(ccord_text_edit *t)
 {
+  t->last_undo_op = UNDO_OP_NONE;
   t->anchor = 0;
   t->caret = t->len;
 }
@@ -384,6 +448,7 @@ void ccord_text_edit_select_line_at(ccord_text_edit *t, size_t byte_pos)
 
 void ccord_text_edit_set_caret(ccord_text_edit *t, size_t byte_pos, bool extend)
 {
+  t->last_undo_op = UNDO_OP_NONE;
   if (byte_pos > t->len) byte_pos = t->len;
   // Snap to a code point boundary (move back to the lead byte).
   while (byte_pos > 0 && byte_pos < t->len && ((uint8_t)t->data[byte_pos] & 0xC0u) == 0x80u) byte_pos--;
@@ -391,13 +456,14 @@ void ccord_text_edit_set_caret(ccord_text_edit *t, size_t byte_pos, bool extend)
   if (!extend) t->anchor = byte_pos;
 }
 
-static bool restore_entry(ccord_text_edit *t, ccord_text_undo_entry *src_stk, size_t *src_len,
-                          ccord_text_undo_entry *dst_stk, size_t *dst_len)
+static bool restore_entry(ccord_text_edit *t, ccord_text_undo_entry **src_stk, size_t *src_len,
+                          ccord_text_undo_entry **dst_stk, size_t *dst_len, size_t *dst_cap)
 {
-  if (!t || *src_len == 0) return false;
-  push_entry(dst_stk, dst_len, t);
-  ccord_text_undo_entry e = src_stk[*src_len - 1];
-  src_stk[*src_len - 1] = (ccord_text_undo_entry){0};
+  if (!t || !*src_stk || *src_len == 0) return false;
+  t->last_undo_op = UNDO_OP_NONE;
+  push_entry(dst_stk, dst_len, dst_cap, t);
+  ccord_text_undo_entry e = (*src_stk)[*src_len - 1];
+  (*src_stk)[*src_len - 1] = (ccord_text_undo_entry){0};
   (*src_len)--;
   size_t need = e.len + 1;
   if (need > t->cap) {
@@ -424,12 +490,12 @@ static bool restore_entry(ccord_text_edit *t, ccord_text_undo_entry *src_stk, si
 
 bool ccord_text_edit_undo(ccord_text_edit *t)
 {
-  return restore_entry(t, t->undo, &t->undo_len, t->redo, &t->redo_len);
+  return restore_entry(t, &t->undo, &t->undo_len, &t->redo, &t->redo_len, &t->redo_cap);
 }
 
 bool ccord_text_edit_redo(ccord_text_edit *t)
 {
-  return restore_entry(t, t->redo, &t->redo_len, t->undo, &t->undo_len);
+  return restore_entry(t, &t->redo, &t->redo_len, &t->undo, &t->undo_len, &t->undo_cap);
 }
 
 char *ccord_text_edit_copy_selection(const ccord_text_edit *t)

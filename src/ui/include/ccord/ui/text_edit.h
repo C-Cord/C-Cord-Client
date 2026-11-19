@@ -15,10 +15,12 @@ typedef struct ccord_text_edit {
   char *data;
   size_t len, cap, max_bytes;
   size_t caret, anchor;   // anchor==caret -> no selection
-  ccord_text_undo_entry undo[CCORD_TEXT_UNDO_CAP];
-  size_t undo_len;
-  ccord_text_undo_entry redo[CCORD_TEXT_UNDO_CAP];
-  size_t redo_len;
+  ccord_text_undo_entry *undo;
+  size_t undo_len, undo_cap;
+  ccord_text_undo_entry *redo;
+  size_t redo_len, redo_cap;
+  size_t last_undo_caret;
+  uint8_t last_undo_op;
 } ccord_text_edit;
 
 void ccord_text_edit_init(ccord_text_edit *t, size_t max_bytes);
