@@ -8961,7 +8961,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       v.self_stream = false;
       v.suppress = false;
       v.request_to_speak_timestamp = 0;
-      memmove(&m->voices[vi], &m->voices[vi + 1u], (m->nvoices - (size_t)vi - 1u) * sizeof *m->voices);
+      memmove(&m->voices[vi], &m->voices[(size_t)vi + 1u], (m->nvoices - (size_t)vi - 1u) * sizeof *m->voices);
       m->nvoices--;
       m->snap.voice_state_count = m->nvoices;
       if (m->has_stream && m->stream.guild_id == g && m->stream.user_id == req->user_id) {

@@ -106,7 +106,7 @@ jobs:
             -DCCORD_BUILD_TESTS=OFF \
             -DCCORD_VERSION="${VER}" \
             -DCMAKE_INSTALL_PREFIX=/tmp/ccord-macos-stage
-          cmake --build build-macos --parallel "$(sysctl -n hw.ncpu)"
+          cmake --build build-macos --parallel "$(sysctl -n hw.ncpu)" -- -k 0
       - name: Smoke Test (macOS)
         run: |
           cmake --install build-macos
@@ -160,7 +160,7 @@ jobs:
             -DCCORD_BUILD_TESTS=OFF \
             -DCCORD_VERSION="${VER}" \
             -DCMAKE_INSTALL_PREFIX=/tmp/ccord-win-stage
-          cmake --build build-win --parallel "$(nproc)"
+          cmake --build build-win --parallel "$(nproc)" -- -k 0
       - name: Smoke Test (Windows)
         run: |
           cmake --install build-win
