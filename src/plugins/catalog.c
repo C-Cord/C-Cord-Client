@@ -16,6 +16,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <limits.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,7 +90,7 @@ typedef struct worker_job {
   char expected_sha256[65];
   char version[33];
   char etag[128];
-  char dest_path[CCORD_PATH_MAX + 160];
+  char *dest_path; // owned by job (JOB_INSTALL only), transferred to worker_result
   char *post_body; // owned by job until worker frees it
   size_t post_len;
   ccord_plugin_tier tier;
@@ -107,7 +108,7 @@ typedef struct worker_result {
   char version[33];
   char sha256[65];
   char etag[128];
-  char dest_path[CCORD_PATH_MAX + 160];
+  char *dest_path; // owned until pump frees after handle_result
   ccord_plugin_tier tier;
   char *body;
   size_t body_len;
@@ -115,9 +116,9 @@ typedef struct worker_result {
 } worker_result;
 
 struct ccord_catalog {
-  char data_dir[CCORD_PATH_MAX];
+  char *data_dir;
   bool has_data_dir;
-  char base_url[256];
+  char *base_url;
   ccord_contrib *contrib;
   ccord_catalog_http http;
   ccord_catalog_host_cbs cbs;
@@ -134,8 +135,8 @@ struct ccord_catalog {
   char cur_sort[16];
   uint64_t discover_req_seq;
 
-  // On-demand single plugin detail (for Detail view & ccord:// deep links)
-  cat_item detail;
+  // On-demand single plugin detail (lazily heap-allocated on first detail fetch)
+  cat_item *detail;
   bool has_detail;
   char detail_target_id[65];
   char detail_etag[128];
@@ -155,23 +156,25 @@ struct ccord_catalog {
   installed_meta *meta;
   size_t nmeta, capmeta;
 
-  // Active download/install IDs
-  char installing_ids[CATALOG_MAX_INFLIGHT_INSTALLS][65];
+  // Active download/install IDs (lazily allocated on first install)
+  char (*installing_ids)[65];
   size_t ninstalling;
 
   bool initial_check_queued;
   uint64_t created_ms;
   uint64_t last_check_ms;
 
+  // Worker thread & queues (lazily allocated & spawned on first job enqueue)
   ccord_thread *thread;
   bool thread_started;
   ccord_mutex *mu;
   ccord_cond *cv;
   bool stop;
+  _Atomic uint32_t ready_count;
 
-  worker_job jobs[CATALOG_QUEUE_CAP];
+  worker_job *jobs;
   size_t job_head, job_count;
-  worker_result results[CATALOG_QUEUE_CAP];
+  worker_result *results;
   size_t res_head, res_count;
 };
 
@@ -308,7 +311,7 @@ static char *read_entire_file(const char *path, size_t max_bytes, size_t *out_le
 
 static bool is_installing(const ccord_catalog *cat, const char *id)
 {
-  if (!cat || !id || !id[0]) return false;
+  if (!cat || !cat->installing_ids || !id || !id[0]) return false;
   for (size_t i = 0; i < cat->ninstalling; i++) {
     if (strcmp(cat->installing_ids[i], id) == 0) return true;
   }
@@ -318,17 +321,23 @@ static bool is_installing(const ccord_catalog *cat, const char *id)
 static void set_installing(ccord_catalog *cat, const char *id, bool on)
 {
   if (!cat || !id || !id[0]) return;
-  for (size_t i = 0; i < cat->ninstalling; i++) {
-    if (strcmp(cat->installing_ids[i], id) == 0) {
-      if (!on) {
-        memmove(&cat->installing_ids[i], &cat->installing_ids[i + 1],
-                (cat->ninstalling - i - 1) * sizeof cat->installing_ids[0]);
-        cat->ninstalling--;
+  if (cat->installing_ids) {
+    for (size_t i = 0; i < cat->ninstalling; i++) {
+      if (strcmp(cat->installing_ids[i], id) == 0) {
+        if (!on) {
+          memmove(&cat->installing_ids[i], &cat->installing_ids[i + 1],
+                  (cat->ninstalling - i - 1) * sizeof cat->installing_ids[0]);
+          cat->ninstalling--;
+        }
+        return;
       }
-      return;
     }
   }
   if (on && cat->ninstalling < CATALOG_MAX_INFLIGHT_INSTALLS) {
+    if (!cat->installing_ids) {
+      cat->installing_ids = ccord_calloc(CATALOG_MAX_INFLIGHT_INSTALLS, sizeof *cat->installing_ids);
+      if (!cat->installing_ids) return;
+    }
     copy_str(cat->installing_ids[cat->ninstalling++], sizeof cat->installing_ids[0], id);
   }
 }
@@ -901,7 +910,7 @@ static const cat_item *find_update_item(const ccord_catalog *cat, const char *id
 static const cat_item *find_best_item(const ccord_catalog *cat, const char *id)
 {
   if (!cat || !id) return nullptr;
-  if (cat->has_detail && strcmp(cat->detail.id, id) == 0) return &cat->detail;
+  if (cat->has_detail && cat->detail && strcmp(cat->detail->id, id) == 0) return cat->detail;
   const cat_item *u = find_update_item(cat, id);
   if (u) return u;
   for (size_t i = 0; i < cat->ndiscover; i++) {
@@ -1028,10 +1037,10 @@ static void publish_catalog(ccord_catalog *cat)
   ccord_free(upd_vers);
 
   // 2. Publish on-demand detail entry
-  if (cat->has_detail) {
+  if (cat->has_detail && cat->detail) {
     char det_ver[33];
     ccord_catalog_entry det_e = {0};
-    build_contrib_entry(cat, &cat->detail, det_ver, &det_e, nullptr);
+    build_contrib_entry(cat, cat->detail, det_ver, &det_e, nullptr);
     ccord_contrib_set_catalog_detail(cat->contrib, &det_e);
   } else {
     ccord_contrib_set_catalog_detail(cat->contrib, nullptr);
@@ -1070,11 +1079,40 @@ static void enforce_revocations(ccord_catalog *cat)
 
 // ---------------------------------------------------------------- worker thread
 
+static void worker_main(void *arg);
+
+static bool ensure_worker_started(ccord_catalog *cat)
+{
+  if (cat->thread_started) return true;
+  if (!cat->jobs) {
+    cat->jobs = ccord_calloc(CATALOG_QUEUE_CAP, sizeof *cat->jobs);
+    if (!cat->jobs) return false;
+  }
+  if (!cat->results) {
+    cat->results = ccord_calloc(CATALOG_QUEUE_CAP, sizeof *cat->results);
+    if (!cat->results) return false;
+  }
+  if (!cat->mu) {
+    cat->mu = ccord_mutex_create();
+    if (!cat->mu) return false;
+  }
+  if (!cat->cv) {
+    cat->cv = ccord_cond_create();
+    if (!cat->cv) return false;
+  }
+  cat->thread = ccord_thread_create(worker_main, cat);
+  if (!cat->thread) return false;
+  cat->thread_started = true;
+  return true;
+}
+
 static bool enqueue_job(ccord_catalog *cat, worker_job *job)
 {
-  if (!cat || !cat->thread_started) {
+  if (!cat || !ensure_worker_started(cat)) {
     ccord_free(job->post_body);
     job->post_body = nullptr;
+    ccord_free(job->dest_path);
+    job->dest_path = nullptr;
     return false;
   }
   ccord_mutex_lock(cat->mu);
@@ -1082,6 +1120,8 @@ static bool enqueue_job(ccord_catalog *cat, worker_job *job)
     ccord_mutex_unlock(cat->mu);
     ccord_free(job->post_body);
     job->post_body = nullptr;
+    ccord_free(job->dest_path);
+    job->dest_path = nullptr;
     return false;
   }
   size_t tail = (cat->job_head + cat->job_count) % CATALOG_QUEUE_CAP;
@@ -1099,8 +1139,10 @@ static void push_result(ccord_catalog *cat, const worker_result *res)
     size_t tail = (cat->res_head + cat->res_count) % CATALOG_QUEUE_CAP;
     cat->results[tail] = *res;
     cat->res_count++;
+    atomic_store_explicit(&cat->ready_count, (uint32_t)cat->res_count, memory_order_release);
   } else {
     ccord_free(res->body);
+    ccord_free(res->dest_path);
   }
   ccord_mutex_unlock(cat->mu);
 }
@@ -1131,7 +1173,8 @@ static void worker_main(void *arg)
     res.tier = job.tier;
     copy_str(res.id, sizeof res.id, job.id);
     copy_str(res.version, sizeof res.version, job.version);
-    copy_str(res.dest_path, sizeof res.dest_path, job.dest_path);
+    res.dest_path = job.dest_path;
+    job.dest_path = nullptr;
 
     if (job.kind == JOB_DISCOVER_QUERY || job.kind == JOB_FETCH_DETAIL || job.kind == JOB_FETCH_REVOCATIONS) {
       if (!cat->http.get) {
@@ -1153,16 +1196,16 @@ static void worker_main(void *arg)
                                      res.error, sizeof res.error);
       }
     } else if (job.kind == JOB_INSTALL) {
-      if (!cat->http.download_file) {
+      if (!cat->http.download_file || !res.dest_path) {
         copy_str(res.error, sizeof res.error, "network downloader unavailable");
-      } else if (cat->http.download_file(cat->http.ud, job.url, job.dest_path, CATALOG_MAX_CCE_BYTES,
+      } else if (cat->http.download_file(cat->http.ud, job.url, res.dest_path, CATALOG_MAX_CCE_BYTES,
                                          res.error, sizeof res.error)) {
         char actual_sha[65];
-        if (!ccord_catalog_sha256_file_hex(job.dest_path, actual_sha)) {
-          ccord_file_unlink(job.dest_path);
+        if (!ccord_catalog_sha256_file_hex(res.dest_path, actual_sha)) {
+          ccord_file_unlink(res.dest_path);
           copy_str(res.error, sizeof res.error, "failed computing SHA-256 of downloaded package");
         } else if (!hex_equal_ci(actual_sha, job.expected_sha256)) {
-          ccord_file_unlink(job.dest_path);
+          ccord_file_unlink(res.dest_path);
           snprintf(res.error, sizeof res.error, "SHA-256 integrity mismatch for %s (download aborted)", job.id);
         } else {
           copy_str(res.sha256, sizeof res.sha256, actual_sha);
@@ -1201,8 +1244,12 @@ static void queue_install_item(ccord_catalog *cat, const cat_item *it, bool is_a
   copy_str(job.url, sizeof job.url, it->download_url);
   copy_str(job.expected_sha256, sizeof job.expected_sha256, it->sha256);
   copy_str(job.version, sizeof job.version, it->version);
-  int dn = snprintf(job.dest_path, sizeof job.dest_path, "%s/%s-%s.cce", tmp_dir, it->id, it->version);
-  if (dn < 0 || (size_t)dn >= sizeof job.dest_path) return;
+  char dpath[CCORD_PATH_MAX + 160];
+  int dn = snprintf(dpath, sizeof dpath, "%s/%s-%s.cce", tmp_dir, it->id, it->version);
+  if (dn < 0 || (size_t)dn >= sizeof dpath) return;
+  job.dest_path = ccord_malloc((size_t)dn + 1u);
+  if (!job.dest_path) return;
+  memcpy(job.dest_path, dpath, (size_t)dn + 1u);
   if (enqueue_job(cat, &job)) {
     set_installing(cat, it->id, true);
     snprintf(cat->status.status_msg, sizeof cat->status.status_msg, "Downloading %s v%s...", it->name, it->version);
@@ -1353,7 +1400,7 @@ static void enqueue_detail_fetch(ccord_catalog *cat, const char *id, bool instal
   };
   copy_str(job.id, sizeof job.id, id);
   snprintf(job.url, sizeof job.url, "%s/api/v2/plugins/%s", cat->base_url, enc_id);
-  if (cat->has_detail && strcmp(cat->detail.id, id) == 0 && cat->detail_etag[0]) {
+  if (cat->has_detail && cat->detail && strcmp(cat->detail->id, id) == 0 && cat->detail_etag[0]) {
     copy_str(job.etag, sizeof job.etag, cat->detail_etag);
   }
   copy_str(cat->detail_target_id, sizeof cat->detail_target_id, id);
@@ -1437,16 +1484,23 @@ ccord_catalog *ccord_catalog_create(const char *data_dir, ccord_contrib *contrib
   if (cbs) cat->cbs = *cbs;
   copy_str(cat->cur_sort, sizeof cat->cur_sort, "popular");
   if (data_dir && data_dir[0]) {
-    copy_str(cat->data_dir, sizeof cat->data_dir, data_dir);
-    cat->has_data_dir = true;
+    cat->data_dir = ccord_strdup(data_dir);
+    cat->has_data_dir = cat->data_dir != nullptr;
   }
 
   const char *env_url = getenv("CCORD_CATALOG_URL");
-  copy_str(cat->base_url, sizeof cat->base_url,
+  char url_buf[256];
+  copy_str(url_buf, sizeof url_buf,
            (env_url && env_url[0]) ? env_url : CATALOG_DEFAULT_BASE_URL);
-  size_t blen = strlen(cat->base_url);
-  while (blen > 0 && cat->base_url[blen - 1] == '/') {
-    cat->base_url[--blen] = '\0';
+  size_t blen = strlen(url_buf);
+  while (blen > 0 && url_buf[blen - 1] == '/') {
+    url_buf[--blen] = '\0';
+  }
+  cat->base_url = ccord_strdup(url_buf);
+  if (!cat->base_url) {
+    ccord_free(cat->data_dir);
+    ccord_free(cat);
+    return nullptr;
   }
   copy_str(cat->status.catalog_url, sizeof cat->status.catalog_url, cat->base_url);
 
@@ -1454,12 +1508,8 @@ ccord_catalog *ccord_catalog_create(const char *data_dir, ccord_contrib *contrib
   load_installed_meta(cat);
   load_revocations_cache(cat);
 
-  cat->mu = ccord_mutex_create();
-  cat->cv = ccord_cond_create();
-  if (cat->mu && cat->cv) {
-    cat->thread = ccord_thread_create(worker_main, cat);
-    if (cat->thread) cat->thread_started = true;
-  }
+  // Worker thread, mutex/cond, and job/result queues are allocated lazily on first job enqueue.
+  atomic_init(&cat->ready_count, 0u);
   if (!cat->http.get && !cat->http.post_json) {
     cat->status.offline = true;
     copy_str(cat->status.status_msg, sizeof cat->status.status_msg, "Offline mode");
@@ -1479,23 +1529,36 @@ void ccord_catalog_destroy(ccord_catalog *cat)
     ccord_mutex_unlock(cat->mu);
     ccord_thread_join(cat->thread);
     cat->thread = nullptr;
+    cat->thread_started = false;
   }
-  while (cat->job_count > 0) {
-    ccord_free(cat->jobs[cat->job_head].post_body);
-    cat->job_head = (cat->job_head + 1) % CATALOG_QUEUE_CAP;
-    cat->job_count--;
+  if (cat->jobs) {
+    while (cat->job_count > 0) {
+      ccord_free(cat->jobs[cat->job_head].post_body);
+      ccord_free(cat->jobs[cat->job_head].dest_path);
+      cat->job_head = (cat->job_head + 1) % CATALOG_QUEUE_CAP;
+      cat->job_count--;
+    }
+    ccord_free(cat->jobs);
   }
-  while (cat->res_count > 0) {
-    ccord_free(cat->results[cat->res_head].body);
-    cat->res_head = (cat->res_head + 1) % CATALOG_QUEUE_CAP;
-    cat->res_count--;
+  if (cat->results) {
+    while (cat->res_count > 0) {
+      ccord_free(cat->results[cat->res_head].body);
+      ccord_free(cat->results[cat->res_head].dest_path);
+      cat->res_head = (cat->res_head + 1) % CATALOG_QUEUE_CAP;
+      cat->res_count--;
+    }
+    ccord_free(cat->results);
   }
-  ccord_cond_destroy(cat->cv);
-  ccord_mutex_destroy(cat->mu);
+  if (cat->cv) ccord_cond_destroy(cat->cv);
+  if (cat->mu) ccord_mutex_destroy(cat->mu);
+  ccord_free(cat->installing_ids);
+  ccord_free(cat->detail);
   ccord_free(cat->discover);
   ccord_free(cat->updates);
   ccord_free(cat->revoked);
   ccord_free(cat->meta);
+  ccord_free(cat->data_dir);
+  ccord_free(cat->base_url);
   ccord_free(cat);
 }
 
@@ -1577,22 +1640,28 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
       if (res->install_after_detail && cat->cbs.toast) {
         cat->cbs.toast(cat->cbs.ud, cat->status.detail_error, 2);
       }
-    } else if (res->not_modified && cat->has_detail && strcmp(cat->detail.id, res->id) == 0) {
+    } else if (res->not_modified && cat->has_detail && cat->detail && strcmp(cat->detail->id, res->id) == 0) {
       cat->status.offline = false;
       cat->status.detail_error[0] = '\0';
       if (res->install_after_detail) {
-        queue_install_item(cat, &cat->detail, false);
+        queue_install_item(cat, cat->detail, false);
       }
     } else if (res->body) {
       cat_item parsed = {0};
       if (parse_detail_json(res->body, res->body_len, &parsed)) {
-        cat->status.offline = false;
-        cat->status.detail_error[0] = '\0';
-        cat->detail = parsed;
-        cat->has_detail = true;
-        if (res->etag[0]) copy_str(cat->detail_etag, sizeof cat->detail_etag, res->etag);
-        if (res->install_after_detail) {
-          queue_install_item(cat, &cat->detail, false);
+        if (!cat->detail) cat->detail = ccord_calloc(1, sizeof *cat->detail);
+        if (cat->detail) {
+          cat->status.offline = false;
+          cat->status.detail_error[0] = '\0';
+          *cat->detail = parsed;
+          cat->has_detail = true;
+          if (res->etag[0]) copy_str(cat->detail_etag, sizeof cat->detail_etag, res->etag);
+          if (res->install_after_detail) {
+            queue_install_item(cat, cat->detail, false);
+          }
+        } else {
+          if (res->install_after_detail) set_installing(cat, res->id, false);
+          copy_str(cat->status.detail_error, sizeof cat->status.detail_error, "Out of memory");
         }
       } else {
         if (res->install_after_detail) set_installing(cat, res->id, false);
@@ -1650,9 +1719,9 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
       return;
     }
     char err_buf[256] = "";
-    bool imported = cat->cbs.import_verified_cce &&
+    bool imported = res->dest_path && cat->cbs.import_verified_cce &&
                     cat->cbs.import_verified_cce(cat->cbs.ud, res->dest_path, err_buf, sizeof err_buf);
-    ccord_file_unlink(res->dest_path);
+    if (res->dest_path) ccord_file_unlink(res->dest_path);
     if (!imported) {
       snprintf(cat->status.status_msg, sizeof cat->status.status_msg,
                "Install failed for %s: %.160s", res->id, err_buf[0] ? err_buf : "import error");
@@ -1691,6 +1760,11 @@ void ccord_catalog_pump(ccord_catalog *cat, uint64_t now_ms)
     ccord_catalog_check_updates(cat);
   }
 
+  // Lock-free atomic fast-path when idle (avoids mutex lock at 60-144 Hz).
+  if (!cat->thread_started || atomic_load_explicit(&cat->ready_count, memory_order_acquire) == 0) {
+    return;
+  }
+
   for (;;) {
     worker_result res = {0};
     bool has = false;
@@ -1699,10 +1773,12 @@ void ccord_catalog_pump(ccord_catalog *cat, uint64_t now_ms)
       res = cat->results[cat->res_head];
       cat->res_head = (cat->res_head + 1) % CATALOG_QUEUE_CAP;
       cat->res_count--;
+      atomic_store_explicit(&cat->ready_count, (uint32_t)cat->res_count, memory_order_release);
       has = true;
     }
     ccord_mutex_unlock(cat->mu);
     if (!has) break;
     handle_result(cat, &res);
+    ccord_free(res.dest_path);
   }
 }

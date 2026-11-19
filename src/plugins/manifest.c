@@ -85,7 +85,7 @@ static bool valid_main(const char *s, size_t n)
 }
 
 static ccord_status get_string(const ccord_json *obj, const char *key, const char *max_key, char *dst, size_t dst_cap,
-                               size_t max_len, bool required, ccord_error *err)
+                               size_t max_len, bool required, size_t *out_len, ccord_error *err)
 {
   const ccord_json *j = ccord_json_get(obj, key);
   if (!j) {
@@ -101,13 +101,13 @@ static ccord_status get_string(const ccord_json *obj, const char *key, const cha
     ccord_error_set(err, CCORD_ERR_PARSE, "plugin.json: '%s' must be a string", key);
     return CCORD_ERR_PARSE;
   }
-  if (n > max_len) {
+  if (n > max_len || n >= dst_cap) {
     ccord_error_set(err, CCORD_ERR_INVALID, "plugin.json: '%s' longer than %s", key, max_key);
     return CCORD_ERR_INVALID;
   }
-  (void)dst_cap;
   memcpy(dst, s, n);
   dst[n] = '\0';
+  if (out_len) *out_len = n;
   return CCORD_OK;
 }
 
@@ -311,7 +311,7 @@ ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *
     "permissions", "limits", "platforms", "requires_capabilities",
   };
   ccord_arena arena;
-  ccord_arena_init(&arena, 0);
+  ccord_arena_init(&arena, len < 2048u ? 2048u : 0u);
   ccord_error pe = {0};
   const ccord_json_limits lim = {16, 8192, 1u << 20};
   const ccord_json *root = ccord_json_parse(&arena, json, len, &lim, &pe);
@@ -348,24 +348,29 @@ ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *
   out->api_version = (uint32_t)iv;
 
   // Strings: validated after copy-out so the lengths are known.
-  if ((st = get_string(root, "id", "64 bytes", out->id, sizeof out->id, 64, true, err)) != CCORD_OK) goto done;
-  if (!valid_id(out->id, strlen(out->id))) { st = bad(err, CCORD_ERR_INVALID, "plugin.json: invalid 'id'"); goto done; }
-  if ((st = get_string(root, "name", "64 bytes", out->name, sizeof out->name, 64, true, err)) != CCORD_OK) goto done;
-  if (!valid_text(out->name, strlen(out->name)) || out->name[0] == '\0') {
+  size_t slen = 0;
+  if ((st = get_string(root, "id", "64 bytes", out->id, sizeof out->id, 64, true, &slen, err)) != CCORD_OK) goto done;
+  if (!valid_id(out->id, slen)) { st = bad(err, CCORD_ERR_INVALID, "plugin.json: invalid 'id'"); goto done; }
+  slen = 0;
+  if ((st = get_string(root, "name", "64 bytes", out->name, sizeof out->name, 64, true, &slen, err)) != CCORD_OK) goto done;
+  if (!valid_text(out->name, slen) || slen == 0) {
     st = bad(err, CCORD_ERR_INVALID, "plugin.json: 'name' must be 1-64 bytes of text");
     goto done;
   }
-  if ((st = get_string(root, "version", "32 bytes", out->version, sizeof out->version, 32, true, err)) != CCORD_OK) goto done;
-  if (!valid_version(out->version, strlen(out->version))) { st = bad(err, CCORD_ERR_INVALID, "plugin.json: 'version' must be MAJOR.MINOR.PATCH"); goto done; }
-  if ((st = get_string(root, "description", "200 bytes", out->description, sizeof out->description, 200, false, err)) != CCORD_OK) goto done;
-  if ((st = get_string(root, "license", "32 bytes", out->license, sizeof out->license, 32, false, err)) != CCORD_OK) goto done;
-  if (ccord_json_get(root, "description") && !valid_text(out->description, strlen(out->description))) {
+  slen = 0;
+  if ((st = get_string(root, "version", "32 bytes", out->version, sizeof out->version, 32, true, &slen, err)) != CCORD_OK) goto done;
+  if (!valid_version(out->version, slen)) { st = bad(err, CCORD_ERR_INVALID, "plugin.json: 'version' must be MAJOR.MINOR.PATCH"); goto done; }
+  slen = 0;
+  if ((st = get_string(root, "description", "200 bytes", out->description, sizeof out->description, 200, false, &slen, err)) != CCORD_OK) goto done;
+  if ((st = get_string(root, "license", "32 bytes", out->license, sizeof out->license, 32, false, nullptr, err)) != CCORD_OK) goto done;
+  if (slen > 0 && !valid_text(out->description, slen)) {
     st = bad(err, CCORD_ERR_INVALID, "plugin.json: 'description' must be text");
     goto done;
   }
   strcpy(out->main, "main.lua");
-  if ((st = get_string(root, "main", "128 bytes", out->main, sizeof out->main, 128, false, err)) != CCORD_OK) goto done;
-  if (!valid_main(out->main, strlen(out->main))) { st = bad(err, CCORD_ERR_INVALID, "plugin.json: invalid 'main'"); goto done; }
+  slen = sizeof("main.lua") - 1u;
+  if ((st = get_string(root, "main", "128 bytes", out->main, sizeof out->main, 128, false, &slen, err)) != CCORD_OK) goto done;
+  if (!valid_main(out->main, slen)) { st = bad(err, CCORD_ERR_INVALID, "plugin.json: invalid 'main'"); goto done; }
 
   const ccord_json *perms = ccord_json_get(root, "permissions");
   if (perms) {

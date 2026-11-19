@@ -57,16 +57,22 @@ static bool mkdir_p(const char *path)
   return ccord_mkdir_p(path, 0755, &err) == CCORD_OK;
 }
 
-static bool read_all(const char *path, uint8_t **out, size_t *out_len)
+static bool read_all(const char *path, size_t max_bytes, uint8_t **out, size_t *out_len, bool *too_large)
 {
+  if (too_large) *too_large = false;
   FILE *f = fopen(path, "rb");
   if (!f) return false;
   if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return false; }
   long sz = ftell(f);
   if (sz < 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
+  if (max_bytes > 0 && (size_t)sz > max_bytes) {
+    if (too_large) *too_large = true;
+    fclose(f);
+    return false;
+  }
   uint8_t *buf = ccord_malloc((size_t)sz + 1);
   if (!buf) { fclose(f); return false; }
-  size_t rd = fread(buf, 1, (size_t)sz, f);
+  size_t rd = sz ? fread(buf, 1, (size_t)sz, f) : 0;
   fclose(f);
   buf[rd] = 0;
   *out = buf;
@@ -88,19 +94,25 @@ static bool inflate_raw(const uint8_t *src, size_t slen, uint8_t *dst, size_t dl
   return ok;
 }
 
+typedef struct extract_scratch {
+  char name[CCORD_PATH_MAX];
+  char out_path[CCORD_PATH_MAX];
+} extract_scratch;
+
 bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf, size_t err_cap)
 {
   if (!zip_path || !dest_dir) { set_err(err_buf, err_cap, "invalid arguments"); return false; }
   uint8_t *data = nullptr;
   size_t len = 0;
-  if (!read_all(zip_path, &data, &len) || len < 22) {
+  bool too_large = false;
+  if (!read_all(zip_path, 64u * 1024u * 1024u, &data, &len, &too_large)) {
     ccord_free(data);
-    set_err(err_buf, err_cap, "cannot read package file");
+    set_err(err_buf, err_cap, too_large ? "archive exceeds 64 MiB limit" : "cannot read package file");
     return false;
   }
-  if (len > 64u * 1024u * 1024u) {
+  if (len < 22) {
     ccord_free(data);
-    set_err(err_buf, err_cap, "archive exceeds 64 MiB limit");
+    set_err(err_buf, err_cap, "cannot read package file");
     return false;
   }
 
@@ -131,6 +143,13 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
     return false;
   }
 
+  extract_scratch *sc = ccord_malloc(sizeof *sc);
+  if (!sc) {
+    ccord_free(data);
+    set_err(err_buf, err_cap, "out of memory");
+    return false;
+  }
+
   // Detect if all entries share a single top-level directory containing plugin.json
   char prefix[256] = "";
   bool has_root_manifest = false;
@@ -139,24 +158,28 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
   uint64_t cumulative_usize = 0;
   for (uint16_t i = 0; i < nentries; i++) {
     if (pos + 46 > cd_off + cd_size || rd32(data + pos) != 0x02014b50u) {
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "corrupt central directory header");
       return false;
     }
     uint32_t usize = rd32(data + pos + 24);
     if (usize > 32u * 1024u * 1024u) {
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "entry exceeds 32 MiB uncompressed limit");
       return false;
     }
     cumulative_usize += usize;
     if (cumulative_usize > 128u * 1024u * 1024u) {
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "archive exceeds 128 MiB cumulative uncompressed limit");
       return false;
     }
     uint32_t ext_attr = rd32(data + pos + 38);
     if (((ext_attr >> 16) & 0170000u) == 0120000u) {
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "symlink external attributes rejected");
       return false;
@@ -165,29 +188,30 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
     uint16_t elen = rd16(data + pos + 30);
     uint16_t clen = rd16(data + pos + 32);
     if (pos + 46 + nlen + elen + clen > cd_off + cd_size) {
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "truncated central directory entry");
       return false;
     }
-    char name[CCORD_PATH_MAX];
-    size_t copy = nlen < sizeof name - 1 ? nlen : sizeof name - 1;
-    memcpy(name, data + pos + 46, copy);
-    name[copy] = '\0';
-    if (strcmp(name, "plugin.json") == 0) has_root_manifest = true;
-    const char *sl = strchr(name, '/');
+    size_t copy = nlen < sizeof sc->name - 1 ? nlen : sizeof sc->name - 1;
+    memcpy(sc->name, data + pos + 46, copy);
+    sc->name[copy] = '\0';
+    if (strcmp(sc->name, "plugin.json") == 0) has_root_manifest = true;
+    const char *sl = strchr(sc->name, '/');
     if (!sl) {
       same_prefix = false;
     } else {
-      size_t plen = (size_t)(sl - name) + 1;
+      size_t plen = (size_t)(sl - sc->name) + 1;
       if (plen >= sizeof prefix) same_prefix = false;
-      else if (prefix[0] == '\0') { memcpy(prefix, name, plen); prefix[plen] = '\0'; }
-      else if (strncmp(prefix, name, plen) != 0 || prefix[plen] != '\0') same_prefix = false;
+      else if (prefix[0] == '\0') { memcpy(prefix, sc->name, plen); prefix[plen] = '\0'; }
+      else if (strncmp(prefix, sc->name, plen) != 0 || prefix[plen] != '\0') same_prefix = false;
     }
     pos += (size_t)46 + nlen + elen + clen;
   }
   size_t strip_len = (!has_root_manifest && same_prefix) ? strlen(prefix) : 0;
 
   if (!mkdir_p(dest_dir)) {
+    ccord_free(sc);
     ccord_free(data);
     set_err(err_buf, err_cap, "cannot create destination directory");
     return false;
@@ -203,33 +227,39 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
     uint16_t elen = rd16(data + pos + 30);
     uint16_t clen = rd16(data + pos + 32);
     uint32_t lhoff = rd32(data + pos + 42);
-    char name[CCORD_PATH_MAX];
-    size_t copy = nlen < sizeof name - 1 ? nlen : sizeof name - 1;
-    memcpy(name, data + pos + 46, copy);
-    name[copy] = '\0';
+    size_t copy = nlen < sizeof sc->name - 1 ? nlen : sizeof sc->name - 1;
+    memcpy(sc->name, data + pos + 46, copy);
+    sc->name[copy] = '\0';
     pos += (size_t)46 + nlen + elen + clen;
 
-    const char *rel = name + strip_len;
+    const char *rel = sc->name + strip_len;
     if (!rel[0]) continue;
     if (!safe_rel_path(rel)) {
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "unsafe path in archive");
       return false;
     }
 
-    char out_path[CCORD_PATH_MAX];
-    if (snprintf(out_path, sizeof out_path, "%s/%s", dest_dir, rel) >= (int)sizeof out_path) {
+    if (snprintf(sc->out_path, sizeof sc->out_path, "%s/%s", dest_dir, rel) >= (int)sizeof sc->out_path) {
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "path too long");
       return false;
     }
 
     if (rel[strlen(rel) - 1] == '/') {
-      if (!mkdir_p(out_path)) { ccord_free(data); set_err(err_buf, err_cap, "mkdir failed"); return false; }
+      if (!mkdir_p(sc->out_path)) {
+        ccord_free(sc);
+        ccord_free(data);
+        set_err(err_buf, err_cap, "mkdir failed");
+        return false;
+      }
       continue;
     }
 
     if ((uint64_t)lhoff + 30 > len || rd32(data + lhoff) != 0x04034b50u) {
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "corrupt local file header");
       return false;
@@ -238,19 +268,27 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
     uint16_t lh_elen = rd16(data + lhoff + 28);
     uint64_t doff = (uint64_t)lhoff + 30 + lh_nlen + lh_elen;
     if (doff + csize > len) {
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "truncated file payload");
       return false;
     }
 
-    // Ensure parent dir exists
-    char parent[CCORD_PATH_MAX];
-    snprintf(parent, sizeof parent, "%s", out_path);
-    char *last = strrchr(parent, '/');
-    if (last) { *last = '\0'; (void)mkdir_p(parent); }
+    // Ensure parent dir exists without a separate 4 KiB buffer copy.
+    char *last = strrchr(sc->out_path, '/');
+    if (last) {
+      *last = '\0';
+      (void)mkdir_p(sc->out_path);
+      *last = '/';
+    }
 
     uint8_t *out_buf = ccord_malloc(usize ? usize : 1);
-    if (!out_buf) { ccord_free(data); set_err(err_buf, err_cap, "out of memory"); return false; }
+    if (!out_buf) {
+      ccord_free(sc);
+      ccord_free(data);
+      set_err(err_buf, err_cap, "out of memory");
+      return false;
+    }
     bool ok = false;
     if (method == 0) {
       ok = csize == usize;
@@ -260,27 +298,30 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
     }
     if (!ok || crc32(0, out_buf, (uInt)usize) != crc_exp) {
       ccord_free(out_buf);
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "decompression or CRC error");
       return false;
     }
 #if !CCORD_OS_WINDOWS
-    int fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int fd = open(sc->out_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
     FILE *wf = fd >= 0 ? fdopen(fd, "wb") : nullptr;
     if (!wf || (usize && fwrite(out_buf, 1, usize, wf) != usize)) {
       if (wf) fclose(wf);
       else if (fd >= 0) close(fd);
       ccord_free(out_buf);
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "failed writing extracted file");
       return false;
     }
     fclose(wf);
 #else
-    FILE *wf = fopen(out_path, "wb");
+    FILE *wf = fopen(sc->out_path, "wb");
     if (!wf || (usize && fwrite(out_buf, 1, usize, wf) != usize)) {
       if (wf) fclose(wf);
       ccord_free(out_buf);
+      ccord_free(sc);
       ccord_free(data);
       set_err(err_buf, err_cap, "failed writing extracted file");
       return false;
@@ -290,6 +331,7 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
     ccord_free(out_buf);
   }
 
+  ccord_free(sc);
   ccord_free(data);
   return true;
 }
@@ -325,75 +367,121 @@ static bool deflate_raw(const uint8_t *src, size_t slen, uint8_t **dst, size_t *
   return true;
 }
 
-static bool pack_walk(pack_ctx *ctx, const char *base_dir, const char *rel_prefix)
-{
+typedef struct pack_scratch {
   char dir_path[CCORD_PATH_MAX];
-  if (rel_prefix[0]) snprintf(dir_path, sizeof dir_path, "%s/%s", base_dir, rel_prefix);
-  else snprintf(dir_path, sizeof dir_path, "%s", base_dir);
-  ccord_dir *d = ccord_dir_open(dir_path);
-  if (!d) return false;
-  char ename[256];
-  bool is_dir = false;
-  while (ccord_dir_next(d, ename, sizeof ename, &is_dir)) {
-    char rel[CCORD_PATH_MAX], full[CCORD_PATH_MAX];
-    if (rel_prefix[0]) snprintf(rel, sizeof rel, "%s/%s", rel_prefix, ename);
-    else snprintf(rel, sizeof rel, "%s", ename);
-    if (snprintf(full, sizeof full, "%s/%s", base_dir, rel) >= (int)sizeof full) continue;
-    if (is_dir || ccord_path_is_dir(full)) {
-      if (!pack_walk(ctx, base_dir, rel)) { ccord_dir_close(d); return false; }
-      continue;
-    }
-    if (!ccord_path_is_file(full)) continue;
-    uint8_t *raw = nullptr;
-    size_t rlen = 0;
-    if (!read_all(full, &raw, &rlen)) { ccord_dir_close(d); return false; }
-    uint32_t crc = (uint32_t)crc32(0, raw, (uInt)rlen);
-    uint8_t *comp = nullptr;
-    size_t clen = 0;
-    uint16_t method = 8;
-    if (!deflate_raw(raw, rlen, &comp, &clen) || clen >= rlen) {
-      ccord_free(comp);
-      comp = raw;
-      clen = rlen;
-      method = 0;
-    } else {
-      ccord_free(raw);
-    }
+  char rel[CCORD_PATH_MAX];
+  char full[CCORD_PATH_MAX];
+} pack_scratch;
 
-    size_t nlen = strlen(rel);
-    uint8_t lh[30] = {0};
-    wr32(lh, 0x04034b50u);
-    wr16(lh + 4, 20);
-    wr16(lh + 8, method);
-    wr32(lh + 14, crc);
-    wr32(lh + 18, (uint32_t)clen);
-    wr32(lh + 22, (uint32_t)rlen);
-    wr16(lh + 26, (uint16_t)nlen);
-
-    uint32_t off = (uint32_t)ctx->out.len;
-    if (ccord_buf_append(&ctx->out, lh, 30) != CCORD_OK ||
-        ccord_buf_append(&ctx->out, rel, nlen) != CCORD_OK ||
-        ccord_buf_append(&ctx->out, comp, clen) != CCORD_OK) {
-      ccord_free(comp);
-      ccord_dir_close(d);
-      return false;
-    }
-    ccord_free(comp);
-
-    if (ctx->nentries == ctx->capentries) {
-      size_t ncap = ctx->capentries ? ctx->capentries * 2 : 8;
-      pack_entry *ne = ccord_realloc_array(ctx->entries, ncap, sizeof *ne);
-      if (!ne) { ccord_dir_close(d); return false; }
-      ctx->entries = ne;
-      ctx->capentries = ncap;
-    }
-    ctx->entries[ctx->nentries++] = (pack_entry){
-      .rel = ccord_strdup(rel), .crc = crc, .csize = (uint32_t)clen,
-      .usize = (uint32_t)rlen, .offset = off, .method = method,
-    };
+// Iterative directory walk with heap-allocated path scratch (eliminates ~12 KiB/level recursion frames).
+static bool pack_walk(pack_ctx *ctx, const char *base_dir)
+{
+  pack_scratch *sc = ccord_malloc(sizeof *sc);
+  if (!sc) return false;
+  char **pending = ccord_malloc(16u * sizeof *pending);
+  if (!pending) {
+    ccord_free(sc);
+    return false;
   }
-  ccord_dir_close(d);
-  return true;
+  size_t npending = 0, cappending = 16u;
+  pending[npending++] = ccord_strdup("");
+  if (!pending[0]) {
+    ccord_free(pending);
+    ccord_free(sc);
+    return false;
+  }
+
+  bool ok = true;
+  while (ok && npending > 0) {
+    char *rel_prefix = pending[--npending];
+    if (rel_prefix[0]) snprintf(sc->dir_path, sizeof sc->dir_path, "%s/%s", base_dir, rel_prefix);
+    else snprintf(sc->dir_path, sizeof sc->dir_path, "%s", base_dir);
+    ccord_dir *d = ccord_dir_open(sc->dir_path);
+    if (!d) {
+      ccord_free(rel_prefix);
+      ok = false;
+      break;
+    }
+    char ename[256];
+    bool is_dir = false;
+    while (ccord_dir_next(d, ename, sizeof ename, &is_dir)) {
+      int rlen_s = rel_prefix[0] ? snprintf(sc->rel, sizeof sc->rel, "%s/%s", rel_prefix, ename)
+                                 : snprintf(sc->rel, sizeof sc->rel, "%s", ename);
+      if (rlen_s < 0 || (size_t)rlen_s >= sizeof sc->rel) continue;
+      if (snprintf(sc->full, sizeof sc->full, "%s/%s", base_dir, sc->rel) >= (int)sizeof sc->full) continue;
+      if (is_dir || ccord_path_is_dir(sc->full)) {
+        if (npending >= 4096u) { ok = false; break; }
+        if (npending == cappending) {
+          size_t ncap = cappending * 2u;
+          char **grown = ccord_realloc_array(pending, ncap, sizeof *grown);
+          if (!grown) { ok = false; break; }
+          pending = grown;
+          cappending = ncap;
+        }
+        char *sub = ccord_strdup(sc->rel);
+        if (!sub) { ok = false; break; }
+        pending[npending++] = sub;
+        continue;
+      }
+      if (!ccord_path_is_file(sc->full)) continue;
+      uint8_t *raw = nullptr;
+      size_t rlen = 0;
+      if (!read_all(sc->full, 32u * 1024u * 1024u, &raw, &rlen, nullptr)) { ok = false; break; }
+      uint32_t crc = (uint32_t)crc32(0, raw, (uInt)rlen);
+      uint8_t *comp = nullptr;
+      size_t clen = 0;
+      uint16_t method = 8;
+      if (!deflate_raw(raw, rlen, &comp, &clen) || clen >= rlen) {
+        ccord_free(comp);
+        comp = raw;
+        clen = rlen;
+        method = 0;
+      } else {
+        ccord_free(raw);
+      }
+
+      size_t nlen = strlen(sc->rel);
+      uint8_t lh[30] = {0};
+      wr32(lh, 0x04034b50u);
+      wr16(lh + 4, 20);
+      wr16(lh + 8, method);
+      wr32(lh + 14, crc);
+      wr32(lh + 18, (uint32_t)clen);
+      wr32(lh + 22, (uint32_t)rlen);
+      wr16(lh + 26, (uint16_t)nlen);
+
+      uint32_t off = (uint32_t)ctx->out.len;
+      if (ccord_buf_append(&ctx->out, lh, 30) != CCORD_OK ||
+          ccord_buf_append(&ctx->out, sc->rel, nlen) != CCORD_OK ||
+          ccord_buf_append(&ctx->out, comp, clen) != CCORD_OK) {
+        ccord_free(comp);
+        ok = false;
+        break;
+      }
+      ccord_free(comp);
+
+      if (ctx->nentries == ctx->capentries) {
+        size_t ncap = ctx->capentries ? ctx->capentries * 2 : 8;
+        pack_entry *ne = ccord_realloc_array(ctx->entries, ncap, sizeof *ne);
+        if (!ne) { ok = false; break; }
+        ctx->entries = ne;
+        ctx->capentries = ncap;
+      }
+      char *rel_dup = ccord_strdup(sc->rel);
+      if (!rel_dup) { ok = false; break; }
+      ctx->entries[ctx->nentries++] = (pack_entry){
+        .rel = rel_dup, .crc = crc, .csize = (uint32_t)clen,
+        .usize = (uint32_t)rlen, .offset = off, .method = method,
+      };
+    }
+    ccord_dir_close(d);
+    ccord_free(rel_prefix);
+  }
+
+  for (size_t i = 0; i < npending; i++) ccord_free(pending[i]);
+  ccord_free(pending);
+  ccord_free(sc);
+  return ok;
 }
 
 bool ccord_zip_pack_dir(const char *src_dir, const char *zip_path, char *err_buf, size_t err_cap)
@@ -401,7 +489,7 @@ bool ccord_zip_pack_dir(const char *src_dir, const char *zip_path, char *err_buf
   if (!src_dir || !zip_path) { set_err(err_buf, err_cap, "invalid arguments"); return false; }
   pack_ctx ctx = {0};
   ccord_buf_init(&ctx.out, 0);
-  if (!pack_walk(&ctx, src_dir, "")) {
+  if (!pack_walk(&ctx, src_dir)) {
     for (size_t i = 0; i < ctx.nentries; i++) ccord_free(ctx.entries[i].rel);
     ccord_free(ctx.entries);
     ccord_buf_free(&ctx.out);

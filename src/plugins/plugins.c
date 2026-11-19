@@ -47,7 +47,7 @@
 #define MAX_CLIPBOARD_BYTES 65536u
 #define INIT_DEADLINE_MS 5000u
 #define CMD_DEADLINE_MS 2000u
-#define PING_INTERVAL_MS 1000u
+#define PING_INTERVAL_MS 5000u
 #define PING_TIMEOUT_MS 5000u
 #define SAVE_INTERVAL_MS 1000u
 #define EXIT_WAIT_MS 300u
@@ -97,8 +97,8 @@ typedef struct plugin {
   bool enabled;
   bool consent_granted;
   ccord_manifest m;                    // m.id is the owner key used everywhere
-  char perm_str[512];
-  char dir[CCORD_PATH_MAX];
+  char *perm_str;
+  char *dir;
   char *source;
   size_t source_len;
   ccord_plugin_state state;
@@ -129,7 +129,7 @@ typedef struct plugin {
   size_t store_bytes;
   bool storage_enabled, dirty;
   uint64_t last_save_ms;
-  char storage_dir[PBUF];
+  char *storage_dir;
   ccord_perm_set consented_perms;
   bool is_bundled;
 } plugin;
@@ -155,10 +155,10 @@ struct ccord_plugins {
   uint32_t plat_bit;
   ccord_plugin_platform_state plat_state;
   ccord_plugin_platform_ops plat_ops;
-  char host_exe[CCORD_PATH_MAX];
-  char data_dir[CCORD_PATH_MAX];
+  char *host_exe;
+  char *data_dir;
   bool has_data_dir;
-  char search[MAX_SEARCH][CCORD_PATH_MAX];
+  char **search;
   size_t nsearch;
   plugin *plugins;
   size_t nplugins, capplugins;
@@ -270,7 +270,7 @@ static void publish_state(ccord_plugins *m, plugin *p)
   ccord_plugin_info info = {
     .id = p->m.id, .name = p->m.name, .version = p->m.version,
     .description = p->m.description,
-    .permissions = p->perm_str,
+    .permissions = p->perm_str ? p->perm_str : "",
     .risk_class = (uint8_t)ccord_perm_max_class(p->m.perms),
     .tier = tier,
     .is_bundled = p->is_bundled,
@@ -427,6 +427,9 @@ static void fail_plugin(ccord_plugins *m, plugin *p, const char *reason)
     ccord_ipc_close(p->ipc);
     p->ipc = nullptr;
   }
+  ccord_free(p->source);
+  p->source = nullptr;
+  p->source_len = 0;
   p->state = CCORD_PLUGIN_FAILED;
   set_text(p->error, sizeof p->error, reason);
   memset(p->pend, 0, sizeof p->pend);
@@ -530,7 +533,7 @@ static void jw_copy_json(ccord_jw *w, const ccord_json *j);
 
 static void storage_load(plugin *p)
 {
-  if (!p->storage_enabled) return;
+  if (!p->storage_enabled || !p->storage_dir) return;
   char path[PBUF + 32];
   int n = snprintf(path, sizeof path, "%s/storage.json", p->storage_dir);
   if (n < 0 || (size_t)n >= sizeof path) {
@@ -594,7 +597,7 @@ static void mkdir_ok(const char *path)
 
 static void storage_save(ccord_plugins *m, plugin *p, uint64_t now)
 {
-  if (!p->storage_enabled || !p->dirty) return;
+  if (!p->storage_enabled || !p->dirty || !p->storage_dir || !m->data_dir) return;
   ccord_buf b;
   ccord_buf_init(&b, 0);
   bool ok = app_raw(&b, "{");
@@ -1512,7 +1515,7 @@ static void handle_hello(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg)
   ccord_jw_key(&w, "id"); ccord_jw_cstr(&w, p->m.id);
   ccord_jw_key(&w, "name"); ccord_jw_cstr(&w, p->m.name);
   ccord_jw_key(&w, "version"); ccord_jw_cstr(&w, p->m.version);
-  ccord_jw_key(&w, "dir"); ccord_jw_cstr(&w, p->dir);
+  ccord_jw_key(&w, "dir"); ccord_jw_cstr(&w, p->dir ? p->dir : "");
   ccord_jw_end_object(&w);
   ccord_jw_key(&w, "permissions");
   ccord_jw_begin_array(&w);
@@ -1520,7 +1523,7 @@ static void handle_hello(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg)
     if (has_perm(p, k_all_perms[i])) ccord_jw_cstr(&w, ccord_perm_name(k_all_perms[i]));
   }
   ccord_jw_end_array(&w);
-  ccord_jw_key(&w, "source"); ccord_jw_string(&w, p->source, p->source_len);
+  ccord_jw_key(&w, "source"); ccord_jw_string(&w, p->source ? p->source : "", p->source ? p->source_len : 0);
   ccord_jw_key(&w, "api"); ccord_jw_int(&w, CCORD_PLUGIN_API_VERSION);
   ccord_jw_key(&w, "platform");
   ccord_jw_begin_object(&w);
@@ -1579,6 +1582,10 @@ static void handle_hello(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg)
     { fail_plugin(m, p, why); return; }
   }
   ccord_buf_free(&b);
+  // Source has been queued for the plugin host; drop our copy to avoid retaining it in RAM.
+  ccord_free(p->source);
+  p->source = nullptr;
+  p->source_len = 0;
   slot->kind = PEND_INIT;
   slot->id = id;
   slot->deadline_ms = m->now_ms + INIT_DEADLINE_MS;
@@ -1928,8 +1935,8 @@ static void on_command_run(void *ud, const ccord_command_contribution *cmd, cons
 
 static void read_host(ccord_plugins *m, plugin *p)
 {
-  ccord_arena arena;
-  ccord_arena_init(&arena, 0);
+  // Lazily initialized: no chunk is allocated and no arena free runs on EAGAIN.
+  ccord_arena arena = {.chunk_size = 4096u};
   for (int k = 0; k < 64 && p->ipc; k++) {
     ccord_ipc_msg msg;
     ccord_error err = {0};
@@ -1954,7 +1961,7 @@ static void read_host(ccord_plugins *m, plugin *p)
     fail_plugin(m, p, reason);
     break;
   }
-  ccord_arena_free(&arena);
+  if (arena.head) ccord_arena_free(&arena);
 }
 
 static void check_timers(ccord_plugins *m, plugin *p)
@@ -2183,23 +2190,29 @@ static ccord_status spawn_host(ccord_plugins *m, plugin *p, ccord_error *err)
 
 static void storage_setup(ccord_plugins *m, plugin *p)
 {
-  p->storage_enabled = m->has_data_dir;
+  p->storage_enabled = m->has_data_dir && m->data_dir != nullptr;
   if (!p->storage_enabled) return;
-  char dir[sizeof p->storage_dir];
+  char dir[PBUF];
   int n = snprintf(dir, sizeof dir, "%s/plugins/%s", m->data_dir, p->m.id);
   if (n < 0 || (size_t)n >= sizeof dir) {
     p->storage_enabled = false;
     CCORD_LOG_W("plugin %s: storage directory path truncated", p->m.id);
     return;
   }
-  memcpy(p->storage_dir, dir, (size_t)n + 1);
+  ccord_free(p->storage_dir);
+  p->storage_dir = ccord_malloc((size_t)n + 1u);
+  if (!p->storage_dir) {
+    p->storage_enabled = false;
+    return;
+  }
+  memcpy(p->storage_dir, dir, (size_t)n + 1u);
   storage_load(p);
 }
 
 static plugin *new_record(ccord_plugins *m)
 {
   if (m->nplugins == m->capplugins) {
-    size_t ncap = m->capplugins ? m->capplugins * 2 : 16;
+    size_t ncap = m->capplugins ? m->capplugins * 2 : 4;
     plugin *np = ccord_realloc_array(m->plugins, ncap, sizeof *np);
     if (!np) return nullptr;
     m->plugins = np;
@@ -2217,28 +2230,34 @@ static plugin *new_record(ccord_plugins *m)
   return p;
 }
 
-static bool consent_load(const ccord_plugins *m, const char *id, uint64_t perms, bool *out_enabled, bool *out_consent, ccord_perm_set *out_consented_perms)
+static const ccord_json *consent_parse_file(const ccord_plugins *m, ccord_arena *ar)
+{
+  if (!m || !m->has_data_dir || !m->data_dir) return nullptr;
+  char path[PBUF + 32];
+  snprintf(path, sizeof path, "%s/plugins/consent.json", m->data_dir);
+  FILE *f = fopen(path, "rb");
+  if (!f) return nullptr;
+  fseek(f, 0, SEEK_END);
+  long sz = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (sz <= 0 || sz > (1 << 20)) { fclose(f); return nullptr; }
+  char *buf = ccord_malloc((size_t)sz + 1);
+  if (!buf) { fclose(f); return nullptr; }
+  size_t rd = fread(buf, 1, (size_t)sz, f);
+  fclose(f);
+  buf[rd] = '\0';
+  ccord_error err = {0};
+  const ccord_json *root = ccord_json_parse(ar, buf, rd, &k_json_limits, &err);
+  ccord_free(buf);
+  return root;
+}
+
+static bool consent_apply(const ccord_json *root, const char *id, uint64_t perms, bool *out_enabled,
+                          bool *out_consent, ccord_perm_set *out_consented_perms)
 {
   *out_enabled = true;
   *out_consent = ccord_perm_max_class(perms) == CCORD_PERM_CLASS_SAFE;
   *out_consented_perms = ccord_perm_max_class(perms) == CCORD_PERM_CLASS_SAFE ? perms : 0;
-  if (!m->has_data_dir) return false;
-  char path[PBUF + 32];
-  snprintf(path, sizeof path, "%s/plugins/consent.json", m->data_dir);
-  FILE *f = fopen(path, "rb");
-  if (!f) return false;
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  if (sz <= 0 || sz > (1 << 20)) { fclose(f); return false; }
-  char *buf = ccord_malloc((size_t)sz + 1);
-  if (!buf) { fclose(f); return false; }
-  size_t rd = fread(buf, 1, (size_t)sz, f);
-  fclose(f);
-  buf[rd] = '\0';
-  ccord_arena ar; ccord_arena_init(&ar, 0); ccord_error err = {0};
-  const ccord_json *root = ccord_json_parse(&ar, buf, rd, &k_json_limits, &err);
-  ccord_free(buf);
   const ccord_json *entry = root ? ccord_json_get(root, id) : nullptr;
   if (entry) {
     *out_enabled = ccord_json_bool(ccord_json_get(entry, "enabled"), true);
@@ -2254,7 +2273,6 @@ static bool consent_load(const ccord_plugins *m, const char *id, uint64_t perms,
       }
     }
   }
-  ccord_arena_free(&ar);
   return entry != nullptr;
 }
 
@@ -2346,7 +2364,8 @@ static bool resolve_real_path(const char *in, char *out, size_t cap)
 #endif
 }
 
-static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir_name, size_t *started)
+static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir_name,
+                         const ccord_json *consent_root, size_t *started)
 {
   char manifest_path[PBUF + 64];
   int mp_len = snprintf(manifest_path, sizeof manifest_path, "%s/plugin.json", dir_path);
@@ -2398,17 +2417,24 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
     record_failed(m, man.id, "main file resolves outside the plugin directory");
     return;
   }
+  if (dl >= CCORD_PATH_MAX) {
+    record_failed(m, man.id, "plugin directory path too long");
+    return;
+  }
   plugin *p = new_record(m);
   if (!p) {
     CCORD_LOG_W("extensions: too many plugins, skipping %s", man.id);
     return;
   }
   p->m = man;
-  p->perm_str[0] = '\0';
-  ccord_perm_list(man.perms, p->perm_str, sizeof p->perm_str);
-  int r = snprintf(p->dir, sizeof p->dir, "%s", real_dir);
-  if (r < 0 || (size_t)r >= sizeof p->dir) {
-    record_failed(m, man.id, "plugin directory path too long");
+  char pbuf[512] = "";
+  ccord_perm_list(man.perms, pbuf, sizeof pbuf);
+  p->perm_str = ccord_strdup(pbuf);
+  p->dir = ccord_strdup(real_dir);
+  if (!p->dir || !p->perm_str) {
+    p->state = CCORD_PLUGIN_FAILED;
+    set_text(p->error, sizeof p->error, "out of memory");
+    publish_state(m, p);
     return;
   }
   if (!read_file(real_main, 16u << 20, &p->source, &p->source_len, why, sizeof why)) {
@@ -2421,18 +2447,24 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
   }
   storage_setup(m, p);
   p->consented_perms = ccord_perm_max_class(man.perms) == CCORD_PERM_CLASS_SAFE ? man.perms : 0;
-  consent_load(m, man.id, man.perms, &p->enabled, &p->consent_granted, &p->consented_perms);
+  consent_apply(consent_root, man.id, man.perms, &p->enabled, &p->consent_granted, &p->consented_perms);
   if (ccord_perm_max_class(man.perms) == CCORD_PERM_CLASS_SAFE) {
     p->consent_granted = true;
     p->consented_perms = man.perms;
   }
   if (!p->consent_granted) {
+    ccord_free(p->source);
+    p->source = nullptr;
+    p->source_len = 0;
     p->enabled = false;
     p->state = CCORD_PLUGIN_NEEDS_CONSENT;
     publish_state(m, p);
     return;
   }
   if (!p->enabled) {
+    ccord_free(p->source);
+    p->source = nullptr;
+    p->source_len = 0;
     p->state = CCORD_PLUGIN_STOPPED;
     publish_state(m, p);
     return;
@@ -2450,6 +2482,9 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
 size_t ccord_plugins_load_all(ccord_plugins *m)
 {
   if (!m) return 0;
+  // Parse consent.json once for the entire discovery pass instead of once per plugin.
+  ccord_arena consent_ar = {.chunk_size = 4096u};
+  const ccord_json *consent_root = m->nsearch > 0 ? consent_parse_file(m, &consent_ar) : nullptr;
   size_t started = 0;
   for (size_t i = 0; i < m->nsearch; i++) {
     ccord_dir *d = ccord_dir_open(m->search[i]);
@@ -2465,10 +2500,11 @@ size_t ccord_plugins_load_all(ccord_plugins *m)
       int n = snprintf(path, sizeof path, "%s/%s", m->search[i], ename);
       if (n < 0 || (size_t)n >= sizeof path) continue;
       if (!is_dir && !ccord_path_is_dir(path)) continue;
-      consider_dir(m, path, ename, &started);
+      consider_dir(m, path, ename, consent_root, &started);
     }
     ccord_dir_close(d);
   }
+  if (consent_ar.head) ccord_arena_free(&consent_ar);
   return started;
 }
 
@@ -2518,17 +2554,65 @@ void ccord_plugins_destroy(ccord_plugins *m)
     for (size_t k = 0; k < p->nitems; k++) ccord_free(p->items[k].json);
     ccord_free(p->items);
     ccord_free(p->source);
+    ccord_free(p->dir);
+    ccord_free(p->storage_dir);
+    ccord_free(p->perm_str);
   }
   ccord_free(m->plugins);
+  if (m->search) {
+    for (size_t i = 0; i < m->nsearch; i++) ccord_free(m->search[i]);
+    ccord_free(m->search);
+  }
+  ccord_free(m->host_exe);
+  ccord_free(m->data_dir);
   if (m->bus && m->sub) {
     ccord_bus_unsubscribe(m->bus, m->sub);
   }
   ccord_free(m);
 }
 
+static bool reload_plugin_source(plugin *p, char *why, size_t why_cap)
+{
+  if (!p->dir || !p->dir[0]) {
+    set_text(why, why_cap, "plugin directory unavailable");
+    return false;
+  }
+  char real_dir[CCORD_PATH_MAX], real_main[CCORD_PATH_MAX], main_path[PBUF + 128];
+  if (!resolve_real_path(p->dir, real_dir, sizeof real_dir)) {
+    set_text(why, why_cap, "plugin directory cannot be resolved");
+    return false;
+  }
+  int main_len = snprintf(main_path, sizeof main_path, "%s/%s", p->dir, p->m.main);
+  if (main_len < 0 || (size_t)main_len >= sizeof main_path) {
+    set_text(why, why_cap, "main file path too long");
+    return false;
+  }
+  if (!resolve_real_path(main_path, real_main, sizeof real_main)) {
+    set_text(why, why_cap, "main file is missing");
+    return false;
+  }
+  size_t dl = strlen(real_dir);
+  if (strncmp(real_main, real_dir, dl) != 0 || (real_main[dl] != '/' && real_main[dl] != '\\')) {
+    set_text(why, why_cap, "main file resolves outside the plugin directory");
+    return false;
+  }
+  return read_file(real_main, 16u << 20, &p->source, &p->source_len, why, why_cap);
+}
+
 static void start_plugin_host(ccord_plugins *m, plugin *p)
 {
   if (!p || p->state == CCORD_PLUGIN_STARTING || p->state == CCORD_PLUGIN_READY) return;
+  if (!p->source) {
+    char why[256] = "";
+    if (!reload_plugin_source(p, why, sizeof why)) {
+      p->state = CCORD_PLUGIN_FAILED;
+      set_text(p->error, sizeof p->error, why);
+      CCORD_LOG_E("plugin %s FAILED: %s", p->m.id, p->error);
+      publish_state(m, p);
+      ccord_contrib_add_plugin_log(m->contrib, p->m.id, m->now_ms, (uint8_t)CCORD_LOG_ERROR, p->error);
+      return;
+    }
+  }
   p->error[0] = '\0';
   p->hello_seen = false;
   p->subs = 0;
@@ -2583,7 +2667,7 @@ static void on_plugin_reload(void *ud, const char *id)
 {
   ccord_plugins *m = ud;
   plugin *p = find_owner(m, id);
-  if (!p || !p->dir[0]) return;
+  if (!p || !p->dir || !p->dir[0]) return;
   bool was_enabled = p->enabled;
   stop_host(m, p);
   char manifest_path[PBUF + 64], main_path[PBUF + 128], why[256];
@@ -2604,14 +2688,22 @@ static void on_plugin_reload(void *ud, const char *id)
   p->source = src;
   p->source_len = slen;
   p->m = man;
-  p->perm_str[0] = '\0';
-  ccord_perm_list(man.perms, p->perm_str, sizeof p->perm_str);
+  char pbuf[512] = "";
+  ccord_perm_list(man.perms, pbuf, sizeof pbuf);
+  char *ps = ccord_strdup(pbuf);
+  if (ps) {
+    ccord_free(p->perm_str);
+    p->perm_str = ps;
+  }
 
   bool safe_class = ccord_perm_max_class(man.perms) == CCORD_PERM_CLASS_SAFE;
   if (safe_class) {
     p->consent_granted = true;
     p->consented_perms = man.perms;
   } else if (!p->consent_granted || (man.perms & ~p->consented_perms) != 0) {
+    ccord_free(p->source);
+    p->source = nullptr;
+    p->source_len = 0;
     p->consent_granted = false;
     p->enabled = false;
     p->state = CCORD_PLUGIN_NEEDS_CONSENT;
@@ -2625,6 +2717,9 @@ static void on_plugin_reload(void *ud, const char *id)
   if (p->enabled) {
     start_plugin_host(m, p);
   } else {
+    ccord_free(p->source);
+    p->source = nullptr;
+    p->source_len = 0;
     p->state = CCORD_PLUGIN_STOPPED;
     publish_state(m, p);
   }
@@ -2637,7 +2732,7 @@ bool ccord_plugins_export_cce(ccord_plugins *m, const char *id, const char *dest
     return false;
   }
   plugin *p = find_owner(m, id);
-  if (!p || !p->dir[0]) {
+  if (!p || !p->dir || !p->dir[0]) {
     if (err_buf && err_cap) snprintf(err_buf, err_cap, "plugin not found or has no directory");
     return false;
   }
@@ -2698,12 +2793,21 @@ bool ccord_plugins_import_package(ccord_plugins *m, const char *pkg_path, char *
   }
 
   if (existing) {
-    set_text(existing->dir, sizeof existing->dir, final_dir);
+    char *nd = ccord_strdup(final_dir);
+    if (!nd) {
+      if (err_buf && err_cap) snprintf(err_buf, err_cap, "out of memory");
+      return false;
+    }
+    ccord_free(existing->dir);
+    existing->dir = nd;
     on_plugin_reload(m, man.id);
     return true;
   }
   size_t started = 0;
-  consider_dir(m, final_dir, man.id, &started);
+  ccord_arena consent_ar = {.chunk_size = 4096u};
+  const ccord_json *consent_root = consent_parse_file(m, &consent_ar);
+  consider_dir(m, final_dir, man.id, consent_root, &started);
+  if (consent_ar.head) ccord_arena_free(&consent_ar);
   return true;
 }
 
@@ -2744,11 +2848,17 @@ bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, si
   for (size_t k = 0; k < p->nitems; k++) ccord_free(p->items[k].json);
   ccord_free(p->items);
   ccord_free(p->source);
+  ccord_free(p->dir);
+  ccord_free(p->storage_dir);
+  ccord_free(p->perm_str);
   p->used = false;
   p->items = nullptr;
   p->nitems = 0;
   p->source = nullptr;
   p->source_len = 0;
+  p->dir = nullptr;
+  p->storage_dir = nullptr;
+  p->perm_str = nullptr;
   consent_save(m);
   if (m->catalog) ccord_catalog_on_uninstalled(m->catalog, id);
   return true;
@@ -2888,24 +2998,45 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     m->plat_state.landscape = !m->plat_is_mobile;
   }
   if (cfg->host_exe) {
-    if (strlen(cfg->host_exe) >= sizeof m->host_exe) {
+    if (strlen(cfg->host_exe) >= CCORD_PATH_MAX) {
       ccord_error_set(err, CCORD_ERR_RANGE, "plugins: host path too long");
-      ccord_free(m);
+      ccord_plugins_destroy(m);
       return nullptr;
     }
-    snprintf(m->host_exe, sizeof m->host_exe, "%s", cfg->host_exe);
+    m->host_exe = ccord_strdup(cfg->host_exe);
+    if (!m->host_exe) {
+      ccord_error_set(err, CCORD_ERR_NOMEM, "plugins: out of memory");
+      ccord_plugins_destroy(m);
+      return nullptr;
+    }
   }
   if (cfg->data_dir) {
-    int dr = snprintf(m->data_dir, sizeof m->data_dir, "%s", cfg->data_dir);
-    m->has_data_dir = dr >= 0 && (size_t)dr < sizeof m->data_dir;
+    if (strlen(cfg->data_dir) < CCORD_PATH_MAX) {
+      m->data_dir = ccord_strdup(cfg->data_dir);
+      m->has_data_dir = m->data_dir != nullptr;
+    }
   }
-  for (size_t i = 0; i < cfg->search_dir_count; i++) {
-    if (!cfg->search_dirs[i] || snprintf(m->search[i], sizeof m->search[i], "%s", cfg->search_dirs[i]) >= (int)sizeof m->search[i]) {
-      ccord_error_set(err, CCORD_ERR_RANGE, "plugins: search directory too long");
-      ccord_free(m);
+  if (cfg->search_dir_count > 0) {
+    m->search = ccord_calloc(cfg->search_dir_count, sizeof *m->search);
+    if (!m->search) {
+      ccord_error_set(err, CCORD_ERR_NOMEM, "plugins: out of memory");
+      ccord_plugins_destroy(m);
       return nullptr;
     }
-    m->nsearch++;
+    for (size_t i = 0; i < cfg->search_dir_count; i++) {
+      if (!cfg->search_dirs[i] || strlen(cfg->search_dirs[i]) >= CCORD_PATH_MAX) {
+        ccord_error_set(err, CCORD_ERR_RANGE, "plugins: search directory too long");
+        ccord_plugins_destroy(m);
+        return nullptr;
+      }
+      m->search[i] = ccord_strdup(cfg->search_dirs[i]);
+      if (!m->search[i]) {
+        ccord_error_set(err, CCORD_ERR_NOMEM, "plugins: out of memory");
+        ccord_plugins_destroy(m);
+        return nullptr;
+      }
+      m->nsearch++;
+    }
   }
   ccord_contrib_handlers h = {
     .ud = m,
@@ -2987,6 +3118,17 @@ void ccord_plugins_update_platform_state(ccord_plugins *m, const ccord_plugin_pl
   if (!m || !st) return;
   ccord_plugin_platform_state prev = m->plat_state;
   m->plat_state = *st;
+  if (m->nplugins == 0) return;
+
+  bool any_ready = false;
+  for (size_t i = 0; i < m->nplugins; i++) {
+    const plugin *p = &m->plugins[i];
+    if (p->used && p->state == CCORD_PLUGIN_READY && p->ipc) {
+      any_ready = true;
+      break;
+    }
+  }
+  if (!any_ready) return;
 
   ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w);
