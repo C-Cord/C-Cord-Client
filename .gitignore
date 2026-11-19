@@ -63,7 +63,9 @@ __pycache__/
 
 # Android build artifacts and cross-compiled dependency cache
 /android/deps/
+/android/.keys/
 /android/.gradle/
+/android/.kotlin/
 /android/build/
 /android/app/build/
 /android/app/.cxx/

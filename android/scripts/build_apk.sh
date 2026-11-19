@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 # Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
-# Cross-compiles C-Cord native libraries for Android (arm64-v8a, x86_64) and builds the APK via Gradle.
+# Cross-compiles C-Cord native libraries for Android (arm64-v8a, x86_64) and builds signed APK(s) via Gradle.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,6 +30,10 @@ API="${CCORD_ANDROID_API:-28}"
 CMAKE_BUILD_TYPE="${CCORD_ANDROID_BUILD_TYPE:-Release}"
 GRADLE_TASK="${CCORD_GRADLE_TASK:-assembleDebug}"
 SKIP_NATIVE="${CCORD_SKIP_NATIVE:-0}"
+VERSION="${CCORD_VERSION:-0.1.0}"
+VERSION_CODE="${CCORD_VERSION_CODE:-}"
+ABI_SPLITS="${CCORD_ABI_SPLITS:-0}"
+OUT_DIR=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -41,14 +45,27 @@ for arg in "$@"; do
       CMAKE_BUILD_TYPE="Release"
       GRADLE_TASK="assembleRelease"
       ;;
+    --splits)
+      ABI_SPLITS=1
+      ;;
     --skip-native)
       SKIP_NATIVE=1
       ;;
     --abi=*)
       ABIS="${arg#--abi=}"
       ;;
+    --version=*)
+      VERSION="${arg#--version=}"
+      VERSION="${VERSION#v}"
+      ;;
+    --version-code=*)
+      VERSION_CODE="${arg#--version-code=}"
+      ;;
+    --out-dir=*)
+      OUT_DIR="${arg#--out-dir=}"
+      ;;
     *)
-      echo "usage: $0 [--debug|--release] [--skip-native] [--abi=\"arm64-v8a x86_64\"]" >&2
+      echo "usage: $0 [--debug|--release] [--splits] [--skip-native] [--abi=\"arm64-v8a x86_64\"] [--version=X.Y.Z] [--version-code=N] [--out-dir=DIR]" >&2
       exit 2
       ;;
   esac
@@ -83,12 +100,12 @@ if [[ "$SKIP_NATIVE" != "1" ]]; then
 
     PREFIX="$ANDROID_DIR/deps/prefix/$ABI"
     if [[ ! -f "$PREFIX/lib/libSDL3.so" ]]; then
-      echo "error: missing cross-compiled deps for $ABI in $PREFIX — run android/scripts/build_deps.sh first" >&2
+      echo "error: missing cross-compiled deps for $ABI in $PREFIX — run android/scripts/build_deps.sh $ABI $API first" >&2
       exit 1
     fi
 
     BUILD_DIR="$ROOT_DIR/build-android-$ABI"
-    echo "==> Configuring C-Cord for Android $ABI (API $API, $CMAKE_BUILD_TYPE)..."
+    echo "==> Configuring C-Cord $VERSION for Android $ABI (API $API, $CMAKE_BUILD_TYPE)..."
     PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" \
     PKG_CONFIG_PATH="" \
     cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
@@ -100,6 +117,7 @@ if [[ "$SKIP_NATIVE" != "1" ]]; then
       -DCMAKE_BUILD_TYPE="$CMAKE_BUILD_TYPE" \
       -DCMAKE_FIND_ROOT_PATH="$PREFIX" \
       -DCMAKE_PREFIX_PATH="$PREFIX" \
+      -DCCORD_VERSION="$VERSION" \
       -DCCORD_WERROR=ON \
       -DCCORD_BUILD_TESTS=OFF
 
@@ -167,30 +185,75 @@ if [[ -z "$GRADLE_BIN" || ! -x "$GRADLE_BIN" ]]; then
   exit 1
 fi
 
-echo "==> Running Gradle $GRADLE_TASK via $GRADLE_BIN..."
+GRADLE_PROPS=(
+  "-PccordVersionName=$VERSION"
+)
+if [[ -n "$VERSION_CODE" ]]; then
+  GRADLE_PROPS+=("-PccordVersionCode=$VERSION_CODE")
+fi
+if [[ "$ABI_SPLITS" == "1" ]]; then
+  GRADLE_PROPS+=("-PccordAbiSplits=true")
+fi
+
+echo "==> Running Gradle $GRADLE_TASK via $GRADLE_BIN (version=$VERSION, splits=$ABI_SPLITS)..."
 (
   cd "$ANDROID_DIR"
-  ANDROID_HOME="$SDK_DIR" ANDROID_SDK_ROOT="$SDK_DIR" "$GRADLE_BIN" "$GRADLE_TASK" --no-daemon
+  ANDROID_HOME="$SDK_DIR" ANDROID_SDK_ROOT="$SDK_DIR" \
+    "$GRADLE_BIN" "$GRADLE_TASK" "${GRADLE_PROPS[@]}" --no-daemon
 )
 
 if [[ "$GRADLE_TASK" == "assembleRelease" ]]; then
-  APK_PATH="$ANDROID_DIR/app/build/outputs/apk/release/app-release.apk"
+  APK_DIR="$ANDROID_DIR/app/build/outputs/apk/release"
 else
-  APK_PATH="$ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
+  APK_DIR="$ANDROID_DIR/app/build/outputs/apk/debug"
 fi
 
-if [[ ! -f "$APK_PATH" ]]; then
-  echo "error: expected APK not found at $APK_PATH" >&2
+ZIPALIGN="$(ls -d "$SDK_DIR"/build-tools/*/zipalign 2>/dev/null | sort -V | tail -n 1 || true)"
+APKSIGNER="$(ls -d "$SDK_DIR"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -n 1 || true)"
+
+verify_apk() {
+  local apk="$1"
+  echo "==> Built APK: $apk ($(du -h "$apk" | cut -f1))"
+  if [[ -n "$ZIPALIGN" && -x "$ZIPALIGN" ]]; then
+    if "$ZIPALIGN" -c -P 16 4 "$apk" >/dev/null 2>&1; then
+      echo "    [OK] 16 KB page alignment (Android 15+ compliant)"
+    else
+      echo "    [WARN] zipalign 16 KB check reported a mismatch on $apk" >&2
+    fi
+  fi
+  if [[ -n "$APKSIGNER" && -x "$APKSIGNER" ]]; then
+    if "$APKSIGNER" verify --print-certs "$apk" >/dev/null 2>&1; then
+      echo "    [OK] APK signature verified"
+    else
+      echo "error: APK signature verification failed for $apk" >&2
+      exit 1
+    fi
+  fi
+}
+
+shopt -s nullglob
+BUILT_APKS=("$APK_DIR"/*.apk)
+shopt -u nullglob
+if [[ "${#BUILT_APKS[@]}" -eq 0 ]]; then
+  echo "error: no APK found in $APK_DIR" >&2
   exit 1
 fi
 
-echo "==> Built APK: $APK_PATH ($(du -h "$APK_PATH" | cut -f1))"
-
-ZIPALIGN="$(ls -d "$SDK_DIR"/build-tools/*/zipalign 2>/dev/null | sort -V | tail -n 1 || true)"
-if [[ -n "$ZIPALIGN" && -x "$ZIPALIGN" ]]; then
-  if "$ZIPALIGN" -c -P 16 4 "$APK_PATH" >/dev/null 2>&1; then
-    echo "==> Verified 16 KB page alignment (Android 15+ compliant)"
-  else
-    echo "warning: zipalign 16 KB check reported a mismatch" >&2
-  fi
+if [[ -n "$OUT_DIR" ]]; then
+  mkdir -p "$OUT_DIR"
 fi
+
+for apk in "${BUILT_APKS[@]}"; do
+  verify_apk "$apk"
+  if [[ -n "$OUT_DIR" ]]; then
+    base="$(basename "$apk")"
+    case "$base" in
+      *arm64-v8a*) dst="$OUT_DIR/C-Cord-${VERSION}-android-arm64.apk" ;;
+      *x86_64*)    dst="$OUT_DIR/C-Cord-${VERSION}-android-x86_64.apk" ;;
+      *universal*) dst="$OUT_DIR/C-Cord-${VERSION}-android-universal.apk" ;;
+      *)           dst="$OUT_DIR/C-Cord-${VERSION}-android-universal.apk" ;;
+    esac
+    cp -f "$apk" "$dst"
+    echo "    -> Staged $dst"
+  fi
+done

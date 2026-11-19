@@ -1,0 +1,1 @@
+Fast, lightweight native C23 Discord client

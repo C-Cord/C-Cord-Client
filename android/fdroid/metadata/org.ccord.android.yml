@@ -1,0 +1,19 @@
+Categories:
+  - Internet
+  - Connectivity
+License: AGPL-3.0-only
+AuthorName: C-Cord Contributors
+AuthorWebSite: https://c-cord.org
+WebSite: https://c-cord.org
+SourceCode: https://github.com/C-Cord/C-Cord-Client
+IssueTracker: https://github.com/C-Cord/C-Cord-Client/issues
+AutoName: C-Cord
+Summary: Fast, lightweight native C23 Discord client
+Description: |-
+    C-Cord is a fast, lightweight native Discord client written in C23 using SDL3.
+
+    Features:
+    * Responsive mobile UI with touch gestures, bottom-sheet menus, drawers, and safe-area / soft-keyboard support
+    * Voice calls, DAVE E2EE, camera & MediaProjection screen sharing, and persistent foreground call controls
+    * Built-in Dark, Light, and AMOLED themes plus QuickCSS
+    * Sandboxed Lua 5.5 plugin system (API v2) with OS/capability detection and mobile haptics & share APIs

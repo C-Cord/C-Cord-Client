@@ -546,9 +546,106 @@ jobs:
           name: release-macos
           path: out/
 
+  build-android:
+    name: Android (Signed APKs + Custom F-Droid Repo)
+    needs: meta
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Android & F-Droid build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build pkg-config autoconf automake libtool nasm yasm \
+            python3 python3-venv python3-pip curl unzip
+          # Install NDK r27 if not already present on the runner
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          NDK_CAND="$(ls -d "$SDK"/ndk/27.* 2>/dev/null | sort -V | tail -n 1 || true)"
+          if [ -z "$NDK_CAND" ]; then
+            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" "ndk;27.2.12479018" "platforms;android-36" "build-tools;35.0.0"
+            NDK_CAND="$SDK/ndk/27.2.12479018"
+          else
+            yes | "$SDK/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;35.0.0" || true
+          fi
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_CAND" >> "$GITHUB_ENV"
+          # Install official fdroidserver in an isolated venv
+          python3 -m venv /tmp/fdroid-venv
+          /tmp/fdroid-venv/bin/pip install --upgrade pip fdroidserver
+          echo "/tmp/fdroid-venv/bin" >> "$GITHUB_PATH"
+      - name: Cache cross-compiled Android native dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/deps/prefix
+            android/deps/stamps
+            android/deps/cacert.pem
+            android/deps/sdl3-java
+          key: android-deps-ndk27-${{ hashFiles('android/scripts/build_deps.sh') }}
+      - name: Cross-compile Android native dependencies (arm64-v8a & x86_64)
+        run: |
+          ./android/scripts/build_deps.sh arm64-v8a 28
+          ./android/scripts/build_deps.sh x86_64 28
+      - name: Build signed Android APKs (arm64, x86_64, universal) & F-Droid repo metadata
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+          ANDROID_KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          ANDROID_STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          FDROID_KEYSTORE_B64: ${{ secrets.FDROID_KEYSTORE_B64 }}
+          FDROID_STORE_PASSWORD: ${{ secrets.FDROID_STORE_PASSWORD }}
+          FDROID_KEY_ALIAS: ${{ secrets.FDROID_KEY_ALIAS }}
+          FDROID_KEY_PASSWORD: ${{ secrets.FDROID_KEY_PASSWORD }}
+        run: |
+          mkdir -p out/assets /tmp/ccord-keys
+          chmod 700 /tmp/ccord-keys
+
+          if [ -n "${ANDROID_KEYSTORE_B64}" ]; then
+            printf '%s' "${ANDROID_KEYSTORE_B64}" | base64 -d > /tmp/ccord-keys/release.jks
+            chmod 600 /tmp/ccord-keys/release.jks
+            export CCORD_ANDROID_KEYSTORE=/tmp/ccord-keys/release.jks
+            export CCORD_ANDROID_STORE_PASS="${ANDROID_STORE_PASSWORD}"
+            export CCORD_ANDROID_KEY_ALIAS="${ANDROID_KEY_ALIAS:-ccord-release}"
+            export CCORD_ANDROID_KEY_PASS="${ANDROID_KEY_PASSWORD:-${ANDROID_STORE_PASSWORD}}"
+            export CCORD_REQUIRE_RELEASE_SIGNING=1
+          else
+            echo "::warning::ANDROID_KEYSTORE_B64 secret is not configured; APKs will be debug-signed! Run android/scripts/gen_signing_keys.sh to configure persistent release signing."
+          fi
+
+          ./android/scripts/build_apk.sh \
+            --release \
+            --splits \
+            --version="${VER}" \
+            --out-dir="$PWD/out/assets"
+
+          if [ -n "${FDROID_KEYSTORE_B64}" ]; then
+            printf '%s' "${FDROID_KEYSTORE_B64}" | base64 -d > /tmp/ccord-keys/fdroid.jks
+            chmod 600 /tmp/ccord-keys/fdroid.jks
+            ./android/scripts/build_fdroid_repo.sh \
+              --apks-dir="$PWD/out/assets" \
+              --out="$PWD/out/assets/ccord-fdroid-repo.tar.gz" \
+              --repo-url="https://c-cord.org/repo/fdroid/repo" \
+              --keystore=/tmp/ccord-keys/fdroid.jks \
+              --store-pass="${FDROID_STORE_PASSWORD}" \
+              --key-alias="${FDROID_KEY_ALIAS:-ccord-fdroid-repo}" \
+              --key-pass="${FDROID_KEY_PASSWORD:-${FDROID_STORE_PASSWORD}}"
+          else
+            echo "::warning::FDROID_KEYSTORE_B64 secret is not configured; skipping ccord-fdroid-repo.tar.gz generation. Run android/scripts/gen_signing_keys.sh to configure F-Droid signing."
+          fi
+
+          rm -rf /tmp/ccord-keys
+          ls -lh out/assets/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-android
+          path: out/
+
   publish:
     name: Publish GitHub Release & Sync c-cord.org Repos
-    needs: [meta, build-arch, build-deb, build-rpm, build-appimage, build-flatpak, build-windows, build-macos]
+    needs: [meta, build-arch, build-deb, build-rpm, build-appimage, build-flatpak, build-windows, build-macos, build-android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
