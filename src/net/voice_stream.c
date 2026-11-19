@@ -42,8 +42,8 @@ struct ccord_vstream {
   uint32_t last_wants_ssrc;
   uint32_t pump_refs;
   bool closed_pending;
-  // Audio queue fields are guarded by vg->mtx (tap and drain both hold it).
-  vstream_audio_pkt audio_q[VSTREAM_AUDIO_QUEUE];
+  // Audio queue fields are guarded by vg->mtx (tap and drain both hold it); lazily allocated on first RX audio frame.
+  vstream_audio_pkt *audio_q;
   size_t audio_head, audio_count;
   uint64_t audio_dropped;
   struct ccord_vstream *next;
@@ -58,8 +58,15 @@ static void vstream_audio_tap(void *ud, uint32_t ssrc, uint16_t seq, uint32_t ts
 {
   ccord_vstream *s = ud;
   if (len == 0 || len > CCORD_JITTER_MAX_PACKET) return;
+  if (!s->audio_q) {
+    s->audio_q = ccord_calloc(VSTREAM_AUDIO_QUEUE, sizeof *s->audio_q);
+    if (!s->audio_q) {
+      s->audio_dropped++;
+      return;
+    }
+  }
   for (size_t i = 0; i < s->audio_count; i++) {
-    const vstream_audio_pkt * cur = &s->audio_q[(s->audio_head + i) % VSTREAM_AUDIO_QUEUE];
+    const vstream_audio_pkt *cur = &s->audio_q[(s->audio_head + i) % VSTREAM_AUDIO_QUEUE];
     if (cur->ssrc == ssrc && cur->seq == seq) return;  // duplicate
   }
   if (s->audio_count == VSTREAM_AUDIO_QUEUE) {
@@ -90,6 +97,7 @@ static void vstream_audio_tap(void *ud, uint32_t ssrc, uint16_t seq, uint32_t ts
 static ccord_status vstream_send_identify(ccord_vstream *s, ccord_error *err)
 {
   ccord_voice_gateway *g = s->vg;
+  ccord_mutex_lock(g->mtx);
   ccord_buf b;
   ccord_buf_init(&b, 1024);
   ccord_jw w;
@@ -137,6 +145,7 @@ static ccord_status vstream_send_identify(ccord_vstream *s, ccord_error *err)
     st = vg_send_raw(g, b.data, b.len, err);
   }
   ccord_buf_free(&b);
+  ccord_mutex_unlock(g->mtx);
   return st;
 }
 
@@ -162,6 +171,7 @@ static void vstream_maybe_inject_udp(ccord_vstream *s)
     if (vg_sock_setsockopt_int(g->udp_fd, SOL_SOCKET, SO_SNDBUF, big_buf) != 0) {
       (void)vg_sock_setsockopt_int(g->udp_fd, SOL_SOCKET, SO_SNDBUF, fallback_buf);
     }
+    g->udp_video_buf = true;
     s->udp_injected = true;
     if (g->ssrc != 0) {
       uint8_t req[CCORD_VOICE_IP_DISCOVERY_SIZE];
@@ -199,7 +209,7 @@ ccord_vstream *ccord_vstream_open(const ccord_vstream_params *p, ccord_error *er
     .send_bin = p->send_bin,
     .send_ud = p->send_ud,
   };
-  s->vg = ccord_voice_gateway_create(&cfg, err);
+  s->vg = ccord_voice_gateway_create_video_only(&cfg, err);
   if (!s->vg || ccord_voice_gateway_start(s->vg, err) != CCORD_OK) {
     ccord_voice_gateway_destroy(s->vg);
     ccord_mutex_destroy(s->mtx);
@@ -287,8 +297,13 @@ ccord_status ccord_vstream_send_audio(ccord_vstream *s, const uint8_t *opus, siz
         uint8_t pkt[2048];
         size_t pkt_len = 0;
         if (g->aead_mode != CCORD_VOICE_MODE_NONE) {
-          st = ccord_voice_seal(g->aead_mode, g->secret, ++g->tx_nonce, rtp, sizeof rtp, payload, payload_len, pkt,
-                                sizeof pkt, &pkt_len, err);
+          if (g->aead_ctx.ready) {
+            st = ccord_voice_aead_seal(&g->aead_ctx, ++g->tx_nonce, rtp, sizeof rtp, payload, payload_len, pkt,
+                                       sizeof pkt, &pkt_len, err);
+          } else {
+            st = ccord_voice_seal(g->aead_mode, g->secret, ++g->tx_nonce, rtp, sizeof rtp, payload, payload_len, pkt,
+                                  sizeof pkt, &pkt_len, err);
+          }
         } else {
           st = ccord_voice_encrypt(g->secret, rtp, sizeof rtp, payload, payload_len, pkt, sizeof pkt, &pkt_len, err);
         }
@@ -354,7 +369,7 @@ static void vstream_deliver_audio(ccord_vstream *s)
     vstream_audio_pkt pkt;
     ccord_id uid = CCORD_ID_NONE;
     ccord_mutex_lock(g->mtx);
-    if (s->audio_count == 0) {
+    if (!s->audio_q || s->audio_count == 0) {
       ccord_mutex_unlock(g->mtx);
       break;
     }
@@ -407,7 +422,10 @@ static void vstream_send_sink_wants(ccord_vstream *s)
   ccord_jw_end_object(&w);
   if (ccord_jw_ok(&w)) {
     ccord_error err;
-    if (vg_send_raw(g, b.data, b.len, &err) == CCORD_OK) {
+    ccord_mutex_lock(g->mtx);
+    ccord_status st = vg_send_raw(g, b.data, b.len, &err);
+    ccord_mutex_unlock(g->mtx);
+    if (st == CCORD_OK) {
       s->last_wants_ssrc = primary;
     }
   }
@@ -437,7 +455,7 @@ size_t ccord_vstream_pop_rx_audio(ccord_vstream *s, uint8_t *opus_out, size_t ca
   size_t len = 0;
   ccord_mutex_lock(g->mtx);
   vg_pump_udp_established(g);
-  if (s->audio_count > 0) {
+  if (s->audio_q && s->audio_count > 0) {
     const vstream_audio_pkt *pkt = &s->audio_q[s->audio_head];
     if (pkt->len <= cap) {
       len = pkt->len;
@@ -452,15 +470,24 @@ size_t ccord_vstream_pop_rx_audio(ccord_vstream *s, uint8_t *opus_out, size_t ca
 
 void ccord_vstream_pump_all(void)
 {
+  ccord_vstream *stack_list[16];
+  ccord_vstream **list = stack_list;
   ccord_spin_lock_acquire(&g_vstreams_mtx);
   size_t count = 0;
   for (ccord_vstream *s = g_vstreams; s; s = s->next) count++;
-  ccord_vstream **list = count > 0 ? (ccord_vstream **)ccord_malloc(count * sizeof(*list)) : NULL;
+  if (count > sizeof stack_list / sizeof stack_list[0]) {
+    list = (ccord_vstream **)ccord_malloc(count * sizeof(*list));
+    if (!list) {
+      list = stack_list;
+      count = sizeof stack_list / sizeof stack_list[0];
+    }
+  }
   size_t idx = 0;
-  for (ccord_vstream *s = g_vstreams; s; s = s->next) {
+  for (ccord_vstream *s = g_vstreams; s && idx < count; s = s->next) {
     s->pump_refs++;
     list[idx++] = s;
   }
+  count = idx;
   ccord_spin_lock_release(&g_vstreams_mtx);
 
   for (size_t i = 0; i < count; i++) {
@@ -530,16 +557,21 @@ void ccord_vstream_pump_all(void)
       s->params.on_state(s->params.ud, cur, cur == CCORD_VSTREAM_CLOSED ? "closed" : "ok");
     }
 
+    bool should_free = false;
     ccord_spin_lock_acquire(&g_vstreams_mtx);
     s->pump_refs--;
     if (s->pump_refs == 0 && s->closed_pending) {
+      should_free = true;
+    }
+    ccord_spin_lock_release(&g_vstreams_mtx);
+    if (should_free) {
       ccord_voice_gateway_destroy(s->vg);
+      ccord_free(s->audio_q);
       ccord_mutex_destroy(s->mtx);
       ccord_free(s);
     }
-    ccord_spin_lock_release(&g_vstreams_mtx);
   }
-  if (list) ccord_free(list);
+  if (list != stack_list) ccord_free(list);
 }
 
 void ccord_vstream_close(ccord_vstream *s)
@@ -563,6 +595,7 @@ void ccord_vstream_close(ccord_vstream *s)
 
   // Destroy also closes an injected params.udp_fd (the gateway adopted it at READY).
   ccord_voice_gateway_destroy(s->vg);
+  ccord_free(s->audio_q);
   ccord_mutex_destroy(s->mtx);
   ccord_free(s);
 }

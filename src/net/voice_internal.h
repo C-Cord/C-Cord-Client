@@ -41,6 +41,34 @@
 #define VOICE_MAX_STREAMS 16u
 #define VG_VIDEO_RING_SLOTS 8u
 #define VG_STREAM_SSRC_MAX 8u
+#define VG_SSRC_CACHE_SIZE 16u  // power of 2
+
+struct evp_cipher_ctx_st;  // OpenSSL EVP_CIPHER_CTX (voice_crypto.c)
+
+// Cached transport AEAD state (AES-256-GCM expanded key schedule / reusable OpenSSL EVP_CIPHER_CTX,
+// or cached XChaCha20-Poly1305 key). Guarded by ccord_voice_gateway.mtx.
+typedef struct ccord_voice_aead_ctx {
+  ccord_voice_mode mode;
+  bool ready;
+  bool use_sodium_aes;
+  uint8_t key[CCORD_VOICE_KEY_BYTES];
+  unsigned char aes_storage[512u + 16u];  // 16-byte-aligned libsodium crypto_aead_aes256gcm_state
+  struct evp_cipher_ctx_st *ossl_enc;
+  struct evp_cipher_ctx_st *ossl_dec;
+} ccord_voice_aead_ctx;
+
+// Lazily heap-allocated circular ring buffer for 48 kHz stereo PCM (capacity VOICE_PCM_CAP_SAMPLES).
+typedef struct vg_pcm_ring {
+  int16_t *data;
+  size_t head;  // stereo-sample read index [0, VOICE_PCM_CAP_SAMPLES)
+  size_t len;   // buffered stereo samples [0, VOICE_PCM_CAP_SAMPLES]
+} vg_pcm_ring;
+
+typedef struct vg_ssrc_cache_entry {
+  uint32_t ssrc;
+  uint32_t gen;
+  ccord_id user_id;
+} vg_ssrc_cache_entry;
 
 typedef struct vg_video_slot {
   uint8_t *buf;
@@ -55,7 +83,10 @@ typedef struct vg_audio_stream {
   bool used;
   bool talking;
   uint8_t plc_streak;
+  uint8_t vol_pct;
   uint32_t ssrc;
+  uint32_t vol_gen;
+  ccord_id user_id;
   uint64_t last_rx_ms;
   OpusDecoder *dec;
   ccord_jitter *jitter;
@@ -136,10 +167,13 @@ struct ccord_voice_gateway {
   ccord_voice_mode aead_mode;
   uint8_t secret[CCORD_VOICE_MAX_SECRET];
   size_t secret_len;
+  ccord_voice_aead_ctx aead_ctx;
   ccord_voice_codec *codec;
   ccord_dave *dave;
   ccord_vad vad;
   ccord_ssrc_map ssrc_map;
+  vg_ssrc_cache_entry ssrc_cache[VG_SSRC_CACHE_SIZE];
+  uint32_t vol_gen;
   ccord_speaking speaking;
   vg_audio_stream audio_streams[VOICE_MAX_STREAMS];
   ccord_rtp_h264_depack *video_depack;
@@ -149,6 +183,8 @@ struct ccord_voice_gateway {
   uint8_t *rx_video_buf;
   size_t rx_video_len;
   size_t rx_video_cap;
+  uint8_t *tx_dave_buf;
+  size_t tx_dave_cap;
   bool rx_video_keyframe;
   bool rx_video_ready;
   uint32_t rx_video_ssrc;
@@ -157,10 +193,10 @@ struct ccord_voice_gateway {
   uint64_t stream_pli_after_ms;
   bool stream_need_idr;
   bool stream_rx_pli;
-  int16_t tx_pcm[VOICE_PCM_CAP_SAMPLES * CCORD_VOICE_CHANNELS];
-  size_t tx_samples;
-  int16_t rx_pcm[VOICE_PCM_CAP_SAMPLES * CCORD_VOICE_CHANNELS];
-  size_t rx_samples;
+  bool video_only;
+  bool udp_video_buf;
+  vg_pcm_ring tx_pcm;
+  vg_pcm_ring rx_pcm;
   uint64_t next_rx_mix_ms;
   bool deafened;
   ccord_voice_connection_state state;
@@ -175,8 +211,7 @@ struct ccord_voice_gateway {
   struct ccord_voice_dsp *dsp;  // nullptr when DSP is unavailable or disabled
   vg_user_volume user_volume[CCORD_SPEAK_MAX];
   size_t user_volume_count;
-  int16_t sb_pcm[VOICE_PCM_CAP_SAMPLES * CCORD_VOICE_CHANNELS];  // soundboard TX queue, mixed with mic
-  size_t sb_samples;
+  vg_pcm_ring sb_pcm;           // soundboard TX queue, mixed with mic (allocated on first push)
   bool sb_speaking;             // SPEAKING flags 2 asserted while the soundboard queue drains
   uint64_t heartbeat_sent_ms;   // when the outstanding heartbeat was sent (ACK-timeout check)
   int ping_ms;                  // last heartbeat round-trip; -1 = unknown
@@ -211,13 +246,39 @@ struct ccord_voice_gateway {
   // Serializes every public entry point (PCM push/pull, pump, signaling, controls, getters) so the
   // app's audio pthread can move PCM while the UI thread polls the gateway. Internal helpers that
   // run under an already-held lock use the unlocked vg_* variants.
+  uint32_t lifecycle_gen;       // bumped on stop / WS drop / connect to guard unlocked WS I/O
+  uint32_t udp_gen;             // bumped on UDP close / discover to guard unlocked DNS & discovery poll
+  bool ws_connecting;           // curl_easy_perform in flight outside g->mtx
+  bool ws_tx_busy;              // curl_ws_send retry loop active (prevents WS frame interleaving)
   ccord_mutex *mtx;
 };
 
 // Shared with the main gateway TU (discord_gateway.c): one curl_global_init for both websockets.
 void gw_ensure_curl(void);
 
-// Raw text-frame send used by voice_gateway.c and the vstream wrapper (voice_stream.c).
+// Cached transport AEAD helpers (voice_crypto.c). Caller holds g->mtx.
+[[nodiscard]] ccord_status ccord_voice_aead_init(ccord_voice_aead_ctx *ctx, ccord_voice_mode mode,
+                                                 const uint8_t key[CCORD_VOICE_KEY_BYTES], ccord_error *err);
+void ccord_voice_aead_clear(ccord_voice_aead_ctx *ctx);
+[[nodiscard]] ccord_status ccord_voice_aead_seal(ccord_voice_aead_ctx *ctx, uint32_t counter,
+                                                 const uint8_t *header, size_t header_len,
+                                                 const uint8_t *plain, size_t plain_len,
+                                                 uint8_t *out, size_t cap, size_t *out_len, ccord_error *err);
+[[nodiscard]] ccord_status ccord_voice_aead_open(ccord_voice_aead_ctx *ctx, const uint8_t *pkt, size_t len,
+                                                 uint8_t *plain, size_t cap, size_t *plain_len,
+                                                 ccord_rtp_view *view, ccord_error *err);
+bool ccord_voice_aead_open_srtcp(ccord_voice_aead_ctx *ctx, const uint8_t *pkt, size_t len,
+                                 uint8_t *plain, size_t cap, size_t *out_len);
+
+// SSRC-cached DAVE decrypt helper (voice_dave.c).
+ccord_dave_result ccord_dave_decrypt_ssrc(ccord_dave *d, uint32_t ssrc, ccord_id sender, ccord_dave_media media,
+                                          const uint8_t *in, size_t len, uint8_t *out, size_t cap, size_t *out_len);
+
+// Video-only gateway constructor for Go Live vstreams (skips Opus codec and mic/RX PCM buffers).
+[[nodiscard]] ccord_voice_gateway *ccord_voice_gateway_create_video_only(const ccord_voice_gateway_config *cfg,
+                                                                         ccord_error *err);
+
+// Raw text-frame send used by voice_gateway.c and the vstream wrapper (voice_stream.c). Caller holds g->mtx.
 ccord_status vg_send_raw(ccord_voice_gateway *g, const char *data, size_t len, ccord_error *err);
 ccord_status vg_set_speaking(ccord_voice_gateway *g, uint8_t speaking, uint32_t delay_ms, ccord_error *err);
 void vg_pump_udp_established(ccord_voice_gateway *g);

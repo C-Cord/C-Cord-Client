@@ -15,6 +15,11 @@
 #define DAVE_INIT_TRANSITION_ID 0u
 #define DAVE_NEW_GROUP_EPOCH 1u
 #define DAVE_MAX_TRANSITIONS 16u
+#define DAVE_DECRYPT_CACHE_SIZE 32u  // power of 2
+
+// Internal SSRC-cached decrypt helper (also declared in voice_internal.h).
+ccord_dave_result ccord_dave_decrypt_ssrc(ccord_dave *d, uint32_t ssrc, ccord_id sender, ccord_dave_media media,
+                                          const uint8_t *in, size_t len, uint8_t *out, size_t cap, size_t *out_len);
 
 ccord_status ccord_vframe_parse(const uint8_t *buf, size_t len, ccord_vframe *out, ccord_error *err)
 {
@@ -68,6 +73,19 @@ typedef struct dave_peer {
 #endif
 } dave_peer;
 
+#ifdef CCORD_HAVE_DAVE
+typedef struct dave_user_cache_entry {
+  ccord_id user_id;
+  DAVEDecryptorHandle decryptor;
+} dave_user_cache_entry;
+
+typedef struct dave_ssrc_cache_entry {
+  uint32_t ssrc;
+  ccord_id user_id;
+  DAVEDecryptorHandle decryptor;
+} dave_ssrc_cache_entry;
+#endif
+
 struct ccord_dave {
   ccord_id self_id;
   ccord_id group_id;
@@ -83,6 +101,8 @@ struct ccord_dave {
 #ifdef CCORD_HAVE_DAVE
   DAVESessionHandle session;
   DAVEEncryptorHandle encryptor;
+  dave_user_cache_entry user_cache[DAVE_DECRYPT_CACHE_SIZE];
+  dave_ssrc_cache_entry ssrc_cache[DAVE_DECRYPT_CACHE_SIZE];
 #endif
 };
 
@@ -227,6 +247,26 @@ static void dave_store_transition(ccord_dave *d, uint16_t transition_id, uint16_
   d->transitions[slot] = (dave_transition){.id = transition_id, .version = version, .used = true};
 }
 
+static void dave_cache_invalidate(ccord_dave *d)
+{
+  memset(d->user_cache, 0, sizeof d->user_cache);
+  memset(d->ssrc_cache, 0, sizeof d->ssrc_cache);
+}
+
+static size_t dave_user_cache_slot(ccord_id user_id)
+{
+  uint64_t h = (uint64_t)user_id;
+  h ^= h >> 16;
+  h ^= h >> 32;
+  return (size_t)(h & (DAVE_DECRYPT_CACHE_SIZE - 1u));
+}
+
+static size_t dave_ssrc_cache_slot(uint32_t ssrc)
+{
+  uint32_t h = ssrc ^ (ssrc >> 8) ^ (ssrc >> 16);
+  return (size_t)(h & (DAVE_DECRYPT_CACHE_SIZE - 1u));
+}
+
 static void dave_prepare_ratchets(ccord_dave *d, uint16_t transition_id, uint16_t version)
 {
   for (size_t i = 0; i < d->npeers; i++) {
@@ -238,6 +278,7 @@ static void dave_prepare_ratchets(ccord_dave *d, uint16_t transition_id, uint16_
     dave_store_transition(d, transition_id, version);
   }
   d->latest_prepared_version = version;
+  dave_cache_invalidate(d);
 }
 
 static void dave_execute_transition_internal(ccord_dave *d, uint16_t transition_id)
@@ -255,6 +296,7 @@ static void dave_execute_transition_internal(ccord_dave *d, uint16_t transition_
   if (!found) return;
   if (version == 0) daveSessionReset(d->session);
   dave_setup_self_ratchet(d, version);
+  dave_cache_invalidate(d);
 }
 
 static void dave_prepare_epoch_internal(ccord_dave *d, uint32_t epoch, uint16_t version)
@@ -262,6 +304,7 @@ static void dave_prepare_epoch_internal(ccord_dave *d, uint32_t epoch, uint16_t 
   if (epoch == DAVE_NEW_GROUP_EPOCH) {
     daveSessionInit(d->session, version, (uint64_t)d->group_id, d->self_user_str);
     d->latest_prepared_version = version;
+    dave_cache_invalidate(d);
   }
 }
 
@@ -269,6 +312,7 @@ static void dave_init_protocol(ccord_dave *d, uint16_t version)
 {
   uint16_t max_ver = daveMaxSupportedProtocolVersion();
   if (version > max_ver) version = max_ver;
+  dave_cache_invalidate(d);
   if (version > 0) {
     daveEncryptorSetPassthroughMode(d->encryptor, false);
     dave_prepare_epoch_internal(d, DAVE_NEW_GROUP_EPOCH, version);
@@ -277,6 +321,17 @@ static void dave_init_protocol(ccord_dave *d, uint16_t version)
   }
   dave_prepare_ratchets(d, DAVE_INIT_TRANSITION_ID, 0);
   dave_execute_transition_internal(d, DAVE_INIT_TRANSITION_ID);
+}
+
+static DAVEDecryptorHandle dave_ensure_peer_decryptor(ccord_dave *d, dave_peer *p)
+{
+  if (!p) return nullptr;
+  if (p->decryptor) return p->decryptor;
+  p->decryptor = daveDecryptorCreate();
+  if (!p->decryptor) return nullptr;
+  daveDecryptorTransitionToPassthroughMode(p->decryptor, true);
+  dave_setup_peer_ratchet(d, p, d->latest_prepared_version);
+  return p->decryptor;
 }
 
 static dave_peer *dave_find_or_add_peer(ccord_dave *d, ccord_id user_id, bool create)
@@ -297,11 +352,7 @@ static dave_peer *dave_find_or_add_peer(ccord_dave *d, ccord_id user_id, bool cr
   memset(p, 0, sizeof *p);
   p->user_id = user_id;
   (void)snprintf(p->user_str, sizeof p->user_str, "%llu", (unsigned long long)user_id);
-  p->decryptor = daveDecryptorCreate();
-  if (p->decryptor) {
-    daveDecryptorTransitionToPassthroughMode(p->decryptor, true);
-  }
-  dave_setup_peer_ratchet(d, p, d->latest_prepared_version);
+  // Decryptor is created lazily on the first encrypted packet from this peer.
   return p;
 }
 
@@ -409,6 +460,7 @@ void ccord_dave_on_client_disconnect(ccord_dave *d, ccord_id user_id)
         memmove(&d->peers[i], &d->peers[i + 1], (d->npeers - i - 1) * sizeof *d->peers);
       }
       d->npeers--;
+      dave_cache_invalidate(d);
       return;
     }
   }
@@ -605,6 +657,99 @@ ccord_dave_result ccord_dave_encrypt(ccord_dave *d,
 #endif
 }
 
+#ifdef CCORD_HAVE_DAVE
+static ccord_dave_result dave_decrypt_with_handle(DAVEDecryptorHandle dec,
+                                                  ccord_dave_media media,
+                                                  const uint8_t *in,
+                                                  size_t len,
+                                                  uint8_t *out,
+                                                  size_t cap,
+                                                  size_t *out_len)
+{
+  size_t written = 0;
+  DAVEDecryptorResultCode rc = daveDecryptorDecrypt(dec, to_dave_media(media), in, len, out, cap, &written);
+  if (rc == DAVE_DECRYPTOR_RESULT_CODE_SUCCESS) {
+    *out_len = written;
+    return CCORD_DAVE_OK;
+  }
+  if (rc == DAVE_DECRYPTOR_RESULT_CODE_MISSING_KEY_RATCHET || rc == DAVE_DECRYPTOR_RESULT_CODE_MISSING_CRYPTOR) {
+    return CCORD_DAVE_NOT_READY;
+  }
+  return CCORD_DAVE_FAILED;
+}
+#endif
+
+ccord_dave_result ccord_dave_decrypt_ssrc(ccord_dave *d,
+                                          uint32_t ssrc,
+                                          ccord_id sender,
+                                          ccord_dave_media media,
+                                          const uint8_t *in,
+                                          size_t len,
+                                          uint8_t *out,
+                                          size_t cap,
+                                          size_t *out_len)
+{
+  if (out_len) *out_len = 0;
+  if (!d || !in || !out || !out_len || len == 0) return CCORD_DAVE_FAILED;
+#ifdef CCORD_HAVE_DAVE
+  bool has_dave_marker = (len >= 4u && in[len - 2u] == 0xFAu && in[len - 1u] == 0xFAu);
+  if (d->latest_prepared_version == 0 && !ccord_dave_e2ee_active(d) && !has_dave_marker) {
+    if (cap < len) return CCORD_DAVE_FAILED;
+    if (out != in) memcpy(out, in, len);
+    *out_len = len;
+    return CCORD_DAVE_OK;
+  }
+
+  // O(1) direct-mapped SSRC -> decryptor fast path.
+  if (ssrc != 0) {
+    const dave_ssrc_cache_entry *se = &d->ssrc_cache[dave_ssrc_cache_slot(ssrc)];
+    if (se->ssrc == ssrc && se->user_id == sender && se->decryptor) {
+      return dave_decrypt_with_handle(se->decryptor, media, in, len, out, cap, out_len);
+    }
+  }
+
+  // O(1) direct-mapped user_id -> decryptor fast path.
+  DAVEDecryptorHandle dec = nullptr;
+  if (sender != CCORD_ID_NONE) {
+    const dave_user_cache_entry *ue = &d->user_cache[dave_user_cache_slot(sender)];
+    if (ue->user_id == sender && ue->decryptor) dec = ue->decryptor;
+  }
+
+  if (!dec) {
+    dave_peer *p = dave_find_or_add_peer(d, sender, true);
+    if (!p && sender == CCORD_ID_NONE && d->npeers == 1u) {
+      p = &d->peers[0];
+    }
+    dec = dave_ensure_peer_decryptor(d, p);
+    if (!dec) {
+      if (!ccord_dave_e2ee_active(d) && !has_dave_marker) {
+        if (cap < len) return CCORD_DAVE_FAILED;
+        if (out != in) memcpy(out, in, len);
+        *out_len = len;
+        return CCORD_DAVE_OK;
+      }
+      return CCORD_DAVE_NOT_READY;
+    }
+    if (sender != CCORD_ID_NONE) {
+      d->user_cache[dave_user_cache_slot(sender)] = (dave_user_cache_entry){.user_id = sender, .decryptor = dec};
+    }
+  }
+  if (ssrc != 0) {
+    d->ssrc_cache[dave_ssrc_cache_slot(ssrc)] = (dave_ssrc_cache_entry){
+      .ssrc = ssrc, .user_id = sender, .decryptor = dec};
+  }
+  return dave_decrypt_with_handle(dec, media, in, len, out, cap, out_len);
+#else
+  (void)ssrc;
+  (void)sender;
+  (void)media;
+  if (cap < len) return CCORD_DAVE_FAILED;
+  if (out != in) memcpy(out, in, len);
+  *out_len = len;
+  return CCORD_DAVE_OK;
+#endif
+}
+
 ccord_dave_result ccord_dave_decrypt(ccord_dave *d,
                                      ccord_id sender,
                                      ccord_dave_media media,
@@ -614,42 +759,7 @@ ccord_dave_result ccord_dave_decrypt(ccord_dave *d,
                                      size_t cap,
                                      size_t *out_len)
 {
-  if (out_len) *out_len = 0;
-  if (!d || !in || !out || !out_len || len == 0) return CCORD_DAVE_FAILED;
-#ifdef CCORD_HAVE_DAVE
-  bool has_dave_marker = (len >= 4u && in[len - 2u] == 0xFAu && in[len - 1u] == 0xFAu);
-  dave_peer *p = dave_find_or_add_peer(d, sender, true);
-  if ((!p || !p->decryptor) && sender == CCORD_ID_NONE && d->npeers == 1u) {
-    p = &d->peers[0];
-  }
-  if (!p || !p->decryptor) {
-    if (!ccord_dave_e2ee_active(d) && !has_dave_marker) {
-      if (cap < len) return CCORD_DAVE_FAILED;
-      if (out != in) memcpy(out, in, len);
-      *out_len = len;
-      return CCORD_DAVE_OK;
-    }
-    return CCORD_DAVE_NOT_READY;
-  }
-  size_t written = 0;
-  DAVEDecryptorResultCode rc =
-    daveDecryptorDecrypt(p->decryptor, to_dave_media(media), in, len, out, cap, &written);
-  if (rc == DAVE_DECRYPTOR_RESULT_CODE_SUCCESS) {
-    *out_len = written;
-    return CCORD_DAVE_OK;
-  }
-  if (rc == DAVE_DECRYPTOR_RESULT_CODE_MISSING_KEY_RATCHET || rc == DAVE_DECRYPTOR_RESULT_CODE_MISSING_CRYPTOR) {
-    return CCORD_DAVE_NOT_READY;
-  }
-  return CCORD_DAVE_FAILED;
-#else
-  (void)sender;
-  (void)media;
-  if (cap < len) return CCORD_DAVE_FAILED;
-  if (out != in) memcpy(out, in, len);
-  *out_len = len;
-  return CCORD_DAVE_OK;
-#endif
+  return ccord_dave_decrypt_ssrc(d, 0u, sender, media, in, len, out, cap, out_len);
 }
 
 void ccord_dave_get_privacy_code(ccord_dave *d, char *out, size_t cap)
