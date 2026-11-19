@@ -96,8 +96,13 @@ bool ccord_tray_icon_rgba(int size, int count, bool has_unread, uint8_t *out, si
   if (count <= 0 && !has_unread) return true;
   badge_layout b = layout_for(count, has_unread);
   const float scale = (float)size / GRID;
-  for (int y = 0; y < size; y++) {
-    for (int x = 0; x < size; x++) {
+  // Restrict supersampling to the badge's bounding box (skipping ~65% of pixels guaranteed outside pill_hit).
+  int y_start = (int)floorf(b.y0 * scale) - 1;
+  int x_start = (int)floorf(b.x0 * scale) - 1;
+  if (y_start < 0) y_start = 0;
+  if (x_start < 0) x_start = 0;
+  for (int y = y_start; y < size; y++) {
+    for (int x = x_start; x < size; x++) {
       int pill = 0, text = 0;
       for (int sy = 0; sy < SUB; sy++) {
         for (int sx = 0; sx < SUB; sx++) {
