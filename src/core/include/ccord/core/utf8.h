@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #pragma once
+#if defined(__has_include) && __has_include(<uchar.h>)
 #include <uchar.h>
+#else
+#include <stdint.h>
+typedef uint_least32_t char32_t;
+#endif
 #include <ccord/core/config.h>
 bool ccord_utf8_valid(const char *s, size_t len);       // rejects overlong, surrogates, > U+10FFFF
 bool ccord_utf8_valid_text(const char *s, size_t len);  // valid + no C0/C1 controls except \n and \t, no U+0000

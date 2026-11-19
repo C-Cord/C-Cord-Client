@@ -463,7 +463,7 @@ static void stream_process(void *ud)
     struct spa_data *d = &buf->datas[0];
     struct spa_chunk *ch = d->chunk;
     if (ch->size >= 4 && ch->offset <= d->maxsize && ch->size <= d->maxsize - ch->offset) {
-      const int16_t *s = (const int16_t *)((const uint8_t *)d->data + ch->offset);
+      const int16_t *s = (const int16_t *)(const void *)((const uint8_t *)d->data + ch->offset);
       size_t frames = ch->size / 4u;   // interleaved stereo S16 = 4 bytes/frame
       size_t h = atomic_load_explicit(&p->head, memory_order_relaxed);
       size_t t = atomic_load_explicit(&p->tail, memory_order_acquire);

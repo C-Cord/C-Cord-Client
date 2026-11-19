@@ -14,7 +14,7 @@ static int pm_sel = -1;   // hovered / keyboard-selected row; reset on open
 static ccord_rect pm_box(const ccord_ui *ui)
 {
   uis_tokens t = uis_tokens_of(ui);
-  float w = t.menu_min_w + 40.0f, h = PM_COUNT * t.menu_row_h + 2.0f * t.menu_pad;
+  float w = t.menu_min_w + 40.0f, h = (float)PM_COUNT * t.menu_row_h + 2.0f * t.menu_pad;
   ccord_rect a = ui->composer_attach_rect;
   float x = a.x < 8.0f ? 8.0f : a.x;
   float y = a.y - 8.0f - h;

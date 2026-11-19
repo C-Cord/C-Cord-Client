@@ -91,7 +91,8 @@ static void init_request(ccord_admin_request *out, ccord_admin_op op, ccord_admi
   out->sound_volume_pct = -1;
 }
 
-static ccord_status set_path(ccord_admin_request *out, ccord_error *err, const char *fmt, ...) CCORD_PRINTF(3, 4);
+CCORD_PRINTF(3, 4)
+static ccord_status set_path(ccord_admin_request *out, ccord_error *err, const char *fmt, ...);
 static ccord_status set_path(ccord_admin_request *out, ccord_error *err, const char *fmt, ...)
 {
   va_list ap;

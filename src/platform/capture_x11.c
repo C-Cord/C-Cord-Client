@@ -77,7 +77,9 @@ static int x11_window_pid(Display *dpy, Window w, Atom net_wm_pid)
   }
   int pid = 0;
   if (actual_type == XA_CARDINAL && actual_format == 32 && nitems >= 1) {
-    pid = (int)(*(unsigned long *)data);
+    unsigned long raw_pid = 0;
+    memcpy(&raw_pid, data, sizeof raw_pid);
+    pid = (int)raw_pid;
   }
   XFree(data);
   return pid;
@@ -179,7 +181,7 @@ static size_t x11_list_windows(Display *dpy, Window root, ccord_capture_source *
       return 0;
     }
   }
-  Window *wins = (Window *)data;
+  Window *wins = (Window *)(void *)data;
   Atom net_wm_pid = XInternAtom(dpy, "_NET_WM_PID", False);
   int own_pid = ccord_capture_own_pid();
   size_t count = 0;

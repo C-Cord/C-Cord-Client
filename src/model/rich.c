@@ -281,7 +281,7 @@ ccord_message_rich *ccord_message_rich_merge(const ccord_message_rich *old, cons
 void ccord_message_rich_free(ccord_message_rich *r)
 {
   if (!r) return;
-  rich_owner *o = (rich_owner *)((char *)r - offsetof(rich_owner, rich));
+  rich_owner *o = (rich_owner *)(void *)((char *)r - offsetof(rich_owner, rich));
   ccord_arena_free(&o->arena);
   ccord_free(o);
 }

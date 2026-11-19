@@ -10,6 +10,7 @@
 #include <ccord/core/alloc.h>
 
 #include <ctype.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -256,14 +257,14 @@ void ccord_thread_join(ccord_thread *t)
 void ccord_spin_lock_acquire(ccord_spin_lock *l)
 {
   if (!l) return;
-  while (__atomic_exchange_n(&l->state, 1u, __ATOMIC_ACQUIRE) != 0u) {
+  while (atomic_exchange_explicit(&l->state, 1u, memory_order_acquire) != 0u) {
     SwitchToThread();
   }
 }
 
 void ccord_spin_lock_release(ccord_spin_lock *l)
 {
-  if (l) __atomic_store_n(&l->state, 0u, __ATOMIC_RELEASE);
+  if (l) atomic_store_explicit(&l->state, 0u, memory_order_release);
 }
 
 // Directory & filesystem helpers ------------------------------------------------------------------
@@ -402,7 +403,7 @@ bool ccord_sock_set_nonblock(ccord_socket_t s)
 {
   if (s == CCORD_INVALID_SOCKET) return false;
   u_long mode = 1;
-  return ioctlsocket((SOCKET)s, FIONBIO, &mode) == 0;
+  return ioctlsocket((SOCKET)s, (long)FIONBIO, &mode) == 0;
 }
 
 bool ccord_sock_set_cloexec(ccord_socket_t s)

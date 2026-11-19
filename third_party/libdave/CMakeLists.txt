@@ -75,7 +75,9 @@ target_include_directories(ccord_dave SYSTEM PUBLIC "${DAVE_SRC}/includes" "${DA
 target_include_directories(ccord_dave SYSTEM PRIVATE "${DAVE_SRC}/src" "${DAVE_SRC}/test")
 target_compile_options(ccord_dave PRIVATE -w)
 target_link_libraries(ccord_dave PRIVATE ccord_mlspp PUBLIC OpenSSL::Crypto)
-if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+if(APPLE OR (WIN32 AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+  target_link_libraries(ccord_dave PUBLIC c++)
+elseif(NOT MSVC)
   target_link_libraries(ccord_dave PUBLIC stdc++)
 endif()
 # C targets that link this static library are linked with the C++ driver automatically (CMake propagates the

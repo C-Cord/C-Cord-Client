@@ -15,6 +15,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -296,14 +297,14 @@ void ccord_thread_join(ccord_thread *t)
 void ccord_spin_lock_acquire(ccord_spin_lock *l)
 {
   if (!l) return;
-  while (__atomic_exchange_n(&l->state, 1u, __ATOMIC_ACQUIRE) != 0u) {
+  while (atomic_exchange_explicit(&l->state, 1u, memory_order_acquire) != 0u) {
     sched_yield();
   }
 }
 
 void ccord_spin_lock_release(ccord_spin_lock *l)
 {
-  if (l) __atomic_store_n(&l->state, 0u, __ATOMIC_RELEASE);
+  if (l) atomic_store_explicit(&l->state, 0u, memory_order_release);
 }
 
 // Directory & filesystem helpers ------------------------------------------------------------------
