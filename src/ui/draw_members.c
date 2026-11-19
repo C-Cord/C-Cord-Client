@@ -151,6 +151,27 @@ static float ui_draw_member_role_plus(ccord_ui *ui, ccord_renderer *r, ccord_id 
   return (cy - y) + 24.0f;
 }
 
+typedef struct role_pill_item {
+  ccord_id role_id;
+  size_t role_idx;
+  float dx, dy, pw, text_h;
+} role_pill_item;
+
+static struct {
+  bool valid;
+  const ccord_renderer *r;
+  const ccord_store *store;
+  uint64_t lists_rev;
+  ccord_id guild_id;
+  ccord_id user_id;
+  float w, font_size, zoom;
+  bool can_add;
+  size_t count;
+  float end_dx, end_dy;
+  float total_h;
+  role_pill_item items[32];
+} g_role_pill_cache;
+
 float ui_draw_member_role_pills(ccord_ui *ui, ccord_renderer *r, ccord_id guild_id, ccord_id user_id,
                                 float x, float y, float w, bool measure_only)
 {
@@ -162,10 +183,42 @@ float ui_draw_member_role_pills(ccord_ui *ui, ccord_renderer *r, ccord_id guild_
   if (!gm && (!known_roles || role_count == 0)) return 0.0f;
   size_t nroles = 0;
   const ccord_role *roles = ccord_store_roles(ui->d.store, guild_id, &nroles);
-  ccord_text_style rts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_header));
+  float fsize = M(font_size_small) - 2.0f;
+  ccord_text_style rts = ui_style(ui, CCORD_FONT_BOLD, fsize, COL(text_header));
+  bool can_add = known_roles && ui_profile_roles_can_add(ui, guild_id, user_id);
+  uint64_t lists_rev = ccord_store_lists_revision(ui->d.store);
+  float zoom = ccord_render_get_zoom(r);
+
+  if (known_roles && role_count > 0 && g_role_pill_cache.valid && g_role_pill_cache.r == r &&
+      g_role_pill_cache.store == ui->d.store && g_role_pill_cache.lists_rev == lists_rev &&
+      g_role_pill_cache.guild_id == guild_id && g_role_pill_cache.user_id == user_id &&
+      g_role_pill_cache.w == w && g_role_pill_cache.font_size == fsize &&
+      g_role_pill_cache.zoom == zoom && g_role_pill_cache.can_add == can_add) {
+    if (!measure_only) {
+      for (size_t i = 0; i < g_role_pill_cache.count; i++) {
+        const role_pill_item *it = &g_role_pill_cache.items[i];
+        if (it->role_idx >= nroles) continue;
+        const ccord_role *rl = &roles[it->role_idx];
+        ui->dbg_role_pills++;
+        ccord_color rc = rl->color != 0 ? ui_rgb_color(rl->color) : COL(text_secondary);
+        ccord_rect pill = {x + it->dx, y + it->dy, it->pw, 20.0f};
+        ccord_draw_rrect(r, pill, 4.0f, COL(bg_tertiary));
+        ccord_draw_circle(r, pill.x + 9.0f, pill.y + 10.0f, 4.5f, rc);
+        ccord_text_draw_ellipsis(r, rl->name, strlen(rl->name), pill.x + 18.0f,
+                                 pill.y + (pill.h - it->text_h) * 0.5f, pill.w - 22.0f, &rts);
+        ui_profile_roles_pill_overlay(ui, r, guild_id, user_id, rl->id, pill);
+      }
+      if (can_add) {
+        return ui_draw_member_role_plus(ui, r, guild_id, user_id, x, y, w,
+                                        x + g_role_pill_cache.end_dx, y + g_role_pill_cache.end_dy, false);
+      }
+    }
+    return g_role_pill_cache.total_h;
+  }
+
   float cx = x, cy = y;
   size_t drawn = 0;
-  bool can_add = known_roles && ui_profile_roles_can_add(ui, guild_id, user_id);
+  role_pill_item items[32];
   for (size_t k = 0; known_roles && role_count > 0 && k < nroles; k++) {
     const ccord_role *rl = &roles[k];
     if (rl->id == CCORD_ID_NONE || rl->id == guild_id || !rl->name || !rl->name[0]) continue;
@@ -183,6 +236,10 @@ float ui_draw_member_role_pills(ccord_ui *ui, ccord_renderer *r, ccord_id guild_
     if (cx > x && cx + pw > x + w) {
       cx = x;
       cy += 24.0f;
+    }
+    if (drawn < 32u) {
+      items[drawn] = (role_pill_item){.role_id = rl->id, .role_idx = k, .dx = cx - x, .dy = cy - y,
+                                      .pw = pw, .text_h = rt.y};
     }
     if (!measure_only) {
       ui->dbg_role_pills++;
@@ -204,26 +261,41 @@ float ui_draw_member_role_pills(ccord_ui *ui, ccord_renderer *r, ccord_id guild_
       if (!can_add) return 0.0f;
       return ui_draw_member_role_plus(ui, r, guild_id, user_id, x, y, w, x, y, measure_only);
     }
-    if (!measure_only) {
-      ui->dbg_role_pills++;
-      ccord_color rc = glook.badge_color != 0 ? ui_rgb_color(glook.badge_color) : COL(text_secondary);
-      ccord_vec2 rt = ccord_text_measure(r, glook.badge, strlen(glook.badge), &rts, 0.0f);
-      float pw = rt.x + 24.0f;
-      if (pw > w) pw = w;
-      ccord_rect pill = {x, y, pw, 20.0f};
-      ccord_draw_rrect(r, pill, 4.0f, COL(bg_tertiary));
-      ccord_draw_circle(r, pill.x + 9.0f, pill.y + 10.0f, 4.5f, rc);
-      ccord_text_draw_ellipsis(r, glook.badge, strlen(glook.badge), pill.x + 18.0f, pill.y + (pill.h - rt.y) * 0.5f,
-                               pill.w - 22.0f, &rts);
-    }
-    if (!can_add) return 24.0f;
     ccord_vec2 bt = ccord_text_measure(r, glook.badge, strlen(glook.badge), &rts, 0.0f);
     float bw = bt.x + 24.0f;
     if (bw > w) bw = w;
+    if (!measure_only) {
+      ui->dbg_role_pills++;
+      ccord_color rc = glook.badge_color != 0 ? ui_rgb_color(glook.badge_color) : COL(text_secondary);
+      ccord_rect pill = {x, y, bw, 20.0f};
+      ccord_draw_rrect(r, pill, 4.0f, COL(bg_tertiary));
+      ccord_draw_circle(r, pill.x + 9.0f, pill.y + 10.0f, 4.5f, rc);
+      ccord_text_draw_ellipsis(r, glook.badge, strlen(glook.badge), pill.x + 18.0f, pill.y + (pill.h - bt.y) * 0.5f,
+                               pill.w - 22.0f, &rts);
+    }
+    if (!can_add) return 24.0f;
     cx = x + bw + 6.0f;
   }
-  if (can_add) return ui_draw_member_role_plus(ui, r, guild_id, user_id, x, y, w, cx, cy, measure_only);
-  return (cy - y) + 24.0f;
+  float res_h = can_add ? ui_draw_member_role_plus(ui, r, guild_id, user_id, x, y, w, cx, cy, measure_only)
+                        : ((cy - y) + 24.0f);
+  if (known_roles && drawn > 0 && drawn <= 32u) {
+    g_role_pill_cache.valid = true;
+    g_role_pill_cache.r = r;
+    g_role_pill_cache.store = ui->d.store;
+    g_role_pill_cache.lists_rev = lists_rev;
+    g_role_pill_cache.guild_id = guild_id;
+    g_role_pill_cache.user_id = user_id;
+    g_role_pill_cache.w = w;
+    g_role_pill_cache.font_size = fsize;
+    g_role_pill_cache.zoom = zoom;
+    g_role_pill_cache.can_add = can_add;
+    g_role_pill_cache.count = drawn;
+    g_role_pill_cache.end_dx = cx - x;
+    g_role_pill_cache.end_dy = cy - y;
+    g_role_pill_cache.total_h = res_h;
+    memcpy(g_role_pill_cache.items, items, drawn * sizeof items[0]);
+  }
+  return res_h;
 }
 
 static void draw_dm_profile_panel(ccord_ui *ui, ccord_renderer *r, const ccord_layout_rect *l)
@@ -647,10 +719,7 @@ void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r)
     float tx = item.x + 8.0f + 32.0f + 12.0f;
     char act_line[160];
     bool has_status = ui_format_user_activity_line(ui, u, act_line, sizeof act_line);
-    ccord_color nc = COL(text_normal);
-    ui_member_look look;
-    ui_member_look_of(ui, g, m, &look);
-    if (look.color != 0) nc = ui_rgb_color(look.color);
+    ccord_color nc = row->name_color != 0 ? ui_rgb_color(row->name_color) : COL(text_normal);
     if (offline) nc = ui_mix(nc, item_bg, 0.55f);
     ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_base), nc);
     float nh = ui_line_h(ui, ns.size);

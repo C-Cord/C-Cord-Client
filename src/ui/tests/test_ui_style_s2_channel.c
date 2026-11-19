@@ -253,11 +253,7 @@ static void check_record(const char *tag, const uis_audit_record *rec, const uis
   CT_CHECK(ok);
 }
 
-// What the chat area behind the drawer draws (header icon buttons, composer surface). It is drawn before the drawer, so its
-// records lead the frame's list; WP-C's test_ui_style_c checks them. The drawer's own counts are what is left.
-static uint32_t g_base_count[UIS_K_COUNT];
-static uint32_t g_base_kept;
-
+// Channel Settings is a full-window opaque overlay, so the workspace behind it is skipped once opaque.
 // The page's expected draw count per control kind (every kind, zero where the page draws none), then each record.
 static void check_page(const char *tag, const uint32_t want[UIS_K_COUNT])
 {
@@ -265,13 +261,13 @@ static void check_page(const char *tag, const uint32_t want[UIS_K_COUNT])
   uis_tokens t = uis_tokens_of(F.ui);
   CT_CHECK(a->total == a->kept);
   for (int k = 0; k < UIS_K_COUNT; k++) {
-    if (a->kind[k].count != want[k] + g_base_count[k]) {
+    if (a->kind[k].count != want[k]) {
       fprintf(stderr, "%s: %s drawn %u time(s), want %u\n", tag, uis_kind_name((uis_kind)k), a->kind[k].count,
-              want[k] + g_base_count[k]);
+              want[k]);
     }
-    CT_CHECK(a->kind[k].count == want[k] + g_base_count[k]);
+    CT_CHECK(a->kind[k].count == want[k]);
   }
-  for (uint32_t i = g_base_kept; i < a->kept; i++) check_record(tag, &a->rec[i], &t);
+  for (uint32_t i = 0; i < a->kept; i++) check_record(tag, &a->rec[i], &t);
 }
 
 // ---- the pages ----
@@ -299,11 +295,6 @@ static void test_channel_settings_pages(void)
 {
   const ccord_channel *ch = ccord_store_channel(F.store, S2C_CHANNEL);
   CT_CHECK(ch != nullptr && ch->kind == CCORD_CHANNEL_TEXT);
-  {
-    const uis_audit *b = audited_frame();   // the chat alone, drawer closed
-    g_base_kept = b->kept;
-    for (int k = 0; k < UIS_K_COUNT; k++) g_base_count[k] = b->kind[k].count;
-  }
   CT_CHECK(ccord_ui_open_channel_settings(F.ui, S2C_CHANNEL));
   frame(3);
   static const char *const k_pages[] = {"overview", "permissions", "invites"};

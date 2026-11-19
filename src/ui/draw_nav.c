@@ -6,6 +6,7 @@
 #include "ui_internal.h"
 #include "ui_style.h"
 
+#include <ccord/core/alloc.h>
 #include <ccord/core/utf8.h>
 #include <ccord/net/live_transport.h>
 #include <ccord/platform/app_icon.h>
@@ -60,20 +61,19 @@ static void text_centered(ccord_renderer *r, const char *s, ccord_rect box, cons
   ccord_text_draw(r, s, n, box.x + (box.w - t.x) * 0.5f, box.y + (box.h - t.y) * 0.5f, st, 0.0f);
 }
 
-// WCAG relative luminance of an sRGB colour.
-static float rel_luminance(ccord_color c)
+// Fast integer Rec.709 perceptual luminance (0..255000), avoiding 6x powf() per fallback avatar.
+static uint32_t fast_luma(ccord_color c)
 {
-  float ch[3] = {(float)c.r / 255.0f, (float)c.g / 255.0f, (float)c.b / 255.0f};
-  for (int i = 0; i < 3; i++) ch[i] = ch[i] <= 0.04045f ? ch[i] / 12.92f : powf((ch[i] + 0.055f) / 1.055f, 2.4f);
-  return 0.2126f * ch[0] + 0.7152f * ch[1] + 0.0722f * ch[2];
+  return 299u * (uint32_t)c.r + 587u * (uint32_t)c.g + 114u * (uint32_t)c.b;
 }
 
-// Light text on the avatar colour, unless that falls under 3:1 (large bold text): then the dark panel colour.
+// Light text on the avatar colour, unless the background is light: then the dark panel colour.
 static ccord_color avatar_text_color(const ccord_ui *ui, ccord_color bg)
 {
-  float lb = rel_luminance(bg);
-  float white = (rel_luminance(COL(text_on_brand)) + 0.05f) / (lb + 0.05f);
-  return white >= 3.0f ? COL(text_on_brand) : COL(bg_tertiary);
+  uint32_t lb = fast_luma(bg);
+  uint32_t lw = fast_luma(COL(text_on_brand));
+  if (lw >= 128000u) return lb <= 150000u ? COL(text_on_brand) : COL(bg_tertiary);
+  return lb >= 105000u ? COL(text_on_brand) : COL(bg_tertiary);
 }
 
 static float squircle_radius(float size)
@@ -149,18 +149,64 @@ bool ui_channel_muted(const ccord_ui *ui, const ccord_channel *ch)
   return ccord_store_channel_is_muted(ui->d.store, ch, ui->now_unix_ms);
 }
 
+typedef struct ui_unread_entry {
+  ccord_id guild_id;
+  uint32_t unread;
+  uint32_t mentions;
+} ui_unread_entry;
+
+struct ui_unread_cache {
+  uint64_t rev;
+  ccord_id preview_guild;
+  ccord_id preview_role;
+  int64_t sec;
+  size_t count;
+  ui_unread_entry entries[CCORD_MAX_GUILDS + 1u];
+};
+
+void ui_nav_caches_free(ccord_ui *ui)
+{
+  if (!ui) return;
+  ccord_free(ui->unread_cache);
+  ui->unread_cache = nullptr;
+}
+
 // Muted channels (their own mute, their category's, or the server's) add no unread; a mention still counts, since
 // Discord counts those regardless and an @mention is worth a badge even in a place you silenced.
 uint32_t ui_guild_unread(const ccord_ui *ui, ccord_id guild_id, uint32_t *mentions)
 {
   uint32_t unread = 0;
   *mentions = 0;
+  struct ui_unread_cache *uc = ui->unread_cache;
+  if (uc) {
+    uint64_t rev = ui->d.store ? ccord_store_revision(ui->d.store) : 0;
+    int64_t sec = ui->now_unix_ms / 1000LL;
+    if (uc->rev != rev || uc->preview_guild != ui->role_preview_guild ||
+        uc->preview_role != ui->role_preview_role_id || uc->sec != sec) {
+      uc->rev = rev;
+      uc->preview_guild = ui->role_preview_guild;
+      uc->preview_role = ui->role_preview_role_id;
+      uc->sec = sec;
+      uc->count = 0;
+    } else {
+      for (size_t i = 0; i < uc->count; i++) {
+        if (uc->entries[i].guild_id == guild_id) {
+          *mentions = uc->entries[i].mentions;
+          return uc->entries[i].unread;
+        }
+      }
+    }
+  }
   size_t n = ccord_store_channel_count(ui->d.store, guild_id);
   for (size_t i = 0; i < n; i++) {
     const ccord_channel *c = ccord_store_channel_at(ui->d.store, guild_id, i);
-    if (!c || c->is_message_request || !ui_channel_visible(ui, guild_id, c)) continue;
-    if (!ui_channel_muted(ui, c)) unread += c->unread_count;
+    if (!c || c->is_message_request || (c->unread_count == 0 && c->mention_count == 0)) continue;
+    if (!ui_channel_visible(ui, guild_id, c)) continue;
+    if (c->unread_count > 0 && !ui_channel_muted(ui, c)) unread += c->unread_count;
     *mentions += c->mention_count;
+  }
+  if (uc && uc->count < (sizeof uc->entries / sizeof uc->entries[0])) {
+    uc->entries[uc->count++] = (ui_unread_entry){.guild_id = guild_id, .unread = unread, .mentions = *mentions};
   }
   return unread;
 }
@@ -216,15 +262,21 @@ void ui_draw_server_list(ccord_ui *ui, ccord_renderer *r)
   ccord_draw_rect(r, (ccord_rect){l->x + l->w - 1.0f, l->y, 1.0f, l->h}, COL(border_subtle));
   ccord_push_clip(r, ui_rect(*l));
 
+  if (!ui->unread_cache) {
+    ui->unread_cache = ccord_calloc(1, sizeof *ui->unread_cache);
+  }
   // The offset stays inside [0, total - view] on every draw (the content can shrink while the rail is scrolled).
   float rail_total = 0.0f;
-  (void)ui_rail_build_slots(ui, nullptr, 0, &rail_total);
+  size_t nslots = 0;
+  const ui_rail_slot *slots = ui_rail_slots_cached(ui, &nslots, &rail_total);
   float rail_max = rail_total - l->h > 0.0f ? rail_total - l->h : 0.0f;
+  float prev_scroll = ui->server_scroll;
   if (ui->server_scroll > rail_max) ui->server_scroll = rail_max;
   if (ui->server_scroll < 0.0f) ui->server_scroll = 0.0f;
-
-  ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
-  size_t nslots = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
+  if (ui->server_scroll != prev_scroll) {
+    slots = ui_rail_slots_cached(ui, &nslots, nullptr);
+  }
+  if (!slots) nslots = 0;
   ccord_id selected = ccord_store_selected_guild(ui->d.store);
 
   // Row motion: a rail row pushed by a folder that opened or closed slides from where it was drawn; the members of a

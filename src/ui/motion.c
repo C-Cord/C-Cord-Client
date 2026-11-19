@@ -2,6 +2,8 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include "ui_internal.h"
 
+#include <ccord/core/alloc.h>
+
 #include <math.h>
 #include <string.h>
 
@@ -161,8 +163,33 @@ static size_t track_bucket(uint64_t key)
   return (size_t)((key * 0x9E3779B97F4A7C15ull) >> 54) & (UI_TRACK_HASH - 1u);
 }
 
-static const ui_track_entry *track_prev(const ui_track *t, uint64_t key)
+static bool track_ensure_alloc(ui_track *t)
 {
+  if (t->prev && t->cur && t->hash) return true;
+  if (!t->prev) t->prev = ccord_calloc(UI_TRACK_MAX, sizeof *t->prev);
+  if (!t->cur) t->cur = ccord_calloc(UI_TRACK_MAX, sizeof *t->cur);
+  if (!t->hash) t->hash = ccord_calloc(UI_TRACK_HASH, sizeof *t->hash);
+  if (t->prev && t->cur && t->hash) return true;
+  ui_track_free(t);
+  return false;
+}
+
+static void track_build_hash(ui_track *t)
+{
+  if (t->hash_built || !t->hash) return;
+  memset(t->hash, 0, UI_TRACK_HASH * sizeof *t->hash);
+  for (size_t i = 0; i < t->nprev; i++) {
+    size_t b = track_bucket(t->prev[i].key);
+    while (t->hash[b]) b = (b + 1u) & (UI_TRACK_HASH - 1u);
+    t->hash[b] = (uint16_t)(i + 1u);
+  }
+  t->hash_built = true;
+}
+
+static const ui_track_entry *track_prev(ui_track *t, uint64_t key)
+{
+  if (t->nprev == 0 || !t->prev) return nullptr;
+  if (!t->hash_built) track_build_hash(t);
   for (size_t b = track_bucket(key);; b = (b + 1u) & (UI_TRACK_HASH - 1u)) {
     if (!t->hash[b]) return nullptr;   // the table is twice the entry count, so an empty bucket always ends the probe
     const ui_track_entry *e = &t->prev[t->hash[b] - 1u];
@@ -170,21 +197,27 @@ static const ui_track_entry *track_prev(const ui_track *t, uint64_t key)
   }
 }
 
+void ui_track_free(ui_track *t)
+{
+  if (!t) return;
+  ccord_free(t->prev);
+  ccord_free(t->cur);
+  ccord_free(t->hash);
+  *t = (ui_track){0};
+}
+
 void ui_track_begin(ccord_ui *ui, ui_track *t, const char *ns, uint64_t scope)
 {
   (void)ui;
+  if (!track_ensure_alloc(t)) return;
   if (scope != t->scope) {   // another guild, folder or DM list: its rows have no earlier place to slide from
     t->scope = scope;
     t->valid = false;
+    t->has_moving = false;
     t->nprev = 0;
   }
   t->ns = ns;
-  memset(t->hash, 0, sizeof t->hash);
-  for (size_t i = 0; i < t->nprev; i++) {
-    size_t b = track_bucket(t->prev[i].key);
-    while (t->hash[b]) b = (b + 1u) & (UI_TRACK_HASH - 1u);
-    t->hash[b] = (uint16_t)(i + 1u);
-  }
+  t->hash_built = false;   // lazily populated only if a row diverges from its previous slot
   t->ncur = 0;
 }
 
@@ -194,12 +227,23 @@ void ui_track_begin(ccord_ui *ui, ui_track *t, const char *ns, uint64_t scope)
 float ui_track_row(ccord_ui *ui, ui_track *t, uint64_t key, float y, float from_y, bool reveal, float *alpha)
 {
   *alpha = 1.0f;
-  if (t->ncur >= UI_TRACK_MAX) return y;   // beyond the snapshot: drawn at its layout y, never slides
+  if (!t->cur || t->ncur >= UI_TRACK_MAX) return y;   // beyond the snapshot: drawn at its layout y, never slides
+  size_t idx = t->ncur;
+  // Stationary fast path: unchanged slot in a settled list needs neither hash lookup nor anim-key hashing.
+  if (t->valid && !t->has_moving && idx < t->nprev && t->prev[idx].key == key && t->prev[idx].y == y) {
+    t->cur[t->ncur++] = (ui_track_entry){.key = key, .y = y, .drawn = y};
+    return y;
+  }
+  // Reduced motion with no active slides never animates: just record the layout y.
+  if (ui->anim.reduced_motion && !t->has_moving) {
+    t->cur[t->ncur++] = (ui_track_entry){.key = key, .y = y, .drawn = y};
+    return y;
+  }
   const ui_track_entry *p = track_prev(t, key);
   ui_track_entry e = {.key = key, .y = y, .drawn = y};
-  uint32_t k = ccord_anim_key(t->ns, key);
   if (p && p->y == y) {
     if (p->moving) {
+      uint32_t k = ccord_anim_key(t->ns, key);
       float prog = ccord_anim_enter(&ui->anim, k, UI_TRACK_MS);
       e.delta = p->delta;
       e.reveal = p->reveal;
@@ -210,6 +254,7 @@ float ui_track_row(ccord_ui *ui, ui_track *t, uint64_t key, float y, float from_
   } else if (!ui->anim.reduced_motion && (p || (reveal && t->valid))) {
     float delta = (p ? p->drawn : from_y) - y;
     if (fabsf(delta) >= 0.5f) {
+      uint32_t k = ccord_anim_key(t->ns, key);
       ccord_anim_reset(&ui->anim, k);
       float prog = ccord_anim_enter(&ui->anim, k, UI_TRACK_MS);
       e.delta = delta;
@@ -219,13 +264,27 @@ float ui_track_row(ccord_ui *ui, ui_track *t, uint64_t key, float y, float from_
       if (e.reveal) *alpha = prog;
     }
   }
+  if (e.moving) t->has_moving = true;
   t->cur[t->ncur++] = e;
   return e.drawn;
 }
 
 void ui_track_end(ui_track *t)
 {
-  memcpy(t->prev, t->cur, t->ncur * sizeof t->cur[0]);
+  if (!t->prev || !t->cur) return;
+  ui_track_entry *tmp = t->prev;
+  t->prev = t->cur;
+  t->cur = tmp;
   t->nprev = t->ncur;
   t->valid = true;
+  bool any_moving = false;
+  if (t->has_moving) {
+    for (size_t i = 0; i < t->nprev; i++) {
+      if (t->prev[i].moving) {
+        any_moving = true;
+        break;
+      }
+    }
+  }
+  t->has_moving = any_moving;
 }

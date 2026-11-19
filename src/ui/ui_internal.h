@@ -8,6 +8,7 @@
 
 #include "scroll.h"
 #include "status_card.h"
+#include <ccord/core/arena.h>
 #include <ccord/core/atomic_file.h>
 #include <ccord/core/os.h>
 #include <ccord/platform/capture.h>
@@ -35,7 +36,7 @@
 #define UI_ACK_RETRY_MS 5000u         // after a failed ack
 #define UI_CARET_BLINK_MS 530u
 #define UI_MENU_MAX_ITEMS 96u
-#define UI_VISIBLE_ROWS_MAX 256u
+#define UI_VISIBLE_ROWS_MAX 128u
 #define UI_PIN_POPOVER_MAX 6u
 #define UI_TYPING_THROTTLE_MS 7000u   // Discord accepts one typing notice per ~8 s; refresh a little sooner
 #define UI_HISTORY_RETRY_MS 1000u     // throttle before=<id> pagination requests
@@ -62,7 +63,7 @@
 #define UI_REACT_TICK_MS 180u        // a reaction count that changes ticks up over this long
 #define UI_BAR_MS 180u               // new-messages and jump-to-present bars fade and slide over this long
 #define UI_BAR_SLIDE 6.0f
-#define UI_CHAT_SEEN_MAX 512u        // more than the rows and pills drawn in one frame; see chat_seen_put
+#define UI_CHAT_SEEN_MAX 256u        // power of two, open-addressed hash; see chat_seen_put
 #define UI_CHAT_LIVE_MAX 8u          // live arrivals fading in at once
 #define UI_CHAT_EV_NONE 0u
 #define UI_CHAT_EV_NEW 1u            // a pill that was not there before, on a message already drawn
@@ -132,7 +133,7 @@ typedef struct ui_autocomplete_item {
 
 typedef struct ui_link_hit {
   ccord_rect rect;
-  char url[UI_URL_MAX];
+  const char *url;   // points into ui->hit_arena (or "" sentinel); valid until next frame draw
 } ui_link_hit;
 
 typedef struct ui_user_hit {
@@ -155,7 +156,7 @@ typedef struct ui_ts_hit {
 
 typedef struct ui_img_hit {
   ccord_rect rect;
-  char urls[CCORD_RICH_MAX_ATTACHMENTS][UI_URL_MAX];
+  const char *urls[CCORD_RICH_MAX_ATTACHMENTS];   // pointers into ui->hit_arena (or "" sentinel)
   size_t count;
   size_t index;
 } ui_img_hit;
@@ -166,7 +167,7 @@ typedef struct ui_media_hit {
   ccord_rect open_rect;
   ccord_id att_id;
   uint32_t duration_ms;
-  char url[UI_URL_MAX];
+  const char *url;   // points into ui->hit_arena (or "" sentinel)
 } ui_media_hit;
 
 // One requested media URL: what to decode it as, and when a failed download may be tried again.
@@ -231,16 +232,45 @@ typedef struct ui_comp_hit {
   uint8_t min_values;
   uint8_t max_values;
   bool disabled;
-  char custom_id[CCORD_RICH_CUSTOM_ID_MAX_BYTES + 1];
-  char url[UI_URL_MAX];
-  char placeholder[160];
+  const char *custom_id;    // points into ui->hit_arena (or "" sentinel)
+  const char *url;          // points into ui->hit_arena (or "" sentinel)
+  const char *placeholder;  // points into ui->hit_arena (or "" sentinel)
   size_t row_idx;
   size_t comp_idx;
 } ui_comp_hit;
 
+typedef struct ui_select_opt {
+  char label[128];
+  char value[128];
+  char desc[128];
+  bool selected;
+} ui_select_opt;
+
+typedef struct ui_select_target {
+  ccord_rect rect;
+  ccord_id channel_id;
+  ccord_id message_id;
+  ccord_id application_id;
+  uint32_t message_flags;
+  ccord_component_kind kind;
+  uint8_t style;
+  uint8_t min_values;
+  uint8_t max_values;
+  bool disabled;
+  char custom_id[CCORD_RICH_CUSTOM_ID_MAX_BYTES + 1];
+  size_t row_idx;
+  size_t comp_idx;
+} ui_select_target;
+
+typedef struct ui_draft {
+  ccord_id channel_id;
+  char text[CCORD_SEND_MAX_BYTES + 1];
+} ui_draft;
+
 typedef struct member_row {
   bool is_header;
   size_t index;          // member index in the store (members only)
+  uint32_t name_color;   // cached role colour (0 = default text colour)
   char label[96];        // header text
   float y, h;
 } member_row;
@@ -479,9 +509,11 @@ typedef struct ui_track {
   const char *ns;                  // anim namespace of this list
   uint64_t scope;                  // the guild / folder / DM list the snapshot belongs to
   bool valid;                      // prev holds a finished frame of this scope
+  bool has_moving;                 // true if any entry in prev is mid-slide
+  bool hash_built;                 // true if hash[] has been populated for prev[]
   size_t nprev, ncur;
-  ui_track_entry prev[UI_TRACK_MAX], cur[UI_TRACK_MAX];
-  uint16_t hash[UI_TRACK_HASH];    // prev index + 1, by key (open addressing)
+  ui_track_entry *prev, *cur;      // lazily heap-allocated [UI_TRACK_MAX]; swapped in O(1) at ui_track_end
+  uint16_t *hash;                  // lazily heap-allocated [UI_TRACK_HASH]: prev index + 1, by key
 } ui_track;
 
 #define UI_THREAD_HIT_MAX 32u
@@ -569,8 +601,21 @@ struct ccord_ui {
 
   // caches rebuilt when the store revision or the selected guild changes
   uint64_t built_rev, built_lists_rev, built_contrib_rev;
+  uint64_t built_chan_sig, built_member_sig;
+  uint64_t synced_msg_rev, synced_view_key;
+  ccord_id synced_msg_ch;
   uint64_t dbg_list_rebuilds;                  // how many times the channel and member rows were rebuilt (tests)
   ccord_id built_guild;
+  uint64_t folder_expand_seq;
+  uint64_t typing_next_ms;
+  bool typing_anim_only;
+  bool settings_save_dirty;
+  uint64_t settings_save_due_ms;
+  uint64_t last_ovl_hover_sig;                 // hover signature inside overlays/modals for CCORD_IN_MOUSE_MOVE dedup
+  ccord_arena hit_arena;                       // per-frame hit string arena; reset at start of ui_draw_frame
+  struct ui_rail_cache *rail_cache;            // lazily allocated cached guild rail slots
+  struct ui_unread_cache *unread_cache;        // lazily allocated per-guild unread/mention totals
+  struct ui_chat_caches *chat_caches;          // lazily allocated row-height, mention & blocked-run caches
   chan_row *crow; size_t ncrow, capcrow; float chan_content_h;
   member_row *mrow; size_t nmrow, capmrow; float member_content_h;
   ccord_id *collapsed; size_t ncollapsed, capcollapsed;
@@ -621,7 +666,7 @@ struct ccord_ui {
   size_t nlinks;
   ui_user_hit user_hits[UI_USER_HIT_MAX];
   size_t nuser_hits;
-  ui_media_req media_reqs[UI_MEDIA_REQ_SLOTS];
+  ui_media_req *media_reqs;   // lazily heap-allocated [UI_MEDIA_REQ_SLOTS]
   size_t nmedia_reqs;
   bool media_animating;   // the last draw showed a moving image or left decoding to do: keep frames coming
   ccord_rect text_hits[UI_TEXT_HIT_MAX];   // selectable message text drawn this frame (I-beam cursor)
@@ -686,11 +731,8 @@ struct ccord_ui {
   ccord_rect text_area;         // composer text area of the last draw (window coords)
   bool ime_active;
   ccord_rect ime_rect;
-  struct {
-    ccord_id channel_id;
-    char text[CCORD_SEND_MAX_BYTES + 1];
-  } drafts[UI_DRAFTS_MAX];
-  size_t ndrafts;
+  ui_draft *drafts;           // lazily heap-allocated up to UI_DRAFTS_MAX
+  size_t ndrafts, cap_drafts;
   struct {
     ccord_id channel_id;
     uint64_t sent_ms;
@@ -708,7 +750,7 @@ struct ccord_ui {
   // fenced code block copy buttons, spoiler pills, channel mentions, jump-to-present
   struct {
     ccord_rect rect;
-    char code[1024];
+    const char *code;   // points into ui->hit_arena (or "" sentinel); ANSI stripped on click
   } code_copy_hits[16];
   size_t ncode_copy_hits;
   struct {
@@ -759,7 +801,7 @@ struct ccord_ui {
   // inline image lightbox & inline media player
   bool lightbox_open;
   char lightbox_url[UI_URL_MAX];
-  char lightbox_urls[CCORD_RICH_MAX_ATTACHMENTS][UI_URL_MAX];
+  char (*lightbox_urls)[UI_URL_MAX];   // lazily heap-allocated [CCORD_RICH_MAX_ATTACHMENTS] while lightbox is open
   size_t lightbox_count, lightbox_index;
   float lightbox_zoom;
   ccord_rect lightbox_img_rect, lightbox_open_btn, lightbox_prev_btn, lightbox_next_btn, lightbox_close_btn, lightbox_zoom_btn;
@@ -791,16 +833,11 @@ struct ccord_ui {
   bool select_open;
   ccord_rect select_anchor_rect, select_dropdown_rect, select_confirm_btn;
   ccord_rect select_opt_rects[CCORD_RICH_MAX_SELECT_OPTIONS];
-  struct {
-    char label[128];
-    char value[128];
-    char desc[128];
-    bool selected;
-  } select_opts[CCORD_RICH_MAX_SELECT_OPTIONS];
+  ui_select_opt *select_opts;          // lazily heap-allocated [CCORD_RICH_MAX_SELECT_OPTIONS]
   size_t select_opt_count;
-  ui_comp_hit select_target;
-  ccord_interaction_modal inter_modal;
-  ccord_text_edit inter_modal_edits[CCORD_RICH_MAX_COMPONENT_ROWS];
+  ui_select_target *select_target;     // lazily heap-allocated while select dropdown is open
+  ccord_interaction_modal *inter_modal;           // lazily heap-allocated while interaction modal is open/fading
+  ccord_text_edit *inter_modal_edits;             // lazily heap-allocated [CCORD_RICH_MAX_COMPONENT_ROWS]
   size_t inter_modal_focus;
   ccord_rect inter_modal_box, inter_modal_ok, inter_modal_cancel;
   ccord_rect inter_modal_field_rects[CCORD_RICH_MAX_COMPONENT_ROWS];
@@ -1296,7 +1333,7 @@ struct ccord_ui {
   size_t nprofile_modal_mutual_hits;
   struct {
     ccord_rect rect;
-    char url[UI_URL_MAX];
+    const char *url;   // points into ui->hit_arena (or "" sentinel)
   } profile_modal_conn_hits[CCORD_PROFILE_MAX_CONNECTIONS];
   size_t nprofile_modal_conn_hits;
   size_t dbg_clan_badges;
@@ -1495,7 +1532,20 @@ size_t ui_dm_member_count(const ccord_channel *ch);                             
 void ui_draw_group_dm_icon(ccord_ui *ui, ccord_renderer *r, const ccord_channel *ch, float cx, float cy, float size);
 bool ui_open_url(ccord_ui *ui, const char *url, const char *label);
 bool ui_activate_link(ccord_ui *ui, const char *url);
-void ui_open_lightbox(ccord_ui *ui, const char urls[][UI_URL_MAX], size_t count, size_t index);
+void ui_open_lightbox(ccord_ui *ui, const char *const *urls, size_t count, size_t index);
+void ui_close_lightbox(ccord_ui *ui);
+void ui_close_select_dropdown(ccord_ui *ui);
+void ui_free_inter_modal(ccord_ui *ui);
+static inline const char *ui_hit_dup(ccord_ui *ui, const char *s, size_t len)
+{
+  if (!ui || !s || len == 0) return "";
+  const char *p = ccord_arena_strndup(&ui->hit_arena, s, len);
+  return p ? p : "";
+}
+static inline const char *ui_hit_cstr(ccord_ui *ui, const char *s)
+{
+  return (s && s[0]) ? ui_hit_dup(ui, s, strlen(s)) : "";
+}
 void ui_open_dm_with_user(ccord_ui *ui, ccord_id user_id);
 void ui_set_user_relationship(ccord_ui *ui, ccord_id user_id, ccord_relationship_kind kind);
 void ui_ensure_caches(ccord_ui *ui);
@@ -1528,6 +1578,7 @@ float ui_ease_to(ccord_ui *ui, const char *ns, uint64_t id, float target, uint32
 void ui_track_begin(ccord_ui *ui, ui_track *t, const char *ns, uint64_t scope);
 float ui_track_row(ccord_ui *ui, ui_track *t, uint64_t key, float y, float from_y, bool reveal, float *alpha);
 void ui_track_end(ui_track *t);
+void ui_track_free(ui_track *t);
 // Close transitions. An overlay is told apart by `ui_overlay`; ui_overlay_presence is its 0..1 value (asked every frame
 // with whether it is open: eases up over open_ms, down over close_ms, instant under reduced motion). While it is open
 // or while the value is above UI_PRESENCE_EPS the overlay is drawn between ui_overlay_begin / ui_overlay_end, which
@@ -1694,6 +1745,12 @@ ccord_rect ui_quick_switcher_rect(const ccord_ui *ui);   // Ctrl+K dialog box, c
 void ui_quick_switcher_reset_list(ccord_ui *ui);         // selection to the first row, list back to the top
 
 size_t ui_rail_build_slots(const ccord_ui *ui, ui_rail_slot *out, size_t cap, float *out_total_h);
+const ui_rail_slot *ui_rail_slots_cached(const ccord_ui *ui, size_t *out_count, float *out_total_h);
+void ui_rail_cache_free(ccord_ui *ui);
+void ui_nav_caches_free(ccord_ui *ui);
+void ui_chat_caches_free(ccord_ui *ui);
+void ui_chat_caches_clear(ccord_ui *ui);
+void ui_composer_format_free(void);
 bool ui_folder_is_expanded(const ccord_ui *ui, ccord_id folder_id);
 void ui_folder_toggle_expanded(ccord_ui *ui, ccord_id folder_id);
 void ui_discovery_request(ccord_ui *ui, bool force);

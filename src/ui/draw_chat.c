@@ -36,6 +36,84 @@ static float clampf(float v, float lo, float hi)
   return v < lo ? lo : (v > hi ? hi : v);
 }
 
+// ---- per-UI chat layout & resolution caches (lazily heap-allocated) ----
+#define CHAT_MENTION_CACHE_SLOTS 64u
+typedef struct chat_mention_entry {
+  uint64_t hash;        // 0 = empty; FNV-1a of lowercase name
+  uint8_t nlen;
+  char name[48];
+  ccord_id user_id;
+} chat_mention_entry;
+
+#define CHAT_ROWH_CACHE_SLOTS 64u
+typedef struct chat_rowh_entry {
+  uint64_t content_hash;
+  ccord_id msg_id;
+  int64_t edited_ts;
+  size_t content_len;
+  int width_q;
+  int scale_q;
+  uint32_t flags;
+  uint32_t meta_sig;
+  float height;
+  uint64_t lru_tick;
+} chat_rowh_entry;
+
+#define CHAT_EMBEDH_CACHE_SLOTS 32u
+typedef struct chat_embedh_entry {
+  ccord_id msg_id;
+  uintptr_t emb_ptr;
+  int width_q;
+  int scale_q;
+  bool streamer;
+  float height;
+  uint64_t lru_tick;
+} chat_embedh_entry;
+
+struct ui_chat_caches {
+  uint64_t mention_rev;
+  ccord_id mention_guild;
+  ccord_id mention_chan;
+  chat_mention_entry mentions[CHAT_MENTION_CACHE_SLOTS];
+
+  bool br_valid;
+  uint64_t br_rev;
+  uint64_t br_blocked_sig;
+  ccord_id br_chan;
+  size_t br_a, br_b;
+  ccord_id br_first_id;
+
+  const ccord_renderer *rh_r;
+  const ccord_theme *rh_theme;
+  int rh_tex_count;
+  size_t rh_nrevealed_spoilers;
+  size_t rh_nblocked_revealed;
+  uint64_t rh_blocked_sig;
+  uint64_t rh_tick;
+  chat_rowh_entry rowh[CHAT_ROWH_CACHE_SLOTS];
+  chat_embedh_entry embedh[CHAT_EMBEDH_CACHE_SLOTS];
+};
+
+static struct ui_chat_caches *chat_caches_ensure(ccord_ui *ui)
+{
+  if (!ui) return nullptr;
+  if (!ui->chat_caches) ui->chat_caches = ccord_calloc(1, sizeof *ui->chat_caches);
+  return ui->chat_caches;
+}
+
+void ui_chat_caches_clear(ccord_ui *ui)
+{
+  if (!ui || !ui->chat_caches) return;
+  memset(ui->chat_caches, 0, sizeof *ui->chat_caches);
+}
+
+void ui_chat_caches_free(ccord_ui *ui)
+{
+  if (!ui) return;
+  ccord_free(ui->chat_caches);
+  ui->chat_caches = nullptr;
+}
+
 // Discord plays animated chat media only while gif_auto_play is on (default when the
 // settings object has not arrived yet); with it off, hovering one tile still plays it.
 static bool ui_gif_auto_play(const ccord_ui *ui)
@@ -502,12 +580,11 @@ static ccord_text_style md_token_style_sized(const ccord_ui *ui, const ui_md_tok
 
 static void record_link_hit(ccord_ui *ui, ccord_rect rect, const char *url, size_t url_len)
 {
-  if (!ui || !url || url_len == 0 || url_len >= sizeof ui->links[0].url) return;
+  if (!ui || !url || url_len == 0 || url_len >= UI_URL_MAX) return;
   if (ui->nlinks >= UI_LINK_HIT_MAX) return;
   ui_link_hit *hit = &ui->links[ui->nlinks++];
   hit->rect = rect;
-  memcpy(hit->url, url, url_len);
-  hit->url[url_len] = '\0';
+  hit->url = ui_hit_dup(ui, url, url_len);
 }
 
 // A line of selectable message text: the I-beam cursor shows over these and nowhere else in the message list.
@@ -548,17 +625,21 @@ static void record_spoiler_hit(ccord_ui *ui, ccord_rect rect, ccord_id key)
   ui->nspoiler_hits++;
 }
 
-static void record_img_hit(ccord_ui *ui, ccord_rect rect, const char urls[][UI_URL_MAX], size_t count, size_t index)
+static void record_img_hit(ccord_ui *ui, ccord_rect rect, const char *const *urls, size_t count, size_t index)
 {
   if (!ui || !urls || count == 0 || index >= count || rect.w <= 0.0f || rect.h <= 0.0f) return;
-  if (!urls[index][0] || ui->nimg_hits >= UI_IMG_HIT_MAX) return;
+  if (!urls[index] || !urls[index][0] || ui->nimg_hits >= UI_IMG_HIT_MAX) return;
   ui_img_hit *hit = &ui->img_hits[ui->nimg_hits++];
   hit->rect = rect;
   if (count > CCORD_RICH_MAX_ATTACHMENTS) count = CCORD_RICH_MAX_ATTACHMENTS;
   hit->count = count;
   hit->index = index < count ? index : 0;
   for (size_t i = 0; i < count; i++) {
-    ui_url_copy(hit->urls[i], sizeof hit->urls[i], urls[i]);
+    const char *u = (urls[i] && strlen(urls[i]) < UI_URL_MAX) ? urls[i] : "";
+    hit->urls[i] = ui_hit_cstr(ui, u);
+  }
+  for (size_t i = count; i < CCORD_RICH_MAX_ATTACHMENTS; i++) {
+    hit->urls[i] = "";
   }
 }
 
@@ -604,63 +685,123 @@ static ccord_id resolve_mention_user_id(const ccord_ui *ui, const ui_md_token *t
     else break;
   }
   if (nlen == 0) return CCORD_ID_NONE;
+  // Never scan the store for broadcast mentions.
+  if (slice_eq_ci("everyone", name, nlen) || slice_eq_ci("here", name, nlen)) {
+    return CCORD_ID_NONE;
+  }
   ccord_id parsed = CCORD_ID_NONE;
   if (ccord_id_parse(name, nlen, &parsed)) return parsed;
   if (!ui || !ui->d.store) return CCORD_ID_NONE;
   const ccord_store *st = ui->d.store;
 
+  ccord_id sel_g = ccord_store_selected_guild(st);
+  ccord_id sel_ch = ccord_store_selected_channel(st);
+  struct ui_chat_caches *cc = ui->chat_caches;
+  uint64_t nh = 0;
+  char lower[48];
+  bool cacheable = cc != nullptr && nlen < sizeof lower;
+  if (cacheable) {
+    uint64_t rev = ccord_store_revision(st);
+    if (cc->mention_rev != rev || cc->mention_guild != sel_g || cc->mention_chan != sel_ch) {
+      cc->mention_rev = rev;
+      cc->mention_guild = sel_g;
+      cc->mention_chan = sel_ch;
+      memset(cc->mentions, 0, sizeof cc->mentions);
+    }
+    nh = 1469598103934665603ULL;
+    for (size_t i = 0; i < nlen; i++) {
+      char ch = name[i];
+      if (ch >= 'A' && ch <= 'Z') ch = (char)(ch - 'A' + 'a');
+      lower[i] = ch;
+      nh = (nh ^ (uint8_t)ch) * 1099511628211ULL;
+    }
+    if (nh == 0) nh = 1u;
+    const chat_mention_entry *ce = &cc->mentions[(size_t)(nh & (CHAT_MENTION_CACHE_SLOTS - 1u))];
+    if (ce->hash == nh && ce->nlen == (uint8_t)nlen && memcmp(ce->name, lower, nlen) == 0) {
+      return ce->user_id;
+    }
+  }
+
+  ccord_id found = CCORD_ID_NONE;
   ccord_id self_id = ccord_store_self_id(st);
   if (self_id != CCORD_ID_NONE) {
     const ccord_user *su = ccord_store_user(st, self_id);
-    if (user_matches_mention(su, name, nlen) || slice_eq_ci("you", name, nlen)) return self_id;
+    if (user_matches_mention(su, name, nlen) || slice_eq_ci("you", name, nlen)) found = self_id;
   }
 
-  ccord_id sel_g = ccord_store_selected_guild(st);
-  if (sel_g != CCORD_ID_NONE) {
+  if (found == CCORD_ID_NONE && sel_g != CCORD_ID_NONE) {
     size_t mc = ccord_store_member_count(st, sel_g);
     for (size_t i = 0; i < mc; i++) {
       const ccord_member *m = ccord_store_member_at(st, sel_g, i);
       const ccord_user *u = m ? ccord_store_user(st, m->user_id) : nullptr;
-      if (user_matches_mention(u, name, nlen)) return m->user_id;
+      if (user_matches_mention(u, name, nlen)) {
+        found = m->user_id;
+        break;
+      }
     }
   }
 
-  ccord_id sel_ch = ccord_store_selected_channel(st);
-  if (sel_ch != CCORD_ID_NONE) {
+  if (found == CCORD_ID_NONE && sel_ch != CCORD_ID_NONE) {
     size_t msg_c = ccord_store_message_count(st, sel_ch);
     for (size_t i = 0; i < msg_c; i++) {
       const ccord_message *msg = ccord_store_message_at(st, sel_ch, i);
       const ccord_user *u = (msg && msg->author_id != CCORD_ID_NONE) ? ccord_store_user(st, msg->author_id) : nullptr;
-      if (user_matches_mention(u, name, nlen)) return msg->author_id;
+      if (user_matches_mention(u, name, nlen)) {
+        found = msg->author_id;
+        break;
+      }
     }
   }
 
-  size_t rc = ccord_store_relationship_count(st);
-  for (size_t i = 0; i < rc; i++) {
-    const ccord_relationship *rel = ccord_store_relationship_at(st, i);
-    const ccord_user *u = rel ? ccord_store_user(st, rel->user_id) : nullptr;
-    if (user_matches_mention(u, name, nlen)) return rel->user_id;
-  }
-
-  size_t dmc = ccord_store_channel_count(st, CCORD_DM_GUILD_ID);
-  for (size_t i = 0; i < dmc; i++) {
-    const ccord_channel *c = ccord_store_channel_at(st, CCORD_DM_GUILD_ID, i);
-    const ccord_user *u = (c && c->user_id != CCORD_ID_NONE) ? ccord_store_user(st, c->user_id) : nullptr;
-    if (user_matches_mention(u, name, nlen)) return c->user_id;
-  }
-
-  size_t gc = ccord_store_guild_count(st);
-  for (size_t g = 0; g < gc; g++) {
-    const ccord_guild *gd = ccord_store_guild_at(st, g);
-    if (!gd || gd->id == sel_g) continue;
-    size_t mc = ccord_store_member_count(st, gd->id);
-    for (size_t i = 0; i < mc; i++) {
-      const ccord_member *m = ccord_store_member_at(st, gd->id, i);
-      const ccord_user *u = m ? ccord_store_user(st, m->user_id) : nullptr;
-      if (user_matches_mention(u, name, nlen)) return m->user_id;
+  if (found == CCORD_ID_NONE) {
+    size_t rc = ccord_store_relationship_count(st);
+    for (size_t i = 0; i < rc; i++) {
+      const ccord_relationship *rel = ccord_store_relationship_at(st, i);
+      const ccord_user *u = rel ? ccord_store_user(st, rel->user_id) : nullptr;
+      if (user_matches_mention(u, name, nlen)) {
+        found = rel->user_id;
+        break;
+      }
     }
   }
-  return CCORD_ID_NONE;
+
+  if (found == CCORD_ID_NONE) {
+    size_t dmc = ccord_store_channel_count(st, CCORD_DM_GUILD_ID);
+    for (size_t i = 0; i < dmc; i++) {
+      const ccord_channel *c = ccord_store_channel_at(st, CCORD_DM_GUILD_ID, i);
+      const ccord_user *u = (c && c->user_id != CCORD_ID_NONE) ? ccord_store_user(st, c->user_id) : nullptr;
+      if (user_matches_mention(u, name, nlen)) {
+        found = c->user_id;
+        break;
+      }
+    }
+  }
+
+  if (found == CCORD_ID_NONE) {
+    size_t gc = ccord_store_guild_count(st);
+    for (size_t g = 0; g < gc && found == CCORD_ID_NONE; g++) {
+      const ccord_guild *gd = ccord_store_guild_at(st, g);
+      if (!gd || gd->id == sel_g) continue;
+      size_t mc = ccord_store_member_count(st, gd->id);
+      for (size_t i = 0; i < mc; i++) {
+        const ccord_member *m = ccord_store_member_at(st, gd->id, i);
+        const ccord_user *u = m ? ccord_store_user(st, m->user_id) : nullptr;
+        if (user_matches_mention(u, name, nlen)) {
+          found = m->user_id;
+          break;
+        }
+      }
+    }
+  }
+
+  if (cacheable) {
+    chat_mention_entry *ce = &cc->mentions[(size_t)(nh & (CHAT_MENTION_CACHE_SLOTS - 1u))];
+    ce->hash = nh;
+    ce->nlen = (uint8_t)nlen;
+    memcpy(ce->name, lower, nlen);
+    ce->user_id = found;
+  }
+  return found;
 }
 
 static size_t format_discord_timestamp(const ccord_ui *ui, int64_t sec, char style, char out[static 96])
@@ -1099,15 +1240,21 @@ static float md_inline_walk_sized(ccord_ui *ui, ccord_renderer *r, const char *t
                                   float wrap, ccord_color base, float font_size, bool force_bold, bool draw)
 {
   if (text && len > 0 && ui_streamer_invites_active(ui)) {
-    char *buf = ccord_alloc_array(len * 2u, 1u);
-    if (!buf) return ui_line_h(ui, font_size);   // out of memory: draw nothing rather than leak the code
+    char stack_buf[1024];
+    char *heap_buf = nullptr;
+    char *buf = stack_buf;
+    if (len > 512u) {
+      heap_buf = ccord_alloc_array(len * 2u, 1u);
+      if (!heap_buf) return ui_line_h(ui, font_size);   // out of memory: draw nothing rather than leak the code
+      buf = heap_buf;
+    }
     char *marked = buf, *stars = buf + len;
     if (ui_streamer_premask(text, len, marked, stars)) {
       float h = md_inline_walk_core(ui, r, marked, len, x, y, wrap, base, font_size, force_bold, draw, stars);
-      ccord_free(buf);
+      ccord_free(heap_buf);
       return h;
     }
-    ccord_free(buf);
+    ccord_free(heap_buf);
   }
   return md_inline_walk_core(ui, r, text, len, x, y, wrap, base, font_size, force_bold, draw, nullptr);
 }
@@ -1241,40 +1388,9 @@ static float md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, siz
           size_t clen = (cend > fence_code_start) ? (cend - fence_code_start) : ll;
           if (clen > 0 && text[fence_code_start + clen - 1] == '\n') clen--;
           if (clen > 0 && text[fence_code_start + clen - 1] == '\r') clen--;
-          char *clean = ccord_malloc(clen + 1);
-          if (clean) {
-            size_t m = 0;
-            size_t i = 0;
-            while (i < clen) {
-              unsigned char c = (unsigned char)text[fence_code_start + i];
-              if (c == 0x1B) {
-                i++;
-                if (i < clen && text[fence_code_start + i] == '[') {
-                  i++;
-                  while (i < clen) {
-                    unsigned char pc = (unsigned char)text[fence_code_start + i];
-                    if (pc >= 0x40 && pc <= 0x7E) { i++; break; }
-                    i++;
-                  }
-                }
-                continue;
-              }
-              clean[m++] = (char)c;
-              i++;
-            }
-            clean[m] = '\0';
-            char copy_mask[1024];
-            size_t copy_ml = ui_streamer_mask_invites(ui, clean, m, copy_mask, sizeof copy_mask, false);
-            if (copy_ml > 0 && copy_ml < sizeof copy_mask) {
-              copy_mask[copy_ml] = '\0';
-              if (ui->d.host.clipboard_set) ui->d.host.clipboard_set(ui->d.host.ud, copy_mask);
-            } else {
-              if (ui->d.host.clipboard_set) ui->d.host.clipboard_set(ui->d.host.ud, clean);
-            }
-            ui_notice(ui, "Copied code block");
-            ccord_free(clean);
-          }
-          ui->ncode_copy_hits++;
+          size_t idx = ui->ncode_copy_hits++;
+          ui->code_copy_hits[idx].rect = cbtn;
+          ui->code_copy_hits[idx].code = ui_hit_dup(ui, text + fence_code_start, clen);
         }
       }
       py += h;
@@ -1785,11 +1901,21 @@ static bool message_edited(const ccord_message *m)
 // ---- chat motion -------------------------------------------------------------------------------------------------
 // Only drawing moves here: row heights, the layout and every other row's y stay as measured.
 
+#define CHAT_SEEN_PROBE 16u
+
+static size_t chat_seen_bucket(uint64_t key)
+{
+  return (size_t)((key * 0x9E3779B97F4A7C15ULL) >> 56) & (UI_CHAT_SEEN_MAX - 1u);
+}
+
 static ui_chat_seen *chat_seen_peek(ccord_ui *ui, uint64_t key)
 {
   if (key == 0) return nullptr;
-  for (size_t i = 0; i < UI_CHAT_SEEN_MAX; i++) {
-    if (ui->chat_seen[i].key == key) return &ui->chat_seen[i];
+  size_t base = chat_seen_bucket(key);
+  const size_t mask = UI_CHAT_SEEN_MAX - 1u;
+  for (size_t i = 0; i < CHAT_SEEN_PROBE; i++) {
+    ui_chat_seen *e = &ui->chat_seen[(base + i) & mask];
+    if (e->key == key) return e;
   }
   return nullptr;
 }
@@ -1801,13 +1927,16 @@ static ui_chat_seen *chat_seen_find(ccord_ui *ui, uint64_t key)
   return e;
 }
 
-// Takes a free slot, else the least recently drawn one that was not drawn this frame, so a frame's own rows and pills
-// keep their memory. Nullptr only when every slot was drawn this frame: that item then gets no motion this frame.
+// Takes a free slot in the probe window, else the least recently drawn one that was not drawn this frame, so a frame's
+// own rows and pills keep their memory. Nullptr only when every probed slot was drawn this frame.
 static ui_chat_seen *chat_seen_put(ccord_ui *ui, uint64_t key)
 {
+  if (key == 0) return nullptr;
+  size_t base = chat_seen_bucket(key);
+  const size_t mask = UI_CHAT_SEEN_MAX - 1u;
   ui_chat_seen *victim = nullptr;
-  for (size_t i = 0; i < UI_CHAT_SEEN_MAX; i++) {
-    ui_chat_seen *e = &ui->chat_seen[i];
+  for (size_t i = 0; i < CHAT_SEEN_PROBE; i++) {
+    ui_chat_seen *e = &ui->chat_seen[(base + i) & mask];
     if (e->key == 0) {
       victim = e;
       break;
@@ -1902,34 +2031,25 @@ typedef struct reaction_pill {
   bool me_burst;
 } reaction_pill;
 
-static size_t reaction_pill_at(const ccord_message *m, size_t index, reaction_pill *out)
+static void reaction_pill_fill(const ccord_reaction *r, reaction_pill *out)
 {
-  if (!m || !m->reactions || m->reaction_kind_count == 0) return 0;
-  size_t seen = 0;
-  for (size_t i = 0; i < m->reaction_kind_count; i++) {
-    const ccord_reaction *r = &m->reactions[i];
-    if (!r->emoji || r->count == 0) continue;
-    if (seen++ != index) continue;
-    out->emoji = r->emoji;
-    out->elen = strlen(r->emoji);
-    out->emoji_id = r->emoji_id;
-    out->animated = r->animated;
-    if (out->emoji_id == CCORD_ID_NONE) {
-      const char *colon = strrchr(r->emoji, ':');
-      if (colon && colon > r->emoji && colon[1] != '\0') {
-        ccord_id parsed = CCORD_ID_NONE;
-        if (ccord_id_parse(colon + 1, strlen(colon + 1), &parsed)) {
-          out->emoji_id = parsed;
-        }
+  out->emoji = r->emoji;
+  out->elen = strlen(r->emoji);
+  out->emoji_id = r->emoji_id;
+  out->animated = r->animated;
+  if (out->emoji_id == CCORD_ID_NONE) {
+    const char *colon = strrchr(r->emoji, ':');
+    if (colon && colon > r->emoji && colon[1] != '\0') {
+      ccord_id parsed = CCORD_ID_NONE;
+      if (ccord_id_parse(colon + 1, strlen(colon + 1), &parsed)) {
+        out->emoji_id = parsed;
       }
     }
-    out->count = r->count;
-    out->burst_count = r->burst_count;
-    out->me_burst = r->me_burst;
-    out->mine = r->self_reacted || r->me_burst;
-    return seen;
   }
-  return 0;
+  out->count = r->count;
+  out->burst_count = r->burst_count;
+  out->me_burst = r->me_burst;
+  out->mine = r->self_reacted || r->me_burst;
 }
 
 // One pill per emoji (emoji + count), wrapping to new rows. Returns total height; draws when asked.
@@ -1941,9 +2061,11 @@ static float reaction_pills_walk(ccord_ui *ui, ccord_renderer *r, const ccord_me
   float gap_x = 6.0f, gap_y = 4.0f;
   float cx = x, cy = y;
   bool any = false;
-  for (size_t i = 0;; i++) {
+  for (size_t ri = 0; ri < m->reaction_kind_count; ri++) {
+    const ccord_reaction *rc = &m->reactions[ri];
+    if (!rc->emoji || rc->count == 0) continue;
     reaction_pill p;
-    if (!reaction_pill_at(m, i, &p)) break;
+    reaction_pill_fill(rc, &p);
     char label[24];
     int ll = snprintf(label, sizeof label, "%u", p.count);
     if (ll < 0) ll = 0;
@@ -2185,36 +2307,42 @@ static void decor_add_thread(decor_info *d, const ccord_message_rich *rich)
                                        nullptr, 0u, 1u, 0u, d->msg_id, d->author_id, ""};
 }
 
-static bool inv_ieq_at(const char *s, size_t rem, const char *lit, size_t *out_len)
+static bool inv_ieq_at_n(const char *s, size_t rem, const char *lit, size_t n)
 {
-  size_t n = strlen(lit);
   if (rem < n) return false;
   for (size_t i = 0; i < n; i++) {
     unsigned char a = (unsigned char)s[i];
     unsigned char b = (unsigned char)lit[i];
     if (a >= 'A' && a <= 'Z') a += (unsigned char)('a' - 'A');
-    if (b >= 'A' && b <= 'Z') b += (unsigned char)('a' - 'A');
-    if (a != b) return false;
+    if (a != b) return false;   // table literals are already lowercase
   }
-  *out_len = n;
   return true;
 }
 
 static void decor_scan_invites(decor_info *d, const char *text, size_t len)
 {
   if (!d || !text || len == 0) return;
-  static const char *const k_prefixes[] = {
-    "https://www.discord.gg/",        "http://www.discord.gg/",        "www.discord.gg/",
-    "https://discord.gg/",            "http://discord.gg/",            "discord.gg/",
-    "https://www.discord.com/invite/","http://www.discord.com/invite/","www.discord.com/invite/",
-    "https://discord.com/invite/",    "http://discord.com/invite/",    "discord.com/invite/",
-    "https://ptb.discord.com/invite/","http://ptb.discord.com/invite/","ptb.discord.com/invite/",
-    "https://canary.discord.com/invite/","http://canary.discord.com/invite/","canary.discord.com/invite/",
-    "https://discordapp.com/invite/", "http://discordapp.com/invite/", "discordapp.com/invite/",
-    "discord://-/invite/",            "discord://invite/",
+  typedef struct inv_prefix {
+    const char *str;
+    size_t len;
+  } inv_prefix;
+#define INV_PFX(s) {s, sizeof(s) - 1u}
+  static const inv_prefix k_prefixes[] = {
+    INV_PFX("https://www.discord.gg/"),         INV_PFX("http://www.discord.gg/"),         INV_PFX("www.discord.gg/"),
+    INV_PFX("https://discord.gg/"),             INV_PFX("http://discord.gg/"),             INV_PFX("discord.gg/"),
+    INV_PFX("https://www.discord.com/invite/"), INV_PFX("http://www.discord.com/invite/"), INV_PFX("www.discord.com/invite/"),
+    INV_PFX("https://discord.com/invite/"),     INV_PFX("http://discord.com/invite/"),     INV_PFX("discord.com/invite/"),
+    INV_PFX("https://ptb.discord.com/invite/"), INV_PFX("http://ptb.discord.com/invite/"), INV_PFX("ptb.discord.com/invite/"),
+    INV_PFX("https://canary.discord.com/invite/"), INV_PFX("http://canary.discord.com/invite/"), INV_PFX("canary.discord.com/invite/"),
+    INV_PFX("https://discordapp.com/invite/"),  INV_PFX("http://discordapp.com/invite/"),  INV_PFX("discordapp.com/invite/"),
+    INV_PFX("discord://-/invite/"),             INV_PFX("discord://invite/"),
   };
+#undef INV_PFX
   size_t found = 0;
   for (size_t i = 0; i < len && found < 3u && d->nparts < DECOR_MAX_PARTS; i++) {
+    unsigned char c0 = (unsigned char)text[i];
+    if (c0 >= 'A' && c0 <= 'Z') c0 += (unsigned char)('a' - 'A');
+    if (c0 != 'h' && c0 != 'w' && c0 != 'd' && c0 != 'p' && c0 != 'c') continue;
     if (i > 0) {
       unsigned char prev = (unsigned char)text[i - 1u];
       bool word_prev = (prev >= '0' && prev <= '9') || (prev >= 'a' && prev <= 'z') ||
@@ -2223,8 +2351,11 @@ static void decor_scan_invites(decor_info *d, const char *text, size_t len)
     }
     size_t plen = 0;
     for (size_t pi = 0; pi < sizeof k_prefixes / sizeof k_prefixes[0]; pi++) {
-      if (inv_ieq_at(text + i, len - i, k_prefixes[pi], &plen)) break;
-      plen = 0;
+      if ((unsigned char)k_prefixes[pi].str[0] != c0) continue;
+      if (inv_ieq_at_n(text + i, len - i, k_prefixes[pi].str, k_prefixes[pi].len)) {
+        plen = k_prefixes[pi].len;
+        break;
+      }
     }
     if (plen == 0) continue;
     size_t cs = i + plen;
@@ -2700,6 +2831,16 @@ static blocked_run blocked_run_at(const ccord_ui *ui, ccord_id channel, size_t s
   blocked_run br = {0};
   if (store_i == SIZE_MAX || !msg_author_blocked(ui, m)) return br;
   br.blocked = true;
+  struct ui_chat_caches *cc = ui->chat_caches;
+  uint64_t rev = ccord_store_revision(ui->d.store);
+  if (cc && cc->br_valid && cc->br_rev == rev && cc->br_blocked_sig == ui->blocked_sig &&
+      cc->br_chan == channel && store_i >= cc->br_a && store_i <= cc->br_b) {
+    br.first = cc->br_a == store_i;
+    br.first_id = cc->br_first_id;
+    br.count = (uint32_t)(cc->br_b - cc->br_a + 1u);
+    br.revealed = blocked_is_revealed(ui, br.first_id);
+    return br;
+  }
   size_t a = store_i;
   while (a > 0 && msg_author_blocked(ui, ccord_store_message_at(ui->d.store, channel, a - 1))) a--;
   size_t total = ccord_store_message_count(ui->d.store, channel);
@@ -2710,6 +2851,15 @@ static blocked_run blocked_run_at(const ccord_ui *ui, ccord_id channel, size_t s
   br.first_id = fm ? fm->id : m->id;
   br.count = (uint32_t)(b - a + 1);
   br.revealed = blocked_is_revealed(ui, br.first_id);
+  if (cc) {
+    cc->br_valid = true;
+    cc->br_rev = rev;
+    cc->br_blocked_sig = ui->blocked_sig;
+    cc->br_chan = channel;
+    cc->br_a = a;
+    cc->br_b = b;
+    cc->br_first_id = br.first_id;
+  }
   return br;
 }
 
@@ -2723,6 +2873,7 @@ void ui_blocked_reveal_for(ccord_ui *ui, ccord_id channel_id, size_t store_i)
     ui->nblocked_revealed--;
   }
   ui->blocked_revealed[ui->nblocked_revealed++] = br.first_id;
+  ui_chat_caches_clear(ui);
   ccord_vlist_invalidate_all(&ui->vlist);
   ui->dirty = true;
 }
@@ -2757,6 +2908,7 @@ bool ui_blocked_toggle_at(ccord_ui *ui, float x, float y)
     } else if (ui->nblocked_revealed < sizeof ui->blocked_revealed / sizeof ui->blocked_revealed[0]) {
       ui->blocked_revealed[ui->nblocked_revealed++] = first;
     }
+    ui_chat_caches_clear(ui);
     ccord_vlist_invalidate_all(&ui->vlist);
     ui->dirty = true;
     return true;
@@ -2786,6 +2938,30 @@ static void draw_blocked_strip(ccord_ui *ui, ccord_renderer *r, const ccord_rect
   }
 }
 
+static uint64_t hash_bytes_fnv(const char *s, size_t n)
+{
+  uint64_t h = 1469598103934665603ULL;
+  for (size_t i = 0; i < n; i++) h = (h ^ (uint8_t)s[i]) * 1099511628211ULL;
+  return h;
+}
+
+static void rowh_cache_sync(struct ui_chat_caches *cc, const ccord_ui *ui, const ccord_renderer *r)
+{
+  int tex_cnt = r ? ccord_render_texture_cache_count(r) : 0;
+  if (cc->rh_r != r || cc->rh_theme != ui->theme || cc->rh_tex_count != tex_cnt ||
+      cc->rh_nrevealed_spoilers != ui->nrevealed_spoilers ||
+      cc->rh_nblocked_revealed != ui->nblocked_revealed || cc->rh_blocked_sig != ui->blocked_sig) {
+    cc->rh_r = r;
+    cc->rh_theme = ui->theme;
+    cc->rh_tex_count = tex_cnt;
+    cc->rh_nrevealed_spoilers = ui->nrevealed_spoilers;
+    cc->rh_nblocked_revealed = ui->nblocked_revealed;
+    cc->rh_blocked_sig = ui->blocked_sig;
+    memset(cc->rowh, 0, sizeof cc->rowh);
+    memset(cc->embedh, 0, sizeof cc->embedh);
+  }
+}
+
 static float measure_row(size_t i, float width, void *ud)
 {
   msg_ctx *c = ud;
@@ -2804,6 +2980,44 @@ static float measure_row(size_t i, float width, void *ud)
     // revealed: the normal row below, plus the Hide strip above the first message of the run
   }
   bool compact = store_i != SIZE_MAX && ui_is_compact(ui, c->channel, store_i, m);
+  bool has_intro = is_dm_intro_row(ui, c->channel, store_i);
+  bool has_div = store_i != SIZE_MAX &&
+                 (ui_row_has_date_divider(ui, c->channel, store_i, m) ||
+                  ui_row_has_new_divider(ui, c->channel, store_i, m));
+  float tpad = tail_pad(ui, i);
+  const char *content = m->content ? m->content : "";
+  size_t content_len = strlen(content);
+  struct ui_chat_caches *cc = chat_caches_ensure(ui);
+  int width_q = (int)lroundf(width * 2.0f);
+  float zoom = c->r ? ccord_render_get_zoom(c->r) : 1.0f;
+  int scale_q = (int)lroundf(zoom * 100.0f) * 256 + (int)lroundf(M(font_size_base) * 4.0f);
+  uint32_t flags = (compact ? 1u : 0u) | (ui_messages_compact(ui) ? 2u : 0u) | (has_intro ? 4u : 0u) |
+                   (has_div ? 8u : 0u) | (br.blocked ? 16u : 0u) | (br.first ? 32u : 0u) |
+                   (br.revealed ? 64u : 0u) | (ui->settings_embeds ? 128u : 0u) |
+                   (ui->settings_attachments ? 256u : 0u) | (ui_streamer_invites_active(ui) ? 512u : 0u) |
+                   (ccord_message_is_ephemeral(m) ? 1024u : 0u) | (((uint32_t)m->send_state & 3u) << 11) |
+                   (tpad > 0.0f ? (1u << 13) : 0u) | (m->edited ? (1u << 14) : 0u) |
+                   (m->reply_to_id != CCORD_ID_NONE ? (1u << 15) : 0u);
+  uint32_t meta_sig = (uint32_t)(m->reaction_kind_count * 31u + m->reaction_count);
+  if (m->rich) {
+    meta_sig ^= (uint32_t)((m->rich->attachment_count << 8) ^ (m->rich->embed_count << 12) ^
+                           (m->rich->component_row_count << 16) ^ (m->rich->v2_component_count << 20) ^
+                           (m->rich->sticker_count << 24) ^ (m->rich->poll.present ? (1u << 28) : 0u) ^
+                           (m->rich->flags));
+  }
+  uint64_t chash = hash_bytes_fnv(content, content_len);
+  if (cc && m->id != CCORD_ID_NONE) {
+    rowh_cache_sync(cc, ui, c->r);
+    for (size_t k = 0; k < CHAT_ROWH_CACHE_SLOTS; k++) {
+      chat_rowh_entry *e = &cc->rowh[k];
+      if (e->msg_id == m->id && e->edited_ts == m->edited_timestamp_ms && e->content_len == content_len &&
+          e->content_hash == chash && e->width_q == width_q && e->scale_q == scale_q &&
+          e->flags == flags && e->meta_sig == meta_sig) {
+        e->lru_tick = ++cc->rh_tick;
+        return e->height;
+      }
+    }
+  }
   decor_info d;
   decor_scan(ui, m, compact, &d);
   float lh = ui_line_h(ui, M(font_size_base));
@@ -2819,15 +3033,35 @@ static float measure_row(size_t i, float width, void *ud)
                         : 0.0f;
   float ephem = ccord_message_is_ephemeral(m) ? UI_EPHEMERAL_FOOTER_H : 0.0f;
   float send_status = send_status_extra_h(ui, m);
-  float intro = is_dm_intro_row(ui, c->channel, store_i) ? UI_DM_INTRO_H : 0.0f;
-  bool has_div = store_i != SIZE_MAX &&
-                 (ui_row_has_date_divider(ui, c->channel, store_i, m) ||
-                  ui_row_has_new_divider(ui, c->channel, store_i, m));
+  float intro = has_intro ? UI_DM_INTRO_H : 0.0f;
   float div_h = has_div ? UI_CHAT_DIVIDER_H : 0.0f;
   float card_w = maxf(width - M(message_text_x) - M(message_pad_x), 40.0f);
   float blocked_strip = (br.blocked && br.first) ? UI_BLOCKED_ROW_H : 0.0f;
-  return intro + div_h + blocked_strip + top + decor_reply_h(&d) + header + maxf(body_h, lh) + decor_total_h(ui, c->r, &d, card_w) + reactions +
-         send_status + ephem + M(message_line_gap) + tail_pad(ui, i);
+  float total_h = intro + div_h + blocked_strip + top + decor_reply_h(&d) + header + maxf(body_h, lh) +
+                  decor_total_h(ui, c->r, &d, card_w) + reactions + send_status + ephem + M(message_line_gap) + tpad;
+  if (cc && m->id != CCORD_ID_NONE) {
+    size_t victim = 0;
+    for (size_t k = 0; k < CHAT_ROWH_CACHE_SLOTS; k++) {
+      if (cc->rowh[k].msg_id == CCORD_ID_NONE) {
+        victim = k;
+        break;
+      }
+      if (cc->rowh[k].lru_tick < cc->rowh[victim].lru_tick) victim = k;
+    }
+    cc->rowh[victim] = (chat_rowh_entry){
+      .content_hash = chash,
+      .msg_id = m->id,
+      .edited_ts = m->edited_timestamp_ms,
+      .content_len = content_len,
+      .width_q = width_q,
+      .scale_q = scale_q,
+      .flags = flags,
+      .meta_sig = meta_sig,
+      .height = total_h,
+      .lru_tick = ++cc->rh_tick,
+    };
+  }
+  return total_h;
 }
 
 // One compact line above a reply's header: vertical quote bar, the replied-to author's avatar, their name in their role
@@ -3141,7 +3375,7 @@ static float gallery_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, 
 
   if (!draw) return total_h;
 
-  char rev_urls[CCORD_RICH_MAX_ATTACHMENTS][UI_URL_MAX];
+  const char *rev_urls[CCORD_RICH_MAX_ATTACHMENTS];
   size_t rev_idx[CCORD_RICH_MAX_ATTACHMENTS];
   size_t rev_count = 0;
   for (size_t k = 0; k < n; k++) {
@@ -3150,7 +3384,7 @@ static float gallery_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, 
     const char *u = attachment_url(&p->att[k]);
     if (!hidden && u[0]) {
       rev_idx[k] = rev_count;
-      ui_url_copy(rev_urls[rev_count], sizeof rev_urls[rev_count], u);
+      rev_urls[rev_count] = u;
       rev_count++;
     } else {
       rev_idx[k] = SIZE_MAX;
@@ -3260,7 +3494,7 @@ static void draw_voice_message_card(ccord_ui *ui, ccord_renderer *r, const decor
     mh->open_rect = (ccord_rect){0, 0, 0, 0};
     mh->att_id = att_id;
     mh->duration_ms = a->duration_ms;
-    ui_url_copy(mh->url, sizeof mh->url, url);
+    mh->url = strlen(url) < UI_URL_MAX ? ui_hit_cstr(ui, url) : "";
   }
 }
 
@@ -3373,25 +3607,25 @@ static void draw_video_surface(ccord_ui *ui, ccord_renderer *r, ccord_rect vp, f
     mh->open_rect = (ccord_rect){0, 0, 0, 0};
     mh->att_id = v->id;
     mh->duration_ms = v->duration_ms;
-    ui_url_copy(mh->url, sizeof mh->url, v->url);
+    mh->url = (v->url && strlen(v->url) < UI_URL_MAX) ? ui_hit_cstr(ui, v->url) : "";
   }
 }
 
-static void draw_media_player_card(ccord_ui *ui, ccord_renderer *r, const decor_part *p, float x, float y, float w)
+static float draw_media_player_card(ccord_ui *ui, ccord_renderer *r, const decor_part *p, float x, float y, float w)
 {
   const ccord_attachment *a = p ? p->att : nullptr;
-  if (!a) return;
+  if (!a) return 0.0f;
+  float h = media_player_h(a, w);
   if (decor_is_voice(a)) {
     draw_voice_message_card(ui, r, p, x, y, w);
-    return;
+    return h;
   }
   float cw = media_player_w(a, w);
-  float h = media_player_h(a, w);
   ccord_rect card = {x, y, cw, h};
   ccord_id skey = spoiler_att_key(p->msg_id, a, 0);
   if (a->spoiler && !is_spoiler_revealed(ui, skey)) {
     draw_spoiler_tile(ui, r, card, skey);
-    return;
+    return h;
   }
 
   const char *url = attachment_url(a);
@@ -3481,7 +3715,7 @@ static void draw_media_player_card(ccord_ui *ui, ccord_renderer *r, const decor_
     mh->open_rect = open_r;
     mh->att_id = att_id;
     mh->duration_ms = a->duration_ms;
-    ui_url_copy(mh->url, sizeof mh->url, url);
+    mh->url = strlen(url) < UI_URL_MAX ? ui_hit_cstr(ui, url) : "";
     if (is_video && ui->nmedia_hits < UI_MEDIA_HIT_MAX) {
       ui_media_hit *vh = &ui->media_hits[ui->nmedia_hits++];
       *vh = *mh;
@@ -3490,6 +3724,7 @@ static void draw_media_player_card(ccord_ui *ui, ccord_renderer *r, const decor_
       vh->open_rect = (ccord_rect){0, 0, 0, 0};
     }
   }
+  return h;
 }
 
 // Streamer Mode: the embed string to draw — a masked copy in buf when invite masking replaced
@@ -3560,9 +3795,8 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
       }
       const char *big = gifv ? vid_url : pic;
       if (big[0]) {
-        char urls[1][UI_URL_MAX];
-        ui_url_copy(urls[0], sizeof urls[0], big);
-        record_img_hit(ui, box, urls, 1u, 0u);
+        const char *one_url = big;
+        record_img_hit(ui, box, &one_url, 1u, 0u);
       }
     }
     return ih;
@@ -3594,8 +3828,30 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
   float cy = y + pad_v;
   char emb_mask[CCORD_MESSAGE_MAX_BYTES + 1];   // streamer-mode invite mask scratch (one string at a time)
 
+  struct ui_chat_caches *cc = chat_caches_ensure(ui);
+  int emb_wq = (int)lroundf(w * 2.0f);
+  float emb_zoom = r ? ccord_render_get_zoom(r) : 1.0f;
+  int emb_sq = (int)lroundf(emb_zoom * 100.0f) * 256 + (int)lroundf(M(font_size_base) * 4.0f);
+  bool emb_streamer = ui_streamer_invites_active(ui);
+  if (cc) rowh_cache_sync(cc, ui, r);
+
   if (draw) {
-    float total_h = embed_card_walk(ui, r, p, x, y, w, false);
+    float total_h = 0.0f;
+    bool hit_cached = false;
+    if (cc && p->msg_id != CCORD_ID_NONE) {
+      uintptr_t ep = (uintptr_t)e;
+      for (size_t k = 0; k < CHAT_EMBEDH_CACHE_SLOTS; k++) {
+        chat_embedh_entry *ce = &cc->embedh[k];
+        if (ce->msg_id == p->msg_id && ce->emb_ptr == ep && ce->width_q == emb_wq &&
+            ce->scale_q == emb_sq && ce->streamer == emb_streamer) {
+          ce->lru_tick = ++cc->rh_tick;
+          total_h = ce->height;
+          hit_cached = true;
+          break;
+        }
+      }
+    }
+    if (!hit_cached) total_h = embed_card_walk(ui, r, p, x, y, w, false);
     ccord_draw_rrect(r, (ccord_rect){x, y, cw, total_h}, 4.0f, COL(bg_secondary));
     ccord_color stripe = e->has_color ? ui_rgb_color(e->color) : COL(brand);
     ccord_draw_rrect(r, (ccord_rect){x, y, 4.0f, total_h}, 2.0f, stripe);
@@ -3613,9 +3869,8 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
         ccord_draw_texture_cover(r, shown, tr, 4.0f, 255, ui_media_animate(ui, tr));
         ui->dbg_attachment_textures_drawn++;
       }
-      char turls[1][UI_URL_MAX];
-      ui_url_copy(turls[0], sizeof turls[0], thumb_url);
-      record_img_hit(ui, tr, turls, 1u, 0u);
+      const char *one_thumb = thumb_url;
+      record_img_hit(ui, tr, &one_thumb, 1u, 0u);
     }
   }
 
@@ -3792,9 +4047,8 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
           ccord_draw_texture_cover(r, shown, ir, 4.0f, 255, ui_media_animate(ui, ir));
           ui->dbg_attachment_textures_drawn++;
         }
-        char iurls[1][UI_URL_MAX];
-        ui_url_copy(iurls[0], sizeof iurls[0], big_url);
-        record_img_hit(ui, ir, iurls, 1u, 0u);
+        const char *one_big = big_url;
+        record_img_hit(ui, ir, &one_big, 1u, 0u);
       }
       cy += ih + 6.0f;
     }
@@ -3845,7 +4099,41 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
 
   if (has_thumb && cy < y + pad_v + thumb_h) cy = y + pad_v + thumb_h;
   if (cy <= y + pad_v) cy = y + pad_v + 24.0f;
-  return (cy - y) + pad_v;
+  float final_h = (cy - y) + pad_v;
+  if (cc && p->msg_id != CCORD_ID_NONE) {
+    uintptr_t ep = (uintptr_t)e;
+    size_t slot = 0;
+    bool matched = false;
+    for (size_t k = 0; k < CHAT_EMBEDH_CACHE_SLOTS; k++) {
+      chat_embedh_entry *ce = &cc->embedh[k];
+      if (ce->msg_id == p->msg_id && ce->emb_ptr == ep && ce->width_q == emb_wq &&
+          ce->scale_q == emb_sq && ce->streamer == emb_streamer) {
+        slot = k;
+        matched = true;
+        break;
+      }
+      if (ce->msg_id == CCORD_ID_NONE) {
+        slot = k;
+        break;
+      }
+      if (ce->lru_tick < cc->embedh[slot].lru_tick) slot = k;
+    }
+    if (!matched) {
+      cc->embedh[slot] = (chat_embedh_entry){
+        .msg_id = p->msg_id,
+        .emb_ptr = ep,
+        .width_q = emb_wq,
+        .scale_q = emb_sq,
+        .streamer = emb_streamer,
+        .height = final_h,
+        .lru_tick = ++cc->rh_tick,
+      };
+    } else {
+      cc->embedh[slot].height = final_h;
+      cc->embedh[slot].lru_tick = ++cc->rh_tick;
+    }
+  }
+  return final_h;
 }
 
 static void draw_sticker_card(ccord_ui *ui, ccord_renderer *r, const ccord_msg_sticker *st, float x, float y)
@@ -4042,11 +4330,12 @@ static float comp_items_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
             .min_values = comp->min_values,
             .max_values = comp->max_values,
             .disabled = comp->disabled,
+            .custom_id = ui_hit_cstr(ui, comp->custom_id),
+            .url = (comp->url && strlen(comp->url) < UI_URL_MAX) ? ui_hit_cstr(ui, comp->url) : "",
+            .placeholder = "",
             .row_idx = v2 ? SIZE_MAX : p->row_idx,
             .comp_idx = ci,
           };
-          if (comp->custom_id) snprintf(hit->custom_id, sizeof hit->custom_id, "%s", comp->custom_id);
-          if (comp->url) ui_url_copy(hit->url, sizeof hit->url, comp->url);
         }
       }
       cx += bw + 8.0f;
@@ -4065,9 +4354,10 @@ static float comp_items_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
         char sum[192];
         sum[0] = '\0';
         bool has_sel = false;
-        bool target_open = ui->select_open && ui->select_target.message_id == p->msg_id &&
-                           (v2 ? strcmp(ui->select_target.custom_id, cid) == 0
-                               : (ui->select_target.row_idx == p->row_idx && ui->select_target.comp_idx == ci));
+        bool target_open = ui->select_open && ui->select_target && ui->select_opts &&
+                           ui->select_target->message_id == p->msg_id &&
+                           (v2 ? strcmp(ui->select_target->custom_id, cid) == 0
+                               : (ui->select_target->row_idx == p->row_idx && ui->select_target->comp_idx == ci));
         if (target_open) {
           size_t slen = 0;
           for (size_t oi = 0; oi < ui->select_opt_count; oi++) {
@@ -4118,11 +4408,12 @@ static float comp_items_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
             .min_values = comp->min_values,
             .max_values = comp->max_values > 0 ? comp->max_values : 1u,
             .disabled = comp->disabled,
+            .custom_id = ui_hit_cstr(ui, comp->custom_id),
+            .url = "",
+            .placeholder = ui_hit_cstr(ui, comp->placeholder),
             .row_idx = v2 ? SIZE_MAX : p->row_idx,
             .comp_idx = ci,
           };
-          if (comp->custom_id) snprintf(hit->custom_id, sizeof hit->custom_id, "%s", comp->custom_id);
-          if (comp->placeholder) snprintf(hit->placeholder, sizeof hit->placeholder, "%s", comp->placeholder);
         }
       }
       cy += sh + 6.0f;
@@ -4178,37 +4469,68 @@ static float cv2_thumbnail(ccord_ui *ui, ccord_renderer *r, const decor_part *p,
     ui->dbg_attachment_textures_drawn++;
   }
   if (url[0]) {
-    char urls[1][UI_URL_MAX];
-    ui_url_copy(urls[0], sizeof urls[0], url);
-    record_img_hit(ui, tr, urls, 1u, 0u);
+    const char *one_url = url;
+    record_img_hit(ui, tr, &one_url, 1u, 0u);
   }
   return th;
 }
 
+#define CV2_MEMO_MAX 128u
+typedef struct cv2_memo {
+  float h[CV2_MEMO_MAX];
+  uint16_t end_idx[CV2_MEMO_MAX];
+  size_t count;
+  size_t cursor;
+  bool valid;
+} cv2_memo;
+
 static float cv2_node(ccord_ui *ui, ccord_renderer *r, const decor_part *p, const ccord_component *n,
-                      float x, float y, float w, bool draw, size_t path, unsigned depth);
+                      float x, float y, float w, bool draw, size_t path, unsigned depth, cv2_memo *memo);
 
 // One node of the tree and everything under it, laid out (draw=false) or drawn. `path` addresses the node for spoiler
-// keys; children continue it.
+// keys; children continue it. When `memo` is provided, a single O(N) measure pass populates every container/node height
+// in pre-order so drawing nested containers never re-measures subtrees (avoiding O(2^D) walks).
 static float cv2_node_layout(ccord_ui *ui, ccord_renderer *r, const decor_part *p, const ccord_component *n,
-                             float x, float y, float w, bool draw, size_t path, unsigned depth)
+                             float x, float y, float w, bool draw, size_t path, unsigned depth, cv2_memo *memo)
 {
   if (!n || depth > 8u) return 0.0f;   // a validated tree never gets this deep
+  size_t my_idx = SIZE_MAX;
+  if (memo) {
+    if (!draw) {
+      if (memo->count < CV2_MEMO_MAX) {
+        my_idx = memo->count++;
+      } else {
+        memo->valid = false;
+      }
+    } else if (memo->valid) {
+      my_idx = memo->cursor++;
+    }
+  }
+  float res = 0.0f;
   switch (n->kind) {
     case CCORD_COMP_CONTAINER: {
       float pad_l = 12.0f, pad_r = 10.0f, pad_v = 10.0f, gap = 6.0f;
       float inner_w = maxf(w - pad_l - pad_r, 48.0f);
-      float ch = 0.0f;
-      for (size_t i = 0; i < n->child_count; i++) {
-        ch += cv2_node(ui, r, p, &n->children[i], x + pad_l, y + pad_v + ch, inner_w, false,
-                       path * 64u + i + 1u, depth + 1u) + gap;
+      float h = 0.0f;
+      if (draw && memo && memo->valid && my_idx < memo->count) {
+        h = memo->h[my_idx];
+      } else {
+        float ch = 0.0f;
+        for (size_t i = 0; i < n->child_count; i++) {
+          ch += cv2_node(ui, r, p, &n->children[i], x + pad_l, y + pad_v + ch, inner_w, false,
+                         path * 64u + i + 1u, depth + 1u, draw ? nullptr : memo) + gap;
+        }
+        if (ch > 0.0f) ch -= gap;
+        h = ch + 2.0f * pad_v;
       }
-      if (ch > 0.0f) ch -= gap;
-      float h = ch + 2.0f * pad_v;
       ccord_id skey = cv2_spoiler_key(p->msg_id, path);
       if (n->spoiler && !is_spoiler_revealed(ui, skey)) {
-        if (draw) draw_spoiler_tile(ui, r, (ccord_rect){x, y, w, h}, skey);
-        return h;
+        if (draw) {
+          draw_spoiler_tile(ui, r, (ccord_rect){x, y, w, h}, skey);
+          if (memo && memo->valid && my_idx < memo->count) memo->cursor = memo->end_idx[my_idx];
+        }
+        res = h;
+        break;
       }
       if (draw) {
         ccord_draw_rrect(r, (ccord_rect){x, y, w, h}, 6.0f, COL(bg_secondary));
@@ -4221,10 +4543,11 @@ static float cv2_node_layout(ccord_ui *ui, ccord_renderer *r, const decor_part *
         float cy = y + pad_v;
         for (size_t i = 0; i < n->child_count; i++) {
           cy += cv2_node(ui, r, p, &n->children[i], x + pad_l, cy, inner_w, true, path * 64u + i + 1u,
-                         depth + 1u) + gap;
+                         depth + 1u, memo) + gap;
         }
       }
-      return h;
+      res = h;
+      break;
     }
     case CCORD_COMP_SECTION: {
       // 1-3 TextDisplay children beside an accessory (a Thumbnail or a Button) pinned to the right edge.
@@ -4233,33 +4556,36 @@ static float cv2_node_layout(ccord_ui *ui, ccord_renderer *r, const decor_part *
       float gap = 12.0f, acc_w = 0.0f, acc_h = 0.0f;
       if (acc && acc->kind == CCORD_COMP_BUTTON) {
         acc_w = comp_button_w(ui, r, acc, maxf(w * 0.5f, 56.0f));
-        acc_h = cv2_node(ui, r, p, acc, 0.0f, 0.0f, acc_w, false, acc_path, depth + 1u);
       } else if (acc) {
         acc_w = 80.0f;
-        acc_h = cv2_node(ui, r, p, acc, 0.0f, 0.0f, acc_w, false, acc_path, depth + 1u);
       }
       float text_w = maxf(w - (acc_w > 0.0f ? acc_w + gap : 0.0f), 48.0f);
       float ty = y;
       for (size_t i = 0; i < n->child_count; i++) {
         if (n->children[i].kind != CCORD_COMP_TEXT_DISPLAY) continue;
-        ty += cv2_node(ui, r, p, &n->children[i], x, ty, text_w, draw, path * 64u + i + 1u, depth + 1u) + 2.0f;
+        ty += cv2_node(ui, r, p, &n->children[i], x, ty, text_w, draw, path * 64u + i + 1u, depth + 1u, memo) + 2.0f;
       }
       float th = ty > y ? ty - y - 2.0f : 0.0f;
-      if (draw && acc) (void)cv2_node(ui, r, p, acc, x + w - acc_w, y, acc_w, true, acc_path, depth + 1u);
-      return maxf(th, acc_h);
+      if (acc) {
+        acc_h = cv2_node(ui, r, p, acc, x + w - acc_w, y, acc_w, draw, acc_path, depth + 1u, memo);
+      }
+      res = maxf(th, acc_h);
+      break;
     }
     case CCORD_COMP_TEXT_DISPLAY: {
       const char *txt = n->content ? n->content : "";
       ccord_id prev_id = ui->current_drawing_msg_id;
       ui->current_drawing_msg_id = p->msg_id;
-      float h = md_body_walk(ui, r, txt, strlen(txt), x, y, w, COL(text_normal), draw);
+      res = md_body_walk(ui, r, txt, strlen(txt), x, y, w, COL(text_normal), draw);
       ui->current_drawing_msg_id = prev_id;
-      return h;
+      break;
     }
     case CCORD_COMP_BUTTON:   // a Section accessory
-      return comp_items_walk(ui, r, p, n, 1u, x, y, w, draw, true);
+      res = comp_items_walk(ui, r, p, n, 1u, x, y, w, draw, true);
+      break;
     case CCORD_COMP_THUMBNAIL:
-      return cv2_thumbnail(ui, r, p, &n->media, x, y, 80.0f, draw, cv2_spoiler_key(p->msg_id, path));
+      res = cv2_thumbnail(ui, r, p, &n->media, x, y, 80.0f, draw, cv2_spoiler_key(p->msg_id, path));
+      break;
     case CCORD_COMP_MEDIA_GALLERY: {
       ccord_attachment tmp[CCORD_RICH_MAX_V2_GALLERY_ITEMS];
       memset(tmp, 0, sizeof tmp);
@@ -4275,12 +4601,12 @@ static float cv2_node_layout(ccord_ui *ui, ccord_renderer *r, const decor_part *
         tmp[k].id = cv2_spoiler_key(p->msg_id, path * 64u + k + 1u) ^ (1ULL << 63);
       }
       decor_part gp = {.kind = DECOR_GALLERY, .att = tmp, .count = cnt, .msg_id = p->msg_id};
-      float h = gallery_walk(ui, r, &gp, x, y, w, draw);
+      res = gallery_walk(ui, r, &gp, x, y, w, draw);
       if (draw) {
         ui->dbg_gallery_cards++;
         ui->dbg_attachment_cards += cnt;
       }
-      return h;
+      break;
     }
     case CCORD_COMP_FILE: {
       ccord_attachment fa = {0};
@@ -4292,32 +4618,42 @@ static float cv2_node_layout(ccord_ui *ui, ccord_renderer *r, const decor_part *
       ccord_id skey = cv2_spoiler_key(p->msg_id, path);
       if (fa.spoiler && !is_spoiler_revealed(ui, skey)) {
         if (draw) draw_spoiler_tile(ui, r, (ccord_rect){x, y, w, 46.0f}, skey);
-        return 46.0f;
+        res = 46.0f;
+        break;
       }
       if (draw) {
         draw_attachment_card(ui, r, &fa, x, y, w);
         ui->dbg_attachment_cards++;
       }
-      return 46.0f;
+      res = 46.0f;
+      break;
     }
     case CCORD_COMP_SEPARATOR: {
       float h = n->spacing == 2u ? 16.0f : 8.0f;
       if (draw && n->divider) ccord_draw_rect(r, (ccord_rect){x, y + h * 0.5f, w, 1.0f}, COL(border_subtle));
-      return h;
+      res = h;
+      break;
     }
     case CCORD_COMP_ACTION_ROW:
       if (draw) ui->dbg_component_rows++;
-      return comp_items_walk(ui, r, p, n->children, n->child_count, x, y, w, draw, true);
+      res = comp_items_walk(ui, r, p, n->children, n->child_count, x, y, w, draw, true);
+      break;
     default:
-      return 0.0f;   // a kind this build does not know draws nothing
+      res = 0.0f;   // a kind this build does not know draws nothing
+      break;
   }
+  if (memo && !draw && my_idx < CV2_MEMO_MAX) {
+    memo->h[my_idx] = res;
+    memo->end_idx[my_idx] = (uint16_t)memo->count;
+  }
+  return res;
 }
 
 // cv2_node_layout plus the debug tally of what was drawn per kind (count and the last height), read by the UI tests.
 static float cv2_node(ccord_ui *ui, ccord_renderer *r, const decor_part *p, const ccord_component *n,
-                      float x, float y, float w, bool draw, size_t path, unsigned depth)
+                      float x, float y, float w, bool draw, size_t path, unsigned depth, cv2_memo *memo)
 {
-  float h = cv2_node_layout(ui, r, p, n, x, y, w, draw, path, depth);
+  float h = cv2_node_layout(ui, r, p, n, x, y, w, draw, path, depth, memo);
   if (draw && n && (size_t)n->kind < UI_CV2_KIND_SLOTS) {
     ui->dbg_cv2_drawn[n->kind]++;
     ui->dbg_cv2_height[n->kind] = h;
@@ -4330,9 +4666,32 @@ static float cv2_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, floa
 {
   if (!p || !p->rich || p->rich->v2_component_count == 0) return 0.0f;
   const ccord_component *nodes = p->rich->v2_components;
-  float cy = y;
+  if (!draw) {
+    float cy = y;
+    for (size_t i = 0; i < p->rich->v2_component_count; i++) {
+      cy += cv2_node(ui, r, p, &nodes[i], x, cy, w, false, i + 1u, 1u, nullptr) + 6.0f;
+    }
+    return cy - y - 6.0f;
+  }
+  // Pre-measure once in O(N) so drawing nested containers never re-measures subtrees.
+  cv2_memo memo = {.valid = true};
+  bool has_container = false;
   for (size_t i = 0; i < p->rich->v2_component_count; i++) {
-    cy += cv2_node(ui, r, p, &nodes[i], x, cy, w, draw, i + 1u, 1u) + 6.0f;
+    if (nodes[i].kind == CCORD_COMP_CONTAINER) {
+      has_container = true;
+      break;
+    }
+  }
+  if (has_container) {
+    float my = y;
+    for (size_t i = 0; i < p->rich->v2_component_count; i++) {
+      my += cv2_node(ui, r, p, &nodes[i], x, my, w, false, i + 1u, 1u, &memo) + 6.0f;
+    }
+  }
+  float cy = y;
+  cv2_memo *mp = (has_container && memo.valid) ? &memo : nullptr;
+  for (size_t i = 0; i < p->rich->v2_component_count; i++) {
+    cy += cv2_node(ui, r, p, &nodes[i], x, cy, w, true, i + 1u, 1u, mp) + 6.0f;
   }
   return cy - y - 6.0f;
 }
@@ -4459,60 +4818,69 @@ static void draw_invite_card(ccord_ui *ui, ccord_renderer *r, const decor_part *
   }
 }
 
-static void draw_decor_cards(ccord_ui *ui, ccord_renderer *r, const decor_info *d, float x, float y, float w)
+static float draw_decor_cards(ccord_ui *ui, ccord_renderer *r, const decor_info *d, float x, float y, float w)
 {
+  float y0 = y;
   for (size_t i = 0; i < d->nparts; i++) {
     const decor_part *p = &d->parts[i];
+    float ph = 0.0f;
     switch (p->kind) {
       case DECOR_REPLY:   // drawn by draw_row as a line above the header
         continue;
       case DECOR_ATTACHMENT:
         draw_attachment_card(ui, r, p->att, x, y, w);
         ui->dbg_attachment_cards++;
+        ph = 46.0f;
         break;
       case DECOR_GALLERY:
-        (void)gallery_walk(ui, r, p, x, y, w, true);
+        ph = gallery_walk(ui, r, p, x, y, w, true);
         ui->dbg_gallery_cards++;
         ui->dbg_attachment_cards += p->count;
         break;
       case DECOR_MEDIA_PLAYER:
-        draw_media_player_card(ui, r, p, x, y, w);
+        ph = draw_media_player_card(ui, r, p, x, y, w);
         ui->dbg_media_player_cards++;
         ui->dbg_attachment_cards++;
         break;
       case DECOR_EMBED:
-        (void)embed_card_walk(ui, r, p, x, y, w, true);
+        ph = embed_card_walk(ui, r, p, x, y, w, true);
         ui->dbg_embed_cards += p->count;
         break;
       case DECOR_STICKER:
         draw_sticker_card(ui, r, p->stk, x, y);
         ui->dbg_sticker_cards++;
+        ph = 164.0f;
         break;
       case DECOR_FORWARD:
         draw_forward_card(ui, r, p, x, y, w);
         ui->dbg_forward_cards++;
+        ph = 46.0f;
         break;
       case DECOR_POLL:
         draw_poll_card(ui, r, p, x, y, w);
         ui->dbg_poll_cards++;
+        ph = 52.0f + (p->poll ? (float)p->poll->answer_count : 0.0f) * DECOR_POLL_ROW_H;
         break;
       case DECOR_COMPONENTS:
-        (void)components_row_walk(ui, r, p, x, y, w, true);
+        ph = components_row_walk(ui, r, p, x, y, w, true);
         break;
       case DECOR_COMPONENTS_V2:
-        (void)cv2_walk(ui, r, p, x, y, w, true);
+        ph = cv2_walk(ui, r, p, x, y, w, true);
         break;
       case DECOR_THREAD:
         draw_thread_card(ui, r, p, d->channel_id, x, y, w);
         ui->dbg_thread_cards++;
+        ph = 42.0f;
         break;
       case DECOR_INVITE:
         draw_invite_card(ui, r, p, x, y, w);
         ui->dbg_invite_cards++;
+        ph = 88.0f;
         break;
     }
-    y += decor_part_h(ui, r, p, w) + 4.0f;
+    y += ph + 4.0f;
   }
+  return y - y0;
 }
 
 static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *ma,
@@ -4711,8 +5079,7 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
   ui->current_drawing_msg_id = CCORD_ID_NONE;
   float card_y = content_y + body_h + M(message_line_gap) * 0.5f;
   float card_w = maxf(ma->w - M(message_text_x) - M(message_pad_x), 40.0f);
-  draw_decor_cards(ui, r, &d, text_x, card_y, card_w);
-  float after_cards_y = card_y + decor_total_h(ui, r, &d, card_w);
+  float after_cards_y = card_y + draw_decor_cards(ui, r, &d, text_x, card_y, card_w);
   if (message_has_reactions(m)) {
     float by = after_cards_y + M(message_line_gap) * 0.5f;
     after_cards_y = by + reaction_pills_walk(ui, r, m, text_x, by, wrap, true);
@@ -5059,7 +5426,11 @@ static void draw_typing(ccord_ui *ui, ccord_renderer *r, const ccord_rect *ma)
       shown++;
     }
   }
-  if (total == 0) return;
+  if (total == 0) {
+    ui->typing_next_ms = 0;
+    ui->typing_anim_only = false;
+    return;
+  }
   char text[3 * (CCORD_NAME_MAX_BYTES + 1) + 32];
   if (total == 1) snprintf(text, sizeof text, "%s is typing...", names[0]);
   else if (total == 2) snprintf(text, sizeof text, "%s and %s are typing...", names[0], names[1]);
@@ -5074,14 +5445,23 @@ static void draw_typing(ccord_ui *ui, ccord_renderer *r, const ccord_rect *ma)
   ui_popup_begin(ui, r, "typing", 0, UI_POPUP_MS, 6.0f);
   ccord_draw_rrect(r, box, h * 0.5f, COL(bg_tertiary));
   for (int d = 0; d < 3; d++) {
-    float phase = (float)(ui->now_ms % 1200u) / 1200.0f * 6.2831853f - (float)d * 0.9f;
-    float wave = fmaxf(0.0f, sinf(phase));   // each dot rises in turn, then rests
+    float wave = 0.0f;
+    if (!ui->anim.reduced_motion) {
+      float phase = (float)(ui->now_ms % 1200u) / 1200.0f * 6.2831853f - (float)d * 0.9f;
+      wave = fmaxf(0.0f, sinf(phase));   // each dot rises in turn, then rests
+    }
     ccord_draw_circle(r, box.x + 12.0f + (float)d * 6.0f, box.y + h * 0.5f - wave * 2.5f, 2.0f,
-                      ui_alpha(COL(text_secondary), 0.45f + 0.55f * wave));
+                      ui_alpha(COL(text_secondary), ui->anim.reduced_motion ? 0.65f : (0.45f + 0.55f * wave)));
   }
   ccord_text_draw(r, text, strlen(text), box.x + 10.0f + dots_w, box.y + (h - t.y) * 0.5f, &st, box.w - 20.0f - dots_w);
   ui_popup_end(r);
-  ui->anim.pending = true;   // the dots keep moving: ask for another frame (cleared again at the next frame's start)
+  if (ui->anim.reduced_motion) {
+    ui->typing_next_ms = 0;
+  } else {
+    // Throttle typing-dot redraws to ~20 Hz (50 ms) instead of pegging 144 Hz;
+    // ui_draw_frame finalizes typing_anim_only & anim.pending after all other animations run.
+    ui->typing_next_ms = ui->now_ms + 50u;
+  }
 }
 
 // Reaching the top while the user scrolls up asks the session for the previous page (before=<id>).
@@ -5348,6 +5728,7 @@ static size_t jump_present_threshold(void)
 
 void ui_draw_messages(ccord_ui *ui, ccord_renderer *r)
 {
+  (void)chat_caches_ensure(ui);
   ccord_rect ma = ui_rect(ui->layout.message_area);
   reset_message_hits(ui);
   if (ma.w <= 0.0f || ma.h <= 0.0f) return;
@@ -11614,29 +11995,29 @@ static void draw_user_profile_modal(ccord_ui *ui, ccord_renderer *r)
         if (ui->nprofile_modal_conn_hits < CCORD_PROFILE_MAX_CONNECTIONS &&
             cr.y + cr.h > body_y0 && cr.y < body_y1) {
           float cy0 = maxf(cr.y, body_y0), cy1 = fminf(cr.y + cr.h, body_y1);
-          char *out_url = ui->profile_modal_conn_hits[ui->nprofile_modal_conn_hits].url;
-          ui->profile_modal_conn_hits[ui->nprofile_modal_conn_hits].rect = (ccord_rect){cr.x, cy0, cr.w, cy1 - cy0};
-          out_url[0] = '\0';
+          char tmp_url[256] = "";
           if (cn->name[0]) {
             if (strcmp(cn->type, "github") == 0) {
-              snprintf(out_url, 256, "https://github.com/%s", cn->name);
+              snprintf(tmp_url, sizeof tmp_url, "https://github.com/%s", cn->name);
             } else if (strcmp(cn->type, "twitch") == 0) {
-              snprintf(out_url, 256, "https://twitch.tv/%s", cn->name);
+              snprintf(tmp_url, sizeof tmp_url, "https://twitch.tv/%s", cn->name);
             } else if (strcmp(cn->type, "reddit") == 0) {
-              snprintf(out_url, 256, "https://reddit.com/u/%s", cn->name);
+              snprintf(tmp_url, sizeof tmp_url, "https://reddit.com/u/%s", cn->name);
             } else if (strcmp(cn->type, "twitter") == 0 || strcmp(cn->type, "x") == 0) {
-              snprintf(out_url, 256, "https://x.com/%s", cn->name);
+              snprintf(tmp_url, sizeof tmp_url, "https://x.com/%s", cn->name);
             } else if (strcmp(cn->type, "youtube") == 0) {
-              snprintf(out_url, 256, "https://youtube.com/@%s", cn->name);
+              snprintf(tmp_url, sizeof tmp_url, "https://youtube.com/@%s", cn->name);
             } else if (strcmp(cn->type, "steam") == 0) {
-              snprintf(out_url, 256, "https://steamcommunity.com/id/%s", cn->name);
+              snprintf(tmp_url, sizeof tmp_url, "https://steamcommunity.com/id/%s", cn->name);
             } else if (strcmp(cn->type, "bluesky") == 0) {
-              snprintf(out_url, 256, "https://bsky.app/profile/%s", cn->name);
+              snprintf(tmp_url, sizeof tmp_url, "https://bsky.app/profile/%s", cn->name);
             } else if (strcmp(cn->type, "tiktok") == 0) {
-              snprintf(out_url, 256, "https://tiktok.com/@%s", cn->name);
+              snprintf(tmp_url, sizeof tmp_url, "https://tiktok.com/@%s", cn->name);
             }
           }
-          ui->nprofile_modal_conn_hits++;
+          size_t idx = ui->nprofile_modal_conn_hits++;
+          ui->profile_modal_conn_hits[idx].rect = (ccord_rect){cr.x, cy0, cr.w, cy1 - cy0};
+          ui->profile_modal_conn_hits[idx].url = ui_hit_cstr(ui, tmp_url);
         }
       }
       cy += (float)((prof->connection_count + 1u) / 2u) * 40.0f + 6.0f;
@@ -12171,6 +12552,7 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
 
   // 1. Inline Image Lightbox
   if (!ui->lightbox_open) {
+    if (ui->lightbox_urls) ui_close_lightbox(ui);
     ui->lightbox_img_rect = (ccord_rect){0, 0, 0, 0};
     ui->lightbox_open_btn = (ccord_rect){0, 0, 0, 0};
     ui->lightbox_prev_btn = (ccord_rect){0, 0, 0, 0};
@@ -12180,14 +12562,13 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
   }
   if (ui->lightbox_open && (ui->lightbox_url[0] || ui->lightbox_count > 0)) {
     if (ui->lightbox_count == 0 && ui->lightbox_url[0]) {
-      ui->lightbox_count = 1u;
-      ui->lightbox_index = 0u;
-      ui_url_copy(ui->lightbox_urls[0], sizeof ui->lightbox_urls[0], ui->lightbox_url);
+      const char *one = ui->lightbox_url;
+      ui_open_lightbox(ui, &one, 1u, 0u);
     }
     if (ui->lightbox_index >= ui->lightbox_count && ui->lightbox_count > 0) {
       ui->lightbox_index = ui->lightbox_count - 1u;
     }
-    if (ui->lightbox_count > 0) {
+    if (ui->lightbox_urls && ui->lightbox_count > 0) {
       ui_url_copy(ui->lightbox_url, sizeof ui->lightbox_url, ui->lightbox_urls[ui->lightbox_index]);
     }
     if (ui->lightbox_zoom < 0.5f || ui->lightbox_zoom > 4.0f) ui->lightbox_zoom = 1.0f;
@@ -12320,8 +12701,8 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
   // 2b. Message Component Select Menu Dropdown
   ui->select_dropdown_rect = (ccord_rect){0, 0, 0, 0};
   ui->select_confirm_btn = (ccord_rect){0, 0, 0, 0};
-  if (ui->select_open) {
-    bool is_multi = ui->select_target.max_values > 1u;
+  if (ui->select_open && ui->select_target && ui->select_opts) {
+    bool is_multi = ui->select_target->max_values > 1u;
     size_t nopt = ui->select_opt_count;
     float row_h = 34.0f;
     float list_h = (nopt > 0 ? (float)nopt : 1.0f) * row_h + 8.0f;
@@ -12336,7 +12717,7 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     dy = clampf(dy, 8.0f, maxf(ui->win_h - dh - 8.0f, 8.0f));
     ccord_rect dbox = {dx, dy, dw, dh};
     ui->select_dropdown_rect = dbox;
-    ui_popup_begin(ui, r, "seldd", ui->select_target.message_id ^ (uint64_t)ui->select_target.row_idx, UI_POPUP_MS, 4.0f);
+    ui_popup_begin(ui, r, "seldd", ui->select_target->message_id ^ (uint64_t)ui->select_target->row_idx, UI_POPUP_MS, 4.0f);
     uis_popover_frame(ui, r, dbox);
     ccord_text_style lst = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
     ccord_text_style dst = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 3.0f, COL(text_muted));
@@ -12412,25 +12793,25 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     draw_edit_group_dm_modal(ui, r);
   } else if (ui->modal_kind == UI_MODAL_MEMBER_VERIFICATION) {
     ui_member_verification_draw(ui, r);
-  } else if (ui->modal_kind == UI_MODAL_INTERACTION) {
+  } else if (ui->modal_kind == UI_MODAL_INTERACTION && ui->inter_modal && ui->inter_modal_edits) {
     ui_popup_begin(ui, r, "imodal", 1u, UI_MODAL_MS, 10.0f);
     uis_tokens mtk = uis_tokens_of(ui);
     float mw = clampf(ui->win_w - 64.0f, 320.0f, 460.0f);
     float mh = 56.0f + 56.0f;
-    for (size_t fi = 0; fi < ui->inter_modal.field_count; fi++) {
-      mh += 22.0f + (ui->inter_modal.fields[fi].style == 2 ? 72.0f : 36.0f) + 14.0f;
+    for (size_t fi = 0; fi < ui->inter_modal->field_count; fi++) {
+      mh += 22.0f + (ui->inter_modal->fields[fi].style == 2 ? 72.0f : 36.0f) + 14.0f;
     }
     ccord_rect m = uis_modal_box(ui, mw, mh);
     ui->inter_modal_box = m;
     uis_modal_frame(ui, r, m);
-    const char *mtitle = ui->inter_modal.title[0] ? ui->inter_modal.title : "Form";
+    const char *mtitle = ui->inter_modal->title[0] ? ui->inter_modal->title : "Form";
     ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large), COL(text_header));
     ccord_text_draw_ellipsis(r, mtitle, strlen(mtitle), m.x + 20.0f, m.y + 18.0f, m.w - 40.0f, &ts);
     float fy = m.y + 56.0f;
     ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(text_secondary));
     ccord_text_style rs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(danger));
-    for (size_t fi = 0; fi < ui->inter_modal.field_count; fi++) {
-      const ccord_modal_field *fld = &ui->inter_modal.fields[fi];
+    for (size_t fi = 0; fi < ui->inter_modal->field_count; fi++) {
+      const ccord_modal_field *fld = &ui->inter_modal->fields[fi];
       const char *flbl = fld->label[0] ? fld->label : "Input";
       float lw = ccord_text_draw_ellipsis(r, flbl, strlen(flbl), m.x + 20.0f, fy, m.w - 52.0f, &ls);
       if (fld->required) {
@@ -12786,6 +13167,11 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
   if (modal_fading) {
     ui->modal_kind = UI_MODAL_NONE;
     modal_reset_hits(ui);
+  } else if (ui->modal_kind != UI_MODAL_INTERACTION && ui->inter_modal) {
+    ui_free_inter_modal(ui);
+  }
+  if (!ui->select_open && (ui->select_opts || ui->select_target)) {
+    ui_close_select_dropdown(ui);
   }
 
   // M5: DAVE badge / RTC button by the voice bar, then the ring banner & DM call bar on top.
@@ -13101,9 +13487,9 @@ static void submit_modal(ccord_ui *ui)
 
 static void submit_select_dropdown(ccord_ui *ui, const char *const *vals, size_t nvals)
 {
-  if (!ui) return;
-  uint8_t min_v = ui->select_target.min_values;
-  uint8_t max_v = ui->select_target.max_values > 0 ? ui->select_target.max_values : 1u;
+  if (!ui || !ui->select_target) return;
+  uint8_t min_v = ui->select_target->min_values;
+  uint8_t max_v = ui->select_target->max_values > 0 ? ui->select_target->max_values : 1u;
   if (nvals < (size_t)min_v) {
     ui_notice(ui, "Select at least %u option%s", (unsigned)min_v, min_v == 1u ? "" : "s");
     return;
@@ -13112,10 +13498,11 @@ static void submit_select_dropdown(ccord_ui *ui, const char *const *vals, size_t
     ui_notice(ui, "You can select at most %u option%s", (unsigned)max_v, max_v == 1u ? "" : "s");
     return;
   }
-  ui_comp_hit target = ui->select_target;
+  ui_select_target target = *ui->select_target;
   ui->select_open = false;
   ui->dirty = true;
   if (!ui->d.session) {
+    ui_close_select_dropdown(ui);
     ui_notice(ui, "Not connected");
     return;
   }
@@ -13134,13 +13521,14 @@ static void submit_select_dropdown(ccord_ui *ui, const char *const *vals, size_t
   if (ccord_session_send_interaction(ui->d.session, &req, &err) != CCORD_OK) {
     ui_notice(ui, "Couldn't submit selection: %s", err.message);
   }
+  ui_close_select_dropdown(ui);
 }
 
 static void submit_interaction_modal(ccord_ui *ui)
 {
-  if (!ui || ui->modal_kind != UI_MODAL_INTERACTION) return;
-  for (size_t i = 0; i < ui->inter_modal.field_count; i++) {
-    const ccord_modal_field *fld = &ui->inter_modal.fields[i];
+  if (!ui || ui->modal_kind != UI_MODAL_INTERACTION || !ui->inter_modal || !ui->inter_modal_edits) return;
+  for (size_t i = 0; i < ui->inter_modal->field_count; i++) {
+    const ccord_modal_field *fld = &ui->inter_modal->fields[i];
     size_t len = ui->inter_modal_edits[i].len;
     const char *lbl = fld->label[0] ? fld->label : "Field";
     if (fld->required && len == 0) {
@@ -13164,22 +13552,22 @@ static void submit_interaction_modal(ccord_ui *ui)
   }
   const char *fids[CCORD_RICH_MAX_COMPONENT_ROWS];
   const char *fvals[CCORD_RICH_MAX_COMPONENT_ROWS];
-  for (size_t i = 0; i < ui->inter_modal.field_count; i++) {
-    fids[i] = ui->inter_modal.fields[i].custom_id;
+  for (size_t i = 0; i < ui->inter_modal->field_count; i++) {
+    fids[i] = ui->inter_modal->fields[i].custom_id;
     fvals[i] = ccord_text_edit_cstr(&ui->inter_modal_edits[i]);
   }
   ccord_interaction_request req = {
     .type = CCORD_INTERACTION_MODAL_SUBMIT,
-    .application_id = ui->inter_modal.application_id,
-    .guild_id = ui->inter_modal.guild_id,
-    .channel_id = ui->inter_modal.channel_id != CCORD_ID_NONE
-                    ? ui->inter_modal.channel_id
+    .application_id = ui->inter_modal->application_id,
+    .guild_id = ui->inter_modal->guild_id,
+    .channel_id = ui->inter_modal->channel_id != CCORD_ID_NONE
+                    ? ui->inter_modal->channel_id
                     : ccord_store_selected_channel(ui->d.store),
-    .custom_id = ui->inter_modal.custom_id,
-    .modal_id = ui->inter_modal.id,
+    .custom_id = ui->inter_modal->custom_id,
+    .modal_id = ui->inter_modal->id,
     .field_ids = fids,
     .field_values = fvals,
-    .field_count = ui->inter_modal.field_count,
+    .field_count = ui->inter_modal->field_count,
   };
   ui->modal_kind = UI_MODAL_NONE;
   ui->dirty = true;
@@ -13208,18 +13596,17 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
   if (ui->lightbox_open) {
     if (ev->type == CCORD_IN_KEY_DOWN) {
       if (ev->key == CCORD_KEY_ESCAPE) {
-        ui->lightbox_open = false;
-        ui->dirty = true;
+        ui_close_lightbox(ui);
         return true;
       }
-      if (ev->key == CCORD_KEY_LEFT && ui->lightbox_count > 1u) {
+      if (ev->key == CCORD_KEY_LEFT && ui->lightbox_urls && ui->lightbox_count > 1u) {
         ui->lightbox_index = (ui->lightbox_index + ui->lightbox_count - 1u) % ui->lightbox_count;
         ui_url_copy(ui->lightbox_url, sizeof ui->lightbox_url, ui->lightbox_urls[ui->lightbox_index]);
         ui->lightbox_zoom = 1.0f;
         ui->dirty = true;
         return true;
       }
-      if (ev->key == CCORD_KEY_RIGHT && ui->lightbox_count > 1u) {
+      if (ev->key == CCORD_KEY_RIGHT && ui->lightbox_urls && ui->lightbox_count > 1u) {
         ui->lightbox_index = (ui->lightbox_index + 1u) % ui->lightbox_count;
         ui_url_copy(ui->lightbox_url, sizeof ui->lightbox_url, ui->lightbox_urls[ui->lightbox_index]);
         ui->lightbox_zoom = 1.0f;
@@ -13261,7 +13648,7 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
         ui->dirty = true;
         return true;
       }
-      if (ui->lightbox_prev_btn.w > 0.0f && ui->lightbox_count > 1u &&
+      if (ui->lightbox_prev_btn.w > 0.0f && ui->lightbox_urls && ui->lightbox_count > 1u &&
           ui_in_rect(ev->x, ev->y, ui->lightbox_prev_btn)) {
         ui->lightbox_index = (ui->lightbox_index + ui->lightbox_count - 1u) % ui->lightbox_count;
         ui_url_copy(ui->lightbox_url, sizeof ui->lightbox_url, ui->lightbox_urls[ui->lightbox_index]);
@@ -13269,7 +13656,7 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
         ui->dirty = true;
         return true;
       }
-      if (ui->lightbox_next_btn.w > 0.0f && ui->lightbox_count > 1u &&
+      if (ui->lightbox_next_btn.w > 0.0f && ui->lightbox_urls && ui->lightbox_count > 1u &&
           ui_in_rect(ev->x, ev->y, ui->lightbox_next_btn)) {
         ui->lightbox_index = (ui->lightbox_index + 1u) % ui->lightbox_count;
         ui_url_copy(ui->lightbox_url, sizeof ui->lightbox_url, ui->lightbox_urls[ui->lightbox_index]);
@@ -13278,8 +13665,7 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
         return true;
       }
       if (ui->lightbox_close_btn.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->lightbox_close_btn)) {
-        ui->lightbox_open = false;
-        ui->dirty = true;
+        ui_close_lightbox(ui);
         return true;
       }
       if (ui->lightbox_img_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->lightbox_img_rect)) {
@@ -13289,8 +13675,7 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
         }
         return true;
       }
-      ui->lightbox_open = false;
-      ui->dirty = true;
+      ui_close_lightbox(ui);
       return true;
     }
     return true;
@@ -13365,11 +13750,14 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
   }
 
   if (ui->select_open) {
-    bool is_multi = ui->select_target.max_values > 1u;
+    if (!ui->select_target || !ui->select_opts) {
+      ui_close_select_dropdown(ui);
+      return true;
+    }
+    bool is_multi = ui->select_target->max_values > 1u;
     if (ev->type == CCORD_IN_KEY_DOWN) {
       if (ev->key == CCORD_KEY_ESCAPE) {
-        ui->select_open = false;
-        ui->dirty = true;
+        ui_close_select_dropdown(ui);
       } else if (ev->key == CCORD_KEY_RETURN && is_multi) {
         const char *vals[CCORD_RICH_MAX_SELECT_OPTIONS];
         size_t nvals = 0;
@@ -13382,8 +13770,7 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 1) {
       if (ui->select_dropdown_rect.w <= 0.0f || !ui_in_rect(ev->x, ev->y, ui->select_dropdown_rect)) {
-        ui->select_open = false;
-        ui->dirty = true;
+        ui_close_select_dropdown(ui);
         return true;
       }
       if (is_multi && ui->select_confirm_btn.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->select_confirm_btn)) {
@@ -13403,15 +13790,15 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
               for (size_t k = 0; k < ui->select_opt_count; k++) {
                 if (ui->select_opts[k].selected) cur++;
               }
-              if (cur >= (size_t)ui->select_target.max_values) {
-                ui_notice(ui, "You can select at most %u options", (unsigned)ui->select_target.max_values);
+              if (cur >= (size_t)ui->select_target->max_values) {
+                ui_notice(ui, "You can select at most %u options", (unsigned)ui->select_target->max_values);
                 return true;
               }
             }
             ui->select_opts[i].selected = !ui->select_opts[i].selected;
             ui->dirty = true;
           } else {
-            if (ui->select_opts[i].selected && ui->select_target.min_values == 0u) {
+            if (ui->select_opts[i].selected && ui->select_target->min_values == 0u) {
               ui->select_opts[i].selected = false;
               submit_select_dropdown(ui, nullptr, 0);
             } else {
@@ -13429,9 +13816,14 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
   }
 
   if (ui->modal_kind == UI_MODAL_INTERACTION) {
+    if (!ui->inter_modal || !ui->inter_modal_edits) {
+      ui->modal_kind = UI_MODAL_NONE;
+      ui->dirty = true;
+      return true;
+    }
     bool ctrl = (ev->mods & (CCORD_MOD_CTRL | CCORD_MOD_SUPER)) != 0;
     bool shift = (ev->mods & CCORD_MOD_SHIFT) != 0;
-    size_t nf = ui->inter_modal.field_count;
+    size_t nf = ui->inter_modal->field_count;
     size_t focus = nf > 0 && ui->inter_modal_focus < nf ? ui->inter_modal_focus : 0;
     if (ev->type == CCORD_IN_KEY_DOWN) {
       if (ev->key == CCORD_KEY_ESCAPE) {
@@ -13445,7 +13837,7 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
         return true;
       }
       if (ev->key == CCORD_KEY_RETURN) {
-        if (nf > 0 && ui->inter_modal.fields[focus].style == 2 && !ctrl) {
+        if (nf > 0 && ui->inter_modal->fields[focus].style == 2 && !ctrl) {
           ccord_error ierr;
           (void)ccord_text_edit_insert(&ui->inter_modal_edits[focus], "\n", 1u, &ierr);
           ui->dirty = true;

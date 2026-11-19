@@ -400,14 +400,99 @@ void ui_folder_toggle_expanded(ccord_ui *ui, ccord_id folder_id)
   for (size_t i = 0; i < ui->nexpanded_folders; i++) {
     if (ui->expanded_folders[i] == folder_id) {
       ui->expanded_folders[i] = ui->expanded_folders[--ui->nexpanded_folders];
+      ui->folder_expand_seq++;
       ui->dirty = true;
       return;
     }
   }
   if (ui->nexpanded_folders < CCORD_MAX_GUILDS) {
     ui->expanded_folders[ui->nexpanded_folders++] = folder_id;
+    ui->folder_expand_seq++;
     ui->dirty = true;
   }
+}
+
+struct ui_rail_cache {
+  bool valid;
+  uint64_t lists_rev;
+  uint64_t expand_hash;
+  float sl_x, sl_w, sz, gap, scroll, total_h;
+  ui_rail_slot *slots;
+  size_t count;
+  size_t cap;
+};
+
+static uint64_t rail_expand_hash(const ccord_ui *ui)
+{
+  uint64_t h = 14695981039346656037ull ^ (uint64_t)ui->nexpanded_folders ^ (ui->folder_expand_seq * 1099511628211ull);
+  for (size_t i = 0; i < ui->nexpanded_folders; i++) {
+    h ^= ui->expanded_folders[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+void ui_rail_cache_free(ccord_ui *ui)
+{
+  if (!ui || !ui->rail_cache) return;
+  ccord_free(ui->rail_cache->slots);
+  ccord_free(ui->rail_cache);
+  ui->rail_cache = nullptr;
+}
+
+const ui_rail_slot *ui_rail_slots_cached(const ccord_ui *ui, size_t *out_count, float *out_total_h)
+{
+  if (out_count) *out_count = 0;
+  if (out_total_h) *out_total_h = 0.0f;
+  if (!ui || !ui->rail_cache) return nullptr;
+  struct ui_rail_cache *c = ui->rail_cache;
+  uint64_t lrev = ui->d.store ? ccord_store_lists_revision(ui->d.store) : 0u;
+  uint64_t ehash = rail_expand_hash(ui);
+  float sl_x = ui->layout.server_list.x;
+  float sl_w = ui->layout.server_list.w;
+  float sz = M(guild_icon_size);
+  float gap = M(guild_icon_gap);
+  float scroll = ui->server_scroll;
+  if (c->valid && c->lists_rev == lrev && c->expand_hash == ehash &&
+      c->sl_x == sl_x && c->sl_w == sl_w && c->sz == sz && c->gap == gap) {
+    if (c->scroll != scroll) {
+      float dy = c->scroll - scroll;
+      for (size_t i = 0; i < c->count; i++) c->slots[i].rect.y += dy;
+      c->scroll = scroll;
+    }
+    if (out_count) *out_count = c->count;
+    if (out_total_h) *out_total_h = c->total_h;
+    return c->slots;
+  }
+  float total_h = 0.0f;
+  size_t need = ui_rail_build_slots(ui, c->slots, c->cap, &total_h);
+  if (need > c->cap) {
+    size_t ncap = c->cap ? c->cap : 32u;
+    while (ncap < need) ncap *= 2u;
+    if (ncap > UI_RAIL_SLOTS_MAX) ncap = UI_RAIL_SLOTS_MAX;
+    ui_rail_slot *ns = ccord_realloc_array(c->slots, ncap, sizeof *ns);
+    if (!ns) {
+      if (out_total_h) *out_total_h = total_h;
+      return nullptr;
+    }
+    c->slots = ns;
+    c->cap = ncap;
+    need = ui_rail_build_slots(ui, c->slots, c->cap, &total_h);
+    if (need > c->cap) need = c->cap;
+  }
+  c->valid = true;
+  c->lists_rev = lrev;
+  c->expand_hash = ehash;
+  c->sl_x = sl_x;
+  c->sl_w = sl_w;
+  c->sz = sz;
+  c->gap = gap;
+  c->scroll = scroll;
+  c->total_h = total_h;
+  c->count = need;
+  if (out_count) *out_count = c->count;
+  if (out_total_h) *out_total_h = c->total_h;
+  return c->slots;
 }
 
 size_t ui_rail_build_slots(const ccord_ui *ui, ui_rail_slot *out, size_t cap, float *out_total_h)
@@ -541,10 +626,11 @@ size_t ui_rail_build_slots(const ccord_ui *ui, ui_rail_slot *out, size_t cap, fl
 
 ccord_rect ui_guild_icon_rect(const ccord_ui *ui, size_t i)
 {
-  ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
-  size_t n = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
+  size_t n = 0;
+  const ui_rail_slot *slots = ui_rail_slots_cached(ui, &n, nullptr);
+  if (!slots || n == 0) return (ccord_rect){0};
   if (i == 0) {
-    return n > 0 ? slots[0].rect : (ccord_rect){0};
+    return slots[0].rect;
   }
   size_t gi = i - 1u;
   for (size_t s = 0; s < n; s++) {
@@ -861,12 +947,9 @@ static bool ui_search_user_matches(void *ud_ptr, ccord_id user_id, const char *n
   return false;
 }
 
-static bool message_matches_search(const ccord_ui *ui, const ccord_message *m, const char *q)
+static bool message_matches_search(const ccord_ui *ui, const ccord_message *m, const ccord_search_query *sq)
 {
-  if (!m || !m->content || !q) return false;
-  if (q[0] == '\0') return true;
-  ccord_search_query sq;
-  ccord_search_parse(q, strlen(q), &sq);
+  if (!m || !m->content || !sq) return false;
   ccord_id gid = ccord_store_selected_guild(ui->d.store);
   ccord_id cid = m->channel_id != CCORD_ID_NONE ? m->channel_id : ccord_store_selected_channel(ui->d.store);
   const ccord_channel *ch = ccord_store_channel(ui->d.store, cid);
@@ -886,7 +969,7 @@ static bool message_matches_search(const ccord_ui *ui, const ccord_message *m, c
     .user_matches = ui_search_user_matches,
     .ud = &uctx,
   };
-  return ccord_search_message_matches(&sq, m, &ctx);
+  return ccord_search_message_matches(sq, m, &ctx);
 }
 
 void ui_rebuild_view(ccord_ui *ui, bool force)
@@ -921,17 +1004,19 @@ void ui_rebuild_view(ccord_ui *ui, bool force)
     ui->vmap = n;
     ui->capvmap = ncap;
   }
+  ccord_search_query sq;
+  ccord_search_parse(q, strlen(q), &sq);
   size_t n = 0;
   for (size_t i = 0; i < total; i++) {
     const ccord_message *m = ccord_store_message_at(ui->d.store, ch, i);
-    if (m && message_matches_search(ui, m, q)) {
+    if (m && message_matches_search(ui, m, &sq)) {
       ui->vmap[n++] = i;
     }
   }
   if (sr && sc > 0) {
     for (size_t k = 0; k < sc; k++) {
       if (sr[k].channel_id != CCORD_ID_NONE && sr[k].channel_id != ch) continue;
-      if (!sr[k].content || !message_matches_search(ui, &sr[k], q)) continue;
+      if (!sr[k].content || !message_matches_search(ui, &sr[k], &sq)) continue;
       if (ccord_store_find_message(ui->d.store, ch, sr[k].id) != nullptr) continue;
       ui->vmap[n++] = (1ULL << 62) | k;
     }
@@ -1143,20 +1228,6 @@ static bool grow_crow(ccord_ui *ui, size_t need)
   return true;
 }
 
-static bool is_thread_channel(const ccord_store *s, ccord_id g, const ccord_channel *ch)
-{
-  if (!ch || ch->kind != CCORD_CHANNEL_TEXT || ch->parent_id == CCORD_ID_NONE) return false;
-  const ccord_channel *parent = ccord_store_channel(s, ch->parent_id);
-  return parent && parent->guild_id == g && parent->kind == CCORD_CHANNEL_TEXT;
-}
-
-static bool is_category_in_guild(const ccord_store *s, ccord_id g, ccord_id cat_id)
-{
-  if (cat_id == CCORD_ID_NONE) return false;
-  const ccord_channel *cat = ccord_store_channel(s, cat_id);
-  return cat && cat->guild_id == g && cat->kind == CCORD_CHANNEL_CATEGORY;
-}
-
 static bool has_selected_thread(const ccord_store *s, ccord_id g, ccord_id text_id, ccord_id sel)
 {
   if (sel == CCORD_ID_NONE) return false;
@@ -1164,23 +1235,65 @@ static bool has_selected_thread(const ccord_store *s, ccord_id g, ccord_id text_
   return sc && sc->guild_id == g && sc->kind == CCORD_CHANNEL_TEXT && sc->parent_id == text_id;
 }
 
-static bool append_channel_and_children(ccord_ui *ui, ccord_id g, size_t n, size_t i, const ccord_channel *ch, float *py)
+typedef struct chan_idx_map {
+  const ccord_channel **chs;
+  uint32_t *parent_idx;
+  uint32_t *thread_head;
+  uint32_t *thread_tail;
+  uint32_t *thread_next;
+  uint32_t *cat_head;
+  uint32_t *cat_tail;
+  uint32_t *cat_next;
+  ccord_id *ht_ids;
+  uint32_t *ht_idx;
+  size_t ht_mask;
+  bool heap_alloc;
+} chan_idx_map;
+
+static uint32_t chan_ht_find(const chan_idx_map *m, ccord_id id)
+{
+  if (id == CCORD_ID_NONE || !m->ht_ids) return UINT32_MAX;
+  size_t slot = (size_t)(id * 11400714819323198485ull) & m->ht_mask;
+  for (;;) {
+    ccord_id k = m->ht_ids[slot];
+    if (k == id) return m->ht_idx[slot];
+    if (k == CCORD_ID_NONE) return UINT32_MAX;
+    slot = (slot + 1u) & m->ht_mask;
+  }
+}
+
+static bool cm_is_thread(const chan_idx_map *cm, size_t i)
+{
+  const ccord_channel *ch = cm->chs[i];
+  uint32_t p = cm->parent_idx[i];
+  return ch && ch->kind == CCORD_CHANNEL_TEXT && p != UINT32_MAX &&
+         cm->chs[p] && cm->chs[p]->kind == CCORD_CHANNEL_TEXT;
+}
+
+static bool cm_is_cat_child(const chan_idx_map *cm, size_t i)
+{
+  uint32_t p = cm->parent_idx[i];
+  return p != UINT32_MAX && cm->chs[p] && cm->chs[p]->kind == CCORD_CHANNEL_CATEGORY;
+}
+
+static bool append_channel_and_children(ccord_ui *ui, ccord_id g, const chan_idx_map *cm, size_t i,
+                                        const ccord_channel *ch, float *py)
 {
   bool is_cat = ch->kind == CCORD_CHANNEL_CATEGORY;
   if (!grow_crow(ui, ui->ncrow + 1)) return false;
   float h = is_cat ? M(category_height) : (g == CCORD_DM_GUILD_ID ? 48.0f : M(channel_item_height));
   ui->crow[ui->ncrow++] = (chan_row){is_cat, false, false, false, i, 0, *py, h, DM_NAV_NONE};
   *py += h + (is_cat ? 0.0f : (g == CCORD_DM_GUILD_ID ? 3.0f : 2.0f));
-  if (!is_cat && ch->kind == CCORD_CHANNEL_TEXT) {
+  if (!is_cat && ch->kind == CCORD_CHANNEL_TEXT && cm->thread_head) {
     bool is_forum = ccord_store_channel_is_forum(ui->d.store, ch->id);
     ccord_id sel_cid = ccord_store_selected_channel(ui->d.store);
-    for (size_t t = 0; t < n; t++) {
-      const ccord_channel *tc = ccord_store_channel_at(ui->d.store, g, t);
-      if (!tc || tc->id == ch->id || tc->parent_id != ch->id || tc->kind != CCORD_CHANNEL_TEXT) continue;
+    for (uint32_t t = cm->thread_head[i]; t != UINT32_MAX; t = cm->thread_next[t]) {
+      const ccord_channel *tc = cm->chs[t];
+      if (!tc) continue;
       if ((is_forum || tc->thread_archived) && tc->id != sel_cid) continue;
       if (!grow_crow(ui, ui->ncrow + 1)) return false;
       float th = M(channel_item_height) - 4.0f;
-      ui->crow[ui->ncrow++] = (chan_row){false, false, false, true, t, 0, *py, th, DM_NAV_NONE};
+      ui->crow[ui->ncrow++] = (chan_row){false, false, false, true, (size_t)t, 0, *py, th, DM_NAV_NONE};
       *py += th + 2.0f;
     }
   }
@@ -1261,7 +1374,7 @@ uint64_t ui_effective_permissions(const ccord_ui *ui, ccord_id guild_id, ccord_i
 // Discord does not list what you may not see. Only on exact data (a guess never hides anything), never the channel you
 // are looking at (except in Role Preview, which shows what that role sees), and a category stays while you may view it
 // or anything inside it. `vis` has one entry per channel of the guild, in store order; nullptr means "show everything".
-static bool *compute_channel_visibility(const ccord_ui *ui, ccord_id g, size_t n)
+static bool *compute_channel_visibility(const ccord_ui *ui, ccord_id g, size_t n, const chan_idx_map *cm)
 {
   if (n == 0 || g == CCORD_DM_GUILD_ID || g == CCORD_ID_NONE) return nullptr;
   const ccord_store *st = ui->d.store;
@@ -1272,16 +1385,17 @@ static bool *compute_channel_visibility(const ccord_ui *ui, ccord_id g, size_t n
   if (!vis) return nullptr;
   ccord_id sel = ccord_store_selected_channel(st);
   for (size_t i = 0; i < n; i++) {
-    const ccord_channel *ch = ccord_store_channel_at(st, g, i);
+    const ccord_channel *ch = cm->chs[i];
     vis[i] = !ch || (!preview && ch->id == sel) ||
              (ui_effective_permissions(ui, g, ch->id) & CCORD_PERM_VIEW_CHANNEL) != 0;
   }
-  for (size_t i = 0; i < n; i++) {   // a category with something visible inside it stays
-    const ccord_channel *cat = ccord_store_channel_at(st, g, i);
-    if (!cat || cat->kind != CCORD_CHANNEL_CATEGORY || vis[i]) continue;
-    for (size_t k = 0; k < n && !vis[i]; k++) {
-      const ccord_channel *ch = ccord_store_channel_at(st, g, k);
-      if (ch && ch->parent_id == cat->id && ch->kind != CCORD_CHANNEL_CATEGORY && vis[k]) vis[i] = true;
+  // O(C) pass: any visible non-category child keeps its parent category visible.
+  for (size_t k = 0; k < n; k++) {
+    const ccord_channel *ch = cm->chs[k];
+    if (!ch || ch->kind == CCORD_CHANNEL_CATEGORY || !vis[k]) continue;
+    uint32_t p = cm->parent_idx[k];
+    if (p != UINT32_MAX && cm->chs[p] && cm->chs[p]->kind == CCORD_CHANNEL_CATEGORY) {
+      vis[p] = true;
     }
   }
   return vis;
@@ -1300,6 +1414,22 @@ bool ui_channel_visible(const ccord_ui *ui, ccord_id guild, const ccord_channel 
   return (ui_effective_permissions(ui, guild, ch->id) & CCORD_PERM_VIEW_CHANNEL) != 0;
 }
 
+static void chan_idx_free(chan_idx_map *cm)
+{
+  if (!cm->heap_alloc) return;
+  ccord_free(cm->chs);
+  ccord_free(cm->parent_idx);
+  ccord_free(cm->thread_head);
+  ccord_free(cm->thread_tail);
+  ccord_free(cm->thread_next);
+  ccord_free(cm->cat_head);
+  ccord_free(cm->cat_tail);
+  ccord_free(cm->cat_next);
+  ccord_free(cm->ht_ids);
+  ccord_free(cm->ht_idx);
+  *cm = (chan_idx_map){0};
+}
+
 static void rebuild_channel_rows(ccord_ui *ui)
 {
   ui->ncrow = 0;
@@ -1311,10 +1441,88 @@ static void rebuild_channel_rows(ccord_ui *ui)
   const ccord_channel_kind kinds[3] = {CCORD_CHANNEL_TEXT, CCORD_CHANNEL_VOICE, CCORD_CHANNEL_STAGE};
   bool *vis = nullptr;
 
+  // Precompute O(C) channel id -> index, parent_idx, thread lists, and category child lists.
+  const ccord_channel *s_chs[64];
+  uint32_t s_parent[64], s_thead[64], s_ttail[64], s_tnext[64], s_chead[192], s_ctail[192], s_cnext[64];
+  ccord_id s_ht_ids[128];
+  uint32_t s_ht_idx[128];
+  chan_idx_map cm = {0};
+
+  if (n > 0) {
+    size_t hcap = 16u;
+    while (hcap < n * 2u) hcap *= 2u;
+    if (n <= 64u) {
+      cm.chs = s_chs;
+      cm.parent_idx = s_parent;
+      cm.thread_head = s_thead;
+      cm.thread_tail = s_ttail;
+      cm.thread_next = s_tnext;
+      cm.cat_head = s_chead;
+      cm.cat_tail = s_ctail;
+      cm.cat_next = s_cnext;
+      cm.ht_ids = s_ht_ids;
+      cm.ht_idx = s_ht_idx;
+      cm.ht_mask = hcap - 1u;
+      memset(s_ht_ids, 0, hcap * sizeof s_ht_ids[0]);
+    } else {
+      cm.heap_alloc = true;
+      cm.chs = ccord_alloc_array(n, sizeof *cm.chs);
+      cm.parent_idx = ccord_alloc_array(n, sizeof *cm.parent_idx);
+      cm.thread_head = ccord_alloc_array(n, sizeof *cm.thread_head);
+      cm.thread_tail = ccord_alloc_array(n, sizeof *cm.thread_tail);
+      cm.thread_next = ccord_alloc_array(n, sizeof *cm.thread_next);
+      cm.cat_head = ccord_alloc_array(n * 3u, sizeof *cm.cat_head);
+      cm.cat_tail = ccord_alloc_array(n * 3u, sizeof *cm.cat_tail);
+      cm.cat_next = ccord_alloc_array(n, sizeof *cm.cat_next);
+      cm.ht_ids = ccord_calloc(hcap, sizeof *cm.ht_ids);
+      cm.ht_idx = ccord_alloc_array(hcap, sizeof *cm.ht_idx);
+      cm.ht_mask = hcap - 1u;
+      if (!cm.chs || !cm.parent_idx || !cm.thread_head || !cm.thread_tail || !cm.thread_next ||
+          !cm.cat_head || !cm.cat_tail || !cm.cat_next || !cm.ht_ids || !cm.ht_idx) {
+        goto done_channels;
+      }
+    }
+    for (size_t i = 0; i < n; i++) {
+      const ccord_channel *ch = ccord_store_channel_at(ui->d.store, g, i);
+      cm.chs[i] = ch;
+      cm.thread_head[i] = UINT32_MAX;
+      cm.thread_tail[i] = UINT32_MAX;
+      cm.thread_next[i] = UINT32_MAX;
+      cm.cat_next[i] = UINT32_MAX;
+      cm.cat_head[i * 3u + 0u] = UINT32_MAX;
+      cm.cat_head[i * 3u + 1u] = UINT32_MAX;
+      cm.cat_head[i * 3u + 2u] = UINT32_MAX;
+      cm.cat_tail[i * 3u + 0u] = UINT32_MAX;
+      cm.cat_tail[i * 3u + 1u] = UINT32_MAX;
+      cm.cat_tail[i * 3u + 2u] = UINT32_MAX;
+      if (ch && ch->id != CCORD_ID_NONE) {
+        size_t slot = (size_t)(ch->id * 11400714819323198485ull) & cm.ht_mask;
+        while (cm.ht_ids[slot] != CCORD_ID_NONE && cm.ht_ids[slot] != ch->id) {
+          slot = (slot + 1u) & cm.ht_mask;
+        }
+        cm.ht_ids[slot] = ch->id;
+        cm.ht_idx[slot] = (uint32_t)i;
+      }
+    }
+    for (size_t i = 0; i < n; i++) {
+      const ccord_channel *ch = cm.chs[i];
+      cm.parent_idx[i] = (ch && ch->parent_id != CCORD_ID_NONE) ? chan_ht_find(&cm, ch->parent_id) : UINT32_MAX;
+    }
+    for (size_t t = 0; t < n; t++) {
+      const ccord_channel *tc = cm.chs[t];
+      uint32_t p = cm.parent_idx[t];
+      if (!tc || tc->kind != CCORD_CHANNEL_TEXT || p == UINT32_MAX || p == (uint32_t)t) continue;
+      if (!cm.chs[p] || cm.chs[p]->kind != CCORD_CHANNEL_TEXT) continue;
+      if (cm.thread_head[p] == UINT32_MAX) cm.thread_head[p] = (uint32_t)t;
+      else cm.thread_next[cm.thread_tail[p]] = (uint32_t)t;
+      cm.thread_tail[p] = (uint32_t)t;
+    }
+  }
+
   if (g == CCORD_DM_GUILD_ID) {
     bool show_requests = ui->dm_requests_view;
     for (size_t i = 0; i < n && !show_requests; i++) {
-      const ccord_channel *ch = ccord_store_channel_at(ui->d.store, g, i);
+      const ccord_channel *ch = cm.chs[i];
       if (ch && ch->is_message_request) show_requests = true;
     }
     if (grow_crow(ui, ui->ncrow + (show_requests ? 5u : 4u))) {
@@ -1338,15 +1546,15 @@ static void rebuild_channel_rows(ccord_ui *ui)
       if (dms) {
         size_t ndm = 0;
         for (size_t i = 0; i < n; i++) {
-          const ccord_channel *ch = ccord_store_channel_at(ui->d.store, g, i);
-          if (!ch || ch->is_message_request || ch->kind != CCORD_CHANNEL_TEXT || is_thread_channel(ui->d.store, g, ch)) continue;
+          const ccord_channel *ch = cm.chs[i];
+          if (!ch || ch->is_message_request || ch->kind != CCORD_CHANNEL_TEXT || cm_is_thread(&cm, i)) continue;
           bool pin = ui_dm_is_pinned(ui, ch->id) || ui_dm_is_favorite(ui, ch->id);
           dms[ndm++] = (dm_sort_item){i, ch->last_message_id, ch->id, pin};
         }
         qsort(dms, ndm, sizeof *dms, cmp_dm_sort);
         for (size_t k = 0; k < ndm; k++) {
-          const ccord_channel *ch = ccord_store_channel_at(ui->d.store, g, dms[k].idx);
-          if (ch && !append_channel_and_children(ui, g, n, dms[k].idx, ch, &y)) break;
+          const ccord_channel *ch = cm.chs[dms[k].idx];
+          if (ch && !append_channel_and_children(ui, g, &cm, dms[k].idx, ch, &y)) break;
         }
         ccord_free(dms);
       }
@@ -1354,37 +1562,53 @@ static void rebuild_channel_rows(ccord_ui *ui)
     goto done_channels;
   }
 
-  vis = compute_channel_visibility(ui, g, n);
+  vis = compute_channel_visibility(ui, g, n, &cm);
 #define CHANNEL_SHOWN(i) (!vis || vis[i])
+  // Group categorized channels into per-(category, kind) order-preserving lists in one O(C) pass.
+  for (size_t i = 0; i < n; i++) {
+    const ccord_channel *ch = cm.chs[i];
+    if (!ch || cm_is_thread(&cm, i) || !cm_is_cat_child(&cm, i) || !CHANNEL_SHOWN(i)) continue;
+    size_t kb = 3u;
+    if (ch->kind == CCORD_CHANNEL_TEXT) kb = 0u;
+    else if (ch->kind == CCORD_CHANNEL_VOICE) kb = 1u;
+    else if (ch->kind == CCORD_CHANNEL_STAGE) kb = 2u;
+    if (kb < 3u) {
+      size_t bucket = (size_t)cm.parent_idx[i] * 3u + kb;
+      if (cm.cat_head[bucket] == UINT32_MAX) cm.cat_head[bucket] = (uint32_t)i;
+      else cm.cat_next[cm.cat_tail[bucket]] = (uint32_t)i;
+      cm.cat_tail[bucket] = (uint32_t)i;
+    }
+  }
+
   // Uncategorized channels (parent_id == NONE or not matching any category in this guild) are never hidden by collapsed categories.
   for (size_t k = 0; k < sizeof kinds / sizeof kinds[0]; k++) {
     for (size_t i = 0; i < n; i++) {
-      const ccord_channel *ch = ccord_store_channel_at(ui->d.store, g, i);
-      if (!ch || ch->kind != kinds[k] || is_thread_channel(ui->d.store, g, ch) || !CHANNEL_SHOWN(i)) continue;
-      if (is_category_in_guild(ui->d.store, g, ch->parent_id)) continue;
-      if (!append_channel_and_children(ui, g, n, i, ch, &y)) goto done_channels;
+      const ccord_channel *ch = cm.chs[i];
+      if (!ch || ch->kind != kinds[k] || cm_is_thread(&cm, i) || !CHANNEL_SHOWN(i)) continue;
+      if (cm_is_cat_child(&cm, i)) continue;
+      if (!append_channel_and_children(ui, g, &cm, i, ch, &y)) goto done_channels;
     }
   }
 
   // Categories in store order, each immediately followed by its child text, voice and stage channels.
   for (size_t ci = 0; ci < n; ci++) {
-    const ccord_channel *cat = ccord_store_channel_at(ui->d.store, g, ci);
+    const ccord_channel *cat = cm.chs[ci];
     if (!cat || cat->kind != CCORD_CHANNEL_CATEGORY || !CHANNEL_SHOWN(ci)) continue;
-    if (!append_channel_and_children(ui, g, n, ci, cat, &y)) goto done_channels;
+    if (!append_channel_and_children(ui, g, &cm, ci, cat, &y)) goto done_channels;
     bool collapsed = ui_is_collapsed(ui, cat->id);
-    for (size_t k = 0; k < sizeof kinds / sizeof kinds[0]; k++) {
-      for (size_t i = 0; i < n; i++) {
-        const ccord_channel *ch = ccord_store_channel_at(ui->d.store, g, i);
-        if (!ch || ch->kind != kinds[k] || ch->parent_id != cat->id || is_thread_channel(ui->d.store, g, ch)) continue;
-        if (!CHANNEL_SHOWN(i)) continue;
+    for (size_t kb = 0; kb < 3u; kb++) {
+      for (uint32_t idx = cm.cat_head[ci * 3u + kb]; idx != UINT32_MAX; idx = cm.cat_next[idx]) {
+        const ccord_channel *ch = cm.chs[idx];
+        if (!ch) continue;
         if (collapsed && ch->id != sel && !has_selected_thread(ui->d.store, g, ch->id, sel)) continue;
-        if (!append_channel_and_children(ui, g, n, i, ch, &y)) goto done_channels;
+        if (!append_channel_and_children(ui, g, &cm, (size_t)idx, ch, &y)) goto done_channels;
       }
     }
   }
 
 done_channels:
 #undef CHANNEL_SHOWN
+  chan_idx_free(&cm);
   ccord_free(vis);
   if (g == CCORD_DM_GUILD_ID) {
     size_t nrel = ccord_store_relationship_count(ui->d.store);
@@ -1418,6 +1642,7 @@ typedef struct msort {
   ccord_id role_id;   // the role it names, when known
   bool plain;         // no hoisted role: listed under "Online"
   const char *name;
+  uint32_t name_color;
 } msort;
 
 static int cmp_msort(const void *pa, const void *pb)
@@ -1477,7 +1702,8 @@ static void rebuild_member_rows(ccord_ui *ui)
     const char *rname = plain ? "Online" : look.group;   // Discord: no hoisted role, "Online"
     int32_t rank = plain ? 2000 : 1000 - look.group_position;
     const char *mname = (m->nick[0] != '\0') ? m->nick : (u ? u->name : "");
-    tmp[i] = (msort){i, !u || u->presence == CCORD_PRESENCE_OFFLINE, rank, rname, plain ? CCORD_ID_NONE : look.group_id, plain, mname};
+    tmp[i] = (msort){i, !u || u->presence == CCORD_PRESENCE_OFFLINE, rank, rname,
+                     plain ? CCORD_ID_NONE : look.group_id, plain, mname, look.color};
   }
   qsort(tmp, n, sizeof *tmp, cmp_msort);
   float y = 8.0f;
@@ -1496,7 +1722,13 @@ static void rebuild_member_rows(ccord_ui *ui)
     snprintf(h->label + used, sizeof h->label - used, " \xE2\x80\x94 %zu", member_group_shown(ui, g, &tmp[i], j - i));
     y += h->h;
     for (size_t k2 = i; k2 < j; k2++) {
-      ui->mrow[ui->nmrow++] = (member_row){.is_header = false, .index = tmp[k2].idx, .y = y, .h = M(member_item_height)};
+      ui->mrow[ui->nmrow++] = (member_row){
+        .is_header = false,
+        .index = tmp[k2].idx,
+        .y = y,
+        .h = M(member_item_height),
+        .name_color = tmp[k2].name_color,
+      };
       y += M(member_item_height);
     }
     i = j;
@@ -1505,11 +1737,170 @@ static void rebuild_member_rows(ccord_ui *ui)
   ui->member_content_h = y + 8.0f;
 }
 
+static uint64_t sig_mix_u64(uint64_t h, uint64_t v)
+{
+  return (h ^ v) * 1099511628211ull;
+}
+
+static uint64_t sig_mix_str(uint64_t h, const char *s)
+{
+  if (!s) return sig_mix_u64(h, 0u);
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    h = (h ^ (uint64_t)*p) * 1099511628211ull;
+  }
+  return sig_mix_u64(h, 0xFFu);
+}
+
+static uint64_t compute_chan_sig(const ccord_ui *ui, ccord_id g)
+{
+  const ccord_store *st = ui->d.store;
+  size_t n = ccord_store_channel_count(st, g);
+  ccord_id sel = ccord_store_selected_channel(st);
+  uint64_t h = 14695981039346656037ull;
+  h = sig_mix_u64(h, g);
+  h = sig_mix_u64(h, (uint64_t)n);
+  h = sig_mix_u64(h, sel);
+  h = sig_mix_u64(h, (uint64_t)(uintptr_t)ui->theme);
+  uint32_t zb = 0;
+  memcpy(&zb, &ui->settings_zoom, sizeof zb);
+  h = sig_mix_u64(h, zb);
+  if (g == CCORD_DM_GUILD_ID) {
+    h = sig_mix_u64(h, ui->dm_requests_view ? 1u : 0u);
+    h = sig_mix_u64(h, (uint64_t)ui->npinned_dms);
+    for (size_t i = 0; i < ui->npinned_dms; i++) h = sig_mix_u64(h, ui->pinned_dms[i]);
+    h = sig_mix_u64(h, (uint64_t)ui->nfavorite_dms);
+    for (size_t i = 0; i < ui->nfavorite_dms; i++) h = sig_mix_u64(h, ui->favorite_dms[i]);
+    for (size_t i = 0; i < n; i++) {
+      const ccord_channel *ch = ccord_store_channel_at(st, g, i);
+      if (!ch) continue;
+      h = sig_mix_u64(h, ch->id);
+      h = sig_mix_u64(h, ((uint64_t)ch->kind << 16) ^ (ch->is_message_request ? 1u : 0u) ^ (ch->thread_archived ? 2u : 0u));
+      h = sig_mix_u64(h, ch->parent_id);
+      h = sig_mix_u64(h, ch->last_message_id);
+    }
+    size_t nrel = ccord_store_relationship_count(st);
+    h = sig_mix_u64(h, (uint64_t)nrel);
+    for (size_t i = 0; i < nrel; i++) {
+      const ccord_relationship *rel = ccord_store_relationship_at(st, i);
+      if (!rel) continue;
+      h = sig_mix_u64(h, rel->user_id);
+      h = sig_mix_u64(h, (uint64_t)rel->kind);
+    }
+    return h ? h : 1ull;
+  }
+  h = sig_mix_u64(h, (uint64_t)ui->ncollapsed);
+  for (size_t i = 0; i < ui->ncollapsed; i++) h = sig_mix_u64(h, ui->collapsed[i]);
+  bool preview = ui_role_preview_active_for(ui, g);
+  ccord_id self = ccord_store_self_id(st);
+  bool exact = ccord_store_permissions_exact(st, g, self);
+  h = sig_mix_u64(h, (preview ? 1u : 0u) | (exact ? 2u : 0u));
+  if (preview) h = sig_mix_u64(h, ui->role_preview_role_id);
+  if (preview || exact) {
+    const ccord_guild *gd = ccord_store_guild(st, g);
+    h = sig_mix_u64(h, gd ? gd->owner_id : 0u);
+    size_t nr = 0;
+    const ccord_role *roles = ccord_store_roles(st, g, &nr);
+    h = sig_mix_u64(h, (uint64_t)nr);
+    for (size_t r = 0; roles && r < nr; r++) {
+      h = sig_mix_u64(h, roles[r].id);
+      h = sig_mix_u64(h, roles[r].permissions);
+    }
+    if (exact) {
+      const ccord_id *srids = nullptr;
+      size_t nsr = 0;
+      if (ccord_store_member_roles(st, g, self, &srids, &nsr)) {
+        h = sig_mix_u64(h, (uint64_t)nsr + 1u);
+        for (size_t r = 0; r < nsr; r++) h = sig_mix_u64(h, srids[r]);
+      }
+    }
+  }
+  for (size_t i = 0; i < n; i++) {
+    const ccord_channel *ch = ccord_store_channel_at(st, g, i);
+    if (!ch) continue;
+    h = sig_mix_u64(h, ch->id);
+    h = sig_mix_u64(h, ((uint64_t)ch->kind << 24) ^ ((uint64_t)ch->discord_type << 8) ^
+                         (ch->thread_archived ? 1u : 0u) ^ (ccord_store_channel_is_forum(st, ch->id) ? 2u : 0u));
+    h = sig_mix_u64(h, ch->parent_id);
+    if (ch->kind == CCORD_CHANNEL_VOICE || ch->kind == CCORD_CHANNEL_STAGE) {
+      size_t nv = ccord_store_voice_count(st, ch->id);
+      h = sig_mix_u64(h, (uint64_t)nv);
+      for (size_t v = 0; v < nv; v++) {
+        const ccord_voice_state *vs = ccord_store_voice_at(st, ch->id, v);
+        if (vs) h = sig_mix_u64(h, vs->user_id);
+      }
+    }
+    if (preview || exact) {
+      size_t now = 0;
+      const ccord_overwrite *ow = ccord_store_channel_overwrites(st, ch->id, &now);
+      h = sig_mix_u64(h, (uint64_t)now);
+      for (size_t w = 0; ow && w < now; w++) {
+        h = sig_mix_u64(h, ow[w].id);
+        h = sig_mix_u64(h, ow[w].allow);
+        h = sig_mix_u64(h, ow[w].deny);
+      }
+    }
+  }
+  return h ? h : 1ull;
+}
+
+static uint64_t compute_member_sig(const ccord_ui *ui, ccord_id g)
+{
+  const ccord_store *st = ui->d.store;
+  size_t n = ccord_store_member_count(st, g);
+  if (n == 0) return 1ull;
+  uint64_t h = 14695981039346656037ull;
+  h = sig_mix_u64(h, g);
+  h = sig_mix_u64(h, (uint64_t)n);
+  h = sig_mix_u64(h, (uint64_t)(uintptr_t)ui->theme);
+  uint32_t zb = 0;
+  memcpy(&zb, &ui->settings_zoom, sizeof zb);
+  h = sig_mix_u64(h, zb);
+  uint32_t gsz = 0;
+  if (ccord_store_member_group_size(st, g, CCORD_MEMBER_GROUP_ONLINE, CCORD_ID_NONE, &gsz)) {
+    h = sig_mix_u64(h, (uint64_t)gsz + 1u);
+  }
+  if (ccord_store_member_group_size(st, g, CCORD_MEMBER_GROUP_OFFLINE, CCORD_ID_NONE, &gsz)) {
+    h = sig_mix_u64(h, ((uint64_t)gsz + 1u) << 16);
+  }
+  size_t nr = 0;
+  const ccord_role *roles = ccord_store_roles(st, g, &nr);
+  h = sig_mix_u64(h, (uint64_t)nr);
+  for (size_t r = 0; roles && r < nr; r++) {
+    h = sig_mix_u64(h, roles[r].id);
+    h = sig_mix_u64(h, ((uint64_t)(uint32_t)roles[r].position << 32) ^ (uint64_t)roles[r].color ^ (roles[r].hoist ? 0x80000000ull : 0ull));
+    if (roles[r].hoist) {
+      h = sig_mix_str(h, roles[r].name);
+      if (ccord_store_member_group_size(st, g, CCORD_MEMBER_GROUP_ROLE, roles[r].id, &gsz)) {
+        h = sig_mix_u64(h, (uint64_t)gsz + 1u);
+      }
+    }
+  }
+  for (size_t i = 0; i < n; i++) {
+    const ccord_member *m = ccord_store_member_at(st, g, i);
+    if (!m) continue;
+    const ccord_user *u = ccord_store_user(st, m->user_id);
+    h = sig_mix_u64(h, m->user_id);
+    h = sig_mix_u64(h, ((uint64_t)m->role_color << 16) ^ ((uint64_t)m->role_rank << 8) ^ (u ? (uint64_t)u->presence : 0xFFu));
+    if (m->nick[0]) h = sig_mix_str(h, m->nick);
+    else h = sig_mix_str(h, u ? u->name : nullptr);
+    if (m->role_name && m->role_name[0]) h = sig_mix_str(h, m->role_name);
+    const ccord_id *mrids = nullptr;
+    size_t nmr = 0;
+    if (ccord_store_member_roles(st, g, m->user_id, &mrids, &nmr)) {
+      h = sig_mix_u64(h, (uint64_t)nmr + 1u);
+      for (size_t k = 0; k < nmr; k++) h = sig_mix_u64(h, mrids[k]);
+    }
+  }
+  return h ? h : 1ull;
+}
+
 // UI-side state that the rows depend on changed (a category was collapsed, a conversation opened): rebuild them next time.
 static void ui_invalidate_rows(ccord_ui *ui)
 {
   ui->built_rev = 0;
   ui->built_lists_rev = UINT64_MAX;   // no store revision is this high
+  ui->built_chan_sig = 0;
+  ui->built_member_sig = 0;
 }
 
 void ui_start_role_preview(ccord_ui *ui, ccord_id guild_id, ccord_id role_id)
@@ -1631,13 +2022,25 @@ void ui_ensure_caches(ccord_ui *ui)
     ccord_vlist_invalidate_all(&ui->vlist);
   }
   // The lists of channels and members are rebuilt (and the members sorted) only when something other than message traffic
-  // changed: a message, a reaction or someone typing needs a redraw, not new lists.
+  // changed: a message, a reaction or someone typing needs a redraw, not new lists. Channel and member caches are
+  // fingerprinted independently so a presence change skips channel rebuild and a channel edit skips member sort.
   if (guild_changed || lists_rev != ui->built_lists_rev) {
     ui->built_lists_rev = lists_rev;
     if ((ui_self_voice(ui) != nullptr) != ui->built_voice_bar) ui_compute_layout(ui);
-    rebuild_channel_rows(ui);
-    rebuild_member_rows(ui);
-    ui->dbg_list_rebuilds++;
+    uint64_t csig = compute_chan_sig(ui, g);
+    uint64_t msig = compute_member_sig(ui, g);
+    bool did_rebuild = false;
+    if (guild_changed || csig != ui->built_chan_sig) {
+      rebuild_channel_rows(ui);
+      ui->built_chan_sig = csig;
+      did_rebuild = true;
+    }
+    if (guild_changed || msig != ui->built_member_sig) {
+      rebuild_member_rows(ui);
+      ui->built_member_sig = msig;
+      did_rebuild = true;
+    }
+    if (did_rebuild) ui->dbg_list_rebuilds++;
   }
   ui->dirty = true;
 }
@@ -1648,6 +2051,21 @@ static bool drafts_path(char *out, size_t cap)
   if (!dir || !dir[0]) return false;
   ccord_error err;
   return ccord_paths_join(out, cap, dir, "drafts.json", &err) == CCORD_OK;
+}
+
+static bool drafts_ensure(ccord_ui *ui, size_t need)
+{
+  if (!ui) return false;
+  if (need > UI_DRAFTS_MAX) need = UI_DRAFTS_MAX;
+  if (need <= ui->cap_drafts) return true;
+  size_t ncap = ui->cap_drafts ? ui->cap_drafts : 8u;
+  while (ncap < need) ncap *= 2u;
+  if (ncap > UI_DRAFTS_MAX) ncap = UI_DRAFTS_MAX;
+  ui_draft *n = ccord_realloc_array(ui->drafts, ncap, sizeof *n);
+  if (!n) return false;
+  ui->drafts = n;
+  ui->cap_drafts = ncap;
+  return true;
 }
 
 static void drafts_save(const ccord_ui *ui)
@@ -1664,7 +2082,7 @@ static void drafts_save(const ccord_ui *ui)
   ccord_jw jw;
   ccord_jw_init(&jw, &b);
   ccord_jw_begin_object(&jw);
-  for (size_t i = 0; i < ui->ndrafts; i++) {
+  for (size_t i = 0; ui->drafts && i < ui->ndrafts; i++) {
     if (ui->drafts[i].channel_id == CCORD_ID_NONE || ui->drafts[i].text[0] == '\0') continue;
     char key[24];
     ccord_id_format(ui->drafts[i].channel_id, key);
@@ -1720,6 +2138,7 @@ static void drafts_load(ccord_ui *ui)
         size_t vlen = 0;
         const char *v = ccord_json_string(val, &vlen);
         if (!v || vlen == 0 || !ccord_utf8_valid_text(v, vlen)) continue;
+        if (!drafts_ensure(ui, ui->ndrafts + 1u)) break;
         if (vlen >= sizeof ui->drafts[0].text) vlen = sizeof ui->drafts[0].text - 1u;
         size_t slot = ui->ndrafts++;
         ui->drafts[slot].channel_id = cid;
@@ -1737,7 +2156,7 @@ static void save_channel_draft(ccord_ui *ui, ccord_id ch)
   if (!ui || ch == CCORD_ID_NONE || ui->editing_message != CCORD_ID_NONE) return;
   const char *txt = ccord_text_edit_cstr(&ui->edit);
   size_t len = ui->edit.len;
-  for (size_t i = 0; i < ui->ndrafts; i++) {
+  for (size_t i = 0; ui->drafts && i < ui->ndrafts; i++) {
     if (ui->drafts[i].channel_id == ch) {
       if (len == 0) {
         ui->drafts[i] = ui->drafts[--ui->ndrafts];
@@ -1751,7 +2170,13 @@ static void save_channel_draft(ccord_ui *ui, ccord_id ch)
     }
   }
   if (len == 0) return;
-  size_t slot = ui->ndrafts < UI_DRAFTS_MAX ? ui->ndrafts++ : (UI_DRAFTS_MAX - 1u);
+  size_t slot = 0;
+  if (ui->ndrafts < UI_DRAFTS_MAX) {
+    if (!drafts_ensure(ui, ui->ndrafts + 1u)) return;
+    slot = ui->ndrafts++;
+  } else {
+    slot = UI_DRAFTS_MAX - 1u;
+  }
   ui->drafts[slot].channel_id = ch;
   if (len >= sizeof ui->drafts[slot].text) len = sizeof ui->drafts[slot].text - 1u;
   memcpy(ui->drafts[slot].text, txt, len);
@@ -1761,7 +2186,7 @@ static void save_channel_draft(ccord_ui *ui, ccord_id ch)
 
 void ui_clear_channel_draft(ccord_ui *ui, ccord_id channel_id)
 {
-  if (!ui || channel_id == CCORD_ID_NONE) return;
+  if (!ui || !ui->drafts || channel_id == CCORD_ID_NONE) return;
   for (size_t i = 0; i < ui->ndrafts; i++) {
     if (ui->drafts[i].channel_id == channel_id) {
       ui->drafts[i] = ui->drafts[--ui->ndrafts];
@@ -1848,7 +2273,7 @@ static void restore_channel_draft(ccord_ui *ui, ccord_id ch)
 {
   if (!ui || ui->editing_message != CCORD_ID_NONE) return;
   ccord_text_edit_clear(&ui->edit);
-  if (ch == CCORD_ID_NONE) return;
+  if (ch == CCORD_ID_NONE || !ui->drafts) return;
   for (size_t i = 0; i < ui->ndrafts; i++) {
     if (ui->drafts[i].channel_id == ch) {
       ccord_error err;
@@ -1924,14 +2349,20 @@ static bool return_failed_draft(ccord_ui *ui, const ccord_action_failure *f)
     ui->caret_on = true;
     return true;
   }
-  for (size_t i = 0; i < ui->ndrafts; i++) {
+  for (size_t i = 0; ui->drafts && i < ui->ndrafts; i++) {
     if (ui->drafts[i].channel_id != f->channel_id) continue;
     size_t len = strlen(ui->drafts[i].text);
     bool ok = prepend_text(ui->drafts[i].text, sizeof ui->drafts[i].text, &len, f->draft, f->draft_len);
     if (ok) drafts_save(ui);
     return ok;
   }
-  size_t slot = ui->ndrafts < UI_DRAFTS_MAX ? ui->ndrafts++ : (UI_DRAFTS_MAX - 1u);
+  size_t slot = 0;
+  if (ui->ndrafts < UI_DRAFTS_MAX) {
+    if (!drafts_ensure(ui, ui->ndrafts + 1u)) return false;
+    slot = ui->ndrafts++;
+  } else {
+    slot = UI_DRAFTS_MAX - 1u;
+  }
   ui->drafts[slot].channel_id = f->channel_id;
   memcpy(ui->drafts[slot].text, f->draft, f->draft_len);
   ui->drafts[slot].text[f->draft_len] = '\0';
@@ -2002,23 +2433,52 @@ static void ui_drain_failures(ccord_ui *ui)
   }
 }
 
+void ui_free_inter_modal(ccord_ui *ui)
+{
+  if (!ui) return;
+  if (ui->inter_modal_edits) {
+    for (size_t i = 0; i < CCORD_RICH_MAX_COMPONENT_ROWS; i++) {
+      ccord_text_edit_free(&ui->inter_modal_edits[i]);
+    }
+    ccord_free(ui->inter_modal_edits);
+    ui->inter_modal_edits = nullptr;
+  }
+  ccord_free(ui->inter_modal);
+  ui->inter_modal = nullptr;
+}
+
 static void ui_drain_modals(ccord_ui *ui)
 {
   if (!ui->d.session) return;
   ccord_interaction_modal m;
   if (ccord_session_pop_interaction_modal(ui->d.session, &m)) {
-    ui->inter_modal = m;
-    for (size_t i = 0; i < CCORD_RICH_MAX_COMPONENT_ROWS; i++) {
-      ccord_text_edit_clear(&ui->inter_modal_edits[i]);
-      if (i < m.field_count && m.fields[i].value[0] != '\0') {
-        ccord_error ierr;
-        (void)ccord_text_edit_insert(&ui->inter_modal_edits[i], m.fields[i].value, strlen(m.fields[i].value), &ierr);
+    if (!ui->inter_modal) {
+      ui->inter_modal = ccord_calloc(1, sizeof *ui->inter_modal);
+    }
+    if (!ui->inter_modal_edits) {
+      ui->inter_modal_edits = ccord_calloc(CCORD_RICH_MAX_COMPONENT_ROWS, sizeof *ui->inter_modal_edits);
+      if (ui->inter_modal_edits) {
+        for (size_t i = 0; i < CCORD_RICH_MAX_COMPONENT_ROWS; i++) {
+          ccord_text_edit_init(&ui->inter_modal_edits[i], 4000);
+        }
       }
     }
-    ui->inter_modal_focus = 0;
-    ui->select_open = false;
-    ui->modal_kind = UI_MODAL_INTERACTION;
-    ui->dirty = true;
+    if (ui->inter_modal && ui->inter_modal_edits) {
+      *ui->inter_modal = m;
+      for (size_t i = 0; i < CCORD_RICH_MAX_COMPONENT_ROWS; i++) {
+        ccord_text_edit_clear(&ui->inter_modal_edits[i]);
+        if (i < m.field_count && m.fields[i].value[0] != '\0') {
+          ccord_error ierr;
+          (void)ccord_text_edit_insert(&ui->inter_modal_edits[i], m.fields[i].value, strlen(m.fields[i].value), &ierr);
+        }
+      }
+      ui->inter_modal_focus = 0;
+      ui_close_select_dropdown(ui);
+      ui->modal_kind = UI_MODAL_INTERACTION;
+      ui->dirty = true;
+    } else {
+      ui_free_inter_modal(ui);
+    }
   }
   ui_report_flow_pump(ui);
 }
@@ -2141,6 +2601,18 @@ static size_t ui_anchor_target(const ccord_ui *ui, ccord_id ch)
 void ui_sync_messages(ccord_ui *ui)
 {
   ccord_id ch = ccord_store_selected_channel(ui->d.store);
+  uint64_t rev = ccord_store_revision(ui->d.store);
+  uint64_t svk = ui->view_key ^ ((uint64_t)ui->nignored_users << 48) ^
+                 (ui->discovery_open ? 2ull : 0ull) ^ (ui->dm_friends_view ? 4ull : 0ull) ^
+                 (ui->dm_requests_view ? 8ull : 0ull) ^ (ui->new_marker_active ? 16ull : 0ull);
+  for (size_t i = 0; i < ui->nignored_users; i++) svk = sig_mix_u64(svk, ui->ignored_users[i]);
+  if (rev == ui->synced_msg_rev && ch == ui->synced_msg_ch && ch == ui->vlist_channel &&
+      !ui->search_open && ui->view_key != 0 && svk == ui->synced_view_key &&
+      ui->nav_hist_len > 0 &&
+      ui->pending_jump_msg_id == CCORD_ID_NONE && ui->stage_channel == CCORD_ID_NONE &&
+      ui->vlist.count == ccord_store_message_count(ui->d.store, ch)) {
+    return;
+  }
   bool switched = ch != ui->vlist_channel;
   const ccord_channel *ch_obj = ccord_store_channel(ui->d.store, ch);
   if (switched) {
@@ -2157,7 +2629,7 @@ void ui_sync_messages(ccord_ui *ui)
     ui->chat_sel_active = false;
     ui->chat_sel_len = 0;
     ui->chat_sel_buf[0] = '\0';
-    ui->select_open = false;
+    ui_close_select_dropdown(ui);
     ui->autocomplete_open = false;
     ui->nautocomplete = 0;
     ui->slash_auto_due_ms = 0;
@@ -2282,6 +2754,13 @@ void ui_sync_messages(ccord_ui *ui)
     }
   }
   ui_record_nav_location(ui);
+  ui->synced_msg_rev = ccord_store_revision(ui->d.store);
+  ui->synced_msg_ch = ch;
+  uint64_t end_svk = ui->view_key ^ ((uint64_t)ui->nignored_users << 48) ^
+                     (ui->discovery_open ? 2ull : 0ull) ^ (ui->dm_friends_view ? 4ull : 0ull) ^
+                     (ui->dm_requests_view ? 8ull : 0ull) ^ (ui->new_marker_active ? 16ull : 0ull);
+  for (size_t i = 0; i < ui->nignored_users; i++) end_svk = sig_mix_u64(end_svk, ui->ignored_users[i]);
+  ui->synced_view_key = end_svk;
 }
 
 // The user is reading the open channel only while the window has focus, no full-window overlay covers the chat,
@@ -2745,6 +3224,8 @@ ccord_ui *ccord_ui_create(const ccord_ui_deps *deps, ccord_error *err)
   ui->caret_on = true;
   ui->window_focused = true;
   ccord_vlist_init(&ui->vlist);
+  ccord_arena_init(&ui->hit_arena, 4096u);
+  ui->rail_cache = ccord_calloc(1, sizeof *ui->rail_cache);
   ccord_text_edit_init(&ui->edit, CCORD_SEND_MAX_BYTES);
   ccord_text_edit_init(&ui->search_edit, 128);
   ccord_text_edit_init(&ui->quick_switcher_edit, 128);
@@ -2752,9 +3233,6 @@ ccord_ui *ccord_ui_create(const ccord_ui_deps *deps, ccord_error *err)
   ccord_text_edit_init(&ui->modal_edit2, 256);
   ui_status_card_init(ui);
   ccord_text_edit_init(&ui->discovery_edit, 128);
-  for (size_t i = 0; i < CCORD_RICH_MAX_COMPONENT_ROWS; i++) {
-    ccord_text_edit_init(&ui->inter_modal_edits[i], 4000);
-  }
   ccord_text_edit_init(&ui->account_email_edit, 128);
   ccord_text_edit_init(&ui->account_password_edit, 128);
   ccord_text_edit_init(&ui->account_mfa_edit, 32);
@@ -2839,6 +3317,10 @@ void ccord_ui_destroy(ccord_ui *ui)
   if (!ui) return;
   if (ui->stream_fullscreen) ui_stream_set_fullscreen(ui, false);
   ui_vm_destroy(ui);
+  if (ui->settings_save_dirty) {
+    ui->settings_save_dirty = false;
+    ui_settings_save(ui);
+  }
   if (ui->d.store && ui->editing_message == CCORD_ID_NONE) {
     ccord_id cur_ch = ui->vlist_channel != CCORD_ID_NONE ? ui->vlist_channel : ccord_store_selected_channel(ui->d.store);
     if (cur_ch != CCORD_ID_NONE) save_channel_draft(ui, cur_ch);
@@ -2863,9 +3345,7 @@ void ccord_ui_destroy(ccord_ui *ui)
   ui_status_card_free(ui);
   ui_settings_profile_release(ui);
   ccord_text_edit_free(&ui->discovery_edit);
-  for (size_t i = 0; i < CCORD_RICH_MAX_COMPONENT_ROWS; i++) {
-    ccord_text_edit_free(&ui->inter_modal_edits[i]);
-  }
+  ui_free_inter_modal(ui);
   ccord_ui_clear_account_token_text(ui);
   ccord_text_edit_free(&ui->account_email_edit);
   ccord_text_edit_free(&ui->account_password_edit);
@@ -2878,6 +3358,19 @@ void ccord_ui_destroy(ccord_ui *ui)
   ui_saved_messages_free(ui);
   ui_call_free(ui);
   ccord_audio_destroy(ui->media_audio);
+  ui_track_free(&ui->trk_chan);
+  ui_track_free(&ui->trk_member);
+  ui_track_free(&ui->trk_rail);
+  ui_rail_cache_free(ui);
+  ui_nav_caches_free(ui);
+  ui_chat_caches_free(ui);
+  ui_composer_format_free();
+  ccord_arena_free(&ui->hit_arena);
+  ccord_free(ui->drafts);
+  ccord_free(ui->media_reqs);
+  ccord_free(ui->lightbox_urls);
+  ccord_free(ui->select_opts);
+  ccord_free(ui->select_target);
   ccord_free(ui->vmap);
   ccord_free(ui->crow);
   ccord_free(ui->mrow);
@@ -3315,11 +3808,56 @@ static bool media_player_tick(ccord_ui *ui, uint64_t dt)
 
 static bool glide_tick(ccord_ui *ui, ccord_scroller *s, float *offset, bool open, float fdt_ms, bool reduced);
 
+static bool ui_caret_wants_blink(const ccord_ui *ui)
+{
+  if (!ui || !ui->window_focused) return false;
+  if (ui_is_loading_screen(ui) || ui->stream_fullscreen) return false;
+  if (ui->settings_open) {
+    if (ui->account_mfa_required) return ui->account_focus_field == 4;
+    if (ui_is_login_screen(ui) || ui->settings_page == 0) return ui->account_focus_field != 0;
+    if (ui->settings_page == 2 && ui->account_focus_field == 6) return true;
+    return ui_settings_profile_wants_text(ui);
+  }
+  if (ui_server_settings_is_open(ui)) return ui_server_settings_wants_caret(ui);
+  if (ui_channel_settings_is_open(ui)) return ui_channel_settings_wants_caret(ui);
+  if (ui->report_open || ui->schedule_open || ui->poll_open || ui->sc.open) return true;
+  if (ui->quick_switcher_open) return true;
+  if (ui->modal_kind != UI_MODAL_NONE) {
+    switch (ui->modal_kind) {
+      case UI_MODAL_CONFIRM:
+      case UI_MODAL_SCHEDULED_EVENTS:
+      case UI_MODAL_MEMBER_VERIFICATION:
+      case UI_MODAL_ACTIVITY_SHELF:
+        return false;
+      case UI_MODAL_USER_PROFILE:
+        return ui->profile_modal_tab == 0;
+      default:
+        return true;
+    }
+  }
+  if (ui->lightbox_open || ui->select_open || ui->menu.open || ui->go_live_open ||
+      ui->pins_open || ui->reactions_open || ui->inbox_open || ui->shortcuts_open ||
+      ui->saved_popover_open || ui->member_popover_open) {
+    return false;
+  }
+  if (ui->touch_mode) {
+    bool drawer_open = ui->mobile_layout && (ui->left_drawer_open || ui->right_drawer_open);
+    return !drawer_open && (ui->search_open || ui->discovery_open ||
+                            (ui->touch_text_focused && (ui_forum_is_active(ui) || composer_accepts_text(ui))));
+  }
+  return ui->emoji_picker_open || ui->discovery_open || ui->search_open ||
+         ui_forum_is_active(ui) || composer_accepts_text(ui);
+}
+
 bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
 {
   uint64_t dt = ui->last_anim_ms && now_ms > ui->last_anim_ms ? now_ms - ui->last_anim_ms : 0;
   ui->last_anim_ms = now_ms;
   ui->now_ms = now_ms;
+  if (ui->settings_save_dirty && now_ms >= ui->settings_save_due_ms) {
+    ui->settings_save_dirty = false;
+    ui_settings_save(ui);
+  }
   ui_vm_tick(ui);   // voice message: reads the mic and enforces the 10 minute cap
   ui_dm_invite_tick(ui);
   ui->now_unix_ms = ui->d.fixed_now_unix_ms ? ui->d.fixed_now_unix_ms : ccord_clock_unix_ms();
@@ -3415,13 +3953,6 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
       ui->dirty = true;
     }
   }
-  if (ui->hover_guild_idx > 0 && (size_t)(ui->hover_guild_idx - 1) < ng) {
-    const ccord_guild *hg = ccord_store_guild_at(ui->d.store, (size_t)(ui->hover_guild_idx - 1));
-    if (hg && hg->icon_url && hg->icon_url[0]) {
-      anim = true;
-      ui->dirty = true;
-    }
-  }
 
   // Touch gestures (long-press timer) and mobile slide-out drawer animation.
   float fdt = dt > 0 ? (float)(dt < 100 ? dt : 100) : 16.0f;
@@ -3454,7 +3985,7 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
   }
   if (ui->server_scroller.pending != 0.0f) {
     float total = 0.0f;
-    (void)ui_rail_build_slots(ui, nullptr, 0, &total);
+    (void)ui_rail_slots_cached(ui, nullptr, &total);
     float max = total - ui->layout.server_list.h;
     if (ccord_scroller_tick(&ui->server_scroller, &ui->server_scroll, fdt, max, reduced)) anim = true;
     ui->dirty = true;
@@ -3501,7 +4032,6 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
     ui->last_slowmode_rem_s = srem;
     ui->dirty = true;
   }
-  if (srem > 0) anim = true;
   bool up_active = ui->d.session && ccord_session_active_uploads(ui->d.session, CCORD_ID_NONE, nullptr, 0) > 0;
   if (up_active) {
     anim = true;
@@ -3522,14 +4052,15 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
     }
   }
   // A transition left running by the last frame, or a moving image it showed (GIFs advance only when drawn).
-  ui->animating = anim || ccord_anim_active(&ui->anim) || ui->media_animating;
+  bool anim_pending = ccord_anim_active(&ui->anim);
+  bool typing_throttle = ui->typing_anim_only && !anim && !ui->media_animating && !ui->dirty;
+  ui->animating = anim || anim_pending || ui->media_animating;
 
-  // caret blink
+  // caret blink: only dirty when window is focused and an editable text field is active.
   bool on = ((now_ms - ui->caret_epoch_ms) / UI_CARET_BLINK_MS) % 2 == 0;
   if (on != ui->caret_on) {
     ui->caret_on = on;
-    if (!ui->settings_open || ui_settings_profile_wants_text(ui) || ui_server_settings_wants_caret(ui) || ui_channel_settings_wants_caret(ui) ||
-        ui->modal_kind != UI_MODAL_NONE) {
+    if (ui_caret_wants_blink(ui)) {
       ui->dirty = true;
     }
   }
@@ -3537,7 +4068,10 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
     ui->notice[0] = '\0';
     ui->dirty = true;
   }
-  if (ui->notice[0] && now_ms < ui->notice_until_ms && ui->notice_until_ms - now_ms < 250) ui->animating = true;   // fading out
+  if (ui->notice[0] && now_ms < ui->notice_until_ms && ui->notice_until_ms - now_ms < 250) {
+    ui->animating = true;   // fading out
+    typing_throttle = false;
+  }
   if (ui->jump_highlight_msg_id != CCORD_ID_NONE) {
     if (now_ms < ui->jump_highlight_until_ms) {
       ui->animating = true;
@@ -3554,6 +4088,9 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
   ui_status_card_tick(ui);
   sync_text_input(ui);
   bool redraw = ui->dirty || ui->animating;
+  if (typing_throttle && !ui->dirty && now_ms < ui->typing_next_ms) {
+    redraw = false;
+  }
   ui->dirty = false;
   return redraw;
 }
@@ -3581,7 +4118,7 @@ static hover_state compute_hover(ccord_ui *ui)
     h.menu = ui->menu.hover;
     return h;
   }
-  if (ui->settings_open || ui->go_live_open) {
+  if (ui->settings_open || ui->go_live_open || ui_server_settings_is_open(ui) || ui_channel_settings_is_open(ui)) {
     if (ui->settings_open) {
       h.settings_page = ui->hover_settings_page;
       h.close = ui->hover_settings_close;
@@ -3598,9 +4135,9 @@ static hover_state compute_hover(ccord_ui *ui)
   bool left_vis = !ui->mobile_layout || l->left_drawer_visible;
   bool right_over = ui->mobile_layout && l->right_drawer_visible;
   if (left_vis && ui_in_rect(x, y, ui_rect(l->server_list))) {
-    ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
-    size_t nslots = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
-    for (size_t si = 0; si < nslots; si++) {
+    size_t nslots = 0;
+    const ui_rail_slot *slots = ui_rail_slots_cached(ui, &nslots, nullptr);
+    for (size_t si = 0; slots && si < nslots; si++) {
       if (ui_in_rect(x, y, slots[si].rect)) {
         h.rail_slot = (int)si;
         if (slots[si].kind == UI_RAIL_DM) h.guild = 0;
@@ -3928,7 +4465,8 @@ static bool update_hover(ccord_ui *ui)
       if (ui_in_rect(ui->mx, ui->my, ui->inter_modal_ok) || ui_in_rect(ui->mx, ui->my, ui->inter_modal_cancel)) {
         k = CCORD_CURSOR_POINTER;
       }
-      for (size_t i = 0; k == CCORD_CURSOR_DEFAULT && i < ui->inter_modal.field_count; i++) {
+      size_t nfields = ui->inter_modal ? ui->inter_modal->field_count : 0u;
+      for (size_t i = 0; k == CCORD_CURSOR_DEFAULT && i < nfields; i++) {
         if (ui_in_rect(ui->mx, ui->my, ui->inter_modal_field_rects[i])) k = CCORD_CURSOR_TEXT;
       }
     } else if (ui->modal_kind == UI_MODAL_USER_PROFILE && ui->mouse_in) {
@@ -4597,12 +5135,16 @@ bool ccord_ui_open_url(ccord_ui *ui, const char *url)
   return ui_open_url(ui, url, "Invite");
 }
 
-void ui_open_lightbox(ccord_ui *ui, const char urls[][UI_URL_MAX], size_t count, size_t index)
+void ui_open_lightbox(ccord_ui *ui, const char *const *urls, size_t count, size_t index)
 {
   if (!ui || !urls || count == 0) return;
   if (count > CCORD_RICH_MAX_ATTACHMENTS) count = CCORD_RICH_MAX_ATTACHMENTS;
   if (index >= count) index = 0;
-  if (!urls[index][0]) return;
+  if (!urls[index] || !urls[index][0]) return;
+  if (!ui->lightbox_urls) {
+    ui->lightbox_urls = ccord_calloc(CCORD_RICH_MAX_ATTACHMENTS, sizeof *ui->lightbox_urls);
+    if (!ui->lightbox_urls) return;
+  }
   ui->lightbox_count = count;
   ui->lightbox_index = index;
   for (size_t i = 0; i < count; i++) {
@@ -4612,6 +5154,16 @@ void ui_open_lightbox(ccord_ui *ui, const char urls[][UI_URL_MAX], size_t count,
   ui->lightbox_zoom = 1.0f;
   ui->lightbox_open = true;
   ui->dirty = true;
+}
+
+void ui_close_lightbox(ccord_ui *ui)
+{
+  if (!ui) return;
+  ui->lightbox_open = false;
+  ui->lightbox_count = 0;
+  ui->lightbox_index = 0;
+  ccord_free(ui->lightbox_urls);
+  ui->lightbox_urls = nullptr;
 }
 
 bool ui_user_avatar_url(const ccord_user *u, char *out, size_t cap)
@@ -4766,6 +5318,12 @@ static uint64_t ui_media_hash(const char *url)
 
 static ui_media_req *ui_media_req_find(ccord_ui *ui, const char *url, bool create)
 {
+  if (!ui->media_reqs) {
+    if (!create) return nullptr;
+    ui->media_reqs = ccord_calloc(UI_MEDIA_REQ_SLOTS, sizeof *ui->media_reqs);
+    if (!ui->media_reqs) return nullptr;
+    ui->nmedia_reqs = 0;
+  }
   uint64_t h = ui_media_hash(url);
   const size_t mask = UI_MEDIA_REQ_SLOTS - 1u;
   for (int pass = 0; pass < 2; pass++) {
@@ -4783,7 +5341,7 @@ static ui_media_req *ui_media_req_find(ccord_ui *ui, const char *url, bool creat
     if (!create) return nullptr;
     // Forgetting everything is harmless: textures and the session's cache stay, so a URL asked for again is
     // answered at once, and a failed one simply gets one early retry.
-    memset(ui->media_reqs, 0, sizeof ui->media_reqs);
+    memset(ui->media_reqs, 0, UI_MEDIA_REQ_SLOTS * sizeof *ui->media_reqs);
     ui->nmedia_reqs = 0;
   }
   return nullptr;
@@ -4791,6 +5349,7 @@ static ui_media_req *ui_media_req_find(ccord_ui *ui, const char *url, bool creat
 
 static const ui_media_req *ui_media_req_peek(const ccord_ui *ui, const char *url)
 {
+  if (!ui->media_reqs) return nullptr;
   uint64_t h = ui_media_hash(url);
   for (size_t n = 0; n < UI_MEDIA_REQ_SLOTS; n++) {
     const ui_media_req *q = &ui->media_reqs[(h + n) % UI_MEDIA_REQ_SLOTS];
@@ -5280,7 +5839,7 @@ static void handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
         ui->dirty = true;
       } else if (ui_in_rect(ev->x, ev->y, ui_rect(l->server_list))) {
         float total = 0.0f;
-        (void)ui_rail_build_slots(ui, nullptr, 0, &total);
+        (void)ui_rail_slots_cached(ui, nullptr, &total);
         float max = total - l->server_list.h;
         ccord_scroller_scroll(&ui->server_scroller, &ui->server_scroll, dy, max, direct);
         ui->animating = true;
@@ -5340,7 +5899,7 @@ static void handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
     }
   } else if (ui_in_rect(ev->x, ev->y, ui_rect(l->server_list))) {
     float total = 0.0f;
-    (void)ui_rail_build_slots(ui, nullptr, 0, &total);
+    (void)ui_rail_slots_cached(ui, nullptr, &total);
     float max = total - l->server_list.h;
     ccord_scroller_scroll(&ui->server_scroller, &ui->server_scroll, dy, max, direct);
   } else {
@@ -6502,9 +7061,9 @@ static void update_server_drag(ccord_ui *ui, float mx, float my)
     ui->dirty = true;
     return;
   }
-  ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
-  size_t nslots = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
-  for (size_t si = 0; si < nslots; si++) {
+  size_t nslots = 0;
+  const ui_rail_slot *slots = ui_rail_slots_cached(ui, &nslots, nullptr);
+  for (size_t si = 0; slots && si < nslots; si++) {
     const ui_rail_slot *s = &slots[si];
     if (s->kind == UI_RAIL_ADD_SERVER) {
       if (my >= s->rect.y - 6.0f && my <= s->rect.y + s->rect.h * 0.5f) {
@@ -6561,10 +7120,11 @@ static void finish_server_drag(ccord_ui *ui)
       ui->drag_drop_zone == UI_DROP_NONE) {
     return;
   }
-  ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
-  size_t nslots = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
-  if ((size_t)ui->drag_drop_slot >= nslots) return;
-  const ui_rail_slot *ts = &slots[ui->drag_drop_slot];
+  size_t nslots = 0;
+  const ui_rail_slot *slots = ui_rail_slots_cached(ui, &nslots, nullptr);
+  if (!slots || (size_t)ui->drag_drop_slot >= nslots) return;
+  ui_rail_slot target_slot = slots[ui->drag_drop_slot];
+  const ui_rail_slot *ts = &target_slot;
 
   size_t ng = ccord_store_guild_count(ui->d.store);
   const ccord_guild *drag_g = ccord_store_guild(ui->d.store, ui->drag_guild_id);
@@ -6853,9 +7413,9 @@ static bool handle_right_click(ccord_ui *ui, const ccord_input_event *ev)
   }
   hover_state h = compute_hover(ui);
   if (h.rail_slot >= 0) {
-    ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
-    size_t nslots = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
-    if ((size_t)h.rail_slot >= nslots) return false;
+    size_t nslots = 0;
+    const ui_rail_slot *slots = ui_rail_slots_cached(ui, &nslots, nullptr);
+    if (!slots || (size_t)h.rail_slot >= nslots) return false;
     const ui_rail_slot *sl = &slots[h.rail_slot];
     if (sl->kind == UI_RAIL_DM) {
       open_menu_at(ui, ev, (ccord_menu_context){CCORD_MENU_NAV, CCORD_DM_GUILD_ID, 0, CCORD_NAV_VIEW_GUILD, 0});
@@ -7013,9 +7573,20 @@ static bool handle_right_click(ccord_ui *ui, const ccord_input_event *ev)
   return true;
 }
 
+void ui_close_select_dropdown(ccord_ui *ui)
+{
+  if (!ui) return;
+  ui->select_open = false;
+  ui->select_opt_count = 0;
+  ccord_free(ui->select_opts);
+  ui->select_opts = nullptr;
+  ccord_free(ui->select_target);
+  ui->select_target = nullptr;
+}
+
 static void select_add_opt(ccord_ui *ui, const char *label, const char *value, const char *desc, bool selected)
 {
-  if (!ui || ui->select_opt_count >= CCORD_RICH_MAX_SELECT_OPTIONS || !value || !value[0]) return;
+  if (!ui || !ui->select_opts || ui->select_opt_count >= CCORD_RICH_MAX_SELECT_OPTIONS || !value || !value[0]) return;
   size_t idx = ui->select_opt_count++;
   snprintf(ui->select_opts[idx].label, sizeof ui->select_opts[idx].label, "%s", (label && label[0]) ? label : value);
   snprintf(ui->select_opts[idx].value, sizeof ui->select_opts[idx].value, "%s", value);
@@ -7026,8 +7597,30 @@ static void select_add_opt(ccord_ui *ui, const char *label, const char *value, c
 static void ui_open_select_dropdown(ccord_ui *ui, const ui_comp_hit *ch)
 {
   if (!ui || !ch) return;
+  if (!ui->select_opts) {
+    ui->select_opts = ccord_calloc(CCORD_RICH_MAX_SELECT_OPTIONS, sizeof *ui->select_opts);
+  }
+  if (!ui->select_target) {
+    ui->select_target = ccord_calloc(1, sizeof *ui->select_target);
+  }
+  if (!ui->select_opts || !ui->select_target) {
+    ui_close_select_dropdown(ui);
+    return;
+  }
   ui->select_opt_count = 0;
-  ui->select_target = *ch;
+  *ui->select_target = (ui_select_target){
+    .channel_id = ch->channel_id,
+    .message_id = ch->message_id,
+    .application_id = ch->application_id,
+    .message_flags = ch->message_flags,
+    .kind = ch->kind,
+    .min_values = ch->min_values,
+    .max_values = ch->max_values,
+    .row_idx = ch->row_idx,
+    .comp_idx = ch->comp_idx,
+  };
+  snprintf(ui->select_target->custom_id, sizeof ui->select_target->custom_id, "%s",
+           ch->custom_id ? ch->custom_id : "");
   ui->select_anchor_rect = ch->rect;
   ccord_id gid = ccord_store_selected_guild(ui->d.store);
   if (ch->kind == CCORD_COMP_STRING_SELECT) {
@@ -7158,9 +7751,9 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     hover_state hd = compute_hover(ui);
     if (in_left) {
       if (hd.rail_slot >= 0) {
-        ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
-        size_t nslots = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
-        if ((size_t)hd.rail_slot < nslots) {
+        size_t nslots = 0;
+        const ui_rail_slot *slots = ui_rail_slots_cached(ui, &nslots, nullptr);
+        if (slots && (size_t)hd.rail_slot < nslots) {
           const ui_rail_slot *sl = &slots[hd.rail_slot];
           switch (sl->kind) {
             case UI_RAIL_FOLDER_COLLAPSED:
@@ -7334,9 +7927,9 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
   }
   hover_state h_early = compute_hover(ui);
   if (h_early.rail_slot >= 0) {
-    ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
-    size_t nslots = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
-    if ((size_t)h_early.rail_slot < nslots) {
+    size_t nslots = 0;
+    const ui_rail_slot *slots = ui_rail_slots_cached(ui, &nslots, nullptr);
+    if (slots && (size_t)h_early.rail_slot < nslots) {
       const ui_rail_slot *sl = &slots[h_early.rail_slot];
       switch (sl->kind) {
         case UI_RAIL_FOLDER_COLLAPSED:
@@ -7804,7 +8397,40 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
   for (size_t i = 0; i < ui->ncode_copy_hits; i++) {
     if (ui_in_rect(ev->x, ev->y, ui->code_copy_hits[i].rect)) {
       if (ui->d.host.clipboard_set) {
-        ui->d.host.clipboard_set(ui->d.host.ud, ui->code_copy_hits[i].code);
+        const char *raw = ui->code_copy_hits[i].code ? ui->code_copy_hits[i].code : "";
+        size_t rlen = strlen(raw);
+        char stack_strip[1024];
+        char *strip_heap = rlen >= sizeof stack_strip ? ccord_malloc(rlen + 1u) : nullptr;
+        char *strip_buf = strip_heap ? strip_heap : stack_strip;
+        size_t strip_cap = strip_heap ? (rlen + 1u) : sizeof stack_strip;
+        size_t w = 0;
+        for (size_t p = 0; p < rlen && w + 1u < strip_cap;) {
+          if (raw[p] == '\x1b' && p + 1u < rlen && raw[p + 1u] == '[') {
+            size_t q = p + 2u;
+            while (q < rlen && (unsigned char)raw[q] >= 0x30u && (unsigned char)raw[q] <= 0x3Fu) q++;
+            while (q < rlen && (unsigned char)raw[q] >= 0x20u && (unsigned char)raw[q] <= 0x2Fu) q++;
+            if (q < rlen && (unsigned char)raw[q] >= 0x40u && (unsigned char)raw[q] <= 0x7Eu) {
+              p = q + 1u;
+              continue;
+            }
+          }
+          strip_buf[w++] = raw[p++];
+        }
+        strip_buf[w] = '\0';
+        const char *to_copy = strip_buf;
+        char stack_mask[1024];
+        char *mask_heap = nullptr;
+        if (ui_streamer_get_opts(ui).hide_invites) {
+          size_t mcap = w + 1u;
+          char *mbuf = mcap <= sizeof stack_mask ? stack_mask : (mask_heap = ccord_malloc(mcap));
+          if (mbuf) {
+            (void)ui_streamer_mask_invites(ui, strip_buf, w, mbuf, mcap, false);
+            to_copy = mbuf;
+          }
+        }
+        ui->d.host.clipboard_set(ui->d.host.ud, to_copy);
+        ccord_free(mask_heap);
+        ccord_free(strip_heap);
       }
       ui_notice(ui, "Copied code block");
       return true;
@@ -7819,6 +8445,7 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
       }
       if (!already && ui->nrevealed_spoilers < 64) {
         ui->revealed_spoilers[ui->nrevealed_spoilers++] = mid;
+        ui_chat_caches_clear(ui);
         ccord_vlist_invalidate_all(&ui->vlist);
       }
       ui->dirty = true;
@@ -8237,6 +8864,154 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
   return false;
 }
 
+static void ui_vlist_shrink_tight(ccord_vlist *v)
+{
+  if (!v) return;
+  if (v->count == 0) {
+    ccord_free(v->heights);
+    ccord_free(v->height_epoch);
+    v->heights = nullptr;
+    v->height_epoch = nullptr;
+    v->heights_cap = 0;
+    return;
+  }
+  if (v->heights_cap > v->count) {
+    size_t ncap = v->count;
+    float *h = ccord_realloc_array(v->heights, ncap, sizeof *h);
+    if (h) {
+      v->heights = h;
+      v->heights_cap = ncap;
+      uint32_t *e = ccord_realloc_array(v->height_epoch, ncap, sizeof *e);
+      if (e) v->height_epoch = e;
+    }
+  }
+}
+
+static uint64_t ui_overlay_hover_sig(const ccord_ui *ui)
+{
+  if (!ui || !ui->mouse_in) return 0u;
+  float x = ui->mx, y = ui->my;
+  uint64_t sig = 14695981039346656037ull;
+#define HBIT(cond, id) do { if (cond) sig = sig_mix_u64(sig, (uint64_t)(id)); } while (0)
+  if (ui->shortcuts_open) {
+    HBIT(ui_in_rect(x, y, ui->shortcuts_close_rect), 1);
+    HBIT(ui_in_rect(x, y, ui->shortcuts_modal_rect), 2);
+  } else if (ui->inbox_open) {
+    HBIT(ui_in_rect(x, y, ui->inbox_mark_all_rect), 10);
+    HBIT(ui_in_rect(x, y, ui->inbox_tab_rects[0]), 11);
+    HBIT(ui_in_rect(x, y, ui->inbox_tab_rects[1]), 12);
+    for (size_t i = 0; i < ui->ninbox_hits; i++) {
+      if (ui_in_rect(x, y, ui->inbox_hits[i].card_rect)) sig = sig_mix_u64(sig, 100u + i);
+      if (ui_in_rect(x, y, ui->inbox_hits[i].ack_rect)) sig = sig_mix_u64(sig, 200u + i);
+    }
+  } else if (ui->saved_popover_open) {
+    HBIT(ui_in_rect(x, y, ui->saved_close_rect), 20);
+    for (size_t i = 0; i < ui->nsaved_hits; i++) {
+      if (ui_in_rect(x, y, ui->saved_hits[i].row)) sig = sig_mix_u64(sig, 300u + i);
+      if (ui_in_rect(x, y, ui->saved_hits[i].jump)) sig = sig_mix_u64(sig, 400u + i);
+      if (ui_in_rect(x, y, ui->saved_hits[i].remove)) sig = sig_mix_u64(sig, 500u + i);
+    }
+  } else if (ui->select_open) {
+    HBIT(ui->select_confirm_btn.w > 0.0f && ui_in_rect(x, y, ui->select_confirm_btn), 30);
+    for (size_t i = 0; i < ui->select_opt_count; i++) {
+      if (ui_in_rect(x, y, ui->select_opt_rects[i])) sig = sig_mix_u64(sig, 600u + i);
+    }
+  } else if (ui->modal_kind != UI_MODAL_NONE) {
+    sig = sig_mix_u64(sig, 700u + (uint64_t)ui->modal_kind);
+    if (ui->modal_kind == UI_MODAL_USER_PROFILE) {
+      HBIT(ui_in_rect(x, y, ui->profile_modal_close_rect), 710);
+      HBIT(ui->profile_modal_msg_rect.w > 0.0f && ui_in_rect(x, y, ui->profile_modal_msg_rect), 711);
+      HBIT(ui_in_rect(x, y, ui->profile_modal_tab_rects[0]), 712);
+      HBIT(ui_in_rect(x, y, ui->profile_modal_tab_rects[1]), 713);
+      HBIT(ui_in_rect(x, y, ui->profile_modal_tab_rects[2]), 714);
+      HBIT(ui->profile_modal_note_rect.w > 0.0f && ui_in_rect(x, y, ui->profile_modal_note_rect), 715);
+      HBIT(ui->profile_modal_note_save_rect.w > 0.0f && ui_in_rect(x, y, ui->profile_modal_note_save_rect), 716);
+      for (size_t i = 0; i < ui->nprofile_modal_mutual_hits; i++) {
+        if (ui_in_rect(x, y, ui->profile_modal_mutual_hits[i].rect)) sig = sig_mix_u64(sig, 800u + i);
+      }
+      for (size_t i = 0; i < ui->nprofile_modal_conn_hits; i++) {
+        if (ui_in_rect(x, y, ui->profile_modal_conn_hits[i].rect)) sig = sig_mix_u64(sig, 900u + i);
+      }
+    } else if (ui->modal_kind == UI_MODAL_MEMBER_VERIFICATION) {
+      HBIT(ui_in_rect(x, y, ui->mv.cancel), 720);
+      HBIT(ui_in_rect(x, y, ui->mv.submit), 721);
+      for (size_t i = 0; i < CCORD_MEMBER_VERIFICATION_MAX_FIELDS; i++) {
+        if (ui->mv.checks[i].w > 0.0f && ui_in_rect(x, y, ui->mv.checks[i])) sig = sig_mix_u64(sig, 950u + i);
+      }
+    } else if (ui->modal_kind == UI_MODAL_SCHEDULED_EVENTS || ui->modal_kind == UI_MODAL_ACTIVITY_SHELF) {
+      ccord_cursor_kind ck = (ui->modal_kind == UI_MODAL_SCHEDULED_EVENTS)
+                               ? ui_scheduled_events_cursor(ui)
+                               : ui_activity_shelf_cursor(ui);
+      sig = sig_mix_u64(sig, (uint64_t)ck + 1u);
+      if (ck != CCORD_CURSOR_DEFAULT) {
+        sig = sig_mix_u64(sig, ((uint64_t)(unsigned)(int)(x / 16.0f) << 16) ^ (uint64_t)(unsigned)(int)(y / 16.0f));
+      }
+    } else {
+      HBIT(ui->modal_ok_rect.w > 0.0f && ui_in_rect(x, y, ui->modal_ok_rect), 730);
+      HBIT(ui->modal_tab_rects[0].w > 0.0f && ui_in_rect(x, y, ui->modal_tab_rects[0]), 731);
+      HBIT(ui->modal_tab_rects[1].w > 0.0f && ui_in_rect(x, y, ui->modal_tab_rects[1]), 732);
+      HBIT(ui->modal_preview_btn_rect.w > 0.0f && ui_in_rect(x, y, ui->modal_preview_btn_rect), 733);
+      HBIT(ui->modal_input_rect.w > 0.0f && ui_in_rect(x, y, ui->modal_input_rect), 734);
+      HBIT(ui->modal_input2_rect.w > 0.0f && ui_in_rect(x, y, ui->modal_input2_rect), 735);
+      // Cancel button sits directly left of modal_ok_rect (width 90, gap 10).
+      ccord_rect cancel_r = {ui->modal_ok_rect.x - 100.0f, ui->modal_ok_rect.y, 90.0f, ui->modal_ok_rect.h};
+      HBIT(ui->modal_ok_rect.w > 0.0f && ui_in_rect(x, y, cancel_r), 736);
+      if (ui->modal_kind == UI_MODAL_FOLDER_SETTINGS) {
+        // Color preset strip sits between input2 bottom and ok top.
+        if (y >= ui->modal_input2_rect.y + ui->modal_input2_rect.h && y <= ui->modal_ok_rect.y) {
+          sig = sig_mix_u64(sig, 737u + (uint64_t)(unsigned)(int)(x / 32.0f));
+        }
+      }
+      for (size_t i = 0; i < ui->nnew_dm_friend_hits; i++) {
+        if (ui_in_rect(x, y, ui->new_dm_friend_hits[i].rect)) sig = sig_mix_u64(sig, 1000u + i);
+      }
+    }
+  } else if (ui->member_popover_open) {
+    HBIT(ui_in_rect(x, y, ui->member_popover_msg_btn), 1100);
+    HBIT(ui_in_rect(x, y, ui->member_popover_friend_btn), 1101);
+    HBIT(ui_in_rect(x, y, ui->member_popover_tab_rects[0]), 1102);
+    HBIT(ui_in_rect(x, y, ui->member_popover_tab_rects[1]), 1103);
+    HBIT(ui->popover_full_profile_rect.w > 0.0f && ui_in_rect(x, y, ui->popover_full_profile_rect), 1104);
+  } else if (ui_is_dm_requests_view(ui) || ui->msg_req_banner_visible) {
+    HBIT(ui_in_rect(x, y, ui->dm_requests_tab_rects[0]), 1200);
+    HBIT(ui_in_rect(x, y, ui->dm_requests_tab_rects[1]), 1201);
+    HBIT(ui->msg_req_banner_visible && ui_in_rect(x, y, ui->msg_req_banner_accept_rect), 1202);
+    HBIT(ui->msg_req_banner_visible && ui_in_rect(x, y, ui->msg_req_banner_reject_rect), 1203);
+    for (size_t i = 0; i < ui->ndm_request_hits; i++) {
+      if (ui_in_rect(x, y, ui->dm_request_hits[i].card_rect)) sig = sig_mix_u64(sig, 1300u + i);
+      if (ui_in_rect(x, y, ui->dm_request_hits[i].accept_rect)) sig = sig_mix_u64(sig, 1400u + i);
+      if (ui_in_rect(x, y, ui->dm_request_hits[i].reject_rect)) sig = sig_mix_u64(sig, 1500u + i);
+    }
+  } else if (ui->discovery_open) {
+    HBIT(ui_in_rect(x, y, ui->discovery_search_rect), 1600);
+    for (size_t i = 0; i < 6u; i++) {
+      if (ui_in_rect(x, y, ui->discovery_cat_rects[i])) sig = sig_mix_u64(sig, 1610u + i);
+    }
+    for (size_t i = 0; i < ui->ndiscovery_hits; i++) {
+      if (ui_in_rect(x, y, ui->discovery_hits[i].join_rect)) sig = sig_mix_u64(sig, 1700u + i);
+    }
+  }
+  if (ui_stream_is_active(ui)) {
+    HBIT(ui_in_rect(x, y, ui->stream_stage_btn1_rect), 1800);
+    HBIT(ui_in_rect(x, y, ui->stream_stage_btn2_rect), 1801);
+    HBIT(ui_in_rect(x, y, ui->stream_stage_pause_rect), 1802);
+    HBIT(ui_in_rect(x, y, ui->stream_stage_fs_rect), 1803);
+    HBIT(ui_in_rect(x, y, ui->stream_stage_vport_rect), 1804);
+    HBIT(ui_in_rect(x, y, ui->stream_stage_resize_rect), 1805);
+    ccord_rect sh = ui_stage_split_handle_rect(ui);
+    HBIT(sh.w > 0.0f && ui_in_rect(x, y, sh), 1806);
+    if (ui_stream_pip_active(ui)) {
+      HBIT(ui_in_rect(x, y, ui->stream_pip_rect), 1810);
+      HBIT(ui_in_rect(x, y, ui->stream_pip_fs_rect), 1811);
+      HBIT(ui_in_rect(x, y, ui->stream_pip_stage_rect), 1812);
+      HBIT(ui_in_rect(x, y, ui->stream_pip_close_rect), 1813);
+      sig = sig_mix_u64(sig, 1820u + (uint64_t)ui_stream_pip_cursor(ui, x, y));
+    }
+  }
+#undef HBIT
+  return sig;
+}
+
 bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
 {
   if (!ui || !ev) return false;
@@ -8273,6 +9048,35 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (ev->type == CCORD_IN_APP_LOW_MEMORY) {
+    if (!ui->lightbox_open) ui_close_lightbox(ui);
+    if (!ui->select_open) ui_close_select_dropdown(ui);
+    if (ui->modal_kind != UI_MODAL_INTERACTION) ui_free_inter_modal(ui);
+    ccord_free(ui->media_reqs);
+    ui->media_reqs = nullptr;
+    ui->nmedia_reqs = 0;
+    ui_track_free(&ui->trk_chan);
+    ui_track_free(&ui->trk_member);
+    ui_track_free(&ui->trk_rail);
+    if (ui->rail_cache) {
+      ccord_free(ui->rail_cache->slots);
+      ui->rail_cache->slots = nullptr;
+      ui->rail_cache->count = 0;
+      ui->rail_cache->cap = 0;
+      ui->rail_cache->valid = false;
+    }
+    ui_nav_caches_free(ui);
+    ui_chat_caches_free(ui);
+    ui_composer_format_free();
+    ui_vlist_shrink_tight(&ui->vlist);
+    ccord_arena_free(&ui->hit_arena);
+    ccord_arena_init(&ui->hit_arena, 4096u);
+    ui->nlinks = 0;
+    ui->nimg_hits = 0;
+    ui->nmedia_hits = 0;
+    ui->ncomp_hits = 0;
+    ui->ncode_copy_hits = 0;
+    ui->nprofile_modal_conn_hits = 0;
+    ui->dirty = true;
     return false;
   }
   if (ev->type == CCORD_IN_KEY_DOWN && ev->key == CCORD_KEY_BACK) {
@@ -8294,7 +9098,8 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         ui->settings_win_w = (int)ev->x;
         ui->settings_win_h = (int)ev->y;
         ui->settings_win_saved = true;
-        ui_settings_save(ui);
+        ui->settings_save_dirty = true;
+        ui->settings_save_due_ms = ui->now_ms + 500u;
       }
       return true;
     case CCORD_IN_FOCUS:
@@ -8335,21 +9140,19 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         return true;
       }
       bool changed = false;
+      bool check_ovl_hover = false;
       if (ui->shortcuts_open || ui->inbox_open || ui->saved_popover_open || ui->select_open) {
-        ui->dirty = true;
-        changed = true;
+        check_ovl_hover = true;
       } else if (ui->modal_kind != UI_MODAL_NONE) {
         if (ui->modal_kind == UI_MODAL_ADD_SERVER || ui->modal_kind == UI_MODAL_FOLDER_SETTINGS ||
             ui->modal_kind == UI_MODAL_NEW_DM || ui->modal_kind == UI_MODAL_ADD_DM_RECIPIENT ||
             ui->modal_kind == UI_MODAL_EDIT_GROUP_DM ||
             ui->modal_kind == UI_MODAL_USER_PROFILE || ui->modal_kind == UI_MODAL_SCHEDULED_EVENTS ||
             ui->modal_kind == UI_MODAL_MEMBER_VERIFICATION || ui->modal_kind == UI_MODAL_ACTIVITY_SHELF) {
-          ui->dirty = true;
-          changed = true;
+          check_ovl_hover = true;
         }
       } else if (ui->member_popover_open || ui_is_dm_requests_view(ui) || ui->msg_req_banner_visible) {
-        ui->dirty = true;
-        changed = true;
+        check_ovl_hover = true;
       } else if (ui_server_settings_is_open(ui)) {
         changed = ui_server_settings_handle(ui, ev);
       } else if (ui_channel_settings_is_open(ui)) {
@@ -8369,8 +9172,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       } else if (ui->emoji_picker_open) {
         changed = ui_expr_handle_event(ui, ev);
       } else if (ui->discovery_open) {
-        ui->dirty = true;
-        changed = true;
+        check_ovl_hover = true;
       } else if (ui_forum_is_active(ui)) {
         (void)ui_forum_handle_event(ui, ev);
       }
@@ -8418,9 +9220,17 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         ui_stream_pip_drag_move(ui, ev->x, ev->y);
         changed = true;
       } else if (ui_stream_is_active(ui)) {
-        // Keep hover accents responsive on the stream player, resize handles, split divider, and floating PiP.
-        ui->dirty = true;
-        changed = true;
+        check_ovl_hover = true;
+      }
+      if (check_ovl_hover) {
+        uint64_t hsig = ui_overlay_hover_sig(ui);
+        if (hsig != ui->last_ovl_hover_sig) {
+          ui->last_ovl_hover_sig = hsig;
+          ui->dirty = true;
+          changed = true;
+        }
+      } else {
+        ui->last_ovl_hover_sig = 0u;
       }
       bool hc = update_hover(ui);
       if (hc) ui->dirty = true;
@@ -8550,9 +9360,9 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       if (ev->button == 2) {
         hover_state hm = compute_hover(ui);
         if (hm.rail_slot >= 0) {
-          ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
-          size_t nslots = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
-          if ((size_t)hm.rail_slot < nslots) {
+          size_t nslots = 0;
+          const ui_rail_slot *slots = ui_rail_slots_cached(ui, &nslots, nullptr);
+          if (slots && (size_t)hm.rail_slot < nslots) {
             const ui_rail_slot *sl = &slots[hm.rail_slot];
             if (sl->kind == UI_RAIL_DM) {
               ui_post_nav_aux(ui, CCORD_DM_GUILD_ID, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_NAV_VIEW_GUILD);
@@ -8971,10 +9781,37 @@ void ccord_ui_draw(ccord_ui *ui, ccord_renderer *r)
   ui->media_animating = ccord_render_take_anim_activity(r) || decoding;
 }
 
+static bool overlay_enter_opaque(const ccord_ui *ui, const char *ns)
+{
+  if (ui->anim.reduced_motion) return true;
+  uint32_t key = ccord_anim_key(ns, 0);
+  size_t base = (size_t)key % CCORD_ANIM_SLOTS;
+  for (size_t i = 0; i < 8u; i++) {
+    const ccord_anim_slot *s = &ui->anim.slots[(base + i) % CCORD_ANIM_SLOTS];
+    if (s->key == key) {
+      if (s->seen_frame + 1u == ui->anim.frame &&
+          (s->value >= 0.999f || (s->to >= 0.999f && ui->anim.now_ms >= s->start_ms + (uint64_t)s->dur_ms))) {
+        return true;
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
 static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
 {
   ccord_anim_begin_frame(&ui->anim, ui->now_ms);
   ccord_render_set_anim_clock(r, ui->now_ms);
+  ccord_arena_reset(&ui->hit_arena);
+  ui->nlinks = 0;
+  ui->nimg_hits = 0;
+  ui->nmedia_hits = 0;
+  ui->ncomp_hits = 0;
+  ui->ncode_copy_hits = 0;
+  ui->nprofile_modal_conn_hits = 0;
+  ui->typing_next_ms = 0;
+  ui->typing_anim_only = false;
   ui_pump_media(ui, r);
   ui_ensure_caches(ui);
   ui_sync_messages(ui);
@@ -9025,142 +9862,159 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui->update_banner_notes_rect = (ccord_rect){0};
   ui->update_banner_dismiss_rect = (ccord_rect){0};
   ui->mobile_send_btn_rect = (ccord_rect){0};
-  float box_h = ui_composer_measure(ui, r);
-  if (box_h != ui->composer_box_h) {
-    ui->composer_box_h = box_h;
-    ui_compute_layout(ui);
-  }
+
+  bool full_settings = ui->settings_open && !ui_is_login_screen(ui);
+  bool full_ss = ui_server_settings_is_open(ui);
+  bool full_cs = ui_channel_settings_is_open(ui);
+  bool opaque_full_ovl = !ui->go_live_open &&
+                         ((full_settings && overlay_enter_opaque(ui, "settings")) ||
+                          (full_ss && overlay_enter_opaque(ui, "ssettings")) ||
+                          (full_cs && overlay_enter_opaque(ui, "csettings")));
+
   const ccord_theme_colors *c = &ui->theme->c;
-  ccord_draw_rect(r, (ccord_rect){0, 0, ui->win_w, ui->win_h}, c->bg_primary);
-  if (ui->discovery_open) {
-    ui_draw_discovery(ui, r);
-  } else if (ui->stage_channel != CCORD_ID_NONE) {
-    ui_draw_voice_stage(ui, r);
-    if (ui_stage_split_active(ui)) ui_draw_messages(ui, r);   // side-by-side Text Chat pane
-    ui_draw_chat_header(ui, r);
-    ui_draw_composer(ui, r);
-    if (ui_stage_split_active(ui)) ui_draw_stage_split_divider(ui, r);
-  } else if (ui_forum_is_active(ui)) {
-    ui_draw_forum(ui, r);
-    ui_draw_chat_header(ui, r);
-  } else {
-    ui_draw_messages(ui, r);
-    ui_draw_chat_header(ui, r);
-    ui_draw_composer(ui, r);
-  }
-  ui_anchor_remember(ui);
-  ui_draw_stale_bar(ui, r);
-  ui_draw_update_bar(ui, r);
-  if (!ui->mobile_layout && !ui->discovery_open && ui->layout.member_list_visible) ui_draw_member_list(ui, r);
-  if (ui->d.store && !ui->discovery_open &&
-      ui_role_preview_active_for(ui, ccord_store_selected_guild(ui->d.store))) {
-    ccord_id pg = ui->role_preview_guild;
-    const ccord_role *pr = ccord_store_role(ui->d.store, pg, ui->role_preview_role_id);
-    const char *rname = (pr && pr->name && pr->name[0]) ? pr->name : "@everyone";
-    ccord_rect bar = {ui->layout.chat_header.x, ui_panels_slot_height(ui, CCORD_PANEL_TOP),
-                      ui->win_w - ui->layout.chat_header.x, 36.0f};
-    ccord_draw_rect(r, bar, c->brand);
-    char lbl[160];
-    if (rname[0] == '@') snprintf(lbl, sizeof lbl, "Viewing server as role: %s", rname);
-    else snprintf(lbl, sizeof lbl, "Viewing server as role: @%s", rname);
-    ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), c->text_on_brand);
-    float blh = ui_line_h(ui, bs.size);
-    ccord_rect exit_r = {bar.x + bar.w - 104.0f, bar.y + 5.0f, 92.0f, 26.0f};
-    ccord_rect cyc_r = {exit_r.x - 104.0f, bar.y + 5.0f, 96.0f, 26.0f};
-    ui->role_preview_exit_rect = exit_r;
-    ui->role_preview_cycle_rect = cyc_r;
-    float text_max = cyc_r.x - (bar.x + 16.0f) - 10.0f;
-    if (text_max > 24.0f) {
-      ccord_text_draw_ellipsis(r, lbl, strlen(lbl), bar.x + 14.0f, bar.y + (bar.h - blh) * 0.5f, text_max, &bs);
+  if (!opaque_full_ovl) {
+    float box_h = ui_composer_measure(ui, r);
+    if (box_h != ui->composer_box_h) {
+      ui->composer_box_h = box_h;
+      ui_compute_layout(ui);
     }
-    bool chv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, cyc_r);
-    bool ehv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, exit_r);
-    ccord_draw_rrect(r, cyc_r, 4.0f, ui_alpha(c->bg_tertiary, chv ? 0.55f : 0.35f));
-    ccord_draw_rrect(r, exit_r, 4.0f, ui_alpha(c->bg_tertiary, ehv ? 0.70f : 0.45f));
-    ccord_text_style btns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, c->text_on_brand);
-    ccord_vec2 cm = ccord_text_measure(r, "Switch Role", 11, &btns, 0.0f);
-    ccord_text_draw(r, "Switch Role", 11, cyc_r.x + (cyc_r.w - cm.x) * 0.5f, cyc_r.y + (cyc_r.h - cm.y) * 0.5f, &btns, 0.0f);
-    ccord_vec2 em = ccord_text_measure(r, "Exit Preview", 12, &btns, 0.0f);
-    ccord_text_draw(r, "Exit Preview", 12, exit_r.x + (exit_r.w - em.x) * 0.5f, exit_r.y + (exit_r.h - em.y) * 0.5f, &btns, 0.0f);
-  }
-  draw_overlay_popup(ui, r, UI_OVL_TIP, "tip",
-                     !ui->touch_mode && !ui->discovery_open && ui->hover_members_btn && !ui->menu.open && !ui->settings_open,
-                     &ui->hover_members_btn, 90, UI_TIP_CLOSE_MS, 0.0f, ui_draw_chat_header_tooltip);
-  {
-    bool ts_open = !ui->touch_mode && !ui->discovery_open && ui->hover_ts_hit >= 0 && (size_t)ui->hover_ts_hit < ui->nts_hits &&
-                   !ui->menu.open && !ui->settings_open && !ui->pins_open && !ui->search_open && !ui->inbox_open &&
-                   !ui->shortcuts_open;
-    if (ts_open) ui->tstip_last_hit = ui->hover_ts_hit;
-    float ts_t = ui_overlay_presence(ui, UI_OVL_TSTIP, ts_open, 90, UI_TIP_CLOSE_MS);
-    if (ts_open) {
-      float ts_enter = ui_enter(ui, "tstip", 0, 90);
-      ui_overlay_begin(ui, r, UI_OVL_TSTIP, ts_enter > ts_t ? ts_enter : ts_t, 0.0f);
-      ui_draw_timestamp_tooltip(ui, r);
-      ui_overlay_end(ui, r);
+    ccord_draw_rect(r, (ccord_rect){0, 0, ui->win_w, ui->win_h}, c->bg_primary);
+    if (ui->discovery_open) {
+      ui_draw_discovery(ui, r);
+    } else if (ui->stage_channel != CCORD_ID_NONE) {
+      ui_draw_voice_stage(ui, r);
+      if (ui_stage_split_active(ui)) ui_draw_messages(ui, r);   // side-by-side Text Chat pane
+      ui_draw_chat_header(ui, r);
+      ui_draw_composer(ui, r);
+      if (ui_stage_split_active(ui)) ui_draw_stage_split_divider(ui, r);
+    } else if (ui_forum_is_active(ui)) {
+      ui_draw_forum(ui, r);
+      ui_draw_chat_header(ui, r);
     } else {
-      // Fading out: the hit the pointer just left (it is -1 now) is put back for that call only.
-      int held = ui->hover_ts_hit;
-      if (ts_t > UI_PRESENCE_EPS && ui->tstip_last_hit >= 0 && (size_t)ui->tstip_last_hit < ui->nts_hits &&
-          !ui->menu.open && !ui->settings_open) {
-        ui->hover_ts_hit = ui->tstip_last_hit;
-        ui_overlay_begin(ui, r, UI_OVL_TSTIP, ts_t, 0.0f);
+      ui_draw_messages(ui, r);
+      ui_draw_chat_header(ui, r);
+      ui_draw_composer(ui, r);
+    }
+    ui_anchor_remember(ui);
+    ui_draw_stale_bar(ui, r);
+    ui_draw_update_bar(ui, r);
+    if (!ui->mobile_layout && !ui->discovery_open && ui->layout.member_list_visible) ui_draw_member_list(ui, r);
+    if (ui->d.store && !ui->discovery_open &&
+        ui_role_preview_active_for(ui, ccord_store_selected_guild(ui->d.store))) {
+      ccord_id pg = ui->role_preview_guild;
+      const ccord_role *pr = ccord_store_role(ui->d.store, pg, ui->role_preview_role_id);
+      const char *rname = (pr && pr->name && pr->name[0]) ? pr->name : "@everyone";
+      ccord_rect bar = {ui->layout.chat_header.x, ui_panels_slot_height(ui, CCORD_PANEL_TOP),
+                        ui->win_w - ui->layout.chat_header.x, 36.0f};
+      ccord_draw_rect(r, bar, c->brand);
+      char lbl[160];
+      if (rname[0] == '@') snprintf(lbl, sizeof lbl, "Viewing server as role: %s", rname);
+      else snprintf(lbl, sizeof lbl, "Viewing server as role: @%s", rname);
+      ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), c->text_on_brand);
+      float blh = ui_line_h(ui, bs.size);
+      ccord_rect exit_r = {bar.x + bar.w - 104.0f, bar.y + 5.0f, 92.0f, 26.0f};
+      ccord_rect cyc_r = {exit_r.x - 104.0f, bar.y + 5.0f, 96.0f, 26.0f};
+      ui->role_preview_exit_rect = exit_r;
+      ui->role_preview_cycle_rect = cyc_r;
+      float text_max = cyc_r.x - (bar.x + 16.0f) - 10.0f;
+      if (text_max > 24.0f) {
+        ccord_text_draw_ellipsis(r, lbl, strlen(lbl), bar.x + 14.0f, bar.y + (bar.h - blh) * 0.5f, text_max, &bs);
+      }
+      bool chv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, cyc_r);
+      bool ehv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, exit_r);
+      ccord_draw_rrect(r, cyc_r, 4.0f, ui_alpha(c->bg_tertiary, chv ? 0.55f : 0.35f));
+      ccord_draw_rrect(r, exit_r, 4.0f, ui_alpha(c->bg_tertiary, ehv ? 0.70f : 0.45f));
+      ccord_text_style btns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, c->text_on_brand);
+      ccord_vec2 cm = ccord_text_measure(r, "Switch Role", 11, &btns, 0.0f);
+      ccord_text_draw(r, "Switch Role", 11, cyc_r.x + (cyc_r.w - cm.x) * 0.5f, cyc_r.y + (cyc_r.h - cm.y) * 0.5f, &btns, 0.0f);
+      ccord_vec2 em = ccord_text_measure(r, "Exit Preview", 12, &btns, 0.0f);
+      ccord_text_draw(r, "Exit Preview", 12, exit_r.x + (exit_r.w - em.x) * 0.5f, exit_r.y + (exit_r.h - em.y) * 0.5f, &btns, 0.0f);
+    }
+    draw_overlay_popup(ui, r, UI_OVL_TIP, "tip",
+                       !ui->touch_mode && !ui->discovery_open && ui->hover_members_btn && !ui->menu.open && !ui->settings_open,
+                       &ui->hover_members_btn, 90, UI_TIP_CLOSE_MS, 0.0f, ui_draw_chat_header_tooltip);
+    {
+      bool ts_open = !ui->touch_mode && !ui->discovery_open && ui->hover_ts_hit >= 0 && (size_t)ui->hover_ts_hit < ui->nts_hits &&
+                     !ui->menu.open && !ui->settings_open && !ui->pins_open && !ui->search_open && !ui->inbox_open &&
+                     !ui->shortcuts_open;
+      if (ts_open) ui->tstip_last_hit = ui->hover_ts_hit;
+      float ts_t = ui_overlay_presence(ui, UI_OVL_TSTIP, ts_open, 90, UI_TIP_CLOSE_MS);
+      if (ts_open) {
+        float ts_enter = ui_enter(ui, "tstip", 0, 90);
+        ui_overlay_begin(ui, r, UI_OVL_TSTIP, ts_enter > ts_t ? ts_enter : ts_t, 0.0f);
         ui_draw_timestamp_tooltip(ui, r);
         ui_overlay_end(ui, r);
-        ui->hover_ts_hit = held;
+      } else {
+        // Fading out: the hit the pointer just left (it is -1 now) is put back for that call only.
+        int held = ui->hover_ts_hit;
+        if (ts_t > UI_PRESENCE_EPS && ui->tstip_last_hit >= 0 && (size_t)ui->tstip_last_hit < ui->nts_hits &&
+            !ui->menu.open && !ui->settings_open) {
+          ui->hover_ts_hit = ui->tstip_last_hit;
+          ui_overlay_begin(ui, r, UI_OVL_TSTIP, ts_t, 0.0f);
+          ui_draw_timestamp_tooltip(ui, r);
+          ui_overlay_end(ui, r);
+          ui->hover_ts_hit = held;
+        }
+        ui_draw_timestamp_tooltip(ui, r);   // closed: clears the tooltip text
       }
-      ui_draw_timestamp_tooltip(ui, r);   // closed: clears the tooltip text
     }
-  }
-  draw_overlay_popup(ui, r, UI_OVL_BARTIP, "bartip", !ui->touch_mode && ui_bar_edit_hovered(ui), nullptr, 90, UI_TIP_CLOSE_MS, 0.0f,
-                     ui_draw_bar_edit_tooltip);
-  if (ui->mobile_layout) {
-    float drawer_t = fmaxf(ui->left_drawer_t, ui->right_drawer_t);
-    if (drawer_t > 0.001f) {
-      ccord_draw_rect(r, (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h},
-                      ui_alpha(c->bg_tertiary, 0.56f * clampf(drawer_t, 0.0f, 1.0f)));
-    }
-    if (ui->layout.right_drawer_visible && !ui->discovery_open) {
-      ui_draw_member_list(ui, r);
-    }
-    if (ui->layout.left_drawer_visible) {
+    draw_overlay_popup(ui, r, UI_OVL_BARTIP, "bartip", !ui->touch_mode && ui_bar_edit_hovered(ui), nullptr, 90, UI_TIP_CLOSE_MS, 0.0f,
+                       ui_draw_bar_edit_tooltip);
+    if (ui->mobile_layout) {
+      float drawer_t = fmaxf(ui->left_drawer_t, ui->right_drawer_t);
+      if (drawer_t > 0.001f) {
+        ccord_draw_rect(r, (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h},
+                        ui_alpha(c->bg_tertiary, 0.56f * clampf(drawer_t, 0.0f, 1.0f)));
+      }
+      if (ui->layout.right_drawer_visible && !ui->discovery_open) {
+        ui_draw_member_list(ui, r);
+      }
+      if (ui->layout.left_drawer_visible) {
+        ui_draw_channel_list(ui, r);
+        ui_draw_server_list(ui, r);
+        ui_draw_voice_bar(ui, r);
+        ui_draw_user_panel(ui, r);
+      }
+      ui_panels_draw(ui, r);
+      ui_draw_stream_pip(ui, r);
+    } else {
       ui_draw_channel_list(ui, r);
       ui_draw_server_list(ui, r);
+      ui_panels_draw(ui, r);
       ui_draw_voice_bar(ui, r);
       ui_draw_user_panel(ui, r);
+      ui_draw_stream_pip(ui, r);
     }
-    ui_panels_draw(ui, r);
-    ui_draw_stream_pip(ui, r);
-  } else {
-    ui_draw_channel_list(ui, r);
-    ui_draw_server_list(ui, r);
-    ui_panels_draw(ui, r);
-    ui_draw_voice_bar(ui, r);
-    ui_draw_user_panel(ui, r);
-    ui_draw_stream_pip(ui, r);
+    ui_draw_notice(ui, r);
+    draw_overlay_popup(ui, r, UI_OVL_SEARCH, "search", ui->search_open, &ui->search_open, UI_POPUP_MS, UI_POPUP_CLOSE_MS, 6.0f,
+                       ui_draw_search_popover);
+    draw_overlay_popup(ui, r, UI_OVL_PINS, "pins", ui->pins_open, &ui->pins_open, UI_POPUP_MS, UI_POPUP_CLOSE_MS, 6.0f,
+                       ui_draw_pins_popover);
+    draw_overlay_popup(ui, r, UI_OVL_INBOX, "inbox", ui->inbox_open, &ui->inbox_open, UI_POPUP_MS, UI_POPUP_CLOSE_MS, 6.0f,
+                       ui_draw_inbox_popover);
+    ui_draw_saved_messages_popover(ui, r);   // manages its own popup entrance; resets hit rects when closed
+    draw_overlay_popup(ui, r, UI_OVL_REACTIONS, "reactpop", ui->reactions_open, &ui->reactions_open, UI_MODAL_MS,
+                       UI_MODAL_CLOSE_MS, 6.0f, ui_draw_reactions_popover);
+    draw_overlay_popup(ui, r, UI_OVL_PICKER, "emoji", ui->emoji_picker_open, &ui->emoji_picker_open, UI_POPUP_MS,
+                       UI_POPUP_CLOSE_MS, 8.0f, ui_draw_emoji_picker);
+    bool autoc_show = ui->autocomplete_open && ui->nautocomplete > 0 && !ui->settings_open && !ui->menu.open &&
+                      !ui->discovery_open && !ui_forum_is_active(ui) && composer_accepts_text(ui);
+    draw_popup(ui, r, autoc_show, "autoc", 90, 4.0f, ui_draw_autocomplete);
+    draw_overlay_popup(ui, r, UI_OVL_MEMBER_POPOVER, "mpop", ui->member_popover_open, &ui->member_popover_open, UI_POPUP_MS,
+                       UI_POPUP_CLOSE_MS, 6.0f, ui_draw_member_popover);
+    ui_status_card_draw(ui, r);
+    ui_plus_menu_draw(ui, r);
   }
-  ui_draw_notice(ui, r);
-  draw_overlay_popup(ui, r, UI_OVL_SEARCH, "search", ui->search_open, &ui->search_open, UI_POPUP_MS, UI_POPUP_CLOSE_MS, 6.0f,
-                     ui_draw_search_popover);
-  draw_overlay_popup(ui, r, UI_OVL_PINS, "pins", ui->pins_open, &ui->pins_open, UI_POPUP_MS, UI_POPUP_CLOSE_MS, 6.0f,
-                     ui_draw_pins_popover);
-  draw_overlay_popup(ui, r, UI_OVL_INBOX, "inbox", ui->inbox_open, &ui->inbox_open, UI_POPUP_MS, UI_POPUP_CLOSE_MS, 6.0f,
-                     ui_draw_inbox_popover);
-  ui_draw_saved_messages_popover(ui, r);   // manages its own popup entrance; resets hit rects when closed
-  draw_overlay_popup(ui, r, UI_OVL_REACTIONS, "reactpop", ui->reactions_open, &ui->reactions_open, UI_MODAL_MS,
-                     UI_MODAL_CLOSE_MS, 6.0f, ui_draw_reactions_popover);
-  draw_overlay_popup(ui, r, UI_OVL_PICKER, "emoji", ui->emoji_picker_open, &ui->emoji_picker_open, UI_POPUP_MS,
-                     UI_POPUP_CLOSE_MS, 8.0f, ui_draw_emoji_picker);
-  bool autoc_show = ui->autocomplete_open && ui->nautocomplete > 0 && !ui->settings_open && !ui->menu.open &&
-                    !ui->discovery_open && !ui_forum_is_active(ui) && composer_accepts_text(ui);
-  draw_popup(ui, r, autoc_show, "autoc", 90, 4.0f, ui_draw_autocomplete);
-  draw_overlay_popup(ui, r, UI_OVL_MEMBER_POPOVER, "mpop", ui->member_popover_open, &ui->member_popover_open, UI_POPUP_MS,
-                     UI_POPUP_CLOSE_MS, 6.0f, ui_draw_member_popover);
-  ui_status_card_draw(ui, r);
-  ui_plus_menu_draw(ui, r);
-  draw_popup(ui, r, ui->settings_open && !ui_is_login_screen(ui), "settings", UI_MODAL_MS, 0.0f, ui_settings_draw);
+  draw_popup(ui, r, full_settings, "settings", UI_MODAL_MS, 0.0f, ui_settings_draw);
   draw_popup(ui, r, ui->go_live_open, "golive", UI_MODAL_MS, 10.0f, ui_draw_go_live);
-  draw_popup(ui, r, ui_server_settings_is_open(ui), "ssettings", UI_MODAL_MS, 0.0f, ui_server_settings_draw);
-  draw_popup(ui, r, ui_channel_settings_is_open(ui), "csettings", UI_MODAL_MS, 0.0f, ui_channel_settings_draw);
+  draw_popup(ui, r, full_ss, "ssettings", UI_MODAL_MS, 0.0f, ui_server_settings_draw);
+  draw_popup(ui, r, full_cs, "csettings", UI_MODAL_MS, 0.0f, ui_channel_settings_draw);
+  if (opaque_full_ovl) {
+    ui_draw_notice(ui, r);
+    if (!ui->settings_open && !ui_server_settings_is_open(ui) && !ui_channel_settings_is_open(ui)) {
+      ui->dirty = true;   // overlay self-closed during draw (e.g. guild/channel deleted): paint workspace next frame
+    }
+  }
   draw_overlay_popup(ui, r, UI_OVL_SHORTCUTS, "shortcuts", ui->shortcuts_open, &ui->shortcuts_open, UI_MODAL_MS, UI_MODAL_CLOSE_MS,
                      8.0f, ui_draw_shortcuts_modal);
   ui_poll_composer_draw(ui, r);
@@ -9170,6 +10024,10 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui_profile_roles_draw(ui, r);   // above the popout / profile that anchors it
   ui_menu_draw(ui, r);            // topmost: context menus & mobile Copy/Paste bottom sheets cover settings/modals
   update_hover(ui);   // rows moved under a stationary pointer
+  if (ui->typing_next_ms != 0) {
+    ui->typing_anim_only = !ui->anim.pending;
+    ui->anim.pending = true;
+  }
 }
 
 void ui_settings_m6_debug(const ccord_ui *ui, ccord_ui_settings_debug *out)
@@ -9381,7 +10239,7 @@ void ccord_ui_get_debug(const ccord_ui *ui, ccord_ui_debug *out)
     out->select_option_rects[i] = ui->select_opt_rects[i];
   }
   out->interaction_modal_open = (ui->modal_kind == UI_MODAL_INTERACTION);
-  out->interaction_modal_field_count = out->interaction_modal_open ? ui->inter_modal.field_count : 0u;
+  out->interaction_modal_field_count = (out->interaction_modal_open && ui->inter_modal) ? ui->inter_modal->field_count : 0u;
   out->interaction_modal_rect = ui->inter_modal_box;
   out->interaction_modal_submit_btn = ui->inter_modal_ok;
   out->interaction_modal_cancel_btn = ui->inter_modal_cancel;
@@ -9441,9 +10299,9 @@ void ccord_ui_get_debug(const ccord_ui *ui, ccord_ui_debug *out)
   out->nav_history_count = ui->nav_hist_len;
   out->nav_history_index = ui->nav_hist_pos;
 
-  ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
-  size_t nslots = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
-  for (size_t si = 0; si < nslots; si++) {
+  size_t nslots = 0;
+  const ui_rail_slot *slots = ui_rail_slots_cached(ui, &nslots, nullptr);
+  for (size_t si = 0; slots && si < nslots; si++) {
     const ui_rail_slot *sl = &slots[si];
     if (sl->kind == UI_RAIL_ADD_SERVER) {
       out->add_server_btn = sl->rect;

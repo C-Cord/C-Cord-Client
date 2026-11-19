@@ -8,6 +8,7 @@
 #include <math.h>
 #include <string.h>
 
+#include <ccord/core/alloc.h>
 #include <ccord/core/utf8.h>
 
 #include "ui_internal.h"
@@ -47,13 +48,14 @@ typedef struct cf_wseg {
   float w;
 } cf_wseg;
 
-static struct {
+typedef struct cf_state {
   bool valid;
   size_t len;
   float wrap, size;
   float probe[5];
   ccord_color colors[7];
-  uint64_t store_rev;
+  uint64_t lists_rev;
+  ccord_id guild_id;
   ccord_id channel_id;
   float pitch, fh;
   char text[CF_MAX_TEXT + 1];
@@ -66,10 +68,33 @@ static struct {
   cf_vline vl[CF_MAX_LINES];
   size_t nvl;
   cf_wseg wseg[CF_MAX_TEXT];
-  uint32_t passes;
   ui_cf_trace_piece trace[CF_TRACE_MAX];
   size_t ntrace;
-} G;
+} cf_state;
+
+static cf_state *g_cf;
+static uint32_t g_cf_passes;
+static size_t g_cf_nvl;
+
+static struct {
+  bool valid;
+  const ccord_renderer *r;
+  const ccord_theme *theme;
+  float size, zoom, rw, rh;
+  int fb_fonts, sys_fonts;
+  float fh, pitch;
+  float probe[5];
+} g_cf_fm;
+
+#define G (*g_cf)
+
+void ui_composer_format_free(void)
+{
+  ccord_free(g_cf);
+  g_cf = nullptr;
+  g_cf_nvl = 0;
+  g_cf_fm.valid = false;
+}
 
 static float cf_maxf(float a, float b) { return a > b ? a : b; }
 
@@ -276,7 +301,7 @@ static size_t cf_fit(ccord_renderer *r, const char *t, size_t s, size_t e, const
 
 static void cf_layout(ccord_ui *ui, ccord_renderer *r, const char *t, size_t len, float wrap)
 {
-  G.passes++;
+  g_cf_passes++;
   G.nll = G.npieces = G.nvl = 0;
   memset(G.fl, 0, len * sizeof G.fl[0]);
   memset(G.lit_span, 0, len * sizeof G.lit_span[0]);
@@ -366,9 +391,45 @@ static void cf_layout(ccord_ui *ui, ccord_renderer *r, const char *t, size_t len
   }
 }
 
-// Brings the cached layout up to date. Nothing is measured again while text, width, size, theme colours and font
-// metrics are unchanged (a font, zoom or display-scale change shows in the probe widths).
-static void cf_ensure(ccord_ui *ui, ccord_renderer *r, const char *text, size_t len, float wrap)
+static void cf_ensure_metrics(const ccord_ui *ui, ccord_renderer *r, float size)
+{
+  float zoom = ccord_render_get_zoom(r);
+  ccord_vec2 rsz = ccord_render_size(r);
+  int fb = ccord_render_fallback_font_count(r);
+  int sys = ccord_render_system_font_count(r);
+  if (g_cf_fm.valid && g_cf_fm.r == r && g_cf_fm.theme == ui->theme && g_cf_fm.size == size &&
+      g_cf_fm.zoom == zoom && g_cf_fm.rw == rsz.x && g_cf_fm.rh == rsz.y &&
+      g_cf_fm.fb_fonts == fb && g_cf_fm.sys_fonts == sys) {
+    return;
+  }
+  ccord_text_style reg = ui_style(ui, CCORD_FONT_REGULAR, size, COL(text_normal));
+  ccord_text_style bold = ui_style(ui, CCORD_FONT_BOLD, size, COL(text_normal));
+  ccord_text_style code = ui_style(ui, CCORD_FONT_REGULAR, cf_maxf(size - 1.0f, 10.0f), COL(text_normal));
+  float fh = ccord_text_measure(r, "A", 1, &reg, 0.0f).y;
+  float pitch = ccord_text_caret_rect(r, "A\nA", 3, &reg, 0.0f, 2).y;
+  if (pitch < 1.0f) pitch = fh;
+  g_cf_fm.valid = true;
+  g_cf_fm.r = r;
+  g_cf_fm.theme = ui->theme;
+  g_cf_fm.size = size;
+  g_cf_fm.zoom = zoom;
+  g_cf_fm.rw = rsz.x;
+  g_cf_fm.rh = rsz.y;
+  g_cf_fm.fb_fonts = fb;
+  g_cf_fm.sys_fonts = sys;
+  g_cf_fm.fh = fh;
+  g_cf_fm.pitch = pitch;
+  g_cf_fm.probe[0] = ccord_text_measure(r, "Mg", 2, &reg, 0.0f).x;
+  g_cf_fm.probe[1] = ccord_text_measure(r, "Mg", 2, &bold, 0.0f).x;
+  g_cf_fm.probe[2] = ccord_text_measure(r, "Mg", 2, &code, 0.0f).x;
+  g_cf_fm.probe[3] = fh;
+  g_cf_fm.probe[4] = pitch;
+}
+
+// Brings the cached layout up to date. Returns false when empty (or OOM), avoiding allocating the 245 KiB
+// layout state while the composer is empty. Font metrics are probed only when the (renderer, theme, size,
+// zoom, viewport, font-set) epoch changes, and store invalidation tracks lists_revision (ignoring chat traffic).
+static bool cf_ensure(ccord_ui *ui, ccord_renderer *r, const char *text, size_t len, float wrap)
 {
   if (!text) len = 0;
   if (len > CF_MAX_TEXT) {
@@ -376,36 +437,53 @@ static void cf_ensure(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
     while (len > 0 && ((unsigned char)text[len] & 0xC0) == 0x80) len--;
   }
   float size = M(font_size_base);
-  ccord_text_style reg = ui_style(ui, CCORD_FONT_REGULAR, size, COL(text_normal));
-  ccord_text_style bold = ui_style(ui, CCORD_FONT_BOLD, size, COL(text_normal));
-  ccord_text_style code = ui_style(ui, CCORD_FONT_REGULAR, cf_maxf(size - 1.0f, 10.0f), COL(text_normal));
-  float fh = ccord_text_measure(r, "A", 1, &reg, 0.0f).y;
-  float pitch = ccord_text_caret_rect(r, "A\nA", 3, &reg, 0.0f, 2).y;
-  if (pitch < 1.0f) pitch = fh;
-  float probe[5] = {ccord_text_measure(r, "Mg", 2, &reg, 0.0f).x, ccord_text_measure(r, "Mg", 2, &bold, 0.0f).x,
-                    ccord_text_measure(r, "Mg", 2, &code, 0.0f).x, fh, pitch};
+  cf_ensure_metrics(ui, r, size);
+  if (len == 0) {
+    g_cf_nvl = 1;
+    if (g_cf) {
+      G.len = 0;
+      G.nll = 0;
+      G.npieces = 0;
+      G.nvl = 1;
+      G.vl[0] = (cf_vline){0};
+      G.text[0] = '\0';
+      G.fh = g_cf_fm.fh;
+      G.pitch = g_cf_fm.pitch;
+      G.valid = false;
+    }
+    return false;
+  }
+  if (!g_cf) {
+    g_cf = ccord_calloc(1, sizeof *g_cf);
+    if (!g_cf) return false;
+  }
   ccord_color colors[7] = {COL(text_normal), COL(text_secondary), COL(text_header), COL(text_muted), COL(bg_tertiary),
                            COL(brand), COL(text_link)};
-  uint64_t store_rev = ui->d.store ? ccord_store_revision(ui->d.store) : 0;
+  uint64_t lists_rev = ui->d.store ? ccord_store_lists_revision(ui->d.store) : 0;
+  ccord_id guild_id = ui->d.store ? ccord_store_selected_guild(ui->d.store) : CCORD_ID_NONE;
   ccord_id channel_id = ui->d.store ? ccord_store_selected_channel(ui->d.store) : CCORD_ID_NONE;
-  if (G.valid && G.len == len && G.wrap == wrap && G.size == size && G.store_rev == store_rev &&
-      G.channel_id == channel_id && memcmp(G.probe, probe, sizeof probe) == 0 &&
+  if (G.valid && G.len == len && G.wrap == wrap && G.size == size && G.lists_rev == lists_rev &&
+      G.guild_id == guild_id && G.channel_id == channel_id &&
+      memcmp(G.probe, g_cf_fm.probe, sizeof G.probe) == 0 &&
       memcmp(G.colors, colors, sizeof colors) == 0 && memcmp(G.text, text, len) == 0) {
-    return;
+    return true;
   }
   memcpy(G.text, text, len);
   G.text[len] = '\0';
   G.len = len;
   G.wrap = wrap;
   G.size = size;
-  G.store_rev = store_rev;
+  G.lists_rev = lists_rev;
+  G.guild_id = guild_id;
   G.channel_id = channel_id;
-  memcpy(G.probe, probe, sizeof probe);
+  memcpy(G.probe, g_cf_fm.probe, sizeof G.probe);
   memcpy(G.colors, colors, sizeof colors);
-  G.fh = fh;
-  G.pitch = pitch;
+  G.fh = g_cf_fm.fh;
+  G.pitch = g_cf_fm.pitch;
   G.valid = true;
   cf_layout(ui, r, G.text, len, wrap);
+  g_cf_nvl = G.nvl;
+  return true;
 }
 
 // ---------------------------------------------------------------- queries
@@ -429,13 +507,13 @@ static float cf_x_in_line(ccord_renderer *r, const cf_vline *v, size_t pos)
 
 float ui_composer_format_height(ccord_ui *ui, ccord_renderer *r, const char *text, size_t len, float wrap)
 {
-  cf_ensure(ui, r, text, len, wrap);
+  if (!cf_ensure(ui, r, text, len, wrap)) return g_cf_fm.fh;
   return (float)(G.nvl > 0 ? G.nvl - 1 : 0) * G.pitch + G.fh;
 }
 
 ccord_rect ui_composer_format_caret(ccord_ui *ui, ccord_renderer *r, const char *text, size_t len, float wrap, size_t pos)
 {
-  cf_ensure(ui, r, text, len, wrap);
+  if (!cf_ensure(ui, r, text, len, wrap)) return (ccord_rect){0.0f, 0.0f, 1.0f, g_cf_fm.fh};
   if (pos > G.len) pos = G.len;
   size_t vi = 0;
   for (size_t k = 0; k < G.nvl; k++) {
@@ -447,8 +525,7 @@ ccord_rect ui_composer_format_caret(ccord_ui *ui, ccord_renderer *r, const char 
 
 size_t ui_composer_format_hit(ccord_ui *ui, ccord_renderer *r, const char *text, size_t len, float wrap, float x, float y)
 {
-  cf_ensure(ui, r, text, len, wrap);
-  if (G.len == 0) return 0;
+  if (!cf_ensure(ui, r, text, len, wrap) || G.len == 0) return 0;
   float fv = y / G.pitch;
   size_t vi = fv <= 0.0f ? 0 : (size_t)fv;
   if (vi >= G.nvl) vi = G.nvl - 1;
@@ -467,7 +544,7 @@ size_t ui_composer_format_hit(ccord_ui *ui, ccord_renderer *r, const char *text,
 size_t ui_composer_format_selection(ccord_ui *ui, ccord_renderer *r, const char *text, size_t len, float wrap, size_t from,
                                     size_t to, ui_cf_sel_rect *out, size_t cap)
 {
-  cf_ensure(ui, r, text, len, wrap);
+  if (!cf_ensure(ui, r, text, len, wrap)) return 0;
   if (from > to) {
     size_t tmp = from;
     from = to;
@@ -517,7 +594,10 @@ static ccord_color cf_piece_bg(const ccord_ui *ui, uint16_t fl, bool *has)
 void ui_composer_format_draw(ccord_ui *ui, ccord_renderer *r, const char *text, size_t len, float wrap, float x, float y,
                              size_t sel_from, size_t sel_to, float view_top, float view_bottom)
 {
-  cf_ensure(ui, r, text, len, wrap);
+  if (!cf_ensure(ui, r, text, len, wrap)) {
+    if (g_cf) G.ntrace = 0;
+    return;
+  }
   G.ntrace = 0;
   if (G.len == 0) return;
   float lh = G.pitch;
@@ -587,13 +667,14 @@ void ui_composer_format_draw(ccord_ui *ui, ccord_renderer *r, const char *text, 
   }
 }
 
-uint32_t ui_composer_format_passes(void) { return G.passes; }
+uint32_t ui_composer_format_passes(void) { return g_cf_passes; }
 
 size_t ui_composer_format_trace(ui_cf_trace_piece *out, size_t cap)
 {
+  if (!g_cf) return 0;
   size_t n = G.ntrace < cap ? G.ntrace : cap;
   if (out) memcpy(out, G.trace, n * sizeof *out);
   return G.ntrace;
 }
 
-size_t ui_composer_format_line_count(void) { return G.nvl; }
+size_t ui_composer_format_line_count(void) { return g_cf ? G.nvl : g_cf_nvl; }
