@@ -16,7 +16,7 @@
 #include <ccord/render/av_stream.h>
 
 #include <math.h>
-#include <pthread.h>
+#include <ccord/core/os.h>
 #include <stdatomic.h>
 #include <string.h>
 
@@ -107,10 +107,10 @@ struct ccord_av_stream {
   ccord_av_source src;
   int64_t src_pos;         // demux thread: AVIO position
   ccord_status src_err;    // demux thread: last failure reported by read_at (0 = none)
-  pthread_t thr;
+  ccord_thread *thr;
   bool thr_started, sync_init;
-  pthread_mutex_t mx;
-  pthread_cond_t cv;
+  ccord_mutex *mx;
+  ccord_cond *cv;
   atomic_bool stop;
   ccord_av_state state;    // mx
   ccord_error serr;        // mx, valid when state == FAILED
@@ -501,37 +501,37 @@ static void avs_fail(ccord_av_stream *s, ccord_status code, const char *msg)
   if (s->state == CCORD_AV_FAILED) return;
   ccord_error_set(&s->serr, code, "%s", msg);
   s->state = CCORD_AV_FAILED;
-  pthread_cond_broadcast(&s->cv);
+  ccord_cond_broadcast(s->cv);
 }
 
-static void *avs_demux_main(void *arg)
+static void avs_demux_main(void *arg)
 {
   ccord_av_stream *s = arg;
   ccord_error err;
   ccord_error_clear(&err);
   ccord_status st = avs_setup(s, &err);
-  pthread_mutex_lock(&s->mx);
+  ccord_mutex_lock(s->mx);
   if (st == CCORD_OK && !atomic_load(&s->stop)) {
     s->src_err = CCORD_OK;
     s->state = CCORD_AV_READY;
-    pthread_cond_broadcast(&s->cv);
+    ccord_cond_broadcast(s->cv);
   } else {
     if (st == CCORD_OK) ccord_error_set(&err, CCORD_ERR_IO, "av_stream: closed while opening");
     avs_fail(s, err.code, err.message);
-    pthread_mutex_unlock(&s->mx);
+    ccord_mutex_unlock(s->mx);
     avs_teardown(s);   // the player never saw these objects; ccord_av_stream_close finds them already freed
-    return nullptr;
+    return;
   }
   while (!atomic_load(&s->stop)) {
-    while (!atomic_load(&s->stop) && avs_demux_idle(s)) pthread_cond_wait(&s->cv, &s->mx);
+    while (!atomic_load(&s->stop) && avs_demux_idle(s)) ccord_cond_wait(s->cv, s->mx);
     if (atomic_load(&s->stop)) break;
     if (s->seek_req) {
       int64_t ts = s->seek_ts;
       s->seek_req = false;
       s->demux_eof = false;
-      pthread_mutex_unlock(&s->mx);
+      ccord_mutex_unlock(s->mx);
       int r = avs_seek_demuxer(s, ts);
-      pthread_mutex_lock(&s->mx);
+      ccord_mutex_lock(s->mx);
       if (r < 0) {
         if (s->src_err != CCORD_OK) avs_fail(s, s->src_err, "av_stream: source read failed");
         else avs_fail(s, CCORD_ERR_UNSUPPORTED, "av_stream: cannot seek");
@@ -540,9 +540,9 @@ static void *avs_demux_main(void *arg)
       continue;
     }
     uint64_t my_gen = s->gen;   // re-read every iteration: a packet read under an older value is stale
-    pthread_mutex_unlock(&s->mx);
+    ccord_mutex_unlock(s->mx);
     int r = avs_read_one(s);
-    pthread_mutex_lock(&s->mx);
+    ccord_mutex_lock(s->mx);
     if (r >= 0) {
       if (my_gen == s->gen) avs_demux_push(s);
       av_packet_unref(s->pkt);
@@ -553,11 +553,10 @@ static void *avs_demux_main(void *arg)
       break;
     } else {
       s->demux_eof = true;
-      pthread_cond_broadcast(&s->cv);
+      ccord_cond_broadcast(s->cv);
     }
   }
-  pthread_mutex_unlock(&s->mx);
-  return nullptr;
+  ccord_mutex_unlock(s->mx);
 }
 
 ccord_av_stream *ccord_av_stream_open_source(const ccord_av_source *src, int max_dim, unsigned flags, ccord_error *err)
@@ -581,12 +580,11 @@ ccord_av_stream *ccord_av_stream_open_source(const ccord_av_source *src, int max
   s->vsi = s->asi = -1;
   s->state = CCORD_AV_OPENING;
   atomic_init(&s->stop, false);
-  s->sync_init = pthread_mutex_init(&s->mx, nullptr) == 0;
-  if (s->sync_init && pthread_cond_init(&s->cv, nullptr) != 0) {
-    pthread_mutex_destroy(&s->mx);
-    s->sync_init = false;
-  }
-  if (!s->sync_init || pthread_create(&s->thr, nullptr, avs_demux_main, s) != 0) {
+  s->mx = ccord_mutex_create();
+  s->cv = s->mx ? ccord_cond_create() : nullptr;
+  s->sync_init = s->mx != nullptr && s->cv != nullptr;
+  s->thr = s->sync_init ? ccord_thread_create(avs_demux_main, s) : nullptr;
+  if (!s->thr) {
     ccord_error_set(err, CCORD_ERR_INTERNAL, "av_stream: cannot start the demux thread");
     ccord_av_stream_close(s);
     return nullptr;
@@ -600,10 +598,10 @@ static ccord_av_state avs_observe(const ccord_av_stream *cs, ccord_error *err)
 {
   ccord_av_stream *s = cs->self;
   if (!s->src_mode) return CCORD_AV_READY;
-  pthread_mutex_lock(&s->mx);
+  ccord_mutex_lock(s->mx);
   ccord_av_state st = s->state;
   if (err && st == CCORD_AV_FAILED) *err = s->serr;
-  pthread_mutex_unlock(&s->mx);
+  ccord_mutex_unlock(s->mx);
   if (st == CCORD_AV_READY && !s->observed) {
     s->observed = true;   // meta is stable: it was written before READY was published under mx
     s->info.has_video = s->meta.has_video;
@@ -637,15 +635,18 @@ void ccord_av_stream_close(ccord_av_stream *s)
     // Wake a read_at that is blocked for good, tell the thread to stop, and wait for it: only then is nothing
     // using fmt/io/the source any more and the teardown below race-free.
     if (s->src.cancel) s->src.cancel(s->src.ud);
-    pthread_mutex_lock(&s->mx);
+    ccord_mutex_lock(s->mx);
     atomic_store(&s->stop, true);
-    pthread_cond_broadcast(&s->cv);
-    pthread_mutex_unlock(&s->mx);
-    pthread_join(s->thr, nullptr);
+    ccord_cond_broadcast(s->cv);
+    ccord_mutex_unlock(s->mx);
+    ccord_thread_join(s->thr);
+    s->thr = nullptr;
   }
-  if (s->sync_init) {
-    pthread_cond_destroy(&s->cv);
-    pthread_mutex_destroy(&s->mx);
+  if (s->sync_init || s->mx || s->cv) {
+    ccord_cond_destroy(s->cv);
+    ccord_mutex_destroy(s->mx);
+    s->cv = nullptr;
+    s->mx = nullptr;
   }
   avs_teardown(s);
   ccord_free(s->vq.v);
@@ -687,21 +688,21 @@ static void avs_finish(ccord_av_stream *s, avs_pktq *q, bool *done)
 {
   *done = true;
   if (!s->src_mode) return;
-  pthread_mutex_lock(&s->mx);
+  ccord_mutex_lock(s->mx);
   q->dead = true;
   pktq_clear(q);
-  pthread_cond_broadcast(&s->cv);
-  pthread_mutex_unlock(&s->mx);
+  ccord_cond_broadcast(s->cv);
+  ccord_mutex_unlock(s->mx);
 }
 
 // Source mode: pops the next packet of q. *eof is true when the queue is empty and the demuxer is at its end.
 static AVPacket *avs_take(ccord_av_stream *s, avs_pktq *q, bool *eof)
 {
-  pthread_mutex_lock(&s->mx);
+  ccord_mutex_lock(s->mx);
   AVPacket *p = pktq_pop(q);
   *eof = s->demux_eof;
-  if (p) pthread_cond_broadcast(&s->cv);   // room for the demux thread
-  pthread_mutex_unlock(&s->mx);
+  if (p) ccord_cond_broadcast(s->cv);   // room for the demux thread
+  ccord_mutex_unlock(s->mx);
   return p;
 }
 
@@ -1072,7 +1073,7 @@ void ccord_av_stream_seek(ccord_av_stream *s, uint32_t pos_ms)
     int64_t ts = (int64_t)pos_ms * (AV_TIME_BASE / 1000);
     if (s->meta.fmt_start_time != AV_NOPTS_VALUE) ts += s->meta.fmt_start_time;
     // Post the request; the demux thread repositions. Packets of the old generation are dropped there.
-    pthread_mutex_lock(&s->mx);
+    ccord_mutex_lock(s->mx);
     s->gen++;
     s->seek_ts = ts;
     s->seek_req = true;
@@ -1080,8 +1081,8 @@ void ccord_av_stream_seek(ccord_av_stream *s, uint32_t pos_ms)
     s->vq.dead = s->aq.dead = false;
     pktq_clear(&s->vq);
     pktq_clear(&s->aq);
-    pthread_cond_broadcast(&s->cv);
-    pthread_mutex_unlock(&s->mx);
+    ccord_cond_broadcast(s->cv);
+    ccord_mutex_unlock(s->mx);
     if (s->vdec) avcodec_flush_buffers(s->vdec);
     if (s->adec) avcodec_flush_buffers(s->adec);
     s->v_flushed = s->a_flushed = false;

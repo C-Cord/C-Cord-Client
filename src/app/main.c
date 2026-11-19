@@ -7,17 +7,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
-#include <dirent.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/atomic_file.h>
 #include <ccord/core/clock.h>
 #include <ccord/core/event_bus.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 #include <ccord/core/paths.h>
+#include <ccord/core/random.h>
 #include <ccord/core/utf8.h>
 #include <ccord/model/contrib.h>
 #include <ccord/net/admin.h>
@@ -73,7 +72,6 @@
 
 #if CCORD_WITH_PLUGINS
 #include <ccord/plugins/plugins.h>
-#include <unistd.h>
 int ccord_plugin_host_main(int argc, char **argv);
 #endif
 
@@ -906,8 +904,8 @@ static void plugins_start(app *a)
   for (size_t i = 0; i < a->opt->plugin_dir_count; i++) dirs[nd++] = a->opt->plugin_dirs[i];
   const char *host_exe = getenv("CCORD_PLUGIN_HOST");
   const char *chosen_host = (host_exe && *host_exe) ? host_exe : CCORD_PLUGIN_HOST_PATH;
-  if ((!host_exe || !*host_exe) && access(chosen_host, X_OK) != 0) {
-    chosen_host = "/proc/self/exe";
+  if ((!host_exe || !*host_exe) && !ccord_path_is_file(chosen_host)) {
+    chosen_host = ccord_paths_exe_path();
   }
   ccord_plugins_config pcfg = {
     .host_exe = chosen_host,
@@ -1905,8 +1903,7 @@ static bool wait_live_history(app *a, uint64_t timeout_ms)
     }
     if (ccord_session_state(a->session) == CCORD_CONN_FAILED) return false;
     if (ccord_clock_ms() - t0 >= timeout_ms) return false;
-    struct timespec ts = {0, 10 * 1000 * 1000};
-    nanosleep(&ts, nullptr);
+    ccord_sleep_ms(10);
   }
 }
 #endif
@@ -1996,8 +1993,7 @@ static int run_screenshot(app *a, const options *o)
   uint64_t t0 = ccord_clock_ms();
   while (!plugins_settled(a) && ccord_clock_ms() - t0 < 2000) {
     pump(a);
-    struct timespec ts = {0, 5 * 1000 * 1000};
-    nanosleep(&ts, nullptr);
+    ccord_sleep_ms(5);
   }
   run_frames(a, o->frames);
 
@@ -2024,8 +2020,7 @@ static int run_screenshot(app *a, const options *o)
       uint64_t st0 = ccord_clock_ms();
       while (ccord_store_message_count(a->store, ch) == before_count && ccord_clock_ms() - st0 < 5000) {
         step(a, false);
-        struct timespec ts = {0, 10 * 1000 * 1000};
-        nanosleep(&ts, nullptr);
+        ccord_sleep_ms(10);
       }
       run_frames(a, 2);
     }
@@ -2086,8 +2081,7 @@ static int run_screenshot(app *a, const options *o)
       bool got = text && *text;
       ccord_free(text);
       if (got) break;
-      struct timespec ts = {0, 5 * 1000 * 1000};
-      nanosleep(&ts, nullptr);
+      ccord_sleep_ms(5);
     }
   }
   run_frames(a, 2);
@@ -3440,7 +3434,7 @@ static void run_interactive(app *a)
           }
           if (dpath[0]) {
             size_t dl = strlen(dpath);
-            bool is_pkg = (dl > 4 && strcasecmp(dpath + dl - 4, ".cce") == 0);
+            bool is_pkg = (dl > 4 && ccord_strcasecmp(dpath + dl - 4, ".cce") == 0);
             if (is_pkg && a->contrib) {
               char ebuf[256] = "";
 #if CCORD_WITH_PLUGINS
@@ -3503,11 +3497,7 @@ static void run_interactive(app *a)
       a->pending_open_url[0] = '\0';
       redraw = true;
     }
-    {
-      struct timespec wall;
-      clock_gettime(CLOCK_REALTIME, &wall);
-      ccord_scheduled_messages_tick(a->session, (int64_t)wall.tv_sec * 1000 + wall.tv_nsec / 1000000);
-    }
+    ccord_scheduled_messages_tick(a->session, ccord_clock_unix_ms());
     // Warm-start cache: READY latency log, a periodic save once the user has been idle for 2 s (no hitch while typing),
     // and a synced save when the window goes to the background (the process may be killed there).
     {
@@ -3560,43 +3550,30 @@ static bool live_token_available(const char *token_file) { (void)token_file; ret
 
 // --verify-slice without --data-dir runs against a throwaway data dir so the user's settings.ini,
 // token and caches are never read or rewritten. Removed again on exit (atexit covers every return).
-static char g_slice_scratch[PATH_MAX];
-
-static void rm_tree(const char *path)
-{
-  struct stat st;
-  if (lstat(path, &st) != 0) return;
-  if (S_ISDIR(st.st_mode)) {
-    DIR *d = opendir(path);
-    if (d) {
-      struct dirent *e;
-      while ((e = readdir(d)) != nullptr) {
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
-        char child[PATH_MAX];
-        if (snprintf(child, sizeof child, "%s/%s", path, e->d_name) < (int)sizeof child) rm_tree(child);
-      }
-      closedir(d);
-    }
-    (void)rmdir(path);
-  } else {
-    (void)unlink(path);
-  }
-}
+static char g_slice_scratch[CCORD_PATH_MAX];
 
 static void slice_scratch_cleanup(void)
 {
-  if (g_slice_scratch[0]) rm_tree(g_slice_scratch);
+  if (g_slice_scratch[0]) {
+    ccord_error err = {0};
+    (void)ccord_rmtree(g_slice_scratch, &err);
+  }
   g_slice_scratch[0] = '\0';
 }
 
-// $TMPDIR when it names a directory, else /tmp. Returns false when no scratch dir can be made.
 static bool slice_scratch_make(void)
 {
-  const char *tmp = getenv("TMPDIR");
-  struct stat st;
-  if (!tmp || !tmp[0] || stat(tmp, &st) != 0 || !S_ISDIR(st.st_mode)) tmp = "/tmp";
-  if (snprintf(g_slice_scratch, sizeof g_slice_scratch, "%s/ccord-slice-XXXXXX", tmp) >= (int)sizeof g_slice_scratch ||
-      mkdtemp(g_slice_scratch) == nullptr) {
+  char base[CCORD_PATH_MAX];
+  if (!ccord_os_runtime_dir(base, sizeof base)) return false;
+  uint8_t rnd[6] = {0};
+  (void)ccord_random_bytes(rnd, sizeof rnd);
+  if (snprintf(g_slice_scratch, sizeof g_slice_scratch, "%s/ccord-slice-%02x%02x%02x%02x%02x%02x",
+               base, rnd[0], rnd[1], rnd[2], rnd[3], rnd[4], rnd[5]) >= (int)sizeof g_slice_scratch) {
+    g_slice_scratch[0] = '\0';
+    return false;
+  }
+  ccord_error err = {0};
+  if (ccord_mkdir_p(g_slice_scratch, 0700, &err) != CCORD_OK) {
     g_slice_scratch[0] = '\0';
     return false;
   }
@@ -3633,7 +3610,7 @@ int main(int argc, char **argv)
   // Single-instance CLI IPC: --toggle-mic/--toggle-deafen/--show/--quit forward to the running
   // instance over the 0600 control socket, print its ack and exit without opening a window.
   if (opt.ipc_cmd) {
-    char ipc_path[PATH_MAX];
+    char ipc_path[CCORD_PATH_MAX];
     ccord_app_ipc_resolve_path(ipc_path, sizeof ipc_path, opt.control_socket);
     ccord_error ierr;
     if (!ccord_app_ipc_send(ipc_path, opt.ipc_cmd, &ierr)) {
@@ -3658,7 +3635,7 @@ int main(int argc, char **argv)
     // session, or live Discord Gateway connection. If a current, responsive primary instance owns the
     // socket, ask it to surface its window and exit cleanly without stealing X11 focus; if the owner
     // is a stale pre-rebuild binary or unresponsive, replace it and launch this instance.
-    char ipc_path[PATH_MAX];
+    char ipc_path[CCORD_PATH_MAX];
     ccord_app_ipc_resolve_path(ipc_path, sizeof ipc_path, opt.control_socket);
     ccord_error ierr;
     a.ipc = ccord_app_ipc_listen(ipc_path, &ierr);
@@ -3953,7 +3930,7 @@ int main(int argc, char **argv)
       ccord_error ierr;
       // Game detection: the detectable list is cached in the data dir; --mock serves the fixture and never touches it.
       const char *ddir = a.mock ? nullptr : ccord_paths_data_dir();
-      if (ddir && ddir[0] != '\0') (void)mkdir(ddir, 0700);   // exists already in the common case
+      if (ddir && ddir[0] != '\0') (void)ccord_mkdir_p(ddir, 0700, &ierr);   // exists already in the common case
       ccord_game_detect_app_config game_cfg = {.mock = a.mock, .cache_dir = ddir, .enabled = game_detect_pref_enabled};
       a.rpc_lookup = ccord_rpc_app_lookup_create_default(opt.mock);
       if (!a.rpc_lookup) CCORD_LOG_W("rich presence: application lookup unavailable; activities without a name are not shown");

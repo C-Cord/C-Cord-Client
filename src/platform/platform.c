@@ -1059,6 +1059,13 @@ static bool open_video_codec_pair(ccord_video_stream *v, const AVCodec *enc)
       av_dict_set(&opts, "zerolatency", "1", 0);
     } else if (enc->name && strcmp(enc->name, "h264_amf") == 0) {
       av_dict_set(&opts, "usage", "ultralowlatency", 0);
+    } else if (enc->name && strcmp(enc->name, "h264_videotoolbox") == 0) {
+      av_dict_set(&opts, "realtime", "1", 0);
+    } else if (enc->name && strcmp(enc->name, "h264_qsv") == 0) {
+      av_dict_set(&opts, "preset", "veryfast", 0);
+      av_dict_set(&opts, "async_depth", "1", 0);
+    } else if (enc->name && strcmp(enc->name, "h264_mf") == 0) {
+      av_dict_set(&opts, "scenario", "live_streaming", 0);
     } else if (enc->name && strcmp(enc->name, "libopenh264") == 0) {
       av_dict_set(&opts, "allow_skip_frames", "0", 0);
     }
@@ -1096,11 +1103,24 @@ static bool probe_h264_encoders(ccord_video_stream *v, const char *preferred)
     }
   }
   static const char *const k_priority[] = {
+#if defined(__APPLE__)
+      "h264_videotoolbox",
+      "libx264",
+      "libopenh264",
+#elif defined(_WIN32)
+      "h264_nvenc",
+      "h264_amf",
+      "h264_qsv",
+      "h264_mf",
+      "libx264",
+      "libopenh264",
+#else
       "h264_nvenc",
       "h264_vaapi",
       "h264_amf",
       "libx264",
       "libopenh264",
+#endif
   };
   for (size_t i = 0; i < sizeof(k_priority) / sizeof(k_priority[0]); i++) {
     if (open_video_codec_pair(v, avcodec_find_encoder_by_name(k_priority[i]))) {

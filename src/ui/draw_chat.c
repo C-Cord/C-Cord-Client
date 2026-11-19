@@ -7,7 +7,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <strings.h>
+#endif
 
 #include "settings_m6_prefs.h"
 #include <stdckdint.h>
@@ -6834,8 +6836,10 @@ void ui_cancel_reply(ccord_ui *ui)
 
 static const char *encoder_label(int v)
 {
-  static const char *const names[] = {"NVENC", "VAAPI", "AMF", "Vulkan", "OpenH264", "x264", "Auto"};
-  return v >= 0 && v < 7 ? names[v] : "Auto";
+  static const char *const names[] = {
+    "NVENC", "VAAPI", "AMF", "Vulkan", "OpenH264", "x264", "Auto", "Quick Sync", "Media Found.", "VideoToolbox",
+  };
+  return v >= 0 && v < 10 ? names[v] : "Auto";
 }
 
 static const char *codec_label(int v)
@@ -6846,8 +6850,10 @@ static const char *codec_label(int v)
 
 [[maybe_unused]] static const char *framework_label(int v)
 {
-  static const char *const names[] = {"PipeWire", "DMA-BUF", "NVFBC", "Vulkan", "X11", "Auto"};
-  return v >= 0 && v < 6 ? names[v] : "Auto";
+  static const char *const names[] = {
+    "PipeWire", "DMA-BUF", "NVFBC", "Vulkan", "X11", "Auto", "Win. Capture", "DXGI Dup", "GDI", "ScreenCaptureKit", "CoreGraphics",
+  };
+  return v >= 0 && v < 11 ? names[v] : "Auto";
 }
 
 static const char *resolution_label(int v)

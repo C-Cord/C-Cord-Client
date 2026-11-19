@@ -6,7 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <strings.h>
+#endif
 
 #include "ui_internal.h"
 #include "ui_voice_surfaces.h"

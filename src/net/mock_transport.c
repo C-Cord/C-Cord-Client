@@ -16,6 +16,7 @@
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/arena.h>
+#include <ccord/core/atomic_file.h>
 #include <ccord/core/buf.h>
 #include <ccord/core/clock.h>
 #include <ccord/core/json.h>
@@ -3640,12 +3641,15 @@ static void ensure_cache_dirs(const char *file_path)
   if (len == 0 || len >= 4096) return;
   char tmp[4096];
   memcpy(tmp, file_path, len + 1);
-  for (size_t i = 1; i < len; i++) {
-    if (tmp[i] != '/') continue;
-    tmp[i] = '\0';
-    (void)mkdir(tmp, 0700);
-    tmp[i] = '/';
-  }
+  char *slash = strrchr(tmp, '/');
+#if defined(_WIN32)
+  char *bs = strrchr(tmp, '\\');
+  if (bs && (!slash || bs > slash)) slash = bs;
+#endif
+  if (!slash || slash == tmp) return;
+  *slash = '\0';
+  ccord_error derr;
+  (void)ccord_mkdir_p(tmp, 0700, &derr);
 }
 
 ccord_status ccord_media_cache_path(const char *url, char *out_path, size_t cap, ccord_error *err)

@@ -5,12 +5,19 @@
 // Not part of the public live_transport.h surface.
 #pragma once
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <netinet/in.h>
-#include <pthread.h>
+#endif
 #include <stdatomic.h>
 
 #include <curl/curl.h>
 #include <opus/opus.h>
+
+#include <ccord/core/os.h>
 
 #include <ccord/net/live_transport.h>
 #include <ccord/net/rtp_h264.h>
@@ -198,7 +205,7 @@ struct ccord_voice_gateway {
   // Serializes every public entry point (PCM push/pull, pump, signaling, controls, getters) so the
   // app's audio pthread can move PCM while the UI thread polls the gateway. Internal helpers that
   // run under an already-held lock use the unlocked vg_* variants.
-  pthread_mutex_t mtx;
+  ccord_mutex *mtx;
 };
 
 // Shared with the main gateway TU (discord_gateway.c): one curl_global_init for both websockets.

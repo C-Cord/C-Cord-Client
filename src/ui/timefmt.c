@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _POSIX_C_SOURCE 200809L
 #include <ccord/ui/timefmt.h>
+#include <ccord/core/os.h>
 
 #include <stdio.h>
 #include <time.h>
@@ -10,7 +11,7 @@ static bool to_tm(int64_t ts_ms, bool use_utc, struct tm *out)
 {
   int64_t secs = ts_ms >= 0 ? ts_ms / 1000 : -((-ts_ms + 999) / 1000);
   time_t t = (time_t)secs;
-  return (use_utc ? gmtime_r(&t, out) : localtime_r(&t, out)) != nullptr;
+  return use_utc ? ccord_gmtime(t, out) : ccord_localtime(t, out);
 }
 
 size_t ccord_timefmt_clock(char *out, size_t cap, int64_t ts_ms, bool use_utc)

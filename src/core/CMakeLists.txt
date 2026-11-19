@@ -23,7 +23,7 @@ add_custom_command(
      fb = f('assets/fonts/NotoSans-Bold.ttf'); \
      pj = f('extensions/copy-message-id/plugin.json'); \
      ml = f('extensions/copy-message-id/main.lua'); \
-     code = '#define _POSIX_C_SOURCE 200809L\\n#include <ccord/core/paths.h>\\n#include <errno.h>\\n#include <stdio.h>\\n#include <string.h>\\n#include <sys/stat.h>\\n' + \
+     code = '#include <ccord/core/atomic_file.h>\\n#include <ccord/core/paths.h>\\n#include <stdio.h>\\n#include <string.h>\\n' + \
             f'static const unsigned char k_theme[] = {{{arr(t)}, 0}};\\n' + \
             f'static const unsigned char k_theme_light[] = {{{arr(tl)}, 0}};\\n' + \
             f'static const unsigned char k_theme_amoled[] = {{{arr(ta)}, 0}};\\n' + \
@@ -52,10 +52,11 @@ add_custom_command(
             '}\\n' + \
             'bool ccord_embedded_materialize_extensions(const char *dest_dir) {\\n' + \
             '  if (!dest_dir || !dest_dir[0]) return false;\\n' + \
-            '  if (mkdir(dest_dir, 0700) != 0 && errno != EEXIST) return false;\\n' + \
+            '  ccord_error err;\\n' + \
+            '  if (ccord_mkdir_p(dest_dir, 0700, &err) != CCORD_OK) return false;\\n' + \
             '  char sub[4096], p1[4096], p2[4096];\\n' + \
             '  if ((size_t)snprintf(sub, sizeof sub, \"%s/copy-message-id\", dest_dir) >= sizeof sub) return false;\\n' + \
-            '  if (mkdir(sub, 0700) != 0 && errno != EEXIST) return false;\\n' + \
+            '  if (ccord_mkdir_p(sub, 0700, &err) != CCORD_OK) return false;\\n' + \
             '  if ((size_t)snprintf(p1, sizeof p1, \"%s/plugin.json\", sub) >= sizeof p1) return false;\\n' + \
             '  if ((size_t)snprintf(p2, sizeof p2, \"%s/main.lua\", sub) >= sizeof p2) return false;\\n' + \
             '  return write_blob(p1, k_ext_json, sizeof k_ext_json) && write_blob(p2, k_ext_lua, sizeof k_ext_lua);\\n' + \
@@ -66,15 +67,26 @@ add_custom_command(
   VERBATIM
   COMMENT "Generating embedded assets for single-binary ccord")
 
+if(WIN32)
+  set(CCORD_CORE_OS_SRC os_win32.c)
+else()
+  set(CCORD_CORE_OS_SRC os_posix.c)
+  find_package(Threads REQUIRED)
+endif()
+
 add_library(ccord_core STATIC
   error.c log.c alloc.c arena.c buf.c utf8.c json.c ini.c clock.c paths.c event_bus.c idmap.c
-  secret.c random.c sha256.c atomic_file.c "${CCORD_EMBEDDED_ASSETS_C}")
+  secret.c random.c sha256.c atomic_file.c ${CCORD_CORE_OS_SRC} "${CCORD_EMBEDDED_ASSETS_C}")
 add_library(ccord::core ALIAS ccord_core)
 target_include_directories(ccord_core PUBLIC include)
 target_compile_definitions(ccord_core PUBLIC CCORD_VERSION_STRING="${CCORD_VERSION_CLEAN}")
 target_include_directories(ccord_core PRIVATE ${CMAKE_SOURCE_DIR}/src/core)
 target_compile_definitions(ccord_core PRIVATE CCORD_DEFAULT_ASSET_DIR="$<IF:$<BOOL:${CCORD_BUILD_TESTS}>,${CCORD_ASSET_DIR},${CMAKE_INSTALL_FULL_DATADIR}/ccord>")
-target_link_libraries(ccord_core PUBLIC)
+if(WIN32)
+  target_link_libraries(ccord_core PUBLIC ws2_32 bcrypt shell32 ole32)
+else()
+  target_link_libraries(ccord_core PUBLIC Threads::Threads)
+endif()
 ccord_strict_warnings(ccord_core)
 
 if(CCORD_BUILD_TESTS)

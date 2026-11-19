@@ -3166,7 +3166,7 @@ static void ss_format_date_ms(int64_t ms, char *out, size_t cap)
   };
   time_t sec = (time_t)(ms / 1000LL);
   struct tm tm_val;
-  if (gmtime_r(&sec, &tm_val) != nullptr && tm_val.tm_mon >= 0 && tm_val.tm_mon < 12) {
+  if (ccord_gmtime(sec, &tm_val) && tm_val.tm_mon >= 0 && tm_val.tm_mon < 12) {
     (void)snprintf(out, cap, "%s %d, %d", k_months[tm_val.tm_mon], tm_val.tm_mday, tm_val.tm_year + 1900);
   } else {
     (void)snprintf(out, cap, "Jan 1, 2015");

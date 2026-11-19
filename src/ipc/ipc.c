@@ -1,20 +1,15 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
-#define _GNU_SOURCE
 #include <ccord/ipc/ipc.h>
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/buf.h>
 #include <ccord/core/clock.h>
+#include <ccord/core/os.h>
 
-#include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
-#include <poll.h>
 #include <stdint.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #define IPC_MAX_PAYLOAD ((size_t)1u << 20)
 #define IPC_READ_CHUNK ((size_t)64u << 10)
@@ -22,7 +17,7 @@
 #define IPC_MAX_METHOD 64u
 
 struct ccord_ipc {
-  int fd;
+  ccord_socket_t fd;
   char *in;
   size_t in_len, in_cap, in_off;
   bool eof;
@@ -54,18 +49,18 @@ static void put_le32(char *p, uint32_t v)
   p[3] = (char)((v >> 24) & 0xffu);
 }
 
-ccord_ipc *ccord_ipc_open(int fd, ccord_error *err)
+ccord_ipc *ccord_ipc_open(ccord_socket_t fd, ccord_error *err)
 {
-  int flags = fcntl(fd, F_GETFL);
-  if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0 || fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
-    ccord_error_set(err, CCORD_ERR_IO, "ipc: fcntl failed: %s", strerror(errno));
-    close(fd);
+  if (fd == CCORD_INVALID_SOCKET || !ccord_sock_set_nonblock(fd) || !ccord_sock_set_cloexec(fd)) {
+    ccord_error_set(err, CCORD_ERR_IO, "ipc: failed to configure socket");
+    ccord_sock_close(fd);
     return nullptr;
   }
+  ccord_sock_set_nosigpipe(fd);
   ccord_ipc *ipc = ccord_calloc(1, sizeof *ipc);
   if (!ipc) {
     fail(err, CCORD_ERR_NOMEM, "ipc: out of memory");
-    close(fd);
+    ccord_sock_close(fd);
     return nullptr;
   }
   ipc->fd = fd;
@@ -75,15 +70,15 @@ ccord_ipc *ccord_ipc_open(int fd, ccord_error *err)
 void ccord_ipc_close(ccord_ipc *ipc)
 {
   if (!ipc) return;
-  if (ipc->fd >= 0) close(ipc->fd);
+  ccord_sock_close(ipc->fd);
   ccord_free(ipc->in);
   ccord_free(ipc->out);
   ccord_free(ipc);
 }
 
-int ccord_ipc_fd(const ccord_ipc *ipc)
+ccord_socket_t ccord_ipc_fd(const ccord_ipc *ipc)
 {
-  return ipc ? ipc->fd : -1;
+  return ipc ? ipc->fd : CCORD_INVALID_SOCKET;
 }
 
 bool ccord_ipc_has_pending_output(const ccord_ipc *ipc)
@@ -217,21 +212,19 @@ static ccord_status fill(ccord_ipc *ipc, ccord_error *err)
     ipc->in = np;
     ipc->in_cap = cap;
   }
-  for (;;) {
-    ssize_t n = read(ipc->fd, ipc->in + ipc->in_len, IPC_READ_CHUNK);
-    if (n > 0) {
-      ipc->in_len += (size_t)n;
-      return CCORD_OK;
-    }
-    if (n == 0) {
-      ipc->eof = true;
-      return CCORD_OK;
-    }
-    if (errno == EINTR) continue;
-    if (errno == EAGAIN) return CCORD_OK;
-    ccord_error_set(err, CCORD_ERR_IO, "ipc: read failed: %s", strerror(errno));
-    return CCORD_ERR_IO;
+  bool would_block = false;
+  ptrdiff_t n = ccord_sock_recv(ipc->fd, ipc->in + ipc->in_len, IPC_READ_CHUNK, &would_block);
+  if (n > 0) {
+    ipc->in_len += (size_t)n;
+    return CCORD_OK;
   }
+  if (n == 0) {
+    ipc->eof = true;
+    return CCORD_OK;
+  }
+  if (would_block) return CCORD_OK;
+  ccord_error_set(err, CCORD_ERR_IO, "ipc: recv failed");
+  return CCORD_ERR_IO;
 }
 
 ccord_ipc_read ccord_ipc_try_read(ccord_ipc *ipc, ccord_arena *arena, ccord_ipc_msg *msg, ccord_error *err)
@@ -270,11 +263,10 @@ ccord_status ccord_ipc_wait(ccord_ipc *ipc, ccord_arena *arena, ccord_ipc_msg *m
     (void)ccord_ipc_flush(ipc, 0, e);
     uint64_t left = deadline - now;
     int ms = left > (uint64_t)INT_MAX ? INT_MAX : (int)left;
-    short events = POLLIN;
-    if (ccord_ipc_has_pending_output(ipc)) events = (short)(events | POLLOUT);
-    struct pollfd pfd = {.fd = ipc->fd, .events = events};
-    if (poll(&pfd, 1, ms) < 0 && errno != EINTR) {
-      ccord_error_set(e, CCORD_ERR_IO, "ipc: poll failed: %s", strerror(errno));
+    unsigned events = CCORD_POLL_IN;
+    if (ccord_ipc_has_pending_output(ipc)) events |= CCORD_POLL_OUT;
+    if (ccord_sock_poll1(ipc->fd, events, ms) < 0) {
+      ccord_error_set(e, CCORD_ERR_IO, "ipc: poll failed");
       return CCORD_ERR_IO;
     }
   }
@@ -403,22 +395,21 @@ ccord_status ccord_ipc_flush(ccord_ipc *ipc, int timeout_ms, ccord_error *err)
   if (!ipc) return CCORD_ERR_INVALID;
   uint64_t deadline = ccord_clock_ms() + (timeout_ms > 0 ? (uint64_t)timeout_ms : 0);
   while (ipc->out_len > ipc->out_off) {
-    ssize_t n = send(ipc->fd, ipc->out + ipc->out_off, ipc->out_len - ipc->out_off, MSG_NOSIGNAL);
+    bool would_block = false;
+    ptrdiff_t n = ccord_sock_send(ipc->fd, ipc->out + ipc->out_off, ipc->out_len - ipc->out_off, &would_block);
     if (n > 0) {
       ipc->out_off += (size_t)n;
       continue;
     }
-    if (n < 0 && errno == EINTR) continue;
-    if (n < 0 && (errno == EAGAIN)) {
+    if (would_block) {
       uint64_t now = ccord_clock_ms();
       if (timeout_ms <= 0 || now >= deadline) return timeout_ms <= 0 ? CCORD_OK : CCORD_ERR_TIMEOUT;
       uint64_t left = deadline - now;
       int ms = left > (uint64_t)INT_MAX ? INT_MAX : (int)left;
-      struct pollfd pfd = {.fd = ipc->fd, .events = POLLOUT};   // POLLOUT is a short-sized constant
-      (void)poll(&pfd, 1, ms);
+      (void)ccord_sock_poll1(ipc->fd, CCORD_POLL_OUT, ms);
       continue;
     }
-    ccord_error_set(err, CCORD_ERR_IO, "ipc: send failed: %s", strerror(errno));
+    ccord_error_set(err, CCORD_ERR_IO, "ipc: send failed");
     return CCORD_ERR_IO;
   }
   ipc->out_len = 0;

@@ -6,15 +6,29 @@
 #include <ccord/core/alloc.h>
 #include <ccord/core/arena.h>
 #include <ccord/core/json.h>
+#include <ccord/core/os.h>
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if CCORD_OS_WINDOWS
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <tlhelp32.h>
+#elif CCORD_OS_MACOS
+#include <libproc.h>
+#include <sys/proc_info.h>
 #include <unistd.h>
+#else
+#include <dirent.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #define NO_APP UINT32_MAX
 #define KEY_MAX 255u                 // longer executable names are dropped at load and never looked up
@@ -116,9 +130,18 @@ static void add_app(ccord_game_list *l, const ccord_json *obj, size_t exe_cap_le
     const char *os = json_str(x, "os", &oslen), *xname = json_str(x, "name", &xlen);
     if (!os || !xname) continue;
     bool win;
+#if CCORD_OS_WINDOWS
+    if (strcmp(os, "win32") == 0) win = false;
+    else continue;
+#elif CCORD_OS_MACOS
+    if (strcmp(os, "darwin") == 0) win = false;
+    else if (strcmp(os, "win32") == 0) win = true;
+    else continue;
+#else
     if (strcmp(os, "linux") == 0) win = false;
     else if (strcmp(os, "win32") == 0) win = true;
-    else continue;                                    // darwin and unknown platforms never match
+    else continue;                                    // darwin and unknown platforms never match on Linux
+#endif
     const ccord_json *launcher = ccord_json_get(x, "is_launcher");
     if (launcher && ccord_json_bool(launcher, false)) continue;
     add_entry(l, xname, xlen, win, idx);
@@ -243,6 +266,119 @@ static size_t normalize(char *dst, size_t cap, const char *src, size_t n)
   return n;
 }
 
+#if CCORD_OS_WINDOWS
+ccord_status ccord_game_scan(const ccord_game_list *l, const char *proc_root, ccord_game_match *out, ccord_error *err)
+{
+  (void)proc_root;
+  ccord_error_clear(err);
+  if (!l || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "game scan: bad arguments");
+  memset(out, 0, sizeof *out);
+  HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  if (snap == INVALID_HANDLE_VALUE) return ccord_error_set(err, CCORD_ERR_IO, "game scan: snapshot failed");
+  PROCESSENTRY32W pe = {.dwSize = sizeof pe};
+  bool have = false;
+  uint32_t best_app = NO_APP;
+  uint64_t best_ticks = 0;
+  int32_t best_pid = 0;
+  char path[PATH_CAP], norm[PATH_CAP];
+  if (Process32FirstW(snap, &pe)) {
+    do {
+      DWORD pid = pe.th32ProcessID;
+      if (pid == 0) continue;
+      HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+      uint64_t ticks = 0;
+      uint32_t a = NO_APP;
+      if (h) {
+        FILETIME ct, et, kt, ut;
+        if (GetProcessTimes(h, &ct, &et, &kt, &ut)) {
+          ticks = ((uint64_t)ct.dwHighDateTime << 32) | (uint64_t)ct.dwLowDateTime;
+        }
+        wchar_t wpath[PATH_CAP];
+        DWORD wlen = PATH_CAP;
+        if (QueryFullProcessImageNameW(h, 0, wpath, &wlen) && wlen > 0) {
+          int u8 = WideCharToMultiByte(CP_UTF8, 0, wpath, (int)wlen, path, (int)sizeof path - 1, nullptr, nullptr);
+          if (u8 > 0) {
+            path[u8] = '\0';
+            size_t len = normalize(norm, sizeof norm, path, (size_t)u8);
+            a = lookup_suffixes(l, norm, len, false);
+          }
+        }
+        CloseHandle(h);
+      }
+      if (a == NO_APP) {
+        int u8 = WideCharToMultiByte(CP_UTF8, 0, pe.szExeFile, -1, path, (int)sizeof path, nullptr, nullptr);
+        if (u8 > 1) {
+          size_t len = normalize(norm, sizeof norm, path, (size_t)(u8 - 1));
+          a = lookup_suffixes(l, norm, len, false);
+        }
+      }
+      if (a != NO_APP && (!have || ticks > best_ticks || (ticks == best_ticks && (int32_t)pid > best_pid))) {
+        have = true;
+        best_app = a;
+        best_ticks = ticks;
+        best_pid = (int32_t)pid;
+      }
+    } while (Process32NextW(snap, &pe));
+  }
+  CloseHandle(snap);
+  if (!have) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "game scan: no detectable game running");
+  const app *ap = &l->apps[best_app];
+  snprintf(out->app_id, sizeof out->app_id, "%s", ap->id);
+  snprintf(out->name, sizeof out->name, "%s", ap->name);
+  out->pid = best_pid;
+  out->start_ticks = best_ticks;
+  return CCORD_OK;
+}
+#elif CCORD_OS_MACOS
+ccord_status ccord_game_scan(const ccord_game_list *l, const char *proc_root, ccord_game_match *out, ccord_error *err)
+{
+  (void)proc_root;
+  ccord_error_clear(err);
+  if (!l || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "game scan: bad arguments");
+  memset(out, 0, sizeof *out);
+  int bytes = proc_listallpids(nullptr, 0);
+  if (bytes <= 0) return ccord_error_set(err, CCORD_ERR_IO, "game scan: proc_listallpids failed");
+  size_t cap = (size_t)bytes + 64u;
+  pid_t *pids = ccord_alloc_array(cap, sizeof *pids);
+  if (!pids) return ccord_error_set(err, CCORD_ERR_NOMEM, "game scan: out of memory");
+  int count = proc_listallpids(pids, (int)(cap * sizeof *pids));
+  bool have = false;
+  uint32_t best_app = NO_APP;
+  uint64_t best_ticks = 0;
+  int32_t best_pid = 0;
+  char path[PROC_PIDPATHINFO_MAXSIZE];
+  char norm[PATH_CAP];
+  for (int i = 0; i < count; i++) {
+    pid_t pid = pids[i];
+    if (pid <= 0) continue;
+    int plen = proc_pidpath(pid, path, sizeof path);
+    if (plen <= 0) continue;
+    struct proc_bsdinfo bsd;
+    uint64_t ticks = 0;
+    if (proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &bsd, (int)sizeof bsd) == (int)sizeof bsd) {
+      if (bsd.pbi_status == SZOMB) continue;
+      ticks = (uint64_t)bsd.pbi_start_tvsec * 1000000ULL + (uint64_t)bsd.pbi_start_tvusec;
+    }
+    size_t len = normalize(norm, sizeof norm, path, (size_t)plen);
+    uint32_t a = lookup_suffixes(l, norm, len, false);
+    if (a == NO_APP) a = lookup_suffixes(l, norm, len, true);
+    if (a != NO_APP && (!have || ticks > best_ticks || (ticks == best_ticks && (int32_t)pid > best_pid))) {
+      have = true;
+      best_app = a;
+      best_ticks = ticks;
+      best_pid = (int32_t)pid;
+    }
+  }
+  ccord_free(pids);
+  if (!have) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "game scan: no detectable game running");
+  const app *ap = &l->apps[best_app];
+  snprintf(out->app_id, sizeof out->app_id, "%s", ap->id);
+  snprintf(out->name, sizeof out->name, "%s", ap->name);
+  out->pid = best_pid;
+  out->start_ticks = best_ticks;
+  return CCORD_OK;
+}
+#else
 // Wine/Proton: any argument containing a path that ends in ".exe" (followed by end, space, quote or NUL).
 static uint32_t match_wine(const ccord_game_list *l, const char *arg, size_t n)
 {
@@ -448,3 +584,4 @@ ccord_status ccord_game_scan(const ccord_game_list *l, const char *proc_root, cc
   out->start_ticks = best_ticks;
   return CCORD_OK;
 }
+#endif

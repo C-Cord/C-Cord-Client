@@ -9,17 +9,15 @@
 #include <ccord/net/voice_dsp.h>
 #include <ccord/net/voice_stream.h>
 
-#include <dirent.h>
 #include <errno.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <stdatomic.h>
+
+#include <ccord/core/os.h>
 
 #include <opus/opus.h>
 
@@ -189,8 +187,8 @@ typedef struct live {
   // on_frame/on_audio fire from ccord_vstream_pump_all() (UI thread); the send/poll hooks may run on an
   // encoder/audio thread, and teardown closes the vstream handles under the same lock so a send can never race
   // a close.
-  pthread_mutex_t media_mtx;
-  pthread_mutex_t voice_mtx;
+  ccord_mutex *media_mtx;
+  ccord_mutex *voice_mtx;
   live_stream_frame rx_frames[LIVE_STREAM_FRAME_SLOTS];
   size_t rx_frame_head, rx_frame_count;
   int16_t *rx_pcm;   // LIVE_STREAM_PCM_CAP_SAMPLES mono ring, lazily allocated on the first stream-audio packet
@@ -1416,15 +1414,18 @@ static const char *live_rest_name(live_rest_kind kind)
 static void ensure_live_cache_dirs(const char *file_path)
 {
   size_t len = strlen(file_path);
-  if (len == 0 || len >= 4096) return;
-  char tmp[4096];
+  if (len == 0 || len >= CCORD_PATH_MAX) return;
+  char tmp[CCORD_PATH_MAX];
   memcpy(tmp, file_path, len + 1);
-  for (size_t i = 1; i < len; i++) {
-    if (tmp[i] != '/') continue;
-    tmp[i] = '\0';
-    (void)mkdir(tmp, 0700);
-    tmp[i] = '/';
-  }
+  char *slash = strrchr(tmp, '/');
+#if defined(_WIN32)
+  char *bs = strrchr(tmp, '\\');
+  if (bs && (!slash || bs > slash)) slash = bs;
+#endif
+  if (!slash || slash == tmp) return;
+  *slash = '\0';
+  ccord_error derr;
+  (void)ccord_mkdir_p(tmp, 0700, &derr);
 }
 
 // The API cache is on for the official API base, and for any base once the caller scopes it to a per-account dir.
@@ -1469,17 +1470,20 @@ static char *live_api_cache_read(const char *cache_path, uint32_t ttl_sec, size_
 {
   if (out_len) *out_len = 0;
   if (!cache_path || cache_path[0] == '\0') return nullptr;
-  struct stat st;
-  if (stat(cache_path, &st) != 0 || st.st_size <= 0 || (uint64_t)st.st_size > (uint64_t)CCORD_LIVE_MAX_RESPONSE) {
+  uint64_t fsz = 0;
+  int64_t mtime_ns = 0;
+  if (!ccord_file_size(cache_path, &fsz) || fsz == 0 || fsz > (uint64_t)CCORD_LIVE_MAX_RESPONSE ||
+      !ccord_file_mtime_ns(cache_path, &mtime_ns)) {
     return nullptr;
   }
   if (ttl_sec > 0) {
-    time_t now = time(nullptr);
-    if (now > st.st_mtime && (uint64_t)(now - st.st_mtime) > (uint64_t)ttl_sec) return nullptr;
+    int64_t now_s = (int64_t)time(nullptr);
+    int64_t mtime_s = mtime_ns / 1000000000LL;
+    if (now_s > mtime_s && (uint64_t)(now_s - mtime_s) > (uint64_t)ttl_sec) return nullptr;
   }
   FILE *fp = fopen(cache_path, "rb");
   if (!fp) return nullptr;
-  size_t sz = (size_t)st.st_size;
+  size_t sz = (size_t)fsz;
   char *buf = ccord_alloc_array(sz + 1u, 1);
   if (!buf) {
     fclose(fp);
@@ -1519,7 +1523,7 @@ static void live_api_cache_write(const char *cache_path, const char *body, size_
 
 typedef struct live_hist_file {
   char name[64];
-  struct timespec mtim;
+  int64_t mtime_ns;
   bool just_written;
 } live_hist_file;
 
@@ -1527,34 +1531,34 @@ static int live_hist_file_newest_first(const void *a, const void *b)
 {
   const live_hist_file *x = a, *y = b;
   if (x->just_written != y->just_written) return x->just_written ? -1 : 1;
-  if (x->mtim.tv_sec != y->mtim.tv_sec) return (x->mtim.tv_sec < y->mtim.tv_sec) - (x->mtim.tv_sec > y->mtim.tv_sec);
-  return (x->mtim.tv_nsec < y->mtim.tv_nsec) - (x->mtim.tv_nsec > y->mtim.tv_nsec);
+  return (x->mtime_ns < y->mtime_ns) - (x->mtime_ns > y->mtime_ns);
 }
 
 static void live_warm_history_prune(const char *dir, const char *just_written)
 {
-  DIR *d = opendir(dir);
+  ccord_dir *d = ccord_dir_open(dir);
   if (!d) return;
   live_hist_file files[128];
   size_t n = 0;
-  struct dirent *e;
-  struct stat st;
-  char full[4096];
-  while ((e = readdir(d)) != nullptr && n < sizeof files / sizeof files[0]) {
-    if (e->d_name[0] == '.' || strlen(e->d_name) >= sizeof files[0].name) continue;
-    int w = snprintf(full, sizeof full, "%s/%s", dir, e->d_name);
-    if (w < 0 || (size_t)w >= sizeof full || stat(full, &st) != 0 || !S_ISREG(st.st_mode)) continue;
-    memcpy(files[n].name, e->d_name, strlen(e->d_name) + 1);
-    files[n].mtim = st.st_mtim;
-    files[n].just_written = just_written && strcmp(e->d_name, just_written) == 0;
+  char name[256];
+  bool is_dir = false;
+  char full[CCORD_PATH_MAX];
+  while (ccord_dir_next(d, name, sizeof name, &is_dir) && n < sizeof files / sizeof files[0]) {
+    if (is_dir || name[0] == '.' || strlen(name) >= sizeof files[0].name) continue;
+    int w = snprintf(full, sizeof full, "%s/%s", dir, name);
+    int64_t mt = 0;
+    if (w < 0 || (size_t)w >= sizeof full || !ccord_file_mtime_ns(full, &mt)) continue;
+    memcpy(files[n].name, name, strlen(name) + 1);
+    files[n].mtime_ns = mt;
+    files[n].just_written = just_written && strcmp(name, just_written) == 0;
     n++;
   }
-  closedir(d);
+  ccord_dir_close(d);
   if (n <= LIVE_WARM_HISTORY_KEEP) return;
   qsort(files, n, sizeof files[0], live_hist_file_newest_first);
   for (size_t i = LIVE_WARM_HISTORY_KEEP; i < n; i++) {
     int w = snprintf(full, sizeof full, "%s/%s", dir, files[i].name);
-    if (w > 0 && (size_t)w < sizeof full) (void)unlink(full);
+    if (w > 0 && (size_t)w < sizeof full) (void)ccord_file_unlink(full);
   }
 }
 
@@ -1582,9 +1586,9 @@ static void live_api_cache_invalidate_channel_history(const live *l, ccord_id ch
   snprintf(path, sizeof path, "/channels/%llu/messages?limit=%u", (unsigned long long)channel_id,
            (unsigned)CCORD_LIVE_HISTORY_DEFAULT);
   if (live_api_cache_path(l, path, cpath, sizeof cpath)) {
-    (void)unlink(cpath);
+    (void)ccord_file_unlink(cpath);
   }
-  if (ccord_live_history_cache_path(l->cache_dir, channel_id, cpath, sizeof cpath)) (void)unlink(cpath);
+  if (ccord_live_history_cache_path(l->cache_dir, channel_id, cpath, sizeof cpath)) (void)ccord_file_unlink(cpath);
 }
 
 static bool push_media_event(live *l, const char *url, const char *path, const void *data, size_t len)
@@ -3674,18 +3678,18 @@ static bool live_poll(ccord_transport *t, ccord_net_event *out)
     l->rx_stream.next_ping_ms = now + 5000u;
   }
   if (l->tx_stream.vs && ccord_vstream_state_of(l->tx_stream.vs) == CCORD_VSTREAM_CLOSED) {
-    pthread_mutex_lock(&l->media_mtx);
+    ccord_mutex_lock(l->media_mtx);
     ccord_vstream_close(l->tx_stream.vs);
     l->tx_stream.vs = nullptr;
     live_stream_tx_clear(l);
-    pthread_mutex_unlock(&l->media_mtx);
+    ccord_mutex_unlock(l->media_mtx);
   }
   if (l->rx_stream.vs && ccord_vstream_state_of(l->rx_stream.vs) == CCORD_VSTREAM_CLOSED) {
-    pthread_mutex_lock(&l->media_mtx);
+    ccord_mutex_lock(l->media_mtx);
     ccord_vstream_close(l->rx_stream.vs);
     l->rx_stream.vs = nullptr;
     live_stream_rx_clear(l);
-    pthread_mutex_unlock(&l->media_mtx);
+    ccord_mutex_unlock(l->media_mtx);
   }
   if (l->gw) {
     ccord_net_event ev;
@@ -4315,26 +4319,26 @@ static ccord_status live_mark_unread(ccord_transport *t, ccord_id channel_id, cc
 
 static void live_vstream_slot_close_media(live *l, live_vstream_slot *slot)
 {
-  pthread_mutex_lock(&l->media_mtx);
+  ccord_mutex_lock(l->media_mtx);
   if (slot->vs) {
     ccord_vstream_close(slot->vs);
     slot->vs = nullptr;
   }
   if (slot->sender) live_stream_tx_clear(l); else live_stream_rx_clear(l);
-  pthread_mutex_unlock(&l->media_mtx);
+  ccord_mutex_unlock(l->media_mtx);
   slot->attempted = false;
 }
 
 static void live_vstream_slot_reset(live *l, live_vstream_slot *slot)
 {
   bool sender = slot->sender;
-  pthread_mutex_lock(&l->media_mtx);
+  ccord_mutex_lock(l->media_mtx);
   if (slot->vs) {
     ccord_vstream_close(slot->vs);
     slot->vs = nullptr;
   }
   if (sender) live_stream_tx_clear(l); else live_stream_rx_clear(l);
-  pthread_mutex_unlock(&l->media_mtx);
+  ccord_mutex_unlock(l->media_mtx);
   ccord_live_wipe(slot->token, sizeof slot->token);
   memset(slot, 0, sizeof *slot);
   slot->sender = sender;
@@ -4497,7 +4501,7 @@ static void live_stream_on_frame(void *ud, uint32_t ssrc, ccord_id user_id, cons
   (void)ssrc;
   (void)user_id;
   if (!l || !annexb || len == 0 || len > LIVE_STREAM_FRAME_MAX) return;
-  pthread_mutex_lock(&l->media_mtx);
+  ccord_mutex_lock(l->media_mtx);
   if (l->rx_frame_count == LIVE_STREAM_FRAME_SLOTS) {
     l->rx_frames[l->rx_frame_head].len = 0;
     l->rx_frame_head = (l->rx_frame_head + 1u) % LIVE_STREAM_FRAME_SLOTS;
@@ -4513,7 +4517,7 @@ static void live_stream_on_frame(void *ud, uint32_t ssrc, ccord_id user_id, cons
     f->keyframe = keyframe;
     l->rx_frame_count++;
   }
-  pthread_mutex_unlock(&l->media_mtx);
+  ccord_mutex_unlock(l->media_mtx);
 }
 
 // Decodes one 48 kHz Opus packet into l->rx_pcm. Caller MUST hold l->media_mtx.
@@ -4565,15 +4569,15 @@ static void live_stream_on_audio(void *ud, uint32_t ssrc, ccord_id user_id, cons
   (void)ts48k;
   if (!l || !opus || len == 0 || len > (size_t)INT32_MAX) return;
   if (l->self_deaf) {
-    pthread_mutex_lock(&l->media_mtx);
+    ccord_mutex_lock(l->media_mtx);
     l->rx_pcm_head = 0;
     l->rx_pcm_count = 0;
-    pthread_mutex_unlock(&l->media_mtx);
+    ccord_mutex_unlock(l->media_mtx);
     return;
   }
-  pthread_mutex_lock(&l->media_mtx);
+  ccord_mutex_lock(l->media_mtx);
   live_stream_decode_opus_locked(l, opus, len);
-  pthread_mutex_unlock(&l->media_mtx);
+  ccord_mutex_unlock(l->media_mtx);
 }
 
 static void live_stream_on_keyframe(void *ud)
@@ -4647,9 +4651,9 @@ static void live_vstream_maybe_open(live *l, live_vstream_slot *slot)
     return;
   }
   live_vstream_seed_peers(l, slot, vs);
-  pthread_mutex_lock(&l->media_mtx);
+  ccord_mutex_lock(l->media_mtx);
   slot->vs = vs;
-  pthread_mutex_unlock(&l->media_mtx);
+  ccord_mutex_unlock(l->media_mtx);
 }
 
 static bool live_stream_sig_matches_tx(const live *l, const ccord_stream_signal *sig)
@@ -5124,10 +5128,10 @@ static void live_set_self_voice_flags(live *l, bool self_mute, bool self_deaf)
   l->self_deaf = self_deaf;
   if (l->voice) ccord_voice_gateway_set_deafened(l->voice, self_deaf);
   if (self_deaf) {
-    pthread_mutex_lock(&l->media_mtx);
+    ccord_mutex_lock(l->media_mtx);
     l->rx_pcm_head = 0;
     l->rx_pcm_count = 0;
-    pthread_mutex_unlock(&l->media_mtx);
+    ccord_mutex_unlock(l->media_mtx);
   }
 }
 
@@ -7567,7 +7571,7 @@ static ccord_status live_send_stream_frame(ccord_transport *t, const uint8_t *an
   ccord_error_clear(err);
   if (!annexb || len == 0) return ccord_error_set(err, CCORD_ERR_INVALID, "live: empty stream frame");
   if (len > LIVE_STREAM_FRAME_MAX) return ccord_error_set(err, CCORD_ERR_RANGE, "live: stream frame too large");
-  pthread_mutex_lock(&l->media_mtx);
+  ccord_mutex_lock(l->media_mtx);
   ccord_status st;
   if (!l->streaming || !l->tx_stream.vs) {
     st = ccord_error_set(err, CCORD_ERR_INVALID, "live: no active Go Live stream");
@@ -7575,7 +7579,7 @@ static ccord_status live_send_stream_frame(ccord_transport *t, const uint8_t *an
     st = ccord_vstream_send_frame(l->tx_stream.vs, annexb, len, ts90k, keyframe);
     if (st != CCORD_OK) ccord_error_set(err, st, "live: stream frame send failed");
   }
-  pthread_mutex_unlock(&l->media_mtx);
+  ccord_mutex_unlock(l->media_mtx);
   return st;
 }
 
@@ -7613,7 +7617,7 @@ static bool live_poll_stream_frame(ccord_transport *t, uint8_t *buf, size_t buf_
 {
   live *l = (live *)t;
   if (!buf || buf_cap == 0 || !out_len) return false;
-  pthread_mutex_lock(&l->media_mtx);
+  ccord_mutex_lock(l->media_mtx);
   while (l->rx_frame_count > 0 && l->rx_frames[l->rx_frame_head].len > buf_cap) {
     l->rx_frames[l->rx_frame_head].len = 0;
     l->rx_frame_head = (l->rx_frame_head + 1u) % LIVE_STREAM_FRAME_SLOTS;
@@ -7631,7 +7635,7 @@ static bool live_poll_stream_frame(ccord_transport *t, uint8_t *buf, size_t buf_
     l->rx_frame_count--;
     got = true;
   }
-  pthread_mutex_unlock(&l->media_mtx);
+  ccord_mutex_unlock(l->media_mtx);
   return got;
 }
 
@@ -7643,7 +7647,7 @@ static ccord_status live_send_stream_pcm(ccord_transport *t, const int16_t *pcm,
   live *l = (live *)t;
   ccord_error_clear(err);
   if (!pcm || samples == 0) return ccord_error_set(err, CCORD_ERR_INVALID, "live: empty stream pcm");
-  pthread_mutex_lock(&l->media_mtx);
+  ccord_mutex_lock(l->media_mtx);
   ccord_status st = CCORD_OK;
   if (!l->streaming || !l->tx_stream.vs) {
     st = ccord_error_set(err, CCORD_ERR_INVALID, "live: no active Go Live stream");
@@ -7680,7 +7684,7 @@ static ccord_status live_send_stream_pcm(ccord_transport *t, const int16_t *pcm,
       l->tx_audio_ts48k += CCORD_VOICE_FRAME_SAMPLES;
     }
   }
-  pthread_mutex_unlock(&l->media_mtx);
+  ccord_mutex_unlock(l->media_mtx);
   return st;
 }
 
@@ -7689,7 +7693,7 @@ static size_t live_poll_stream_pcm(ccord_transport *t, int16_t *out_pcm, size_t 
 {
   live *l = (live *)t;
   if (!out_pcm || cap_samples == 0) return 0;
-  pthread_mutex_lock(&l->media_mtx);
+  ccord_mutex_lock(l->media_mtx);
   if (l->rx_stream.vs) {
     // Drain UDP + decrypted Opus packets directly on the caller (audio pthread) so UI-thread
     // stalls or idle sleeps never starve stream audio or overflow the kernel UDP buffer.
@@ -7714,7 +7718,7 @@ static size_t live_poll_stream_pcm(ccord_transport *t, int16_t *out_pcm, size_t 
     l->rx_pcm_head = (l->rx_pcm_head + take) % LIVE_STREAM_PCM_CAP_SAMPLES;
     l->rx_pcm_count -= take;
   }
-  pthread_mutex_unlock(&l->media_mtx);
+  ccord_mutex_unlock(l->media_mtx);
   return take;
 }
 
@@ -7755,7 +7759,8 @@ static void live_destroy(ccord_transport *t)
   ccord_free(l->rx_pcm);
   if (l->stream_enc) opus_encoder_destroy(l->stream_enc);
   if (l->stream_dec) opus_decoder_destroy(l->stream_dec);
-  pthread_mutex_destroy(&l->media_mtx);
+  ccord_mutex_destroy(l->media_mtx);
+  ccord_mutex_destroy(l->voice_mtx);
   ccord_live_wipe(l->token, sizeof l->token);
   ccord_free(l);
 }
@@ -7885,8 +7890,8 @@ ccord_transport *ccord_live_transport_create(const ccord_live_config *cfg, ccord
   }
   l->tx_stream.sender = true;
   l->rx_stream.sender = false;
-  (void)pthread_mutex_init(&l->media_mtx, nullptr);
-  (void)pthread_mutex_init(&l->voice_mtx, nullptr);
+  l->media_mtx = ccord_mutex_create();
+  l->voice_mtx = ccord_mutex_create();
   atomic_init(&l->ptt_active, false);
   atomic_init(&l->ptt_release_ms, 0);
   atomic_init(&l->ptt_enabled, false);

@@ -3,10 +3,8 @@
 #define _POSIX_C_SOURCE 200809L
 #include <ccord/net/live_transport.h>
 
-#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #include <curl/curl.h>
 #include <curl/websockets.h>
@@ -19,6 +17,7 @@
 #include <ccord/core/clock.h>
 #include <ccord/core/json.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 #include <ccord/core/utf8.h>
 #include <ccord/net/gateway_pace.h>
 
@@ -166,8 +165,7 @@ static ccord_status gw_send_raw(ccord_gateway *g, const char *data, size_t len, 
     CURLcode rc = curl_ws_send(g->curl, ptr, len - sent, &n, 0, flags);
     if (rc == CURLE_AGAIN) {
       if (++waits > GW_SEND_AGAIN_MAX) return CCORD_ERR_TIMEOUT;
-      struct timespec ts = {.tv_sec = 0, .tv_nsec = 1000000};
-      (void)nanosleep(&ts, nullptr);
+      ccord_sleep_ms(1);
       continue;
     }
     if (rc != CURLE_OK) return CCORD_ERR_IO;
@@ -543,6 +541,9 @@ static const char *stream_encoder_name(ccord_stream_encoder e)
     case CCORD_STREAM_ENCODER_OPENH264: return "openh264";
     case CCORD_STREAM_ENCODER_X264: return "x264";
     case CCORD_STREAM_ENCODER_AUTO: return "auto";
+    case CCORD_STREAM_ENCODER_QSV: return "qsv";
+    case CCORD_STREAM_ENCODER_MF: return "mf";
+    case CCORD_STREAM_ENCODER_VIDEOTOOLBOX: return "videotoolbox";
   }
   return "openh264";
 }
@@ -566,8 +567,13 @@ static const char *stream_framework_name(ccord_stream_framework f)
     case CCORD_STREAM_FRAMEWORK_VULKAN: return "vulkan";
     case CCORD_STREAM_FRAMEWORK_X11: return "x11";
     case CCORD_STREAM_FRAMEWORK_AUTO: return "auto";
+    case CCORD_STREAM_FRAMEWORK_WGC: return "wgc";
+    case CCORD_STREAM_FRAMEWORK_DXGI: return "dxgi";
+    case CCORD_STREAM_FRAMEWORK_GDI: return "gdi";
+    case CCORD_STREAM_FRAMEWORK_SCK: return "screencapturekit";
+    case CCORD_STREAM_FRAMEWORK_CG: return "coregraphics";
   }
-  return "pipewire";
+  return "auto";
 }
 
 static const char *stream_resolution_name(ccord_stream_resolution r)
@@ -1569,8 +1575,7 @@ static ccord_status gw_open(ccord_gateway *g, bool retrying, ccord_error *err)
     }
     return ccord_error_set(err, CCORD_ERR_IO, "gateway: no socket");
   }
-  int flags = fcntl(sock, F_GETFL, 0);
-  if (flags >= 0) (void)fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+  (void)ccord_sock_set_nonblock((ccord_socket_t)sock);
   if (g->compress) {
     memset(&g->z_in, 0, sizeof g->z_in);
     if (inflateInit(&g->z_in) != Z_OK) {

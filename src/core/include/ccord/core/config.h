@@ -11,4 +11,12 @@ static_assert(__STDC_VERSION__ >= 202311L, "C-Cord requires C23");
 #define CCORD_PLUGIN_API_VERSION 1
 #define CCORD_IPC_PROTO_VERSION 1
 #define CCORD_LUA_EXPECTED_RELEASE "Lua 5.5.1"
+#if defined(__has_c_attribute)
+#if __has_c_attribute(gnu::format)
 #define CCORD_PRINTF(fmt_idx, first_arg) [[gnu::format(printf, fmt_idx, first_arg)]]
+#else
+#define CCORD_PRINTF(fmt_idx, first_arg)
+#endif
+#else
+#define CCORD_PRINTF(fmt_idx, first_arg)
+#endif

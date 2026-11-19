@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
-#define _POSIX_C_SOURCE 200809L
 #include "catalog.h"
 
 #include <ccord/core/alloc.h>
@@ -9,19 +8,17 @@
 #include <ccord/core/buf.h>
 #include <ccord/core/json.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 #include <ccord/core/sha256.h>
 #include <ccord/ipc/perm.h>
 
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #define CATALOG_DEFAULT_URL "https://plugins.c-cord.org/catalog.v1.json"
 #define CATALOG_MAX_JSON_BYTES (8u * 1024u * 1024u)
@@ -76,7 +73,7 @@ typedef struct worker_job {
   char expected_sha256[65];
   char version[33];
   char etag[128];
-  char dest_path[PATH_MAX + 160];
+  char dest_path[CCORD_PATH_MAX + 160];
   ccord_plugin_tier tier;
   bool is_auto_update;
 } worker_job;
@@ -90,7 +87,7 @@ typedef struct worker_result {
   char version[33];
   char sha256[65];
   char etag[128];
-  char dest_path[PATH_MAX + 160];
+  char dest_path[CCORD_PATH_MAX + 160];
   ccord_plugin_tier tier;
   char *body;
   size_t body_len;
@@ -98,7 +95,7 @@ typedef struct worker_result {
 } worker_result;
 
 struct ccord_catalog {
-  char data_dir[PATH_MAX];
+  char data_dir[CCORD_PATH_MAX];
   bool has_data_dir;
   ccord_contrib *contrib;
   ccord_catalog_http http;
@@ -118,10 +115,10 @@ struct ccord_catalog {
   uint64_t created_ms;
   uint64_t last_refresh_ms;
 
-  pthread_t thread;
+  ccord_thread *thread;
   bool thread_started;
-  pthread_mutex_t mu;
-  pthread_cond_t cv;
+  ccord_mutex *mu;
+  ccord_cond *cv;
   bool stop;
 
   worker_job jobs[CATALOG_QUEUE_CAP];
@@ -142,7 +139,10 @@ static void copy_str(char *dst, size_t cap, const char *src)
 
 static void mkdir_ok(const char *p)
 {
-  if (p && p[0]) (void)mkdir(p, 0700);
+  if (p && p[0]) {
+    ccord_error err = {0};
+    (void)ccord_mkdir_p(p, 0700, &err);
+  }
 }
 
 static bool parse_semver_triplet(const char *s, uint64_t out[3])
@@ -275,7 +275,7 @@ static installed_meta *upsert_meta(ccord_catalog *cat, const char *id)
 static void save_prefs(const ccord_catalog *cat)
 {
   if (!cat || !cat->has_data_dir) return;
-  char dir[PATH_MAX + 32], path[PATH_MAX + 64];
+  char dir[CCORD_PATH_MAX + 32], path[CCORD_PATH_MAX + 64];
   snprintf(dir, sizeof dir, "%s/plugins", cat->data_dir);
   mkdir_ok(cat->data_dir);
   mkdir_ok(dir);
@@ -300,7 +300,7 @@ static void load_prefs(ccord_catalog *cat)
   cat->prefs.auto_update_enabled = false;   // opt-in by default
   cat->prefs.auto_update_min_tier = 2;      // Official & Verified by default
   if (!cat->has_data_dir) return;
-  char path[PATH_MAX + 64];
+  char path[CCORD_PATH_MAX + 64];
   snprintf(path, sizeof path, "%s/plugins/catalog-prefs.json", cat->data_dir);
   size_t len = 0;
   char *raw = read_entire_file(path, 65536, &len);
@@ -326,7 +326,7 @@ static void load_prefs(ccord_catalog *cat)
 static void save_installed_meta(const ccord_catalog *cat)
 {
   if (!cat || !cat->has_data_dir) return;
-  char dir[PATH_MAX + 32], path[PATH_MAX + 64];
+  char dir[CCORD_PATH_MAX + 32], path[CCORD_PATH_MAX + 64];
   snprintf(dir, sizeof dir, "%s/plugins", cat->data_dir);
   mkdir_ok(cat->data_dir);
   mkdir_ok(dir);
@@ -357,7 +357,7 @@ static void save_installed_meta(const ccord_catalog *cat)
 static void load_installed_meta(ccord_catalog *cat)
 {
   if (!cat->has_data_dir) return;
-  char path[PATH_MAX + 64];
+  char path[CCORD_PATH_MAX + 64];
   snprintf(path, sizeof path, "%s/plugins/installed-meta.json", cat->data_dir);
   size_t len = 0;
   char *raw = read_entire_file(path, 512u * 1024u, &len);
@@ -395,7 +395,7 @@ static void load_installed_meta(ccord_catalog *cat)
 static void save_catalog_cache(const ccord_catalog *cat, const char *json_body, size_t body_len)
 {
   if (!cat || !cat->has_data_dir || !json_body || body_len == 0) return;
-  char dir[PATH_MAX + 32], path[PATH_MAX + 64], meta_path[PATH_MAX + 64];
+  char dir[CCORD_PATH_MAX + 32], path[CCORD_PATH_MAX + 64], meta_path[CCORD_PATH_MAX + 64];
   snprintf(dir, sizeof dir, "%s/plugins", cat->data_dir);
   mkdir_ok(cat->data_dir);
   mkdir_ok(dir);
@@ -600,7 +600,7 @@ static bool parse_catalog_json(ccord_catalog *cat, const char *json, size_t len)
 static void load_catalog_cache(ccord_catalog *cat)
 {
   if (!cat->has_data_dir) return;
-  char path[PATH_MAX + 64], meta_path[PATH_MAX + 64];
+  char path[CCORD_PATH_MAX + 64], meta_path[CCORD_PATH_MAX + 64];
   snprintf(path, sizeof path, "%s/plugins/catalog-cache.json", cat->data_dir);
   size_t len = 0;
   char *raw = read_entire_file(path, CATALOG_MAX_JSON_BYTES, &len);
@@ -767,22 +767,22 @@ static void enforce_revocations(ccord_catalog *cat)
 static bool enqueue_job(ccord_catalog *cat, const worker_job *job)
 {
   if (!cat || !cat->thread_started) return false;
-  pthread_mutex_lock(&cat->mu);
+  ccord_mutex_lock(cat->mu);
   if (cat->job_count >= CATALOG_QUEUE_CAP) {
-    pthread_mutex_unlock(&cat->mu);
+    ccord_mutex_unlock(cat->mu);
     return false;
   }
   size_t tail = (cat->job_head + cat->job_count) % CATALOG_QUEUE_CAP;
   cat->jobs[tail] = *job;
   cat->job_count++;
-  pthread_cond_signal(&cat->cv);
-  pthread_mutex_unlock(&cat->mu);
+  ccord_cond_signal(cat->cv);
+  ccord_mutex_unlock(cat->mu);
   return true;
 }
 
 static void push_result(ccord_catalog *cat, const worker_result *res)
 {
-  pthread_mutex_lock(&cat->mu);
+  ccord_mutex_lock(cat->mu);
   if (cat->res_count < CATALOG_QUEUE_CAP) {
     size_t tail = (cat->res_head + cat->res_count) % CATALOG_QUEUE_CAP;
     cat->results[tail] = *res;
@@ -790,25 +790,25 @@ static void push_result(ccord_catalog *cat, const worker_result *res)
   } else {
     ccord_free(res->body);
   }
-  pthread_mutex_unlock(&cat->mu);
+  ccord_mutex_unlock(cat->mu);
 }
 
-static void *worker_main(void *arg)
+static void worker_main(void *arg)
 {
   ccord_catalog *cat = arg;
   for (;;) {
-    pthread_mutex_lock(&cat->mu);
+    ccord_mutex_lock(cat->mu);
     while (!cat->stop && cat->job_count == 0) {
-      pthread_cond_wait(&cat->cv, &cat->mu);
+      ccord_cond_wait(cat->cv, cat->mu);
     }
     if (cat->stop) {
-      pthread_mutex_unlock(&cat->mu);
+      ccord_mutex_unlock(cat->mu);
       break;
     }
     worker_job job = cat->jobs[cat->job_head];
     cat->job_head = (cat->job_head + 1) % CATALOG_QUEUE_CAP;
     cat->job_count--;
-    pthread_mutex_unlock(&cat->mu);
+    ccord_mutex_unlock(cat->mu);
 
     worker_result res = {0};
     res.kind = job.kind;
@@ -834,10 +834,10 @@ static void *worker_main(void *arg)
                                          res.error, sizeof res.error)) {
         char actual_sha[65];
         if (!ccord_catalog_sha256_file_hex(job.dest_path, actual_sha)) {
-          unlink(job.dest_path);
+          ccord_file_unlink(job.dest_path);
           copy_str(res.error, sizeof res.error, "failed computing SHA-256 of downloaded package");
         } else if (!hex_equal_ci(actual_sha, job.expected_sha256)) {
-          unlink(job.dest_path);
+          ccord_file_unlink(job.dest_path);
           snprintf(res.error, sizeof res.error, "SHA-256 integrity mismatch for %s (download aborted)", job.id);
         } else {
           copy_str(res.sha256, sizeof res.sha256, actual_sha);
@@ -847,7 +847,6 @@ static void *worker_main(void *arg)
     }
     push_result(cat, &res);
   }
-  return nullptr;
 }
 
 // ---------------------------------------------------------------- public API
@@ -855,10 +854,10 @@ static void *worker_main(void *arg)
 static void queue_install_item(ccord_catalog *cat, cat_item *it, bool is_auto)
 {
   if (!cat || !it || it->installing || !cat->has_data_dir) return;
-  char tmp_dir[PATH_MAX + 32];
+  char tmp_dir[CCORD_PATH_MAX + 32];
   snprintf(tmp_dir, sizeof tmp_dir, "%s/plugins/.download_tmp", cat->data_dir);
   mkdir_ok(cat->data_dir);
-  char pdir[PATH_MAX + 32];
+  char pdir[CCORD_PATH_MAX + 32];
   snprintf(pdir, sizeof pdir, "%s/plugins", cat->data_dir);
   mkdir_ok(pdir);
   mkdir_ok(tmp_dir);
@@ -930,10 +929,11 @@ ccord_catalog *ccord_catalog_create(const char *data_dir, ccord_contrib *contrib
   load_installed_meta(cat);
   load_catalog_cache(cat);
 
-  if (pthread_mutex_init(&cat->mu, nullptr) == 0 && pthread_cond_init(&cat->cv, nullptr) == 0) {
-    if (pthread_create(&cat->thread, nullptr, worker_main, cat) == 0) {
-      cat->thread_started = true;
-    }
+  cat->mu = ccord_mutex_create();
+  cat->cv = ccord_cond_create();
+  if (cat->mu && cat->cv) {
+    cat->thread = ccord_thread_create(worker_main, cat);
+    if (cat->thread) cat->thread_started = true;
   }
   if (!cat->http.get) {
     cat->status.offline = true;
@@ -949,19 +949,20 @@ void ccord_catalog_destroy(ccord_catalog *cat)
 {
   if (!cat) return;
   if (cat->thread_started) {
-    pthread_mutex_lock(&cat->mu);
+    ccord_mutex_lock(cat->mu);
     cat->stop = true;
-    pthread_cond_broadcast(&cat->cv);
-    pthread_mutex_unlock(&cat->mu);
-    pthread_join(cat->thread, nullptr);
+    ccord_cond_broadcast(cat->cv);
+    ccord_mutex_unlock(cat->mu);
+    ccord_thread_join(cat->thread);
+    cat->thread = nullptr;
   }
   while (cat->res_count > 0) {
     ccord_free(cat->results[cat->res_head].body);
     cat->res_head = (cat->res_head + 1) % CATALOG_QUEUE_CAP;
     cat->res_count--;
   }
-  pthread_cond_destroy(&cat->cv);
-  pthread_mutex_destroy(&cat->mu);
+  ccord_cond_destroy(cat->cv);
+  ccord_mutex_destroy(cat->mu);
   ccord_free(cat->items);
   ccord_free(cat->revoked);
   ccord_free(cat->meta);
@@ -1085,7 +1086,7 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
     char err_buf[256] = "";
     bool imported = cat->cbs.import_verified_cce &&
                     cat->cbs.import_verified_cce(cat->cbs.ud, res->dest_path, err_buf, sizeof err_buf);
-    unlink(res->dest_path);
+    ccord_file_unlink(res->dest_path);
     if (!imported) {
       snprintf(cat->status.status_msg, sizeof cat->status.status_msg,
                "Install failed for %s: %.160s", res->id, err_buf[0] ? err_buf : "import error");
@@ -1124,14 +1125,14 @@ void ccord_catalog_pump(ccord_catalog *cat, uint64_t now_ms)
   for (;;) {
     worker_result res = {0};
     bool has = false;
-    pthread_mutex_lock(&cat->mu);
+    ccord_mutex_lock(cat->mu);
     if (cat->res_count > 0) {
       res = cat->results[cat->res_head];
       cat->res_head = (cat->res_head + 1) % CATALOG_QUEUE_CAP;
       cat->res_count--;
       has = true;
     }
-    pthread_mutex_unlock(&cat->mu);
+    ccord_mutex_unlock(cat->mu);
     if (!has) break;
     handle_result(cat, &res);
   }

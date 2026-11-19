@@ -99,9 +99,51 @@ static const char *const k_categories[CAT_COUNT] = {"USER SETTINGS", "APP SETTIN
 // M5: device lists come from the platform (SDL) enumeration, never hardcoded names.
 // Entry 0 of every selector is "Default"; entries 1..N are the enumerated devices.
 #define VOICE_DEV_MAX 16
-static const char *const k_encoders[5] = {"NVENC", "VAAPI", "AMF", "Vulkan", "OpenH264"};
+#if defined(_WIN32)
+#define STREAM_ENC_COUNT 5
+static const char *const k_encoders[STREAM_ENC_COUNT] = {"NVENC", "AMF", "Quick Sync", "Media Found.", "OpenH264"};
+static const int k_encoder_vals[STREAM_ENC_COUNT] = {
+  (int)CCORD_STREAM_ENCODER_NVENC, (int)CCORD_STREAM_ENCODER_AMF, (int)CCORD_STREAM_ENCODER_QSV,
+  (int)CCORD_STREAM_ENCODER_MF, (int)CCORD_STREAM_ENCODER_OPENH264,
+};
+#define STREAM_FW_COUNT 3
+static const char *const k_frameworks[STREAM_FW_COUNT] = {"Win. Capture", "DXGI Dup", "GDI"};
+static const int k_framework_vals[STREAM_FW_COUNT] = {
+  (int)CCORD_STREAM_FRAMEWORK_WGC, (int)CCORD_STREAM_FRAMEWORK_DXGI, (int)CCORD_STREAM_FRAMEWORK_GDI,
+};
+#elif defined(__APPLE__)
+#define STREAM_ENC_COUNT 3
+static const char *const k_encoders[STREAM_ENC_COUNT] = {"VideoToolbox", "x264", "OpenH264"};
+static const int k_encoder_vals[STREAM_ENC_COUNT] = {
+  (int)CCORD_STREAM_ENCODER_VIDEOTOOLBOX, (int)CCORD_STREAM_ENCODER_X264, (int)CCORD_STREAM_ENCODER_OPENH264,
+};
+#define STREAM_FW_COUNT 2
+static const char *const k_frameworks[STREAM_FW_COUNT] = {"ScreenCaptureKit", "CoreGraphics"};
+static const int k_framework_vals[STREAM_FW_COUNT] = {
+  (int)CCORD_STREAM_FRAMEWORK_SCK, (int)CCORD_STREAM_FRAMEWORK_CG,
+};
+#else
+#define STREAM_ENC_COUNT 5
+static const char *const k_encoders[STREAM_ENC_COUNT] = {"NVENC", "VAAPI", "AMF", "Vulkan", "OpenH264"};
+static const int k_encoder_vals[STREAM_ENC_COUNT] = {
+  (int)CCORD_STREAM_ENCODER_NVENC, (int)CCORD_STREAM_ENCODER_VAAPI, (int)CCORD_STREAM_ENCODER_AMF,
+  (int)CCORD_STREAM_ENCODER_VULKAN, (int)CCORD_STREAM_ENCODER_OPENH264,
+};
+#define STREAM_FW_COUNT 5
+static const char *const k_frameworks[STREAM_FW_COUNT] = {"PipeWire", "DMA-BUF", "NVFBC", "Vulkan", "X11"};
+static const int k_framework_vals[STREAM_FW_COUNT] = {
+  (int)CCORD_STREAM_FRAMEWORK_PIPEWIRE, (int)CCORD_STREAM_FRAMEWORK_DMABUF, (int)CCORD_STREAM_FRAMEWORK_NVFBC,
+  (int)CCORD_STREAM_FRAMEWORK_VULKAN, (int)CCORD_STREAM_FRAMEWORK_X11,
+};
+#endif
+static int find_val_index(const int *vals, int count, int value)
+{
+  for (int i = 0; i < count; i++) {
+    if (vals[i] == value) return i;
+  }
+  return -1;
+}
 static const char *const k_codecs[3] = {"H.264", "HEVC", "AV1"};
-static const char *const k_frameworks[5] = {"PipeWire", "DMA-BUF", "NVFBC", "Vulkan", "X11"};
 static const char *const k_resolutions[4] = {"720p", "1080p", "1440p", "Source"};
 static const char *const k_fps[3] = {"15", "30", "60"};
 static const char *const k_display_mode[2] = {"Compact", "Cozy"};
@@ -292,8 +334,16 @@ static void keybind_name(int scancode, uint8_t mods, char *out, size_t cap)
   snprintf(out, cap, "%s%s%s%s%s",
            (mods & CCORD_MOD_CTRL) ? "Ctrl + " : "",
            (mods & CCORD_MOD_SHIFT) ? "Shift + " : "",
+#if defined(__APPLE__)
+           (mods & CCORD_MOD_ALT) ? "Option + " : "",
+           (mods & CCORD_MOD_SUPER) ? "Cmd + " : "", key);
+#elif defined(_WIN32)
+           (mods & CCORD_MOD_ALT) ? "Alt + " : "",
+           (mods & CCORD_MOD_SUPER) ? "Win + " : "", key);
+#else
            (mods & CCORD_MOD_ALT) ? "Alt + " : "",
            (mods & CCORD_MOD_SUPER) ? "Super + " : "", key);
+#endif
 }
 
 bool ui_keybind_match(const ccord_ui *ui, int which, const ccord_input_event *ev)
@@ -1109,7 +1159,8 @@ static void settings_save(ccord_ui *ui)
   char path[PATH_MAX];
   if (!settings_path(path, sizeof path)) return;
   const char *dir = ccord_paths_data_dir();
-  if (dir && dir[0] && mkdir(dir, 0700) != 0 && errno != EEXIST) return;
+  ccord_error derr;
+  if (dir && dir[0] && ccord_mkdir_p(dir, 0700, &derr) != CCORD_OK) return;
   FILE *f = fopen(path, "wb");
   if (!f) return;
   fprintf(f, "[ui]\n");
@@ -1626,18 +1677,18 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         ui->dirty = true;
         return true;
       }
-      for (int i = 0; i < 5; i++) {
-        if (ui_in_rect(x, y, chips_rect(g, 0, i, 5))) {
-          ui->settings_encoder = i;
-          ui->gl_encoder = i;   // Go Live starts from these defaults
+      for (int i = 0; i < STREAM_ENC_COUNT; i++) {
+        if (ui_in_rect(x, y, chips_rect(g, 0, i, STREAM_ENC_COUNT))) {
+          ui->settings_encoder = k_encoder_vals[i];
+          ui->gl_encoder = k_encoder_vals[i];   // Go Live starts from these defaults
           ui->dirty = true;
           return true;
         }
       }
-      for (int i = 0; i < 5; i++) {
-        if (ui_in_rect(x, y, chips_rect(g, 1, i, 5))) {
-          ui->settings_framework = i;
-          ui->gl_framework = i;
+      for (int i = 0; i < STREAM_FW_COUNT; i++) {
+        if (ui_in_rect(x, y, chips_rect(g, 1, i, STREAM_FW_COUNT))) {
+          ui->settings_framework = k_framework_vals[i];
+          ui->gl_framework = k_framework_vals[i];
           ui->dirty = true;
           return true;
         }
@@ -2660,10 +2711,10 @@ static void draw_streaming(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 {
   draw_row_label(ui, r, g, 0, "GPU / DISCORD ENCODER");
   draw_auto_pill(ui, r, g, 0, ui->settings_encoder == (int)CCORD_STREAM_ENCODER_AUTO);
-  draw_chip_row(ui, r, g, 0, 5, k_encoders, ui->settings_encoder);
+  draw_chip_row(ui, r, g, 0, STREAM_ENC_COUNT, k_encoders, find_val_index(k_encoder_vals, STREAM_ENC_COUNT, ui->settings_encoder));
   draw_row_label(ui, r, g, 1, "CAPTURE FRAMEWORK");
   draw_auto_pill(ui, r, g, 1, ui->settings_framework == (int)CCORD_STREAM_FRAMEWORK_AUTO);
-  draw_chip_row(ui, r, g, 1, 5, k_frameworks, ui->settings_framework);
+  draw_chip_row(ui, r, g, 1, STREAM_FW_COUNT, k_frameworks, find_val_index(k_framework_vals, STREAM_FW_COUNT, ui->settings_framework));
   draw_row_label(ui, r, g, 2, "RESOLUTION");
   draw_chip_row(ui, r, g, 2, 4, k_resolutions, ui->settings_resolution);
   draw_row_label(ui, r, g, 3, "FRAMERATE");
@@ -3238,10 +3289,18 @@ static void draw_account(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
   }
 
   ccord_rect tbox = account_token_box_rect(g);
-  ccord_text_draw(r, "STANDALONE DISCORD TOKEN ($XDG_CONFIG_HOME/ccord/token)", 55,
-                  tbox.x, tbox.y - 15.0f, &ls, 0.0f);
-  draw_input_field(ui, r, tbox, &ui->account_token_edit, ui->account_focus_field == 1, true,
-                   "Paste Discord user token or press Ctrl+V...");
+#if defined(_WIN32)
+  const char *tok_hdr = "STANDALONE DISCORD TOKEN (%APPDATA%\\C-Cord\\token)";
+  const char *tok_ph = "Paste Discord user token or press Ctrl+V...";
+#elif defined(__APPLE__)
+  const char *tok_hdr = "STANDALONE DISCORD TOKEN (~/Library/Application Support/C-Cord/token)";
+  const char *tok_ph = "Paste Discord user token or press Cmd+V...";
+#else
+  const char *tok_hdr = "STANDALONE DISCORD TOKEN ($XDG_CONFIG_HOME/ccord/token)";
+  const char *tok_ph = "Paste Discord user token or press Ctrl+V...";
+#endif
+  ccord_text_draw(r, tok_hdr, strlen(tok_hdr), tbox.x, tbox.y - 15.0f, &ls, 0.0f);
+  draw_input_field(ui, r, tbox, &ui->account_token_edit, ui->account_focus_field == 1, true, tok_ph);
   draw_button(ui, r, account_token_paste_rect(g), "Paste", false);
   draw_button(ui, r, account_token_save_rect(g), "Save & Connect", true);
   draw_button(ui, r, account_token_clear_rect(g), "Sign Out", false);
@@ -3391,8 +3450,16 @@ static void draw_login_screen(ccord_ui *ui, ccord_renderer *r)
                      "Paste Discord user token or press Ctrl+V...");
     draw_button(ui, r, login_token_paste_rect(&card), "Paste from Clipboard (Ctrl+V)", false);
     draw_button(ui, r, login_token_save_rect(&card), connecting ? "Connecting to Discord Gateway..." : "Connect to Discord", true);
+#if defined(_WIN32)
+    const char *h1 = "Token is saved locally in your Windows user profile at:";
+    const char *h2 = "%APPDATA%\\C-Cord\\token";
+#elif defined(__APPLE__)
+    const char *h1 = "Token is saved locally with 0600 permissions at:";
+    const char *h2 = "~/Library/Application Support/C-Cord/token";
+#else
     const char *h1 = "Token is saved locally with 0600 permissions at:";
     const char *h2 = "$XDG_CONFIG_HOME/ccord/token";
+#endif
     ccord_text_draw_ellipsis(r, h1, strlen(h1), cx, card.y + 344.0f, cw, &hs);
     ccord_text_draw_ellipsis(r, h2, strlen(h2), cx, card.y + 362.0f, cw, &ls);
   } else {

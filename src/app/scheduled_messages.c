@@ -1,23 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
-#define _POSIX_C_SOURCE 200809L
 #include "scheduled_messages.h"
 
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/arena.h>
+#include <ccord/core/atomic_file.h>
 #include <ccord/core/buf.h>
 #include <ccord/core/clock.h>
 #include <ccord/core/json.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 #include <ccord/core/paths.h>
 #include <ccord/core/utf8.h>
 #include <ccord/model/model.h>
@@ -51,7 +49,7 @@ static struct {
   uint64_t next_id;
   bool loaded;
   ccord_id account;
-  char path[PATH_MAX];
+  char path[CCORD_PATH_MAX];
   int64_t (*clock)(void *ud);
   void *clock_ud;
 } g;
@@ -91,29 +89,8 @@ static void clear_items(void)
 // mkdir -p, every created level 0700.
 static bool make_dirs(const char *dir)
 {
-  char tmp[PATH_MAX];
-  if (snprintf(tmp, sizeof tmp, "%s", dir) >= (int)sizeof tmp) return false;
-  for (char *p = tmp + 1; *p; p++) {
-    if (*p != '/') continue;
-    *p = '\0';
-    if (mkdir(tmp, 0700) != 0 && errno != EEXIST) return false;
-    *p = '/';
-  }
-  return mkdir(tmp, 0700) == 0 || errno == EEXIST;
-}
-
-static bool write_all(int fd, const char *p, size_t n)
-{
-  while (n > 0) {
-    ssize_t w = write(fd, p, n);
-    if (w < 0) {
-      if (errno == EINTR) continue;
-      return false;
-    }
-    p += w;
-    n -= (size_t)w;
-  }
-  return true;
+  ccord_error err = {0};
+  return ccord_mkdir_p(dir, 0700, &err) == CCORD_OK;
 }
 
 // Serializes the queue and replaces the file atomically (write temp 0600, fsync, rename).
@@ -154,19 +131,9 @@ static bool save(void)
   ccord_jw_end_array(&w);
   ccord_jw_end_object(&w);
   bool ok = ccord_jw_ok(&w);
-  char tmp[PATH_MAX + 8];
-  if (ok && snprintf(tmp, sizeof tmp, "%s.tmp", g.path) >= (int)sizeof tmp) ok = false;
   if (ok) {
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0) {
-      ok = false;
-    } else {
-      (void)fchmod(fd, 0600);
-      ok = write_all(fd, b.data, b.len) && fsync(fd) == 0;
-      if (close(fd) != 0) ok = false;
-      if (ok) ok = rename(tmp, g.path) == 0;
-      if (!ok) (void)unlink(tmp);
-    }
+    ccord_error werr = {0};
+    ok = ccord_file_write_atomic(g.path, b.data, b.len, 0600, true, &werr) == CCORD_OK;
   }
   ccord_buf_free(&b);
   if (!ok) CCORD_LOG_W("scheduled: cannot write %s", g.path);
@@ -216,8 +183,8 @@ static void load_file(int64_t now_ms)
   const ccord_json *arr = root ? ccord_json_get(root, "entries") : nullptr;
   if (!arr || ccord_json_type_of(arr) != CCORD_JSON_ARRAY) {
     // Never overwrite what cannot be read: keep it aside so the user's text is not lost.
-    char bad[PATH_MAX + 16];
-    if (snprintf(bad, sizeof bad, "%s.corrupt", g.path) < (int)sizeof bad) (void)rename(g.path, bad);
+    char bad[CCORD_PATH_MAX + 16];
+    if (snprintf(bad, sizeof bad, "%s.corrupt", g.path) < (int)sizeof bad) (void)ccord_file_rename_replace(g.path, bad);
     CCORD_LOG_W("scheduled: unreadable queue moved to %s", bad);
   } else {
     int64_t next = 1;
@@ -285,7 +252,7 @@ static bool ensure_loaded(ccord_session *session, int64_t now_ms)
   g.path[0] = '\0';
   g.account = self;
   const char *base = ccord_paths_data_dir();
-  char dir[PATH_MAX];
+  char dir[CCORD_PATH_MAX];
   if (!base || !base[0] || snprintf(dir, sizeof dir, "%s/accounts/%llu", base, (unsigned long long)self) >= (int)sizeof dir ||
       !make_dirs(dir) || snprintf(g.path, sizeof g.path, "%s/" SM_FILE, dir) >= (int)sizeof g.path) {
     g.path[0] = '\0';
@@ -327,6 +294,20 @@ ccord_status ccord_scheduled_messages_add(ccord_id channel_id, const char *utf8,
   return ccord_scheduled_messages_add_files(channel_id, utf8, len, due_unix_ms, now_unix_ms, nullptr, nullptr, 0, out_id, err);
 }
 
+static bool is_abs_disk_path(const char *p)
+{
+  if (!p || !p[0]) return false;
+  if (p[0] == '/') return true;
+#if CCORD_OS_WINDOWS
+  if ((p[0] == '\\' && p[1] == '\\') ||
+      (((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')) && p[1] == ':' &&
+       (p[2] == '\\' || p[2] == '/'))) {
+    return true;
+  }
+#endif
+  return false;
+}
+
 ccord_status ccord_scheduled_messages_add_files(ccord_id channel_id, const char *utf8, size_t len, int64_t due_unix_ms,
                                                 int64_t now_unix_ms, const char *const *paths, const bool *spoilers,
                                                 size_t npaths, uint64_t *out_id, ccord_error *err)
@@ -334,7 +315,7 @@ ccord_status ccord_scheduled_messages_add_files(ccord_id channel_id, const char 
   ccord_error_clear(err);
   if (npaths > CCORD_RICH_MAX_ATTACHMENTS) return ccord_error_set(err, CCORD_ERR_RANGE, "Too many attachments.");
   for (size_t k = 0; k < npaths; k++) {
-    if (!paths || !paths[k] || paths[k][0] != '/') return ccord_error_set(err, CCORD_ERR_INVALID, "Attachments must be files on disk.");
+    if (!paths || !is_abs_disk_path(paths[k])) return ccord_error_set(err, CCORD_ERR_INVALID, "Attachments must be files on disk.");
   }
   if (!utf8 || channel_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "Pick a channel first.");
   if (!ensure_loaded(g.session, now_unix_ms)) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "Not signed in yet.");
@@ -455,23 +436,27 @@ static ccord_status send_with_files(ccord_session *session, const sm_entry *e, c
   for (size_t k = 0; k < n && st == CCORD_OK; k++) {
     const char *path = e->paths[k];
     const char *base = strrchr(path, '/');
+#if CCORD_OS_WINDOWS
+    const char *bs = strrchr(path, '\\');
+    if (bs && (!base || bs > base)) base = bs;
+#endif
     base = base ? base + 1 : path;
-    struct stat sb;
+    uint64_t fsz = 0;
     FILE *f = nullptr;
-    if (stat(path, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+    if (!ccord_path_is_file(path) || !ccord_file_size(path, &fsz)) {
       st = ccord_error_set(err, CCORD_ERR_NOT_FOUND, "Attachment %.80s is missing.", base);
-    } else if (sb.st_size <= 0 || sb.st_size > (off_t)(25u * 1024u * 1024u)) {
+    } else if (fsz == 0 || fsz > (uint64_t)(25u * 1024u * 1024u)) {
       st = ccord_error_set(err, CCORD_ERR_RANGE, "Attachment %.80s must be between 1 B and 25 MB.", base);
     } else if (!(f = fopen(path, "rb"))) {
       st = ccord_error_set(err, CCORD_ERR_IO, "Attachment %.80s cannot be read.", base);
     } else {
-      data[k] = ccord_malloc((size_t)sb.st_size);
+      data[k] = ccord_malloc((size_t)fsz);
       if (!data[k]) {
         st = ccord_error_set(err, CCORD_ERR_NOMEM, "Out of memory.");
-      } else if (fread(data[k], 1, (size_t)sb.st_size, f) != (size_t)sb.st_size) {
+      } else if (fread(data[k], 1, (size_t)fsz, f) != (size_t)fsz) {
         st = ccord_error_set(err, CCORD_ERR_IO, "Attachment %.80s cannot be read.", base);
       }
-      up[k] = (ccord_upload_file){.filename = base, .data = data[k], .size = (size_t)sb.st_size, .spoiler = e->spoilers[k]};
+      up[k] = (ccord_upload_file){.filename = base, .data = data[k], .size = (size_t)fsz, .spoiler = e->spoilers[k]};
     }
     if (f) fclose(f);
   }

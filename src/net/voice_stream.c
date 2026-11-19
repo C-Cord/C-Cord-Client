@@ -8,16 +8,13 @@
 #define _POSIX_C_SOURCE 200809L
 #include <ccord/net/live_transport.h>
 
-#include <pthread.h>
-#include <fcntl.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include "voice_internal.h"
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/json.h>
+#include <ccord/core/os.h>
 #include <ccord/net/voice_stream.h>
 
 // ---- Go Live / vstream wrapper (voice_stream.h) ----
@@ -37,7 +34,7 @@ typedef struct vstream_audio_pkt {
 struct ccord_vstream {
   ccord_vstream_params params;
   ccord_voice_gateway *vg;
-  pthread_mutex_t mtx;
+  ccord_mutex *mtx;
   ccord_vstream_state reported_state;
   bool announced;
   bool identify_sent;
@@ -53,7 +50,7 @@ struct ccord_vstream {
 };
 
 static ccord_vstream *g_vstreams = nullptr;
-static pthread_mutex_t g_vstreams_mtx = PTHREAD_MUTEX_INITIALIZER;
+static ccord_spin_lock g_vstreams_mtx = CCORD_SPIN_LOCK_INIT;
 
 // Gateway raw-audio tap (voice_gateway.c): queue one decrypted Opus packet in RTP seq order.
 static void vstream_audio_tap(void *ud, uint32_t ssrc, uint16_t seq, uint32_t ts48k, const uint8_t *opus,
@@ -151,29 +148,28 @@ static void vstream_maybe_inject_udp(ccord_vstream *s)
 {
   if (s->params.udp_fd <= 0 || s->udp_injected) return;
   ccord_voice_gateway *g = s->vg;
-  pthread_mutex_lock(&g->mtx);
+  ccord_mutex_lock(g->mtx);
   if ((g->state == CCORD_VOICE_READY || g->state == CCORD_VOICE_ESTABLISHED) && g->peer_valid) {
-    if (g->udp_fd >= 0 && g->udp_fd != s->params.udp_fd) close(g->udp_fd);
+    if (g->udp_fd >= 0 && g->udp_fd != s->params.udp_fd) ccord_sock_close((ccord_socket_t)g->udp_fd);
     g->udp_fd = s->params.udp_fd;
     // The pump's recvfrom loop is non-blocking; an injected socket may not be.
-    int flags = fcntl(g->udp_fd, F_GETFL, 0);
-    if (flags >= 0) (void)fcntl(g->udp_fd, F_SETFL, flags | O_NONBLOCK);
+    (void)ccord_sock_set_nonblock((ccord_socket_t)g->udp_fd);
     int big_buf = 4 * 1024 * 1024;
     int fallback_buf = 1024 * 1024;
-    if (setsockopt(g->udp_fd, SOL_SOCKET, SO_RCVBUF, &big_buf, sizeof big_buf) != 0) {
-      (void)setsockopt(g->udp_fd, SOL_SOCKET, SO_RCVBUF, &fallback_buf, sizeof fallback_buf);
+    if (setsockopt(g->udp_fd, SOL_SOCKET, SO_RCVBUF, (const char *)&big_buf, sizeof big_buf) != 0) {
+      (void)setsockopt(g->udp_fd, SOL_SOCKET, SO_RCVBUF, (const char *)&fallback_buf, sizeof fallback_buf);
     }
-    if (setsockopt(g->udp_fd, SOL_SOCKET, SO_SNDBUF, &big_buf, sizeof big_buf) != 0) {
-      (void)setsockopt(g->udp_fd, SOL_SOCKET, SO_SNDBUF, &fallback_buf, sizeof fallback_buf);
+    if (setsockopt(g->udp_fd, SOL_SOCKET, SO_SNDBUF, (const char *)&big_buf, sizeof big_buf) != 0) {
+      (void)setsockopt(g->udp_fd, SOL_SOCKET, SO_SNDBUF, (const char *)&fallback_buf, sizeof fallback_buf);
     }
     s->udp_injected = true;
     if (g->ssrc != 0) {
       uint8_t req[CCORD_VOICE_IP_DISCOVERY_SIZE];
       ccord_voice_ip_discovery_build(g->ssrc, req);
-      (void)sendto(g->udp_fd, req, sizeof req, 0, (const struct sockaddr *)&g->peer_addr, sizeof g->peer_addr);
+      (void)sendto(g->udp_fd, (const char *)req, sizeof req, 0, (const struct sockaddr *)&g->peer_addr, sizeof g->peer_addr);
     }
   }
-  pthread_mutex_unlock(&g->mtx);
+  ccord_mutex_unlock(g->mtx);
 }
 
 ccord_vstream *ccord_vstream_open(const ccord_vstream_params *p, ccord_error *err)
@@ -190,7 +186,7 @@ ccord_vstream *ccord_vstream_open(const ccord_vstream_params *p, ccord_error *er
     return nullptr;
   }
   s->params = *p;
-  (void)pthread_mutex_init(&s->mtx, nullptr);
+  s->mtx = ccord_mutex_create();
   ccord_id group_id = p->dave_group_id ? p->dave_group_id : (p->server_id > 1 ? p->server_id - 1 : p->server_id);
   ccord_voice_gateway_config cfg = {
     .server_id = p->server_id,
@@ -206,13 +202,13 @@ ccord_vstream *ccord_vstream_open(const ccord_vstream_params *p, ccord_error *er
   s->vg = ccord_voice_gateway_create(&cfg, err);
   if (!s->vg || ccord_voice_gateway_start(s->vg, err) != CCORD_OK) {
     ccord_voice_gateway_destroy(s->vg);
-    (void)pthread_mutex_destroy(&s->mtx);
+    ccord_mutex_destroy(s->mtx);
     ccord_free(s);
     return nullptr;
   }
   // Suppress the stock identify (the wrapper sends the Go Live one after HELLO) and tap stream
   // audio: a vstream is video-only, its Opus packets must not enter the microphone PCM pipeline.
-  pthread_mutex_lock(&s->vg->mtx);
+  ccord_mutex_lock(s->vg->mtx);
   s->vg->identified = true;
   s->vg->raw_audio_cb = vstream_audio_tap;
   s->vg->raw_audio_ud = s;
@@ -225,12 +221,12 @@ ccord_vstream *ccord_vstream_open(const ccord_vstream_params *p, ccord_error *er
     .payload_type = p->video_payload_type ? p->video_payload_type : CCORD_VSTREAM_H264_PT_DEFAULT,
     .rtx_payload_type = p->rtx_payload_type ? p->rtx_payload_type : CCORD_VSTREAM_H264_RTX_PT_DEFAULT,
   };
-  pthread_mutex_unlock(&s->vg->mtx);
+  ccord_mutex_unlock(s->vg->mtx);
   s->reported_state = CCORD_VSTREAM_CONNECTING;
-  pthread_mutex_lock(&g_vstreams_mtx);
+  ccord_spin_lock_acquire(&g_vstreams_mtx);
   s->next = g_vstreams;
   g_vstreams = s;
-  pthread_mutex_unlock(&g_vstreams_mtx);
+  ccord_spin_lock_release(&g_vstreams_mtx);
   return s;
 }
 
@@ -244,10 +240,10 @@ ccord_status ccord_vstream_send_frame(ccord_vstream *s, const uint8_t *annexb, s
 {
   (void)keyframe;   // the packetizer detects IDR/SPS NALs itself; DAVE wraps the whole access unit
   if (!s || !s->vg || !annexb || len == 0) return CCORD_ERR_INVALID;
-  (void)pthread_mutex_lock(&s->mtx);
+  ccord_mutex_lock(s->mtx);
   ccord_error err;
   ccord_status st = ccord_voice_gateway_send_h264(s->vg, annexb, len, ts90k, &err);
-  (void)pthread_mutex_unlock(&s->mtx);
+  ccord_mutex_unlock(s->mtx);
   return st;
 }
 
@@ -259,10 +255,10 @@ ccord_status ccord_vstream_send_audio(ccord_vstream *s, const uint8_t *opus, siz
     return ccord_error_set(err, CCORD_ERR_INVALID, "vstream: invalid audio packet");
   }
   if (len > CCORD_JITTER_MAX_PACKET) return ccord_error_set(err, CCORD_ERR_RANGE, "vstream: audio packet too large");
-  (void)pthread_mutex_lock(&s->mtx);
+  ccord_mutex_lock(s->mtx);
   ccord_voice_gateway *g = s->vg;
   ccord_status st;
-  pthread_mutex_lock(&g->mtx);
+  ccord_mutex_lock(g->mtx);
   if (g->state != CCORD_VOICE_ESTABLISHED || g->secret_len != CCORD_VOICE_MAX_SECRET || g->ssrc == 0) {
     st = ccord_error_set(err, CCORD_ERR_INVALID, "vstream: session not established");
   } else {
@@ -317,17 +313,17 @@ ccord_status ccord_vstream_send_audio(ccord_vstream *s, const uint8_t *opus, siz
       }
     }
   }
-  pthread_mutex_unlock(&g->mtx);
-  (void)pthread_mutex_unlock(&s->mtx);
+  ccord_mutex_unlock(g->mtx);
+  ccord_mutex_unlock(s->mtx);
   return st;
 }
 
 void ccord_vstream_network_event(ccord_vstream *s)
 {
   if (!s) return;
-  (void)pthread_mutex_lock(&s->mtx);
+  ccord_mutex_lock(s->mtx);
   ccord_voice_gateway_network_event(s->vg);
-  (void)pthread_mutex_unlock(&s->mtx);
+  ccord_mutex_unlock(s->mtx);
 }
 
 ccord_vstream_state ccord_vstream_state_of(const ccord_vstream *s)
@@ -342,9 +338,9 @@ ccord_vstream_state ccord_vstream_state_of(const ccord_vstream *s)
 uint32_t ccord_vstream_video_ssrc(const ccord_vstream *s)
 {
   if (!s || !s->vg) return 0;
-  pthread_mutex_lock(&s->vg->mtx);
+  ccord_mutex_lock(s->vg->mtx);
   uint32_t ssrc = s->vg->video_ssrc;
-  pthread_mutex_unlock(&s->vg->mtx);
+  ccord_mutex_unlock(s->vg->mtx);
   return ssrc;
 }
 
@@ -353,25 +349,25 @@ uint32_t ccord_vstream_video_ssrc(const ccord_vstream *s)
 static void vstream_deliver_audio(ccord_vstream *s)
 {
   ccord_voice_gateway *g = s->vg;
-  (void)pthread_mutex_unlock(&s->mtx);
+  ccord_mutex_unlock(s->mtx);
   for (;;) {
     vstream_audio_pkt pkt;
     ccord_id uid = CCORD_ID_NONE;
-    pthread_mutex_lock(&g->mtx);
+    ccord_mutex_lock(g->mtx);
     if (s->audio_count == 0) {
-      pthread_mutex_unlock(&g->mtx);
+      ccord_mutex_unlock(g->mtx);
       break;
     }
     pkt = s->audio_q[s->audio_head];
     s->audio_head = (s->audio_head + 1u) % VSTREAM_AUDIO_QUEUE;
     s->audio_count--;
     uid = ccord_ssrc_map_user(&g->ssrc_map, pkt.ssrc);
-    pthread_mutex_unlock(&g->mtx);
+    ccord_mutex_unlock(g->mtx);
     if (s->params.on_audio) {
       s->params.on_audio(s->params.ud, pkt.ssrc, uid, pkt.data, pkt.len, pkt.ts48k);
     }
   }
-  (void)pthread_mutex_lock(&s->mtx);
+  ccord_mutex_lock(s->mtx);
 }
 
 static void vstream_send_sink_wants(ccord_vstream *s)
@@ -380,7 +376,7 @@ static void vstream_send_sink_wants(ccord_vstream *s)
   uint32_t ssrcs[VG_STREAM_SSRC_MAX + 1u];
   size_t nssrcs = 0;
   uint32_t primary = 0;
-  pthread_mutex_lock(&g->mtx);
+  ccord_mutex_lock(g->mtx);
   primary = g->remote_video_ssrc;
   if (primary != 0) ssrcs[nssrcs++] = primary;
   for (size_t i = 0; i < g->remote_stream_ssrc_count && nssrcs < sizeof ssrcs / sizeof ssrcs[0]; i++) {
@@ -388,7 +384,7 @@ static void vstream_send_sink_wants(ccord_vstream *s)
     if (extra == 0 || extra == primary) continue;
     ssrcs[nssrcs++] = extra;
   }
-  pthread_mutex_unlock(&g->mtx);
+  ccord_mutex_unlock(g->mtx);
 
   ccord_buf b;
   ccord_buf_init(&b, 256);
@@ -422,7 +418,7 @@ void ccord_vstream_register_peers(ccord_vstream *s, ccord_id owner_id, const cco
 {
   if (!s || !s->vg) return;
   ccord_voice_gateway *g = s->vg;
-  pthread_mutex_lock(&g->mtx);
+  ccord_mutex_lock(g->mtx);
   if (owner_id != CCORD_ID_NONE && owner_id != g->user_id) {
     g->default_remote_user = owner_id;
     if (g->remote_video_user == CCORD_ID_NONE) g->remote_video_user = owner_id;
@@ -431,7 +427,7 @@ void ccord_vstream_register_peers(ccord_vstream *s, ccord_id owner_id, const cco
   if (g->dave && peer_ids && count > 0) {
     ccord_dave_on_clients_connect(g->dave, peer_ids, count);
   }
-  pthread_mutex_unlock(&g->mtx);
+  ccord_mutex_unlock(g->mtx);
 }
 
 size_t ccord_vstream_pop_rx_audio(ccord_vstream *s, uint8_t *opus_out, size_t cap)
@@ -439,7 +435,7 @@ size_t ccord_vstream_pop_rx_audio(ccord_vstream *s, uint8_t *opus_out, size_t ca
   if (!s || !s->vg || !opus_out || cap == 0) return 0;
   ccord_voice_gateway *g = s->vg;
   size_t len = 0;
-  pthread_mutex_lock(&g->mtx);
+  ccord_mutex_lock(g->mtx);
   vg_pump_udp_established(g);
   if (s->audio_count > 0) {
     const vstream_audio_pkt *pkt = &s->audio_q[s->audio_head];
@@ -450,13 +446,13 @@ size_t ccord_vstream_pop_rx_audio(ccord_vstream *s, uint8_t *opus_out, size_t ca
     s->audio_head = (s->audio_head + 1u) % VSTREAM_AUDIO_QUEUE;
     s->audio_count--;
   }
-  pthread_mutex_unlock(&g->mtx);
+  ccord_mutex_unlock(g->mtx);
   return len;
 }
 
 void ccord_vstream_pump_all(void)
 {
-  pthread_mutex_lock(&g_vstreams_mtx);
+  ccord_spin_lock_acquire(&g_vstreams_mtx);
   size_t count = 0;
   for (ccord_vstream *s = g_vstreams; s; s = s->next) count++;
   ccord_vstream **list = count > 0 ? (ccord_vstream **)ccord_malloc(count * sizeof(*list)) : NULL;
@@ -465,11 +461,11 @@ void ccord_vstream_pump_all(void)
     s->pump_refs++;
     list[idx++] = s;
   }
-  pthread_mutex_unlock(&g_vstreams_mtx);
+  ccord_spin_lock_release(&g_vstreams_mtx);
 
   for (size_t i = 0; i < count; i++) {
     ccord_vstream *s = list[i];
-    (void)pthread_mutex_lock(&s->mtx);
+    ccord_mutex_lock(s->mtx);
     ccord_voice_event ev;
     while (ccord_voice_gateway_poll(s->vg, &ev)) {
     }
@@ -491,57 +487,57 @@ void ccord_vstream_pump_all(void)
       }
       (void)ccord_voice_gateway_consume_keyframe_request(s->vg);
       if (s->params.on_keyframe_request) {
-        (void)pthread_mutex_unlock(&s->mtx);
+        ccord_mutex_unlock(s->mtx);
         s->params.on_keyframe_request(s->params.ud);
-        (void)pthread_mutex_lock(&s->mtx);
+        ccord_mutex_lock(s->mtx);
       }
     } else if (cur == CCORD_VSTREAM_READY) {
       if (!s->params.sender) {
-        pthread_mutex_lock(&s->vg->mtx);
+        ccord_mutex_lock(s->vg->mtx);
         uint32_t cur_ssrc = s->vg->remote_video_ssrc;
-        pthread_mutex_unlock(&s->vg->mtx);
+        ccord_mutex_unlock(s->vg->mtx);
         if (cur_ssrc != 0 && cur_ssrc != s->last_wants_ssrc) {
           vstream_send_sink_wants(s);
         }
       }
       if (ccord_voice_gateway_consume_keyframe_request(s->vg) && s->params.on_keyframe_request) {
-        (void)pthread_mutex_unlock(&s->mtx);
+        ccord_mutex_unlock(s->mtx);
         s->params.on_keyframe_request(s->params.ud);
-        (void)pthread_mutex_lock(&s->mtx);
+        ccord_mutex_lock(s->mtx);
       }
     }
     const uint8_t *au = nullptr;
     size_t au_len = 0;
     bool kf = false;
     while (ccord_voice_gateway_poll_video(s->vg, &au, &au_len, &kf)) {
-      pthread_mutex_lock(&s->vg->mtx);
+      ccord_mutex_lock(s->vg->mtx);
       uint32_t ssrc = s->vg->rx_video_ssrc;
       uint32_t ts = s->vg->rx_video_ts90k;
       ccord_id uid = ccord_ssrc_map_user(&s->vg->ssrc_map, ssrc);
       if (uid == CCORD_ID_NONE) {
         uid = s->vg->remote_video_user != CCORD_ID_NONE ? s->vg->remote_video_user : s->vg->default_remote_user;
       }
-      pthread_mutex_unlock(&s->vg->mtx);
-      (void)pthread_mutex_unlock(&s->mtx);
+      ccord_mutex_unlock(s->vg->mtx);
+      ccord_mutex_unlock(s->mtx);
       if (s->params.on_frame) s->params.on_frame(s->params.ud, ssrc, uid, au, au_len, kf, ts);
-      (void)pthread_mutex_lock(&s->mtx);
+      ccord_mutex_lock(s->mtx);
     }
     vstream_deliver_audio(s);
     bool state_changed = (cur != s->reported_state);
     s->reported_state = cur;
-    (void)pthread_mutex_unlock(&s->mtx);
+    ccord_mutex_unlock(s->mtx);
     if (state_changed && s->params.on_state) {
       s->params.on_state(s->params.ud, cur, cur == CCORD_VSTREAM_CLOSED ? "closed" : "ok");
     }
 
-    pthread_mutex_lock(&g_vstreams_mtx);
+    ccord_spin_lock_acquire(&g_vstreams_mtx);
     s->pump_refs--;
     if (s->pump_refs == 0 && s->closed_pending) {
       ccord_voice_gateway_destroy(s->vg);
-      (void)pthread_mutex_destroy(&s->mtx);
+      ccord_mutex_destroy(s->mtx);
       ccord_free(s);
     }
-    pthread_mutex_unlock(&g_vstreams_mtx);
+    ccord_spin_lock_release(&g_vstreams_mtx);
   }
   if (list) ccord_free(list);
 }
@@ -549,7 +545,7 @@ void ccord_vstream_pump_all(void)
 void ccord_vstream_close(ccord_vstream *s)
 {
   if (!s) return;
-  pthread_mutex_lock(&g_vstreams_mtx);
+  ccord_spin_lock_acquire(&g_vstreams_mtx);
   ccord_vstream **pp = &g_vstreams;
   while (*pp) {
     if (*pp == s) {
@@ -560,13 +556,13 @@ void ccord_vstream_close(ccord_vstream *s)
   }
   if (s->pump_refs > 0) {
     s->closed_pending = true;
-    pthread_mutex_unlock(&g_vstreams_mtx);
+    ccord_spin_lock_release(&g_vstreams_mtx);
     return;
   }
-  pthread_mutex_unlock(&g_vstreams_mtx);
+  ccord_spin_lock_release(&g_vstreams_mtx);
 
   // Destroy also closes an injected params.udp_fd (the gateway adopted it at READY).
   ccord_voice_gateway_destroy(s->vg);
-  (void)pthread_mutex_destroy(&s->mtx);
+  ccord_mutex_destroy(s->mtx);
   ccord_free(s);
 }

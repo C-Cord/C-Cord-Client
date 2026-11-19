@@ -63,7 +63,7 @@ static void sd_init_once(void)
 static bool sd_local_tm(const ccord_ui *ui, int64_t ms, struct tm *out)
 {
   time_t t = (time_t)(ms / 1000);
-  return (ui->use_utc ? gmtime_r(&t, out) : localtime_r(&t, out)) != nullptr;
+  return ui->use_utc ? ccord_gmtime(t, out) : ccord_localtime(t, out);
 }
 
 static void sd_set_edit(ccord_text_edit *e, const char *s)

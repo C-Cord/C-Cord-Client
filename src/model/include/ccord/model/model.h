@@ -374,13 +374,16 @@ typedef enum ccord_presence : uint8_t { CCORD_PRESENCE_OFFLINE, CCORD_PRESENCE_O
 // Voice and live-streaming configuration. The encoder is the GPU/codec backend,
 // the codec the wire format, and the framework how frames are captured.
 typedef enum ccord_stream_encoder : uint8_t {
-  CCORD_STREAM_ENCODER_NVENC = 0,   // NVIDIA NVENC (H.264/HEVC/AV1)
-  CCORD_STREAM_ENCODER_VAAPI,       // Linux VA-API
-  CCORD_STREAM_ENCODER_AMF,         // AMD AMF
-  CCORD_STREAM_ENCODER_VULKAN,      // Vulkan video
-  CCORD_STREAM_ENCODER_OPENH264,    // software OpenH264
-  CCORD_STREAM_ENCODER_X264,        // software libx264 (ultrafast/zerolatency)
-  CCORD_STREAM_ENCODER_AUTO,        // probe at runtime: nvenc -> vaapi -> amf -> libx264 -> openh264 (default)
+  CCORD_STREAM_ENCODER_NVENC = 0,     // NVIDIA NVENC (H.264/HEVC/AV1)
+  CCORD_STREAM_ENCODER_VAAPI,         // Linux VA-API
+  CCORD_STREAM_ENCODER_AMF,           // AMD AMF
+  CCORD_STREAM_ENCODER_VULKAN,        // Vulkan video
+  CCORD_STREAM_ENCODER_OPENH264,      // software OpenH264
+  CCORD_STREAM_ENCODER_X264,          // software libx264 (ultrafast/zerolatency)
+  CCORD_STREAM_ENCODER_AUTO,          // probe best native hardware encoder at runtime (default)
+  CCORD_STREAM_ENCODER_QSV,           // Intel Quick Sync Video (Windows/Linux)
+  CCORD_STREAM_ENCODER_MF,            // Windows Media Foundation hardware H.264
+  CCORD_STREAM_ENCODER_VIDEOTOOLBOX,  // macOS Apple VideoToolbox hardware H.264
 } ccord_stream_encoder;
 typedef enum ccord_stream_codec : uint8_t {
   CCORD_STREAM_CODEC_H264 = 0,
@@ -388,12 +391,17 @@ typedef enum ccord_stream_codec : uint8_t {
   CCORD_STREAM_CODEC_AV1,
 } ccord_stream_codec;
 typedef enum ccord_stream_framework : uint8_t {
-  CCORD_STREAM_FRAMEWORK_PIPEWIRE = 0,
-  CCORD_STREAM_FRAMEWORK_DMABUF,
-  CCORD_STREAM_FRAMEWORK_NVFBC,
-  CCORD_STREAM_FRAMEWORK_VULKAN,
-  CCORD_STREAM_FRAMEWORK_X11,
-  CCORD_STREAM_FRAMEWORK_AUTO,      // X11 on X11 sessions, PipeWire portal on Wayland (default)
+  CCORD_STREAM_FRAMEWORK_PIPEWIRE = 0, // Linux xdg-desktop-portal + PipeWire
+  CCORD_STREAM_FRAMEWORK_DMABUF,       // Linux DMA-BUF
+  CCORD_STREAM_FRAMEWORK_NVFBC,        // Linux NVFBC
+  CCORD_STREAM_FRAMEWORK_VULKAN,       // Linux Vulkan
+  CCORD_STREAM_FRAMEWORK_X11,          // Linux X11 XShm/XComposite
+  CCORD_STREAM_FRAMEWORK_AUTO,         // OS-native automatic capture backend (default)
+  CCORD_STREAM_FRAMEWORK_WGC,          // Windows Graphics Capture (Win10+)
+  CCORD_STREAM_FRAMEWORK_DXGI,         // Windows DXGI Desktop Duplication
+  CCORD_STREAM_FRAMEWORK_GDI,          // Windows GDI compatibility capture
+  CCORD_STREAM_FRAMEWORK_SCK,          // macOS ScreenCaptureKit
+  CCORD_STREAM_FRAMEWORK_CG,           // macOS CoreGraphics Display Capture
 } ccord_stream_framework;
 typedef enum ccord_stream_resolution : uint8_t {
   CCORD_STREAM_RES_720P = 0,

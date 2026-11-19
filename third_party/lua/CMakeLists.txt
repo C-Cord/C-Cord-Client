@@ -26,7 +26,7 @@ add_library(ccord_lua STATIC ${ccord_lua_files})
 add_library(ccord::lua ALIAS ccord_lua)
 target_include_directories(ccord_lua PUBLIC "${CCORD_LUA_SRC}")
 target_compile_options(ccord_lua PRIVATE -w)
-target_link_libraries(ccord_lua PUBLIC m)
+target_link_libraries(ccord_lua PUBLIC ${CCORD_MATH_LIB})
 
 if(CCORD_BUILD_TESTS)
   ccord_add_test(NAME test_lua_version

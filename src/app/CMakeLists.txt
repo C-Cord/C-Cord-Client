@@ -3,6 +3,9 @@ target_link_libraries(ccord_account PUBLIC ccord_ui_logic)
 ccord_strict_warnings(ccord_account)
 
 add_executable(ccord main.c)
+if(WIN32)
+  target_sources(ccord PRIVATE ${CMAKE_SOURCE_DIR}/assets/windows/ccord.rc)
+endif()
 target_link_libraries(ccord PRIVATE ccord_core ccord_model ccord_store ccord_net ccord_session ccord_theme ccord_platform ccord_render ccord_ui
                                ccord_account ccord_rpc SDL3::SDL3)
 ccord_strict_warnings(ccord)
@@ -63,12 +66,19 @@ target_include_directories(ccord PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin_host)
 target_link_libraries(ccord PRIVATE ccord_plugins ccord_ipc ccord_lua)
 target_compile_definitions(ccord PRIVATE CCORD_WITH_PLUGINS=1 CCORD_PLUGIN_HOST_PATH="$<IF:$<BOOL:${CCORD_BUILD_TESTS}>,$<TARGET_FILE:ccord-plugin-host>,${CMAKE_INSTALL_FULL_BINDIR}/ccord-plugin-host>" CCORD_EXTENSIONS_DIR="$<IF:$<BOOL:${CCORD_BUILD_TESTS}>,${CMAKE_SOURCE_DIR}/extensions,${CMAKE_INSTALL_FULL_DATADIR}/ccord/extensions>")
 add_dependencies(ccord ccord-plugin-host)
-add_custom_command(TARGET ccord POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ccord>" "${CMAKE_BINARY_DIR}/ccord"
-  COMMAND ${CMAKE_COMMAND} -E create_symlink ccord "${CMAKE_CURRENT_BINARY_DIR}/c-cord"
-  COMMAND ${CMAKE_COMMAND} -E create_symlink ccord "${CMAKE_BINARY_DIR}/c-cord"
-  BYPRODUCTS "${CMAKE_BINARY_DIR}/ccord" "${CMAKE_BINARY_DIR}/c-cord" "${CMAKE_CURRENT_BINARY_DIR}/c-cord"
-  COMMENT "Copying self-contained ccord binary (and c-cord alias) to ${CMAKE_BINARY_DIR}")
+if(UNIX)
+  add_custom_command(TARGET ccord POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ccord>" "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:ccord>"
+    COMMAND ${CMAKE_COMMAND} -E create_symlink ccord "${CMAKE_CURRENT_BINARY_DIR}/c-cord"
+    COMMAND ${CMAKE_COMMAND} -E create_symlink ccord "${CMAKE_BINARY_DIR}/c-cord"
+    BYPRODUCTS "${CMAKE_BINARY_DIR}/ccord" "${CMAKE_BINARY_DIR}/c-cord" "${CMAKE_CURRENT_BINARY_DIR}/c-cord"
+    COMMENT "Copying self-contained ccord binary (and c-cord alias) to ${CMAKE_BINARY_DIR}")
+else()
+  add_custom_command(TARGET ccord POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ccord>" "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:ccord>"
+    BYPRODUCTS "${CMAKE_BINARY_DIR}/ccord${CMAKE_EXECUTABLE_SUFFIX}"
+    COMMENT "Copying self-contained ccord binary to ${CMAKE_BINARY_DIR}")
+endif()
 
 if(CCORD_BUILD_TESTS)
   ccord_add_test(NAME test_app_smoke SOURCES tests/test_app_smoke.c LIBS SDL3::SDL3 LABELS integration ui)
@@ -205,8 +215,14 @@ install(DIRECTORY ${CMAKE_SOURCE_DIR}/assets/fonts ${CMAKE_SOURCE_DIR}/assets/th
         DESTINATION ${CMAKE_INSTALL_DATADIR}/ccord)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/extensions
         DESTINATION ${CMAKE_INSTALL_DATADIR}/ccord)
-install(FILES ${CMAKE_SOURCE_DIR}/assets/icons/C-Cord.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
-foreach(sz 16 22 24 32 48 64 128 256 512)
-  install(FILES ${CMAKE_SOURCE_DIR}/assets/icons/ccord-${sz}.png
-          DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${sz}x${sz}/apps RENAME C-Cord.png)
-endforeach()
+if(UNIX AND NOT APPLE)
+  install(FILES ${CMAKE_SOURCE_DIR}/assets/icons/C-Cord.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+  foreach(sz 16 22 24 32 48 64 128 256 512)
+    install(FILES ${CMAKE_SOURCE_DIR}/assets/icons/ccord-${sz}.png
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${sz}x${sz}/apps RENAME C-Cord.png)
+  endforeach()
+elseif(APPLE)
+  configure_file(${CMAKE_SOURCE_DIR}/assets/macos/Info.plist.in
+                 ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/Info.plist DESTINATION ${CMAKE_INSTALL_DATADIR}/ccord)
+endif()

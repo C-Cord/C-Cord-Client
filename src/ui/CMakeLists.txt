@@ -9,7 +9,7 @@ add_library(ccord_ui STATIC ui.c motion.c draw_nav.c draw_chat.c draw_forum.c dr
 add_library(ccord::ui ALIAS ccord_ui)
 target_include_directories(ccord_ui PUBLIC include)
 target_include_directories(ccord_ui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(ccord_ui PUBLIC ccord_ui_logic ccord_render ccord_session ccord_model ccord_store ccord_emoji ccord_theme ccord_platform ccord_core m)
+target_link_libraries(ccord_ui PUBLIC ccord_ui_logic ccord_render ccord_session ccord_model ccord_store ccord_emoji ccord_theme ccord_platform ccord_core ${CCORD_MATH_LIB})
 ccord_strict_warnings(ccord_ui)
 
 if(CCORD_BUILD_TESTS)

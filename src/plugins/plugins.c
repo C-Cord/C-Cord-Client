@@ -14,27 +14,32 @@
 #include <ccord/core/input.h>
 #include <ccord/core/json.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 #include <ccord/core/utf8.h>
 #include <ccord/ipc/ipc.h>
 #include <ccord/store/notify.h>
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
-#include <signal.h>
-#include <sys/socket.h>
-#include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <sys/wait.h>
 #include <time.h>
-#include <unistd.h>
 
-#define PBUF (2 * PATH_MAX + 320)   // composed paths: data_dir + plugin id + file name
+#if CCORD_OS_WINDOWS
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <signal.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
+#define PBUF (2 * CCORD_PATH_MAX + 320)   // composed paths: data_dir + plugin id + file name
 #define MAX_SEARCH 16
 #define MAX_PENDING 8
 #define MAX_CLIPBOARD_BYTES 65536u
@@ -84,12 +89,17 @@ typedef struct plugin {
   bool consent_granted;
   ccord_manifest m;                    // m.id is the owner key used everywhere
   char perm_str[512];
-  char dir[PATH_MAX];
+  char dir[CCORD_PATH_MAX];
   char *source;
   size_t source_len;
   ccord_plugin_state state;
   char error[256];
+#if CCORD_OS_WINDOWS
+  HANDLE proc;
+  HANDLE job;
+#else
   pid_t pid;
+#endif
   bool reaped;
   ccord_ipc *ipc;
   bool hello_seen;
@@ -117,10 +127,10 @@ struct ccord_plugins {
   void *clipboard_ud;
   void (*toast_show)(void *ud, const char *utf8, uint8_t level);
   void *toast_ud;
-  char host_exe[PATH_MAX];
-  char data_dir[PATH_MAX];
+  char host_exe[CCORD_PATH_MAX];
+  char data_dir[CCORD_PATH_MAX];
   bool has_data_dir;
-  char search[MAX_SEARCH][PATH_MAX];
+  char search[MAX_SEARCH][CCORD_PATH_MAX];
   size_t nsearch;
   plugin *plugins;
   size_t nplugins, capplugins;
@@ -145,25 +155,8 @@ static const ccord_json_limits k_json_limits = {16, 8192, (size_t)1u << 20};
 
 static void rm_dir_recursive(const char *path)
 {
-  DIR *d = opendir(path);
-  if (!d) return;
-  struct dirent *de;
-  char buf[PATH_MAX];
-  while ((de = readdir(d)) != nullptr) {
-    if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-    int n = snprintf(buf, sizeof buf, "%s/%s", path, de->d_name);
-    if (n < 0 || (size_t)n >= sizeof buf) continue;
-    struct stat st;
-    if (lstat(buf, &st) == 0) {
-      if (S_ISDIR(st.st_mode)) {
-        rm_dir_recursive(buf);
-      } else {
-        unlink(buf);
-      }
-    }
-  }
-  closedir(d);
-  rmdir(path);
+  ccord_error err = {0};
+  (void)ccord_rmtree(path, &err);
 }
 
 static void set_text(char *dst, size_t cap, const char *src)
@@ -273,10 +266,70 @@ static void publish_state(ccord_plugins *m, plugin *p)
   }
 }
 
+static void format_exit_code(int code, char *out, size_t cap)
+{
+  switch (code) {
+    case 0: set_text(out, cap, "host exited"); break;
+    case 64: set_text(out, cap, "host usage error"); break;
+    case 70: set_text(out, cap, "host internal error"); break;
+    case 71: set_text(out, cap, "host protocol violation"); break;
+    case 72: set_text(out, cap, "host out of memory at startup"); break;
+    case 73: set_text(out, cap, "instruction limit exceeded"); break;
+    case 74: set_text(out, cap, "memory limit exceeded"); break;
+    case 75: set_text(out, cap, "undeclared restricted API called"); break;
+    default: snprintf(out, cap, "host exited with code %d", code); break;
+  }
+}
+
+static bool host_is_running(const plugin *p)
+{
+#if CCORD_OS_WINDOWS
+  return p->proc != nullptr && !p->reaped;
+#else
+  return p->pid > 0 && !p->reaped;
+#endif
+}
+
+static void kill_host_process(plugin *p)
+{
+  if (!host_is_running(p)) return;
+#if CCORD_OS_WINDOWS
+  (void)TerminateProcess(p->proc, 1);
+  (void)WaitForSingleObject(p->proc, 2000);
+  CloseHandle(p->proc);
+  p->proc = nullptr;
+  if (p->job) {
+    CloseHandle(p->job);
+    p->job = nullptr;
+  }
+#else
+  (void)kill(p->pid, SIGKILL);
+  int st = 0;
+  while (waitpid(p->pid, &st, 0) < 0 && errno == EINTR) {
+  }
+#endif
+  p->reaped = true;
+}
+
 // Reaps the child if it has exited within wait_ms. Fills a human reason on exit.
 static bool reap_wait(plugin *p, uint32_t wait_ms, char *out, size_t cap)
 {
-  if (p->pid <= 0 || p->reaped) return true;
+  if (!host_is_running(p)) return true;
+#if CCORD_OS_WINDOWS
+  DWORD wr = WaitForSingleObject(p->proc, (DWORD)wait_ms);
+  if (wr == WAIT_TIMEOUT) return false;
+  DWORD code = 0;
+  if (GetExitCodeProcess(p->proc, &code)) format_exit_code((int)code, out, cap);
+  else set_text(out, cap, "host ended");
+  CloseHandle(p->proc);
+  p->proc = nullptr;
+  if (p->job) {
+    CloseHandle(p->job);
+    p->job = nullptr;
+  }
+  p->reaped = true;
+  return true;
+#else
   uint32_t waited = 0;
   for (;;) {
     int st = 0;
@@ -284,17 +337,7 @@ static bool reap_wait(plugin *p, uint32_t wait_ms, char *out, size_t cap)
     if (r == p->pid) {
       p->reaped = true;
       if (WIFEXITED(st)) {
-        switch (WEXITSTATUS(st)) {
-          case 0: set_text(out, cap, "host exited"); break;
-          case 64: set_text(out, cap, "host usage error"); break;
-          case 70: set_text(out, cap, "host internal error"); break;
-          case 71: set_text(out, cap, "host protocol violation"); break;
-          case 72: set_text(out, cap, "host out of memory at startup"); break;
-          case 73: set_text(out, cap, "instruction limit exceeded"); break;
-          case 74: set_text(out, cap, "memory limit exceeded"); break;
-          case 75: set_text(out, cap, "undeclared restricted API called"); break;
-          default: snprintf(out, cap, "host exited with code %d", WEXITSTATUS(st)); break;
-        }
+        format_exit_code(WEXITSTATUS(st), out, cap);
       } else if (WIFSIGNALED(st)) {
         snprintf(out, cap, "host killed by signal %d", WTERMSIG(st));
       } else {
@@ -308,23 +351,17 @@ static bool reap_wait(plugin *p, uint32_t wait_ms, char *out, size_t cap)
       return true;
     }
     if (waited >= wait_ms) return false;
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = 5 * 1000 * 1000};
-    (void)nanosleep(&ts, nullptr);
+    ccord_sleep_ms(5);
     waited += 5;
   }
+#endif
 }
 
 // Moves a plugin to FAILED: kills the host, drops its contributions, announces the state.
 static void fail_plugin(ccord_plugins *m, plugin *p, const char *reason)
 {
   if (p->state == CCORD_PLUGIN_FAILED || p->state == CCORD_PLUGIN_STOPPED) return;
-  if (p->pid > 0 && !p->reaped) {
-    (void)kill(p->pid, SIGKILL);
-    int st = 0;
-    while (waitpid(p->pid, &st, 0) < 0 && errno == EINTR) {
-    }
-    p->reaped = true;
-  }
+  kill_host_process(p);
   if (p->ipc) {
     ccord_ipc_close(p->ipc);
     p->ipc = nullptr;
@@ -439,31 +476,25 @@ static void storage_load(plugin *p)
     CCORD_LOG_W("plugin %s: storage file path too long", p->m.id);
     return;
   }
-  int fd = open(path, O_RDONLY | O_CLOEXEC);
-  if (fd < 0) {
-    if (errno != ENOENT) CCORD_LOG_W("plugin %s: storage not loaded: %s", p->m.id, strerror(errno));
-    return;
-  }
-  struct stat st;
-  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size > (off_t)(16u << 20)) {
+  if (!ccord_path_exists(path)) return;
+  uint64_t fsz = 0;
+  if (!ccord_path_is_file(path) || !ccord_file_size(path, &fsz) || fsz > (uint64_t)(16u << 20)) {
     CCORD_LOG_W("plugin %s: storage file rejected (size or type)", p->m.id);
-    close(fd);
     return;
   }
-  size_t len = (size_t)st.st_size;
+  FILE *f = fopen(path, "rb");
+  if (!f) {
+    CCORD_LOG_W("plugin %s: storage not loaded: %s", p->m.id, strerror(errno));
+    return;
+  }
+  size_t len = (size_t)fsz;
   char *buf = ccord_malloc(len + 1);
   if (!buf) {
-    close(fd);
+    fclose(f);
     return;
   }
-  size_t got = 0;
-  while (got < len) {
-    ssize_t r = read(fd, buf + got, len - got);
-    if (r < 0 && errno == EINTR) continue;
-    if (r <= 0) break;
-    got += (size_t)r;
-  }
-  close(fd);
+  size_t got = len ? fread(buf, 1, len, f) : 0;
+  fclose(f);
   ccord_arena arena;
   ccord_arena_init(&arena, 0);
   ccord_error err = {0};
@@ -496,7 +527,8 @@ static void storage_load(plugin *p)
 
 static void mkdir_ok(const char *path)
 {
-  if (mkdir(path, 0700) != 0 && errno != EEXIST) CCORD_LOG_W("storage: mkdir %s: %s", path, strerror(errno));
+  ccord_error err = {0};
+  if (ccord_mkdir_p(path, 0700, &err) != CCORD_OK) CCORD_LOG_W("storage: mkdir %s: %s", path, err.message);
 }
 
 static void storage_save(ccord_plugins *m, plugin *p, uint64_t now)
@@ -526,28 +558,16 @@ static void storage_save(ccord_plugins *m, plugin *p, uint64_t now)
   }
   mkdir_ok(plugins_dir);
   mkdir_ok(p->storage_dir);
-  char tmp[PBUF + 32], final_path[PBUF + 32];
-  int n2 = snprintf(tmp, sizeof tmp, "%s/storage.json.tmp", p->storage_dir);
+  char final_path[PBUF + 32];
   int n3 = snprintf(final_path, sizeof final_path, "%s/storage.json", p->storage_dir);
-  if (n2 < 0 || (size_t)n2 >= sizeof tmp || n3 < 0 || (size_t)n3 >= sizeof final_path) {
+  if (n3 < 0 || (size_t)n3 >= sizeof final_path) {
     CCORD_LOG_W("plugin %s: storage file path too long", p->m.id);
     ccord_buf_free(&b);
     return;
   }
-  int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-  bool wrote = fd >= 0;
-  size_t off = 0;
-  while (wrote && off < b.len) {
-    ssize_t w = write(fd, b.data + off, b.len - off);
-    if (w < 0 && errno == EINTR) continue;
-    if (w <= 0) wrote = false;
-    else off += (size_t)w;
-  }
-  if (wrote && fsync(fd) != 0) wrote = false;
-  if (fd >= 0) close(fd);
-  if (wrote && rename(tmp, final_path) != 0) wrote = false;
-  if (!wrote) {
-    CCORD_LOG_W("plugin %s: storage save failed: %s", p->m.id, strerror(errno));
+  ccord_error werr = {0};
+  if (ccord_file_write_atomic(final_path, b.data, b.len, 0600, true, &werr) != CCORD_OK) {
+    CCORD_LOG_W("plugin %s: storage save failed: %s", p->m.id, werr.message);
   } else {
     p->dirty = false;
     p->last_save_ms = now;
@@ -1804,11 +1824,58 @@ void ccord_plugins_pump(ccord_plugins *m, uint64_t now_ms)
 
 static ccord_status spawn_host(ccord_plugins *m, plugin *p, ccord_error *err)
 {
-  int sv[2];
-  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) != 0) {
-    ccord_error_set(err, CCORD_ERR_IO, "socketpair failed: %s", strerror(errno));
+  ccord_socket_t sv[2] = {CCORD_INVALID_SOCKET, CCORD_INVALID_SOCKET};
+  if (!ccord_sock_pair(sv)) {
+    ccord_error_set(err, CCORD_ERR_IO, "socket pair failed");
     return CCORD_ERR_IO;
   }
+#if CCORD_OS_WINDOWS
+  if (!SetHandleInformation((HANDLE)sv[1], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT)) {
+    ccord_sock_close(sv[0]);
+    ccord_sock_close(sv[1]);
+    ccord_error_set(err, CCORD_ERR_IO, "SetHandleInformation failed");
+    return CCORD_ERR_IO;
+  }
+  char cmd_utf8[CCORD_PATH_MAX + 64];
+  snprintf(cmd_utf8, sizeof cmd_utf8, "\"%s\" --ipc-fd %llu", m->host_exe, (unsigned long long)sv[1]);
+  wchar_t wcmd[CCORD_PATH_MAX + 64];
+  if (MultiByteToWideChar(CP_UTF8, 0, cmd_utf8, -1, wcmd, (int)(sizeof wcmd / sizeof wcmd[0])) <= 0) {
+    ccord_sock_close(sv[0]);
+    ccord_sock_close(sv[1]);
+    ccord_error_set(err, CCORD_ERR_IO, "host path encoding failed");
+    return CCORD_ERR_IO;
+  }
+  STARTUPINFOW si = {.cb = sizeof si};
+  PROCESS_INFORMATION pi = {0};
+  wchar_t empty_env[2] = {0, 0};
+  BOOL ok = CreateProcessW(nullptr, wcmd, nullptr, nullptr, TRUE,
+                           CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                           empty_env, nullptr, &si, &pi);
+  ccord_sock_close(sv[1]);
+  if (!ok) {
+    ccord_sock_close(sv[0]);
+    ccord_error_set(err, CCORD_ERR_IO, "spawn %s failed (win32=%lu)", m->host_exe, (unsigned long)GetLastError());
+    return CCORD_ERR_IO;
+  }
+  CloseHandle(pi.hThread);
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  if (job) {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION info = {0};
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof info)) {
+      (void)AssignProcessToJobObject(job, pi.hProcess);
+    }
+  }
+  p->proc = pi.hProcess;
+  p->job = job;
+  p->reaped = false;
+  p->ipc = ccord_ipc_open(sv[0], err);
+  if (!p->ipc) {
+    kill_host_process(p);
+    return err->code ? err->code : CCORD_ERR_INTERNAL;
+  }
+  return CCORD_OK;
+#else
   int child = sv[1];
   if (child == 3) {   // dup2 onto fd 3 would keep CLOEXEC on the same fd; move it first
     int moved = fcntl(3, F_DUPFD_CLOEXEC, 4);
@@ -1826,6 +1893,11 @@ static ccord_status spawn_host(ccord_plugins *m, plugin *p, ccord_error *err)
   posix_spawn_file_actions_adddup2(&fa, child, 3);
 #if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
   posix_spawn_file_actions_addclosefrom_np(&fa, 4);
+#endif
+  posix_spawnattr_t attr;
+  posix_spawnattr_init(&attr);
+#ifdef POSIX_SPAWN_CLOEXEC_DEFAULT
+  (void)posix_spawnattr_setflags(&attr, POSIX_SPAWN_CLOEXEC_DEFAULT);
 #endif
   char arg_fd[] = "3";
   char arg_opt[] = "--ipc-fd";
@@ -1850,7 +1922,8 @@ static ccord_status spawn_host(ccord_plugins *m, plugin *p, ccord_error *err)
   (void)ne;
 #endif
   pid_t pid = 0;
-  int rc = posix_spawn(&pid, m->host_exe, &fa, nullptr, argv, envp);
+  int rc = posix_spawn(&pid, m->host_exe, &fa, &attr, argv, envp);
+  posix_spawnattr_destroy(&attr);
   posix_spawn_file_actions_destroy(&fa);
   close(child);
   if (rc != 0) {
@@ -1862,13 +1935,11 @@ static ccord_status spawn_host(ccord_plugins *m, plugin *p, ccord_error *err)
   p->reaped = false;
   p->ipc = ccord_ipc_open(sv[0], err);
   if (!p->ipc) {
-    (void)kill(pid, SIGKILL);
-    int st = 0;
-    (void)waitpid(pid, &st, 0);
-    p->reaped = true;
+    kill_host_process(p);
     return err->code ? err->code : CCORD_ERR_INTERNAL;
   }
   return CCORD_OK;
+#endif
 }
 
 static void storage_setup(ccord_plugins *m, plugin *p)
@@ -1993,32 +2064,25 @@ static void record_failed(ccord_plugins *m, const char *dir_name, const char *re
 
 static bool read_file(const char *path, size_t max, char **out, size_t *len, char *why, size_t why_cap)
 {
-  int fd = open(path, O_RDONLY | O_CLOEXEC);
-  if (fd < 0) {
+  uint64_t fsz = 0;
+  if (!ccord_path_is_file(path) || !ccord_file_size(path, &fsz) || fsz > (uint64_t)max) {
+    set_text(why, why_cap, "file is not a regular file of acceptable size");
+    return false;
+  }
+  FILE *f = fopen(path, "rb");
+  if (!f) {
     snprintf(why, why_cap, "cannot open %s: %s", path, strerror(errno));
     return false;
   }
-  struct stat st;
-  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0 || (size_t)st.st_size > max) {
-    set_text(why, why_cap, "file is not a regular file of acceptable size");
-    close(fd);
-    return false;
-  }
-  size_t n = (size_t)st.st_size;
+  size_t n = (size_t)fsz;
   char *buf = ccord_malloc(n + 1);
   if (!buf) {
     set_text(why, why_cap, "out of memory");
-    close(fd);
+    fclose(f);
     return false;
   }
-  size_t got = 0;
-  while (got < n) {
-    ssize_t r = read(fd, buf + got, n - got);
-    if (r < 0 && errno == EINTR) continue;
-    if (r <= 0) break;
-    got += (size_t)r;
-  }
-  close(fd);
+  size_t got = n ? fread(buf, 1, n, f) : 0;
+  fclose(f);
   if (got != n) {
     ccord_free(buf);
     set_text(why, why_cap, "short read");
@@ -2028,6 +2092,17 @@ static bool read_file(const char *path, size_t max, char **out, size_t *len, cha
   *out = buf;
   *len = n;
   return true;
+}
+
+static bool resolve_real_path(const char *in, char *out, size_t cap)
+{
+#if CCORD_OS_WINDOWS
+  if (!in || !out || cap == 0) return false;
+  return _fullpath(out, in, cap) != nullptr && ccord_path_exists(out);
+#else
+  if (!in || !out || cap < PATH_MAX) return false;
+  return realpath(in, out) != nullptr;
+#endif
 }
 
 static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir_name, size_t *started)
@@ -2055,8 +2130,8 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
     }
   }
   // main.lua must resolve inside the plugin directory (no symlink escape).
-  char real_dir[PATH_MAX], real_main[PATH_MAX], main_path[PBUF + 128];
-  if (!realpath(dir_path, real_dir)) {
+  char real_dir[CCORD_PATH_MAX], real_main[CCORD_PATH_MAX], main_path[PBUF + 128];
+  if (!resolve_real_path(dir_path, real_dir, sizeof real_dir)) {
     record_failed(m, man.id, "plugin directory cannot be resolved");
     return;
   }
@@ -2065,12 +2140,13 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
     record_failed(m, man.id, "main file path too long");
     return;
   }
-  if (!realpath(main_path, real_main)) {
+  if (!resolve_real_path(main_path, real_main, sizeof real_main)) {
     record_failed(m, man.id, "main file is missing");
     return;
   }
   size_t dl = strlen(real_dir);
-  if (strncmp(real_main, real_dir, dl) != 0 || real_main[dl] != '/') {
+  bool under_dir = strncmp(real_main, real_dir, dl) == 0 && (real_main[dl] == '/' || real_main[dl] == '\\');
+  if (!under_dir) {
     record_failed(m, man.id, "main file resolves outside the plugin directory");
     return;
   }
@@ -2128,22 +2204,22 @@ size_t ccord_plugins_load_all(ccord_plugins *m)
   if (!m) return 0;
   size_t started = 0;
   for (size_t i = 0; i < m->nsearch; i++) {
-    DIR *d = opendir(m->search[i]);
+    ccord_dir *d = ccord_dir_open(m->search[i]);
     if (!d) {
-      CCORD_LOG_D("extensions: %s not readable: %s", m->search[i], strerror(errno));
+      CCORD_LOG_D("extensions: %s not readable", m->search[i]);
       continue;
     }
-    struct dirent *de;
-    while ((de = readdir(d)) != nullptr) {
-      if (de->d_name[0] == '.') continue;
+    char ename[256];
+    bool is_dir = false;
+    while (ccord_dir_next(d, ename, sizeof ename, &is_dir)) {
+      if (ename[0] == '.') continue;
       char path[PBUF + 32];
-      int n = snprintf(path, sizeof path, "%s/%s", m->search[i], de->d_name);
+      int n = snprintf(path, sizeof path, "%s/%s", m->search[i], ename);
       if (n < 0 || (size_t)n >= sizeof path) continue;
-      struct stat st;
-      if (stat(path, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-      consider_dir(m, path, de->d_name, &started);
+      if (!is_dir && !ccord_path_is_dir(path)) continue;
+      consider_dir(m, path, ename, &started);
     }
-    closedir(d);
+    ccord_dir_close(d);
   }
   return started;
 }
@@ -2160,12 +2236,8 @@ static void stop_host(ccord_plugins *m, plugin *p)
     }
     storage_save(m, p, m->now_ms);
     char reason[160];
-    if (p->pid > 0 && !p->reaped && !reap_wait(p, 1000, reason, sizeof reason)) {
-      (void)kill(p->pid, SIGKILL);
-      int st = 0;
-      while (waitpid(p->pid, &st, 0) < 0 && errno == EINTR) {
-      }
-      p->reaped = true;
+    if (host_is_running(p) && !reap_wait(p, 1000, reason, sizeof reason)) {
+      kill_host_process(p);
     }
     if (p->ipc) {
       ccord_ipc_close(p->ipc);
@@ -2368,8 +2440,7 @@ bool ccord_plugins_import_package(ccord_plugins *m, const char *pkg_path, char *
 
   char final_dir[PBUF + 128];
   snprintf(final_dir, sizeof final_dir, "%s/%s", inst_root, man.id);
-  struct stat st_final;
-  if (lstat(final_dir, &st_final) == 0) {
+  if (ccord_path_exists(final_dir)) {
     rm_dir_recursive(final_dir);
   }
   if (rename(tmp_dir, final_dir) != 0) {
@@ -2420,8 +2491,7 @@ bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, si
   if (m->has_data_dir) {
     char inst_dir[PBUF + 128];
     snprintf(inst_dir, sizeof inst_dir, "%s/plugins/installed/%s", m->data_dir, p->m.id);
-    struct stat st;
-    if (lstat(inst_dir, &st) == 0) rm_dir_recursive(inst_dir);
+    if (ccord_path_exists(inst_dir)) rm_dir_recursive(inst_dir);
   }
   for (size_t k = 0; k < p->nitems; k++) ccord_free(p->items[k].json);
   ccord_free(p->items);

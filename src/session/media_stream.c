@@ -11,16 +11,15 @@
 #define _POSIX_C_SOURCE 200809L
 #include <ccord/session/media_stream.h>
 
-#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #include "media_stream_hub.h"
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/clock.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 
 #define STREAM_LOG_RING 16u
 #define STREAM_RANGE_STALL_MS 60000u   // an answer that never comes (a dead transport) counts as a failed attempt
@@ -47,8 +46,8 @@ struct ccord_media_stream {
   char *url;
   char host[96];
 
-  pthread_mutex_t mtx;
-  pthread_cond_t cv;
+  ccord_mutex *mtx;
+  ccord_cond *cv;
 
   // ---- shared with the reader thread (under mtx) ----
   slot slots[CCORD_STREAM_CACHE_BLOCKS];
@@ -106,7 +105,7 @@ static void latch_locked(ccord_media_stream *ms, ccord_status st, const char *te
     ms->error = st;
     snprintf(ms->error_text, sizeof ms->error_text, "%s", text);
   }
-  pthread_cond_broadcast(&ms->cv);
+  ccord_cond_broadcast(ms->cv);
 }
 
 static slot *slot_find(ccord_media_stream *ms, int64_t blk)
@@ -163,8 +162,8 @@ static void stream_free(ccord_media_stream *ms)
   CCORD_LOG_I("stream: close host=%s fetched=%llu MiB requests=%u retries=%u", ms->host,
               (unsigned long long)(ms->st.bytes_fetched >> 20), ms->st.requests, ms->st.retries);
   for (size_t i = 0; i < CCORD_STREAM_CACHE_BLOCKS; i++) ccord_free(ms->slots[i].data);
-  pthread_cond_destroy(&ms->cv);
-  pthread_mutex_destroy(&ms->mtx);
+  ccord_cond_destroy(ms->cv);
+  ccord_mutex_destroy(ms->mtx);
   ccord_free(ms->url);
   ccord_free(ms);
 }
@@ -193,12 +192,12 @@ void ccord_stream_hub_set_transport(ccord_stream_hub *h, ccord_transport *t)
   if (!h) return;
   h->t = t;
   for (ccord_media_stream *ms = h->head; ms; ms = ms->next) {
-    pthread_mutex_lock(&ms->mtx);
+    ccord_mutex_lock(ms->mtx);
     if (ms->flight == FLIGHT_ACTIVE) {   // the old transport will never answer: issue the same range again
       ms->flight = FLIGHT_RETRY;
       ms->retry_at_ms = 0;
     }
-    pthread_mutex_unlock(&ms->mtx);
+    ccord_mutex_unlock(ms->mtx);
   }
 }
 
@@ -224,16 +223,11 @@ ccord_media_stream *ccord_stream_hub_open(ccord_stream_hub *h, const char *url, 
     ccord_error_set(err, CCORD_ERR_NOMEM, "stream: out of memory");
     return nullptr;
   }
-  pthread_condattr_t ca;
-  pthread_condattr_init(&ca);
-  pthread_condattr_setclock(&ca, CLOCK_MONOTONIC);
-  bool ok = pthread_mutex_init(&ms->mtx, nullptr) == 0;
-  if (ok && pthread_cond_init(&ms->cv, &ca) != 0) {
-    pthread_mutex_destroy(&ms->mtx);
-    ok = false;
-  }
-  pthread_condattr_destroy(&ca);
-  if (!ok) {
+  ms->mtx = ccord_mutex_create();
+  ms->cv = ms->mtx ? ccord_cond_create() : nullptr;
+  if (!ms->mtx || !ms->cv) {
+    ccord_cond_destroy(ms->cv);
+    ccord_mutex_destroy(ms->mtx);
     ccord_free(ms->url);
     ccord_free(ms);
     ccord_error_set(err, CCORD_ERR_NOMEM, "stream: cannot create synchronisation");
@@ -316,9 +310,9 @@ static void failed_attempt_locked(ccord_media_stream *ms, uint64_t now_ms, const
 
 static void stream_pump(ccord_stream_hub *h, ccord_media_stream *ms, uint64_t now_ms)
 {
-  pthread_mutex_lock(&ms->mtx);
+  ccord_mutex_lock(ms->mtx);
   if (ms->cancelled || ms->error != CCORD_OK) {
-    pthread_mutex_unlock(&ms->mtx);
+    ccord_mutex_unlock(ms->mtx);
     return;
   }
   if (ms->flight == FLIGHT_ACTIVE) {
@@ -327,20 +321,20 @@ static void stream_pump(ccord_stream_hub *h, ccord_media_stream *ms, uint64_t no
       failed_attempt_locked(ms, now_ms, "no answer");
     }
     if (ms->flight == FLIGHT_ACTIVE || ms->flight == FLIGHT_IDLE) {
-      pthread_mutex_unlock(&ms->mtx);
+      ccord_mutex_unlock(ms->mtx);
       return;
     }
   }
   if (ms->flight == FLIGHT_RETRY) {
     if (now_ms < ms->retry_at_ms) {
-      pthread_mutex_unlock(&ms->mtx);
+      ccord_mutex_unlock(ms->mtx);
       return;
     }
   } else {
     int64_t sb = 0;
     uint32_t nb = 0;
     if (!choose_range(ms, &sb, &nb)) {
-      pthread_mutex_unlock(&ms->mtx);
+      ccord_mutex_unlock(ms->mtx);
       return;
     }
     ms->probed = true;
@@ -356,13 +350,13 @@ static void stream_pump(ccord_stream_hub *h, ccord_media_stream *ms, uint64_t no
   ms->st.requests++;
   ccord_media_range_req req = {.id = ms->flight_id, .url = ms->url, .start = ms->flight_start,
                                .len = ms->flight_len, .if_range = ms->etag[0] ? ms->etag : nullptr};
-  pthread_mutex_unlock(&ms->mtx);
+  ccord_mutex_unlock(ms->mtx);
 
   ccord_error e;
   ccord_status st = ccord_transport_fetch_media_range(h->t, &req, &e);
   if (st == CCORD_OK) return;
 
-  pthread_mutex_lock(&ms->mtx);
+  ccord_mutex_lock(ms->mtx);
   if (ms->flight == FLIGHT_ACTIVE && ms->flight_id == req.id) {
     ms->flight_id = 0;
     if (st == CCORD_ERR_PERMISSION || st == CCORD_ERR_UNSUPPORTED || st == CCORD_ERR_INVALID) {
@@ -373,7 +367,7 @@ static void stream_pump(ccord_stream_hub *h, ccord_media_stream *ms, uint64_t no
       failed_attempt_locked(ms, now_ms, ccord_status_name(st));
     }
   }
-  pthread_mutex_unlock(&ms->mtx);
+  ccord_mutex_unlock(ms->mtx);
 }
 
 void ccord_stream_hub_pump(ccord_stream_hub *h, uint64_t now_ms)
@@ -439,7 +433,7 @@ static void handle_answer_locked(ccord_media_stream *ms, const ccord_net_event *
     } else if (ev->range_total >= 0) {
       ms->total = ev->range_total;
       ms->demand = ev->range_total <= ms->cursor ? -1 : ms->demand;
-      pthread_cond_broadcast(&ms->cv);
+      ccord_cond_broadcast(ms->cv);
     } else {
       latch_locked(ms, CCORD_ERR_IO, "range not satisfiable");
     }
@@ -525,14 +519,14 @@ static void handle_answer_locked(ccord_media_stream *ms, const ccord_net_event *
   CCORD_LOG_D("stream: range start=%lld len=%zu http=%d redirects=%u host=%s", (long long)asked_start, len,
               (int)ev->range_http, (unsigned)ev->range_redirects, ms->host);
   if (ms->demand >= 0 && slot_find(ms, ms->demand)) ms->demand = -1;
-  pthread_cond_broadcast(&ms->cv);
+  ccord_cond_broadcast(ms->cv);
 }
 
 void ccord_stream_hub_on_range(ccord_stream_hub *h, const ccord_net_event *ev, uint64_t now_ms)
 {
   if (!h || !ev || ev->type != CCORD_NET_MEDIA_RANGE) return;
   for (ccord_media_stream *ms = h->head; ms; ms = ms->next) {
-    pthread_mutex_lock(&ms->mtx);
+    ccord_mutex_lock(ms->mtx);
     bool mine = ms->flight == FLIGHT_ACTIVE && ms->flight_id == ev->range_id && ev->range_id != 0;
     if (mine) {
       if (ms->cancelled) {
@@ -540,10 +534,10 @@ void ccord_stream_hub_on_range(ccord_stream_hub *h, const ccord_net_event *ev, u
       } else {
         handle_answer_locked(ms, ev, now_ms);
       }
-      pthread_mutex_unlock(&ms->mtx);
+      ccord_mutex_unlock(ms->mtx);
       return;
     }
-    pthread_mutex_unlock(&ms->mtx);
+    ccord_mutex_unlock(ms->mtx);
   }
   CCORD_LOG_D("stream: dropped a late range answer");   // its stream is closed (or the request was abandoned)
 }
@@ -555,31 +549,20 @@ void ccord_media_stream_cancel(void *p)
 {
   ccord_media_stream *ms = p;
   if (!ms) return;
-  pthread_mutex_lock(&ms->mtx);
+  ccord_mutex_lock(ms->mtx);
   ms->cancelled = true;
-  pthread_cond_broadcast(&ms->cv);
-  pthread_mutex_unlock(&ms->mtx);
+  ccord_cond_broadcast(ms->cv);
+  ccord_mutex_unlock(ms->mtx);
 }
 
 int64_t ccord_media_stream_size(void *p)
 {
   ccord_media_stream *ms = p;
   if (!ms) return -1;
-  pthread_mutex_lock(&ms->mtx);
+  ccord_mutex_lock(ms->mtx);
   int64_t t = ms->total;
-  pthread_mutex_unlock(&ms->mtx);
+  ccord_mutex_unlock(ms->mtx);
   return t;
-}
-
-static void deadline_after_ms(struct timespec *ts, unsigned ms)
-{
-  clock_gettime(CLOCK_MONOTONIC, ts);
-  ts->tv_sec += ms / 1000u;
-  ts->tv_nsec += (long)(ms % 1000u) * 1000000L;
-  if (ts->tv_nsec >= 1000000000L) {
-    ts->tv_sec++;
-    ts->tv_nsec -= 1000000000L;
-  }
 }
 
 // Copies from consecutive READY blocks starting at off. Returns bytes copied (0 when the first block is missing).
@@ -607,7 +590,7 @@ int ccord_media_stream_read_at(void *p, int64_t off, uint8_t *buf, int n)
   ccord_media_stream *ms = p;
   if (!ms || !buf || off < 0) return -(int)CCORD_ERR_INVALID;
   if (n <= 0) return 0;
-  pthread_mutex_lock(&ms->mtx);
+  ccord_mutex_lock(ms->mtx);
   uint64_t waited_from = ccord_clock_ms();
   int rc;
   for (;;) {
@@ -638,11 +621,9 @@ int ccord_media_stream_read_at(void *p, int64_t off, uint8_t *buf, int n)
       rc = -(int)CCORD_ERR_TIMEOUT;
       break;
     }
-    struct timespec dl;
-    deadline_after_ms(&dl, STREAM_READ_SLICE_MS);
-    (void)pthread_cond_timedwait(&ms->cv, &ms->mtx, &dl);
+    (void)ccord_cond_wait_timeout(ms->cv, ms->mtx, STREAM_READ_SLICE_MS);
   }
-  pthread_mutex_unlock(&ms->mtx);
+  ccord_mutex_unlock(ms->mtx);
   return rc;
 }
 
@@ -653,11 +634,11 @@ void ccord_media_stream_stats_get(const ccord_media_stream *cms, ccord_media_str
   out->total = -1;
   if (!cms) return;
   ccord_media_stream *ms = (ccord_media_stream *)(uintptr_t)cms;   // locking does not change what the caller sees
-  pthread_mutex_lock(&ms->mtx);
+  ccord_mutex_lock(ms->mtx);
   *out = ms->st;
   out->total = ms->total;
   out->error = ms->error;
   memcpy(out->error_text, ms->error_text, sizeof out->error_text);
   out->resident_blocks = resident_locked(ms);
-  pthread_mutex_unlock(&ms->mtx);
+  ccord_mutex_unlock(ms->mtx);
 }

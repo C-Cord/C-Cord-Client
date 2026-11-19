@@ -4,19 +4,21 @@
 #include "zip.h"
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/atomic_file.h>
 #include <ccord/core/buf.h>
+#include <ccord/core/os.h>
 
-#include <dirent.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <zlib.h>
+#if !CCORD_OS_WINDOWS
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0] | ((uint16_t)p[1] << 8)); }
 static uint32_t rd32(const uint8_t *p)
@@ -51,18 +53,8 @@ static bool safe_rel_path(const char *name)
 
 static bool mkdir_p(const char *path)
 {
-  char tmp[PATH_MAX];
-  size_t n = strlen(path);
-  if (n == 0 || n >= sizeof tmp) return false;
-  memcpy(tmp, path, n + 1);
-  for (size_t i = 1; i < n; i++) {
-    if (tmp[i] == '/') {
-      tmp[i] = '\0';
-      if (mkdir(tmp, 0755) != 0 && errno != EEXIST) return false;
-      tmp[i] = '/';
-    }
-  }
-  return mkdir(tmp, 0755) == 0 || errno == EEXIST;
+  ccord_error err = {0};
+  return ccord_mkdir_p(path, 0755, &err) == CCORD_OK;
 }
 
 static bool read_all(const char *path, uint8_t **out, size_t *out_len)
@@ -177,7 +169,7 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
       set_err(err_buf, err_cap, "truncated central directory entry");
       return false;
     }
-    char name[PATH_MAX];
+    char name[CCORD_PATH_MAX];
     size_t copy = nlen < sizeof name - 1 ? nlen : sizeof name - 1;
     memcpy(name, data + pos + 46, copy);
     name[copy] = '\0';
@@ -211,7 +203,7 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
     uint16_t elen = rd16(data + pos + 30);
     uint16_t clen = rd16(data + pos + 32);
     uint32_t lhoff = rd32(data + pos + 42);
-    char name[PATH_MAX];
+    char name[CCORD_PATH_MAX];
     size_t copy = nlen < sizeof name - 1 ? nlen : sizeof name - 1;
     memcpy(name, data + pos + 46, copy);
     name[copy] = '\0';
@@ -225,7 +217,7 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
       return false;
     }
 
-    char out_path[PATH_MAX];
+    char out_path[CCORD_PATH_MAX];
     if (snprintf(out_path, sizeof out_path, "%s/%s", dest_dir, rel) >= (int)sizeof out_path) {
       ccord_free(data);
       set_err(err_buf, err_cap, "path too long");
@@ -252,7 +244,7 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
     }
 
     // Ensure parent dir exists
-    char parent[PATH_MAX];
+    char parent[CCORD_PATH_MAX];
     snprintf(parent, sizeof parent, "%s", out_path);
     char *last = strrchr(parent, '/');
     if (last) { *last = '\0'; (void)mkdir_p(parent); }
@@ -272,6 +264,7 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
       set_err(err_buf, err_cap, "decompression or CRC error");
       return false;
     }
+#if !CCORD_OS_WINDOWS
     int fd = open(out_path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
     FILE *wf = fd >= 0 ? fdopen(fd, "wb") : nullptr;
     if (!wf || (usize && fwrite(out_buf, 1, usize, wf) != usize)) {
@@ -283,6 +276,17 @@ bool ccord_zip_extract(const char *zip_path, const char *dest_dir, char *err_buf
       return false;
     }
     fclose(wf);
+#else
+    FILE *wf = fopen(out_path, "wb");
+    if (!wf || (usize && fwrite(out_buf, 1, usize, wf) != usize)) {
+      if (wf) fclose(wf);
+      ccord_free(out_buf);
+      ccord_free(data);
+      set_err(err_buf, err_cap, "failed writing extracted file");
+      return false;
+    }
+    fclose(wf);
+#endif
     ccord_free(out_buf);
   }
 
@@ -323,28 +327,26 @@ static bool deflate_raw(const uint8_t *src, size_t slen, uint8_t **dst, size_t *
 
 static bool pack_walk(pack_ctx *ctx, const char *base_dir, const char *rel_prefix)
 {
-  char dir_path[PATH_MAX];
+  char dir_path[CCORD_PATH_MAX];
   if (rel_prefix[0]) snprintf(dir_path, sizeof dir_path, "%s/%s", base_dir, rel_prefix);
   else snprintf(dir_path, sizeof dir_path, "%s", base_dir);
-  DIR *d = opendir(dir_path);
+  ccord_dir *d = ccord_dir_open(dir_path);
   if (!d) return false;
-  struct dirent *de;
-  while ((de = readdir(d)) != nullptr) {
-    if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-    char rel[PATH_MAX], full[PATH_MAX];
-    if (rel_prefix[0]) snprintf(rel, sizeof rel, "%s/%s", rel_prefix, de->d_name);
-    else snprintf(rel, sizeof rel, "%s", de->d_name);
+  char ename[256];
+  bool is_dir = false;
+  while (ccord_dir_next(d, ename, sizeof ename, &is_dir)) {
+    char rel[CCORD_PATH_MAX], full[CCORD_PATH_MAX];
+    if (rel_prefix[0]) snprintf(rel, sizeof rel, "%s/%s", rel_prefix, ename);
+    else snprintf(rel, sizeof rel, "%s", ename);
     if (snprintf(full, sizeof full, "%s/%s", base_dir, rel) >= (int)sizeof full) continue;
-    struct stat st;
-    if (stat(full, &st) != 0) continue;
-    if (S_ISDIR(st.st_mode)) {
-      if (!pack_walk(ctx, base_dir, rel)) { closedir(d); return false; }
+    if (is_dir || ccord_path_is_dir(full)) {
+      if (!pack_walk(ctx, base_dir, rel)) { ccord_dir_close(d); return false; }
       continue;
     }
-    if (!S_ISREG(st.st_mode)) continue;
+    if (!ccord_path_is_file(full)) continue;
     uint8_t *raw = nullptr;
     size_t rlen = 0;
-    if (!read_all(full, &raw, &rlen)) { closedir(d); return false; }
+    if (!read_all(full, &raw, &rlen)) { ccord_dir_close(d); return false; }
     uint32_t crc = (uint32_t)crc32(0, raw, (uInt)rlen);
     uint8_t *comp = nullptr;
     size_t clen = 0;
@@ -373,7 +375,7 @@ static bool pack_walk(pack_ctx *ctx, const char *base_dir, const char *rel_prefi
         ccord_buf_append(&ctx->out, rel, nlen) != CCORD_OK ||
         ccord_buf_append(&ctx->out, comp, clen) != CCORD_OK) {
       ccord_free(comp);
-      closedir(d);
+      ccord_dir_close(d);
       return false;
     }
     ccord_free(comp);
@@ -381,7 +383,7 @@ static bool pack_walk(pack_ctx *ctx, const char *base_dir, const char *rel_prefi
     if (ctx->nentries == ctx->capentries) {
       size_t ncap = ctx->capentries ? ctx->capentries * 2 : 8;
       pack_entry *ne = ccord_realloc_array(ctx->entries, ncap, sizeof *ne);
-      if (!ne) { closedir(d); return false; }
+      if (!ne) { ccord_dir_close(d); return false; }
       ctx->entries = ne;
       ctx->capentries = ncap;
     }
@@ -390,7 +392,7 @@ static bool pack_walk(pack_ctx *ctx, const char *base_dir, const char *rel_prefi
       .usize = (uint32_t)rlen, .offset = off, .method = method,
     };
   }
-  closedir(d);
+  ccord_dir_close(d);
   return true;
 }
 

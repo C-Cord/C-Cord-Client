@@ -4,6 +4,7 @@
 #include <ccord/net/detectable.h>
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/os.h>
 #include <ccord/core/log.h>
 #include <ccord/net/live_transport.h>
 
@@ -11,7 +12,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
 #include <unistd.h>
+#endif
 
 #ifndef CCORD_DETECTABLE_LIVE
 #define CCORD_DETECTABLE_LIVE 0
@@ -232,7 +235,7 @@ char *ccord_detectable_cache_read(const char *dir, size_t *len, int64_t *mtime_s
     return nullptr;
   }
   struct stat sb;
-  if (fstat(fileno(f), &sb) != 0 || !S_ISREG(sb.st_mode) || sb.st_size <= 0 ||
+  if (stat(p, &sb) != 0 || sb.st_size <= 0 ||
       (uint64_t)sb.st_size > CCORD_DETECTABLE_MAX_BYTES) {
     fclose(f);
     (void)ccord_error_set(err, CCORD_ERR_RANGE, "detectable: cache file empty or too large");
@@ -270,8 +273,8 @@ ccord_status ccord_detectable_cache_write(const char *dir, const char *body, siz
   bool ok = fwrite(body, 1, len, f) == len;
   ok = (fflush(f) == 0) && ok;
   ok = (fclose(f) == 0) && ok;
-  if (!ok || rename(tmp, p) != 0) {
-    (void)unlink(tmp);
+  if (!ok || !ccord_file_rename_replace(tmp, p)) {
+    (void)ccord_file_unlink(tmp);
     return ccord_error_set(err, CCORD_ERR_IO, "detectable: cannot write the cache file");
   }
   return CCORD_OK;

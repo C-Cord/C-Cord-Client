@@ -74,6 +74,9 @@ set_target_properties(ccord_dave PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRE
 target_include_directories(ccord_dave SYSTEM PUBLIC "${DAVE_SRC}/includes" "${DAVE_SRC}/test/capi")
 target_include_directories(ccord_dave SYSTEM PRIVATE "${DAVE_SRC}/src" "${DAVE_SRC}/test")
 target_compile_options(ccord_dave PRIVATE -w)
-target_link_libraries(ccord_dave PRIVATE ccord_mlspp PUBLIC OpenSSL::Crypto stdc++)
+target_link_libraries(ccord_dave PRIVATE ccord_mlspp PUBLIC OpenSSL::Crypto)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  target_link_libraries(ccord_dave PUBLIC stdc++)
+endif()
 # C targets that link this static library are linked with the C++ driver automatically (CMake propagates the
 # CXX link language of static libraries), so libstdc++ comes along without extra flags.

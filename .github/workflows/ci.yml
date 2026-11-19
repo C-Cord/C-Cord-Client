@@ -73,3 +73,97 @@ jobs:
           else
             ctest --test-dir ${{ matrix.build_dir }} --output-on-failure
           fi
+
+  macos-build:
+    name: macOS (arm64)
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          brew install cmake ninja pkg-config llvm \
+            sdl3 sdl3_ttf ffmpeg libpng jpeg-turbo webp \
+            opus libsodium curl openssl@3 nlohmann-json speexdsp
+      - name: Configure & Build (macOS)
+        run: |
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          OPENSSL_PREFIX="$(brew --prefix openssl@3)"
+          CURL_PREFIX="$(brew --prefix curl)"
+          export PKG_CONFIG_PATH="${OPENSSL_PREFIX}/lib/pkgconfig:${CURL_PREFIX}/lib/pkgconfig:$(brew --prefix)/lib/pkgconfig"
+          export CMAKE_PREFIX_PATH="${OPENSSL_PREFIX};${CURL_PREFIX};$(brew --prefix)"
+          VER="0.1.0+${GITHUB_SHA::7}"
+          cmake -S . -B build-macos -G Ninja \
+            -DCMAKE_C_COMPILER="${LLVM_PREFIX}/bin/clang" \
+            -DCMAKE_CXX_COMPILER="${LLVM_PREFIX}/bin/clang++" \
+            -DCMAKE_OBJC_COMPILER="/usr/bin/clang" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCCORD_WERROR=ON \
+            -DCCORD_BUILD_TESTS=OFF \
+            -DCCORD_VERSION="${VER}" \
+            -DCMAKE_INSTALL_PREFIX=/tmp/ccord-macos-stage
+          cmake --build build-macos --parallel "$(sysctl -n hw.ncpu)"
+      - name: Smoke Test (macOS)
+        run: |
+          cmake --install build-macos
+          /tmp/ccord-macos-stage/bin/ccord --version
+          /tmp/ccord-macos-stage/bin/ccord --headless --mock --data-dir /tmp/ccord-macos-data --screenshot /tmp/ccord-macos-shot.png
+          test -s /tmp/ccord-macos-shot.png
+
+  windows-build:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      SDL_VIDEODRIVER: dummy
+      SDL_AUDIODRIVER: dummy
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+      - name: Setup MSYS2 CLANG64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-pkgconf
+            mingw-w64-clang-x86_64-sdl3
+            mingw-w64-clang-x86_64-sdl3-ttf
+            mingw-w64-clang-x86_64-ffmpeg
+            mingw-w64-clang-x86_64-libpng
+            mingw-w64-clang-x86_64-libjpeg-turbo
+            mingw-w64-clang-x86_64-libwebp
+            mingw-w64-clang-x86_64-opus
+            mingw-w64-clang-x86_64-libsodium
+            mingw-w64-clang-x86_64-curl
+            mingw-w64-clang-x86_64-openssl
+            mingw-w64-clang-x86_64-nlohmann-json
+            mingw-w64-clang-x86_64-speexdsp
+      - name: Configure & Build (Windows)
+        run: |
+          VER="0.1.0+${GITHUB_SHA::7}"
+          cmake -S . -B build-win -G Ninja \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCCORD_WERROR=ON \
+            -DCCORD_BUILD_TESTS=OFF \
+            -DCCORD_VERSION="${VER}" \
+            -DCMAKE_INSTALL_PREFIX=/tmp/ccord-win-stage
+          cmake --build build-win --parallel "$(nproc)"
+      - name: Smoke Test (Windows)
+        run: |
+          cmake --install build-win
+          /tmp/ccord-win-stage/bin/ccord.exe --version
+          /tmp/ccord-win-stage/bin/ccord.exe --headless --mock --data-dir /tmp/ccord-win-data --screenshot /tmp/ccord-win-shot.png
+          test -s /tmp/ccord-win-shot.png

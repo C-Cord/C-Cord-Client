@@ -24,7 +24,7 @@ add_library(ccord::render ALIAS ccord_render)
 target_include_directories(ccord_render PUBLIC include)
 target_include_directories(ccord_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ccord_render
-  PUBLIC ccord_core ccord_platform ccord_theme m
+  PUBLIC ccord_core ccord_platform ccord_theme ${CCORD_MATH_LIB}
   PRIVATE Threads::Threads SDL3::SDL3 SDL3_ttf::SDL3_ttf PkgConfig::CCORD_PNG PkgConfig::CCORD_JPEG PkgConfig::CCORD_WEBP
   PkgConfig::CCORD_AVFORMAT PkgConfig::CCORD_AVCODEC_R PkgConfig::CCORD_AVUTIL_R PkgConfig::CCORD_SWSCALE_R)
 target_compile_definitions(ccord_render PRIVATE CCORD_HAVE_FONTCONFIG=${CCORD_RENDER_HAVE_FONTCONFIG})

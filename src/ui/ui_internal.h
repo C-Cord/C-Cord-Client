@@ -8,6 +8,8 @@
 
 #include "scroll.h"
 #include "status_card.h"
+#include <ccord/core/atomic_file.h>
+#include <ccord/core/os.h>
 #include <ccord/platform/capture.h>
 #include <ccord/platform/platform.h>
 #include <ccord/render/av_stream.h>

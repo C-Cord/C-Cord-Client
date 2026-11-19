@@ -13,10 +13,12 @@
 
 typedef enum ccord_capture_kind : uint8_t { CCORD_CAPTURE_WINDOW = 0, CCORD_CAPTURE_SCREEN = 1 } ccord_capture_kind;
 typedef enum ccord_capture_backend_id : uint8_t {
-  CCORD_CAPBE_AUTO = 0,   // X11 on an X11 session, portal on Wayland, none otherwise
+  CCORD_CAPBE_AUTO = 0,   // OS-native default (X11/portal on Linux, Win32 on Windows, ScreenCaptureKit/CG on macOS)
   CCORD_CAPBE_X11,
   CCORD_CAPBE_PORTAL,
   CCORD_CAPBE_FAKE,       // synthetic windows/screens with animated test patterns
+  CCORD_CAPBE_WIN32,      // Windows DXGI / GDI desktop & window capture
+  CCORD_CAPBE_MACOS,      // macOS ScreenCaptureKit / CoreGraphics capture
 } ccord_capture_backend_id;
 
 #define CCORD_CAPTURE_ID_MAX 64
@@ -122,8 +124,14 @@ typedef struct ccord_capture_backend {
   bool (*thumbnail)(const ccord_capture_source *src, int max_w, int max_h, uint8_t *rgba, int *out_w, int *out_h,
                     ccord_error *err);
 } ccord_capture_backend;
+#if defined(_WIN32)
+extern const ccord_capture_backend ccord_capture_win32_backend;    // capture_win32.c
+#elif defined(__APPLE__)
+extern const ccord_capture_backend ccord_capture_macos_backend;    // capture_macos.m
+#else
 extern const ccord_capture_backend ccord_capture_x11_backend;      // capture_x11.c
 extern const ccord_capture_backend ccord_capture_portal_backend;   // capture_portal.c
+#endif
 int ccord_capture_own_pid(void);
 // Shared helper (capture.c): BGRA -> RGBA box/nearest downscale into a max_w x max_h bound, aspect preserved.
 bool ccord_capture_downscale_rgba(const ccord_capture_frame *in, int max_w, int max_h, uint8_t *rgba, int *out_w,

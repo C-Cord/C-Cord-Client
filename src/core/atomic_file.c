@@ -4,19 +4,205 @@
 #include <ccord/core/atomic_file.h>
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/os.h>
 
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <limits.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #define RMTREE_MAX_DEPTH 64
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+static bool af_utf8_to_wide(const char *s, wchar_t *out, int cap)
+{
+  int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, out, cap);
+  return n > 0 && n <= cap;
+}
+
+static ccord_status win_io_error(ccord_error *err, const char *what)
+{
+  return ccord_error_set(err, CCORD_ERR_IO, "%s: Win32 error %lu", what, (unsigned long)GetLastError());
+}
+
+ccord_status ccord_mkdir_p(const char *path, unsigned mode, ccord_error *err)
+{
+  (void)mode;
+  ccord_error_clear(err);
+  if (!path || path[0] == '\0') return ccord_error_set(err, CCORD_ERR_INVALID, "mkdir_p: empty path");
+  size_t len = strlen(path);
+  if (len >= CCORD_PATH_MAX) return ccord_error_set(err, CCORD_ERR_RANGE, "mkdir_p: path too long");
+  char tmp[CCORD_PATH_MAX];
+  memcpy(tmp, path, len + 1);
+  for (size_t i = 0; i < len; i++) {
+    if (tmp[i] == '/') tmp[i] = '\\';
+  }
+  while (len > 1 && tmp[len - 1] == '\\' && !(len == 3 && tmp[1] == ':')) tmp[--len] = '\0';
+  size_t start = (len >= 2 && tmp[1] == ':') ? 3 : 1;
+  for (size_t i = start; i <= len; i++) {
+    if (tmp[i] != '\\' && tmp[i] != '\0') continue;
+    char saved = tmp[i];
+    tmp[i] = '\0';
+    wchar_t w[CCORD_PATH_MAX];
+    if (!af_utf8_to_wide(tmp, w, CCORD_PATH_MAX)) return ccord_error_set(err, CCORD_ERR_INVALID, "mkdir_p: invalid UTF-8");
+    if (!CreateDirectoryW(w, nullptr)) {
+      DWORD e = GetLastError();
+      if (e == ERROR_ALREADY_EXISTS) {
+        DWORD attr = GetFileAttributesW(w);
+        if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+          return ccord_error_set(err, CCORD_ERR_IO, "mkdir_p: a path component is not a directory");
+        }
+      } else {
+        return win_io_error(err, "mkdir_p");
+      }
+    }
+    tmp[i] = saved;
+  }
+  return CCORD_OK;
+}
+
+ccord_status ccord_file_write_atomic(const char *path, const void *data, size_t len, unsigned mode, bool sync,
+                                     ccord_error *err)
+{
+  (void)mode;
+  ccord_error_clear(err);
+  if (!path || path[0] == '\0' || (!data && len > 0)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "write_atomic: bad argument");
+  }
+  static _Atomic unsigned seq;
+  char tmp[CCORD_PATH_MAX];
+  int n = snprintf(tmp, sizeof tmp, "%s.tmp.%llu.%u", path, (unsigned long long)ccord_os_pid(), atomic_fetch_add(&seq, 1u));
+  if (n < 0 || (size_t)n >= sizeof tmp) return ccord_error_set(err, CCORD_ERR_RANGE, "write_atomic: path too long");
+  wchar_t wtmp[CCORD_PATH_MAX], wdst[CCORD_PATH_MAX];
+  if (!af_utf8_to_wide(tmp, wtmp, CCORD_PATH_MAX) || !af_utf8_to_wide(path, wdst, CCORD_PATH_MAX)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "write_atomic: invalid UTF-8");
+  }
+  HANDLE h = CreateFileW(wtmp, GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return win_io_error(err, "write_atomic: CreateFileW");
+  const unsigned char *p = data;
+  size_t left = len;
+  ccord_status st = CCORD_OK;
+  while (left > 0) {
+    DWORD chunk = left > 0x7FFFFFFFu ? 0x7FFFFFFFu : (DWORD)left;
+    DWORD wrote = 0;
+    if (!WriteFile(h, p, chunk, &wrote, nullptr) || wrote == 0) {
+      st = win_io_error(err, "write_atomic: WriteFile");
+      break;
+    }
+    p += wrote;
+    left -= wrote;
+  }
+  if (st == CCORD_OK && sync && !FlushFileBuffers(h)) st = win_io_error(err, "write_atomic: FlushFileBuffers");
+  CloseHandle(h);
+  if (st == CCORD_OK && !MoveFileExW(wtmp, wdst, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    st = win_io_error(err, "write_atomic: MoveFileExW");
+  }
+  if (st != CCORD_OK) DeleteFileW(wtmp);
+  return st;
+}
+
+char *ccord_file_read_max(const char *path, size_t max, size_t *out_len, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (out_len) *out_len = 0;
+  if (!path || path[0] == '\0') {
+    ccord_error_set(err, CCORD_ERR_INVALID, "read_max: empty path");
+    return nullptr;
+  }
+  wchar_t w[CCORD_PATH_MAX];
+  if (!af_utf8_to_wide(path, w, CCORD_PATH_MAX)) {
+    ccord_error_set(err, CCORD_ERR_INVALID, "read_max: invalid UTF-8");
+    return nullptr;
+  }
+  HANDLE h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    (void)win_io_error(err, "read_max: CreateFileW");
+    return nullptr;
+  }
+  LARGE_INTEGER sz;
+  if (!GetFileSizeEx(h, &sz) || sz.QuadPart < 0 || (uint64_t)sz.QuadPart > (uint64_t)max) {
+    CloseHandle(h);
+    ccord_error_set(err, CCORD_ERR_RANGE, "read_max: file larger than limit");
+    return nullptr;
+  }
+  size_t size = (size_t)sz.QuadPart;
+  char *buf = ccord_alloc_array(size + 1u, 1);
+  if (!buf) {
+    CloseHandle(h);
+    ccord_error_set(err, CCORD_ERR_NOMEM, "read_max: out of memory");
+    return nullptr;
+  }
+  size_t got = 0;
+  while (got < size) {
+    DWORD chunk = (size - got) > 0x7FFFFFFFu ? 0x7FFFFFFFu : (DWORD)(size - got);
+    DWORD rd = 0;
+    if (!ReadFile(h, buf + got, chunk, &rd, nullptr) || rd == 0) break;
+    got += rd;
+  }
+  CloseHandle(h);
+  if (got != size) {
+    ccord_free(buf);
+    ccord_error_set(err, CCORD_ERR_IO, "read_max: short read");
+    return nullptr;
+  }
+  buf[size] = '\0';
+  if (out_len) *out_len = size;
+  return buf;
+}
+
+static ccord_status rmtree_win(const char *path, int depth, ccord_error *err)
+{
+  wchar_t w[CCORD_PATH_MAX];
+  if (!af_utf8_to_wide(path, w, CCORD_PATH_MAX)) return ccord_error_set(err, CCORD_ERR_INVALID, "rmtree: invalid UTF-8");
+  DWORD attr = GetFileAttributesW(w);
+  if (attr == INVALID_FILE_ATTRIBUTES) return CCORD_OK;
+  if ((attr & FILE_ATTRIBUTE_DIRECTORY) == 0 || (attr & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    SetFileAttributesW(w, FILE_ATTRIBUTE_NORMAL);
+    if ((attr & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+      return RemoveDirectoryW(w) ? CCORD_OK : win_io_error(err, "rmtree: RemoveDirectoryW");
+    }
+    return DeleteFileW(w) ? CCORD_OK : win_io_error(err, "rmtree: DeleteFileW");
+  }
+  if (depth >= RMTREE_MAX_DEPTH) return ccord_error_set(err, CCORD_ERR_RANGE, "rmtree: tree too deep");
+  ccord_dir *d = ccord_dir_open(path);
+  if (d) {
+    char name[512];
+    ccord_status st = CCORD_OK;
+    while (st == CCORD_OK && ccord_dir_next(d, name, sizeof name, nullptr)) {
+      char child[CCORD_PATH_MAX];
+      int n = snprintf(child, sizeof child, "%s\\%s", path, name);
+      if (n <= 0 || (size_t)n >= sizeof child) {
+        st = ccord_error_set(err, CCORD_ERR_RANGE, "rmtree: path too long");
+        break;
+      }
+      st = rmtree_win(child, depth + 1, err);
+    }
+    ccord_dir_close(d);
+    if (st != CCORD_OK) return st;
+  }
+  return RemoveDirectoryW(w) ? CCORD_OK : win_io_error(err, "rmtree: RemoveDirectoryW");
+}
+
+ccord_status ccord_rmtree(const char *path, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!path || path[0] == '\0' || strcmp(path, "/") == 0 || strcmp(path, "\\") == 0 ||
+      (strlen(path) <= 3 && path[1] == ':')) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "rmtree: refusing empty or root path");
+  }
+  return rmtree_win(path, 0, err);
+}
+
+#else
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 static ccord_status io_error(ccord_error *err, const char *what)
 {
@@ -217,3 +403,4 @@ ccord_status ccord_rmtree(const char *path, ccord_error *err)
   }
   return rmtree_at(AT_FDCWD, path, 0, err);
 }
+#endif

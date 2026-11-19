@@ -10,13 +10,23 @@
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 
-#ifdef __linux__
+#if defined(__linux__)
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #define LINKWATCH_HAVE_NETLINK 1
+#elif defined(__APPLE__)
+#include <mach/mach_time.h>
+#define LINKWATCH_HAVE_NETLINK 0
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#define LINKWATCH_HAVE_NETLINK 0
 #else
 #define LINKWATCH_HAVE_NETLINK 0
 #endif
@@ -236,11 +246,27 @@ void ccord_linkwatch_destroy(ccord_linkwatch *w)
 void ccord_linkwatch_sample(ccord_linkwatch *w)
 {
   if (!w) return;
+#if defined(__linux__)
   struct timespec boot, mono;
   if (clock_gettime(CLOCK_BOOTTIME, &boot) == 0 && clock_gettime(CLOCK_MONOTONIC, &mono) == 0) {
     ccord_linkwatch_feed_clocks(w, (uint64_t)boot.tv_sec * 1000u + (uint64_t)boot.tv_nsec / 1000000u,
                                 (uint64_t)mono.tv_sec * 1000u + (uint64_t)mono.tv_nsec / 1000000u);
   }
+#elif defined(__APPLE__)
+  static mach_timebase_info_data_t tb = {0, 0};
+  if (tb.denom == 0) mach_timebase_info(&tb);
+  if (tb.denom != 0) {
+    uint64_t cont_ms = (mach_continuous_time() * tb.numer / tb.denom) / 1000000ULL;
+    uint64_t mono_ms = (mach_absolute_time() * tb.numer / tb.denom) / 1000000ULL;
+    ccord_linkwatch_feed_clocks(w, cont_ms, mono_ms);
+  }
+#elif defined(_WIN32)
+  ULONGLONG boot_ms = GetTickCount64();
+  ULONGLONG unbiased_100ns = 0;
+  if (QueryUnbiasedInterruptTime(&unbiased_100ns)) {
+    ccord_linkwatch_feed_clocks(w, (uint64_t)boot_ms, (uint64_t)(unbiased_100ns / 10000ULL));
+  }
+#endif
 #if LINKWATCH_HAVE_NETLINK
   for (unsigned i = 0; w->fd >= 0 && i < NL_READS_PER_SAMPLE; i++) {
     ssize_t n = recv(w->fd, w->buf, sizeof w->buf, MSG_DONTWAIT);

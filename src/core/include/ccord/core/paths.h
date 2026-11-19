@@ -4,6 +4,7 @@
 #include <ccord/core/error.h>
 // asset dir resolution: $CCORD_ASSET_DIR, then <exe_dir>/../share/ccord, then compile-time CCORD_DEFAULT_ASSET_DIR (source tree assets/).
 [[nodiscard]] ccord_status ccord_paths_init(const char *argv0, ccord_error *err);
+const char *ccord_paths_exe_path(void);
 const char *ccord_paths_exe_dir(void);
 const char *ccord_paths_asset_dir(void);
 const char *ccord_paths_data_dir(void);     // $XDG_DATA_HOME/ccord or ~/.local/share/ccord; override via ccord_paths_set_data_dir

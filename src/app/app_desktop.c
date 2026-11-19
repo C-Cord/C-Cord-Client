@@ -6,26 +6,41 @@
 #define _GNU_SOURCE
 #include "app_desktop.h"
 
+#include <ccord/core/os.h>
+
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
 #include <math.h>
-#include <poll.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+
+#if CCORD_OS_WINDOWS
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
-#include <time.h>
 #include <unistd.h>
+#if CCORD_OS_MACOS
+#include <libproc.h>
+#endif
+#endif
 
 #include <SDL3/SDL.h>
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/clock.h>
 #include <ccord/core/ini.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 #include <ccord/core/paths.h>
 #include <ccord/store/notify.h>
 #include <ccord/store/roles.h>
@@ -152,7 +167,7 @@ void ccord_app_desktop_startup_read(ccord_app_startup *out, const char *ini_path
 {
   if (!out) return;
   ccord_app_desktop_startup_defaults(out);
-  char path[PATH_MAX];
+  char path[CCORD_PATH_MAX];
   if (ini_path && ini_path[0]) {
     snprintf(path, sizeof path, "%s", ini_path);
   } else {
@@ -207,7 +222,7 @@ struct ccord_app_desktop {
   ccord_theme *theme;
   ccord_ui *ui;
   char ptt_trigger[48];           // push-to-talk trigger last offered to the portal ("" = none)
-  char asset_dir[PATH_MAX];
+  char asset_dir[CCORD_PATH_MAX];
   ccord_theme base_theme;                  // pristine base snapshot; QuickCSS restores it before overlaying
   bool quickcss_enabled;
   char quickcss[256];
@@ -268,7 +283,7 @@ static void desktop_load_base(ccord_app_desktop *d, const char *builtin_id)
   ccord_error err;
   bool loaded = false;
   if (d->asset_dir[0]) {
-    char rel[128], path[PATH_MAX];
+    char rel[128], path[CCORD_PATH_MAX];
     snprintf(rel, sizeof rel, "themes/%s.theme", id);
     if (ccord_paths_join(path, sizeof path, d->asset_dir, rel, &err) == CCORD_OK &&
         ccord_theme_load(d->theme, path, &err) == CCORD_OK) {
@@ -411,9 +426,7 @@ static uint32_t badge_sum(uint32_t a, uint32_t b)
 
 static int64_t now_unix_ms_wall(void)
 {
-  struct timespec ts;
-  if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return 0;
-  return (int64_t)ts.tv_sec * 1000LL + (int64_t)(ts.tv_nsec / 1000000L);
+  return ccord_clock_unix_ms();
 }
 
 static void badge_add_guild(const ccord_store *s, ccord_id guild_id, int64_t now_unix_ms, uint32_t *unread,
@@ -693,9 +706,231 @@ void ccord_app_desktop_get_debug(const ccord_app_desktop *d, ccord_app_desktop_d
 #define IPC_CMD_MAX 512
 #define IPC_ACK_MAX 544
 
+static bool ipc_cmd_valid(const char *cmd)
+{
+  if (!cmd || !cmd[0]) return false;
+  size_t n = strlen(cmd);
+  if (n >= IPC_CMD_MAX) return false;
+  if (strncmp(cmd, "open-url ", 9) == 0) {
+    if (n <= 9) return false;
+    for (size_t i = 9; i < n; i++) {
+      unsigned char c = (unsigned char)cmd[i];
+      if (c <= 0x20u || c >= 0x7Fu) return false;
+    }
+    return true;
+  }
+  for (size_t i = 0; i < n; i++) {
+    char c = cmd[i];
+    if (!((c >= 'a' && c <= 'z') || c == '-')) return false;
+  }
+  return true;
+}
+
+#if CCORD_OS_WINDOWS
+
+struct ccord_app_ipc {
+  HANDLE pipe;
+  HANDLE ev;
+  OVERLAPPED ov;
+  bool pending;
+  char path[CCORD_PATH_MAX];
+};
+
+void ccord_app_ipc_resolve_path(char *out, size_t cap, const char *override_path)
+{
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  if (override_path && override_path[0]) {
+    snprintf(out, cap, "%s", override_path);
+    return;
+  }
+  const char *user = getenv("USERNAME");
+  if (!user || !user[0]) user = "user";
+  snprintf(out, cap, "\\\\.\\pipe\\ccord-control-%s", user);
+}
+
+static bool win_ipc_arm(ccord_app_ipc *ipc)
+{
+  if (ipc->pipe == INVALID_HANDLE_VALUE) {
+    ipc->pipe = CreateNamedPipeA(ipc->path, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                                 PIPE_UNLIMITED_INSTANCES, 1024, 1024, 0, nullptr);
+    if (ipc->pipe == INVALID_HANDLE_VALUE) return false;
+  }
+  ResetEvent(ipc->ev);
+  memset(&ipc->ov, 0, sizeof ipc->ov);
+  ipc->ov.hEvent = ipc->ev;
+  BOOL ok = ConnectNamedPipe(ipc->pipe, &ipc->ov);
+  if (ok || GetLastError() == ERROR_PIPE_CONNECTED) {
+    SetEvent(ipc->ev);
+    ipc->pending = true;
+    return true;
+  }
+  if (GetLastError() == ERROR_IO_PENDING) {
+    ipc->pending = true;
+    return true;
+  }
+  CloseHandle(ipc->pipe);
+  ipc->pipe = INVALID_HANDLE_VALUE;
+  ipc->pending = false;
+  return false;
+}
+
+ccord_app_ipc *ccord_app_ipc_listen(const char *path, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!path || !path[0]) {
+    (void)ccord_error_set(err, CCORD_ERR_INVALID, "ipc: pipe path missing");
+    return nullptr;
+  }
+  HANDLE h = CreateNamedPipeA(path, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                              PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                              PIPE_UNLIMITED_INSTANCES, 1024, 1024, 0, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    DWORD e = GetLastError();
+    if (e == ERROR_ACCESS_DENIED || e == ERROR_PIPE_BUSY) {
+      (void)ccord_error_set(err, CCORD_ERR_PROTOCOL, "another ccord instance is already running");
+    } else {
+      (void)ccord_error_set(err, CCORD_ERR_IO, "ipc: CreateNamedPipe failed");
+    }
+    return nullptr;
+  }
+  HANDLE ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (!ev) {
+    CloseHandle(h);
+    (void)ccord_error_set(err, CCORD_ERR_IO, "ipc: CreateEvent failed");
+    return nullptr;
+  }
+  ccord_app_ipc *ipc = ccord_calloc(1, sizeof *ipc);
+  if (!ipc) {
+    CloseHandle(ev);
+    CloseHandle(h);
+    (void)ccord_error_set(err, CCORD_ERR_NOMEM, "ipc: out of memory");
+    return nullptr;
+  }
+  ipc->pipe = h;
+  ipc->ev = ev;
+  snprintf(ipc->path, sizeof ipc->path, "%s", path);
+  if (!win_ipc_arm(ipc)) {
+    ccord_app_ipc_destroy(ipc);
+    (void)ccord_error_set(err, CCORD_ERR_IO, "ipc: ConnectNamedPipe failed");
+    return nullptr;
+  }
+  return ipc;
+}
+
+void ccord_app_ipc_destroy(ccord_app_ipc *ipc)
+{
+  if (!ipc) return;
+  if (ipc->pipe != INVALID_HANDLE_VALUE) {
+    (void)CancelIo(ipc->pipe);
+    CloseHandle(ipc->pipe);
+  }
+  if (ipc->ev) CloseHandle(ipc->ev);
+  ccord_free(ipc);
+}
+
+const char *ccord_app_ipc_path(const ccord_app_ipc *ipc)
+{
+  return ipc ? ipc->path : "";
+}
+
+bool ccord_app_ipc_poll(ccord_app_ipc *ipc, char *out, size_t cap)
+{
+  if (!ipc || !out || cap == 0) return false;
+  for (int attempt = 0; attempt < 8; attempt++) {
+    if (!ipc->pending && !win_ipc_arm(ipc)) return false;
+    if (WaitForSingleObject(ipc->ev, 0) != WAIT_OBJECT_0) return false;
+    HANDLE client = ipc->pipe;
+    ipc->pipe = INVALID_HANDLE_VALUE;
+    ipc->pending = false;
+    (void)win_ipc_arm(ipc);
+
+    bool ok = false;
+    char buf[IPC_CMD_MAX + 2];
+    OVERLAPPED rov = {0};
+    rov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (rov.hEvent) {
+      DWORD n = 0;
+      BOOL rd = ReadFile(client, buf, (DWORD)(sizeof buf - 1), &n, &rov);
+      if (!rd && GetLastError() == ERROR_IO_PENDING) {
+        if (WaitForSingleObject(rov.hEvent, 50) == WAIT_OBJECT_0) {
+          rd = GetOverlappedResult(client, &rov, &n, FALSE);
+        } else {
+          (void)CancelIoEx(client, &rov);
+        }
+      }
+      CloseHandle(rov.hEvent);
+      if (rd && n > 0) {
+        buf[n] = '\0';
+        buf[strcspn(buf, "\r\n")] = '\0';
+        if (ipc_cmd_valid(buf)) {
+          snprintf(out, cap, "%s", buf);
+          char ack[IPC_ACK_MAX];
+          int alen = snprintf(ack, sizeof ack, "ipc_ack=%s\n", buf);
+          OVERLAPPED wov = {0};
+          wov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+          if (wov.hEvent) {
+            DWORD wr = 0;
+            if (!WriteFile(client, ack, (DWORD)alen, &wr, &wov) && GetLastError() == ERROR_IO_PENDING) {
+              (void)WaitForSingleObject(wov.hEvent, 50);
+            }
+            CloseHandle(wov.hEvent);
+          }
+          ok = true;
+        }
+      }
+    }
+    (void)DisconnectNamedPipe(client);
+    CloseHandle(client);
+    if (ok) return true;
+  }
+  return false;
+}
+
+bool ccord_app_ipc_send(const char *path, const char *cmd, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!path || !path[0] || !ipc_cmd_valid(cmd)) {
+    (void)ccord_error_set(err, CCORD_ERR_INVALID, "ipc: invalid pipe path or command");
+    return false;
+  }
+  HANDLE h = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    (void)ccord_error_set(err, CCORD_ERR_NOT_FOUND, "no running ccord instance on the control pipe");
+    return false;
+  }
+  char line[IPC_CMD_MAX + 2];
+  int len = snprintf(line, sizeof line, "%s\n", cmd);
+  DWORD written = 0;
+  bool ok = WriteFile(h, line, (DWORD)len, &written, nullptr) && written == (DWORD)len;
+  if (ok) {
+    char ack[IPC_ACK_MAX], expect[IPC_ACK_MAX];
+    snprintf(expect, sizeof expect, "ipc_ack=%s", cmd);
+    DWORD rd = 0;
+    if (ReadFile(h, ack, (DWORD)(sizeof ack - 1), &rd, nullptr) && rd > 0) {
+      ack[rd] = '\0';
+      ack[strcspn(ack, "\r\n")] = '\0';
+      ok = strcmp(ack, expect) == 0;
+    } else {
+      ok = false;
+    }
+  }
+  CloseHandle(h);
+  if (!ok) (void)ccord_error_set(err, CCORD_ERR_PROTOCOL, "ipc: no valid ack from the running instance");
+  return ok;
+}
+
+bool ccord_app_ipc_handoff(const char *path, ccord_error *err)
+{
+  return ccord_app_ipc_send(path, "show", err);
+}
+
+#else
+
 struct ccord_app_ipc {
   int fd;                        // non-blocking listener; -1 after destroy
-  char path[PATH_MAX];
+  char path[CCORD_PATH_MAX];
 };
 
 void ccord_app_ipc_resolve_path(char *out, size_t cap, const char *override_path)
@@ -721,26 +956,6 @@ void ccord_app_ipc_resolve_path(char *out, size_t cap, const char *override_path
   // No runtime dir and no TMPDIR: leave the path empty; the caller runs without single-instance IPC.
 }
 
-static bool ipc_cmd_valid(const char *cmd)
-{
-  if (!cmd || !cmd[0]) return false;
-  size_t n = strlen(cmd);
-  if (n >= IPC_CMD_MAX) return false;
-  if (strncmp(cmd, "open-url ", 9) == 0) {
-    if (n <= 9) return false;
-    for (size_t i = 9; i < n; i++) {
-      unsigned char c = (unsigned char)cmd[i];
-      if (c <= 0x20u || c >= 0x7Fu) return false;
-    }
-    return true;
-  }
-  for (size_t i = 0; i < n; i++) {
-    char c = cmd[i];
-    if (!((c >= 'a' && c <= 'z') || c == '-')) return false;
-  }
-  return true;
-}
-
 static bool ipc_sockaddr(const char *path, struct sockaddr_un *out)
 {
   if (!path || !path[0] || strlen(path) >= sizeof out->sun_path) return false;
@@ -750,13 +965,39 @@ static bool ipc_sockaddr(const char *path, struct sockaddr_un *out)
   return true;
 }
 
+static bool ipc_peer_same_user(int fd, pid_t *out_pid)
+{
+  if (out_pid) *out_pid = 0;
+#ifdef SO_PEERCRED
+  struct ucred cred = {0};
+  socklen_t clen = sizeof cred;
+  if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &clen) != 0 || cred.uid != geteuid()) return false;
+  if (out_pid && cred.pid > 1) *out_pid = cred.pid;
+  return true;
+#elif CCORD_OS_MACOS
+  uid_t euid = 0;
+  gid_t egid = 0;
+  if (getpeereid(fd, &euid, &egid) != 0 || euid != geteuid()) return false;
+  if (out_pid) {
+    pid_t pid = 0;
+    socklen_t plen = sizeof pid;
+    if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &plen) == 0 && pid > 1) *out_pid = pid;
+  }
+  return true;
+#else
+  (void)fd;
+  return false;
+#endif
+}
+
 // A live listener answers connect(); a stale socket file refuses it.
 static bool ipc_probe_alive(const char *path)
 {
   struct sockaddr_un addr;
   if (!ipc_sockaddr(path, &addr)) return false;
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) return false;
+  (void)ccord_sock_set_cloexec(fd);
   bool alive = connect(fd, (struct sockaddr *)&addr, sizeof addr) == 0;
   close(fd);
   return alive;
@@ -771,7 +1012,7 @@ ccord_app_ipc *ccord_app_ipc_listen(const char *path, ccord_error *err)
     return nullptr;
   }
   // Create the parent directory (e.g. $XDG_RUNTIME_DIR/ccord) private to the user.
-  char parent[PATH_MAX];
+  char parent[CCORD_PATH_MAX];
   snprintf(parent, sizeof parent, "%s", path);
   char *slash = strrchr(parent, '/');
   if (slash && slash != parent) {
@@ -781,11 +1022,12 @@ ccord_app_ipc *ccord_app_ipc_listen(const char *path, ccord_error *err)
       return nullptr;
     }
   }
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) {
     (void)ccord_error_set(err, CCORD_ERR_IO, "ipc: socket() failed");
     return nullptr;
   }
+  (void)ccord_sock_set_cloexec(fd);
   (void)fchmod(fd, 0600);
   int rc = bind(fd, (struct sockaddr *)&addr, sizeof addr);
   int bind_errno = errno;
@@ -809,7 +1051,7 @@ ccord_app_ipc *ccord_app_ipc_listen(const char *path, ccord_error *err)
     }
   }
   (void)chmod(path, 0600);
-  if (listen(fd, 4) != 0 || fcntl(fd, F_SETFL, O_NONBLOCK) != 0) {
+  if (listen(fd, 4) != 0 || !ccord_sock_set_nonblock(fd)) {
     close(fd);
     (void)unlink(path);
     (void)ccord_error_set(err, CCORD_ERR_IO, "ipc: listen() failed");
@@ -848,12 +1090,11 @@ bool ccord_app_ipc_poll(ccord_app_ipc *ipc, char *out, size_t cap)
   for (int attempt = 0; attempt < 8; attempt++) {
     int cfd = accept(ipc->fd, nullptr, nullptr);   // listener is non-blocking
     if (cfd < 0) return false;
-    struct ucred cred = {0};
-    socklen_t clen = sizeof cred;
-    if (getsockopt(cfd, SOL_SOCKET, SO_PEERCRED, &cred, &clen) != 0 || cred.uid != geteuid()) {
+    if (!ipc_peer_same_user(cfd, nullptr)) {
       close(cfd);
       continue;
     }
+    ccord_sock_set_nosigpipe(cfd);
     bool ok = false;
     char buf[IPC_CMD_MAX + 2];
     struct pollfd pfd = {.fd = cfd, .events = POLLIN};
@@ -866,7 +1107,7 @@ bool ccord_app_ipc_poll(ccord_app_ipc *ipc, char *out, size_t cap)
           snprintf(out, cap, "%s", buf);
           char ack[IPC_ACK_MAX];
           int alen = snprintf(ack, sizeof ack, "ipc_ack=%s\n", buf);
-          (void)fcntl(cfd, F_SETFL, O_NONBLOCK);
+          (void)ccord_sock_set_nonblock(cfd);
           ssize_t w = write(cfd, ack, (size_t)alen);   // best effort: the client waits for this ack
           (void)w;
           ok = true;
@@ -882,6 +1123,14 @@ bool ccord_app_ipc_poll(ccord_app_ipc *ipc, char *out, size_t cap)
 static bool ipc_peer_is_ccord(pid_t pid)
 {
   if (pid <= 1) return false;
+#if CCORD_OS_MACOS
+  char path[PROC_PIDPATHINFO_MAXSIZE];
+  int n = proc_pidpath(pid, path, sizeof path);
+  if (n <= 0) return false;
+  const char *base = strrchr(path, '/');
+  base = base ? base + 1 : path;
+  return strcmp(base, "ccord") == 0 || strcmp(base, "c-cord") == 0;
+#else
   char path[64], comm[64];
   snprintf(path, sizeof path, "/proc/%ld/comm", (long)pid);
   int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -892,12 +1141,25 @@ static bool ipc_peer_is_ccord(pid_t pid)
   while (n > 0 && (comm[n - 1] == '\n' || comm[n - 1] == '\r')) n--;
   comm[n] = '\0';
   return strcmp(comm, "ccord") == 0 || strcmp(comm, "c-cord") == 0;
+#endif
 }
 
 static bool ipc_peer_is_stale_exe(pid_t peer_pid)
 {
   if (peer_pid <= 1 || peer_pid == getpid()) return false;
-  char link_path[64], peer_exe[PATH_MAX], self_exe[PATH_MAX];
+#if CCORD_OS_MACOS
+  char peer_exe[PROC_PIDPATHINFO_MAXSIZE], self_exe[PROC_PIDPATHINFO_MAXSIZE];
+  if (proc_pidpath(peer_pid, peer_exe, sizeof peer_exe) <= 0 ||
+      proc_pidpath(getpid(), self_exe, sizeof self_exe) <= 0) {
+    return false;
+  }
+  struct stat peer_st, self_st;
+  if (stat(peer_exe, &peer_st) == 0 && stat(self_exe, &self_st) == 0) {
+    if (peer_st.st_size != self_st.st_size || peer_st.st_mtime < self_st.st_mtime) return true;
+  }
+  return false;
+#else
+  char link_path[64], peer_exe[CCORD_PATH_MAX], self_exe[CCORD_PATH_MAX];
   snprintf(link_path, sizeof link_path, "/proc/%ld/exe", (long)peer_pid);
   ssize_t pn = readlink(link_path, peer_exe, sizeof peer_exe - 1);
   if (pn <= 0) return false;
@@ -915,6 +1177,7 @@ static bool ipc_peer_is_stale_exe(pid_t peer_pid)
     if (peer_st.st_size != self_st.st_size || peer_st.st_mtime < self_st.st_mtime) return true;
   }
   return false;
+#endif
 }
 
 bool ccord_app_ipc_handoff(const char *path, ccord_error *err)
@@ -925,11 +1188,13 @@ bool ccord_app_ipc_handoff(const char *path, ccord_error *err)
     (void)ccord_error_set(err, CCORD_ERR_INVALID, "ipc: invalid socket path");
     return false;
   }
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) {
     (void)ccord_error_set(err, CCORD_ERR_IO, "ipc: socket() failed");
     return false;
   }
+  (void)ccord_sock_set_cloexec(fd);
+  ccord_sock_set_nosigpipe(fd);
   if (connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
     if (errno == ECONNREFUSED || errno == ENOENT) (void)unlink(path);
     close(fd);
@@ -938,15 +1203,7 @@ bool ccord_app_ipc_handoff(const char *path, ccord_error *err)
   }
 
   pid_t peer_pid = 0;
-  bool same_uid = false;
-#ifdef SO_PEERCRED
-  struct ucred cred = {0};
-  socklen_t clen = sizeof cred;
-  if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &clen) == 0 && cred.pid > 1) {
-    peer_pid = cred.pid;
-    same_uid = (cred.uid == getuid());
-  }
-#endif
+  bool same_uid = ipc_peer_same_user(fd, &peer_pid);
 
   bool stale = same_uid && ipc_peer_is_stale_exe(peer_pid);
   const char *cmd = stale ? "quit" : "show";
@@ -972,11 +1229,10 @@ bool ccord_app_ipc_handoff(const char *path, ccord_error *err)
   if (!stale && ok) return true;   // healthy current primary surfaced its window
 
   if (peer_pid > 1 && same_uid) {
-    struct timespec ts = {.tv_sec = 0, .tv_nsec = 20 * 1000 * 1000};
-    for (int i = 0; i < 40 && kill(peer_pid, 0) == 0; i++) (void)nanosleep(&ts, nullptr);
+    for (int i = 0; i < 40 && kill(peer_pid, 0) == 0; i++) ccord_sleep_ms(20);
     if (kill(peer_pid, 0) == 0 && ipc_peer_is_ccord(peer_pid)) {
       (void)kill(peer_pid, SIGTERM);
-      for (int i = 0; i < 20 && kill(peer_pid, 0) == 0; i++) (void)nanosleep(&ts, nullptr);
+      for (int i = 0; i < 20 && kill(peer_pid, 0) == 0; i++) ccord_sleep_ms(20);
     }
   }
   (void)unlink(path);
@@ -993,11 +1249,13 @@ bool ccord_app_ipc_send(const char *path, const char *cmd, ccord_error *err)
     (void)ccord_error_set(err, CCORD_ERR_INVALID, "ipc: invalid socket path or command");
     return false;
   }
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) {
     (void)ccord_error_set(err, CCORD_ERR_IO, "ipc: socket() failed");
     return false;
   }
+  (void)ccord_sock_set_cloexec(fd);
+  ccord_sock_set_nosigpipe(fd);
   if (connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
     close(fd);
     (void)ccord_error_set(err, CCORD_ERR_NOT_FOUND, "no running ccord instance on the control socket");
@@ -1028,6 +1286,7 @@ bool ccord_app_ipc_send(const char *path, const char *cmd, ccord_error *err)
   if (!ok) (void)ccord_error_set(err, CCORD_ERR_PROTOCOL, "ipc: no valid ack from the running instance");
   return ok;
 }
+#endif
 
 // ---------------------------------------------------------------- link events (resume / network change)
 

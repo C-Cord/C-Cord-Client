@@ -4,12 +4,15 @@
 #include <ccord/net/http_fetch.h>
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/os.h>
 
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <strings.h>
+#endif
 
 #if defined(CCORD_HTTP_FETCH_LIVE)
 #include <curl/curl.h>

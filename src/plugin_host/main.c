@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
-#define _GNU_SOURCE
 #include "sandbox.h"
 
 #include <ccord/core/alloc.h>
@@ -9,6 +8,7 @@
 #include <ccord/core/clock.h>
 #include <ccord/core/config.h>
 #include <ccord/core/json.h>
+#include <ccord/core/os.h>
 #include <ccord/core/utf8.h>
 #include <ccord/ipc/ipc.h>
 
@@ -16,14 +16,16 @@
 
 #include <errno.h>
 #include <limits.h>
-#include <poll.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__)
+#include <signal.h>
 #include <sys/prctl.h>
+#endif
+#if !CCORD_OS_WINDOWS
 #include <sys/resource.h>
-#include <unistd.h>
+#endif
 
 // Exit codes are part of the contract: the main process maps them to the FAILED reason.
 #define EXIT_USAGE 64
@@ -312,9 +314,9 @@ static int run_loop(host *h)
   ccord_arena arena;
   ccord_arena_init(&arena, 0);
   while (!h->stop) {
-    struct pollfd pfd = {.fd = ccord_ipc_fd(h->ipc), .events = POLLIN, .revents = 0};
-    if (ccord_ipc_has_pending_output(h->ipc)) pfd.events |= POLLOUT;
-    if (poll(&pfd, 1, 100) < 0 && errno != EINTR) fatal(h, EXIT_INTERNAL);
+    unsigned events = CCORD_POLL_IN;
+    if (ccord_ipc_has_pending_output(h->ipc)) events |= CCORD_POLL_OUT;
+    if (ccord_sock_poll1(ccord_ipc_fd(h->ipc), events, 100) < 0) fatal(h, EXIT_INTERNAL);
     for (;;) {
       ccord_ipc_msg msg;
       ccord_error err = {0};
@@ -350,13 +352,17 @@ static int run_loop(host *h)
   return h->exit_code;
 }
 
-// Process-level hardening. Empty environment and /dev/null stdin come from the spawning side.
+// Process-level hardening. Empty environment and null stdin come from the spawning side.
 static void harden(void)
 {
+#if defined(__linux__)
   (void)prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
   (void)prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0);
+#endif
+#if !CCORD_OS_WINDOWS
   struct rlimit core = {0, 0};
   (void)setrlimit(RLIMIT_CORE, &core);
+#endif
 }
 
 static void send_hello(host *h)
@@ -391,15 +397,22 @@ int main(int argc, char **argv)
     return EXIT_USAGE;
   }
   char *end = nullptr;
-  long fd = strtol(argv[2], &end, 10);
-  if (!end || *end != '\0' || fd < 0 || fd > INT_MAX) {
+  unsigned long long raw_fd = strtoull(argv[2], &end, 10);
+  if (!end || *end != '\0' || argv[2][0] == '-' ||
+#if !CCORD_OS_WINDOWS
+      raw_fd > (unsigned long long)INT_MAX
+#else
+      raw_fd == (unsigned long long)CCORD_INVALID_SOCKET
+#endif
+  ) {
     fprintf(stderr, "ccord-plugin-host: bad --ipc-fd\n");
     return EXIT_USAGE;
   }
+  ccord_net_os_init();
   harden();
   host h = {.ipc = nullptr, .sb = nullptr, .next_id = 1, .stop = false, .exit_code = 0};
   ccord_error err = {0};
-  h.ipc = ccord_ipc_open((int)fd, &err);   // takes ownership of fd
+  h.ipc = ccord_ipc_open((ccord_socket_t)raw_fd, &err);   // takes ownership of socket
   if (!h.ipc) {
     fprintf(stderr, "ccord-plugin-host: %s\n", err.message);
     return EXIT_INTERNAL;

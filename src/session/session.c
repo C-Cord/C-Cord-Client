@@ -9,7 +9,7 @@
 #include <ccord/store/roles.h>
 #include <ccord/store/unread.h>
 
-#include <pthread.h>
+#include <ccord/core/os.h>
 #include <stdatomic.h>
 #include <string.h>
 
@@ -144,7 +144,7 @@ typedef struct session_fav_pending {
 } session_fav_pending;
 
 struct ccord_session {
-  pthread_mutex_t audio_mtx;
+  ccord_mutex *audio_mtx;
   ccord_stream_hub *streams;   // chunked video streams (media_stream.c); lives with the session
   ccord_bus *bus;
   ccord_store *store;
@@ -390,7 +390,7 @@ ccord_session *ccord_session_create(ccord_bus *bus, ccord_store *store, ccord_tr
   s->bus = bus;
   s->store = store;
   s->transport = transport;
-  pthread_mutex_init(&s->audio_mtx, nullptr);
+  s->audio_mtx = ccord_mutex_create();
   s->state = CCORD_CONN_DISCONNECTED;
   return s;
 }
@@ -402,11 +402,11 @@ void ccord_session_destroy(ccord_session *s)
 {
   if (!s) return;
   ccord_stream_hub_destroy(s->streams);   // before the transport: closes the streams that read through it
-  pthread_mutex_lock(&s->audio_mtx);
+  ccord_mutex_lock(s->audio_mtx);
   ccord_transport_destroy(s->transport);
   s->transport = nullptr;
-  pthread_mutex_unlock(&s->audio_mtx);
-  pthread_mutex_destroy(&s->audio_mtx);
+  ccord_mutex_unlock(s->audio_mtx);
+  ccord_mutex_destroy(s->audio_mtx);
   ccord_profile_rest_destroy(s->profile_rest);   // pending edits answer CCORD_ERR_IO without touching the store
   for (size_t i = 0; i < s->nfav_pending; i++) ccord_free(s->fav_pending[i].url);
   ccord_free(s->requested);
@@ -469,10 +469,10 @@ ccord_status ccord_session_set_transport(ccord_session *s, ccord_transport *tran
     ccord_transport_destroy(transport);
     return ccord_error_set(err, CCORD_ERR_INVALID, "session: null session or transport");
   }
-  pthread_mutex_lock(&s->audio_mtx);
+  ccord_mutex_lock(s->audio_mtx);
   ccord_transport_destroy(s->transport);
   s->transport = transport;
-  pthread_mutex_unlock(&s->audio_mtx);
+  ccord_mutex_unlock(s->audio_mtx);
   ccord_stream_hub_set_transport(s->streams, transport);
   s->nrequested = 0;
   s->nchan_hist = 0;
@@ -6142,32 +6142,32 @@ ccord_status ccord_session_push_voice_pcm(ccord_session *s, const int16_t *pcm,
                                           size_t samples, ccord_error *err)
 {
   if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "session: null session");
-  pthread_mutex_lock(&s->audio_mtx);
+  ccord_mutex_lock(s->audio_mtx);
   if (!s->transport) {
-    pthread_mutex_unlock(&s->audio_mtx);
+    ccord_mutex_unlock(s->audio_mtx);
     return ccord_error_set(err, CCORD_ERR_INVALID, "session: transport is null");
   }
   // Push-to-talk gate: while PTT mode is on and the key is not held, mic frames are dropped before
   // they reach the transport (the live voice gateway applies the same gate; no traffic either way).
   if (atomic_load(&s->has_voice_cfg) && s->voice_cfg.ptt && !atomic_load(&s->ptt_held)) {
-    pthread_mutex_unlock(&s->audio_mtx);
+    ccord_mutex_unlock(s->audio_mtx);
     return CCORD_OK;
   }
   ccord_status st = ccord_transport_push_voice_pcm(s->transport, pcm, samples, err);
-  pthread_mutex_unlock(&s->audio_mtx);
+  ccord_mutex_unlock(s->audio_mtx);
   return st;
 }
 
 size_t ccord_session_pull_voice_pcm(ccord_session *s, int16_t *pcm, size_t max_samples)
 {
   if (!s || !pcm || max_samples == 0) return 0;
-  pthread_mutex_lock(&s->audio_mtx);
+  ccord_mutex_lock(s->audio_mtx);
   if (!s->transport) {
-    pthread_mutex_unlock(&s->audio_mtx);
+    ccord_mutex_unlock(s->audio_mtx);
     return 0;
   }
   size_t n = ccord_transport_pull_voice_pcm(s->transport, pcm, max_samples);
-  pthread_mutex_unlock(&s->audio_mtx);
+  ccord_mutex_unlock(s->audio_mtx);
   return n;
 }
 
@@ -6929,34 +6929,34 @@ bool ccord_session_consume_keyframe_request(ccord_session *s)
 ccord_status ccord_session_stream_send_pcm(ccord_session *s, const int16_t *pcm, size_t samples, ccord_error *err)
 {
   if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "session: null session");
-  pthread_mutex_lock(&s->audio_mtx);
+  ccord_mutex_lock(s->audio_mtx);
   if (!s->transport) {
-    pthread_mutex_unlock(&s->audio_mtx);
+    ccord_mutex_unlock(s->audio_mtx);
     return ccord_error_set(err, CCORD_ERR_INVALID, "session: transport is null");
   }
   if (!pcm || samples == 0) {
-    pthread_mutex_unlock(&s->audio_mtx);
+    ccord_mutex_unlock(s->audio_mtx);
     return ccord_error_set(err, CCORD_ERR_INVALID, "session: empty stream pcm");
   }
   if (!ccord_store_stream_active(s->store)) {
-    pthread_mutex_unlock(&s->audio_mtx);
+    ccord_mutex_unlock(s->audio_mtx);
     return ccord_error_set(err, CCORD_ERR_INVALID, "session: start a stream before sending audio");
   }
   ccord_status st = ccord_transport_send_stream_pcm(s->transport, pcm, samples, err);
-  pthread_mutex_unlock(&s->audio_mtx);
+  ccord_mutex_unlock(s->audio_mtx);
   return st;
 }
 
 size_t ccord_session_stream_poll_pcm(ccord_session *s, int16_t *out_pcm, size_t cap_samples)
 {
   if (!s || !out_pcm || cap_samples == 0) return 0;
-  pthread_mutex_lock(&s->audio_mtx);
+  ccord_mutex_lock(s->audio_mtx);
   if (!s->transport || !atomic_load((_Atomic bool *)&s->watched.active)) {
-    pthread_mutex_unlock(&s->audio_mtx);
+    ccord_mutex_unlock(s->audio_mtx);
     return 0;
   }
   size_t n = ccord_transport_poll_stream_pcm(s->transport, out_pcm, cap_samples);
-  pthread_mutex_unlock(&s->audio_mtx);
+  ccord_mutex_unlock(s->audio_mtx);
   return n;
 }
 

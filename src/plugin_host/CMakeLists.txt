@@ -8,12 +8,12 @@ target_link_libraries(ccord-plugin-host PRIVATE ccord_host_sandbox)
 ccord_strict_warnings(ccord-plugin-host)
 
 add_custom_target(ccord_plugin_host ALL
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:ccord-plugin-host> $<TARGET_FILE_DIR:ccord-plugin-host>/ccord_plugin_host
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:ccord-plugin-host> $<TARGET_FILE_DIR:ccord-plugin-host>/ccord_plugin_host${CMAKE_EXECUTABLE_SUFFIX}
   DEPENDS ccord-plugin-host
   COMMENT "Creating ccord_plugin_host binary alias"
 )
 add_custom_command(TARGET ccord-plugin-host POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:ccord-plugin-host> $<TARGET_FILE_DIR:ccord-plugin-host>/ccord_plugin_host
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:ccord-plugin-host> $<TARGET_FILE_DIR:ccord-plugin-host>/ccord_plugin_host${CMAKE_EXECUTABLE_SUFFIX}
   COMMENT "Creating ccord_plugin_host binary alias"
 )
 

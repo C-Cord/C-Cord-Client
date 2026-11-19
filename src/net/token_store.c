@@ -3,14 +3,12 @@
 #define _POSIX_C_SOURCE 200809L
 #include <ccord/net/live_transport.h>
 #include <ccord/core/atomic_file.h>
+#include <ccord/core/os.h>
 
 #include <errno.h>
-#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
 
 #include <ccord/core/alloc.h>
 
@@ -20,35 +18,20 @@
 
 static char *read_file_max(const char *path, size_t max, size_t *out_len)
 {
-  int fd = open(path, O_RDONLY | O_CLOEXEC);
-  if (fd < 0) return nullptr;
-  struct stat st;
-  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
-      (uintmax_t)st.st_size > (uintmax_t)max) {
-    close(fd);
+  uint64_t fsz = 0;
+  if (!ccord_path_is_file(path) || !ccord_file_size(path, &fsz) || fsz == 0 || fsz >= (uint64_t)max) {
     return nullptr;
   }
-  size_t n = (size_t)st.st_size;
-  if (n >= max) {
-    close(fd);
-    return nullptr;
-  }
+  FILE *f = fopen(path, "rb");
+  if (!f) return nullptr;
+  size_t n = (size_t)fsz;
   char *buf = ccord_malloc(n + 1);
   if (!buf) {
-    close(fd);
+    fclose(f);
     return nullptr;
   }
-  size_t got = 0;
-  while (got < n) {
-    ssize_t r = read(fd, buf + got, n - got);
-    if (r < 0) {
-      if (errno == EINTR) continue;
-      break;
-    }
-    if (r == 0) break;
-    got += (size_t)r;
-  }
-  close(fd);
+  size_t got = fread(buf, 1, n, f);
+  fclose(f);
   if (got == 0) {
     ccord_live_wipe(buf, n);
     ccord_free(buf);
@@ -73,26 +56,12 @@ ccord_status ccord_live_token_path(char *out, size_t cap, ccord_error *err)
 {
   ccord_error_clear(err);
   if (!out || cap == 0) return ccord_error_set(err, CCORD_ERR_INVALID, "token: null path buffer");
-  const char *xdg = getenv("XDG_CONFIG_HOME");
-  if (xdg && xdg[0] != '\0') {
-    size_t xn = strlen(xdg);
-    while (xn > 1 && xdg[xn - 1] == '/') xn--;
-    const char *suffix = "/ccord/token";
-    size_t sn = strlen(suffix);
-    if (xn + sn + 1 > cap) return ccord_error_set(err, CCORD_ERR_RANGE, "token: config path too long");
-    memcpy(out, xdg, xn);
-    memcpy(out + xn, suffix, sn + 1);
-    return CCORD_OK;
+  char dir[CCORD_PATH_MAX];
+  if (!ccord_os_config_dir(dir, sizeof dir)) {
+    return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "token: config directory is not set");
   }
-  const char *home = getenv("HOME");
-  if (!home || home[0] == '\0') return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "token: HOME is not set");
-  size_t hn = strlen(home);
-  while (hn > 1 && home[hn - 1] == '/') hn--;
-  const char *suffix = "/.config/ccord/token";
-  size_t sn = strlen(suffix);
-  if (hn + sn + 1 > cap) return ccord_error_set(err, CCORD_ERR_RANGE, "token: home path too long");
-  memcpy(out, home, hn);
-  memcpy(out + hn, suffix, sn + 1);
+  int n = snprintf(out, cap, "%s/token", dir);
+  if (n < 0 || (size_t)n >= cap) return ccord_error_set(err, CCORD_ERR_RANGE, "token: config path too long");
   return CCORD_OK;
 }
 
@@ -111,18 +80,17 @@ static void trim_token_bounds(const char *s, size_t len, size_t *out_start, size
 static ccord_status ensure_parent_dirs(const char *file_path, ccord_error *err)
 {
   size_t len = strlen(file_path);
-  if (len == 0 || len >= 4096) return ccord_error_set(err, CCORD_ERR_RANGE, "token: path too long");
-  char tmp[4096];
+  if (len == 0 || len >= CCORD_PATH_MAX) return ccord_error_set(err, CCORD_ERR_RANGE, "token: path too long");
+  char tmp[CCORD_PATH_MAX];
   memcpy(tmp, file_path, len + 1);
-  for (size_t i = 1; i < len; i++) {
-    if (tmp[i] != '/') continue;
-    tmp[i] = '\0';
-    if (mkdir(tmp, 0700) != 0 && errno != EEXIST) {
-      return ccord_error_set(err, CCORD_ERR_IO, "token: cannot create config directory");
-    }
-    tmp[i] = '/';
-  }
-  return CCORD_OK;
+  char *slash = strrchr(tmp, '/');
+#if defined(_WIN32)
+  char *bs = strrchr(tmp, '\\');
+  if (bs && (!slash || bs > slash)) slash = bs;
+#endif
+  if (!slash || slash == tmp) return CCORD_OK;
+  *slash = '\0';
+  return ccord_mkdir_p(tmp, 0700, err);
 }
 
 ccord_status ccord_live_save_token(const char *path_or_null, const char *token, ccord_error *err)
@@ -161,23 +129,23 @@ ccord_status ccord_live_delete_token(const char *path_or_null, ccord_error *err)
     if (st != CCORD_OK) return st;
     target = resolved;
   }
-  int fd = open(target, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
-  if (fd >= 0) {
-    struct stat st;
-    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0 && st.st_size <= 4096) {
+  uint64_t fsz = 0;
+  if (ccord_path_is_file(target) && ccord_file_size(target, &fsz) && fsz > 0 && fsz <= 4096) {
+    FILE *f = fopen(target, "r+b");
+    if (f) {
       char zeros[256];
       memset(zeros, 0, sizeof zeros);
-      size_t rem = (size_t)st.st_size;
+      size_t rem = (size_t)fsz;
       while (rem > 0) {
         size_t chunk = rem < sizeof zeros ? rem : sizeof zeros;
-        ssize_t w = write(fd, zeros, chunk);
-        if (w <= 0) break;
-        rem -= (size_t)w;
+        if (fwrite(zeros, 1, chunk, f) != chunk) break;
+        rem -= chunk;
       }
+      fflush(f);
+      fclose(f);
     }
-    close(fd);
   }
-  if (unlink(target) != 0 && errno != ENOENT) {
+  if (ccord_path_exists(target) && !ccord_file_unlink(target)) {
     return ccord_error_set(err, CCORD_ERR_IO, "token: unlink failed");
   }
   return CCORD_OK;
@@ -491,7 +459,7 @@ static ccord_status accounts_load(account_db *db, bool migrate, ccord_error *err
   size_t n = 0;
   char *buf = read_file_max(path, ACCOUNTS_FILE_MAX, &n);
   if (!buf) {
-    if (access(path, F_OK) == 0) return CCORD_OK;
+    if (ccord_path_exists(path)) return CCORD_OK;
     return migrate ? migrate_legacy_token(db, err) : CCORD_OK;
   }
   st = accounts_parse(db, buf, err);

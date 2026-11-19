@@ -1071,8 +1071,13 @@ static void p_draw_advanced(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
                cur.developer_mode, false, "m6pad", 0);
   p_toggle_row(ui, r, c, 1, "HARDWARE ACCELERATION", "Use the GPU for rendering. Requires restart.",
                ui->settings_hardware_accel, false, "m6pad", 1);
+#if defined(__APPLE__)
+  p_toggle_row(ui, r, c, 2, "CLOSE TO TRAY", "Closing the window hides it to the menu bar; Menu Bar Quit or Cmd+Q still exits.",
+               s_prefs.close_background, false, "m6pad", 2);
+#else
   p_toggle_row(ui, r, c, 2, "CLOSE TO TRAY", "Closing the window hides it to the tray; Tray Quit or Ctrl+Q still exits.",
                s_prefs.close_background, false, "m6pad", 2);
+#endif
   p_row_label(ui, r, c, 3, "DATA DIRECTORY");
   const char *dir = ccord_paths_data_dir();
   p_note(ui, r, c.x, p_row_y(c, 3) + 18.0f, c.w, dir && dir[0] ? dir : "(not available)");

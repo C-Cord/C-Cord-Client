@@ -1,25 +1,39 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
-#define _GNU_SOURCE   // accept4, plus the POSIX socket/stat declarations that -std=c2x hides
+#define _GNU_SOURCE   // POSIX socket/stat declarations that -std=c2x hides
 #include <ccord/rpc/rpc.h>
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/arena.h>
 #include <ccord/core/buf.h>
 #include <ccord/core/json.h>
+#include <ccord/core/os.h>
 
 #include <errno.h>
-#include <fcntl.h>
 #include <limits.h>
-#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if CCORD_OS_WINDOWS
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+typedef uint32_t ccord_rpc_pid_t;
+#else
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
+#if CCORD_OS_MACOS
+#include <sys/sysctl.h>
+#endif
+typedef pid_t ccord_rpc_pid_t;
+#endif
 
 enum { OP_HANDSHAKE = 0, OP_FRAME = 1, OP_CLOSE = 2, OP_PING = 3, OP_PONG = 4 };
 
@@ -33,12 +47,16 @@ enum { OP_HANDSHAKE = 0, OP_FRAME = 1, OP_CLOSE = 2, OP_PING = 3, OP_PONG = 4 };
 #define PID_CHECK_INTERVAL_MS 1000u                   // how often to check tracked PIDs for exit while socket stays open
 
 struct ccord_rpc_conn {
-  int fd;
+#if CCORD_OS_WINDOWS
+  HANDLE pipe;
+#else
+  ccord_socket_t fd;
+#endif
   uint32_t id;
   bool ready;                                         // handshake done and READY sent
   bool has_activity;                                  // true while an activity is active on this connection
-  pid_t peer_pid;                                     // SO_PEERCRED pid at accept() (0 if unavailable)
-  pid_t tracked_pid;                                  // live Linux PID monitored for exit (0 = none)
+  ccord_rpc_pid_t peer_pid;                           // peer PID at accept() (0 if unavailable)
+  ccord_rpc_pid_t tracked_pid;                        // live host PID monitored for exit (0 = none)
   uint64_t accepted_ms;
   uint64_t last_pid_check_ms;
   char client_id[CLIENT_ID_MAX + 4u];
@@ -49,8 +67,16 @@ struct ccord_rpc_conn {
 struct ccord_rpc_server {
   ccord_rpc_hooks hooks;
   void *ctx;
-  int fd;                                             // non-blocking listener
+#if CCORD_OS_WINDOWS
+  HANDLE accept_pipe;
+  HANDLE accept_ev;
+  OVERLAPPED accept_ov;
+  bool accept_pending;
+  char path[128];
+#else
+  ccord_socket_t fd;                                  // non-blocking listener
   char path[sizeof(((struct sockaddr_un *)nullptr)->sun_path)];
+#endif
   ccord_rpc_conn *conns[CCORD_RPC_MAX_CONNECTIONS];
   size_t nconns;
   uint32_t next_id;
@@ -61,6 +87,40 @@ struct ccord_rpc_server {
 
 // ---------------------------------------------------------------- listener
 
+#if CCORD_OS_WINDOWS
+static HANDLE create_pipe_instance(const char *path, bool first)
+{
+  DWORD open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
+  if (first) open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+  return CreateNamedPipeA(path, open_mode, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                          PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, nullptr);
+}
+
+static bool arm_pipe_accept(ccord_rpc_server *s)
+{
+  if (s->accept_pipe == INVALID_HANDLE_VALUE) {
+    s->accept_pipe = create_pipe_instance(s->path, false);
+    if (s->accept_pipe == INVALID_HANDLE_VALUE) return false;
+  }
+  ResetEvent(s->accept_ev);
+  memset(&s->accept_ov, 0, sizeof s->accept_ov);
+  s->accept_ov.hEvent = s->accept_ev;
+  BOOL ok = ConnectNamedPipe(s->accept_pipe, &s->accept_ov);
+  if (ok || GetLastError() == ERROR_PIPE_CONNECTED) {
+    SetEvent(s->accept_ev);
+    s->accept_pending = true;
+    return true;
+  }
+  if (GetLastError() == ERROR_IO_PENDING) {
+    s->accept_pending = true;
+    return true;
+  }
+  CloseHandle(s->accept_pipe);
+  s->accept_pipe = INVALID_HANDLE_VALUE;
+  s->accept_pending = false;
+  return false;
+}
+#else
 static bool fill_addr(const char *path, struct sockaddr_un *out)
 {
   if (strlen(path) >= sizeof out->sun_path) return false;
@@ -74,8 +134,10 @@ static bool fill_addr(const char *path, struct sockaddr_un *out)
 // queue is full (EAGAIN) counts as alive instead of hanging us.
 static bool probe_alive(const struct sockaddr_un *addr)
 {
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) return true;   // cannot tell: assume it is live rather than unlink someone's socket
+  (void)ccord_sock_set_cloexec(fd);
+  (void)ccord_sock_set_nonblock(fd);
   bool alive = connect(fd, (const struct sockaddr *)addr, sizeof *addr) == 0 || errno == EAGAIN || errno == EINPROGRESS;
   close(fd);
   return alive;
@@ -97,8 +159,10 @@ static bind_result bind_slot(const char *path, int *out_fd)
   struct sockaddr_un addr;
   if (!fill_addr(path, &addr)) return BIND_FAILED;
   for (int attempt = 0; attempt < 2; attempt++) {
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) return BIND_FAILED;
+    (void)ccord_sock_set_cloexec(fd);
+    (void)ccord_sock_set_nonblock(fd);
     (void)fchmod(fd, 0600);
     int rc = bind(fd, (struct sockaddr *)&addr, sizeof addr);
     int bind_errno = errno;
@@ -131,10 +195,50 @@ static const char *env_dir(const char *name)
   }
   return v;
 }
+#endif
 
 ccord_rpc_server *ccord_rpc_server_create(const ccord_rpc_config *cfg, ccord_error *err)
 {
   ccord_error_clear(err);
+#if CCORD_OS_WINDOWS
+  ccord_rpc_server *s = ccord_calloc(1, sizeof *s);
+  if (!s) {
+    (void)ccord_error_set(err, CCORD_ERR_NOMEM, "rpc: out of memory");
+    return nullptr;
+  }
+  s->accept_pipe = INVALID_HANDLE_VALUE;
+  s->accept_ev = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (!s->accept_ev) {
+    ccord_free(s);
+    (void)ccord_error_set(err, CCORD_ERR_IO, "rpc: CreateEvent failed");
+    return nullptr;
+  }
+  const char *prefix = (cfg && cfg->dir && cfg->dir[0]) ? cfg->dir : "\\\\.\\pipe";
+  for (unsigned slot = 0; slot < CCORD_RPC_SLOTS; slot++) {
+    char path[sizeof s->path];
+    int n = snprintf(path, sizeof path, "%s\\discord-ipc-%u", prefix, slot);
+    if (n < 0 || (size_t)n >= sizeof path) continue;
+    HANDLE h = create_pipe_instance(path, true);
+    if (h != INVALID_HANDLE_VALUE) {
+      s->accept_pipe = h;
+      memcpy(s->path, path, (size_t)n + 1u);
+      break;
+    }
+  }
+  if (s->accept_pipe == INVALID_HANDLE_VALUE || !arm_pipe_accept(s)) {
+    if (s->accept_pipe != INVALID_HANDLE_VALUE) CloseHandle(s->accept_pipe);
+    CloseHandle(s->accept_ev);
+    ccord_free(s);
+    (void)ccord_error_set(err, CCORD_ERR_IO, "rpc: all discord-ipc-0..9 pipe slots are in use");
+    return nullptr;
+  }
+  if (cfg) {
+    s->hooks = cfg->hooks;
+    s->ctx = cfg->ctx;
+  }
+  ccord_arena_init(&s->scratch, 0);
+  return s;
+#else
   const char *dir = (cfg && cfg->dir && cfg->dir[0]) ? cfg->dir : env_dir("XDG_RUNTIME_DIR");
   if (!dir) dir = env_dir("TMPDIR");
   if (!dir) {
@@ -177,6 +281,7 @@ ccord_rpc_server *ccord_rpc_server_create(const ccord_rpc_config *cfg, ccord_err
   }
   ccord_arena_init(&s->scratch, 0);
   return s;
+#endif
 }
 
 const char *ccord_rpc_server_path(const ccord_rpc_server *s)
@@ -201,9 +306,43 @@ const char *ccord_rpc_conn_client_id(const ccord_rpc_conn *conn)
 
 // ---------------------------------------------------------------- writing
 
-// Replies are tiny next to the socket buffer, so a write that cannot complete means the client is not reading: the
-// caller drops the connection instead of queueing unbounded output.
-static bool send_frame(int fd, uint32_t op, const char *payload, size_t len)
+#if CCORD_OS_WINDOWS
+static bool send_frame_handle(HANDLE pipe, uint32_t op, const char *payload, size_t len)
+{
+  if (len > CCORD_RPC_FRAME_MAX_PAYLOAD) return false;
+  size_t total = 8u + len;
+  char *frame = ccord_malloc(total);
+  if (!frame) return false;
+  bool ok = ccord_rpc_frame_encode(frame, total, op, payload, len) == CCORD_OK;
+  if (ok) {
+    OVERLAPPED ov = {0};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    DWORD written = 0;
+    if (!ov.hEvent) {
+      ok = false;
+    } else {
+      BOOL wr = WriteFile(pipe, frame, (DWORD)total, &written, &ov);
+      if (!wr) {
+        if (GetLastError() == ERROR_IO_PENDING) {
+          ok = WaitForSingleObject(ov.hEvent, 100) == WAIT_OBJECT_0 &&
+               GetOverlappedResult(pipe, &ov, &written, FALSE) && written == (DWORD)total;
+          if (!ok) (void)CancelIoEx(pipe, &ov);
+        } else {
+          ok = false;
+        }
+      } else {
+        ok = written == (DWORD)total;
+      }
+      CloseHandle(ov.hEvent);
+    }
+  }
+  ccord_free(frame);
+  return ok;
+}
+#define RPC_CONN_HANDLE(c) ((c)->pipe)
+typedef HANDLE rpc_handle_t;
+#else
+static bool send_frame_handle(ccord_socket_t fd, uint32_t op, const char *payload, size_t len)
 {
   if (len > CCORD_RPC_FRAME_MAX_PAYLOAD) return false;
   size_t total = 8u + len;
@@ -212,11 +351,10 @@ static bool send_frame(int fd, uint32_t op, const char *payload, size_t len)
   bool ok = ccord_rpc_frame_encode(frame, total, op, payload, len) == CCORD_OK;
   size_t off = 0;
   while (ok && off < total) {
-    ssize_t n = send(fd, frame + off, total - off, MSG_NOSIGNAL | MSG_DONTWAIT);
+    bool wb = false;
+    ptrdiff_t n = ccord_sock_send(fd, frame + off, total - off, &wb);
     if (n > 0) {
       off += (size_t)n;
-    } else if (n < 0 && errno == EINTR) {
-      continue;
     } else {
       ok = false;
     }
@@ -224,12 +362,15 @@ static bool send_frame(int fd, uint32_t op, const char *payload, size_t len)
   ccord_free(frame);
   return ok;
 }
+#define RPC_CONN_HANDLE(c) ((c)->fd)
+typedef ccord_socket_t rpc_handle_t;
+#endif
 
-static bool send_close(int fd, int code, const char *message)
+static bool send_close(rpc_handle_t h, int code, const char *message)
 {
   char json[160];
   int n = snprintf(json, sizeof json, "{\"code\":%d,\"message\":\"%s\"}", code, message);
-  return n > 0 && (size_t)n < sizeof json && send_frame(fd, OP_CLOSE, json, (size_t)n);
+  return n > 0 && (size_t)n < sizeof json && send_frame_handle(h, OP_CLOSE, json, (size_t)n);
 }
 
 static bool append_lit(ccord_buf *b, const char *s)
@@ -255,7 +396,7 @@ static bool send_envelope(ccord_rpc_conn *c, const char *cmd, const char *nonce,
   bool ok = append_lit(&b, "{\"cmd\":") && append_jstr(&b, cmd) && append_lit(&b, ",\"data\":") &&
             append_lit(&b, data) && append_lit(&b, ",\"evt\":") && append_jstr(&b, evt) &&
             append_lit(&b, ",\"nonce\":") && append_jstr(&b, nonce) && append_lit(&b, "}") && !b.failed;
-  ok = ok && send_frame(c->fd, OP_FRAME, b.data, b.len);
+  ok = ok && send_frame_handle(RPC_CONN_HANDLE(c), OP_FRAME, b.data, b.len);
   ccord_buf_free(&b);
   return ok;
 }
@@ -347,18 +488,18 @@ static bool handle_handshake(ccord_rpc_server *s, ccord_rpc_conn *c, const char 
   ccord_error perr;
   const ccord_json *j = ccord_json_parse(&s->scratch, payload, plen, nullptr, &perr);
   if (!j || ccord_json_type_of(j) != CCORD_JSON_OBJECT) {
-    (void)send_close(c->fd, CCORD_RPC_CLOSE_INVALID_ENCODING, "Invalid encoding");
+    (void)send_close(RPC_CONN_HANDLE(c), CCORD_RPC_CLOSE_INVALID_ENCODING, "Invalid encoding");
     return false;
   }
   int64_t version = 0;
   const ccord_json *v = ccord_json_get(j, "v");
   if (!v || !ccord_json_int64(v, &version) || version != RPC_VERSION) {
-    (void)send_close(c->fd, CCORD_RPC_CLOSE_INVALID_VERSION, "Invalid version");
+    (void)send_close(RPC_CONN_HANDLE(c), CCORD_RPC_CLOSE_INVALID_VERSION, "Invalid version");
     return false;
   }
   const char *client_id = json_string_field(j, "client_id");
   if (!valid_client_id(client_id)) {
-    (void)send_close(c->fd, CCORD_RPC_CLOSE_INVALID_CLIENT_ID, "Invalid client id");
+    (void)send_close(RPC_CONN_HANDLE(c), CCORD_RPC_CLOSE_INVALID_CLIENT_ID, "Invalid client id");
     return false;
   }
   memcpy(c->client_id, client_id, strlen(client_id) + 1u);
@@ -376,9 +517,24 @@ static bool handle_handshake(ccord_rpc_server *s, ccord_rpc_conn *c, const char 
   return true;
 }
 
-static bool is_pid_alive(pid_t pid)
+static bool is_pid_alive(ccord_rpc_pid_t pid)
 {
   if (pid <= 0) return false;
+#if CCORD_OS_WINDOWS
+  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
+  if (!h) return GetLastError() == ERROR_ACCESS_DENIED;
+  DWORD code = 0;
+  bool alive = GetExitCodeProcess(h, &code) && code == STILL_ACTIVE;
+  CloseHandle(h);
+  return alive;
+#elif CCORD_OS_MACOS
+  if (kill(pid, 0) < 0 && errno == ESRCH) return false;
+  int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+  struct kinfo_proc kp;
+  size_t len = sizeof kp;
+  if (sysctl(mib, 4, &kp, &len, nullptr, 0) != 0 || len == 0) return false;
+  return kp.kp_proc.p_stat != SZOMB;
+#else
   if (kill(pid, 0) < 0 && errno == ESRCH) return false;
   char path[64];
   snprintf(path, sizeof path, "/proc/%ld/stat", (long)pid);
@@ -399,6 +555,7 @@ static bool is_pid_alive(pid_t pid)
   p++;
   while (*p == ' ') p++;
   return *p != 'Z' && *p != 'X' && *p != 'x';
+#endif
 }
 
 static bool cmd_set_activity(ccord_rpc_server *s, ccord_rpc_conn *c, const ccord_json *j, const char *cmd,
@@ -437,9 +594,9 @@ static bool cmd_set_activity(ccord_rpc_server *s, ccord_rpc_conn *c, const ccord
   int64_t arg_pid = 0;
   const ccord_json *pid_val = ccord_json_get(args, "pid");
   if (pid_val) (void)ccord_json_int64(pid_val, &arg_pid);
-  pid_t candidate = 0;
+  ccord_rpc_pid_t candidate = 0;
   if (arg_pid > 0 && arg_pid <= INT32_MAX) {
-    candidate = (pid_t)arg_pid;
+    candidate = (ccord_rpc_pid_t)arg_pid;
   } else if (arg_pid <= 0 && c->peer_pid > 0) {
     candidate = c->peer_pid;
   }
@@ -491,18 +648,18 @@ static bool handle_frame(ccord_rpc_server *s, ccord_rpc_conn *c, uint32_t op, co
   switch (op) {
     case OP_HANDSHAKE:
       if (c->ready) {
-        (void)send_close(c->fd, CCORD_RPC_CLOSE_ABNORMAL, "Already handshaken");
+        (void)send_close(RPC_CONN_HANDLE(c), CCORD_RPC_CLOSE_ABNORMAL, "Already handshaken");
         return false;
       }
       return handle_handshake(s, c, payload, plen);
     case OP_FRAME:
       if (!c->ready) {
-        (void)send_close(c->fd, CCORD_RPC_CLOSE_ABNORMAL, "Handshake required");
+        (void)send_close(RPC_CONN_HANDLE(c), CCORD_RPC_CLOSE_ABNORMAL, "Handshake required");
         return false;
       }
       return handle_command(s, c, payload, plen);
     case OP_PING:
-      return send_frame(c->fd, OP_PONG, payload, plen);
+      return send_frame_handle(RPC_CONN_HANDLE(c), OP_PONG, payload, plen);
     case OP_PONG:
       return true;
     case OP_CLOSE:
@@ -523,7 +680,7 @@ static bool drain_frames(ccord_rpc_server *s, ccord_rpc_conn *c)
     ccord_rpc_frame_result r = ccord_rpc_frame_decode(c->rbuf + off, c->rlen - off, &op, &payload, &plen, &used);
     if (r == CCORD_RPC_FRAME_NEED_MORE) break;
     if (r == CCORD_RPC_FRAME_BAD) {
-      (void)send_close(c->fd, CCORD_RPC_CLOSE_INVALID_ENCODING, "Invalid frame");
+      (void)send_close(RPC_CONN_HANDLE(c), CCORD_RPC_CLOSE_INVALID_ENCODING, "Invalid frame");
       return false;
     }
     s->work++;
@@ -544,7 +701,30 @@ static bool service_conn(ccord_rpc_server *s, ccord_rpc_conn *c, uint64_t now_ms
 {
   for (unsigned round = 0; round < READ_ROUNDS; round++) {
     size_t room = sizeof c->rbuf - c->rlen;   // never 0: complete frames are consumed, and a frame fits the buffer
-    ssize_t n = recv(c->fd, c->rbuf + c->rlen, room, MSG_DONTWAIT);
+#if CCORD_OS_WINDOWS
+    DWORD avail = 0;
+    if (!PeekNamedPipe(c->pipe, nullptr, 0, nullptr, &avail, nullptr)) return false;
+    if (avail == 0) break;
+    DWORD want = avail < (DWORD)room ? avail : (DWORD)room;
+    OVERLAPPED ov = {0};
+    ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!ov.hEvent) return false;
+    DWORD got = 0;
+    BOOL ok = ReadFile(c->pipe, c->rbuf + c->rlen, want, &got, &ov);
+    if (!ok) {
+      if (GetLastError() == ERROR_IO_PENDING) {
+        ok = WaitForSingleObject(ov.hEvent, 50) == WAIT_OBJECT_0 && GetOverlappedResult(c->pipe, &ov, &got, FALSE);
+        if (!ok) (void)CancelIoEx(c->pipe, &ov);
+      }
+    }
+    CloseHandle(ov.hEvent);
+    if (!ok || got == 0) return false;
+    c->rlen += (size_t)got;
+    if (!drain_frames(s, c)) return false;
+    if ((size_t)got < room) break;
+#else
+    bool wb = false;
+    ptrdiff_t n = ccord_sock_recv(c->fd, c->rbuf + c->rlen, room, &wb);
     if (n > 0) {
       c->rlen += (size_t)n;
       if (!drain_frames(s, c)) return false;
@@ -552,12 +732,12 @@ static bool service_conn(ccord_rpc_server *s, ccord_rpc_conn *c, uint64_t now_ms
       continue;
     }
     if (n == 0) return false;                 // EOF
-    if (errno == EINTR) continue;
-    if (errno == EAGAIN) break;   // EWOULDBLOCK is the same value on Linux
+    if (wb) break;
     return false;
+#endif
   }
   if (!c->ready && now_ms > c->accepted_ms && now_ms - c->accepted_ms >= CCORD_RPC_HANDSHAKE_TIMEOUT_MS) {
-    (void)send_close(c->fd, CCORD_RPC_CLOSE_ABNORMAL, "Handshake timeout");
+    (void)send_close(RPC_CONN_HANDLE(c), CCORD_RPC_CLOSE_ABNORMAL, "Handshake timeout");
     return false;
   }
   return true;
@@ -566,18 +746,53 @@ static bool service_conn(ccord_rpc_server *s, ccord_rpc_conn *c, uint64_t now_ms
 static void release_conn(ccord_rpc_server *s, ccord_rpc_conn *c)
 {
   if (c->ready && s->hooks.on_disconnect) s->hooks.on_disconnect(s->ctx, c);
-  close(c->fd);
+#if CCORD_OS_WINDOWS
+  if (c->pipe != INVALID_HANDLE_VALUE) {
+    (void)DisconnectNamedPipe(c->pipe);
+    CloseHandle(c->pipe);
+  }
+#else
+  ccord_sock_close(c->fd);
+#endif
   ccord_free(c);
 }
 
 static void accept_clients(ccord_rpc_server *s, uint64_t now_ms)
 {
+#if CCORD_OS_WINDOWS
   for (unsigned i = 0; i < ACCEPTS_PER_POLL; i++) {
-    int fd = accept4(s->fd, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
+    if (!s->accept_pending && !arm_pipe_accept(s)) return;
+    if (WaitForSingleObject(s->accept_ev, 0) != WAIT_OBJECT_0) return;
+    HANDLE client = s->accept_pipe;
+    s->accept_pipe = INVALID_HANDLE_VALUE;
+    s->accept_pending = false;
+    (void)arm_pipe_accept(s);
+    s->work++;
+    ccord_rpc_conn *c = s->nconns < CCORD_RPC_MAX_CONNECTIONS ? ccord_calloc(1, sizeof *c) : nullptr;
+    if (!c) {
+      (void)send_close(client, CCORD_RPC_CLOSE_ABNORMAL,
+                       s->nconns < CCORD_RPC_MAX_CONNECTIONS ? "Out of memory" : "Too many connections");
+      DisconnectNamedPipe(client);
+      CloseHandle(client);
+      continue;
+    }
+    c->pipe = client;
+    c->id = ++s->next_id;
+    c->accepted_ms = now_ms;
+    ULONG cpid = 0;
+    if (GetNamedPipeClientProcessId(client, &cpid) && cpid > 0) c->peer_pid = (ccord_rpc_pid_t)cpid;
+    s->conns[s->nconns++] = c;
+  }
+#else
+  for (unsigned i = 0; i < ACCEPTS_PER_POLL; i++) {
+    int fd = accept(s->fd, nullptr, nullptr);
     if (fd < 0) {
       if (errno == EINTR || errno == ECONNABORTED) continue;
       return;   // EAGAIN: nothing pending
     }
+    (void)ccord_sock_set_nonblock(fd);
+    (void)ccord_sock_set_cloexec(fd);
+    ccord_sock_set_nosigpipe(fd);
     s->work++;
     ccord_rpc_conn *c = s->nconns < CCORD_RPC_MAX_CONNECTIONS ? ccord_calloc(1, sizeof *c) : nullptr;
     if (!c) {
@@ -594,15 +809,29 @@ static void accept_clients(ccord_rpc_server *s, uint64_t now_ms)
     socklen_t clen = sizeof cred;
     if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &clen) != 0 || cred.uid != geteuid()) {
       close(fd);
+      ccord_free(c);
       continue;
     }
     if (cred.pid > 0) c->peer_pid = cred.pid;
+#elif CCORD_OS_MACOS
+    uid_t euid = 0;
+    gid_t egid = 0;
+    if (getpeereid(fd, &euid, &egid) != 0 || euid != geteuid()) {
+      close(fd);
+      ccord_free(c);
+      continue;
+    }
+    pid_t ppid = 0;
+    socklen_t plen = sizeof ppid;
+    if (getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &ppid, &plen) == 0 && ppid > 0) c->peer_pid = ppid;
 #else
     close(fd);
+    ccord_free(c);
     continue;
 #endif
     s->conns[s->nconns++] = c;
   }
+#endif
 }
 
 size_t ccord_rpc_server_poll(ccord_rpc_server *s, uint64_t now_ms)
@@ -642,8 +871,16 @@ void ccord_rpc_server_destroy(ccord_rpc_server *s)
     s->conns[s->nconns] = nullptr;
     release_conn(s, c);
   }
+#if CCORD_OS_WINDOWS
+  if (s->accept_pipe != INVALID_HANDLE_VALUE) {
+    (void)CancelIo(s->accept_pipe);
+    CloseHandle(s->accept_pipe);
+  }
+  if (s->accept_ev) CloseHandle(s->accept_ev);
+#else
   if (s->fd >= 0) close(s->fd);
   if (s->path[0]) (void)unlink(s->path);
+#endif
   ccord_arena_free(&s->scratch);
   ccord_free(s);
 }

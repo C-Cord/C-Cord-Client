@@ -8,8 +8,9 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+#if !defined(_WIN32)
 #include <strings.h>
+#endif
 #include <sys/stat.h>
 #include <time.h>
 
@@ -1579,7 +1580,8 @@ static void drafts_save(const ccord_ui *ui)
   if (!dir || !dir[0]) return;
   char path[1024];
   if (!drafts_path(path, sizeof path)) return;
-  (void)mkdir(dir, 0700);
+  ccord_error derr;
+  (void)ccord_mkdir_p(dir, 0700, &derr);
   ccord_buf b;
   ccord_buf_init(&b, 512);
   ccord_jw jw;
@@ -4365,7 +4367,7 @@ void ui_snowflake_date(ccord_id id, char *out, size_t cap)
   uint64_t ms = 1420070400000ull + (id >> 22);
   time_t sec = (time_t)(ms / 1000ull);
   struct tm tm_val;
-  if (gmtime_r(&sec, &tm_val) != nullptr && tm_val.tm_mon >= 0 && tm_val.tm_mon < 12) {
+  if (ccord_gmtime(sec, &tm_val) && tm_val.tm_mon >= 0 && tm_val.tm_mon < 12) {
     snprintf(out, cap, "%s %d, %d", k_months[tm_val.tm_mon], tm_val.tm_mday, tm_val.tm_year + 1900);
   } else {
     snprintf(out, cap, "Jan 1, 2015");
@@ -8909,7 +8911,7 @@ bool ccord_ui_attach_file(ccord_ui *ui, const char *path)
       if (strlen(path) < cap) snprintf(dst, cap, "%s", path);
     } else {
       char cwd[512];
-      if (getcwd(cwd, sizeof cwd) && strlen(cwd) + strlen(path) + 2u < cap) (void)snprintf(dst, cap, "%s/%.400s", cwd, path);
+      if (ccord_os_getcwd(cwd, sizeof cwd) && strlen(cwd) + strlen(path) + 2u < cap) (void)snprintf(dst, cap, "%s/%.400s", cwd, path);
     }
   }
   return ok;

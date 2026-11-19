@@ -23,7 +23,15 @@
 #include <ccord/platform/capture.h>
 #include <ccord/platform/platform.h>
 
+#ifdef __linux__
 #include "loopback_pw.h"
+#elif defined(_WIN32)
+typedef struct ccord_loopback_win32 ccord_loopback_win32;
+ccord_loopback_win32 *ccord_loopback_win32_open(void);
+size_t ccord_loopback_win32_read(ccord_loopback_win32 *w, int16_t *pcm, size_t max_samples);
+bool ccord_loopback_win32_failed(const ccord_loopback_win32 *w);
+void ccord_loopback_win32_close(ccord_loopback_win32 *w);
+#endif
 
 #include <math.h>
 #include <stdatomic.h>
@@ -207,7 +215,7 @@ bool ccord_audio_devices_handle_event(const SDL_Event *e)
 // sink monitor, stdout drained through a non-blocking pipe. An unavailable monitor fails soft at
 // open() so callers can fall back and retry; nothing here ever blocks the caller for long.
 
-typedef enum lb_kind : uint8_t { LB_KIND_FAKE = 0, LB_KIND_PIPE, LB_KIND_SDL, LB_KIND_PW } lb_kind;
+typedef enum lb_kind : uint8_t { LB_KIND_FAKE = 0, LB_KIND_PIPE, LB_KIND_SDL, LB_KIND_PW, LB_KIND_WIN32 } lb_kind;
 
 struct ccord_loopback_audio {
   lb_kind kind;
@@ -220,7 +228,11 @@ struct ccord_loopback_audio {
   bool have_pending;
   SDL_AudioStream *sdl_stream;   // SDL monitor fallback stream when helpers are absent
   bool sdl_audio_init;
+#ifdef __linux__
   ccord_loopback_pw *pw;         // PipeWire self-excluding capture when available
+#elif defined(_WIN32)
+  ccord_loopback_win32 *win32;   // Windows WASAPI loopback capture
+#endif
 };
 
 static atomic_bool g_lb_fake;
@@ -577,6 +589,7 @@ static size_t lb_sdl_read(ccord_loopback_audio *l, int16_t *pcm, size_t max_samp
   return (size_t)got / 2u;
 }
 
+#ifdef __linux__
 // Backend preference. Default (unset / "auto" / "pipewire") tries the self-excluding
 // PipeWire capture first; "parec" / "pipe" / "sdl" / "legacy" force the whole-sink
 // fallback path (used by tests and as an escape hatch).
@@ -587,6 +600,7 @@ static bool lb_pw_preferred(void)
   if (strcmp(e, "auto") == 0 || strcmp(e, "pipewire") == 0 || strcmp(e, "pw") == 0) return true;
   return false;
 }
+#endif
 
 ccord_loopback_audio *ccord_loopback_audio_open(ccord_error *err)
 {
@@ -602,6 +616,7 @@ ccord_loopback_audio *ccord_loopback_audio_open(ccord_error *err)
     l->kind = LB_KIND_FAKE;
     return l;
   }
+#ifdef __linux__
   // Self-excluding PipeWire capture first: it never folds our own playback back out.
   if (lb_pw_preferred()) {
     l->pw = ccord_loopback_pw_open();
@@ -613,8 +628,13 @@ ccord_loopback_audio *ccord_loopback_audio_open(ccord_error *err)
     if (!atomic_exchange(&warned_pw, true))
       CCORD_LOG_W("loopback: PipeWire capture unavailable, falling back to whole-sink monitor");
   }
-#ifdef __linux__
   if (lb_open_pipe(l)) return l;
+#elif defined(_WIN32)
+  l->win32 = ccord_loopback_win32_open();
+  if (l->win32) {
+    l->kind = LB_KIND_WIN32;
+    return l;
+  }
 #endif
   if (lb_open_sdl_monitor(l)) return l;
   ccord_free(l);
@@ -626,7 +646,11 @@ size_t ccord_loopback_audio_read(ccord_loopback_audio *l, int16_t *pcm, size_t m
 {
   if (!l || !pcm || max_samples == 0) return 0;
   if (l->kind == LB_KIND_FAKE) return lb_fake_read(l, pcm, max_samples);
+#ifdef __linux__
   if (l->kind == LB_KIND_PW) return ccord_loopback_pw_read(l->pw, pcm, max_samples);
+#elif defined(_WIN32)
+  if (l->kind == LB_KIND_WIN32) return ccord_loopback_win32_read(l->win32, pcm, max_samples);
+#endif
   if (l->kind == LB_KIND_SDL) return lb_sdl_read(l, pcm, max_samples);
 #ifdef __linux__
   return lb_pipe_read(l, pcm, max_samples);
@@ -638,7 +662,11 @@ size_t ccord_loopback_audio_read(ccord_loopback_audio *l, int16_t *pcm, size_t m
 bool ccord_loopback_audio_failed(const ccord_loopback_audio *l)
 {
   if (!l) return true;
+#ifdef __linux__
   if (l->kind == LB_KIND_PW) return ccord_loopback_pw_failed(l->pw);
+#elif defined(_WIN32)
+  if (l->kind == LB_KIND_WIN32) return ccord_loopback_win32_failed(l->win32);
+#endif
   return l->failed;
 }
 
@@ -647,11 +675,13 @@ void ccord_loopback_audio_close(ccord_loopback_audio *l)
   if (!l) return;
 #ifdef __linux__
   if (l->kind == LB_KIND_PIPE) lb_stop(l->fd, l->child, l->reaped);
+  if (l->kind == LB_KIND_PW) ccord_loopback_pw_close(l->pw);
+#elif defined(_WIN32)
+  if (l->kind == LB_KIND_WIN32) ccord_loopback_win32_close(l->win32);
 #endif
   if (l->kind == LB_KIND_SDL) {
     if (l->sdl_stream) SDL_DestroyAudioStream(l->sdl_stream);
     if (l->sdl_audio_init) SDL_QuitSubSystem(SDL_INIT_AUDIO);
   }
-  if (l->kind == LB_KIND_PW) ccord_loopback_pw_close(l->pw);
   ccord_free(l);
 }

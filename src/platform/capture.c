@@ -167,8 +167,14 @@ static const ccord_capture_backend k_fake_backend = {.name = "Test pattern", .av
 static const ccord_capture_backend *backend_of(ccord_capture_backend_id id)
 {
   switch (id) {
+#if defined(_WIN32)
+    case CCORD_CAPBE_WIN32: return &ccord_capture_win32_backend;
+#elif defined(__APPLE__)
+    case CCORD_CAPBE_MACOS: return &ccord_capture_macos_backend;
+#else
     case CCORD_CAPBE_X11: return &ccord_capture_x11_backend;
     case CCORD_CAPBE_PORTAL: return &ccord_capture_portal_backend;
+#endif
     case CCORD_CAPBE_FAKE: return &k_fake_backend;
     default: return nullptr;
   }
@@ -190,6 +196,13 @@ ccord_capture_backend_id ccord_capture_resolve_backend(ccord_capture_backend_id 
 {
   if (ccord_capture_fake_enabled()) return CCORD_CAPBE_FAKE;
   if (requested != CCORD_CAPBE_AUTO) return ccord_capture_backend_available(requested) ? requested : CCORD_CAPBE_AUTO;
+#if defined(_WIN32)
+  if (ccord_capture_backend_available(CCORD_CAPBE_WIN32)) return CCORD_CAPBE_WIN32;
+  return CCORD_CAPBE_AUTO;
+#elif defined(__APPLE__)
+  if (ccord_capture_backend_available(CCORD_CAPBE_MACOS)) return CCORD_CAPBE_MACOS;
+  return CCORD_CAPBE_AUTO;
+#else
   const char *session = getenv("XDG_SESSION_TYPE");
   const char *wl_dpy = getenv("WAYLAND_DISPLAY");
   bool wayland = (session && strcmp(session, "wayland") == 0) || (wl_dpy && wl_dpy[0] != '\0');
@@ -197,6 +210,7 @@ ccord_capture_backend_id ccord_capture_resolve_backend(ccord_capture_backend_id 
   if (ccord_capture_backend_available(CCORD_CAPBE_PORTAL)) return CCORD_CAPBE_PORTAL;
   if (ccord_capture_backend_available(CCORD_CAPBE_X11)) return CCORD_CAPBE_X11;   // Xwayland: windows of X11 clients only
   return CCORD_CAPBE_AUTO;
+#endif
 }
 
 size_t ccord_capture_list(ccord_capture_backend_id be, ccord_capture_kind kind, ccord_capture_source *out,

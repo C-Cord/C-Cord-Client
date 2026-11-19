@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
-#define _POSIX_C_SOURCE 200809L
 #include "sandbox.h"
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/atomic_file.h>
 #include <ccord/core/buf.h>
 #include <ccord/core/clock.h>
 #include <ccord/core/config.h>
+#include <ccord/core/os.h>
 #include <ccord/core/random.h>
 #include <ccord/core/sha256.h>
 #include <ccord/core/utf8.h>
@@ -15,16 +16,12 @@
 #include <lua.h>
 #include <lualib.h>
 
-#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <sys/utsname.h>
 #include <time.h>
-#include <unistd.h>
 
 #define SB_HOOK_STEP 1000
 #define SB_MAX_TEXT 65536u
@@ -50,7 +47,7 @@ struct ccord_sandbox {
   lua_State *L;
   ccord_sandbox_services svc;
   char id[65], name[65], version[33];
-  char dir[PATH_MAX];
+  char dir[CCORD_PATH_MAX];
   ccord_perm_set perms;
   size_t mem_limit, mem_used;     // 0 = unlimited
   uint64_t insn_per_call;         // 0 = unlimited
@@ -903,7 +900,7 @@ static int api_time_now_iso(lua_State *L)
 {
   time_t t = time(nullptr);
   struct tm tm_utc;
-  gmtime_r(&t, &tm_utc);
+  (void)ccord_gmtime(t, &tm_utc);
   char buf[32];
   strftime(buf, sizeof buf, "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
   lua_pushstring(L, buf);
@@ -1189,17 +1186,13 @@ static int api_require(lua_State *L)
   size_t r = 0;
   for (size_t i = 0; i < mn && r + 5 < sizeof rel; i++) rel[r++] = mod[i] == '.' ? '/' : mod[i];
   memcpy(rel + r, ".lua", 5);
-  char path[PATH_MAX];
+  char path[CCORD_PATH_MAX];
   int pn = snprintf(path, sizeof path, "%s/%s", sb->dir, rel);
   if (pn < 0 || (size_t)pn >= sizeof path) return luaL_error(L, "require: path too long");
 
+  if (!ccord_path_is_file(path)) return luaL_error(L, "require: module '%s' not found", mod);
   FILE *f = fopen(path, "rb");
   if (!f) return luaL_error(L, "require: module '%s' not found", mod);
-  struct stat st;
-  if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode)) {
-    fclose(f);
-    return luaL_error(L, "require: module '%s' is not a regular file", mod);
-  }
   fseek(f, 0, SEEK_END);
   long sz = ftell(f);
   fseek(f, 0, SEEK_SET);
@@ -1517,8 +1510,7 @@ static int api_fs_read(lua_State *L)
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_FS_READ, "fs.read")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
-  struct stat st;
-  if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
+  if (!ccord_path_is_file(path)) {
     lua_pushnil(L);
     lua_pushliteral(L, "not a regular file");
     return 2;
@@ -1543,8 +1535,7 @@ static int api_fs_exists(lua_State *L)
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_FS_READ, "fs.exists")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
-  struct stat st;
-  lua_pushboolean(L, stat(path, &st) == 0);
+  lua_pushboolean(L, ccord_path_exists(path));
   return 1;
 }
 
@@ -1553,17 +1544,16 @@ static int api_fs_list(lua_State *L)
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_FS_READ, "fs.list")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
-  DIR *d = opendir(path);
+  ccord_dir *d = ccord_dir_open(path);
   if (!d) { lua_pushnil(L); lua_pushstring(L, strerror(errno)); return 2; }
   lua_newtable(L);
   lua_Integer i = 0;
-  struct dirent *de;
-  while ((de = readdir(d)) != nullptr) {
-    if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
-    lua_pushstring(L, de->d_name);
+  char name[256];
+  while (ccord_dir_next(d, name, sizeof name, nullptr)) {
+    lua_pushstring(L, name);
     lua_rawseti(L, -2, ++i);
   }
-  closedir(d);
+  ccord_dir_close(d);
   return 1;
 }
 
@@ -1591,7 +1581,8 @@ static int api_fs_mkdir(lua_State *L)
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_FS_WRITE, "fs.mkdir")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
-  if (mkdir(path, 0755) != 0 && errno != EEXIST) { lua_pushnil(L); lua_pushstring(L, strerror(errno)); return 2; }
+  ccord_error err = {0};
+  if (ccord_mkdir_p(path, 0755, &err) != CCORD_OK) { lua_pushnil(L); lua_pushstring(L, err.message); return 2; }
   lua_pushboolean(L, 1);
   return 1;
 }
@@ -1610,9 +1601,7 @@ static int api_system_os(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_SYSTEM_INFO, "system.os")) return push_undeclared(L);
-  struct utsname u;
-  if (uname(&u) != 0) { lua_pushliteral(L, "linux"); return 1; }
-  lua_pushstring(L, u.sysname);
+  lua_pushstring(L, ccord_os_name());
   return 1;
 }
 
@@ -1620,9 +1609,7 @@ static int api_system_arch(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_SYSTEM_INFO, "system.arch")) return push_undeclared(L);
-  struct utsname u;
-  if (uname(&u) != 0) { lua_pushliteral(L, "unknown"); return 1; }
-  lua_pushstring(L, u.machine);
+  lua_pushstring(L, ccord_os_arch());
   return 1;
 }
 
@@ -1631,7 +1618,7 @@ static int api_system_hostname(lua_State *L)
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_SYSTEM_INFO, "system.hostname")) return push_undeclared(L);
   char buf[256] = "";
-  if (gethostname(buf, sizeof buf - 1) != 0) { lua_pushnil(L); return 1; }
+  if (!ccord_os_hostname(buf, sizeof buf)) { lua_pushnil(L); return 1; }
   lua_pushstring(L, buf);
   return 1;
 }

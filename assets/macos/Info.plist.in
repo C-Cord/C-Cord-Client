@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>C-Cord</string>
+  <key>CFBundleDisplayName</key>
+  <string>C-Cord</string>
+  <key>CFBundleIdentifier</key>
+  <string>org.c-cord.client</string>
+  <key>CFBundleVersion</key>
+  <string>@CCORD_VERSION_CLEAN@</string>
+  <key>CFBundleShortVersionString</key>
+  <string>@CCORD_VERSION_CLEAN@</string>
+  <key>CFBundleExecutable</key>
+  <string>ccord</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>12.3</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>C-Cord needs microphone access for voice chat and voice messages.</string>
+  <key>NSCameraUsageDescription</key>
+  <string>C-Cord needs camera access for video calls.</string>
+  <key>NSScreenCaptureUsageDescription</key>
+  <string>C-Cord needs Screen Recording access to share your screen or windows in Go Live.</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>org.c-cord.client.url</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>ccord</string>
+      </array>
+    </dict>
+  </array>
+</dict>
+</plist>

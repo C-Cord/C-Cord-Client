@@ -1,20 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
-#define _POSIX_C_SOURCE 200809L
 #include "game_detect_app.h"
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/clock.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 #include <ccord/net/detectable.h>
 #include <ccord/rpc/game_detect.h>
 
 #include <ctype.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if CCORD_OS_LINUX
 #include <unistd.h>
+#endif
 
 typedef enum job_kind { JOB_NONE, JOB_LOAD_CACHE, JOB_LOAD_BODY, JOB_SCAN } job_kind;
 
@@ -51,10 +52,10 @@ struct ccord_game_detect_app {
 
   // Worker.
   ccord_game_list *list;       // worker-owned (main thread in synchronous mode)
-  pthread_t thread;
+  ccord_thread *thread;
   bool thread_started;
-  pthread_mutex_t mu;
-  pthread_cond_t cv;
+  ccord_mutex *mu;
+  ccord_cond *cv;
   bool quit;
   bool job_pending;
   bool running;
@@ -88,11 +89,20 @@ static void replace_list(ccord_game_detect_app *g, ccord_game_list *nl)
   g->list = nl;
 }
 
-// Process start (since boot, in clock ticks) as wall-clock ms: now - (uptime - start). Uptime comes from
-// <proc_root>/uptime; without it the first sighting is the best estimate.
+// Process start as wall-clock ms.
 static int64_t start_unix_ms(const ccord_game_detect_app *g, uint64_t start_ticks)
 {
   int64_t now = ccord_clock_unix_ms();
+#if CCORD_OS_WINDOWS
+  (void)g;
+  const uint64_t epoch_diff = 116444736000000000ULL;
+  if (start_ticks >= epoch_diff) return (int64_t)((start_ticks - epoch_diff) / 10000ULL);
+  return now;
+#elif CCORD_OS_MACOS
+  (void)g;
+  if (start_ticks > 0) return (int64_t)(start_ticks / 1000ULL);
+  return now;
+#else
   char p[4096];
   (void)snprintf(p, sizeof p, "%s/uptime", g->proc_root);
   FILE *f = fopen(p, "r");
@@ -105,6 +115,7 @@ static int64_t start_unix_ms(const ccord_game_detect_app *g, uint64_t start_tick
   double age_s = up - (double)start_ticks / (double)hz;
   if (age_s < 0) age_s = 0;
   return now - (int64_t)(age_s * 1000.0);
+#endif
 }
 
 static void run_job(ccord_game_detect_app *g, job_kind kind, char *body, size_t len, uint32_t epoch, job_result *res)
@@ -127,7 +138,7 @@ static void run_job(ccord_game_detect_app *g, job_kind kind, char *body, size_t 
         CCORD_LOG_W("game detect: cached list unusable (%s); it will be refetched", err.message);
         char p[4096];
         (void)snprintf(p, sizeof p, "%s/%s", g->cache_dir, CCORD_DETECTABLE_CACHE_FILE);
-        (void)unlink(p);
+        (void)ccord_file_unlink(p);
       }
     }
   } else if (kind == JOB_LOAD_BODY) {
@@ -151,12 +162,12 @@ static void run_job(ccord_game_detect_app *g, job_kind kind, char *body, size_t 
   ccord_free(body);
 }
 
-static void *worker_main(void *arg)
+static void worker_main(void *arg)
 {
   ccord_game_detect_app *g = arg;
-  pthread_mutex_lock(&g->mu);
+  ccord_mutex_lock(g->mu);
   for (;;) {
-    while (!g->job_pending && !g->quit) pthread_cond_wait(&g->cv, &g->mu);
+    while (!g->job_pending && !g->quit) ccord_cond_wait(g->cv, g->mu);
     if (g->quit) break;
     job_kind kind = g->job;
     char *body = g->job_body;
@@ -165,16 +176,15 @@ static void *worker_main(void *arg)
     g->job_body = nullptr;
     g->job_pending = false;
     g->running = true;
-    pthread_mutex_unlock(&g->mu);
+    ccord_mutex_unlock(g->mu);
     job_result res;
     run_job(g, kind, body, len, epoch, &res);
-    pthread_mutex_lock(&g->mu);
+    ccord_mutex_lock(g->mu);
     g->result = res;
     g->result_ready = true;
     g->running = false;
   }
-  pthread_mutex_unlock(&g->mu);
-  return nullptr;
+  ccord_mutex_unlock(g->mu);
 }
 
 // ---- main thread ------------------------------------------------------------------------------------------------
@@ -192,8 +202,15 @@ ccord_game_detect_app *ccord_game_detect_app_create(const ccord_game_detect_app_
     return nullptr;
   }
   g->cfg = *cfg;
-  pthread_mutex_init(&g->mu, nullptr);
-  pthread_cond_init(&g->cv, nullptr);
+  g->mu = ccord_mutex_create();
+  g->cv = ccord_cond_create();
+  if (!g->mu || !g->cv) {
+    ccord_cond_destroy(g->cv);
+    ccord_mutex_destroy(g->mu);
+    ccord_free(g);
+    (void)ccord_error_set(err, CCORD_ERR_NOMEM, "game detect: out of memory");
+    return nullptr;
+  }
   if (cfg->cache_dir && cfg->cache_dir[0] != '\0') g->cache_dir = ccord_strndup(cfg->cache_dir, strlen(cfg->cache_dir));
   const char *root = cfg->proc_root && cfg->proc_root[0] != '\0' ? cfg->proc_root : CCORD_GAME_DETECT_PROC_ROOT;
   g->proc_root = ccord_strndup(root, strlen(root));
@@ -215,11 +232,12 @@ void ccord_game_detect_app_destroy(ccord_game_detect_app *g)
 {
   if (!g) return;
   if (g->thread_started) {
-    pthread_mutex_lock(&g->mu);
+    ccord_mutex_lock(g->mu);
     g->quit = true;
-    pthread_cond_signal(&g->cv);
-    pthread_mutex_unlock(&g->mu);
-    pthread_join(g->thread, nullptr);
+    ccord_cond_signal(g->cv);
+    ccord_mutex_unlock(g->mu);
+    ccord_thread_join(g->thread);
+    g->thread = nullptr;
   }
   ccord_detectable_destroy(g->det);
   ccord_game_list_free(g->list);
@@ -227,16 +245,16 @@ void ccord_game_detect_app_destroy(ccord_game_detect_app *g)
   ccord_free(g->pending_body);
   ccord_free(g->cache_dir);
   ccord_free(g->proc_root);
-  pthread_mutex_destroy(&g->mu);
-  pthread_cond_destroy(&g->cv);
+  ccord_mutex_destroy(g->mu);
+  ccord_cond_destroy(g->cv);
   ccord_free(g);
 }
 
 static bool worker_busy(ccord_game_detect_app *g)
 {
-  pthread_mutex_lock(&g->mu);
+  ccord_mutex_lock(g->mu);
   bool busy = g->job_pending || g->running || g->result_ready;
-  pthread_mutex_unlock(&g->mu);
+  ccord_mutex_unlock(g->mu);
   return busy;
 }
 
@@ -245,28 +263,29 @@ static void submit(ccord_game_detect_app *g, job_kind kind, char *body, size_t l
 {
   if (kind == JOB_SCAN) g->scans++;
   if (g->cfg.synchronous) {
-    pthread_mutex_lock(&g->mu);
+    ccord_mutex_lock(g->mu);
     run_job(g, kind, body, len, g->epoch, &g->result);
     g->result_ready = true;
-    pthread_mutex_unlock(&g->mu);
+    ccord_mutex_unlock(g->mu);
     return;
   }
   if (!g->thread_started) {
-    if (pthread_create(&g->thread, nullptr, worker_main, g) != 0) {
+    g->thread = ccord_thread_create(worker_main, g);
+    if (!g->thread) {
       CCORD_LOG_W("game detect: cannot start the worker thread");
       ccord_free(body);
       return;
     }
     g->thread_started = true;
   }
-  pthread_mutex_lock(&g->mu);
+  ccord_mutex_lock(g->mu);
   g->job = kind;
   g->job_body = body;
   g->job_len = len;
   g->job_epoch = g->epoch;
   g->job_pending = true;
-  pthread_cond_signal(&g->cv);
-  pthread_mutex_unlock(&g->mu);
+  ccord_cond_signal(g->cv);
+  ccord_mutex_unlock(g->mu);
 }
 
 static void clear_detected(ccord_game_detect_app *g)
@@ -280,11 +299,11 @@ static void clear_detected(ccord_game_detect_app *g)
 // Moves a finished job into the main-thread state; returns true when the detected activity changed.
 static bool take_result(ccord_game_detect_app *g, uint64_t now_ms)
 {
-  pthread_mutex_lock(&g->mu);
+  ccord_mutex_lock(g->mu);
   bool have = g->result_ready;
   job_result r = g->result;
   g->result_ready = false;
-  pthread_mutex_unlock(&g->mu);
+  ccord_mutex_unlock(g->mu);
   if (!have) return false;
   if (r.kind == JOB_LOAD_CACHE || r.kind == JOB_LOAD_BODY) {
     if (r.kind == JOB_LOAD_CACHE) g->cache_done = true;

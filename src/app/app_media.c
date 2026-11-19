@@ -3,16 +3,15 @@
 // M5 runtime media coordinator. See app_media.h. All external effects go through the injected ops
 // vtable, so this file is SDL-free and unit-testable headless. The host (main.c) owns the real
 // session/store/ui/platform/renderer and supplies the ops; the coordinator only sequences them.
-#define _POSIX_C_SOURCE 200809L
 #include "app_media.h"
 
-#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 
 #define MEDIA_FRAME 960u                       // 20 ms at 48 kHz, matches the gateway frame size
 #define MEDIA_MAX_USERS 64u                    // per-user volume sync table / voice user read cap
@@ -77,8 +76,7 @@ struct ccord_app_media {
   ccord_voice_audio_thread *thread;
 
   // local soundboard playback ring (shared between main thread decode and live/inline speaker pull)
-  pthread_mutex_t sb_mtx;
-  bool sb_mtx_init;
+  ccord_mutex *sb_mtx;
   int16_t *sb_pcm;
   size_t sb_samples;
   size_t sb_pos;
@@ -203,13 +201,13 @@ static void copy_id(char *dst, const char *src)
 
 static void clear_soundboard(ccord_app_media *m)
 {
-  pthread_mutex_lock(&m->sb_mtx);
+  ccord_mutex_lock(m->sb_mtx);
   ccord_free(m->sb_pcm);
   m->sb_pcm = nullptr;
   m->sb_samples = 0;
   m->sb_pos = 0;
   m->sb_next_ms = 0;
-  pthread_mutex_unlock(&m->sb_mtx);
+  ccord_mutex_unlock(m->sb_mtx);
 }
 
 static void discard_pending_soundboard(ccord_app_media *m)
@@ -311,7 +309,7 @@ static void pump_stream_loopback(ccord_app_media *m, uint64_t now, bool loop_on,
 static size_t pull_playback_pcm(ccord_app_media *m, int16_t *pcm, size_t max_frames)
 {
   size_t pframes = m->ops->pull_pcm(m->ud, pcm, max_frames);
-  pthread_mutex_lock(&m->sb_mtx);
+  ccord_mutex_lock(m->sb_mtx);
   if (m->sb_pcm && m->sb_pos < m->sb_samples) {
     size_t avail_frames = (m->sb_samples - m->sb_pos) / 2u;
     if (pframes > 0) {
@@ -350,7 +348,7 @@ static size_t pull_playback_pcm(ccord_app_media *m, int16_t *pcm, size_t max_fra
       m->sb_pos = 0;
     }
   }
-  pthread_mutex_unlock(&m->sb_mtx);
+  ccord_mutex_unlock(m->sb_mtx);
 
   // Go Live stream audio: drain the watched broadcast's mono PCM and mix it into local playback,
   // duplicating each mono sample to both stereo channels with additive int16 clamping. When no
@@ -418,13 +416,13 @@ static void pump_soundboard(ccord_app_media *m, uint64_t now)
   samples &= ~(size_t)1u;
   apply_gain(buf, samples, clamp_vol((int)vol_pct));
 
-  pthread_mutex_lock(&m->sb_mtx);
+  ccord_mutex_lock(m->sb_mtx);
   ccord_free(m->sb_pcm);
   m->sb_pcm = buf;
   m->sb_samples = samples;
   m->sb_pos = 0;
   m->sb_next_ms = now;
-  pthread_mutex_unlock(&m->sb_mtx);
+  ccord_mutex_unlock(m->sb_mtx);
 }
 
 ccord_status ccord_app_media_play_soundboard(ccord_app_media *m, ccord_id guild_id, ccord_id sound_id,
@@ -792,12 +790,15 @@ static void open_encoder(ccord_app_media *m, bool virtual_clock, uint64_t now)
   int vw = 640, vh = 360;
   m->ops->resolve_dims(m->ud, 1280, 720, target_h, &vw, &vh);
   int vfps = sc.fps == CCORD_STREAM_FPS_15 ? 15 : sc.fps == CCORD_STREAM_FPS_60 ? 60 : 30;
-  const char *pref_enc = sc.encoder == CCORD_STREAM_ENCODER_NVENC     ? "h264_nvenc"
-                         : sc.encoder == CCORD_STREAM_ENCODER_VAAPI   ? "h264_vaapi"
-                         : sc.encoder == CCORD_STREAM_ENCODER_AMF     ? "h264_amf"
-                         : sc.encoder == CCORD_STREAM_ENCODER_X264    ? "libx264"
-                         : sc.encoder == CCORD_STREAM_ENCODER_OPENH264 ? "libopenh264"
-                                                                       : "auto";
+  const char *pref_enc = sc.encoder == CCORD_STREAM_ENCODER_NVENC          ? "h264_nvenc"
+                         : sc.encoder == CCORD_STREAM_ENCODER_VAAPI        ? "h264_vaapi"
+                         : sc.encoder == CCORD_STREAM_ENCODER_AMF          ? "h264_amf"
+                         : sc.encoder == CCORD_STREAM_ENCODER_QSV          ? "h264_qsv"
+                         : sc.encoder == CCORD_STREAM_ENCODER_MF           ? "h264_mf"
+                         : sc.encoder == CCORD_STREAM_ENCODER_VIDEOTOOLBOX ? "h264_videotoolbox"
+                         : sc.encoder == CCORD_STREAM_ENCODER_X264         ? "libx264"
+                         : sc.encoder == CCORD_STREAM_ENCODER_OPENH264     ? "libopenh264"
+                                                                           : "auto";
   if (virtual_clock && (vw > 640 || vh > 360)) {
     vw = 640;
     vh = 360;
@@ -847,6 +848,17 @@ static void fill_default_capture_source(ccord_capture_source *src, bool portal)
   memset(src, 0, sizeof *src);
   src->kind = CCORD_CAPTURE_SCREEN;
   src->primary = true;
+#if CCORD_OS_WINDOWS
+  (void)portal;
+  src->backend = CCORD_CAPBE_WIN32;
+  snprintf(src->id, sizeof src->id, "win32:mon:primary");
+  snprintf(src->title, sizeof src->title, "Screen 1 (primary)");
+#elif CCORD_OS_MACOS
+  (void)portal;
+  src->backend = CCORD_CAPBE_MACOS;
+  snprintf(src->id, sizeof src->id, "macos:mon:main");
+  snprintf(src->title, sizeof src->title, "Main Display");
+#else
   if (portal) {
     src->backend = CCORD_CAPBE_PORTAL;
     snprintf(src->id, sizeof src->id, "portal:pick");
@@ -857,6 +869,7 @@ static void fill_default_capture_source(ccord_capture_source *src, bool portal)
     snprintf(src->id, sizeof src->id, "x11:mon:root");
     snprintf(src->title, sizeof src->title, "Screen 1 (primary)");
   }
+#endif
 }
 
 static void grab_camera_frame(ccord_app_media *m, uint64_t now, const uint8_t **out_bgra, int *out_w, int *out_h,
@@ -1425,17 +1438,17 @@ ccord_app_media *ccord_app_media_create(const ccord_app_media_config *cfg, ccord
     ccord_error_set(err, CCORD_ERR_NOMEM, "app_media: out of memory");
     return nullptr;
   }
-  if (pthread_mutex_init(&m->sb_mtx, nullptr) != 0) {
+  m->sb_mtx = ccord_mutex_create();
+  if (!m->sb_mtx) {
     ccord_free(m);
     ccord_error_set(err, CCORD_ERR_INTERNAL, "app_media: mutex init failed");
     return nullptr;
   }
-  m->sb_mtx_init = true;
   m->ops = ops;
   m->ud = cfg->ud;
   m->pkt = ccord_malloc(MEDIA_PKT_CAP);
   if (!m->pkt) {
-    pthread_mutex_destroy(&m->sb_mtx);
+    ccord_mutex_destroy(m->sb_mtx);
     ccord_free(m);
     ccord_error_set(err, CCORD_ERR_NOMEM, "app_media: out of memory");
     return nullptr;
@@ -1462,7 +1475,7 @@ void ccord_app_media_destroy(ccord_app_media **pm)
   }
   cam_close_all(m);
   clear_soundboard(m);
-  if (m->sb_mtx_init) pthread_mutex_destroy(&m->sb_mtx);
+  ccord_mutex_destroy(m->sb_mtx);
   ccord_free(m->pkt);
   ccord_free(m);
 }

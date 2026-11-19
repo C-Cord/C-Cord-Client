@@ -1,18 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 // Warm-start disk cache: see warm_cache.h and
-#define _POSIX_C_SOURCE 200809L
 #include "warm_cache.h"
 
-#include <dirent.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
-#include <unistd.h>
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/arena.h>
@@ -22,6 +18,7 @@
 #include <ccord/core/ini.h>
 #include <ccord/core/json.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 #include <ccord/core/sha256.h>
 #include <ccord/model/notify.h>
 #include <ccord/net/live_transport.h>
@@ -689,26 +686,26 @@ static void prune_account_dirs(const ccord_warm *w)
 {
   char root[1100];
   if (snprintf(root, sizeof root, "%s/accounts", w->data_dir) >= (int)sizeof root) return;
-  DIR *d = opendir(root);
+  ccord_dir *d = ccord_dir_open(root);
   if (!d) return;
   struct victim {
     char name[64];
     int64_t mtime;
   } list[64];
   size_t n = 0;
-  struct dirent *e;
-  while ((e = readdir(d)) != nullptr && n < 64) {
-    if (e->d_name[0] == '.' || strcmp(e->d_name, w->fp) == 0 || strlen(e->d_name) >= sizeof list[0].name) continue;
+  char ename[256];
+  while (ccord_dir_next(d, ename, sizeof ename, nullptr) && n < 64) {
+    if (ename[0] == '.' || strcmp(ename, w->fp) == 0 || strlen(ename) >= sizeof list[0].name) continue;
     char p[1300];
-    struct stat st;
-    if (snprintf(p, sizeof p, "%s/%s/meta.json", root, e->d_name) >= (int)sizeof p || lstat(p, &st) != 0) {
-      if (snprintf(p, sizeof p, "%s/%s", root, e->d_name) >= (int)sizeof p || lstat(p, &st) != 0) continue;
+    int64_t mtime_ns = 0;
+    if (snprintf(p, sizeof p, "%s/%s/meta.json", root, ename) >= (int)sizeof p || !ccord_file_mtime_ns(p, &mtime_ns)) {
+      if (snprintf(p, sizeof p, "%s/%s", root, ename) >= (int)sizeof p || !ccord_file_mtime_ns(p, &mtime_ns)) continue;
     }
-    memcpy(list[n].name, e->d_name, strlen(e->d_name) + 1);
-    list[n].mtime = (int64_t)st.st_mtime;
+    memcpy(list[n].name, ename, strlen(ename) + 1);
+    list[n].mtime = mtime_ns;
     n++;
   }
-  closedir(d);
+  ccord_dir_close(d);
   // Keep CCORD_WARM_MAX_ACCOUNT_DIRS in total: this account plus the newest others.
   while (n > CCORD_WARM_MAX_ACCOUNT_DIRS - 1) {
     size_t oldest = 0;
@@ -876,8 +873,7 @@ bool ccord_warm_forget_token(const char *data_dir, const char *token)
   ccord_warm_fingerprint(token, fp);
   char dir[1300];
   if (snprintf(dir, sizeof dir, "%s/accounts/%s", data_dir, fp) >= (int)sizeof dir) return false;
-  struct stat st;
-  if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) return false;   // absent, or a symlink: never followed
+  if (ccord_path_is_symlink(dir) || !ccord_path_is_dir(dir)) return false;   // absent, or a symlink: never followed
   ccord_error e;
   return ccord_rmtree(dir, &e) == CCORD_OK;
 }
@@ -887,16 +883,16 @@ void ccord_warm_forget_user(const char *data_dir, ccord_id user_id)
   if (!data_dir || !data_dir[0] || user_id == CCORD_ID_NONE) return;
   char root[1100];
   if (snprintf(root, sizeof root, "%s/accounts", data_dir) >= (int)sizeof root) return;
-  DIR *d = opendir(root);
+  ccord_dir *d = ccord_dir_open(root);
   if (!d) return;
   char names[64][64];
   size_t n = 0;
-  struct dirent *e;
-  while ((e = readdir(d)) != nullptr && n < 64) {
-    if (e->d_name[0] == '.' || strlen(e->d_name) >= sizeof names[0]) continue;
-    memcpy(names[n++], e->d_name, strlen(e->d_name) + 1);
+  char ename[256];
+  while (ccord_dir_next(d, ename, sizeof ename, nullptr) && n < 64) {
+    if (ename[0] == '.' || strlen(ename) >= sizeof names[0]) continue;
+    memcpy(names[n++], ename, strlen(ename) + 1);
   }
-  closedir(d);
+  ccord_dir_close(d);
   for (size_t i = 0; i < n; i++) {
     char mp[1300];
     if (snprintf(mp, sizeof mp, "%s/%s/meta.json", root, names[i]) >= (int)sizeof mp) continue;
@@ -1208,20 +1204,19 @@ static size_t load_history(const ccord_warm *w, ccord_store *store)
 {
   char dir[1300];
   if (snprintf(dir, sizeof dir, "%s/warm/history", w->dir) >= (int)sizeof dir) return 0;
-  DIR *d = opendir(dir);
+  ccord_dir *d = ccord_dir_open(dir);
   if (!d) return 0;
   ccord_id ids[CCORD_WARM_MAX_HISTORY_CHANNELS * 4];
   size_t n = 0;
-  struct dirent *e;
-  while ((e = readdir(d)) != nullptr && n < sizeof ids / sizeof ids[0]) {
-    const char *nm = e->d_name;
+  char nm[256];
+  while (ccord_dir_next(d, nm, sizeof nm, nullptr) && n < sizeof ids / sizeof ids[0]) {
     size_t l = strlen(nm);
     if (l < 6 || strcmp(nm + l - 5, ".json") != 0) continue;
     ccord_id id = CCORD_ID_NONE;
     if (!ccord_id_parse(nm, l - 5, &id)) continue;
     ids[n++] = id;
   }
-  closedir(d);
+  ccord_dir_close(d);
   size_t seeded = 0;
   for (size_t i = 0; i < n && seeded < CCORD_WARM_MAX_HISTORY_CHANNELS; i++) {
     char path[1400];
@@ -1271,8 +1266,7 @@ ccord_status ccord_warm_load(ccord_warm *w, ccord_store *store, ccord_session *s
   uint64_t t0 = ccord_clock_ms();
   char path[1300];
   if (!state_path(w, path, sizeof path)) return CCORD_OK;
-  struct stat st;
-  if (lstat(path, &st) != 0) return CCORD_OK;   // cold start: nothing cached yet
+  if (!ccord_path_exists(path)) return CCORD_OK;   // cold start: nothing cached yet
 
   ccord_error e;
   size_t n = 0;

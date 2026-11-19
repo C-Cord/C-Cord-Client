@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
-#include <dirent.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <strings.h>
-#include <sys/stat.h>
+#endif
 
 #include <SDL3_ttf/SDL_textengine.h>
 
@@ -14,6 +14,7 @@
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 #include <ccord/core/paths.h>
 #include <ccord/core/utf8.h>
 
@@ -292,18 +293,17 @@ static int font_file_cmp(const void *a, const void *b)
 
 static void scan_font_dir(const char *dir, int depth)
 {
-  DIR *d = opendir(dir);
+  ccord_dir *d = ccord_dir_open(dir);
   if (!d) return;
-  struct dirent *de;
-  while ((de = readdir(d)) != nullptr && g_nfont_files < 8192) {
-    if (de->d_name[0] == '.') continue;
+  char name[512];
+  bool is_dir = false;
+  while (ccord_dir_next(d, name, sizeof name, &is_dir) && g_nfont_files < 8192) {
+    if (name[0] == '.') continue;
     char full[1024];
-    if (snprintf(full, sizeof full, "%s/%s", dir, de->d_name) >= (int)sizeof full) continue;
-    struct stat st;
-    if (stat(full, &st) != 0) continue;
-    if (S_ISDIR(st.st_mode)) {
+    if (snprintf(full, sizeof full, "%s/%s", dir, name) >= (int)sizeof full) continue;
+    if (is_dir) {
       if (depth < 6) scan_font_dir(full, depth + 1);
-    } else if (S_ISREG(st.st_mode) && font_file_ext(de->d_name)) {
+    } else if (font_file_ext(name)) {
       char **grown = ccord_realloc(g_font_files, (size_t)(g_nfont_files + 1) * sizeof *g_font_files);
       char *copy = grown ? ccord_strndup(full, strlen(full)) : nullptr;
       if (!copy) break;
@@ -311,18 +311,31 @@ static void scan_font_dir(const char *dir, int depth)
       g_font_files[g_nfont_files++] = copy;
     }
   }
-  closedir(d);
+  ccord_dir_close(d);
 }
 
 static bool lookup_system_font(ccord_renderer *r, uint32_t cp)
 {
   if (!g_font_scanned) {
     g_font_scanned = true;
+    char user[1024];
+#if defined(_WIN32)
+    const char *windir = getenv("WINDIR");
+    if (windir && windir[0] && snprintf(user, sizeof user, "%s/Fonts", windir) < (int)sizeof user) scan_font_dir(user, 0);
+    else scan_font_dir("C:/Windows/Fonts", 0);
+    const char *la = getenv("LOCALAPPDATA");
+    if (la && la[0] && snprintf(user, sizeof user, "%s/Microsoft/Windows/Fonts", la) < (int)sizeof user) scan_font_dir(user, 0);
+#elif defined(__APPLE__)
+    scan_font_dir("/System/Library/Fonts", 0);
+    scan_font_dir("/Library/Fonts", 0);
+    const char *home = getenv("HOME");
+    if (home && home[0] && snprintf(user, sizeof user, "%s/Library/Fonts", home) < (int)sizeof user) scan_font_dir(user, 0);
+#else
     scan_font_dir("/usr/share/fonts", 0);
     scan_font_dir("/usr/local/share/fonts", 0);
     const char *xdg = getenv("XDG_DATA_HOME");
-    char user[1024];
     if (xdg && xdg[0] && snprintf(user, sizeof user, "%s/fonts", xdg) < (int)sizeof user) scan_font_dir(user, 0);
+#endif
     if (g_nfont_files > 1) qsort(g_font_files, (size_t)g_nfont_files, sizeof *g_font_files, font_file_cmp);
   }
   for (int i = 0; i < g_nfont_files; i++) {
