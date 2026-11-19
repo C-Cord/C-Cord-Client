@@ -31,10 +31,17 @@ static int row_cmp_key(ccord_id ch_a, ccord_id g_a, ccord_id ch_b, ccord_id g_b)
   return 0;
 }
 
-static int row_cmp(const void *a, const void *b)
+typedef struct notify_ord {
+  ccord_notify_scope row;
+  size_t ord;
+} notify_ord;
+
+static int notify_ord_cmp(const void *a, const void *b)
 {
-  const ccord_notify_scope *x = a, *y = b;
-  return row_cmp_key(x->channel_id, x->guild_id, y->channel_id, y->guild_id);
+  const notify_ord *x = a, *y = b;
+  int c = row_cmp_key(x->row.channel_id, x->row.guild_id, y->row.channel_id, y->row.guild_id);
+  if (c != 0) return c;
+  return x->ord < y->ord ? -1 : (x->ord > y->ord ? 1 : 0);
 }
 
 static const ccord_notify_scope *find_row(const struct notify_cache *c, ccord_id guild_id, ccord_id channel_id)
@@ -78,32 +85,104 @@ ccord_status ccord_store_set_notify(ccord_store *s, ccord_id guild_id, const cco
   }
   struct notify_cache *c = cache_get(s, true);
   if (!c) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  // The new rows, then what other servers already hold, in one array.
+  // Count surviving rows from other servers (already strictly sorted).
   size_t keep = 0;
   for (size_t i = 0; i < c->n; i++) keep += c->rows[i].guild_id != guild_id;
   if (keep + n > NOTIFY_MAX_ROWS) return ccord_error_set(err, CCORD_ERR_RANGE, "store: too many notification rows");
-  size_t total = keep + n;
-  ccord_notify_scope *fresh = total ? ccord_alloc_array(total, sizeof *fresh) : nullptr;
-  if (total && !fresh) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  size_t k = 0;
-  for (size_t i = 0; i < c->n; i++) {
-    if (c->rows[i].guild_id != guild_id) fresh[k++] = c->rows[i];
-  }
-  for (size_t i = 0; i < n; i++) fresh[k++] = rows[i];
-  if (total > 1) qsort(fresh, total, sizeof *fresh, row_cmp);
-  // Two rows for the same place would make the lookup ambiguous: the later one wins.
-  size_t out = 0;
-  for (size_t i = 0; i < total; i++) {
-    if (out > 0 && fresh[out - 1].channel_id == fresh[i].channel_id && fresh[out - 1].guild_id == fresh[i].guild_id) {
-      fresh[out - 1] = fresh[i];
-    } else {
-      fresh[out++] = fresh[i];
+
+  // Prepare the incoming guild's rows in strictly ascending order; duplicate keys keep the later row.
+  ccord_notify_scope stack_inc[32];
+  const ccord_notify_scope *inc = rows;
+  notify_ord *heap_ord = nullptr;
+  ccord_notify_scope *heap_inc = nullptr;
+  size_t nin = n;
+  bool sorted_unique = true;
+  for (size_t i = 1; i < n; i++) {
+    if (row_cmp_key(rows[i - 1].channel_id, rows[i - 1].guild_id, rows[i].channel_id, rows[i].guild_id) >= 0) {
+      sorted_unique = false;
+      break;
     }
   }
-  ccord_free(c->rows);
-  c->rows = fresh;
-  c->n = out;
-  c->cap = total;
+  if (!sorted_unique) {
+    if (n <= sizeof stack_inc / sizeof stack_inc[0]) {
+      // Stable insertion sort preserves later-one-wins for duplicates without heap allocation.
+      for (size_t i = 0; i < n; i++) {
+        ccord_notify_scope key = rows[i];
+        size_t j = i;
+        while (j > 0 && row_cmp_key(stack_inc[j - 1].channel_id, stack_inc[j - 1].guild_id,
+                                    key.channel_id, key.guild_id) > 0) {
+          stack_inc[j] = stack_inc[j - 1];
+          j--;
+        }
+        stack_inc[j] = key;
+      }
+      size_t u = 0;
+      for (size_t i = 0; i < n; i++) {
+        if (u > 0 && stack_inc[u - 1].channel_id == stack_inc[i].channel_id &&
+            stack_inc[u - 1].guild_id == stack_inc[i].guild_id) {
+          stack_inc[u - 1] = stack_inc[i];
+        } else {
+          stack_inc[u++] = stack_inc[i];
+        }
+      }
+      inc = stack_inc;
+      nin = u;
+    } else {
+      heap_ord = ccord_alloc_array(n, sizeof *heap_ord);
+      heap_inc = ccord_alloc_array(n, sizeof *heap_inc);
+      if (!heap_ord || !heap_inc) {
+        ccord_free(heap_ord);
+        ccord_free(heap_inc);
+        return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+      }
+      for (size_t i = 0; i < n; i++) heap_ord[i] = (notify_ord){.row = rows[i], .ord = i};
+      qsort(heap_ord, n, sizeof *heap_ord, notify_ord_cmp);
+      size_t u = 0;
+      for (size_t i = 0; i < n; i++) {
+        if (u > 0 && heap_inc[u - 1].channel_id == heap_ord[i].row.channel_id &&
+            heap_inc[u - 1].guild_id == heap_ord[i].row.guild_id) {
+          heap_inc[u - 1] = heap_ord[i].row;
+        } else {
+          heap_inc[u++] = heap_ord[i].row;
+        }
+      }
+      ccord_free(heap_ord);
+      heap_ord = nullptr;
+      inc = heap_inc;
+      nin = u;
+    }
+  }
+
+  size_t total = keep + nin;
+  if (total > c->cap) {
+    size_t ncap = c->cap ? c->cap * 2u : 16u;
+    while (ncap < total) ncap *= 2u;
+    if (ncap > NOTIFY_MAX_ROWS) ncap = NOTIFY_MAX_ROWS;
+    ccord_notify_scope *grown = ccord_realloc_array(c->rows, ncap, sizeof *grown);
+    if (!grown) {
+      ccord_free(heap_inc);
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    }
+    c->rows = grown;
+    c->cap = ncap;
+  }
+
+  // Compact other guilds' rows in place (they stay strictly sorted), then backwards-merge incoming rows in O(total).
+  size_t k = 0;
+  for (size_t i = 0; i < c->n; i++) {
+    if (c->rows[i].guild_id != guild_id) c->rows[k++] = c->rows[i];
+  }
+  size_t a = keep, b = nin, w = total;
+  while (b > 0) {
+    if (a > 0 && row_cmp_key(c->rows[a - 1].channel_id, c->rows[a - 1].guild_id,
+                             inc[b - 1].channel_id, inc[b - 1].guild_id) > 0) {
+      c->rows[--w] = c->rows[--a];
+    } else {
+      c->rows[--w] = inc[--b];
+    }
+  }
+  ccord_free(heap_inc);
+  c->n = total;
   ccord_store_notify_mutated(s, guild_id, CCORD_ID_NONE);
   return CCORD_OK;
 }
