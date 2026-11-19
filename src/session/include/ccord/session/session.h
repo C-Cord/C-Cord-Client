@@ -226,6 +226,10 @@ typedef struct ccord_notification {
 [[nodiscard]] ccord_status ccord_session_fetch_media_user(ccord_session *s, const char *url, ccord_error *err);
 [[nodiscard]] ccord_status ccord_session_request_media(ccord_session *s, const char *url, ccord_error *err);
 bool ccord_session_pop_media(ccord_session *s, ccord_media_item *out);
+// Pops the oldest unread media item whose URL contains `url_substring` (e.g. "/soundboard-sounds/") without
+// touching, re-queuing, or updating LRU ticks of any other unread items. Returns false in O(1) when none are unread.
+[[nodiscard]] bool ccord_session_pop_media_matching(ccord_session *s, const char *url_substring,
+                                                    const char **url, const uint8_t **data, size_t *len);
 // The returned item is valid until the next ccord_session_pump (a newer download may evict it).
 const ccord_media_item *ccord_session_get_media(const ccord_session *s, const char *url);
 // True when the most recent attempt to load `url` failed (blocked host, HTTP error, too large, timed out). A failed

@@ -32,13 +32,31 @@
 #define SESSION_MAX_REPORT_EVENTS 4u   // report answers wait here for the UI; newest dropped when full
 #define SESSION_MAX_MODALS 4u
 #define SESSION_MAX_MEDIA 2048u
+#define SESSION_MEDIA_HASH_CAP 4096u
+#define SESSION_MEDIA_HASH_MASK (SESSION_MEDIA_HASH_CAP - 1u)
+#define SESSION_MEDIA_IDX_END 0xFFFFu
 // Decoded textures live in the renderer; these are the compressed bodies kept so a texture evicted there can be
 // re-uploaded without a round trip. Bounded by bytes as well as by count now that one body can be a 32 MiB video.
-#define SESSION_MEDIA_BYTE_BUDGET ((size_t)192u * 1024u * 1024u)
+#if CCORD_OS_ANDROID
+#define SESSION_MEDIA_BYTE_BUDGET ((size_t)16u * 1024u * 1024u)
+#else
+#define SESSION_MEDIA_BYTE_BUDGET ((size_t)32u * 1024u * 1024u)
+#endif
 #define SESSION_MEDIA_FAILED_MAX 256u
+#define SESSION_PROFILE_CACHE_MAX 64u
+#define SESSION_VERIFICATION_CACHE_MAX 32u
+#define SESSION_ACTIVITY_SHELF_CACHE_MAX 32u
+#define SESSION_GUILD_PROFILE_CACHE_MAX 64u
 // Largest Go Live access unit the session will accept from the transport into its reusable receive scratch.
 // Matches the transport media plane (256 KiB per Annex-B access unit).
 #define SESSION_STREAM_FRAME_MAX (256u * 1024u)
+
+static_assert((SESSION_MEDIA_HASH_CAP & (SESSION_MEDIA_HASH_CAP - 1u)) == 0u,
+              "media hash table capacity must be a power of two");
+static_assert(SESSION_MEDIA_HASH_CAP >= SESSION_MAX_MEDIA * 2u,
+              "media hash table capacity must keep load factor <= 0.5");
+static_assert(SESSION_MAX_MEDIA < SESSION_MEDIA_IDX_END,
+              "media 1-based slot index must fit in uint16_t without colliding with END");
 
 typedef struct session_media_entry {
   char *url;
@@ -47,8 +65,16 @@ typedef struct session_media_entry {
   size_t len;
   ccord_media_item pub;
   uint64_t access_tick;
-  bool pop_queued;
+  uint32_t url_hash;      // mixed 32-bit FNV-1a URL hash for O(1) lookup & backward-shift removal
+  uint16_t unread_prev;   // 0 = read (not queued), SESSION_MEDIA_IDX_END = head, else (idx + 1)
+  uint16_t unread_next;   // 0 = read, SESSION_MEDIA_IDX_END = tail, else (idx + 1)
 } session_media_entry;
+
+typedef struct session_voice_entry {
+  ccord_id guild_id;
+  ccord_id channel_id;
+  ccord_id user_id;
+} session_voice_entry;
 
 typedef struct session_channel_hist {
   ccord_id channel_id;
@@ -69,6 +95,7 @@ typedef struct session_profile_cache {
   ccord_id guild_id;
   uint64_t sent_ms;
   uint64_t fetched_ms;
+  uint64_t last_use;
   bool in_flight;
   bool loaded;
 } session_profile_cache;
@@ -90,6 +117,7 @@ typedef struct session_invite_cache {
 // live in the entry's arena; a new GET answer replaces the whole form.
 typedef struct session_verification_cache {
   ccord_id guild_id;
+  uint64_t last_use;
   ccord_arena arena;
   ccord_member_verification form;
 } session_verification_cache;
@@ -119,6 +147,7 @@ typedef struct session_activity_shelf {
   bool loading;
   uint64_t sent_ms;
   uint64_t fetched_ms;   // when the last answer arrived (0 = never)
+  uint64_t last_use;
   size_t count;
   ccord_activity_app apps[SESSION_ACTIVITY_SHELF_MAX];
 } session_activity_shelf;
@@ -129,6 +158,7 @@ typedef struct session_guild_profile_cache {
   bool has_profile;
   uint64_t sent_ms;
   uint64_t fetched_ms;
+  uint64_t last_use;
   ccord_guild_profile profile;
 } session_guild_profile_cache;
 
@@ -179,8 +209,9 @@ struct ccord_session {
   size_t fail_head, fail_count;
   ccord_report_event report_events[SESSION_MAX_REPORT_EVENTS];
   size_t report_head, report_count;
-  ccord_interaction_modal modals[SESSION_MAX_MODALS];
+  ccord_interaction_modal *modals;   // lazily allocated SESSION_MAX_MODALS ring
   size_t modal_head, modal_count;
+  uint64_t cache_tick;               // monotonic LRU tick for bounded session caches
   session_slash_cache *slash_cache;
   size_t nslash_cache, capslash_cache;
   session_activity_shelf *activity_shelves;
@@ -193,11 +224,20 @@ struct ccord_session {
   session_media_entry media[SESSION_MAX_MEDIA];
   size_t media_count;
   uint64_t media_tick;
+  uint16_t media_hash[SESSION_MEDIA_HASH_CAP];        // 0 = empty, else (media[] index + 1)
+  uint16_t media_unread_head;                         // 0 = empty, else (media[] index + 1)
+  uint16_t media_unread_tail;                         // 0 = empty, else (media[] index + 1)
+  size_t media_unread_count;
   char *media_requested[SESSION_MAX_MEDIA];
+  uint32_t media_req_hashes[SESSION_MAX_MEDIA];       // mixed 32-bit FNV-1a hash parallel to media_requested[]
+  uint16_t media_req_hash[SESSION_MEDIA_HASH_CAP];    // 0 = empty, else (media_requested[] index + 1)
   size_t media_req_count;
   size_t media_bytes;                                  // sum of media[i].len
   uint64_t media_failed[SESSION_MEDIA_FAILED_MAX];     // FNV-1a of URLs whose last download failed (ring)
   size_t media_failed_head, media_failed_count;
+  session_voice_entry *voice_track;                    // mirrors active voice participants for O(V) guild replace
+  size_t nvoice_track, capvoice_track;
+  bool voice_track_synced;
   ccord_message *search_results;
   ccord_message_rich **search_rich;   // owned copies of the results' rich blocks (index-parallel)
   size_t search_count;
@@ -232,13 +272,13 @@ struct ccord_session {
   ccord_invite_preview invite_preview;
   bool has_invite_preview;
   bool invite_preview_loading;
-  session_invite_cache invite_cache[SESSION_INVITE_CACHE_SLOTS];
+  session_invite_cache *invite_cache;   // lazily allocated SESSION_INVITE_CACHE_SLOTS table
   size_t invite_cache_rr;
   session_verification_cache *verification_cache;
   size_t nverification_cache, capverification_cache;
   ccord_id pending_join_guild_id;
   ccord_id pending_join_channel_id;
-  ccord_discover_guild discovery_items[CCORD_DISCOVERY_PAGE_MAX];
+  ccord_discover_guild *discovery_items;   // lazily allocated CCORD_DISCOVERY_PAGE_MAX array
   size_t discovery_count;
   uint32_t discovery_total;
   uint32_t discovery_offset;
@@ -246,7 +286,7 @@ struct ccord_session {
   char discovery_query[104];
   bool discovery_loading;
   uint64_t discovery_sent_ms;
-  session_discovery_cache_entry discovery_cache[SESSION_DISCOVERY_CACHE_SLOTS];
+  session_discovery_cache_entry *discovery_cache;   // lazily allocated SESSION_DISCOVERY_CACHE_SLOTS table
   size_t discovery_cache_rr;
   bool has_pending_presence;
   ccord_presence pending_presence;
@@ -311,18 +351,39 @@ static session_activity_shelf *activity_shelf_for(ccord_session *s, ccord_id gui
 {
   if (!s || guild_id == CCORD_ID_NONE) return nullptr;
   for (size_t i = 0; i < s->nactivity_shelves; i++) {
-    if (s->activity_shelves[i].guild_id == guild_id) return &s->activity_shelves[i];
+    if (s->activity_shelves[i].guild_id == guild_id) {
+      s->activity_shelves[i].last_use = ++s->cache_tick;
+      return &s->activity_shelves[i];
+    }
   }
-  if (s->nactivity_shelves == s->capactivity_shelves) {
-    size_t ncap = s->capactivity_shelves ? s->capactivity_shelves * 2u : 8u;
-    session_activity_shelf *g = ccord_realloc_array(s->activity_shelves, ncap, sizeof *g);
-    if (!g) return nullptr;
-    s->activity_shelves = g;
-    s->capactivity_shelves = ncap;
+  session_activity_shelf *ent;
+  if (s->nactivity_shelves >= SESSION_ACTIVITY_SHELF_CACHE_MAX) {
+    size_t victim = SIZE_MAX;
+    for (size_t i = 0; i < s->nactivity_shelves; i++) {
+      if (s->activity_shelves[i].loading) continue;
+      if (victim == SIZE_MAX || s->activity_shelves[i].last_use < s->activity_shelves[victim].last_use) victim = i;
+    }
+    if (victim == SIZE_MAX) {
+      victim = 0;
+      for (size_t i = 1; i < s->nactivity_shelves; i++) {
+        if (s->activity_shelves[i].last_use < s->activity_shelves[victim].last_use) victim = i;
+      }
+    }
+    ent = &s->activity_shelves[victim];
+  } else {
+    if (s->nactivity_shelves == s->capactivity_shelves) {
+      size_t ncap = s->capactivity_shelves ? s->capactivity_shelves * 2u : 4u;
+      if (ncap > SESSION_ACTIVITY_SHELF_CACHE_MAX) ncap = SESSION_ACTIVITY_SHELF_CACHE_MAX;
+      session_activity_shelf *g = ccord_realloc_array(s->activity_shelves, ncap, sizeof *g);
+      if (!g) return nullptr;
+      s->activity_shelves = g;
+      s->capactivity_shelves = ncap;
+    }
+    ent = &s->activity_shelves[s->nactivity_shelves++];
   }
-  session_activity_shelf *ent = &s->activity_shelves[s->nactivity_shelves++];
   memset(ent, 0, sizeof *ent);
   ent->guild_id = guild_id;
+  ent->last_use = ++s->cache_tick;
   return ent;
 }
 
@@ -392,6 +453,8 @@ ccord_session *ccord_session_create(ccord_bus *bus, ccord_store *store, ccord_tr
   s->transport = transport;
   s->audio_mtx = ccord_mutex_create();
   s->state = CCORD_CONN_DISCONNECTED;
+  s->voice_track_synced = (ccord_store_guild_count(store) == 0u &&
+                           ccord_store_channel_count(store, CCORD_DM_GUILD_ID) == 0u);
   return s;
 }
 
@@ -412,9 +475,14 @@ void ccord_session_destroy(ccord_session *s)
   ccord_free(s->requested);
   ccord_free(s->chan_hist);
   ccord_free(s->profile_cache);
+  ccord_free(s->modals);
   ccord_free(s->slash_cache);
   ccord_free(s->activity_shelves);
   ccord_free(s->guild_profiles);
+  ccord_free(s->voice_track);
+  ccord_free(s->invite_cache);
+  ccord_free(s->discovery_items);
+  ccord_free(s->discovery_cache);
   ccord_free(s->stream_frame_buf);
   ccord_free(s->cam_frame_buf);
   ccord_free(s->rich_json);
@@ -495,7 +563,10 @@ ccord_status ccord_session_set_transport(ccord_session *s, ccord_transport *tran
   s->discovery_count = 0;
   s->discovery_total = 0;
   s->discovery_loading = false;
-  memset(s->discovery_cache, 0, sizeof s->discovery_cache);
+  if (s->discovery_cache) {
+    memset(s->discovery_cache, 0, SESSION_DISCOVERY_CACHE_SLOTS * sizeof *s->discovery_cache);
+  }
+  s->discovery_cache_rr = 0;
   s->has_voice_cfg = false;
   s->ptt_held = false;
   reset_account_lists(s);
@@ -570,18 +641,38 @@ static session_profile_cache *find_profile_cache(const ccord_session *s, ccord_i
 static session_profile_cache *profile_cache_for(ccord_session *s, ccord_id user_id)
 {
   session_profile_cache *pe = find_profile_cache(s, user_id);
-  if (pe) return pe;
-  if (!s || user_id == CCORD_ID_NONE) return nullptr;
-  if (s->nprofile_req == s->capprofile_req) {
-    size_t ncap = s->capprofile_req ? s->capprofile_req * 2u : 32u;
-    session_profile_cache *g = ccord_realloc_array(s->profile_cache, ncap, sizeof *g);
-    if (!g) return nullptr;
-    s->profile_cache = g;
-    s->capprofile_req = ncap;
+  if (pe) {
+    pe->last_use = ++s->cache_tick;
+    return pe;
   }
-  pe = &s->profile_cache[s->nprofile_req++];
+  if (!s || user_id == CCORD_ID_NONE) return nullptr;
+  if (s->nprofile_req >= SESSION_PROFILE_CACHE_MAX) {
+    size_t victim = SIZE_MAX;
+    for (size_t i = 0; i < s->nprofile_req; i++) {
+      if (s->profile_cache[i].in_flight) continue;
+      if (victim == SIZE_MAX || s->profile_cache[i].last_use < s->profile_cache[victim].last_use) victim = i;
+    }
+    if (victim == SIZE_MAX) {
+      victim = 0;
+      for (size_t i = 1; i < s->nprofile_req; i++) {
+        if (s->profile_cache[i].last_use < s->profile_cache[victim].last_use) victim = i;
+      }
+    }
+    pe = &s->profile_cache[victim];
+  } else {
+    if (s->nprofile_req == s->capprofile_req) {
+      size_t ncap = s->capprofile_req ? s->capprofile_req * 2u : 16u;
+      if (ncap > SESSION_PROFILE_CACHE_MAX) ncap = SESSION_PROFILE_CACHE_MAX;
+      session_profile_cache *g = ccord_realloc_array(s->profile_cache, ncap, sizeof *g);
+      if (!g) return nullptr;
+      s->profile_cache = g;
+      s->capprofile_req = ncap;
+    }
+    pe = &s->profile_cache[s->nprofile_req++];
+  }
   memset(pe, 0, sizeof *pe);
   pe->user_id = user_id;
+  pe->last_use = ++s->cache_tick;
   return pe;
 }
 
@@ -610,7 +701,7 @@ static void clear_profile_requested(ccord_session *s, ccord_id user_id)
 // Invite previews are small and immutable enough to key by code: the cache owns value copies, never store pointers.
 static session_invite_cache *find_invite_cache(ccord_session *s, const char *code)
 {
-  if (!s || !code || code[0] == '\0') return nullptr;
+  if (!s || !s->invite_cache || !code || code[0] == '\0') return nullptr;
   for (size_t i = 0; i < SESSION_INVITE_CACHE_SLOTS; i++) {
     if (s->invite_cache[i].valid && strcmp(s->invite_cache[i].code, code) == 0) return &s->invite_cache[i];
   }
@@ -622,6 +713,10 @@ static session_invite_cache *invite_cache_for(ccord_session *s, const char *code
   session_invite_cache *entry = find_invite_cache(s, code);
   if (entry) return entry;
   if (!s || !code || code[0] == '\0') return nullptr;
+  if (!s->invite_cache) {
+    s->invite_cache = ccord_calloc(SESSION_INVITE_CACHE_SLOTS, sizeof *s->invite_cache);
+    if (!s->invite_cache) return nullptr;
+  }
   entry = &s->invite_cache[s->invite_cache_rr++ % SESSION_INVITE_CACHE_SLOTS];
   memset(entry, 0, sizeof *entry);
   entry->valid = true;
@@ -637,7 +732,7 @@ static void invalidate_invite_cache(ccord_session *s, const char *code)
 
 static void reset_invite_cache(ccord_session *s)
 {
-  memset(s->invite_cache, 0, sizeof s->invite_cache);
+  if (s->invite_cache) memset(s->invite_cache, 0, SESSION_INVITE_CACHE_SLOTS * sizeof *s->invite_cache);
   s->invite_cache_rr = 0;
 }
 
@@ -651,18 +746,33 @@ static session_verification_cache *verification_cache_for(ccord_session *s, ccor
 {
   if (!s || guild_id == CCORD_ID_NONE) return nullptr;
   for (size_t i = 0; i < s->nverification_cache; i++) {
-    if (s->verification_cache[i].guild_id == guild_id) return &s->verification_cache[i];
+    if (s->verification_cache[i].guild_id == guild_id) {
+      s->verification_cache[i].last_use = ++s->cache_tick;
+      return &s->verification_cache[i];
+    }
   }
-  if (s->nverification_cache == s->capverification_cache) {
-    size_t ncap = s->capverification_cache ? s->capverification_cache * 2u : 4u;
-    session_verification_cache *g = ccord_realloc_array(s->verification_cache, ncap, sizeof *g);
-    if (!g) return nullptr;
-    s->verification_cache = g;
-    s->capverification_cache = ncap;
+  session_verification_cache *ent;
+  if (s->nverification_cache >= SESSION_VERIFICATION_CACHE_MAX) {
+    size_t victim = 0;
+    for (size_t i = 1; i < s->nverification_cache; i++) {
+      if (s->verification_cache[i].last_use < s->verification_cache[victim].last_use) victim = i;
+    }
+    ent = &s->verification_cache[victim];
+    ccord_arena_free(&ent->arena);
+  } else {
+    if (s->nverification_cache == s->capverification_cache) {
+      size_t ncap = s->capverification_cache ? s->capverification_cache * 2u : 4u;
+      if (ncap > SESSION_VERIFICATION_CACHE_MAX) ncap = SESSION_VERIFICATION_CACHE_MAX;
+      session_verification_cache *g = ccord_realloc_array(s->verification_cache, ncap, sizeof *g);
+      if (!g) return nullptr;
+      s->verification_cache = g;
+      s->capverification_cache = ncap;
+    }
+    ent = &s->verification_cache[s->nverification_cache++];
   }
-  session_verification_cache *ent = &s->verification_cache[s->nverification_cache++];
   memset(ent, 0, sizeof *ent);
   ent->guild_id = guild_id;
+  ent->last_use = ++s->cache_tick;
   return ent;
 }
 
@@ -681,7 +791,7 @@ static char *verification_str(ccord_arena *a, const char *src, size_t cap)
 static bool cache_verification_form(session_verification_cache *ent, const ccord_member_verification *form)
 {
   ccord_arena fresh;
-  ccord_arena_init(&fresh, 0);
+  ccord_arena_init(&fresh, 1024u);
   ccord_member_verification copy = {0};
   bool ok = true;
   copy.version = verification_str(&fresh, form->version, CCORD_MEMBER_VERIFICATION_VERSION_MAX_BYTES);
@@ -830,26 +940,238 @@ static uint64_t media_url_hash(const char *url)
   return h ? h : 1u;
 }
 
-static void media_forget_request(ccord_session *s, const char *url)
+static uint32_t media_hash_mix(uint64_t h)
 {
-  for (size_t r = 0; r < s->media_req_count; r++) {
-    if (s->media_requested[r] && strcmp(s->media_requested[r], url) == 0) {
-      ccord_free(s->media_requested[r]);
-      memmove(&s->media_requested[r], &s->media_requested[r + 1u],
-              (s->media_req_count - r - 1u) * sizeof s->media_requested[0]);
-      s->media_req_count--;
+  return (uint32_t)(h ^ (h >> 32));
+}
+
+static bool media_is_unread(const session_media_entry *e)
+{
+  return e->unread_prev != 0u;
+}
+
+static void media_unread_push(ccord_session *s, size_t idx)
+{
+  session_media_entry *e = &s->media[idx];
+  if (media_is_unread(e)) return;
+  uint16_t slot = (uint16_t)(idx + 1u);
+  if (s->media_unread_tail == 0u) {
+    e->unread_prev = SESSION_MEDIA_IDX_END;
+    e->unread_next = SESSION_MEDIA_IDX_END;
+    s->media_unread_head = slot;
+    s->media_unread_tail = slot;
+  } else {
+    size_t tail_idx = (size_t)s->media_unread_tail - 1u;
+    s->media[tail_idx].unread_next = slot;
+    e->unread_prev = s->media_unread_tail;
+    e->unread_next = SESSION_MEDIA_IDX_END;
+    s->media_unread_tail = slot;
+  }
+  s->media_unread_count++;
+}
+
+static void media_unread_remove(ccord_session *s, size_t idx)
+{
+  session_media_entry *e = &s->media[idx];
+  if (!media_is_unread(e)) return;
+  uint16_t prev = e->unread_prev;
+  uint16_t next = e->unread_next;
+  if (prev == SESSION_MEDIA_IDX_END) {
+    s->media_unread_head = (next == SESSION_MEDIA_IDX_END) ? 0u : next;
+  } else {
+    s->media[(size_t)prev - 1u].unread_next = next;
+  }
+  if (next == SESSION_MEDIA_IDX_END) {
+    s->media_unread_tail = (prev == SESSION_MEDIA_IDX_END) ? 0u : prev;
+  } else {
+    s->media[(size_t)next - 1u].unread_prev = prev;
+  }
+  e->unread_prev = 0u;
+  e->unread_next = 0u;
+  s->media_unread_count--;
+}
+
+static void media_unread_relocate(ccord_session *s, size_t new_idx)
+{
+  const session_media_entry *e = &s->media[new_idx];
+  if (!media_is_unread(e)) return;
+  uint16_t new_slot = (uint16_t)(new_idx + 1u);
+  if (e->unread_prev == SESSION_MEDIA_IDX_END) {
+    s->media_unread_head = new_slot;
+  } else {
+    s->media[(size_t)e->unread_prev - 1u].unread_next = new_slot;
+  }
+  if (e->unread_next == SESSION_MEDIA_IDX_END) {
+    s->media_unread_tail = new_slot;
+  } else {
+    s->media[(size_t)e->unread_next - 1u].unread_prev = new_slot;
+  }
+}
+
+static size_t media_find_index(const ccord_session *s, const char *url, uint32_t h32)
+{
+  size_t b = (size_t)(h32 & SESSION_MEDIA_HASH_MASK);
+  while (s->media_hash[b] != 0u) {
+    size_t idx = (size_t)s->media_hash[b] - 1u;
+    if (s->media[idx].url_hash == h32 && s->media[idx].url && strcmp(s->media[idx].url, url) == 0) {
+      return idx;
+    }
+    b = (b + 1u) & SESSION_MEDIA_HASH_MASK;
+  }
+  return SIZE_MAX;
+}
+
+static void media_hash_insert(ccord_session *s, size_t idx, uint32_t h32)
+{
+  size_t b = (size_t)(h32 & SESSION_MEDIA_HASH_MASK);
+  while (s->media_hash[b] != 0u) {
+    b = (b + 1u) & SESSION_MEDIA_HASH_MASK;
+  }
+  s->media_hash[b] = (uint16_t)(idx + 1u);
+}
+
+static void media_hash_remove(ccord_session *s, size_t idx, uint32_t h32)
+{
+  uint16_t target = (uint16_t)(idx + 1u);
+  size_t b = (size_t)(h32 & SESSION_MEDIA_HASH_MASK);
+  while (s->media_hash[b] != 0u) {
+    if (s->media_hash[b] == target) {
+      size_t hole = b;
+      size_t cur = (hole + 1u) & SESSION_MEDIA_HASH_MASK;
+      while (s->media_hash[cur] != 0u) {
+        size_t cur_idx = (size_t)s->media_hash[cur] - 1u;
+        size_t home = (size_t)(s->media[cur_idx].url_hash & SESSION_MEDIA_HASH_MASK);
+        if (((hole - home) & SESSION_MEDIA_HASH_MASK) < ((cur - home) & SESSION_MEDIA_HASH_MASK)) {
+          s->media_hash[hole] = s->media_hash[cur];
+          hole = cur;
+        }
+        cur = (cur + 1u) & SESSION_MEDIA_HASH_MASK;
+      }
+      s->media_hash[hole] = 0u;
       return;
     }
+    b = (b + 1u) & SESSION_MEDIA_HASH_MASK;
   }
+}
+
+static void media_hash_relocate(ccord_session *s, size_t old_idx, size_t new_idx, uint32_t h32)
+{
+  uint16_t target = (uint16_t)(old_idx + 1u);
+  size_t b = (size_t)(h32 & SESSION_MEDIA_HASH_MASK);
+  while (s->media_hash[b] != 0u) {
+    if (s->media_hash[b] == target) {
+      s->media_hash[b] = (uint16_t)(new_idx + 1u);
+      return;
+    }
+    b = (b + 1u) & SESSION_MEDIA_HASH_MASK;
+  }
+}
+
+static size_t media_req_find_index(const ccord_session *s, const char *url, uint32_t h32)
+{
+  size_t b = (size_t)(h32 & SESSION_MEDIA_HASH_MASK);
+  while (s->media_req_hash[b] != 0u) {
+    size_t idx = (size_t)s->media_req_hash[b] - 1u;
+    if (s->media_req_hashes[idx] == h32 && s->media_requested[idx] && strcmp(s->media_requested[idx], url) == 0) {
+      return idx;
+    }
+    b = (b + 1u) & SESSION_MEDIA_HASH_MASK;
+  }
+  return SIZE_MAX;
+}
+
+static void media_req_hash_insert(ccord_session *s, size_t idx, uint32_t h32)
+{
+  size_t b = (size_t)(h32 & SESSION_MEDIA_HASH_MASK);
+  while (s->media_req_hash[b] != 0u) {
+    b = (b + 1u) & SESSION_MEDIA_HASH_MASK;
+  }
+  s->media_req_hash[b] = (uint16_t)(idx + 1u);
+}
+
+static void media_req_hash_remove(ccord_session *s, size_t idx, uint32_t h32)
+{
+  uint16_t target = (uint16_t)(idx + 1u);
+  size_t b = (size_t)(h32 & SESSION_MEDIA_HASH_MASK);
+  while (s->media_req_hash[b] != 0u) {
+    if (s->media_req_hash[b] == target) {
+      size_t hole = b;
+      size_t cur = (hole + 1u) & SESSION_MEDIA_HASH_MASK;
+      while (s->media_req_hash[cur] != 0u) {
+        size_t cur_idx = (size_t)s->media_req_hash[cur] - 1u;
+        size_t home = (size_t)(s->media_req_hashes[cur_idx] & SESSION_MEDIA_HASH_MASK);
+        if (((hole - home) & SESSION_MEDIA_HASH_MASK) < ((cur - home) & SESSION_MEDIA_HASH_MASK)) {
+          s->media_req_hash[hole] = s->media_req_hash[cur];
+          hole = cur;
+        }
+        cur = (cur + 1u) & SESSION_MEDIA_HASH_MASK;
+      }
+      s->media_req_hash[hole] = 0u;
+      return;
+    }
+    b = (b + 1u) & SESSION_MEDIA_HASH_MASK;
+  }
+}
+
+static void media_req_hash_relocate(ccord_session *s, size_t old_idx, size_t new_idx, uint32_t h32)
+{
+  uint16_t target = (uint16_t)(old_idx + 1u);
+  size_t b = (size_t)(h32 & SESSION_MEDIA_HASH_MASK);
+  while (s->media_req_hash[b] != 0u) {
+    if (s->media_req_hash[b] == target) {
+      s->media_req_hash[b] = (uint16_t)(new_idx + 1u);
+      return;
+    }
+    b = (b + 1u) & SESSION_MEDIA_HASH_MASK;
+  }
+}
+
+static void media_req_remove_at(ccord_session *s, size_t idx)
+{
+  media_req_hash_remove(s, idx, s->media_req_hashes[idx]);
+  ccord_free(s->media_requested[idx]);
+  size_t last = s->media_req_count - 1u;
+  if (idx != last) {
+    s->media_requested[idx] = s->media_requested[last];
+    s->media_req_hashes[idx] = s->media_req_hashes[last];
+    media_req_hash_relocate(s, last, idx, s->media_req_hashes[idx]);
+  }
+  s->media_req_count--;
+  s->media_requested[s->media_req_count] = nullptr;
+  s->media_req_hashes[s->media_req_count] = 0u;
+}
+
+static void media_forget_request(ccord_session *s, const char *url)
+{
+  if (!url || s->media_req_count == 0u) return;
+  uint32_t h32 = media_hash_mix(media_url_hash(url));
+  size_t idx = media_req_find_index(s, url, h32);
+  if (idx != SIZE_MAX) media_req_remove_at(s, idx);
 }
 
 static void media_failed_set(ccord_session *s, const char *url, bool failed)
 {
+  if (!failed && s->media_failed_count == 0u) return;
   uint64_t h = media_url_hash(url);
   for (size_t i = 0; i < s->media_failed_count; i++) {
     size_t idx = (s->media_failed_head + i) % SESSION_MEDIA_FAILED_MAX;
     if (s->media_failed[idx] == h) {
-      if (!failed) s->media_failed[idx] = 0;   // tombstone; hashes are never 0
+      if (!failed) {
+        if (i == 0u) {
+          s->media_failed[idx] = 0u;
+          s->media_failed_head = (s->media_failed_head + 1u) % SESSION_MEDIA_FAILED_MAX;
+          s->media_failed_count--;
+        } else {
+          for (size_t j = i; j + 1u < s->media_failed_count; j++) {
+            size_t dst = (s->media_failed_head + j) % SESSION_MEDIA_FAILED_MAX;
+            size_t src = (s->media_failed_head + j + 1u) % SESSION_MEDIA_FAILED_MAX;
+            s->media_failed[dst] = s->media_failed[src];
+          }
+          s->media_failed_count--;
+          s->media_failed[(s->media_failed_head + s->media_failed_count) % SESSION_MEDIA_FAILED_MAX] = 0u;
+        }
+        if (s->media_failed_count == 0u) s->media_failed_head = 0u;
+      }
       return;
     }
   }
@@ -863,17 +1185,24 @@ static void media_failed_set(ccord_session *s, const char *url, bool failed)
   s->media_failed[idx] = h;
 }
 
-// Drops one cached body. Its pending-request marker goes too, so a later fetch really asks the transport again
-// (which normally answers from the disk cache).
+// Drops one cached body using swap-with-last and updates the hash & unread indices in O(1). Its pending-request
+// marker goes too, so a later fetch really asks the transport again (which normally answers from the disk cache).
 static void media_evict(ccord_session *s, size_t idx)
 {
   session_media_entry *e = &s->media[idx];
+  media_unread_remove(s, idx);
+  media_hash_remove(s, idx, e->url_hash);
   if (e->url) media_forget_request(s, e->url);
   s->media_bytes -= e->len <= s->media_bytes ? e->len : s->media_bytes;
   ccord_free(e->url);
   ccord_free(e->cache_path);
   ccord_free(e->data);
-  memmove(&s->media[idx], &s->media[idx + 1u], (s->media_count - idx - 1u) * sizeof s->media[0]);
+  size_t last = s->media_count - 1u;
+  if (idx != last) {
+    s->media[idx] = s->media[last];
+    media_hash_relocate(s, last, idx, s->media[idx].url_hash);
+    media_unread_relocate(s, idx);
+  }
   s->media_count--;
   memset(&s->media[s->media_count], 0, sizeof s->media[0]);
 }
@@ -883,22 +1212,16 @@ static size_t media_lru(const ccord_session *s, size_t keep, bool allow_queued)
 {
   size_t best = SIZE_MAX;
   for (size_t i = 0; i < s->media_count; i++) {
-    if (i == keep || (!allow_queued && s->media[i].pop_queued)) continue;
+    if (i == keep || (!allow_queued && media_is_unread(&s->media[i]))) continue;
     if (best == SIZE_MAX || s->media[i].access_tick < s->media[best].access_tick) best = i;
   }
   return best;
 }
 
-static void media_trim_bytes(ccord_session *s, const char *keep_url)
+static void media_trim_bytes(ccord_session *s, const char *keep_url, uint32_t keep_h32)
 {
   while (s->media_bytes > SESSION_MEDIA_BYTE_BUDGET && s->media_count > 1) {
-    size_t keep = SIZE_MAX;
-    for (size_t i = 0; i < s->media_count; i++) {
-      if (strcmp(s->media[i].url, keep_url) == 0) {
-        keep = i;
-        break;
-      }
-    }
+    size_t keep = media_find_index(s, keep_url, keep_h32);
     size_t victim = media_lru(s, keep, false);
     if (victim == SIZE_MAX) return;
     media_evict(s, victim);
@@ -915,35 +1238,38 @@ static void store_media_loaded(ccord_session *s, const ccord_net_event *ev)
     return;
   }
   media_failed_set(s, ev->media_url, false);
-  for (size_t i = 0; i < s->media_count; i++) {
-    if (strcmp(s->media[i].url, ev->media_url) == 0) {
-      s->media_bytes -= s->media[i].len <= s->media_bytes ? s->media[i].len : s->media_bytes;
-      ccord_free(s->media[i].cache_path);
-      ccord_free(s->media[i].data);
-      s->media[i].cache_path = ccord_strndup(ev->media_path ? ev->media_path : "",
-                                             ev->media_path ? strlen(ev->media_path) : 0);
-      s->media[i].data = ev->media_len ? ccord_alloc_array(ev->media_len, 1) : nullptr;
-      if (s->media[i].data && ev->media_data) memcpy(s->media[i].data, ev->media_data, ev->media_len);
-      s->media[i].len = s->media[i].data ? ev->media_len : 0;
-      s->media_bytes += s->media[i].len;
-      s->media[i].pub = (ccord_media_item){
-        .url = s->media[i].url,
-        .cache_path = s->media[i].cache_path ? s->media[i].cache_path : "",
-        .data = s->media[i].data,
-        .len = s->media[i].len,
-      };
-      s->media[i].access_tick = ++s->media_tick;
-      s->media[i].pop_queued = true;
-      media_trim_bytes(s, ev->media_url);
-      return;
-    }
+  uint32_t h32 = media_hash_mix(media_url_hash(ev->media_url));
+  size_t existing = media_find_index(s, ev->media_url, h32);
+  if (existing != SIZE_MAX) {
+    session_media_entry *em = &s->media[existing];
+    s->media_bytes -= em->len <= s->media_bytes ? em->len : s->media_bytes;
+    ccord_free(em->cache_path);
+    ccord_free(em->data);
+    em->cache_path = ccord_strndup(ev->media_path ? ev->media_path : "",
+                                   ev->media_path ? strlen(ev->media_path) : 0);
+    em->data = ev->media_len ? ccord_alloc_array(ev->media_len, 1) : nullptr;
+    if (em->data && ev->media_data) memcpy(em->data, ev->media_data, ev->media_len);
+    em->len = em->data ? ev->media_len : 0;
+    s->media_bytes += em->len;
+    em->pub = (ccord_media_item){
+      .url = em->url,
+      .cache_path = em->cache_path ? em->cache_path : "",
+      .data = em->data,
+      .len = em->len,
+    };
+    em->access_tick = ++s->media_tick;
+    media_unread_push(s, existing);
+    media_forget_request(s, ev->media_url);
+    media_trim_bytes(s, ev->media_url, h32);
+    return;
   }
   if (s->media_count >= SESSION_MAX_MEDIA) {
     size_t evict = media_lru(s, SIZE_MAX, false);
     if (evict == SIZE_MAX) evict = media_lru(s, SIZE_MAX, true);
     media_evict(s, evict);
   }
-  session_media_entry *e = &s->media[s->media_count];
+  size_t new_idx = s->media_count;
+  session_media_entry *e = &s->media[new_idx];
   memset(e, 0, sizeof *e);
   e->url = ccord_strndup(ev->media_url, strlen(ev->media_url));
   e->cache_path = ccord_strndup(ev->media_path ? ev->media_path : "",
@@ -954,6 +1280,7 @@ static void store_media_loaded(ccord_session *s, const ccord_net_event *ev)
     ccord_free(e->cache_path);
     ccord_free(e->data);
     memset(e, 0, sizeof *e);
+    media_forget_request(s, ev->media_url);
     return;
   }
   if (ev->media_len > 0 && ev->media_data) memcpy(e->data, ev->media_data, ev->media_len);
@@ -965,10 +1292,13 @@ static void store_media_loaded(ccord_session *s, const ccord_net_event *ev)
     .len = e->len,
   };
   e->access_tick = ++s->media_tick;
-  e->pop_queued = true;
+  e->url_hash = h32;
   s->media_count++;
+  media_hash_insert(s, new_idx, h32);
+  media_unread_push(s, new_idx);
   s->media_bytes += e->len;
-  media_trim_bytes(s, ev->media_url);
+  media_forget_request(s, ev->media_url);
+  media_trim_bytes(s, ev->media_url, h32);
 }
 
 static const char *dup_in_search_arena(ccord_arena *a, const char *str)
@@ -1118,6 +1448,19 @@ static void store_search_results(ccord_session *s, const ccord_net_event *ev)
   s->search_count = ev->message_count;
 }
 
+static void flush_seeded_members(ccord_store *store, ccord_id gid, const ccord_member *batch, size_t nbatch,
+                                 bool fallback_per_item)
+{
+  if (nbatch == 0) return;
+  ccord_error ignored;
+  if (ccord_store_upsert_guild_members(store, gid, batch, nbatch, nullptr, 0, &ignored) != CCORD_OK &&
+      fallback_per_item && nbatch > 1u) {
+    for (size_t i = 0; i < nbatch; i++) {
+      (void)ccord_store_upsert_guild_members(store, gid, &batch[i], 1u, nullptr, 0, &ignored);
+    }
+  }
+}
+
 static void seed_channel_message_members(ccord_session *s, ccord_id channel_id, ccord_id guild_hint,
                                          const ccord_message *msgs, size_t msg_count,
                                          const ccord_member *ev_members, size_t ev_member_count)
@@ -1128,13 +1471,20 @@ static void seed_channel_message_members(ccord_session *s, ccord_id channel_id, 
   if (gid == CCORD_ID_NONE || gid == CCORD_DM_GUILD_ID) return;
   if (!ccord_store_guild(s->store, gid)) return;
 
-  ccord_error ignored;
+  ccord_member batch[64];
+  size_t nbatch = 0;
   if (ev_members && ev_member_count > 0) {
     for (size_t i = 0; i < ev_member_count; i++) {
       if (ev_members[i].guild_id == gid && ccord_store_user(s->store, ev_members[i].user_id)) {
-        (void)ccord_store_upsert_guild_members(s->store, gid, &ev_members[i], 1, nullptr, 0, &ignored);
+        batch[nbatch++] = ev_members[i];
+        if (nbatch == sizeof batch / sizeof batch[0]) {
+          flush_seeded_members(s->store, gid, batch, nbatch, true);
+          nbatch = 0;
+        }
       }
     }
+    flush_seeded_members(s->store, gid, batch, nbatch, true);
+    nbatch = 0;
   }
   if (!msgs || msg_count == 0) return;
   for (size_t i = 0; i < msg_count; i++) {
@@ -1143,15 +1493,27 @@ static void seed_channel_message_members(ccord_session *s, ccord_id channel_id, 
     // Seeing an author says nothing new about a member we know: the sighting has no nickname or roles, so it must not
     // overwrite the ones the list already has.
     if (ccord_store_find_member(s->store, gid, uid)) continue;
-    ccord_member m = {
+    bool dup = false;
+    for (size_t b = 0; b < nbatch; b++) {
+      if (batch[b].user_id == uid) {
+        dup = true;
+        break;
+      }
+    }
+    if (dup) continue;
+    batch[nbatch++] = (ccord_member){
       .guild_id = gid,
       .user_id = uid,
       .role_name = "Members",
       .role_color = 0,
       .role_rank = 255,
     };
-    (void)ccord_store_upsert_guild_members(s->store, gid, &m, 1, nullptr, 0, &ignored);
+    if (nbatch == sizeof batch / sizeof batch[0]) {
+      flush_seeded_members(s->store, gid, batch, nbatch, false);
+      nbatch = 0;
+    }
   }
+  flush_seeded_members(s->store, gid, batch, nbatch, false);
 }
 
 // Applies the emoji/sticker lists carried by SNAPSHOT / GUILD_UPSERT / GUILD_EXPRESSIONS events. The lists are grouped
@@ -1710,18 +2072,39 @@ static void session_leave_channel_activities(ccord_session *s, ccord_id channel_
 static session_guild_profile_cache *guild_profile_for(ccord_session *s, ccord_id guild_id)
 {
   for (size_t i = 0; i < s->nguild_profiles; i++) {
-    if (s->guild_profiles[i].guild_id == guild_id) return &s->guild_profiles[i];
+    if (s->guild_profiles[i].guild_id == guild_id) {
+      s->guild_profiles[i].last_use = ++s->cache_tick;
+      return &s->guild_profiles[i];
+    }
   }
-  if (s->nguild_profiles == s->capguild_profiles) {
-    size_t ncap = s->capguild_profiles ? s->capguild_profiles * 2u : 8u;
-    session_guild_profile_cache *g = ccord_realloc_array(s->guild_profiles, ncap, sizeof *g);
-    if (!g) return nullptr;
-    s->guild_profiles = g;
-    s->capguild_profiles = ncap;
+  session_guild_profile_cache *ent;
+  if (s->nguild_profiles >= SESSION_GUILD_PROFILE_CACHE_MAX) {
+    size_t victim = SIZE_MAX;
+    for (size_t i = 0; i < s->nguild_profiles; i++) {
+      if (s->guild_profiles[i].loading) continue;
+      if (victim == SIZE_MAX || s->guild_profiles[i].last_use < s->guild_profiles[victim].last_use) victim = i;
+    }
+    if (victim == SIZE_MAX) {
+      victim = 0;
+      for (size_t i = 1; i < s->nguild_profiles; i++) {
+        if (s->guild_profiles[i].last_use < s->guild_profiles[victim].last_use) victim = i;
+      }
+    }
+    ent = &s->guild_profiles[victim];
+  } else {
+    if (s->nguild_profiles == s->capguild_profiles) {
+      size_t ncap = s->capguild_profiles ? s->capguild_profiles * 2u : 8u;
+      if (ncap > SESSION_GUILD_PROFILE_CACHE_MAX) ncap = SESSION_GUILD_PROFILE_CACHE_MAX;
+      session_guild_profile_cache *g = ccord_realloc_array(s->guild_profiles, ncap, sizeof *g);
+      if (!g) return nullptr;
+      s->guild_profiles = g;
+      s->capguild_profiles = ncap;
+    }
+    ent = &s->guild_profiles[s->nguild_profiles++];
   }
-  session_guild_profile_cache *ent = &s->guild_profiles[s->nguild_profiles++];
   memset(ent, 0, sizeof *ent);
   ent->guild_id = guild_id;
+  ent->last_use = ++s->cache_tick;
   return ent;
 }
 
@@ -1764,6 +2147,105 @@ static void session_set_self_activity(ccord_session *s, bool has, ccord_activity
                                          end_ms, &err) != CCORD_OK) {
     CCORD_LOG_W("session: own activity not applied: %s", err.message);
   }
+}
+
+static void voice_track_upsert(ccord_session *s, ccord_id guild_id, ccord_id channel_id, ccord_id user_id)
+{
+  if (user_id == CCORD_ID_NONE) return;
+  for (size_t i = 0; i < s->nvoice_track; i++) {
+    if (s->voice_track[i].guild_id == guild_id && s->voice_track[i].user_id == user_id) {
+      if (channel_id == CCORD_ID_NONE) {
+        s->voice_track[i] = s->voice_track[--s->nvoice_track];
+      } else {
+        s->voice_track[i].channel_id = channel_id;
+      }
+      return;
+    }
+  }
+  if (channel_id == CCORD_ID_NONE) return;
+  if (s->nvoice_track == s->capvoice_track) {
+    size_t ncap = s->capvoice_track ? s->capvoice_track * 2u : 16u;
+    session_voice_entry *g = ccord_realloc_array(s->voice_track, ncap, sizeof *g);
+    if (!g) {
+      s->voice_track_synced = false;
+      return;
+    }
+    s->voice_track = g;
+    s->capvoice_track = ncap;
+  }
+  s->voice_track[s->nvoice_track++] = (session_voice_entry){
+    .guild_id = guild_id,
+    .channel_id = channel_id,
+    .user_id = user_id,
+  };
+}
+
+static void voice_track_remove_guild(ccord_session *s, ccord_id guild_id)
+{
+  for (size_t i = 0; i < s->nvoice_track; ) {
+    if (s->voice_track[i].guild_id == guild_id) {
+      s->voice_track[i] = s->voice_track[--s->nvoice_track];
+    } else {
+      i++;
+    }
+  }
+}
+
+static void voice_track_remove_channel(ccord_session *s, ccord_id channel_id)
+{
+  for (size_t i = 0; i < s->nvoice_track; ) {
+    if (s->voice_track[i].channel_id == channel_id) {
+      s->voice_track[i] = s->voice_track[--s->nvoice_track];
+    } else {
+      i++;
+    }
+  }
+}
+
+static size_t voice_id_slot(ccord_id id, size_t mask)
+{
+  uint64_t x = (uint64_t)id;
+  x ^= x >> 33;
+  x *= 0xff51afd7ed558ccdULL;
+  x ^= x >> 33;
+  return (size_t)(x & (uint64_t)mask);
+}
+
+static bool voice_keep_lookup(const ccord_id *keep_set, size_t keep_mask,
+                              const ccord_voice_state *states, size_t count,
+                              ccord_id guild_id, ccord_id user_id)
+{
+  if (keep_set) {
+    size_t b = voice_id_slot(user_id, keep_mask);
+    while (keep_set[b] != CCORD_ID_NONE) {
+      if (keep_set[b] == user_id) return true;
+      b = (b + 1u) & keep_mask;
+    }
+    return false;
+  }
+  for (size_t k = 0; states && k < count; k++) {
+    if (states[k].guild_id == guild_id && states[k].user_id == user_id &&
+        states[k].channel_id != CCORD_ID_NONE) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool push_stale_voice_id(ccord_id **buf, ccord_id **heap_buf, size_t *count, size_t *cap, ccord_id uid)
+{
+  if (*count == *cap) {
+    size_t ncap = (*cap) * 2u;
+    ccord_id *g = ccord_alloc_array(ncap, sizeof *g);
+    if (!g) return false;
+    memcpy(g, *buf, (*count) * sizeof *g);
+    ccord_free(*heap_buf);
+    *heap_buf = g;
+    *buf = g;
+    *cap = ncap;
+  }
+  (*buf)[(*count)++] = uid;
+  return true;
 }
 
 static void session_apply_voice_state(ccord_session *s, const ccord_voice_state *raw_vs, const ccord_user *opt_user)
@@ -1809,6 +2291,8 @@ static void session_apply_voice_state(ccord_session *s, const ccord_voice_state 
     if (err.code != CCORD_ERR_NOT_FOUND) {
       CCORD_LOG_W("session: voice state rejected: %s", err.message);
     }
+  } else {
+    voice_track_upsert(s, vs.guild_id, vs.channel_id, vs.user_id);
   }
   if (vs.user_id == ccord_store_self_id(s->store)) {
     s->pending_voice_guild = CCORD_ID_NONE;
@@ -1856,43 +2340,71 @@ static void session_apply_voice_states(ccord_session *s, ccord_id replace_guild_
     ccord_error_clear(&err);
   }
   if (replace_guild_id != CCORD_ID_NONE && replace_guild_id != CCORD_DM_GUILD_ID) {
-    size_t nc = ccord_store_channel_count(s->store, replace_guild_id);
-    size_t stale_cap = 0;
-    for (size_t ci = 0; ci < nc; ci++) {
-      const ccord_channel *ch = ccord_store_channel_at(s->store, replace_guild_id, ci);
-      if (ch && (ch->kind == CCORD_CHANNEL_VOICE || ch->kind == CCORD_CHANNEL_STAGE)) {
-        stale_cap += ccord_store_voice_count(s->store, ch->id);
+    ccord_id keep_stack[128];
+    ccord_id *keep_heap = nullptr;
+    ccord_id *keep_set = nullptr;
+    size_t keep_mask = 0;
+    if (states && count > 8u) {
+      size_t keep_cap = 32u;
+      while (keep_cap < count * 2u && keep_cap <= (SIZE_MAX >> 1)) keep_cap <<= 1u;
+      if (keep_cap <= sizeof keep_stack / sizeof keep_stack[0]) {
+        memset(keep_stack, 0, keep_cap * sizeof keep_stack[0]);
+        keep_set = keep_stack;
+      } else {
+        keep_heap = ccord_calloc(keep_cap, sizeof *keep_heap);
+        keep_set = keep_heap;
+      }
+      if (keep_set) {
+        keep_mask = keep_cap - 1u;
+        for (size_t k = 0; k < count; k++) {
+          if (states[k].guild_id != replace_guild_id || states[k].channel_id == CCORD_ID_NONE ||
+              states[k].user_id == CCORD_ID_NONE) {
+            continue;
+          }
+          size_t b = voice_id_slot(states[k].user_id, keep_mask);
+          while (keep_set[b] != CCORD_ID_NONE && keep_set[b] != states[k].user_id) {
+            b = (b + 1u) & keep_mask;
+          }
+          keep_set[b] = states[k].user_id;
+        }
       }
     }
-    if (stale_cap > 0) {
-      ccord_id *stale = ccord_alloc_array(stale_cap, sizeof *stale);
-      if (stale) {
-        size_t nstale = 0;
-        for (size_t ci = 0; ci < nc; ci++) {
-          const ccord_channel *ch = ccord_store_channel_at(s->store, replace_guild_id, ci);
-          if (!ch || (ch->kind != CCORD_CHANNEL_VOICE && ch->kind != CCORD_CHANNEL_STAGE)) continue;
-          size_t nv = ccord_store_voice_count(s->store, ch->id);
-          for (size_t vi = 0; vi < nv; vi++) {
-            const ccord_voice_state *cur = ccord_store_voice_at(s->store, ch->id, vi);
-            if (!cur) continue;
-            bool keep = false;
-            for (size_t k = 0; states && k < count; k++) {
-              if (states[k].guild_id == replace_guild_id && states[k].user_id == cur->user_id &&
-                  states[k].channel_id != CCORD_ID_NONE) {
-                keep = true;
-                break;
-              }
-            }
-            if (!keep && nstale < stale_cap) stale[nstale++] = cur->user_id;
+
+    ccord_id stale_stack[64];
+    ccord_id *stale_heap = nullptr;
+    ccord_id *stale = stale_stack;
+    size_t nstale = 0;
+    size_t stale_cap = sizeof stale_stack / sizeof stale_stack[0];
+
+    if (s->voice_track_synced) {
+      for (size_t i = 0; i < s->nvoice_track; i++) {
+        if (s->voice_track[i].guild_id != replace_guild_id) continue;
+        ccord_id uid = s->voice_track[i].user_id;
+        if (!voice_keep_lookup(keep_set, keep_mask, states, count, replace_guild_id, uid)) {
+          if (!push_stale_voice_id(&stale, &stale_heap, &nstale, &stale_cap, uid)) break;
+        }
+      }
+    } else {
+      size_t nc = ccord_store_channel_count(s->store, replace_guild_id);
+      for (size_t ci = 0; ci < nc; ci++) {
+        const ccord_channel *ch = ccord_store_channel_at(s->store, replace_guild_id, ci);
+        if (!ch || (ch->kind != CCORD_CHANNEL_VOICE && ch->kind != CCORD_CHANNEL_STAGE)) continue;
+        for (size_t vi = 0; ; vi++) {
+          const ccord_voice_state *cur = ccord_store_voice_at(s->store, ch->id, vi);
+          if (!cur) break;
+          if (!voice_keep_lookup(keep_set, keep_mask, states, count, replace_guild_id, cur->user_id)) {
+            if (!push_stale_voice_id(&stale, &stale_heap, &nstale, &stale_cap, cur->user_id)) break;
           }
         }
-        for (size_t i = 0; i < nstale; i++) {
-          ccord_voice_state leave = {.guild_id = replace_guild_id, .channel_id = CCORD_ID_NONE, .user_id = stale[i]};
-          session_apply_voice_state(s, &leave, nullptr);
-        }
-        ccord_free(stale);
       }
     }
+
+    ccord_free(keep_heap);
+    for (size_t i = 0; i < nstale; i++) {
+      ccord_voice_state leave = {.guild_id = replace_guild_id, .channel_id = CCORD_ID_NONE, .user_id = stale[i]};
+      session_apply_voice_state(s, &leave, nullptr);
+    }
+    ccord_free(stale_heap);
   }
   for (size_t i = 0; states && i < count; i++) {
     session_apply_voice_state(s, &states[i], nullptr);
@@ -2001,7 +2513,16 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
         s->nslash_cache = 0;
         s->nactivity_shelves = 0;
         s->nguild_profiles = 0;
-  s->nguild_profiles = 0;
+        s->nvoice_track = 0;
+        s->voice_track_synced = true;
+        if (ev->snapshot && ev->snapshot->voice_states) {
+          for (size_t i = 0; i < ev->snapshot->voice_state_count; i++) {
+            const ccord_voice_state *svs = &ev->snapshot->voice_states[i];
+            if (svs->channel_id != CCORD_ID_NONE) {
+              voice_track_upsert(s, svs->guild_id, svs->channel_id, svs->user_id);
+            }
+          }
+        }
         reset_invite_cache(s);
         reset_verification_cache(s);
         s->slash_choice_count = 0;
@@ -2100,12 +2621,21 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
                                    ev->guild_members, ev->guild_member_count);
       for (size_t i = 0; i < ev->message_count; i++) {
         const ccord_message *in = &ev->messages[i];
-        (void)ccord_store_forum_apply_message(s->store, in, &err);
-        if (!ccord_store_channel(s->store, in->channel_id) &&
-            ccord_store_forum_find_post(s->store, in->channel_id) != nullptr) {
-          continue;
+        const ccord_channel *existing_ch = ccord_store_channel(s->store, in->channel_id);
+        if (!existing_ch) {
+          if (ccord_store_forum_apply_message(s->store, in, &err) == CCORD_OK) {
+            continue;
+          }
+          if (err.code != CCORD_ERR_NOT_FOUND &&
+              ccord_store_forum_find_post(s->store, in->channel_id) != nullptr) {
+            continue;
+          }
+        } else if (ccord_discord_type_is_thread(existing_ch->discord_type) ||
+                   (existing_ch->parent_id != CCORD_ID_NONE &&
+                    ccord_store_channel_is_forum(s->store, existing_ch->parent_id))) {
+          (void)ccord_store_forum_apply_message(s->store, in, &err);
         }
-        if (!ccord_store_channel(s->store, in->channel_id) &&
+        if (!existing_ch &&
             (ev->guild_id == CCORD_ID_NONE || ev->guild_id == CCORD_DM_GUILD_ID) &&
             in->author_id != CCORD_ID_NONE && ccord_store_self_id(s->store) != CCORD_ID_NONE) {
           ccord_id dm_uid = (in->author_id != ccord_store_self_id(s->store)) ? in->author_id : CCORD_ID_NONE;
@@ -2303,6 +2833,8 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
       if (ccord_store_channel(s->store, ev->channel_id)) {
         if (ccord_store_delete_channel(s->store, ev->channel_id, &err) != CCORD_OK) {
           CCORD_LOG_W("session: channel delete rejected: %s", err.message);
+        } else {
+          voice_track_remove_channel(s, ev->channel_id);
         }
       }
       break;
@@ -2319,15 +2851,70 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
             CCORD_LOG_W("session: reaction clear rejected: %s", err.message);
           }
         } else {
-          // Clear any existing breakdown and rebuild from the authoritative message reactions.
-          (void)ccord_store_set_reactions(s->store, ev->channel_id, ev->message_id, 0, false, &err);
+          // Diff against existing reactions in place to avoid clearing & reallocating unchanged emojis.
+          size_t valid_auth = 0;
           for (size_t ri = 0; ri < authoritative->reaction_kind_count; ri++) {
             const ccord_reaction *ar = &authoritative->reactions[ri];
-            if (!ar->emoji || ar->count == 0) continue;
-            if (ccord_store_set_reaction_ex(s->store, ev->channel_id, ev->message_id, ar->emoji,
-                                            ar->count, ar->self_reacted, ar->burst_count, ar->me_burst,
-                                            &err) != CCORD_OK) {
-              CCORD_LOG_W("session: reaction sync rejected: %s", err.message);
+            if (ar->emoji && ar->count > 0) valid_auth++;
+          }
+          if (valid_auth == 0) {
+            if (ccord_store_set_reactions(s->store, ev->channel_id, ev->message_id, 0, false, &err) != CCORD_OK) {
+              CCORD_LOG_W("session: reaction clear rejected: %s", err.message);
+            }
+          } else {
+            char stale_emojis[CCORD_MAX_REACTIONS_PER_MESSAGE][CCORD_EMOJI_MAX_BYTES + 1];
+            size_t nstale = 0;
+            for (size_t ci = 0; ci < rmsg->reaction_kind_count; ci++) {
+              const char *cur_emoji = rmsg->reactions[ci].emoji;
+              if (!cur_emoji) continue;
+              bool kept = false;
+              for (size_t ri = 0; ri < authoritative->reaction_kind_count; ri++) {
+                const ccord_reaction *ar = &authoritative->reactions[ri];
+                if (ar->emoji && ar->count > 0 && strcmp(cur_emoji, ar->emoji) == 0) {
+                  kept = true;
+                  break;
+                }
+              }
+              if (!kept && nstale < CCORD_MAX_REACTIONS_PER_MESSAGE) {
+                size_t elen = strlen(cur_emoji);
+                if (elen > CCORD_EMOJI_MAX_BYTES) elen = CCORD_EMOJI_MAX_BYTES;
+                memcpy(stale_emojis[nstale], cur_emoji, elen);
+                stale_emojis[nstale][elen] = '\0';
+                nstale++;
+              }
+            }
+            if (nstale > 0) {
+              if (nstale == rmsg->reaction_kind_count) {
+                (void)ccord_store_set_reactions(s->store, ev->channel_id, ev->message_id, 0, false, &err);
+              } else {
+                for (size_t si = 0; si < nstale; si++) {
+                  (void)ccord_store_set_reaction_ex(s->store, ev->channel_id, ev->message_id, stale_emojis[si],
+                                                    0, false, 0, false, &err);
+                }
+              }
+              rmsg = ccord_store_find_message(s->store, ev->channel_id, ev->message_id);
+            }
+            for (size_t ri = 0; rmsg && ri < authoritative->reaction_kind_count; ri++) {
+              const ccord_reaction *ar = &authoritative->reactions[ri];
+              if (!ar->emoji || ar->count == 0) continue;
+              uint32_t want_burst = ar->burst_count > ar->count ? ar->count : ar->burst_count;
+              bool want_me_burst = want_burst == 0 ? false : ar->me_burst;
+              bool same = false;
+              for (size_t ci = 0; ci < rmsg->reaction_kind_count; ci++) {
+                const ccord_reaction *cr = &rmsg->reactions[ci];
+                if (cr->emoji && strcmp(cr->emoji, ar->emoji) == 0) {
+                  same = (cr->count == ar->count && cr->self_reacted == ar->self_reacted &&
+                          cr->burst_count == want_burst && cr->me_burst == want_me_burst);
+                  break;
+                }
+              }
+              if (same) continue;
+              if (ccord_store_set_reaction_ex(s->store, ev->channel_id, ev->message_id, ar->emoji,
+                                              ar->count, ar->self_reacted, ar->burst_count, ar->me_burst,
+                                              &err) != CCORD_OK) {
+                CCORD_LOG_W("session: reaction sync rejected: %s", err.message);
+              }
+              rmsg = ccord_store_find_message(s->store, ev->channel_id, ev->message_id);
             }
           }
         }
@@ -2442,6 +3029,8 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
     case CCORD_NET_GUILD_DELETE:
       if (ccord_store_delete_guild(s->store, ev->guild_id, &err) != CCORD_OK) {
         CCORD_LOG_W("session: guild delete rejected: %s", err.message);
+      } else {
+        voice_track_remove_guild(s, ev->guild_id);
       }
       break;
     case CCORD_NET_MEMBER_REMOVE:
@@ -2832,11 +3421,13 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
           (ev->admin_op == CCORD_ADMIN_PREVIEW_INVITE || ev->admin_op == CCORD_ADMIN_ACCEPT_INVITE)) {
         s->invite_preview_loading = false;
         // A failed preview must not keep the in-flight guard closed: the next ask retries immediately.
-        for (size_t i = 0; i < SESSION_INVITE_CACHE_SLOTS; i++) {
-          if (s->invite_cache[i].sent_ms != 0 && ev->admin_op == CCORD_ADMIN_PREVIEW_INVITE) {
-            s->invite_cache[i].failed = true;
+        if (s->invite_cache) {
+          for (size_t i = 0; i < SESSION_INVITE_CACHE_SLOTS; i++) {
+            if (s->invite_cache[i].sent_ms != 0 && ev->admin_op == CCORD_ADMIN_PREVIEW_INVITE) {
+              s->invite_cache[i].failed = true;
+            }
+            s->invite_cache[i].sent_ms = 0;
           }
-          s->invite_cache[i].sent_ms = 0;
         }
       }
       if (ev->action == CCORD_ACTION_ADMIN && ev->admin_op == CCORD_ADMIN_GET_GUILD_PROFILE) {
@@ -2888,6 +3479,13 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
     }
     case CCORD_NET_INTERACTION_MODAL:
       if (ev->modal) {
+        if (!s->modals) {
+          s->modals = ccord_calloc(SESSION_MAX_MODALS, sizeof *s->modals);
+          if (!s->modals) {
+            CCORD_LOG_W("session: out of memory queuing interaction modal");
+            break;
+          }
+        }
         if (s->modal_count == SESSION_MAX_MODALS) {
           s->modal_head = (s->modal_head + 1u) % SESSION_MAX_MODALS;
           s->modal_count--;
@@ -3005,7 +3603,7 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
           entry->failed = false;
           entry->preview = *ev->invite_preview;
         }
-      } else {
+      } else if (s->invite_cache) {
         for (size_t i = 0; i < SESSION_INVITE_CACHE_SLOTS; i++) s->invite_cache[i].sent_ms = 0;
       }
       break;
@@ -3038,7 +3636,14 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
       size_t n = ev->discovery_count;
       if (n > CCORD_DISCOVERY_PAGE_MAX) n = CCORD_DISCOVERY_PAGE_MAX;
       if (n > 0 && ev->discovery_guilds) {
-        memcpy(s->discovery_items, ev->discovery_guilds, n * sizeof s->discovery_items[0]);
+        if (!s->discovery_items) {
+          s->discovery_items = ccord_calloc(CCORD_DISCOVERY_PAGE_MAX, sizeof *s->discovery_items);
+        }
+        if (s->discovery_items) {
+          memcpy(s->discovery_items, ev->discovery_guilds, n * sizeof s->discovery_items[0]);
+        } else {
+          n = 0;
+        }
       }
       s->discovery_count = n;
       s->discovery_total = ev->discovery_total >= n ? ev->discovery_total : (uint32_t)n;
@@ -3050,30 +3655,35 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
       memcpy(s->discovery_query, dq, dqlen);
       s->discovery_query[dqlen] = '\0';
 
-      size_t slot = SIZE_MAX;
-      for (size_t i = 0; i < SESSION_DISCOVERY_CACHE_SLOTS; i++) {
-        if (s->discovery_cache[i].valid &&
-            s->discovery_cache[i].category_id == ev->discovery_category_id &&
-            s->discovery_cache[i].offset == ev->discovery_offset &&
-            strcmp(s->discovery_cache[i].query, s->discovery_query) == 0) {
-          slot = i;
-          break;
+      if (!s->discovery_cache) {
+        s->discovery_cache = ccord_calloc(SESSION_DISCOVERY_CACHE_SLOTS, sizeof *s->discovery_cache);
+      }
+      if (s->discovery_cache) {
+        size_t slot = SIZE_MAX;
+        for (size_t i = 0; i < SESSION_DISCOVERY_CACHE_SLOTS; i++) {
+          if (s->discovery_cache[i].valid &&
+              s->discovery_cache[i].category_id == ev->discovery_category_id &&
+              s->discovery_cache[i].offset == ev->discovery_offset &&
+              strcmp(s->discovery_cache[i].query, s->discovery_query) == 0) {
+            slot = i;
+            break;
+          }
         }
+        if (slot == SIZE_MAX) {
+          slot = s->discovery_cache_rr % SESSION_DISCOVERY_CACHE_SLOTS;
+          s->discovery_cache_rr++;
+        }
+        session_discovery_cache_entry *ce = &s->discovery_cache[slot];
+        ce->valid = true;
+        uint64_t fms = s->discovery_sent_ms ? s->discovery_sent_ms : ccord_clock_ms();
+        ce->fetched_ms = fms ? fms : 1u;
+        memcpy(ce->query, s->discovery_query, dqlen + 1u);
+        ce->category_id = ev->discovery_category_id;
+        ce->offset = ev->discovery_offset;
+        ce->total = s->discovery_total;
+        ce->count = n;
+        if (n > 0 && s->discovery_items) memcpy(ce->items, s->discovery_items, n * sizeof ce->items[0]);
       }
-      if (slot == SIZE_MAX) {
-        slot = s->discovery_cache_rr % SESSION_DISCOVERY_CACHE_SLOTS;
-        s->discovery_cache_rr++;
-      }
-      session_discovery_cache_entry *ce = &s->discovery_cache[slot];
-      ce->valid = true;
-      uint64_t fms = s->discovery_sent_ms ? s->discovery_sent_ms : ccord_clock_ms();
-      ce->fetched_ms = fms ? fms : 1u;
-      memcpy(ce->query, s->discovery_query, dqlen + 1u);
-      ce->category_id = ev->discovery_category_id;
-      ce->offset = ev->discovery_offset;
-      ce->total = s->discovery_total;
-      ce->count = n;
-      if (n > 0) memcpy(ce->items, s->discovery_items, n * sizeof ce->items[0]);
       break;
     }
     case CCORD_NET_DM_RECIPIENT_CHANGE:
@@ -3884,15 +4494,22 @@ static const ccord_voice_state *self_voice(const ccord_session *s, ccord_id guil
 
 static const ccord_voice_state *find_active_self_voice(const ccord_session *s)
 {
-  for (size_t g = 0; g < ccord_store_guild_count(s->store); g++) {
-    const ccord_guild *gu = ccord_store_guild_at(s->store, g);
-    if (gu) {
-      const ccord_voice_state *v = self_voice(s, gu->id);
-      if (v && v->channel_id != CCORD_ID_NONE) return v;
-    }
+  ccord_id self_id = ccord_store_self_id(s->store);
+  if (self_id == CCORD_ID_NONE) return nullptr;
+  ccord_id ch_id = ccord_store_active_voice_channel(s->store);
+  if (ch_id == CCORD_ID_NONE) return nullptr;
+  const ccord_channel *ch = ccord_store_channel(s->store, ch_id);
+  if (ch) {
+    const ccord_voice_state *v = ccord_store_voice_user(s->store, ch->guild_id, self_id);
+    if (v && v->channel_id != CCORD_ID_NONE) return v;
   }
-  const ccord_voice_state *dm = self_voice(s, CCORD_DM_GUILD_ID);
+  const ccord_voice_state *dm = ccord_store_voice_user(s->store, CCORD_DM_GUILD_ID, self_id);
   if (dm && dm->channel_id != CCORD_ID_NONE) return dm;
+  size_t nv = ccord_store_voice_count(s->store, ch_id);
+  for (size_t i = 0; i < nv; i++) {
+    const ccord_voice_state *v = ccord_store_voice_at(s->store, ch_id, i);
+    if (v && v->user_id == self_id && v->channel_id != CCORD_ID_NONE) return v;
+  }
   return nullptr;
 }
 
@@ -4595,15 +5212,15 @@ static ccord_status session_fetch_media(ccord_session *s, const char *url, bool 
 {
   if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "session: null session");
   if (!url || url[0] == '\0') return ccord_error_set(err, CCORD_ERR_INVALID, "session: empty media url");
-  for (size_t i = 0; i < s->media_count; i++) {
-    if (strcmp(s->media[i].url, url) == 0) {
-      s->media[i].access_tick = ++s->media_tick;
-      s->media[i].pop_queued = true;
-      return CCORD_OK;
-    }
+  uint32_t h32 = media_hash_mix(media_url_hash(url));
+  size_t midx = media_find_index(s, url, h32);
+  if (midx != SIZE_MAX) {
+    s->media[midx].access_tick = ++s->media_tick;
+    media_unread_push(s, midx);
+    return CCORD_OK;
   }
-  for (size_t i = 0; i < s->media_req_count; i++) {
-    if (strcmp(s->media_requested[i], url) == 0) return CCORD_OK;
+  if (media_req_find_index(s, url, h32) != SIZE_MAX) {
+    return CCORD_OK;
   }
   ccord_status st = user ? ccord_transport_fetch_media_user(s->transport, url, err)
                          : ccord_transport_fetch_media(s->transport, url, err);
@@ -4613,12 +5230,12 @@ static ccord_status session_fetch_media(ccord_session *s, const char *url, bool 
     char *copy = ccord_strndup(url, strlen(url));
     if (copy) {
       if (s->media_req_count >= SESSION_MAX_MEDIA) {
-        ccord_free(s->media_requested[0]);
-        memmove(&s->media_requested[0], &s->media_requested[1],
-                (SESSION_MAX_MEDIA - 1u) * sizeof s->media_requested[0]);
-        s->media_req_count = SESSION_MAX_MEDIA - 1u;
+        media_req_remove_at(s, 0u);
       }
-      s->media_requested[s->media_req_count++] = copy;
+      size_t ridx = s->media_req_count++;
+      s->media_requested[ridx] = copy;
+      s->media_req_hashes[ridx] = h32;
+      media_req_hash_insert(s, ridx, h32);
     }
   }
   return st;
@@ -4655,29 +5272,44 @@ ccord_status ccord_session_request_media(ccord_session *s, const char *url, ccor
 
 bool ccord_session_pop_media(ccord_session *s, ccord_media_item *out)
 {
-  if (!s || !out) return false;
-  for (size_t i = 0; i < s->media_count; i++) {
-    if (s->media[i].pop_queued) {
-      s->media[i].pop_queued = false;
-      *out = s->media[i].pub;
+  if (!s || !out || s->media_unread_head == 0u) return false;
+  size_t idx = (size_t)s->media_unread_head - 1u;
+  media_unread_remove(s, idx);
+  *out = s->media[idx].pub;
+  return true;
+}
+
+bool ccord_session_pop_media_matching(ccord_session *s, const char *url_substring,
+                                      const char **url, const uint8_t **data, size_t *len)
+{
+  if (!s || s->media_unread_count == 0u || !url_substring || url_substring[0] == '\0') return false;
+  uint16_t cur = s->media_unread_head;
+  while (cur != 0u && cur != SESSION_MEDIA_IDX_END) {
+    size_t idx = (size_t)cur - 1u;
+    session_media_entry *e = &s->media[idx];
+    if (e->url && strstr(e->url, url_substring) != nullptr) {
+      media_unread_remove(s, idx);
+      if (url) *url = e->pub.url;
+      if (data) *data = e->pub.data;
+      if (len) *len = e->pub.len;
       return true;
     }
+    cur = e->unread_next;
   }
   return false;
 }
 
 const ccord_media_item *ccord_session_get_media(const ccord_session *s, const char *url)
 {
-  if (!s || !url || url[0] == '\0') return nullptr;
-  for (size_t i = 0; i < s->media_count; i++) {
-    if (strcmp(s->media[i].url, url) == 0) return &s->media[i].pub;
-  }
-  return nullptr;
+  if (!s || s->media_count == 0u || !url || url[0] == '\0') return nullptr;
+  uint32_t h32 = media_hash_mix(media_url_hash(url));
+  size_t idx = media_find_index(s, url, h32);
+  return idx != SIZE_MAX ? &s->media[idx].pub : nullptr;
 }
 
 bool ccord_session_media_failed(const ccord_session *s, const char *url)
 {
-  if (!s || !url || url[0] == '\0') return false;
+  if (!s || s->media_failed_count == 0u || !url || url[0] == '\0') return false;
   uint64_t h = media_url_hash(url);
   for (size_t i = 0; i < s->media_failed_count; i++) {
     if (s->media_failed[(s->media_failed_head + i) % SESSION_MEDIA_FAILED_MAX] == h) return true;
@@ -6440,7 +7072,7 @@ ccord_status ccord_session_send_interaction(ccord_session *s, const ccord_intera
 
 bool ccord_session_pop_interaction_modal(ccord_session *s, ccord_interaction_modal *out)
 {
-  if (!s || s->modal_count == 0) return false;
+  if (!s || !s->modals || s->modal_count == 0) return false;
   if (out) *out = s->modals[s->modal_head];
   s->modal_head = (s->modal_head + 1u) % SESSION_MAX_MODALS;
   s->modal_count--;
@@ -6541,7 +7173,7 @@ const ccord_invite_preview *ccord_session_invite_lookup(const ccord_session *s, 
 {
   if (out_loading) *out_loading = false;
   if (out_failed) *out_failed = false;
-  if (!s || !code_or_url || !code_or_url[0]) return nullptr;
+  if (!s || !s->invite_cache || !code_or_url || !code_or_url[0]) return nullptr;
   char code[CCORD_ADMIN_INVITE_CODE_MAX + 1];
   ccord_error err;
   if (ccord_admin_parse_invite_code(code_or_url, code, &err) != CCORD_OK) return nullptr;
@@ -6570,19 +7202,25 @@ ccord_status ccord_session_request_discovery(ccord_session *s, const char *query
   uint64_t t = now_ms ? now_ms : (ccord_clock_ms() ? ccord_clock_ms() : 1u);
 
   if (!force) {
-    for (size_t i = 0; i < SESSION_DISCOVERY_CACHE_SLOTS; i++) {
-      const session_discovery_cache_entry *ce = &s->discovery_cache[i];
-      if (!ce->valid) continue;
-      if (ce->category_id != category_id || ce->offset != offset || strcmp(ce->query, q) != 0) continue;
-      if (t >= ce->fetched_ms && t < ce->fetched_ms + CCORD_DISCOVERY_TTL_MS) {
-        s->discovery_count = ce->count;
-        s->discovery_total = ce->total;
-        s->discovery_offset = ce->offset;
-        s->discovery_category_id = ce->category_id;
-        memcpy(s->discovery_query, ce->query, strlen(ce->query) + 1u);
-        if (ce->count > 0) memcpy(s->discovery_items, ce->items, ce->count * sizeof s->discovery_items[0]);
-        s->discovery_loading = false;
-        return CCORD_OK;
+    if (s->discovery_cache) {
+      for (size_t i = 0; i < SESSION_DISCOVERY_CACHE_SLOTS; i++) {
+        const session_discovery_cache_entry *ce = &s->discovery_cache[i];
+        if (!ce->valid) continue;
+        if (ce->category_id != category_id || ce->offset != offset || strcmp(ce->query, q) != 0) continue;
+        if (t >= ce->fetched_ms && t < ce->fetched_ms + CCORD_DISCOVERY_TTL_MS) {
+          if (ce->count > 0 && !s->discovery_items) {
+            s->discovery_items = ccord_calloc(CCORD_DISCOVERY_PAGE_MAX, sizeof *s->discovery_items);
+            if (!s->discovery_items) break;
+          }
+          s->discovery_count = ce->count;
+          s->discovery_total = ce->total;
+          s->discovery_offset = ce->offset;
+          s->discovery_category_id = ce->category_id;
+          memcpy(s->discovery_query, ce->query, strlen(ce->query) + 1u);
+          if (ce->count > 0) memcpy(s->discovery_items, ce->items, ce->count * sizeof s->discovery_items[0]);
+          s->discovery_loading = false;
+          return CCORD_OK;
+        }
       }
     }
     if (s->discovery_loading && s->discovery_category_id == category_id && s->discovery_offset == offset &&
@@ -6606,11 +7244,11 @@ const ccord_discover_guild *ccord_session_discovery_results(const ccord_session 
                                                             uint32_t *out_total, uint32_t *out_offset,
                                                             bool *out_loading)
 {
-  if (out_count) *out_count = s ? s->discovery_count : 0u;
+  if (out_count) *out_count = (s && s->discovery_items) ? s->discovery_count : 0u;
   if (out_total) *out_total = s ? s->discovery_total : 0u;
   if (out_offset) *out_offset = s ? s->discovery_offset : 0u;
   if (out_loading) *out_loading = s ? s->discovery_loading : false;
-  return (s && s->discovery_count > 0) ? s->discovery_items : nullptr;
+  return (s && s->discovery_items && s->discovery_count > 0) ? s->discovery_items : nullptr;
 }
 
 ccord_status ccord_session_set_custom_status(ccord_session *s, const char *emoji_name, ccord_id emoji_id,
