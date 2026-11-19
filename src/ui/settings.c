@@ -331,19 +331,21 @@ static void keybind_name(int scancode, uint8_t mods, char *out, size_t cap)
   }
   const char *key = SDL_GetScancodeName((SDL_Scancode)scancode);
   if (!key || !key[0]) key = "Unknown key";
+#if defined(__APPLE__)
+  const char *alt_lbl = "Option + ";
+  const char *super_lbl = "Cmd + ";
+#elif defined(_WIN32)
+  const char *alt_lbl = "Alt + ";
+  const char *super_lbl = "Win + ";
+#else
+  const char *alt_lbl = "Alt + ";
+  const char *super_lbl = "Super + ";
+#endif
   snprintf(out, cap, "%s%s%s%s%s",
            (mods & CCORD_MOD_CTRL) ? "Ctrl + " : "",
            (mods & CCORD_MOD_SHIFT) ? "Shift + " : "",
-#if defined(__APPLE__)
-           (mods & CCORD_MOD_ALT) ? "Option + " : "",
-           (mods & CCORD_MOD_SUPER) ? "Cmd + " : "", key);
-#elif defined(_WIN32)
-           (mods & CCORD_MOD_ALT) ? "Alt + " : "",
-           (mods & CCORD_MOD_SUPER) ? "Win + " : "", key);
-#else
-           (mods & CCORD_MOD_ALT) ? "Alt + " : "",
-           (mods & CCORD_MOD_SUPER) ? "Super + " : "", key);
-#endif
+           (mods & CCORD_MOD_ALT) ? alt_lbl : "",
+           (mods & CCORD_MOD_SUPER) ? super_lbl : "", key);
 }
 
 bool ui_keybind_match(const ccord_ui *ui, int which, const ccord_input_event *ev)
