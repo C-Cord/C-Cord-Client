@@ -198,8 +198,25 @@ fi
 echo "==> Running Gradle $GRADLE_TASK via $GRADLE_BIN (version=$VERSION, splits=$ABI_SPLITS)..."
 (
   cd "$ANDROID_DIR"
-  ANDROID_HOME="$SDK_DIR" ANDROID_SDK_ROOT="$SDK_DIR" \
-    "$GRADLE_BIN" "$GRADLE_TASK" "${GRADLE_PROPS[@]}" --no-daemon
+  for attempt in 1 2 3; do
+    EXTRA_GRADLE_ARGS=(
+      "-Dorg.gradle.internal.http.connectionTimeout=60000"
+      "-Dorg.gradle.internal.http.socketTimeout=60000"
+    )
+    if [[ "$attempt" -gt 1 ]]; then
+      EXTRA_GRADLE_ARGS+=("--refresh-dependencies")
+      echo "==> Retrying Gradle $GRADLE_TASK (attempt $attempt/3)..."
+    fi
+    if ANDROID_HOME="$SDK_DIR" ANDROID_SDK_ROOT="$SDK_DIR" \
+      "$GRADLE_BIN" "$GRADLE_TASK" "${GRADLE_PROPS[@]}" "${EXTRA_GRADLE_ARGS[@]}" --no-daemon; then
+      break
+    fi
+    if [[ "$attempt" -ge 3 ]]; then
+      echo "error: Gradle $GRADLE_TASK failed after 3 attempts" >&2
+      exit 1
+    fi
+    sleep $((attempt * 5))
+  done
 )
 
 if [[ "$GRADLE_TASK" == "assembleRelease" ]]; then

@@ -598,6 +598,15 @@ jobs:
             android/deps/cacert.pem
             android/deps/sdl3-java
           key: android-deps-ndk27-${{ hashFiles('android/scripts/build_deps.sh') }}
+      - name: Cache Gradle modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/modules-2
+            ~/.gradle/caches/jars-9
+          key: android-gradle-${{ hashFiles('android/settings.gradle.kts', 'android/build.gradle.kts', 'android/app/build.gradle.kts', 'android/gradle.properties') }}
+          restore-keys: |
+            android-gradle-
       - name: Cross-compile Android native dependencies (arm64-v8a & x86_64)
         run: |
           ./android/scripts/build_deps.sh arm64-v8a 28
