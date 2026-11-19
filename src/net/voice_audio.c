@@ -28,13 +28,14 @@ float ccord_vad_threshold_from_sensitivity(uint32_t percent)
 float ccord_pcm_rms_dbfs(const int16_t *pcm, size_t frames, unsigned channels)
 {
   if (!pcm || frames == 0 || channels == 0) return CCORD_VAD_FLOOR_DB;
-  size_t n = frames * channels;
-  double acc = 0.0;
+  size_t n = frames * (size_t)channels;
+  int64_t sum = 0;
   for (size_t i = 0; i < n; i++) {
-    double s = (double)pcm[i] / 32768.0;
-    acc += s * s;
+    int64_t s = (int64_t)pcm[i];
+    sum += s * s;
   }
-  double rms = sqrt(acc / (double)n);
+  if (sum == 0) return CCORD_VAD_FLOOR_DB;
+  double rms = sqrt((double)sum / ((double)n * (32768.0 * 32768.0)));
   if (rms < 1e-5) return CCORD_VAD_FLOOR_DB;
   double db = 20.0 * log10(rms);
   return db < (double)CCORD_VAD_FLOOR_DB ? CCORD_VAD_FLOOR_DB : (float)db;
@@ -87,7 +88,20 @@ void ccord_mix_s16(int16_t *dst, const int16_t *src, size_t samples)
 void ccord_mix_s16_gain(int16_t *dst, const int16_t *src, size_t samples, uint32_t pct)
 {
   if (!dst || !src || pct == 0u) return;  // muted: dst stays untouched
+  if (pct == 100u) {
+    ccord_mix_s16(dst, src, samples);
+    return;
+  }
   if (pct > 200u) pct = 200u;
+  if (pct == 200u) {
+    for (size_t i = 0; i < samples; i++) {
+      int32_t sum = (int32_t)dst[i] + (int32_t)src[i] * 2;
+      if (sum > INT16_MAX) sum = INT16_MAX;
+      if (sum < INT16_MIN) sum = INT16_MIN;
+      dst[i] = (int16_t)sum;
+    }
+    return;
+  }
   for (size_t i = 0; i < samples; i++) {
     int32_t scaled = ((int32_t)src[i] * (int32_t)pct) / 100;
     int32_t sum = (int32_t)dst[i] + scaled;
