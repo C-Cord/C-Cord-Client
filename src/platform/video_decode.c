@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include <libavcodec/avcodec.h>
+#include <libavutil/buffer.h>
 #include <libavutil/frame.h>
 #include <libavutil/log.h>
 #include <libavutil/pixfmt.h>
@@ -28,17 +29,28 @@
 // buffer handed to sws_scale as a destination is over-allocated by this tail; sizes and copies stay w*h*4.
 #define VIDEO_DECODE_SWS_DST_PAD 128u
 
-struct ccord_video_decoder {
-  AVCodecContext *ctx;
-  AVFrame *frame;
-  AVPacket *pkt;
+// Lazily materialized RGBA output cache (accessed via non-const pointer from const decoder handle).
+typedef struct video_decode_rgba {
   struct SwsContext *sws;
   uint8_t *last_rgba;
+  size_t last_cap;
   int last_w;
   int last_h;
+  bool rgba_dirty;
+  bool have_frame;
+} video_decode_rgba;
+
+struct ccord_video_decoder {
+  AVCodecContext *ctx;
+  AVFrame *frame;         // scratch frame for avcodec_receive_frame
+  AVFrame *latest;        // newest valid decoded picture, converted lazily on last_rgba()
+  AVPacket *pkt;          // persistent ref-counted packet buffer reused across feed() calls
+  size_t pkt_cap;
   int max_w;  // output clamp (<= 0: native); scale down only
   int max_h;
   bool have_idr;
+  video_decode_rgba *out;
+  video_decode_rgba out_storage;
 };
 
 // Scan an Annex-B access unit for start codes, IDR/non-IDR slices, and leading SPS/PPS parameter sets.
@@ -106,34 +118,62 @@ static void clamp_output_dims(const ccord_video_decoder *d, int w, int h, int *o
   *out_h = (int)oh;
 }
 
-static ccord_status scale_current_frame(ccord_video_decoder *d, ccord_error *err)
+// Prepares d->pkt with a copy of [src, src+len) plus zeroed AV_INPUT_BUFFER_PADDING_SIZE tail,
+// reusing the existing writable AVBufferRef whenever it fits (zero per-AU heap allocs in steady state).
+static bool prepare_pkt(ccord_video_decoder *d, const uint8_t *src, size_t len)
 {
-  int src_w = d->frame->width;
-  int src_h = d->frame->height;
-  if (src_w <= 0 || src_h <= 0 || src_w > VIDEO_DECODE_MAX_W || src_h > VIDEO_DECODE_MAX_H) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "video decode: invalid decoded dimensions");
+  const size_t max_len = (size_t)INT_MAX - (size_t)AV_INPUT_BUFFER_PADDING_SIZE;
+  if (len > max_len) return false;
+  if (!d->pkt->buf || !av_buffer_is_writable(d->pkt->buf) || d->pkt_cap < len) {
+    size_t new_cap = d->pkt_cap ? d->pkt_cap : 4096u;
+    while (new_cap < len) {
+      if (new_cap > max_len / 2u) {
+        new_cap = len;
+        break;
+      }
+      new_cap *= 2u;
+    }
+    av_packet_unref(d->pkt);
+    if (av_new_packet(d->pkt, (int)new_cap) < 0) {
+      d->pkt_cap = 0;
+      return false;
+    }
+    d->pkt_cap = new_cap;
   }
-  int w = src_w;
-  int h = src_h;
-  clamp_output_dims(d, src_w, src_h, &w, &h);
-  size_t bytes = (size_t)w * (size_t)h * 4u;
-  if (!d->last_rgba || d->last_w != w || d->last_h != h) {
-    uint8_t *nbuf = ccord_malloc(bytes + VIDEO_DECODE_SWS_DST_PAD);
-    if (!nbuf) return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: out of memory");
-    ccord_free(d->last_rgba);
-    d->last_rgba = nbuf;
-    d->last_w = w;
-    d->last_h = h;
-    sws_freeContext(d->sws);
-    d->sws = nullptr;
+  d->pkt->data = d->pkt->buf->data;
+  d->pkt->size = (int)len;
+  memcpy(d->pkt->data, src, len);
+  memset(d->pkt->data + len, 0, AV_INPUT_BUFFER_PADDING_SIZE);
+  return true;
+}
+
+static bool materialize_rgba(const ccord_video_decoder *d)
+{
+  video_decode_rgba *o = d->out;
+  if (!o->rgba_dirty) return o->last_rgba != nullptr;
+  if (!o->have_frame || !d->latest || !d->latest->data[0]) return false;
+  int src_w = d->latest->width;
+  int src_h = d->latest->height;
+  int w = o->last_w;
+  int h = o->last_h;
+  if (src_w <= 0 || src_h <= 0 || w <= 0 || h <= 0) return false;
+  size_t need = (size_t)w * (size_t)h * 4u + VIDEO_DECODE_SWS_DST_PAD;
+  if (!o->last_rgba || need > o->last_cap) {
+    uint8_t *nbuf = ccord_malloc(need);
+    if (!nbuf) return false;
+    ccord_free(o->last_rgba);
+    o->last_rgba = nbuf;
+    o->last_cap = need;
   }
-  d->sws = sws_getCachedContext(d->sws, src_w, src_h, (enum AVPixelFormat)d->frame->format, w, h, AV_PIX_FMT_RGBA,
+  o->sws = sws_getCachedContext(o->sws, src_w, src_h, (enum AVPixelFormat)d->latest->format, w, h, AV_PIX_FMT_RGBA,
                                 SWS_BILINEAR, nullptr, nullptr, nullptr);
-  if (!d->sws) return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: sws_getCachedContext failed");
-  uint8_t *dst_slices[1] = {d->last_rgba};
+  if (!o->sws) return false;
+  uint8_t *dst_slices[1] = {o->last_rgba};
   int dst_linesize[1] = {w * 4};
-  sws_scale(d->sws, (const uint8_t *const *)d->frame->data, d->frame->linesize, 0, src_h, dst_slices, dst_linesize);
-  return CCORD_OK;
+  sws_scale(o->sws, (const uint8_t *const *)d->latest->data, d->latest->linesize, 0, src_h, dst_slices, dst_linesize);
+  av_frame_unref(d->latest);
+  o->rgba_dirty = false;
+  return true;
 }
 
 ccord_video_decoder *ccord_video_decoder_create(ccord_error *err)
@@ -153,10 +193,12 @@ ccord_video_decoder *ccord_video_decoder_create(ccord_error *err)
     ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: out of memory");
     return nullptr;
   }
+  d->out = &d->out_storage;
   d->ctx = avcodec_alloc_context3(codec);
   d->frame = av_frame_alloc();
+  d->latest = av_frame_alloc();
   d->pkt = av_packet_alloc();
-  if (!d->ctx || !d->frame || !d->pkt) {
+  if (!d->ctx || !d->frame || !d->latest || !d->pkt) {
     ccord_video_decoder_destroy(d);
     ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: out of memory");
     return nullptr;
@@ -175,7 +217,9 @@ ccord_status ccord_video_decoder_feed(ccord_video_decoder *d, const uint8_t *ann
 {
   ccord_error_clear(err);
   if (!d || !annexb || len == 0) return ccord_error_set(err, CCORD_ERR_INVALID, "video decode: invalid argument");
-  if (len > (size_t)INT_MAX) return ccord_error_set(err, CCORD_ERR_RANGE, "video decode: access unit too large");
+  if (len > (size_t)INT_MAX - (size_t)AV_INPUT_BUFFER_PADDING_SIZE) {
+    return ccord_error_set(err, CCORD_ERR_RANGE, "video decode: access unit too large");
+  }
   bool has_idr = false;
   bool has_param_set = false;
   size_t param_prefix_len = len;
@@ -186,21 +230,15 @@ ccord_status ccord_video_decoder_feed(ccord_video_decoder *d, const uint8_t *ann
     // Cache leading SPS/PPS parameter sets without feeding pre-IDR P/B-slices, which would cause
     // libavcodec to synthesize a solid grey YUV(128,128,128) error-concealment reference frame.
     if (has_param_set && param_prefix_len > 0) {
-      av_packet_unref(d->pkt);
-      if (av_new_packet(d->pkt, (int)param_prefix_len) >= 0) {
-        memcpy(d->pkt->data, annexb, param_prefix_len);
+      if (prepare_pkt(d, annexb, param_prefix_len)) {
         (void)avcodec_send_packet(d->ctx, d->pkt);
-        av_packet_unref(d->pkt);
         while (avcodec_receive_frame(d->ctx, d->frame) >= 0) av_frame_unref(d->frame);
       }
     }
     return ccord_error_set(err, CCORD_ERR_PARSE, "video decode: waiting for IDR keyframe");
   }
-  av_packet_unref(d->pkt);
-  if (av_new_packet(d->pkt, (int)len) < 0) return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: out of memory");
-  memcpy(d->pkt->data, annexb, len);
+  if (!prepare_pkt(d, annexb, len)) return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: out of memory");
   int send_rc = avcodec_send_packet(d->ctx, d->pkt);
-  av_packet_unref(d->pkt);
   if (send_rc < 0) {
     d->have_idr = false;
     return ccord_error_set(err, CCORD_ERR_PARSE, "video decode: invalid bitstream packet");
@@ -220,9 +258,22 @@ ccord_status ccord_video_decoder_feed(ccord_video_decoder *d, const uint8_t *ann
       avcodec_flush_buffers(d->ctx);
       return ccord_error_set(err, CCORD_ERR_PARSE, "video decode: corrupt decoded picture");
     }
-    ccord_status st = scale_current_frame(d, err);
-    av_frame_unref(d->frame);
-    if (st != CCORD_OK) return st;
+    int src_w = d->frame->width;
+    int src_h = d->frame->height;
+    if (src_w <= 0 || src_h <= 0 || src_w > VIDEO_DECODE_MAX_W || src_h > VIDEO_DECODE_MAX_H) {
+      av_frame_unref(d->frame);
+      return ccord_error_set(err, CCORD_ERR_PARSE, "video decode: invalid decoded dimensions");
+    }
+    int w = src_w;
+    int h = src_h;
+    clamp_output_dims(d, src_w, src_h, &w, &h);
+    // Retain only the newest decoded YUV frame; defer sws_scale until last_rgba() is requested.
+    av_frame_unref(d->latest);
+    av_frame_move_ref(d->latest, d->frame);
+    d->out->last_w = w;
+    d->out->last_h = h;
+    d->out->have_frame = true;
+    d->out->rgba_dirty = true;
     d->have_idr = true;
     got_frame = true;
   }
@@ -238,28 +289,30 @@ void ccord_video_decoder_set_max_dim(ccord_video_decoder *d, int max_w, int max_
   if (d->max_w == max_w && d->max_h == max_h) return;
   d->max_w = max_w;
   d->max_h = max_h;
-  // Next frame rebuilds the scaler (and the output buffer when its size changes).
-  sws_freeContext(d->sws);
-  d->sws = nullptr;
+  // Next decoded frame computes clamped dimensions and sws_getCachedContext updates the scaler.
 }
 
 const uint8_t *ccord_video_decoder_last_rgba(const ccord_video_decoder *d, int *out_w, int *out_h)
 {
   if (out_w) *out_w = 0;
   if (out_h) *out_h = 0;
-  if (!d || !d->last_rgba) return nullptr;
-  if (out_w) *out_w = d->last_w;
-  if (out_h) *out_h = d->last_h;
-  return d->last_rgba;
+  if (!d || !d->out || !d->out->have_frame) return nullptr;
+  if (!materialize_rgba(d)) return nullptr;
+  if (out_w) *out_w = d->out->last_w;
+  if (out_h) *out_h = d->out->last_h;
+  return d->out->last_rgba;
 }
 
 void ccord_video_decoder_destroy(ccord_video_decoder *d)
 {
   if (!d) return;
-  sws_freeContext(d->sws);
+  if (d->out) {
+    sws_freeContext(d->out->sws);
+    ccord_free(d->out->last_rgba);
+  }
   av_packet_free(&d->pkt);
+  av_frame_free(&d->latest);
   av_frame_free(&d->frame);
   avcodec_free_context(&d->ctx);
-  ccord_free(d->last_rgba);
   ccord_free(d);
 }
