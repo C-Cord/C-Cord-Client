@@ -7,6 +7,7 @@
 #include "ui_style.h"
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/arena.h>
 #include <ccord/model/forum.h>
 #include <ccord/store/admin.h>
 
@@ -39,6 +40,62 @@ static float menu_max_h(const ccord_ui *ui)
   return max_h > MENU_MIN_H ? max_h : MENU_MIN_H;
 }
 
+typedef struct menu_aux {
+  const ccord_ui *owner;
+  uint64_t seq;
+  ccord_arena arena;
+  bool arena_live;
+  bool from_arena[UI_MENU_MAX_ITEMS];
+
+  bool measured_top;
+  size_t measured_count;
+  float measured_font_size;
+  float measured_pad;
+  float measured_min_w;
+  bool measured_mobile;
+  float cached_w;
+
+  bool measured_sub;
+  int measured_open_sub;
+  size_t measured_sub_count;
+  float cached_sub_w;
+
+  int invite_parent;
+  bool invite_populated;
+  ccord_id invite_self_id;
+} menu_aux;
+
+static menu_aux g_menu_aux;
+
+static menu_aux *menu_aux_for(const ccord_ui *ui)
+{
+  if (!ui) return nullptr;
+  if (g_menu_aux.arena_live && g_menu_aux.owner == ui && g_menu_aux.seq == ui->menu.seq) {
+    return &g_menu_aux;
+  }
+  return nullptr;
+}
+
+static void menu_aux_begin(ccord_ui *ui)
+{
+  if (!ui) return;
+  if (g_menu_aux.arena_live) {
+    // Only reset if we own it (or the previous owner's menu is no longer using this seq).
+    if (g_menu_aux.owner == ui) {
+      ccord_arena_free(&g_menu_aux.arena);
+      memset(&g_menu_aux, 0, sizeof g_menu_aux);
+    } else {
+      return;   // another ui owns the arena; this ui will fall back to ccord_strdup
+    }
+  }
+  ccord_arena_init(&g_menu_aux.arena, 4096u);
+  g_menu_aux.owner = ui;
+  g_menu_aux.seq = ui->menu.seq;
+  g_menu_aux.arena_live = true;
+  g_menu_aux.invite_parent = -1;
+  g_menu_aux.measured_open_sub = -2;
+}
+
 static void item_free(menu_item *it)
 {
   ccord_free(it->label);
@@ -50,7 +107,19 @@ static void item_free(menu_item *it)
 
 void ui_menu_release(ccord_ui *ui)
 {
-  for (size_t i = 0; i < ui->menu.count; i++) item_free(&ui->menu.items[i]);
+  if (!ui) return;
+  menu_aux *aux = menu_aux_for(ui);
+  for (size_t i = 0; i < ui->menu.count; i++) {
+    if (aux && aux->from_arena[i]) {
+      ui->menu.items[i] = (menu_item){0};
+    } else {
+      item_free(&ui->menu.items[i]);
+    }
+  }
+  if (aux) {
+    ccord_arena_free(&aux->arena);
+    memset(aux, 0, sizeof *aux);
+  }
   ui->menu.count = 0;
   ui->menu.open = false;
   ui->menu.hover = -1;
@@ -89,10 +158,21 @@ void ui_menu_close(ccord_ui *ui)
   ui->dirty = true;
 }
 
+static char *menu_str_copy(menu_aux *aux, const char *s)
+{
+  if (!s) return nullptr;
+  if (aux && aux->arena_live) {
+    return ccord_arena_strndup(&aux->arena, s, strlen(s));
+  }
+  return ccord_strdup(s);
+}
+
 static bool add_item_ex(ccord_ui *ui, const char *label, const char *sublabel, menu_builtin builtin, const char *owner,
                         const char *item_id, bool sep, bool disabled, bool danger, int64_t arg)
 {
   if (ui->menu.count >= UI_MENU_MAX_ITEMS) return false;
+  menu_aux *aux = menu_aux_for(ui);
+  bool use_arena = aux != nullptr && aux->arena_live;
   menu_item it = {
     .builtin = builtin,
     .sep_before = sep,
@@ -101,15 +181,17 @@ static bool add_item_ex(ccord_ui *ui, const char *label, const char *sublabel, m
     .parent = -1,
     .arg = arg,
   };
-  it.label = ccord_strdup(label);
-  if (sublabel) it.sublabel = ccord_strdup(sublabel);
-  if (owner) it.owner = ccord_strdup(owner);
-  if (item_id) it.item_id = ccord_strdup(item_id);
+  it.label = menu_str_copy(use_arena ? aux : nullptr, label);
+  if (sublabel) it.sublabel = menu_str_copy(use_arena ? aux : nullptr, sublabel);
+  if (owner) it.owner = menu_str_copy(use_arena ? aux : nullptr, owner);
+  if (item_id) it.item_id = menu_str_copy(use_arena ? aux : nullptr, item_id);
   if (!it.label || (sublabel && !it.sublabel) || (owner && !it.owner) || (item_id && !it.item_id)) {
-    item_free(&it);
+    if (!use_arena) item_free(&it);
     return false;
   }
-  ui->menu.items[ui->menu.count++] = it;
+  size_t idx = ui->menu.count++;
+  ui->menu.items[idx] = it;
+  if (aux) aux->from_arena[idx] = use_arena;
   return true;
 }
 
@@ -423,10 +505,18 @@ static ccord_id guild_invite_channel(const ccord_ui *ui, ccord_id gid, ccord_id 
 
 static bool add_invite_to_server_submenu(ccord_ui *ui, ccord_id self_id, bool sep)
 {
-  int p = add_parent_ex(ui, "Invite to Server", sep, false);
-  if (p < 0) return false;
-  size_t added = 0;
   size_t ng = ui->d.store ? ccord_store_guild_count(ui->d.store) : 0;
+  int p = add_parent_ex(ui, "Invite to Server", sep, ng == 0);
+  if (p < 0) return false;
+  menu_aux *aux = menu_aux_for(ui);
+  if (aux && ng > 0) {
+    // Populate invitable guilds lazily only when the user hovers/opens this submenu.
+    aux->invite_parent = p;
+    aux->invite_populated = false;
+    aux->invite_self_id = self_id;
+    return true;
+  }
+  size_t added = 0;
   for (size_t i = 0; i < ng; i++) {
     const ccord_guild *gd = ccord_store_guild_at(ui->d.store, i);
     if (!gd || gd->id == CCORD_DM_GUILD_ID || !gd->name || !gd->name[0]) continue;
@@ -437,6 +527,32 @@ static bool add_invite_to_server_submenu(ccord_ui *ui, ccord_id self_id, bool se
   }
   if (added == 0) ui->menu.items[p].disabled = true;
   return true;
+}
+
+static void ensure_invite_submenu_populated(ccord_ui *ui)
+{
+  menu_aux *aux = menu_aux_for(ui);
+  if (!aux || aux->invite_populated || aux->invite_parent < 0) return;
+  if (ui->menu.open_sub != aux->invite_parent) return;
+  aux->invite_populated = true;
+  int p = aux->invite_parent;
+  if ((size_t)p >= ui->menu.count) return;
+  size_t added = 0;
+  size_t ng = ui->d.store ? ccord_store_guild_count(ui->d.store) : 0;
+  for (size_t i = 0; i < ng; i++) {
+    const ccord_guild *gd = ccord_store_guild_at(ui->d.store, i);
+    if (!gd || gd->id == CCORD_DM_GUILD_ID || !gd->name || !gd->name[0]) continue;
+    if (guild_invite_channel(ui, gd->id, aux->invite_self_id) == CCORD_ID_NONE) continue;
+    if (add_child(ui, p, gd->name, MENU_BUILTIN_INVITE_TO_GUILD, (int64_t)gd->id, false, false)) {
+      added++;
+    }
+  }
+  aux->measured_sub = false;
+  if (added == 0) {
+    ui->menu.items[p].disabled = true;
+    ui->menu.open_sub = -1;
+    ui->mobile_menu_in_sub = false;
+  }
 }
 
 static ccord_id find_1on1_dm_channel(const ccord_ui *ui, ccord_id user_id)
@@ -547,6 +663,7 @@ void ui_menu_open(ccord_ui *ui, float x, float y, const ccord_menu_context *ctx)
   ui_menu_release(ui);
   ui->menu_folder_id = folder_id;
   ui->menu.seq++;
+  menu_aux_begin(ui);
   ui->menu.ctx = *ctx;
   // Context-menu application commands (USER / MESSAGE) come from the same per-guild index as slash
   // commands; make sure it is requested (cached) so the rows appear once the answer lands.
@@ -1002,7 +1119,10 @@ void ui_menu_open(ccord_ui *ui, float x, float y, const ccord_menu_context *ctx)
       if (!add_item(ui, c->label, MENU_BUILTIN_NONE, c->owner, c->item_id, builtin && i == 0)) break;
     }
   }
-  if (ui->menu.count == 0) return;   // nothing to show: the menu does not open
+  if (ui->menu.count == 0) {
+    ui_menu_release(ui);
+    return;   // nothing to show: the menu does not open
+  }
   ui->menu.open = true;
   ui->menu.hover = -1;
   ui->menu.open_sub = -1;
@@ -1034,6 +1154,7 @@ void ui_menu_open_text_field(ccord_ui *ui, float x, float y, ccord_text_edit *ed
   if (!ui || !edit) return;
   ui_menu_release(ui);
   ui->menu.seq++;
+  menu_aux_begin(ui);
   ui->menu.ctx = (ccord_menu_context){0};
   ui->menu_text_edit = edit;
   ui->menu_text_masked = masked;
@@ -1054,7 +1175,10 @@ void ui_menu_open_text_field(ccord_ui *ui, float x, float y, ccord_text_edit *ed
   (void)add_item_ex(ui, "Select All", nullptr, MENU_BUILTIN_TEXT_SELECT_ALL, nullptr, nullptr, false, !has_text, false, 0);
   (void)add_item_ex(ui, "Clear", nullptr, MENU_BUILTIN_TEXT_CLEAR, nullptr, nullptr, true, !has_text, true, 0);
 
-  if (ui->menu.count == 0) return;
+  if (ui->menu.count == 0) {
+    ui_menu_release(ui);
+    return;
+  }
   ui->menu.open = true;
   ui->menu.hover = -1;
   ui->menu.open_sub = -1;
@@ -1109,18 +1233,38 @@ static bool in_menu_interior(const ccord_ui *ui, float x, float y)
 }
 
 // The item under the point: the open fly-out's items first (they sit over the right edge of the menu), then the
-// top-level ones. -1 for padding, separators, scrolled-off rows and outside.
+// top-level ones. -1 for padding, separators, scrolled-off rows and outside. Single O(N) incremental y pass.
 static int hit_item(const ccord_ui *ui, float x, float y)
 {
-  if (in_sub_box(ui, x, y)) {
+  float pad = M(context_menu_pad);
+  ccord_rect sb = sub_box(ui);
+  if (sb.w > 0.0f && ui_in_rect(x, y, sb)) {
+    float top_pad = pad + (ui->mobile_layout ? (SHEET_HANDLE_H + SHEET_BACK_H) : 0.0f);
+    float ry = sb.y + top_pad - ui->menu.sub_scroll_y;
+    float rx = sb.x + pad, rw = sb.w - 2.0f * pad;
+    if (x < rx || x > rx + rw) return -1;
     for (size_t i = 0; i < ui->menu.count; i++) {
-      if (ui->menu.items[i].parent == ui->menu.open_sub && ui_in_rect(x, y, item_rect(ui, i))) return (int)i;
+      const menu_item *it = &ui->menu.items[i];
+      if (it->parent != ui->menu.open_sub) continue;
+      if (it->sep_before) ry += SEP_H;
+      float rh = row_height(ui, it);
+      if (y >= ry && y < ry + rh) return (int)i;
+      ry += rh;
     }
     return -1;
   }
   if (!in_menu_interior(ui, x, y)) return -1;
+  float top_pad = pad + (ui->mobile_layout ? SHEET_HANDLE_H : 0.0f);
+  float ry = ui->menu.y + top_pad - ui->menu.scroll_y;
+  float rx = ui->menu.x + pad, rw = ui->menu.w - 2.0f * pad;
+  if (x < rx || x > rx + rw) return -1;
   for (size_t i = 0; i < ui->menu.count; i++) {
-    if (ui->menu.items[i].parent < 0 && ui_in_rect(x, y, item_rect(ui, i))) return (int)i;
+    const menu_item *it = &ui->menu.items[i];
+    if (it->parent >= 0) continue;
+    if (it->sep_before) ry += SEP_H;
+    float rh = row_height(ui, it);
+    if (y >= ry && y < ry + rh) return (int)i;
+    ry += rh;
   }
   return -1;
 }
@@ -2020,6 +2164,7 @@ bool ui_menu_handle_mouse(ccord_ui *ui, const ccord_input_event *ev)
         ui->menu.open_sub = want;
         ui->menu.sub_scroll_y = 0.0f;
         ccord_scroller_cancel(&ui->menu_sub_glide);   // a wheel glide of the old fly-out does not carry over
+        ensure_invite_submenu_populated(ui);
         ui->dirty = true;
       }
     }
@@ -2048,6 +2193,7 @@ bool ui_menu_handle_mouse(ccord_ui *ui, const ccord_input_event *ev)
       ui->menu.sub_scroll_y = 0.0f;
       if (ui->mobile_layout) ui->mobile_menu_in_sub = true;
       ccord_scroller_cancel(&ui->menu_sub_glide);   // a wheel glide of the old fly-out does not carry over
+      ensure_invite_submenu_populated(ui);
       ui->dirty = true;
       return true;
     }
@@ -2066,16 +2212,32 @@ bool ui_menu_handle_mouse(ccord_ui *ui, const ccord_input_event *ev)
 }
 
 // One panel (the menu, or a fly-out): shadow, border, body, then the items whose parent is `parent`.
+// Computes incremental y offsets in a single O(N) pass.
 static void draw_panel(ccord_ui *ui, ccord_renderer *r, ccord_rect box, int parent, const ccord_text_style *st)
 {
   (void)st;   // row text comes from uis_menu_row
   uis_popover_frame(ui, r, box);
   // Rows scrolled past either edge must not paint over the panel border or the window.
   ccord_push_clip(r, box);
+  float pad = M(context_menu_pad);
+  float top_pad = pad;
+  float scroll = ui->menu.scroll_y;
+  if (parent < 0) {
+    if (ui->mobile_layout) top_pad += SHEET_HANDLE_H;
+  } else {
+    if (ui->mobile_layout) top_pad += SHEET_HANDLE_H + SHEET_BACK_H;
+    scroll = ui->menu.sub_scroll_y;
+  }
+  float ry = box.y + top_pad - scroll;
+  float rx = box.x + pad;
+  float rw = box.w - 2.0f * pad;
   for (size_t i = 0; i < ui->menu.count; i++) {
     const menu_item *it = &ui->menu.items[i];
     if (it->parent != parent) continue;
-    ccord_rect ir = item_rect(ui, i);
+    if (it->sep_before) ry += SEP_H;
+    float rh = row_height(ui, it);
+    ccord_rect ir = {rx, ry, rw, rh};
+    ry += rh;
     if (ir.y + ir.h <= box.y || ir.y >= box.y + box.h) continue;   // fully outside the visible interior
     if (it->sep_before) {
       uis_divider(ui, r, box.x + UIS_SP_2, ir.y - SEP_H * 0.5f - 0.5f, box.w - 2.0f * UIS_SP_2);
@@ -2139,22 +2301,62 @@ void ui_menu_draw(ccord_ui *ui, ccord_renderer *r)
     if (fading) ui_menu_release(ui);   // the fade is over
     return;
   }
+  ensure_invite_submenu_populated(ui);
   ccord_text_style st = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) + 1.0f, COL(text_normal));
-  float maxw = 0.0f, subw = 0.0f;
-  for (size_t i = 0; i < ui->menu.count; i++) {
-    const menu_item *it = &ui->menu.items[i];
-    float tw = ccord_text_measure(r, it->label, strlen(it->label), &st, 0.0f).x;
-    if (it->sublabel) {
-      float sw0 = ccord_text_measure(r, it->sublabel, strlen(it->sublabel), &st, 0.0f).x;
-      if (sw0 > tw) tw = sw0;
+  float pad = M(context_menu_pad);
+  float min_w = M(context_menu_min_width);
+  menu_aux *aux = menu_aux_for(ui);
+  bool style_changed = !aux || !aux->measured_top || aux->measured_font_size != st.size || aux->measured_pad != pad ||
+                       aux->measured_min_w != min_w || aux->measured_mobile != ui->mobile_layout;
+  bool need_top = style_changed || aux->measured_count != ui->menu.count;
+  bool need_sub = style_changed || !aux->measured_sub || aux->measured_open_sub != ui->menu.open_sub ||
+                  aux->measured_sub_count != ui->menu.count;
+  float w = aux && !need_top ? aux->cached_w : min_w;
+  float sw = aux && !need_sub ? aux->cached_sub_w : min_w;
+  if (need_top || need_sub) {
+    float maxw = 0.0f, subw = 0.0f;
+    for (size_t i = 0; i < ui->menu.count; i++) {
+      const menu_item *it = &ui->menu.items[i];
+      bool is_top = it->parent < 0;
+      bool is_sub = !is_top && it->parent == ui->menu.open_sub;
+      if ((is_top && !need_top) || (is_sub && !need_sub) || (!is_top && !is_sub)) continue;
+      float tw = ccord_text_measure(r, it->label, strlen(it->label), &st, 0.0f).x;
+      if (it->sublabel) {
+        float sw0 = ccord_text_measure(r, it->sublabel, strlen(it->sublabel), &st, 0.0f).x;
+        if (sw0 > tw) tw = sw0;
+      }
+      float iw = tw + ((it->has_sub || it->checked) ? 18.0f : ((it->owner && it->owner[0] != '\0') ? 26.0f : 0.0f));
+      if (is_top) maxw = iw > maxw ? iw : maxw;
+      else subw = iw > subw ? iw : subw;
     }
-    float w = tw + ((it->has_sub || it->checked) ? 18.0f : ((it->owner && it->owner[0] != '\0') ? 26.0f : 0.0f));
-    if (it->parent < 0) maxw = w > maxw ? w : maxw;
-    else if (it->parent == ui->menu.open_sub) subw = w > subw ? w : subw;
+    if (need_top) {
+      w = maxw + 2.0f * pad + 24.0f;
+      if (w < min_w) w = min_w;
+      if (w > 420.0f) w = 420.0f;
+    }
+    if (need_sub) {
+      sw = subw + 2.0f * pad + 24.0f;
+      if (sw < min_w) sw = min_w;
+      if (sw > 420.0f) sw = 420.0f;
+    }
+    if (aux) {
+      aux->measured_font_size = st.size;
+      aux->measured_pad = pad;
+      aux->measured_min_w = min_w;
+      aux->measured_mobile = ui->mobile_layout;
+      if (need_top) {
+        aux->measured_top = true;
+        aux->measured_count = ui->menu.count;
+        aux->cached_w = w;
+      }
+      if (need_sub) {
+        aux->measured_sub = true;
+        aux->measured_open_sub = ui->menu.open_sub;
+        aux->measured_sub_count = ui->menu.count;
+        aux->cached_sub_w = sw;
+      }
+    }
   }
-  float w = maxw + 2.0f * M(context_menu_pad) + 24.0f;
-  if (w < M(context_menu_min_width)) w = M(context_menu_min_width);
-  if (w > 420.0f) w = 420.0f;
   ui->menu.w = w;
   ui->menu.content_h = menu_height(ui);
   ui->menu.h = ui->menu.content_h;
@@ -2162,9 +2364,6 @@ void ui_menu_draw(ccord_ui *ui, ccord_renderer *r)
   if (ui->menu.h > max_h) ui->menu.h = max_h;
   float max_s = ui->menu.content_h > ui->menu.h ? ui->menu.content_h - ui->menu.h : 0.0f;
   ui->menu.scroll_y = clampf(ui->menu.scroll_y, 0.0f, max_s);
-  float sw = subw + 2.0f * M(context_menu_pad) + 24.0f;
-  if (sw < M(context_menu_min_width)) sw = M(context_menu_min_width);
-  if (sw > 420.0f) sw = 420.0f;
   ui->menu.sub_w = sw;
   ui->menu.sub_content_h = sub_content_height(ui);
   float max_sub_s = ui->menu.sub_content_h > max_h ? ui->menu.sub_content_h - max_h : 0.0f;
