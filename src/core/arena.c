@@ -30,7 +30,7 @@ static ccord_arena_chunk *chunk_new(size_t cap)
   if (ckd_add(&total, sizeof(ccord_arena_chunk), cap)) {
     return nullptr;
   }
-  ccord_arena_chunk *c = ccord_calloc(1, total);
+  ccord_arena_chunk *c = ccord_malloc(total);
   if (!c) {
     return nullptr;
   }
@@ -40,9 +40,9 @@ static ccord_arena_chunk *chunk_new(size_t cap)
   return c;
 }
 
-void *ccord_arena_alloc(ccord_arena *a, size_t size, size_t align)
+void *ccord_arena_alloc_uninit(ccord_arena *a, size_t size, size_t align)
 {
-  if (align == 0 || (align & (align - 1)) != 0 || align > alignof(max_align_t)) {
+  if (!a || align == 0 || (align & (align - 1u)) != 0 || align > alignof(max_align_t)) {
     return nullptr;
   }
   if (size == 0) {
@@ -50,71 +50,79 @@ void *ccord_arena_alloc(ccord_arena *a, size_t size, size_t align)
   }
   ccord_arena_chunk *c = a->head;
   if (c) {
-    size_t needed = 0;
-    if (ckd_add(&needed, size, align)) {
-      return nullptr;
-    }
-    // Check if c->used + align - 1 overflows
     size_t aligned_off;
-    if (ckd_add(&aligned_off, c->used, align)) {
+    if (ckd_add(&aligned_off, c->used, align - 1u)) {
       return nullptr;
     }
-    size_t off = (c->used + align - 1) & ~(align - 1);
+    size_t off = aligned_off & ~(align - 1u);
     if (off <= c->cap && size <= c->cap - off) {
       c->used = off + size;
       a->used_total += size;
       return c->data + off;
     }
   }
-  // Oversized requests get their own chunk; otherwise a fresh default-sized one.
-  size_t want = a->chunk_size;
-  size_t size_align = 0;
-  if (ckd_add(&size_align, size, align)) {
-    return nullptr;
-  }
-  if (size_align > want) {
-    want = size_align;
-  }
+  // Oversized requests get their own exact-fit chunk inserted behind a->head so a->head keeps its unused slack.
+  bool oversized = (a->head != nullptr) && (size >= a->chunk_size / 2u);
+  size_t want = oversized ? size : (size > a->chunk_size ? size : a->chunk_size);
   ccord_arena_chunk *n = chunk_new(want);
   if (!n) {
     return nullptr;
   }
-  n->next = a->head;
-  a->head = n;
-  size_t off = 0; // malloc'd chunk data is max_align_t-aligned, so offset 0 satisfies align
-  n->used = off + size;
+  // malloc'd chunk data is max_align_t-aligned, so offset 0 satisfies align.
+  n->used = size;
   a->used_total += size;
-  return n->data + off;
+  if (oversized) {
+    n->next = a->head->next;
+    a->head->next = n;
+  } else {
+    n->next = a->head;
+    a->head = n;
+  }
+  return n->data;
+}
+
+void *ccord_arena_alloc(ccord_arena *a, size_t size, size_t align)
+{
+  size_t z = size ? size : 1u;
+  void *p = ccord_arena_alloc_uninit(a, z, align);
+  if (p) {
+    memset(p, 0, z);
+  }
+  return p;
 }
 
 char *ccord_arena_strndup(ccord_arena *a, const char *s, size_t n)
 {
-  char *d = ccord_arena_alloc(a, n + 1, 1);
+  size_t total;
+  if (ckd_add(&total, n, 1u)) {
+    return nullptr;
+  }
+  char *d = ccord_arena_alloc_uninit(a, total, 1);
   if (!d) {
     return nullptr;
   }
-  memcpy(d, s, n);
+  if (n > 0) {
+    memcpy(d, s, n);
+  }
   d[n] = '\0';
   return d;
 }
 
 void ccord_arena_reset(ccord_arena *a)
 {
-  ccord_arena_chunk *c = a->head;
-  if (!c) {
+  ccord_arena_chunk *head = a->head;
+  if (!head) {
     a->used_total = 0;
     return;
   }
-  while (c->next) {
+  ccord_arena_chunk *c = head->next;
+  while (c) {
     ccord_arena_chunk *n = c->next;
     ccord_free(c);
     c = n;
   }
-  if (c->used > 0) {
-    memset(c->data, 0, c->used);
-  }
-  c->used = 0;
-  a->head = c;
+  head->next = nullptr;
+  head->used = 0;
   a->used_total = 0;
 }
 
