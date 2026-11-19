@@ -4,7 +4,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-static_assert(__STDC_VERSION__ >= 202311L, "C-Cord requires C23");
+// GCC 14 reports 202000L under -std=c23/-std=c2x (C17 is 201710L; GCC 15+/Clang 18+ report 202311L).
+static_assert(__STDC_VERSION__ >= 202000L, "C-Cord requires C23");
 #ifndef CCORD_VERSION_STRING
 #define CCORD_VERSION_STRING "0.1.0"
 #endif

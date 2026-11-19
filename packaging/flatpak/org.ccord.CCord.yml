@@ -2,7 +2,14 @@ id: org.ccord.CCord
 runtime: org.freedesktop.Platform
 runtime-version: '24.08'
 sdk: org.freedesktop.Sdk
+default-branch: stable
 command: ccord
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - '*.la'
+  - '*.a'
 finish-args:
   - --share=ipc
   - --share=network
@@ -44,21 +51,24 @@ modules:
 
   - name: c-cord
     buildsystem: cmake-ninja
+    builddir: true
     build-options:
       build-args:
         - --share=network
     config-opts:
       - -DCMAKE_BUILD_TYPE=Release
+      - -DCMAKE_INSTALL_LIBDIR=lib
       - -DCCORD_WERROR=OFF
       - -DCCORD_BUILD_TESTS=OFF
       - -DCCORD_DEPS=fetch
+      - -DSDL_INSTALL=ON
+      - -DSDLTTF_INSTALL=ON
       - -DCMAKE_INSTALL_RPATH=/app/lib
       - -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
     post-install:
       - |
-        install -Dm644 assets/icons/C-Cord.desktop /app/share/applications/org.ccord.CCord.desktop
+        mv /app/share/applications/C-Cord.desktop /app/share/applications/org.ccord.CCord.desktop
         sed -i 's/^Icon=.*/Icon=org.ccord.CCord/' /app/share/applications/org.ccord.CCord.desktop
-        rm -f /app/share/applications/C-Cord.desktop
         for sz in 16 22 24 32 48 64 128 256 512; do
           if [ -f "/app/share/icons/hicolor/${sz}x${sz}/apps/C-Cord.png" ]; then
             mv "/app/share/icons/hicolor/${sz}x${sz}/apps/C-Cord.png" \

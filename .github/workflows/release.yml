@@ -124,7 +124,8 @@ jobs:
             libfreetype-dev libharfbuzz-dev libfontconfig1-dev \
             libpipewire-0.3-dev libglib2.0-dev libdbus-1-dev \
             libx11-dev libxext-dev libxcomposite-dev libxrandr-dev libxfixes-dev \
-            libwayland-dev libxkbcommon-dev libgl-dev libasound2-dev libpulse-dev libdrm-dev libgbm-dev
+            libxcursor-dev libxinerama-dev libxi-dev libxss-dev libxtst-dev \
+            libwayland-dev libxkbcommon-dev libgl-dev libegl-dev libasound2-dev libpulse-dev libdrm-dev libgbm-dev
       - uses: actions/checkout@v4
       - name: Build & Package Debian (.deb + APT metadata)
         env:
@@ -178,9 +179,10 @@ jobs:
           dpkg-deb --root-owner-group --build debstage "out/assets/${DEB}"
 
           # Generate APT Packages index pointing to pool/main/c/c-cord/<deb>
+          ROOT="$PWD"
           mkdir -p aptwork/pool/main/c/c-cord
           cp "out/assets/${DEB}" "aptwork/pool/main/c/c-cord/${DEB}"
-          (cd aptwork && dpkg-scanpackages --multiversion pool/ > "$OLDPWD/out/repo-meta/deb/dists/stable/main/binary-amd64/Packages")
+          (cd aptwork && dpkg-scanpackages --multiversion pool/ > "$ROOT/out/repo-meta/deb/dists/stable/main/binary-amd64/Packages")
       - uses: actions/upload-artifact@v4
         with:
           name: release-deb
@@ -258,7 +260,8 @@ jobs:
             libfreetype-dev libharfbuzz-dev libfontconfig1-dev \
             libpipewire-0.3-dev libglib2.0-dev libdbus-1-dev \
             libx11-dev libxext-dev libxcomposite-dev libxrandr-dev libxfixes-dev \
-            libwayland-dev libxkbcommon-dev libgl-dev libasound2-dev libpulse-dev libdrm-dev libgbm-dev
+            libxcursor-dev libxinerama-dev libxi-dev libxss-dev libxtst-dev \
+            libwayland-dev libxkbcommon-dev libgl-dev libegl-dev libasound2-dev libpulse-dev libdrm-dev libgbm-dev
       - uses: actions/checkout@v4
       - name: Build & Package AppImage
         env:
@@ -280,7 +283,10 @@ jobs:
 
           # Bundle non-base shared libraries (keep libc/libm/libGL/libwayland/libX11/libpipewire/libstdc++ from host).
           for bin in AppDir/usr/bin/ccord AppDir/usr/bin/ccord-plugin-host; do
-            ldd "$bin" | awk '/=> \// {print $3}' | while read -r lib; do
+            LD_LIBRARY_PATH="$PWD/AppDir/usr/lib" ldd "$bin" | awk '/=> \// {print $3}' | while read -r lib; do
+              case "$lib" in
+                "$PWD/AppDir"*) continue ;;
+              esac
               base=$(basename "$lib")
               case "$base" in
                 libc.so*|libm.so*|libdl.so*|librt.so*|libpthread.so*|libgcc_s.so*|libstdc++.so*|ld-linux*|libresolv.so*|\
@@ -322,7 +328,7 @@ jobs:
       - name: Install Flatpak toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder ostree
+          sudo apt-get install -y flatpak flatpak-builder ostree elfutils debugedit
           flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           flatpak install --user -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
       - uses: actions/checkout@v4
@@ -331,21 +337,21 @@ jobs:
           VER: ${{ needs.meta.outputs.version }}
         run: |
           sed -i "s/-DCCORD_BUILD_TESTS=OFF/-DCCORD_BUILD_TESTS=OFF\n      - -DCCORD_VERSION=${VER}/" packaging/flatpak/org.ccord.CCord.yml
-          flatpak-builder --user --force-clean --repo=fp-repo fp-build packaging/flatpak/org.ccord.CCord.yml
-          flatpak build-update-repo --generate-static-deltas fp-repo
+          flatpak-builder --user --force-clean --state-dir=/tmp/fp-state --default-branch=stable --repo=/tmp/fp-repo /tmp/fp-build packaging/flatpak/org.ccord.CCord.yml
+          flatpak build-update-repo --generate-static-deltas /tmp/fp-repo
 
           mkdir -p out/assets
           # 1. Standalone single-file bundle
-          flatpak build-bundle fp-repo "out/assets/C-Cord-${VER}-linux-x86_64.flatpak" org.ccord.CCord stable
+          flatpak build-bundle /tmp/fp-repo "out/assets/C-Cord-${VER}-linux-x86_64.flatpak" org.ccord.CCord stable
 
           # 2. Extract static delta part 0 for GitHub Releases storage (c-cord.org 302-redirects delta/0 here)
-          DELTA_PART=$(find fp-repo/deltas -type f -name '0' | head -n1 || true)
+          DELTA_PART=$(find /tmp/fp-repo/deltas -type f -name '0' | head -n1 || true)
           if [ -n "$DELTA_PART" ]; then
             cp "$DELTA_PART" "out/assets/ccord-flatpak-delta-0.bin"
             # Pack lightweight OSTree metadata without the heavy delta/0 payload
-            tar --exclude='deltas/*/*/0' -czf "out/assets/ccord-flatpak-repo.tar.gz" -C fp-repo .
+            tar --exclude='./deltas/*/*/0' --exclude='deltas/*/*/0' -czf "out/assets/ccord-flatpak-repo.tar.gz" -C /tmp/fp-repo .
           else
-            tar -czf "out/assets/ccord-flatpak-repo.tar.gz" -C fp-repo .
+            tar -czf "out/assets/ccord-flatpak-repo.tar.gz" -C /tmp/fp-repo .
           fi
       - uses: actions/upload-artifact@v4
         with:
@@ -540,6 +546,7 @@ jobs:
           else
             gh release create "$TAG" release-files/* \
               --repo "${{ github.repository }}" \
+              --target "${{ github.sha }}" \
               --title "C-Cord ${TAG}" \
               --generate-notes
           fi
