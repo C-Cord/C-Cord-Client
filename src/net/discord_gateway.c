@@ -25,6 +25,8 @@
 #define GW_QUEUE_SIZE 512u
 #define GW_DRAIN_BUDGET_MS 8u
 #define GW_SEND_AGAIN_MAX 500
+#define GW_BUF_SHRINK_THRESHOLD 262144u
+#define GW_BUF_SHRINK_KEEP 65536u
 
 struct ccord_gateway {
   char token[CCORD_LIVE_TOKEN_MAX + 1];
@@ -56,6 +58,7 @@ struct ccord_gateway {
   ccord_connection_state state;
   ccord_buf frame;
   bool compress;          // zlib-stream transport compression, negotiated in the URL
+  bool frame_active;      // true while assembling fragments/chunks of one WS message
   bool frame_is_binary;   // opcode of the first fragment of the frame being assembled
   z_stream z_in;          // inflate state; the deflate dictionary is shared per connection only
   bool z_ready;
@@ -118,6 +121,15 @@ static void gw_push_error(ccord_gateway *g, ccord_status status, const char *tex
   gw_push(g, &ev);
 }
 
+static void gw_buf_release(ccord_buf *b)
+{
+  if (b->cap > GW_BUF_SHRINK_THRESHOLD) {
+    ccord_buf_shrink(b, GW_BUF_SHRINK_KEEP);
+  } else {
+    ccord_buf_clear(b);
+  }
+}
+
 static void gw_close_socket(ccord_gateway *g)
 {
   if (g->curl) {
@@ -131,8 +143,10 @@ static void gw_close_socket(ccord_gateway *g)
     memset(&g->z_in, 0, sizeof g->z_in);
     g->z_ready = false;
   }
-  ccord_buf_clear(&g->z_buf);
-  ccord_buf_clear(&g->z_out);
+  gw_buf_release(&g->frame);
+  gw_buf_release(&g->z_buf);
+  gw_buf_release(&g->z_out);
+  g->frame_active = false;
   g->frame_is_binary = false;
 }
 
@@ -146,14 +160,7 @@ static void gw_fail(ccord_gateway *g, ccord_status status, const char *text)
   gw_close_socket(g);
 }
 
-void gw_ensure_curl(void)
-{
-  static bool ready;
-  if (!ready) {
-    (void)curl_global_init(CURL_GLOBAL_DEFAULT);
-    ready = true;
-  }
-}
+void gw_ensure_curl(void) { ccord_curl_global_init_once(); }
 
 static ccord_status gw_send_raw(ccord_gateway *g, const char *data, size_t len, unsigned int flags)
 {
@@ -1108,76 +1115,70 @@ static void gw_copy_str(char *dst, size_t cap, const char *src)
   dst[n] = '\0';
 }
 
-static bool gw_handle_payload(ccord_gateway *g, const char *data, size_t len)
+static bool gw_finish_decoded(ccord_gateway *g, ccord_live_event *ev, size_t payload_len)
 {
-  ccord_live_event ev;
-  ccord_error err;
-  ccord_status st = ccord_live_gateway_decode_ex(data, len, g->self_id, &ev, &err);
-  if (st != CCORD_OK) {
-    CCORD_LOG_W("gateway: bad payload: %s", err.message);
-    ccord_live_event_free(&ev);
-    return false;
-  }
-  if (ev.seq >= 0) g->seq = ev.seq;
-  if (ev.ev.type == CCORD_NET_VOICE_STATE_UPDATE && g->self_id != CCORD_ID_NONE &&
-      ev.ev.user_id == g->self_id) {
-    if (ev.ev.channel_id == CCORD_ID_NONE) {
+  if (ev->seq >= 0) g->seq = ev->seq;
+  if (ev->ev.type == CCORD_NET_VOICE_STATE_UPDATE && g->self_id != CCORD_ID_NONE &&
+      ev->ev.user_id == g->self_id) {
+    if (ev->ev.channel_id == CCORD_ID_NONE) {
       g->voice_session_id[0] = '\0';
-    } else if (ev.voice_session_id) {
-      gw_copy_str(g->voice_session_id, sizeof g->voice_session_id, ev.voice_session_id);
+    } else if (ev->voice_session_id) {
+      gw_copy_str(g->voice_session_id, sizeof g->voice_session_id, ev->voice_session_id);
     }
   }
-  if (ev.hello) {
+  if (ev->hello) {
     g->hello = true;
-    ccord_gwpace_hello(&g->pace, gw_now(g), ev.heartbeat_interval_ms);   // first beat after interval * random(0..1)
+    ccord_gwpace_hello(&g->pace, gw_now(g), ev->heartbeat_interval_ms);   // first beat after interval * random(0..1)
     if (!g->identified) {
       g->identified = true;
       ccord_status ist = g->resuming && g->session_id[0] != '\0' ? gw_resume(g) : gw_identify(g);
       if (ist != CCORD_OK) {
-        ccord_live_event_free(&ev);
+        ccord_live_event_free(ev);
         gw_fail(g, CCORD_ERR_IO, "gateway: identify/resume failed");
         return false;
       }
     }
-    ccord_live_event_free(&ev);
+    ccord_live_event_free(ev);
     return false;
   }
-  if (ev.op == 7 || ev.reconnect) {
-    ccord_live_event_free(&ev);
+  if (ev->op == 7 || ev->reconnect) {
+    ccord_live_event_free(ev);
     gw_schedule_reconnect(g, CCORD_GWPACE_RECONNECT_REQUESTED, true);
     return false;
   }
-  if (ev.op == 9 || ev.invalid_session) {
-    bool resumable = ev.resumable;
-    ccord_live_event_free(&ev);
+  if (ev->op == 9 || ev->invalid_session) {
+    bool resumable = ev->resumable;
+    ccord_live_event_free(ev);
     gw_schedule_reconnect(g, CCORD_GWPACE_INVALID_SESSION, resumable);
     return false;
   }
-  if (ev.op == 1) {   // Discord asks for a heartbeat right now
-    ccord_live_event_free(&ev);
+  if (ev->op == 1) {   // Discord asks for a heartbeat right now
+    ccord_live_event_free(ev);
     gw_heartbeat(g);
     return false;
   }
-  if (ev.op == 11) {
+  if (ev->op == 11) {
     (void)ccord_gwpace_heartbeat_ack(&g->pace, gw_now(g));
-    ccord_live_event_free(&ev);
+    ccord_live_event_free(ev);
     return false;
   }
-  bool heavy = (ev.ev.type == CCORD_NET_SNAPSHOT || ev.guild_op == CCORD_LIVE_GUILD_UPSERT);
-  if (ev.ev.type == CCORD_NET_SNAPSHOT) {
-    if (ev.snapshot.self_id != CCORD_ID_NONE) g->self_id = ev.snapshot.self_id;
+  bool heavy = (ev->ev.type == CCORD_NET_SNAPSHOT || ev->guild_op == CCORD_LIVE_GUILD_UPSERT ||
+                ev->ev.type == CCORD_NET_VOICE_STATES || ev->ev.type == CCORD_NET_GUILD_MEMBERS ||
+                ev->guild_op == CCORD_LIVE_GUILD_MEMBERS || payload_len >= 65536u);
+  if (ev->ev.type == CCORD_NET_SNAPSHOT) {
+    if (ev->snapshot.self_id != CCORD_ID_NONE) g->self_id = ev->snapshot.self_id;
     g->resume_url[0] = '\0';
     g->voice_session_id[0] = '\0';
-    gw_copy_str(g->session_id, sizeof g->session_id, ev.session_id);
-    if (ev.resume_gateway_url && (strncmp(ev.resume_gateway_url, "wss://", 6) == 0 || strncmp(g->base_url, "ws://", 5) == 0 || strncmp(g->url, "ws://", 5) == 0)) {
-      gw_copy_str(g->resume_url, sizeof g->resume_url, ev.resume_gateway_url);
+    gw_copy_str(g->session_id, sizeof g->session_id, ev->session_id);
+    if (ev->resume_gateway_url && (strncmp(ev->resume_gateway_url, "wss://", 6) == 0 || strncmp(g->base_url, "ws://", 5) == 0 || strncmp(g->url, "ws://", 5) == 0)) {
+      gw_copy_str(g->resume_url, sizeof g->resume_url, ev->resume_gateway_url);
     }
     g->resuming = false;
     g->state = CCORD_CONN_CONNECTED;
     ccord_gwpace_connected(&g->pace, gw_now(g));
     gw_push_state(g, CCORD_CONN_CONNECTED);
     if (g->lazy_guild != CCORD_ID_NONE) (void)gw_lazy_request(g, g->lazy_guild, g->lazy_channel);
-  } else if (ev.resumed) {
+  } else if (ev->resumed) {
     g->resuming = false;
     g->state = CCORD_CONN_CONNECTED;
     ccord_gwpace_connected(&g->pace, gw_now(g));
@@ -1185,42 +1186,42 @@ static bool gw_handle_payload(ccord_gateway *g, const char *data, size_t len)
     if (g->lazy_guild != CCORD_ID_NONE) (void)gw_lazy_request(g, g->lazy_guild, g->lazy_channel);
   }
   // Surface guild dispatches as first-class transport events.
-  if (ev.guild_op != CCORD_LIVE_GUILD_NONE) {
-    if (ev.guild_op == CCORD_LIVE_GUILD_UPSERT) {
-      ev.ev.type = CCORD_NET_GUILD_UPSERT;
-      ev.ev.guild = ev.guild_count ? &ev.guilds[0] : nullptr;
-      ev.ev.guild_channels = ev.snap_channels;
-      ev.ev.guild_channel_count = ev.snap_channel_count;
-      ev.ev.guild_members = ev.members;
-      ev.ev.guild_member_count = ev.member_count;
-      ev.ev.users = ev.users;
-      ev.ev.user_count = ev.user_count;
-      ev.ev.voice_states = ev.voice_states;
-      ev.ev.voice_state_count = ev.voice_state_count;
-      if (ev.ev.guild) ev.ev.guild_id = ev.ev.guild->id;
-    } else if (ev.guild_op == CCORD_LIVE_GUILD_DELETE) {
-      ev.ev.type = CCORD_NET_GUILD_DELETE;
-    } else if (ev.guild_op == CCORD_LIVE_GUILD_MEMBERS) {
-      ev.ev.type = CCORD_NET_GUILD_MEMBERS;
-      ev.ev.guild_members = ev.members;
-      ev.ev.guild_member_count = ev.member_count;
-      ev.ev.users = ev.users;
-      ev.ev.user_count = ev.user_count;
+  if (ev->guild_op != CCORD_LIVE_GUILD_NONE) {
+    if (ev->guild_op == CCORD_LIVE_GUILD_UPSERT) {
+      ev->ev.type = CCORD_NET_GUILD_UPSERT;
+      ev->ev.guild = ev->guild_count ? &ev->guilds[0] : nullptr;
+      ev->ev.guild_channels = ev->snap_channels;
+      ev->ev.guild_channel_count = ev->snap_channel_count;
+      ev->ev.guild_members = ev->members;
+      ev->ev.guild_member_count = ev->member_count;
+      ev->ev.users = ev->users;
+      ev->ev.user_count = ev->user_count;
+      ev->ev.voice_states = ev->voice_states;
+      ev->ev.voice_state_count = ev->voice_state_count;
+      if (ev->ev.guild) ev->ev.guild_id = ev->ev.guild->id;
+    } else if (ev->guild_op == CCORD_LIVE_GUILD_DELETE) {
+      ev->ev.type = CCORD_NET_GUILD_DELETE;
+    } else if (ev->guild_op == CCORD_LIVE_GUILD_MEMBERS) {
+      ev->ev.type = CCORD_NET_GUILD_MEMBERS;
+      ev->ev.guild_members = ev->members;
+      ev->ev.guild_member_count = ev->member_count;
+      ev->ev.users = ev->users;
+      ev->ev.user_count = ev->user_count;
     }
   }
   // M6 account settings: READY.user_settings and USER_SETTINGS_UPDATE carry the full object alongside their
   // existing event (snapshot / guild layout / custom status). Publish it as its own USER_SETTINGS event after
   // that event so the session applies the snapshot first and the account settings second.
-  bool want_settings = ev.has_user_settings && ev.ev.type != CCORD_NET_USER_SETTINGS;
-  ccord_user_settings settings = ev.user_settings;
-  if (ev.ev.type != CCORD_NET_NONE || ev.guild_op != CCORD_LIVE_GUILD_NONE) {
+  bool want_settings = ev->has_user_settings && ev->ev.type != CCORD_NET_USER_SETTINGS;
+  ccord_user_settings settings = ev->user_settings;
+  if (ev->ev.type != CCORD_NET_NONE || ev->guild_op != CCORD_LIVE_GUILD_NONE) {
     // CALL_CREATE carries its participants in the internal array: surface each as its own VOICE_STATE_UPDATE,
     // because the public event has a single voice_state slot and the store keeps one row per participant.
-    bool is_call_create = ev.ev.type == CCORD_NET_CALL_CREATE;
-    const ccord_voice_state *parts = is_call_create ? ev.voice_states : nullptr;
-    size_t nparts = is_call_create ? ev.voice_state_count : 0;
+    bool is_call_create = ev->ev.type == CCORD_NET_CALL_CREATE;
+    const ccord_voice_state *parts = is_call_create ? ev->voice_states : nullptr;
+    size_t nparts = is_call_create ? ev->voice_state_count : 0;
     bool dropped = g->count == GW_QUEUE_SIZE;   // gw_push would free the event (and its arena) instead of queueing it
-    gw_push(g, &ev);
+    gw_push(g, ev);
     for (size_t i = 0; !dropped && i < nparts; i++) {
       ccord_live_event ve;
       ccord_live_event_init(&ve);
@@ -1240,7 +1241,7 @@ static bool gw_handle_payload(ccord_gateway *g, const char *data, size_t len)
       gw_push(g, &ve);
     }
   } else {
-    ccord_live_event_free(&ev);
+    ccord_live_event_free(ev);
   }
   if (want_settings) {
     ccord_live_event sev;
@@ -1251,6 +1252,19 @@ static bool gw_handle_payload(ccord_gateway *g, const char *data, size_t len)
     gw_push(g, &sev);
   }
   return heavy;
+}
+
+static bool gw_handle_payload(ccord_gateway *g, const char *data, size_t len)
+{
+  ccord_live_event ev;
+  ccord_error err;
+  ccord_status st = ccord_live_gateway_decode_ex(data, len, g->self_id, &ev, &err);
+  if (st != CCORD_OK) {
+    CCORD_LOG_W("gateway: bad payload: %s", err.message);
+    ccord_live_event_free(&ev);
+    return false;
+  }
+  return gw_finish_decoded(g, &ev, len);
 }
 
 // Length of the leading JSON value (object or array) in `data`, skipping leading whitespace.
@@ -1283,11 +1297,49 @@ static size_t gw_json_value_len(const char *data, size_t len)
   return 0;
 }
 
-// One zlib-stream message can carry several concatenated JSON payloads. Returns true if any was heavy.
+// One zlib-stream message usually carries a single JSON object (including multi-MiB READY payloads), so try
+// decoding directly first to avoid scanning the entire buffer twice; fall back to splitting only when trailing
+// data (concatenated payloads) is encountered. Returns true if any payload was heavy.
 static bool gw_dispatch_inflated(ccord_gateway *g)
 {
   bool heavy = false;
   size_t off = 0;
+  while (off < g->z_out.len &&
+         (g->z_out.data[off] == ' ' || g->z_out.data[off] == '\t' || g->z_out.data[off] == '\r' ||
+          g->z_out.data[off] == '\n')) {
+    off++;
+  }
+  if (g->open && off < g->z_out.len) {
+    char lead = g->z_out.data[off];
+    if (lead != '{' && lead != '[') {
+      CCORD_LOG_W("gateway: ignoring trailing bytes in inflated payload");
+      gw_buf_release(&g->z_out);
+      return false;
+    }
+    ccord_live_event ev;
+    ccord_error err;
+    ccord_status st = ccord_live_gateway_decode_ex(g->z_out.data + off, g->z_out.len - off, g->self_id, &ev, &err);
+    if (st == CCORD_OK) {
+      heavy = gw_finish_decoded(g, &ev, g->z_out.len - off);
+      gw_buf_release(&g->z_out);
+      return heavy;
+    }
+    ccord_live_event_free(&ev);
+    bool split_needed = (st == CCORD_ERR_PARSE && strstr(err.message, "trailing data") != nullptr);
+    if (!split_needed) {
+      size_t first_n = gw_json_value_len(g->z_out.data + off, g->z_out.len - off);
+      if (first_n == 0) {
+        CCORD_LOG_W("gateway: ignoring trailing bytes in inflated payload");
+        gw_buf_release(&g->z_out);
+        return false;
+      }
+      if (off + first_n >= g->z_out.len) {
+        CCORD_LOG_W("gateway: bad payload: %s", err.message);
+        gw_buf_release(&g->z_out);
+        return false;
+      }
+    }
+  }
   while (g->open && off < g->z_out.len) {
     size_t n = gw_json_value_len(g->z_out.data + off, g->z_out.len - off);
     if (n == 0) {
@@ -1297,7 +1349,7 @@ static bool gw_dispatch_inflated(ccord_gateway *g)
     if (gw_handle_payload(g, g->z_out.data + off, n)) heavy = true;
     off += n;
   }
-  ccord_buf_clear(&g->z_out);
+  gw_buf_release(&g->z_out);
   return heavy;
 }
 
@@ -1338,7 +1390,7 @@ static bool gw_inflate_message(ccord_gateway *g)
     gw_schedule_reconnect(g, CCORD_GWPACE_NETWORK, true);
     return false;
   }
-  ccord_buf_clear(&g->z_buf);
+  gw_buf_release(&g->z_buf);
   return true;
 }
 
@@ -1394,19 +1446,20 @@ static void gw_drain(ccord_gateway *g)
     }
     if ((meta->flags & (CURLWS_TEXT | CURLWS_BINARY | CURLWS_CONT)) == 0) continue;
     // curl keeps the message's TEXT/BINARY bit on every fragment; CONT marks all but the final one.
-    if (g->frame.len == 0) g->frame_is_binary = (meta->flags & CURLWS_BINARY) != 0;
-    if (n > 0 && ccord_buf_append(&g->frame, buf, n) != CCORD_OK) {
-      gw_fail(g, CCORD_ERR_RANGE, "gateway: frame too large");
+    if (!g->frame_active) {
+      g->frame_active = true;
+      g->frame_is_binary = (meta->flags & CURLWS_BINARY) != 0;
+    }
+    bool to_zbuf = g->compress && g->frame_is_binary;
+    ccord_buf *dst = to_zbuf ? &g->z_buf : &g->frame;
+    if (n > 0 && ccord_buf_append(dst, buf, n) != CCORD_OK) {
+      gw_fail(g, CCORD_ERR_RANGE, to_zbuf ? "gateway: compressed frame too large" : "gateway: frame too large");
       return;
     }
     if ((meta->flags & CURLWS_CONT) == 0 && meta->bytesleft == 0) {
+      g->frame_active = false;
       bool heavy = false;
-      if (g->compress && g->frame_is_binary) {
-        if (ccord_buf_append(&g->z_buf, g->frame.data, g->frame.len) != CCORD_OK) {
-          gw_fail(g, CCORD_ERR_RANGE, "gateway: compressed frame too large");
-          return;
-        }
-        ccord_buf_clear(&g->frame);
+      if (to_zbuf) {
         if (!gw_inflate_message(g)) {
           if (!g->open) return;
           continue;   // no flush suffix yet: keep buffering
@@ -1414,7 +1467,7 @@ static void gw_drain(ccord_gateway *g)
         heavy = gw_dispatch_inflated(g);
       } else {
         heavy = gw_handle_payload(g, g->frame.data, g->frame.len);
-        ccord_buf_clear(&g->frame);
+        gw_buf_release(&g->frame);
       }
       if (!g->open) return;
       uint64_t now_ms = ccord_clock_ms();
@@ -1493,7 +1546,7 @@ void ccord_gateway_stop(ccord_gateway *g)
   g->voice_session_id[0] = '\0';
   g->resume_url[0] = '\0';
   g->state = CCORD_CONN_DISCONNECTED;
-  ccord_buf_clear(&g->frame);
+  gw_buf_release(&g->frame);
 }
 
 void ccord_gateway_destroy(ccord_gateway *g)
@@ -1619,7 +1672,7 @@ static bool gw_use_resume_url(ccord_gateway *g)
 static void gw_reconnect_now(ccord_gateway *g, bool resume)
 {
   gw_close_socket(g);
-  ccord_buf_clear(&g->frame);
+  gw_buf_release(&g->frame);
   ccord_gwpace_reconnect_started(&g->pace);
   if (resume && g->session_id[0] != '\0' && gw_use_resume_url(g)) {
     g->resuming = true;
@@ -1647,7 +1700,7 @@ static void gw_reconnect_now(ccord_gateway *g, bool resume)
 static void gw_schedule_reconnect(ccord_gateway *g, ccord_gwpace_reason reason, bool resumable)
 {
   gw_close_socket(g);
-  ccord_buf_clear(&g->frame);
+  gw_buf_release(&g->frame);
   ccord_gwpace_disconnected(&g->pace);
   if (!resumable) {
     g->session_id[0] = '\0';
@@ -1673,7 +1726,7 @@ ccord_gwpace_wake_verdict ccord_gateway_wake(ccord_gateway *g, ccord_link_event 
       ccord_gwpace_plan_wake(&g->pace, gw_now(g), kind == CCORD_LINK_CHANGED, g->session_id[0] != '\0');
   if (verdict != CCORD_GWPACE_WAKE_ACCEPTED) return verdict;
   gw_close_socket(g);
-  ccord_buf_clear(&g->frame);
+  gw_buf_release(&g->frame);
   ccord_gwpace_disconnected(&g->pace);
   if (g->state != CCORD_CONN_CONNECTING) {
     g->state = CCORD_CONN_CONNECTING;
