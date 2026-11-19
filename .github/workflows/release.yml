@@ -344,15 +344,22 @@ jobs:
           # 1. Standalone single-file bundle
           flatpak build-bundle /tmp/fp-repo "out/assets/C-Cord-${VER}-linux-x86_64.flatpak" org.ccord.CCord stable
 
-          # 2. Extract static delta part 0 for GitHub Releases storage (c-cord.org 302-redirects delta/0 here)
-          DELTA_PART=$(find /tmp/fp-repo/deltas -type f -name '0' | head -n1 || true)
-          if [ -n "$DELTA_PART" ]; then
-            cp "$DELTA_PART" "out/assets/ccord-flatpak-delta-0.bin"
-            # Pack lightweight OSTree metadata without the heavy delta/0 payload
-            tar --exclude='./deltas/*/*/0' --exclude='deltas/*/*/0' -czf "out/assets/ccord-flatpak-repo.tar.gz" -C /tmp/fp-repo .
-          else
-            tar -czf "out/assets/ccord-flatpak-repo.tar.gz" -C /tmp/fp-repo .
-          fi
+          # 2. Extract app static delta part 0 for GitHub Releases storage (c-cord.org 302-redirects delta/0 here)
+          APP_COMMIT=$(ostree --repo=/tmp/fp-repo rev-parse app/org.ccord.CCord/x86_64/stable)
+          APP_DELTA_DIR=$(python3 -c 'import base64,sys; b=base64.b64encode(bytes.fromhex(sys.argv[1].strip())).decode().rstrip("=").replace("/","_"); print(f"{b[:2]}/{b[2:]}")' "$APP_COMMIT")
+          DELTA_PART="/tmp/fp-repo/deltas/${APP_DELTA_DIR}/0"
+          echo "Flatpak app commit=${APP_COMMIT} delta=${APP_DELTA_DIR}"
+          ls -lh "/tmp/fp-repo/deltas/${APP_DELTA_DIR}/"
+          test -f "$DELTA_PART"
+          test ! -f "/tmp/fp-repo/deltas/${APP_DELTA_DIR}/1"
+          cp "$DELTA_PART" "out/assets/ccord-flatpak-delta-0.bin"
+          # Pack lightweight OSTree metadata without the heavy delta/0 payload or raw .filez objects
+          tar \
+            --exclude="./deltas/${APP_DELTA_DIR}/0" \
+            --exclude="deltas/${APP_DELTA_DIR}/0" \
+            --exclude='*.filez' \
+            -czf "out/assets/ccord-flatpak-repo.tar.gz" -C /tmp/fp-repo .
+          ls -lh out/assets/
       - uses: actions/upload-artifact@v4
         with:
           name: release-flatpak
@@ -551,11 +558,22 @@ jobs:
               --generate-notes
           fi
       - name: Announce release to c-cord.org (zero-secret OIDC)
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
         run: |
+          # Wait briefly for GitHub's public Releases API edge cache to reflect the new/updated release.
+          for i in 1 2 3 4 5 6; do
+            if curl -fsSL "https://api.github.com/repos/${{ github.repository }}/releases/tags/${TAG}" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 3
+          done
+          sleep 2
           OIDC_TOKEN=$(curl -fsSL \
             -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
             "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://plugins.c-cord.org" \
             | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
-          curl -fsSL -X POST "https://c-cord.org/api/v1/releases/announce" \
+          RESP=$(curl -fsSL -X POST "https://c-cord.org/api/v1/releases/announce" \
             -H "Authorization: Bearer ${OIDC_TOKEN}" \
-            -H "Content-Type: application/json"
+            -H "Content-Type: application/json")
+          echo "Announce response: ${RESP}"
