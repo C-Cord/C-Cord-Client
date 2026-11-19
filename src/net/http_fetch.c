@@ -95,14 +95,14 @@ static size_t write_mem_cb(char *ptr, size_t size, size_t nmemb, void *ud)
   if (size != 0 && nmemb > SIZE_MAX / size) { s->overflow = true; return 0; }
   size_t n = size * nmemb;
   if (n == 0) return 0;
-  if (s->len + n > s->max_bytes) { s->overflow = true; return 0; }
+  if (n > s->max_bytes || s->len > s->max_bytes - n) { s->overflow = true; return 0; }
   if (s->len + n + 1 > s->cap) {
     size_t ncap = s->cap ? s->cap * 2u : 4096u;
     while (ncap < s->len + n + 1) {
       if (ncap > SIZE_MAX / 2u) { ncap = s->len + n + 1; break; }
       ncap *= 2u;
     }
-    if (ncap > s->max_bytes + 1u) ncap = s->max_bytes + 1u;
+    if (s->max_bytes < SIZE_MAX && ncap > s->max_bytes + 1u) ncap = s->max_bytes + 1u;
     char *nb = ccord_realloc(s->data, ncap);
     if (!nb) { s->overflow = true; return 0; }
     s->data = nb;
@@ -121,6 +121,7 @@ typedef struct hdr_sink {
 static size_t header_cb(char *buf, size_t size, size_t nitems, void *ud)
 {
   hdr_sink *h = ud;
+  if (size != 0 && nitems > SIZE_MAX / size) return 0;
   size_t n = size * nitems;
   if (n > 5 && strncasecmp(buf, "etag:", 5) == 0) {
     const char *v = buf + 5;
@@ -148,7 +149,7 @@ static size_t write_file_cb(char *ptr, size_t size, size_t nmemb, void *ud)
   if (size != 0 && nmemb > SIZE_MAX / size) { s->overflow = true; return 0; }
   size_t n = size * nmemb;
   if (n == 0) return 0;
-  if (s->written + n > s->max_bytes) { s->overflow = true; return 0; }
+  if (n > s->max_bytes || s->written > s->max_bytes - n) { s->overflow = true; return 0; }
   size_t w = fwrite(ptr, 1, n, s->fp);
   s->written += w;
   return w;
@@ -178,6 +179,7 @@ bool ccord_http_get(const char *url, const char *if_none_match, size_t max_bytes
     set_err(out->error, sizeof out->error, "URL blocked by HTTPS catalog host allowlist");
     return false;
   }
+  ccord_curl_global_init_once();
   CURL *curl = curl_easy_init();
   if (!curl) {
     set_err(out->error, sizeof out->error, "libcurl initialization failed");
@@ -240,6 +242,7 @@ bool ccord_http_post_json(const char *url, const char *json_body, size_t body_le
     set_err(out->error, sizeof out->error, "URL blocked by HTTPS catalog host allowlist");
     return false;
   }
+  ccord_curl_global_init_once();
   CURL *curl = curl_easy_init();
   if (!curl) {
     set_err(out->error, sizeof out->error, "libcurl initialization failed");
@@ -302,6 +305,7 @@ bool ccord_http_download_file(const char *url, const char *dest_path, size_t max
     set_err(err_buf, err_cap, "cannot create temporary download file");
     return false;
   }
+  ccord_curl_global_init_once();
   CURL *curl = curl_easy_init();
   if (!curl) {
     fclose(fp);

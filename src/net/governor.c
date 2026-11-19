@@ -19,6 +19,7 @@
 typedef struct gov_bucket {
   bool used;
   uint32_t gen;
+  uint32_t key_hash;
   char key[GOV_KEY_MAX];
   int32_t limit;
   int32_t remaining;  // -1 unknown
@@ -31,6 +32,7 @@ typedef struct gov_bucket {
 typedef struct gov_route {
   bool used;
   uint32_t gen;
+  uint32_t key_hash;
   char key[GOV_KEY_MAX];
   char major[GOV_MAJOR_MAX];
   int32_t bucket;  // index into buckets, -1 when none
@@ -46,6 +48,8 @@ struct ccord_gov {
   ccord_gov_config cfg;
   gov_bucket buckets[GOV_BUCKETS];
   gov_route routes[GOV_ROUTES];
+  uint32_t route_hi;
+  uint32_t bucket_hi;
   uint32_t inflight;
   double tokens;
   uint64_t tokens_at_ms;
@@ -94,6 +98,7 @@ bool ccord_gov_route_key(const char *method, const char *path, char *route, size
   major[1] = '\0';
   bool have_major = false;
   char prev[16] = "";
+  size_t prev_len = 0;
   const char *p = path;
   size_t segments = 0;
   while (*p == '/') {
@@ -105,9 +110,9 @@ bool ccord_gov_route_key(const char *method, const char *path, char *route, size
     const char *emit = start;
     size_t emit_n = n;
     if (all_digits(start, n)) {
-      bool is_channels = seg_is(prev, strlen(prev), "channels");
-      bool is_guilds = seg_is(prev, strlen(prev), "guilds");
-      bool major_parent = is_channels || is_guilds || seg_is(prev, strlen(prev), "webhooks");
+      bool is_channels = seg_is(prev, prev_len, "channels");
+      bool is_guilds = seg_is(prev, prev_len, "guilds");
+      bool major_parent = is_channels || is_guilds || seg_is(prev, prev_len, "webhooks");
       if (is_guilds && strncmp(path, "/users/@me/guilds/", 18) == 0) {
         // When path begins with /users/@me/guilds/, do not treat segment after guilds as major parameter
         major_parent = false;
@@ -121,10 +126,11 @@ bool ccord_gov_route_key(const char *method, const char *path, char *route, size
         emit = ":id";
         emit_n = 3;
       }
-    } else if ((seg_is(prev, strlen(prev), "reactions") || seg_is(prev, strlen(prev), "emoji")) && !seg_is(start, n, "@me")) {
+    } else if ((seg_is(prev, prev_len, "reactions") || seg_is(prev, prev_len, "emoji")) &&
+               !seg_is(start, n, "@me")) {
       emit = ":emoji";
       emit_n = 6;
-    } else if (seg_is(prev, strlen(prev), "invites")) {
+    } else if (seg_is(prev, prev_len, "invites")) {
       emit = ":code";
       emit_n = 5;
     }
@@ -136,6 +142,7 @@ bool ccord_gov_route_key(const char *method, const char *path, char *route, size
     size_t pn = n < sizeof prev - 1u ? n : sizeof prev - 1u;
     memcpy(prev, start, pn);
     prev[pn] = '\0';
+    prev_len = pn;
   }
   if (segments == 0) {
     if (o + 1u >= route_cap) return false;
@@ -235,15 +242,25 @@ static void gov_note_invalid(ccord_gov *g, uint64_t now_ms)
 
 // ---------------------------------------------------------------- tables
 
-static int32_t gov_find_route(ccord_gov *g, const char *key)
+static uint32_t gov_key_hash(const char *s)
 {
-  for (uint32_t i = 0; i < GOV_ROUTES; i++) {
-    if (g->routes[i].used && strcmp(g->routes[i].key, key) == 0) return (int32_t)i;
+  uint32_t h = 2166136261u;
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    h ^= (uint32_t)*p;
+    h *= 16777619u;
+  }
+  return h;
+}
+
+static int32_t gov_find_route(ccord_gov *g, const char *key, uint32_t h)
+{
+  for (uint32_t i = 0; i < g->route_hi; i++) {
+    if (g->routes[i].used && g->routes[i].key_hash == h && strcmp(g->routes[i].key, key) == 0) return (int32_t)i;
   }
   return -1;
 }
 
-static int32_t gov_new_route(ccord_gov *g, const char *key, const char *major, uint64_t now_ms)
+static int32_t gov_new_route(ccord_gov *g, const char *key, uint32_t h, const char *major, uint64_t now_ms)
 {
   int32_t slot = -1;
   uint64_t oldest = UINT64_MAX;
@@ -266,10 +283,12 @@ static int32_t gov_new_route(ccord_gov *g, const char *key, const char *major, u
       }
     }
   }
+  if ((uint32_t)slot >= g->route_hi) g->route_hi = (uint32_t)slot + 1u;
   gov_route *r = &g->routes[slot];
   uint32_t gen = r->gen + 1u;
   memset(r, 0, sizeof *r);
   r->gen = gen;
+  r->key_hash = h;
   r->used = true;
   r->bucket = -1;
   r->last_used_ms = now_ms;
@@ -278,17 +297,18 @@ static int32_t gov_new_route(ccord_gov *g, const char *key, const char *major, u
   return slot;
 }
 
-static int32_t gov_find_bucket(ccord_gov *g, const char *key)
+static int32_t gov_find_bucket(ccord_gov *g, const char *key, uint32_t h)
 {
-  for (uint32_t i = 0; i < GOV_BUCKETS; i++) {
-    if (g->buckets[i].used && strcmp(g->buckets[i].key, key) == 0) return (int32_t)i;
+  for (uint32_t i = 0; i < g->bucket_hi; i++) {
+    if (g->buckets[i].used && g->buckets[i].key_hash == h && strcmp(g->buckets[i].key, key) == 0) return (int32_t)i;
   }
   return -1;
 }
 
 static int32_t gov_get_bucket(ccord_gov *g, const char *key, uint64_t now_ms)
 {
-  int32_t found = gov_find_bucket(g, key);
+  uint32_t h = gov_key_hash(key);
+  int32_t found = gov_find_bucket(g, key, h);
   if (found >= 0) return found;
   int32_t slot = -1;
   uint64_t oldest = UINT64_MAX;
@@ -311,10 +331,12 @@ static int32_t gov_get_bucket(ccord_gov *g, const char *key, uint64_t now_ms)
       }
     }
   }
+  if ((uint32_t)slot >= g->bucket_hi) g->bucket_hi = (uint32_t)slot + 1u;
   gov_bucket *b = &g->buckets[slot];
   uint32_t gen = b->gen + 1u;
   memset(b, 0, sizeof *b);
   b->gen = gen;
+  b->key_hash = h;
   b->used = true;
   b->remaining = -1;
   b->last_used_ms = now_ms;
@@ -425,16 +447,16 @@ void ccord_gov_response_header(ccord_gov_response *r, const char *line, size_t l
   }
   while (vn > 0 && (v[vn - 1] == '\r' || v[vn - 1] == '\n' || v[vn - 1] == ' ' || v[vn - 1] == '\t')) vn--;
 
-  struct {
+  static const struct {
     const char *name;
+    size_t len;
     int id;
-  } const names[] = {{"x-ratelimit-bucket", 1}, {"x-ratelimit-limit", 2}, {"x-ratelimit-remaining", 3},
-                     {"x-ratelimit-reset-after", 4}, {"x-ratelimit-global", 5}, {"retry-after", 6},
-                     {"content-type", 7}};
+  } names[] = {{"x-ratelimit-bucket", 18, 1}, {"x-ratelimit-limit", 17, 2}, {"x-ratelimit-remaining", 21, 3},
+               {"x-ratelimit-reset-after", 23, 4}, {"x-ratelimit-global", 18, 5}, {"retry-after", 11, 6},
+               {"content-type", 12, 7}};
   int id = 0;
   for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
-    size_t l = strlen(names[i].name);
-    if (l == name_n && ci_prefix(line, name_n, names[i].name)) {
+    if (names[i].len == name_n && ci_prefix(line, name_n, names[i].name)) {
       id = names[i].id;
       break;
     }
@@ -586,8 +608,9 @@ static ccord_gov_decision gov_acquire(ccord_gov *g, const char *method, const ch
     }
   }
 
-  int32_t ri = gov_find_route(g, key);
-  if (ri < 0) ri = gov_new_route(g, key, major, now_ms);
+  uint32_t kh = gov_key_hash(key);
+  int32_t ri = gov_find_route(g, key, kh);
+  if (ri < 0) ri = gov_new_route(g, key, kh, major, now_ms);
   gov_route *r = &g->routes[ri];
   gov_bucket *b = route_bucket(g, r);
   if (b) {
