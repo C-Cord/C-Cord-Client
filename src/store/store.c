@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/clock.h>
 #include <ccord/core/idmap.h>
 #include <ccord/core/log.h>
 #include <ccord/core/utf8.h>
@@ -24,24 +25,38 @@
 #define CCORD_STORE_URL_MAX_BYTES 512u
 #define CCORD_STORE_MAX_SAVED_MESSAGES 256u   // local bookmarks; the oldest is dropped past this
 #define CCORD_STORE_MAX_EVENTS_PER_GUILD 100u   // Discord's scheduled-event cap per guild
+#define CCORD_STORE_MAX_PROFILES 64u            // LRU cap on cached ~25 KiB user profiles
+#define CCORD_STORE_TYPING_UNIX_THRESHOLD 1000000000000LL
+#define CCORD_STORE_TYPING_PRUNE_MARGIN_MS 15000LL
+#define CCORD_STORE_MAX_TYPING 256u
 
 typedef struct note_entry {
   ccord_id user_id;
   char *note;
 } note_entry;
 
+// Small per-store string interner for ccord_member.role_name so 50k members don't duplicate heap strings.
+// Owned by store_data and released wholesale in data_free().
+typedef struct role_str_pool {
+  char **items;
+  size_t n, cap;
+  size_t *slots;   // open-addressed hash table: item index + 1 (0 = empty)
+  size_t hcap;     // power of two, or 0
+} role_str_pool;
+
 // Owned copy of the snapshot data. Every string pointer below is owned by the store.
 typedef struct store_data {
   ccord_id self_id;
-  ccord_user *users;     size_t nusers;
-  ccord_user_profile *profiles; size_t nprofiles;
-  ccord_guild *guilds;   ccord_id *guild_last; size_t nguilds;
+  ccord_user *users;                 size_t nusers, cap_users;
+  ccord_user_profile *profiles;      size_t nprofiles, cap_profiles;
+  ccord_guild *guilds;               ccord_id *guild_last; size_t nguilds, cap_guilds;
   ccord_id dm_last;
-  ccord_channel *channels; size_t nchannels;
-  ccord_member *members; size_t nmembers;
-  ccord_voice_state *voices; size_t nvoices;
-  ccord_relationship *relationships; size_t nrelationships;
-  note_entry *notes; size_t nnotes, capnotes;
+  ccord_channel *channels;           size_t nchannels, cap_channels;
+  ccord_member *members;             size_t nmembers, cap_members;
+  ccord_voice_state *voices;         size_t nvoices, cap_voices;
+  ccord_relationship *relationships; size_t nrelationships, cap_relationships;
+  note_entry *notes;                 size_t nnotes, capnotes;
+  role_str_pool role_pool;
   // Where things are, so that lookups do not scan everything. Kept in step with the arrays above by the helpers below;
   // when one could not be (out of memory) its flag is false and lookups scan, as they always could.
   ccord_idmap user_by_id;  bool user_ix_ok;
@@ -96,6 +111,8 @@ struct ccord_store {
   ccord_id sel_guild, sel_channel;
   history *hist;
   size_t nhist, caphist;
+  ccord_idmap hist_by_chan;
+  bool hist_ix_ok;
   typing_entry *typing;
   size_t ntyping, captyping;
   ccord_voice_server *servers;
@@ -139,12 +156,195 @@ const struct user_cache *ccord_store_user_slot_const(const ccord_store *s) { ret
 ccord_expr_data **ccord_store_expr_slot_(ccord_store *s) { return s ? &s->expr : nullptr; }
 ccord_expr_data *const *ccord_store_expr_slot_const_(const ccord_store *s) { return s ? &s->expr : nullptr; }
 
-// Frees a string the store owns; the public structs hold const char * fields.
+// Private accessor used by store_voice.c so stage speaker/request counts run in a single O(V) pass.
+const ccord_voice_state *ccord_store_voices_raw_(const ccord_store *s, size_t *out_count);
+const ccord_voice_state *ccord_store_voices_raw_(const ccord_store *s, size_t *out_count)
+{
+  if (out_count) *out_count = s ? s->d.nvoices : 0;
+  return s ? s->d.voices : nullptr;
+}
+
+static const char k_empty_str[] = "";
+static const char k_default_role_str[] = "Members";
+
+// Duplicates a store string; empty/null strings share k_empty_str with zero heap allocation.
+static const char *dup_cstr(const char *s)
+{
+  if (!s || s[0] == '\0') return k_empty_str;
+  return ccord_strdup(s);
+}
+
+// Frees a string the store owns; static sentinels are never passed to ccord_free.
 static void free_cstr(const char **p)
 {
+  if (!p || !*p || *p == k_empty_str || *p == k_default_role_str) {
+    if (p) *p = nullptr;
+    return;
+  }
   union { const char *c; void *v; } u = {.c = *p};
   ccord_free(u.v);
   *p = nullptr;
+}
+
+static size_t cstr_hash(const char *s)
+{
+  uint64_t h = 14695981039346656037ull;
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    h ^= (uint64_t)*p;
+    h *= 1099511628211ull;
+  }
+  return (size_t)h;
+}
+
+static void role_pool_free(role_str_pool *p)
+{
+  for (size_t i = 0; i < p->n; i++) ccord_free(p->items[i]);
+  ccord_free(p->items);
+  ccord_free(p->slots);
+  *p = (role_str_pool){0};
+}
+
+static bool role_pool_rehash(role_str_pool *p, size_t ncap)
+{
+  size_t *ns = ccord_calloc(ncap, sizeof *ns);
+  if (!ns) return false;
+  size_t mask = ncap - 1u;
+  for (size_t i = 0; i < p->n; i++) {
+    size_t k = cstr_hash(p->items[i]) & mask;
+    while (ns[k] != 0) k = (k + 1u) & mask;
+    ns[k] = i + 1u;
+  }
+  ccord_free(p->slots);
+  p->slots = ns;
+  p->hcap = ncap;
+  return true;
+}
+
+static const char *role_pool_intern(role_str_pool *p, const char *s)
+{
+  if (!s || s[0] == '\0') return k_empty_str;
+  if (strcmp(s, k_default_role_str) == 0) return k_default_role_str;
+  size_t h = cstr_hash(s);
+  if (p->hcap > 0) {
+    size_t mask = p->hcap - 1u;
+    size_t k = h & mask;
+    while (p->slots[k] != 0) {
+      const char *cand = p->items[p->slots[k] - 1u];
+      if (strcmp(cand, s) == 0) return cand;
+      k = (k + 1u) & mask;
+    }
+  }
+  if (p->hcap == 0 || (p->n + 1u) * 10u > p->hcap * 7u) {
+    size_t nhcap = p->hcap ? p->hcap * 2u : 32u;
+    if (!role_pool_rehash(p, nhcap)) return nullptr;
+  }
+  if (p->n == p->cap) {
+    size_t ncap = p->cap ? p->cap * 2u : 16u;
+    char **grown = ccord_realloc_array(p->items, ncap, sizeof *grown);
+    if (!grown) return nullptr;
+    p->items = grown;
+    p->cap = ncap;
+  }
+  char *copy = ccord_strdup(s);
+  if (!copy) return nullptr;
+  size_t idx = p->n++;
+  p->items[idx] = copy;
+  size_t mask = p->hcap - 1u;
+  size_t k = h & mask;
+  while (p->slots[k] != 0) k = (k + 1u) & mask;
+  p->slots[k] = idx + 1u;
+  return copy;
+}
+
+static size_t next_cap_geom(size_t cur, size_t need, size_t min_cap)
+{
+  size_t cap = cur ? cur : min_cap;
+  while (cap < need) {
+    if (cap > SIZE_MAX / 2u) return need;
+    cap *= 2u;
+  }
+  return cap;
+}
+
+static bool ensure_users(store_data *d, size_t need)
+{
+  if (need <= d->cap_users) return true;
+  size_t ncap = next_cap_geom(d->cap_users, need, 16u);
+  ccord_user *g = ccord_realloc_array(d->users, ncap, sizeof *g);
+  if (!g) return false;
+  d->users = g;
+  d->cap_users = ncap;
+  return true;
+}
+
+static bool ensure_profiles(store_data *d, size_t need)
+{
+  if (need <= d->cap_profiles) return true;
+  size_t ncap = next_cap_geom(d->cap_profiles, need, 8u);
+  if (ncap > CCORD_STORE_MAX_PROFILES) ncap = CCORD_STORE_MAX_PROFILES;
+  ccord_user_profile *g = ccord_realloc_array(d->profiles, ncap, sizeof *g);
+  if (!g) return false;
+  d->profiles = g;
+  d->cap_profiles = ncap;
+  return true;
+}
+
+static bool ensure_guilds(store_data *d, size_t need)
+{
+  if (need <= d->cap_guilds) return true;
+  size_t ncap = next_cap_geom(d->cap_guilds, need, 16u);
+  ccord_id *last = ccord_realloc_array(d->guild_last, ncap, sizeof *last);
+  if (!last) return false;
+  d->guild_last = last;
+  ccord_guild *g = ccord_realloc_array(d->guilds, ncap, sizeof *g);
+  if (!g) return false;
+  d->guilds = g;
+  d->cap_guilds = ncap;
+  return true;
+}
+
+static bool ensure_channels(store_data *d, size_t need)
+{
+  if (need <= d->cap_channels) return true;
+  size_t ncap = next_cap_geom(d->cap_channels, need, 16u);
+  ccord_channel *g = ccord_realloc_array(d->channels, ncap, sizeof *g);
+  if (!g) return false;
+  d->channels = g;
+  d->cap_channels = ncap;
+  return true;
+}
+
+static bool ensure_members(store_data *d, size_t need)
+{
+  if (need <= d->cap_members) return true;
+  size_t ncap = next_cap_geom(d->cap_members, need, 16u);
+  ccord_member *g = ccord_realloc_array(d->members, ncap, sizeof *g);
+  if (!g) return false;
+  d->members = g;
+  d->cap_members = ncap;
+  return true;
+}
+
+static bool ensure_voices(store_data *d, size_t need)
+{
+  if (need <= d->cap_voices) return true;
+  size_t ncap = next_cap_geom(d->cap_voices, need, 16u);
+  ccord_voice_state *g = ccord_realloc_array(d->voices, ncap, sizeof *g);
+  if (!g) return false;
+  d->voices = g;
+  d->cap_voices = ncap;
+  return true;
+}
+
+static bool ensure_relationships(store_data *d, size_t need)
+{
+  if (need <= d->cap_relationships) return true;
+  size_t ncap = next_cap_geom(d->cap_relationships, need, 16u);
+  ccord_relationship *g = ccord_realloc_array(d->relationships, ncap, sizeof *g);
+  if (!g) return false;
+  d->relationships = g;
+  d->cap_relationships = ncap;
+  return true;
 }
 
 // The six per-server and decoration strings of a profile. The store owns heap copies of them, like the other profile
@@ -159,6 +359,17 @@ static void free_profile_extra_cstrs(ccord_user_profile *p)
   free_cstr(&p->avatar_decoration_url);
 }
 
+static void profile_free(ccord_user_profile *p)
+{
+  free_cstr(&p->display_name);
+  free_cstr(&p->handle);
+  free_cstr(&p->avatar_url);
+  free_cstr(&p->banner_url);
+  free_cstr(&p->bio);
+  free_cstr(&p->pronouns);
+  free_profile_extra_cstrs(p);
+}
+
 // Sets the six extra strings of dst to heap copies of those of src. On out-of-memory it frees what it made, leaves
 // all six null and returns false, so the caller can free dst without touching a borrowed pointer.
 static bool dup_profile_extra_cstrs(ccord_user_profile *dst, const ccord_user_profile *src)
@@ -169,7 +380,7 @@ static bool dup_profile_extra_cstrs(ccord_user_profile *dst, const ccord_user_pr
                        &dst->guild_bio, &dst->guild_pronouns, &dst->avatar_decoration_url};
   for (size_t i = 0; i < sizeof to / sizeof to[0]; i++) *to[i] = nullptr;
   for (size_t i = 0; i < sizeof from / sizeof from[0]; i++) {
-    char *c = ccord_strdup(*from[i] ? *from[i] : "");
+    const char *c = dup_cstr(*from[i]);
     if (!c) {
       free_profile_extra_cstrs(dst);
       return false;
@@ -210,15 +421,7 @@ static void data_free(store_data *d)
     free_cstr(&d->users[i].bio);
     free_cstr(&d->users[i].pronouns);
   }
-  for (size_t i = 0; i < d->nprofiles; i++) {
-    free_cstr(&d->profiles[i].display_name);
-    free_cstr(&d->profiles[i].handle);
-    free_cstr(&d->profiles[i].avatar_url);
-    free_cstr(&d->profiles[i].banner_url);
-    free_cstr(&d->profiles[i].bio);
-    free_cstr(&d->profiles[i].pronouns);
-    free_profile_extra_cstrs(&d->profiles[i]);
-  }
+  for (size_t i = 0; i < d->nprofiles; i++) profile_free(&d->profiles[i]);
   for (size_t i = 0; i < d->nguilds; i++) {
     free_cstr(&d->guilds[i].name);
     free_cstr(&d->guilds[i].icon_url);
@@ -228,7 +431,7 @@ static void data_free(store_data *d)
     free_cstr(&d->channels[i].topic);
     free_cstr(&d->channels[i].icon_url);
   }
-  for (size_t i = 0; i < d->nmembers; i++) free_cstr(&d->members[i].role_name);
+  role_pool_free(&d->role_pool);
   for (size_t i = 0; i < d->nnotes; i++) ccord_free(d->notes[i].note);
   ccord_free(d->users);
   ccord_free(d->profiles);
@@ -289,26 +492,39 @@ static ccord_status copy_snapshot(store_data *d, const ccord_snapshot *s, ccord_
   memset(d, 0, sizeof *d);
   d->user_ix_ok = d->mem_ix_ok = true;
   d->self_id = s->self_id;
-  d->users = ccord_alloc_array(s->user_count ? s->user_count : 1, sizeof *d->users);
-  d->guilds = ccord_alloc_array(s->guild_count ? s->guild_count : 1, sizeof *d->guilds);
-  d->guild_last = ccord_calloc(s->guild_count ? s->guild_count : 1, sizeof *d->guild_last);
-  d->channels = ccord_alloc_array(s->channel_count ? s->channel_count : 1, sizeof *d->channels);
-  d->members = ccord_alloc_array(s->member_count ? s->member_count : 1, sizeof *d->members);
-  d->voices = ccord_alloc_array(s->voice_state_count ? s->voice_state_count : 1, sizeof *d->voices);
-  d->relationships = ccord_alloc_array(s->relationship_count ? s->relationship_count : 1, sizeof *d->relationships);
+  size_t cu = s->user_count ? s->user_count : 1u;
+  size_t cg = s->guild_count ? s->guild_count : 1u;
+  size_t cc = s->channel_count ? s->channel_count : 1u;
+  size_t cm = s->member_count ? s->member_count : 1u;
+  size_t cv = s->voice_state_count ? s->voice_state_count : 1u;
+  size_t cr = s->relationship_count ? s->relationship_count : 1u;
+  d->users = ccord_alloc_array(cu, sizeof *d->users);
+  d->guilds = ccord_alloc_array(cg, sizeof *d->guilds);
+  d->guild_last = ccord_calloc(cg, sizeof *d->guild_last);
+  d->channels = ccord_alloc_array(cc, sizeof *d->channels);
+  d->members = ccord_alloc_array(cm, sizeof *d->members);
+  d->voices = ccord_alloc_array(cv, sizeof *d->voices);
+  d->relationships = ccord_alloc_array(cr, sizeof *d->relationships);
   if (!d->users || !d->guilds || !d->guild_last || !d->channels || !d->members || !d->voices || !d->relationships) {
     goto oom;
   }
+  d->cap_users = cu;
+  d->cap_guilds = cg;
+  d->cap_channels = cc;
+  d->cap_members = cm;
+  d->cap_voices = cv;
+  d->cap_relationships = cr;
+  if (s->user_count > 0 && !ccord_idmap_reserve(&d->user_by_id, s->user_count)) d->user_ix_ok = false;
 
   for (size_t i = 0; i < s->user_count; i++) {
     ccord_user u = s->users[i];
-    u.name = ccord_strdup(s->users[i].name);
-    u.handle = ccord_strdup(s->users[i].handle ? s->users[i].handle : "");
-    u.status_text = ccord_strdup(s->users[i].status_text);
-    u.avatar_url = ccord_strdup(s->users[i].avatar_url ? s->users[i].avatar_url : "");
-    u.banner_url = ccord_strdup(s->users[i].banner_url ? s->users[i].banner_url : "");
-    u.bio = ccord_strdup(s->users[i].bio ? s->users[i].bio : "");
-    u.pronouns = ccord_strdup(s->users[i].pronouns ? s->users[i].pronouns : "");
+    u.name = dup_cstr(s->users[i].name);
+    u.handle = dup_cstr(s->users[i].handle);
+    u.status_text = dup_cstr(s->users[i].status_text);
+    u.avatar_url = dup_cstr(s->users[i].avatar_url);
+    u.banner_url = dup_cstr(s->users[i].banner_url);
+    u.bio = dup_cstr(s->users[i].bio);
+    u.pronouns = dup_cstr(s->users[i].pronouns);
     d->users[i] = u;
     d->nusers = i + 1;
     users_index_add(d, i);
@@ -316,22 +532,22 @@ static ccord_status copy_snapshot(store_data *d, const ccord_snapshot *s, ccord_
   }
   for (size_t i = 0; i < s->guild_count; i++) {
     d->guilds[i] = s->guilds[i];
-    d->guilds[i].name = ccord_strdup(s->guilds[i].name);
-    d->guilds[i].icon_url = ccord_strdup(s->guilds[i].icon_url ? s->guilds[i].icon_url : "");
+    d->guilds[i].name = dup_cstr(s->guilds[i].name);
+    d->guilds[i].icon_url = dup_cstr(s->guilds[i].icon_url);
     d->nguilds = i + 1;
     if (!d->guilds[i].name || !d->guilds[i].icon_url) goto oom;
   }
   for (size_t i = 0; i < s->channel_count; i++) {
     d->channels[i] = s->channels[i];
-    d->channels[i].name = ccord_strdup(s->channels[i].name);
-    d->channels[i].topic = ccord_strdup(s->channels[i].topic);
-    d->channels[i].icon_url = ccord_strdup(s->channels[i].icon_url ? s->channels[i].icon_url : "");
+    d->channels[i].name = dup_cstr(s->channels[i].name);
+    d->channels[i].topic = dup_cstr(s->channels[i].topic);
+    d->channels[i].icon_url = dup_cstr(s->channels[i].icon_url);
     d->nchannels = i + 1;
     if (!d->channels[i].name || !d->channels[i].topic || !d->channels[i].icon_url) goto oom;
   }
   for (size_t i = 0; i < s->member_count; i++) {
     d->members[i] = s->members[i];
-    d->members[i].role_name = ccord_strdup(s->members[i].role_name);
+    d->members[i].role_name = role_pool_intern(&d->role_pool, s->members[i].role_name);
     d->nmembers = i + 1;
     members_index_add(d, i);
     if (!d->members[i].role_name) goto oom;
@@ -348,26 +564,37 @@ static ccord_status copy_snapshot(store_data *d, const ccord_snapshot *s, ccord_
     d->notes = ccord_alloc_array(s->note_count, sizeof *d->notes);
     if (!d->notes) goto oom;
     d->capnotes = s->note_count;
+    ccord_idmap note_ix = {0};
+    bool use_ix = s->note_count > 32u && ccord_idmap_reserve(&note_ix, s->note_count);
     for (size_t i = 0; i < s->note_count; i++) {
       const char *nsrc = s->notes[i].note ? s->notes[i].note : "";
       if (nsrc[0] == '\0') continue;
-      bool merged = false;
-      for (size_t k = 0; k < d->nnotes; k++) {
-        if (d->notes[k].user_id == s->notes[i].user_id) {
-          char *dup = ccord_strdup(nsrc);
-          if (!dup) goto oom;
-          ccord_free(d->notes[k].note);
-          d->notes[k].note = dup;
-          merged = true;
-          break;
+      size_t existing = SIZE_MAX;
+      if (use_ix) {
+        if (!ccord_idmap_find(&note_ix, s->notes[i].user_id, &existing)) existing = SIZE_MAX;
+      } else {
+        for (size_t k = 0; k < d->nnotes; k++) {
+          if (d->notes[k].user_id == s->notes[i].user_id) {
+            existing = k;
+            break;
+          }
         }
       }
-      if (!merged) {
-        char *dup = ccord_strdup(nsrc);
-        if (!dup) goto oom;
-        d->notes[d->nnotes++] = (note_entry){.user_id = s->notes[i].user_id, .note = dup};
+      char *dup = ccord_strdup(nsrc);
+      if (!dup) {
+        ccord_idmap_free(&note_ix);
+        goto oom;
+      }
+      if (existing != SIZE_MAX) {
+        ccord_free(d->notes[existing].note);
+        d->notes[existing].note = dup;
+      } else {
+        size_t idx = d->nnotes++;
+        d->notes[idx] = (note_entry){.user_id = s->notes[i].user_id, .note = dup};
+        if (use_ix && !ccord_idmap_put(&note_ix, s->notes[i].user_id, idx)) use_ix = false;
       }
     }
+    ccord_idmap_free(&note_ix);
   }
   // The channels are indexed by the caller once they are sorted (sorting moves them).
   return CCORD_OK;
@@ -422,6 +649,7 @@ ccord_store *ccord_store_create(ccord_bus *bus, ccord_error *err)
   }
   s->bus = bus;
   s->d.user_ix_ok = s->d.chan_ix_ok = s->d.mem_ix_ok = true;   // empty indexes match empty arrays
+  s->hist_ix_ok = true;
   return s;
 }
 
@@ -568,6 +796,7 @@ void ccord_store_destroy(ccord_store *s)
     ccord_free(s->hist[i].msgs);
   }
   ccord_free(s->hist);
+  ccord_idmap_free(&s->hist_by_chan);
   ccord_free(s->typing);
   ccord_expr_data_free(s->expr);
   ccord_store_forum_cache_destroy(s->forum);
@@ -601,6 +830,8 @@ void ccord_store_reset(ccord_store *s)
   s->hist = nullptr;
   s->nhist = 0;
   s->caphist = 0;
+  ccord_idmap_free(&s->hist_by_chan);
+  s->hist_ix_ok = true;
   ccord_free(s->typing);
   s->typing = nullptr;
   s->ntyping = 0;
@@ -690,10 +921,13 @@ static long find_channel(const store_data *d, ccord_id id)
 // First text channel of a guild (skipping unaccepted DM message requests), or 0.
 static ccord_id default_channel(const store_data *d, ccord_id guild)
 {
-  for (size_t i = 0; i < d->nchannels; i++) {
-    if (d->channels[i].guild_id == guild && d->channels[i].kind == CCORD_CHANNEL_TEXT) {
-      if (guild == CCORD_DM_GUILD_ID && d->channels[i].is_message_request) continue;
-      return d->channels[i].id;
+  size_t count = d->chan_ix_ok ? store_index_count(&d->chan_ix, guild) : d->nchannels;
+  for (size_t i = 0; i < count; i++) {
+    size_t k = i;
+    if (d->chan_ix_ok && !store_index_at(&d->chan_ix, guild, i, &k)) continue;
+    if (d->channels[k].guild_id == guild && d->channels[k].kind == CCORD_CHANNEL_TEXT) {
+      if (guild == CCORD_DM_GUILD_ID && d->channels[k].is_message_request) continue;
+      return d->channels[k].id;
     }
   }
   return CCORD_ID_NONE;
@@ -715,8 +949,11 @@ static ccord_id default_channel_for(const ccord_store *s, ccord_id guild)
   ccord_id self = d->self_id;
   bool exact = ccord_store_permissions_exact(s, guild, self);
   ccord_id fallback_viewable = CCORD_ID_NONE;
-  for (size_t i = 0; i < d->nchannels; i++) {
-    const ccord_channel *c = &d->channels[i];
+  size_t count = d->chan_ix_ok ? store_index_count(&d->chan_ix, guild) : d->nchannels;
+  for (size_t i = 0; i < count; i++) {
+    size_t k = i;
+    if (d->chan_ix_ok && !store_index_at(&d->chan_ix, guild, i, &k)) continue;
+    const ccord_channel *c = &d->channels[k];
     if (!is_viewable_text(s, guild, c, exact, self)) continue;
     if (!ccord_discord_type_is_thread(c->discord_type) && !ccord_discord_type_is_forum(c->discord_type)) {
       return c->id;
@@ -771,17 +1008,36 @@ static void typing_remove(ccord_store *s, ccord_id channel_id, ccord_id user_id)
   }
 }
 
+static void hist_reindex(ccord_store *s)
+{
+  ccord_idmap_clear(&s->hist_by_chan);
+  s->hist_ix_ok = ccord_idmap_reserve(&s->hist_by_chan, s->nhist);
+  for (size_t i = 0; s->hist_ix_ok && i < s->nhist; i++) {
+    if (!ccord_idmap_put(&s->hist_by_chan, s->hist[i].channel_id, i)) s->hist_ix_ok = false;
+  }
+}
+
 static void history_remove(ccord_store *s, ccord_id channel_id)
 {
   pins_remove_channel(s, channel_id);
-  for (size_t i = 0; i < s->nhist; i++) {
-    if (s->hist[i].channel_id != channel_id) continue;
-    for (size_t k = 0; k < s->hist[i].n; k++) msg_free(&s->hist[i].msgs[k]);
-    ccord_free(s->hist[i].msgs);
-    memmove(&s->hist[i], &s->hist[i + 1], (s->nhist - i - 1) * sizeof *s->hist);
-    s->nhist--;
-    return;
+  size_t i = SIZE_MAX;
+  if (s->hist_ix_ok && channel_id != CCORD_ID_NONE) {
+    if (!ccord_idmap_find(&s->hist_by_chan, channel_id, &i)) return;
+  } else {
+    for (size_t k = 0; k < s->nhist; k++) {
+      if (s->hist[k].channel_id == channel_id) {
+        i = k;
+        break;
+      }
+    }
+    if (i == SIZE_MAX) return;
   }
+  for (size_t k = 0; k < s->hist[i].n; k++) msg_free(&s->hist[i].msgs[k]);
+  ccord_free(s->hist[i].msgs);
+  size_t last = s->nhist - 1u;
+  if (i != last) s->hist[i] = s->hist[last];
+  s->nhist--;
+  hist_reindex(s);
 }
 
 static void voice_remove_channel(ccord_store *s, ccord_id channel_id)
@@ -829,96 +1085,146 @@ static int cmp_dm_channel(const void *a, const void *b)
 
 static void sort_guild_channels(store_data *d, ccord_id guild_id);
 
-// Sorts a guild's channels and indexes them again at their new positions.
+// Sorts a guild's channels and keeps channel indexes in step. When chan_ix is already valid,
+// sort_guild_channels updates chan_by_id for only that guild's slots in O(m) instead of O(C_total).
 static void resort_channels(store_data *d, ccord_id guild_id)
 {
   sort_guild_channels(d, guild_id);
-  channels_reindex(d);
+  if (!d->chan_ix_ok) channels_reindex(d);
 }
 
 static void sort_guild_channels(store_data *d, ccord_id guild_id)
 {
-  size_t slots[CCORD_MAX_CHANNELS_PER_GUILD];
-  ccord_channel tmp[CCORD_MAX_CHANNELS_PER_GUILD];
-  bool placed[CCORD_MAX_CHANNELS_PER_GUILD];
   size_t m = 0;
-  for (size_t k = 0; k < d->nchannels && m < CCORD_MAX_CHANNELS_PER_GUILD; k++) {
-    if (d->channels[k].guild_id == guild_id) {
-      slots[m] = k;
-      tmp[m] = d->channels[k];
-      placed[m] = false;
-      m++;
+  if (d->chan_ix_ok) {
+    m = store_index_count(&d->chan_ix, guild_id);
+    if (m > CCORD_MAX_CHANNELS_PER_GUILD) m = CCORD_MAX_CHANNELS_PER_GUILD;
+  } else {
+    for (size_t k = 0; k < d->nchannels && m < CCORD_MAX_CHANNELS_PER_GUILD; k++) {
+      if (d->channels[k].guild_id == guild_id) m++;
     }
   }
   if (m <= 1) return;
 
-  if (guild_id == CCORD_DM_GUILD_ID) {
-    qsort(tmp, m, sizeof *tmp, cmp_dm_channel);
-    for (size_t i = 0; i < m; i++) d->channels[slots[i]] = tmp[i];
+  size_t *slots = ccord_alloc_array(m, sizeof *slots);
+  ccord_channel *tmp = ccord_alloc_array(m, sizeof *tmp);
+  bool *placed = ccord_calloc(m, sizeof *placed);
+  if (!slots || !tmp || !placed) {
+    ccord_free(slots);
+    ccord_free(tmp);
+    ccord_free(placed);
     return;
   }
 
-  qsort(tmp, m, sizeof *tmp, cmp_chan_pos_id);
-  size_t out = 0;
-
-  // 1. Uncategorized text/announcement/forum channels and their child threads.
-  for (size_t i = 0; i < m; i++) {
-    if (!placed[i] && tmp[i].kind == CCORD_CHANNEL_TEXT && tmp[i].parent_id == CCORD_ID_NONE) {
-      ccord_id tid = tmp[i].id;
-      d->channels[slots[out++]] = tmp[i];
-      placed[i] = true;
-      for (size_t t = 0; t < m; t++) {
-        if (!placed[t] && tmp[t].kind == CCORD_CHANNEL_TEXT && tmp[t].parent_id == tid) {
-          d->channels[slots[out++]] = tmp[t];
-          placed[t] = true;
-        }
+  size_t filled = 0;
+  if (d->chan_ix_ok) {
+    for (size_t i = 0; i < m; i++) {
+      size_t k = 0;
+      if (store_index_at(&d->chan_ix, guild_id, i, &k)) {
+        slots[filled] = k;
+        tmp[filled] = d->channels[k];
+        filled++;
+      }
+    }
+  } else {
+    for (size_t k = 0; k < d->nchannels && filled < m; k++) {
+      if (d->channels[k].guild_id == guild_id) {
+        slots[filled] = k;
+        tmp[filled] = d->channels[k];
+        filled++;
       }
     }
   }
-
-  // 2. Uncategorized voice/stage channels.
-  for (size_t i = 0; i < m; i++) {
-    if (!placed[i] && (tmp[i].kind == CCORD_CHANNEL_VOICE || tmp[i].kind == CCORD_CHANNEL_STAGE) && tmp[i].parent_id == CCORD_ID_NONE) {
-      d->channels[slots[out++]] = tmp[i];
-      placed[i] = true;
-    }
+  m = filled;
+  if (m <= 1) {
+    ccord_free(slots);
+    ccord_free(tmp);
+    ccord_free(placed);
+    return;
   }
 
-  // 3. Categories sorted by (position, id), each followed by its text channels (and threads) then voice channels.
-  for (size_t i = 0; i < m; i++) {
-    if (!placed[i] && tmp[i].kind == CCORD_CHANNEL_CATEGORY) {
-      ccord_id cat_id = tmp[i].id;
-      d->channels[slots[out++]] = tmp[i];
-      placed[i] = true;
-      for (size_t j = 0; j < m; j++) {
-        if (!placed[j] && tmp[j].kind == CCORD_CHANNEL_TEXT && tmp[j].parent_id == cat_id) {
-          ccord_id tid = tmp[j].id;
-          d->channels[slots[out++]] = tmp[j];
-          placed[j] = true;
-          for (size_t t = 0; t < m; t++) {
-            if (!placed[t] && tmp[t].kind == CCORD_CHANNEL_TEXT && tmp[t].parent_id == tid) {
-              d->channels[slots[out++]] = tmp[t];
-              placed[t] = true;
-            }
+  if (guild_id == CCORD_DM_GUILD_ID) {
+    qsort(tmp, m, sizeof *tmp, cmp_dm_channel);
+    for (size_t i = 0; i < m; i++) d->channels[slots[i]] = tmp[i];
+  } else {
+    qsort(tmp, m, sizeof *tmp, cmp_chan_pos_id);
+    size_t out = 0;
+
+    // 1. Uncategorized text/announcement/forum channels and their child threads.
+    for (size_t i = 0; i < m; i++) {
+      if (!placed[i] && tmp[i].kind == CCORD_CHANNEL_TEXT && tmp[i].parent_id == CCORD_ID_NONE) {
+        ccord_id tid = tmp[i].id;
+        d->channels[slots[out++]] = tmp[i];
+        placed[i] = true;
+        for (size_t t = 0; t < m; t++) {
+          if (!placed[t] && tmp[t].kind == CCORD_CHANNEL_TEXT && tmp[t].parent_id == tid) {
+            d->channels[slots[out++]] = tmp[t];
+            placed[t] = true;
           }
         }
       }
-      for (size_t j = 0; j < m; j++) {
-        if (!placed[j] && (tmp[j].kind == CCORD_CHANNEL_VOICE || tmp[j].kind == CCORD_CHANNEL_STAGE) && tmp[j].parent_id == cat_id) {
-          d->channels[slots[out++]] = tmp[j];
-          placed[j] = true;
+    }
+
+    // 2. Uncategorized voice/stage channels.
+    for (size_t i = 0; i < m; i++) {
+      if (!placed[i] && (tmp[i].kind == CCORD_CHANNEL_VOICE || tmp[i].kind == CCORD_CHANNEL_STAGE) &&
+          tmp[i].parent_id == CCORD_ID_NONE) {
+        d->channels[slots[out++]] = tmp[i];
+        placed[i] = true;
+      }
+    }
+
+    // 3. Categories sorted by (position, id), each followed by its text channels (and threads) then voice channels.
+    for (size_t i = 0; i < m; i++) {
+      if (!placed[i] && tmp[i].kind == CCORD_CHANNEL_CATEGORY) {
+        ccord_id cat_id = tmp[i].id;
+        d->channels[slots[out++]] = tmp[i];
+        placed[i] = true;
+        for (size_t j = 0; j < m; j++) {
+          if (!placed[j] && tmp[j].kind == CCORD_CHANNEL_TEXT && tmp[j].parent_id == cat_id) {
+            ccord_id tid = tmp[j].id;
+            d->channels[slots[out++]] = tmp[j];
+            placed[j] = true;
+            for (size_t t = 0; t < m; t++) {
+              if (!placed[t] && tmp[t].kind == CCORD_CHANNEL_TEXT && tmp[t].parent_id == tid) {
+                d->channels[slots[out++]] = tmp[t];
+                placed[t] = true;
+              }
+            }
+          }
         }
+        for (size_t j = 0; j < m; j++) {
+          if (!placed[j] && (tmp[j].kind == CCORD_CHANNEL_VOICE || tmp[j].kind == CCORD_CHANNEL_STAGE) &&
+              tmp[j].parent_id == cat_id) {
+            d->channels[slots[out++]] = tmp[j];
+            placed[j] = true;
+          }
+        }
+      }
+    }
+
+    // 4. Any remaining channels.
+    for (size_t i = 0; i < m; i++) {
+      if (!placed[i]) {
+        d->channels[slots[out++]] = tmp[i];
+        placed[i] = true;
       }
     }
   }
 
-  // 4. Any remaining channels.
-  for (size_t i = 0; i < m; i++) {
-    if (!placed[i]) {
-      d->channels[slots[out++]] = tmp[i];
-      placed[i] = true;
+  // The guild's slot positions in d->channels did not change (chan_ix stays valid); update chan_by_id for those m slots.
+  if (d->chan_ix_ok) {
+    for (size_t i = 0; i < m; i++) {
+      if (!ccord_idmap_put(&d->chan_by_id, d->channels[slots[i]].id, slots[i])) {
+        d->chan_ix_ok = false;
+        break;
+      }
     }
   }
+
+  ccord_free(slots);
+  ccord_free(tmp);
+  ccord_free(placed);
 }
 
 ccord_status ccord_store_set_snapshot(ccord_store *s, const ccord_snapshot *snap, ccord_error *err)
@@ -946,11 +1252,13 @@ ccord_status ccord_store_set_snapshot_ex(ccord_store *s, const ccord_snapshot *s
   ccord_store_user_reset(s);    // a new READY brings its own account settings
   events_clear(s);              // scheduled events belong to the old connection's guilds (saved bookmarks are local and stay)
 
+  // Index first so each guild sort touches only its own channels in O(m log m) instead of scanning all C_total.
+  channels_reindex(&fresh);
   for (size_t i = 0; i < fresh.nguilds; i++) {
     sort_guild_channels(&fresh, fresh.guilds[i].id);
   }
   sort_guild_channels(&fresh, CCORD_DM_GUILD_ID);
-  channels_reindex(&fresh);   // positions changed
+  if (!fresh.chan_ix_ok) channels_reindex(&fresh);
 
   ccord_id old_guild = s->sel_guild, old_channel = s->sel_channel;
   ccord_id guild = old_guild, channel = old_channel;
@@ -1005,6 +1313,7 @@ ccord_status ccord_store_set_snapshot_ex(ccord_store *s, const ccord_snapshot *s
     ccord_free(s->hist[i].msgs);
   }
   s->nhist = kept;
+  hist_reindex(s);
   s->ntyping = 0;
   voice_servers_clear(s);
   s->has_stream = false;
@@ -1093,9 +1402,8 @@ ccord_status ccord_store_select_channel(ccord_store *s, ccord_id channel_id, cco
 
 static history *history_for(ccord_store *s, ccord_id channel_id, ccord_error *err)
 {
-  for (size_t i = 0; i < s->nhist; i++) {
-    if (s->hist[i].channel_id == channel_id) return &s->hist[i];
-  }
+  history *existing = find_history(s, channel_id);
+  if (existing) return existing;
   if (s->nhist == s->caphist) {
     size_t ncap = s->caphist ? s->caphist * 2 : 8;
     history *g = ccord_realloc_array(s->hist, ncap, sizeof *g);
@@ -1106,8 +1414,12 @@ static history *history_for(ccord_store *s, ccord_id channel_id, ccord_error *er
     s->hist = g;
     s->caphist = ncap;
   }
-  history *h = &s->hist[s->nhist++];
+  size_t idx = s->nhist++;
+  history *h = &s->hist[idx];
   *h = (history){.channel_id = channel_id};
+  if (s->hist_ix_ok && channel_id != CCORD_ID_NONE && !ccord_idmap_put(&s->hist_by_chan, channel_id, idx)) {
+    s->hist_ix_ok = false;
+  }
   return h;
 }
 
@@ -1146,7 +1458,7 @@ static ccord_reaction *reactions_clone(const ccord_reaction *in, size_t n, ccord
   }
   for (size_t i = 0; i < n; i++) {
     out[i] = in[i];
-    out[i].emoji = ccord_strdup(in[i].emoji);
+    out[i].emoji = dup_cstr(in[i].emoji);
     if (!out[i].emoji) {
       for (size_t k = 0; k < i; k++) free_cstr(&out[k].emoji);
       ccord_free(out);
@@ -1161,7 +1473,7 @@ static ccord_reaction *reactions_clone(const ccord_reaction *in, size_t n, ccord
 static bool msg_copy(ccord_message *dst, const ccord_message *src, ccord_error *err)
 {
   *dst = *src;
-  dst->content = ccord_strdup(src->content);
+  dst->content = dup_cstr(src->content);
   if (!dst->content) {
     ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
     return false;
@@ -1321,30 +1633,52 @@ ccord_status ccord_store_set_history(ccord_store *s, ccord_id channel_id, const 
     return ccord_error_set(err, CCORD_ERR_RANGE, "store: channel history limit exceeded");
   }
 
-  // merge with existing (incoming wins on equal ids)
-  size_t cap = h->n + nin;
-  ccord_message *out = ccord_alloc_array(cap ? cap : 1, sizeof *out);
-  if (!out) {
-    for (size_t k = 0; k < nin; k++) msg_free(&in[k]);
-    ccord_free(in);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  }
-  size_t i = 0, j = 0, o = 0;
-  while (i < h->n || j < nin) {
-    if (j >= nin || (i < h->n && h->msgs[i].id < in[j].id)) {
-      out[o++] = h->msgs[i++];
-    } else if (i >= h->n || in[j].id < h->msgs[i].id) {
-      out[o++] = in[j++];
-    } else {
-      msg_free(&h->msgs[i++]);
-      out[o++] = in[j++];
+  // merge with existing (incoming wins on equal ids), growing h->cap geometrically
+  size_t need = h->n + nin;
+  if (need <= h->cap && h->msgs != nullptr) {
+    size_t keep = 0, j = 0;
+    for (size_t i = 0; i < h->n; i++) {
+      while (j < nin && in[j].id < h->msgs[i].id) j++;
+      if (j < nin && in[j].id == h->msgs[i].id) {
+        msg_free(&h->msgs[i]);
+      } else {
+        h->msgs[keep++] = h->msgs[i];
+      }
     }
+    size_t total = keep + nin;
+    size_t a = keep, b = nin, o = total;
+    while (b > 0) {
+      if (a > 0 && h->msgs[a - 1].id > in[b - 1].id) h->msgs[--o] = h->msgs[--a];
+      else h->msgs[--o] = in[--b];
+    }
+    ccord_free(in);
+    h->n = total;
+  } else {
+    size_t cap = next_cap_geom(h->cap, need ? need : 1u, 16u);
+    if (cap > CCORD_MAX_MESSAGES_PER_CHANNEL) cap = CCORD_MAX_MESSAGES_PER_CHANNEL;
+    ccord_message *out = ccord_alloc_array(cap, sizeof *out);
+    if (!out) {
+      for (size_t k = 0; k < nin; k++) msg_free(&in[k]);
+      ccord_free(in);
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    }
+    size_t i = 0, j = 0, o = 0;
+    while (i < h->n || j < nin) {
+      if (j >= nin || (i < h->n && h->msgs[i].id < in[j].id)) {
+        out[o++] = h->msgs[i++];
+      } else if (i >= h->n || in[j].id < h->msgs[i].id) {
+        out[o++] = in[j++];
+      } else {
+        msg_free(&h->msgs[i++]);
+        out[o++] = in[j++];
+      }
+    }
+    ccord_free(h->msgs);
+    ccord_free(in);
+    h->msgs = out;
+    h->n = o;
+    h->cap = cap;
   }
-  ccord_free(h->msgs);
-  ccord_free(in);
-  h->msgs = out;
-  h->n = o;
-  h->cap = cap;
   h->loaded = true;
   h->stale = false;
   h->stale_max_id = CCORD_ID_NONE;
@@ -1550,7 +1884,12 @@ const ccord_member *ccord_store_member_at(const ccord_store *s, ccord_id guild_i
 
 static history *find_history(const ccord_store *s, ccord_id channel_id)
 {
-  for (size_t i = 0; s && i < s->nhist; i++) if (s->hist[i].channel_id == channel_id) return &s->hist[i];
+  if (!s) return nullptr;
+  if (s->hist_ix_ok && channel_id != CCORD_ID_NONE) {
+    size_t at = 0;
+    return ccord_idmap_find(&s->hist_by_chan, channel_id, &at) ? &s->hist[at] : nullptr;
+  }
+  for (size_t i = 0; i < s->nhist; i++) if (s->hist[i].channel_id == channel_id) return &s->hist[i];
   return nullptr;
 }
 
@@ -1641,7 +1980,7 @@ ccord_status ccord_store_update_message(ccord_store *s, const ccord_message *m, 
 
   // An update that did not carry the text (a link preview, a flag) leaves the stored text, and is not an edit.
   bool keep_text = m->omit_content || (m->rich && m->rich->text_absent);
-  char *content = ccord_strdup(keep_text ? old->content : updated.content);
+  const char *content = dup_cstr(keep_text ? old->content : updated.content);
   if (!content) {
     if (merged) ccord_message_rich_free(merged);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
@@ -1650,7 +1989,7 @@ ccord_status ccord_store_update_message(ccord_store *s, const ccord_message *m, 
   if (m->reaction_kind_count) {
     new_reactions = reactions_clone(m->reactions, m->reaction_kind_count, err);
     if (!new_reactions) {
-      ccord_free(content);
+      free_cstr(&content);
       if (merged) ccord_message_rich_free(merged);
       return err && err->code != CCORD_OK ? err->code : CCORD_ERR_NOMEM;
     }
@@ -1755,22 +2094,70 @@ ccord_status ccord_store_delete_messages_bulk(ccord_store *s, ccord_id channel_i
   long ci = find_channel(&s->d, channel_id);
   if (ci < 0) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown channel");
   history *h = find_history(s, channel_id);
+  if (!h || h->n == 0 || count == 0) return CCORD_OK;
+
+  bool dead_stack[256];
+  bool *dead = nullptr;
+  bool *dead_heap = nullptr;
+  if (h->n <= sizeof dead_stack / sizeof dead_stack[0]) {
+    memset(dead_stack, 0, h->n * sizeof dead_stack[0]);
+    dead = dead_stack;
+  } else {
+    dead_heap = ccord_calloc(h->n, sizeof *dead_heap);
+    dead = dead_heap;
+  }
+  if (!dead) {
+    // OOM fallback: delete one by one as before so bulk delete never fails due to scratch allocation.
+    for (size_t i = 0; i < count; i++) {
+      ccord_id message_id = message_ids[i];
+      if (message_id == CCORD_ID_NONE) continue;
+      long mi = find_msg_index(h, message_id);
+      if (mi < 0) continue;
+      unread_forget_message(s, &s->d.channels[ci], &h->msgs[mi]);
+      pins_remove_msg(s, channel_id, message_id);
+      msg_free(&h->msgs[mi]);
+      memmove(&h->msgs[mi], &h->msgs[mi + 1], (h->n - (size_t)mi - 1) * sizeof *h->msgs);
+      h->n--;
+      ccord_id newest_before = s->d.channels[ci].last_message_id;
+      unread_settle_after_delete(&s->d.channels[ci], h, message_id);
+      if (s->d.channels[ci].guild_id == CCORD_DM_GUILD_ID && s->d.channels[ci].last_message_id != newest_before) {
+        s->revision++;
+      } else {
+        bump_traffic(s);
+      }
+      post(s, CCORD_EVT_MESSAGE_DELETE, s->d.channels[ci].guild_id, channel_id, message_id, CCORD_ID_NONE, 0);
+    }
+    return CCORD_OK;
+  }
+
+  ccord_id guild_id = s->d.channels[ci].guild_id;
+  ccord_id newest_before = s->d.channels[ci].last_message_id;
+  bool any_deleted = false;
+  bool deleted_newest = false;
   for (size_t i = 0; i < count; i++) {
     ccord_id message_id = message_ids[i];
     if (message_id == CCORD_ID_NONE) continue;
     long mi = find_msg_index(h, message_id);
-    if (mi < 0) continue;
+    if (mi < 0 || dead[mi]) continue;
+    dead[mi] = true;
+    any_deleted = true;
+    if (message_id == newest_before) deleted_newest = true;
     unread_forget_message(s, &s->d.channels[ci], &h->msgs[mi]);
     pins_remove_msg(s, channel_id, message_id);
-    msg_free(&h->msgs[mi]);
-    memmove(&h->msgs[mi], &h->msgs[mi + 1], (h->n - (size_t)mi - 1) * sizeof *h->msgs);
-    h->n--;
-    ccord_id newest_before = s->d.channels[ci].last_message_id;
-    unread_settle_after_delete(&s->d.channels[ci], h, message_id);
-    if (s->d.channels[ci].guild_id == CCORD_DM_GUILD_ID && s->d.channels[ci].last_message_id != newest_before) s->revision++;
-    else bump_traffic(s);
-    post(s, CCORD_EVT_MESSAGE_DELETE, s->d.channels[ci].guild_id, channel_id, message_id, CCORD_ID_NONE, 0);
+    post(s, CCORD_EVT_MESSAGE_DELETE, guild_id, channel_id, message_id, CCORD_ID_NONE, 0);
   }
+  if (any_deleted) {
+    size_t w = 0;
+    for (size_t i = 0; i < h->n; i++) {
+      if (dead[i]) msg_free(&h->msgs[i]);
+      else h->msgs[w++] = h->msgs[i];
+    }
+    h->n = w;
+    unread_settle_after_delete(&s->d.channels[ci], h, deleted_newest ? newest_before : CCORD_ID_NONE);
+    if (guild_id == CCORD_DM_GUILD_ID && s->d.channels[ci].last_message_id != newest_before) s->revision++;
+    else bump_traffic(s);
+  }
+  ccord_free(dead_heap);
   return CCORD_OK;
 }
 
@@ -1872,41 +2259,67 @@ ccord_status ccord_store_set_reaction_ex(ccord_store *s, ccord_id channel_id, cc
   if (burst_count == 0) me_burst = false;
   if (count == 0) self_reacted = false;
 
-  ccord_reaction out[CCORD_MAX_REACTIONS_PER_MESSAGE];
-  size_t n = 0;
-  bool replaced = false;
+  union { const ccord_reaction *c; ccord_reaction *v; } ru = {.c = m->reactions};
+  ccord_reaction *rs = ru.v;
+  size_t found_i = SIZE_MAX;
   for (size_t i = 0; i < m->reaction_kind_count; i++) {
-    if (reaction_emoji_eq(m->reactions[i].emoji, emoji)) {
-      replaced = true;
-      if (count == 0) continue;
+    if (reaction_emoji_eq(rs[i].emoji, emoji)) {
+      found_i = i;
+      break;
+    }
+  }
+  if (found_i != SIZE_MAX) {
+    if (count == 0) {
+      // Remove all entries matching this emoji in place without reallocating or duplicating the rest.
+      size_t w = 0;
+      for (size_t i = 0; i < m->reaction_kind_count; i++) {
+        if (reaction_emoji_eq(rs[i].emoji, emoji)) {
+          free_cstr(&rs[i].emoji);
+        } else {
+          rs[w++] = rs[i];
+        }
+      }
+      m->reaction_kind_count = w;
+      if (w == 0) {
+        ccord_free(rs);
+        m->reactions = nullptr;
+      }
+    } else {
+      // Update existing reaction counts/flags in place; only replace the emoji string if canonical form changed.
       ccord_id qid = CCORD_ID_NONE;
       bool qanim = false;
       parse_reaction_emoji_meta(emoji, &qid, &qanim);
-      const char *canon = (qid != CCORD_ID_NONE || m->reactions[i].emoji_id == CCORD_ID_NONE)
-                            ? emoji
-                            : m->reactions[i].emoji;
-      ccord_id eid = qid != CCORD_ID_NONE ? qid : m->reactions[i].emoji_id;
-      bool anim = qanim || m->reactions[i].animated;
-      out[n++] = (ccord_reaction){
-        .emoji = canon,
-        .emoji_id = eid,
-        .count = count,
-        .burst_count = burst_count,
-        .self_reacted = self_reacted,
-        .me_burst = me_burst,
-        .animated = anim,
-      };
-    } else {
-      out[n++] = m->reactions[i];
+      bool replace_str = (qid != CCORD_ID_NONE || rs[found_i].emoji_id == CCORD_ID_NONE) &&
+                         strcmp(rs[found_i].emoji, emoji) != 0;
+      if (replace_str) {
+        const char *dup = dup_cstr(emoji);
+        if (!dup) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+        free_cstr(&rs[found_i].emoji);
+        rs[found_i].emoji = dup;
+      }
+      if (qid != CCORD_ID_NONE) rs[found_i].emoji_id = qid;
+      if (qanim) rs[found_i].animated = true;
+      rs[found_i].count = count;
+      rs[found_i].burst_count = burst_count;
+      rs[found_i].self_reacted = self_reacted;
+      rs[found_i].me_burst = me_burst;
     }
-  }
-  if (!replaced && count > 0) {
-    if (n >= CCORD_MAX_REACTIONS_PER_MESSAGE) return ccord_error_set(err, CCORD_ERR_RANGE, "store: too many reaction kinds");
+  } else if (count > 0) {
+    if (m->reaction_kind_count >= CCORD_MAX_REACTIONS_PER_MESSAGE) {
+      return ccord_error_set(err, CCORD_ERR_RANGE, "store: too many reaction kinds");
+    }
+    const char *dup = dup_cstr(emoji);
+    if (!dup) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    ccord_reaction *grown = ccord_realloc_array(rs, m->reaction_kind_count + 1u, sizeof *grown);
+    if (!grown) {
+      free_cstr(&dup);
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    }
     ccord_id eid = CCORD_ID_NONE;
     bool anim = false;
     parse_reaction_emoji_meta(emoji, &eid, &anim);
-    out[n++] = (ccord_reaction){
-      .emoji = emoji,
+    grown[m->reaction_kind_count++] = (ccord_reaction){
+      .emoji = dup,
       .emoji_id = eid,
       .count = count,
       .burst_count = burst_count,
@@ -1914,33 +2327,15 @@ ccord_status ccord_store_set_reaction_ex(ccord_store *s, ccord_id channel_id, cc
       .me_burst = me_burst,
       .animated = anim,
     };
+    m->reactions = grown;
   }
-  // The temporary array borrows existing emoji strings; clone the final set.
-  ccord_reaction *copy = n ? ccord_alloc_array(n, sizeof *copy) : nullptr;
-  if (n && !copy) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  for (size_t i = 0; i < n; i++) {
-    copy[i] = out[i];
-    copy[i].emoji = ccord_strdup(out[i].emoji);
-    if (!copy[i].emoji) {
-      for (size_t k = 0; k < i; k++) free_cstr(&copy[k].emoji);
-      ccord_free(copy);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-    }
-  }
-  // Free the previous breakdown before replacing it.
-  if (m->reactions) {
-    union { const ccord_reaction *c; ccord_reaction *v; } u = {.c = m->reactions};
-    for (size_t i = 0; i < m->reaction_kind_count; i++) free_cstr(&u.v[i].emoji);
-    ccord_free(u.v);
-  }
+
   uint32_t total = 0;
   bool me = false;
-  for (size_t i = 0; i < n; i++) {
-    total += copy[i].count;
-    if (copy[i].self_reacted || copy[i].me_burst) me = true;
+  for (size_t i = 0; i < m->reaction_kind_count; i++) {
+    total += m->reactions[i].count;
+    if (m->reactions[i].self_reacted || m->reactions[i].me_burst) me = true;
   }
-  m->reactions = copy;
-  m->reaction_kind_count = n;
   m->reaction_count = total;
   m->self_reacted = me;
   bump_traffic(s);
@@ -2409,12 +2804,12 @@ ccord_status ccord_store_update_presence(ccord_store *s, ccord_id user_id, ccord
     if (found >= 0) ui = (size_t)found;
     if (ui == s->d.nusers) return ccord_error_set(err, CCORD_ERR_INTERNAL, "store: stub user missing");
   }
-  char *copy = nullptr;
+  const char *copy = nullptr;
   if (status_text) {
     if (!store_text_ok(status_text, CCORD_STORE_STATUS_MAX_BYTES)) {
       return ccord_error_set(err, CCORD_ERR_INVALID, "store: status text");
     }
-    copy = ccord_strdup(status_text);
+    copy = dup_cstr(status_text);
     if (!copy) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
   if (copy) {
@@ -2561,21 +2956,21 @@ ccord_status ccord_store_upsert_user(ccord_store *s, const ccord_user *user, cco
       return CCORD_OK;
     }
   }
-  char *name = ccord_strdup(name_src);
-  char *handle = ccord_strdup(handle_src ? handle_src : "");
-  char *text = ccord_strdup(status_src ? status_src : "");
-  char *avatar = ccord_strdup(avatar_src ? avatar_src : "");
-  char *banner = ccord_strdup(banner_src ? banner_src : "");
-  char *bio = ccord_strdup(bio_src ? bio_src : "");
-  char *pronouns = ccord_strdup(pronouns_src ? pronouns_src : "");
+  const char *name = dup_cstr(name_src);
+  const char *handle = dup_cstr(handle_src);
+  const char *text = dup_cstr(status_src);
+  const char *avatar = dup_cstr(avatar_src);
+  const char *banner = dup_cstr(banner_src);
+  const char *bio = dup_cstr(bio_src);
+  const char *pronouns = dup_cstr(pronouns_src);
   if (!name || !handle || !text || !avatar || !banner || !bio || !pronouns) {
-    ccord_free(name);
-    ccord_free(handle);
-    ccord_free(text);
-    ccord_free(avatar);
-    ccord_free(banner);
-    ccord_free(bio);
-    ccord_free(pronouns);
+    free_cstr(&name);
+    free_cstr(&handle);
+    free_cstr(&text);
+    free_cstr(&avatar);
+    free_cstr(&banner);
+    free_cstr(&bio);
+    free_cstr(&pronouns);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
   ccord_user copy = *user;
@@ -2627,23 +3022,24 @@ ccord_status ccord_store_upsert_user(ccord_store *s, const ccord_user *user, cco
     free_cstr(&s->d.users[ui].pronouns);
     s->d.users[ui] = copy;
   } else {
-    ccord_user *grown = ccord_realloc_array(s->d.users, s->d.nusers + 1, sizeof *grown);
-    if (!grown) {
-      ccord_free(name);
-      ccord_free(handle);
-      ccord_free(text);
-      ccord_free(avatar);
-      ccord_free(banner);
-      ccord_free(bio);
-      ccord_free(pronouns);
+    if (!ensure_users(&s->d, s->d.nusers + 1u)) {
+      free_cstr(&name);
+      free_cstr(&handle);
+      free_cstr(&text);
+      free_cstr(&avatar);
+      free_cstr(&banner);
+      free_cstr(&bio);
+      free_cstr(&pronouns);
       return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
     }
-    s->d.users = grown;
     s->d.users[s->d.nusers++] = copy;
     users_index_add(&s->d, s->d.nusers - 1);
   }
   if (copy.name && copy.name[0] != '\0' && strncmp(copy.name, "User ", 5) != 0) {
-    for (size_t k = 0; k < s->d.nchannels; k++) {
+    size_t dm_count = s->d.chan_ix_ok ? store_index_count(&s->d.chan_ix, CCORD_DM_GUILD_ID) : s->d.nchannels;
+    for (size_t di = 0; di < dm_count; di++) {
+      size_t k = di;
+      if (s->d.chan_ix_ok && !store_index_at(&s->d.chan_ix, CCORD_DM_GUILD_ID, di, &k)) continue;
       ccord_channel *ch = &s->d.channels[k];
       if (ch->guild_id != CCORD_DM_GUILD_ID) continue;
       if (ch->discord_type == CCORD_DISCORD_CHANNEL_GROUP_DM) {
@@ -2678,7 +3074,7 @@ ccord_status ccord_store_upsert_user(ccord_store *s, const ccord_user *user, cco
               gname[off] = '\0';
             }
             if (off > 0) {
-              char *dup_gname = ccord_strdup(gname);
+              const char *dup_gname = dup_cstr(gname);
               if (dup_gname) {
                 free_cstr(&ch->name);
                 ch->name = dup_gname;
@@ -2690,14 +3086,14 @@ ccord_status ccord_store_upsert_user(ccord_store *s, const ccord_user *user, cco
       }
       if (ch->user_id != copy.id) continue;
       if (!ch->name || strcmp(ch->name, "Direct Message") == 0 || strncmp(ch->name, "User ", 5) == 0) {
-        char *dup_name = ccord_strdup(copy.name);
+        const char *dup_name = dup_cstr(copy.name);
         if (dup_name) {
           free_cstr(&ch->name);
           ch->name = dup_name;
         }
       }
       if ((!ch->icon_url || ch->icon_url[0] == '\0') && copy.avatar_url && copy.avatar_url[0] != '\0') {
-        char *dup_icon = ccord_strdup(copy.avatar_url);
+        const char *dup_icon = dup_cstr(copy.avatar_url);
         if (dup_icon) {
           free_cstr(&ch->icon_url);
           ch->icon_url = dup_icon;
@@ -2765,19 +3161,19 @@ ccord_status ccord_store_upsert_user_profile(ccord_store *s, const ccord_user_pr
     has_accent = true;
   }
 
-  char *p_display = ccord_strdup(display_src ? display_src : "");
-  char *p_handle = ccord_strdup(handle_src ? handle_src : "");
-  char *p_avatar = ccord_strdup(avatar_src ? avatar_src : "");
-  char *p_banner = ccord_strdup(banner_src ? banner_src : "");
-  char *p_bio = ccord_strdup(bio_src ? bio_src : "");
-  char *p_pronouns = ccord_strdup(pronouns_src ? pronouns_src : "");
+  const char *p_display = dup_cstr(display_src);
+  const char *p_handle = dup_cstr(handle_src);
+  const char *p_avatar = dup_cstr(avatar_src);
+  const char *p_banner = dup_cstr(banner_src);
+  const char *p_bio = dup_cstr(bio_src);
+  const char *p_pronouns = dup_cstr(pronouns_src);
   if (!p_display || !p_handle || !p_avatar || !p_banner || !p_bio || !p_pronouns) {
-    ccord_free(p_display);
-    ccord_free(p_handle);
-    ccord_free(p_avatar);
-    ccord_free(p_banner);
-    ccord_free(p_bio);
-    ccord_free(p_pronouns);
+    free_cstr(&p_display);
+    free_cstr(&p_handle);
+    free_cstr(&p_avatar);
+    free_cstr(&p_banner);
+    free_cstr(&p_bio);
+    free_cstr(&p_pronouns);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
 
@@ -2791,12 +3187,12 @@ ccord_status ccord_store_upsert_user_profile(ccord_store *s, const ccord_user_pr
   pcopy.bio = p_bio;
   pcopy.pronouns = p_pronouns;
   if (!dup_profile_extra_cstrs(&pcopy, profile)) {
-    ccord_free(p_display);
-    ccord_free(p_handle);
-    ccord_free(p_avatar);
-    ccord_free(p_banner);
-    ccord_free(p_bio);
-    ccord_free(p_pronouns);
+    free_cstr(&p_display);
+    free_cstr(&p_handle);
+    free_cstr(&p_avatar);
+    free_cstr(&p_banner);
+    free_cstr(&p_bio);
+    free_cstr(&p_pronouns);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
   if (pcopy.clan_tag[0] == '\0') {
@@ -2821,27 +3217,26 @@ ccord_status ccord_store_upsert_user_profile(ccord_store *s, const ccord_user_pr
     }
   }
   if (pi >= 0) {
-    free_cstr(&s->d.profiles[pi].display_name);
-    free_cstr(&s->d.profiles[pi].handle);
-    free_cstr(&s->d.profiles[pi].avatar_url);
-    free_cstr(&s->d.profiles[pi].banner_url);
-    free_cstr(&s->d.profiles[pi].bio);
-    free_cstr(&s->d.profiles[pi].pronouns);
-    free_profile_extra_cstrs(&s->d.profiles[pi]);
-    s->d.profiles[pi] = pcopy;
+    profile_free(&s->d.profiles[pi]);
+    size_t idx = (size_t)pi;
+    if (idx + 1u < s->d.nprofiles) {
+      memmove(&s->d.profiles[idx], &s->d.profiles[idx + 1u], (s->d.nprofiles - idx - 1u) * sizeof *s->d.profiles);
+    }
+    s->d.profiles[s->d.nprofiles - 1u] = pcopy;   // promote to MRU tail
+  } else if (s->d.nprofiles >= CCORD_STORE_MAX_PROFILES) {
+    // Evict LRU profile (preferring not to evict self_id if it happens to sit at slot 0).
+    size_t victim = (s->d.nprofiles > 1u && s->d.profiles[0].user_id == s->d.self_id) ? 1u : 0u;
+    profile_free(&s->d.profiles[victim]);
+    if (victim + 1u < s->d.nprofiles) {
+      memmove(&s->d.profiles[victim], &s->d.profiles[victim + 1u],
+              (s->d.nprofiles - victim - 1u) * sizeof *s->d.profiles);
+    }
+    s->d.profiles[s->d.nprofiles - 1u] = pcopy;
   } else {
-    ccord_user_profile *grown = ccord_realloc_array(s->d.profiles, s->d.nprofiles + 1, sizeof *grown);
-    if (!grown) {
-      free_profile_extra_cstrs(&pcopy);
-      ccord_free(p_display);
-      ccord_free(p_handle);
-      ccord_free(p_avatar);
-      ccord_free(p_banner);
-      ccord_free(p_bio);
-      ccord_free(p_pronouns);
+    if (!ensure_profiles(&s->d, s->d.nprofiles + 1u)) {
+      profile_free(&pcopy);
       return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
     }
-    s->d.profiles = grown;
     s->d.profiles[s->d.nprofiles++] = pcopy;
   }
 
@@ -2919,10 +3314,9 @@ ccord_status ccord_store_set_relationship(ccord_store *s, ccord_id user_id,
     if (s->d.nrelationships >= CCORD_MAX_RELATIONSHIPS) {
       return ccord_error_set(err, CCORD_ERR_RANGE, "store: relationship cap reached");
     }
-    ccord_relationship *grown =
-      ccord_realloc_array(s->d.relationships, s->d.nrelationships + 1, sizeof *grown);
-    if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-    s->d.relationships = grown;
+    if (!ensure_relationships(&s->d, s->d.nrelationships + 1u)) {
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    }
     s->d.relationships[s->d.nrelationships++] = (ccord_relationship){.user_id = user_id, .kind = kind};
   }
   s->revision++;
@@ -2963,8 +3357,6 @@ static ccord_status upsert_member(ccord_store *s, const ccord_member *member, cc
   if (find_user(&s->d, member->user_id) < 0) {
     return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: member user missing");
   }
-  char *role = ccord_strdup(member->role_name);
-  if (!role) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   long mi = find_member(&s->d, member->guild_id, member->user_id);
   bool eff_mute = (member->omit_mute && mi >= 0 && s->d.members) ? s->d.members[mi].mute : member->mute;
   bool eff_deaf = (member->omit_deaf && mi >= 0 && s->d.members) ? s->d.members[mi].deaf : member->deaf;
@@ -2995,14 +3387,12 @@ static ccord_status upsert_member(ccord_store *s, const ccord_member *member, cc
         (partial ? (member->permissions == 0 || member->permissions == o->permissions)
                  : (o->permissions == member->permissions && o->role_color == member->role_color &&
                     o->role_rank == member->role_rank && strcmp(o->role_name, member->role_name) == 0))) {
-      ccord_free(role);
       return CCORD_OK;   // nothing new about this member: no change, no new revision
     }
   }
   if (mi >= 0) {
     int64_t prev_joined = s->d.members[mi].joined_at_ms;
     if (is_default_member_role(member) && !is_default_member_role(&s->d.members[mi])) {
-      ccord_free(role);
       // The incoming member says nothing about roles (a partial update), so the role we resolved earlier stays.
       // Nickname and timeout are on every member object, so a cleared nickname or a lifted timeout must stick.
       memcpy(s->d.members[mi].nick, member->nick, sizeof member->nick);
@@ -3016,7 +3406,8 @@ static ccord_status upsert_member(ccord_store *s, const ccord_member *member, cc
       s->d.members[mi].pending = eff_pending;
       s->d.members[mi].omit_pending = false;
     } else {
-      free_cstr(&s->d.members[mi].role_name);
+      const char *role = role_pool_intern(&s->d.role_pool, member->role_name);
+      if (!role) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
       s->d.members[mi] = *member;
       s->d.members[mi].role_name = role;
       if (member->joined_at_ms == 0) s->d.members[mi].joined_at_ms = prev_joined;
@@ -3029,15 +3420,13 @@ static ccord_status upsert_member(ccord_store *s, const ccord_member *member, cc
     }
   } else {
     if (ccord_store_member_count(s, member->guild_id) >= CCORD_MAX_MEMBERS_PER_GUILD) {
-      ccord_free(role);
       return ccord_error_set(err, CCORD_ERR_RANGE, "store: too many members in a guild");
     }
-    ccord_member *grown = ccord_realloc_array(s->d.members, s->d.nmembers + 1, sizeof *grown);
-    if (!grown) {
-      ccord_free(role);
+    const char *role = role_pool_intern(&s->d.role_pool, member->role_name);
+    if (!role) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    if (!ensure_members(&s->d, s->d.nmembers + 1u)) {
       return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
     }
-    s->d.members = grown;
     s->d.members[s->d.nmembers] = *member;
     s->d.members[s->d.nmembers].role_name = role;
     s->d.members[s->d.nmembers].mute = eff_mute;
@@ -3055,8 +3444,80 @@ static ccord_status upsert_member(ccord_store *s, const ccord_member *member, cc
 
 static bool dm_channels_present(const store_data *d)
 {
+  if (d->chan_ix_ok) return store_index_count(&d->chan_ix, CCORD_DM_GUILD_ID) > 0;
   for (size_t i = 0; i < d->nchannels; i++) if (d->channels[i].guild_id == CCORD_DM_GUILD_ID) return true;
   return false;
+}
+
+static ccord_status upsert_channel_ex(ccord_store *s, const ccord_channel *channel, bool defer_sort, ccord_error *err);
+
+static ccord_status upsert_guild_users_batch(ccord_store *s, const ccord_user *users, size_t user_count,
+                                             const ccord_member *members, size_t member_count, ccord_error *err)
+{
+  if (user_count == 0) return CCORD_OK;
+  // Pre-reserve users storage so large guild payloads grow once instead of repeatedly.
+  size_t new_users = 0;
+  for (size_t i = 0; i < user_count; i++) {
+    if (users[i].id != CCORD_ID_NONE && find_user(&s->d, users[i].id) < 0) new_users++;
+  }
+  if (new_users > 0) {
+    (void)ensure_users(&s->d, s->d.nusers + new_users);
+    if (s->d.user_ix_ok) (void)ccord_idmap_reserve(&s->d.user_by_id, s->d.nusers + new_users);
+  }
+  // Avoid O(user_count * member_count) join when checking server nicknames against existing global names.
+  ccord_idmap nick_mem = {0};
+  bool use_map = false;
+  if (member_count > 16u && user_count > 1u) {
+    size_t nick_count = 0;
+    for (size_t m = 0; m < member_count; m++) {
+      if (members[m].nick[0] != '\0') nick_count++;
+    }
+    if (nick_count == 0) {
+      use_map = true;   // empty map: skip member scan completely
+    } else if (ccord_idmap_reserve(&nick_mem, nick_count)) {
+      use_map = true;
+      for (size_t m = 0; m < member_count; m++) {
+        if (members[m].nick[0] == '\0') continue;
+        size_t earlier = 0;
+        if (!ccord_idmap_find(&nick_mem, members[m].user_id, &earlier) &&
+            !ccord_idmap_put(&nick_mem, members[m].user_id, m)) {
+          use_map = false;
+          break;
+        }
+      }
+    }
+  }
+  for (size_t i = 0; i < user_count; i++) {
+    ccord_user u = users[i];
+    long ui = find_user(&s->d, u.id);
+    if (ui >= 0 && s->d.users[ui].name && s->d.users[ui].name[0] != '\0' &&
+        strncmp(s->d.users[ui].name, "User ", 5) != 0) {
+      // If a guild member payload replaced u.name with a server-specific nickname, keep the user's
+      // global display name on s->d.users[ui] while storing the nickname on s->d.members[mi].
+      if (use_map) {
+        size_t m = 0;
+        if (nick_mem.count > 0 && ccord_idmap_find(&nick_mem, u.id, &m) &&
+            u.name && strcmp(u.name, members[m].nick) == 0) {
+          u.name = s->d.users[ui].name;
+        }
+      } else {
+        for (size_t m = 0; m < member_count; m++) {
+          if (members[m].user_id == u.id && members[m].nick[0] != '\0' &&
+              u.name && strcmp(u.name, members[m].nick) == 0) {
+            u.name = s->d.users[ui].name;
+            break;
+          }
+        }
+      }
+    }
+    ccord_status st = ccord_store_upsert_user(s, &u, err);
+    if (st != CCORD_OK) {
+      ccord_idmap_free(&nick_mem);
+      return st;
+    }
+  }
+  ccord_idmap_free(&nick_mem);
+  return CCORD_OK;
 }
 
 ccord_status ccord_store_upsert_guild_members(ccord_store *s, ccord_id guild_id, const ccord_member *members,
@@ -3072,23 +3533,13 @@ ccord_status ccord_store_upsert_guild_members(ccord_store *s, ccord_id guild_id,
   if ((member_count && !members) || (user_count && !users)) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: null guild array");
   }
-  for (size_t i = 0; i < user_count; i++) {
-    ccord_user u = users[i];
-    long ui = find_user(&s->d, u.id);
-    if (ui >= 0 && s->d.users[ui].name && s->d.users[ui].name[0] != '\0' &&
-        strncmp(s->d.users[ui].name, "User ", 5) != 0) {
-      // If a guild member payload replaced u.name with a server-specific nickname, keep the user's
-      // global display name on s->d.users[ui] while storing the nickname on s->d.members[mi].
-      for (size_t m = 0; m < member_count; m++) {
-        if (members[m].user_id == u.id && members[m].nick[0] != '\0' &&
-            u.name && strcmp(u.name, members[m].nick) == 0) {
-          u.name = s->d.users[ui].name;
-          break;
-        }
-      }
-    }
-    ccord_status st = ccord_store_upsert_user(s, &u, err);
-    if (st != CCORD_OK) return st;
+  ccord_status ust = upsert_guild_users_batch(s, users, user_count, members, member_count, err);
+  if (ust != CCORD_OK) return ust;
+  if (member_count > 1u) {
+    size_t cur_guild = ccord_store_member_count(s, guild_id);
+    size_t room = cur_guild < CCORD_MAX_MEMBERS_PER_GUILD ? CCORD_MAX_MEMBERS_PER_GUILD - cur_guild : 0u;
+    size_t add = member_count < room ? member_count : room;
+    if (add > 0) (void)ensure_members(&s->d, s->d.nmembers + add);
   }
   for (size_t i = 0; i < member_count; i++) {
     if (members[i].guild_id != guild_id) return ccord_error_set(err, CCORD_ERR_INVALID, "store: member in wrong guild");
@@ -3118,35 +3569,19 @@ ccord_status ccord_store_upsert_guild(ccord_store *s, const ccord_guild *guild, 
   if (channel_count > CCORD_MAX_CHANNELS_PER_GUILD || member_count > CCORD_MAX_MEMBERS_PER_GUILD) {
     return ccord_error_set(err, CCORD_ERR_RANGE, "store: guild payload too large");
   }
-  for (size_t i = 0; i < user_count; i++) {
-    ccord_user u = users[i];
-    long ui = find_user(&s->d, u.id);
-    if (ui >= 0 && s->d.users[ui].name && s->d.users[ui].name[0] != '\0' &&
-        strncmp(s->d.users[ui].name, "User ", 5) != 0) {
-      // If a guild member payload replaced u.name with a server-specific nickname, keep the user's
-      // global display name on s->d.users[ui] while storing the nickname on s->d.members[mi].
-      for (size_t m = 0; m < member_count; m++) {
-        if (members[m].user_id == u.id && members[m].nick[0] != '\0' &&
-            u.name && strcmp(u.name, members[m].nick) == 0) {
-          u.name = s->d.users[ui].name;
-          break;
-        }
-      }
-    }
-    ccord_status st = ccord_store_upsert_user(s, &u, err);
-    if (st != CCORD_OK) return st;
-  }
+  ccord_status ust = upsert_guild_users_batch(s, users, user_count, members, member_count, err);
+  if (ust != CCORD_OK) return ust;
 
   long gi = find_guild(&s->d, guild->id);
   const char *icon_src = guild->icon_url;
   if ((!icon_src || icon_src[0] == '\0') && !guild->has_guild_settings && gi >= 0 && s->d.guilds[gi].icon_url) {
     icon_src = s->d.guilds[gi].icon_url;
   }
-  char *name = ccord_strdup(guild->name);
-  char *icon = ccord_strdup(icon_src ? icon_src : "");
+  const char *name = dup_cstr(guild->name);
+  const char *icon = dup_cstr(icon_src);
   if (!name || !icon) {
-    ccord_free(name);
-    ccord_free(icon);
+    free_cstr(&name);
+    free_cstr(&icon);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
   if (gi >= 0) {
@@ -3189,24 +3624,15 @@ ccord_status ccord_store_upsert_guild(ccord_store *s, const ccord_guild *guild, 
   } else {
     size_t cap = dm_channels_present(&s->d) ? CCORD_MAX_REAL_GUILDS : CCORD_MAX_GUILDS;
     if (s->d.nguilds >= cap) {
-      ccord_free(name);
-      ccord_free(icon);
+      free_cstr(&name);
+      free_cstr(&icon);
       return ccord_error_set(err, CCORD_ERR_RANGE, "store: guild cap reached");
     }
-    ccord_id *last = ccord_realloc_array(s->d.guild_last, s->d.nguilds + 1, sizeof *last);
-    if (!last) {
-      ccord_free(name);
-      ccord_free(icon);
+    if (!ensure_guilds(&s->d, s->d.nguilds + 1u)) {
+      free_cstr(&name);
+      free_cstr(&icon);
       return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
     }
-    s->d.guild_last = last;
-    ccord_guild *grown = ccord_realloc_array(s->d.guilds, s->d.nguilds + 1, sizeof *grown);
-    if (!grown) {
-      ccord_free(name);
-      ccord_free(icon);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-    }
-    s->d.guilds = grown;
     gi = (long)s->d.nguilds;
     s->d.guilds[gi] = *guild;
     s->d.guilds[gi].name = name;
@@ -3237,10 +3663,16 @@ ccord_status ccord_store_upsert_guild(ccord_store *s, const ccord_guild *guild, 
       break;
     }
   }
+  if (channel_count > 1u) (void)ensure_channels(&s->d, s->d.nchannels + channel_count);
+  bool any_chan = false;
   if (linear_ok) {
     for (size_t i = 0; i < channel_count; i++) {
-      ccord_status st = ccord_store_upsert_channel(s, &channels[i], err);
-      if (st != CCORD_OK) return st;
+      ccord_status st = upsert_channel_ex(s, &channels[i], true, err);
+      if (st != CCORD_OK) {
+        if (any_chan) resort_channels(&s->d, guild->id);
+        return st;
+      }
+      any_chan = true;
     }
   } else {
     for (int pass = 0; pass < 3; pass++) {
@@ -3254,11 +3686,17 @@ ccord_status ccord_store_upsert_guild(ccord_store *s, const ccord_guild *guild, 
           bool parent_is_cat = pi >= 0 && s->d.channels[pi].kind == CCORD_CHANNEL_CATEGORY;
           if ((pass == 1) != parent_is_cat) continue;
         }
-        ccord_status st = ccord_store_upsert_channel(s, c, err);
-        if (st != CCORD_OK) return st;
+        ccord_status st = upsert_channel_ex(s, c, true, err);
+        if (st != CCORD_OK) {
+          if (any_chan) resort_channels(&s->d, guild->id);
+          return st;
+        }
+        any_chan = true;
       }
     }
   }
+  if (any_chan) resort_channels(&s->d, guild->id);
+  if (member_count > 1u) (void)ensure_members(&s->d, s->d.nmembers + member_count);
   for (size_t i = 0; i < member_count; i++) {
     if (members[i].guild_id != guild->id) return ccord_error_set(err, CCORD_ERR_INVALID, "store: member in wrong guild");
     ccord_status st = upsert_member(s, &members[i], err);
@@ -3299,38 +3737,47 @@ ccord_status ccord_store_delete_guild(ccord_store *s, ccord_id guild_id, ccord_e
   ccord_store_voice_forget_guild(s, guild_id);   // before the channels go, so status rows can be matched
   event_bucket_drop(s, guild_id);
 
-  for (size_t i = s->d.nchannels; i-- > 0;) {
-    if (s->d.channels[i].guild_id != guild_id) continue;
-    ccord_error ignored;
-    (void)ccord_store_delete_channel(s, s->d.channels[i].id, &ignored);
-  }
-  for (size_t i = 0; i < s->d.nmembers;) {
-    if (s->d.members[i].guild_id != guild_id) {
-      i++;
+  // Compact deleted channels in a single O(C_total) pass, then reindex once.
+  size_t ch_w = 0;
+  for (size_t i = 0; i < s->d.nchannels; i++) {
+    if (s->d.channels[i].guild_id != guild_id) {
+      s->d.channels[ch_w++] = s->d.channels[i];
       continue;
     }
-    free_cstr(&s->d.members[i].role_name);
-    memmove(&s->d.members[i], &s->d.members[i + 1], (s->d.nmembers - i - 1) * sizeof *s->d.members);
-    s->d.nmembers--;
+    ccord_id ch_id = s->d.channels[i].id;
+    free_cstr(&s->d.channels[i].name);
+    free_cstr(&s->d.channels[i].topic);
+    free_cstr(&s->d.channels[i].icon_url);
+    history_remove(s, ch_id);
+    typing_remove(s, ch_id, CCORD_ID_NONE);
+    ccord_store_voice_forget_channel(s, ch_id);
+    if (s->sel_channel == ch_id) s->sel_channel = CCORD_ID_NONE;
+    post(s, CCORD_EVT_CHANNEL_DELETE, guild_id, ch_id, CCORD_ID_NONE, CCORD_ID_NONE, 0);
   }
-  members_reindex(&s->d);
-  for (size_t i = 0; i < s->d.nvoices;) {
-    if (s->d.voices[i].guild_id != guild_id) {
-      i++;
-      continue;
-    }
-    memmove(&s->d.voices[i], &s->d.voices[i + 1], (s->d.nvoices - i - 1) * sizeof *s->d.voices);
-    s->d.nvoices--;
+  if (ch_w != s->d.nchannels) {
+    s->d.nchannels = ch_w;
+    channels_reindex(&s->d);
   }
-  for (size_t i = 0; i < s->nservers;) {
-    if (s->servers[i].guild_id != guild_id) {
-      i++;
-      continue;
-    }
-    voice_server_free(&s->servers[i]);
-    memmove(&s->servers[i], &s->servers[i + 1], (s->nservers - i - 1) * sizeof *s->servers);
-    s->nservers--;
+  // Compact deleted members in a single O(M_total) pass, then reindex once (role_name is pool-owned).
+  size_t mem_w = 0;
+  for (size_t i = 0; i < s->d.nmembers; i++) {
+    if (s->d.members[i].guild_id != guild_id) s->d.members[mem_w++] = s->d.members[i];
   }
+  if (mem_w != s->d.nmembers) {
+    s->d.nmembers = mem_w;
+    members_reindex(&s->d);
+  }
+  size_t v_w = 0;
+  for (size_t i = 0; i < s->d.nvoices; i++) {
+    if (s->d.voices[i].guild_id != guild_id) s->d.voices[v_w++] = s->d.voices[i];
+  }
+  s->d.nvoices = v_w;
+  size_t srv_w = 0;
+  for (size_t i = 0; i < s->nservers; i++) {
+    if (s->servers[i].guild_id != guild_id) s->servers[srv_w++] = s->servers[i];
+    else voice_server_free(&s->servers[i]);
+  }
+  s->nservers = srv_w;
   if (s->has_stream && s->stream.guild_id == guild_id) {
     s->has_stream = false;
     memset(&s->stream, 0, sizeof s->stream);
@@ -3369,6 +3816,33 @@ ccord_status ccord_store_set_typing(ccord_store *s, ccord_id channel_id, ccord_i
   if (expires_ms < 0) return ccord_error_set(err, CCORD_ERR_INVALID, "store: typing expiry");
   long ci = find_channel(&s->d, channel_id);
   if (ci < 0) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown channel");
+
+  // Prune expired typing entries in the same clock domain so cancelled typers do not accumulate indefinitely.
+  bool in_unix = expires_ms > CCORD_STORE_TYPING_UNIX_THRESHOLD;
+  int64_t prune_before = -1;
+  if (in_unix) {
+    int64_t now_unix = ccord_clock_unix_ms();
+    if (now_unix > CCORD_STORE_TYPING_UNIX_THRESHOLD &&
+        expires_ms >= now_unix - 60000LL && expires_ms <= now_unix + 60000LL) {
+      prune_before = now_unix;
+    } else if (expires_ms > CCORD_STORE_TYPING_UNIX_THRESHOLD + CCORD_STORE_TYPING_PRUNE_MARGIN_MS) {
+      prune_before = expires_ms - CCORD_STORE_TYPING_PRUNE_MARGIN_MS;
+    }
+  } else if (expires_ms > CCORD_STORE_TYPING_PRUNE_MARGIN_MS) {
+    prune_before = expires_ms - CCORD_STORE_TYPING_PRUNE_MARGIN_MS;
+  }
+  if (prune_before > 0 && s->ntyping > 0) {
+    size_t w = 0;
+    for (size_t i = 0; i < s->ntyping; i++) {
+      const typing_entry *e = &s->typing[i];
+      bool e_unix = e->expires_ms > CCORD_STORE_TYPING_UNIX_THRESHOLD;
+      bool is_target = (e->channel_id == channel_id && e->user_id == user_id);
+      if (!is_target && e_unix == in_unix && e->expires_ms <= prune_before) continue;
+      s->typing[w++] = *e;
+    }
+    s->ntyping = w;
+  }
+
   for (size_t i = 0; i < s->ntyping; i++) {
     if (s->typing[i].channel_id == channel_id && s->typing[i].user_id == user_id) {
       s->typing[i].expires_ms = expires_ms;
@@ -3377,8 +3851,19 @@ ccord_status ccord_store_set_typing(ccord_store *s, ccord_id channel_id, ccord_i
       return CCORD_OK;
     }
   }
+  if (s->ntyping >= CCORD_STORE_MAX_TYPING) {
+    size_t oldest = 0;
+    for (size_t i = 1; i < s->ntyping; i++) {
+      if (s->typing[i].expires_ms < s->typing[oldest].expires_ms) oldest = i;
+    }
+    s->typing[oldest] = (typing_entry){.channel_id = channel_id, .user_id = user_id, .expires_ms = expires_ms};
+    bump_traffic(s);
+    post(s, CCORD_EVT_TYPING_START, s->d.channels[ci].guild_id, channel_id, CCORD_ID_NONE, user_id, expires_ms);
+    return CCORD_OK;
+  }
   if (s->ntyping == s->captyping) {
     size_t ncap = s->captyping ? s->captyping * 2 : 8;
+    if (ncap > CCORD_STORE_MAX_TYPING) ncap = CCORD_STORE_MAX_TYPING;
     typing_entry *grown = ccord_realloc_array(s->typing, ncap, sizeof *grown);
     if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
     s->typing = grown;
@@ -3390,7 +3875,7 @@ ccord_status ccord_store_set_typing(ccord_store *s, ccord_id channel_id, ccord_i
   return CCORD_OK;
 }
 
-ccord_status ccord_store_upsert_channel(ccord_store *s, const ccord_channel *channel, ccord_error *err)
+static ccord_status upsert_channel_ex(ccord_store *s, const ccord_channel *channel, bool defer_sort, ccord_error *err)
 {
   ccord_error_clear(err);
   if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "store: null");
@@ -3509,13 +3994,13 @@ ccord_status ccord_store_upsert_channel(ccord_store *s, const ccord_channel *cha
     last_msg = s->d.channels[ci].last_message_id;
   }
 
-  char *name = ccord_strdup(name_src);
-  char *topic = ccord_strdup(channel->topic);
-  char *icon = ccord_strdup(icon_src ? icon_src : "");
+  const char *name = dup_cstr(name_src);
+  const char *topic = dup_cstr(channel->topic);
+  const char *icon = dup_cstr(icon_src);
   if (!name || !topic || !icon) {
-    ccord_free(name);
-    ccord_free(topic);
-    ccord_free(icon);
+    free_cstr(&name);
+    free_cstr(&topic);
+    free_cstr(&icon);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
   ccord_channel copy = *channel;
@@ -3564,27 +4049,40 @@ ccord_status ccord_store_upsert_channel(ccord_store *s, const ccord_channel *cha
     typing_remove(s, evict_id, CCORD_ID_NONE);
     voice_remove_channel(s, evict_id);
     ci = evict_ci;
+    s->d.chan_ix_ok = false;   // evicted slot's id disappeared from chan_by_id: force full reindex
   }
   if (ci >= 0) {
+    ccord_id old_guild_id = s->d.channels[ci].guild_id;
     free_cstr(&s->d.channels[ci].name);
     free_cstr(&s->d.channels[ci].topic);
     free_cstr(&s->d.channels[ci].icon_url);
     s->d.channels[ci] = copy;
+    if (old_guild_id != copy.guild_id) s->d.chan_ix_ok = false;
   } else {
-    ccord_channel *grown = ccord_realloc_array(s->d.channels, s->d.nchannels + 1, sizeof *grown);
-    if (!grown) {
-      ccord_free(name);
-      ccord_free(topic);
-      ccord_free(icon);
+    if (!ensure_channels(&s->d, s->d.nchannels + 1u)) {
+      free_cstr(&name);
+      free_cstr(&topic);
+      free_cstr(&icon);
       return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
     }
-    s->d.channels = grown;
-    s->d.channels[s->d.nchannels++] = copy;
+    size_t idx = s->d.nchannels++;
+    s->d.channels[idx] = copy;
+    if (s->d.chan_ix_ok) {
+      if (!ccord_idmap_put(&s->d.chan_by_id, copy.id, idx) ||
+          !store_index_add(&s->d.chan_ix, copy.guild_id, CCORD_ID_NONE, idx)) {
+        s->d.chan_ix_ok = false;
+      }
+    }
   }
-  resort_channels(&s->d, copy.guild_id);
+  if (!defer_sort) resort_channels(&s->d, copy.guild_id);
   s->revision++;
   post(s, CCORD_EVT_CHANNEL_UPSERT, copy.guild_id, copy.id, CCORD_ID_NONE, CCORD_ID_NONE, 0);
   return CCORD_OK;
+}
+
+ccord_status ccord_store_upsert_channel(ccord_store *s, const ccord_channel *channel, ccord_error *err)
+{
+  return upsert_channel_ex(s, channel, false, err);
 }
 
 ccord_status ccord_store_delete_channel(ccord_store *s, ccord_id channel_id, ccord_error *err)
@@ -3726,10 +4224,7 @@ static bool voice_channel_ok(const store_data *d, ccord_id guild_id, ccord_id ch
 
 static bool user_known(const store_data *d, ccord_id user_id)
 {
-  for (size_t i = 0; i < d->nusers; i++) {
-    if (d->users[i].id == user_id) return true;
-  }
-  return false;
+  return find_user(d, user_id) >= 0;
 }
 
 ccord_status ccord_store_set_voice_state(ccord_store *s, const ccord_voice_state *state, ccord_error *err)
@@ -3774,9 +4269,9 @@ ccord_status ccord_store_set_voice_state(ccord_store *s, const ccord_voice_state
   if (vi >= 0) {
     s->d.voices[vi] = copy;
   } else {
-    ccord_voice_state *grown = ccord_realloc_array(s->d.voices, s->d.nvoices + 1, sizeof *grown);
-    if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-    s->d.voices = grown;
+    if (!ensure_voices(&s->d, s->d.nvoices + 1u)) {
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    }
     s->d.voices[s->d.nvoices++] = copy;
   }
   s->revision++;
@@ -3800,10 +4295,10 @@ ccord_status ccord_store_set_voice_server(ccord_store *s, const ccord_voice_serv
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: voice server text");
   }
   char *token = ccord_strdup(server->token);
-  char *endpoint = ccord_strdup(server->endpoint);
+  const char *endpoint = dup_cstr(server->endpoint);
   if (!token || !endpoint) {
     if (token) { wipe_bytes(token, strlen(token)); ccord_free(token); }
-    ccord_free(endpoint);
+    free_cstr(&endpoint);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
   size_t i = 0;
@@ -3822,7 +4317,7 @@ ccord_status ccord_store_set_voice_server(ccord_store *s, const ccord_voice_serv
       if (!grown) {
         wipe_bytes(token, strlen(token));
         ccord_free(token);
-        ccord_free(endpoint);
+        free_cstr(&endpoint);
         return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
       }
       s->servers = grown;
@@ -4128,7 +4623,6 @@ ccord_status ccord_store_remove_member(ccord_store *s, ccord_id guild_id, ccord_
   ccord_store_forget_member_roles(s, guild_id, user_id);
   long mi = find_member(&s->d, guild_id, user_id);
   if (mi < 0) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown member");
-  free_cstr(&s->d.members[mi].role_name);
   memmove(&s->d.members[mi], &s->d.members[mi + 1], (s->d.nmembers - (size_t)mi - 1) * sizeof *s->d.members);
   s->d.nmembers--;
   members_reindex(&s->d);
@@ -4245,9 +4739,16 @@ ccord_status ccord_store_set_guild_layout(ccord_store *s, const ccord_guild_fold
 
   if (s->d.nguilds == 0) return CCORD_OK;
 
-  ccord_guild next_g[CCORD_MAX_GUILDS];
-  ccord_id next_last[CCORD_MAX_GUILDS];
-  bool placed[CCORD_MAX_GUILDS] = {0};
+  size_t ng = s->d.nguilds;
+  ccord_guild *next_g = ccord_alloc_array(ng, sizeof *next_g);
+  ccord_id *next_last = ccord_alloc_array(ng, sizeof *next_last);
+  bool *placed = ccord_calloc(ng, sizeof *placed);
+  if (!next_g || !next_last || !placed) {
+    ccord_free(next_g);
+    ccord_free(next_last);
+    ccord_free(placed);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+  }
   size_t out = 0;
 
   for (size_t i = 0; i < count; i++) {
@@ -4269,7 +4770,7 @@ ccord_status ccord_store_set_guild_layout(ccord_store *s, const ccord_guild_fold
     out++;
   }
 
-  for (size_t gi = 0; gi < s->d.nguilds; gi++) {
+  for (size_t gi = 0; gi < ng; gi++) {
     if (!placed[gi]) {
       next_g[out] = s->d.guilds[gi];
       next_last[out] = s->d.guild_last[gi];
@@ -4279,6 +4780,9 @@ ccord_status ccord_store_set_guild_layout(ccord_store *s, const ccord_guild_fold
 
   memcpy(s->d.guilds, next_g, out * sizeof *next_g);
   memcpy(s->d.guild_last, next_last, out * sizeof *next_last);
+  ccord_free(next_g);
+  ccord_free(next_last);
+  ccord_free(placed);
   s->revision++;
   post(s, CCORD_EVT_GUILDS_LOADED, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, (int64_t)s->d.nguilds);
   return CCORD_OK;
@@ -4472,7 +4976,7 @@ ccord_status ccord_store_set_self_custom_status(ccord_store *s, const char *emoj
 
   ccord_user *u = &s->d.users[ui];
   const char *fallback_status = ct_src[0] != '\0' ? ct_src : (u->has_activity ? u->activity_name : "");
-  char *dup_status = ccord_strdup(fallback_status);
+  const char *dup_status = dup_cstr(fallback_status);
   if (!dup_status) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   free_cstr(&u->status_text);
   u->status_text = dup_status;
@@ -4487,7 +4991,7 @@ ccord_status ccord_store_set_self_custom_status(ccord_store *s, const char *emoj
 // Replaces an owned string field; keeps the old value (and returns false) when the copy fails.
 static bool replace_cstr(const char **field, const char *value)
 {
-  char *dup = ccord_strdup(value ? value : "");
+  const char *dup = dup_cstr(value);
   if (!dup) return false;
   free_cstr(field);
   *field = dup;
@@ -4633,7 +5137,7 @@ ccord_status ccord_store_change_dm_recipient(ccord_store *s, ccord_id channel_id
                        (old_default[0] != '\0' && strcmp(ch->name, old_default) == 0);
   if (had_auto_name) {
     const char *target_name = new_default[0] != '\0' ? new_default : "Group DM";
-    char *dup = ccord_strdup(target_name);
+    const char *dup = dup_cstr(target_name);
     if (dup) {
       free_cstr(&ch->name);
       ch->name = dup;

@@ -9,6 +9,9 @@
 
 #include "store_internal.h"
 
+// Private accessor defined in store.c so stage speaker/request counts iterate voices in a single pass.
+extern const ccord_voice_state *ccord_store_voices_raw_(const ccord_store *s, size_t *out_count);
+
 // M5 call / stage / voice-status / Go Live / audio / DAVE state.
 // Rows are few (one DM call per conversation, one stage per stage channel, one status per voice
 // channel, one broadcast per broadcaster) and looked up by id, so each list stays sorted by its
@@ -121,8 +124,13 @@ static int stream_key_cmp(const stream_row *row, ccord_id channel_id, ccord_id u
 static long find_stream(const struct voice_cache *c, ccord_id channel_id, ccord_id user_id)
 {
   if (!c) return -1;
-  for (size_t i = 0; i < c->nstreams; i++) {
-    if (stream_key_cmp(&c->streams[i], channel_id, user_id) == 0) return (long)i;
+  size_t lo = 0, hi = c->nstreams;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    int cmp = stream_key_cmp(&c->streams[mid], channel_id, user_id);
+    if (cmp == 0) return (long)mid;
+    if (cmp < 0) lo = mid + 1u;
+    else hi = mid;
   }
   return -1;
 }
@@ -349,20 +357,27 @@ ccord_status ccord_store_set_stage_request_to_speak(ccord_store *s, ccord_id gui
 
 size_t ccord_store_stage_speaker_count(const ccord_store *s, ccord_id guild_id, ccord_id channel_id)
 {
+  if (!s) return 0;
+  size_t nv = 0;
+  const ccord_voice_state *voices = ccord_store_voices_raw_(s, &nv);
   size_t n = 0;
-  for (size_t i = 0; s && i < ccord_store_voice_count(s, channel_id); i++) {
-    const ccord_voice_state *v = ccord_store_voice_at(s, channel_id, i);
-    if (v && v->guild_id == guild_id && !v->suppress) n++;
+  for (size_t i = 0; i < nv; i++) {
+    if (voices[i].channel_id == channel_id && voices[i].guild_id == guild_id && !voices[i].suppress) n++;
   }
   return n;
 }
 
 size_t ccord_store_stage_request_count(const ccord_store *s, ccord_id guild_id, ccord_id channel_id)
 {
+  if (!s) return 0;
+  size_t nv = 0;
+  const ccord_voice_state *voices = ccord_store_voices_raw_(s, &nv);
   size_t n = 0;
-  for (size_t i = 0; s && i < ccord_store_voice_count(s, channel_id); i++) {
-    const ccord_voice_state *v = ccord_store_voice_at(s, channel_id, i);
-    if (v && v->guild_id == guild_id && v->request_to_speak_timestamp > 0) n++;
+  for (size_t i = 0; i < nv; i++) {
+    if (voices[i].channel_id == channel_id && voices[i].guild_id == guild_id &&
+        voices[i].request_to_speak_timestamp > 0) {
+      n++;
+    }
   }
   return n;
 }
@@ -951,22 +966,17 @@ void ccord_store_voice_forget_channel(ccord_store *s, ccord_id channel_id)
     c->nstatus--;
     changed = true;
   }
-  for (size_t k = 0; k < c->nstreams;) {
-    if (c->streams[k].state.channel_id != channel_id) {
-      k++;
-      continue;
-    }
-    memmove(&c->streams[k], &c->streams[k + 1], (c->nstreams - k - 1u) * sizeof *c->streams);
-    c->nstreams--;
-    changed = true;
+  size_t out = 0;
+  for (size_t k = 0; k < c->nstreams; k++) {
+    if (c->streams[k].state.channel_id != channel_id) c->streams[out++] = c->streams[k];
+    else changed = true;
   }
-  for (size_t k = 0; k < c->nactivities;) {
-    if (c->activities[k].channel_id != channel_id) {
-      k++;
-      continue;
-    }
-    activity_remove_at(c, k);
-    changed = true;
+  c->nstreams = out;
+  out = 0;
+  for (size_t k = 0; k < c->nactivities; k++) {
+    if (c->activities[k].channel_id != channel_id) c->activities[out++] = c->activities[k];
+    else changed = true;
   }
+  c->nactivities = out;
   if (changed) ccord_store_voice_mutated(s);
 }
