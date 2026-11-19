@@ -13,60 +13,94 @@
 #define NAL_TYPE_STAP_A 24
 #define NAL_TYPE_FU_A 28
 
-#define PKT_CAP 16384u                     // packetize scratch buffer (STAP-A / FU-A); larger max_payload is clamped
+#define PKT_CAP 16384u                     // max packetize payload cap (larger max_payload is clamped)
+#define PKT_STACK_CAP 1500u                // MTU-sized stack scratch buffer; larger max_payload uses heap
 #define DEPACK_MAX_AU (8u * 1024u * 1024u) // hard cap on a reassembled access unit
 #define DEPACK_INITIAL_CAP (64u * 1024u)
+#define DEPACK_SHRINK_THRESHOLD (128u * 1024u)
 
 // ===================================================== packetizer =====================================================
+
+typedef struct annexb_nal {
+  const uint8_t *p;
+  size_t len;
+} annexb_nal;
 
 typedef struct annexb_iter {
   const uint8_t *p;
   size_t len;
-  size_t pos;
+  size_t next_sc;     // index of next 00 00 01 start code, or SIZE_MAX when exhausted
+  bool dave_wrapped;
+  bool has_lookahead;
+  annexb_nal la;
 } annexb_iter;
 
 // Finds the next 00 00 01 at or after `from`; returns its index or SIZE_MAX.
 static size_t find_start_code(const uint8_t *p, size_t len, size_t from) {
-  if (len < 3) return SIZE_MAX;
+  if (from > len || len - from < 3u) return SIZE_MAX;
   size_t i = from;
-  while (i + 3 <= len) {
-    if (p[i + 2] > 1) {
-      i += 3;
-    } else if (p[i + 2] == 1 && p[i] == 0 && p[i + 1] == 0) {
-      return i;
+  while (i + 3u <= len) {
+    uint8_t b2 = p[i + 2u];
+    if (b2 > 1u) {
+      i += 3u;
+    } else if (b2 == 1u) {
+      if (p[i] == 0u && p[i + 1u] == 0u) return i;
+      i += 3u;
     } else {
-      i++;
+      i += (p[i + 1u] == 0u) ? 1u : 2u;
     }
   }
   return SIZE_MAX;
 }
 
-// Next non-empty NAL that is not an access unit delimiter.
-static bool next_valid_nal(annexb_iter *it, const uint8_t **nal, size_t *nal_len) {
-  for (;;) {
-    size_t sc = find_start_code(it->p, it->len, it->pos);
-    if (sc == SIZE_MAX) {
-      it->pos = it->len;
-      return false;
-    }
-    size_t start = sc + 3;
+static void annexb_init(annexb_iter *it, const uint8_t *p, size_t len) {
+  it->p = p;
+  it->len = len;
+  it->dave_wrapped = (len >= 4u && p[len - 2u] == 0xFAu && p[len - 1u] == 0xFAu);
+  it->next_sc = find_start_code(p, len, 0);
+  it->has_lookahead = false;
+  it->la = (annexb_nal){nullptr, 0};
+}
+
+// Single-pass forward scan for the next non-empty NAL that is not an access unit delimiter.
+static bool annexb_scan_next(annexb_iter *it, annexb_nal *out) {
+  while (it->next_sc != SIZE_MAX) {
+    size_t start = it->next_sc + 3u;
     size_t next = find_start_code(it->p, it->len, start);
+    it->next_sc = next;
     size_t end = next == SIZE_MAX ? it->len : next;
-    it->pos = end;
-    bool dave_wrapped = (it->len >= 4u && it->p[it->len - 2u] == 0xFAu && it->p[it->len - 1u] == 0xFAu);
-    if (dave_wrapped) {
+    if (it->dave_wrapped) {
       // libdave emits canonical 4-byte start codes (00 00 00 01) between encrypted NALs; strip only that
       // single leading zero_byte so legitimate 0x00 ciphertext bytes at the end of a NAL are preserved.
-      if (next != SIZE_MAX && end > start && it->p[end - 1u] == 0) end--;
+      if (next != SIZE_MAX && end > start && it->p[end - 1u] == 0u) end--;
     } else {
-      while (end > start && it->p[end - 1] == 0) end--; // trailing_zero_8bits / leading zero of a 4-byte start code
+      while (end > start && it->p[end - 1u] == 0u) end--; // trailing_zero_8bits / leading zero of a 4-byte start code
     }
     if (end == start) continue;
-    if ((it->p[start] & 0x1F) == NAL_TYPE_AUD) continue;
-    *nal = it->p + start;
-    *nal_len = end - start;
+    if ((it->p[start] & 0x1Fu) == NAL_TYPE_AUD) continue;
+    out->p = it->p + start;
+    out->len = end - start;
     return true;
   }
+  return false;
+}
+
+static bool annexb_peek(annexb_iter *it, annexb_nal *out) {
+  if (!it->has_lookahead) {
+    if (!annexb_scan_next(it, &it->la)) return false;
+    it->has_lookahead = true;
+  }
+  *out = it->la;
+  return true;
+}
+
+static bool annexb_pop(annexb_iter *it, annexb_nal *out) {
+  if (it->has_lookahead) {
+    *out = it->la;
+    it->has_lookahead = false;
+    return true;
+  }
+  return annexb_scan_next(it, out);
 }
 
 static bool emit_checked(ccord_rtp_emit_fn emit, void *ud, const uint8_t *p, size_t n, bool marker, size_t *count) {
@@ -80,95 +114,95 @@ ccord_status ccord_rtp_h264_packetize(const uint8_t *annexb, size_t len, size_t 
   size_t count = 0;
   if (out_packets) *out_packets = 0;
   if (!annexb || len == 0 || !emit) return ccord_error_set(err, CCORD_ERR_INVALID, "empty access unit");
-  if (max_payload < 64) return ccord_error_set(err, CCORD_ERR_INVALID, "max_payload must be >= 64");
+  if (max_payload < 64u) return ccord_error_set(err, CCORD_ERR_INVALID, "max_payload must be >= 64");
   if (max_payload > PKT_CAP) max_payload = PKT_CAP;
 
-  uint8_t buf[PKT_CAP];
-  annexb_iter it = {annexb, len, 0};
-  const uint8_t *cur;
-  size_t clen;
-  if (!next_valid_nal(&it, &cur, &clen)) return ccord_error_set(err, CCORD_ERR_INVALID, "no NAL units in access unit");
+  uint8_t stack_buf[PKT_STACK_CAP];
+  uint8_t *buf = stack_buf;
+  if (max_payload > PKT_STACK_CAP) {
+    buf = ccord_malloc(max_payload);
+    if (!buf) return ccord_error_set(err, CCORD_ERR_NOMEM, "RTP scratch buffer out of memory");
+  }
+
+  ccord_status st = CCORD_OK;
+  annexb_iter it;
+  annexb_init(&it, annexb, len);
+  annexb_nal cur = {nullptr, 0};
+  if (!annexb_pop(&it, &cur)) {
+    st = ccord_error_set(err, CCORD_ERR_INVALID, "no NAL units in access unit");
+    goto done;
+  }
 
   bool more = true;
   while (more) {
-    // it is positioned after cur. Decide the packet shape for cur (+ following NALs for a STAP-A).
-    const uint8_t *nxt = nullptr;
-    size_t nlen = 0;
-    bool aggregate = false;
-    if (clen + 3 <= max_payload) {
-      annexb_iter peek = it;
-      aggregate = next_valid_nal(&peek, &nxt, &nlen) && clen + 3 + 2 + nlen <= max_payload;
-    }
+    // Decide the packet shape for cur (+ following NALs for a STAP-A) using 1-NAL lookahead (single pass).
+    annexb_nal nxt = {nullptr, 0};
+    bool has_nxt = annexb_peek(&it, &nxt);
+    bool aggregate = has_nxt && cur.len + 5u <= max_payload && nxt.len <= max_payload - (cur.len + 5u);
 
     if (aggregate) {
-      size_t total = 1;
       uint8_t f = 0, nri = 0;
-      size_t used = 1;
-      const uint8_t *m = cur;
-      size_t mlen = clen;
+      size_t used = 1u;
+      annexb_nal m = cur;
       for (;;) {
-        buf[used++] = (uint8_t)(mlen >> 8);
-        buf[used++] = (uint8_t)mlen;
-        memcpy(buf + used, m, mlen);
-        used += mlen;
-        total = used;
-        f |= m[0] & 0x80;
-        if ((m[0] & 0x60) > nri) nri = m[0] & 0x60;
-        annexb_iter peek = it;
-        const uint8_t *n2;
-        size_t l2;
-        if (!next_valid_nal(&peek, &n2, &l2) || total + 2 + l2 > max_payload) break;
-        it = peek;
-        m = n2;
-        mlen = l2;
+        buf[used++] = (uint8_t)(m.len >> 8);
+        buf[used++] = (uint8_t)m.len;
+        memcpy(buf + used, m.p, m.len);
+        used += m.len;
+        f |= m.p[0] & 0x80u;
+        if ((m.p[0] & 0x60u) > nri) nri = m.p[0] & 0x60u;
+        annexb_nal n2 = {nullptr, 0};
+        if (!annexb_peek(&it, &n2) || used + 2u > max_payload || n2.len > max_payload - used - 2u) break;
+        (void)annexb_pop(&it, &m);
       }
       buf[0] = (uint8_t)(f | nri | NAL_TYPE_STAP_A);
-      more = next_valid_nal(&it, &cur, &clen);
-      if (!emit_checked(emit, ud, buf, total, !more, &count)) {
-        if (out_packets) *out_packets = count;
-        return ccord_error_set(err, CCORD_ERR_IO, "RTP emit callback failed");
+      more = annexb_pop(&it, &cur);
+      if (!emit_checked(emit, ud, buf, used, !more, &count)) {
+        st = ccord_error_set(err, CCORD_ERR_IO, "RTP emit callback failed");
+        goto done;
       }
       continue;
     }
 
-    if (clen <= max_payload) {
-      more = next_valid_nal(&it, &nxt, &nlen);
-      if (!emit_checked(emit, ud, cur, clen, !more, &count)) {
-        if (out_packets) *out_packets = count;
-        return ccord_error_set(err, CCORD_ERR_IO, "RTP emit callback failed");
+    if (cur.len <= max_payload) {
+      more = annexb_pop(&it, &nxt);
+      if (!emit_checked(emit, ud, cur.p, cur.len, !more, &count)) {
+        st = ccord_error_set(err, CCORD_ERR_IO, "RTP emit callback failed");
+        goto done;
       }
       cur = nxt;
-      clen = nlen;
       continue;
     }
 
     // FU-A
-    const uint8_t *src = cur + 1;
-    size_t remaining = clen - 1;
-    size_t chunk_max = max_payload - 2;
-    uint8_t indicator = (uint8_t)((cur[0] & 0xE0) | NAL_TYPE_FU_A);
-    uint8_t type = cur[0] & 0x1F;
-    more = next_valid_nal(&it, &nxt, &nlen);
+    const uint8_t *src = cur.p + 1u;
+    size_t remaining = cur.len - 1u;
+    size_t chunk_max = max_payload - 2u;
+    uint8_t indicator = (uint8_t)((cur.p[0] & 0xE0u) | NAL_TYPE_FU_A);
+    uint8_t type = cur.p[0] & 0x1Fu;
+    more = annexb_pop(&it, &nxt);
     bool first = true;
     while (remaining > 0) {
       size_t n = remaining < chunk_max ? remaining : chunk_max;
       bool last = n == remaining;
       buf[0] = indicator;
-      buf[1] = (uint8_t)((first ? 0x80 : 0) | (last ? 0x40 : 0) | type);
-      memcpy(buf + 2, src, n);
-      if (!emit_checked(emit, ud, buf, n + 2, last && !more, &count)) {
-        if (out_packets) *out_packets = count;
-        return ccord_error_set(err, CCORD_ERR_IO, "RTP emit callback failed");
+      buf[1] = (uint8_t)((first ? 0x80u : 0u) | (last ? 0x40u : 0u) | type);
+      memcpy(buf + 2u, src, n);
+      if (!emit_checked(emit, ud, buf, n + 2u, last && !more, &count)) {
+        st = ccord_error_set(err, CCORD_ERR_IO, "RTP emit callback failed");
+        goto done;
       }
       src += n;
       remaining -= n;
       first = false;
     }
     cur = nxt;
-    clen = nlen;
   }
+
+done:
+  if (buf != stack_buf) ccord_free(buf);
   if (out_packets) *out_packets = count;
-  return CCORD_OK;
+  return st;
 }
 
 // ==================================================== depacketizer ====================================================
@@ -202,6 +236,16 @@ void ccord_rtp_h264_depack_destroy(ccord_rtp_h264_depack *d) {
   ccord_free(d);
 }
 
+static void depack_maybe_shrink(ccord_rtp_h264_depack *d) {
+  if (d->cap > DEPACK_SHRINK_THRESHOLD) {
+    uint8_t *nb = ccord_realloc(d->buf, DEPACK_SHRINK_THRESHOLD);
+    if (nb) {
+      d->buf = nb;
+      d->cap = DEPACK_SHRINK_THRESHOLD;
+    }
+  }
+}
+
 void ccord_rtp_h264_depack_reset(ccord_rtp_h264_depack *d) {
   if (!d) return;
   d->len = 0;
@@ -212,6 +256,7 @@ void ccord_rtp_h264_depack_reset(ccord_rtp_h264_depack *d) {
   d->has_idr = false;
   d->has_sps = false;
   d->needs_keyframe = true;
+  depack_maybe_shrink(d);
 }
 
 void ccord_rtp_h264_depack_note_padding(ccord_rtp_h264_depack *d, uint16_t seq) {
@@ -229,6 +274,7 @@ uint64_t ccord_rtp_h264_depack_lost(const ccord_rtp_h264_depack *d) { return d ?
 
 static void begin_au(ccord_rtp_h264_depack *d, uint32_t ts) {
   d->len = 0;
+  depack_maybe_shrink(d);
   d->cur_ts = ts;
   d->in_au = true;
   d->au_bad = false;
