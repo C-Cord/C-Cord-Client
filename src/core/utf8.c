@@ -3,6 +3,8 @@
 #include <ccord/core/utf8.h>
 
 #include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 
 // Returns the number of bytes of the sequence starting at s[0] (1..4), or 0 if malformed.
 static size_t seq_len(const unsigned char *s, size_t len, char32_t *cp)
@@ -45,6 +47,20 @@ bool ccord_utf8_valid(const char *s, size_t len)
   const unsigned char *p = (const unsigned char *)s;
   size_t i = 0;
   while (i < len) {
+    while (len - i >= 8u) {
+      uint64_t w;
+      memcpy(&w, p + i, sizeof w);
+      if ((w & 0x8080808080808080ULL) != 0) {
+        break;
+      }
+      i += 8u;
+    }
+    while (i < len && p[i] < 0x80u) {
+      i++;
+    }
+    if (i >= len) {
+      break;
+    }
     char32_t cp;
     size_t n = seq_len(p + i, len - i, &cp);
     if (n == 0) {
@@ -58,14 +74,38 @@ bool ccord_utf8_valid(const char *s, size_t len)
 bool ccord_utf8_valid_text(const char *s, size_t len)
 {
   const unsigned char *p = (const unsigned char *)s;
+  const uint64_t hi = 0x8080808080808080ULL;
   size_t i = 0;
   while (i < len) {
+    while (len - i >= 8u) {
+      uint64_t w;
+      memcpy(&w, p + i, sizeof w);
+      // Fast-path 8 printable ASCII bytes (0x20..0x7E): high bit 0 guarantees zero inter-byte carries.
+      uint64_t bad = (w & hi) |
+                     ((w + 0x0101010101010101ULL) & hi) |
+                     (~(w + 0x6060606060606060ULL) & hi);
+      if (bad != 0) {
+        break;
+      }
+      i += 8u;
+    }
+    while (i < len && p[i] >= 0x20u && p[i] <= 0x7Eu) {
+      i++;
+    }
+    if (i >= len) {
+      break;
+    }
+    unsigned char c = p[i];
+    if (c == '\n' || c == '\t') {
+      i++;
+      continue;
+    }
+    if (c < 0x80u) {
+      return false; // C0 control (other than \n/\t) or DEL (0x7F)
+    }
     char32_t cp;
     size_t n = seq_len(p + i, len - i, &cp);
     if (n == 0) {
-      return false;
-    }
-    if (n == 1 && (cp < 0x20u || cp == 0x7Fu) && cp != '\n' && cp != '\t') {
       return false;
     }
     if (cp >= 0x80u && cp <= 0x9Fu) {
