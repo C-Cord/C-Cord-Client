@@ -24,19 +24,45 @@
 #include <string.h>
 #include <unistd.h>
 
+#if defined(__has_feature)
+#if __has_feature(objc_arc)
+#define CCORD_MACOS_ARC 1
+#else
+#define CCORD_MACOS_ARC 0
+#endif
+#else
+#define CCORD_MACOS_ARC 0
+#endif
+
+#if CCORD_MACOS_ARC
+#define CCORD_DISPATCH_RETAIN(obj) ((void)(obj))
+#define CCORD_DISPATCH_RELEASE(obj) ((void)(obj))
+#else
+#define CCORD_DISPATCH_RETAIN(obj) do { if (obj) dispatch_retain(obj); } while (0)
+#define CCORD_DISPATCH_RELEASE(obj) do { if (obj) dispatch_release(obj); } while (0)
+#endif
+
 typedef struct macos_cap {
   ccord_capture base;
   CGDirectDisplayID display_id;
   CGWindowID window_id;
-  uint8_t *buf;
-  size_t buf_cap;
-  int w, h, stride;
+  // Triple-buffer pointer swap: front_buf is owned exclusively by the grab() caller between grabs,
+  // ready_buf is swapped under mtx, and back_buf is written unlocked on the serial sc_queue.
+  uint8_t *front_buf;
+  size_t front_cap;
+  int front_w, front_h, front_stride;
+  uint8_t *ready_buf;
+  size_t ready_cap;
+  int ready_w, ready_h, ready_stride;
+  uint8_t *back_buf;
+  size_t back_cap;
   bool has_frame;
   bool dead;
   ccord_mutex *mtx;
 #if CCORD_HAVE_SCK
-  id sc_stream;    // SCStream*
-  id sc_output;    // CCordSCOutput*
+  id sc_stream;             // SCStream*
+  id sc_output;             // CCordSCOutput*
+  dispatch_queue_t sc_queue;
 #endif
 } macos_cap;
 
@@ -60,26 +86,40 @@ API_AVAILABLE(macos(12.3))
   size_t h = CVPixelBufferGetHeight(img);
   size_t bpr = CVPixelBufferGetBytesPerRow(img);
   const uint8_t *src = (const uint8_t *)CVPixelBufferGetBaseAddress(img);
-  if (src && w > 0 && h > 0 && bpr >= w * 4u) {
-    size_t need = w * h * 4u;
-    ccord_mutex_lock(cap->mtx);
-    if (need > cap->buf_cap) {
-      uint8_t *nb = (uint8_t *)ccord_realloc(cap->buf, need);
+  if (src && w > 0 && h > 0 && w <= SIZE_MAX / 4u && bpr >= w * 4u && h <= SIZE_MAX / (w * 4u)) {
+    const size_t row_bytes = w * 4u;
+    const size_t need = row_bytes * h;
+    // Grow and populate the producer-private back_buf outside cap->mtx (serial sc_queue only).
+    if (need > cap->back_cap) {
+      uint8_t *nb = (uint8_t *)ccord_malloc(need);
       if (nb) {
-        cap->buf = nb;
-        cap->buf_cap = need;
+        ccord_free(cap->back_buf);
+        cap->back_buf = nb;
+        cap->back_cap = need;
       }
     }
-    if (cap->buf && cap->buf_cap >= need) {
-      for (size_t y = 0; y < h; y++) {
-        memcpy(cap->buf + y * w * 4u, src + y * bpr, w * 4u);
+    if (cap->back_buf && cap->back_cap >= need) {
+      if (bpr == row_bytes) {
+        memcpy(cap->back_buf, src, need);
+      } else {
+        for (size_t y = 0; y < h; y++) {
+          memcpy(cap->back_buf + y * row_bytes, src + y * bpr, row_bytes);
+        }
       }
-      cap->w = (int)w;
-      cap->h = (int)h;
-      cap->stride = (int)(w * 4u);
+      // Publish completed frame via O(1) pointer swap under mtx.
+      ccord_mutex_lock(cap->mtx);
+      uint8_t *old_ready = cap->ready_buf;
+      size_t old_ready_cap = cap->ready_cap;
+      cap->ready_buf = cap->back_buf;
+      cap->ready_cap = cap->back_cap;
+      cap->back_buf = old_ready;
+      cap->back_cap = old_ready_cap;
+      cap->ready_w = (int)w;
+      cap->ready_h = (int)h;
+      cap->ready_stride = (int)row_bytes;
       cap->has_frame = true;
+      ccord_mutex_unlock(cap->mtx);
     }
-    ccord_mutex_unlock(cap->mtx);
   }
   CVPixelBufferUnlockBaseAddress(img, kCVPixelBufferLock_ReadOnly);
 }
@@ -87,13 +127,30 @@ API_AVAILABLE(macos(12.3))
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
   (void)stream;
   (void)error;
-  if (cap) {
-    ccord_mutex_lock(cap->mtx);
-    cap->dead = true;
-    ccord_mutex_unlock(cap->mtx);
+  macos_cap *c = cap;
+  if (c) {
+    ccord_mutex_lock(c->mtx);
+    c->dead = true;
+    ccord_mutex_unlock(c->mtx);
   }
 }
 @end
+
+typedef struct macos_pick_ctx {
+  ccord_mutex *mtx;
+  bool done;
+  bool abandoned;
+  id filter;   // SCContentFilter*
+  int cap_w;
+  int cap_h;
+} macos_pick_ctx;
+
+typedef struct macos_start_ctx {
+  ccord_mutex *mtx;
+  bool done;
+  bool abandoned;
+  bool started;
+} macos_start_ctx;
 #endif
 
 static bool macos_available(void) { return true; }
@@ -178,23 +235,39 @@ static size_t macos_list(ccord_capture_kind kind, ccord_capture_source *out, siz
 static bool macos_grab(ccord_capture *base, ccord_capture_frame *out)
 {
   macos_cap *c = (macos_cap *)base;
+  bool ok = false;
   ccord_mutex_lock(c->mtx);
-  if (c->dead) {
-    ccord_mutex_unlock(c->mtx);
-    return false;
-  }
-  bool ok = c->has_frame && c->buf != NULL && c->w > 0 && c->h > 0;
-  if (ok) {
-    *out = (ccord_capture_frame){.data = c->buf, .width = c->w, .height = c->h, .stride = c->stride};
+  if (!c->dead) {
+    if (c->has_frame && c->ready_buf != NULL && c->ready_w > 0 && c->ready_h > 0) {
+      // O(1) pointer swap: caller owns front_buf exclusively until the next grab/close.
+      uint8_t *prev = c->front_buf;
+      size_t prev_cap = c->front_cap;
+      c->front_buf = c->ready_buf;
+      c->front_cap = c->ready_cap;
+      c->ready_buf = prev;
+      c->ready_cap = prev_cap;
+      c->front_w = c->ready_w;
+      c->front_h = c->ready_h;
+      c->front_stride = c->ready_stride;
+      c->has_frame = false;
+    }
+    ok = c->front_buf != NULL && c->front_w > 0 && c->front_h > 0;
   }
   ccord_mutex_unlock(c->mtx);
+  if (ok) {
+    *out = (ccord_capture_frame){.data = c->front_buf, .width = c->front_w, .height = c->front_h,
+                                 .stride = c->front_stride};
+  }
   return ok;
 }
 
 static bool macos_failed(const ccord_capture *base)
 {
   const macos_cap *c = (const macos_cap *)base;
-  return c->dead;
+  ccord_mutex_lock(c->mtx);
+  bool dead = c->dead;
+  ccord_mutex_unlock(c->mtx);
+  return dead;
 }
 
 static void macos_close(ccord_capture *base)
@@ -206,25 +279,45 @@ static void macos_close(ccord_capture *base)
       if (c->sc_stream) {
         SCStream *st = (SCStream *)c->sc_stream;
         dispatch_semaphore_t sem = dispatch_semaphore_create(0);
-        [st stopCaptureWithCompletionHandler:^(NSError *error) {
-          (void)error;
-          dispatch_semaphore_signal(sem);
-        }];
-        dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 500LL * NSEC_PER_MSEC));
+        if (sem) {
+          CCORD_DISPATCH_RETAIN(sem);
+          [st stopCaptureWithCompletionHandler:^(NSError *error) {
+            (void)error;
+            dispatch_semaphore_signal(sem);
+            CCORD_DISPATCH_RELEASE(sem);
+          }];
+          dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 500LL * NSEC_PER_MSEC));
+          CCORD_DISPATCH_RELEASE(sem);
+        } else {
+          [st stopCaptureWithCompletionHandler:^(NSError *error) { (void)error; }];
+        }
         [st release];
         c->sc_stream = nil;
       }
       if (c->sc_output) {
         CCordSCOutput *outp = (CCordSCOutput *)c->sc_output;
-        outp->cap = NULL;
+        if (c->sc_queue) {
+          // Drain any queued didOutputSampleBuffer callback on the serial queue before freeing c.
+          dispatch_sync(c->sc_queue, ^{
+            outp->cap = NULL;
+          });
+        } else {
+          outp->cap = NULL;
+        }
         [outp release];
         c->sc_output = nil;
+      }
+      if (c->sc_queue) {
+        CCORD_DISPATCH_RELEASE(c->sc_queue);
+        c->sc_queue = NULL;
       }
     }
   }
 #endif
   ccord_mutex_destroy(c->mtx);
-  ccord_free(c->buf);
+  ccord_free(c->front_buf);
+  ccord_free(c->ready_buf);
+  ccord_free(c->back_buf);
   ccord_free(c);
 }
 
@@ -254,20 +347,43 @@ static ccord_capture *macos_open(const ccord_capture_source *src, ccord_error *e
 #if CCORD_HAVE_SCK
   if (@available(macOS 12.3, *)) {
     @autoreleasepool {
-      __block SCContentFilter *filter = nil;
-      __block int cap_w = src->width > 0 ? src->width : 1280;
-      __block int cap_h = src->height > 0 ? src->height : 720;
+      macos_pick_ctx *pctx = (macos_pick_ctx *)ccord_calloc(1, sizeof *pctx);
       dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+      if (!pctx || !sem) {
+        if (sem) CCORD_DISPATCH_RELEASE(sem);
+        ccord_free(pctx);
+        macos_close(&c->base);
+        ccord_error_set(err, CCORD_ERR_NOMEM, "capture: out of memory");
+        return NULL;
+      }
+      pctx->mtx = ccord_mutex_create();
+      if (!pctx->mtx) {
+        CCORD_DISPATCH_RELEASE(sem);
+        ccord_free(pctx);
+        macos_close(&c->base);
+        ccord_error_set(err, CCORD_ERR_NOMEM, "capture: out of memory");
+        return NULL;
+      }
+      pctx->cap_w = src->width > 0 ? src->width : 1280;
+      pctx->cap_h = src->height > 0 ? src->height : 720;
+      const ccord_capture_kind req_kind = src->kind;
+      const CGWindowID req_win = c->window_id;
+      const CGDirectDisplayID req_disp = c->display_id;
+
+      CCORD_DISPATCH_RETAIN(sem);
       [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent *content, NSError *sc_err) {
         (void)sc_err;
+        SCContentFilter *local_filter = nil;
+        int local_w = 0;
+        int local_h = 0;
         if (content) {
-          if (src->kind == CCORD_CAPTURE_WINDOW) {
+          if (req_kind == CCORD_CAPTURE_WINDOW) {
             for (SCWindow *w in content.windows) {
-              if (w.windowID == c->window_id) {
-                filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:w];
+              if (w.windowID == req_win) {
+                local_filter = [[SCContentFilter alloc] initWithDesktopIndependentWindow:w];
                 if (w.frame.size.width > 0 && w.frame.size.height > 0) {
-                  cap_w = (int)w.frame.size.width;
-                  cap_h = (int)w.frame.size.height;
+                  local_w = (int)w.frame.size.width;
+                  local_h = (int)w.frame.size.height;
                 }
                 break;
               }
@@ -275,19 +391,55 @@ static ccord_capture *macos_open(const ccord_capture_source *src, ccord_error *e
           } else {
             SCDisplay *chosen = nil;
             for (SCDisplay *d in content.displays) {
-              if (d.displayID == c->display_id) { chosen = d; break; }
+              if (d.displayID == req_disp) { chosen = d; break; }
             }
             if (!chosen && content.displays.count > 0) chosen = content.displays.firstObject;
             if (chosen) {
-              filter = [[SCContentFilter alloc] initWithDisplay:chosen excludingWindows:@[]];
-              cap_w = (int)chosen.width;
-              cap_h = (int)chosen.height;
+              local_filter = [[SCContentFilter alloc] initWithDisplay:chosen excludingWindows:@[]];
+              local_w = (int)chosen.width;
+              local_h = (int)chosen.height;
             }
           }
         }
+        ccord_mutex_lock(pctx->mtx);
+        bool abandoned = pctx->abandoned;
+        if (!abandoned) {
+          pctx->filter = local_filter;
+          if (local_w > 0 && local_h > 0) {
+            pctx->cap_w = local_w;
+            pctx->cap_h = local_h;
+          }
+          pctx->done = true;
+        }
+        ccord_mutex_unlock(pctx->mtx);
+        if (abandoned) {
+          [local_filter release];
+          ccord_mutex_destroy(pctx->mtx);
+          ccord_free(pctx);
+        }
         dispatch_semaphore_signal(sem);
+        CCORD_DISPATCH_RELEASE(sem);
       }];
       dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 2000LL * NSEC_PER_MSEC));
+      CCORD_DISPATCH_RELEASE(sem);
+
+      SCContentFilter *filter = nil;
+      int cap_w = 1280;
+      int cap_h = 720;
+      ccord_mutex_lock(pctx->mtx);
+      bool pick_done = pctx->done;
+      if (pick_done) {
+        filter = (SCContentFilter *)pctx->filter;
+        cap_w = pctx->cap_w;
+        cap_h = pctx->cap_h;
+      } else {
+        pctx->abandoned = true;
+      }
+      ccord_mutex_unlock(pctx->mtx);
+      if (pick_done) {
+        ccord_mutex_destroy(pctx->mtx);
+        ccord_free(pctx);
+      }
 
       if (!filter) {
         macos_close(&c->base);
@@ -315,33 +467,82 @@ static ccord_capture *macos_open(const ccord_capture_source *src, ccord_error *e
         return NULL;
       }
       dispatch_queue_t q = dispatch_queue_create("org.ccord.capture", DISPATCH_QUEUE_SERIAL);
-      NSError *add_err = nil;
-      BOOL added = [stream addStreamOutput:outp type:SCStreamOutputTypeScreen sampleHandlerQueue:q error:&add_err];
-      if (!added) {
+      if (!q) {
         [stream release];
         outp->cap = NULL;
         [outp release];
         macos_close(&c->base);
+        ccord_error_set(err, CCORD_ERR_NOMEM, "capture: out of memory");
+        return NULL;
+      }
+      NSError *add_err = nil;
+      BOOL added = [stream addStreamOutput:outp type:SCStreamOutputTypeScreen sampleHandlerQueue:q error:&add_err];
+      if (!added) {
+        [stream release];
+        dispatch_sync(q, ^{ outp->cap = NULL; });
+        [outp release];
+        CCORD_DISPATCH_RELEASE(q);
+        macos_close(&c->base);
         ccord_error_set(err, CCORD_ERR_IO, "capture: failed to attach ScreenCaptureKit output");
         return NULL;
       }
-      __block BOOL started = NO;
+      macos_start_ctx *sctx = (macos_start_ctx *)ccord_calloc(1, sizeof *sctx);
       dispatch_semaphore_t start_sem = dispatch_semaphore_create(0);
+      if (!sctx || !start_sem || !(sctx->mtx = ccord_mutex_create())) {
+        if (start_sem) CCORD_DISPATCH_RELEASE(start_sem);
+        ccord_free(sctx);
+        [stream release];
+        dispatch_sync(q, ^{ outp->cap = NULL; });
+        [outp release];
+        CCORD_DISPATCH_RELEASE(q);
+        macos_close(&c->base);
+        ccord_error_set(err, CCORD_ERR_NOMEM, "capture: out of memory");
+        return NULL;
+      }
+      CCORD_DISPATCH_RETAIN(start_sem);
       [stream startCaptureWithCompletionHandler:^(NSError *st_err) {
-        started = (st_err == nil);
+        ccord_mutex_lock(sctx->mtx);
+        bool abandoned = sctx->abandoned;
+        if (!abandoned) {
+          sctx->started = (st_err == nil);
+          sctx->done = true;
+        }
+        ccord_mutex_unlock(sctx->mtx);
+        if (abandoned) {
+          ccord_mutex_destroy(sctx->mtx);
+          ccord_free(sctx);
+        }
         dispatch_semaphore_signal(start_sem);
+        CCORD_DISPATCH_RELEASE(start_sem);
       }];
       dispatch_semaphore_wait(start_sem, dispatch_time(DISPATCH_TIME_NOW, 2000LL * NSEC_PER_MSEC));
+      CCORD_DISPATCH_RELEASE(start_sem);
+
+      bool started = false;
+      ccord_mutex_lock(sctx->mtx);
+      bool start_done = sctx->done;
+      if (start_done) {
+        started = sctx->started;
+      } else {
+        sctx->abandoned = true;
+      }
+      ccord_mutex_unlock(sctx->mtx);
+      if (start_done) {
+        ccord_mutex_destroy(sctx->mtx);
+        ccord_free(sctx);
+      }
       if (!started) {
         [stream release];
-        outp->cap = NULL;
+        dispatch_sync(q, ^{ outp->cap = NULL; });
         [outp release];
+        CCORD_DISPATCH_RELEASE(q);
         macos_close(&c->base);
         ccord_error_set(err, CCORD_ERR_PERMISSION, "capture: ScreenCaptureKit start failed");
         return NULL;
       }
       c->sc_stream = stream;
       c->sc_output = outp;
+      c->sc_queue = q;
       return &c->base;
     }
   }

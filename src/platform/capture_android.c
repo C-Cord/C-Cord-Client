@@ -7,6 +7,7 @@
 #include <ccord/core/alloc.h>
 #include <ccord/core/os.h>
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -27,39 +28,92 @@ static int g_shared_h = 0;
 static uint64_t g_shared_seq = 0;
 static bool g_shared_stopped = false;
 static bool g_shared_active = false;
+// Recycled back-buffers checked out/returned under g_cap_lock so swizzle & malloc run unlocked
+// and grab() swaps pointers in O(1) without copying full-screen frames under the spinlock.
+static uint8_t *g_spare_buf[2] = {nullptr, nullptr};
+static size_t g_spare_cap[2] = {0, 0};
+static size_t g_spare_n = 0;
+
+static void swizzle_rgba_to_bgra(uint8_t *restrict dst, const uint8_t *restrict rgba, int width, int height, int stride)
+{
+  const size_t row_bytes = (size_t)width * 4u;
+  for (int y = 0; y < height; y++) {
+    const uint8_t *restrict src = rgba + (size_t)y * (size_t)stride;
+    uint8_t *restrict out = dst + (size_t)y * row_bytes;
+    for (int x = 0; x < width; x++, src += 4, out += 4) {
+      out[0] = src[2];  // B
+      out[1] = src[1];  // G
+      out[2] = src[0];  // R
+      out[3] = 255u;    // A
+    }
+  }
+}
 
 void ccord_capture_android_push_frame(const uint8_t *rgba, int width, int height, int stride)
 {
-  if (!rgba || width <= 0 || height <= 0 || stride < width * 4) return;
+  if (!rgba || width <= 0 || height <= 0 || width > INT_MAX / 4 || stride < width * 4) return;
   size_t need = (size_t)width * (size_t)height * 4u;
+
+  // Check out a spare buffer (if any) under the spinlock; never hold the spinlock across malloc/swizzle.
+  uint8_t *buf = nullptr;
+  size_t cap = 0;
   ccord_spin_lock_acquire(&g_cap_lock);
-  if (g_shared_active) {
-    if (need > g_shared_cap) {
-      uint8_t *nb = ccord_malloc(need);
-      if (nb) {
-        ccord_free(g_shared_bgra);
-        g_shared_bgra = nb;
-        g_shared_cap = need;
+  bool active = g_shared_active;
+  if (active && g_spare_n > 0) {
+    g_spare_n--;
+    buf = g_spare_buf[g_spare_n];
+    cap = g_spare_cap[g_spare_n];
+    g_spare_buf[g_spare_n] = nullptr;
+    g_spare_cap[g_spare_n] = 0;
+  }
+  ccord_spin_lock_release(&g_cap_lock);
+  if (!active) return;
+
+  if (need > cap) {
+    uint8_t *nb = ccord_malloc(need);
+    if (nb) {
+      ccord_free(buf);
+      buf = nb;
+      cap = need;
+    }
+  }
+  bool ready = buf != nullptr && need <= cap;
+  if (ready) {
+    swizzle_rgba_to_bgra(buf, rgba, width, height, stride);
+  }
+
+  // Publish the completed back buffer via O(1) pointer swap under the spinlock.
+  uint8_t *to_free = nullptr;
+  ccord_spin_lock_acquire(&g_cap_lock);
+  if (g_shared_active && ready) {
+    uint8_t *old = g_shared_bgra;
+    size_t old_cap = g_shared_cap;
+    g_shared_bgra = buf;
+    g_shared_cap = cap;
+    g_shared_w = width;
+    g_shared_h = height;
+    g_shared_seq++;
+    g_shared_stopped = false;
+    if (old) {
+      if (g_spare_n < 2u) {
+        g_spare_buf[g_spare_n] = old;
+        g_spare_cap[g_spare_n] = old_cap;
+        g_spare_n++;
+      } else {
+        to_free = old;
       }
     }
-    if (g_shared_bgra && need <= g_shared_cap) {
-      for (int y = 0; y < height; y++) {
-        const uint8_t *src = rgba + (size_t)y * (size_t)stride;
-        uint8_t *dst = g_shared_bgra + (size_t)y * (size_t)width * 4u;
-        for (int x = 0; x < width; x++) {
-          dst[x * 4 + 0] = src[x * 4 + 2];  // B
-          dst[x * 4 + 1] = src[x * 4 + 1];  // G
-          dst[x * 4 + 2] = src[x * 4 + 0];  // R
-          dst[x * 4 + 3] = 255u;            // A
-        }
-      }
-      g_shared_w = width;
-      g_shared_h = height;
-      g_shared_seq++;
-      g_shared_stopped = false;
+  } else if (buf) {
+    if (g_shared_active && g_spare_n < 2u) {
+      g_spare_buf[g_spare_n] = buf;
+      g_spare_cap[g_spare_n] = cap;
+      g_spare_n++;
+    } else {
+      to_free = buf;
     }
   }
   ccord_spin_lock_release(&g_cap_lock);
+  ccord_free(to_free);
 }
 
 void ccord_capture_android_mark_stopped(void)
@@ -93,26 +147,32 @@ static bool android_cap_grab(ccord_capture *base, ccord_capture_frame *out)
   android_capture *c = (android_capture *)base;
   if (!c || !out) return false;
   bool got = false;
+  uint8_t *to_free = nullptr;
   ccord_spin_lock_acquire(&g_cap_lock);
   if (g_shared_bgra && g_shared_w > 0 && g_shared_h > 0 && g_shared_seq != c->last_seq) {
-    size_t need = (size_t)g_shared_w * (size_t)g_shared_h * 4u;
-    if (need > c->out_cap) {
-      uint8_t *nb = ccord_malloc(need);
-      if (nb) {
-        ccord_free(c->out_bgra);
-        c->out_bgra = nb;
-        c->out_cap = need;
+    // O(1) pointer swap: take ownership of g_shared_bgra and recycle the previous front buffer.
+    uint8_t *prev = c->out_bgra;
+    size_t prev_cap = c->out_cap;
+    c->out_bgra = g_shared_bgra;
+    c->out_cap = g_shared_cap;
+    c->out_w = g_shared_w;
+    c->out_h = g_shared_h;
+    c->last_seq = g_shared_seq;
+    g_shared_bgra = nullptr;
+    g_shared_cap = 0;
+    if (prev) {
+      if (g_spare_n < 2u) {
+        g_spare_buf[g_spare_n] = prev;
+        g_spare_cap[g_spare_n] = prev_cap;
+        g_spare_n++;
+      } else {
+        to_free = prev;
       }
     }
-    if (c->out_bgra && need <= c->out_cap) {
-      memcpy(c->out_bgra, g_shared_bgra, need);
-      c->out_w = g_shared_w;
-      c->out_h = g_shared_h;
-      c->last_seq = g_shared_seq;
-      got = true;
-    }
+    got = true;
   }
   ccord_spin_lock_release(&g_cap_lock);
+  ccord_free(to_free);
   if (!got) return false;
   out->data = c->out_bgra;
   out->width = c->out_w;
@@ -135,15 +195,28 @@ static void android_cap_close(ccord_capture *base)
   android_capture *c = (android_capture *)base;
   if (!c) return;
   ccord_android_stop_screen_capture();
+  uint8_t *p_shared = nullptr;
+  uint8_t *p_spare0 = nullptr;
+  uint8_t *p_spare1 = nullptr;
   ccord_spin_lock_acquire(&g_cap_lock);
   g_shared_active = false;
   g_shared_stopped = false;
-  ccord_free(g_shared_bgra);
+  p_shared = g_shared_bgra;
   g_shared_bgra = nullptr;
   g_shared_cap = 0;
   g_shared_w = 0;
   g_shared_h = 0;
+  p_spare0 = g_spare_buf[0];
+  p_spare1 = g_spare_buf[1];
+  g_spare_buf[0] = nullptr;
+  g_spare_buf[1] = nullptr;
+  g_spare_cap[0] = 0;
+  g_spare_cap[1] = 0;
+  g_spare_n = 0;
   ccord_spin_lock_release(&g_cap_lock);
+  ccord_free(p_shared);
+  ccord_free(p_spare0);
+  ccord_free(p_spare1);
   ccord_free(c->out_bgra);
   ccord_free(c);
 }
