@@ -13,11 +13,10 @@
 static const char k_default_name[] = "Rich Presence";
 
 // Copies a string, truncating to the field capacity on a UTF-8 boundary so the writer never sees a split sequence.
-static void copy_text(char dst[static A_TEXT_CAP], const char *src)
+static void copy_text_n(char dst[static A_TEXT_CAP], const char *src, size_t n)
 {
   dst[0] = '\0';
   if (!src) return;
-  size_t n = strlen(src);
   if (n > CCORD_RPC_ACTIVITY_TEXT_MAX) {
     n = CCORD_RPC_ACTIVITY_TEXT_MAX;
     // The first dropped byte may be a continuation byte; back up to the start of its sequence and drop it whole.
@@ -34,7 +33,7 @@ static ccord_status text_field(const ccord_json *root, const char *key, char dst
   size_t len = 0;
   const char *s = ccord_json_string(v, &len);
   if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "rpc: %s must be a string", key);
-  copy_text(dst, s);
+  copy_text_n(dst, s, len);
   return CCORD_OK;
 }
 
@@ -95,11 +94,12 @@ static ccord_status parse_buttons(const ccord_json *root, ccord_rpc_activity *ou
     if (!url_json || ccord_json_type_of(url_json) != CCORD_JSON_STRING) {
       return ccord_error_set(err, CCORD_ERR_INVALID, "rpc: button url must be a string");
     }
-    const char *label = ccord_json_string(label_json, nullptr);
-    const char *url = ccord_json_string(url_json, nullptr);
+    size_t llen = 0, ulen = 0;
+    const char *label = ccord_json_string(label_json, &llen);
+    const char *url = ccord_json_string(url_json, &ulen);
     if (!is_http_url(url)) return ccord_error_set(err, CCORD_ERR_INVALID, "rpc: button url must be http or https");
-    copy_text(out->button_labels[i], label);
-    copy_text(out->button_urls[i], url);
+    copy_text_n(out->button_labels[i], label, llen);
+    copy_text_n(out->button_urls[i], url, ulen);
     out->button_count = i + 1u;
   }
   return CCORD_OK;
@@ -169,16 +169,14 @@ static ccord_status parse_application_id(const ccord_json *root, ccord_rpc_activ
   size_t len = 0;
   const char *s = ccord_json_string(v, &len);
   if (s) {
-    copy_text(out->application_id, s);
+    copy_text_n(out->application_id, s, len);
     return CCORD_OK;
   }
   int64_t id = 0;
   if (!ccord_json_int64(v, &id) || id < 0) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "rpc: application_id must be a snowflake");
   }
-  char buf[32];
-  (void)snprintf(buf, sizeof buf, "%lld", (long long)id);
-  copy_text(out->application_id, buf);
+  (void)snprintf(out->application_id, A_TEXT_CAP, "%lld", (long long)id);
   return CCORD_OK;
 }
 
@@ -256,7 +254,8 @@ static void jw_activity(ccord_jw *w, const ccord_rpc_activity *a)
 {
   ccord_jw_begin_object(w);
   ccord_jw_key(w, "name");
-  ccord_jw_string(w, a->name[0] ? a->name : k_default_name, strlen(a->name[0] ? a->name : k_default_name));
+  if (a->name[0]) ccord_jw_string(w, a->name, strlen(a->name));
+  else ccord_jw_string(w, k_default_name, sizeof k_default_name - 1u);
   ccord_jw_key(w, "type");
   ccord_jw_int(w, a->type);
   jw_text(w, "application_id", a->application_id);
@@ -330,6 +329,11 @@ ccord_status ccord_rpc_activity_to_gateway_json(const ccord_rpc_activity *acts, 
   if (!out || cap == 0) return CCORD_ERR_INVALID;
   out[0] = '\0';
   if (n > 0 && !acts) return CCORD_ERR_INVALID;
+  if (n == 0) {
+    if (cap < 3u) return CCORD_ERR_RANGE;
+    memcpy(out, "[]", 3u);
+    return CCORD_OK;
+  }
   if (n > CCORD_RPC_ACTIVITY_MAX) n = CCORD_RPC_ACTIVITY_MAX;
   ccord_buf b;
   ccord_buf_init(&b, cap);

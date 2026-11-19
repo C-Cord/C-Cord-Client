@@ -39,6 +39,9 @@ enum { OP_HANDSHAKE = 0, OP_FRAME = 1, OP_CLOSE = 2, OP_PING = 3, OP_PONG = 4 };
 
 #define RPC_VERSION 1
 #define RBUF_CAP (8u + CCORD_RPC_FRAME_MAX_PAYLOAD)   // one maximal frame always fits, so a full buffer is never stuck
+#define RBUF_INIT_CAP 4096u                           // start at 4 KiB and grow geometrically up to RBUF_CAP
+#define RBUF_SHRINK_THRESHOLD 8192u                   // shrink back to 4 KiB after large frames drain
+#define ACCEPT_IDLE_INTERVAL_MS 50u                   // throttle idle accept() when no clients are connected
 #define READ_ROUNDS 8u                                // bounded work per connection per poll
 #define ACCEPTS_PER_POLL 16u
 #define CLIENT_ID_MAX 20u                             // a u64 snowflake has at most 20 digits
@@ -60,8 +63,9 @@ struct ccord_rpc_conn {
   uint64_t accepted_ms;
   uint64_t last_pid_check_ms;
   char client_id[CLIENT_ID_MAX + 4u];
+  char *rbuf;
   size_t rlen;
-  char rbuf[RBUF_CAP];
+  size_t rcap;
 };
 
 struct ccord_rpc_server {
@@ -82,6 +86,9 @@ struct ccord_rpc_server {
   uint32_t next_id;
   size_t work;                                        // accepts + frames handled by the current poll
   uint64_t now_ms;                                    // clock of the current poll
+  bool accept_polled;
+  uint64_t last_accept_ms;
+  uint64_t last_poll_ms;
   ccord_arena scratch;                                // JSON parse arena, reset after every frame
 };
 
@@ -236,7 +243,7 @@ ccord_rpc_server *ccord_rpc_server_create(const ccord_rpc_config *cfg, ccord_err
     s->hooks = cfg->hooks;
     s->ctx = cfg->ctx;
   }
-  ccord_arena_init(&s->scratch, 0);
+  ccord_arena_init(&s->scratch, 4096u);
   return s;
 #else
   const char *dir = (cfg && cfg->dir && cfg->dir[0]) ? cfg->dir : env_dir("XDG_RUNTIME_DIR");
@@ -279,7 +286,7 @@ ccord_rpc_server *ccord_rpc_server_create(const ccord_rpc_config *cfg, ccord_err
     s->hooks = cfg->hooks;
     s->ctx = cfg->ctx;
   }
-  ccord_arena_init(&s->scratch, 0);
+  ccord_arena_init(&s->scratch, 4096u);
   return s;
 #endif
 }
@@ -311,7 +318,8 @@ static bool send_frame_handle(HANDLE pipe, uint32_t op, const char *payload, siz
 {
   if (len > CCORD_RPC_FRAME_MAX_PAYLOAD) return false;
   size_t total = 8u + len;
-  char *frame = ccord_malloc(total);
+  char stack_buf[4096];
+  char *frame = total <= sizeof stack_buf ? stack_buf : ccord_malloc(total);
   if (!frame) return false;
   bool ok = ccord_rpc_frame_encode(frame, total, op, payload, len) == CCORD_OK;
   if (ok) {
@@ -336,7 +344,7 @@ static bool send_frame_handle(HANDLE pipe, uint32_t op, const char *payload, siz
       CloseHandle(ov.hEvent);
     }
   }
-  ccord_free(frame);
+  if (frame != stack_buf) ccord_free(frame);
   return ok;
 }
 #define RPC_CONN_HANDLE(c) ((c)->pipe)
@@ -346,7 +354,8 @@ static bool send_frame_handle(ccord_socket_t fd, uint32_t op, const char *payloa
 {
   if (len > CCORD_RPC_FRAME_MAX_PAYLOAD) return false;
   size_t total = 8u + len;
-  char *frame = ccord_malloc(total);
+  char stack_buf[4096];
+  char *frame = total <= sizeof stack_buf ? stack_buf : ccord_malloc(total);
   if (!frame) return false;
   bool ok = ccord_rpc_frame_encode(frame, total, op, payload, len) == CCORD_OK;
   size_t off = 0;
@@ -359,7 +368,7 @@ static bool send_frame_handle(ccord_socket_t fd, uint32_t op, const char *payloa
       ok = false;
     }
   }
-  ccord_free(frame);
+  if (frame != stack_buf) ccord_free(frame);
   return ok;
 }
 #define RPC_CONN_HANDLE(c) ((c)->fd)
@@ -543,10 +552,12 @@ static bool is_pid_alive(ccord_rpc_pid_t pid)
   char buf[512];
   size_t got = 0;
   while (got < sizeof buf - 1) {
-    ssize_t r = read(fd, buf + got, sizeof buf - 1 - got);
+    size_t want = sizeof buf - 1 - got;
+    ssize_t r = read(fd, buf + got, want);
     if (r < 0 && errno == EINTR) continue;
     if (r <= 0) break;
     got += (size_t)r;
+    if ((size_t)r < want) break;
   }
   close(fd);
   buf[got] = '\0';
@@ -690,21 +701,62 @@ static bool drain_frames(ccord_rpc_server *s, ccord_rpc_conn *c)
   }
   if (!alive) return false;
   if (off > 0) {
-    memmove(c->rbuf, c->rbuf + off, c->rlen - off);
-    c->rlen -= off;
+    size_t rem = c->rlen - off;
+    if (rem > 0) memmove(c->rbuf, c->rbuf + off, rem);
+    c->rlen = rem;
+    if (c->rlen == 0 && c->rcap > RBUF_SHRINK_THRESHOLD) {
+      char *shrunk = ccord_realloc(c->rbuf, RBUF_INIT_CAP);
+      if (shrunk) {
+        c->rbuf = shrunk;
+        c->rcap = RBUF_INIT_CAP;
+      }
+    }
   }
   return true;
+}
+
+// Ensures c->rbuf has room for incoming data, starting at 4 KiB and growing geometrically up to RBUF_CAP.
+static bool ensure_rbuf(ccord_rpc_conn *c)
+{
+  if (c->rcap == 0) {
+    c->rbuf = ccord_malloc(RBUF_INIT_CAP);
+    if (!c->rbuf) return false;
+    c->rcap = RBUF_INIT_CAP;
+    return true;
+  }
+  size_t need = c->rlen == c->rcap ? c->rcap + 1u : c->rcap;
+  if (c->rlen >= 8u) {
+    const unsigned char *h = (const unsigned char *)c->rbuf;
+    uint32_t flen = (uint32_t)h[4] | ((uint32_t)h[5] << 8) | ((uint32_t)h[6] << 16) | ((uint32_t)h[7] << 24);
+    if (flen <= CCORD_RPC_FRAME_MAX_PAYLOAD) {
+      size_t total = 8u + (size_t)flen;
+      if (total > need) need = total;
+    }
+  }
+  if (need > RBUF_CAP) need = RBUF_CAP;
+  if (c->rcap >= need) return c->rlen < c->rcap;
+  size_t ncap = c->rcap;
+  while (ncap < need) {
+    ncap *= 2u;
+    if (ncap > RBUF_CAP) { ncap = RBUF_CAP; break; }
+  }
+  char *nb = ccord_realloc(c->rbuf, ncap);
+  if (!nb) return false;
+  c->rbuf = nb;
+  c->rcap = ncap;
+  return c->rlen < c->rcap;
 }
 
 // Reads what the client sent and handles it, then applies the handshake timeout. False = drop the connection.
 static bool service_conn(ccord_rpc_server *s, ccord_rpc_conn *c, uint64_t now_ms)
 {
   for (unsigned round = 0; round < READ_ROUNDS; round++) {
-    size_t room = sizeof c->rbuf - c->rlen;   // never 0: complete frames are consumed, and a frame fits the buffer
 #if CCORD_OS_WINDOWS
     DWORD avail = 0;
     if (!PeekNamedPipe(c->pipe, nullptr, 0, nullptr, &avail, nullptr)) return false;
     if (avail == 0) break;
+    if (!ensure_rbuf(c)) return false;
+    size_t room = c->rcap - c->rlen;
     DWORD want = avail < (DWORD)room ? avail : (DWORD)room;
     OVERLAPPED ov = {0};
     ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -723,6 +775,8 @@ static bool service_conn(ccord_rpc_server *s, ccord_rpc_conn *c, uint64_t now_ms
     if (!drain_frames(s, c)) return false;
     if ((size_t)got < room) break;
 #else
+    if (!ensure_rbuf(c)) return false;
+    size_t room = c->rcap - c->rlen;   // never 0: complete frames are consumed, and a frame fits RBUF_CAP
     bool wb = false;
     ptrdiff_t n = ccord_sock_recv(c->fd, c->rbuf + c->rlen, room, &wb);
     if (n > 0) {
@@ -754,6 +808,7 @@ static void release_conn(ccord_rpc_server *s, ccord_rpc_conn *c)
 #else
   ccord_sock_close(c->fd);
 #endif
+  ccord_free(c->rbuf);
   ccord_free(c);
 }
 
@@ -839,7 +894,14 @@ size_t ccord_rpc_server_poll(ccord_rpc_server *s, uint64_t now_ms)
   if (!s) return 0;
   s->work = 0;
   s->now_ms = now_ms;
-  accept_clients(s, now_ms);
+  bool should_accept = s->nconns > 0 || !s->accept_polled || now_ms == s->last_poll_ms ||
+                       now_ms < s->last_accept_ms || now_ms - s->last_accept_ms >= ACCEPT_IDLE_INTERVAL_MS;
+  if (should_accept) {
+    accept_clients(s, now_ms);
+    s->last_accept_ms = now_ms;
+    s->accept_polled = true;
+  }
+  s->last_poll_ms = now_ms;
   for (size_t i = 0; i < s->nconns;) {
     ccord_rpc_conn *c = s->conns[i];
     if (service_conn(s, c, now_ms)) {
