@@ -17,6 +17,7 @@ _Static_assert(CCORD_EARCON_COUNT == UI_SOUND_KIND_COUNT, "every earcon kind has
 #define EAR_PEAK 0.28f              // well below full scale
 #define EAR_MAX_PER_PUMP 4u
 #define EAR_RETRY_OPEN_MS 10000
+#define EAR_IDLE_CLOSE_MS 2000      // close idle playback stream after 2 s of silence so DAC/PipeWire can suspend
 #define EAR_MAX_VOICE 64            // tracked members of the connected channel
 #define EAR_PI 3.14159265358979f
 
@@ -58,16 +59,21 @@ static const ear_def k_defs[CCORD_EARCON_COUNT] = {
   [CCORD_EARCON_INVITED_TO_SPEAK] = {{{587, 587, 90}, {740, 740, 90}, {880, 880, 90}, {1175, 1175, 240}}},
 };
 
-static int16_t *s_pcm[CCORD_EARCON_COUNT];
+static int16_t *s_pcm[CCORD_EARCON_COUNT];   // stereo PCM cache populated only if ccord_earcon_pcm() is called
 static size_t s_frames[CCORD_EARCON_COUNT];
+static size_t s_meta_frames[CCORD_EARCON_COUNT];
+static int16_t s_meta_peak[CCORD_EARCON_COUNT];
+static bool s_meta_valid[CCORD_EARCON_COUNT];
 
-static void ear_synth(ccord_earcon_kind k)
+static int16_t *ear_synth_buf(ccord_earcon_kind k, int channels, size_t *out_frames, int16_t *out_peak)
 {
   size_t total = 0;
   for (int i = 0; i < 4; i++) total += (size_t)k_defs[k].notes[i].ms * EAR_RATE / 1000u;
-  int16_t *pcm = ccord_calloc(total * 2u, sizeof *pcm);
-  if (!pcm) return;
+  if (total == 0) return nullptr;
+  int16_t *pcm = ccord_calloc(total * (size_t)channels, sizeof *pcm);
+  if (!pcm) return nullptr;
   size_t at = 0;
+  int peak = 0;
   for (int i = 0; i < 4; i++) {
     const ear_note *n = &k_defs[k].notes[i];
     size_t len = (size_t)n->ms * EAR_RATE / 1000u;
@@ -85,20 +91,35 @@ static void ear_synth(ccord_earcon_kind k)
       // Fundamental plus a soft second harmonic reads as a "bell" rather than a test tone.
       float s = (sinf(phase) + 0.25f * sinf(2.0f * phase)) / 1.25f;
       int16_t v = (int16_t)(s * env * EAR_PEAK * 32767.0f);
-      pcm[(at + j) * 2u] = v;
-      pcm[(at + j) * 2u + 1u] = v;
+      int av = v < 0 ? -v : v;
+      if (av > peak) peak = av;
+      if (channels == 1) {
+        pcm[at + j] = v;
+      } else {
+        pcm[(at + j) * 2u] = v;
+        pcm[(at + j) * 2u + 1u] = v;
+      }
     }
     at += len;
   }
-  s_pcm[k] = pcm;
-  s_frames[k] = total;
+  if (out_frames) *out_frames = total;
+  if (out_peak) *out_peak = (int16_t)peak;
+  return pcm;
 }
 
 const int16_t *ccord_earcon_pcm(ccord_earcon_kind kind, size_t *frames)
 {
   if (frames) *frames = 0;
   if ((unsigned)kind >= CCORD_EARCON_COUNT) return nullptr;
-  if (!s_pcm[kind]) ear_synth(kind);
+  if (!s_pcm[kind]) {
+    int16_t peak = 0;
+    s_pcm[kind] = ear_synth_buf(kind, 2, &s_frames[kind], &peak);
+    if (s_pcm[kind]) {
+      s_meta_frames[kind] = s_frames[kind];
+      s_meta_peak[kind] = peak;
+      s_meta_valid[kind] = true;
+    }
+  }
   if (frames) *frames = s_frames[kind];
   return s_pcm[kind];
 }
@@ -108,10 +129,14 @@ const int16_t *ccord_earcon_pcm(ccord_earcon_kind kind, size_t *frames)
 struct ccord_earcons {
   ccord_audio *out;
   int64_t open_tried_ms;
+  int64_t out_busy_until_ms;
   bool open_tried;
   ccord_app_desktop *desktop;   // last pumped desktop glue (verify slices deliver through it)
   ccord_earcons_debug dbg;
   uint32_t burst;            // enqueues in the current pump
+  const ccord_store *last_store;
+  uint64_t last_store_rev;
+  bool store_rev_valid;
   // voice diff
   bool voice_valid;
   ccord_id voice_channel;
@@ -155,6 +180,9 @@ void ccord_earcons_destroy(ccord_earcons *e)
     ccord_free(s_pcm[k]);
     s_pcm[k] = nullptr;
     s_frames[k] = 0;
+    s_meta_frames[k] = 0;
+    s_meta_peak[k] = 0;
+    s_meta_valid[k] = false;
   }
 }
 
@@ -194,33 +222,59 @@ static bool sounds_allowed(const ccord_ui *ui, const ccord_store *store)
 
 static void ear_play(ccord_earcons *e, ccord_earcon_kind kind, int64_t now_ms)
 {
+  if ((unsigned)kind >= CCORD_EARCON_COUNT) return;
   if (e->burst >= EAR_MAX_PER_PUMP) {
     e->dbg.dropped++;
     return;
   }
+  if (!e->out && (!e->open_tried || now_ms - e->open_tried_ms >= EAR_RETRY_OPEN_MS)) {
+    e->open_tried = true;
+    e->open_tried_ms = now_ms;
+    ccord_audio_config cfg = {.sample_rate = EAR_RATE, .channels = 1, .frame_samples = 960, .capture = false};
+    ccord_error err;
+    e->out = ccord_audio_create(&cfg, &err);
+    if (e->out && !ccord_audio_available(e->out)) {
+      ccord_audio_destroy(e->out);
+      e->out = nullptr;
+    }
+  }
   size_t frames = 0;
-  const int16_t *pcm = ccord_earcon_pcm(kind, &frames);
-  if (!pcm || frames == 0) return;
+  int16_t peak = 0;
+  if (e->out && ccord_audio_available(e->out)) {
+    // Synthesize mono on demand and free immediately so earcons retain 0 B of PCM at rest.
+    int16_t *pcm = ear_synth_buf(kind, 1, &frames, &peak);
+    if (!pcm || frames == 0) {
+      ccord_free(pcm);
+      return;
+    }
+    s_meta_frames[kind] = frames;
+    s_meta_peak[kind] = peak;
+    s_meta_valid[kind] = true;
+    // A second SDL stream on the same device is mixed with the voice/video playback streams.
+    (void)ccord_audio_write(e->out, pcm, frames);
+    ccord_free(pcm);
+    int64_t dur_ms = (int64_t)((frames * 1000u + (EAR_RATE - 1u)) / EAR_RATE);
+    int64_t base = e->out_busy_until_ms > now_ms ? e->out_busy_until_ms : now_ms;
+    e->out_busy_until_ms = base + dur_ms;
+  } else {
+    if (!s_meta_valid[kind]) {
+      int16_t *pcm = ear_synth_buf(kind, 1, &frames, &peak);
+      ccord_free(pcm);
+      if (frames == 0) return;
+      s_meta_frames[kind] = frames;
+      s_meta_peak[kind] = peak;
+      s_meta_valid[kind] = true;
+    } else {
+      frames = s_meta_frames[kind];
+      peak = s_meta_peak[kind];
+    }
+  }
   e->burst++;
   e->dbg.enqueued[kind]++;
   e->dbg.total++;
   e->dbg.last = kind;
   e->dbg.last_frames = frames;
-  int peak = 0;
-  for (size_t i = 0; i < frames * 2u; i++) {
-    int v = pcm[i] < 0 ? -pcm[i] : pcm[i];
-    if (v > peak) peak = v;
-  }
-  e->dbg.last_peak = (int16_t)peak;
-  if (!e->out && (!e->open_tried || now_ms - e->open_tried_ms >= EAR_RETRY_OPEN_MS)) {
-    e->open_tried = true;
-    e->open_tried_ms = now_ms;
-    ccord_audio_config cfg = {.sample_rate = EAR_RATE, .channels = 2, .frame_samples = 960, .capture = false};
-    ccord_error err;
-    e->out = ccord_audio_create(&cfg, &err);
-  }
-  // A second SDL stream on the same device is mixed with the voice/video playback streams.
-  if (e->out && ccord_audio_available(e->out)) (void)ccord_audio_write(e->out, pcm, frames);
+  e->dbg.last_peak = peak;
 }
 
 // Plays `kind` when sounds are allowed right now and its own toggle is on.
@@ -254,12 +308,19 @@ static bool notification_sound_hook(const ccord_notification *n, const ccord_ui 
 static void pump_notifications(ccord_earcons *e, ccord_session *session, const ccord_store *store, const ccord_ui *ui,
                                ccord_app_desktop *desktop, bool virtual_clock, int64_t now_ms)
 {
+  if (!session) return;
   ccord_notification n;
-  ccord_platform *plat = desktop ? ccord_app_desktop_platform(desktop) : nullptr;
-  bool focused = plat && ccord_platform_window_focused(plat);
-  ccord_id selected = store ? ccord_store_selected_channel(store) : CCORD_ID_NONE;
-  bool reading_selected = focused && selected != CCORD_ID_NONE && (!ui || ui_is_reading(ui));
-  while (session && ccord_session_pop_notification(session, &n)) {
+  bool ctx_ready = false;
+  ccord_id selected = CCORD_ID_NONE;
+  bool reading_selected = false;
+  while (ccord_session_pop_notification(session, &n)) {
+    if (!ctx_ready) {
+      ccord_platform *plat = desktop ? ccord_app_desktop_platform(desktop) : nullptr;
+      bool focused = plat && ccord_platform_window_focused(plat);
+      selected = store ? ccord_store_selected_channel(store) : CCORD_ID_NONE;
+      reading_selected = focused && selected != CCORD_ID_NONE && (!ui || ui_is_reading(ui));
+      ctx_ready = true;
+    }
     // Delivery requests its sound through notification_sound_hook for a notification the desktop accepted;
     // every other case is ours.
     bool delivered = !virtual_clock && desktop && ccord_app_desktop_deliver(desktop, &n, now_ms);
@@ -371,9 +432,14 @@ static bool pump_voice(ccord_earcons *e, const ccord_store *store, const ccord_u
 static void pump_ptt(ccord_earcons *e, const ccord_session *session, const ccord_store *store, const ccord_ui *ui,
                      bool connected, int64_t now_ms)
 {
+  if (!connected || !ui) {
+    e->ptt_arm = 2;
+    e->ptt_held = false;
+    return;
+  }
   ccord_ui_voice_prefs vp = {0};
-  if (ui) ccord_ui_voice_settings(ui, &vp);
-  if (!connected || !ui || !vp.ptt) {
+  ccord_ui_voice_settings(ui, &vp);
+  if (!vp.ptt) {
     e->ptt_arm = 2;
     e->ptt_held = false;
     return;
@@ -395,22 +461,23 @@ static void pump_ptt(ccord_earcons *e, const ccord_session *session, const ccord
 // My own stream and a stream I watch start / stop; the viewer count of my stream going up / down. A stream that
 // ends because my connection ended or moved is covered by the connect/disconnect sound (quiet_stream_until_ms).
 static void pump_streams(ccord_earcons *e, const ccord_session *session, const ccord_store *store, const ccord_ui *ui,
-                         int64_t now_ms)
+                         bool store_unchanged, int64_t now_ms)
 {
   ccord_id self = ccord_store_self_id(store);
   bool quiet = now_ms < e->quiet_stream_until_ms;
-  bool mine = ccord_store_stream_active(store);
-  if (mine != e->stream_on) {
-    e->stream_on = mine;
-    e->viewers_valid = false;
-    if (mine) ear_emit(e, CCORD_EARCON_STREAM_START, ui, store, now_ms);
-    else if (!quiet) ear_emit(e, CCORD_EARCON_STREAM_STOP, ui, store, now_ms);
-  }
   const ccord_watched_stream *w = ccord_session_watched_stream(session);
   bool watching = w && w->active && w->user_id != self;   // watching my own preview is covered by `mine`
   if (watching != e->watching) {
     e->watching = watching;
     if (watching) ear_emit(e, CCORD_EARCON_STREAM_START, ui, store, now_ms);
+    else if (!quiet) ear_emit(e, CCORD_EARCON_STREAM_STOP, ui, store, now_ms);
+  }
+  if (store_unchanged) return;
+  bool mine = ccord_store_stream_active(store);
+  if (mine != e->stream_on) {
+    e->stream_on = mine;
+    e->viewers_valid = false;
+    if (mine) ear_emit(e, CCORD_EARCON_STREAM_START, ui, store, now_ms);
     else if (!quiet) ear_emit(e, CCORD_EARCON_STREAM_STOP, ui, store, now_ms);
   }
   const ccord_stream_state *ms = mine ? ccord_store_stream(store) : nullptr;
@@ -462,10 +529,21 @@ void ccord_earcons_pump(ccord_earcons *e, ccord_session *session, const ccord_st
   e->burst = 0;
   e->desktop = desktop;
   if (desktop) ccord_app_desktop_set_sound_hook(desktop, notification_sound_hook);
+  // Release the playback stream after 2 s of silence so PipeWire / the audio DAC can suspend.
+  if (e->out && now_ms >= e->out_busy_until_ms + EAR_IDLE_CLOSE_MS) {
+    ccord_audio_destroy(e->out);
+    e->out = nullptr;
+    e->open_tried = false;
+  }
   if (!store || !session) return;
+  uint64_t rev = ccord_store_revision(store);
+  bool store_unchanged = e->store_rev_valid && store == e->last_store && rev == e->last_store_rev;
   pump_notifications(e, session, store, ui, desktop, virtual_clock, now_ms);
-  bool connected = pump_voice(e, store, ui, now_ms);
+  bool connected = store_unchanged ? e->voice_valid : pump_voice(e, store, ui, now_ms);
   pump_ptt(e, session, store, ui, connected, now_ms);
-  pump_streams(e, session, store, ui, now_ms);
+  pump_streams(e, session, store, ui, store_unchanged, now_ms);
   pump_ring(e, session, store, ui, now_ms);
+  e->last_store = store;
+  e->last_store_rev = rev;
+  e->store_rev_valid = true;
 }

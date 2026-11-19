@@ -226,12 +226,19 @@ struct ccord_app_desktop {
   ccord_theme base_theme;                  // pristine base snapshot; QuickCSS restores it before overlaying
   bool quickcss_enabled;
   char quickcss[256];
-  ccord_audio *playback;          // lazy capability probe + notification beep stream (one device)
+  ccord_audio *playback;          // lazy notification beep stream (closed after idle silence)
+  int64_t playback_busy_until_ms;
+  bool audio_cap_probed;
+  bool audio_cap_avail;
   ccord_app_desktop_sound_fn sound_hook;   // optional notification sound (earcons); null = legacy tone
   int16_t *beep_pcm;
   size_t beep_frames;
   uint64_t badge_revision;
   bool badge_valid;
+  uint32_t badge_last_unread;
+  uint32_t badge_last_mentions;
+  uint32_t badge_last_tray;
+  bool badge_pushed;
   bool voice_sync_valid;          // tray voice state: push only when mute/deafen actually changed
   bool redraw;
   ccord_app_desktop_debug dbg;
@@ -340,12 +347,20 @@ void ccord_app_desktop_set_zoom(void *ud, float zoom)
   d->redraw = true;
 }
 
+#define APP_PLAYBACK_IDLE_MS 2000
+
 static ccord_audio *app_playback(ccord_app_desktop *d)
 {
   if (d->playback) return d->playback;
-  ccord_audio_config cfg = {.sample_rate = 48000, .channels = 2, .frame_samples = 960, .capture = false};
+  ccord_audio_config cfg = {.sample_rate = 48000, .channels = 1, .frame_samples = 960, .capture = false};
   ccord_error err;
   d->playback = ccord_audio_create(&cfg, &err);
+  if (d->playback && !ccord_audio_available(d->playback)) {
+    ccord_audio_destroy(d->playback);
+    d->playback = nullptr;
+  }
+  d->audio_cap_probed = true;
+  d->audio_cap_avail = d->playback != nullptr;
   return d->playback;
 }
 
@@ -354,7 +369,22 @@ uint32_t ccord_app_desktop_capabilities(void *ud)
   ccord_app_desktop *d = ud;
   if (!d) return 0;
   uint32_t caps = 0;
-  if (ccord_audio_available(app_playback(d))) caps |= CCORD_UI_CAP_AUDIO_PLAYBACK;
+  bool audio_ok = false;
+  if (d->playback) {
+    audio_ok = ccord_audio_available(d->playback);
+  } else if (d->audio_cap_probed) {
+    audio_ok = d->audio_cap_avail;
+  } else {
+    // Probe without keeping an idle 48 kHz audio stream open permanently.
+    ccord_audio_config cfg = {.sample_rate = 48000, .channels = 1, .frame_samples = 960, .capture = false};
+    ccord_error err;
+    ccord_audio *probe = ccord_audio_create(&cfg, &err);
+    audio_ok = ccord_audio_available(probe);
+    ccord_audio_destroy(probe);
+    d->audio_cap_probed = true;
+    d->audio_cap_avail = audio_ok;
+  }
+  if (audio_ok) caps |= CCORD_UI_CAP_AUDIO_PLAYBACK;
   if (d->platform) {
     if (ccord_platform_notifications_available(d->platform)) caps |= CCORD_UI_CAP_NOTIFICATIONS;
     if (ccord_platform_tray_available(d->platform)) caps |= CCORD_UI_CAP_TRAY;
@@ -434,14 +464,16 @@ static void badge_add_guild(const ccord_store *s, ccord_id guild_id, int64_t now
 {
   ccord_id self = ccord_store_self_id(s);
   bool exact = guild_id != CCORD_DM_GUILD_ID && ccord_store_permissions_exact(s, guild_id, self);
+  bool guild_muted = ccord_store_guild_muted(s, guild_id, now_unix_ms);
   size_t channels = ccord_store_channel_count(s, guild_id);
   for (size_t i = 0; i < channels; i++) {
     const ccord_channel *ch = ccord_store_channel_at(s, guild_id, i);
     if (!ch || ch->is_message_request || ch->is_spam) continue;
+    if (ch->unread_count == 0 && ch->mention_count == 0) continue;
     if (exact && (ccord_store_permissions(s, guild_id, ch->id, self, now_unix_ms) & CCORD_PERM_VIEW_CHANNEL) == 0) {
       continue;
     }
-    if (!ccord_store_guild_muted(s, guild_id, now_unix_ms) && !ccord_store_channel_is_muted(s, ch, now_unix_ms)) {
+    if (ch->unread_count > 0 && !guild_muted && !ccord_store_channel_is_muted(s, ch, now_unix_ms)) {
       *unread = badge_sum(*unread, ch->unread_count);
     }
     *mentions = badge_sum(*mentions, ch->mention_count);
@@ -460,16 +492,22 @@ static void badge_totals(const ccord_store *s, int64_t now_unix_ms, uint32_t *ou
     if (g) badge_add_guild(s, g->id, now_unix_ms, &unread, &mentions);
   }
   uint32_t dm_unread_extra = 0;   // unread DM messages beyond the mentions already counted for that DM
+  bool dm_guild_muted = ccord_store_guild_muted(s, CCORD_DM_GUILD_ID, now_unix_ms);
   size_t dms = ccord_store_channel_count(s, CCORD_DM_GUILD_ID);
   for (size_t i = 0; i < dms; i++) {
     const ccord_channel *ch = ccord_store_channel_at(s, CCORD_DM_GUILD_ID, i);
     if (!ch || ch->is_message_request || ch->is_spam) continue;
-    if (ccord_store_channel_is_muted(s, ch, now_unix_ms)) continue;
-    if (ch->unread_count > ch->mention_count) {
-      dm_unread_extra = badge_sum(dm_unread_extra, ch->unread_count - ch->mention_count);
+    if (ch->unread_count == 0 && ch->mention_count == 0) continue;
+    if (!ccord_store_channel_is_muted(s, ch, now_unix_ms)) {
+      if (ch->unread_count > ch->mention_count) {
+        dm_unread_extra = badge_sum(dm_unread_extra, ch->unread_count - ch->mention_count);
+      }
+      if (!dm_guild_muted && ch->unread_count > 0) {
+        unread = badge_sum(unread, ch->unread_count);
+      }
     }
+    mentions = badge_sum(mentions, ch->mention_count);
   }
-  badge_add_guild(s, CCORD_DM_GUILD_ID, now_unix_ms, &unread, &mentions);
   *out_unread = unread;
   *out_mentions = mentions;
   *out_tray = badge_sum(mentions, dm_unread_extra);
@@ -485,6 +523,14 @@ void ccord_app_desktop_sync_badge(ccord_app_desktop *d)
   uint32_t unread = 0, mentions = 0, tray = 0;
   badge_totals(d->store, now_unix_ms_wall(), &unread, &mentions, &tray);
   d->dbg.badge_computations++;
+  if (d->badge_pushed && unread == d->badge_last_unread && mentions == d->badge_last_mentions &&
+      tray == d->badge_last_tray) {
+    return;
+  }
+  d->badge_pushed = true;
+  d->badge_last_unread = unread;
+  d->badge_last_mentions = mentions;
+  d->badge_last_tray = tray;
   ccord_platform_set_badge_counts(d->platform, unread, mentions, tray);
 }
 
@@ -528,7 +574,7 @@ static const int16_t k_sine[64] = {
 static bool app_beep_tone(ccord_app_desktop *d)
 {
   if (d->beep_pcm) return true;
-  int16_t *pcm = ccord_calloc(APP_BEEP_FRAMES * 2u, sizeof *pcm);
+  int16_t *pcm = ccord_calloc(APP_BEEP_FRAMES, sizeof *pcm);
   if (!pcm) return false;
   uint32_t phase = 0;                              // 16.16 fixed point over the 64-entry table
   const uint32_t step = (uint32_t)((880u * 64u * 65536u) / APP_BEEP_RATE);
@@ -536,8 +582,7 @@ static bool app_beep_tone(ccord_app_desktop *d)
     int32_t sample = k_sine[(phase >> 16) & 63u];
     size_t left = APP_BEEP_FRAMES - i;
     if (left < APP_BEEP_FADE) sample = sample * (int32_t)left / APP_BEEP_FADE;
-    pcm[i * 2u] = (int16_t)sample;
-    pcm[i * 2u + 1u] = (int16_t)sample;
+    pcm[i] = (int16_t)sample;
     phase += step;
   }
   d->beep_pcm = pcm;
@@ -554,6 +599,8 @@ static void app_beep(ccord_app_desktop *d, bool sounds_on, const ccord_notificat
   ccord_audio *a = app_playback(d);
   if (!ccord_audio_available(a) || !app_beep_tone(d)) return;   // honest silent no-op without a device
   (void)ccord_audio_write(a, d->beep_pcm, d->beep_frames);
+  int64_t base = d->playback_busy_until_ms > now_unix_ms ? d->playback_busy_until_ms : now_unix_ms;
+  d->playback_busy_until_ms = base + 150;
 }
 
 static void notify_prefs_now(const ccord_app_desktop *d, ccord_app_notify_prefs *out, int64_t now_unix_ms)
@@ -652,6 +699,14 @@ static void desktop_sync_voice_state(ccord_app_desktop *d)
 void ccord_app_desktop_pump(ccord_app_desktop *d, bool virtual_clock, int64_t now_unix_ms)
 {
   if (!d) return;
+  if (d->playback && now_unix_ms >= d->playback_busy_until_ms + APP_PLAYBACK_IDLE_MS) {
+    ccord_audio_destroy(d->playback);
+    d->playback = nullptr;
+    d->playback_busy_until_ms = 0;
+    ccord_free(d->beep_pcm);
+    d->beep_pcm = nullptr;
+    d->beep_frames = 0;
+  }
   if (d->session) {
     ccord_notification notif;
     while (ccord_session_pop_notification(d->session, &notif)) {
