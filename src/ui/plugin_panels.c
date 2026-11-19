@@ -1316,15 +1316,24 @@ static uint64_t hash_str(const char *s)
 void ui_panels_draw(ccord_ui *ui, ccord_renderer *r)
 {
   if (!ui || !r) return;
+  size_t np = ui->d.contrib ? ccord_contrib_panel_count(ui->d.contrib) : 0;
+  if (np == 0) {
+    if (ui->panel_mgr) ui_panels_destroy(ui);
+    return;
+  }
+  if (ui->discovery_open) {
+    if (ui->panel_mgr) {
+      ui->panel_mgr->nhits = 0;
+      ui->panel_mgr->nboxes = 0;
+      prune_stale_compiled(ui->panel_mgr, ui->d.contrib);
+    }
+    return;
+  }
   ui_panel_mgr *m = ensure_mgr(ui);
   if (!m) return;
   m->nhits = 0;
   m->nboxes = 0;
   prune_stale_compiled(m, ui->d.contrib);
-  if (!ui->d.contrib || ui->discovery_open) return;
-
-  size_t np = ccord_contrib_panel_count(ui->d.contrib);
-  if (np == 0) return;
 
   float col_x = ui->layout.chat_header.x;
   float col_w = ui->layout.chat_header.w;
