@@ -96,8 +96,11 @@ static void test_window_lifecycle(void)
   CT_CHECK(!ccord_platform_close_to_tray(p));   // default off
   ccord_platform_set_window_visible(p, true);
   CT_CHECK(ccord_platform_window_visible(p));
+  ccord_platform_set_window_focused(p, true);
+  CT_CHECK(ccord_platform_window_focused(p));
   ccord_platform_set_window_visible(p, false);
   CT_CHECK(!ccord_platform_window_visible(p));
+  CT_CHECK(!ccord_platform_window_focused(p));
   // Offline tray/voice setters are safe no-ops (no bus), must not crash.
   ccord_platform_set_tray_callback(p, nullptr, nullptr);
   ccord_platform_set_voice_state(p, true, true);
@@ -109,15 +112,47 @@ static void test_window_lifecycle(void)
   push_window_event(p, SDL_EVENT_WINDOW_CLOSE_REQUESTED);
   CT_CHECK(drain_saw_quit(p));
 
-  // close_to_tray=true: the close request hides the window without emitting CCORD_IN_QUIT.
+  // close_to_tray=true: the close request hides the window, clears focused state, and emits CCORD_IN_FOCUS(false) without CCORD_IN_QUIT.
   ccord_platform_set_window_visible(p, true);
+  ccord_platform_set_window_focused(p, true);
   drain(p);
   ccord_platform_set_close_to_tray(p, true);
   ccord_platform_set_tray_override(p, 1);   // headless has no tray: pretend one registered so close hides
   CT_CHECK(ccord_platform_close_to_tray(p));
   push_window_event(p, SDL_EVENT_WINDOW_CLOSE_REQUESTED);
-  CT_CHECK(!drain_saw_quit(p));
+  {
+    ccord_input_event cev;
+    bool saw_quit = false, saw_unfocus = false;
+    while (ccord_platform_next_event(p, &cev, 0)) {
+      if (cev.type == CCORD_IN_QUIT) saw_quit = true;
+      if (cev.type == CCORD_IN_FOCUS && !cev.focused) saw_unfocus = true;
+    }
+    CT_CHECK(!saw_quit);
+    CT_CHECK(saw_unfocus);
+  }
   CT_CHECK(!ccord_platform_window_visible(p));
+  CT_CHECK(!ccord_platform_window_focused(p));
+
+  // Without a tray available, close_to_tray minimizes instead, still clearing focus and emitting CCORD_IN_FOCUS(false).
+  ccord_platform_set_window_visible(p, true);
+  ccord_platform_set_window_focused(p, true);
+  ccord_platform_set_tray_override(p, -1);
+  drain(p);
+  push_window_event(p, SDL_EVENT_WINDOW_CLOSE_REQUESTED);
+  {
+    ccord_input_event cev;
+    bool saw_quit = false, saw_unfocus = false;
+    while (ccord_platform_next_event(p, &cev, 0)) {
+      if (cev.type == CCORD_IN_QUIT) saw_quit = true;
+      if (cev.type == CCORD_IN_FOCUS && !cev.focused) saw_unfocus = true;
+    }
+    CT_CHECK(!saw_quit);
+    CT_CHECK(saw_unfocus);
+  }
+  CT_CHECK(ccord_platform_window_minimized(p));
+  CT_CHECK(!ccord_platform_window_focused(p));
+  ccord_platform_set_tray_override(p, 1);
+
   // Restore from the tray and close again: still hidden, still no quit.
   ccord_platform_set_window_visible(p, true);
   CT_CHECK(ccord_platform_window_visible(p));
@@ -274,6 +309,18 @@ static void test_offline(void)
   CT_CHECK(saw_unfocus);
   CT_CHECK(!ccord_platform_window_focused(p));
   ccord_platform_set_window_focused(p, true);
+
+  // Window fullscreen toggle + resize/move system cursor kinds (safe even under dummy video driver).
+  CT_CHECK(!ccord_platform_window_fullscreen(p));
+  CT_CHECK(ccord_platform_set_fullscreen(p, true));
+  CT_CHECK(ccord_platform_window_fullscreen(p));
+  CT_CHECK(ccord_platform_set_fullscreen(p, false));
+  CT_CHECK(!ccord_platform_window_fullscreen(p));
+  CT_CHECK(!ccord_platform_set_fullscreen(nullptr, true));
+  for (int ck = 0; ck < (int)CCORD_CURSOR_COUNT; ck++) {
+    ccord_platform_set_cursor(p, (ccord_cursor_kind)ck);
+  }
+  ccord_platform_set_cursor(p, CCORD_CURSOR_DEFAULT);
 
   // Binding shortcuts offline fails honestly; invalid definitions fail everywhere.
   ccord_global_shortcut defs[1] = {{.id = "toggle-mute", .description = "Toggle mute", .preferred_trigger = "CTRL+SHIFT+M"}};
@@ -1261,6 +1308,63 @@ static void test_empty_bus(void)
   g_spawn_close_pid(pid);
 }
 
+static bool cond_notify_unavailable(void) { return g_live_p && !ccord_platform_notifications_available(g_live_p); }
+
+static void test_late_notify_daemon(void)
+{
+  // If the notification daemon starts after C-Cord (common at desktop login or after a daemon restart),
+  // notifications_available must transition from false -> true and deliver notifications, then return to false if it vanishes.
+  char addr[512];
+  GPid pid = spawn_bus(addr, sizeof addr);
+  if (!pid) {
+    fprintf(stderr, "test_platform_desktop: dbus-daemon unavailable; late daemon checks skipped\n");
+    return;
+  }
+  const char *orig = getenv("DBUS_SESSION_BUS_ADDRESS");
+  char saved[512];
+  saved[0] = '\0';
+  if (orig) snprintf(saved, sizeof saved, "%s", orig);
+  setenv("DBUS_SESSION_BUS_ADDRESS", addr, 1);
+  SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
+  ccord_error err;
+  ccord_platform_config cfg = {.title = "C-Cord", .width = 320, .height = 200, .headless = false};
+  ccord_platform *p = ccord_platform_create(&cfg, &err);
+  CT_CHECK(p != nullptr);
+  if (p) {
+    g_live_p = p;
+    drain(p);
+    wait_for(p, cond_never, 300);
+    CT_CHECK(!ccord_platform_notifications_available(p));
+
+    CT_CHECK(mock_start(addr));
+    if (g_mock.names_acquired == 3) {
+      CT_CHECK(wait_for(p, cond_notify_cap, 5000));
+      CT_CHECK(ccord_platform_notifications_available(p));
+
+      ccord_platform_set_window_focused(p, false);
+      CT_CHECK(ccord_platform_notify(p, "Late daemon", "Delivered after startup"));
+      CT_CHECK(wait_for(p, cond_notify, 5000));
+      CT_CHECK(g_mock.notify_count == 1);
+      CT_CHECK(strcmp(g_mock.notify_summary, "Late daemon") == 0);
+      CT_CHECK(strcmp(g_mock.notify_body, "Delivered after startup") == 0);
+
+      // Daemon vanishes: capability drops back to false until it returns.
+      g_bus_unown_name(g_mock.owner_ids[0]);
+      g_mock.owner_ids[0] = 0;
+      CT_CHECK(wait_for(p, cond_notify_unavailable, 5000));
+      CT_CHECK(!ccord_platform_notifications_available(p));
+    }
+    ccord_platform_destroy(p);
+    g_live_p = nullptr;
+  }
+  mock_stop();
+  if (saved[0]) setenv("DBUS_SESSION_BUS_ADDRESS", saved, 1);
+  else unsetenv("DBUS_SESSION_BUS_ADDRESS");
+  kill(pid, SIGTERM);
+  waitpid(pid, nullptr, 0);
+  g_spawn_close_pid(pid);
+}
+
 static void test_live(void)
 {
   char addr[512];
@@ -1456,6 +1560,7 @@ int main(void)
   test_dead_bus();
 #if CCORD_HAVE_PORTAL
   test_empty_bus();
+  test_late_notify_daemon();
   test_live();
 #endif
   return CT_RESULT("test_platform_desktop");

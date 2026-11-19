@@ -12,6 +12,8 @@ typedef struct ccord_catalog_http {
   bool (*get)(void *ud, const char *url, const char *if_none_match, size_t max_bytes,
               char **out_body, size_t *out_len, char *out_etag, size_t etag_cap,
               bool *out_not_modified, char *err_buf, size_t err_cap);
+  bool (*post_json)(void *ud, const char *url, const char *json_body, size_t body_len, size_t max_bytes,
+                    char **out_body, size_t *out_len, char *err_buf, size_t err_cap);
   bool (*download_file)(void *ud, const char *url, const char *dest_path, size_t max_bytes,
                         char *err_buf, size_t err_cap);
 } ccord_catalog_http;

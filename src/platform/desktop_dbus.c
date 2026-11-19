@@ -79,11 +79,14 @@ struct ccord_desktop {
   GDBusConnection *bus;
   GCancellable *cancellable;
   bool notifications_available;
+  bool notifications_owned;
+  bool notifications_activatable;
   bool tray_available;
   bool shortcuts_available;
   GDBusNodeInfo *sni_node;
   guint sni_reg_id;
   guint watcher_watch_id;
+  guint notify_watch_id;           // org.freedesktop.Notifications name owner: tracks daemon appearing/restarting
   guint portal_watch_id;           // org.freedesktop.portal.Desktop name owner: vanishing releases held shortcuts
   // com.canonical.dbusmenu context menu exported at /MenuBar on the same connection.
   GDBusNodeInfo *menu_node;
@@ -282,16 +285,46 @@ static GDBusConnection *open_bus(void)
 // Capability probes are asynchronous: a synchronous call would block the UI thread and, when the
 // service lives in the same process (as in tests), deadlock — call_sync's private wait loop never
 // dispatches the callee's incoming messages. Replies land during ccord_desktop_pump().
-static void probe_notify_done(GObject *source, GAsyncResult *res, gpointer user_data)
+static void notify_appeared(GDBusConnection *connection, const gchar *name, const gchar *name_owner, gpointer user_data)
+{
+  (void)connection;
+  (void)name;
+  (void)name_owner;
+  ccord_desktop *d = user_data;
+  if (!d->dead) {
+    d->notifications_owned = true;
+    d->notifications_available = true;
+  }
+}
+
+static void notify_vanished(GDBusConnection *connection, const gchar *name, gpointer user_data)
+{
+  (void)connection;
+  (void)name;
+  ccord_desktop *d = user_data;
+  if (!d->dead) {
+    d->notifications_owned = false;
+    d->notifications_available = d->notifications_activatable;
+  }
+}
+
+static void probe_activatable_done(GObject *source, GAsyncResult *res, gpointer user_data)
 {
   ccord_desktop *d = user_data;
   GError *gerr = nullptr;
   GVariant *ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &gerr);
   if (gerr) g_error_free(gerr);
   if (!d->dead && ret) {
-    gboolean has = FALSE;
-    g_variant_get(ret, "(b)", &has);
-    d->notifications_available = has;
+    GVariantIter *iter = nullptr;
+    g_variant_get(ret, "(as)", &iter);
+    const gchar *name = nullptr;
+    bool found = false;
+    while (iter && g_variant_iter_loop(iter, "&s", &name)) {
+      if (name && strcmp(name, NOTIFY_NAME) == 0) found = true;
+    }
+    if (iter) g_variant_iter_free(iter);
+    d->notifications_activatable = found;
+    d->notifications_available = d->notifications_owned || d->notifications_activatable;
   }
   if (ret) g_variant_unref(ret);
   desktop_unref(d);
@@ -310,9 +343,10 @@ static void probe_portal_version_done(GObject *source, GAsyncResult *res, gpoint
 
 static void probe_capabilities(ccord_desktop *d)
 {
+  // D-Bus-activatable notification daemons (e.g. dunst / xfce4-notifyd) may not own the name until first Notify.
   g_dbus_connection_call(d->bus, "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
-                         "NameHasOwner", g_variant_new("(s)", "org.freedesktop.Notifications"), G_VARIANT_TYPE("(b)"),
-                         G_DBUS_CALL_FLAGS_NONE, 1500, d->cancellable, probe_notify_done, desktop_ref(d));
+                         "ListActivatableNames", nullptr, G_VARIANT_TYPE("(as)"),
+                         G_DBUS_CALL_FLAGS_NONE, 1500, d->cancellable, probe_activatable_done, desktop_ref(d));
   // Reading GlobalShortcuts.version confirms the interface exists; if the portal name is unowned
   // the call fails asynchronously and shortcuts_available stays false.
   g_dbus_connection_call(d->bus, PORTAL_NAME, PORTAL_PATH, "org.freedesktop.DBus.Properties", "Get",
@@ -1037,6 +1071,8 @@ ccord_desktop *ccord_desktop_create(const char *app_id, bool offline)
   }
   d->watcher_watch_id = g_bus_watch_name_on_connection(d->bus, WATCHER_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
                                                        watcher_appeared, watcher_vanished, d, nullptr);
+  d->notify_watch_id = g_bus_watch_name_on_connection(d->bus, NOTIFY_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
+                                                      notify_appeared, notify_vanished, d, nullptr);
 #else
   (void)offline;
 #endif
@@ -1051,6 +1087,7 @@ void ccord_desktop_destroy(ccord_desktop *d)
   if (d->cancellable) g_cancellable_cancel(d->cancellable);
   if (d->bus) {
     if (d->watcher_watch_id) g_bus_unwatch_name(d->watcher_watch_id);
+    if (d->notify_watch_id) g_bus_unwatch_name(d->notify_watch_id);
     if (d->response_sub_id) g_dbus_connection_signal_unsubscribe(d->bus, d->response_sub_id);
     if (d->portal_watch_id) g_bus_unwatch_name(d->portal_watch_id);
     if (d->activated_sub_id) g_dbus_connection_signal_unsubscribe(d->bus, d->activated_sub_id);

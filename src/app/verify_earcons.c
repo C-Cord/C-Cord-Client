@@ -142,6 +142,16 @@ static int ev_step(ev *v, const char *name, ev_act act, int arg, int expect_kind
 
 static int act_message(ev *v, int arg) { (void)arg; return ev_post(v, false); }
 static int act_mention(ev *v, int arg) { (void)arg; return ev_post(v, true); }
+static int act_selected_message(ev *v, int arg)
+{
+  (void)arg;
+  ccord_id sel = ccord_store_selected_channel(v->c->store);
+  ccord_error err;
+  return ccord_mock_post_rich_message(v->c->transport, sel, EV_ADA, "selected channel msg", nullptr, nullptr, &err) ==
+                 CCORD_OK
+             ? 0
+             : 1;
+}
 static int act_self_join(ev *v, int arg)
 {
   (void)arg;
@@ -704,6 +714,40 @@ int ccord_verify_earcons_slice(const ccord_verify_ui_parity_ctx *ctx)
   (void)ccord_store_update_presence(ctx->store, v.self, CCORD_PRESENCE_ONLINE, nullptr, &err);
 
   if (ev_check_delivered(&v, ui) != 0) return 1;
+
+  // Focused window suppression: quiet while actively reading the selected channel, audible when covered by Settings
+  // or scrolled up in history (still focused, not actively reading).
+  {
+    ccord_app_desktop *d = ccord_earcons_desktop(v.e);
+    ccord_platform *plat = d ? ccord_app_desktop_platform(d) : nullptr;
+    if (plat) ccord_platform_set_window_focused(plat, true);
+    ui->window_focused = true;
+    ui->vlist.stick_bottom = true;
+    ui_open_settings(ui, false);
+    ev_frames(&v, 2);
+    if (ev_step(&v, "focused and reading selected channel is silent", act_selected_message, 0, -1) != 0) return 1;
+    ui_open_settings(ui, true);
+    ev_frames(&v, 2);
+    if (ev_step(&v, "focused with settings covering selected channel plays message earcon", act_selected_message, 0,
+                CCORD_EARCON_MESSAGE) != 0) {
+      ui_open_settings(ui, false);
+      return 1;
+    }
+    ui_open_settings(ui, false);
+    const ccord_layout *lay = ccord_ui_get_layout(ui);
+    ccord_input_event wheel_up = {.type = CCORD_IN_WHEEL, .wheel = 600.0f,
+                                  .x = lay->message_area.x + 100.0f, .y = lay->message_area.y + 100.0f};
+    v.c->input(v.c->ud, &wheel_up);
+    ev_frames(&v, 2);
+    if (ui->vlist.stick_bottom) return ev_fail("scrolled up", "wheel did not detach from bottom");
+    if (ev_step(&v, "focused while scrolled up in selected channel plays message earcon", act_selected_message, 0,
+                CCORD_EARCON_MESSAGE) != 0) {
+      ccord_vlist_reset_bottom(&ui->vlist);
+      return 1;
+    }
+    ccord_vlist_reset_bottom(&ui->vlist);
+    ev_frames(&v, 2);
+  }
 
   // One line per kind, printed only when it was heard for its own event and also kept silent by its own toggle.
   for (int k = 0; k < CCORD_EARCON_COUNT; k++) {

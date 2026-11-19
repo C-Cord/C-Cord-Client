@@ -48,6 +48,7 @@ static void ccord_test_cleanup_dir(void) {
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/paths.h>
+#include <ccord/core/utf8.h>
 #include <ccord/model/audit.h>
 #include <ccord/model/permissions.h>
 #include <ccord/net/mock_transport.h>
@@ -12169,6 +12170,129 @@ static void test_chat_message_vs_profile_right_click_and_admin_tools(void)
   }
 }
 
+// Covers three notification edge cases:
+// 1) ui_is_reading() is false when full-window overlays (Settings, full-screen voice stage, fullscreen stream) hide chat.
+// 2) CCORD_IN_FOCUS(false) updates session reading_channel immediately (before ccord_ui_update) so incoming messages notify.
+// 3) ccord_ui_prepare_notification() truncates multi-byte UTF-8 on codepoint boundaries so platform delivery never drops them.
+static void test_reading_overlays_immediate_focus_and_utf8_notify(void)
+{
+  ccord_error err;
+  ccord_id g = ccord_store_guild_at(F.store, 0)->id;
+  CT_CHECK(ccord_session_select_guild(F.session, g, &err) == CCORD_OK);
+  frame(3);
+  ccord_id ch = ccord_store_selected_channel(F.store);
+  CT_CHECK(ch != CCORD_ID_NONE);
+  send((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = true});
+  ccord_vlist_reset_bottom(&F.ui->vlist);
+  frame(3);
+  CT_CHECK(ui_is_reading(F.ui));
+
+  // 1. Settings overlay, full-screen voice stage, and fullscreen stream all pause active reading.
+  ui_open_settings(F.ui, true);
+  CT_CHECK(!ui_is_reading(F.ui));
+  ui_open_settings(F.ui, false);
+  CT_CHECK(ui_is_reading(F.ui));
+
+  ccord_id voice_ch = CCORD_ID_NONE;
+  size_t nch = ccord_store_channel_count(F.store, g);
+  for (size_t i = 0; i < nch && voice_ch == CCORD_ID_NONE; i++) {
+    const ccord_channel *c = ccord_store_channel_at(F.store, g, i);
+    if (c && c->kind == CCORD_CHANNEL_VOICE) voice_ch = c->id;
+  }
+  if (voice_ch != CCORD_ID_NONE) {
+    ccord_ui_set_viewport(F.ui, 1280.0f, 800.0f);
+    CT_CHECK(ccord_session_join_voice(F.session, g, voice_ch, &err) == CCORD_OK);
+    frame(3);
+    F.ui->stage_channel = voice_ch;
+    F.ui->stage_chat_open = false;
+    ccord_ui_set_viewport(F.ui, 1280.0f, 800.0f);
+    frame(2);
+    CT_CHECK(F.ui->stage_channel == voice_ch && !ui_stage_split_active(F.ui));
+    CT_CHECK(!ui_is_reading(F.ui));
+    ccord_rect chat_btn = ui_stage_chat_btn(F.ui);
+    click(chat_btn.x + chat_btn.w * 0.5f, chat_btn.y + chat_btn.h * 0.5f);
+    frame(2);
+    CT_CHECK(ui_stage_split_active(F.ui));
+    CT_CHECK(ui_is_reading(F.ui));
+    CT_CHECK(ccord_session_leave_voice(F.session, g, &err) == CCORD_OK);
+    frame(3);
+    CT_CHECK(F.ui->stage_channel == CCORD_ID_NONE && ui_is_reading(F.ui));
+  }
+
+  F.ui->stream_fullscreen = true;
+  CT_CHECK(!ui_is_reading(F.ui));
+  F.ui->stream_fullscreen = false;
+  CT_CHECK(ui_is_reading(F.ui));
+
+  // 2. Losing focus syncs reading_channel to CCORD_ID_NONE immediately (before ccord_ui_update runs),
+  // so a message arriving in the selected channel in the same tick still queues a notification.
+  ccord_notification popped;
+  while (ccord_session_pop_notification(F.session, &popped)) {}
+  ccord_notify_scope all_row = {.guild_id = g, .channel_id = CCORD_ID_NONE, .level = CCORD_NOTIFY_ALL};
+  CT_CHECK(ccord_store_set_notify(F.store, g, &all_row, 1, &err) == CCORD_OK);
+  frame(2);
+  while (ccord_session_pop_notification(F.session, &popped)) {}
+  send((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = false});
+  // Intentionally do NOT call ccord_ui_update() before pumping the incoming message.
+  ccord_id posted_id = CCORD_ID_NONE;
+  CT_CHECK(ccord_mock_post_rich_message(F.transport, ch, 1002u, "arrived right on unfocus", nullptr, &posted_id, &err) ==
+           CCORD_OK);
+  CT_CHECK(ccord_session_pump(F.session) >= 1);
+  bool saw_ch = false;
+  while (ccord_session_pop_notification(F.session, &popped)) {
+    if (popped.channel_id == ch && popped.message_id == posted_id) saw_ch = true;
+  }
+  CT_CHECK(saw_ch);
+  send((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = true});
+  CT_CHECK(ccord_store_set_notify(F.store, g, nullptr, 0, &err) == CCORD_OK);
+  frame(2);
+
+  // 3. UTF-8 boundary-safe truncation in ccord_ui_prepare_notification: 4-byte emoji straddling bytes 50, 60, and 240
+  // must never leave invalid UTF-8 bytes that ccord_platform_notify_message would reject.
+  char uname50[80], uname60[80], cname50[80], body240[300];
+  memset(uname50, 'a', 49); memcpy(uname50 + 49, "\xF0\x9F\x98\x80tail", 9);
+  memset(uname60, 'b', 59); memcpy(uname60 + 59, "\xF0\x9F\x98\x80tail", 9);
+  memset(cname50, 'c', 49); memcpy(cname50 + 49, "\xF0\x9F\x98\x80tail", 9);
+  memset(body240, 'x', 239); memcpy(body240 + 239, "\xF0\x9F\x98\x80tail", 9);
+
+  const ccord_id u50_id = 9876501u, u60_id = 9876502u, c50_id = 9876511u, dm_id = 9876512u, m50_id = 9876521u, m60_id = 9876522u;
+  ccord_user u50 = {.id = u50_id, .name = uname50, .status_text = ""};
+  ccord_user u60 = {.id = u60_id, .name = uname60, .status_text = ""};
+  ccord_channel c50 = {.id = c50_id, .guild_id = g, .kind = CCORD_CHANNEL_TEXT, .name = cname50, .topic = ""};
+  ccord_channel dm60 = {.id = dm_id, .guild_id = CCORD_DM_GUILD_ID, .kind = CCORD_CHANNEL_TEXT, .name = uname60, .topic = "",
+                        .user_id = u60_id};
+  ccord_message m50 = {.id = m50_id, .channel_id = c50_id, .author_id = u50_id, .timestamp_ms = 1000, .content = body240};
+  ccord_message m60 = {.id = m60_id, .channel_id = dm_id, .author_id = u60_id, .timestamp_ms = 1001, .content = body240};
+  CT_CHECK(ccord_store_upsert_user(F.store, &u50, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_upsert_user(F.store, &u60, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_upsert_channel(F.store, &c50, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_upsert_channel(F.store, &dm60, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_append_message(F.store, &m50, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_append_message(F.store, &m60, &err) == CCORD_OK);
+
+  F.ui->settings_notify_desktop = true;
+  F.ui->settings_notify_messages = true;
+  F.ui->settings_notify_mentions = true;
+  ccord_platform_set_window_focused(F.platform, false);
+
+  char title[128], body[256];
+  ccord_notification gn = {.guild_id = g, .channel_id = c50_id, .message_id = m50_id, .author_id = u50_id};
+  CT_CHECK(ccord_ui_prepare_notification(F.ui, &gn, title, sizeof title, body, sizeof body));
+  CT_CHECK(ccord_utf8_valid(title, strlen(title)));
+  CT_CHECK(ccord_utf8_valid(body, strlen(body)));
+  ccord_notify_target tgt = {.guild_id = g, .channel_id = c50_id, .message_id = m50_id};
+  CT_CHECK(ccord_platform_notify_message(F.platform, title, body, &tgt));
+
+  ccord_notification dn = {.guild_id = CCORD_DM_GUILD_ID, .channel_id = dm_id, .message_id = m60_id,
+                           .author_id = u60_id, .is_dm = true};
+  CT_CHECK(ccord_ui_prepare_notification(F.ui, &dn, title, sizeof title, body, sizeof body));
+  CT_CHECK(ccord_utf8_valid(title, strlen(title)));
+  CT_CHECK(ccord_utf8_valid(body, strlen(body)));
+  ccord_notify_target dtgt = {.guild_id = CCORD_DM_GUILD_ID, .channel_id = dm_id, .message_id = m60_id};
+  CT_CHECK(ccord_platform_notify_message(F.platform, title, body, &dtgt));
+  ccord_platform_set_window_focused(F.platform, true);
+}
+
 int main(int argc, char **argv)
 {
   if (!setup(argc > 0 ? argv[0] : "test_ui_interaction")) {
@@ -12259,6 +12383,7 @@ int main(int argc, char **argv)
   test_composer_upload_progress_indicator();
   test_plugin_nav_hooks_menus_and_aux_events();
   test_chat_message_vs_profile_right_click_and_admin_tools();
+  test_reading_overlays_immediate_focus_and_utf8_notify();
   ccord_ui_destroy(F.ui);
   ccord_render_destroy(F.renderer);
   ccord_platform_destroy(F.platform);

@@ -67,6 +67,7 @@ typedef struct ccord_ui_host {      // everything the UI needs from the OS; test
   bool (*scheduled_send_now)(void *ud, uint64_t id, char *err, size_t err_cap);   // send immediately; removed on success
   void (*update_check)(void *ud);                            // nullable: Settings > C-Cord "Check for Updates"
   void (*update_install)(void *ud);                          // nullable: apply / open downloaded update
+  void (*set_fullscreen)(void *ud, bool fullscreen);         // nullable: toggle OS window fullscreen for stream viewer
 } ccord_ui_host;
 typedef struct ccord_ui_deps {
   ccord_bus *bus; ccord_store *store; ccord_session *session; ccord_contrib *contrib;

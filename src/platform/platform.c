@@ -50,14 +50,15 @@
 
 struct ccord_platform {
   SDL_Window *window;
-  SDL_Cursor *cursors[3];       // indexed by ccord_cursor_kind, created lazily
-  bool cursor_unavailable[3];   // creation failed once (e.g. dummy driver): do not retry or log again
+  SDL_Cursor *cursors[CCORD_CURSOR_COUNT];       // indexed by ccord_cursor_kind, created lazily
+  bool cursor_unavailable[CCORD_CURSOR_COUNT];   // creation failed once (e.g. dummy driver): do not retry or log again
   ccord_cursor_kind cursor_kind;
   bool text_input_on;
   bool headless;
   bool focused;
   bool window_visible;            // tracked even under the dummy video driver (start_minimized / tray)
   bool minimized;                 // close request minimized the window (no tray to restore from)
+  bool fullscreen;                // borderless desktop fullscreen (tracked even headless)
   int tray_override;              // test hook: -1 force unavailable, 1 force available, 0 use the real tray
   bool close_to_tray;             // window-close request hides instead of quitting
   ccord_tray_action_fn tray_fn;
@@ -278,6 +279,12 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
     return nullptr;
   }
+  if (!c.headless && !c.start_minimized) {
+    const char *drv = SDL_GetCurrentVideoDriver();
+    if (!drv || strcmp(drv, "dummy") != 0) {
+      p->focused = (SDL_GetWindowFlags(p->window) & SDL_WINDOW_INPUT_FOCUS) != 0;
+    }
+  }
   p->window_icon_sizes = set_window_icon(p->window, &p->window_icon_accepted);
   // The window was created in screen coordinates; the requested size is in logical px. Fix it up once the
   // display scale is known (X11 with a content scale, Wayland fractional scaling).
@@ -308,7 +315,7 @@ void ccord_platform_destroy(ccord_platform *p)
   ccord_desktop_destroy(p->desktop);
   ccord_linkwatch_destroy(p->link);
   SDL_SetCursor(nullptr);
-  for (size_t i = 0; i < 3; i++) {
+  for (size_t i = 0; i < (size_t)CCORD_CURSOR_COUNT; i++) {
     if (p->cursors[i]) SDL_DestroyCursor(p->cursors[i]);
   }
   ccord_free(p->clip_image);
@@ -345,8 +352,17 @@ void ccord_platform_set_title(ccord_platform *p, const char *utf8)
 void ccord_platform_set_cursor(ccord_platform *p, ccord_cursor_kind kind)
 {
   if (!p || p->cursor_kind == kind) return;
-  static const SDL_SystemCursor map[3] = {SDL_SYSTEM_CURSOR_DEFAULT, SDL_SYSTEM_CURSOR_POINTER, SDL_SYSTEM_CURSOR_TEXT};
-  if ((size_t)kind >= 3 || p->cursor_unavailable[kind]) return;
+  static const SDL_SystemCursor map[CCORD_CURSOR_COUNT] = {
+    [CCORD_CURSOR_DEFAULT] = SDL_SYSTEM_CURSOR_DEFAULT,
+    [CCORD_CURSOR_POINTER] = SDL_SYSTEM_CURSOR_POINTER,
+    [CCORD_CURSOR_TEXT] = SDL_SYSTEM_CURSOR_TEXT,
+    [CCORD_CURSOR_NS_RESIZE] = SDL_SYSTEM_CURSOR_NS_RESIZE,
+    [CCORD_CURSOR_EW_RESIZE] = SDL_SYSTEM_CURSOR_EW_RESIZE,
+    [CCORD_CURSOR_NWSE_RESIZE] = SDL_SYSTEM_CURSOR_NWSE_RESIZE,
+    [CCORD_CURSOR_NESW_RESIZE] = SDL_SYSTEM_CURSOR_NESW_RESIZE,
+    [CCORD_CURSOR_MOVE] = SDL_SYSTEM_CURSOR_MOVE,
+  };
+  if ((size_t)kind >= (size_t)CCORD_CURSOR_COUNT || p->cursor_unavailable[kind]) return;
   if (!p->cursors[kind]) {
     p->cursors[kind] = SDL_CreateSystemCursor(map[kind]);
     if (!p->cursors[kind]) {
@@ -608,6 +624,7 @@ void ccord_platform_set_window_visible(ccord_platform *p, bool visible)
 {
   if (!p || p->window_visible == visible) return;
   p->window_visible = visible;
+  if (!visible) p->focused = false;
   if (!p->window) return;
   if (visible) {
     SDL_ShowWindow(p->window);
@@ -636,6 +653,24 @@ bool ccord_platform_window_visible(const ccord_platform *p)
   return p ? p->window_visible : false;
 }
 
+bool ccord_platform_set_fullscreen(ccord_platform *p, bool fullscreen)
+{
+  if (!p) return false;
+  if (p->window && !p->headless) {
+    if (!SDL_SetWindowFullscreen(p->window, fullscreen)) {
+      CCORD_LOG_W("platform: fullscreen(%d) failed: %s", fullscreen ? 1 : 0, SDL_GetError());
+      return false;
+    }
+  }
+  p->fullscreen = fullscreen;
+  return true;
+}
+
+bool ccord_platform_window_fullscreen(const ccord_platform *p)
+{
+  return p ? p->fullscreen : false;
+}
+
 void ccord_platform_set_close_to_tray(ccord_platform *p, bool enabled)
 {
   if (!p) return;
@@ -645,6 +680,7 @@ void ccord_platform_set_close_to_tray(ccord_platform *p, bool enabled)
 bool ccord_platform_request_close(ccord_platform *p)
 {
   if (!p || !p->close_to_tray) return true;
+  p->focused = false;
   if (ccord_platform_tray_available(p)) {
     ccord_platform_set_window_visible(p, false);
   } else {
@@ -1534,7 +1570,11 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
       return true;
     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
       // Close-to-tray: hide the window and keep running; the tray icon restores it.
-      if (!ccord_platform_request_close(p)) return false;
+      if (!ccord_platform_request_close(p)) {
+        out->type = CCORD_IN_FOCUS;
+        out->focused = false;
+        return true;
+      }
       out->type = CCORD_IN_QUIT;
       return true;
     case SDL_EVENT_WINDOW_MINIMIZED:
@@ -1546,6 +1586,12 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
     case SDL_EVENT_WINDOW_RESTORED:
     case SDL_EVENT_WINDOW_MAXIMIZED:
       p->minimized = false;
+      return false;
+    case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
+      p->fullscreen = true;
+      return false;
+    case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
+      p->fullscreen = false;
       return false;
     case SDL_EVENT_WINDOW_SHOWN:
       p->window_visible = true;

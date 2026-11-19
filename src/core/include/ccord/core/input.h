@@ -29,4 +29,14 @@ typedef struct ccord_input_event {
   int32_t ime_start;   // IME_PREEDIT: cursor offset within text, in codepoints (0 when unset)
   int32_t ime_length;  // IME_PREEDIT: selection length within text, in codepoints (0 when none)
 } ccord_input_event;
-typedef enum ccord_cursor_kind : uint8_t { CCORD_CURSOR_DEFAULT, CCORD_CURSOR_POINTER, CCORD_CURSOR_TEXT } ccord_cursor_kind;
+typedef enum ccord_cursor_kind : uint8_t {
+  CCORD_CURSOR_DEFAULT,
+  CCORD_CURSOR_POINTER,
+  CCORD_CURSOR_TEXT,
+  CCORD_CURSOR_NS_RESIZE,
+  CCORD_CURSOR_EW_RESIZE,
+  CCORD_CURSOR_NWSE_RESIZE,
+  CCORD_CURSOR_NESW_RESIZE,
+  CCORD_CURSOR_MOVE,
+  CCORD_CURSOR_COUNT
+} ccord_cursor_kind;

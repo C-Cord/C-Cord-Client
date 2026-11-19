@@ -644,6 +644,36 @@ ccord_rect ui_stage_chat_btn(const ccord_ui *ui)
   return (ccord_rect){ma.x + ma.w - 8.0f - 110.0f, ma.y + 10.0f, 110.0f, 28.0f};
 }
 
+ccord_rect ui_stage_split_handle_rect(const ccord_ui *ui)
+{
+  if (!ui_stage_split_active(ui)) return (ccord_rect){0, 0, 0, 0};
+  float sx = ui->layout.stage_pane.x + ui->layout.stage_pane.w;
+  return (ccord_rect){sx - 4.0f, ui->layout.stage_pane.y, 8.0f, ui->layout.stage_pane.h};
+}
+
+void ui_stream_set_fullscreen(ccord_ui *ui, bool on)
+{
+  if (!ui || ui->stream_fullscreen == on) return;
+  ui->stream_fullscreen = on;
+  ui->stream_fs_hud_ms = ui->now_ms;
+  if (on) {
+    ui_menu_close(ui);
+    ui->drag = DRAG_NONE;
+    ui->hover_members_btn = false;
+  } else {
+    ui->stream_fs_exit_rect = (ccord_rect){0, 0, 0, 0};
+    ui->stream_fs_bot_exit_rect = (ccord_rect){0, 0, 0, 0};
+    ui->stream_fs_pause_rect = (ccord_rect){0, 0, 0, 0};
+    ui->stream_fs_btn1_rect = (ccord_rect){0, 0, 0, 0};
+    ui->stream_fs_btn2_rect = (ccord_rect){0, 0, 0, 0};
+    ui->stream_fs_top_bar = (ccord_rect){0, 0, 0, 0};
+    ui->stream_fs_bot_bar = (ccord_rect){0, 0, 0, 0};
+    ui->stream_fs_video_rect = (ccord_rect){0, 0, 0, 0};
+  }
+  if (ui->d.host.set_fullscreen) ui->d.host.set_fullscreen(ui->d.host.ud, on);
+  ui->dirty = true;
+}
+
 ccord_rect ui_search_rect(const ccord_ui *ui)
 {
   ccord_rect mb = ui_members_btn_rect(ui);
@@ -949,8 +979,12 @@ void ui_compute_layout(ccord_ui *ui)
   // pane (header / timeline / composer) keeps the right. Falls back to the full-width stage when
   // the window cannot hold both panes.
   bool split = ui->stage_channel != CCORD_ID_NONE && ui->stage_chat_open;
-  if (split) ccord_layout_compute_split(&ui->theme->m, ui->win_w, ui->win_h, ui->composer_box_h, &ui->layout);
-  else ccord_layout_compute(&ui->theme->m, ui->win_w, ui->win_h, ui->composer_box_h, &ui->layout);
+  if (split) {
+    ccord_layout_compute_split_ratio(&ui->theme->m, ui->win_w, ui->win_h, ui->composer_box_h,
+                                     ui->stage_split_ratio, &ui->layout);
+  } else {
+    ccord_layout_compute(&ui->theme->m, ui->win_w, ui->win_h, ui->composer_box_h, &ui->layout);
+  }
   split = ui->layout.stage_split;
   ui->members_available = ui->layout.member_list_visible;
   ui->panel_state = ui_panel_state(ui);
@@ -963,8 +997,12 @@ void ui_compute_layout(ccord_ui *ui)
     // Same layout with the right-hand panel switched off: the chat column takes its width.
     ccord_theme_metrics m = ui->theme->m;
     m.hide_members_below_width = ui->win_w + 1.0f;
-    if (split) ccord_layout_compute_split(&m, ui->win_w, ui->win_h, ui->composer_box_h, &ui->layout);
-    else ccord_layout_compute(&m, ui->win_w, ui->win_h, ui->composer_box_h, &ui->layout);
+    if (split) {
+      ccord_layout_compute_split_ratio(&m, ui->win_w, ui->win_h, ui->composer_box_h,
+                                       ui->stage_split_ratio, &ui->layout);
+    } else {
+      ccord_layout_compute(&m, ui->win_w, ui->win_h, ui->composer_box_h, &ui->layout);
+    }
   }
   if (search_panel && !ui->layout.member_list_visible) {
     // A window too narrow for the member list still shows search results: the panel takes a share of the
@@ -2207,15 +2245,26 @@ void ui_sync_messages(ccord_ui *ui)
   ui_record_nav_location(ui);
 }
 
-// The user is reading the open channel only while the window has focus and the list is at its newest message. Away or
-// scrolled up, what arrives there is unread (as in Discord), and it is not acknowledged either.
-static bool ui_is_reading(const ccord_ui *ui)
+// The user is reading the open channel only while the window has focus, no full-window overlay covers the chat,
+// and the list is at its newest message. Away, covered or scrolled up, what arrives there is unread (as in Discord),
+// and it is not acknowledged either.
+bool ui_is_reading(const ccord_ui *ui)
 {
-  if (!ui->window_focused || !ui->vlist.stick_bottom) return false;
-  if (ui->discovery_open || ui_is_dm_friends_view(ui) || ui_is_dm_requests_view(ui)) return false;
+  if (!ui || !ui->window_focused || !ui->vlist.stick_bottom) return false;
+  if (ui->settings_open || ui_server_settings_is_open(ui) || ui_channel_settings_is_open(ui) ||
+      ui->discovery_open || ui->stream_fullscreen || ui_is_dm_friends_view(ui) || ui_is_dm_requests_view(ui)) {
+    return false;
+  }
+  if (ui->stage_channel != CCORD_ID_NONE && !ui_stage_split_active(ui)) return false;
   const ccord_channel *c = ui_selected_channel(ui);
   if (c && c->is_message_request) return false;
   return true;
+}
+
+static void ui_sync_reading(ccord_ui *ui)
+{
+  if (!ui || !ui->d.session) return;
+  ccord_session_set_reading(ui->d.session, ui_is_reading(ui) ? ccord_store_selected_channel(ui->d.store) : CCORD_ID_NONE);
 }
 
 // The server sends a big member list a hundred positions at a time. While the list is on screen in a focused window and its
@@ -2237,7 +2286,7 @@ static void page_members(ccord_ui *ui)
 static void auto_ack(ccord_ui *ui)
 {
   if (!ui->d.session) return;
-  ccord_session_set_reading(ui->d.session, ui_is_reading(ui) ? ccord_store_selected_channel(ui->d.store) : CCORD_ID_NONE);
+  ui_sync_reading(ui);
   if (!ui_is_reading(ui) || ccord_session_is_stale(ui->d.session)) return;
   ccord_id ch = ccord_store_selected_channel(ui->d.store);
   const ccord_channel *c = ccord_store_channel(ui->d.store, ch);
@@ -2672,6 +2721,8 @@ ccord_ui *ccord_ui_create(const ccord_ui_deps *deps, ccord_error *err)
   ccord_text_edit_init(&ui->account_token_edit, 512);
   ccord_text_edit_init(&ui->quickcss_edit, 256);
   ui->stage_channel = CCORD_ID_NONE;
+  ui->stage_split_ratio = 0.55f;
+  ui->stream_pip_w = 320.0f;
   ui->reply_channel = ui->reply_message = CCORD_ID_NONE;
   ui->reply_ping = true;
   ui->gl_encoder = CCORD_STREAM_ENCODER_AUTO;
@@ -2746,6 +2797,7 @@ static void media_player_close(ccord_ui *ui);
 void ccord_ui_destroy(ccord_ui *ui)
 {
   if (!ui) return;
+  if (ui->stream_fullscreen) ui_stream_set_fullscreen(ui, false);
   ui_vm_destroy(ui);
   if (ui->d.store && ui->editing_message == CCORD_ID_NONE) {
     ccord_id cur_ch = ui->vlist_channel != CCORD_ID_NONE ? ui->vlist_channel : ccord_store_selected_channel(ui->d.store);
@@ -3316,6 +3368,17 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
     ui->dirty = true;
   }
   ui->had_active_uploads = up_active;
+  if (ui->stream_fullscreen) {
+    if (!ui_stream_is_active(ui)) {
+      ui_stream_set_fullscreen(ui, false);
+    } else if (now_ms > 0) {
+      uint64_t idle = now_ms >= ui->stream_fs_hud_ms ? (now_ms - ui->stream_fs_hud_ms) : 0;
+      if (idle >= 2450u && idle <= 2850u) {
+        anim = true;
+        ui->dirty = true;
+      }
+    }
+  }
   // A transition left running by the last frame, or a moving image it showed (GIFs advance only when drawn).
   ui->animating = anim || ccord_anim_active(&ui->anim) || ui->media_animating;
 
@@ -3381,6 +3444,13 @@ static hover_state compute_hover(ccord_ui *ui)
       h.settings_page = ui->hover_settings_page;
       h.close = ui->hover_settings_close;
     }
+    return h;
+  }
+  if (ui->stream_fullscreen || ui->drag == DRAG_STREAM_STAGE_H || ui->drag == DRAG_STAGE_SPLIT ||
+      ui->drag == DRAG_STREAM_PIP_MOVE || ui->drag == DRAG_STREAM_PIP_RESIZE) {
+    return h;
+  }
+  if (ui_stream_pip_active(ui) && ui->stream_pip_rect.w > 0.0f && ui_in_rect(x, y, ui->stream_pip_rect)) {
     return h;
   }
   if (ui_in_rect(x, y, ui_rect(l->server_list))) {
@@ -3619,7 +3689,21 @@ static bool update_hover(ccord_ui *ui)
 
   // cursor
   ccord_cursor_kind k = CCORD_CURSOR_DEFAULT;
-  if (ui->shortcuts_open) {
+  if (ui->drag == DRAG_STREAM_STAGE_H) {
+    k = CCORD_CURSOR_NS_RESIZE;
+  } else if (ui->drag == DRAG_STAGE_SPLIT) {
+    k = CCORD_CURSOR_EW_RESIZE;
+  } else if (ui->drag == DRAG_STREAM_PIP_MOVE || ui->drag == DRAG_STREAM_PIP_RESIZE) {
+    k = ui_stream_pip_cursor(ui, ui->mx, ui->my);
+  } else if (ui->stream_fullscreen) {
+    if (ui->mouse_in && ((ui->stream_fs_exit_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->stream_fs_exit_rect)) ||
+                         (ui->stream_fs_bot_exit_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->stream_fs_bot_exit_rect)) ||
+                         (ui->stream_fs_pause_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->stream_fs_pause_rect)) ||
+                         (ui->stream_fs_btn1_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->stream_fs_btn1_rect)) ||
+                         (ui->stream_fs_btn2_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->stream_fs_btn2_rect)))) {
+      k = CCORD_CURSOR_POINTER;
+    }
+  } else if (ui->shortcuts_open) {
     if (ui->mouse_in && ui->shortcuts_close_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->shortcuts_close_rect)) {
       k = CCORD_CURSOR_POINTER;
     }
@@ -3741,7 +3825,21 @@ static bool update_hover(ccord_ui *ui)
       k = CCORD_CURSOR_POINTER;
     }
   } else if (ui->mouse_in) {
-    if (!ui_panels_cursor(ui, ui->mx, ui->my, &k)) {
+    ccord_rect split_h = ui_stage_split_handle_rect(ui);
+    if (ui_stream_pip_active(ui) && ui->stream_pip_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->stream_pip_rect)) {
+      k = ui_stream_pip_cursor(ui, ui->mx, ui->my);
+    } else if (split_h.w > 0.0f && ui_in_rect(ui->mx, ui->my, split_h)) {
+      k = CCORD_CURSOR_EW_RESIZE;
+    } else if (ui->stage_channel != CCORD_ID_NONE && ui->stream_stage_resize_rect.w > 0.0f &&
+               ui_in_rect(ui->mx, ui->my, ui->stream_stage_resize_rect)) {
+      k = CCORD_CURSOR_NS_RESIZE;
+    } else if (ui->stage_channel != CCORD_ID_NONE &&
+               ((ui->stream_stage_fs_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->stream_stage_fs_rect)) ||
+                (ui->stream_stage_btn1_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->stream_stage_btn1_rect)) ||
+                (ui->stream_stage_btn2_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->stream_stage_btn2_rect)) ||
+                (ui->stream_stage_pause_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->stream_stage_pause_rect)))) {
+      k = CCORD_CURSOR_POINTER;
+    } else if (!ui_panels_cursor(ui, ui->mx, ui->my, &k)) {
       ccord_rect box = ui_composer_box(ui);
       ccord_rect call_bar = ui_call_bar_rect(ui);
       bool comp_btn = !ui->discovery_open &&
@@ -3796,6 +3894,7 @@ static bool update_hover(ccord_ui *ui)
 
 void ui_open_settings(ccord_ui *ui, bool open)
 {
+  if (open && ui->stream_fullscreen) ui_stream_set_fullscreen(ui, false);
   ui->settings_open = open;
   if (open) {
     ui_menu_close(ui);
@@ -5695,6 +5794,30 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
   bool ctrl = (ev->mods & (CCORD_MOD_CTRL | CCORD_MOD_SUPER)) != 0;
   bool shift = (ev->mods & CCORD_MOD_SHIFT) != 0;
   bool alt = (ev->mods & CCORD_MOD_ALT) != 0;
+  if (ui->stream_fullscreen) {
+    ui->stream_fs_hud_ms = ui->now_ms;
+    if (ev->key == CCORD_KEY_ESCAPE || (!ctrl && !alt && !shift && ev->key == CCORD_KEY_F)) {
+      if (!ctrl && !alt) s_suppress_next_text_ui = ui;
+      ui_stream_set_fullscreen(ui, false);
+      return true;
+    }
+    if (ui_keybind_match(ui, CCORD_UI_KEYBIND_MUTE, ev)) {
+      if (!ctrl && !alt) s_suppress_next_text_ui = ui;
+      toggle_voice_mute(ui);
+      return true;
+    }
+    if (ui_keybind_match(ui, CCORD_UI_KEYBIND_DEAFEN, ev)) {
+      if (!ctrl && !alt) s_suppress_next_text_ui = ui;
+      toggle_voice_deafen(ui);
+      return true;
+    }
+    if (ui_keybind_match(ui, CCORD_UI_KEYBIND_PTT, ev)) {
+      if (!ctrl && !alt) s_suppress_next_text_ui = ui;
+      return true;
+    }
+    ui->dirty = true;
+    return true;
+  }
   if (ui->shortcuts_open) return ui_shortcuts_handle(ui, ev);
   if (ui->lightbox_open || ui->quick_switcher_open || ui->select_open || ui->modal_kind != UI_MODAL_NONE) {
     return ui_overlays_handle(ui, ev);
@@ -5937,6 +6060,12 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
     return false;
+  }
+  if (!ctrl && !alt && !shift && ev->key == CCORD_KEY_F && ui->stage_channel != CCORD_ID_NONE &&
+      !composer_accepts_text(ui) && ui_stream_is_active(ui)) {
+    s_suppress_next_text_ui = ui;
+    ui_stream_set_fullscreen(ui, true);
+    return true;
   }
   if (ui->autocomplete_open) {
     if (ev->key == CCORD_KEY_UP) {
@@ -6760,6 +6889,20 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     if (row >= 0.0f && row < (float)ui->nautocomplete && ui_accept_autocomplete(ui, (size_t)row)) {
       reset_caret_blink(ui);
     }
+    return true;
+  }
+  if (ui_stream_pip_handle(ui, ev)) return true;
+  ccord_rect split_h = ui_stage_split_handle_rect(ui);
+  if (split_h.w > 0.0f && ui_in_rect(ev->x, ev->y, split_h)) {
+    if (ev->clicks >= 2) {
+      ui->stage_split_ratio = 0.55f;
+      ui_compute_layout(ui);
+      ccord_vlist_invalidate_all(&ui->vlist);
+      ui_settings_save(ui);
+    } else {
+      ui->drag = DRAG_STAGE_SPLIT;
+    }
+    ui->dirty = true;
     return true;
   }
   const ccord_layout *l = &ui->layout;
@@ -7666,7 +7809,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
   switch (ev->type) {
     case CCORD_IN_RESIZE:
       ccord_ui_set_viewport(ui, ev->x, ev->y);
-      if (ev->x >= 320.0f && ev->y >= 240.0f) {
+      if (ev->x >= 320.0f && ev->y >= 240.0f && !ui->stream_fullscreen) {
         ui->settings_win_w = (int)ev->x;
         ui->settings_win_h = (int)ev->y;
         ui->settings_win_saved = true;
@@ -7675,6 +7818,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     case CCORD_IN_FOCUS:
       ui->window_focused = ev->focused;
+      ui_sync_reading(ui);
       if (!ev->focused) {
         ui_ime_preedit_clear(ui);
         if (s_suppress_next_text_ui == ui) s_suppress_next_text_ui = nullptr;
@@ -7698,6 +7842,12 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       ui->mx = ev->x;
       ui->my = ev->y;
       ui->mouse_in = true;
+      if (ui->stream_fullscreen) {
+        ui->stream_fs_hud_ms = ui->now_ms;
+        update_hover(ui);
+        ui->dirty = true;
+        return true;
+      }
       bool changed = false;
       if (ui->shortcuts_open || ui->inbox_open || ui->saved_popover_open || ui->select_open) {
         ui->dirty = true;
@@ -7758,6 +7908,33 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       } else if (ui->drag == DRAG_CHANNEL) {
         update_channel_drag(ui, ev->x, ev->y);
         changed = true;
+      } else if (ui->drag == DRAG_STREAM_STAGE_H) {
+        float avail = ui->stream_stage_avail_h;
+        if (avail > 1.0f) {
+          float min_h = fminf(160.0f, avail);
+          float max_h = fmaxf(avail - 14.0f, min_h);
+          float nh = clampf(ev->y - ui->stream_stage_player_y, min_h, max_h);
+          ui->stream_stage_height_frac = clampf(nh / avail, 0.05f, 1.0f);
+          ui->dirty = true;
+          changed = true;
+        }
+      } else if (ui->drag == DRAG_STAGE_SPLIT) {
+        float x0 = ui->layout.stage_pane.x;
+        float total_w = ui->win_w - x0;
+        if (total_w > 1.0f) {
+          ui->stage_split_ratio = clampf((ev->x - x0) / total_w, 0.15f, 0.85f);
+          ui_compute_layout(ui);
+          ccord_vlist_invalidate_all(&ui->vlist);
+          ui->dirty = true;
+          changed = true;
+        }
+      } else if (ui->drag == DRAG_STREAM_PIP_MOVE || ui->drag == DRAG_STREAM_PIP_RESIZE) {
+        ui_stream_pip_drag_move(ui, ev->x, ev->y);
+        changed = true;
+      } else if (ui_stream_is_active(ui)) {
+        // Keep hover accents responsive on the stream player, resize handles, split divider, and floating PiP.
+        ui->dirty = true;
+        changed = true;
       }
       bool hc = update_hover(ui);
       if (hc) ui->dirty = true;
@@ -7767,6 +7944,12 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       ui->mx = ev->x;
       ui->my = ev->y;
       ui->mouse_in = true;
+      if (ui->stream_fullscreen) {
+        ui_stream_fullscreen_handle(ui, ev);
+        update_hover(ui);
+        ui->dirty = true;
+        return true;
+      }
       bool handled = false;
       if (ui->shortcuts_open) {
         ui_shortcuts_handle(ui, ev);
@@ -7956,6 +8139,18 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       return handled;
     }
     case CCORD_IN_MOUSE_UP:
+      if (ui->drag == DRAG_STREAM_STAGE_H || ui->drag == DRAG_STAGE_SPLIT) {
+        ui->drag = DRAG_NONE;
+        ui_settings_save(ui);
+        update_hover(ui);
+        ui->dirty = true;
+        return true;
+      }
+      if (ui->drag == DRAG_STREAM_PIP_MOVE || ui->drag == DRAG_STREAM_PIP_RESIZE) {
+        ui_stream_pip_drag_end(ui);
+        update_hover(ui);
+        return true;
+      }
       if (ui->drag == DRAG_SERVER) {
         if (ui->drag_active) finish_server_drag(ui);
         ui->drag = DRAG_NONE;
@@ -7994,6 +8189,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     case CCORD_IN_WHEEL:
       ui->mx = ev->x;
       ui->my = ev->y;
+      if (ui->stream_fullscreen) return true;
       if (ui->lightbox_open || ui->quick_switcher_open || ui->modal_kind == UI_MODAL_USER_PROFILE ||
           ui->modal_kind == UI_MODAL_SCHEDULED_EVENTS || ui->modal_kind == UI_MODAL_FORWARD_PICKER ||
           ui->modal_kind == UI_MODAL_MEMBER_VERIFICATION || ui->modal_kind == UI_MODAL_ACTIVITY_SHELF) {
@@ -8022,6 +8218,9 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         update_hover(ui);
         return true;
       }
+      if (ui_stream_pip_active(ui) && ui->stream_pip_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->stream_pip_rect)) {
+        return true;   // wheel over the floating PiP does not scroll the chat underneath
+      }
       if (ui_panels_handle_input(ui, ev)) {
         update_hover(ui);
         return true;
@@ -8032,6 +8231,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     case CCORD_IN_KEY_DOWN:
       return handle_key(ui, ev);
     case CCORD_IN_TEXT: {
+      if (ui->stream_fullscreen) return true;
       if (s_suppress_next_text_ui == ui) {
         s_suppress_next_text_ui = nullptr;
         return true;
@@ -8286,6 +8486,16 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
     ui_draw_loading_screen(ui, r);
     return;
   }
+  if (ui->stream_fullscreen && !ui_stream_is_active(ui)) {
+    ui_stream_set_fullscreen(ui, false);
+  }
+  if (ui->stream_fullscreen) {
+    ui->stream_pip_rect = (ccord_rect){0, 0, 0, 0};
+    ui_draw_stream_fullscreen(ui, r);
+    ui_draw_notice(ui, r);
+    update_hover(ui);
+    return;
+  }
   ui->loading_bar_rect = (ccord_rect){0.0f, 0.0f, 0.0f, 0.0f};
   ui->dbg_clan_badges = 0;
   ui->dbg_activity_cards = 0;
@@ -8323,6 +8533,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
     if (ui_stage_split_active(ui)) ui_draw_messages(ui, r);   // side-by-side Text Chat pane
     ui_draw_chat_header(ui, r);
     ui_draw_composer(ui, r);
+    if (ui_stage_split_active(ui)) ui_draw_stage_split_divider(ui, r);
   } else if (ui_forum_is_active(ui)) {
     ui_draw_forum(ui, r);
     ui_draw_chat_header(ui, r);
@@ -8401,6 +8612,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui_panels_draw(ui, r);
   ui_draw_voice_bar(ui, r);
   ui_draw_user_panel(ui, r);
+  ui_draw_stream_pip(ui, r);
   ui_draw_notice(ui, r);
   draw_overlay_popup(ui, r, UI_OVL_SEARCH, "search", ui->search_open, &ui->search_open, UI_POPUP_MS, UI_POPUP_CLOSE_MS, 6.0f,
                      ui_draw_search_popover);
@@ -8840,6 +9052,22 @@ const char *ccord_ui_composer_text(const ccord_ui *ui)
   return ccord_text_edit_cstr(&ui->edit);
 }
 
+static size_t utf8_fit_bytes(const char *s, size_t max_bytes)
+{
+  if (!s) return 0;
+  size_t n = strlen(s);
+  if (n > max_bytes) n = max_bytes;
+  while (n > 0 && !ccord_utf8_valid(s, n)) n--;
+  return n;
+}
+
+static void utf8_trim_inplace(char *s)
+{
+  size_t n = strlen(s);
+  while (n > 0 && !ccord_utf8_valid(s, n)) n--;
+  s[n] = '\0';
+}
+
 bool ccord_ui_prepare_notification(ccord_ui *ui, const ccord_notification *notif,
                                    char *out_title, size_t title_cap, char *out_body, size_t body_cap)
 {
@@ -8851,18 +9079,27 @@ bool ccord_ui_prepare_notification(ccord_ui *ui, const ccord_notification *notif
     const ccord_user *u = ccord_store_user(ui->d.store, notif->author_id);
     const ccord_channel *ch = ccord_store_channel(ui->d.store, notif->channel_id);
     if (notif->is_dm) {
-      snprintf(out_title, title_cap, "%.60s (Direct Message)", u ? u->name : "Direct Message");
+      const char *uname = u ? u->name : "Direct Message";
+      size_t un = utf8_fit_bytes(uname, 60u);
+      snprintf(out_title, title_cap, "%.*s (Direct Message)", (int)un, uname);
     } else {
-      snprintf(out_title, title_cap, "%.50s in #%.50s",
-               u ? u->name : "New Message", ch ? ch->name : "channel");
+      const char *uname = u ? u->name : "New Message";
+      const char *cname = ch ? ch->name : "channel";
+      size_t un = utf8_fit_bytes(uname, 50u);
+      size_t cn = utf8_fit_bytes(cname, 50u);
+      snprintf(out_title, title_cap, "%.*s in #%.*s", (int)un, uname, (int)cn, cname);
     }
+    utf8_trim_inplace(out_title);
   }
   if (out_body && body_cap > 0) {
     const ccord_message *m = ccord_store_find_message(ui->d.store, notif->channel_id, notif->message_id);
     char preview[256];
     size_t pl = m ? ccord_message_preview(m, preview, sizeof preview) : 0u;
     pl = ui_streamer_mask_inplace(ui, preview, pl, false);   // Streamer Mode: no invite codes in toasts
-    snprintf(out_body, body_cap, "%.240s", pl > 0 ? preview : "Sent a message");
+    const char *src = pl > 0 ? preview : "Sent a message";
+    size_t bn = utf8_fit_bytes(src, 240u);
+    snprintf(out_body, body_cap, "%.*s", (int)bn, src);
+    utf8_trim_inplace(out_body);
   }
   ui->dbg_notifications_prepared++;
   return true;

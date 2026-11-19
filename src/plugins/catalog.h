@@ -16,6 +16,8 @@ typedef struct ccord_catalog_host_cbs {
   // Query locally installed plugin state (main thread only).
   bool (*get_local_plugin)(void *ud, const char *id, char *ver_out, size_t ver_cap,
                            uint64_t *consented_perms_out, bool *is_bundled_out);
+  // Enumerate locally installed non-bundled plugin IDs for targeted update/revocation checks.
+  size_t (*list_local_plugins)(void *ud, char (*ids_out)[65], size_t cap);
   // Install a SHA-256-verified .cce file on the main thread.
   bool (*import_verified_cce)(void *ud, const char *pkg_path, char *err_buf, size_t err_cap);
   // Stop & disable a plugin whose installed SHA-256 was revoked for malware.
@@ -36,6 +38,10 @@ void ccord_catalog_pump(ccord_catalog *cat, uint64_t now_ms);
 
 // Actions (main thread only).
 void ccord_catalog_refresh(ccord_catalog *cat);
+void ccord_catalog_query(ccord_catalog *cat, const char *q, int tier, int api_class, const char *sort,
+                         bool append_next_page);
+void ccord_catalog_fetch_detail(ccord_catalog *cat, const char *id);
+void ccord_catalog_check_updates(ccord_catalog *cat);
 void ccord_catalog_install(ccord_catalog *cat, const char *id);
 void ccord_catalog_set_prefs(ccord_catalog *cat, const ccord_catalog_prefs *prefs);
 void ccord_catalog_set_plugin_auto_update(ccord_catalog *cat, const char *id, bool enabled);

@@ -258,13 +258,14 @@ static void pump_notifications(ccord_earcons *e, ccord_session *session, const c
   ccord_platform *plat = desktop ? ccord_app_desktop_platform(desktop) : nullptr;
   bool focused = plat && ccord_platform_window_focused(plat);
   ccord_id selected = store ? ccord_store_selected_channel(store) : CCORD_ID_NONE;
+  bool reading_selected = focused && selected != CCORD_ID_NONE && (!ui || ui_is_reading(ui));
   while (session && ccord_session_pop_notification(session, &n)) {
     // Delivery requests its sound through notification_sound_hook for a notification the desktop accepted;
     // every other case is ours.
     bool delivered = !virtual_clock && desktop && ccord_app_desktop_deliver(desktop, &n, now_ms);
     if (delivered || !notification_wants_sound(&n, store, now_ms)) continue;
-    // Suppress the message earcon when the user is actively looking at that channel.
-    if (!n.is_mention && focused && selected != CCORD_ID_NONE && n.channel_id == selected) continue;
+    // Suppress the message earcon only when the user is actively reading that channel.
+    if (!n.is_mention && reading_selected && n.channel_id == selected) continue;
     ear_emit(e, n.is_mention ? CCORD_EARCON_MENTION : CCORD_EARCON_MESSAGE, ui, store, now_ms);
   }
 }

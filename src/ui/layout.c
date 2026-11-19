@@ -47,7 +47,8 @@ void ccord_layout_compute(const ccord_theme_metrics *m, float win_w, float win_h
   out->stage_split = false;
 }
 
-void ccord_layout_compute_split(const ccord_theme_metrics *m, float win_w, float win_h, float composer_height, ccord_layout *out)
+void ccord_layout_compute_split_ratio(const ccord_theme_metrics *m, float win_w, float win_h,
+                                      float composer_height, float stage_ratio, ccord_layout *out)
 {
   ccord_layout_compute(m, win_w, win_h, composer_height, out);
   float x0 = out->message_area.x;
@@ -55,7 +56,8 @@ void ccord_layout_compute_split(const ccord_theme_metrics *m, float win_w, float
   // Both panes need room to be usable; below that the stage keeps the whole column.
   const float min_stage = 280.0f, min_chat = 320.0f;
   if (chat_w < min_stage + min_chat) return;
-  float stage_w = clampf(chat_w * 0.55f, min_stage, chat_w - min_chat);
+  float ratio = (stage_ratio > 0.0f && stage_ratio < 1.0f) ? stage_ratio : 0.55f;
+  float stage_w = clampf(chat_w * ratio, min_stage, chat_w - min_chat);
   out->stage_split = true;
   out->stage_pane = (ccord_layout_rect){x0, 0.0f, stage_w, win_h};
   float cx = x0 + stage_w;
@@ -67,4 +69,9 @@ void ccord_layout_compute_split(const ccord_theme_metrics *m, float win_w, float
   out->message_area.w = cw;
   out->composer.x = cx;
   out->composer.w = cw;
+}
+
+void ccord_layout_compute_split(const ccord_theme_metrics *m, float win_w, float win_h, float composer_height, ccord_layout *out)
+{
+  ccord_layout_compute_split_ratio(m, win_w, win_h, composer_height, 0.55f, out);
 }

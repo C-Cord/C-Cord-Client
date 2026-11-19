@@ -383,6 +383,10 @@ typedef enum drag_kind : uint8_t {
   DRAG_CHAT_SELECT,
   DRAG_SERVER,
   DRAG_CHANNEL,
+  DRAG_STREAM_STAGE_H,
+  DRAG_STAGE_SPLIT,
+  DRAG_STREAM_PIP_MOVE,
+  DRAG_STREAM_PIP_RESIZE,
 } drag_kind;
 
 typedef enum ui_modal_kind : uint8_t {
@@ -937,6 +941,35 @@ struct ccord_ui {
   ccord_rect stream_stage_btn1_rect;
   ccord_rect stream_stage_btn2_rect;
   ccord_rect stream_stage_pause_rect;
+  ccord_rect stream_stage_fs_rect;        // Fullscreen toggle button on the stage stream player
+  ccord_rect stream_stage_vport_rect;     // Video viewport inside the stage stream player (double-click fullscreen)
+  ccord_rect stream_stage_resize_rect;    // Bottom resize handle hit rect on the stage stream player
+  float stream_stage_player_y;            // Top y of the stream player (for vertical drag math)
+  float stream_stage_avail_h;             // Available height for player + participant strip below
+  float stream_stage_height_frac;         // 0 = auto default; (0..1] = user-dragged height / avail_h
+  float stage_split_ratio;                // Stage/chat horizontal split ratio (default 0.55)
+  bool stream_fullscreen;                 // Fullscreen stream viewer active (fills window + requests OS fullscreen)
+  uint64_t stream_fs_hud_ms;              // Last pointer/key timestamp for auto-hiding the fullscreen HUD
+  ccord_rect stream_fs_exit_rect;         // Exit Fullscreen button (top-right HUD)
+  ccord_rect stream_fs_bot_exit_rect;     // Exit Fullscreen button (bottom HUD)
+  ccord_rect stream_fs_pause_rect;        // Pause/Resume button in fullscreen HUD (self-stream)
+  ccord_rect stream_fs_btn1_rect;         // Hide Preview (self) / Pause (remote) in fullscreen HUD
+  ccord_rect stream_fs_btn2_rect;         // Stop Streaming / Stop Watching in fullscreen HUD
+  ccord_rect stream_fs_top_bar;           // Top HUD bar rect (keeps HUD visible while hovered)
+  ccord_rect stream_fs_bot_bar;           // Bottom HUD bar rect (keeps HUD visible while hovered)
+  ccord_rect stream_fs_video_rect;        // Last drawn fullscreen video rect
+  bool stream_pip_positioned;             // False until moved/resized (auto-anchors bottom-right)
+  float stream_pip_x, stream_pip_y;       // Top-left logical px (clamped inside viewport)
+  float stream_pip_w;                     // Resizable PiP width in logical px (default 320)
+  float stream_pip_aspect;                // Last drawn PiP video aspect ratio (for aspect-locked resize)
+  uint8_t stream_pip_resize_edge;         // Bitmask during DRAG_STREAM_PIP_RESIZE: 1=L, 2=R, 4=T, 8=B
+  float stream_pip_drag_ox, stream_pip_drag_oy;
+  ccord_rect stream_pip_anchor;           // Initial PiP rect at start of resize/move drag
+  bool stream_pip_moved;                  // True once pointer moved >= 4 px during DRAG_STREAM_PIP_MOVE
+  ccord_rect stream_pip_rect;             // Last drawn floating PiP window rect (zero when hidden)
+  ccord_rect stream_pip_fs_rect;          // PiP Fullscreen button
+  ccord_rect stream_pip_stage_rect;       // PiP Return-to-Stage button
+  ccord_rect stream_pip_close_rect;       // PiP Close / Stop Watching button
   ccord_rect stage_watch_rects[16];
   ccord_id stage_watch_users[16];
   size_t stage_watch_count;
@@ -1350,6 +1383,7 @@ void ui_cycle_role_preview(ccord_ui *ui);
 void ui_snowflake_date(ccord_id id, char *out, size_t cap);
 bool ui_is_dm_friends_view(const ccord_ui *ui);
 bool ui_is_dm_requests_view(const ccord_ui *ui);
+bool ui_is_reading(const ccord_ui *ui);
 void ui_open_user_profile_modal(ccord_ui *ui, ccord_id user_id, ccord_id guild_id);
 ccord_rect ui_user_status_area_rect(const ccord_ui *ui);
 bool ui_format_user_activity_line(const ccord_ui *ui, const ccord_user *u, char *out, size_t cap);
@@ -1540,6 +1574,20 @@ ccord_rect ui_stage_chat_btn(const ccord_ui *ui);
 bool ui_stage_split_active(const ccord_ui *ui);
 // The stage's draw/hit area: the split stage pane, or the whole message area when not split.
 ccord_rect ui_stage_area(const ccord_ui *ui);
+// Vertical splitter between the stage pane and text chat pane (zero size when not split).
+ccord_rect ui_stage_split_handle_rect(const ccord_ui *ui);
+// Stream fullscreen & floating Picture-in-Picture (PiP) helpers (implemented in draw_chat.c / ui.c).
+bool ui_stream_is_active(const ccord_ui *ui);
+void ui_stream_set_fullscreen(ccord_ui *ui, bool on);
+bool ui_stream_pip_active(const ccord_ui *ui);
+ccord_cursor_kind ui_stream_pip_cursor(const ccord_ui *ui, float x, float y);
+void ui_draw_stage_split_divider(ccord_ui *ui, ccord_renderer *r);
+void ui_draw_stream_fullscreen(ccord_ui *ui, ccord_renderer *r);
+bool ui_stream_fullscreen_handle(ccord_ui *ui, const ccord_input_event *ev);
+void ui_draw_stream_pip(ccord_ui *ui, ccord_renderer *r);
+bool ui_stream_pip_handle(ccord_ui *ui, const ccord_input_event *ev);
+void ui_stream_pip_drag_move(ccord_ui *ui, float x, float y);
+void ui_stream_pip_drag_end(ccord_ui *ui);
 ccord_rect ui_search_rect(const ccord_ui *ui);
 ccord_rect ui_pin_rect(const ccord_ui *ui);
 ccord_rect ui_inbox_rect(const ccord_ui *ui);
@@ -1896,6 +1944,8 @@ void ui_icon_inbox(ccord_renderer *r, float cx, float cy, float size, ccord_colo
 void ui_icon_folder(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
 void ui_icon_plus(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
 void ui_icon_compass(ccord_renderer *r, float cx, float cy, float size, ccord_color c, ccord_color bg);
+void ui_icon_fullscreen(ccord_renderer *r, float cx, float cy, float size, ccord_color c, bool exit_mode);
+void ui_icon_stage_return(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
 // ---- draw_forum.c ----
 void ui_forum_destroy(ccord_ui *ui);
 bool ui_forum_is_active(const ccord_ui *ui);
