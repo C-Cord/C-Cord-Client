@@ -137,6 +137,17 @@ typedef struct cs_overview_copy {
   size_t tag_count;
 } cs_overview_copy;
 
+typedef struct cs_ow_target_item {
+  ccord_id id;
+  ccord_overwrite_kind kind;
+  char label[128];
+} cs_ow_target_item;
+
+typedef struct cs_ow_add_item {
+  ccord_id id;
+  char label[96];
+} cs_ow_add_item;
+
 struct ui_channel_settings {
   bool open;
   ccord_id guild_id;
@@ -151,6 +162,32 @@ struct ui_channel_settings {
   uint64_t flash_until_ms;
   int hover;
   size_t dbg_rows;
+
+  // Cached channel permission summary (avoids 5-9x ccord_store_permissions per frame).
+  bool perm_cache_valid;
+  uint64_t perm_cache_rev;
+  int64_t perm_cache_now_ms;
+  uint64_t cached_perms;
+  bool cached_exact;
+
+  // Cached overwrite targets and add-menu candidates (avoids per-frame O(Roles x Overwrites)).
+  bool ow_targets_valid;
+  uint64_t ow_targets_rev;
+  ccord_id ow_targets_sel_id;
+  ccord_overwrite_kind ow_targets_sel_kind;
+  bool ow_sel_has_stored;
+  cs_ow_target_item *ow_targets;
+  size_t ow_target_count;
+  size_t ow_target_cap;
+
+  bool ow_add_valid;
+  uint64_t ow_add_rev;
+  cs_ow_add_item *ow_add_roles;
+  size_t ow_add_role_count;
+  size_t ow_add_role_cap;
+  cs_ow_add_item *ow_add_members;
+  size_t ow_add_member_count;
+  size_t ow_add_member_cap;
 
   cs_overview_copy ov_base, ov_work;
   ccord_text_edit name_edit;
@@ -211,6 +248,9 @@ void ui_channel_settings_destroy(ccord_ui *ui)
   ccord_text_edit_free(&ui->cs->topic_edit);
   ccord_text_edit_free(&ui->cs->tag_name_edit);
   ccord_text_edit_free(&ui->cs->tag_emoji_edit);
+  ccord_free(ui->cs->ow_targets);
+  ccord_free(ui->cs->ow_add_roles);
+  ccord_free(ui->cs->ow_add_members);
   ccord_free(ui->cs);
   ui->cs = nullptr;
 }
@@ -258,10 +298,24 @@ static uint64_t cs_self_chan_perms(const ccord_ui *ui, ccord_id guild_id, ccord_
   return ccord_store_permissions(ui->d.store, guild_id, channel_id, ccord_store_self_id(ui->d.store), ui->now_unix_ms);
 }
 
-static bool cs_page_allowed(const ccord_ui *ui, const ccord_channel *ch, cs_page p)
+static uint64_t cs_cached_chan_perms(const ccord_ui *ui, struct ui_channel_settings *cs)
 {
-  if (!ui || !ch || ch->guild_id == CCORD_ID_NONE || ch->guild_id == CCORD_DM_GUILD_ID) return false;
-  uint64_t perms = cs_self_chan_perms(ui, ch->guild_id, ch->id);
+  uint64_t rev = ccord_store_revision(ui->d.store);
+  if (cs->perm_cache_valid && cs->perm_cache_rev == rev && cs->perm_cache_now_ms == ui->now_unix_ms) {
+    return cs->cached_perms;
+  }
+  ccord_id self = ccord_store_self_id(ui->d.store);
+  cs->cached_perms = ccord_store_permissions(ui->d.store, cs->guild_id, cs->channel_id, self, ui->now_unix_ms);
+  cs->cached_exact = ccord_store_permissions_exact(ui->d.store, cs->guild_id, self);
+  cs->perm_cache_rev = rev;
+  cs->perm_cache_now_ms = ui->now_unix_ms;
+  cs->perm_cache_valid = true;
+  return cs->cached_perms;
+}
+
+static bool cs_page_allowed_with(const ccord_channel *ch, uint64_t perms, cs_page p)
+{
+  if (!ch || ch->guild_id == CCORD_ID_NONE || ch->guild_id == CCORD_DM_GUILD_ID) return false;
   switch (p) {
     case CS_OVERVIEW:
       return ccord_perm_has(perms, CCORD_PERM_MANAGE_CHANNELS);
@@ -281,8 +335,9 @@ bool ui_channel_settings_available(const ccord_ui *ui, ccord_id guild_id, ccord_
   if (!ui || !ui->d.store || guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) return false;
   const ccord_channel *ch = ccord_store_channel(ui->d.store, channel_id);
   if (!ch || ch->guild_id != guild_id || ccord_discord_type_is_thread(ch->discord_type)) return false;
+  uint64_t perms = cs_self_chan_perms(ui, guild_id, channel_id);
   for (cs_page p = CS_OVERVIEW; p < CS_PAGE_COUNT; p++) {
-    if (cs_page_allowed(ui, ch, p)) return true;
+    if (cs_page_allowed_with(ch, perms, p)) return true;
   }
   return false;
 }
@@ -408,13 +463,25 @@ static void cs_sync(ccord_ui *ui)
   }
   struct ui_channel_settings *cs = ui->cs;
   const ccord_channel *ch = ccord_store_channel(ui->d.store, cs->channel_id);
-  if (!ch || !ui_channel_settings_available(ui, cs->guild_id, cs->channel_id)) {
+  if (!ch || ch->guild_id != cs->guild_id || ccord_discord_type_is_thread(ch->discord_type)) {
     ui_channel_settings_close(ui);
     return;
   }
-  if (!cs_page_allowed(ui, ch, cs->page)) {
+  uint64_t perms = cs_cached_chan_perms(ui, cs);
+  bool any_page = false;
+  for (cs_page p = CS_OVERVIEW; p < CS_PAGE_COUNT; p++) {
+    if (cs_page_allowed_with(ch, perms, p)) {
+      any_page = true;
+      break;
+    }
+  }
+  if (!any_page) {
+    ui_channel_settings_close(ui);
+    return;
+  }
+  if (!cs_page_allowed_with(ch, perms, cs->page)) {
     for (cs_page p = CS_OVERVIEW; p < CS_PAGE_COUNT; p++) {
-      if (cs_page_allowed(ui, ch, p)) {
+      if (cs_page_allowed_with(ch, perms, p)) {
         cs_enter_page(ui, p);
         break;
       }
@@ -516,6 +583,9 @@ bool ui_channel_settings_open(ccord_ui *ui, ccord_id channel_id)
   cs->open = true;
   cs->guild_id = ch->guild_id;
   cs->channel_id = channel_id;
+  cs->perm_cache_valid = false;
+  cs->ow_targets_valid = false;
+  cs->ow_add_valid = false;
   ui->mobile_channel_settings_detail = false;
   ui->left_drawer_open = false;
   ui->right_drawer_open = false;
@@ -535,9 +605,10 @@ bool ui_channel_settings_open(ccord_ui *ui, ccord_id channel_id)
   cs_load_channel(ui, ch);
   cs_select_overwrite_target(ui, ch->guild_id, CCORD_OVERWRITE_ROLE, false);
 
+  uint64_t perms = cs_cached_chan_perms(ui, cs);
   cs_page first = CS_OVERVIEW;
   for (cs_page p = CS_OVERVIEW; p < CS_PAGE_COUNT; p++) {
-    if (cs_page_allowed(ui, ch, p)) {
+    if (cs_page_allowed_with(ch, perms, p)) {
       first = p;
       break;
     }
@@ -564,11 +635,8 @@ void ui_channel_settings_close(ccord_ui *ui)
   if (!ui_channel_settings_is_open(ui)) return;
   ccord_id gid = ui->cs->guild_id;
   ccord_id cid = ui->cs->channel_id;
-  ui->cs->open = false;
-  ui->cs->focus = CSF_NONE;
-  ui->cs->nhits = 0;
-  ui->cs->hover = -1;
   if (ui->d.store && cid != CCORD_ID_NONE) ccord_store_forget_channel_invites(ui->d.store, gid, cid);
+  ui_channel_settings_destroy(ui);
   ui->dirty = true;
 }
 
@@ -882,25 +950,57 @@ static void draw_cs_overview(cs_cx *c, const ccord_channel *ch, float x, float w
 
 // ---------------------------------------------------------------- Permissions page (tri-state overwrites)
 
-typedef struct cs_ow_target_item {
-  ccord_id id;
-  ccord_overwrite_kind kind;
-  char label[128];
-} cs_ow_target_item;
-
-static size_t cs_build_overwrite_targets(const ccord_ui *ui, cs_ow_target_item *out, size_t cap)
+static int cs_cmp_id(const void *a, const void *b)
 {
-  const struct ui_channel_settings *cs = ui->cs;
+  ccord_id ia = *(const ccord_id *)a;
+  ccord_id ib = *(const ccord_id *)b;
+  return ia < ib ? -1 : (ia > ib ? 1 : 0);
+}
+
+static bool cs_id_in_sorted(const ccord_id *ids, size_t n, ccord_id target)
+{
+  size_t lo = 0, hi = n;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    if (ids[mid] == target) return true;
+    if (ids[mid] < target) lo = mid + 1u;
+    else hi = mid;
+  }
+  return false;
+}
+
+static void cs_ensure_ow_targets_cache(const ccord_ui *ui, struct ui_channel_settings *cs)
+{
+  uint64_t rev = ccord_store_revision(ui->d.store);
+  if (cs->ow_targets_valid && cs->ow_targets_rev == rev &&
+      cs->ow_targets_sel_id == cs->ow_sel_id && cs->ow_targets_sel_kind == cs->ow_sel_kind) {
+    return;
+  }
   const ccord_store *st = ui->d.store;
-  size_t count = 0;
-  if (cap == 0) return 0;
-
-  out[count++] = (cs_ow_target_item){.id = cs->guild_id, .kind = CCORD_OVERWRITE_ROLE, .label = "@everyone"};
-
   size_t nows = 0;
   const ccord_overwrite *ows = ccord_store_channel_overwrites(st, cs->channel_id, &nows);
-  for (size_t i = 0; ows && i < nows && count < cap; i++) {
-    if (ows[i].id == cs->guild_id) continue;
+  size_t need = 1u + nows + 1u;
+  if (need > CCORD_ADMIN_CLONE_OVERWRITES_MAX) need = CCORD_ADMIN_CLONE_OVERWRITES_MAX;
+  if (need > cs->ow_target_cap) {
+    cs_ow_target_item *nv = ccord_realloc(cs->ow_targets, need * sizeof *nv);
+    if (!nv) {
+      cs->ow_target_count = 0;
+      cs->ow_sel_has_stored = false;
+      return;
+    }
+    cs->ow_targets = nv;
+    cs->ow_target_cap = need;
+  }
+
+  size_t count = 0;
+  bool sel_stored = false;
+  cs->ow_targets[count++] = (cs_ow_target_item){
+    .id = cs->guild_id, .kind = CCORD_OVERWRITE_ROLE, .label = "@everyone"
+  };
+
+  for (size_t i = 0; ows && i < nows; i++) {
+    if (ows[i].id == cs->ow_sel_id) sel_stored = true;
+    if (ows[i].id == cs->guild_id || count >= CCORD_ADMIN_CLONE_OVERWRITES_MAX) continue;
     cs_ow_target_item it = {.id = ows[i].id, .kind = ows[i].kind};
     if (ows[i].kind == CCORD_OVERWRITE_ROLE) {
       const ccord_role *ro = ccord_store_role(st, cs->guild_id, ows[i].id);
@@ -909,30 +1009,86 @@ static size_t cs_build_overwrite_targets(const ccord_ui *ui, cs_ow_target_item *
       const char *mn = ui_member_display_name(ui, cs->guild_id, ows[i].id);
       (void)snprintf(it.label, sizeof it.label, "%s", mn && mn[0] ? mn : "Member");
     }
-    out[count++] = it;
+    cs->ow_targets[count++] = it;
   }
 
-  if (cs->ow_sel_id != CCORD_ID_NONE && cs->ow_sel_id != cs->guild_id && count < cap) {
-    bool present = false;
-    for (size_t i = 0; i < count; i++) {
-      if (out[i].id == cs->ow_sel_id) {
-        present = true;
-        break;
-      }
+  if (cs->ow_sel_id != CCORD_ID_NONE && cs->ow_sel_id != cs->guild_id && !sel_stored &&
+      count < CCORD_ADMIN_CLONE_OVERWRITES_MAX) {
+    cs_ow_target_item it = {.id = cs->ow_sel_id, .kind = cs->ow_sel_kind};
+    if (cs->ow_sel_kind == CCORD_OVERWRITE_ROLE) {
+      const ccord_role *ro = ccord_store_role(st, cs->guild_id, cs->ow_sel_id);
+      (void)snprintf(it.label, sizeof it.label, "@%s", (ro && ro->name && ro->name[0]) ? ro->name : "role");
+    } else {
+      const char *mn = ui_member_display_name(ui, cs->guild_id, cs->ow_sel_id);
+      (void)snprintf(it.label, sizeof it.label, "%s", mn && mn[0] ? mn : "Member");
     }
-    if (!present) {
-      cs_ow_target_item it = {.id = cs->ow_sel_id, .kind = cs->ow_sel_kind};
-      if (cs->ow_sel_kind == CCORD_OVERWRITE_ROLE) {
-        const ccord_role *ro = ccord_store_role(st, cs->guild_id, cs->ow_sel_id);
-        (void)snprintf(it.label, sizeof it.label, "@%s", (ro && ro->name && ro->name[0]) ? ro->name : "role");
-      } else {
-        const char *mn = ui_member_display_name(ui, cs->guild_id, cs->ow_sel_id);
-        (void)snprintf(it.label, sizeof it.label, "%s", mn && mn[0] ? mn : "Member");
-      }
-      out[count++] = it;
-    }
+    cs->ow_targets[count++] = it;
   }
-  return count;
+
+  cs->ow_target_count = count;
+  cs->ow_sel_has_stored = sel_stored;
+  cs->ow_targets_rev = rev;
+  cs->ow_targets_sel_id = cs->ow_sel_id;
+  cs->ow_targets_sel_kind = cs->ow_sel_kind;
+  cs->ow_targets_valid = true;
+}
+
+static void cs_ensure_ow_add_cache(const ccord_ui *ui, struct ui_channel_settings *cs)
+{
+  uint64_t rev = ccord_store_revision(ui->d.store);
+  if (cs->ow_add_valid && cs->ow_add_rev == rev) return;
+
+  cs->ow_add_role_count = 0;
+  cs->ow_add_member_count = 0;
+
+  // Build sorted overwrite id table once so role/member membership tests are O(log O) instead of O(R x O).
+  size_t nows = 0;
+  const ccord_overwrite *ows = ccord_store_channel_overwrites(ui->d.store, cs->channel_id, &nows);
+  ccord_id stack_ids[64];
+  ccord_id *ow_ids = stack_ids;
+  if (nows > 64u) {
+    ow_ids = ccord_malloc(nows * sizeof *ow_ids);
+    if (!ow_ids) return;
+  }
+  for (size_t i = 0; i < nows; i++) ow_ids[i] = ows[i].id;
+  if (nows > 1u) qsort(ow_ids, nows, sizeof *ow_ids, cs_cmp_id);
+
+  size_t nroles = 0;
+  const ccord_role *roles = ccord_store_roles(ui->d.store, cs->guild_id, &nroles);
+  for (size_t i = 0; roles && i < nroles; i++) {
+    if (roles[i].id == cs->guild_id) continue;
+    if (nows > 0 && cs_id_in_sorted(ow_ids, nows, roles[i].id)) continue;
+    if (cs->ow_add_role_count == cs->ow_add_role_cap) {
+      size_t ncap = cs->ow_add_role_cap ? cs->ow_add_role_cap * 2u : 16u;
+      cs_ow_add_item *nv = ccord_realloc(cs->ow_add_roles, ncap * sizeof *nv);
+      if (!nv) break;
+      cs->ow_add_roles = nv;
+      cs->ow_add_role_cap = ncap;
+    }
+    cs_ow_add_item *it = &cs->ow_add_roles[cs->ow_add_role_count++];
+    it->id = roles[i].id;
+    (void)snprintf(it->label, sizeof it->label, "+ @%s", roles[i].name ? roles[i].name : "role");
+  }
+
+  size_t nmemb = ccord_store_member_count(ui->d.store, cs->guild_id);
+  for (size_t i = 0; i < nmemb && i < 24u; i++) {
+    const ccord_member *mb = ccord_store_member_at(ui->d.store, cs->guild_id, i);
+    if (!mb || (nows > 0 && cs_id_in_sorted(ow_ids, nows, mb->user_id))) continue;
+    if (cs->ow_add_member_count == cs->ow_add_member_cap) {
+      size_t ncap = cs->ow_add_member_cap ? cs->ow_add_member_cap * 2u : 16u;
+      cs_ow_add_item *nv = ccord_realloc(cs->ow_add_members, ncap * sizeof *nv);
+      if (!nv) break;
+      cs->ow_add_members = nv;
+      cs->ow_add_member_cap = ncap;
+    }
+    cs_ow_add_item *it = &cs->ow_add_members[cs->ow_add_member_count++];
+    it->id = mb->user_id;
+    (void)snprintf(it->label, sizeof it->label, "+ %s", ui_member_display_name(ui, cs->guild_id, mb->user_id));
+  }
+
+  if (ow_ids != stack_ids) ccord_free(ow_ids);
+  cs->ow_add_rev = rev;
+  cs->ow_add_valid = true;
 }
 
 // A tri-state permission button is a button: danger for deny, success for allow, secondary for inherit / unset.
@@ -971,73 +1127,65 @@ static void draw_cs_permissions(cs_cx *c, float x, float w, float *py)
   y += 28.0f;
 
   if (cs->ow_add_open) {
-    size_t nroles = 0;
-    const ccord_role *roles = ccord_store_roles(ui->d.store, cs->guild_id, &nroles);
+    cs_ensure_ow_add_cache(ui, cs);
     float cx = x;
-    for (size_t i = 0; roles && i < nroles; i++) {
-      if (roles[i].id == cs->guild_id) continue;
-      if (cs_find_stored_overwrite(ui->d.store, cs->channel_id, roles[i].id, nullptr)) continue;
-      char lbl[96], nm[CS_NAME_LEN];
-      (void)snprintf(lbl, sizeof lbl, "+ @%s", roles[i].name ? roles[i].name : "role");
+    for (size_t i = 0; i < cs->ow_add_role_count; i++) {
+      const cs_ow_add_item *it = &cs->ow_add_roles[i];
+      char nm[CS_NAME_LEN];
       float cw = 128.0f;
       if (cx + cw > x + w) {
         cx = x;
         y += 32.0f;
       }
-      cs_chip(c, (ccord_rect){cx, y, cw, 26.0f}, lbl, false, nullptr, CA_OW_ADD_ROLE, roles[i].id,
-              NAME(nm, "ow_add_role:%llu", (unsigned long long)roles[i].id));
+      cs_chip(c, (ccord_rect){cx, y, cw, 26.0f}, it->label, false, nullptr, CA_OW_ADD_ROLE, it->id,
+              NAME(nm, "ow_add_role:%llu", (unsigned long long)it->id));
       cx += cw + 6.0f;
     }
     if (cx > x) {
       cx = x;
       y += 32.0f;
     }
-    size_t nmemb = ccord_store_member_count(ui->d.store, cs->guild_id);
-    for (size_t i = 0; i < nmemb && i < 24u; i++) {
-      const ccord_member *mb = ccord_store_member_at(ui->d.store, cs->guild_id, i);
-      if (!mb || cs_find_stored_overwrite(ui->d.store, cs->channel_id, mb->user_id, nullptr)) continue;
-      char lbl[96], nm[CS_NAME_LEN];
-      (void)snprintf(lbl, sizeof lbl, "+ %s", ui_member_display_name(ui, cs->guild_id, mb->user_id));
+    for (size_t i = 0; i < cs->ow_add_member_count; i++) {
+      const cs_ow_add_item *it = &cs->ow_add_members[i];
+      char nm[CS_NAME_LEN];
       float cw = 128.0f;
       if (cx + cw > x + w) {
         cx = x;
         y += 32.0f;
       }
-      cs_chip(c, (ccord_rect){cx, y, cw, 26.0f}, lbl, false, nullptr, CA_OW_ADD_MEMBER, mb->user_id,
-              NAME(nm, "ow_add_member:%llu", (unsigned long long)mb->user_id));
+      cs_chip(c, (ccord_rect){cx, y, cw, 26.0f}, it->label, false, nullptr, CA_OW_ADD_MEMBER, it->id,
+              NAME(nm, "ow_add_member:%llu", (unsigned long long)it->id));
       cx += cw + 6.0f;
     }
     if (cx > x) y += 32.0f;
     y += 8.0f;
   }
 
-  cs_ow_target_item targets[CCORD_ADMIN_CLONE_OVERWRITES_MAX];
-  size_t ntargets = cs_build_overwrite_targets(ui, targets, CCORD_ADMIN_CLONE_OVERWRITES_MAX);
-  cs->dbg_rows = ntargets;
+  cs_ensure_ow_targets_cache(ui, cs);
+  cs->dbg_rows = cs->ow_target_count;
   float cx = x;
-  for (size_t i = 0; i < ntargets; i++) {
+  for (size_t i = 0; i < cs->ow_target_count; i++) {
+    const cs_ow_target_item *t = &cs->ow_targets[i];
     float cw = 132.0f;
     if (cx + cw > x + w) {
       cx = x;
       y += 34.0f;
     }
     char nm[CS_NAME_LEN];
-    cs_chip(c, (ccord_rect){cx, y, cw, 28.0f}, targets[i].label, targets[i].id == cs->ow_sel_id, nullptr, CA_OW_TARGET,
-            targets[i].id | ((uint64_t)targets[i].kind << 63u),
-            NAME(nm, "ow_target:%llu", (unsigned long long)targets[i].id));
+    cs_chip(c, (ccord_rect){cx, y, cw, 28.0f}, t->label, t->id == cs->ow_sel_id, nullptr, CA_OW_TARGET,
+            t->id | ((uint64_t)t->kind << 63u),
+            NAME(nm, "ow_target:%llu", (unsigned long long)t->id));
     cx += cw + 6.0f;
   }
   y += 40.0f;
 
-  bool has_stored = cs_find_stored_overwrite(ui->d.store, cs->channel_id, cs->ow_sel_id, nullptr);
-  if (has_stored) {
+  if (cs->ow_sel_has_stored) {
     cs_button(c, (ccord_rect){x + w - 154.0f, y - 4.0f, 154.0f, 28.0f}, "Remove Overwrite", UIS_BTN_DANGER, nullptr, CA_OW_DELETE, cs->ow_sel_id, "ow_delete");
     y += 32.0f;
   }
 
-  ccord_id self = ccord_store_self_id(ui->d.store);
-  bool exact = ccord_store_permissions_exact(ui->d.store, cs->guild_id, self);
-  uint64_t ch_perms = cs_self_chan_perms(ui, cs->guild_id, cs->channel_id);
+  uint64_t ch_perms = cs_cached_chan_perms(ui, cs);
+  bool exact = cs->cached_exact;
 
   size_t nperms = 0;
   const ccord_perm_info *tbl = ccord_perm_table(&nperms);
@@ -1098,8 +1246,7 @@ static void draw_cs_invites(cs_cx *c, float x, float w, float *py)
             nullptr, CA_REFRESH, 0, "refresh");
   y += 40.0f;
 
-  bool can_create = ccord_store_has_permission(ui->d.store, cs->guild_id, cs->channel_id,
-                                               ccord_store_self_id(ui->d.store), CCORD_PERM_CREATE_INSTANT_INVITE);
+  bool can_create = ccord_perm_has(cs_cached_chan_perms(ui, cs), CCORD_PERM_CREATE_INSTANT_INVITE);
   if (can_create) {
     char age_lbl[64], use_lbl[64];
     (void)snprintf(age_lbl, sizeof age_lbl, "Expire: %s", k_cs_inv_age_labels[cs->inv_age_idx]);
@@ -1199,8 +1346,9 @@ void ui_channel_settings_draw(ccord_ui *ui, ccord_renderer *r)
     (void)cs_text(&side_cx, title, sx + 8.0f, sy, uis_tokens_of(ui).fs_control, true, COL(text_header), sw - 48.0f);
     sy += 26.0f;
 
+    uint64_t side_perms = cs_cached_chan_perms(ui, cs);
     for (cs_page p = CS_OVERVIEW; p < CS_PAGE_COUNT; p++) {
-      if (!cs_page_allowed(ui, ch, p)) continue;
+      if (!cs_page_allowed_with(ch, side_perms, p)) continue;
       float row_h = ui->mobile_layout ? 42.0f : 32.0f;
       ccord_rect pr = {sx, sy, sw, row_h};
       char nm[CS_NAME_LEN];
@@ -1216,7 +1364,7 @@ void ui_channel_settings_draw(ccord_ui *ui, ccord_renderer *r)
       sy += row_h + 2.0f;
     }
 
-    if (ccord_perm_has(cs_self_chan_perms(ui, cs->guild_id, cs->channel_id), CCORD_PERM_MANAGE_CHANNELS)) {
+    if (ccord_perm_has(side_perms, CCORD_PERM_MANAGE_CHANNELS)) {
       sy += 8.0f;
       uis_divider(ui, r, sx + 8.0f, sy, sw - 16.0f);
       sy += 10.0f;
