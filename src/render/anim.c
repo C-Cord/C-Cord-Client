@@ -15,11 +15,16 @@
 #include <libswscale/swscale.h>
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/os.h>
 
 #define ANIM_MAX_INPUT ((size_t)32u * 1024u * 1024u)
 #define ANIM_MAX_DIM 8192
 #define ANIM_MAX_SRC_PIXELS ((int64_t)32 * 1024 * 1024)
+#if CCORD_OS_ANDROID
+#define ANIM_MAX_BYTES ((size_t)32u * 1024u * 1024u)
+#else
 #define ANIM_MAX_BYTES ((size_t)64u * 1024u * 1024u)
+#endif
 #define ANIM_IO_BUF 32768
 #define ANIM_DEFAULT_DELAY_MS 100u
 
@@ -195,7 +200,7 @@ static void add_frame(anim_ctx *c, const AVFrame *f)
     return;
   }
   if (o->frame_count == c->cap) {
-    size_t ncap = c->cap ? c->cap * 2 : 8;
+    size_t ncap = c->cap ? c->cap * 2u : ((c->max_frames > 0 && c->max_frames < 8u) ? c->max_frames : 8u);
     uint8_t **nf = ccord_realloc_array(o->frames, ncap, sizeof *nf);
     if (!nf) {
       ctx_fail(c, CCORD_ERR_NOMEM, "anim: out of memory");
@@ -210,26 +215,39 @@ static void add_frame(anim_ctx *c, const AVFrame *f)
     o->delay_ms = nd;
     c->cap = ncap;
   }
-  uint8_t *px = ccord_malloc(fbytes + ANIM_SWS_DST_PAD);
+  const int row_bytes = o->w * 4;
+  const bool direct_rgba = (enum AVPixelFormat)f->format == AV_PIX_FMT_RGBA && f->width == o->w &&
+                           f->height == o->h && f->data[0] && f->linesize[0] >= row_bytes;
+  uint8_t *px = ccord_malloc(direct_rgba ? fbytes : fbytes + ANIM_SWS_DST_PAD);
   if (!px) {
     ctx_fail(c, CCORD_ERR_NOMEM, "anim: out of memory");
     return;
   }
-  int flags = (o->w < f->width || o->h < f->height) ? SWS_AREA : SWS_BILINEAR;
-  c->sws = sws_getCachedContext(c->sws, f->width, f->height, (enum AVPixelFormat)f->format, o->w, o->h,
-                                AV_PIX_FMT_RGBA, flags, nullptr, nullptr, nullptr);
-  if (!c->sws) {
-    ccord_free(px);
-    ctx_fail(c, CCORD_ERR_UNSUPPORTED, "anim: unsupported pixel format");
-    return;
-  }
-  uint8_t *dst[4] = {px, nullptr, nullptr, nullptr};
-  int dst_ls[4] = {o->w * 4, 0, 0, 0};
-  int rows = sws_scale(c->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, dst, dst_ls);
-  if (rows != o->h) {
-    ccord_free(px);
-    ctx_fail(c, CCORD_ERR_PARSE, "anim: frame conversion failed");
-    return;
+  if (direct_rgba) {
+    if (f->linesize[0] == row_bytes) {
+      memcpy(px, f->data[0], fbytes);
+    } else {
+      for (int y = 0; y < o->h; y++) {
+        memcpy(px + (size_t)y * (size_t)row_bytes, f->data[0] + (size_t)y * (size_t)f->linesize[0], (size_t)row_bytes);
+      }
+    }
+  } else {
+    int flags = (o->w < f->width || o->h < f->height) ? SWS_AREA : SWS_BILINEAR;
+    c->sws = sws_getCachedContext(c->sws, f->width, f->height, (enum AVPixelFormat)f->format, o->w, o->h,
+                                  AV_PIX_FMT_RGBA, flags, nullptr, nullptr, nullptr);
+    if (!c->sws) {
+      ccord_free(px);
+      ctx_fail(c, CCORD_ERR_UNSUPPORTED, "anim: unsupported pixel format");
+      return;
+    }
+    uint8_t *dst[4] = {px, nullptr, nullptr, nullptr};
+    int dst_ls[4] = {row_bytes, 0, 0, 0};
+    int rows = sws_scale(c->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, dst, dst_ls);
+    if (rows != o->h) {
+      ccord_free(px);
+      ctx_fail(c, CCORD_ERR_PARSE, "anim: frame conversion failed");
+      return;
+    }
   }
   int64_t dur = 0;
   if (f->duration > 0 && c->stream) {
@@ -285,6 +303,7 @@ ccord_status ccord_anim_decode(const uint8_t *data, size_t len, int max_dim, siz
     ctx_fail(&c, CCORD_ERR_NOMEM, "anim: out of memory");
     goto done;
   }
+  fmt->max_streams = 16;
   fmt->pb = io;
   fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
   av_dict_set(&opts, "format_whitelist", "gif,apng,webp_anim,webp_pipe,png_pipe,jpeg_pipe,bmp_pipe,tiff_pipe", 0);
@@ -304,6 +323,9 @@ ccord_status ccord_anim_decode(const uint8_t *data, size_t len, int max_dim, siz
     goto done;
   }
   c.stream = fmt->streams[si];
+  for (unsigned i = 0; i < fmt->nb_streams; i++) {
+    if ((int)i != si) fmt->streams[i]->discard = AVDISCARD_ALL;
+  }
   if (c.stream->codecpar->width > ANIM_MAX_DIM || c.stream->codecpar->height > ANIM_MAX_DIM ||
       (int64_t)c.stream->codecpar->width * c.stream->codecpar->height > ANIM_MAX_SRC_PIXELS) {
     ctx_fail(&c, CCORD_ERR_RANGE, "anim: dimensions out of range");
