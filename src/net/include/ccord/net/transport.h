@@ -321,7 +321,6 @@ typedef struct ccord_net_event {
   ccord_relationship_kind relationship_kind; // RELATIONSHIP_UPDATE
   uint32_t mention_count;                  // MESSAGE_ACK
   const ccord_user_profile *user_profile;  // USER_PROFILE
-  ccord_user_profile profile;              // USER_PROFILE value copy
   const ccord_stream_signal *stream_signal; // STREAM_SIGNAL
   // Forum channels (see ccord/model/forum.h). Metas ride on SNAPSHOT / GUILD_UPSERT / CHANNEL_UPSERT; posts on
   // SNAPSHOT / GUILD_UPSERT (active threads) / CHANNEL_UPSERT (thread events) / FORUM_POSTS / FORUM_POST_CREATED.
@@ -414,18 +413,6 @@ typedef struct ccord_net_event {
   uint32_t discovery_category_id;
   const char *discovery_query;             // DISCOVERY_RESULTS (nullable)
   bool recipient_added;                    // DM_RECIPIENT_CHANGE: true = added, false = removed
-  bool has_presence_detail;                // PRESENCE_UPDATE: activity & custom_status fields below are authoritative
-  char custom_status_emoji[65];            // PRESENCE_UPDATE / CUSTOM_STATUS_UPDATE
-  char custom_status_text[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
-  int64_t custom_status_expires_ms;        // PRESENCE_UPDATE / CUSTOM_STATUS_UPDATE (0 = none)
-  bool custom_status_clear;                // CUSTOM_STATUS_UPDATE: true when custom_status cleared to null
-  bool has_activity;                       // PRESENCE_UPDATE: non-custom rich presence activity present
-  ccord_activity_type activity_type;
-  char activity_name[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
-  char activity_details[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
-  char activity_state[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
-  int64_t activity_start_ms;
-  int64_t activity_end_ms;
   int64_t invites_disabled_until_ms;       // GUILD_INCIDENTS (0 = unpaused)
   int64_t dms_disabled_until_ms;           // GUILD_INCIDENTS (0 = unpaused)
   ccord_prune_info prune_info;             // PRUNE_RESULT
@@ -439,7 +426,6 @@ typedef struct ccord_net_event {
   const ccord_welcome_screen *welcome_screen; // WELCOME_SCREEN
   const ccord_onboarding *onboarding;      // ONBOARDING
   const ccord_member_verification *member_verification; // MEMBER_VERIFICATION (GET form answer; valid until next poll)
-  ccord_guild_profile guild_profile;       // GUILD_PROFILE (GET /guilds/{g}/profile answer)
   ccord_overwrite overwrite_item;          // CHANNEL_OVERWRITE_UPSERT / CHANNEL_OVERWRITE_DELETE
   const ccord_call_state *call;            // CALL_CREATE / CALL_UPDATE
   const ccord_stage_instance *stage_instance; // STAGE_INSTANCE_UPDATE
@@ -451,27 +437,50 @@ typedef struct ccord_net_event {
   bool scheduled_event_user_added;         // SCHEDULED_EVENT_USER_CHANGE: true = USER_ADD, false = USER_REMOVE
   const ccord_activity_app *activity_apps; // ACTIVITY_SHELF: the guild's activities in shelf order
   size_t activity_app_count;
-  ccord_activity_instance activity_instance; // ACTIVITY_INSTANCE_UPDATE (value copy; participant_count 0 = ended)
   const char *voice_status;                // VOICE_STATUS_UPDATE (nullptr / "" = cleared)
   // M6 account settings, devices & connections.
   const ccord_user_settings *user_settings; // USER_SETTINGS: full object (REST answer or gateway push)
   const ccord_auth_session *auth_sessions;  // AUTH_SESSIONS
   size_t auth_session_count;
-  char session_hashes[CCORD_ADMIN_SESSION_LOGOUT_MAX][64]; // AUTH_SESSIONS_LOGOUT: hashes the server logged out
-  size_t session_hash_count;
   const ccord_connection *connections;      // CONNECTIONS
   size_t connection_count;
-  ccord_connection connection;              // CONNECTION_UPSERT: the changed entry (value copy)
-  char connection_name[32];                 // CONNECTION_DELETE: service type (the request path segment)
-  char connection_id[64];                   // CONNECTION_DELETE: account id
-  // Ranged media (CCORD_NET_MEDIA_RANGE). Appended last; value-initialised everywhere.
-  uint64_t range_id;         // MEDIA_RANGE: the id from ccord_media_range_req
-  int64_t  range_start;      // MEDIA_RANGE: file offset of media_data[0]
-  int64_t  range_total;      // MEDIA_RANGE: whole-file length, -1 unknown
-  uint32_t range_flags;      // MEDIA_RANGE: ccord_range_flags
-  int32_t  range_http;       // MEDIA_RANGE: final HTTP status after redirects, 0 when none
-  uint8_t  range_redirects;  // MEDIA_RANGE: hops followed
-  char     range_etag[96];   // MEDIA_RANGE: strong ETag ("" if none or weak)
+  // Mutually exclusive event-specific value payloads (anonymous union preserves every field name).
+  union {
+    ccord_guild_profile guild_profile;          // GUILD_PROFILE (GET /guilds/{g}/profile answer)
+    ccord_activity_instance activity_instance;  // ACTIVITY_INSTANCE_UPDATE (value copy; participant_count 0 = ended)
+    struct {
+      char session_hashes[CCORD_ADMIN_SESSION_LOGOUT_MAX][64]; // AUTH_SESSIONS_LOGOUT: hashes the server logged out
+      size_t session_hash_count;
+    };
+    ccord_connection connection;                // CONNECTION_UPSERT: the changed entry (value copy)
+    struct {
+      char connection_name[32];                 // CONNECTION_DELETE: service type (the request path segment)
+      char connection_id[64];                   // CONNECTION_DELETE: account id
+    };
+    struct {
+      bool has_presence_detail;                 // PRESENCE_UPDATE / SESSIONS_REPLACE: activity & custom_status fields below are authoritative
+      char custom_status_emoji[65];             // PRESENCE_UPDATE / CUSTOM_STATUS_UPDATE
+      char custom_status_text[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
+      int64_t custom_status_expires_ms;         // PRESENCE_UPDATE / CUSTOM_STATUS_UPDATE (0 = none)
+      bool custom_status_clear;                 // CUSTOM_STATUS_UPDATE: true when custom_status cleared to null
+      bool has_activity;                        // PRESENCE_UPDATE / SESSIONS_REPLACE: non-custom rich presence activity present
+      ccord_activity_type activity_type;
+      char activity_name[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
+      char activity_details[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
+      char activity_state[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
+      int64_t activity_start_ms;
+      int64_t activity_end_ms;
+    };
+    struct {
+      uint64_t range_id;         // MEDIA_RANGE: the id from ccord_media_range_req
+      int64_t  range_start;      // MEDIA_RANGE: file offset of media_data[0]
+      int64_t  range_total;      // MEDIA_RANGE: whole-file length, -1 unknown
+      uint32_t range_flags;      // MEDIA_RANGE: ccord_range_flags
+      int32_t  range_http;       // MEDIA_RANGE: final HTTP status after redirects, 0 when none
+      uint8_t  range_redirects;  // MEDIA_RANGE: hops followed
+      char     range_etag[96];   // MEDIA_RANGE: strong ETag ("" if none or weak)
+    };
+  };
   // Voice link (CCORD_NET_VOICE_LINK). Appended last; value-initialised everywhere.
   uint8_t  voice_link;          // VOICE_LINK: ccord_voice_link
   uint32_t voice_link_attempt;  // VOICE_LINK: 1-based attempt number (0 when none)

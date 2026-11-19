@@ -35,10 +35,30 @@ void ccord_live_event_free(ccord_live_event *ev)
   ev->seq = -1;
 }
 
+static size_t scratch_chunk_size(size_t json_len)
+{
+  if (json_len > 65536u) return 256u * 1024u;
+  if (json_len > 4096u) return 16u * 1024u;
+  return 4096u;
+}
+
 static const ccord_json *parse_json(ccord_arena *a, const char *text, size_t len, ccord_error *err)
 {
   ccord_json_limits lim = {LIVE_JSON_MAX_DEPTH, LIVE_JSON_MAX_NODES, LIVE_JSON_MAX_STRING};
   return ccord_json_parse(a, text, len, &lim, err);
+}
+
+static const char *arena_dup(ccord_arena *a, const char *s)
+{
+  if (!s || s[0] == '\0' || !a) return "";
+  char *d = ccord_arena_strndup(a, s, strlen(s));
+  return d ? d : "";
+}
+
+static const char *arena_dup_nullable(ccord_arena *a, const char *s)
+{
+  if (!s || s[0] == '\0' || !a) return nullptr;
+  return ccord_arena_strndup(a, s, strlen(s));
 }
 
 static const char *sanitize_str_inplace(char *s)
@@ -90,13 +110,6 @@ static size_t jarray_len(const ccord_json *obj, const char *key)
   if (!obj) return 0;
   const ccord_json *j = ccord_json_get(obj, key);
   return j ? ccord_json_array_len(j) : 0;
-}
-
-static const ccord_json *jarray_at(const ccord_json *obj, const char *key, size_t i)
-{
-  if (!obj) return nullptr;
-  const ccord_json *j = ccord_json_get(obj, key);
-  return j ? ccord_json_array_at(j, i) : nullptr;
 }
 
 static bool json_bool_key(const ccord_json *obj, const char *key, bool fallback);
@@ -266,6 +279,13 @@ static const char *opt_text(const char *s, size_t max)
   return (n <= max && ccord_utf8_valid_text(s, n)) ? s : "";
 }
 
+static const char *opt_text_dup(ccord_arena *a, const char *s, size_t max)
+{
+  const char *ok = opt_text(s, max);
+  if (ok[0] == '\0') return "";
+  return arena_dup(a, ok);
+}
+
 static bool topic_ok(const char *s)
 {
   if (!s) return true;
@@ -300,9 +320,10 @@ static const char *dm_name(ccord_arena *a, const ccord_json *j, const ccord_user
   ccord_buf_init(&b, 512);
   ccord_id primary_uid = CCORD_ID_NONE;
   const char *primary_icon = "";
-  size_t count = jarray_len(j, "recipients");
+  const ccord_json *recs = j ? ccord_json_get(j, "recipients") : nullptr;
+  size_t count = recs ? ccord_json_array_len(recs) : 0;
   for (size_t i = 0; i < count; i++) {
-    const ccord_json *ru = jarray_at(j, "recipients", i);
+    const ccord_json *ru = ccord_json_array_at(recs, i);
     ccord_id ruid = CCORD_ID_NONE;
     (void)json_id_key(ru, "id", &ruid);
     if (count > 1 && self_id != CCORD_ID_NONE && ruid == self_id) continue;
@@ -336,10 +357,11 @@ static const char *dm_name(ccord_arena *a, const ccord_json *j, const ccord_user
     (void)ccord_buf_append_str(&b, name);
   }
   if (b.len == 0) {
-    size_t nids = jarray_len(j, "recipient_ids");
+    const ccord_json *rids = j ? ccord_json_get(j, "recipient_ids") : nullptr;
+    size_t nids = rids ? ccord_json_array_len(rids) : 0;
     for (size_t i = 0; i < nids; i++) {
       ccord_id ruid = CCORD_ID_NONE;
-      if (!json_id(jarray_at(j, "recipient_ids", i), &ruid)) continue;
+      if (!json_id(ccord_json_array_at(rids, i), &ruid)) continue;
       if (nids > 1 && self_id != CCORD_ID_NONE && ruid == self_id) continue;
       const char *name = nullptr;
       const char *av = "";
@@ -399,19 +421,21 @@ static bool map_channel_ex(ccord_arena *a, const ccord_user *users, size_t user_
     msg_req = (consent == 2) ? false : (mr_j ? ccord_json_bool(mr_j, false) : (consent == 1));
     spam = (consent == 2) ? false : json_bool_key(j, "is_spam", false);
     if (spam && consent != 2) msg_req = true;
-    size_t nrec = jarray_len(j, "recipients");
+    const ccord_json *recs = ccord_json_get(j, "recipients");
+    size_t nrec = recs ? ccord_json_array_len(recs) : 0;
     for (size_t i = 0; i < nrec; i++) {
       ccord_id ruid = CCORD_ID_NONE;
-      if (!json_id_key(jarray_at(j, "recipients", i), "id", &ruid) || ruid == CCORD_ID_NONE) continue;
+      if (!json_id_key(ccord_json_array_at(recs, i), "id", &ruid) || ruid == CCORD_ID_NONE) continue;
       if (self_id != CCORD_ID_NONE && ruid == self_id) continue;
       total++;
       if (kept < CCORD_MAX_DM_RECIPIENTS) out->recipient_ids[kept++] = ruid;
     }
     if (total == 0) {
-      size_t nids = jarray_len(j, "recipient_ids");
+      const ccord_json *rids = ccord_json_get(j, "recipient_ids");
+      size_t nids = rids ? ccord_json_array_len(rids) : 0;
       for (size_t i = 0; i < nids; i++) {
         ccord_id ruid = CCORD_ID_NONE;
-        if (!json_id(jarray_at(j, "recipient_ids", i), &ruid) || ruid == CCORD_ID_NONE) continue;
+        if (!json_id(ccord_json_array_at(rids, i), &ruid) || ruid == CCORD_ID_NONE) continue;
         if (self_id != CCORD_ID_NONE && ruid == self_id) continue;
         total++;
         if (kept < CCORD_MAX_DM_RECIPIENTS) out->recipient_ids[kept++] = ruid;
@@ -440,26 +464,37 @@ static bool map_channel_ex(ccord_arena *a, const ccord_user *users, size_t user_
     }
   }
   const char *name = jstr(j, "name");
-  if ((!name || name[0] == '\0') && resolved_dm) name = resolved_dm;
+  bool name_owned = false;
+  if ((!name || name[0] == '\0') && resolved_dm) {
+    name = resolved_dm;
+    name_owned = true;
+  }
   // Discord caps names at 100 *characters*; emoji and styled Unicode can push that well past
   // CCORD_NAME_MAX_BYTES. Truncate on a code point boundary instead of dropping the channel
   // (dropping it hid named group DMs and made their messages spawn a fake 1:1 DM).
   if (name && strlen(name) > CCORD_NAME_MAX_BYTES) {
     size_t cut = utf8_trunc_len(name, strlen(name), CCORD_NAME_MAX_BYTES);
     name = cut > 0 ? ccord_arena_strndup(a, name, cut) : nullptr;
+    name_owned = true;
   }
   if (!text_ok(name, CCORD_NAME_MAX_BYTES)) {
     if (resolved_dm && text_ok(resolved_dm, CCORD_NAME_MAX_BYTES)) {
       name = resolved_dm;
+      name_owned = true;
     } else if (type != 1 && type != 3) {
       name = "unnamed";
+      name_owned = true;
     } else {
       return false;
     }
   }
+  if (!name_owned) {
+    name = ccord_arena_strndup(a, name, strlen(name));
+    if (!name) return false;
+  }
   const char *topic = jstr(j, "topic");
-  if (!topic) topic = "";
-  if (!topic_ok(topic)) topic = "";
+  if (!topic || topic[0] == '\0' || !topic_ok(topic)) topic = "";
+  else topic = arena_dup(a, topic);
   ccord_id parent = CCORD_ID_NONE;
   if (type != 4) (void)json_id_key(j, "parent_id", &parent);
   int64_t pos = json_i64(j, "position", 0);
@@ -608,7 +643,7 @@ static const char *format_reaction_emoji(ccord_arena *a, const ccord_json *emj, 
     return buf;
   }
   if (!text_ok(name, CCORD_EMOJI_MAX_BYTES)) return nullptr;
-  return name;
+  return ccord_arena_strndup(a, name, strlen(name));
 }
 
 // Fills the per-emoji breakdown from a Discord message's `reactions` array.
@@ -664,10 +699,10 @@ static void map_reaction_list(ccord_arena *a, const ccord_json *j, ccord_message
 
 static const char *clamp_message_text(ccord_arena *a, const char *s)
 {
-  if (!s) return "";
+  if (!s || s[0] == '\0') return "";
   size_t len = strlen(s);
-  if (len <= CCORD_MESSAGE_MAX_BYTES) return s;
-  size_t n = utf8_trunc_len(s, len, CCORD_MESSAGE_MAX_BYTES);
+  size_t n = (len <= CCORD_MESSAGE_MAX_BYTES) ? len : utf8_trunc_len(s, len, CCORD_MESSAGE_MAX_BYTES);
+  if (n == 0) return "";
   const char *out = ccord_arena_strndup(a, s, n);
   return out ? out : "";
 }
@@ -1504,6 +1539,90 @@ static bool map_message(ccord_arena *a, const ccord_json *j, ccord_id fallback_c
   return map_message_ex(a, j, fallback_channel, false, out);
 }
 
+typedef struct pair_map_entry {
+  ccord_id k1;
+  ccord_id k2;
+  size_t slot;   // array index + 1; 0 marks a free slot
+} pair_map_entry;
+
+typedef struct pair_map {
+  pair_map_entry *entries;
+  size_t count;
+  size_t cap;    // power of two, or 0 before the first put
+} pair_map;
+
+static uint64_t pair_hash(ccord_id a, ccord_id b)
+{
+  uint64_t h = (a * 0x9e3779b97f4a7c15ULL) ^ b;
+  h ^= h >> 30;
+  h *= 0xbf58476d1ce4e5b9ULL;
+  h ^= h >> 27;
+  h *= 0x94d049bb133111ebULL;
+  h ^= h >> 31;
+  return h;
+}
+
+static bool pair_map_find(const pair_map *m, ccord_id k1, ccord_id k2, size_t *value)
+{
+  if (!m || !m->entries || m->cap == 0) return false;
+  size_t mask = m->cap - 1u;
+  size_t at = (size_t)pair_hash(k1, k2) & mask;
+  for (;;) {
+    const pair_map_entry *e = &m->entries[at];
+    if (e->slot == 0) return false;
+    if (e->k1 == k1 && e->k2 == k2) {
+      if (value) *value = e->slot - 1u;
+      return true;
+    }
+    at = (at + 1u) & mask;
+  }
+}
+
+static bool pair_map_put(pair_map *m, ccord_id k1, ccord_id k2, size_t value)
+{
+  if (!m || value == SIZE_MAX) return false;
+  if (!m->entries || (m->count + 1u) * 2u >= m->cap) {
+    if (m->cap > SIZE_MAX / 2u) return false;
+    size_t ncap = m->cap ? m->cap * 2u : 16u;
+    pair_map_entry *ne = ccord_calloc(ncap, sizeof *ne);
+    if (!ne) return false;
+    size_t nmask = ncap - 1u;
+    for (size_t i = 0; i < m->cap; i++) {
+      if (m->entries[i].slot == 0) continue;
+      size_t at = (size_t)pair_hash(m->entries[i].k1, m->entries[i].k2) & nmask;
+      while (ne[at].slot != 0) at = (at + 1u) & nmask;
+      ne[at] = m->entries[i];
+    }
+    ccord_free(m->entries);
+    m->entries = ne;
+    m->cap = ncap;
+  }
+  size_t mask = m->cap - 1u;
+  size_t at = (size_t)pair_hash(k1, k2) & mask;
+  for (;;) {
+    pair_map_entry *e = &m->entries[at];
+    if (e->slot == 0) {
+      e->k1 = k1;
+      e->k2 = k2;
+      e->slot = value + 1u;
+      m->count++;
+      return true;
+    }
+    if (e->k1 == k1 && e->k2 == k2) {
+      e->slot = value + 1u;
+      return true;
+    }
+    at = (at + 1u) & mask;
+  }
+}
+
+static void pair_map_free(pair_map *m)
+{
+  if (!m) return;
+  ccord_free(m->entries);
+  *m = (pair_map){0};
+}
+
 typedef struct snapshot_builder {
   ccord_arena *arena;
   ccord_id self_id;
@@ -1512,19 +1631,26 @@ typedef struct snapshot_builder {
   id_index user_idx;
   ccord_guild *guilds;
   size_t guild_count, guild_cap;
+  id_index guild_idx;
   ccord_channel *channels;
   size_t channel_count, channel_cap;
   id_index chan_idx;
   ccord_member *members;
   size_t member_count, member_cap;
+  pair_map member_idx;
+  id_index guild_mem_counts;
   ccord_voice_state *voices;
   size_t voice_count, voice_cap;
+  pair_map voice_idx;
   ccord_relationship *relationships;
   size_t relationship_count, relationship_cap;
+  id_index rel_idx;
   ccord_forum_meta *forum_metas;
   size_t forum_meta_count, forum_meta_cap;
+  id_index forum_meta_idx;
   ccord_forum_post *forum_posts;
   size_t forum_post_count, forum_post_cap;
+  id_index forum_post_idx;
 } snapshot_builder;
 
 static bool grow(void **items, size_t *cap, size_t need, size_t size)
@@ -1625,26 +1751,25 @@ static bool sb_user(snapshot_builder *b, const ccord_user *u)
 static bool sb_relationship(snapshot_builder *b, const ccord_relationship *rel)
 {
   if (!rel || rel->user_id == CCORD_ID_NONE || rel->kind == CCORD_REL_NONE) return true;
-  for (size_t i = 0; i < b->relationship_count; i++) {
-    if (b->relationships[i].user_id == rel->user_id) {
-      b->relationships[i].kind = rel->kind;
-      return true;
-    }
+  size_t i = 0;
+  if (ccord_idmap_find(&b->rel_idx, rel->user_id, &i)) {
+    b->relationships[i].kind = rel->kind;
+    return true;
   }
   if (b->relationship_count >= CCORD_MAX_RELATIONSHIPS) return true;
   if (!grow((void **)&b->relationships, &b->relationship_cap, b->relationship_count + 1, sizeof *b->relationships)) {
     return false;
   }
+  if (!ccord_idmap_put(&b->rel_idx, rel->user_id, b->relationship_count)) return false;
   b->relationships[b->relationship_count++] = *rel;
   return true;
 }
 
 static bool sb_guild(snapshot_builder *b, const ccord_guild *g)
 {
-  for (size_t i = 0; i < b->guild_count; i++) {
-    if (b->guilds[i].id == g->id) return true;
-  }
+  if (ccord_idmap_find(&b->guild_idx, g->id, nullptr)) return true;
   if (!grow((void **)&b->guilds, &b->guild_cap, b->guild_count + 1, sizeof *b->guilds)) return false;
+  if (!ccord_idmap_put(&b->guild_idx, g->id, b->guild_count)) return false;
   b->guilds[b->guild_count++] = *g;
   return true;
 }
@@ -1660,39 +1785,38 @@ static bool sb_channel(snapshot_builder *b, const ccord_channel *c)
 
 static bool sb_member(snapshot_builder *b, const ccord_member *m)
 {
-  size_t per_guild = 0;
-  for (size_t i = 0; i < b->member_count; i++) {
-    if (b->members[i].guild_id == m->guild_id) {
-      if (b->members[i].user_id == m->user_id) {
-        bool existing_default = (!b->members[i].role_name || b->members[i].role_name[0] == '\0' ||
-                                 strcmp(b->members[i].role_name, "Members") == 0) &&
-                                b->members[i].role_rank == 255 && b->members[i].role_color == 0;
-        bool incoming_default = (!m->role_name || m->role_name[0] == '\0' ||
-                                 strcmp(m->role_name, "Members") == 0) &&
-                                m->role_rank == 255 && m->role_color == 0;
-        if (!incoming_default || existing_default) {
-          b->members[i] = *m;
-        }
-        return true;
-      }
-      per_guild++;
+  size_t i = 0;
+  if (pair_map_find(&b->member_idx, m->guild_id, m->user_id, &i)) {
+    bool existing_default = (!b->members[i].role_name || b->members[i].role_name[0] == '\0' ||
+                             strcmp(b->members[i].role_name, "Members") == 0) &&
+                            b->members[i].role_rank == 255 && b->members[i].role_color == 0;
+    bool incoming_default = (!m->role_name || m->role_name[0] == '\0' ||
+                             strcmp(m->role_name, "Members") == 0) &&
+                            m->role_rank == 255 && m->role_color == 0;
+    if (!incoming_default || existing_default) {
+      b->members[i] = *m;
     }
+    return true;
   }
+  size_t per_guild = 0;
+  (void)ccord_idmap_find(&b->guild_mem_counts, m->guild_id, &per_guild);
   if (per_guild >= CCORD_MAX_MEMBERS_PER_GUILD) return true;
   if (!grow((void **)&b->members, &b->member_cap, b->member_count + 1, sizeof *b->members)) return false;
+  if (!pair_map_put(&b->member_idx, m->guild_id, m->user_id, b->member_count)) return false;
+  if (!ccord_idmap_put(&b->guild_mem_counts, m->guild_id, per_guild + 1u)) return false;
   b->members[b->member_count++] = *m;
   return true;
 }
 
 static bool sb_voice(snapshot_builder *b, const ccord_voice_state *v)
 {
-  for (size_t i = 0; i < b->voice_count; i++) {
-    if (b->voices[i].guild_id == v->guild_id && b->voices[i].user_id == v->user_id) {
-      b->voices[i] = *v;
-      return true;
-    }
+  size_t i = 0;
+  if (pair_map_find(&b->voice_idx, v->guild_id, v->user_id, &i)) {
+    b->voices[i] = *v;
+    return true;
   }
   if (!grow((void **)&b->voices, &b->voice_cap, b->voice_count + 1, sizeof *b->voices)) return false;
+  if (!pair_map_put(&b->voice_idx, v->guild_id, v->user_id, b->voice_count)) return false;
   b->voices[b->voice_count++] = *v;
   return true;
 }
@@ -1700,15 +1824,15 @@ static bool sb_voice(snapshot_builder *b, const ccord_voice_state *v)
 static bool sb_forum_meta(snapshot_builder *b, const ccord_forum_meta *m)
 {
   if (!m || m->forum_id == CCORD_ID_NONE) return true;
-  for (size_t i = 0; i < b->forum_meta_count; i++) {
-    if (b->forum_metas[i].forum_id == m->forum_id) {
-      b->forum_metas[i] = *m;
-      return true;
-    }
+  size_t i = 0;
+  if (ccord_idmap_find(&b->forum_meta_idx, m->forum_id, &i)) {
+    b->forum_metas[i] = *m;
+    return true;
   }
   if (!grow((void **)&b->forum_metas, &b->forum_meta_cap, b->forum_meta_count + 1, sizeof *b->forum_metas)) {
     return false;
   }
+  if (!ccord_idmap_put(&b->forum_meta_idx, m->forum_id, b->forum_meta_count)) return false;
   b->forum_metas[b->forum_meta_count++] = *m;
   return true;
 }
@@ -1716,15 +1840,15 @@ static bool sb_forum_meta(snapshot_builder *b, const ccord_forum_meta *m)
 static bool sb_forum_post(snapshot_builder *b, const ccord_forum_post *p)
 {
   if (!p || p->thread_id == CCORD_ID_NONE || p->forum_id == CCORD_ID_NONE) return true;
-  for (size_t i = 0; i < b->forum_post_count; i++) {
-    if (b->forum_posts[i].thread_id == p->thread_id) {
-      b->forum_posts[i] = *p;
-      return true;
-    }
+  size_t i = 0;
+  if (ccord_idmap_find(&b->forum_post_idx, p->thread_id, &i)) {
+    b->forum_posts[i] = *p;
+    return true;
   }
   if (!grow((void **)&b->forum_posts, &b->forum_post_cap, b->forum_post_count + 1, sizeof *b->forum_posts)) {
     return false;
   }
+  if (!ccord_idmap_put(&b->forum_post_idx, p->thread_id, b->forum_post_count)) return false;
   b->forum_posts[b->forum_post_count++] = *p;
   return true;
 }
@@ -1732,7 +1856,14 @@ static bool sb_forum_post(snapshot_builder *b, const ccord_forum_post *p)
 static void sb_free(snapshot_builder *b)
 {
   ccord_idmap_free(&b->user_idx);
+  ccord_idmap_free(&b->guild_idx);
   ccord_idmap_free(&b->chan_idx);
+  pair_map_free(&b->member_idx);
+  ccord_idmap_free(&b->guild_mem_counts);
+  pair_map_free(&b->voice_idx);
+  ccord_idmap_free(&b->rel_idx);
+  ccord_idmap_free(&b->forum_meta_idx);
+  ccord_idmap_free(&b->forum_post_idx);
   ccord_free(b->users);
   ccord_free(b->guilds);
   ccord_free(b->channels);
@@ -1841,33 +1972,59 @@ static bool sb_finish(snapshot_builder *b, ccord_live_event *ev)
 
 static ccord_presence presence_from(const char *status);
 
-static const char *guild_str(const ccord_json *gj, const char *key)
+static const ccord_json *guild_props(const ccord_json *gj)
+{
+  const ccord_json *p = gj ? ccord_json_get(gj, "properties") : nullptr;
+  return (p && ccord_json_type_of(p) == CCORD_JSON_OBJECT) ? p : nullptr;
+}
+
+static const char *guild_str_p(const ccord_json *gj, const ccord_json *props, const char *key)
 {
   const char *s = jstr(gj, key);
   if (s && s[0] != '\0') return s;
-  const ccord_json *props = gj ? ccord_json_get(gj, "properties") : nullptr;
   return props ? jstr(props, key) : s;
 }
 
-static bool guild_id_key(const ccord_json *gj, const char *key, ccord_id *out)
+static bool guild_id_key_p(const ccord_json *gj, const ccord_json *props, const char *key, ccord_id *out)
 {
   if (json_id_key(gj, key, out)) return true;
-  const ccord_json *props = gj ? ccord_json_get(gj, "properties") : nullptr;
   return props && json_id_key(props, key, out);
 }
 
-static const ccord_json *guild_arr(const ccord_json *gj, const char *key)
+static const ccord_json *guild_arr_p(const ccord_json *gj, const ccord_json *props, const char *key)
 {
   const ccord_json *r = gj ? ccord_json_get(gj, key) : nullptr;
   if (r && ccord_json_type_of(r) == CCORD_JSON_ARRAY) return r;
-  const ccord_json *props = gj ? ccord_json_get(gj, "properties") : nullptr;
   r = props ? ccord_json_get(props, key) : nullptr;
   return (r && ccord_json_type_of(r) == CCORD_JSON_ARRAY) ? r : nullptr;
 }
 
+static int64_t guild_i64_p(const ccord_json *gj, const ccord_json *props, const char *key, int64_t def)
+{
+  const ccord_json *v = gj ? ccord_json_get(gj, key) : nullptr;
+  int64_t out = 0;
+  if (v && ccord_json_int64(v, &out)) return out;
+  v = props ? ccord_json_get(props, key) : nullptr;
+  if (v && ccord_json_int64(v, &out)) return out;
+  return def;
+}
+
+static const ccord_json *guild_obj_p(const ccord_json *gj, const ccord_json *props, const char *key)
+{
+  const ccord_json *v = gj ? ccord_json_get(gj, key) : nullptr;
+  if (v && ccord_json_type_of(v) == CCORD_JSON_OBJECT) return v;
+  v = props ? ccord_json_get(props, key) : nullptr;
+  return (v && ccord_json_type_of(v) == CCORD_JSON_OBJECT) ? v : nullptr;
+}
+
+static const ccord_json *guild_arr(const ccord_json *gj, const char *key)
+{
+  return guild_arr_p(gj, guild_props(gj), key);
+}
+
 static const ccord_json *guild_roles(const ccord_json *gj)
 {
-  return guild_arr(gj, "roles");
+  return guild_arr_p(gj, guild_props(gj), "roles");
 }
 
 static bool parse_u64_str(const char *s, size_t len, uint64_t *out)
@@ -1907,17 +2064,17 @@ typedef struct guild_perm_ctx {
   ccord_id self_id;
   ccord_id owner_id;
   uint64_t base_perms;
-  const ccord_json *self_roles;
+  ccord_id self_role_ids[CCORD_MAX_ROLES_PER_GUILD];
+  size_t self_role_count;
+  bool has_self_roles;
   bool is_admin;
 } guild_perm_ctx;
 
-static bool role_list_contains(const ccord_json *role_arr, ccord_id rid)
+static bool perm_has_self_role(const guild_perm_ctx *ctx, ccord_id rid)
 {
-  if (!role_arr || rid == CCORD_ID_NONE) return false;
-  size_t n = ccord_json_array_len(role_arr);
-  for (size_t i = 0; i < n; i++) {
-    ccord_id id = CCORD_ID_NONE;
-    if (json_id(ccord_json_array_at(role_arr, i), &id) && id == rid) return true;
+  if (!ctx || rid == CCORD_ID_NONE) return false;
+  for (size_t i = 0; i < ctx->self_role_count; i++) {
+    if (ctx->self_role_ids[i] == rid) return true;
   }
   return false;
 }
@@ -1948,7 +2105,7 @@ static const ccord_json *extract_member_roles(const ccord_json *entry, ccord_id 
   return nullptr;
 }
 
-static void init_guild_perm_ctx(guild_perm_ctx *ctx, const ccord_json *gj,
+static void init_guild_perm_ctx(guild_perm_ctx *ctx, const ccord_json *gj, const ccord_json *props,
                                 const ccord_json *ready_merged_entry, ccord_id gid, ccord_id self_id)
 {
   *ctx = (guild_perm_ctx){
@@ -1956,40 +2113,51 @@ static void init_guild_perm_ctx(guild_perm_ctx *ctx, const ccord_json *gj,
     .self_id = self_id,
     .base_perms = DISCORD_PERM_VIEW_CHANNEL,
   };
-  (void)guild_id_key(gj, "owner_id", &ctx->owner_id);
+  (void)guild_id_key_p(gj, props, "owner_id", &ctx->owner_id);
   if (self_id == CCORD_ID_NONE || (ctx->owner_id != CCORD_ID_NONE && ctx->owner_id == self_id)) {
     ctx->is_admin = true;
     return;
   }
-  ctx->self_roles = extract_member_roles(guild_arr(gj, "members"), self_id, false);
-  if (!ctx->self_roles && gj) {
-    ctx->self_roles = extract_member_roles(ccord_json_get(gj, "merged_members"), self_id, true);
+  const ccord_json *self_roles = extract_member_roles(guild_arr_p(gj, props, "members"), self_id, false);
+  if (!self_roles && gj) {
+    self_roles = extract_member_roles(ccord_json_get(gj, "merged_members"), self_id, true);
   }
-  if (!ctx->self_roles && ready_merged_entry) {
-    ctx->self_roles = extract_member_roles(ready_merged_entry, self_id, true);
+  if (!self_roles && ready_merged_entry) {
+    self_roles = extract_member_roles(ready_merged_entry, self_id, true);
   }
-  const ccord_json *roles = guild_roles(gj);
+  if (self_roles) {
+    ctx->has_self_roles = true;
+    size_t nsr = ccord_json_array_len(self_roles);
+    for (size_t i = 0; i < nsr && ctx->self_role_count < CCORD_MAX_ROLES_PER_GUILD; i++) {
+      ccord_id rid = CCORD_ID_NONE;
+      if (json_id(ccord_json_array_at(self_roles, i), &rid) && rid != CCORD_ID_NONE) {
+        ctx->self_role_ids[ctx->self_role_count++] = rid;
+      }
+    }
+  }
+  const ccord_json *roles = guild_arr_p(gj, props, "roles");
   size_t nr = roles ? ccord_json_array_len(roles) : 0;
+  bool found_everyone = false;
+  uint64_t everyone_perms = DISCORD_PERM_VIEW_CHANNEL;
+  uint64_t role_perms = 0;
   for (size_t i = 0; i < nr; i++) {
     const ccord_json *rj = ccord_json_array_at(roles, i);
     ccord_id rid = CCORD_ID_NONE;
     if (!json_id_key(rj, "id", &rid)) continue;
-    uint64_t p = 0;
-    if (rid == gid && json_u64_key(rj, "permissions", &p)) {
-      ctx->base_perms = p;
-      break;
-    }
-  }
-  if (ctx->self_roles) {
-    for (size_t i = 0; i < nr; i++) {
-      const ccord_json *rj = ccord_json_array_at(roles, i);
-      ccord_id rid = CCORD_ID_NONE;
-      if (!json_id_key(rj, "id", &rid) || rid == gid) continue;
-      if (!role_list_contains(ctx->self_roles, rid)) continue;
+    if (rid == gid) {
+      if (!found_everyone) {
+        uint64_t p = 0;
+        if (json_u64_key(rj, "permissions", &p)) {
+          everyone_perms = p;
+          found_everyone = true;
+        }
+      }
+    } else if (ctx->has_self_roles && perm_has_self_role(ctx, rid)) {
       uint64_t p = 0;
-      if (json_u64_key(rj, "permissions", &p)) ctx->base_perms |= p;
+      if (json_u64_key(rj, "permissions", &p)) role_perms |= p;
     }
   }
+  ctx->base_perms = everyone_perms | role_perms;
   if ((ctx->base_perms & DISCORD_PERM_ADMINISTRATOR) != 0) {
     ctx->is_admin = true;
   }
@@ -1997,7 +2165,7 @@ static void init_guild_perm_ctx(guild_perm_ctx *ctx, const ccord_json *gj,
 
 static bool channel_can_view(const guild_perm_ctx *ctx, const ccord_json *cj)
 {
-  if (!ctx || ctx->is_admin || !ctx->self_roles) return true;
+  if (!ctx || ctx->is_admin || !ctx->has_self_roles) return true;
   uint64_t perms = ctx->base_perms;
   const ccord_json *ows = cj ? ccord_json_get(cj, "permission_overwrites") : nullptr;
   size_t n = ows ? ccord_json_array_len(ows) : 0;
@@ -2010,13 +2178,13 @@ static bool channel_can_view(const guild_perm_ctx *ctx, const ccord_json *cj)
     (void)json_u64_key(ow, "deny", &deny);
     perms = (perms & ~deny) | allow;
   }
-  if (ctx->self_roles) {
+  if (ctx->self_role_count > 0) {
     uint64_t r_allow = 0, r_deny = 0;
     for (size_t i = 0; i < n; i++) {
       const ccord_json *ow = ccord_json_array_at(ows, i);
       ccord_id id = CCORD_ID_NONE;
       if (!json_id_key(ow, "id", &id) || id == ctx->guild_id) continue;
-      if (!role_list_contains(ctx->self_roles, id)) continue;
+      if (!perm_has_self_role(ctx, id)) continue;
       uint64_t allow = 0, deny = 0;
       (void)json_u64_key(ow, "allow", &allow);
       (void)json_u64_key(ow, "deny", &deny);
@@ -2040,8 +2208,12 @@ static bool channel_can_view(const guild_perm_ctx *ctx, const ccord_json *cj)
 typedef struct raw_guild_channel {
   ccord_channel chan;
   int64_t position;
+  size_t first_child;
+  size_t last_child;
+  size_t next_sibling;
   bool emitted;
   bool hidden_cat;
+  bool has_visible_child;
 } raw_guild_channel;
 
 static int cmp_raw_guild_channel(const void *a, const void *b)
@@ -2101,7 +2273,7 @@ static bool perm_bool(const ccord_json *obj, const char *key)
   return j && ccord_json_bool(j, false);
 }
 
-static bool perm_add_role(perm_lists *L, const ccord_json *rj, ccord_id gid)
+static bool perm_add_role(ccord_arena *a, perm_lists *L, const ccord_json *rj, ccord_id gid)
 {
   ccord_id rid = CCORD_ID_NONE;
   if (!rj || !json_id_key(rj, "id", &rid)) return true;   // a malformed entry is skipped, not fatal
@@ -2114,7 +2286,7 @@ static bool perm_add_role(perm_lists *L, const ccord_json *rj, ccord_id gid)
   int64_t color = json_i64(rj, "color", 0);
   L->roles[L->nroles++] = (ccord_role){
     .id = rid, .guild_id = gid,
-    .name = opt_text(jstr(rj, "name"), CCORD_NAME_MAX_BYTES * 4u),
+    .name = opt_text_dup(a, jstr(rj, "name"), CCORD_NAME_MAX_BYTES * 4u),
     .color = color > 0 ? (uint32_t)(color & 0xFFFFFF) : 0u,
     .position = (int32_t)pos, .permissions = perms,
     .hoist = perm_bool(rj, "hoist"), .mentionable = perm_bool(rj, "mentionable"), .managed = perm_bool(rj, "managed"),
@@ -2122,12 +2294,12 @@ static bool perm_add_role(perm_lists *L, const ccord_json *rj, ccord_id gid)
   return true;
 }
 
-static bool perm_add_roles(perm_lists *L, const ccord_json *arr, ccord_id gid)
+static bool perm_add_roles(ccord_arena *a, perm_lists *L, const ccord_json *arr, ccord_id gid)
 {
   size_t n = arr && ccord_json_type_of(arr) == CCORD_JSON_ARRAY ? ccord_json_array_len(arr) : 0;
   if (n > CCORD_MAX_ROLES_PER_GUILD + 1u) n = CCORD_MAX_ROLES_PER_GUILD + 1u;
   for (size_t i = 0; i < n; i++) {
-    if (!perm_add_role(L, ccord_json_array_at(arr, i), gid)) return false;
+    if (!perm_add_role(a, L, ccord_json_array_at(arr, i), gid)) return false;
   }
   return true;
 }
@@ -2254,10 +2426,11 @@ static void perm_collect_guilds(ccord_live_event *ev, const ccord_json *const *g
   bool ok = true;
   for (size_t i = 0; ok && i < ng; i++) {
     const ccord_json *gj = guilds[i];
+    const ccord_json *props = guild_props(gj);
     ccord_id gid = CCORD_ID_NONE;
-    if (!guild_id_key(gj, "id", &gid) || gid == CCORD_DM_GUILD_ID) continue;
-    ok = perm_add_roles(&L, guild_arr(gj, "roles"), gid);
-    const ccord_json *members = guild_arr(gj, "members");
+    if (!guild_id_key_p(gj, props, "id", &gid) || gid == CCORD_DM_GUILD_ID) continue;
+    ok = perm_add_roles(&ev->arena, &L, guild_arr_p(gj, props, "roles"), gid);
+    const ccord_json *members = guild_arr_p(gj, props, "members");
     size_t nm = members ? ccord_json_array_len(members) : 0;
     if (nm > CCORD_MAX_MEMBERS_PER_GUILD) nm = CCORD_MAX_MEMBERS_PER_GUILD;
     size_t first_member = L.nmr;
@@ -2271,7 +2444,7 @@ static void perm_collect_guilds(ccord_live_event *ev, const ccord_json *const *g
       if (!self_roles && merged && merged[i]) self_roles = extract_member_roles(merged[i], self_id, true);
       if (self_roles) ok = perm_add_member_roles(&ev->arena, &L, gid, self_id, self_roles);
     }
-    const ccord_json *chans = guild_arr(gj, "channels");
+    const ccord_json *chans = guild_arr_p(gj, props, "channels");
     size_t nc = chans ? ccord_json_array_len(chans) : 0;
     if (nc > CCORD_MAX_CHANNELS_PER_GUILD) nc = CCORD_MAX_CHANNELS_PER_GUILD;
     for (size_t k = 0; ok && k < nc; k++) ok = perm_add_channel(&ev->arena, &L, ccord_json_array_at(chans, k));
@@ -2331,9 +2504,10 @@ static size_t notify_entry_fill(const ccord_json *e, ccord_id gid, ccord_notify_
   srv.suppress_everyone = perm_bool(e, "suppress_everyone");
   srv.suppress_roles = perm_bool(e, "suppress_roles");
   out[n++] = srv;
-  size_t no = jarray_len(e, "channel_overrides");
+  const ccord_json *ovs = e ? ccord_json_get(e, "channel_overrides") : nullptr;
+  size_t no = ovs ? ccord_json_array_len(ovs) : 0;
   for (size_t i = 0; i < no && n < cap; i++) {
-    const ccord_json *oj = jarray_at(e, "channel_overrides", i);
+    const ccord_json *oj = ccord_json_array_at(ovs, i);
     ccord_id cid = CCORD_ID_NONE;
     if (!oj || !json_id_key(oj, "channel_id", &cid)) continue;
     ccord_notify_scope row = {.guild_id = gid, .channel_id = cid, .level = notify_level_from(oj)};
@@ -2436,8 +2610,9 @@ static bool map_notify_settings(ccord_live_event *ev, const ccord_json *d)
   return true;
 }
 
+typedef struct role_table role_table;
 static bool sb_ensure_user_stub(snapshot_builder *b, ccord_id uid);
-static void resolve_member_role(ccord_arena *a, ccord_id gid, const ccord_json *roles, const ccord_json *mj,
+static void resolve_member_role(ccord_arena *a, ccord_id gid, const role_table *rt, const ccord_json *mj,
                                 const char **out_name, uint32_t *out_color, uint8_t *out_rank);
 
 static void read_clan_obj(const ccord_json *clan, char out_tag[16], ccord_id *out_guild_id, char out_badge[64])
@@ -2527,10 +2702,11 @@ static void extract_presence_detail(const ccord_json *obj, parsed_presence_detai
 {
   memset(out, 0, sizeof *out);
   if (!obj) return;
-  size_t na = jarray_len(obj, "activities");
+  const ccord_json *acts = ccord_json_get(obj, "activities");
+  size_t na = acts ? ccord_json_array_len(acts) : 0;
   bool saw_custom = false;
   for (size_t i = 0; i < na; i++) {
-    const ccord_json *act = jarray_at(obj, "activities", i);
+    const ccord_json *act = ccord_json_array_at(acts, i);
     if (!act || ccord_json_type_of(act) != CCORD_JSON_OBJECT) continue;
     int64_t type = json_i64(act, "type", -1);
     if (type == 4 && !saw_custom) {
@@ -2597,15 +2773,16 @@ static void apply_presence_detail_to_user(ccord_user *u, const parsed_presence_d
 static const char *extract_activity_status(ccord_arena *a, const ccord_json *obj)
 {
   if (!obj) return "";
-  size_t na = jarray_len(obj, "activities");
+  const ccord_json *acts = ccord_json_get(obj, "activities");
+  size_t na = acts ? ccord_json_array_len(acts) : 0;
   for (size_t i = 0; i < na; i++) {
-    const ccord_json *act = jarray_at(obj, "activities", i);
+    const ccord_json *act = ccord_json_array_at(acts, i);
     if (json_i64(act, "type", -1) != 4) continue;
     const char *state = jstr(act, "state");
-    if (text_ok(state, LIVE_STATUS_MAX_BYTES)) return state;
+    if (text_ok(state, LIVE_STATUS_MAX_BYTES)) return arena_dup(a, state);
   }
   for (size_t i = 0; i < na; i++) {
-    const ccord_json *act = jarray_at(obj, "activities", i);
+    const ccord_json *act = ccord_json_array_at(acts, i);
     int64_t type = json_i64(act, "type", -1);
     const char *name = jstr(act, "name");
     if (!text_ok(name, LIVE_STATUS_MAX_BYTES)) continue;
@@ -2619,7 +2796,7 @@ static const char *extract_activity_status(ccord_arena *a, const ccord_json *obj
       default: break;
     }
     if (!prefix) continue;
-    if (!a) return name;
+    if (!a) return "";
     size_t plen = strlen(prefix);
     size_t nlen = strlen(name);
     char buf[LIVE_STATUS_MAX_BYTES + 32];
@@ -2634,7 +2811,7 @@ static const char *extract_activity_status(ccord_arena *a, const ccord_json *obj
   return "";
 }
 
-static bool map_member_with_pres_ex(snapshot_builder *b, const ccord_json *roles, const id_index *pres_map,
+static bool map_member_with_pres_ex(snapshot_builder *b, const role_table *rt, const id_index *pres_map,
                                     const ccord_json *mj, ccord_id gid, ccord_id fallback_uid)
 {
   if (!mj || ccord_json_type_of(mj) != CCORD_JSON_OBJECT) return true;
@@ -2663,10 +2840,12 @@ static bool map_member_with_pres_ex(snapshot_builder *b, const ccord_json *roles
   }
 
   const char *nick = jstr(mj, "nick");
+  bool nick_ok = nick && text_ok(nick, CCORD_NAME_MAX_BYTES);
   if (mu && ccord_json_type_of(mu) == CCORD_JSON_OBJECT) {
-    const char *name = (nick && text_ok(nick, CCORD_NAME_MAX_BYTES)) ? nick : jstr(mu, "global_name");
+    const char *name = nick_ok ? nick : jstr(mu, "global_name");
     if (!name || name[0] == '\0') name = jstr(mu, "username");
     if (!text_ok(name, CCORD_NAME_MAX_BYTES)) name = "User";
+    else name = arena_dup(b->arena, name);
     const ccord_json *botj = ccord_json_get(mu, "bot");
     bool bot = botj && ccord_json_bool(botj, false);
     const char *av_hash = jstr(mu, "avatar");
@@ -2674,7 +2853,7 @@ static bool map_member_with_pres_ex(snapshot_builder *b, const ccord_json *roles
     ccord_user u = {
       .id = uid,
       .name = name,
-      .handle = opt_text(jstr(mu, "username"), CCORD_NAME_MAX_BYTES),
+      .handle = opt_text_dup(b->arena, jstr(mu, "username"), CCORD_NAME_MAX_BYTES),
       .status_text = stext,
       .avatar_url = build_cdn_url(b->arena, "avatars", uid, av_hash),
       .banner_url = build_cdn_url(b->arena, "banners", uid, jstr(mu, "banner")),
@@ -2690,10 +2869,10 @@ static bool map_member_with_pres_ex(snapshot_builder *b, const ccord_json *roles
     if (had_user && existing_idx < b->user_count) {
       // Only fill b->users[existing_idx].name from a server nickname if the user entry was a stub;
       // never overwrite a user's global display name / DM identity with a server-only nickname.
-      if (nick && text_ok(nick, CCORD_NAME_MAX_BYTES) && uid != b->self_id &&
+      if (nick_ok && uid != b->self_id &&
           (!b->users[existing_idx].name || b->users[existing_idx].name[0] == '\0' ||
            strncmp(b->users[existing_idx].name, "User ", 5) == 0)) {
-        b->users[existing_idx].name = nick;
+        b->users[existing_idx].name = arena_dup(b->arena, nick);
       }
       if (u.clan_tag[0] != '\0') {
         memcpy(b->users[existing_idx].clan_tag, u.clan_tag, sizeof u.clan_tag);
@@ -2714,10 +2893,10 @@ static bool map_member_with_pres_ex(snapshot_builder *b, const ccord_json *roles
     if (!sb_ensure_user_stub(b, uid)) return false;
     size_t existing_idx = 0;
     if (ccord_idmap_find(&b->user_idx, uid, &existing_idx) && existing_idx < b->user_count) {
-      if (nick && text_ok(nick, CCORD_NAME_MAX_BYTES) && uid != b->self_id &&
+      if (nick_ok && uid != b->self_id &&
           (!b->users[existing_idx].name || b->users[existing_idx].name[0] == '\0' ||
            strncmp(b->users[existing_idx].name, "User ", 5) == 0)) {
-        b->users[existing_idx].name = nick;
+        b->users[existing_idx].name = arena_dup(b->arena, nick);
       }
       if (pres != CCORD_PRESENCE_OFFLINE) {
         b->users[existing_idx].presence = pres;
@@ -2734,7 +2913,7 @@ static bool map_member_with_pres_ex(snapshot_builder *b, const ccord_json *roles
   const char *role_name = "Members";
   uint32_t color = 0;
   uint8_t rank = 255;
-  resolve_member_role(b->arena, gid, roles, mj, &role_name, &color, &rank);
+  resolve_member_role(b->arena, gid, rt, mj, &role_name, &color, &rank);
   // Present (an ISO timestamp) only while the member is timed out; absent or null otherwise.
   int64_t timeout_until = 0;
   const char *cdu = jstr(mj, "communication_disabled_until");
@@ -2770,68 +2949,112 @@ static bool map_member_with_pres_ex(snapshot_builder *b, const ccord_json *roles
     .pending = has_pending && ccord_json_bool(pending_j, false),
     .omit_pending = !has_pending,
   };
-  if (nick && text_ok(nick, CCORD_NAME_MAX_BYTES)) {
+  if (nick_ok) {
     size_t nlen = strlen(nick);
     memcpy(m.nick, nick, nlen + 1);
   }
   return sb_member(b, &m);
 }
 
-static bool map_member_with_pres(snapshot_builder *b, const ccord_json *roles, const id_index *pres_map,
+static bool map_member_with_pres(snapshot_builder *b, const role_table *rt, const id_index *pres_map,
                                  const ccord_json *mj, ccord_id gid)
 {
-  return map_member_with_pres_ex(b, roles, pres_map, mj, gid, CCORD_ID_NONE);
+  return map_member_with_pres_ex(b, rt, pres_map, mj, gid, CCORD_ID_NONE);
 }
 
 typedef struct cached_role_entry {
   ccord_id id;
-  char name[CCORD_NAME_MAX_BYTES + 1];
   uint32_t color;
+  uint32_t name_off;
+  uint16_t name_len;
   uint8_t rank;
 } cached_role_entry;
 
+struct role_table {
+  cached_role_entry *roles;
+  size_t count;
+  char *names;
+  ccord_idmap idx;   // populated when count > 8: role_id -> index in roles[]
+};
+
 typedef struct cached_guild_roles {
   ccord_id guild_id;
-  cached_role_entry roles[64];
-  size_t count;
+  role_table table;
 } cached_guild_roles;
 
-static cached_guild_roles g_role_cache[CCORD_MAX_GUILDS];
+#define LIVE_ROLE_CACHE_MAX_GUILDS 256u
+#define LIVE_ROLE_TABLE_MAX_ROLES  512u
+static cached_guild_roles *g_role_cache = nullptr;
 static size_t g_role_cache_count = 0;
+static size_t g_role_cache_cap = 0;
+static ccord_idmap g_role_cache_idx = {0};
 
-static void cache_guild_roles(ccord_id gid, const ccord_json *roles)
+static void role_table_free(role_table *t)
 {
-  if (gid == CCORD_ID_NONE || !roles) return;
+  if (!t) return;
+  ccord_free(t->roles);
+  ccord_free(t->names);
+  ccord_idmap_free(&t->idx);
+  *t = (role_table){0};
+}
+
+static void role_table_build(role_table *t, const ccord_json *roles)
+{
+  role_table_free(t);
+  if (!roles) return;
   size_t nr = ccord_json_array_len(roles);
   if (nr == 0) return;
-  cached_guild_roles *slot = nullptr;
-  for (size_t i = 0; i < g_role_cache_count; i++) {
-    if (g_role_cache[i].guild_id == gid) {
-      slot = &g_role_cache[i];
-      break;
-    }
-  }
-  if (!slot) {
-    if (g_role_cache_count < CCORD_MAX_GUILDS) {
-      slot = &g_role_cache[g_role_cache_count++];
-    } else {
-      slot = &g_role_cache[gid % CCORD_MAX_GUILDS];
-    }
-  }
-  slot->guild_id = gid;
-  slot->count = 0;
-  for (size_t i = 0; i < nr && slot->count < 64; i++) {
+  if (nr > LIVE_ROLE_TABLE_MAX_ROLES) nr = LIVE_ROLE_TABLE_MAX_ROLES;
+
+  size_t valid = 0;
+  size_t name_bytes = 0;
+  for (size_t i = 0; i < nr; i++) {
     const ccord_json *rj = ccord_json_array_at(roles, i);
     ccord_id rid = CCORD_ID_NONE;
     if (!json_id_key(rj, "id", &rid) || rid == CCORD_ID_NONE) continue;
+    valid++;
     const char *rn = jstr(rj, "name");
-    if (!text_ok(rn, CCORD_NAME_MAX_BYTES)) continue;
-    cached_role_entry *e = &slot->roles[slot->count++];
+    if (text_ok(rn, CCORD_NAME_MAX_BYTES)) {
+      name_bytes += strlen(rn) + 1u;
+    }
+  }
+  if (valid == 0) return;
+
+  cached_role_entry *entries = ccord_alloc_array(valid, sizeof *entries);
+  if (!entries) return;
+  char *names = name_bytes > 0 ? ccord_malloc(name_bytes) : nullptr;
+  if (name_bytes > 0 && !names) {
+    ccord_free(entries);
+    return;
+  }
+
+  bool use_idx = valid > 8u;
+  if (use_idx && !ccord_idmap_reserve(&t->idx, valid)) {
+    ccord_idmap_free(&t->idx);
+    use_idx = false;
+  }
+
+  size_t count = 0;
+  size_t off = 0;
+  for (size_t i = 0; i < nr && count < valid; i++) {
+    const ccord_json *rj = ccord_json_array_at(roles, i);
+    ccord_id rid = CCORD_ID_NONE;
+    if (!json_id_key(rj, "id", &rid) || rid == CCORD_ID_NONE) continue;
+    cached_role_entry *e = &entries[count];
     e->id = rid;
-    size_t rlen = strlen(rn);
-    if (rlen > CCORD_NAME_MAX_BYTES) rlen = CCORD_NAME_MAX_BYTES;
-    memcpy(e->name, rn, rlen);
-    e->name[rlen] = '\0';
+    e->name_off = 0;
+    e->name_len = 0;
+    const char *rn = jstr(rj, "name");
+    if (names && text_ok(rn, CCORD_NAME_MAX_BYTES)) {
+      size_t rlen = strlen(rn);
+      if (off + rlen + 1u <= name_bytes) {
+        memcpy(names + off, rn, rlen);
+        names[off + rlen] = '\0';
+        e->name_off = (uint32_t)off;
+        e->name_len = (uint16_t)rlen;
+        off += rlen + 1u;
+      }
+    }
     int64_t c = json_i64(rj, "color", 0);
     if (c < 0) c = 0;
     if (c > (int64_t)0xFFFFFF) c = (int64_t)0xFFFFFF;
@@ -2840,99 +3063,131 @@ static void cache_guild_roles(ccord_id gid, const ccord_json *roles)
     if (pos < 0) pos = 0;
     if (pos > 255) pos = 255;
     e->rank = (uint8_t)pos;
+    if (use_idx && !ccord_idmap_find(&t->idx, rid, nullptr)) {
+      if (!ccord_idmap_put(&t->idx, rid, count)) {
+        ccord_idmap_free(&t->idx);
+        use_idx = false;
+      }
+    }
+    count++;
   }
+  t->roles = entries;
+  t->count = count;
+  t->names = names;
 }
 
-static void resolve_member_role(ccord_arena *a, ccord_id gid, const ccord_json *roles, const ccord_json *mj,
+static const cached_role_entry *role_table_find(const role_table *t, ccord_id rid)
+{
+  if (!t || t->count == 0 || rid == CCORD_ID_NONE) return nullptr;
+  if (t->idx.cap > 0) {
+    size_t idx = 0;
+    if (ccord_idmap_find(&t->idx, rid, &idx) && idx < t->count) return &t->roles[idx];
+    return nullptr;
+  }
+  for (size_t i = 0; i < t->count; i++) {
+    if (t->roles[i].id == rid) return &t->roles[i];
+  }
+  return nullptr;
+}
+
+static const role_table *find_cached_guild_roles(ccord_id gid)
+{
+  if (gid == CCORD_ID_NONE || !g_role_cache) return nullptr;
+  size_t slot_idx = 0;
+  if (ccord_idmap_find(&g_role_cache_idx, gid, &slot_idx) && slot_idx < g_role_cache_count) {
+    return g_role_cache[slot_idx].table.count > 0 ? &g_role_cache[slot_idx].table : nullptr;
+  }
+  return nullptr;
+}
+
+static const role_table *cache_guild_roles(ccord_id gid, const ccord_json *roles)
+{
+  if (gid == CCORD_ID_NONE || !roles) return nullptr;
+  size_t nr = ccord_json_array_len(roles);
+  if (nr == 0) return nullptr;
+  size_t slot_idx = 0;
+  if (!ccord_idmap_find(&g_role_cache_idx, gid, &slot_idx) || slot_idx >= g_role_cache_count) {
+    if (g_role_cache_count < LIVE_ROLE_CACHE_MAX_GUILDS) {
+      if (g_role_cache_count == g_role_cache_cap) {
+        size_t ncap = g_role_cache_cap ? g_role_cache_cap * 2u : 8u;
+        if (ncap > LIVE_ROLE_CACHE_MAX_GUILDS) ncap = LIVE_ROLE_CACHE_MAX_GUILDS;
+        cached_guild_roles *np = ccord_realloc_array(g_role_cache, ncap, sizeof *np);
+        if (!np) return nullptr;
+        g_role_cache = np;
+        g_role_cache_cap = ncap;
+      }
+      slot_idx = g_role_cache_count++;
+      g_role_cache[slot_idx] = (cached_guild_roles){.guild_id = gid};
+      if (!ccord_idmap_put(&g_role_cache_idx, gid, slot_idx)) {
+        g_role_cache_count--;
+        return nullptr;
+      }
+    } else {
+      slot_idx = (size_t)(gid % LIVE_ROLE_CACHE_MAX_GUILDS);
+      if (g_role_cache[slot_idx].guild_id != CCORD_ID_NONE) {
+        (void)ccord_idmap_remove(&g_role_cache_idx, g_role_cache[slot_idx].guild_id);
+      }
+      role_table_free(&g_role_cache[slot_idx].table);
+      g_role_cache[slot_idx].guild_id = gid;
+      if (!ccord_idmap_put(&g_role_cache_idx, gid, slot_idx)) {
+        g_role_cache[slot_idx].guild_id = CCORD_ID_NONE;
+        return nullptr;
+      }
+    }
+  }
+  role_table_build(&g_role_cache[slot_idx].table, roles);
+  return g_role_cache[slot_idx].table.count > 0 ? &g_role_cache[slot_idx].table : nullptr;
+}
+
+static void resolve_member_role(ccord_arena *a, ccord_id gid, const role_table *rt, const ccord_json *mj,
                                 const char **out_name, uint32_t *out_color, uint8_t *out_rank)
 {
   const char *role_name = "Members";
   uint32_t color = 0;
   uint8_t rank = 255;
-  size_t ng = roles ? ccord_json_array_len(roles) : 0;
-  size_t nr = mj ? jarray_len(mj, "roles") : 0;
-  const cached_guild_roles *cached = nullptr;
-  if (ng == 0 && gid != CCORD_ID_NONE) {
-    for (size_t i = 0; i < g_role_cache_count; i++) {
-      if (g_role_cache[i].guild_id == gid) {
-        cached = &g_role_cache[i];
-        break;
+  const ccord_json *mroles = mj ? ccord_json_get(mj, "roles") : nullptr;
+  size_t nr = mroles ? ccord_json_array_len(mroles) : 0;
+  if (nr > 0) {
+    if ((!rt || rt->count == 0) && gid != CCORD_ID_NONE) {
+      rt = find_cached_guild_roles(gid);
+    }
+    for (size_t i = 0; i < nr; i++) {
+      ccord_id rid = CCORD_ID_NONE;
+      if (!json_id(ccord_json_array_at(mroles, i), &rid)) continue;
+      const cached_role_entry *e = role_table_find(rt, rid);
+      if (e) {
+        if (e->name_len > 0 && rt->names && a) {
+          const char *dup = ccord_arena_strndup(a, rt->names + e->name_off, e->name_len);
+          if (dup) role_name = dup;
+        }
+        color = e->color;
+        rank = e->rank;
       }
+      break; // the first role is the member's highest displayed role
     }
-  }
-  for (size_t i = 0; i < nr; i++) {
-    ccord_id rid = CCORD_ID_NONE;
-    if (!json_id(jarray_at(mj, "roles", i), &rid)) continue;
-    bool matched = false;
-    for (size_t k = 0; k < ng; k++) {
-      const ccord_json *rj = ccord_json_array_at(roles, k);
-      ccord_id rgid = CCORD_ID_NONE;
-      if (!json_id_key(rj, "id", &rgid) || rgid != rid) continue;
-      const char *rn = jstr(rj, "name");
-      if (text_ok(rn, CCORD_NAME_MAX_BYTES)) role_name = rn;
-      int64_t c = json_i64(rj, "color", 0);
-      if (c < 0) c = 0;
-      if (c > (int64_t)0xFFFFFF) c = (int64_t)0xFFFFFF;
-      color = (uint32_t)c;
-      int64_t pos = json_i64(rj, "position", 0);
-      if (pos < 0) pos = 0;
-      if (pos > 255) pos = 255;
-      rank = (uint8_t)pos;
-      matched = true;
-      break;
-    }
-    if (!matched && cached && a) {
-      for (size_t k = 0; k < cached->count; k++) {
-        if (cached->roles[k].id != rid) continue;
-        const char *dup = ccord_arena_strndup(a, cached->roles[k].name, strlen(cached->roles[k].name));
-        if (dup) role_name = dup;
-        color = cached->roles[k].color;
-        rank = cached->roles[k].rank;
-        break;
-      }
-    }
-    break; // the first role is the member's highest displayed role
   }
   *out_name = role_name;
   *out_color = color;
   *out_rank = rank;
 }
 
-static bool map_merged_member_entry(snapshot_builder *b, const ccord_json *roles, const id_index *pres_map,
+static bool map_merged_member_entry(snapshot_builder *b, const role_table *rt, const id_index *pres_map,
                                     const ccord_json *entry, ccord_id gid)
 {
   if (!entry) return true;
   if (ccord_json_type_of(entry) == CCORD_JSON_OBJECT) {
-    return map_member_with_pres_ex(b, roles, pres_map, entry, gid, b->self_id);
+    return map_member_with_pres_ex(b, rt, pres_map, entry, gid, b->self_id);
   }
   if (ccord_json_type_of(entry) == CCORD_JSON_ARRAY) {
     size_t n = ccord_json_array_len(entry);
     for (size_t i = 0; i < n && i < CCORD_MAX_MEMBERS_PER_GUILD; i++) {
       ccord_id fb = (i == 0) ? b->self_id : CCORD_ID_NONE;
-      if (!map_member_with_pres_ex(b, roles, pres_map, ccord_json_array_at(entry, i), gid, fb)) {
+      if (!map_member_with_pres_ex(b, rt, pres_map, ccord_json_array_at(entry, i), gid, fb)) {
         return false;
       }
     }
   }
   return true;
-}
-
-static bool map_member(snapshot_builder *b, const ccord_json *gj, const ccord_json *mj, ccord_id gid)
-{
-  const ccord_json *pres_arr = guild_arr(gj, "presences");
-  size_t np = pres_arr ? ccord_json_array_len(pres_arr) : 0;
-  id_index pres_map = {0};
-  for (size_t i = 0; i < np; i++) {
-    const ccord_json *pj = ccord_json_array_at(pres_arr, i);
-    const ccord_json *pu = pj ? ccord_json_get(pj, "user") : nullptr;
-    ccord_id pid = CCORD_ID_NONE;
-    if (json_id_key(pu, "id", &pid) || json_id_key(pj, "user_id", &pid)) {
-      (void)ccord_idmap_put(&pres_map, pid, (size_t)presence_from(jstr(pj, "status")));
-    }
-  }
-  bool ok = map_member_with_pres(b, guild_roles(gj), &pres_map, mj, gid);
-  ccord_idmap_free(&pres_map);
-  return ok;
 }
 
 // Maps one voice_states entry. Entries without a channel are disconnected and skipped.
@@ -3101,9 +3356,10 @@ static void map_forum_meta(const ccord_json *cj, ccord_id forum_id, uint8_t disc
 static const char *extract_message_thumbnail(ccord_arena *a, const ccord_json *msg)
 {
   if (!a || !msg) return "";
-  size_t natts = jarray_len(msg, "attachments");
+  const ccord_json *atts = ccord_json_get(msg, "attachments");
+  size_t natts = atts ? ccord_json_array_len(atts) : 0;
   for (size_t i = 0; i < natts; i++) {
-    const ccord_json *att = jarray_at(msg, "attachments", i);
+    const ccord_json *att = ccord_json_array_at(atts, i);
     const char *url = att ? jstr(att, "url") : nullptr;
     if (!url || url[0] == '\0') url = att ? jstr(att, "proxy_url") : nullptr;
     if (!url || url[0] == '\0' || strlen(url) > CCORD_URL_MAX_BYTES) continue;
@@ -3114,9 +3370,10 @@ static const char *extract_message_thumbnail(ccord_arena *a, const ccord_json *m
       return dup ? dup : "";
     }
   }
-  size_t nemb = jarray_len(msg, "embeds");
+  const ccord_json *embs = ccord_json_get(msg, "embeds");
+  size_t nemb = embs ? ccord_json_array_len(embs) : 0;
   for (size_t i = 0; i < nemb; i++) {
-    const ccord_json *emb = jarray_at(msg, "embeds", i);
+    const ccord_json *emb = ccord_json_array_at(embs, i);
     const ccord_json *img = emb ? ccord_json_get(emb, "image") : nullptr;
     const ccord_json *th = emb ? ccord_json_get(emb, "thumbnail") : nullptr;
     const char *url = img ? jstr(img, "url") : nullptr;
@@ -3164,10 +3421,11 @@ static bool map_forum_post(ccord_arena *a, const ccord_json *tj, const ccord_jso
   out->message_count = (uint32_t)mc;
   (void)json_id_key(tj, "last_message_id", &out->last_message_id);
 
-  size_t nat = jarray_len(tj, "applied_tags");
+  const ccord_json *atags = ccord_json_get(tj, "applied_tags");
+  size_t nat = atags ? ccord_json_array_len(atags) : 0;
   for (size_t i = 0; i < nat && out->applied_tag_count < CCORD_FORUM_MAX_APPLIED_TAGS; i++) {
     ccord_id tag_id = CCORD_ID_NONE;
-    if (json_id(jarray_at(tj, "applied_tags", i), &tag_id) && tag_id != CCORD_ID_NONE) {
+    if (json_id(ccord_json_array_at(atags, i), &tag_id) && tag_id != CCORD_ID_NONE) {
       out->applied_tags[out->applied_tag_count++] = tag_id;
     }
   }
@@ -3238,26 +3496,6 @@ static bool map_forum_post(ccord_arena *a, const ccord_json *tj, const ccord_jso
   return true;
 }
 
-static int64_t guild_i64(const ccord_json *gj, const char *key, int64_t def)
-{
-  const ccord_json *v = gj ? ccord_json_get(gj, key) : nullptr;
-  int64_t out = 0;
-  if (v && ccord_json_int64(v, &out)) return out;
-  const ccord_json *props = gj ? ccord_json_get(gj, "properties") : nullptr;
-  v = props ? ccord_json_get(props, key) : nullptr;
-  if (v && ccord_json_int64(v, &out)) return out;
-  return def;
-}
-
-static const ccord_json *guild_obj(const ccord_json *gj, const char *key)
-{
-  const ccord_json *v = gj ? ccord_json_get(gj, key) : nullptr;
-  if (v && ccord_json_type_of(v) == CCORD_JSON_OBJECT) return v;
-  const ccord_json *props = gj ? ccord_json_get(gj, "properties") : nullptr;
-  v = props ? ccord_json_get(props, key) : nullptr;
-  return (v && ccord_json_type_of(v) == CCORD_JSON_OBJECT) ? v : nullptr;
-}
-
 static void parse_incidents_obj(const ccord_json *inc, int64_t *out_inv_ms, int64_t *out_dms_ms)
 {
   *out_inv_ms = 0;
@@ -3278,19 +3516,27 @@ static void parse_incidents_obj(const ccord_json *inc, int64_t *out_inv_ms, int6
 // Maps one full guild object (READY entry, GUILD_CREATE or GUILD_UPDATE).
 static bool map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_json *ready_merged_entry)
 {
+  const ccord_json *props = guild_props(gj);
   ccord_id gid = CCORD_ID_NONE;
-  if (!guild_id_key(gj, "id", &gid)) return true;
-  const char *gname = guild_str(gj, "name");
+  if (!guild_id_key_p(gj, props, "id", &gid)) return true;
+  const char *gname = guild_str_p(gj, props, "name");
+  bool gname_owned = false;
   if (gname && strlen(gname) > CCORD_NAME_MAX_BYTES) {
     size_t cut = utf8_trunc_len(gname, strlen(gname), CCORD_NAME_MAX_BYTES);
     gname = cut > 0 ? ccord_arena_strndup(b->arena, gname, cut) : nullptr;
+    gname_owned = true;
   }
-  if (!text_ok(gname, CCORD_NAME_MAX_BYTES)) gname = "Guild";
+  if (!text_ok(gname, CCORD_NAME_MAX_BYTES)) {
+    gname = "Guild";
+    gname_owned = true;
+  } else if (!gname_owned) {
+    gname = arena_dup(b->arena, gname);
+    if (gname[0] == '\0') gname = "Guild";
+  }
   guild_perm_ctx pctx;
-  init_guild_perm_ctx(&pctx, gj, ready_merged_entry, gid, b->self_id);
+  init_guild_perm_ctx(&pctx, gj, props, ready_merged_entry, gid, b->self_id);
   uint64_t self_perms = 0;
   if (!json_u64_key(gj, "permissions", &self_perms)) {
-    const ccord_json *props = gj ? ccord_json_get(gj, "properties") : nullptr;
     (void)json_u64_key(props, "permissions", &self_perms);
   }
   if (b->self_id != CCORD_ID_NONE) {
@@ -3301,31 +3547,31 @@ static bool map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_
     .owner_id = pctx.owner_id,
     .self_permissions = self_perms,
     .name = gname,
-    .icon_url = build_cdn_url(b->arena, "icons", gid, guild_str(gj, "icon")),
+    .icon_url = build_cdn_url(b->arena, "icons", gid, guild_str_p(gj, props, "icon")),
     .has_guild_settings = true,
   };
-  const char *burl = build_cdn_url(b->arena, "banners", gid, guild_str(gj, "banner"));
+  const char *burl = build_cdn_url(b->arena, "banners", gid, guild_str_p(gj, props, "banner"));
   copy_trunc_utf8(g.banner_url, sizeof g.banner_url, burl);
-  (void)guild_id_key(gj, "system_channel_id", &g.system_channel_id);
-  int64_t sflags = guild_i64(gj, "system_channel_flags", 0);
+  (void)guild_id_key_p(gj, props, "system_channel_id", &g.system_channel_id);
+  int64_t sflags = guild_i64_p(gj, props, "system_channel_flags", 0);
   if (sflags >= 0) g.system_channel_flags = (uint32_t)sflags & CCORD_SYSCHAN_KNOWN_MASK;
-  int64_t dmn = guild_i64(gj, "default_message_notifications", 0);
+  int64_t dmn = guild_i64_p(gj, props, "default_message_notifications", 0);
   g.default_message_notifications = (dmn == 1) ? 1u : 0u;
-  (void)guild_id_key(gj, "afk_channel_id", &g.afk_channel_id);
-  int64_t afkt = guild_i64(gj, "afk_timeout", 300);
+  (void)guild_id_key_p(gj, props, "afk_channel_id", &g.afk_channel_id);
+  int64_t afkt = guild_i64_p(gj, props, "afk_timeout", 300);
   if (afkt > 0 && afkt <= 3600) g.afk_timeout = (uint32_t)afkt;
-  int64_t vlev = guild_i64(gj, "verification_level", 0);
+  int64_t vlev = guild_i64_p(gj, props, "verification_level", 0);
   if (vlev >= 0 && vlev <= 4) g.verification_level = (uint8_t)vlev;
-  int64_t ecf = guild_i64(gj, "explicit_content_filter", 0);
+  int64_t ecf = guild_i64_p(gj, props, "explicit_content_filter", 0);
   if (ecf >= 0 && ecf <= 2) g.explicit_content_filter = (uint8_t)ecf;
-  int64_t ptier = guild_i64(gj, "premium_tier", 0);
+  int64_t ptier = guild_i64_p(gj, props, "premium_tier", 0);
   if (ptier >= 0 && ptier <= 3) g.premium_tier = (uint8_t)ptier;
-  int64_t psubs = guild_i64(gj, "premium_subscription_count", 0);
+  int64_t psubs = guild_i64_p(gj, props, "premium_subscription_count", 0);
   if (psubs > 0 && psubs <= UINT32_MAX) g.premium_subscription_count = (uint32_t)psubs;
-  copy_trunc_utf8(g.vanity_url_code, sizeof g.vanity_url_code, guild_str(gj, "vanity_url_code"));
-  (void)guild_id_key(gj, "rules_channel_id", &g.rules_channel_id);
-  (void)guild_id_key(gj, "public_updates_channel_id", &g.public_updates_channel_id);
-  const ccord_json *feats = guild_arr(gj, "features");
+  copy_trunc_utf8(g.vanity_url_code, sizeof g.vanity_url_code, guild_str_p(gj, props, "vanity_url_code"));
+  (void)guild_id_key_p(gj, props, "rules_channel_id", &g.rules_channel_id);
+  (void)guild_id_key_p(gj, props, "public_updates_channel_id", &g.public_updates_channel_id);
+  const ccord_json *feats = guild_arr_p(gj, props, "features");
   size_t nfeat = feats ? ccord_json_array_len(feats) : 0;
   for (size_t fi = 0; fi < nfeat; fi++) {
     size_t flen = 0;
@@ -3336,25 +3582,27 @@ static bool map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_
     else if (strcmp(fs, "BANNER") == 0) g.feature_banner = true;
   }
   const ccord_json *inc_raw = gj ? ccord_json_get(gj, "incidents_data") : nullptr;
-  if (!inc_raw) {
-    const ccord_json *props = gj ? ccord_json_get(gj, "properties") : nullptr;
-    inc_raw = props ? ccord_json_get(props, "incidents_data") : nullptr;
-  }
+  if (!inc_raw && props) inc_raw = ccord_json_get(props, "incidents_data");
   if (inc_raw) {
     g.has_incidents_data = true;
-    const ccord_json *inc = guild_obj(gj, "incidents_data");
+    const ccord_json *inc = guild_obj_p(gj, props, "incidents_data");
     parse_incidents_obj(inc, &g.invites_disabled_until_ms, &g.dms_disabled_until_ms);
   }
   if (!sb_guild(b, &g)) return false;
 
-  const ccord_json *ch_arr = guild_arr(gj, "channels");
-  const ccord_json *th_arr = guild_arr(gj, "threads");
+  const ccord_json *ch_arr = guild_arr_p(gj, props, "channels");
+  const ccord_json *th_arr = guild_arr_p(gj, props, "threads");
   size_t nc = ch_arr ? ccord_json_array_len(ch_arr) : 0;
   size_t nt = th_arr ? ccord_json_array_len(th_arr) : 0;
   size_t max_raw = nc + nt;
   if (max_raw > CCORD_MAX_CHANNELS_PER_GUILD) max_raw = CCORD_MAX_CHANNELS_PER_GUILD;
   raw_guild_channel *raw = max_raw > 0 ? ccord_calloc(max_raw, sizeof *raw) : nullptr;
   if (max_raw > 0 && !raw) return false;
+  id_index raw_idx = {0};
+  if (max_raw > 0 && !ccord_idmap_reserve(&raw_idx, max_raw)) {
+    ccord_free(raw);
+    return false;
+  }
   size_t nraw = 0;
   for (size_t k = 0; k < nc && nraw < max_raw; k++) {
     const ccord_json *cj = ccord_json_array_at(ch_arr, k);
@@ -3362,24 +3610,30 @@ static bool map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_
     if (!can_view && json_i64(cj, "type", 0) != 4) continue;
     ccord_channel c;
     if (!map_channel(b->arena, cj, gid, &c)) continue;
-    bool dup = false;
-    for (size_t m = 0; m < nraw; m++) {
-      if (raw[m].chan.id == c.id) { dup = true; break; }
-    }
-    if (dup) continue;
+    if (ccord_idmap_find(&raw_idx, c.id, nullptr)) continue;
     if (ccord_discord_type_is_forum(c.discord_type)) {
       ccord_forum_meta fm;
       map_forum_meta(cj, c.id, c.discord_type, &fm);
       if (!sb_forum_meta(b, &fm)) {
+        ccord_idmap_free(&raw_idx);
         ccord_free(raw);
         return false;
       }
     }
+    if (!ccord_idmap_put(&raw_idx, c.id, nraw)) {
+      ccord_idmap_free(&raw_idx);
+      ccord_free(raw);
+      return false;
+    }
     raw[nraw++] = (raw_guild_channel){
       .chan = c,
       .position = c.position,
+      .first_child = SIZE_MAX,
+      .last_child = SIZE_MAX,
+      .next_sibling = SIZE_MAX,
       .emitted = false,
       .hidden_cat = !can_view && c.kind == CCORD_CHANNEL_CATEGORY,
+      .has_visible_child = false,
     };
   }
   for (size_t k = 0; k < nt && nraw < max_raw; k++) {
@@ -3389,71 +3643,94 @@ static bool map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_
     if (!map_channel(b->arena, tj, gid, &c)) continue;
     bool parent_is_forum = false;
     if (c.parent_id != CCORD_ID_NONE) {
-      for (size_t m = 0; m < nraw; m++) {
-        if (raw[m].chan.id == c.parent_id && ccord_discord_type_is_forum(raw[m].chan.discord_type)) {
-          parent_is_forum = true;
-          break;
-        }
+      size_t pidx = 0;
+      if (ccord_idmap_find(&raw_idx, c.parent_id, &pidx) && pidx < nraw &&
+          ccord_discord_type_is_forum(raw[pidx].chan.discord_type)) {
+        parent_is_forum = true;
       }
     }
     if (parent_is_forum) {
       ccord_forum_post fp;
       if (map_forum_post(b->arena, tj, nullptr, c.parent_id, gid, &fp)) {
         if (!sb_forum_post(b, &fp)) {
+          ccord_idmap_free(&raw_idx);
           ccord_free(raw);
           return false;
         }
       }
       continue;
     }
-    bool dup = false;
-    for (size_t m = 0; m < nraw; m++) {
-      if (raw[m].chan.id == c.id) { dup = true; break; }
+    if (ccord_idmap_find(&raw_idx, c.id, nullptr)) continue;
+    if (!ccord_idmap_put(&raw_idx, c.id, nraw)) {
+      ccord_idmap_free(&raw_idx);
+      ccord_free(raw);
+      return false;
     }
-    if (dup) continue;
     raw[nraw++] = (raw_guild_channel){
       .chan = c,
       .position = c.position,
+      .first_child = SIZE_MAX,
+      .last_child = SIZE_MAX,
+      .next_sibling = SIZE_MAX,
       .emitted = false,
+      .hidden_cat = false,
+      .has_visible_child = false,
     };
   }
   // Drop categories that failed channel_can_view and have no visible child channels inside them.
+  for (size_t k = 0; k < nraw; k++) {
+    if (raw[k].hidden_cat || raw[k].chan.kind == CCORD_CHANNEL_CATEGORY ||
+        raw[k].chan.parent_id == CCORD_ID_NONE) {
+      continue;
+    }
+    size_t pidx = 0;
+    if (ccord_idmap_find(&raw_idx, raw[k].chan.parent_id, &pidx) && pidx < nraw && pidx != k) {
+      raw[pidx].has_visible_child = true;
+    }
+  }
   {
     size_t w = 0;
     for (size_t i = 0; i < nraw; i++) {
-      if (raw[i].hidden_cat) {
-        bool has_child = false;
-        for (size_t k = 0; k < nraw; k++) {
-          if (k != i && !raw[k].hidden_cat && raw[k].chan.kind != CCORD_CHANNEL_CATEGORY &&
-              raw[k].chan.parent_id == raw[i].chan.id) {
-            has_child = true;
-            break;
-          }
-        }
-        if (!has_child) continue;
-      }
-      raw[w++] = raw[i];
+      if (raw[i].hidden_cat && !raw[i].has_visible_child) continue;
+      if (w != i) raw[w] = raw[i];
+      w++;
     }
     nraw = w;
   }
   if (nraw > 1) {
     qsort(raw, nraw, sizeof *raw, cmp_raw_guild_channel);
   }
-  // Normalize parent_id against visible categories and text channels in this guild.
+  // Rebuild id -> sorted index map once for O(1) parent normalization and child-list linking.
+  ccord_idmap_clear(&raw_idx);
+  for (size_t i = 0; i < nraw; i++) {
+    raw[i].first_child = SIZE_MAX;
+    raw[i].last_child = SIZE_MAX;
+    raw[i].next_sibling = SIZE_MAX;
+    (void)ccord_idmap_put(&raw_idx, raw[i].chan.id, i);
+  }
+  // Normalize parent_id against visible categories and text channels in this guild and link child lists in sorted order.
   for (size_t i = 0; i < nraw; i++) {
     ccord_channel *c = &raw[i].chan;
     if (c->parent_id == CCORD_ID_NONE) continue;
+    size_t pidx = 0;
     bool parent_ok = false;
-    for (size_t k = 0; k < nraw; k++) {
-      const ccord_channel *p = &raw[k].chan;
-      if (p->id != c->id && p->id == c->parent_id &&
-          (p->kind == CCORD_CHANNEL_CATEGORY ||
-           (c->kind == CCORD_CHANNEL_TEXT && p->kind == CCORD_CHANNEL_TEXT))) {
+    if (ccord_idmap_find(&raw_idx, c->parent_id, &pidx) && pidx < nraw && pidx != i) {
+      const ccord_channel *p = &raw[pidx].chan;
+      if (p->kind == CCORD_CHANNEL_CATEGORY ||
+          (c->kind == CCORD_CHANNEL_TEXT && p->kind == CCORD_CHANNEL_TEXT)) {
         parent_ok = true;
-        break;
       }
     }
-    if (!parent_ok) c->parent_id = CCORD_ID_NONE;
+    if (!parent_ok) {
+      c->parent_id = CCORD_ID_NONE;
+    } else if (c->kind != CCORD_CHANNEL_CATEGORY) {
+      if (raw[pidx].first_child == SIZE_MAX) {
+        raw[pidx].first_child = i;
+      } else {
+        raw[raw[pidx].last_child].next_sibling = i;
+      }
+      raw[pidx].last_child = i;
+    }
   }
   bool ok = true;
   // 1. Emit uncategorized channels in (is_voice, position, id) order, followed by any child threads.
@@ -3465,9 +3742,8 @@ static bool map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_
     raw[i].emitted = true;
     ok = sb_channel(b, &raw[i].chan);
     if (raw[i].chan.kind == CCORD_CHANNEL_TEXT) {
-      for (size_t t = 0; ok && t < nraw; t++) {
-        if (!raw[t].emitted && raw[t].chan.kind == CCORD_CHANNEL_TEXT &&
-            raw[t].chan.parent_id == raw[i].chan.id) {
+      for (size_t t = raw[i].first_child; ok && t != SIZE_MAX; t = raw[t].next_sibling) {
+        if (!raw[t].emitted && raw[t].chan.kind == CCORD_CHANNEL_TEXT) {
           raw[t].emitted = true;
           ok = sb_channel(b, &raw[t].chan);
         }
@@ -3478,19 +3754,14 @@ static bool map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_
   for (size_t i = 0; ok && i < nraw; i++) {
     if (raw[i].emitted || raw[i].chan.kind != CCORD_CHANNEL_CATEGORY) continue;
     raw[i].emitted = true;
-    ccord_id cat_id = raw[i].chan.id;
     ok = sb_channel(b, &raw[i].chan);
-    for (size_t k = 0; ok && k < nraw; k++) {
-      if (raw[k].emitted || raw[k].chan.kind == CCORD_CHANNEL_CATEGORY ||
-          raw[k].chan.parent_id != cat_id) {
-        continue;
-      }
+    for (size_t k = raw[i].first_child; ok && k != SIZE_MAX; k = raw[k].next_sibling) {
+      if (raw[k].emitted || raw[k].chan.kind == CCORD_CHANNEL_CATEGORY) continue;
       raw[k].emitted = true;
       ok = sb_channel(b, &raw[k].chan);
       if (raw[k].chan.kind == CCORD_CHANNEL_TEXT) {
-        for (size_t t = 0; ok && t < nraw; t++) {
-          if (!raw[t].emitted && raw[t].chan.kind == CCORD_CHANNEL_TEXT &&
-              raw[t].chan.parent_id == raw[k].chan.id) {
+        for (size_t t = raw[k].first_child; ok && t != SIZE_MAX; t = raw[t].next_sibling) {
+          if (!raw[t].emitted && raw[t].chan.kind == CCORD_CHANNEL_TEXT) {
             raw[t].emitted = true;
             ok = sb_channel(b, &raw[t].chan);
           }
@@ -3505,16 +3776,17 @@ static bool map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_
       ok = sb_channel(b, &raw[i].chan);
     }
   }
+  ccord_idmap_free(&raw_idx);
   ccord_free(raw);
   if (!ok) return false;
 
-  const ccord_json *roles = guild_roles(gj);
-  cache_guild_roles(gid, roles);
-  const ccord_json *mem_arr = guild_arr(gj, "members");
+  const ccord_json *roles = guild_arr_p(gj, props, "roles");
+  const role_table *rt = cache_guild_roles(gid, roles);
+  const ccord_json *mem_arr = guild_arr_p(gj, props, "members");
   const ccord_json *gj_merged = gj ? ccord_json_get(gj, "merged_members") : nullptr;
   size_t nm = mem_arr ? ccord_json_array_len(mem_arr) : 0;
   if (nm > 0 || gj_merged || ready_merged_entry) {
-    const ccord_json *pres_arr = guild_arr(gj, "presences");
+    const ccord_json *pres_arr = guild_arr_p(gj, props, "presences");
     size_t np = pres_arr ? ccord_json_array_len(pres_arr) : 0;
     id_index pres_map = {0};
     for (size_t i = 0; i < np; i++) {
@@ -3526,13 +3798,13 @@ static bool map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_
       }
     }
     for (size_t k = 0; ok && k < nm && k < CCORD_MAX_MEMBERS_PER_GUILD; k++) {
-      ok = map_member_with_pres(b, roles, &pres_map, ccord_json_array_at(mem_arr, k), gid);
+      ok = map_member_with_pres(b, rt, &pres_map, ccord_json_array_at(mem_arr, k), gid);
     }
     if (ok && gj_merged) {
-      ok = map_merged_member_entry(b, roles, &pres_map, gj_merged, gid);
+      ok = map_merged_member_entry(b, rt, &pres_map, gj_merged, gid);
     }
     if (ok && ready_merged_entry) {
-      ok = map_merged_member_entry(b, roles, &pres_map, ready_merged_entry, gid);
+      ok = map_merged_member_entry(b, rt, &pres_map, ready_merged_entry, gid);
     }
     for (size_t i = 0; ok && i < np; i++) {
       const ccord_json *pj = ccord_json_array_at(pres_arr, i);
@@ -3553,7 +3825,7 @@ static bool map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_
     if (!ok) return false;
   }
 
-  const ccord_json *vs_arr = guild_arr(gj, "voice_states");
+  const ccord_json *vs_arr = guild_arr_p(gj, props, "voice_states");
   size_t nv = vs_arr ? ccord_json_array_len(vs_arr) : 0;
   for (size_t k = 0; k < nv && k < CCORD_MAX_MEMBERS_PER_GUILD; k++) {
     if (!collect_voice_state_entry(b, ccord_json_array_at(vs_arr, k), gid, false, true, true)) return false;
@@ -3585,6 +3857,7 @@ static bool map_user_obj(ccord_arena *a, const ccord_json *uj, ccord_presence pr
   const char *name = jstr(uj, "global_name");
   if (!name || name[0] == '\0') name = jstr(uj, "username");
   if (!text_ok(name, CCORD_NAME_MAX_BYTES)) name = "User";
+  else name = arena_dup(a, name);
   const ccord_json *botj = ccord_json_get(uj, "bot");
   const ccord_json *acj = ccord_json_get(uj, "accent_color");
   bool has_accent = acj && ccord_json_type_of(acj) == CCORD_JSON_NUMBER;
@@ -3596,14 +3869,14 @@ static bool map_user_obj(ccord_arena *a, const ccord_json *uj, ccord_presence pr
   *out = (ccord_user){
     .id = uid,
     .name = name,
-    .handle = opt_text(jstr(uj, "username"), CCORD_NAME_MAX_BYTES),
+    .handle = opt_text_dup(a, jstr(uj, "username"), CCORD_NAME_MAX_BYTES),
     .status_text = "",
     .avatar_url = build_cdn_url(a, "avatars", uid, jstr(uj, "avatar")),
     .banner_url = build_cdn_url(a, "banners", uid, jstr(uj, "banner")),
     .accent_color = (uint32_t)accent,
     .has_accent_color = has_accent,
-    .bio = opt_text(jstr(uj, "bio"), CCORD_USER_BIO_MAX_BYTES),
-    .pronouns = opt_text(jstr(uj, "pronouns"), CCORD_USER_PRONOUNS_MAX_BYTES),
+    .bio = opt_text_dup(a, jstr(uj, "bio"), CCORD_USER_BIO_MAX_BYTES),
+    .pronouns = opt_text_dup(a, jstr(uj, "pronouns"), CCORD_USER_PRONOUNS_MAX_BYTES),
     .presence = pres,
     .is_bot = botj && ccord_json_bool(botj, false),
     .avatar_palette = (uint8_t)(uid % 6u),
@@ -3757,17 +4030,6 @@ static bool pb_skip_field(const uint8_t *buf, size_t len, size_t *pos, uint32_t 
   }
 }
 
-static bool guild_id_in_ready(const ccord_json *d, size_t ng, ccord_id want_gid)
-{
-  if (want_gid == CCORD_ID_NONE) return false;
-  for (size_t i = 0; i < ng; i++) {
-    const ccord_json *gj = jarray_at(d, "guilds", i);
-    ccord_id gid = CCORD_ID_NONE;
-    if (guild_id_key(gj, "id", &gid) && gid == want_gid) return true;
-  }
-  return false;
-}
-
 static void stamp_guild_folder(ccord_guild *g, ccord_id folder_id, const char *folder_name, uint32_t folder_color)
 {
   if (!g) return;
@@ -3784,32 +4046,31 @@ static void stamp_guild_folder(ccord_guild *g, ccord_id folder_id, const char *f
   }
 }
 
-static void emit_want_guild_folder(snapshot_builder *b, const ccord_json *d, size_t ng,
-                                   size_t guild_cap, bool *visited, ccord_id want_gid,
+static void emit_want_guild_folder(snapshot_builder *b, const ccord_json *guilds_arr,
+                                   const ccord_json *merged_arr, const id_index *ready_guild_idx,
+                                   size_t ng, size_t guild_cap, bool *visited, ccord_id want_gid,
                                    ccord_id folder_id, const char *folder_name, uint32_t folder_color,
                                    bool *ok)
 {
-  if (!*ok || want_gid == CCORD_ID_NONE || b->guild_count >= guild_cap) return;
-  for (size_t i = 0; i < ng; i++) {
-    if (visited[i]) continue;
-    const ccord_json *gj = jarray_at(d, "guilds", i);
-    ccord_id gid = CCORD_ID_NONE;
-    if (guild_id_key(gj, "id", &gid) && gid == want_gid) {
-      visited[i] = true;
-      size_t prev = b->guild_count;
-      *ok = map_guild_ex(b, gj, jarray_at(d, "merged_members", i));
-      if (*ok && b->guild_count > prev) {
-        stamp_guild_folder(&b->guilds[prev], folder_id, folder_name, folder_color);
-      }
-      return;
-    }
+  if (!*ok || want_gid == CCORD_ID_NONE || b->guild_count >= guild_cap || !ready_guild_idx) return;
+  size_t i = 0;
+  if (!ccord_idmap_find(ready_guild_idx, want_gid, &i) || i >= ng || visited[i]) return;
+  visited[i] = true;
+  size_t prev = b->guild_count;
+  const ccord_json *gj = ccord_json_array_at(guilds_arr, i);
+  const ccord_json *mj = merged_arr ? ccord_json_array_at(merged_arr, i) : nullptr;
+  *ok = map_guild_ex(b, gj, mj);
+  if (*ok && b->guild_count > prev) {
+    stamp_guild_folder(&b->guilds[prev], folder_id, folder_name, folder_color);
   }
 }
 
-static void emit_want_guild(snapshot_builder *b, const ccord_json *d, size_t ng,
-                            size_t guild_cap, bool *visited, ccord_id want_gid, bool *ok)
+static void emit_want_guild(snapshot_builder *b, const ccord_json *guilds_arr,
+                            const ccord_json *merged_arr, const id_index *ready_guild_idx,
+                            size_t ng, size_t guild_cap, bool *visited, ccord_id want_gid, bool *ok)
 {
-  emit_want_guild_folder(b, d, ng, guild_cap, visited, want_gid, CCORD_ID_NONE, nullptr, 0, ok);
+  emit_want_guild_folder(b, guilds_arr, merged_arr, ready_guild_idx, ng, guild_cap, visited, want_gid,
+                         CCORD_ID_NONE, nullptr, 0, ok);
 }
 
 static bool pb_read_wrapped_u64(const uint8_t *sub, size_t nsub, uint64_t *out)
@@ -3860,7 +4121,7 @@ typedef struct pb_folder_parsed {
   uint32_t color;
 } pb_folder_parsed;
 
-static void pb_decode_one_folder(const uint8_t *buf, size_t len, const ccord_json *ready_d, size_t ready_ng,
+static void pb_decode_one_folder(const uint8_t *buf, size_t len, const id_index *ready_guild_idx,
                                  size_t folder_seq, pb_folder_parsed *out)
 {
   memset(out, 0, sizeof *out);
@@ -3886,12 +4147,12 @@ static void pb_decode_one_folder(const uint8_t *buf, size_t len, const ccord_jso
         pos += nsub;
         bool use_fixed64 = false;
         if (nsub > 0 && (nsub % 8u) == 0) {
-          if (ready_d && ready_ng > 0) {
+          if (ready_guild_idx && ready_guild_idx->count > 0) {
             size_t fpos = 0;
             while (fpos < nsub) {
               uint64_t fv = 0;
               if (!pb_read_fixed64(sub, nsub, &fpos, &fv)) break;
-              if (guild_id_in_ready(ready_d, ready_ng, (ccord_id)fv)) {
+              if (fv != 0 && ccord_idmap_find(ready_guild_idx, (ccord_id)fv, nullptr)) {
                 use_fixed64 = true;
                 break;
               }
@@ -3966,20 +4227,23 @@ static void pb_decode_one_folder(const uint8_t *buf, size_t len, const ccord_jso
 }
 
 static void pb_parse_guild_folder(const uint8_t *buf, size_t len, snapshot_builder *b,
-                                  const ccord_json *d, size_t ng, size_t guild_cap,
+                                  const ccord_json *guilds_arr, const ccord_json *merged_arr,
+                                  const id_index *ready_guild_idx, size_t ng, size_t guild_cap,
                                   size_t folder_seq, bool *visited, bool *ok)
 {
   pb_folder_parsed fp;
-  pb_decode_one_folder(buf, len, d, ng, folder_seq, &fp);
+  pb_decode_one_folder(buf, len, ready_guild_idx, folder_seq, &fp);
   for (size_t i = 0; *ok && i < fp.ngids && b->guild_count < guild_cap; i++) {
-    emit_want_guild_folder(b, d, ng, guild_cap, visited, fp.gids[i], fp.folder_id, fp.name, fp.color, ok);
+    emit_want_guild_folder(b, guilds_arr, merged_arr, ready_guild_idx, ng, guild_cap, visited,
+                           fp.gids[i], fp.folder_id, fp.name, fp.color, ok);
   }
 }
 
 static void expr_collect_guild(ccord_live_event *ev, const ccord_json *const *guilds, size_t ng);
 
 static void apply_proto_guild_order(const char *proto_b64, snapshot_builder *b,
-                                    const ccord_json *d, size_t ng, size_t guild_cap,
+                                    const ccord_json *guilds_arr, const ccord_json *merged_arr,
+                                    const id_index *ready_guild_idx, size_t ng, size_t guild_cap,
                                     bool *visited, bool *ok)
 {
   if (!proto_b64 || proto_b64[0] == '\0' || !*ok) return;
@@ -4011,14 +4275,15 @@ static void apply_proto_guild_order(const char *proto_b64, snapshot_builder *b,
         if (fnum == 1 && fwire == 2) {
           uint64_t flen = 0;
           if (!pb_read_varint(gf, ngf, &gpos, &flen) || flen > ngf - gpos) break;
-          pb_parse_guild_folder(gf + gpos, (size_t)flen, b, d, ng, guild_cap, folder_seq++, visited, ok);
+          pb_parse_guild_folder(gf + gpos, (size_t)flen, b, guilds_arr, merged_arr, ready_guild_idx,
+                                ng, guild_cap, folder_seq++, visited, ok);
           gpos += (size_t)flen;
         } else if (fnum == 1 && (fwire == 0 || fwire == 1)) {
           uint64_t v = 0;
           bool r = (fwire == 0) ? pb_read_varint(gf, ngf, &gpos, &v)
                                 : pb_read_fixed64(gf, ngf, &gpos, &v);
           if (!r) break;
-          emit_want_guild(b, d, ng, guild_cap, visited, (ccord_id)v, ok);
+          emit_want_guild(b, guilds_arr, merged_arr, ready_guild_idx, ng, guild_cap, visited, (ccord_id)v, ok);
         } else {
           if (!pb_skip_field(gf, ngf, &gpos, fwire)) break;
         }
@@ -4164,14 +4429,15 @@ static bool map_user_settings_folders(ccord_live_event *ev, const ccord_json *d,
   size_t n = 0;
   for (size_t f = 0; f < nf && n < CCORD_MAX_GUILDS; f++) {
     const ccord_json *fj = ccord_json_array_at(gf, f);
-    size_t ngids = fj ? jarray_len(fj, "guild_ids") : 0;
+    const ccord_json *gids = fj ? ccord_json_get(fj, "guild_ids") : nullptr;
+    size_t ngids = gids ? ccord_json_array_len(gids) : 0;
     ccord_id fid = CCORD_ID_NONE;
     char fname[64];
     uint32_t fcolor = 0;
     parse_json_folder_meta(fj, ngids, f, &fid, fname, &fcolor);
     for (size_t k = 0; k < ngids && n < CCORD_MAX_GUILDS; k++) {
       ccord_id gid = CCORD_ID_NONE;
-      if (!json_id(jarray_at(fj, "guild_ids", k), &gid) || gid == CCORD_ID_NONE || gid == CCORD_DM_GUILD_ID) continue;
+      if (!json_id(ccord_json_array_at(gids, k), &gid) || gid == CCORD_ID_NONE || gid == CCORD_DM_GUILD_ID) continue;
       bool dup = false;
       for (size_t p = 0; p < n; p++) {
         if (items[p].guild_id == gid) { dup = true; break; }
@@ -4263,7 +4529,7 @@ static bool map_user_settings_proto_update(ccord_live_event *ev, const ccord_jso
           uint64_t flen = 0;
           if (!pb_read_varint(gf, ngf, &gpos, &flen) || flen > ngf - gpos) break;
           pb_folder_parsed fp;
-          pb_decode_one_folder(gf + gpos, (size_t)flen, nullptr, 0, folder_seq++, &fp);
+          pb_decode_one_folder(gf + gpos, (size_t)flen, nullptr, folder_seq++, &fp);
           gpos += (size_t)flen;
           for (size_t k = 0; k < fp.ngids && n < CCORD_MAX_GUILDS; k++) {
             ccord_id gid = fp.gids[k];
@@ -4414,12 +4680,15 @@ static bool parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *
   const char *uname = jstr(me, "global_name");
   if (!uname || uname[0] == '\0') uname = jstr(me, "username");
   if (!text_ok(uname, CCORD_NAME_MAX_BYTES)) uname = "You";
-  ev->session_id = jstr(d, "session_id");
-  if (ev->session_id && ev->session_id[0] == '\0') ev->session_id = nullptr;
-  ev->resume_gateway_url = jstr(d, "resume_gateway_url");
-  if (ev->resume_gateway_url && ev->resume_gateway_url[0] == '\0') ev->resume_gateway_url = nullptr;
+  else {
+    uname = arena_dup(&ev->arena, uname);
+    if (uname[0] == '\0') uname = "You";
+  }
+  ev->session_id = arena_dup_nullable(&ev->arena, jstr(d, "session_id"));
+  ev->resume_gateway_url = arena_dup_nullable(&ev->arena, jstr(d, "resume_gateway_url"));
   // M6 account settings ride READY; the snapshot event keeps ev.type == CCORD_NET_SNAPSHOT.
-  map_user_settings_model(ev, ccord_json_get(d, "user_settings"));
+  const ccord_json *uset = ccord_json_get(d, "user_settings");
+  map_user_settings_model(ev, uset);
   {   // READY's type-1 proto is the base a later status write patches (the snapshot itself ignores it here)
     const char *p1 = jstr(d, "user_settings_proto");
     size_t p1_len = 0;
@@ -4466,55 +4735,60 @@ static bool parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *
   ccord_user self_user = {
     .id = self,
     .name = uname,
-    .handle = opt_text(jstr(me, "username"), CCORD_NAME_MAX_BYTES),
+    .handle = opt_text_dup(&ev->arena, jstr(me, "username"), CCORD_NAME_MAX_BYTES),
     .status_text = "",
     .avatar_url = build_cdn_url(&ev->arena, "avatars", self, jstr(me, "avatar")),
     .banner_url = build_cdn_url(&ev->arena, "banners", self, self_banner),
     .accent_color = (uint32_t)self_accent,
     .has_accent_color = has_self_accent,
-    .bio = opt_text(self_bio, CCORD_USER_BIO_MAX_BYTES),
-    .pronouns = opt_text(self_pronouns, CCORD_USER_PRONOUNS_MAX_BYTES),
+    .bio = opt_text_dup(&ev->arena, self_bio, CCORD_USER_BIO_MAX_BYTES),
+    .pronouns = opt_text_dup(&ev->arena, self_pronouns, CCORD_USER_PRONOUNS_MAX_BYTES),
     .presence = CCORD_PRESENCE_ONLINE,
     .is_bot = is_bot,
     .avatar_palette = (uint8_t)(self % 6u),
   };
   extract_clan_info(me, self_user.clan_tag, &self_user.clan_guild_id, self_user.clan_badge);
   {
-    const ccord_json *uset_init = ccord_json_get(d, "user_settings");
-    const ccord_json *cs_init = uset_init ? ccord_json_get(uset_init, "custom_status") : nullptr;
+    const ccord_json *cs_init = uset ? ccord_json_get(uset, "custom_status") : nullptr;
     if (cs_init && ccord_json_type_of(cs_init) == CCORD_JSON_OBJECT) {
       copy_trunc_utf8(self_user.custom_status_text, sizeof self_user.custom_status_text, jstr(cs_init, "text"));
       copy_trunc_utf8(self_user.custom_status_emoji, sizeof self_user.custom_status_emoji, jstr(cs_init, "emoji_name"));
       self_user.custom_status_expires_ms = json_ts_ms(cs_init, "expires_at");
-      const char *cs_st = opt_text(jstr(cs_init, "text"), LIVE_STATUS_MAX_BYTES);
-      if (cs_st && cs_st[0] != '\0') self_user.status_text = cs_st;
+      const char *cs_st = opt_text_dup(&ev->arena, jstr(cs_init, "text"), LIVE_STATUS_MAX_BYTES);
+      if (cs_st[0] != '\0') self_user.status_text = cs_st;
     }
   }
   bool ok = sb_user(&b, &self_user);
-  size_t nu = jarray_len(d, "users");
+  const ccord_json *users_arr = ccord_json_get(d, "users");
+  size_t nu = users_arr ? ccord_json_array_len(users_arr) : 0;
   for (size_t i = 0; ok && i < nu; i++) {
     ccord_user top_u;
-    if (map_user_obj(&ev->arena, jarray_at(d, "users", i), CCORD_PRESENCE_OFFLINE, &top_u)) {
+    if (map_user_obj(&ev->arena, ccord_json_array_at(users_arr, i), CCORD_PRESENCE_OFFLINE, &top_u)) {
       ok = sb_user(&b, &top_u);
     }
   }
-  size_t ng = jarray_len(d, "guilds");
-  size_t np = jarray_len(d, "private_channels");
+  const ccord_json *guilds_arr = ccord_json_get(d, "guilds");
+  const ccord_json *merged_arr = ccord_json_get(d, "merged_members");
+  const ccord_json *pchs_arr = ccord_json_get(d, "private_channels");
+  const ccord_json *rels_arr = ccord_json_get(d, "relationships");
+  size_t ng = guilds_arr ? ccord_json_array_len(guilds_arr) : 0;
+  size_t np = pchs_arr ? ccord_json_array_len(pchs_arr) : 0;
   // Seed DM recipients and relationship user objects BEFORE guild members so a server nickname in
   // d.guilds[].members never claims the user's global display name ahead of their real account name.
   for (size_t i = 0; ok && i < np; i++) {
-    const ccord_json *pc = jarray_at(d, "private_channels", i);
-    size_t nr = jarray_len(pc, "recipients");
+    const ccord_json *pc = ccord_json_array_at(pchs_arr, i);
+    const ccord_json *recs = pc ? ccord_json_get(pc, "recipients") : nullptr;
+    size_t nr = recs ? ccord_json_array_len(recs) : 0;
     for (size_t r = 0; ok && r < nr; r++) {
       ccord_user dm_u;
-      if (map_user_obj(&ev->arena, jarray_at(pc, "recipients", r), CCORD_PRESENCE_OFFLINE, &dm_u)) {
+      if (map_user_obj(&ev->arena, ccord_json_array_at(recs, r), CCORD_PRESENCE_OFFLINE, &dm_u)) {
         ok = sb_user(&b, &dm_u);
       }
     }
   }
-  size_t nrel = jarray_len(d, "relationships");
+  size_t nrel = rels_arr ? ccord_json_array_len(rels_arr) : 0;
   for (size_t i = 0; ok && i < nrel; i++) {
-    const ccord_json *rj = jarray_at(d, "relationships", i);
+    const ccord_json *rj = ccord_json_array_at(rels_arr, i);
     const ccord_json *ru = rj ? ccord_json_get(rj, "user") : nullptr;
     ccord_id ruid = CCORD_ID_NONE;
     if (!json_id_key(rj, "user_id", &ruid) && (!ru || !json_id_key(ru, "id", &ruid))) {
@@ -4540,55 +4814,77 @@ static bool parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *
   size_t guild_cap = CCORD_MAX_REAL_GUILDS;
   if (ng > 0 && ok) {
     bool *visited = ccord_calloc(ng, sizeof *visited);
-    if (!visited) {
+    id_index ready_guild_idx = {0};
+    if (!visited || !ccord_idmap_reserve(&ready_guild_idx, ng)) {
+      ccord_idmap_free(&ready_guild_idx);
+      ccord_free(visited);
       ok = false;
     } else {
-      const ccord_json *uset = ccord_json_get(d, "user_settings");
-      size_t nfolders = uset ? jarray_len(uset, "guild_folders") : 0;
+      for (size_t i = 0; i < ng; i++) {
+        const ccord_json *gj = ccord_json_array_at(guilds_arr, i);
+        const ccord_json *gprops = guild_props(gj);
+        ccord_id gid = CCORD_ID_NONE;
+        if (guild_id_key_p(gj, gprops, "id", &gid) && gid != CCORD_ID_NONE &&
+            !ccord_idmap_find(&ready_guild_idx, gid, nullptr)) {
+          if (!ccord_idmap_put(&ready_guild_idx, gid, i)) {
+            ok = false;
+            break;
+          }
+        }
+      }
+      const ccord_json *gfolders = uset ? ccord_json_get(uset, "guild_folders") : nullptr;
+      size_t nfolders = gfolders ? ccord_json_array_len(gfolders) : 0;
       for (size_t f = 0; ok && f < nfolders && b.guild_count < guild_cap; f++) {
-        const ccord_json *fj = jarray_at(uset, "guild_folders", f);
-        size_t ngids = fj ? jarray_len(fj, "guild_ids") : 0;
+        const ccord_json *fj = ccord_json_array_at(gfolders, f);
+        const ccord_json *gids = fj ? ccord_json_get(fj, "guild_ids") : nullptr;
+        size_t ngids = gids ? ccord_json_array_len(gids) : 0;
         ccord_id fid = CCORD_ID_NONE;
         char fname[64];
         uint32_t fcolor = 0;
         parse_json_folder_meta(fj, ngids, f, &fid, fname, &fcolor);
         for (size_t k = 0; ok && k < ngids && b.guild_count < guild_cap; k++) {
           ccord_id want_gid = CCORD_ID_NONE;
-          if (!json_id(jarray_at(fj, "guild_ids", k), &want_gid)) continue;
-          emit_want_guild_folder(&b, d, ng, guild_cap, visited, want_gid, fid, fname, fcolor, &ok);
+          if (!json_id(ccord_json_array_at(gids, k), &want_gid)) continue;
+          emit_want_guild_folder(&b, guilds_arr, merged_arr, &ready_guild_idx, ng, guild_cap, visited,
+                                 want_gid, fid, fname, fcolor, &ok);
         }
       }
-      size_t npos = uset ? jarray_len(uset, "guild_positions") : 0;
+      const ccord_json *gpos = uset ? ccord_json_get(uset, "guild_positions") : nullptr;
+      size_t npos = gpos ? ccord_json_array_len(gpos) : 0;
       for (size_t p = 0; ok && p < npos && b.guild_count < guild_cap; p++) {
         ccord_id want_gid = CCORD_ID_NONE;
-        if (!json_id(jarray_at(uset, "guild_positions", p), &want_gid)) continue;
-        emit_want_guild(&b, d, ng, guild_cap, visited, want_gid, &ok);
+        if (!json_id(ccord_json_array_at(gpos, p), &want_gid)) continue;
+        emit_want_guild(&b, guilds_arr, merged_arr, &ready_guild_idx, ng, guild_cap, visited, want_gid, &ok);
       }
       const char *proto_b64 = jstr(d, "user_settings_proto");
       if (proto_b64 && proto_b64[0] != '\0') {
-        apply_proto_guild_order(proto_b64, &b, d, ng, guild_cap, visited, &ok);
+        apply_proto_guild_order(proto_b64, &b, guilds_arr, merged_arr, &ready_guild_idx, ng, guild_cap, visited, &ok);
       }
       for (size_t i = 0; ok && i < ng && b.guild_count < guild_cap; i++) {
         if (visited[i]) continue;
         visited[i] = true;
-        ok = map_guild_ex(&b, jarray_at(d, "guilds", i), jarray_at(d, "merged_members", i));
+        ok = map_guild_ex(&b, ccord_json_array_at(guilds_arr, i),
+                          merged_arr ? ccord_json_array_at(merged_arr, i) : nullptr);
       }
+      ccord_idmap_free(&ready_guild_idx);
       ccord_free(visited);
     }
   }
   for (size_t i = 0; ok && i < np; i++) {
-    const ccord_json *pc = jarray_at(d, "private_channels", i);
-    size_t nids = jarray_len(pc, "recipient_ids");
+    const ccord_json *pc = ccord_json_array_at(pchs_arr, i);
+    const ccord_json *rids = pc ? ccord_json_get(pc, "recipient_ids") : nullptr;
+    size_t nids = rids ? ccord_json_array_len(rids) : 0;
     for (size_t r = 0; ok && r < nids; r++) {
       ccord_id ruid = CCORD_ID_NONE;
-      if (json_id(jarray_at(pc, "recipient_ids", r), &ruid) && ruid != CCORD_ID_NONE) {
+      if (json_id(ccord_json_array_at(rids, r), &ruid) && ruid != CCORD_ID_NONE) {
         ok = sb_ensure_user_stub(&b, ruid);
       }
     }
   }
-  size_t npres = jarray_len(d, "presences");
+  const ccord_json *pres_arr = ccord_json_get(d, "presences");
+  size_t npres = pres_arr ? ccord_json_array_len(pres_arr) : 0;
   for (size_t i = 0; ok && i < npres; i++) {
-    const ccord_json *pj = jarray_at(d, "presences", i);
+    const ccord_json *pj = ccord_json_array_at(pres_arr, i);
     const ccord_json *pu = pj ? ccord_json_get(pj, "user") : nullptr;
     ccord_id pid = CCORD_ID_NONE;
     if (!json_id_key(pu, "id", &pid) && !json_id_key(pj, "user_id", &pid)) continue;
@@ -4611,7 +4907,7 @@ static bool parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *
     } else {
       size_t ndms = 0;
       for (size_t i = 0; i < np; i++) {
-        const ccord_json *pc = jarray_at(d, "private_channels", i);
+        const ccord_json *pc = ccord_json_array_at(pchs_arr, i);
         ccord_channel c;
         if (!map_channel_ex(&ev->arena, b.users, b.user_count, &b.user_idx, self, pc, CCORD_DM_GUILD_ID, &c)) {
           continue;
@@ -4632,16 +4928,27 @@ static bool parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *
     if (b.channel_count > dm_start + 1u) {
       qsort(&b.channels[dm_start], b.channel_count - dm_start, sizeof *b.channels, cmp_dm_channel_desc);
       // Deduplicate 1:1 DM channels that share the same recipient user_id (keep the first, most recent one).
+      id_index dm_uid_seen = {0};
+      bool use_dm_map = ccord_idmap_reserve(&dm_uid_seen, b.channel_count - dm_start);
       size_t out_dm = dm_start;
       for (size_t i = dm_start; i < b.channel_count; i++) {
         const ccord_channel *ch = &b.channels[i];
         bool dup = false;
         if (ch->discord_type != CCORD_DISCORD_CHANNEL_GROUP_DM && ch->user_id != CCORD_ID_NONE) {
-          for (size_t j = dm_start; j < out_dm; j++) {
-            if (b.channels[j].discord_type != CCORD_DISCORD_CHANNEL_GROUP_DM &&
-                b.channels[j].user_id == ch->user_id) {
+          if (use_dm_map) {
+            if (ccord_idmap_find(&dm_uid_seen, ch->user_id, nullptr)) {
               dup = true;
-              break;
+            } else if (!ccord_idmap_put(&dm_uid_seen, ch->user_id, out_dm)) {
+              ccord_idmap_free(&dm_uid_seen);
+              use_dm_map = false;
+            }
+          } else {
+            for (size_t j = dm_start; j < out_dm; j++) {
+              if (b.channels[j].discord_type != CCORD_DISCORD_CHANNEL_GROUP_DM &&
+                  b.channels[j].user_id == ch->user_id) {
+                dup = true;
+                break;
+              }
             }
           }
         }
@@ -4650,6 +4957,7 @@ static bool parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *
           out_dm++;
         }
       }
+      ccord_idmap_free(&dm_uid_seen);
       b.channel_count = out_dm;
     }
     if (b.channel_count - dm_start > CCORD_MAX_CHANNELS_PER_GUILD) {
@@ -4662,9 +4970,10 @@ static bool parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *
       }
     }
   }
-  size_t nv = jarray_len(d, "voice_states");
+  const ccord_json *vs_arr = ccord_json_get(d, "voice_states");
+  size_t nv = vs_arr ? ccord_json_array_len(vs_arr) : 0;
   for (size_t i = 0; ok && i < nv; i++) {
-    ok = collect_voice_state_entry(&b, jarray_at(d, "voice_states", i), CCORD_ID_NONE, false, true, true);
+    ok = collect_voice_state_entry(&b, ccord_json_array_at(vs_arr, i), CCORD_ID_NONE, false, true, true);
   }
   if (ok) ok = sb_finish(&b, ev);
   if (ok && ng > 0) {
@@ -4672,8 +4981,8 @@ static bool parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *
     if (gl) {
       const ccord_json **ml = ccord_calloc(ng, sizeof *ml);
       for (size_t i = 0; i < ng; i++) {
-        gl[i] = jarray_at(d, "guilds", i);
-        if (ml) ml[i] = jarray_at(d, "merged_members", i);
+        gl[i] = ccord_json_array_at(guilds_arr, i);
+        if (ml) ml[i] = merged_arr ? ccord_json_array_at(merged_arr, i) : nullptr;
       }
       expr_collect_guild(ev, gl, ng);
       perm_collect_guilds(ev, gl, ml, ng, ev->snapshot.self_id);
@@ -4800,14 +5109,15 @@ static bool map_user_note_update(ccord_live_event *ev, const ccord_json *d, ccor
 
 static void attach_channel_recipients(ccord_live_event *ev, const ccord_json *d)
 {
-  size_t nr = jarray_len(d, "recipients");
+  const ccord_json *recs = d ? ccord_json_get(d, "recipients") : nullptr;
+  size_t nr = recs ? ccord_json_array_len(recs) : 0;
   if (nr == 0) return;
   if (nr > 32) nr = 32;
   ccord_user *users = ccord_arena_alloc(&ev->arena, nr * sizeof *users, _Alignof(ccord_user));
   if (!users) return;
   size_t kept = 0;
   for (size_t i = 0; i < nr; i++) {
-    if (map_user_obj(&ev->arena, jarray_at(d, "recipients", i), CCORD_PRESENCE_OFFLINE, &users[kept])) {
+    if (map_user_obj(&ev->arena, ccord_json_array_at(recs, i), CCORD_PRESENCE_OFFLINE, &users[kept])) {
       kept++;
     }
   }
@@ -4973,7 +5283,8 @@ static bool map_message_delete_bulk(ccord_live_event *ev, const ccord_json *d)
   ccord_id channel = CCORD_ID_NONE, gid = CCORD_ID_NONE;
   if (!json_id_key(d, "channel_id", &channel)) return false;
   (void)json_id_key(d, "guild_id", &gid);
-  size_t n = jarray_len(d, "ids");
+  const ccord_json *id_arr = d ? ccord_json_get(d, "ids") : nullptr;
+  size_t n = id_arr ? ccord_json_array_len(id_arr) : 0;
   if (n == 0) return false;
   if (n > CCORD_MAX_MESSAGES_PER_CHANNEL) n = CCORD_MAX_MESSAGES_PER_CHANNEL;
   ccord_id *ids = ccord_arena_alloc(&ev->arena, n * sizeof *ids, _Alignof(ccord_id));
@@ -4981,7 +5292,7 @@ static bool map_message_delete_bulk(ccord_live_event *ev, const ccord_json *d)
   size_t kept = 0;
   for (size_t i = 0; i < n; i++) {
     ccord_id mid = CCORD_ID_NONE;
-    if (json_id(jarray_at(d, "ids", i), &mid) && mid != CCORD_ID_NONE) {
+    if (json_id(ccord_json_array_at(id_arr, i), &mid) && mid != CCORD_ID_NONE) {
       ids[kept++] = mid;
     }
   }
@@ -5339,11 +5650,12 @@ static void expr_collect_guild(ccord_live_event *ev, const ccord_json *const *gu
   size_t en = 0, ecap = 0, sn = 0, scap = 0, sbn = 0, sbcap = 0;
   bool ok = true;
   for (size_t i = 0; ok && i < ng; i++) {
+    const ccord_json *props = guild_props(guilds[i]);
     ccord_id gid = CCORD_ID_NONE;
-    if (!guild_id_key(guilds[i], "id", &gid)) continue;
-    const ccord_json *ea = guild_arr(guilds[i], "emojis");
-    const ccord_json *sa = guild_arr(guilds[i], "stickers");
-    const ccord_json *sba = guild_arr(guilds[i], "soundboard_sounds");
+    if (!guild_id_key_p(guilds[i], props, "id", &gid)) continue;
+    const ccord_json *ea = guild_arr_p(guilds[i], props, "emojis");
+    const ccord_json *sa = guild_arr_p(guilds[i], props, "stickers");
+    const ccord_json *sba = guild_arr_p(guilds[i], props, "soundboard_sounds");
     if (ng == 1) {
       ev->ev.replace_emojis = ea != nullptr;
       ev->ev.replace_stickers = sa != nullptr;
@@ -5642,14 +5954,22 @@ static bool map_guild_members(ccord_live_event *ev, const ccord_json *d)
   if (!json_id_key(d, "guild_id", &gid)) return false;
   snapshot_builder b = {.arena = &ev->arena};
   perm_lists pl = {0};
-  size_t nm = jarray_len(d, "members");
+  const ccord_json *props = guild_props(d);
+  const ccord_json *mem_arr = d ? ccord_json_get(d, "members") : nullptr;
+  const ccord_json *roles_arr = guild_arr_p(d, props, "roles");
+  role_table rt = {0};
+  if (roles_arr) role_table_build(&rt, roles_arr);
+  const role_table *rtp = rt.count > 0 ? &rt : nullptr;
+  size_t nm = mem_arr ? ccord_json_array_len(mem_arr) : 0;
   bool ok = true;
   for (size_t i = 0; ok && i < nm && i < CCORD_MAX_MEMBERS_PER_GUILD; i++) {
-    ok = map_member(&b, d, jarray_at(d, "members", i), gid);
-    if (ok) ok = perm_add_member(&ev->arena, &pl, gid, jarray_at(d, "members", i));
+    const ccord_json *mj = ccord_json_array_at(mem_arr, i);
+    ok = map_member_with_pres(&b, rtp, nullptr, mj, gid);
+    if (ok) ok = perm_add_member(&ev->arena, &pl, gid, mj);
   }
+  role_table_free(&rt);
   if (ok) {
-    const ccord_json *pres_arr = guild_arr(d, "presences");
+    const ccord_json *pres_arr = guild_arr_p(d, props, "presences");
     size_t np = pres_arr ? ccord_json_array_len(pres_arr) : 0;
     for (size_t i = 0; i < np; i++) {
       const ccord_json *pj = ccord_json_array_at(pres_arr, i);
@@ -5713,7 +6033,7 @@ static bool map_role_upsert(ccord_live_event *ev, const ccord_json *d)
   ccord_id rid = CCORD_ID_NONE;
   if (!json_id_key(d, "guild_id", &gid) || !rj || !json_id_key(rj, "id", &rid)) return false;
   perm_lists pl = {0};
-  bool ok = perm_add_role(&pl, rj, gid);
+  bool ok = perm_add_role(&ev->arena, &pl, rj, gid);
   if (!ok || pl.nroles != 1) {
     ccord_free(pl.roles);
     return false;
@@ -5758,13 +6078,14 @@ static void member_list_sizes(ccord_live_event *ev, const ccord_json *d)
   if (mc && ccord_json_int64(mc, &v) && v > 0 && v <= UINT32_MAX) ev->ev.member_total = (uint32_t)v;
   const ccord_json *oc = ccord_json_get(d, "online_count");
   if (oc && ccord_json_int64(oc, &v) && v >= 0 && v <= UINT32_MAX) ev->ev.member_online = (uint32_t)v;
-  size_t n = jarray_len(d, "groups");
+  const ccord_json *groups = d ? ccord_json_get(d, "groups") : nullptr;
+  size_t n = groups ? ccord_json_array_len(groups) : 0;
   if (n == 0 || n > CCORD_MAX_ROLES_PER_GUILD + 2u) return;
   ccord_member_group *out = ccord_arena_alloc(&ev->arena, n * sizeof *out, _Alignof(ccord_member_group));
   if (!out) return;
   size_t k = 0;
   for (size_t i = 0; i < n; i++) {
-    const ccord_json *gj = jarray_at(d, "groups", i);
+    const ccord_json *gj = ccord_json_array_at(groups, i);
     const char *id = gj ? jstr(gj, "id") : nullptr;
     const ccord_json *cj = gj ? ccord_json_get(gj, "count") : nullptr;
     if (!id || !cj || !ccord_json_int64(cj, &v) || v < 0 || v > UINT32_MAX) continue;
@@ -5794,19 +6115,24 @@ static bool map_guild_member_list_update(ccord_live_event *ev, const ccord_json 
   snapshot_builder b = {.arena = &ev->arena};
   perm_lists pl = {0};
   const ccord_json *roles = guild_roles(d);
-  size_t nops = jarray_len(d, "ops");
+  role_table rt = {0};
+  if (roles) role_table_build(&rt, roles);
+  const role_table *rtp = rt.count > 0 ? &rt : nullptr;
+  const ccord_json *ops = d ? ccord_json_get(d, "ops") : nullptr;
+  size_t nops = ops ? ccord_json_array_len(ops) : 0;
   bool ok = true;
   uint32_t synced_to = 0;
   for (size_t i = 0; ok && i < nops; i++) {
-    const ccord_json *opj = jarray_at(d, "ops", i);
+    const ccord_json *opj = ccord_json_array_at(ops, i);
     const char *op_name = jstr(opj, "op");
     if (!op_name) continue;
     if (strcmp(op_name, "SYNC") == 0) {
       // The range this answers (the last position of it): how far down the list the update reaches.
       int64_t first = 0, last = 0;
-      const bool two = jarray_len(opj, "range") == 2;
-      const ccord_json *first_j = two ? jarray_at(opj, "range", 0) : nullptr;
-      const ccord_json *last_j = two ? jarray_at(opj, "range", 1) : nullptr;
+      const ccord_json *range = opj ? ccord_json_get(opj, "range") : nullptr;
+      const bool two = range && ccord_json_array_len(range) == 2;
+      const ccord_json *first_j = two ? ccord_json_array_at(range, 0) : nullptr;
+      const ccord_json *last_j = two ? ccord_json_array_at(range, 1) : nullptr;
       if (first_j && last_j && ccord_json_int64(first_j, &first) && ccord_json_int64(last_j, &last) && first >= 0 &&
           last >= first && last < UINT32_MAX && (uint32_t)last + 1u > synced_to) {
         synced_to = (uint32_t)last + 1u;
@@ -5816,18 +6142,20 @@ static bool map_guild_member_list_update(ccord_live_event *ev, const ccord_json 
       const ccord_json *single = ccord_json_get(opj, "item");
       const ccord_json *smem = single ? ccord_json_get(single, "member") : nullptr;
       if (smem) {
-        ok = map_member_with_pres(&b, roles, nullptr, smem, gid) && perm_add_member(&ev->arena, &pl, gid, smem);
+        ok = map_member_with_pres(&b, rtp, nullptr, smem, gid) && perm_add_member(&ev->arena, &pl, gid, smem);
       }
-      size_t nitems = jarray_len(opj, "items");
+      const ccord_json *items_arr = opj ? ccord_json_get(opj, "items") : nullptr;
+      size_t nitems = items_arr ? ccord_json_array_len(items_arr) : 0;
       for (size_t k = 0; ok && k < nitems; k++) {
-        const ccord_json *it = jarray_at(opj, "items", k);
+        const ccord_json *it = ccord_json_array_at(items_arr, k);
         const ccord_json *mj = it ? ccord_json_get(it, "member") : nullptr;
         if (mj) {
-          ok = map_member_with_pres(&b, roles, nullptr, mj, gid) && perm_add_member(&ev->arena, &pl, gid, mj);
+          ok = map_member_with_pres(&b, rtp, nullptr, mj, gid) && perm_add_member(&ev->arena, &pl, gid, mj);
         }
       }
     }
   }
+  role_table_free(&rt);
   if (ok) ok = sb_publish(&b, ev);
   sb_free(&b);
   (void)perm_publish(ev, &pl);
@@ -5905,10 +6233,11 @@ static bool map_ready_supplemental(ccord_live_event *ev, const ccord_json *d)
 {
   if (!is_json_object(d)) return false;
   snapshot_builder b = {.arena = &ev->arena};
-  size_t nu = jarray_len(d, "users");
+  const ccord_json *users_arr = ccord_json_get(d, "users");
+  size_t nu = users_arr ? ccord_json_array_len(users_arr) : 0;
   for (size_t i = 0; i < nu; i++) {
     ccord_user u;
-    if (map_user_obj(&ev->arena, jarray_at(d, "users", i), CCORD_PRESENCE_OFFLINE, &u)) {
+    if (map_user_obj(&ev->arena, ccord_json_array_at(users_arr, i), CCORD_PRESENCE_OFFLINE, &u)) {
       if (!sb_user(&b, &u)) {
         sb_free(&b);
         return false;
@@ -5919,9 +6248,10 @@ static bool map_ready_supplemental(ccord_live_event *ev, const ccord_json *d)
     sb_free(&b);
     return false;
   }
-  size_t ng = jarray_len(d, "guilds");
+  const ccord_json *guilds_arr = ccord_json_get(d, "guilds");
+  size_t ng = guilds_arr ? ccord_json_array_len(guilds_arr) : 0;
   for (size_t gi = 0; gi < ng && gi < CCORD_MAX_GUILDS; gi++) {
-    const ccord_json *gj = jarray_at(d, "guilds", gi);
+    const ccord_json *gj = ccord_json_array_at(guilds_arr, gi);
     ccord_id gid = CCORD_ID_NONE;
     if (!gj || !json_id_key(gj, "id", &gid) || gid == CCORD_ID_NONE || gid == CCORD_DM_GUILD_ID) continue;
     const ccord_json *vs_arr = ccord_json_get(gj, "voice_states");
@@ -5933,9 +6263,10 @@ static bool map_ready_supplemental(ccord_live_event *ev, const ccord_json *d)
       }
     }
   }
-  size_t top_nv = jarray_len(d, "voice_states");
+  const ccord_json *top_vs_arr = ccord_json_get(d, "voice_states");
+  size_t top_nv = top_vs_arr ? ccord_json_array_len(top_vs_arr) : 0;
   for (size_t k = 0; k < top_nv && k < CCORD_MAX_MEMBERS_PER_GUILD; k++) {
-    if (!collect_voice_state_entry(&b, jarray_at(d, "voice_states", k), CCORD_ID_NONE, false, false, false)) {
+    if (!collect_voice_state_entry(&b, ccord_json_array_at(top_vs_arr, k), CCORD_ID_NONE, false, false, false)) {
       sb_free(&b);
       return false;
     }
@@ -5953,16 +6284,18 @@ static bool map_passive_update_v2(ccord_live_event *ev, const ccord_json *d)
     sb_free(&b);
     return false;
   }
-  size_t nv = jarray_len(d, "updated_voice_states");
+  const ccord_json *uvs_arr = ccord_json_get(d, "updated_voice_states");
+  size_t nv = uvs_arr ? ccord_json_array_len(uvs_arr) : 0;
   for (size_t k = 0; k < nv && k < CCORD_MAX_MEMBERS_PER_GUILD; k++) {
-    if (!collect_voice_state_entry(&b, jarray_at(d, "updated_voice_states", k), gid, true, false, false)) {
+    if (!collect_voice_state_entry(&b, ccord_json_array_at(uvs_arr, k), gid, true, false, false)) {
       sb_free(&b);
       return false;
     }
   }
-  size_t nr = jarray_len(d, "removed_voice_states");
+  const ccord_json *rvs_arr = ccord_json_get(d, "removed_voice_states");
+  size_t nr = rvs_arr ? ccord_json_array_len(rvs_arr) : 0;
   for (size_t k = 0; k < nr && k < CCORD_MAX_MEMBERS_PER_GUILD; k++) {
-    const ccord_json *rj = jarray_at(d, "removed_voice_states", k);
+    const ccord_json *rj = ccord_json_array_at(rvs_arr, k);
     ccord_id uid = CCORD_ID_NONE;
     if (!json_id(rj, &uid)) (void)json_id_key(rj, "user_id", &uid);
     if (uid == CCORD_ID_NONE) continue;
@@ -6106,12 +6439,16 @@ static void map_message_author(ccord_arena *a, const ccord_json *j, ccord_id aut
   if (!name || name[0] == '\0') name = au ? jstr(au, "username") : nullptr;
   if (!name || name[0] == '\0') name = j ? jstr(j, "username") : nullptr;
   if (!text_ok(name, CCORD_NAME_MAX_BYTES)) name = "System";
+  else {
+    name = arena_dup(a, name);
+    if (name[0] == '\0') name = "System";
+  }
   const char *handle = au ? jstr(au, "username") : (j ? jstr(j, "username") : nullptr);
   const ccord_json *botj = au ? ccord_json_get(au, "bot") : nullptr;
   *out = (ccord_user){
     .id = author_id,
     .name = name,
-    .handle = opt_text(handle, CCORD_NAME_MAX_BYTES),
+    .handle = opt_text_dup(a, handle, CCORD_NAME_MAX_BYTES),
     .status_text = "",
     .avatar_url = au ? build_cdn_url(a, "avatars", author_id, jstr(au, "avatar")) : "",
     .bio = "",
@@ -6143,12 +6480,14 @@ static void collect_message_mentions(ccord_arena *a, const ccord_json *j,
     if (!name || name[0] == '\0') name = jstr(mu, "global_name");
     if (!name || name[0] == '\0') name = jstr(mu, "username");
     if (!text_ok(name, CCORD_NAME_MAX_BYTES)) continue;
+    const char *name_dup = arena_dup(a, name);
+    if (name_dup[0] == '\0') continue;
     const char *handle = jstr(mu, "username");
     const ccord_json *botj = ccord_json_get(mu, "bot");
     users[(*ukept)++] = (ccord_user){
       .id = uid,
-      .name = name,
-      .handle = opt_text(handle, CCORD_NAME_MAX_BYTES),
+      .name = name_dup,
+      .handle = opt_text_dup(a, handle, CCORD_NAME_MAX_BYTES),
       .status_text = "",
       .avatar_url = build_cdn_url(a, "avatars", uid, jstr(mu, "avatar")),
       .bio = "",
@@ -6516,14 +6855,9 @@ static bool map_slash_autocomplete(ccord_live_event *ev, const ccord_json *d)
   return true;
 }
 
-ccord_status ccord_live_gateway_decode_ex(const char *json, size_t len, ccord_id self_id, ccord_live_event *out,
-                                           ccord_error *err)
+static ccord_status decode_gateway_root(const ccord_json *root, ccord_id self_id, ccord_live_event *out,
+                                        ccord_error *err)
 {
-  ccord_error_clear(err);
-  if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "gateway: null payload");
-  ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
-  if (!root) return CCORD_ERR_PARSE;
   if (ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     return ccord_error_set(err, CCORD_ERR_PARSE, "gateway: payload is not an object");
   }
@@ -6650,10 +6984,15 @@ ccord_status ccord_live_gateway_decode_ex(const char *json, size_t len, ccord_id
       if (msg_gid != CCORD_ID_NONE && msg_gid != CCORD_DM_GUILD_ID && m->author_id != CCORD_ID_NONE) {
         ccord_member *gm = ccord_arena_alloc(&out->arena, sizeof *gm, _Alignof(ccord_member));
         if (gm) {
+          const ccord_json *mem_obj = ccord_json_get(d, "member");
+          const ccord_json *d_roles = guild_roles(d);
+          role_table rt = {0};
+          if (d_roles) role_table_build(&rt, d_roles);
           const char *rname = "Members";
           uint32_t rcol = 0;
           uint8_t rrank = 255;
-          resolve_member_role(&out->arena, msg_gid, guild_roles(d), ccord_json_get(d, "member"), &rname, &rcol, &rrank);
+          resolve_member_role(&out->arena, msg_gid, rt.count > 0 ? &rt : nullptr, mem_obj, &rname, &rcol, &rrank);
+          role_table_free(&rt);
           *gm = (ccord_member){
             .guild_id = msg_gid,
             .user_id = m->author_id,
@@ -6663,7 +7002,6 @@ ccord_status ccord_live_gateway_decode_ex(const char *json, size_t len, ccord_id
             .omit_pending = true,   // a message's partial member object never says whether screening is done
           };
           // The author's server nickname travels with the message; leaving it out would clear one the list already has.
-          const ccord_json *mem_obj = ccord_json_get(d, "member");
           const char *nick = mem_obj ? jstr(mem_obj, "nick") : nullptr;
           if (nick && text_ok(nick, CCORD_NAME_MAX_BYTES)) memcpy(gm->nick, nick, strlen(nick) + 1);
           const char *jat = mem_obj ? jstr(mem_obj, "joined_at") : nullptr;
@@ -6782,6 +7120,20 @@ ccord_status ccord_live_gateway_decode_ex(const char *json, size_t len, ccord_id
   return CCORD_OK;
 }
 
+ccord_status ccord_live_gateway_decode_ex(const char *json, size_t len, ccord_id self_id, ccord_live_event *out,
+                                          ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "gateway: null payload");
+  ccord_live_event_init(out);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  ccord_status st = root ? decode_gateway_root(root, self_id, out, err) : CCORD_ERR_PARSE;
+  ccord_arena_free(&scratch);
+  return st;
+}
+
 ccord_status ccord_live_gateway_decode(const char *json, size_t len, ccord_live_event *out, ccord_error *err)
 {
   return ccord_live_gateway_decode_ex(json, len, CCORD_ID_NONE, out, err);
@@ -6793,12 +7145,22 @@ ccord_status ccord_live_json_message(const char *json, size_t len, ccord_net_eve
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null message");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
-  if (!root) return CCORD_ERR_PARSE;
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  if (!root) {
+    st = CCORD_ERR_PARSE;
+    goto done;
+  }
   ccord_message *m = ccord_arena_alloc(&out->arena, sizeof *m, _Alignof(ccord_message));
-  if (!m) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+  if (!m) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
+  }
   if (!map_message(&out->arena, root, CCORD_ID_NONE, m)) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad message object");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad message object");
+    goto done;
   }
   if (m->author_id != CCORD_ID_NONE) {
     ccord_user *u = ccord_arena_alloc(&out->arena, sizeof *u, _Alignof(ccord_user));
@@ -6816,7 +7178,9 @@ ccord_status ccord_live_json_message(const char *json, size_t len, ccord_net_eve
   out->ev.channel_id = m->channel_id;
   out->ev.messages = m;
   out->ev.message_count = 1;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_history(const char *json, size_t len, ccord_id channel_id,
@@ -6825,13 +7189,19 @@ ccord_status ccord_live_json_history(const char *json, size_t len, ccord_id chan
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null history");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
-  if (!root) return CCORD_ERR_PARSE;
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  if (!root) {
+    st = CCORD_ERR_PARSE;
+    goto done;
+  }
   size_t n = ccord_json_array_len(root);
   if (n == 0) {
     out->ev.type = CCORD_NET_HISTORY;
     out->ev.channel_id = channel_id;
-    return CCORD_OK;
+    goto done;
   }
   size_t ucap = n;
   for (size_t i = 0; i < n; i++) {
@@ -6840,7 +7210,10 @@ ccord_status ccord_live_json_history(const char *json, size_t len, ccord_id chan
   }
   ccord_message *msgs = ccord_arena_alloc(&out->arena, n * sizeof *msgs, _Alignof(ccord_message));
   ccord_user *users = ccord_arena_alloc(&out->arena, ucap * sizeof *users, _Alignof(ccord_user));
-  if (!msgs || !users) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: history too large");
+  if (!msgs || !users) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: history too large");
+    goto done;
+  }
   size_t kept = 0, ukept = 0;
   for (size_t i = 0; i < n; i++) {
     const ccord_json *mj = ccord_json_array_at(root, i);
@@ -6868,7 +7241,9 @@ ccord_status ccord_live_json_history(const char *json, size_t len, ccord_id chan
   out->ev.message_count = kept;
   out->ev.users = users;
   out->ev.user_count = ukept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_search(const char *json, size_t len, ccord_live_event *out, ccord_error *err)
@@ -6876,8 +7251,14 @@ ccord_status ccord_live_json_search(const char *json, size_t len, ccord_live_eve
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null search");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
-  if (!root) return CCORD_ERR_PARSE;
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  if (!root) {
+    st = CCORD_ERR_PARSE;
+    goto done;
+  }
 
   const ccord_json *arr = root;
   bool nested = false;
@@ -6891,12 +7272,15 @@ ccord_status ccord_live_json_search(const char *json, size_t len, ccord_live_eve
   if (n == 0) {
     out->ev.type = CCORD_NET_SEARCH_RESULTS;
     out->ev.search_total_results = total_raw >= 0 ? clamp_u32(total_raw) : 0u;
-    return CCORD_OK;
+    goto done;
   }
   size_t ucap = n * 4u;
   ccord_message *msgs = ccord_arena_alloc(&out->arena, n * sizeof *msgs, _Alignof(ccord_message));
   ccord_user *users = ccord_arena_alloc(&out->arena, ucap * sizeof *users, _Alignof(ccord_user));
-  if (!msgs || !users) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: search results too large");
+  if (!msgs || !users) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: search results too large");
+    goto done;
+  }
   size_t kept = 0, ukept = 0;
   for (size_t i = 0; i < n; i++) {
     const ccord_json *item = ccord_json_array_at(arr, i);
@@ -6938,7 +7322,9 @@ ccord_status ccord_live_json_search(const char *json, size_t len, ccord_live_eve
   out->ev.users = users;
   out->ev.user_count = ukept;
   out->ev.search_total_results = total_raw >= 0 ? clamp_u32(total_raw) : (uint32_t)kept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_pins(const char *json, size_t len, ccord_id channel_id, bool append,
@@ -6949,8 +7335,14 @@ ccord_status ccord_live_json_pins(const char *json, size_t len, ccord_id channel
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad pins args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
-  if (!root) return CCORD_ERR_PARSE;
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  if (!root) {
+    st = CCORD_ERR_PARSE;
+    goto done;
+  }
 
   const ccord_json *arr = nullptr;
   bool wrapped_items = false;
@@ -6958,7 +7350,8 @@ ccord_status ccord_live_json_pins(const char *json, size_t len, ccord_id channel
   if (ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
     arr = ccord_json_get(root, "items");
     if (!arr || ccord_json_type_of(arr) != CCORD_JSON_ARRAY) {
-      return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad pins items");
+      st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad pins items");
+      goto done;
     }
     wrapped_items = true;
     const ccord_json *hm = ccord_json_get(root, "has_more");
@@ -6966,7 +7359,8 @@ ccord_status ccord_live_json_pins(const char *json, size_t len, ccord_id channel
   } else if (ccord_json_type_of(root) == CCORD_JSON_ARRAY) {
     arr = root;
   } else {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad pins payload");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad pins payload");
+    goto done;
   }
 
   size_t n = ccord_json_array_len(arr);
@@ -6976,13 +7370,16 @@ ccord_status ccord_live_json_pins(const char *json, size_t len, ccord_id channel
   out->ev.pins_append = append;
   if (n == 0) {
     out->ev.pins_has_more = false;
-    return CCORD_OK;
+    goto done;
   }
 
   size_t ucap = n * 4u;
   ccord_message *msgs = ccord_arena_alloc(&out->arena, n * sizeof *msgs, _Alignof(ccord_message));
   ccord_user *users = ccord_arena_alloc(&out->arena, ucap * sizeof *users, _Alignof(ccord_user));
-  if (!msgs || !users) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: pins too large");
+  if (!msgs || !users) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: pins too large");
+    goto done;
+  }
   size_t kept = 0, ukept = 0;
   const char *last_pinned_at = nullptr;
   for (size_t i = 0; i < n; i++) {
@@ -7028,7 +7425,9 @@ ccord_status ccord_live_json_pins(const char *json, size_t len, ccord_id channel
   out->ev.message_count = kept;
   out->ev.users = users;
   out->ev.user_count = ukept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_reaction_users(const char *json, size_t len, ccord_id channel_id,
@@ -7040,14 +7439,21 @@ ccord_status ccord_live_json_reaction_users(const char *json, size_t len, ccord_
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad reaction users args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_ARRAY) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad reaction users array");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad reaction users array");
+    goto done;
   }
   size_t n = ccord_json_array_len(root);
   if (n > 100u) n = 100u;
   ccord_user *users = n > 0 ? ccord_arena_alloc(&out->arena, n * sizeof *users, _Alignof(ccord_user)) : nullptr;
-  if (n > 0 && !users) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+  if (n > 0 && !users) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
+  }
   size_t kept = 0;
   for (size_t i = 0; i < n; i++) {
     const ccord_json *uj = ccord_json_array_at(root, i);
@@ -7064,7 +7470,9 @@ ccord_status ccord_live_json_reaction_users(const char *json, size_t len, ccord_
   out->ev.reaction_emoji = ccord_arena_strndup(&out->arena, em, strlen(em));
   out->ev.users = users;
   out->ev.user_count = kept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_channel(const char *json, size_t len, ccord_id guild_hint,
@@ -7073,20 +7481,26 @@ ccord_status ccord_live_json_channel(const char *json, size_t len, ccord_id guil
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null channel");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad channel object");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad channel object");
+    goto done;
   }
   ccord_channel c;
   if (!map_channel(&out->arena, root, guild_hint, &c)) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid channel fields");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid channel fields");
+    goto done;
   }
   ccord_channel *slot = ccord_arena_alloc(&out->arena, sizeof *slot, _Alignof(ccord_channel));
   if (!slot) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   *slot = c;
   out->channels = slot;
@@ -7109,7 +7523,9 @@ ccord_status ccord_live_json_channel(const char *json, size_t len, ccord_id guil
   out->ev.guild_id = c.guild_id;
   out->ev.channel_id = c.id;
   out->ev.channel = slot;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 // A REST member object (PATCH /guilds/{g}/members/{u}) as a GUILD_MEMBERS event, exactly like the gateway's
@@ -7120,9 +7536,13 @@ ccord_status ccord_live_json_member(const char *json, size_t len, ccord_id guild
   ccord_error_clear(err);
   if (!json || !out || guild_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad member args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad member object");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad member object");
+    goto done;
   }
   snapshot_builder b = {.arena = &out->arena};
   perm_lists pl = {0};
@@ -7131,7 +7551,10 @@ ccord_status ccord_live_json_member(const char *json, size_t len, ccord_id guild
   if (ok) ok = sb_publish(&b, out);
   sb_free(&b);
   (void)perm_publish(out, &pl);
-  if (!ok || out->member_count == 0) return ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid member fields");
+  if (!ok || out->member_count == 0) {
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid member fields");
+    goto done;
+  }
   out->guild_op = CCORD_LIVE_GUILD_MEMBERS;
   out->ev.type = CCORD_NET_GUILD_MEMBERS;
   out->ev.guild_id = guild_id;
@@ -7139,7 +7562,9 @@ ccord_status ccord_live_json_member(const char *json, size_t len, ccord_id guild
   out->ev.guild_member_count = out->member_count;
   out->ev.users = out->users;
   out->ev.user_count = out->user_count;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 // A REST guild object (PATCH /guilds/{g}) as a GUILD_UPSERT event, shaped exactly as the gateway shapes
@@ -7149,9 +7574,13 @@ ccord_status ccord_live_json_guild(const char *json, size_t len, ccord_live_even
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null guild");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT || !map_guild_upsert(out, root) || out->guild_count == 0) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad guild object");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad guild object");
+    goto done;
   }
   out->ev.type = CCORD_NET_GUILD_UPSERT;
   out->ev.guild = &out->guilds[0];
@@ -7162,7 +7591,9 @@ ccord_status ccord_live_json_guild(const char *json, size_t len, ccord_live_even
   out->ev.users = out->users;
   out->ev.user_count = out->user_count;
   out->ev.guild_id = out->guilds[0].id;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 // Discord's error body is {"code":50013,"message":"Missing Permissions"}; validation failures (400) also carry
@@ -7231,9 +7662,13 @@ ccord_status ccord_live_json_forum_posts(const char *json, size_t len, ccord_id 
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: invalid forum posts args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: forum posts response not an object");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: forum posts response not an object");
+    goto done;
   }
   const ccord_json *th_arr = ccord_json_get(root, "threads");
   const ccord_json *fm_arr = ccord_json_get(root, "first_messages");
@@ -7253,7 +7688,8 @@ ccord_status ccord_live_json_forum_posts(const char *json, size_t len, ccord_id 
     ? ccord_arena_alloc(&out->arena, ucap * sizeof *users, _Alignof(ccord_user))
     : nullptr;
   if ((nt > 0 && !posts) || (ucap > 0 && !users)) {
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
 
   size_t kept = 0, ukept = 0;
@@ -7297,7 +7733,9 @@ ccord_status ccord_live_json_forum_posts(const char *json, size_t len, ccord_id 
   out->ev.forum_has_more = has_more;
   out->ev.users = users;
   out->ev.user_count = ukept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_forum_post_created(const char *json, size_t len, ccord_id forum_id,
@@ -7308,22 +7746,31 @@ ccord_status ccord_live_json_forum_post_created(const char *json, size_t len, cc
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: invalid forum post created args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad created thread object");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad created thread object");
+    goto done;
   }
   ccord_channel c;
   if (!map_channel(&out->arena, root, CCORD_ID_NONE, &c)) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid created thread channel");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid created thread channel");
+    goto done;
   }
   if (c.parent_id == CCORD_ID_NONE) c.parent_id = forum_id;
   ccord_channel *slot_c = ccord_arena_alloc(&out->arena, sizeof *slot_c, _Alignof(ccord_channel));
   ccord_forum_post *slot_p = ccord_arena_alloc(&out->arena, sizeof *slot_p, _Alignof(ccord_forum_post));
-  if (!slot_c || !slot_p) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+  if (!slot_c || !slot_p) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
+  }
   *slot_c = c;
   const ccord_json *msg_j = ccord_json_get(root, "message");
   if (!map_forum_post(&out->arena, root, msg_j, forum_id, c.guild_id, slot_p)) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid created forum post");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid created forum post");
+    goto done;
   }
   out->channels = slot_c;
   out->channel_count = 1;
@@ -7353,7 +7800,9 @@ ccord_status ccord_live_json_forum_post_created(const char *json, size_t len, cc
       }
     }
   }
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 // Profile extras of GET /users/{id}/profile. Source: docs.discord.food/resources/user, which lists the user-object keys
@@ -7382,10 +7831,11 @@ static bool parse_hex_color(const char *s, uint32_t *out)
 // obj[key] is [primary, accent], each an integer 0..0xFFFFFF. Both must be valid, else nothing is written.
 static bool theme_pair(const ccord_json *obj, const char *key, uint32_t *primary, uint32_t *accent)
 {
-  if (jarray_len(obj, key) < 2) return false;
+  const ccord_json *arr = obj ? ccord_json_get(obj, key) : nullptr;
+  if (!arr || ccord_json_array_len(arr) < 2) return false;
   int64_t p = -1, a = -1;
-  const ccord_json *pj2 = jarray_at(obj, key, 0);
-  const ccord_json *aj = jarray_at(obj, key, 1);
+  const ccord_json *pj2 = ccord_json_array_at(arr, 0);
+  const ccord_json *aj = ccord_json_array_at(arr, 1);
   if (!pj2 || !aj || !ccord_json_int64(pj2, &p) || !ccord_json_int64(aj, &a)) return false;
   if (p < 0 || a < 0 || p > (int64_t)0xFFFFFF || a > (int64_t)0xFFFFFF) return false;
   *primary = (uint32_t)p;
@@ -7473,18 +7923,19 @@ static void parse_profile_extras(ccord_arena *a, const ccord_json *root, const c
       }
     }
   }
-  prof->guild_nick = opt_text(jstr(gm, "nick"), CCORD_NAME_MAX_BYTES);
+  prof->guild_nick = opt_text_dup(a, jstr(gm, "nick"), CCORD_NAME_MAX_BYTES);
   prof->guild_avatar_url = guild_member_asset_url(a, gid, uid, "avatars", jstr(gm, "avatar"));
   prof->guild_banner_url = guild_member_asset_url(a, gid, uid, "banners", jstr(gmp, "banner"));
-  prof->guild_bio = opt_text(jstr(gmp, "bio"), CCORD_USER_BIO_MAX_BYTES);
-  prof->guild_pronouns = opt_text(jstr(gmp, "pronouns"), CCORD_USER_PRONOUNS_MAX_BYTES);
+  prof->guild_bio = opt_text_dup(a, jstr(gmp, "bio"), CCORD_USER_BIO_MAX_BYTES);
+  prof->guild_pronouns = opt_text_dup(a, jstr(gmp, "pronouns"), CCORD_USER_PRONOUNS_MAX_BYTES);
   prof->guild_joined_at_ms = iso_key_ms(gm, "joined_at");
   prof->premium_since_ms = iso_key_ms(gm, "premium_since");
 
   // Top-level badges: [{id, description, icon}], capped at CCORD_PROFILE_MAX_BADGES.
-  size_t nb = jarray_len(root, "badges");
+  const ccord_json *badges_arr = root ? ccord_json_get(root, "badges") : nullptr;
+  size_t nb = badges_arr ? ccord_json_array_len(badges_arr) : 0;
   for (size_t i = 0; i < nb && prof->badge_count < CCORD_PROFILE_MAX_BADGES; i++) {
-    const ccord_json *bj = jarray_at(root, "badges", i);
+    const ccord_json *bj = ccord_json_array_at(badges_arr, i);
     if (!bj || ccord_json_type_of(bj) != CCORD_JSON_OBJECT) continue;
     ccord_profile_badge *dst = &prof->badges[prof->badge_count];
     copy_trunc_utf8(dst->id, sizeof dst->id, jstr(bj, "id"));
@@ -7508,9 +7959,13 @@ ccord_status ccord_live_json_user_profile(const char *json, size_t len, ccord_id
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null user profile");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad user profile object");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad user profile object");
+    goto done;
   }
   const ccord_json *uj = ccord_json_get(root, "user");
   if (!uj || ccord_json_type_of(uj) != CCORD_JSON_OBJECT) uj = root;
@@ -7521,14 +7976,15 @@ ccord_status ccord_live_json_user_profile(const char *json, size_t len, ccord_id
   (void)json_id_key(uj, "id", &uid);
   if (uid == CCORD_ID_NONE) (void)json_id_key(root, "id", &uid);
   if (uid == CCORD_ID_NONE) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: user profile missing id");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: user profile missing id");
+    goto done;
   }
 
   const char *display_name = jstr(uj, "global_name");
   if (!display_name || display_name[0] == '\0') display_name = jstr(uj, "username");
-  display_name = opt_text(display_name, CCORD_NAME_MAX_BYTES);
+  display_name = opt_text_dup(&out->arena, display_name, CCORD_NAME_MAX_BYTES);
 
-  const char *handle = opt_text(jstr(uj, "username"), CCORD_NAME_MAX_BYTES);
+  const char *handle = opt_text_dup(&out->arena, jstr(uj, "username"), CCORD_NAME_MAX_BYTES);
 
   const char *av_hash = jstr(uj, "avatar");
   const char *avatar_url = build_cdn_url(&out->arena, "avatars", uid, av_hash);
@@ -7550,15 +8006,18 @@ ccord_status ccord_live_json_user_profile(const char *json, size_t len, ccord_id
 
   const char *bio = pj ? jstr(pj, "bio") : nullptr;
   if (!bio || bio[0] == '\0') bio = jstr(uj, "bio");
-  bio = opt_text(bio, CCORD_USER_BIO_MAX_BYTES);
+  bio = opt_text_dup(&out->arena, bio, CCORD_USER_BIO_MAX_BYTES);
 
   const char *pronouns = pj ? jstr(pj, "pronouns") : nullptr;
   if (!pronouns || pronouns[0] == '\0') pronouns = jstr(uj, "pronouns");
-  pronouns = opt_text(pronouns, CCORD_USER_PRONOUNS_MAX_BYTES);
+  pronouns = opt_text_dup(&out->arena, pronouns, CCORD_USER_PRONOUNS_MAX_BYTES);
 
   ccord_user_profile *prof = ccord_arena_alloc(&out->arena, sizeof *prof, _Alignof(ccord_user_profile));
   ccord_user *u = ccord_arena_alloc(&out->arena, sizeof *u, _Alignof(ccord_user));
-  if (!prof || !u) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+  if (!prof || !u) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
+  }
 
   *prof = (ccord_user_profile){
     .user_id = uid,
@@ -7574,9 +8033,10 @@ ccord_status ccord_live_json_user_profile(const char *json, size_t len, ccord_id
   extract_clan_info(uj, prof->clan_tag, &prof->clan_guild_id, prof->clan_badge);
   parse_profile_extras(&out->arena, root, uj, pj, uid, prof);
   {
-    size_t nconn = jarray_len(root, "connected_accounts");
+    const ccord_json *conn_arr = ccord_json_get(root, "connected_accounts");
+    size_t nconn = conn_arr ? ccord_json_array_len(conn_arr) : 0;
     for (size_t i = 0; i < nconn && prof->connection_count < CCORD_PROFILE_MAX_CONNECTIONS; i++) {
-      const ccord_json *cj = jarray_at(root, "connected_accounts", i);
+      const ccord_json *cj = ccord_json_array_at(conn_arr, i);
       if (!cj || ccord_json_type_of(cj) != CCORD_JSON_OBJECT) continue;
       const char *ctype = jstr(cj, "type");
       const char *cname = jstr(cj, "name");
@@ -7588,9 +8048,10 @@ ccord_status ccord_live_json_user_profile(const char *json, size_t len, ccord_id
       dst->verified = json_bool_key(cj, "verified", false);
       prof->connection_count++;
     }
-    size_t nmg = jarray_len(root, "mutual_guilds");
+    const ccord_json *mg_arr = ccord_json_get(root, "mutual_guilds");
+    size_t nmg = mg_arr ? ccord_json_array_len(mg_arr) : 0;
     for (size_t i = 0; i < nmg && prof->mutual_guild_count < CCORD_PROFILE_MAX_MUTUAL_GUILDS; i++) {
-      const ccord_json *mgj = jarray_at(root, "mutual_guilds", i);
+      const ccord_json *mgj = ccord_json_array_at(mg_arr, i);
       ccord_id mgid = CCORD_ID_NONE;
       if (!json_id_key(mgj, "id", &mgid) && !json_id(mgj, &mgid)) continue;
       if (mgid == CCORD_ID_NONE || mgid == CCORD_DM_GUILD_ID) continue;
@@ -7600,9 +8061,10 @@ ccord_status ccord_live_json_user_profile(const char *json, size_t len, ccord_id
       }
       if (!dup) prof->mutual_guild_ids[prof->mutual_guild_count++] = mgid;
     }
-    size_t nmf = jarray_len(root, "mutual_friends");
+    const ccord_json *mf_arr = ccord_json_get(root, "mutual_friends");
+    size_t nmf = mf_arr ? ccord_json_array_len(mf_arr) : 0;
     for (size_t i = 0; i < nmf && prof->mutual_friend_count < CCORD_PROFILE_MAX_MUTUAL_FRIENDS; i++) {
-      const ccord_json *mfj = jarray_at(root, "mutual_friends", i);
+      const ccord_json *mfj = ccord_json_array_at(mf_arr, i);
       ccord_id fuid = CCORD_ID_NONE;
       if (!mfj || !json_id_key(mfj, "id", &fuid) || fuid == CCORD_ID_NONE) continue;
       bool dup = false;
@@ -7618,7 +8080,7 @@ ccord_status ccord_live_json_user_profile(const char *json, size_t len, ccord_id
       copy_trunc_utf8(mf->name, sizeof mf->name, fname);
       if (mf->name[0] == '\0') copy_trunc_utf8(mf->name, sizeof mf->name, "User");
       copy_trunc_utf8(mf->handle, sizeof mf->handle, jstr(mfj, "username"));
-      const char *fav = build_cdn_url(&out->arena, "avatars", fuid, jstr(mfj, "avatar"));
+      const char *fav = build_cdn_url(&scratch, "avatars", fuid, jstr(mfj, "avatar"));
       copy_trunc_utf8(mf->avatar_url, sizeof mf->avatar_url, fav);
       prof->mutual_friend_count++;
     }
@@ -7654,10 +8116,11 @@ ccord_status ccord_live_json_user_profile(const char *json, size_t len, ccord_id
   out->ev.type = CCORD_NET_USER_PROFILE;
   out->ev.user_id = uid;
   out->ev.user_profile = prof;
-  out->ev.profile = *prof;
   out->ev.users = u;
   out->ev.user_count = 1;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_upload_slots(const char *json, size_t len, size_t expected_count,
@@ -7674,7 +8137,7 @@ ccord_status ccord_live_json_upload_slots(const char *json, size_t len, size_t e
     out_upload_filenames[i][0] = '\0';
   }
   ccord_arena arena;
-  ccord_arena_init(&arena, 0);
+  ccord_arena_init(&arena, scratch_chunk_size(len));
   const ccord_json *root = parse_json(&arena, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_arena_free(&arena);
@@ -7793,8 +8256,14 @@ ccord_status ccord_live_json_slash_commands(const char *json, size_t len, ccord_
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null slash commands");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
-  if (!root) return CCORD_ERR_PARSE;
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  if (!root) {
+    st = CCORD_ERR_PARSE;
+    goto done;
+  }
   const ccord_json *arr = nullptr;
   if (is_json_array(root)) {
     arr = root;
@@ -7803,14 +8272,18 @@ ccord_status ccord_live_json_slash_commands(const char *json, size_t len, ccord_
     if (!arr) arr = ccord_json_get(root, "commands");
   }
   if (!is_json_array(arr)) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: slash commands not an array");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: slash commands not an array");
+    goto done;
   }
   size_t raw_n = ccord_json_array_len(arr);
   size_t cap = raw_n < CCORD_SLASH_MAX_COMMANDS ? raw_n : CCORD_SLASH_MAX_COMMANDS;
   ccord_slash_command *cmds = nullptr;
   if (cap > 0) {
     cmds = ccord_arena_alloc(&out->arena, cap * sizeof *cmds, _Alignof(ccord_slash_command));
-    if (!cmds) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    if (!cmds) {
+      st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      goto done;
+    }
     memset(cmds, 0, cap * sizeof *cmds);
   }
   size_t out_n = 0;
@@ -7856,7 +8329,9 @@ ccord_status ccord_live_json_slash_commands(const char *json, size_t len, ccord_
   out->ev.channel_id = channel_id;
   out->ev.slash_commands = cmds;
   out->ev.slash_command_count = out_n;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_auth_response(const char *json, size_t len, long http_status,
@@ -7873,7 +8348,7 @@ ccord_status ccord_live_json_auth_response(const char *json, size_t len, long ht
     return ccord_error_set(err, CCORD_ERR_PARSE, "auth: empty response (HTTP %ld)", http_status);
   }
   ccord_arena arena;
-  ccord_arena_init(&arena, 0);
+  ccord_arena_init(&arena, scratch_chunk_size(len));
   const ccord_json *root = parse_json(&arena, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_arena_free(&arena);
@@ -7943,7 +8418,7 @@ ccord_status ccord_voice_gateway_decode(const char *json, size_t len, ccord_voic
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "voice: null payload");
   memset(out, 0, sizeof *out);
   ccord_arena arena;
-  ccord_arena_init(&arena, 0);
+  ccord_arena_init(&arena, scratch_chunk_size(len));
   const ccord_json *root = parse_json(&arena, json, len, err);
   if (!root) {
     ccord_arena_free(&arena);
@@ -8102,11 +8577,11 @@ ccord_status ccord_voice_gateway_decode(const char *json, size_t len, ccord_voic
 #define LIVE_AUDIT_DETAIL_MAX 220u
 #define LIVE_AUDIT_CHANGES_SHOWN 3u
 
-static const char *user_label(const ccord_json *u)
+static const char *user_label(ccord_arena *a, const ccord_json *u)
 {
   const char *n = jstr(u, "global_name");
   if (!n || n[0] == '\0') n = jstr(u, "username");
-  return opt_text(n, CCORD_NAME_MAX_BYTES * 4u);
+  return opt_text_dup(a, n, CCORD_NAME_MAX_BYTES * 4u);
 }
 
 // A role object, or the array of them PATCH /guilds/{g}/roles answers with, as a ROLE_UPSERT.
@@ -8117,11 +8592,15 @@ ccord_status ccord_live_json_notify_settings(const char *json, size_t len, ccord
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad notification args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  ccord_status st = CCORD_OK;
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT || !map_notify_settings(out, root)) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad notification settings");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad notification settings");
   }
-  return CCORD_OK;
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_role(const char *json, size_t len, ccord_id guild_id, ccord_live_event *out, ccord_error *err)
@@ -8129,25 +8608,37 @@ ccord_status ccord_live_json_role(const char *json, size_t len, ccord_id guild_i
   ccord_error_clear(err);
   if (!json || !out || guild_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad role args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
-  if (!root) return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad role object");
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  if (!root) {
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad role object");
+    goto done;
+  }
   perm_lists pl = {0};
   bool ok = false;
   if (ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
-    ok = perm_add_role(&pl, root, guild_id);
+    ok = perm_add_role(&out->arena, &pl, root, guild_id);
   } else if (ccord_json_type_of(root) == CCORD_JSON_ARRAY) {
-    ok = perm_add_roles(&pl, root, guild_id);
+    ok = perm_add_roles(&out->arena, &pl, root, guild_id);
   }
   if (!ok || pl.nroles == 0) {
     ccord_free(pl.roles);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid role fields");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid role fields");
+    goto done;
   }
   ok = perm_publish(out, &pl);
-  if (!ok || out->ev.role_count == 0) return ccord_error_set(err, CCORD_ERR_PARSE, "rest: out of memory");
+  if (!ok || out->ev.role_count == 0) {
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: out of memory");
+    goto done;
+  }
   out->ev.type = CCORD_NET_ROLE_UPSERT;
   out->ev.guild_id = guild_id;
   out->ev.role_id = out->ev.roles[0].id;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 // GET /guilds/{g}/bans: [{reason, user:{id, username, global_name}}].
@@ -8156,20 +8647,29 @@ ccord_status ccord_live_json_bans(const char *json, size_t len, ccord_id guild_i
   ccord_error_clear(err);
   if (!json || !out || guild_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad ban args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
-  if (!root || ccord_json_type_of(root) != CCORD_JSON_ARRAY) return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad ban list");
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  if (!root || ccord_json_type_of(root) != CCORD_JSON_ARRAY) {
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad ban list");
+    goto done;
+  }
   size_t n = ccord_json_array_len(root);
   if (n > LIVE_ADMIN_LIST_MAX) n = LIVE_ADMIN_LIST_MAX;
   ccord_ban *bans = n > 0 ? ccord_arena_alloc(&out->arena, n * sizeof *bans, _Alignof(ccord_ban)) : nullptr;
-  if (n > 0 && !bans) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+  if (n > 0 && !bans) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
+  }
   size_t kept = 0;
   for (size_t i = 0; i < n; i++) {
     const ccord_json *e = ccord_json_array_at(root, i);
     const ccord_json *u = e ? ccord_json_get(e, "user") : nullptr;
     ccord_id uid = CCORD_ID_NONE;
     if (!u || !json_id_key(u, "id", &uid)) continue;   // a malformed entry is skipped
-    bans[kept++] = (ccord_ban){.user_id = uid, .name = user_label(u),
-                               .reason = opt_text(jstr(e, "reason"), CCORD_NAME_MAX_BYTES * 8u)};
+    bans[kept++] = (ccord_ban){.user_id = uid, .name = user_label(&out->arena, u),
+                               .reason = opt_text_dup(&out->arena, jstr(e, "reason"), CCORD_NAME_MAX_BYTES * 8u)};
   }
   out->bans = bans;
   out->ban_count = kept;
@@ -8177,13 +8677,17 @@ ccord_status ccord_live_json_bans(const char *json, size_t len, ccord_id guild_i
   out->ev.guild_id = guild_id;
   out->ev.bans = bans;
   out->ev.ban_count = kept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
-static bool map_invite(const ccord_json *j, ccord_invite *out)
+static bool map_invite(ccord_arena *a, const ccord_json *j, ccord_invite *out)
 {
   const char *code = jstr(j, "code");
   if (!j || !code || code[0] == '\0' || strlen(code) > CCORD_ADMIN_INVITE_CODE_MAX) return false;
+  const char *code_dup = arena_dup(a, code);
+  if (code_dup[0] == '\0') return false;
   const ccord_json *ch = ccord_json_get(j, "channel");
   const ccord_json *inv = ccord_json_get(j, "inviter");
   ccord_id cid = CCORD_ID_NONE, iid = CCORD_ID_NONE;
@@ -8205,8 +8709,8 @@ static bool map_invite(const ccord_json *j, ccord_invite *out)
   if (es) expires = iso_ms(es, strlen(es));
   if (expires < 0 && created >= 0 && age > 0) expires = created + age * 1000;
   *out = (ccord_invite){
-    .code = code, .channel_id = cid, .channel_name = opt_text(jstr(ch, "name"), CCORD_NAME_MAX_BYTES * 4u),
-    .inviter_id = iid, .inviter_name = user_label(inv),
+    .code = code_dup, .channel_id = cid, .channel_name = opt_text_dup(a, jstr(ch, "name"), CCORD_NAME_MAX_BYTES * 4u),
+    .inviter_id = iid, .inviter_name = user_label(a, inv),
     .uses = (uint32_t)uses, .max_uses = (uint32_t)max_uses, .max_age_s = (uint32_t)age,
     .temporary = perm_bool(j, "temporary"),
     .created_ms = created > 0 ? created : 0, .expires_ms = expires > 0 ? expires : 0,
@@ -8220,26 +8724,43 @@ ccord_status ccord_live_json_invites(const char *json, size_t len, ccord_id guil
   ccord_error_clear(err);
   if (!json || !out || guild_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad invite args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
-  if (!root) return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad invite");
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  if (!root) {
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad invite");
+    goto done;
+  }
   bool single = ccord_json_type_of(root) == CCORD_JSON_OBJECT;
-  if (!single && ccord_json_type_of(root) != CCORD_JSON_ARRAY) return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad invite");
+  if (!single && ccord_json_type_of(root) != CCORD_JSON_ARRAY) {
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad invite");
+    goto done;
+  }
   size_t n = single ? 1u : ccord_json_array_len(root);
   if (n > LIVE_ADMIN_LIST_MAX) n = LIVE_ADMIN_LIST_MAX;
   ccord_invite *items = n > 0 ? ccord_arena_alloc(&out->arena, n * sizeof *items, _Alignof(ccord_invite)) : nullptr;
-  if (n > 0 && !items) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+  if (n > 0 && !items) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
+  }
   size_t kept = 0;
   for (size_t i = 0; i < n; i++) {
-    if (map_invite(single ? root : ccord_json_array_at(root, i), &items[kept])) kept++;
+    if (map_invite(&out->arena, single ? root : ccord_json_array_at(root, i), &items[kept])) kept++;
   }
-  if (single && kept == 0) return ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid invite fields");
+  if (single && kept == 0) {
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: invalid invite fields");
+    goto done;
+  }
   out->invites = items;
   out->invite_count = kept;
   out->ev.type = single ? CCORD_NET_INVITE_UPSERT : CCORD_NET_INVITE_LIST;
   out->ev.guild_id = guild_id;
   out->ev.invites = items;
   out->ev.invite_count = kept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_channel_invites(const char *json, size_t len, ccord_id guild_id, ccord_id channel_id,
@@ -8250,17 +8771,24 @@ ccord_status ccord_live_json_channel_invites(const char *json, size_t len, ccord
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad channel invite args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_ARRAY) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad channel invites");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad channel invites");
+    goto done;
   }
   size_t n = ccord_json_array_len(root);
   if (n > LIVE_ADMIN_LIST_MAX) n = LIVE_ADMIN_LIST_MAX;
   ccord_invite *items = n > 0 ? ccord_arena_alloc(&out->arena, n * sizeof *items, _Alignof(ccord_invite)) : nullptr;
-  if (n > 0 && !items) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+  if (n > 0 && !items) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
+  }
   size_t kept = 0;
   for (size_t i = 0; i < n; i++) {
-    if (map_invite(ccord_json_array_at(root, i), &items[kept])) {
+    if (map_invite(&out->arena, ccord_json_array_at(root, i), &items[kept])) {
       if (items[kept].channel_id == CCORD_ID_NONE) items[kept].channel_id = channel_id;
       kept++;
     }
@@ -8272,7 +8800,9 @@ ccord_status ccord_live_json_channel_invites(const char *json, size_t len, ccord
   out->ev.channel_id = channel_id;
   out->ev.invites = items;
   out->ev.invite_count = kept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 // A short human rendering of one audit-log change value ("Red", 5, yes ...). Long text is cut on a character boundary.
@@ -8335,7 +8865,7 @@ static const char *audit_detail(ccord_arena *a, const ccord_json *entry)
   return dup ? dup : "";
 }
 
-static const char *audit_change_name(const ccord_json *entry)
+static const char *audit_change_name(ccord_arena *a, const ccord_json *entry)
 {
   const ccord_json *changes = ccord_json_get(entry, "changes");
   size_t n = changes && ccord_json_type_of(changes) == CCORD_JSON_ARRAY ? ccord_json_array_len(changes) : 0;
@@ -8345,18 +8875,26 @@ static const char *audit_change_name(const ccord_json *entry)
     if (!key || strcmp(key, "name") != 0) continue;
     const char *v = jstr(c, "new_value");
     if (!v || v[0] == '\0') v = jstr(c, "old_value");
-    if (v && v[0] != '\0') return opt_text(v, CCORD_NAME_MAX_BYTES * 4u);
+    if (v && v[0] != '\0') return opt_text_dup(a, v, CCORD_NAME_MAX_BYTES * 4u);
   }
   return "";
 }
 
-static const char *audit_user_name(const ccord_json *users, ccord_id id)
+static const char *audit_user_name(ccord_arena *a, const ccord_json *users, const id_index *user_idx, ccord_id id)
 {
-  size_t n = users && ccord_json_type_of(users) == CCORD_JSON_ARRAY ? ccord_json_array_len(users) : 0;
+  if (!users || ccord_json_type_of(users) != CCORD_JSON_ARRAY) return "";
+  size_t n = ccord_json_array_len(users);
+  if (user_idx && user_idx->count > 0) {
+    size_t idx = 0;
+    if (ccord_idmap_find(user_idx, id, &idx) && idx < n) {
+      return user_label(a, ccord_json_array_at(users, idx));
+    }
+    return "";
+  }
   for (size_t i = 0; i < n; i++) {
     const ccord_json *u = ccord_json_array_at(users, i);
     ccord_id uid = CCORD_ID_NONE;
-    if (json_id_key(u, "id", &uid) && uid == id) return user_label(u);
+    if (json_id_key(u, "id", &uid) && uid == id) return user_label(a, u);
   }
   return "";
 }
@@ -8399,23 +8937,43 @@ ccord_status ccord_live_json_audit_log(const char *json, size_t len, ccord_id gu
   ccord_error_clear(err);
   if (!json || !out || guild_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad audit args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  id_index user_idx = {0};
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad audit log");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad audit log");
+    goto done;
   }
   const ccord_json *entries = ccord_json_get(root, "audit_log_entries");
   if (!entries || ccord_json_type_of(entries) != CCORD_JSON_ARRAY) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad audit log");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad audit log");
+    goto done;
   }
   const ccord_json *users = ccord_json_get(root, "users");
+  size_t nu = users && ccord_json_type_of(users) == CCORD_JSON_ARRAY ? ccord_json_array_len(users) : 0;
+  if (nu > 8u && ccord_idmap_reserve(&user_idx, nu)) {
+    for (size_t i = 0; i < nu; i++) {
+      ccord_id uid = CCORD_ID_NONE;
+      if (json_id_key(ccord_json_array_at(users, i), "id", &uid) && uid != CCORD_ID_NONE &&
+          !ccord_idmap_find(&user_idx, uid, nullptr)) {
+        if (!ccord_idmap_put(&user_idx, uid, i)) {
+          ccord_idmap_free(&user_idx);
+          break;
+        }
+      }
+    }
+  }
   size_t n = ccord_json_array_len(entries);
   if (n > LIVE_ADMIN_LIST_MAX) n = LIVE_ADMIN_LIST_MAX;
   ccord_audit_entry *items = n > 0 ? ccord_arena_alloc(&out->arena, n * sizeof *items, _Alignof(ccord_audit_entry)) : nullptr;
   if (n > 0 && !items) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   size_t kept = 0;
   for (size_t i = 0; i < n; i++) {
@@ -8426,13 +8984,13 @@ ccord_status ccord_live_json_audit_log(const char *json, size_t len, ccord_id gu
     (void)json_id_key(e, "target_id", &tid);
     int64_t action = json_i64(e, "action_type", 0);
     if (action < 0 || action > UINT16_MAX) action = 0;
-    const char *tname = tid != CCORD_ID_NONE ? audit_user_name(users, tid) : "";
-    if (tname[0] == '\0') tname = audit_change_name(e);
+    const char *tname = tid != CCORD_ID_NONE ? audit_user_name(&out->arena, users, &user_idx, tid) : "";
+    if (tname[0] == '\0') tname = audit_change_name(&out->arena, e);
     items[kept] = (ccord_audit_entry){
       .id = id, .time_ms = (int64_t)(id >> 22) + 1420070400000LL,   // Discord's epoch is 2015-01-01
-      .user_id = uid, .user_name = uid != CCORD_ID_NONE ? audit_user_name(users, uid) : "",
+      .user_id = uid, .user_name = uid != CCORD_ID_NONE ? audit_user_name(&out->arena, users, &user_idx, uid) : "",
       .target_id = tid, .target_name = tname, .action = (uint16_t)action,
-      .reason = opt_text(jstr(e, "reason"), CCORD_NAME_MAX_BYTES * 8u), .detail = audit_detail(&out->arena, e),
+      .reason = opt_text_dup(&out->arena, jstr(e, "reason"), CCORD_NAME_MAX_BYTES * 8u), .detail = audit_detail(&out->arena, e),
     };
     audit_populate_changes(e, &items[kept]);
     kept++;
@@ -8443,7 +9001,10 @@ ccord_status ccord_live_json_audit_log(const char *json, size_t len, ccord_id gu
   out->ev.guild_id = guild_id;
   out->ev.audit = items;
   out->ev.audit_count = kept;
-  return CCORD_OK;
+done:
+  ccord_idmap_free(&user_idx);
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 // Discord session object: id_hash, approx_last_used_time, client_info{client,os,platform,location}.
@@ -8472,10 +9033,14 @@ ccord_status ccord_live_json_auth_sessions(const char *json, size_t len, ccord_l
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad auth sessions args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_ARRAY) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad auth sessions");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad auth sessions");
+    goto done;
   }
   size_t total = ccord_json_array_len(root);
   size_t cap = total < CCORD_LIVE_MAX_AUTH_SESSIONS ? total : CCORD_LIVE_MAX_AUTH_SESSIONS;
@@ -8483,7 +9048,8 @@ ccord_status ccord_live_json_auth_sessions(const char *json, size_t len, ccord_l
     cap > 0 ? ccord_arena_alloc(&out->arena, cap * sizeof *items, _Alignof(ccord_auth_session)) : nullptr;
   if (cap > 0 && !items) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   size_t kept = 0;
   for (size_t i = 0; i < total && kept < cap; i++) {
@@ -8495,7 +9061,9 @@ ccord_status ccord_live_json_auth_sessions(const char *json, size_t len, ccord_l
   }
   out->auth_sessions = items;
   out->auth_session_count = kept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 // Connection object: id, name, type, revoked, verified, friend_sync, show_activity, two_way_link, visibility.
@@ -8518,15 +9086,20 @@ ccord_status ccord_live_json_connections(const char *json, size_t len, ccord_liv
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad connections args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad connections");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad connections");
+    goto done;
   }
   bool single = ccord_json_type_of(root) == CCORD_JSON_OBJECT;
   if (!single && ccord_json_type_of(root) != CCORD_JSON_ARRAY) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad connections");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad connections");
+    goto done;
   }
   size_t total = single ? 1u : ccord_json_array_len(root);
   size_t cap = total < CCORD_LIVE_MAX_CONNECTIONS ? total : CCORD_LIVE_MAX_CONNECTIONS;
@@ -8534,7 +9107,8 @@ ccord_status ccord_live_json_connections(const char *json, size_t len, ccord_liv
     cap > 0 ? ccord_arena_alloc(&out->arena, cap * sizeof *items, _Alignof(ccord_connection)) : nullptr;
   if (cap > 0 && !items) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   size_t kept = 0;
   for (size_t i = 0; i < total && kept < cap; i++) {
@@ -8546,7 +9120,9 @@ ccord_status ccord_live_json_connections(const char *json, size_t len, ccord_liv
   }
   out->connections = items;
   out->connection_count = kept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_user_settings(const char *json, size_t len, ccord_live_event *out, ccord_error *err)
@@ -8554,12 +9130,16 @@ ccord_status ccord_live_json_user_settings(const char *json, size_t len, ccord_l
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad user settings args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  ccord_status st = CCORD_OK;
   if (!root || !map_user_settings_folders(out, root, false)) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad user settings");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad user settings");
   }
-  return CCORD_OK;
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_custom_status(const char *json, size_t len, ccord_live_event *out, ccord_error *err)
@@ -8567,12 +9147,16 @@ ccord_status ccord_live_json_custom_status(const char *json, size_t len, ccord_l
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad custom status args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  ccord_status st = CCORD_OK;
   if (!root || !map_user_settings_custom_status(out, root)) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad custom status");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad custom status");
   }
-  return CCORD_OK;
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_user_note(const char *json, size_t len, ccord_id fallback_uid,
@@ -8581,12 +9165,16 @@ ccord_status ccord_live_json_user_note(const char *json, size_t len, ccord_id fa
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad user note args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  ccord_status st = CCORD_OK;
   if (!root || !map_user_note_update(out, root, fallback_uid)) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad user note");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad user note");
   }
-  return CCORD_OK;
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_invite_preview(const char *json, size_t len, bool accepted, ccord_live_event *out,
@@ -8595,9 +9183,13 @@ ccord_status ccord_live_json_invite_preview(const char *json, size_t len, bool a
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad invite preview args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad invite preview");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad invite preview");
+    goto done;
   }
   const char *code = jstr(root, "code");
   const ccord_json *gj = ccord_json_get(root, "guild");
@@ -8607,16 +9199,20 @@ ccord_status ccord_live_json_invite_preview(const char *json, size_t len, bool a
   if (gid == CCORD_ID_NONE) (void)json_id_key(root, "guild_id", &gid);
   (void)json_id_key(cj, "id", &cid);
   if (!code || code[0] == '\0' || gid == CCORD_ID_NONE) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: incomplete invite preview");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: incomplete invite preview");
+    goto done;
   }
   ccord_invite_preview *p = ccord_arena_alloc(&out->arena, sizeof *p, _Alignof(ccord_invite_preview));
-  if (!p) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+  if (!p) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
+  }
   memset(p, 0, sizeof *p);
   copy_trunc_utf8(p->code, sizeof p->code, code);
   p->guild_id = gid;
   copy_trunc_utf8(p->guild_name, sizeof p->guild_name, gj ? jstr(gj, "name") : nullptr);
   if (p->guild_name[0] == '\0') copy_trunc_utf8(p->guild_name, sizeof p->guild_name, "Server");
-  const char *icon_url = gj ? build_cdn_url(&out->arena, "icons", gid, jstr(gj, "icon")) : "";
+  const char *icon_url = gj ? build_cdn_url(&scratch, "icons", gid, jstr(gj, "icon")) : "";
   copy_trunc_utf8(p->guild_icon_url, sizeof p->guild_icon_url, icon_url);
   copy_trunc_utf8(p->guild_description, sizeof p->guild_description, gj ? jstr(gj, "description") : nullptr);
   p->channel_id = cid;
@@ -8634,7 +9230,9 @@ ccord_status ccord_live_json_invite_preview(const char *json, size_t len, bool a
   out->ev.guild_id = gid;
   out->ev.channel_id = cid;
   out->ev.invite_preview = p;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_discoverable_guilds(const char *json, size_t len, const char *query,
@@ -8644,8 +9242,14 @@ ccord_status ccord_live_json_discoverable_guilds(const char *json, size_t len, c
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad discovery args");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
-  if (!root) return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad discovery json");
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  if (!root) {
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad discovery json");
+    goto done;
+  }
   const ccord_json *arr = nullptr;
   int64_t total_raw = -1;
   if (ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
@@ -8655,13 +9259,17 @@ ccord_status ccord_live_json_discoverable_guilds(const char *json, size_t len, c
     arr = root;
   }
   if (!arr || ccord_json_type_of(arr) != CCORD_JSON_ARRAY) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: discovery guilds missing");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: discovery guilds missing");
+    goto done;
   }
   size_t n = ccord_json_array_len(arr);
   if (n > CCORD_DISCOVERY_PAGE_MAX) n = CCORD_DISCOVERY_PAGE_MAX;
   ccord_discover_guild *items =
     n > 0 ? ccord_arena_alloc(&out->arena, n * sizeof *items, _Alignof(ccord_discover_guild)) : nullptr;
-  if (n > 0 && !items) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+  if (n > 0 && !items) {
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
+  }
   size_t kept = 0;
   for (size_t i = 0; i < n; i++) {
     const ccord_json *gj = ccord_json_array_at(arr, i);
@@ -8674,7 +9282,7 @@ ccord_status ccord_live_json_discoverable_guilds(const char *json, size_t len, c
     it->guild_id = gid;
     copy_trunc_utf8(it->name, sizeof it->name, gname);
     copy_trunc_utf8(it->description, sizeof it->description, jstr(gj, "description"));
-    const char *icon_url = build_cdn_url(&out->arena, "icons", gid, jstr(gj, "icon"));
+    const char *icon_url = build_cdn_url(&scratch, "icons", gid, jstr(gj, "icon"));
     copy_trunc_utf8(it->icon_url, sizeof it->icon_url, icon_url);
     copy_trunc_utf8(it->vanity_code, sizeof it->vanity_code, jstr(gj, "vanity_url_code"));
     int64_t cat = json_i64(gj, "primary_category_id", 0);
@@ -8697,7 +9305,9 @@ ccord_status ccord_live_json_discoverable_guilds(const char *json, size_t len, c
   out->ev.discovery_offset = offset;
   out->ev.discovery_category_id = category_id;
   out->ev.discovery_query = query ? ccord_arena_strndup(&out->arena, query, strlen(query)) : "";
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_incident_actions(const char *json, size_t len, ccord_id guild_id,
@@ -8708,10 +9318,14 @@ ccord_status ccord_live_json_incident_actions(const char *json, size_t len, ccor
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad incident args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || (ccord_json_type_of(root) != CCORD_JSON_OBJECT && ccord_json_type_of(root) != CCORD_JSON_NULL)) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad incident actions");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad incident actions");
+    goto done;
   }
   int64_t inv_ms = 0, dms_ms = 0;
   if (ccord_json_type_of(root) == CCORD_JSON_OBJECT) parse_incidents_obj(root, &inv_ms, &dms_ms);
@@ -8719,7 +9333,9 @@ ccord_status ccord_live_json_incident_actions(const char *json, size_t len, ccor
   out->ev.guild_id = guild_id;
   out->ev.invites_disabled_until_ms = inv_ms;
   out->ev.dms_disabled_until_ms = dms_ms;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_vanity_url(const char *json, size_t len, ccord_id guild_id,
@@ -8730,22 +9346,29 @@ ccord_status ccord_live_json_vanity_url(const char *json, size_t len, ccord_id g
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad vanity url args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad vanity url");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad vanity url");
+    goto done;
   }
   const char *code = jstr(root, "code");
   if (!code) code = "";
   const char *dup = ccord_arena_strndup(&out->arena, code, strlen(code));
   if (!dup) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   out->ev.type = CCORD_NET_GUILD_VANITY;
   out->ev.guild_id = guild_id;
   out->ev.invite_code = dup;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_guild_emojis(const char *json, size_t len, ccord_id guild_id,
@@ -8756,10 +9379,14 @@ ccord_status ccord_live_json_guild_emojis(const char *json, size_t len, ccord_id
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad emoji args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad emoji json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad emoji json");
+    goto done;
   }
   if (ccord_json_type_of(root) == CCORD_JSON_ARRAY) {
     ccord_emoji *el = nullptr;
@@ -8769,30 +9396,35 @@ ccord_status ccord_live_json_guild_emojis(const char *json, size_t len, ccord_id
     else ccord_free(el);
     if (!ok) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      goto done;
     }
     out->ev.type = CCORD_NET_GUILD_EXPRESSIONS;
     out->ev.guild_id = guild_id;
     out->ev.replace_emojis = true;
     out->ev.expressions_admin = true;
-    return CCORD_OK;
+    goto done;
   }
   if (ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
     ccord_emoji *e = ccord_arena_alloc(&out->arena, sizeof *e, _Alignof(ccord_emoji));
     bool oom = false;
     if (!e || !map_one_emoji(&out->arena, root, guild_id, e, &oom)) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, (!e || oom) ? CCORD_ERR_NOMEM : CCORD_ERR_PARSE, "rest: bad emoji object");
+      st = ccord_error_set(err, (!e || oom) ? CCORD_ERR_NOMEM : CCORD_ERR_PARSE, "rest: bad emoji object");
+      goto done;
     }
     e->guild_id = guild_id;
     out->ev.type = CCORD_NET_EMOJI_UPSERT;
     out->ev.guild_id = guild_id;
     out->ev.emojis = e;
     out->ev.emoji_count = 1;
-    return CCORD_OK;
+    goto done;
   }
   ccord_live_event_free(out);
-  return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad emoji payload");
+  st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad emoji payload");
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_guild_stickers(const char *json, size_t len, ccord_id guild_id,
@@ -8803,10 +9435,14 @@ ccord_status ccord_live_json_guild_stickers(const char *json, size_t len, ccord_
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad sticker args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st_res = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad sticker json");
+    st_res = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad sticker json");
+    goto done;
   }
   if (ccord_json_type_of(root) == CCORD_JSON_ARRAY) {
     ccord_sticker *sl = nullptr;
@@ -8816,30 +9452,35 @@ ccord_status ccord_live_json_guild_stickers(const char *json, size_t len, ccord_
     else ccord_free(sl);
     if (!ok) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      st_res = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      goto done;
     }
     out->ev.type = CCORD_NET_GUILD_EXPRESSIONS;
     out->ev.guild_id = guild_id;
     out->ev.replace_stickers = true;
     out->ev.expressions_admin = true;
-    return CCORD_OK;
+    goto done;
   }
   if (ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
     ccord_sticker *st = ccord_arena_alloc(&out->arena, sizeof *st, _Alignof(ccord_sticker));
     bool oom = false;
     if (!st || !map_one_sticker(&out->arena, root, guild_id, st, &oom)) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, (!st || oom) ? CCORD_ERR_NOMEM : CCORD_ERR_PARSE, "rest: bad sticker object");
+      st_res = ccord_error_set(err, (!st || oom) ? CCORD_ERR_NOMEM : CCORD_ERR_PARSE, "rest: bad sticker object");
+      goto done;
     }
     st->guild_id = guild_id;
     out->ev.type = CCORD_NET_STICKER_UPSERT;
     out->ev.guild_id = guild_id;
     out->ev.stickers = st;
     out->ev.sticker_count = 1;
-    return CCORD_OK;
+    goto done;
   }
   ccord_live_event_free(out);
-  return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad sticker payload");
+  st_res = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad sticker payload");
+done:
+  ccord_arena_free(&scratch);
+  return st_res;
 }
 
 ccord_status ccord_live_json_guild_soundboard(const char *json, size_t len, ccord_id guild_id,
@@ -8850,10 +9491,14 @@ ccord_status ccord_live_json_guild_soundboard(const char *json, size_t len, ccor
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad soundboard args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad soundboard json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad soundboard json");
+    goto done;
   }
   const ccord_json *arr = nullptr;
   if (ccord_json_type_of(root) == CCORD_JSON_ARRAY) {
@@ -8870,13 +9515,14 @@ ccord_status ccord_live_json_guild_soundboard(const char *json, size_t len, ccor
     else ccord_free(sbl);
     if (!ok) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      goto done;
     }
     out->ev.type = CCORD_NET_GUILD_EXPRESSIONS;
     out->ev.guild_id = guild_id;
     out->ev.replace_soundboard = true;
     out->ev.expressions_admin = true;
-    return CCORD_OK;
+    goto done;
   }
   if (ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
     ccord_soundboard_sound *sb =
@@ -8884,17 +9530,21 @@ ccord_status ccord_live_json_guild_soundboard(const char *json, size_t len, ccor
     bool oom = false;
     if (!sb || !map_one_soundboard(&out->arena, root, guild_id, sb, &oom)) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, (!sb || oom) ? CCORD_ERR_NOMEM : CCORD_ERR_PARSE, "rest: bad soundboard object");
+      st = ccord_error_set(err, (!sb || oom) ? CCORD_ERR_NOMEM : CCORD_ERR_PARSE, "rest: bad soundboard object");
+      goto done;
     }
     sb->guild_id = guild_id;
     out->ev.type = CCORD_NET_SOUNDBOARD_UPSERT;
     out->ev.guild_id = guild_id;
     out->ev.soundboard = sb;
     out->ev.soundboard_count = 1;
-    return CCORD_OK;
+    goto done;
   }
   ccord_live_event_free(out);
-  return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad soundboard payload");
+  st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad soundboard payload");
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_prune(const char *json, size_t len, ccord_id guild_id, uint8_t days, bool executed,
@@ -8905,22 +9555,28 @@ ccord_status ccord_live_json_prune(const char *json, size_t len, ccord_id guild_
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad prune args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad prune json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad prune json");
+    goto done;
   }
   const ccord_json *pj = ccord_json_get(root, "pruned");
   if (!pj) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: missing pruned field");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: missing pruned field");
+    goto done;
   }
   int32_t pruned = -1;
   if (ccord_json_type_of(pj) != CCORD_JSON_NULL) {
     int64_t pv = 0;
     if (!ccord_json_int64(pj, &pv) || pv < 0 || pv > INT32_MAX) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad pruned count");
+      st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad pruned count");
+      goto done;
     }
     pruned = (int32_t)pv;
   }
@@ -8932,7 +9588,9 @@ ccord_status ccord_live_json_prune(const char *json, size_t len, ccord_id guild_
     .executed = executed,
     .has_result = true,
   };
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_automod_rules(const char *json, size_t len, ccord_id guild_id, ccord_live_event *out,
@@ -8943,10 +9601,14 @@ ccord_status ccord_live_json_automod_rules(const char *json, size_t len, ccord_i
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad automod args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad automod json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad automod json");
+    goto done;
   }
   if (ccord_json_type_of(root) == CCORD_JSON_ARRAY) {
     size_t n = ccord_json_array_len(root);
@@ -8955,7 +9617,8 @@ ccord_status ccord_live_json_automod_rules(const char *json, size_t len, ccord_i
                                       : nullptr;
     if (n > 0 && !items) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      goto done;
     }
     size_t k = 0;
     for (size_t i = 0; i < n; i++) {
@@ -8965,7 +9628,8 @@ ccord_status ccord_live_json_automod_rules(const char *json, size_t len, ccord_i
         k++;
       } else if (oom) {
         ccord_live_event_free(out);
-        return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+        st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+        goto done;
       }
     }
     out->automod_rules = k > 0 ? items : nullptr;
@@ -8974,14 +9638,15 @@ ccord_status ccord_live_json_automod_rules(const char *json, size_t len, ccord_i
     out->ev.guild_id = guild_id;
     out->ev.automod_rules = out->automod_rules;
     out->ev.automod_rule_count = k;
-    return CCORD_OK;
+    goto done;
   }
   if (ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
     ccord_automod_rule *r = ccord_arena_alloc(&out->arena, sizeof *r, _Alignof(ccord_automod_rule));
     bool oom = false;
     if (!r || !map_one_automod_rule(&out->arena, root, guild_id, r, &oom)) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, (!r || oom) ? CCORD_ERR_NOMEM : CCORD_ERR_PARSE, "rest: bad automod rule object");
+      st = ccord_error_set(err, (!r || oom) ? CCORD_ERR_NOMEM : CCORD_ERR_PARSE, "rest: bad automod rule object");
+      goto done;
     }
     r->guild_id = guild_id;
     out->automod_rules = r;
@@ -8990,10 +9655,13 @@ ccord_status ccord_live_json_automod_rules(const char *json, size_t len, ccord_i
     out->ev.guild_id = guild_id;
     out->ev.automod_rules = r;
     out->ev.automod_rule_count = 1;
-    return CCORD_OK;
+    goto done;
   }
   ccord_live_event_free(out);
-  return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad automod payload");
+  st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad automod payload");
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 static const char *arena_dup_trunc(ccord_arena *a, const char *s, size_t max_bytes, bool *oom)
@@ -9062,10 +9730,14 @@ ccord_status ccord_live_json_webhooks(const char *json, size_t len, ccord_id gui
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad webhooks args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad webhooks json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad webhooks json");
+    goto done;
   }
   if (ccord_json_type_of(root) == CCORD_JSON_ARRAY) {
     size_t n = ccord_json_array_len(root);
@@ -9073,7 +9745,8 @@ ccord_status ccord_live_json_webhooks(const char *json, size_t len, ccord_id gui
     ccord_webhook *items = n > 0 ? ccord_arena_alloc(&out->arena, n * sizeof *items, _Alignof(ccord_webhook)) : nullptr;
     if (n > 0 && !items) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      goto done;
     }
     size_t k = 0;
     for (size_t i = 0; i < n; i++) {
@@ -9083,7 +9756,8 @@ ccord_status ccord_live_json_webhooks(const char *json, size_t len, ccord_id gui
         k++;
       } else if (oom) {
         ccord_live_event_free(out);
-        return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+        st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+        goto done;
       }
     }
     out->webhooks = k > 0 ? items : nullptr;
@@ -9092,14 +9766,15 @@ ccord_status ccord_live_json_webhooks(const char *json, size_t len, ccord_id gui
     out->ev.guild_id = guild_id;
     out->ev.webhooks = out->webhooks;
     out->ev.webhook_count = k;
-    return CCORD_OK;
+    goto done;
   }
   if (ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
     ccord_webhook *wh = ccord_arena_alloc(&out->arena, sizeof *wh, _Alignof(ccord_webhook));
     bool oom = false;
     if (!wh || !map_one_webhook(&out->arena, root, guild_id, wh, &oom)) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, (!wh || oom) ? CCORD_ERR_NOMEM : CCORD_ERR_PARSE, "rest: bad webhook object");
+      st = ccord_error_set(err, (!wh || oom) ? CCORD_ERR_NOMEM : CCORD_ERR_PARSE, "rest: bad webhook object");
+      goto done;
     }
     wh->guild_id = guild_id;
     out->webhooks = wh;
@@ -9108,10 +9783,13 @@ ccord_status ccord_live_json_webhooks(const char *json, size_t len, ccord_id gui
     out->ev.guild_id = guild_id;
     out->ev.webhooks = wh;
     out->ev.webhook_count = 1;
-    return CCORD_OK;
+    goto done;
   }
   ccord_live_event_free(out);
-  return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad webhooks payload");
+  st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad webhooks payload");
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_followed_channel(const char *json, size_t len, ccord_id guild_id, ccord_id fallback_src_ch,
@@ -9122,23 +9800,30 @@ ccord_status ccord_live_json_followed_channel(const char *json, size_t len, ccor
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad followed channel args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad followed channel json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad followed channel json");
+    goto done;
   }
   ccord_id src_id = CCORD_ID_NONE, wh_id = CCORD_ID_NONE;
   if (!json_id_key(root, "channel_id", &src_id) || src_id == CCORD_ID_NONE) src_id = fallback_src_ch;
   if (!json_id_key(root, "webhook_id", &wh_id) || wh_id == CCORD_ID_NONE || src_id == CCORD_ID_NONE) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: missing followed channel ids");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: missing followed channel ids");
+    goto done;
   }
   out->ev.type = CCORD_NET_CHANNEL_FOLLOWER_ADDED;
   out->ev.guild_id = guild_id;
   out->ev.channel_id = src_id;
   out->ev.target_channel_id = target_ch;
   out->ev.expr_id = wh_id;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_app_cmd_perms(const char *json, size_t len, ccord_id guild_id, ccord_live_event *out,
@@ -9149,10 +9834,14 @@ ccord_status ccord_live_json_app_cmd_perms(const char *json, size_t len, ccord_i
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad app cmd perms args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_ARRAY) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad app cmd perms json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad app cmd perms json");
+    goto done;
   }
   size_t n = ccord_json_array_len(root);
   if (n > 256u) n = 256u;
@@ -9160,7 +9849,8 @@ ccord_status ccord_live_json_app_cmd_perms(const char *json, size_t len, ccord_i
     n > 0 ? ccord_arena_alloc(&out->arena, n * sizeof *items, _Alignof(ccord_app_cmd_perms)) : nullptr;
   if (n > 0 && !items) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   size_t k = 0;
   for (size_t i = 0; i < n; i++) {
@@ -9196,7 +9886,9 @@ ccord_status ccord_live_json_app_cmd_perms(const char *json, size_t len, ccord_i
   out->ev.guild_id = guild_id;
   out->ev.app_cmd_perms = out->app_cmd_perms;
   out->ev.app_cmd_perms_count = k;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_welcome_screen(const char *json, size_t len, ccord_id guild_id, ccord_live_event *out,
@@ -9207,22 +9899,28 @@ ccord_status ccord_live_json_welcome_screen(const char *json, size_t len, ccord_
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad welcome screen args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad welcome screen json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad welcome screen json");
+    goto done;
   }
   ccord_welcome_screen *ws = ccord_arena_alloc(&out->arena, sizeof *ws, _Alignof(ccord_welcome_screen));
   if (!ws) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   *ws = (ccord_welcome_screen){0};
   bool oom = false;
   ws->description = arena_dup_trunc(&out->arena, jstr(root, "description"), CCORD_WELCOME_DESC_MAX_BYTES, &oom);
   if (oom) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   const ccord_json *carr = ccord_json_get(root, "welcome_channels");
   if (carr && ccord_json_type_of(carr) == CCORD_JSON_ARRAY) {
@@ -9232,7 +9930,8 @@ ccord_status ccord_live_json_welcome_screen(const char *json, size_t len, ccord_
       n > 0 ? ccord_arena_alloc(&out->arena, n * sizeof *chs, _Alignof(ccord_welcome_channel)) : nullptr;
     if (n > 0 && !chs) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      goto done;
     }
     size_t k = 0;
     for (size_t i = 0; i < n; i++) {
@@ -9245,7 +9944,8 @@ ccord_status ccord_live_json_welcome_screen(const char *json, size_t len, ccord_
       ch.emoji_name = arena_dup_trunc(&out->arena, jstr(cj, "emoji_name"), CCORD_EMOJI_MAX_BYTES, &oom);
       if (oom) {
         ccord_live_event_free(out);
-        return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+        st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+        goto done;
       }
       chs[k++] = ch;
     }
@@ -9257,7 +9957,9 @@ ccord_status ccord_live_json_welcome_screen(const char *json, size_t len, ccord_
   out->ev.type = CCORD_NET_WELCOME_SCREEN;
   out->ev.guild_id = guild_id;
   out->ev.welcome_screen = ws;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_onboarding(const char *json, size_t len, ccord_id guild_id, ccord_live_event *out,
@@ -9268,15 +9970,20 @@ ccord_status ccord_live_json_onboarding(const char *json, size_t len, ccord_id g
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad onboarding args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad onboarding json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad onboarding json");
+    goto done;
   }
   ccord_onboarding *ob = ccord_arena_alloc(&out->arena, sizeof *ob, _Alignof(ccord_onboarding));
   if (!ob) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   *ob = (ccord_onboarding){.guild_id = guild_id};
   ccord_id ogid = CCORD_ID_NONE;
@@ -9304,7 +10011,8 @@ ccord_status ccord_live_json_onboarding(const char *json, size_t len, ccord_id g
       pn > 0 ? ccord_arena_alloc(&out->arena, pn * sizeof *prompts, _Alignof(ccord_onboarding_prompt)) : nullptr;
     if (pn > 0 && !prompts) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      goto done;
     }
     size_t pk = 0;
     bool oom = false;
@@ -9320,7 +10028,8 @@ ccord_status ccord_live_json_onboarding(const char *json, size_t len, ccord_id g
       pr.title = arena_dup_trunc(&out->arena, ptitle, CCORD_ONBOARDING_TITLE_MAX_BYTES, &oom);
       if (oom) {
         ccord_live_event_free(out);
-        return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+        st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+        goto done;
       }
       pr.single_select = json_bool_key(pj, "single_select", false);
       pr.required = json_bool_key(pj, "required", false);
@@ -9334,7 +10043,8 @@ ccord_status ccord_live_json_onboarding(const char *json, size_t len, ccord_id g
           on > 0 ? ccord_arena_alloc(&out->arena, on * sizeof *opts, _Alignof(ccord_onboarding_option)) : nullptr;
         if (on > 0 && !opts) {
           ccord_live_event_free(out);
-          return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+          st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+          goto done;
         }
         size_t ok = 0;
         for (size_t j = 0; j < on; j++) {
@@ -9358,7 +10068,8 @@ ccord_status ccord_live_json_onboarding(const char *json, size_t len, ccord_id g
           opt.emoji_name = arena_dup_trunc(&out->arena, ename, CCORD_EMOJI_MAX_BYTES, &oom);
           if (oom) {
             ccord_live_event_free(out);
-            return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+            st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+            goto done;
           }
           const ccord_json *oc_arr = ccord_json_get(oj, "channel_ids");
           if (oc_arr && ccord_json_type_of(oc_arr) == CCORD_JSON_ARRAY) {
@@ -9394,7 +10105,9 @@ ccord_status ccord_live_json_onboarding(const char *json, size_t len, ccord_id g
   out->ev.type = CCORD_NET_ONBOARDING;
   out->ev.guild_id = guild_id;
   out->ev.onboarding = ob;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 // GET /guilds/{g}/member-verification answer: {"version":"...","description":"...","form_fields":[{"field_type":"TERMS",
@@ -9409,15 +10122,20 @@ ccord_status ccord_live_json_member_verification(const char *json, size_t len, c
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad member verification args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad member verification json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad member verification json");
+    goto done;
   }
   ccord_member_verification *mv = ccord_arena_alloc(&out->arena, sizeof *mv, _Alignof(ccord_member_verification));
   if (!mv) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   *mv = (ccord_member_verification){0};
   bool oom = false;
@@ -9450,12 +10168,15 @@ ccord_status ccord_live_json_member_verification(const char *json, size_t len, c
   }
   if (oom) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   out->ev.type = CCORD_NET_MEMBER_VERIFICATION;
   out->ev.guild_id = guild_id;
   out->ev.member_verification = mv;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_stage_instance(const char *json, size_t len, ccord_id guild_id, ccord_id channel_id,
@@ -9464,27 +10185,35 @@ ccord_status ccord_live_json_stage_instance(const char *json, size_t len, ccord_
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null stage instance");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad stage instance json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad stage instance json");
+    goto done;
   }
   ccord_stage_instance *si = ccord_arena_alloc(&out->arena, sizeof *si, _Alignof(ccord_stage_instance));
   if (!si) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   memset(si, 0, sizeof *si);
   if (!map_stage_instance_obj(root, guild_id, channel_id, si)) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: stage instance has no channel id");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: stage instance has no channel id");
+    goto done;
   }
   out->ev.type = CCORD_NET_STAGE_INSTANCE_UPDATE;
   out->ev.guild_id = si->guild_id;
   out->ev.channel_id = si->channel_id;
   out->ev.stage_instance = si;
   out->ev.stage_deleted = false;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_scheduled_event(const char *json, size_t len, ccord_id guild_id,
@@ -9493,19 +10222,25 @@ ccord_status ccord_live_json_scheduled_event(const char *json, size_t len, ccord
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null scheduled event");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad scheduled event json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad scheduled event json");
+    goto done;
   }
   ccord_scheduled_event *se = ccord_arena_alloc(&out->arena, sizeof *se, _Alignof(ccord_scheduled_event));
   if (!se) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    goto done;
   }
   if (!map_scheduled_event_obj(root, guild_id, false, se)) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad scheduled event object");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad scheduled event object");
+    goto done;
   }
   out->ev.type = CCORD_NET_SCHEDULED_EVENT_UPDATE;
   out->ev.guild_id = se->guild_id;
@@ -9513,7 +10248,9 @@ ccord_status ccord_live_json_scheduled_event(const char *json, size_t len, ccord
   out->ev.scheduled_event_count = 1;
   out->ev.scheduled_event_id = se->id;
   out->ev.scheduled_event_deleted = false;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_scheduled_event_list(const char *json, size_t len, ccord_id guild_id,
@@ -9522,11 +10259,18 @@ ccord_status ccord_live_json_scheduled_event_list(const char *json, size_t len, 
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null scheduled events");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
-  if (!root) return CCORD_ERR_PARSE;
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
+  if (!root) {
+    st = CCORD_ERR_PARSE;
+    goto done;
+  }
   if (!is_json_array(root)) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: scheduled events not an array");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: scheduled events not an array");
+    goto done;
   }
   size_t raw_n = ccord_json_array_len(root);
   size_t cap = raw_n < CCORD_LIVE_MAX_SCHEDULED_EVENTS ? raw_n : CCORD_LIVE_MAX_SCHEDULED_EVENTS;
@@ -9535,7 +10279,8 @@ ccord_status ccord_live_json_scheduled_event_list(const char *json, size_t len, 
     events = ccord_arena_alloc(&out->arena, cap * sizeof *events, _Alignof(ccord_scheduled_event));
     if (!events) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      goto done;
     }
   }
   size_t kept = 0;
@@ -9548,7 +10293,9 @@ ccord_status ccord_live_json_scheduled_event_list(const char *json, size_t len, 
   out->ev.guild_id = guild_id;
   out->ev.scheduled_events = kept > 0 ? events : nullptr;
   out->ev.scheduled_event_count = kept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 // One shelf config passes the platform filter when it names "web": a "platform" string, a "platforms" or
@@ -9595,10 +10342,14 @@ ccord_status ccord_live_json_activity_shelf(const char *json, size_t len, ccord_
     return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad activity shelf args");
   }
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
     ccord_live_event_free(out);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad activity shelf json");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad activity shelf json");
+    goto done;
   }
   const ccord_json *carr = ccord_json_get(root, "activities");
   const ccord_json *aarr = ccord_json_get(root, "applications");
@@ -9610,7 +10361,8 @@ ccord_status ccord_live_json_activity_shelf(const char *json, size_t len, ccord_
     apps = ccord_arena_alloc(&out->arena, cap * sizeof *apps, _Alignof(ccord_activity_app));
     if (!apps) {
       ccord_live_event_free(out);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+      goto done;
     }
   }
   size_t kept = 0;
@@ -9660,7 +10412,9 @@ ccord_status ccord_live_json_activity_shelf(const char *json, size_t len, ccord_
   out->ev.guild_id = guild_id;
   out->ev.activity_apps = kept > 0 ? apps : nullptr;
   out->ev.activity_app_count = kept;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }
 
 ccord_status ccord_live_json_guild_profile(const char *json, size_t len, ccord_id guild_id,
@@ -9669,9 +10423,13 @@ ccord_status ccord_live_json_guild_profile(const char *json, size_t len, ccord_i
   ccord_error_clear(err);
   if (!json || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null guild profile");
   ccord_live_event_init(out);
-  const ccord_json *root = parse_json(&out->arena, json, len, err);
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = parse_json(&scratch, json, len, err);
   if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) {
-    return ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad guild profile object");
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad guild profile object");
+    goto done;
   }
   const ccord_json *src = root;
   const ccord_json *sub = ccord_json_get(root, "profile");
@@ -9681,7 +10439,10 @@ ccord_status ccord_live_json_guild_profile(const char *json, size_t len, ccord_i
   ccord_id gid = guild_id;
   (void)json_id_key(src, "id", &gid);
   if (gid == CCORD_ID_NONE) (void)json_id_key(root, "id", &gid);
-  if (gid == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_PARSE, "rest: guild profile missing id");
+  if (gid == CCORD_ID_NONE) {
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: guild profile missing id");
+    goto done;
+  }
 
   ccord_guild_profile gp = {.guild_id = gid};
   copy_trunc_utf8(gp.name, sizeof gp.name, jstr(src, "name"));
@@ -9691,13 +10452,13 @@ ccord_status ccord_live_json_guild_profile(const char *json, size_t len, ccord_i
 
   const char *icon = jstr(src, "icon_hash");
   if (!icon || icon[0] == '\0') icon = jstr(src, "icon");
-  const char *iurl = build_cdn_url_sized(&out->arena, "icons", gid, icon, "128");
+  const char *iurl = build_cdn_url_sized(&scratch, "icons", gid, icon, "128");
   copy_trunc_utf8(gp.icon_url, sizeof gp.icon_url, iurl);
 
   const char *banner = jstr(src, "custom_banner_hash");
   if (!banner || banner[0] == '\0') banner = jstr(src, "banner_hash");
   if (!banner || banner[0] == '\0') banner = jstr(src, "banner");
-  const char *burl = build_cdn_url_sized(&out->arena, "banners", gid, banner, "512");
+  const char *burl = build_cdn_url_sized(&scratch, "banners", gid, banner, "512");
   copy_trunc_utf8(gp.banner_url, sizeof gp.banner_url, burl);
 
   const char *badge = jstr(src, "badge_hash");
@@ -9723,5 +10484,7 @@ ccord_status ccord_live_json_guild_profile(const char *json, size_t len, ccord_i
   out->ev.type = CCORD_NET_GUILD_PROFILE;
   out->ev.guild_id = gid;
   out->ev.guild_profile = gp;
-  return CCORD_OK;
+done:
+  ccord_arena_free(&scratch);
+  return st;
 }

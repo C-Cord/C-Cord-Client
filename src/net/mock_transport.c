@@ -315,7 +315,7 @@ typedef struct mock {
   int16_t stream_pcm[MOCK_STREAM_PCM_CAP];
   size_t stream_pcm_head, stream_pcm_count;
   ccord_snapshot snap;
-  mock_item *queue; size_t nq, capq;
+  mock_item *queue; size_t qhead, nq, capq;
   mock_item current;
   bool have_current;
   const char **garbage; size_t ngarbage, capgarbage; // retired message contents kept until destroy
@@ -1290,9 +1290,34 @@ static ccord_status build_dataset(mock *m, ccord_error *err)
   return CCORD_OK;
 }
 
-static void free_items(mock_item *items, size_t n)
+static size_t qidx(const mock *m, size_t logical)
 {
-  for (size_t i = 0; i < n; i++) item_release(&items[i]);
+  return (m->qhead + logical) % m->capq;
+}
+
+static void free_queue(mock *m)
+{
+  for (size_t i = 0; i < m->nq; i++) item_release(&m->queue[qidx(m, i)]);
+  m->qhead = 0;
+  m->nq = 0;
+}
+
+static bool mock_queue_linearize(mock *m)
+{
+  if (m->qhead == 0 || m->nq == 0) {
+    m->qhead = 0;
+    return true;
+  }
+  mock_item *tmp = ccord_alloc_array(m->nq, sizeof *tmp);
+  if (!tmp) return false;
+  size_t first = m->capq - m->qhead;
+  if (first > m->nq) first = m->nq;
+  memcpy(tmp, m->queue + m->qhead, first * sizeof *tmp);
+  if (m->nq > first) memcpy(tmp + first, m->queue, (m->nq - first) * sizeof *tmp);
+  memcpy(m->queue, tmp, m->nq * sizeof *tmp);
+  ccord_free(tmp);
+  m->qhead = 0;
+  return true;
 }
 
 static void dataset_free(mock *m)
@@ -1328,19 +1353,29 @@ static void dataset_free(mock *m)
 
 // ---- queue ----
 
-static ccord_status push_item(mock *m, mock_item item, ccord_error *err)
+static ccord_status push_item(mock *m, const mock_item *item, ccord_error *err)
 {
   if (m->nq == m->capq) {
-    size_t ncap = m->capq ? m->capq * 2 : 16;
-    mock_item *g = ccord_realloc_array(m->queue, ncap, sizeof *g);
+    size_t ncap = m->capq ? m->capq * 2u : 16u;
+    mock_item *g = ccord_alloc_array(ncap, sizeof *g);
     if (!g) {
-      item_release(&item);
+      mock_item drop = *item;
+      item_release(&drop);
       return ccord_error_set(err, CCORD_ERR_NOMEM, "mock: out of memory");
     }
+    if (m->nq > 0) {
+      size_t first = m->capq - m->qhead;
+      if (first > m->nq) first = m->nq;
+      memcpy(g, m->queue + m->qhead, first * sizeof *g);
+      if (m->nq > first) memcpy(g + first, m->queue, (m->nq - first) * sizeof *g);
+    }
+    ccord_free(m->queue);
     m->queue = g;
+    m->qhead = 0;
     m->capq = ncap;
   }
-  m->queue[m->nq++] = item;
+  m->queue[(m->qhead + m->nq) % m->capq] = *item;
+  m->nq++;
   return CCORD_OK;
 }
 
@@ -1417,7 +1452,7 @@ static ccord_status queue_message_create(mock *m, ccord_message msg, uint64_t du
   it.ev.message_count = 1;
   it.ev.channel_id = msg.channel_id;
   it.ev.guild_id = CCORD_ID_NONE;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status queue_message_update(mock *m, ccord_message msg, uint64_t due, ccord_error *err)
@@ -1429,7 +1464,7 @@ static ccord_status queue_message_update(mock *m, ccord_message msg, uint64_t du
   it.ev.messages = it.msgs;
   it.ev.message_count = 1;
   it.ev.channel_id = msg.channel_id;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static int64_t message_time(const mock *m)
@@ -1467,7 +1502,7 @@ static ccord_status queue_activity_instance(mock *m, const ccord_activity_instan
   it.ev.guild_id = inst->guild_id;
   it.ev.channel_id = inst->channel_id;
   it.ev.activity_instance = *inst;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status queue_voice_state(mock *m, const ccord_voice_state *v, uint64_t due, ccord_error *err)
@@ -1480,7 +1515,7 @@ static ccord_status queue_voice_state(mock *m, const ccord_voice_state *v, uint6
   it.ev.guild_id = v->guild_id;
   it.ev.channel_id = v->channel_id;
   it.ev.user_id = v->user_id;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status queue_stream_state(mock *m, const ccord_stream_state *st, uint64_t due, ccord_error *err)
@@ -1493,7 +1528,7 @@ static ccord_status queue_stream_state(mock *m, const ccord_stream_state *st, ui
   it.ev.guild_id = st->guild_id;
   it.ev.channel_id = st->channel_id;
   it.ev.user_id = st->user_id;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // ---- M5 voice & video simulation ------------------------------------
@@ -1769,7 +1804,7 @@ static ccord_status queue_voice_server(mock *m, ccord_id guild_id, ccord_id chan
   it.ev.voice_server = it.vserver_own;
   it.ev.guild_id = guild_id;
   it.ev.channel_id = channel_id;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static long mock_call_index(const mock *m, ccord_id channel_id)
@@ -1793,7 +1828,7 @@ static ccord_status queue_call_event(mock *m, const ccord_call_state *call, ccor
     *it.call_own = *call;
     it.ev.call = it.call_own;
   }
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static bool call_drop_ringing(ccord_call_state *call, ccord_id user_id)
@@ -1847,7 +1882,7 @@ static ccord_status queue_stage_instance(mock *m, const ccord_stage_instance *st
   it.ev.stage_deleted = deleted;
   it.ev.guild_id = stage->guild_id;
   it.ev.channel_id = stage->channel_id;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // Joining a stage channel with no live instance starts one (the mock's stand-in for POST /stage-instances).
@@ -1885,7 +1920,7 @@ static ccord_status queue_voice_status(mock *m, ccord_id guild_id, ccord_id chan
   it.ev.voice_status = it.voice_status_own;
   it.ev.guild_id = guild_id;
   it.ev.channel_id = channel_id;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // Go Live signalling. `kind` picks the payload: CREATE names the media connection, SERVER_UPDATE hands
@@ -1937,7 +1972,7 @@ static ccord_status queue_stream_signal_ex(mock *m, ccord_id guild_id, ccord_id 
   it.ev.channel_id = channel_id;
   it.ev.user_id = user_id;
   it.ev.stream_signal = sig;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // ---- vtable ----
@@ -1981,7 +2016,7 @@ static ccord_status mock_queue_ready(mock *m, uint64_t due, ccord_error *err)
 {
   mock_item st = make_item(CCORD_NET_STATE, due);
   st.ev.state = CCORD_CONN_CONNECTED;
-  ccord_status s = push_item(m, st, err);
+  ccord_status s = push_item(m, &st, err);
   if (s != CCORD_OK) return s;
   mock_item snap = make_item(CCORD_NET_SNAPSHOT, due);
   snap.ev.snapshot = &m->snap;
@@ -2036,7 +2071,7 @@ static ccord_status mock_queue_ready(mock *m, uint64_t due, ccord_error *err)
   snap.ev.overwrite_count = m->noverwrites;
   snap.ev.notify = m->notify;
   snap.ev.notify_count = m->nnotify;
-  s = push_item(m, snap, err);
+  s = push_item(m, &snap, err);
   if (s != CCORD_OK) return s;
   // Stage instances and scheduled events are gateway dispatches, not snapshot rows: they follow the snapshot.
   for (size_t i = 0; i < m->nstages; i++) {
@@ -2060,7 +2095,7 @@ static ccord_status mock_queue_ready(mock *m, uint64_t due, ccord_error *err)
     eit.ev.guild_id = gid;
     eit.ev.scheduled_events = eit.events_own;
     eit.ev.scheduled_event_count = ev_n;
-    s = push_item(m, eit, err);
+    s = push_item(m, &eit, err);
     if (s != CCORD_OK) return s;
   }
   // Running activity instances survive a reconnect: Discord re-sends them with the guild's state.
@@ -2083,7 +2118,7 @@ static ccord_status mock_connect(ccord_transport *t, ccord_error *err)
   mock_link_on_connect(m, now);
   mock_item st = make_item(CCORD_NET_STATE, now);
   st.ev.state = CCORD_CONN_CONNECTING;
-  ccord_status s = push_item(m, st, err);
+  ccord_status s = push_item(m, &st, err);
   if (s != CCORD_OK) return s;
   return mock_queue_ready(m, now + m->cfg.latency_ms, err);
 }
@@ -2098,11 +2133,10 @@ static void mock_disconnect(ccord_transport *t)
   mock_stream_media_clear(m);
   mock_cam_clear(m);
   m->ninflight_uploads = 0;
-  free_items(m->queue, m->nq);
-  m->nq = 0;
+  free_queue(m);
   mock_item st = make_item(CCORD_NET_STATE, now_of(m));
   st.ev.state = CCORD_CONN_DISCONNECTED;
-  push_item(m, st, nullptr);
+  push_item(m, &st, nullptr);
 }
 
 static ccord_status mock_request_history(ccord_transport *t, ccord_id channel_id, uint32_t limit, ccord_error *err)
@@ -2125,7 +2159,7 @@ static ccord_status mock_request_history(ccord_transport *t, ccord_id channel_id
   if (take) memcpy(it.msgs, m->chmsgs[ci] + from, take * sizeof *it.msgs);
   it.ev.messages = it.msgs;
   it.ev.message_count = take;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // refuse_writes: the call succeeded but Discord says no. Reported on a later poll, with the user's text.
@@ -2148,7 +2182,7 @@ static ccord_status queue_action_refused(mock *m, ccord_action_kind action, ccor
     memcpy(it.ev.action_nonce, nonce, nonce_len);
     it.ev.action_nonce[nonce_len] = '\0';
   }
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static uint64_t mock_self_perms(mock *m, ccord_id guild);
@@ -2186,7 +2220,7 @@ static bool mock_slowmode_refused(mock *m, size_t ci, ccord_action_kind action, 
           memcpy(it.ev.action_nonce, nonce, nonce_len);
           it.ev.action_nonce[nonce_len] = '\0';
         }
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
         return true;
       }
       break;
@@ -2293,7 +2327,7 @@ static ccord_status mock_delete_message(ccord_transport *t, ccord_id channel_id,
   it.ev.guild_id = m->channels[ci].guild_id;
   it.ev.channel_id = channel_id;
   it.ev.message_id = message_id;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_send_typing(ccord_transport *t, ccord_id channel_id, ccord_error *err)
@@ -2310,7 +2344,7 @@ static ccord_status mock_send_typing(ccord_transport *t, ccord_id channel_id, cc
   it.ev.channel_id = channel_id;
   it.ev.user_id = m->self_id;
   it.ev.timestamp_ms = (int64_t)due + 8000;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_toggle_reaction(ccord_transport *t, ccord_id channel_id, ccord_id message_id,
@@ -2347,7 +2381,7 @@ static ccord_status mock_toggle_reaction(ccord_transport *t, ccord_id channel_id
     retire_content(m, emoji_copy);
     it.ev.reaction_emoji = emoji_copy;
   }
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_request_reaction_users(ccord_transport *t, ccord_id channel_id, ccord_id message_id,
@@ -2417,7 +2451,7 @@ static ccord_status mock_request_reaction_users(ccord_transport *t, ccord_id cha
   it.ev.reaction_emoji = ecopy;
   it.ev.users = it.users_own;
   it.ev.user_count = kept;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_ack_message(ccord_transport *t, ccord_id channel_id, ccord_id message_id, ccord_error *err)
@@ -2440,7 +2474,7 @@ static void queue_speaking(mock *m, ccord_id guild_id, ccord_id channel_id, ccor
   it.ev.channel_id = channel_id;
   it.ev.user_id = user_id;
   it.ev.speaking = speaking;
-  (void)push_item(m, it, nullptr);
+  (void)push_item(m, &it, nullptr);
 }
 
 // ---- voice outage simulation ---------------------------
@@ -2461,7 +2495,7 @@ static ccord_status queue_voice_link(mock *m, ccord_voice_link st, uint32_t atte
       break;
     }
   }
-  ccord_status s = push_item(m, it, err);
+  ccord_status s = push_item(m, &it, err);
   if (s == CCORD_OK && m->nvstate_tl < sizeof m->vstate_tl / sizeof m->vstate_tl[0]) {
     uint8_t rs = st == CCORD_VLINK_CONNECTED ? CCORD_VOICE_ESTABLISHED
                : st == CCORD_VLINK_RECONNECTING ? CCORD_VOICE_RECONNECTING : CCORD_VOICE_FAILED;
@@ -2477,14 +2511,16 @@ static void mock_purge_voice_link(mock *m)
 {
   size_t w = 0;
   for (size_t i = 0; i < m->nq; i++) {
-    if (m->queue[i].ev.type == CCORD_NET_VOICE_LINK) {
-      item_release(&m->queue[i]);
+    size_t si = qidx(m, i);
+    if (m->queue[si].ev.type == CCORD_NET_VOICE_LINK) {
+      item_release(&m->queue[si]);
       continue;
     }
-    if (w != i) m->queue[w] = m->queue[i];
+    if (w != i) m->queue[qidx(m, w)] = m->queue[si];
     w++;
   }
   m->nq = w;
+  if (m->nq == 0) m->qhead = 0;
   m->nvstate_tl = 0;
 }
 
@@ -2894,7 +2930,7 @@ static ccord_status mock_mark_unread(ccord_transport *t, ccord_id channel_id, cc
   it.ev.channel_id = channel_id;
   it.ev.message_id = mi > 0 ? m->chmsgs[ci][mi - 1].id : (message_id - 1u);
   it.ev.mention_count = mentions;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_toggle_pin(ccord_transport *t, ccord_id channel_id, ccord_id message_id, bool pinned,
@@ -2913,7 +2949,7 @@ static ccord_status mock_toggle_pin(ccord_transport *t, ccord_id channel_id, cco
   it.ev.channel_id = channel_id;
   it.ev.message_id = message_id;
   it.ev.pinned = pinned;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_request_history_before(ccord_transport *t, ccord_id channel_id, ccord_id before_id,
@@ -2938,7 +2974,7 @@ static ccord_status mock_request_history_before(ccord_transport *t, ccord_id cha
   if (take) memcpy(it.msgs, m->chmsgs[ci] + from, take * sizeof *it.msgs);
   it.ev.messages = it.msgs;
   it.ev.message_count = take;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_request_pins_before(ccord_transport *t, ccord_id channel_id, const char *before_cursor,
@@ -2990,7 +3026,7 @@ static ccord_status mock_request_pins_before(ccord_transport *t, ccord_id channe
   it.ev.message_count = n;
   it.ev.pins_has_more = has_more;
   it.ev.pins_append = has_before;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_request_pins(ccord_transport *t, ccord_id channel_id, uint32_t limit, ccord_error *err)
@@ -3051,7 +3087,7 @@ static ccord_status mock_set_presence_ex(ccord_transport *t, ccord_presence pres
   it.ev.activity_start_ms = m->users[0].activity_start_ms;
   it.ev.activity_end_ms = m->users[0].activity_end_ms;
   if (m->own_presence_silent) return CCORD_OK;   // the server does not echo the account's own presence back
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_set_presence(ccord_transport *t, ccord_presence presence, const char *status_text,
@@ -3075,7 +3111,7 @@ static ccord_status mock_set_presence(ccord_transport *t, ccord_presence presenc
     }
   }
   if (m->own_presence_silent) return CCORD_OK;   // the server does not echo the account's own presence back
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // Same contract as the live gateway's ccord_gateway_set_rich_activities.
@@ -3532,7 +3568,7 @@ static ccord_status mock_create_poll(ccord_transport *t, ccord_id channel_id, co
     it.ev.channel_id = channel_id;
     it.ev.status = CCORD_ERR_PERMISSION;
     it.ev.text = m->late_poll_fail;
-    return push_item(m, it, err);
+    return push_item(m, &it, err);
   }
   ccord_message_rich rich = {.present = CCORD_RICH_ALL};
   rich.poll.present = true;
@@ -3624,7 +3660,7 @@ static ccord_status mock_request_slash_commands(ccord_transport *t, ccord_id gui
   it.ev.channel_id = channel_id;
   it.ev.slash_commands = it.slash_own;
   it.ev.slash_command_count = count;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static const uint8_t k_mock_png_1x1[67] = {
@@ -3800,7 +3836,7 @@ static ccord_status mock_fetch_media(ccord_transport *t, const char *url, ccord_
     fit.ev.status = CCORD_ERR_IO;
     fit.ev.media_url = failed_url;
     fit.ev.media_path = "";
-    return push_item(m, fit, err);
+    return push_item(m, &fit, err);
   }
 
   const mock_upload *uploaded = upload_cache_find(m, url);
@@ -3838,7 +3874,7 @@ static ccord_status mock_fetch_media(ccord_transport *t, const char *url, ccord_
   it.ev.media_path = path_copy;
   it.ev.media_data = bytes;
   it.ev.media_len = payload_len;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // ---- Ranged media ----
@@ -3912,7 +3948,7 @@ static ccord_status mock_range_answer(mock *m, const ccord_media_range_req *req,
   it.ev.range_http = http;
   it.ev.range_redirects = hops;
   if (etag) snprintf(it.ev.range_etag, sizeof it.ev.range_etag, "%s", etag);
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_fetch_media_range(ccord_transport *t, const ccord_media_range_req *req, ccord_error *err)
@@ -4072,7 +4108,7 @@ static ccord_status mock_search_messages_ex(ccord_transport *t, ccord_id guild_i
   it.ev.search_total_results = total > UINT32_MAX ? UINT32_MAX : (uint32_t)total;
   it.ev.users = m->users;
   it.ev.user_count = MOCK_NUM_USERS;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_search_messages(ccord_transport *t, ccord_id guild_id, ccord_id channel_id,
@@ -4107,7 +4143,7 @@ static ccord_status mock_search_messages(ccord_transport *t, ccord_id guild_id, 
   it.ev.search_total_results = total > UINT32_MAX ? UINT32_MAX : (uint32_t)total;
   it.ev.users = m->users;
   it.ev.user_count = MOCK_NUM_USERS;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_open_dm(ccord_transport *t, ccord_id recipient_id, ccord_error *err)
@@ -4179,7 +4215,7 @@ static ccord_status mock_open_dm(ccord_transport *t, ccord_id recipient_id, ccor
   it.ev.channel = it.chan;
   it.ev.channel_id = it.chan->id;
   it.ev.guild_id = CCORD_DM_GUILD_ID;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_push_voice_pcm(ccord_transport *t, const int16_t *pcm, size_t samples, ccord_error *err)
@@ -4265,7 +4301,7 @@ static ccord_status mock_set_relationship(ccord_transport *t, ccord_id user_id, 
   mock_item it = make_item(CCORD_NET_RELATIONSHIP_UPDATE, now_of(m) + m->cfg.latency_ms);
   it.ev.user_id = user_id;
   it.ev.relationship_kind = kind;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // Profile extras the mock answers with. Only the second seeded user, Ada (users[1]), carries them, so a test can tell a
@@ -4393,10 +4429,9 @@ static ccord_status mock_request_profile_ex(ccord_transport *t, ccord_id user_id
   }
   it.ev.user_id = u->id;
   it.ev.user_profile = it.profile;
-  it.ev.profile = *it.profile;
   it.ev.users = u;
   it.ev.user_count = 1;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_request_profile(ccord_transport *t, ccord_id user_id, ccord_error *err)
@@ -4691,7 +4726,7 @@ static ccord_status mock_request_expression_data(ccord_transport *t, ccord_expr_
   it.ev.expr_body_len = body_len;
   it.ev.raw_proto = raw_proto_own;
   it.ev.raw_proto_len = raw_proto_len;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_patch_settings_proto(ccord_transport *t, const uint8_t *proto, size_t proto_len,
@@ -4707,7 +4742,7 @@ static ccord_status mock_patch_settings_proto(ccord_transport *t, const uint8_t 
     it.ev.status = CCORD_ERR_PERMISSION;
     it.ev.expr_kind = CCORD_EXPR_SETTINGS_PROTO;
     it.ev.text = "You don't have permission to do that. (Missing Permissions)";
-    return push_item(m, it, err);
+    return push_item(m, &it, err);
   }
   uint8_t *stored = ccord_alloc_array(proto_len ? proto_len : 1u, 1);
   uint8_t *ev_proto = ccord_alloc_array(proto_len ? proto_len : 1u, 1);
@@ -4750,7 +4785,7 @@ static ccord_status mock_patch_settings_proto(ccord_transport *t, const uint8_t 
   it.ev.expr_body_len = body_len;
   it.ev.raw_proto = ev_proto;
   it.ev.raw_proto_len = proto_len;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // set_status_proto: patch the server's type-1 bytes (the mock is the server, so its bytes are the base a live
@@ -4912,7 +4947,7 @@ static ccord_status mock_request_forum_posts(ccord_transport *t, const ccord_for
   it.ev.forum_posts = it.fposts;
   it.ev.forum_post_count = out_n;
   it.ev.forum_has_more = (query->offset + out_n) < total_matches;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_create_forum_post(ccord_transport *t, ccord_id forum_id,
@@ -5035,7 +5070,7 @@ static ccord_status mock_create_forum_post(ccord_transport *t, ccord_id forum_id
   it.ev.forum_post_count = 1;
   it.ev.messages = it.msgs;
   it.ev.message_count = 1;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // ---- server administration: the mock plays a small Discord -----------------------------------------------------------
@@ -5054,7 +5089,7 @@ static ccord_status admin_reply_failed(mock *m, const ccord_admin_request *req, 
   it.ev.expr_id = req->expr_id;
   it.ev.status = st;
   it.ev.text = text;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static const char *mock_user_name(const mock *m, ccord_id id)
@@ -5194,7 +5229,7 @@ static ccord_status admin_emit_channel_op(mock *m, size_t ci, ccord_admin_op op,
     item_release(&it);
     return CCORD_ERR_NOMEM;
   }
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status admin_emit_channel(mock *m, size_t ci, ccord_error *err)
@@ -5211,7 +5246,7 @@ static ccord_status admin_emit_member(mock *m, size_t mi, ccord_error *err)
   it.ev.guild_id = it.member->guild_id;
   it.ev.guild_members = it.member;
   it.ev.guild_member_count = 1;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // ---- roles, bans, invites and the audit log of the simulated server ----
@@ -5346,7 +5381,7 @@ static ccord_status admin_emit_roles(mock *m, ccord_net_event_type type, const c
   it.ev.role_count = k;
   it.ev.guild_id = guild;
   it.ev.role_id = k ? it.roles_own[0].id : CCORD_ID_NONE;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status admin_emit_member_roles(mock *m, ccord_id guild, ccord_id user, ccord_id role, bool added,
@@ -5357,7 +5392,7 @@ static ccord_status admin_emit_member_roles(mock *m, ccord_id guild, ccord_id us
   it.ev.user_id = user;
   it.ev.role_id = role;
   it.ev.role_added = added;
-  ccord_status st = push_item(m, it, err);
+  ccord_status st = push_item(m, &it, err);
   if (st != CCORD_OK) return st;
   long mi = admin_member_index(m, guild, user);
   if (mi < 0) return CCORD_OK;
@@ -5377,7 +5412,7 @@ static ccord_status admin_emit_member_roles(mock *m, ccord_id guild, ccord_id us
       break;
     }
   }
-  return push_item(m, up, err);
+  return push_item(m, &up, err);
 }
 
 static ccord_status admin_emit_bans(mock *m, ccord_id guild, ccord_error *err)
@@ -5392,7 +5427,7 @@ static ccord_status admin_emit_bans(mock *m, ccord_id guild, ccord_error *err)
   it.ev.guild_id = guild;
   it.ev.bans = it.bans_own;
   it.ev.ban_count = k;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status admin_emit_invites(mock *m, ccord_net_event_type type, ccord_id guild, const char *code,
@@ -5402,7 +5437,7 @@ static ccord_status admin_emit_invites(mock *m, ccord_net_event_type type, ccord
   it.ev.guild_id = guild;
   if (type == CCORD_NET_INVITE_DELETE) {
     it.ev.invite_code = code;
-    return push_item(m, it, err);
+    return push_item(m, &it, err);
   }
   it.invites_own = ccord_alloc_array(m->ninvites ? m->ninvites : 1u, sizeof *it.invites_own);
   if (!it.invites_own) return ccord_error_set(err, CCORD_ERR_NOMEM, "mock: out of memory");
@@ -5414,7 +5449,7 @@ static ccord_status admin_emit_invites(mock *m, ccord_net_event_type type, ccord
   }
   it.ev.invites = it.invites_own;
   it.ev.invite_count = k;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // Newest first, at most CCORD_ADMIN_AUDIT_LIMIT, optionally only one actor and / or one action type.
@@ -5434,7 +5469,7 @@ static ccord_status admin_emit_audit(mock *m, const ccord_admin_request *req, cc
   it.ev.guild_id = req->guild_id;
   it.ev.audit = it.audit_own;
   it.ev.audit_count = k;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // Appends a channel (and its empty message list) and returns its index, or SIZE_MAX.
@@ -5572,7 +5607,7 @@ static ccord_status mock_emit_guild_upsert(mock *m, size_t gi, ccord_admin_op op
   it.ev.guild = it.guild;
   it.ev.guild_id = it.guild->id;
   it.ev.admin_op = op;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // Handles the roles / bans / invites / audit-log / server-settings operations. Returns false when `req` is not one of
@@ -6138,7 +6173,7 @@ static ccord_status queue_scheduled_event_update(mock *m, const ccord_scheduled_
   it.ev.scheduled_event_count = 1;
   it.ev.scheduled_event_id = ev->id;
   it.ev.scheduled_event_deleted = deleted;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static bool mock_event_entity_valid(mock *m, ccord_id g, const ccord_scheduled_event *ev, bool check_create_perms,
@@ -6221,7 +6256,7 @@ static bool admin_scheduled_events(mock *m, const ccord_admin_request *req, ccor
       it.ev.guild_id = g;
       it.ev.scheduled_events = it.events_own;
       it.ev.scheduled_event_count = count;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_EVENT_CREATE: {
@@ -6349,7 +6384,7 @@ static bool admin_scheduled_events(mock *m, const ccord_admin_request *req, ccor
       it.ev.scheduled_event_id = m->events[ei].id;
       it.ev.user_id = m->self_id;
       it.ev.scheduled_event_user_added = adding;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     default:
@@ -6366,7 +6401,7 @@ static ccord_status admin_m6_emit_settings(mock *m, ccord_error *err)
   if (!it.settings_own) return ccord_error_set(err, CCORD_ERR_NOMEM, "mock: out of memory");
   *it.settings_own = m->user_settings;
   it.ev.user_settings = it.settings_own;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status admin_m6_emit_sessions(mock *m, ccord_error *err)
@@ -6378,7 +6413,7 @@ static ccord_status admin_m6_emit_sessions(mock *m, ccord_error *err)
   if (m->nauth_sessions) memcpy(it.auth_sessions_own, m->auth_sessions, m->nauth_sessions * sizeof *it.auth_sessions_own);
   it.ev.auth_sessions = it.auth_sessions_own;
   it.ev.auth_session_count = m->nauth_sessions;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status admin_m6_emit_logout(mock *m, const ccord_admin_request *req, ccord_error *err)
@@ -6386,7 +6421,7 @@ static ccord_status admin_m6_emit_logout(mock *m, const ccord_admin_request *req
   mock_item it = make_item(CCORD_NET_AUTH_SESSIONS_LOGOUT, now_of(m) + m->cfg.latency_ms);
   it.ev.session_hash_count = req->session_hash_count;
   memcpy(it.ev.session_hashes, req->session_hashes, req->session_hash_count * sizeof it.ev.session_hashes[0]);
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status admin_m6_emit_connections(mock *m, ccord_error *err)
@@ -6398,14 +6433,14 @@ static ccord_status admin_m6_emit_connections(mock *m, ccord_error *err)
   if (m->nconnections) memcpy(it.connections_own, m->connections, m->nconnections * sizeof *it.connections_own);
   it.ev.connections = it.connections_own;
   it.ev.connection_count = m->nconnections;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status admin_m6_emit_connection(mock *m, const ccord_connection *c, ccord_error *err)
 {
   mock_item it = make_item(CCORD_NET_CONNECTION_UPSERT, now_of(m) + m->cfg.latency_ms);
   it.ev.connection = *c;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status admin_m6_emit_connection_delete(mock *m, const ccord_admin_request *req, ccord_error *err)
@@ -6413,7 +6448,7 @@ static ccord_status admin_m6_emit_connection_delete(mock *m, const ccord_admin_r
   mock_item it = make_item(CCORD_NET_CONNECTION_DELETE, now_of(m) + m->cfg.latency_ms);
   (void)snprintf(it.ev.connection_name, sizeof it.ev.connection_name, "%s", req->connection_name);
   (void)snprintf(it.ev.connection_id, sizeof it.ev.connection_id, "%s", req->connection_id);
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static void admin_m6_apply_settings_patch(ccord_user_settings *s, const ccord_user_settings_patch *p)
@@ -6576,7 +6611,7 @@ static ccord_status mock_call_action(ccord_transport *t, ccord_id channel_id, cc
         it.ev.guild_id = CCORD_DM_GUILD_ID;
         it.ev.status = CCORD_ERR_PERMISSION;
         it.ev.text = m->ring_refusal;
-        st = push_item(m, it, err);
+        st = push_item(m, &it, err);
         if (st != CCORD_OK) return st;
       }
     }
@@ -7065,7 +7100,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       mock_item it = make_item(CCORD_NET_ROLE_DELETE, now_of(m) + m->cfg.latency_ms);
       it.ev.guild_id = g;
       it.ev.role_id = req->role_id;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_REORDER_ROLES: {
@@ -7154,7 +7189,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       mock_item it = make_item(CCORD_NET_BAN_REMOVE, now_of(m) + m->cfg.latency_ms);
       it.ev.guild_id = g;
       it.ev.user_id = req->user_id;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_CREATE_INVITE: {
@@ -7273,7 +7308,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       it.ev.reorder_parents = it.reorder_par_own;
       it.ev.reorder_has_parent = it.reorder_hpar_own;
       it.ev.reorder_count = n;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_EDIT_GUILD: {
@@ -7483,7 +7518,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       it.ev.guild_id = g;
       it.ev.invites_disabled_until_ms = req->invites_disabled_until_ms;
       it.ev.dms_disabled_until_ms = req->dms_disabled_until_ms;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_SET_VANITY_URL: {
@@ -7517,7 +7552,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       mock_item it = make_item(CCORD_NET_GUILD_VANITY, now_of(m) + m->cfg.latency_ms);
       it.ev.guild_id = g;
       it.ev.invite_code = own_code;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_LEAVE_GUILD: {
@@ -7534,7 +7569,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       mock_item it = make_item(CCORD_NET_GUILD_DELETE, now_of(m) + m->cfg.latency_ms);
       it.ev.guild_id = g;
       it.ev.admin_op = req->op;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_DELETE_GUILD: {
@@ -7551,7 +7586,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       mock_item it = make_item(CCORD_NET_GUILD_DELETE, now_of(m) + m->cfg.latency_ms);
       it.ev.guild_id = g;
       it.ev.admin_op = req->op;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_TRANSFER_OWNERSHIP: {
@@ -7603,7 +7638,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       it.ev.emoji_count = k;
       it.ev.replace_emojis = true;
       it.ev.expressions_admin = true;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_CREATE_EMOJI: {
@@ -7656,7 +7691,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.emojis = it.emojis_own;
         it.ev.emoji_count = 1u;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -7697,7 +7732,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.emojis = it.emojis_own;
         it.ev.emoji_count = 1u;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -7726,7 +7761,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         mock_item it = make_item(CCORD_NET_EMOJI_DELETE, now_of(m) + m->cfg.latency_ms);
         it.ev.guild_id = g;
         it.ev.expr_id = req->expr_id;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -7754,7 +7789,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       it.ev.sticker_count = k;
       it.ev.replace_stickers = true;
       it.ev.expressions_admin = true;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_CREATE_STICKER: {
@@ -7807,7 +7842,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.stickers = it.stickers_own;
         it.ev.sticker_count = 1u;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -7869,7 +7904,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.stickers = it.stickers_own;
         it.ev.sticker_count = 1u;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -7898,7 +7933,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         mock_item it = make_item(CCORD_NET_STICKER_DELETE, now_of(m) + m->cfg.latency_ms);
         it.ev.guild_id = g;
         it.ev.expr_id = req->expr_id;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -7926,7 +7961,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       it.ev.soundboard_count = k;
       it.ev.replace_soundboard = true;
       it.ev.expressions_admin = true;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_CREATE_SOUNDBOARD: {
@@ -7980,7 +8015,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.soundboard = it.soundboard_own;
         it.ev.soundboard_count = 1u;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8043,7 +8078,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.soundboard = it.soundboard_own;
         it.ev.soundboard_count = 1u;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8072,7 +8107,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         mock_item it = make_item(CCORD_NET_SOUNDBOARD_DELETE, now_of(m) + m->cfg.latency_ms);
         it.ev.guild_id = g;
         it.ev.expr_id = req->expr_id;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8102,7 +8137,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.prune_info = (ccord_prune_info){
           .pruned = cnt, .days = req->prune_days, .executed = false, .has_result = true
         };
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
         return true;
       }
       ccord_id removed[MOCK_NUM_USERS];
@@ -8128,7 +8163,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         mock_item rm = make_item(CCORD_NET_MEMBER_REMOVE, now_of(m) + m->cfg.latency_ms);
         rm.ev.guild_id = g;
         rm.ev.user_id = removed[i];
-        *out = push_item(m, rm, err);
+        *out = push_item(m, &rm, err);
       }
       if (*out == CCORD_OK) {
         mock_item it = make_item(CCORD_NET_PRUNE_RESULT, now_of(m) + m->cfg.latency_ms);
@@ -8139,7 +8174,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
           .executed = true,
           .has_result = true,
         };
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8171,7 +8206,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       it.ev.guild_id = g;
       it.ev.automod_rules = it.automod_own;
       it.ev.automod_rule_count = cnt;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_CREATE_AUTOMOD_RULE: {
@@ -8213,7 +8248,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.automod_rules = it.automod_own;
         it.ev.automod_rule_count = 1u;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8252,7 +8287,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.automod_rules = it.automod_own;
         it.ev.automod_rule_count = 1u;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8281,7 +8316,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         mock_item it = make_item(CCORD_NET_AUTOMOD_DELETE, now_of(m) + m->cfg.latency_ms);
         it.ev.guild_id = g;
         it.ev.expr_id = req->expr_id;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8313,7 +8348,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       it.ev.guild_id = g;
       it.ev.webhooks = it.webhooks_own;
       it.ev.webhook_count = cnt;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_CREATE_WEBHOOK: {
@@ -8367,7 +8402,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.webhooks = it.webhooks_own;
         it.ev.webhook_count = 1u;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8416,7 +8451,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.webhooks = it.webhooks_own;
         it.ev.webhook_count = 1u;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8445,7 +8480,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         mock_item it = make_item(CCORD_NET_WEBHOOK_DELETE, now_of(m) + m->cfg.latency_ms);
         it.ev.guild_id = g;
         it.ev.expr_id = req->expr_id;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8502,7 +8537,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.channel_id = req->channel_id;
         it.ev.target_channel_id = req->target_channel_id;
         it.ev.expr_id = wid;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8534,7 +8569,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       it.ev.guild_id = g;
       it.ev.app_cmd_perms = it.app_perms_own;
       it.ev.app_cmd_perms_count = cnt;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_GET_WELCOME_SCREEN:
@@ -8580,7 +8615,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       }
       it.ev.guild_id = g;
       it.ev.welcome_screen = it.welcome_own;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_GET_ONBOARDING:
@@ -8623,7 +8658,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       }
       it.ev.guild_id = g;
       it.ev.onboarding = it.onboarding_own;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_PUT_CHANNEL_OVERWRITE: {
@@ -8687,7 +8722,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.channel_id = req->channel_id;
         it.ev.overwrite_item = req->overwrite;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8729,7 +8764,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
         it.ev.guild_id = g;
         it.ev.channel_id = req->channel_id;
         it.ev.overwrite_item = req->overwrite;
-        *out = push_item(m, it, err);
+        *out = push_item(m, &it, err);
       }
       return true;
     }
@@ -8769,7 +8804,7 @@ static bool mock_admin_server(mock *m, const ccord_admin_request *req, ccord_sta
       it.ev.channel_id = req->channel_id;
       it.ev.invites = it.invites_own;
       it.ev.invite_count = cnt;
-      *out = push_item(m, it, err);
+      *out = push_item(m, &it, err);
       return true;
     }
     case CCORD_ADMIN_CLONE_CHANNEL: {
@@ -9238,7 +9273,7 @@ static ccord_status mock_materialize_guild(mock *m, ccord_id gid_hint, const cha
       break;
     }
   }
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status admin_set_guild_folders(mock *m, const ccord_admin_request *req, ccord_error *err)
@@ -9286,7 +9321,7 @@ static ccord_status admin_set_guild_folders(mock *m, const ccord_admin_request *
     it.ev.folder_items = it.folder_items_own;
     it.ev.folder_item_count = n;
   }
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status admin_handle_invite(mock *m, const ccord_admin_request *req, bool accept, ccord_error *err)
@@ -9396,7 +9431,7 @@ static ccord_status admin_handle_invite(mock *m, const ccord_admin_request *req,
   it.ev.guild_id = prev.guild_id;
   it.ev.channel_id = prev.channel_id;
   it.ev.invite_preview = it.invite_preview_own;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // GET /guilds/{g}/member-verification: only the screening guild has a form (Discord answers 404 for the rest).
@@ -9423,7 +9458,7 @@ static ccord_status admin_member_verification_get(mock *m, const ccord_admin_req
   };
   it.ev.guild_id = req->guild_id;
   it.ev.member_verification = it.mv_own;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // PUT /guilds/{g}/requests/@me: the self member stops being pending once the required TERMS field is accepted
@@ -9483,7 +9518,7 @@ static ccord_status mock_request_discoverable_guilds(ccord_transport *t, const c
   it.ev.discovery_offset = offset;
   it.ev.discovery_category_id = category_id;
   it.ev.discovery_query = it.discovery_query_own;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 // Notification settings are the user's own (no permission involved): the mock keeps the row, then answers with the
@@ -9530,7 +9565,7 @@ static ccord_status admin_set_notify(mock *m, const ccord_admin_request *req, cc
   it.ev.guild_id = g;
   it.ev.notify = it.notify_own;
   it.ev.notify_count = k;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static void mock_default_group_dm_name(const mock *m, const ccord_id *recipient_ids, size_t recipient_count,
@@ -9639,7 +9674,7 @@ static ccord_status admin_activity(mock *m, const ccord_admin_request *req, ccor
       it.ev.guild_id = req->guild_id;
       it.ev.activity_apps = it.activity_apps_own;
       it.ev.activity_app_count = MOCK_ACTIVITY_APP_COUNT;
-      return push_item(m, it, err);
+      return push_item(m, &it, err);
     }
     case CCORD_ADMIN_ACTIVITY_LAUNCH: {
       size_t ci = admin_channel_index(m, req->channel_id);
@@ -9770,7 +9805,7 @@ static ccord_status admin_guild_profile_get(mock *m, const ccord_admin_request *
   mock_item it = make_item(CCORD_NET_GUILD_PROFILE, now_of(m) + m->cfg.latency_ms);
   it.ev.guild_id = req->guild_id;
   it.ev.guild_profile = gp;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static ccord_status mock_admin_action(ccord_transport *t, const ccord_admin_request *req, ccord_error *err)
@@ -9893,7 +9928,7 @@ static ccord_status mock_admin_action(ccord_transport *t, const ccord_admin_requ
       it.ev.channel_id = req->channel_id;
       it.ev.user_id = m->self_id;
       it.ev.thread_joined = joined;
-      return push_item(m, it, err);
+      return push_item(m, &it, err);
     }
     case CCORD_ADMIN_EDIT_CHANNEL: {
       size_t ci = admin_channel_index(m, req->channel_id);
@@ -9962,7 +9997,7 @@ static ccord_status mock_admin_action(ccord_transport *t, const ccord_admin_requ
       mock_item it = make_item(CCORD_NET_CHANNEL_DELETE, now_of(m) + m->cfg.latency_ms);
       it.ev.guild_id = guild;
       it.ev.channel_id = req->channel_id;
-      return push_item(m, it, err);
+      return push_item(m, &it, err);
     }
     case CCORD_ADMIN_ACCEPT_MESSAGE_REQUEST: {
       size_t ci = admin_channel_index(m, req->channel_id);
@@ -9974,7 +10009,7 @@ static ccord_status mock_admin_action(ccord_transport *t, const ccord_admin_requ
       mock_item it = make_item(CCORD_NET_MESSAGE_REQUEST_ACCEPTED, now_of(m) + m->cfg.latency_ms);
       it.ev.guild_id = CCORD_DM_GUILD_ID;
       it.ev.channel_id = req->channel_id;
-      return push_item(m, it, err);
+      return push_item(m, &it, err);
     }
     case CCORD_ADMIN_CREATE_GROUP_DM: {
       if (req->dm_recipient_count == 0 || req->dm_recipient_count > CCORD_ADMIN_GROUP_DM_RECIPIENTS_MAX) {
@@ -10092,7 +10127,7 @@ static ccord_status mock_admin_action(ccord_transport *t, const ccord_admin_requ
       it.ev.recipient_added = true;
       it.ev.users = tu;
       it.ev.user_count = 1u;
-      return push_item(m, it, err);
+      return push_item(m, &it, err);
     }
     case CCORD_ADMIN_REMOVE_DM_RECIPIENT: {
       size_t ci = admin_channel_index(m, req->channel_id);
@@ -10105,7 +10140,7 @@ static ccord_status mock_admin_action(ccord_transport *t, const ccord_admin_requ
         mock_item it = make_item(CCORD_NET_CHANNEL_DELETE, now_of(m) + m->cfg.latency_ms);
         it.ev.guild_id = CCORD_DM_GUILD_ID;
         it.ev.channel_id = req->channel_id;
-        return push_item(m, it, err);
+        return push_item(m, &it, err);
       }
       if (ch->owner_id != m->self_id) {
         return admin_reply_failed(m, req, CCORD_ERR_PERMISSION, k_missing_permissions, err);
@@ -10128,7 +10163,7 @@ static ccord_status mock_admin_action(ccord_transport *t, const ccord_admin_requ
       it.ev.channel_id = req->channel_id;
       it.ev.user_id = req->user_id;
       it.ev.recipient_added = false;
-      return push_item(m, it, err);
+      return push_item(m, &it, err);
     }
     case CCORD_ADMIN_EDIT_GROUP_DM: {
       size_t ci = admin_channel_index(m, req->channel_id);
@@ -10193,7 +10228,7 @@ static ccord_status mock_admin_action(ccord_transport *t, const ccord_admin_requ
       mock_item it = make_item(CCORD_NET_USER_NOTE_UPDATE, now_of(m) + m->cfg.latency_ms);
       it.ev.user_id = req->user_id;
       it.ev.text = owned_note;
-      return push_item(m, it, err);
+      return push_item(m, &it, err);
     }
     case CCORD_ADMIN_SET_CUSTOM_STATUS: {
       if (req->custom_status_clear) {
@@ -10220,7 +10255,7 @@ static ccord_status mock_admin_action(ccord_transport *t, const ccord_admin_requ
         (void)snprintf(it.ev.custom_status_text, sizeof it.ev.custom_status_text, "%s", req->custom_status_text);
         it.ev.custom_status_expires_ms = req->until_ms;
       }
-      return push_item(m, it, err);
+      return push_item(m, &it, err);
     }
     case CCORD_ADMIN_SET_NICK:
     case CCORD_ADMIN_TIMEOUT: {
@@ -10260,7 +10295,7 @@ static ccord_status mock_admin_action(ccord_transport *t, const ccord_admin_requ
       mock_item it = make_item(CCORD_NET_MEMBER_REMOVE, now_of(m) + m->cfg.latency_ms);
       it.ev.guild_id = req->guild_id;
       it.ev.user_id = req->user_id;
-      return push_item(m, it, err);
+      return push_item(m, &it, err);
     }
     case CCORD_ADMIN_NONE:
     case CCORD_ADMIN_CREATE_ROLE:
@@ -10519,7 +10554,7 @@ static ccord_status mock_vote_poll(ccord_transport *t, ccord_id channel_id, ccor
       it.ev.user_id = m->self_id;
       it.ev.poll_answer_id = pa->id;
       it.ev.poll_vote_added = false;
-      st = push_item(m, it, err);
+      st = push_item(m, &it, err);
       if (st != CCORD_OK) {
         ccord_message_rich_free(nr);
         return st;
@@ -10538,7 +10573,7 @@ static ccord_status mock_vote_poll(ccord_transport *t, ccord_id channel_id, ccor
       it.ev.user_id = m->self_id;
       it.ev.poll_answer_id = pa->id;
       it.ev.poll_vote_added = true;
-      st = push_item(m, it, err);
+      st = push_item(m, &it, err);
       if (st != CCORD_OK) {
         ccord_message_rich_free(nr);
         return st;
@@ -10754,7 +10789,7 @@ static ccord_status mock_send_interaction(ccord_transport *t, const ccord_intera
       it.ev.modal = md;
       it.ev.guild_id = md->guild_id;
       it.ev.channel_id = md->channel_id;
-      return push_item(m, it, err);
+      return push_item(m, &it, err);
     }
   } else if (req->type == CCORD_INTERACTION_MODAL_SUBMIT) {
     for (size_t i = 0; i < req->field_count; i++) {
@@ -10801,7 +10836,7 @@ static ccord_status mock_send_interaction(ccord_transport *t, const ccord_intera
     it.ev.slash_choices = it.choices_own;
     it.ev.slash_choice_count = out_n;
     it.ev.interaction_nonce = "mock-nonce";
-    return push_item(m, it, err);
+    return push_item(m, &it, err);
   } else if (req->command_type == 2u || req->command_type == 3u) {
     char tbuf[32];
     int tn = snprintf(tbuf, sizeof tbuf, "%llu", (unsigned long long)req->target_id);
@@ -10950,7 +10985,7 @@ static void mock_link_push_state(mock *m, ccord_connection_state state, uint64_t
 {
   mock_item st = make_item(CCORD_NET_STATE, due);
   st.ev.state = state;
-  (void)push_item(m, st, nullptr);   // out of memory only loses a state notification
+  (void)push_item(m, &st, nullptr);   // out of memory only loses a state notification
 }
 
 // The socket is gone (closed, errored or declared a zombie): the app sees CONNECTING and a reconnect is up to the pace.
@@ -10969,6 +11004,7 @@ static void mock_queue_front(mock *m, size_t first)
 {
   size_t added = m->nq - first;
   if (first == 0 || added == 0) return;
+  if (!mock_queue_linearize(m)) return;   // order is cosmetic; keep the items
   mock_item *tmp = ccord_alloc_array(added, sizeof *tmp);
   if (!tmp) return;   // order is cosmetic; keep the items
   // A CONNECTING queued by the loss that this reconnect repairs (same instant when latency is 0) stays ahead of it, or the
@@ -11144,19 +11180,28 @@ static bool mock_poll(ccord_transport *t, ccord_net_event *out)
     pick = SIZE_MAX;
     if (!m->link.dead_silent) {
       for (size_t i = 0; i < m->nq; i++) {
-        if (m->queue[i].ev.type == CCORD_NET_STATE && m->queue[i].due <= now) {
+        size_t si = qidx(m, i);
+        if (m->queue[si].ev.type == CCORD_NET_STATE && m->queue[si].due <= now) {
           pick = i;
           break;
         }
       }
     }
   }
-  if (m->nq == 0 || pick == SIZE_MAX || m->queue[pick].due > now) return false;
+  if (m->nq == 0 || pick == SIZE_MAX || m->queue[qidx(m, pick)].due > now) return false;
 
-  m->current = m->queue[pick];
+  m->current = m->queue[qidx(m, pick)];
   m->have_current = true;
-  memmove(&m->queue[pick], &m->queue[pick + 1u], (m->nq - pick - 1u) * sizeof *m->queue);
-  m->nq--;
+  if (pick == 0) {
+    m->qhead = (m->qhead + 1u) % m->capq;
+    m->nq--;
+    if (m->nq == 0) m->qhead = 0;
+  } else {
+    for (size_t i = pick; i + 1u < m->nq; i++) {
+      m->queue[qidx(m, i)] = m->queue[qidx(m, i + 1u)];
+    }
+    m->nq--;
+  }
   if (m->current.ev.type == CCORD_NET_MESSAGE_CREATE && m->current.ev.message_count > 0 && m->current.ev.messages) {
     ccord_id mid = m->current.ev.messages[0].id;
     for (size_t i = 0; i < m->ninflight_uploads; i++) {
@@ -11246,7 +11291,7 @@ ccord_status ccord_mock_voice_drop(ccord_transport *t, const ccord_mock_vdrop *d
         it.ev.channel_id = self.channel_id;
         it.ev.status = CCORD_ERR_IO;
         it.ev.text = reason;
-        st = push_item(m, it, err);
+        st = push_item(m, &it, err);
       }
       m->vstats.give_ups++;
       if (tell_server) m->vstats.leaves_sent++;
@@ -11274,7 +11319,7 @@ ccord_status ccord_mock_voice_drop(ccord_transport *t, const ccord_mock_vdrop *d
           size_t before = m->nq;
           st = queue_stream_signal_ex(m, m->stream.guild_id, m->stream.channel_id, m->stream.user_id,
                                       CCORD_STREAM_SIG_DELETE, 0, false, "voice reconnected", err);
-          if (st == CCORD_OK && m->nq > before) m->queue[m->nq - 1].due = ta;
+          if (st == CCORD_OK && m->nq > before) m->queue[qidx(m, m->nq - 1u)].due = ta;
           m->has_stream = false;
           m->voices[vi].self_stream = false;
           mock_stream_media_clear(m);
@@ -11292,7 +11337,7 @@ ccord_status ccord_mock_voice_drop(ccord_transport *t, const ccord_mock_vdrop *d
             it.ev.voice_server = it.vserver_own;
             it.ev.guild_id = self.guild_id;
             it.ev.channel_id = self.channel_id;
-            st = push_item(m, it, err);
+            st = push_item(m, &it, err);
           }
         }
       }
@@ -11364,7 +11409,7 @@ ccord_status ccord_mock_set_self_activity(ccord_transport *t, const char *name, 
   it.ev.has_activity = m->users[0].has_activity;
   it.ev.activity_type = (ccord_activity_type)m->users[0].activity_type;
   (void)snprintf(it.ev.activity_name, sizeof it.ev.activity_name, "%s", m->users[0].activity_name);
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 ccord_status ccord_mock_inject_sessions_replace_activity(ccord_transport *t, ccord_presence overall,
@@ -11379,7 +11424,7 @@ ccord_status ccord_mock_inject_sessions_replace_activity(ccord_transport *t, cco
   it.ev.has_activity = m->users[0].has_activity;
   it.ev.activity_type = (ccord_activity_type)m->users[0].activity_type;
   (void)snprintf(it.ev.activity_name, sizeof it.ev.activity_name, "%s", m->users[0].activity_name);
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 ccord_status ccord_mock_inject_sessions_replace(ccord_transport *t, ccord_presence overall, ccord_error *err)
@@ -11388,7 +11433,7 @@ ccord_status ccord_mock_inject_sessions_replace(ccord_transport *t, ccord_presen
   if (!m) return ccord_error_set(err, CCORD_ERR_INVALID, "mock: null transport");
   mock_item it = make_item(CCORD_NET_SESSIONS_REPLACE, now_of(m) + m->cfg.latency_ms);
   it.ev.presence = overall;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 void ccord_mock_set_status_proto_base(ccord_transport *t, const uint8_t *proto, size_t len)
@@ -11445,7 +11490,7 @@ ccord_status ccord_mock_inject_status_proto_update(ccord_transport *t, const uin
   it.ev.settings_proto1 = ev_bytes;
   it.ev.settings_proto1_len = len;
   it.ev.settings_proto1_partial = partial;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 ccord_status ccord_mock_inject_settings_proto_update(ccord_transport *t, const uint8_t *proto, size_t len, bool partial,
@@ -11474,7 +11519,7 @@ ccord_status ccord_mock_inject_settings_proto_update(ccord_transport *t, const u
   it.ev.raw_proto = ev_bytes;
   it.ev.raw_proto_len = len;
   it.ev.settings_proto1_partial = partial;
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 void ccord_mock_set_refuse_writes(ccord_transport *t, bool refuse)
@@ -11587,7 +11632,7 @@ static ccord_status mock_request_report_menu(ccord_transport *t, ccord_report_ty
     if (!why) return ccord_error_set(err, CCORD_ERR_NOMEM, "mock: out of memory");
     retire_content(m, why);
     it.ev.text = why;
-    return push_item(m, it, err);
+    return push_item(m, &it, err);
   }
   const char *json = mock_report_menu_json(m, type);
   char *copy = ccord_strndup(json, strlen(json));
@@ -11598,7 +11643,7 @@ static ccord_status mock_request_report_menu(ccord_transport *t, ccord_report_ty
   it.ev.expr_arg = ccord_report_type_name(type);
   it.ev.expr_body = copy;
   it.ev.expr_body_len = strlen(copy);
-  return push_item(m, it, err);
+  return push_item(m, &it, err);
 }
 
 static bool report_is_edge(const ccord_report_node *n, uint32_t to)
@@ -11712,7 +11757,7 @@ static ccord_status mock_submit_report(ccord_transport *t, const ccord_report_re
     if (!why) return ccord_error_set(err, CCORD_ERR_NOMEM, "mock: out of memory");
     retire_content(m, why);
     it.ev.text = why;
-    return push_item(m, it, err);
+    return push_item(m, &it, err);
   }
   mock_report *copy = mock_report_copy(req);
   if (!copy) return ccord_error_set(err, CCORD_ERR_NOMEM, "mock: out of memory");
@@ -11723,7 +11768,7 @@ static ccord_status mock_submit_report(ccord_transport *t, const ccord_report_re
   it.ev.channel_id = req->channel_id;
   it.ev.message_id = req->message_id;
   it.ev.user_id = req->reported_user_id;
-  st = push_item(m, it, err);
+  st = push_item(m, &it, err);
   if (st != CCORD_OK) {
     mock_report_free(copy);
     return st;
@@ -11759,7 +11804,7 @@ const ccord_report_request *ccord_mock_last_report(const ccord_transport *t)
 static void mock_destroy(ccord_transport *t)
 {
   mock *m = (mock *)t;
-  free_items(m->queue, m->nq);
+  free_queue(m);
   ccord_free(m->queue);
   if (m->have_current) item_release(&m->current);
   clear_last_interaction_values(m);
