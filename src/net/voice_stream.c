@@ -156,17 +156,17 @@ static void vstream_maybe_inject_udp(ccord_vstream *s)
     (void)ccord_sock_set_nonblock((ccord_socket_t)g->udp_fd);
     int big_buf = 4 * 1024 * 1024;
     int fallback_buf = 1024 * 1024;
-    if (setsockopt(g->udp_fd, SOL_SOCKET, SO_RCVBUF, (const char *)&big_buf, sizeof big_buf) != 0) {
-      (void)setsockopt(g->udp_fd, SOL_SOCKET, SO_RCVBUF, (const char *)&fallback_buf, sizeof fallback_buf);
+    if (vg_sock_setsockopt_int(g->udp_fd, SOL_SOCKET, SO_RCVBUF, big_buf) != 0) {
+      (void)vg_sock_setsockopt_int(g->udp_fd, SOL_SOCKET, SO_RCVBUF, fallback_buf);
     }
-    if (setsockopt(g->udp_fd, SOL_SOCKET, SO_SNDBUF, (const char *)&big_buf, sizeof big_buf) != 0) {
-      (void)setsockopt(g->udp_fd, SOL_SOCKET, SO_SNDBUF, (const char *)&fallback_buf, sizeof fallback_buf);
+    if (vg_sock_setsockopt_int(g->udp_fd, SOL_SOCKET, SO_SNDBUF, big_buf) != 0) {
+      (void)vg_sock_setsockopt_int(g->udp_fd, SOL_SOCKET, SO_SNDBUF, fallback_buf);
     }
     s->udp_injected = true;
     if (g->ssrc != 0) {
       uint8_t req[CCORD_VOICE_IP_DISCOVERY_SIZE];
       ccord_voice_ip_discovery_build(g->ssrc, req);
-      (void)sendto(g->udp_fd, (const char *)req, sizeof req, 0, (const struct sockaddr *)&g->peer_addr, sizeof g->peer_addr);
+      (void)vg_sock_sendto(g->udp_fd, req, sizeof req, (const struct sockaddr *)&g->peer_addr, sizeof g->peer_addr);
     }
   }
   ccord_mutex_unlock(g->mtx);
@@ -303,8 +303,8 @@ ccord_status ccord_vstream_send_audio(ccord_vstream *s, const uint8_t *opus, siz
                 g->speaking_active = true;
               }
             }
-            ssize_t sent = sendto(g->udp_fd, pkt, pkt_len, 0, (const struct sockaddr *)&g->peer_addr,
-                                  sizeof g->peer_addr);
+            ptrdiff_t sent = vg_sock_sendto(g->udp_fd, pkt, pkt_len, (const struct sockaddr *)&g->peer_addr,
+                                            sizeof g->peer_addr);
             if (sent < 0 || (size_t)sent != pkt_len) {
               st = ccord_error_set(err, CCORD_ERR_IO, "vstream: udp sendto failed");
             }

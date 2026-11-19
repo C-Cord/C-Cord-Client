@@ -19,7 +19,11 @@
 
 #include <ccord/core/os.h>
 
+#if defined(__has_include) && __has_include(<opus/opus.h>)
 #include <opus/opus.h>
+#else
+#include <opus.h>
+#endif
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/atomic_file.h>
@@ -281,7 +285,7 @@ static void live_voice_cache_put(live *l, const ccord_voice_state *v)
   if (v->channel_id == CCORD_ID_NONE) {
     // Disconnected: drop the row so a later stage answer cannot resurrect stale flags.
     if (idx >= 0) {
-      memmove(&l->voice_cache[idx], &l->voice_cache[idx + 1u],
+      memmove(&l->voice_cache[idx], &l->voice_cache[(size_t)idx + 1u],
               (l->voice_cache_count - (size_t)idx - 1u) * sizeof l->voice_cache[0]);
       l->voice_cache_count--;
     }

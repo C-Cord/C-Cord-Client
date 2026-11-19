@@ -6,7 +6,11 @@
 #include <stdint.h>
 #include <string.h>
 
+#if defined(__has_include) && __has_include(<opus/opus.h>)
 #include <opus/opus.h>
+#else
+#include <opus.h>
+#endif
 #include <sodium.h>
 
 #include <ccord/core/alloc.h>

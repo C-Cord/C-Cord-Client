@@ -43,6 +43,7 @@ void ccord_sleep_ms(uint32_t ms);
 void ccord_sleep_us(uint32_t us);
 bool ccord_gmtime(time_t t, struct tm *out);
 bool ccord_localtime(time_t t, struct tm *out);
+time_t ccord_timegm(struct tm *tm);
 int ccord_strcasecmp(const char *a, const char *b);
 int ccord_strncasecmp(const char *a, const char *b, size_t n);
 #if CCORD_OS_WINDOWS

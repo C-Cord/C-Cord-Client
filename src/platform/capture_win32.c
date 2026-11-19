@@ -397,11 +397,11 @@ size_t ccord_loopback_win32_read(ccord_loopback_win32 *w, int16_t *pcm, size_t m
       if (src_i >= nframes) src_i = nframes - 1u;
       float acc = 0.0f;
       if (w->is_float && w->bits == 32) {
-        const float *fp = (const float *)data + (size_t)src_i * ch;
+        const float *fp = (const float *)(const void *)data + (size_t)src_i * ch;
         for (uint32_t c = 0; c < ch; c++) acc += fp[c];
         acc /= (float)ch;
       } else if (w->bits == 16) {
-        const int16_t *sp = (const int16_t *)data + (size_t)src_i * ch;
+        const int16_t *sp = (const int16_t *)(const void *)data + (size_t)src_i * ch;
         for (uint32_t c = 0; c < ch; c++) acc += (float)sp[c] / 32768.0f;
         acc /= (float)ch;
       }

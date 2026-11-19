@@ -54,14 +54,6 @@ struct ccord_linkwatch {
   alignas(8) unsigned char buf[NL_BUF];
 };
 
-static size_t route_find(const ccord_linkwatch *w, const route_key *k)
-{
-  for (size_t i = 0; i < w->n_routes; i++) {
-    if (memcmp(&w->routes[i], k, sizeof *k) == 0) return i;
-  }
-  return w->n_routes;
-}
-
 void ccord_linkwatch_feed_clocks(ccord_linkwatch *w, uint64_t boottime_ms, uint64_t monotonic_ms)
 {
   if (!w) return;
@@ -76,6 +68,14 @@ void ccord_linkwatch_feed_clocks(ccord_linkwatch *w, uint64_t boottime_ms, uint6
 }
 
 #if LINKWATCH_HAVE_NETLINK
+static size_t route_find(const ccord_linkwatch *w, const route_key *k)
+{
+  for (size_t i = 0; i < w->n_routes; i++) {
+    if (memcmp(&w->routes[i], k, sizeof *k) == 0) return i;
+  }
+  return w->n_routes;
+}
+
 // Applies one RTM_NEWROUTE / RTM_DELROUTE payload (rtmsg + attributes, `len` bytes at `p`, unaligned-safe).
 static void route_message(ccord_linkwatch *w, bool add, const unsigned char *p, size_t len)
 {

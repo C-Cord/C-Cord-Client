@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE
 #endif
@@ -134,6 +135,11 @@ bool ccord_gmtime(time_t t, struct tm *out)
 bool ccord_localtime(time_t t, struct tm *out)
 {
   return out && localtime_r(&t, out) != nullptr;
+}
+
+time_t ccord_timegm(struct tm *tm)
+{
+  return tm ? timegm(tm) : (time_t)-1;
 }
 
 int ccord_strcasecmp(const char *a, const char *b)

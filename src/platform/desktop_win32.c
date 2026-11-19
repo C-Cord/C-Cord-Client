@@ -231,7 +231,7 @@ static void show_tray_menu(ccord_desktop *d)
   DestroyMenu(menu);
   if (!d->tray_fn) return;
   switch (cmd) {
-    case CMD_TRAY_SHOW: d->tray_fn(d->tray_ud, CCORD_TRAY_TOGGLE_SHOW); break;
+    case CMD_TRAY_SHOW: d->tray_fn(d->tray_ud, CCORD_TRAY_ACTIVATE); break;
     case CMD_TRAY_MUTE: d->tray_fn(d->tray_ud, CCORD_TRAY_TOGGLE_MUTE); break;
     case CMD_TRAY_DEAFEN: d->tray_fn(d->tray_ud, CCORD_TRAY_TOGGLE_DEAFEN); break;
     case CMD_TRAY_QUIT: d->tray_fn(d->tray_ud, CCORD_TRAY_QUIT); break;
@@ -246,7 +246,7 @@ static LRESULT CALLBACK tray_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     switch (lp) {
       case WM_LBUTTONUP:
       case WM_LBUTTONDBLCLK:
-        if (d->tray_fn) d->tray_fn(d->tray_ud, CCORD_TRAY_TOGGLE_SHOW);
+        if (d->tray_fn) d->tray_fn(d->tray_ud, CCORD_TRAY_ACTIVATE);
         return 0;
       case WM_RBUTTONUP:
       case WM_CONTEXTMENU:

@@ -11,6 +11,7 @@
 #include <time.h>
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/os.h>
 
 #include "ui_internal.h"
 #include "ui_style.h"
@@ -99,7 +100,7 @@ static void sd_apply_preset(ccord_ui *ui, int preset)
     tm.tm_min = 0;
     tm.tm_sec = 0;
     tm.tm_isdst = -1;
-    time_t t = ui->use_utc ? timegm(&tm) : mktime(&tm);
+    time_t t = ui->use_utc ? ccord_timegm(&tm) : mktime(&tm);
     sd_set_fields(ui, (int64_t)t * 1000);
   }
   sd.status[0] = '\0';
@@ -121,7 +122,7 @@ static bool sd_parse_due(const ccord_ui *ui, int64_t *out_ms, char *why, size_t 
   }
   struct tm tm = {.tm_year = y - 1900, .tm_mon = mo - 1, .tm_mday = d, .tm_hour = h, .tm_min = mi, .tm_isdst = -1};
   struct tm chk = tm;
-  time_t t = ui->use_utc ? timegm(&chk) : mktime(&chk);
+  time_t t = ui->use_utc ? ccord_timegm(&chk) : mktime(&chk);
   if (t == (time_t)-1 || chk.tm_year != tm.tm_year || chk.tm_mon != tm.tm_mon || chk.tm_mday != tm.tm_mday ||
       chk.tm_hour != tm.tm_hour || chk.tm_min != tm.tm_min) {
     snprintf(why, why_cap, "That date or time does not exist.");

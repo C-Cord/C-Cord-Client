@@ -128,6 +128,11 @@ bool ccord_localtime(time_t t, struct tm *out)
   return out && localtime_s(out, &t) == 0;
 }
 
+time_t ccord_timegm(struct tm *tm)
+{
+  return tm ? _mkgmtime(tm) : (time_t)-1;
+}
+
 int ccord_strcasecmp(const char *a, const char *b)
 {
   if (!a || !b) return (a == b) ? 0 : (a ? 1 : -1);

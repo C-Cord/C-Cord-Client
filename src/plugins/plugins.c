@@ -1811,7 +1811,7 @@ void ccord_plugins_pump(ccord_plugins *m, uint64_t now_ms)
       if (ccord_ipc_flush(p->ipc, 0, &err) != CCORD_OK) fail_plugin(m, p, "host connection lost while writing");
     }
     if (p->ipc) check_timers(m, p);
-    if (p->ipc == nullptr && p->pid > 0 && !p->reaped) {
+    if (p->ipc == nullptr && host_is_running(p)) {
       char reason[160];
       (void)reap_wait(p, 0, reason, sizeof reason);
     }
@@ -1970,7 +1970,9 @@ static plugin *new_record(ccord_plugins *m)
   memset(p, 0, sizeof *p);
   p->used = true;
   p->enabled = true;
+#if !CCORD_OS_WINDOWS
   p->pid = -1;
+#endif
   p->next_id = 1;
   p->state = CCORD_PLUGIN_STARTING;
   return p;
@@ -2638,7 +2640,14 @@ int ccord_plugins_host_pid(const ccord_plugins *m, const char *owner)
   if (!m || !owner) return -1;
   for (size_t i = 0; i < m->nplugins; i++) {
     const plugin *p = &m->plugins[i];
-    if (p->used && strcmp(p->m.id, owner) == 0) return (p->ipc && p->pid > 0 && !p->reaped) ? (int)p->pid : -1;
+    if (p->used && strcmp(p->m.id, owner) == 0) {
+      if (!p->ipc || !host_is_running(p)) return -1;
+#if CCORD_OS_WINDOWS
+      return (int)GetProcessId(p->proc);
+#else
+      return (int)p->pid;
+#endif
+    }
   }
   return -1;
 }

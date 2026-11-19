@@ -22,6 +22,7 @@
 #include <tlhelp32.h>
 #elif CCORD_OS_MACOS
 #include <libproc.h>
+#include <sys/proc.h>
 #include <sys/proc_info.h>
 #include <unistd.h>
 #else

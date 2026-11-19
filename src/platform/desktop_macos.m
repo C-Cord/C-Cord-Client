@@ -95,7 +95,7 @@ struct ccord_desktop {
 @implementation CCordTrayTarget
 - (void)onShow:(id)sender {
   (void)sender;
-  if (desktop && desktop->tray_fn) desktop->tray_fn(desktop->tray_ud, CCORD_TRAY_TOGGLE_SHOW);
+  if (desktop && desktop->tray_fn) desktop->tray_fn(desktop->tray_ud, CCORD_TRAY_ACTIVATE);
 }
 - (void)onMute:(id)sender {
   (void)sender;

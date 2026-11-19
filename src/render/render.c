@@ -543,7 +543,7 @@ struct jpeg_decode_ctx {
 
 static void jpeg_error_exit_fn(j_common_ptr cinfo)
 {
-  struct jpeg_decode_ctx *ctx = (struct jpeg_decode_ctx *)cinfo->err;
+  struct jpeg_decode_ctx *ctx = (struct jpeg_decode_ctx *)(void *)cinfo->err;
   longjmp(ctx->jb, 1);
 }
 

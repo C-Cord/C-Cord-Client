@@ -22,7 +22,11 @@
 #include <curl/curl.h>
 #include <curl/websockets.h>
 #include <openssl/evp.h>
+#if defined(__has_include) && __has_include(<opus/opus.h>)
 #include <opus/opus.h>
+#else
+#include <opus.h>
+#endif
 #include <sodium.h>
 
 #include "voice_internal.h"
@@ -616,7 +620,7 @@ static void vg_open_udp_and_discover(ccord_voice_gateway *g)
   for (struct addrinfo *rp = res; rp; rp = rp->ai_next) {
     ccord_socket_t s = (ccord_socket_t)socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
     if (s == CCORD_INVALID_SOCKET) continue;
-    if (connect((int)s, rp->ai_addr, (socklen_t)rp->ai_addrlen) == 0) {
+    if (vg_sock_connect(s, rp->ai_addr, (size_t)rp->ai_addrlen) == 0) {
       fd = (int)s;
       memcpy(&peer, rp->ai_addr, rp->ai_addrlen);
       break;
@@ -630,11 +634,11 @@ static void vg_open_udp_and_discover(ccord_voice_gateway *g)
   (void)ccord_sock_set_nonblock((ccord_socket_t)fd);
   int big_buf = 4 * 1024 * 1024;
   int fallback_buf = 1024 * 1024;
-  if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&big_buf, sizeof big_buf) != 0) {
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVBUF, (const char *)&fallback_buf, sizeof fallback_buf);
+  if (vg_sock_setsockopt_int(fd, SOL_SOCKET, SO_RCVBUF, big_buf) != 0) {
+    (void)vg_sock_setsockopt_int(fd, SOL_SOCKET, SO_RCVBUF, fallback_buf);
   }
-  if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&big_buf, sizeof big_buf) != 0) {
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&fallback_buf, sizeof fallback_buf);
+  if (vg_sock_setsockopt_int(fd, SOL_SOCKET, SO_SNDBUF, big_buf) != 0) {
+    (void)vg_sock_setsockopt_int(fd, SOL_SOCKET, SO_SNDBUF, fallback_buf);
   }
 
   g->udp_fd = fd;
@@ -648,7 +652,7 @@ static void vg_open_udp_and_discover(ccord_voice_gateway *g)
 
   uint8_t req[CCORD_VOICE_IP_DISCOVERY_SIZE];
   ccord_voice_ip_discovery_build(g->ssrc, req);
-  (void)sendto(g->udp_fd, (const char *)req, sizeof req, 0, (const struct sockaddr *)&g->peer_addr, sizeof g->peer_addr);
+  (void)vg_sock_sendto(g->udp_fd, req, sizeof req, (const struct sockaddr *)&g->peer_addr, sizeof g->peer_addr);
   g->ip_discovery_deadline = vg_now(g) + 250u;
 
   // If connecting to loopback (tests) or a live socket, poll briefly for the 74-byte 0x0002 response.
@@ -657,7 +661,7 @@ static void vg_open_udp_and_discover(ccord_voice_gateway *g)
     int ev = ccord_sock_poll1((ccord_socket_t)g->udp_fd, CCORD_POLL_IN, wait_ms);
     if (ev > 0 && (ev & CCORD_POLL_IN)) {
       uint8_t resp[128];
-      ptrdiff_t n = recvfrom(g->udp_fd, (char *)resp, sizeof resp, 0, nullptr, nullptr);
+      ptrdiff_t n = vg_sock_recvfrom(g->udp_fd, resp, sizeof resp, nullptr, nullptr);
       if (n >= (ptrdiff_t)CCORD_VOICE_IP_DISCOVERY_SIZE) {
         ccord_error ignored;
         char dip[64];
@@ -1406,7 +1410,7 @@ static ccord_status vg_seal_and_send_rtp(ccord_voice_gateway *g,
   if (g->udp_fd < 0 || !g->peer_valid) {
     return ccord_error_set(err, CCORD_ERR_IO, "voice: udp socket not ready");
   }
-  ssize_t sent = sendto(g->udp_fd, pkt, pkt_len, 0, (const struct sockaddr *)&g->peer_addr, sizeof g->peer_addr);
+  ptrdiff_t sent = vg_sock_sendto(g->udp_fd, pkt, pkt_len, (const struct sockaddr *)&g->peer_addr, sizeof g->peer_addr);
   if (sent < 0 || (size_t)sent != pkt_len) {
     return ccord_error_set(err, CCORD_ERR_IO, "voice: udp sendto failed");
   }
@@ -2010,7 +2014,7 @@ static void vg_pump_udp(ccord_voice_gateway *g)
     uint8_t pkt[2048];
     struct sockaddr_storage from = {0};
     socklen_t from_len = sizeof from;
-    ssize_t n = recvfrom(g->udp_fd, pkt, sizeof pkt, 0, (struct sockaddr *)&from, &from_len);
+    ptrdiff_t n = vg_sock_recvfrom(g->udp_fd, pkt, sizeof pkt, (struct sockaddr *)&from, &from_len);
     if (n < 0) {
       break;
     }

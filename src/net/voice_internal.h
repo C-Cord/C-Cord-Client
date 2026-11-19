@@ -11,11 +11,16 @@
 #include <ws2tcpip.h>
 #else
 #include <netinet/in.h>
+#include <sys/socket.h>
 #endif
 #include <stdatomic.h>
 
 #include <curl/curl.h>
+#if defined(__has_include) && __has_include(<opus/opus.h>)
 #include <opus/opus.h>
+#else
+#include <opus.h>
+#endif
 
 #include <ccord/core/os.h>
 
@@ -219,3 +224,40 @@ void vg_pump_udp_established(ccord_voice_gateway *g);
 // The voice gateway behind a vstream handle (loopback tests inject signaling with ccord_voice_gateway_handle).
 // Defined in voice_stream.c; nullptr for a null handle.
 ccord_voice_gateway *ccord_vstream_gateway(ccord_vstream *s);
+
+// Winsock/POSIX UDP socket wrappers so callers stay free of SOCKET/char*/int-len #ifdef noise.
+static inline int vg_sock_connect(ccord_socket_t s, const struct sockaddr *addr, size_t addrlen)
+{
+#if defined(_WIN32)
+  return connect((SOCKET)s, addr, (int)addrlen);
+#else
+  return connect(s, addr, (socklen_t)addrlen);
+#endif
+}
+
+static inline int vg_sock_setsockopt_int(int fd, int level, int optname, int val)
+{
+#if defined(_WIN32)
+  return setsockopt((SOCKET)fd, level, optname, (const char *)&val, (int)sizeof val);
+#else
+  return setsockopt(fd, level, optname, &val, sizeof val);
+#endif
+}
+
+static inline ptrdiff_t vg_sock_sendto(int fd, const void *buf, size_t len, const struct sockaddr *dst, socklen_t dstlen)
+{
+#if defined(_WIN32)
+  return (ptrdiff_t)sendto((SOCKET)fd, (const char *)buf, (int)len, 0, dst, (int)dstlen);
+#else
+  return (ptrdiff_t)sendto(fd, buf, len, 0, dst, dstlen);
+#endif
+}
+
+static inline ptrdiff_t vg_sock_recvfrom(int fd, void *buf, size_t cap, struct sockaddr *src, socklen_t *srclen)
+{
+#if defined(_WIN32)
+  return (ptrdiff_t)recvfrom((SOCKET)fd, (char *)buf, (int)cap, 0, src, srclen);
+#else
+  return (ptrdiff_t)recvfrom(fd, buf, cap, 0, src, srclen);
+#endif
+}
