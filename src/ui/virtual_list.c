@@ -46,6 +46,18 @@ ccord_status ccord_vlist_set_count(ccord_vlist *v, size_t count, ccord_error *er
     if (v->count > 0) v->height_epoch[v->count - 1] = 0;
     if (count > 0) v->height_epoch[count - 1] = 0;
   }
+  // Shrink oversized height caches when switching from a huge channel to a small one.
+  if (v->heights_cap > 512u && count < v->heights_cap / 4u) {
+    size_t ncap = 256u;
+    while (ncap < count) ncap *= 2u;
+    float *h = ccord_realloc_array(v->heights, ncap, sizeof *h);
+    if (h) {
+      v->heights = h;
+      v->heights_cap = ncap;
+      uint32_t *e = ccord_realloc_array(v->height_epoch, ncap, sizeof *e);
+      if (e) v->height_epoch = e;
+    }
+  }
   size_t old_count = v->count;
   v->count = count;
   if (count == 0) {
