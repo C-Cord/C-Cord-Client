@@ -18,14 +18,20 @@
 #include <ccord/core/paths.h>
 #include <ccord/core/utf8.h>
 
-#define MAX_TEXT_BYTES 8192u   // longer strings are cut (callers cap messages at 4000 bytes)
+#define MAX_TEXT_BYTES 8192u         // longer strings are cut (callers cap messages at 4000 bytes)
+#define CCORD_ELLIPSIS_MAX_KEY 512u  // cache ellipsis truncation for UI labels up to this byte length
 
 // ---- fonts ----
 
 static bool has_fallback_family(const ccord_renderer *r, const char *fam)
 {
   if (!fam || fam[0] == '\0') return false;
-  for (int i = 0; i < r->nfallbacks; i++) {
+  for (int i = 0; i < CCORD_BUNDLED_COUNT; i++) {
+    if (!r->bundled_base[i]) continue;
+    const char *existing = TTF_GetFontFamilyName(r->bundled_base[i]);
+    if (existing && strcmp(existing, fam) == 0) return true;
+  }
+  for (int i = 0; i < r->nsys_fallbacks; i++) {
     if (!r->fallback_base[i]) continue;
     const char *existing = TTF_GetFontFamilyName(r->fallback_base[i]);
     if (existing && strcmp(existing, fam) == 0) return true;
@@ -35,91 +41,105 @@ static bool has_fallback_family(const ccord_renderer *r, const char *fam)
 
 static void text_entries_flush(ccord_renderer *r);
 
-// Attaches `fb` (owned from here on) as the next fallback to both base faces and to every sized font already made.
+// Attaches a sized copy of `base_fb` to a single sized font `fe` on demand.
 // A font that gains a fallback gets a new generation, and SDL_ttf then re-lays out every TTF_Text made from it the next time
 // it is drawn. That drops what normalize_bitmap_glyphs did to the cached text (a colour emoji's bitmap is cut back to the
 // line height there), so the emoji came out at full size over the chat. The cached texts are dropped here instead and
 // rebuilt, normalised, on their next use. No caller holds a text_entry across a text_get that can reach this.
-static void adopt_fallback(ccord_renderer *r, TTF_Font *fb, const char *path)
+static bool attach_fallback_to_font(ccord_renderer *r, font_entry *fe, TTF_Font *base_fb, TTF_Font **slot_ptr)
 {
-  int idx = r->nfallbacks++;
-  r->fallback_base[idx] = fb;
-  snprintf(r->fallback_path[idx], sizeof r->fallback_path[idx], "%s", path);
-  for (int b = 0; b < 2; b++) {
-    if (r->base[b]) (void)TTF_AddFallbackFont(r->base[b], fb);
+  if (!fe || !fe->font || !base_fb || !slot_ptr) return false;
+  if (*slot_ptr) return true;
+  TTF_Font *copy = TTF_CopyFont(base_fb);
+  if (!copy) return false;
+  TTF_SetFontSize(copy, (float)fe->px);
+  TTF_SetFontHinting(copy, TTF_HINTING_LIGHT);
+  if (!TTF_AddFallbackFont(fe->font, copy)) {
+    TTF_CloseFont(copy);
+    return false;
   }
-  for (int i = 0; i < r->nfonts; i++) {
-    font_entry *fe = &r->fonts[i];
-    if (!fe->font || fe->nfallbacks >= CCORD_MAX_FALLBACKS) continue;
-    TTF_Font *copy = TTF_CopyFont(fb);
-    if (!copy) continue;
-    TTF_SetFontSize(copy, (float)fe->px);
-    TTF_SetFontHinting(copy, TTF_HINTING_LIGHT);
-    if (TTF_AddFallbackFont(fe->font, copy)) {
-      fe->fallbacks[fe->nfallbacks++] = copy;
-    } else {
-      TTF_CloseFont(copy);
-    }
-  }
+  *slot_ptr = copy;
   text_entries_flush(r);
+  return true;
 }
 
-static bool try_bundled(ccord_renderer *r, const char *path)
+static void adopt_sys_fallback(ccord_renderer *r, font_entry *fe, TTF_Font *fb, const char *path)
 {
-  if (r->nfallbacks >= CCORD_MAX_FALLBACKS) return false;
-  TTF_Font *fb = TTF_OpenFont(path, 16.0f);
-  if (!fb) return false;
+  int idx = r->nsys_fallbacks++;
+  r->fallback_base[idx] = fb;
+  snprintf(r->fallback_path[idx], sizeof r->fallback_path[idx], "%s", path);
+  if (fe) (void)attach_fallback_to_font(r, fe, fb, &fe->fallbacks[idx]);
+}
+
+// Opens one bundled OFL subset (CCORD_BUNDLED_EMOJI or CCORD_BUNDLED_CJK) independently on first use.
+static void bundled_fallback_ensure(ccord_renderer *r, int slot)
+{
+  if (!r || slot < 0 || slot >= CCORD_BUNDLED_COUNT || r->bundled_probed[slot]) return;
+  r->bundled_probed[slot] = true;
+  static const char *const k_bundled_rel[CCORD_BUNDLED_COUNT] = {
+    "fonts/NotoColorEmoji-Subset.ttf",
+    "fonts/NotoSansCJK-Subset.ttf",
+  };
+  const char *rel = k_bundled_rel[slot];
+  char path[1024];
+  TTF_Font *fb = nullptr;
+  ccord_error err;
+  if (ccord_paths_join(path, sizeof path, ccord_paths_asset_dir(), rel, &err) == CCORD_OK) {
+    fb = TTF_OpenFont(path, 16.0f);
+  }
+#if defined(__ANDROID__)
+  // On Android, SDL_IOFromFile reads directly from APK assets/ via AAssetManager.
+  if (!fb) {
+    SDL_IOStream *io = SDL_IOFromFile(rel, "rb");
+    if (io) fb = TTF_OpenFontIO(io, true, 16.0f);
+  }
+#endif
+  if (!fb) return;
   const char *fam = TTF_GetFontFamilyName(fb);
   if (has_fallback_family(r, fam)) {
     TTF_CloseFont(fb);
-    return false;
+    return;
   }
-  adopt_fallback(r, fb, path);
-  r->nbundled = r->nfallbacks;
-  return true;
+  r->bundled_base[slot] = fb;
 }
 
 // Only the bundled OFL subsets are opened here, so startup touches no system font. Code points they and the base
 // face do not cover are looked up on the host the first time text needs them (ensure_coverage).
 void fallback_fonts_init(ccord_renderer *r)
 {
-  if (!r || r->fallbacks_probed) return;
-  r->fallbacks_probed = true;
-  static const char *const k_bundled_rel[] = {
-    "fonts/NotoColorEmoji-Subset.ttf",
-    "fonts/NotoSansCJK-Subset.ttf",
-  };
-  char path[1024];
-  for (size_t i = 0; i < sizeof k_bundled_rel / sizeof k_bundled_rel[0]; i++) {
-    ccord_error err;
-    bool loaded = false;
-    if (ccord_paths_join(path, sizeof path, ccord_paths_asset_dir(), k_bundled_rel[i], &err) == CCORD_OK) {
-      loaded = try_bundled(r, path);
-    }
-#if defined(__ANDROID__)
-    // On Android, SDL_IOFromFile reads directly from APK assets/ via AAssetManager.
-    if (!loaded) {
-      SDL_IOStream *io = SDL_IOFromFile(k_bundled_rel[i], "rb");
-      if (io) {
-        TTF_Font *fb = TTF_OpenFontIO(io, true, 16.0f);
-        if (fb) {
-          const char *fam = TTF_GetFontFamilyName(fb);
-          if (has_fallback_family(r, fam)) {
-            TTF_CloseFont(fb);
-          } else {
-            adopt_fallback(r, fb, k_bundled_rel[i]);
-            r->nbundled = r->nfallbacks;
-            loaded = true;
-          }
-        }
-      }
-    }
-#endif
-    (void)loaded;
-  }
+  if (!r) return;
+  bundled_fallback_ensure(r, CCORD_BUNDLED_EMOJI);
+  bundled_fallback_ensure(r, CCORD_BUNDLED_CJK);
 }
 
 // ---- code point classes ----
+
+// Code points covered by bundled NotoColorEmoji-Subset.ttf (non-ASCII symbols, dingbats, pictographs, emoji, flags).
+static bool cp_is_emoji(uint32_t cp)
+{
+  return (cp >= 0x1F000u && cp <= 0x1FAFFu) ||
+         (cp >= 0x2600u && cp <= 0x27BFu) ||
+         (cp >= 0x2300u && cp <= 0x23FFu) ||
+         (cp >= 0x25A0u && cp <= 0x25FFu) ||
+         (cp >= 0x2B00u && cp <= 0x2BFFu) ||
+         cp == 0x203Cu || cp == 0x2049u || cp == 0x20E3u || cp == 0x2122u || cp == 0x2139u ||
+         (cp >= 0x2194u && cp <= 0x2199u) || cp == 0x21A9u || cp == 0x21AAu ||
+         cp == 0x24C2u || cp == 0x2934u || cp == 0x2935u ||
+         cp == 0x3030u || cp == 0x303Du || cp == 0x3297u || cp == 0x3299u;
+}
+
+// Code points covered by bundled NotoSansCJK-Subset.ttf (CJK ideographs, Kana, Bopomofo, Hangul, CJK/Fullwidth forms).
+static bool cp_is_cjk(uint32_t cp)
+{
+  return (cp >= 0x2E80u && cp <= 0x33FFu) ||
+         (cp >= 0x3400u && cp <= 0x4DBFu) ||
+         (cp >= 0x4E00u && cp <= 0x9FFFu) ||
+         (cp >= 0xAC00u && cp <= 0xD7AFu) ||
+         (cp >= 0xF900u && cp <= 0xFAFFu) ||
+         (cp >= 0xFE30u && cp <= 0xFE4Fu) ||
+         (cp >= 0xFF00u && cp <= 0xFFEFu) ||
+         (cp >= 0x20000u && cp <= 0x2FA1Fu);
+}
 
 // Characters HarfBuzz already hides (zero advance, no ink) even when no font has them; they also steer shaping (ZWJ
 // in emoji, ZWNJ in Persian, variation selectors), so they are never cut and never searched for.
@@ -210,14 +230,14 @@ static bool font_file_ext(const char *name)
 
 static bool already_adopted(const ccord_renderer *r, const char *path)
 {
-  for (int i = 0; i < r->nfallbacks; i++) {
+  for (int i = 0; i < r->nsys_fallbacks; i++) {
     if (strcmp(r->fallback_path[i], path) == 0) return true;
   }
   return false;
 }
 
-// Opens `path` (face `face`) and keeps it as a fallback when it really has `cp`.
-static bool try_system_font(ccord_renderer *r, const char *path, int face, uint32_t cp)
+// Opens `path` (face `face`) and keeps it as a system fallback when it really has `cp`, attaching it to `fe`.
+static bool try_system_font(ccord_renderer *r, font_entry *fe, const char *path, int face, uint32_t cp)
 {
   if (!font_file_ext(path) || strlen(path) >= CCORD_FALLBACK_PATH_MAX) return false;
   char id[CCORD_FALLBACK_PATH_MAX];
@@ -236,7 +256,7 @@ static bool try_system_font(ccord_renderer *r, const char *path, int face, uint3
     TTF_CloseFont(fb);
     return false;
   }
-  adopt_fallback(r, fb, id);
+  adopt_sys_fallback(r, fe, fb, id);
   CCORD_LOG_D("render: font fallback for U+%04X: %s", (unsigned)cp, id);
   return true;
 }
@@ -244,15 +264,39 @@ static bool try_system_font(ccord_renderer *r, const char *path, int face, uint3
 #if CCORD_HAVE_FONTCONFIG
 #include <fontconfig/fontconfig.h>
 
-// Asks fontconfig for fonts covering `cp`, nearest to Noto Sans first, and keeps the first one that opens and has it.
-static bool lookup_system_font(ccord_renderer *r, uint32_t cp)
+#define FC_PATH_CACHE_CAP 32
+typedef struct fc_path_cache_entry {
+  char path[512];
+  int face;
+} fc_path_cache_entry;
+
+static fc_path_cache_entry g_fc_paths[FC_PATH_CACHE_CAP];
+static int g_fc_npaths;
+
+static void fc_path_cache_remember(const char *path, int face)
 {
-  static FcConfig *cfg;
-  static bool tried;
-  if (!tried) {
-    tried = true;
-    cfg = FcInitLoadConfigAndFonts();
+  size_t plen = strlen(path);
+  if (plen == 0 || plen >= sizeof g_fc_paths[0].path) return;
+  for (int i = 0; i < g_fc_npaths; i++) {
+    if (g_fc_paths[i].face == face && strcmp(g_fc_paths[i].path, path) == 0) return;
   }
+  if (g_fc_npaths < FC_PATH_CACHE_CAP) {
+    memcpy(g_fc_paths[g_fc_npaths].path, path, plen + 1);
+    g_fc_paths[g_fc_npaths].face = face;
+    g_fc_npaths++;
+  }
+}
+
+// Asks fontconfig for fonts covering `cp`, nearest to Noto Sans first, and keeps the first one that opens and has it.
+// Uses a caller-scoped FcConfig (*io_cfg) that is destroyed as soon as ensure_coverage returns so the 5-20 MiB
+// Fontconfig database is never permanently retained for the process lifetime.
+static bool lookup_system_font(ccord_renderer *r, font_entry *fe, uint32_t cp, FcConfig **io_cfg)
+{
+  for (int i = 0; i < g_fc_npaths; i++) {
+    if (try_system_font(r, fe, g_fc_paths[i].path, g_fc_paths[i].face, cp)) return true;
+  }
+  if (!*io_cfg) *io_cfg = FcInitLoadConfigAndFonts();
+  FcConfig *cfg = *io_cfg;
   if (!cfg) return false;
   FcPattern *pat = FcPatternCreate();
   FcCharSet *cs = FcCharSetCreate();
@@ -278,7 +322,11 @@ static bool lookup_system_font(ccord_renderer *r, uint32_t cp)
     if (FcPatternGetCharSet(fs->fonts[i], FC_CHARSET, 0, &have) != FcResultMatch || !FcCharSetHasChar(have, cp)) continue;
     if (FcPatternGetString(fs->fonts[i], FC_FILE, 0, &file) != FcResultMatch) continue;
     (void)FcPatternGetInteger(fs->fonts[i], FC_INDEX, 0, &idx);
-    ok = try_system_font(r, (const char *)file, idx & 0xFFFF, cp);
+    int face = idx & 0xFFFF;
+    if (try_system_font(r, fe, (const char *)file, face, cp)) {
+      fc_path_cache_remember((const char *)file, face);
+      ok = true;
+    }
   }
   if (fs) FcFontSetDestroy(fs);
   FcCharSetDestroy(cs);
@@ -336,7 +384,7 @@ static void scan_font_dir(const char *dir, int depth)
   ccord_dir_close(d);
 }
 
-static bool lookup_system_font(ccord_renderer *r, uint32_t cp)
+static bool lookup_system_font(ccord_renderer *r, font_entry *fe, uint32_t cp)
 {
   if (!g_font_scanned) {
     g_font_scanned = true;
@@ -366,7 +414,7 @@ static bool lookup_system_font(ccord_renderer *r, uint32_t cp)
     if (g_nfont_files > 1) qsort(g_font_files, (size_t)g_nfont_files, sizeof *g_font_files, font_file_cmp);
   }
   for (int i = 0; i < g_nfont_files; i++) {
-    if (try_system_font(r, g_font_files[i], 0, cp)) return true;
+    if (try_system_font(r, fe, g_font_files[i], 0, cp)) return true;
   }
   return false;
 }
@@ -387,11 +435,16 @@ static void miss_add(ccord_renderer *r, uint32_t cp)
   if (r->nmiss < CCORD_MISS_CACHE_SIZE) r->nmiss++;
 }
 
-// Before `s` is shaped: for each code point neither the base face nor an attached fallback has, look for an installed
-// font that does and attach it. Nothing is opened for text the bundled fonts already cover.
-static void ensure_coverage(ccord_renderer *r, TTF_Font *font, const char *s, size_t len)
+// Before `s` is shaped: for each code point neither the base face nor an attached fallback on `fe` has, lazily
+// load/attach the matching bundled subset (emoji vs CJK independently) or look up an installed system font.
+static void ensure_coverage(ccord_renderer *r, font_entry *fe, const char *s, size_t len)
 {
+  if (!fe || !fe->font) return;
+  TTF_Font *font = fe->font;
   int budget = 16;   // distinct lookups per text; a long run of unknown characters must not stall one frame
+#if CCORD_HAVE_FONTCONFIG
+  FcConfig *fc_cfg = nullptr;
+#endif
   size_t i = 0;
   while (i < len && budget > 0) {
     uint8_t b = (uint8_t)s[i];
@@ -407,16 +460,46 @@ static void ensure_coverage(ccord_renderer *r, TTF_Font *font, const char *s, si
     }
     i += (size_t)n;
     if (cp_default_ignorable(cp) || cp_hidden(cp) || TTF_FontHasGlyph(font, cp) || miss_known(r, cp)) continue;
-    // Lazily load bundled emoji/CJK subsets on the first code point NotoSans doesn't cover so cold start
-    // draws its first frame immediately without parsing ~16 MB of fallback font tables upfront.
-    if (!r->fallbacks_probed) {
-      fallback_fonts_init(r);
-      if (TTF_FontHasGlyph(font, cp)) continue;
+    // Lazily load bundled emoji and CJK subsets independently on first code point in each range, and attach
+    // only to the sized font that actually renders it.
+    if (cp_is_emoji(cp)) {
+      bundled_fallback_ensure(r, CCORD_BUNDLED_EMOJI);
+      TTF_Font *efb = r->bundled_base[CCORD_BUNDLED_EMOJI];
+      if (efb && !fe->bundled_fb[CCORD_BUNDLED_EMOJI] && TTF_FontHasGlyph(efb, cp)) {
+        (void)attach_fallback_to_font(r, fe, efb, &fe->bundled_fb[CCORD_BUNDLED_EMOJI]);
+        if (TTF_FontHasGlyph(font, cp)) continue;
+      }
+    }
+    if (cp_is_cjk(cp)) {
+      bundled_fallback_ensure(r, CCORD_BUNDLED_CJK);
+      TTF_Font *cfb = r->bundled_base[CCORD_BUNDLED_CJK];
+      if (cfb && !fe->bundled_fb[CCORD_BUNDLED_CJK] && TTF_FontHasGlyph(cfb, cp)) {
+        (void)attach_fallback_to_font(r, fe, cfb, &fe->bundled_fb[CCORD_BUNDLED_CJK]);
+        if (TTF_FontHasGlyph(font, cp)) continue;
+      }
     }
     if (r->glyph_fixes_off) continue;
+    // Attach an already-opened system fallback to this sized font before querying fontconfig / font dirs.
+    bool attached = false;
+    for (int k = 0; k < r->nsys_fallbacks; k++) {
+      if (fe->fallbacks[k] || !r->fallback_base[k]) continue;
+      if (TTF_FontHasGlyph(r->fallback_base[k], cp)) {
+        (void)attach_fallback_to_font(r, fe, r->fallback_base[k], &fe->fallbacks[k]);
+        attached = TTF_FontHasGlyph(font, cp);
+        if (attached) break;
+      }
+    }
+    if (attached) continue;
     budget--;
-    if (r->nfallbacks >= CCORD_MAX_FALLBACKS || !lookup_system_font(r, cp)) miss_add(r, cp);
+#if CCORD_HAVE_FONTCONFIG
+    if (r->nsys_fallbacks >= CCORD_MAX_FALLBACKS || !lookup_system_font(r, fe, cp, &fc_cfg)) miss_add(r, cp);
+#else
+    if (r->nsys_fallbacks >= CCORD_MAX_FALLBACKS || !lookup_system_font(r, fe, cp)) miss_add(r, cp);
+#endif
   }
+#if CCORD_HAVE_FONTCONFIG
+  if (fc_cfg) FcConfigDestroy(fc_cfg);
+#endif
 }
 
 static int font_px(const ccord_renderer *r, const ccord_text_style *st)
@@ -425,10 +508,10 @@ static int font_px(const ccord_renderer *r, const ccord_text_style *st)
   return px < 4 ? 4 : (px > 512 ? 512 : px);
 }
 
-static TTF_Font *font_get(ccord_renderer *r, ccord_font_style style, int px)
+static font_entry *font_entry_get(ccord_renderer *r, ccord_font_style style, int px)
 {
   for (int i = 0; i < r->nfonts; i++) {
-    if (r->fonts[i].style == style && r->fonts[i].px == px) return r->fonts[i].font;
+    if (r->fonts[i].style == style && r->fonts[i].px == px) return &r->fonts[i];
   }
   if (r->nfonts == CCORD_FONT_CACHE_SIZE) {
     CCORD_LOG_W("render: font cache full, flushing");
@@ -443,29 +526,30 @@ static TTF_Font *font_get(ccord_renderer *r, ccord_font_style style, int px)
   TTF_SetFontHinting(f, TTF_HINTING_LIGHT);
   int skip = (int)lroundf((float)px * r->line_factor);
   TTF_SetFontLineSkip(f, skip);
-  font_entry fe = {.font = f, .style = style, .px = px};
-  const int nfb = r->glyph_fixes_off ? r->nbundled : r->nfallbacks;
-  for (int k = 0; k < nfb && fe.nfallbacks < CCORD_MAX_FALLBACKS; k++) {
-    TTF_Font *fb = TTF_CopyFont(r->fallback_base[k]);
-    if (!fb) continue;
-    TTF_SetFontSize(fb, (float)px);
-    TTF_SetFontHinting(fb, TTF_HINTING_LIGHT);
-    if (TTF_AddFallbackFont(f, fb)) {
-      fe.fallbacks[fe.nfallbacks++] = fb;
-    } else {
-      TTF_CloseFont(fb);
-    }
-  }
-  r->fonts[r->nfonts++] = fe;
-  return f;
+  int slot = r->nfonts++;
+  r->fonts[slot] = (font_entry){.font = f, .style = style, .px = px};
+  return &r->fonts[slot];
 }
 
-// ---- text cache: fixed-size LRU, hash buckets chained through `next` ----
+// ---- text cache: fixed-size O(1) LRU, hash buckets chained through `next` ----
+
+static void ellipsis_cache_flush(ccord_renderer *r)
+{
+  for (int s = 0; s < CCORD_ELLIPSIS_SETS; s++) {
+    for (int w = 0; w < CCORD_ELLIPSIS_WAYS; w++) {
+      ccord_free(r->ellipsis[s][w].str);
+      r->ellipsis[s][w] = (ellipsis_entry){0};
+    }
+    r->ellipsis_lru[s] = 0;
+  }
+}
 
 void text_cache_init(ccord_renderer *r)
 {
   for (int i = 0; i < CCORD_TEXT_CACHE_SIZE; i++) r->buckets[i] = -1;
   r->ntexts = 0;
+  r->text_lru_head = -1;
+  r->text_lru_tail = -1;
 }
 
 static void entry_free(text_entry *e)
@@ -478,12 +562,15 @@ static void entry_free(text_entry *e)
   memset(e, 0, sizeof *e);
 }
 
-// Drops every cached text and keeps the fonts.
+// Drops every cached text (and ellipsis truncation entries) while keeping sized fonts.
 static void text_entries_flush(ccord_renderer *r)
 {
   for (int i = 0; i < r->ntexts; i++) entry_free(&r->texts[i]);
   r->ntexts = 0;
+  r->text_lru_head = -1;
+  r->text_lru_tail = -1;
   for (int i = 0; i < CCORD_TEXT_CACHE_SIZE; i++) r->buckets[i] = -1;
+  ellipsis_cache_flush(r);
 }
 
 void text_cache_flush(ccord_renderer *r)
@@ -494,12 +581,43 @@ void text_cache_flush(ccord_renderer *r)
       TTF_ClearFallbackFonts(r->fonts[i].font);
       TTF_CloseFont(r->fonts[i].font);
     }
-    for (int k = 0; k < r->fonts[i].nfallbacks; k++) {
+    for (int k = 0; k < CCORD_BUNDLED_COUNT; k++) {
+      if (r->fonts[i].bundled_fb[k]) TTF_CloseFont(r->fonts[i].bundled_fb[k]);
+    }
+    for (int k = 0; k < CCORD_MAX_FALLBACKS; k++) {
       if (r->fonts[i].fallbacks[k]) TTF_CloseFont(r->fonts[i].fallbacks[k]);
     }
     memset(&r->fonts[i], 0, sizeof r->fonts[i]);
   }
   r->nfonts = 0;
+}
+
+static void text_lru_unlink(ccord_renderer *r, int slot)
+{
+  text_entry *e = &r->texts[slot];
+  if (e->lru_prev != -1) r->texts[e->lru_prev].lru_next = e->lru_next;
+  else r->text_lru_head = e->lru_next;
+  if (e->lru_next != -1) r->texts[e->lru_next].lru_prev = e->lru_prev;
+  else r->text_lru_tail = e->lru_prev;
+  e->lru_prev = -1;
+  e->lru_next = -1;
+}
+
+static void text_lru_push_front(ccord_renderer *r, int slot)
+{
+  text_entry *e = &r->texts[slot];
+  e->lru_prev = -1;
+  e->lru_next = r->text_lru_head;
+  if (r->text_lru_head != -1) r->texts[r->text_lru_head].lru_prev = (int16_t)slot;
+  else r->text_lru_tail = (int16_t)slot;
+  r->text_lru_head = (int16_t)slot;
+}
+
+static void text_lru_touch(ccord_renderer *r, int slot)
+{
+  if (r->text_lru_head == (int16_t)slot) return;
+  text_lru_unlink(r, slot);
+  text_lru_push_front(r, slot);
 }
 
 static uint32_t hash_key(const TTF_Font *font, int wrap_px, const char *s, size_t len)
@@ -612,19 +730,19 @@ static text_entry *text_get(ccord_renderer *r, const char *s, size_t len, const 
   }
   if (len > MAX_TEXT_BYTES) {
     len = MAX_TEXT_BYTES;
-    while (len > 0 && !ccord_utf8_valid(s, len)) len--;   // never split a code point
+    while (len > 0 && (((uint8_t)s[len] & 0xC0u) == 0x80u)) len--;   // never split a code point
   }
   int px = font_px(r, st);
-  TTF_Font *font = font_get(r, st->font, px);
-  if (!font) return nullptr;
+  font_entry *fe = font_entry_get(r, st->font, px);
+  if (!fe) return nullptr;
+  TTF_Font *font = fe->font;
   int wrap_px = wrap_width > 0.0f ? (int)lroundf(wrap_width * r->scale) : 0;
   if (wrap_width > 0.0f && wrap_px < 1) wrap_px = 1;
   uint32_t h = hash_key(font, wrap_px, s, len);
-  r->tick++;
   for (int i = r->buckets[h % CCORD_TEXT_CACHE_SIZE]; i != -1; i = r->texts[i].next) {
     text_entry *e = &r->texts[i];
     if (e->hash == h && e->font == font && e->wrap_px == wrap_px && e->len == len && memcmp(e->str, s, len) == 0) {
-      e->tick = r->tick;
+      text_lru_touch(r, i);
       return e;
     }
   }
@@ -636,7 +754,7 @@ static text_entry *text_get(ccord_renderer *r, const char *s, size_t len, const 
   uint32_t *o2s = nullptr, *s2o = nullptr;
   if (!r->glyph_fixes_off) (void)sanitize_text(copy, len, &shaped, &slen, &o2s, &s2o);   // shaped stays null if nothing to cut
   const char *src = shaped ? shaped : copy;
-  ensure_coverage(r, font, src, slen);
+  ensure_coverage(r, fe, src, slen);
   TTF_Text *t = TTF_CreateText(r->engine, font, src, slen);
   if (!t) {
     CCORD_LOG_W("render: TTF_CreateText failed: %s", SDL_GetError());
@@ -651,16 +769,14 @@ static text_entry *text_get(ccord_renderer *r, const char *s, size_t len, const 
   if (r->ntexts < CCORD_TEXT_CACHE_SIZE) {
     slot = r->ntexts++;
   } else {
-    slot = 0;   // evict the least recently used entry
-    for (int i = 1; i < r->ntexts; i++) {
-      if (r->texts[i].tick < r->texts[slot].tick) slot = i;
-    }
+    slot = r->text_lru_tail;   // O(1) LRU eviction from tail
+    text_lru_unlink(r, slot);
     bucket_unlink(r, slot);
     entry_free(&r->texts[slot]);
   }
   text_entry *e = &r->texts[slot];
   *e = (text_entry){.text = t, .font = font, .str = copy, .len = len, .shaped = shaped, .slen = slen, .o2s = o2s, .s2o = s2o,
-                    .wrap_px = wrap_px, .hash = h, .tick = r->tick};
+                    .wrap_px = wrap_px, .hash = h, .lru_prev = -1, .lru_next = -1};
   TTF_GetTextSize(t, &e->w, &e->h);
   normalize_bitmap_glyphs(t, font, wrap_px, &e->w, &e->h);
   int fh = TTF_GetFontHeight(font);
@@ -672,6 +788,7 @@ static text_entry *text_get(ccord_renderer *r, const char *s, size_t len, const 
   int *head = &r->buckets[h % CCORD_TEXT_CACHE_SIZE];
   e->next = *head;
   *head = slot;
+  text_lru_push_front(r, slot);
   return e;
 }
 
@@ -685,16 +802,27 @@ int ccord_render_fallback_font_count(const ccord_renderer *r)
   if (!r) return 0;
   union { const ccord_renderer *c; ccord_renderer *v; } u = {.c = r};
   fallback_fonts_init(u.v);
-  return r->nfallbacks;
+  int count = r->nsys_fallbacks;
+  for (int k = 0; k < CCORD_BUNDLED_COUNT; k++) {
+    if (r->bundled_base[k]) count++;
+  }
+  return count;
 }
 
 const char *ccord_render_fallback_font_family(const ccord_renderer *r, int index)
 {
-  if (!r) return nullptr;
+  if (!r || index < 0) return nullptr;
   union { const ccord_renderer *c; ccord_renderer *v; } u = {.c = r};
   fallback_fonts_init(u.v);
-  if (index < 0 || index >= r->nfallbacks) return nullptr;
-  return TTF_GetFontFamilyName(r->fallback_base[index]);
+  int pos = 0;
+  for (int k = 0; k < CCORD_BUNDLED_COUNT; k++) {
+    if (!r->bundled_base[k]) continue;
+    if (pos == index) return TTF_GetFontFamilyName(r->bundled_base[k]);
+    pos++;
+  }
+  int sidx = index - pos;
+  if (sidx < 0 || sidx >= r->nsys_fallbacks) return nullptr;
+  return TTF_GetFontFamilyName(r->fallback_base[sidx]);
 }
 
 // ---- glyph probe (test hooks) ----
@@ -708,7 +836,7 @@ void ccord_render_set_glyph_fixes(ccord_renderer *r, bool enabled)
 
 int ccord_render_system_font_count(const ccord_renderer *r)
 {
-  return r ? r->nfallbacks - r->nbundled : 0;
+  return r ? r->nsys_fallbacks : 0;
 }
 
 static int text_draw_ops(const text_entry *e)
@@ -735,6 +863,15 @@ ccord_glyph_kind ccord_text_glyph_kind(ccord_renderer *r, const ccord_text_style
 
 // ---- public API ----
 
+static void text_draw_entry(ccord_renderer *r, text_entry *e, float x, float y, const ccord_text_style *st)
+{
+  if (!e || st->color.a == 0) return;
+  uint8_t a = ccord_fx_alpha(r, st->color.a);
+  if (a == 0) return;
+  TTF_SetTextColor(e->text, st->color.r, st->color.g, st->color.b, a);
+  TTF_DrawRendererText(e->text, roundf((x + r->ox) * r->scale), roundf((y + r->oy) * r->scale));
+}
+
 ccord_vec2 ccord_text_measure(ccord_renderer *r, const char *utf8, size_t len, const ccord_text_style *st, float wrap_width)
 {
   text_entry *e = text_get(r, utf8, len, st, wrap_width);
@@ -746,42 +883,123 @@ void ccord_text_draw(ccord_renderer *r, const char *utf8, size_t len, float x, f
 {
   if (!utf8 || len == 0 || st->color.a == 0) return;
   text_entry *e = text_get(r, utf8, len, st, wrap_width);
-  if (!e) return;
-  uint8_t a = ccord_fx_alpha(r, st->color.a);
-  if (a == 0) return;
-  TTF_SetTextColor(e->text, st->color.r, st->color.g, st->color.b, a);
-  TTF_DrawRendererText(e->text, roundf((x + r->ox) * r->scale), roundf((y + r->oy) * r->scale));
+  text_draw_entry(r, e, x, y, st);
+}
+
+static const ellipsis_entry *ellipsis_cache_find(ccord_renderer *r, const TTF_Font *font, int max_w_px,
+                                                 uint32_t h, const char *s, size_t len)
+{
+  const uint32_t set = h & (CCORD_ELLIPSIS_SETS - 1u);
+  for (int w = 0; w < CCORD_ELLIPSIS_WAYS; w++) {
+    const ellipsis_entry *e = &r->ellipsis[set][w];
+    if (e->valid && e->hash == h && e->font == font && e->max_w_px == max_w_px && e->len == (uint32_t)len &&
+        memcmp(e->str, s, len) == 0) {
+      r->ellipsis_lru[set] = (uint8_t)(1 - w);
+      return e;
+    }
+  }
+  return nullptr;
+}
+
+static void ellipsis_cache_put(ccord_renderer *r, const TTF_Font *font, int max_w_px, uint32_t h,
+                               const char *s, size_t len, bool fits_full, uint16_t fit_bytes)
+{
+  if (len > CCORD_ELLIPSIS_MAX_KEY) return;
+  const uint32_t set = h & (CCORD_ELLIPSIS_SETS - 1u);
+  int way = (int)r->ellipsis_lru[set];
+  for (int w = 0; w < CCORD_ELLIPSIS_WAYS; w++) {
+    if (!r->ellipsis[set][w].valid) {
+      way = w;
+      break;
+    }
+  }
+  char *copy = ccord_strndup(s, len);
+  if (!copy) return;
+  ellipsis_entry *e = &r->ellipsis[set][way];
+  ccord_free(e->str);
+  *e = (ellipsis_entry){
+    .font = font,
+    .max_w_px = max_w_px,
+    .hash = h,
+    .len = (uint32_t)len,
+    .str = copy,
+    .fit_bytes = fit_bytes,
+    .fits_full = fits_full,
+    .valid = true,
+  };
+  r->ellipsis_lru[set] = (uint8_t)(1 - way);
 }
 
 float ccord_text_draw_ellipsis(ccord_renderer *r, const char *utf8, size_t len, float x, float y, float max_w, const ccord_text_style *st)
 {
   if (!utf8 || len == 0 || max_w <= 0.0f) return 0.0f;
-  ccord_vec2 full = ccord_text_measure(r, utf8, len, st, 0.0f);
-  if (full.x <= max_w) {
-    ccord_text_draw(r, utf8, len, x, y, st, 0.0f);
-    return full.x;
-  }
   static const char dots[] = "\xE2\x80\xA6";   // U+2026
-  ccord_vec2 dw = ccord_text_measure(r, dots, 3, st, 0.0f);
-  TTF_Font *font = font_get(r, st->font, font_px(r, st));
-  if (!font) return 0.0f;
-  int avail = (int)floorf((max_w - dw.x) * r->scale);
+  int px = font_px(r, st);
+  font_entry *fe = font_entry_get(r, st->font, px);
+  if (!fe) return 0.0f;
+  const TTF_Font *font = fe->font;
+  float max_w_f = max_w * r->scale;
+  int max_w_px = max_w_f >= 1000000.0f ? 1000000 : (int)floorf(max_w_f);
+
+  if (len <= CCORD_ELLIPSIS_MAX_KEY) {
+    uint32_t eh = hash_key(font, max_w_px, utf8, len);
+    const ellipsis_entry *ce = ellipsis_cache_find(r, font, max_w_px, eh, utf8, len);
+    if (ce) {
+      if (ce->fits_full) {
+        text_entry *e = text_get(r, utf8, len, st, 0.0f);
+        if (!e) return 0.0f;
+        text_draw_entry(r, e, x, y, st);
+        return (float)e->w / r->scale;
+      }
+      char buf[320];
+      size_t fit = ce->fit_bytes;
+      memcpy(buf, utf8, fit);
+      memcpy(buf + fit, dots, 3);
+      text_entry *e = text_get(r, buf, fit + 3, st, 0.0f);
+      if (!e) return 0.0f;
+      text_draw_entry(r, e, x, y, st);
+      return (float)e->w / r->scale;
+    }
+  }
+
+  text_entry *full_e = text_get(r, utf8, len, st, 0.0f);
+  if (!full_e) return 0.0f;
+  if (full_e->w <= max_w_px) {
+    if (len <= CCORD_ELLIPSIS_MAX_KEY) {
+      uint32_t eh = hash_key(full_e->font, max_w_px, utf8, len);
+      ellipsis_cache_put(r, full_e->font, max_w_px, eh, utf8, len, true, 0);
+    }
+    text_draw_entry(r, full_e, x, y, st);
+    return (float)full_e->w / r->scale;
+  }
+
+  text_entry *dots_e = text_get(r, dots, 3, st, 0.0f);
+  int dw_px = dots_e ? dots_e->w : 0;
+  TTF_Font *cur_font = dots_e ? dots_e->font : fe->font;
+  int avail = max_w_px - dw_px;
   size_t fit = 0;
   if (avail > 0) {
     int mw = 0;
-    if (!TTF_MeasureString(font, utf8, len, avail, &mw, &fit)) fit = 0;
+    if (!TTF_MeasureString(cur_font, utf8, len, avail, &mw, &fit)) fit = 0;
   }
-  while (fit > 0 && fit < len && !ccord_utf8_valid(utf8, fit)) fit--;
   char buf[320];
   if (fit > sizeof buf - 4) fit = sizeof buf - 4;
-  while (fit > 0 && !ccord_utf8_valid(utf8, fit)) fit--;
+  if (fit < len) {
+    while (fit > 0 && (((uint8_t)utf8[fit] & 0xC0u) == 0x80u)) fit--;   // O(1) UTF-8 code-point boundary backup
+  }
   // Trailing spaces before the ellipsis look sloppy.
   while (fit > 0 && utf8[fit - 1] == ' ') fit--;
   memcpy(buf, utf8, fit);
   memcpy(buf + fit, dots, 3);
   size_t total = fit + 3;
-  ccord_text_draw(r, buf, total, x, y, st, 0.0f);
-  return ccord_text_measure(r, buf, total, st, 0.0f).x;
+  text_entry *trunc_e = text_get(r, buf, total, st, 0.0f);
+  if (!trunc_e) return 0.0f;
+  if (len <= CCORD_ELLIPSIS_MAX_KEY) {
+    uint32_t eh = hash_key(trunc_e->font, max_w_px, utf8, len);
+    ellipsis_cache_put(r, trunc_e->font, max_w_px, eh, utf8, len, false, (uint16_t)fit);
+  }
+  text_draw_entry(r, trunc_e, x, y, st);
+  return (float)trunc_e->w / r->scale;
 }
 
 // SDL3_ttf collapses trailing whitespace on a line into a single zero-width TTF_SubString; measure the prefix

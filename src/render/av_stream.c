@@ -13,7 +13,7 @@
 //   - meta is written by the demux thread before READY is published and is read-only afterwards. The UI thread
 //     never dereferences fmt, io or an AVStream once the thread runs (nothing outside the demux-side helpers
 //     avs_setup, avs_read_one, avs_seek_demuxer and avs_teardown touches them).
-#include <ccord/render/av_stream.h>
+#include "render_internal.h"
 
 #include <math.h>
 #include <ccord/core/os.h>
@@ -121,6 +121,7 @@ struct ccord_av_stream {
   bool starved;            // UI: the last sync/seek needed packets the demux thread has not produced
   bool pre_seek;           // UI: a seek requested before READY, applied when READY is first seen
   uint32_t pre_seek_ms;
+  uint64_t last_used_ms;   // monotonic clock (ccord_clock_ms) of last open/decode/sync/seek/draw
 };
 
 // ---- memory AVIO ----
@@ -466,6 +467,7 @@ ccord_av_stream *ccord_av_stream_open(const uint8_t *data, size_t len, int max_d
   s->info.has_audio = s->meta.has_audio;
   s->info.duration_ms = s->meta.duration_ms;
   avs_reset_playhead(s, 0);
+  s->last_used_ms = ccord_clock_ms();
   return s;
 }
 
@@ -607,6 +609,7 @@ ccord_av_stream *ccord_av_stream_open_source(const ccord_av_source *src, int max
     return nullptr;
   }
   s->thr_started = true;
+  s->last_used_ms = ccord_clock_ms();
   return s;
 }
 
@@ -842,14 +845,26 @@ static bool avs_convert(ccord_av_stream *s, uint8_t **dst)
   if (!*dst) *dst = ccord_malloc(bytes + AVS_SWS_DST_PAD);
   if (s->rot != 0 && !s->scratch) s->scratch = ccord_malloc(bytes + AVS_SWS_DST_PAD);
   if (!*dst || (s->rot != 0 && !s->scratch)) return false;
-  s->sws = sws_getCachedContext(s->sws, f->width, f->height, (enum AVPixelFormat)f->format, s->sw, s->sh,
-                                AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-  if (!s->sws) return false;
   uint8_t *target = s->rot != 0 ? s->scratch : *dst;
-  uint8_t *planes[4] = {target, nullptr, nullptr, nullptr};
-  int strides[4] = {s->sw * 4, 0, 0, 0};
-  if (sws_scale(s->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, planes, strides) != s->sh) {
-    return false;
+  if ((enum AVPixelFormat)f->format == AV_PIX_FMT_RGBA && f->width == s->sw && f->height == s->sh &&
+      f->data[0] && f->linesize[0] >= s->sw * 4) {
+    const int row_bytes = s->sw * 4;
+    if (f->linesize[0] == row_bytes) {
+      memcpy(target, f->data[0], bytes);
+    } else {
+      for (int y = 0; y < s->sh; y++) {
+        memcpy(target + (size_t)y * (size_t)row_bytes, f->data[0] + (size_t)y * (size_t)f->linesize[0], (size_t)row_bytes);
+      }
+    }
+  } else {
+    s->sws = sws_getCachedContext(s->sws, f->width, f->height, (enum AVPixelFormat)f->format, s->sw, s->sh,
+                                  AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+    if (!s->sws) return false;
+    uint8_t *planes[4] = {target, nullptr, nullptr, nullptr};
+    int strides[4] = {s->sw * 4, 0, 0, 0};
+    if (sws_scale(s->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, planes, strides) != s->sh) {
+      return false;
+    }
   }
   if (s->rot != 0) avs_rotate(s->scratch, s->sw, s->sh, *dst, s->rot);
   return true;
@@ -859,6 +874,7 @@ bool ccord_av_stream_next_frame(ccord_av_stream *s, const uint8_t **rgba, uint32
 {
   if (rgba) *rgba = nullptr;
   if (!s || !rgba) return false;
+  s->last_used_ms = ccord_clock_ms();
   if (avs_observe(s, nullptr) != CCORD_AV_READY) return false;
   if (!avs_decode(s, s->vdec, &s->vq, &s->v_flushed, &s->v_done)) return false;
   uint32_t pts = 0, dur = 0;
@@ -996,6 +1012,7 @@ uint32_t ccord_av_stream_pcm_pos_ms(const ccord_av_stream *s)
 size_t ccord_av_stream_read_pcm(ccord_av_stream *s, int16_t *out, size_t max_frames)
 {
   if (!s || !out || max_frames == 0 || s->pcm_len == 0) return 0;
+  s->last_used_ms = ccord_clock_ms();
   size_t n = max_frames < s->pcm_len ? max_frames : s->pcm_len;
   memcpy(out, s->pcm + s->pcm_head * 2u, n * 2u * sizeof *out);
   s->pcm_head += n;
@@ -1012,6 +1029,7 @@ size_t ccord_av_stream_read_pcm(ccord_av_stream *s, int16_t *out, size_t max_fra
 bool ccord_av_stream_sync(ccord_av_stream *s, uint32_t pos_ms, uint32_t budget_ms)
 {
   if (!s) return true;
+  s->last_used_ms = ccord_clock_ms();
   if (s->src_mode) {
     ccord_av_state st = avs_observe(s, nullptr);
     if (st != CCORD_AV_READY) {   // still opening: buffering. failed: nothing more will ever arrive
@@ -1079,6 +1097,7 @@ const uint8_t *ccord_av_stream_frame(const ccord_av_stream *s, uint32_t *serial)
 void ccord_av_stream_seek(ccord_av_stream *s, uint32_t pos_ms)
 {
   if (!s) return;
+  s->last_used_ms = ccord_clock_ms();
   if (s->src_mode) {
     ccord_av_state st = avs_observe(s, nullptr);
     if (st == CCORD_AV_OPENING) {   // the decoders are not ours yet: apply the seek once READY is seen
@@ -1142,4 +1161,33 @@ bool ccord_av_stream_ended(const ccord_av_stream *s)
     if (st != CCORD_AV_READY) return st == CCORD_AV_FAILED;
   }
   return (!s->vdec || (s->v_done && !s->have_next)) && (!s->adec || (s->a_done && s->pcm_len == 0));
+}
+
+uint64_t av_stream_last_used_ms(const ccord_av_stream *s)
+{
+  return s ? s->last_used_ms : 0;
+}
+
+void av_stream_touch(ccord_av_stream *s, uint64_t now_ms)
+{
+  if (s) s->last_used_ms = now_ms;
+}
+
+size_t av_stream_mem_bytes(const ccord_av_stream *s)
+{
+  if (!s) return 0;
+  size_t total = s->mb.len;
+  size_t fbytes = (s->sw > 0 && s->sh > 0) ? (size_t)s->sw * (size_t)s->sh * 4u : 0;
+  if (s->cur) total += fbytes;
+  if (s->next) total += fbytes;
+  if (s->scratch) total += fbytes;
+  total += s->pcm_cap * 2u * sizeof(int16_t);
+  if (s->src_mode && s->mx) {
+    ccord_mutex_lock(s->mx);
+    total += s->vq.bytes + s->aq.bytes;
+    ccord_mutex_unlock(s->mx);
+  } else {
+    total += s->vq.bytes + s->aq.bytes;
+  }
+  return total;
 }
