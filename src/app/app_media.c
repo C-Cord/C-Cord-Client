@@ -17,6 +17,8 @@
 #define MEDIA_MAX_USERS 64u                    // per-user volume sync table / voice user read cap
 #define MEDIA_ID_CAP 64u                       // matches ccord_ui_voice_prefs device id fields
 #define MEDIA_PKT_CAP (256u * 1024u)
+#define MEDIA_CAM_INIT_BYTES (640u * 480u * 4u)    // initial BGRA camera buffer (~1.17 MiB); resized to fit
+#define MEDIA_CAM_HD_BYTES (1280u * 720u * 4u)
 #define MEDIA_CAM_MAX_BYTES (1920u * 1080u * 4u)   // largest BGRA camera frame we buffer
 #define MEDIA_SB_CAP_SAMPLES (48000u * 2u * 6u)    // 6 s stereo 48 kHz cap for soundboard clips
 #define MEDIA_VIDEO_KEY "__video_stream__"     // same texture the voice/stage views draw
@@ -42,8 +44,7 @@ typedef struct cam_slot {
   bool need_idr;       // discard non-keyframes until the first IDR decodes
   bool fresh;          // a unit decoded since the last texture upload
   int w, h;
-  uint64_t frames, decode_errors, dropped_until_idr, frame_hash;
-  uint8_t center_rgb[3];
+  uint64_t frames, decode_errors, dropped_until_idr;
   char key[MEDIA_CAM_KEY_CAP];
 } cam_slot;
 
@@ -55,9 +56,15 @@ struct ccord_app_media {
   ccord_ui_voice_prefs prefs;
   ccord_voice_config last_cfg;
   bool have_cfg;
+  bool have_ptt;
+  bool last_ptt_held;
+  bool last_ptt_mode;
 
   // per-user playback volume sync
   media_user_vol vol[MEDIA_MAX_USERS];
+  size_t vol_count;
+  ccord_id last_vol_users[MEDIA_MAX_USERS];
+  size_t last_vol_n;
 
   // device selection (both paths). sel_* = last resolved settings ids, eff_* = ids actually used
   // (default "" when the chosen device is gone), opened_* = ids the inline handles were last tried
@@ -74,9 +81,16 @@ struct ccord_app_media {
   ccord_audio *audio_cap;
   ccord_audio *audio_play;
   ccord_voice_audio_thread *thread;
+  bool inline_cap_gated;
+  bool have_thread_ctrl;
+  bool last_th_muted;
+  bool last_th_deafened;
+  int last_th_in_vol;
+  int last_th_out_vol;
 
   // local soundboard playback ring (shared between main thread decode and live/inline speaker pull)
   ccord_mutex *sb_mtx;
+  _Atomic bool sb_active;
   int16_t *sb_pcm;
   size_t sb_samples;
   size_t sb_pos;
@@ -87,6 +101,8 @@ struct ccord_app_media {
   ccord_capture *screen_cap;
   ccord_camera *camera;
   uint8_t *cam_buf;
+  size_t cam_buf_cap;
+  uint8_t cam_grab_fails;
   uint8_t *pkt;
   uint64_t last_video_ms;
   uint64_t stream_start_ms;
@@ -201,12 +217,14 @@ static void copy_id(char *dst, const char *src)
 
 static void clear_soundboard(ccord_app_media *m)
 {
+  if (!atomic_load_explicit(&m->sb_active, memory_order_acquire)) return;
   ccord_mutex_lock(m->sb_mtx);
   ccord_free(m->sb_pcm);
   m->sb_pcm = nullptr;
   m->sb_samples = 0;
   m->sb_pos = 0;
   m->sb_next_ms = 0;
+  atomic_store_explicit(&m->sb_active, false, memory_order_release);
   ccord_mutex_unlock(m->sb_mtx);
 }
 
@@ -309,46 +327,51 @@ static void pump_stream_loopback(ccord_app_media *m, uint64_t now, bool loop_on,
 static size_t pull_playback_pcm(ccord_app_media *m, int16_t *pcm, size_t max_frames)
 {
   size_t pframes = m->ops->pull_pcm(m->ud, pcm, max_frames);
-  ccord_mutex_lock(m->sb_mtx);
-  if (m->sb_pcm && m->sb_pos < m->sb_samples) {
-    size_t avail_frames = (m->sb_samples - m->sb_pos) / 2u;
-    if (pframes > 0) {
-      size_t mix = avail_frames < pframes ? avail_frames : pframes;
-      for (size_t i = 0; i < mix * 2u; i++) {
-        int32_t s = (int32_t)pcm[i] + (int32_t)m->sb_pcm[m->sb_pos + i];
-        if (s > 32767) s = 32767;
-        if (s < -32768) s = -32768;
-        pcm[i] = (int16_t)s;
-      }
-      m->sb_pos += mix * 2u;
-      uint64_t now = m->ops->now_ms(m->ud);
-      uint64_t step_ms = ((uint64_t)mix * 1000u) / 48000u;
-      if (step_ms == 0) step_ms = 1u;
-      m->sb_next_ms = now + step_ms;
-    } else {
-      uint64_t now = m->ops->now_ms(m->ud);
-      if (now >= m->sb_next_ms) {
-        size_t cap_frames = max_frames < MEDIA_FRAME ? max_frames : MEDIA_FRAME;
-        size_t take = avail_frames < cap_frames ? avail_frames : cap_frames;
-        if (take > 0) {
-          memcpy(pcm, m->sb_pcm + m->sb_pos, take * 2u * sizeof(int16_t));
-          m->sb_pos += take * 2u;
-          uint64_t step_ms = ((uint64_t)take * 1000u) / 48000u;
-          if (step_ms == 0) step_ms = 1u;
-          m->sb_next_ms += step_ms;
-          if (m->sb_next_ms < now) m->sb_next_ms = now + step_ms;
-          pframes = take;
+  if (atomic_load_explicit(&m->sb_active, memory_order_acquire)) {
+    ccord_mutex_lock(m->sb_mtx);
+    if (m->sb_pcm && m->sb_pos < m->sb_samples) {
+      size_t avail_frames = (m->sb_samples - m->sb_pos) / 2u;
+      if (pframes > 0) {
+        size_t mix = avail_frames < pframes ? avail_frames : pframes;
+        for (size_t i = 0; i < mix * 2u; i++) {
+          int32_t s = (int32_t)pcm[i] + (int32_t)m->sb_pcm[m->sb_pos + i];
+          if (s > 32767) s = 32767;
+          if (s < -32768) s = -32768;
+          pcm[i] = (int16_t)s;
+        }
+        m->sb_pos += mix * 2u;
+        uint64_t now = m->ops->now_ms(m->ud);
+        uint64_t step_ms = ((uint64_t)mix * 1000u) / 48000u;
+        if (step_ms == 0) step_ms = 1u;
+        m->sb_next_ms = now + step_ms;
+      } else {
+        uint64_t now = m->ops->now_ms(m->ud);
+        if (now >= m->sb_next_ms) {
+          size_t cap_frames = max_frames < MEDIA_FRAME ? max_frames : MEDIA_FRAME;
+          size_t take = avail_frames < cap_frames ? avail_frames : cap_frames;
+          if (take > 0) {
+            memcpy(pcm, m->sb_pcm + m->sb_pos, take * 2u * sizeof(int16_t));
+            m->sb_pos += take * 2u;
+            uint64_t step_ms = ((uint64_t)take * 1000u) / 48000u;
+            if (step_ms == 0) step_ms = 1u;
+            m->sb_next_ms += step_ms;
+            if (m->sb_next_ms < now) m->sb_next_ms = now + step_ms;
+            pframes = take;
+          }
         }
       }
+      if (m->sb_pos >= m->sb_samples) {
+        ccord_free(m->sb_pcm);
+        m->sb_pcm = nullptr;
+        m->sb_samples = 0;
+        m->sb_pos = 0;
+        atomic_store_explicit(&m->sb_active, false, memory_order_release);
+      }
+    } else {
+      atomic_store_explicit(&m->sb_active, false, memory_order_release);
     }
-    if (m->sb_pos >= m->sb_samples) {
-      ccord_free(m->sb_pcm);
-      m->sb_pcm = nullptr;
-      m->sb_samples = 0;
-      m->sb_pos = 0;
-    }
+    ccord_mutex_unlock(m->sb_mtx);
   }
-  ccord_mutex_unlock(m->sb_mtx);
 
   // Go Live stream audio: drain the watched broadcast's mono PCM and mix it into local playback,
   // duplicating each mono sample to both stereo channels with additive int16 clamping. When no
@@ -414,6 +437,10 @@ static void pump_soundboard(ccord_app_media *m, uint64_t now)
     return;
   }
   samples &= ~(size_t)1u;
+  if (samples < MEDIA_SB_CAP_SAMPLES) {
+    int16_t *shrunk = ccord_realloc(buf, samples * sizeof(int16_t));
+    if (shrunk) buf = shrunk;
+  }
   apply_gain(buf, samples, clamp_vol((int)vol_pct));
 
   ccord_mutex_lock(m->sb_mtx);
@@ -422,6 +449,7 @@ static void pump_soundboard(ccord_app_media *m, uint64_t now)
   m->sb_samples = samples;
   m->sb_pos = 0;
   m->sb_next_ms = now;
+  atomic_store_explicit(&m->sb_active, true, memory_order_release);
   ccord_mutex_unlock(m->sb_mtx);
 }
 
@@ -504,6 +532,7 @@ static void close_inline(ccord_app_media *m)
   }
   m->opened_in[0] = '\0';
   m->opened_out[0] = '\0';
+  m->inline_cap_gated = false;
 }
 
 static void stop_thread(ccord_app_media *m)
@@ -514,6 +543,7 @@ static void stop_thread(ccord_app_media *m)
   }
   m->thread_in[0] = '\0';
   m->thread_out[0] = '\0';
+  m->have_thread_ctrl = false;
 }
 
 // Re-resolve the effective device ids when settings changed or a hot-plug event arrived. Shared by
@@ -546,13 +576,22 @@ static void sync_live_thread(ccord_app_media *m, const ccord_app_media_voice *v,
     m->thread = m->ops->thread_start(m->ud, &io, &err);
     if (m->thread) {
       m->thread_retry_ms = 0;
+      m->have_thread_ctrl = false;
     } else {
       m->thread_retry_ms = now + MEDIA_OPEN_RETRY_MS;
       CCORD_LOG_W("media: audio thread start failed (retry in %u ms): %s", MEDIA_OPEN_RETRY_MS, err.message);
     }
   }
   if (m->thread) {
-    m->ops->thread_controls(m->ud, m->thread, v->muted, v->deafened, in_vol, out_vol);
+    if (!m->have_thread_ctrl || v->muted != m->last_th_muted || v->deafened != m->last_th_deafened ||
+        in_vol != m->last_th_in_vol || out_vol != m->last_th_out_vol) {
+      m->ops->thread_controls(m->ud, m->thread, v->muted, v->deafened, in_vol, out_vol);
+      m->have_thread_ctrl = true;
+      m->last_th_muted = v->muted;
+      m->last_th_deafened = v->deafened;
+      m->last_th_in_vol = in_vol;
+      m->last_th_out_vol = out_vol;
+    }
   }
 }
 
@@ -597,13 +636,29 @@ static void pump_inline(ccord_app_media *m, bool muted, bool deafened, int in_vo
 {
   ccord_error err;
   int16_t pcm[MEDIA_FRAME * 2];
-  if (m->audio_cap && !muted && in_vol > 0) {
+  bool cap_gated = (muted || in_vol <= 0);
+  if (m->audio_cap && !cap_gated) {
+    if (m->inline_cap_gated) {
+      // Discard any stale PCM queued right before unmuting.
+      for (int i = 0; i < 4; i++) {
+        size_t drop = m->ops->audio_read(m->ud, m->audio_cap, pcm, MEDIA_FRAME);
+        if (drop < MEDIA_FRAME) break;
+      }
+      m->inline_cap_gated = false;
+    }
     size_t rframes = m->ops->audio_read(m->ud, m->audio_cap, pcm, MEDIA_FRAME);
     if (rframes > 0) {
       apply_gain(pcm, rframes * 2, in_vol);
       (void)m->ops->push_pcm(m->ud, pcm, rframes, &err);
       pump_stream_send_pcm(m, pcm, rframes);
     }
+  } else if (m->audio_cap && cap_gated) {
+    // Drain and discard capture samples while muted so the SDL capture stream cannot leak RAM.
+    for (int i = 0; i < 8; i++) {
+      size_t drop = m->ops->audio_read(m->ud, m->audio_cap, pcm, MEDIA_FRAME);
+      if (drop < MEDIA_FRAME) break;
+    }
+    m->inline_cap_gated = true;
   }
   if (m->audio_play && !deafened && out_vol > 0) {
     size_t pframes = pull_playback_pcm(m, pcm, MEDIA_FRAME);
@@ -649,25 +704,44 @@ static void sync_ptt(ccord_app_media *m)
   // Per-frame key state: in PTT mode the mic is open only while the bound key (or the portal's push-to-talk
   // shortcut) is held. The session applies the gate on push_voice_pcm.
   bool held = ccord_app_media_ptt_open(m->ops, m->ud, &m->prefs);
+  if (m->have_ptt && held == m->last_ptt_held && m->prefs.ptt == m->last_ptt_mode) return;
   ccord_error err;
-  (void)m->ops->set_ptt_held(m->ud, held, &err);
+  if (m->ops->set_ptt_held(m->ud, held, &err) == CCORD_OK) {
+    m->have_ptt = true;
+    m->last_ptt_held = held;
+    m->last_ptt_mode = m->prefs.ptt;
+  }
 }
 
 static void sync_volumes(ccord_app_media *m)
 {
   ccord_id users[MEDIA_MAX_USERS];
   size_t n = m->ops->voice_users(m->ud, users, MEDIA_MAX_USERS);
-  // Evict departed users first so a full 64-slot table frees slots immediately on member rotation.
-  for (size_t j = 0; j < MEDIA_MAX_USERS; j++) {
-    if (!m->vol[j].used) continue;
-    bool present = false;
-    for (size_t i = 0; i < n; i++) {
-      if (users[i] == m->vol[j].user) {
-        present = true;
-        break;
+  if (n > MEDIA_MAX_USERS) n = MEDIA_MAX_USERS;
+  if (n == 0 && m->vol_count == 0) return;
+
+  bool roster_changed = n != m->last_vol_n ||
+                        (n > 0 && memcmp(users, m->last_vol_users, n * sizeof(ccord_id)) != 0);
+  if (roster_changed) {
+    // Evict departed users first so a full 64-slot table frees slots immediately on member rotation.
+    if (m->vol_count > 0) {
+      for (size_t j = 0; j < MEDIA_MAX_USERS; j++) {
+        if (!m->vol[j].used) continue;
+        bool present = false;
+        for (size_t i = 0; i < n; i++) {
+          if (users[i] == m->vol[j].user) {
+            present = true;
+            break;
+          }
+        }
+        if (!present) {
+          m->vol[j].used = false;
+          m->vol_count--;
+        }
       }
     }
-    if (!present) m->vol[j].used = false;
+    if (n > 0) memcpy(m->last_vol_users, users, n * sizeof(ccord_id));
+    m->last_vol_n = n;
   }
   for (size_t i = 0; i < n; i++) {
     ccord_id u = users[i];
@@ -685,6 +759,7 @@ static void sync_volumes(ccord_app_media *m)
     if (m->vol[slot].used && m->vol[slot].user == u && m->vol[slot].pct == pct) continue;
     ccord_error err;
     if (m->ops->set_user_volume(m->ud, u, pct, &err) == CCORD_OK) {
+      if (!m->vol[slot].used) m->vol_count++;
       m->vol[slot].user = u;
       m->vol[slot].pct = pct;
       m->vol[slot].used = true;
@@ -695,11 +770,16 @@ static void sync_volumes(ccord_app_media *m)
 static void reset_sync(ccord_app_media *m)
 {
   m->have_cfg = false;
+  m->have_ptt = false;
   m->resolved = false;
   m->audio_cap_retry_ms = 0;
   m->audio_play_retry_ms = 0;
   m->thread_retry_ms = 0;
-  for (size_t i = 0; i < MEDIA_MAX_USERS; i++) m->vol[i].used = false;
+  if (m->vol_count > 0) {
+    for (size_t i = 0; i < MEDIA_MAX_USERS; i++) m->vol[i].used = false;
+    m->vol_count = 0;
+  }
+  m->last_vol_n = 0;
 }
 
 // ---- Go Live send / receive ------------------------------------------------------------------
@@ -718,6 +798,28 @@ static void reset_stream_warns(ccord_app_media *m)
   m->warn_loopback = false;
 }
 
+static void free_cam_buf(ccord_app_media *m)
+{
+  ccord_free(m->cam_buf);
+  m->cam_buf = nullptr;
+  m->cam_buf_cap = 0;
+  m->cam_grab_fails = 0;
+}
+
+static bool ensure_pkt(ccord_app_media *m)
+{
+  if (!m->pkt) m->pkt = ccord_malloc(MEDIA_PKT_CAP);
+  return m->pkt != nullptr;
+}
+
+static void maybe_free_pkt(ccord_app_media *m)
+{
+  if (!m->video && !m->cam_video && m->pkt) {
+    ccord_free(m->pkt);
+    m->pkt = nullptr;
+  }
+}
+
 static void close_cam_tx(ccord_app_media *m, bool close_cam)
 {
   if (m->cam_video) {
@@ -730,11 +832,11 @@ static void close_cam_tx(ccord_app_media *m, bool close_cam)
       m->camera = nullptr;
     }
     m->opened_cam[0] = '\0';
-    ccord_free(m->cam_buf);
-    m->cam_buf = nullptr;
+    free_cam_buf(m);
     m->camera_retry_ms = 0;
     m->warn_camera = false;
   }
+  maybe_free_pkt(m);
   m->cam_streaming = false;
   m->last_cam_ms = 0;
   m->cam_enc_retry_ms = 0;
@@ -761,12 +863,12 @@ static void close_send(ccord_app_media *m)
     m->camera = nullptr;
   }
   m->opened_cam[0] = '\0';
-  ccord_free(m->cam_buf);
-  m->cam_buf = nullptr;
+  free_cam_buf(m);
   if (m->video) {
     m->ops->video_close(m->ud, m->video);
     m->video = nullptr;
   }
+  maybe_free_pkt(m);
   m->last_video_ms = 0;
   m->streaming = false;
   m->was_paused = false;
@@ -891,9 +993,14 @@ static void grab_camera_frame(ccord_app_media *m, uint64_t now, const uint8_t **
     ccord_error err;
     m->camera = m->ops->camera_open(m->ud, m->prefs.camera_device_id, &err);
     copy_id(m->opened_cam, m->prefs.camera_device_id);
-    if (m->camera && !m->cam_buf) m->cam_buf = ccord_malloc(MEDIA_CAM_MAX_BYTES);
+    if (m->camera && !m->cam_buf) {
+      m->cam_buf = ccord_malloc(MEDIA_CAM_INIT_BYTES);
+      m->cam_buf_cap = m->cam_buf ? MEDIA_CAM_INIT_BYTES : 0;
+      m->cam_grab_fails = 0;
+    }
     if (m->camera) {
       m->camera_retry_ms = 0;
+      m->cam_grab_fails = 0;
     } else {
       m->camera_retry_ms = now + MEDIA_OPEN_RETRY_MS;
       if (!m->warn_camera) {
@@ -902,9 +1009,44 @@ static void grab_camera_frame(ccord_app_media *m, uint64_t now, const uint8_t **
       }
     }
   }
+  if (!m->camera || !m->cam_buf || m->cam_buf_cap == 0) return;
+
   int w = 0, h = 0;
-  if (m->camera && m->cam_buf &&
-      m->ops->camera_grab(m->ud, m->camera, m->cam_buf, MEDIA_CAM_MAX_BYTES, &w, &h)) {
+  bool ok = m->ops->camera_grab(m->ud, m->camera, m->cam_buf, m->cam_buf_cap, &w, &h);
+  if (!ok) {
+    // Grow buffer if the camera backend needs more than our current capacity (up to 1080p BGRA).
+    size_t next_cap = 0;
+    if (w > 0 && h > 0) {
+      size_t need = (size_t)w * (size_t)h * 4u;
+      if (need > m->cam_buf_cap && need <= MEDIA_CAM_MAX_BYTES) next_cap = need;
+    } else if (m->cam_buf_cap < MEDIA_CAM_MAX_BYTES) {
+      if (m->cam_grab_fails < 255u) m->cam_grab_fails++;
+      if (m->cam_grab_fails >= 2u) {
+        next_cap = m->cam_buf_cap < MEDIA_CAM_HD_BYTES ? MEDIA_CAM_HD_BYTES : MEDIA_CAM_MAX_BYTES;
+      }
+    }
+    if (next_cap > m->cam_buf_cap) {
+      uint8_t *grown = ccord_realloc(m->cam_buf, next_cap);
+      if (grown) {
+        m->cam_buf = grown;
+        m->cam_buf_cap = next_cap;
+        m->cam_grab_fails = 0;
+        w = 0;
+        h = 0;
+        ok = m->ops->camera_grab(m->ud, m->camera, m->cam_buf, m->cam_buf_cap, &w, &h);
+      }
+    }
+  }
+  if (ok && w > 0 && h > 0) {
+    m->cam_grab_fails = 0;
+    size_t actual = (size_t)w * (size_t)h * 4u;
+    if (actual > 0 && actual <= m->cam_buf_cap / 2u) {
+      uint8_t *shrunk = ccord_realloc(m->cam_buf, actual);
+      if (shrunk) {
+        m->cam_buf = shrunk;
+        m->cam_buf_cap = actual;
+      }
+    }
     *out_bgra = m->cam_buf;
     *out_w = w;
     *out_h = h;
@@ -943,6 +1085,13 @@ static void pump_send(ccord_app_media *m, const ccord_app_media_voice *v, uint64
   if (!m->video) open_encoder(m, virtual_clock, now);
   if (!m->video) return;
 
+  // Throttle BEFORE capturing/converting a frame so a 60-144 Hz UI loop does not grab and discard
+  // frames faster than the configured stream FPS.
+  int fps = m->ops->video_fps(m->ud, m->video);
+  uint64_t interval = fps > 0 ? (uint64_t)(1000 / fps) : 33u;
+  if (m->last_video_ms != 0 && now >= m->last_video_ms && now - m->last_video_ms < interval) return;
+  m->last_video_ms = now;
+
   // Source: camera when self_video is on, otherwise the selected screen/portal capture source.
   const uint8_t *bgra = nullptr;
   int w = 0, h = 0, stride = 0;
@@ -957,6 +1106,7 @@ static void pump_send(ccord_app_media *m, const ccord_app_media_voice *v, uint64
       m->ops->camera_close(m->ud, m->camera);
       m->camera = nullptr;
       m->opened_cam[0] = '\0';
+      free_cam_buf(m);
     }
     if (!m->screen_cap && open_retry_due(now, m->capture_retry_ms)) {
       ccord_capture_source src;
@@ -1004,11 +1154,8 @@ static void pump_send(ccord_app_media *m, const ccord_app_media_voice *v, uint64
     }
   }
 
-  int fps = m->ops->video_fps(m->ud, m->video);
-  uint64_t interval = fps > 0 ? (uint64_t)(1000 / fps) : 33u;
-  if (m->last_video_ms != 0 && now - m->last_video_ms < interval) return;
-  m->last_video_ms = now;
   if (!bgra || w <= 0 || h <= 0) return;
+  if (!ensure_pkt(m)) return;
 
   if (m->pending_keyframe) {
     m->pending_keyframe = false;
@@ -1082,15 +1229,17 @@ static void pump_voice_camera(ccord_app_media *m, const ccord_app_media_voice *v
   }
   if (!m->cam_video) return;
 
+  // Throttle BEFORE grabbing/converting a camera frame.
+  int fps = m->ops->video_fps(m->ud, m->cam_video);
+  uint64_t interval = fps > 0 ? (uint64_t)(1000 / fps) : 33u;
+  if (m->last_cam_ms != 0 && now >= m->last_cam_ms && now - m->last_cam_ms < interval) return;
+  m->last_cam_ms = now;
+
   const uint8_t *bgra = nullptr;
   int w = 0, h = 0, stride = 0;
   grab_camera_frame(m, now, &bgra, &w, &h, &stride);
-
-  int fps = m->ops->video_fps(m->ud, m->cam_video);
-  uint64_t interval = fps > 0 ? (uint64_t)(1000 / fps) : 33u;
-  if (m->last_cam_ms != 0 && now - m->last_cam_ms < interval) return;
-  m->last_cam_ms = now;
   if (!bgra || w <= 0 || h <= 0) return;
+  if (!ensure_pkt(m)) return;
 
   if (m->cam_pending_keyframe) {
     m->cam_pending_keyframe = false;
@@ -1201,7 +1350,9 @@ static void cam_open_decoder(ccord_app_media *m, cam_slot *c, uint64_t now)
 }
 
 // FNV-1a over 4096 bytes of the RGBA sampled at a fixed stride, plus the centre pixel.
-static void cam_fingerprint(cam_slot *c, const uint8_t *rgba, int w, int h)
+// Computed lazily only when ccord_app_media_cam_debug_of() is queried so production decoding
+// never pays per-frame hashing overhead.
+static void cam_fingerprint(const uint8_t *rgba, int w, int h, uint64_t *out_hash, uint8_t out_rgb[3])
 {
   size_t total = (size_t)w * (size_t)h * 4u;
   size_t stride = total / 4096u;
@@ -1211,11 +1362,11 @@ static void cam_fingerprint(cam_slot *c, const uint8_t *rgba, int w, int h)
     hash ^= rgba[off];
     hash *= 1099511628211ull;
   }
-  c->frame_hash = hash;
+  *out_hash = hash;
   size_t mid = (((size_t)h / 2u) * (size_t)w + (size_t)w / 2u) * 4u;
-  c->center_rgb[0] = rgba[mid];
-  c->center_rgb[1] = rgba[mid + 1];
-  c->center_rgb[2] = rgba[mid + 2];
+  out_rgb[0] = rgba[mid];
+  out_rgb[1] = rgba[mid + 1];
+  out_rgb[2] = rgba[mid + 2];
 }
 
 static void cam_upload(ccord_app_media *m, cam_slot *c)
@@ -1231,7 +1382,6 @@ static void cam_upload(ccord_app_media *m, cam_slot *c)
   c->fresh = false;
   c->w = w;
   c->h = h;
-  cam_fingerprint(c, rgba, w, h);
 }
 
 static void pump_cameras(ccord_app_media *m, const ccord_app_media_voice *v, uint64_t now)
@@ -1307,8 +1457,13 @@ bool ccord_app_media_cam_debug_of(const ccord_app_media *m, ccord_id user_id, cc
     out->frames = c->frames;
     out->decode_errors = c->decode_errors;
     out->dropped_until_idr = c->dropped_until_idr;
-    out->frame_hash = c->frame_hash;
-    memcpy(out->center_rgb, c->center_rgb, sizeof out->center_rgb);
+    if (c->decoder && c->w > 0 && c->h > 0) {
+      int dw = 0, dh = 0;
+      const uint8_t *rgba = m->ops->decoder_rgba(m->ud, c->decoder, &dw, &dh);
+      if (rgba && dw > 0 && dh > 0) {
+        cam_fingerprint(rgba, dw, dh, &out->frame_hash, out->center_rgb);
+      }
+    }
     snprintf(out->key, sizeof out->key, "%s", c->key);
     return true;
   }
@@ -1451,13 +1606,7 @@ ccord_app_media *ccord_app_media_create(const ccord_app_media_config *cfg, ccord
   }
   m->ops = ops;
   m->ud = cfg->ud;
-  m->pkt = ccord_malloc(MEDIA_PKT_CAP);
-  if (!m->pkt) {
-    ccord_mutex_destroy(m->sb_mtx);
-    ccord_free(m);
-    ccord_error_set(err, CCORD_ERR_NOMEM, "app_media: out of memory");
-    return nullptr;
-  }
+  atomic_init(&m->sb_active, false);
   m->prefs.input_volume = 100;
   m->prefs.output_volume = 100;
   ops->hotplug_register(cfg->ud, media_hotplug, m);
