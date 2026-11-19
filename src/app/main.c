@@ -143,9 +143,16 @@ typedef struct app {
   const char *token_file;
   char mfa_ticket[256];
 #if CCORD_LIVE_ACCOUNT
-  ccord_rest_queue *auth_q;      // governed queue for login/MFA; token-less until Discord answers
+  ccord_rest_queue *auth_q;      // governed queue for login/MFA; created lazily on login and retired once signed in
   bool auth_pending;             // a login/MFA request is in flight; blocks double submission
+  bool auth_q_retire;            // destroy auth_q after ccord_rest_queue_pump returns
 #endif
+  ccord_account_view last_av;    // cached last account_view pushed to UI (avoids dirtying UI every idle tick)
+  char last_av_display[128];
+  char last_av_username[128];
+  char last_av_status[128];
+  char last_av_detail[256];
+  bool last_av_valid;
   ccord_app_media *media;                   // M5: runtime media coordinator (voice devices, Go Live, soundboard)
   ccord_earcons *earcons;                   // synthesized notification/voice sounds (earcons.h)
   ccord_app_desktop *desktop;               // M6: startup prefs, host callbacks, tray badge, notifications, shortcuts
@@ -177,6 +184,79 @@ typedef struct app {
 } app;
 
 // ---------------------------------------------------------------- host callbacks (ui -> os)
+
+static bool cstr_opt_eq(const char *x, const char *y)
+{
+  if (x == y) return true;
+  if (!x || !y) return false;
+  return strcmp(x, y) == 0;
+}
+
+// Pushes ccord_account_view to the UI only when any field actually changed (ccord_ui_set_account_view marks ui->dirty).
+static void app_sync_account_view(app *a)
+{
+  if (!a || !a->ui || !a->account) return;
+  const ccord_account_view *v = ccord_account_view_of(a->account);
+  if (!v) return;
+  const char *disp = v->display_name ? v->display_name : "";
+  const char *user = v->username ? v->username : "";
+  const char *stat = v->status ? v->status : "";
+  const char *det = v->detail ? v->detail : "";
+  if (a->last_av_valid &&
+      v->mode == a->last_av.mode &&
+      v->error == a->last_av.error &&
+      v->configured == a->last_av.configured &&
+      v->signed_in == a->last_av.signed_in &&
+      v->busy == a->last_av.busy &&
+      v->can_sign_in == a->last_av.can_sign_in &&
+      v->can_sign_out == a->last_av.can_sign_out &&
+      v->can_refresh == a->last_av.can_refresh &&
+      v->demo_chip_visible == a->last_av.demo_chip_visible &&
+      v->show_non_goals == a->last_av.show_non_goals &&
+      cstr_opt_eq(v->heading, a->last_av.heading) &&
+      strcmp(stat, a->last_av_status) == 0 &&
+      strcmp(det, a->last_av_detail) == 0 &&
+      strcmp(disp, a->last_av_display) == 0 &&
+      strcmp(user, a->last_av_username) == 0 &&
+      strcmp(v->user_id_text, a->last_av.user_id_text) == 0 &&
+      v->guild_count == a->last_av.guild_count &&
+      v->guilds_truncated == a->last_av.guilds_truncated &&
+      v->non_goals == a->last_av.non_goals &&
+      v->non_goal_count == a->last_av.non_goal_count &&
+      v->identity == a->last_av.identity) {
+    return;
+  }
+  a->last_av = *v;
+  snprintf(a->last_av_display, sizeof a->last_av_display, "%s", disp);
+  snprintf(a->last_av_username, sizeof a->last_av_username, "%s", user);
+  snprintf(a->last_av_status, sizeof a->last_av_status, "%s", stat);
+  snprintf(a->last_av_detail, sizeof a->last_av_detail, "%s", det);
+  a->last_av_valid = true;
+  ccord_ui_set_account_view(a->ui, v);
+}
+
+#if CCORD_LIVE_ACCOUNT
+static bool app_ensure_auth_q(app *a, ccord_error *err)
+{
+  if (a->auth_q) {
+    a->auth_q_retire = false;
+    return true;
+  }
+  ccord_rest_config auth_cfg = {.timeout_ms = 10000, .max_response_bytes = 65536};
+  a->auth_q = ccord_rest_queue_create(&auth_cfg, err);
+  a->auth_q_retire = false;
+  return a->auth_q != nullptr;
+}
+
+static void app_destroy_auth_q(app *a)
+{
+  if (a->auth_q) {
+    ccord_rest_queue_destroy(a->auth_q);
+    a->auth_q = nullptr;
+  }
+  a->auth_q_retire = false;
+}
+#endif
 
 static void host_clipboard_set(void *ud, const char *utf8)
 {
@@ -711,14 +791,14 @@ static void host_account_switch(void *ud, uint64_t user_id)
                                   user_id != 0 ? user_id : 1u, 0);
     app_connect_live(a);
     app_push_saved_accounts(a);
-    ccord_ui_set_account_view(a->ui, ccord_account_view_of(a->account));
+    app_sync_account_view(a);
     return;
   }
 #endif
   (void)ccord_account_switch(a->account, user_id, &err);
   ccord_error_clear(&err);
   app_push_saved_accounts(a);
-  ccord_ui_set_account_view(a->ui, ccord_account_view_of(a->account));
+  app_sync_account_view(a);
 }
 
 // Removing an account deletes its warm cache by user id; when it is the one running, the handle also stops saving.
@@ -795,7 +875,7 @@ static void host_account_remove(void *ud, uint64_t user_id)
       }
     }
     app_push_saved_accounts(a);
-    ccord_ui_set_account_view(a->ui, ccord_account_view_of(a->account));
+    app_sync_account_view(a);
     return;
   }
 #endif
@@ -804,7 +884,7 @@ static void host_account_remove(void *ud, uint64_t user_id)
   (void)ccord_account_remove(a->account, user_id, &err);
   ccord_error_clear(&err);
   app_push_saved_accounts(a);
-  ccord_ui_set_account_view(a->ui, ccord_account_view_of(a->account));
+  app_sync_account_view(a);
 }
 
 #if CCORD_LIVE_ACCOUNT
@@ -820,7 +900,7 @@ static void host_auth_result(void *ud, ccord_status st, long http_status, const 
     ccord_ui_set_login_error(a->ui, st == CCORD_ERR_TIMEOUT ? "Login timed out; try again."
                                                             : "Network error during login; try again.",
                              keep_mfa);
-    ccord_ui_set_account_view(a->ui, ccord_account_view_of(a->account));
+    app_sync_account_view(a);
     return;
   }
   char token[CCORD_LIVE_TOKEN_MAX + 1] = {0};
@@ -833,7 +913,8 @@ static void host_auth_result(void *ud, ccord_status st, long http_status, const 
     if (ccord_live_save_token(a->token_file, token, &err) == CCORD_OK) {
       ccord_account_set_token_state(a->account, true, false, "Discord User", "token_session", 1u, 0);
       ccord_ui_clear_account_token_text(a->ui);
-      ccord_rest_queue_set_token(a->auth_q, token);
+      // Auth succeeded: retire the temporary login REST queue after ccord_rest_queue_pump returns.
+      a->auth_q_retire = true;
       app_connect_live(a);
     } else {
       ccord_ui_set_login_error(a->ui, err.message[0] ? err.message : "Failed to save token", false);
@@ -847,7 +928,7 @@ static void host_auth_result(void *ud, ccord_status st, long http_status, const 
   }
   ccord_live_wipe(token, sizeof token);
   ccord_live_wipe(ticket, sizeof ticket);
-  ccord_ui_set_account_view(a->ui, ccord_account_view_of(a->account));
+  app_sync_account_view(a);
 }
 #endif
 
@@ -882,6 +963,7 @@ static void host_account_action(void *ud, ccord_account_action action)
       ccord_warm_forget(a->warm);   // plaintext cache goes before the token; no later save recreates it
 #if CCORD_LIVE_ACCOUNT
       a->auth_pending = false;
+      app_destroy_auth_q(a);
       ccord_live_wipe(a->mfa_ticket, sizeof a->mfa_ticket);
       if (ccord_account_has_token_session(a->account)) {
         (void)ccord_live_delete_token(a->token_file, &err);
@@ -900,6 +982,7 @@ static void host_account_action(void *ud, ccord_account_action action)
       if (ccord_live_save_token(a->token_file, tok, &err) == CCORD_OK) {
         ccord_account_set_token_state(a->account, true, false, "Discord User", "token_session", 1u, 0);
         ccord_ui_clear_account_token_text(a->ui);
+        if (!a->auth_pending) app_destroy_auth_q(a);
         app_connect_live(a);
       } else {
         ccord_ui_set_login_status(a->ui, err.message[0] ? err.message : "Invalid token", false);
@@ -911,6 +994,7 @@ static void host_account_action(void *ud, ccord_account_action action)
       ccord_warm_forget(a->warm);
 #if CCORD_LIVE_ACCOUNT
       a->auth_pending = false;
+      app_destroy_auth_q(a);
       ccord_live_wipe(a->mfa_ticket, sizeof a->mfa_ticket);
       (void)ccord_live_delete_token(a->token_file, &err);
       if (a->live) app_disconnect_live(a);
@@ -922,6 +1006,11 @@ static void host_account_action(void *ud, ccord_account_action action)
     case CCORD_ACCOUNT_ACTION_CREDENTIALS_LOGIN: {
 #if CCORD_LIVE_ACCOUNT
       if (a->auth_pending) break;  // a login/MFA request is already in flight; wait for Discord's answer
+      if (!app_ensure_auth_q(a, &err)) {
+        bool keep_mfa = a->mfa_ticket[0] != '\0';
+        ccord_ui_set_login_error(a->ui, err.message[0] ? err.message : "Login initialization failed", keep_mfa);
+        break;
+      }
       const char *email = nullptr, *password = nullptr, *mfa_code = nullptr;
       ccord_ui_account_login_fields(a->ui, &email, &password, &mfa_code);
       ccord_status st;
@@ -945,11 +1034,12 @@ static void host_account_action(void *ud, ccord_account_action action)
     case CCORD_ACCOUNT_ACTION_MFA_CANCEL:
 #if CCORD_LIVE_ACCOUNT
       a->auth_pending = false;
+      app_destroy_auth_q(a);
       ccord_live_wipe(a->mfa_ticket, sizeof a->mfa_ticket);
 #endif
       break;
   }
-  ccord_ui_set_account_view(a->ui, ccord_account_view_of(a->account));
+  app_sync_account_view(a);
   app_push_saved_accounts(a);   // sign-in/out changes which roster row is active
 }
 
@@ -1676,46 +1766,36 @@ static ccord_status media_op_play_soundboard(void *ud, ccord_id guild_id, ccord_
   return ccord_session_play_soundboard(((app *)ud)->session, guild_id, sound_id, err);
 }
 
-// Consumes arrived CDN soundboard media ("/soundboard-sounds/<id>.mp3") from the session queue so
-// app_media decodes and plays it locally once Discord confirms send-soundboard-sound. Non-soundboard
-// items (avatars, icons, attachments) are re-queued in memory via ccord_session_fetch_media without
-// any network call so ui_pump_media still receives them in order.
+// Consumes arrived CDN soundboard media ("/soundboard-sounds/<id>.mp3") directly via O(1) filtered
+// pop without disturbing avatars/icons/attachments in the session media queue. Returns immediately
+// when not connected to a voice channel.
 static bool media_op_pop_soundboard(void *ud, const uint8_t **data, size_t *len, uint8_t *vol_pct)
 {
   app *a = ud;
-  if (!a->session) return false;
-  const char *requeue[2048];
-  size_t nrequeue = 0;
-  bool found = false;
-  ccord_media_item item;
-  while (nrequeue < 2048u && ccord_session_pop_media(a->session, &item)) {
-    const char *tag = item.url ? strstr(item.url, "/soundboard-sounds/") : nullptr;
+  if (!a->session || !a->store || ccord_store_active_voice_channel(a->store) == CCORD_ID_NONE) return false;
+  const char *url = nullptr;
+  const uint8_t *mdata = nullptr;
+  size_t mlen = 0;
+  while (ccord_session_pop_media_matching(a->session, "/soundboard-sounds/", &url, &mdata, &mlen)) {
+    if (!mdata || mlen == 0) continue;
+    *data = mdata;
+    *len = mlen;
+    uint8_t vol = 100u;
+    const char *tag = url ? strstr(url, "/soundboard-sounds/") : nullptr;
     if (tag != nullptr) {
-      if (item.data && item.len > 0) {
-        *data = item.data;
-        *len = item.len;
-        uint8_t vol = 100u;
-        const char *id_str = tag + strlen("/soundboard-sounds/");
-        char *end = nullptr;
-        errno = 0;
-        unsigned long long sid = strtoull(id_str, &end, 10);
-        if (errno == 0 && end != id_str && sid != 0u && a->store) {
-          const ccord_soundboard_sound *sb = ccord_store_find_soundboard(a->store, (ccord_id)sid);
-          if (sb) vol = sb->volume_pct;
-        }
-        *vol_pct = vol;
-        found = true;
-        break;
+      const char *id_str = tag + strlen("/soundboard-sounds/");
+      char *end = nullptr;
+      errno = 0;
+      unsigned long long sid = strtoull(id_str, &end, 10);
+      if (errno == 0 && end != id_str && sid != 0u) {
+        const ccord_soundboard_sound *sb = ccord_store_find_soundboard(a->store, (ccord_id)sid);
+        if (sb) vol = sb->volume_pct;
       }
-      continue;
     }
-    if (item.url && item.url[0]) requeue[nrequeue++] = item.url;
+    *vol_pct = vol;
+    return true;
   }
-  ccord_error err;
-  for (size_t i = 0; i < nrequeue; i++) {
-    (void)ccord_session_fetch_media(a->session, requeue[i], &err);
-  }
-  return found;
+  return false;
 }
 
 static ccord_voice_audio_thread *media_op_thread_start(void *ud, const ccord_voice_audio_io *io, ccord_error *err)
@@ -2045,7 +2125,10 @@ static void pump_voice_and_video(app *a)
 static void pump(app *a)
 {
 #if CCORD_LIVE_ACCOUNT
-  if (a->auth_q) ccord_rest_queue_pump(a->auth_q, now_ms(a));
+  if (a->auth_q) {
+    ccord_rest_queue_pump(a->auth_q, now_ms(a));
+    if (a->auth_q_retire && !a->auth_pending) app_destroy_auth_q(a);
+  }
 #endif
   (void)ccord_session_pump(a->session);
   // M6: desktop notification gating (queue is always drained; delivery is skipped under a virtual clock)
@@ -2064,12 +2147,12 @@ static void pump(app *a)
                (ccord_store_self_id(a->store) == CCORD_ID_NONE || ccord_session_is_stale(a->session))) {
       a->live = false;
       ccord_account_set_token_state(a->account, false, false, nullptr, nullptr, 0, 0);
-      ccord_ui_set_account_view(a->ui, ccord_account_view_of(a->account));
+      app_sync_account_view(a);
       ccord_ui_open_account_settings(a->ui);
       ccord_ui_set_login_status(a->ui, "Authentication failed (4004 / 401): invalid or expired Discord token.", false);
     }
 #endif
-    ccord_ui_set_account_view(a->ui, ccord_account_view_of(a->account));
+    app_sync_account_view(a);
   }
   // First interactive frame: show the saved-account roster (keyring for live runs, in-memory for mock).
   if (!a->saved_accounts_pushed && !a->virtual_clock) app_push_saved_accounts(a);
@@ -3670,18 +3753,33 @@ static bool game_detect_pref_enabled(void *ud)
 static void run_interactive(app *a)
 {
   bool redraw = true;
+  bool animating = false;
+  unsigned fast_draws = 0;   // consecutive sub-2 ms presents -> VSync inactive, fall back to bounded wait
   uint64_t last_input_ms = now_ms(a);
   bool was_visible = true;
   ccord_scheduled_messages_init(a->session, a->store);
   while (!a->quit) {
     ccord_app_media_voice vstate = {0};
     if (a->session && a->store) media_op_voice(a, &vstate);
-    bool media_active = a->session && a->store &&
-                        (media_op_stream_active(a) || media_op_watch_active(a) || vstate.active);
+    // Live voice audio runs on its own dedicated pthread, so an audio-only call does not need 16 ms
+    // UI event waits; only active video/camera/screen capture/decode (or mock inline audio) does.
+    bool video_active = a->session && a->store &&
+                        (media_op_stream_active(a) || media_op_watch_active(a) ||
+                         (vstate.active && (vstate.camera || ccord_app_media_cam_count(a->media) > 0)));
+    bool inline_voice = !a->live && a->session && a->store && vstate.active;
+    bool media_fast = video_active || inline_voice;
+    bool should_draw = ccord_app_desktop_should_draw(a->platform);
     uint32_t timeout = 100;
-    if (redraw || media_active) timeout = 16;
-    // Hidden/minimized in the background: no frames, and a long wait unless active voice/stream media needs pumping.
-    if (!ccord_app_desktop_should_draw(a->platform) && !media_active) timeout = 250;
+    if (!should_draw) {
+      // Hidden/minimized in the background: no frames, and a long wait unless active video/inline media needs pumping.
+      timeout = media_fast ? 16 : 250;
+    } else if (redraw || animating) {
+      // Non-blocking poll while animations/redraws are active so VSync in SDL_RenderPresent paces
+      // full native refresh rate instead of halving FPS via SDL_WaitEventTimeout(16).
+      timeout = (!(a->opt && a->opt->headless) && fast_draws < 4u) ? 0u : 8u;
+    } else if (media_fast) {
+      timeout = 16;
+    }
     ccord_input_event ev;
     if (ccord_platform_next_event(a->platform, &ev, timeout)) {
       last_input_ms = now_ms(a);
@@ -3895,9 +3993,22 @@ static void run_interactive(app *a)
     bool upd = ccord_ui_update(a->ui, now_ms(a));
     if (!ccord_app_desktop_should_draw(a->platform)) {
       redraw = true;   // repaint once the window is shown again
+      animating = false;
+      fast_draws = 0;
     } else if (upd || redraw) {
+      uint64_t dt0 = now_ms(a);
       draw_frame(a);
-      redraw = upd;   // keep the short wait while animations run
+      uint64_t dt = now_ms(a) - dt0;
+      if (dt < 2u) {
+        if (fast_draws < 8u) fast_draws++;
+      } else {
+        fast_draws = 0;
+      }
+      redraw = false;
+      animating = upd;   // keep VSync-paced cadence while animations run
+    } else {
+      animating = false;
+      fast_draws = 0;
     }
   }
   ccord_scheduled_messages_shutdown();
@@ -4310,21 +4421,12 @@ int main(int argc, char **argv)
     goto done;
   }
 #if CCORD_LIVE_ACCOUNT
-  {
-    // Login/MFA queue: no token until Discord answers one; pre-auth requests carry no Authorization header.
-    ccord_rest_config auth_cfg = {.timeout_ms = 10000, .max_response_bytes = 65536};
-    a.auth_q = ccord_rest_queue_create(&auth_cfg, &err);
-    if (!a.auth_q) {
-      fprintf(stderr, "ccord: %s\n", err.message);
-      result = 2;
-      goto done;
-    }
-  }
+  // auth_q is created lazily only when credentials/2FA login is initiated and retired once authenticated.
   if (a.live || (opt.token_file && live_token_available(opt.token_file))) {
     ccord_account_set_token_state(a.account, true, a.live, "Discord User", "token_session", 1u, 0);
   }
 #endif
-  ccord_ui_set_account_view(a.ui, ccord_account_view_of(a.account));
+  app_sync_account_view(&a);
   if (!use_mock && !a.live && !verify_live) {
     ccord_ui_open_account_settings(a.ui);
   }
