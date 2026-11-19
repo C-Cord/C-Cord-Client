@@ -23,7 +23,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define CATALOG_DEFAULT_URL "https://c-cord.github.io/plugin-catalog/catalog.v1.json"
+#define CATALOG_DEFAULT_URL "https://plugins.c-cord.org/catalog.v1.json"
 #define CATALOG_MAX_JSON_BYTES (8u * 1024u * 1024u)
 #define CATALOG_MAX_CCE_BYTES (25u * 1024u * 1024u)
 #define CATALOG_REFRESH_INTERVAL_MS (6ULL * 60ULL * 60ULL * 1000ULL)

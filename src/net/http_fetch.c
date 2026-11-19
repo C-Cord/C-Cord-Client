@@ -43,6 +43,8 @@ bool ccord_http_url_allowed(const char *url)
   if (hlen == 0 || hlen > 253) return false;
 
   static const char *const k_hosts[] = {
+    "plugins.c-cord.org",
+    "c-cord.org",
     "c-cord.github.io",
     "github.com",
     "api.github.com",
