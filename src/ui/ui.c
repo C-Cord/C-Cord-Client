@@ -661,12 +661,14 @@ ccord_rect ui_pin_rect(const ccord_ui *ui)
 
 ccord_rect ui_inbox_rect(const ccord_ui *ui)
 {
+  if (ui->mobile_layout && ui->win_w < 520.0f) return (ccord_rect){0.0f, 0.0f, 0.0f, 0.0f};
   ccord_rect p = ui_pin_rect(ui);
   return (ccord_rect){p.x - 4.0f - 32.0f, p.y, 32.0f, 32.0f};
 }
 
 ccord_rect ui_saved_messages_rect(const ccord_ui *ui)
 {
+  if (ui->mobile_layout && ui->win_w < 520.0f) return (ccord_rect){0.0f, 0.0f, 0.0f, 0.0f};
   ccord_rect i = ui_inbox_rect(ui);
   return (ccord_rect){i.x - 4.0f - 32.0f, i.y, 32.0f, 32.0f};
 }
@@ -945,6 +947,32 @@ bool ui_search_panel_active(const ccord_ui *ui)
 
 void ui_compute_layout(ccord_ui *ui)
 {
+  ui->mobile_layout = ui->force_mobile_mode || (ui->win_w > 0.0f && ui->win_w < CCORD_MOBILE_BREAKPOINT_W);
+  if (ui->mobile_layout) {
+    ccord_layout_compute_mobile(&ui->theme->m, ui->win_w, ui->win_h, ui->composer_box_h,
+                                ui->safe_insets, ui->keyboard_inset,
+                                ui->left_drawer_t, ui->right_drawer_t, &ui->layout);
+    ui->members_available = !ui->discovery_open;
+    ui->panel_state = ui_panel_state(ui);
+    if (ui_self_voice(ui) && ui->layout.channel_scroll.h > UI_VOICE_BAR_H) {
+      ui->layout.channel_scroll.h -= UI_VOICE_BAR_H;
+    }
+    ui->built_voice_bar = (ui_self_voice(ui) != nullptr);
+    ui_panels_apply_layout(ui);
+    if (ui->d.store && !ui->discovery_open &&
+        ui_role_preview_active_for(ui, ccord_store_selected_guild(ui->d.store)) &&
+        ui->layout.message_area.h > 100.0f) {
+      const float rpb_h = 36.0f;
+      ui->layout.chat_header.y += rpb_h;
+      ui->layout.message_area.y += rpb_h;
+      ui->layout.message_area.h -= rpb_h;
+    }
+    if (ui_call_bar_active(ui)) {
+      ui->layout.message_area.y += UI_CALL_BAR_H;
+      ui->layout.message_area.h -= UI_CALL_BAR_H;
+    }
+    return;
+  }
   // Side-by-side stage + Text Chat: the stage pane takes the left of the chat column, the chat
   // pane (header / timeline / composer) keeps the right. Falls back to the full-width stage when
   // the window cannot hold both panes.
@@ -1013,6 +1041,14 @@ ccord_rect ui_members_btn_rect(const ccord_ui *ui)
   const ccord_layout_rect *h = &ui->layout.chat_header;
   float sz = 32.0f;
   return (ccord_rect){h->x + h->w - 8.0f - sz, h->y + (h->h - sz) * 0.5f, sz, sz};
+}
+
+ccord_rect ui_drawer_btn_rect(const ccord_ui *ui)
+{
+  if (!ui || !ui->mobile_layout) return (ccord_rect){0.0f, 0.0f, 0.0f, 0.0f};
+  const ccord_layout_rect *h = &ui->layout.chat_header;
+  float sz = 36.0f;
+  return (ccord_rect){h->x + 6.0f, h->y + (h->h - sz) * 0.5f, sz, sz};
 }
 
 void ccord_ui_set_viewport(ccord_ui *ui, float logical_w, float logical_h)
@@ -2817,15 +2853,26 @@ static void sync_text_input(ccord_ui *ui)
 {
   bool want = false;
   if (ui->settings_open) {
-    want = (ui->settings_page == 0 && ui->account_focus_field != 0) || ui_settings_profile_wants_text(ui);
-  } else if (ui_server_settings_is_open(ui) || ui_channel_settings_is_open(ui)) {
-    want = true;
+    bool field = (ui->settings_page == 0 && ui->account_focus_field != 0) || ui_settings_profile_wants_text(ui);
+    want = ui->touch_mode ? (ui->touch_text_focused && field) : field;
+  } else if (ui_server_settings_is_open(ui)) {
+    want = ui->touch_mode ? ui_server_settings_wants_caret(ui) : true;
+  } else if (ui_channel_settings_is_open(ui)) {
+    want = ui->touch_mode ? ui_channel_settings_wants_caret(ui) : true;
   } else if (ui->quick_switcher_open || ui->modal_kind != UI_MODAL_NONE) {
     want = true;
   } else if (!ui->lightbox_open && !ui->select_open && !ui->menu.open && !ui->go_live_open &&
              !ui->pins_open && !ui->reactions_open && !ui->inbox_open && !ui->shortcuts_open) {
-    want = ui->emoji_picker_open || ui->discovery_open || ui->search_open ||
-           ui_forum_is_active(ui) || composer_accepts_text(ui);
+    if (ui->touch_mode) {
+      // On touchscreens, only bring up the soft keyboard when a text field was explicitly focused
+      // (or search/discovery is active) and no navigation drawer is open over chat.
+      bool drawer_open = ui->mobile_layout && (ui->left_drawer_open || ui->right_drawer_open);
+      want = !drawer_open && (ui->search_open || ui->discovery_open ||
+                              (ui->touch_text_focused && (ui_forum_is_active(ui) || composer_accepts_text(ui))));
+    } else {
+      want = ui->emoji_picker_open || ui->discovery_open || ui->search_open ||
+             ui_forum_is_active(ui) || composer_accepts_text(ui);
+    }
   }
   ccord_rect box = ui->text_area;
   if (!ui->d.host.text_input) return;
@@ -3242,8 +3289,21 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
     }
   }
 
-  // Wheel glides: one shared eased scroller per list (scroll.h), driven by the frame dt.
+  // Touch gestures (long-press timer) and mobile slide-out drawer animation.
   float fdt = dt > 0 ? (float)(dt < 100 ? dt : 100) : 16.0f;
+  {
+    float prev_lt = ui->left_drawer_t, prev_rt = ui->right_drawer_t;
+    if (ui_touch_update(ui, now_ms, fdt)) {
+      anim = true;
+      ui->dirty = true;
+    }
+    if (ui->left_drawer_t != prev_lt || ui->right_drawer_t != prev_rt) {
+      ui_compute_layout(ui);
+      ui->dirty = true;
+    }
+  }
+
+  // Wheel glides: one shared eased scroller per list (scroll.h), driven by the frame dt.
   bool reduced = ui->anim.reduced_motion;
   float msg_step = ccord_scroller_advance(&ui->msg_scroller, fdt, reduced);
   if (msg_step != 0.0f) scroll_messages(ui, msg_step);
@@ -3383,7 +3443,9 @@ static hover_state compute_hover(ccord_ui *ui)
     }
     return h;
   }
-  if (ui_in_rect(x, y, ui_rect(l->server_list))) {
+  bool left_vis = !ui->mobile_layout || l->left_drawer_visible;
+  bool right_over = ui->mobile_layout && l->right_drawer_visible;
+  if (left_vis && ui_in_rect(x, y, ui_rect(l->server_list))) {
     ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
     size_t nslots = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
     for (size_t si = 0; si < nslots; si++) {
@@ -3394,7 +3456,8 @@ static hover_state compute_hover(ccord_ui *ui)
         break;
       }
     }
-  } else if (ui_in_rect(x, y, ui_rect(l->channel_scroll))) {
+    return h;
+  } else if (left_vis && ui_in_rect(x, y, ui_rect(l->channel_scroll))) {
     float cy = y - l->channel_scroll.y + ui->chan_scroll;
     for (size_t i = 0; i < ui->ncrow; i++) {
       if (cy >= ui->crow[i].y && cy < ui->crow[i].y + ui->crow[i].h) {
@@ -3405,22 +3468,59 @@ static hover_state compute_hover(ccord_ui *ui)
         break;
       }
     }
-  } else if (ui_in_rect(x, y, ui_rect(l->guild_header))) {
+    return h;
+  } else if (left_vis && ui_in_rect(x, y, ui_rect(l->guild_header))) {
     h.header = true;
-  } else if (ui_in_rect(x, y, ui_user_btn_rect(ui, 2))) {
+    return h;
+  } else if (left_vis && ui_in_rect(x, y, ui_user_btn_rect(ui, 2))) {
     h.gear = true;
-  } else if (ui_in_rect(x, y, ui_user_btn_rect(ui, 1))) {
+    return h;
+  } else if (left_vis && ui_in_rect(x, y, ui_user_btn_rect(ui, 1))) {
     h.deafen = true;
-  } else if (ui_in_rect(x, y, ui_user_btn_rect(ui, 0))) {
+    return h;
+  } else if (left_vis && ui_in_rect(x, y, ui_user_btn_rect(ui, 0))) {
     h.mute = true;
-  } else if (ui_in_rect(x, y, ui_user_status_area_rect(ui))) {
+    return h;
+  } else if (left_vis && ui_in_rect(x, y, ui_user_status_area_rect(ui))) {
     h.user_status = true;
-  } else if (ui_in_rect(x, y, ui_voice_btn_rect(ui, 2))) {
+    return h;
+  } else if (left_vis && ui_in_rect(x, y, ui_voice_btn_rect(ui, 2))) {
     h.disconnect = ui_voice_bar_rect(ui).w > 0.0f;
-  } else if (ui_in_rect(x, y, ui_voice_btn_rect(ui, 1))) {
+    return h;
+  } else if (left_vis && ui_in_rect(x, y, ui_voice_btn_rect(ui, 1))) {
     h.screen = ui_voice_bar_rect(ui).w > 0.0f;
-  } else if (ui_in_rect(x, y, ui_voice_btn_rect(ui, 0))) {
+    return h;
+  } else if (left_vis && ui_in_rect(x, y, ui_voice_btn_rect(ui, 0))) {
     h.camera = ui_voice_bar_rect(ui).w > 0.0f;
+    return h;
+  } else if (ui->mobile_layout && l->left_drawer_visible) {
+    return h;   // dimmed scrim covers chat while left drawer is open
+  } else if (right_over && !ui_in_rect(x, y, ui_rect(l->member_list))) {
+    return h;   // dimmed scrim covers chat while right drawer is open
+  } else if (right_over && ui_in_rect(x, y, ui_rect(l->member_list))) {
+    if (ccord_store_selected_guild(ui->d.store) == CCORD_DM_GUILD_ID) {
+      if (ui->dm_panel_full_profile_rect.w > 0.0f && ui_in_rect(x, y, ui->dm_panel_full_profile_rect)) {
+        h.gdm_ctrl = true;
+      }
+      for (size_t i = 0; i < ui->ngdm_member_hits; i++) {
+        if (ui_in_rect(x, y, ui->gdm_member_hits[i].rect)) {
+          h.user = ui->gdm_member_hits[i].user_id;
+          h.gdm_ctrl = true;
+          break;
+        }
+      }
+    } else {
+      float cy = y - l->member_list.y + ui->member_scroll;
+      for (size_t i = 0; i < ui->nmrow; i++) {
+        if (!ui->mrow[i].is_header && cy >= ui->mrow[i].y && cy < ui->mrow[i].y + ui->mrow[i].h) {
+          h.mrow = (int)i;
+          const ccord_member *m = ccord_store_member_at(ui->d.store, ccord_store_selected_guild(ui->d.store), ui->mrow[i].index);
+          if (m) h.user = m->user_id;
+          break;
+        }
+      }
+    }
+    return h;
   } else if (ui->discovery_open) {
     if (ui->discovery_search_rect.w > 0.0f && ui_in_rect(x, y, ui->discovery_search_rect)) {
       h.disc_text = true;
@@ -3800,8 +3900,12 @@ void ui_open_settings(ccord_ui *ui, bool open)
   if (open) {
     ui_menu_close(ui);
     ui->settings_page = 0;
+    ui->mobile_settings_detail = false;
+    ui->left_drawer_open = false;
+    ui->right_drawer_open = false;
   } else {
     ui->login_screen = false;
+    ui->mobile_settings_detail = false;
     ui_settings_profile_release(ui);   // unsaved Profile edits are dropped with the page
   }
   ui->hover_settings_page = -1;
@@ -4785,6 +4889,7 @@ static void click_channel_row(ccord_ui *ui, size_t row)
         ui->dm_requests_view = false;
         ui->dm_friends_scroll = 0.0f;
         ui->stage_channel = CCORD_ID_NONE;
+        if (ui->mobile_layout) ui->left_drawer_open = false;
         ui_record_nav_location(ui);
         ui_post_view_select(ui, CCORD_DM_GUILD_ID, CCORD_NAV_VIEW_FRIENDS);
         ui->dirty = true;
@@ -4798,6 +4903,7 @@ static void click_channel_row(ccord_ui *ui, size_t row)
         ui->dm_friends_view = false;
         ui->dm_requests_scroll = 0.0f;
         ui->stage_channel = CCORD_ID_NONE;
+        if (ui->mobile_layout) ui->left_drawer_open = false;
         ui_record_nav_location(ui);
         ui_post_view_select(ui, CCORD_DM_GUILD_ID, CCORD_NAV_VIEW_REQUESTS);
         ui->dirty = true;
@@ -4866,6 +4972,7 @@ static void click_channel_row(ccord_ui *ui, size_t row)
       ui->discovery_open = false;
       ui_compute_layout(ui);
     }
+    if (ui->mobile_layout) ui->left_drawer_open = false;
     const ccord_voice_state *self = ui_self_voice(ui);
     if (self && self->channel_id == ch->id) {
       ui->stage_channel = ch->id;   // clicking the joined channel reopens its stage
@@ -4881,6 +4988,7 @@ static void click_channel_row(ccord_ui *ui, size_t row)
     ui->discovery_open = false;
     ui_compute_layout(ui);
   }
+  if (ui->mobile_layout) ui->left_drawer_open = false;
   ui->dm_friends_view = false;
   ui->dm_requests_view = false;
   ui->stage_channel = CCORD_ID_NONE;
@@ -4981,6 +5089,39 @@ static void handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
   }
   // Jumps (10+ notches), precise (trackpad / hi-res wheel) deltas and reduced motion apply at once; whole notches glide.
   const ccord_layout *l = &ui->layout;
+  if (ui->mobile_layout) {
+    // Open mobile drawers overlap message_area and own scroll gestures inside their bounds.
+    if (l->left_drawer_visible) {
+      if (ui_in_rect(ev->x, ev->y, ui_rect(l->channel_scroll))) {
+        float max = ui->chan_content_h - l->channel_scroll.h;
+        ccord_scroller_scroll(&ui->chan_scroller, &ui->chan_scroll, dy, max, direct);
+        ui->animating = true;
+        ui->dirty = true;
+      } else if (ui_in_rect(ev->x, ev->y, ui_rect(l->server_list))) {
+        float total = 0.0f;
+        (void)ui_rail_build_slots(ui, nullptr, 0, &total);
+        float max = total - l->server_list.h;
+        ccord_scroller_scroll(&ui->server_scroller, &ui->server_scroll, dy, max, direct);
+        ui->animating = true;
+        ui->dirty = true;
+      }
+      return;
+    }
+    if (l->right_drawer_visible) {
+      if (ui_in_rect(ev->x, ev->y, ui_rect(l->member_list))) {
+        if (ui_search_panel_active(ui)) {
+          float max = ui->search_panel_max;
+          ccord_scroller_scroll(&ui->search_panel_glide, &ui->search_panel_scroll, dy, max, direct);
+        } else {
+          float max = ui->member_content_h - l->member_list.h;
+          ccord_scroller_scroll(&ui->member_scroller, &ui->member_scroll, dy, max, direct);
+        }
+        ui->animating = true;
+        ui->dirty = true;
+      }
+      return;
+    }
+  }
   if (ui_is_dm_requests_view(ui) && ui_in_rect(ev->x, ev->y, ui_rect(l->message_area))) {
     float max = ui->dm_requests_content_h - l->message_area.h;
     ccord_scroller_scroll(&ui->dm_requests_glide, &ui->dm_requests_scroll, dy, max, direct);
@@ -6486,6 +6627,10 @@ static bool handle_right_click(ccord_ui *ui, const ccord_input_event *ev)
     }
     return false;
   }
+  if (ui->mobile_layout) {
+    if (l->left_drawer_visible && ev->x > l->channel_list.x + l->channel_list.w) return false;
+    if (l->right_drawer_visible && ev->x < l->member_list.x) return false;
+  }
   hover_state h = compute_hover(ui);
   if (h.rail_slot >= 0) {
     ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
@@ -6763,6 +6908,193 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   const ccord_layout *l = &ui->layout;
+  if (ui->mobile_layout && (l->left_drawer_visible || l->right_drawer_visible)) {
+    bool in_left = l->left_drawer_visible && ev->x <= l->channel_list.x + l->channel_list.w;
+    bool in_right = l->right_drawer_visible && ev->x >= l->member_list.x;
+    if (!in_left && !in_right) {
+      // Tapping the dimmed backdrop outside an open drawer dismisses it.
+      ui->left_drawer_open = false;
+      ui->right_drawer_open = false;
+      ui->dirty = true;
+      return true;
+    }
+    hover_state hd = compute_hover(ui);
+    if (in_left) {
+      if (hd.rail_slot >= 0) {
+        ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
+        size_t nslots = ui_rail_build_slots(ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
+        if ((size_t)hd.rail_slot < nslots) {
+          const ui_rail_slot *sl = &slots[hd.rail_slot];
+          switch (sl->kind) {
+            case UI_RAIL_FOLDER_COLLAPSED:
+            case UI_RAIL_FOLDER_HEADER:
+              ui_folder_toggle_expanded(ui, sl->folder_id);
+              return true;
+            case UI_RAIL_ADD_SERVER:
+              ui->left_drawer_open = false;
+              ui->modal_kind = UI_MODAL_ADD_SERVER;
+              ui->modal_type_sel = 0;
+              ccord_text_edit_clear(&ui->modal_edit1);
+              if (ui->d.session) ccord_session_clear_invite_preview(ui->d.session);
+              reset_caret_blink(ui);
+              ui->dirty = true;
+              return true;
+            case UI_RAIL_DISCOVERY:
+              ui->left_drawer_open = false;
+              ui->discovery_open = !ui->discovery_open;
+              if (ui->discovery_open) {
+                ui->inbox_open = false;
+                ui->pins_open = false;
+                ui->search_open = false;
+                ui->view_key = 0;
+                ui_compute_layout(ui);
+                ui_discovery_request(ui, false);
+                reset_caret_blink(ui);
+                ui_post_view_select(ui, ccord_store_selected_guild(ui->d.store), CCORD_NAV_VIEW_DISCOVERY);
+              } else {
+                ui_compute_layout(ui);
+              }
+              ui->dirty = true;
+              return true;
+            case UI_RAIL_DM:
+              select_guild_at(ui, 0);
+              return true;
+            case UI_RAIL_GUILD:
+              select_guild_at(ui, sl->guild_index + 1u);
+              return true;
+          }
+        }
+      }
+      if (ui->dm_header_plus_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->dm_header_plus_rect)) {
+        ui->left_drawer_open = false;
+        ui->modal_kind = UI_MODAL_NEW_DM;
+        ui->modal_focus_field = 0;
+        ui->new_dm_recipient_count = 0;
+        ccord_text_edit_clear(&ui->modal_edit1);
+        ccord_text_edit_clear(&ui->modal_edit2);
+        reset_caret_blink(ui);
+        ui->dirty = true;
+        return true;
+      }
+      for (size_t i = 0; i < ui->ndm_close_rects; i++) {
+        if (ui_in_rect(ev->x, ev->y, ui->dm_close_rects[i].rect)) {
+          ui_close_dm(ui, ui->dm_close_rects[i].channel_id);
+          ui->dirty = true;
+          return true;
+        }
+      }
+      for (size_t i = 0; i < ui->nchan_gear_rects; i++) {
+        if (ui_in_rect(ev->x, ev->y, ui->chan_gear_rects[i].rect)) {
+          ui->left_drawer_open = false;
+          (void)ui_channel_settings_open(ui, ui->chan_gear_rects[i].channel_id);
+          ui->dirty = true;
+          return true;
+        }
+      }
+      if (hd.user_status) { ui_status_card_open(ui); reset_caret_blink(ui); return true; }
+      if (hd.guild >= 0) { select_guild_at(ui, (size_t)hd.guild); return true; }
+      if (hd.crow >= 0) { click_channel_row(ui, (size_t)hd.crow); return true; }
+      if (hd.mute) { toggle_voice_mute(ui); return true; }
+      if (hd.deafen) { toggle_voice_deafen(ui); return true; }
+      if (hd.gear) { ui_open_settings(ui, true); return true; }
+      if (hd.camera) {
+        bool next = !ui->camera_on;
+        if (ui->d.session) {
+          ccord_error err;
+          if (ccord_session_set_voice_camera(ui->d.session, next, &err) != CCORD_OK) {
+            ui_notice(ui, "Cannot toggle camera: %s", err.message);
+            return true;
+          }
+        }
+        ui->camera_on = next;
+        ui_notice(ui, ui->camera_on ? "Camera on" : "Camera off");
+        ui->dirty = true;
+        return true;
+      }
+      if (hd.screen) { ui->left_drawer_open = false; open_go_live(ui); return true; }
+      if (hd.disconnect) { leave_voice(ui); return true; }
+      if (hd.header) {
+        ui->menu_folder_id = CCORD_ID_NONE;
+        ccord_id g = ccord_store_selected_guild(ui->d.store);
+        if (g == CCORD_DM_GUILD_ID) {
+          ui->left_drawer_open = false;
+          ui->quick_switcher_open = true;
+          ccord_text_edit_clear(&ui->quick_switcher_edit);
+          ui_quick_switcher_reset_list(ui);
+          ui->dirty = true;
+          return true;
+        }
+        open_menu_at(ui, ev, (ccord_menu_context){CCORD_MENU_GUILD, g, 0, 0, 0});
+        return true;
+      }
+      return true;
+    }
+    // Right drawer (member list / DM profile / group DM members)
+    if (ui->dm_panel_full_profile_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->dm_panel_full_profile_rect)) {
+      const ccord_channel *dch = ui_selected_channel(ui);
+      const ccord_user *du = dch ? ui_dm_recipient(ui, dch) : nullptr;
+      ccord_id target_uid = du ? du->id : (dch ? dch->user_id : CCORD_ID_NONE);
+      if (target_uid != CCORD_ID_NONE) {
+        ui->right_drawer_open = false;
+        ui_open_user_profile_modal(ui, target_uid, CCORD_ID_NONE);
+        reset_caret_blink(ui);
+      }
+      return true;
+    }
+    if (ui->gdm_add_btn_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->gdm_add_btn_rect)) {
+      const ccord_channel *gch = ui_selected_channel(ui);
+      if (gch) {
+        ui->right_drawer_open = false;
+        ui->modal_kind = UI_MODAL_ADD_DM_RECIPIENT;
+        ui->modal_target_id = gch->id;
+        ui->modal_focus_field = 0;
+        ui->new_dm_recipient_count = 0;
+        ccord_text_edit_clear(&ui->modal_edit1);
+        reset_caret_blink(ui);
+        ui->dirty = true;
+      }
+      return true;
+    }
+    if (ui->gdm_edit_btn_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->gdm_edit_btn_rect)) {
+      const ccord_channel *gch = ui_selected_channel(ui);
+      if (gch) {
+        ui->right_drawer_open = false;
+        ui->modal_kind = UI_MODAL_EDIT_GROUP_DM;
+        ui->modal_target_id = gch->id;
+        ui->modal_focus_field = 0;
+        ccord_text_edit_clear(&ui->modal_edit1);
+        ccord_text_edit_clear(&ui->modal_edit2);
+        ccord_error eerr;
+        if (gch->name && gch->name[0]) (void)ccord_text_edit_insert(&ui->modal_edit1, gch->name, strlen(gch->name), &eerr);
+        if (gch->icon_url && gch->icon_url[0]) (void)ccord_text_edit_insert(&ui->modal_edit2, gch->icon_url, strlen(gch->icon_url), &eerr);
+        reset_caret_blink(ui);
+        ui->dirty = true;
+      }
+      return true;
+    }
+    if (hd.user != CCORD_ID_NONE) {
+      ui_open_member_popover(ui, hd.user, ev->x, ev->y, true);
+      return true;
+    }
+    return true;
+  }
+  if (ui->mobile_layout && ui_in_rect(ev->x, ev->y, ui_drawer_btn_rect(ui))) {
+    ui->left_drawer_open = !ui->left_drawer_open;
+    ui->right_drawer_open = false;
+    if (ui->left_drawer_open && ui->touch_text_focused) {
+      ui->touch_text_focused = false;
+      if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+    }
+    if (ui->d.host.haptic_impact) (void)ui->d.host.haptic_impact(ui->d.host.ud, 0);
+    ui->dirty = true;
+    return true;
+  }
+  if (ui->mobile_layout && ui->mobile_send_btn_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->mobile_send_btn_rect)) {
+    ui_send_composer(ui);
+    if (ui->d.host.haptic_impact) (void)ui->d.host.haptic_impact(ui->d.host.ud, 0);
+    ui->dirty = true;
+    return true;
+  }
   hover_state h_early = compute_hover(ui);
   if (h_early.rail_slot >= 0) {
     ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
@@ -6811,13 +7143,15 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
             return true;
           }
           select_guild_at(ui, sl->guild_index + 1u);
-          ui->drag = DRAG_SERVER;
-          ui->drag_active = false;
-          ui->drag_guild_id = sl->guild_id;
-          ui->drag_start_x = ev->x;
-          ui->drag_start_y = ev->y;
-          ui->drag_drop_slot = -1;
-          ui->drag_drop_zone = UI_DROP_NONE;
+          if (!ui->touch_mode) {
+            ui->drag = DRAG_SERVER;
+            ui->drag_active = false;
+            ui->drag_guild_id = sl->guild_id;
+            ui->drag_start_x = ev->x;
+            ui->drag_start_y = ev->y;
+            ui->drag_drop_slot = -1;
+            ui->drag_drop_zone = UI_DROP_NONE;
+          }
           return true;
       }
     }
@@ -7444,7 +7778,7 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
       }
     }
     click_channel_row(ui, (size_t)h.crow);
-    if (drag_cid != CCORD_ID_NONE) {
+    if (drag_cid != CCORD_ID_NONE && !ui->touch_mode) {
       ui->drag = DRAG_CHANNEL;
       ui->drag_active = false;
       ui->drag_chan_id = drag_cid;
@@ -7561,6 +7895,18 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (h.members) {
+    if (ui->mobile_layout) {
+      ui->right_drawer_open = !ui->right_drawer_open;
+      ui->left_drawer_open = false;
+      if (ui->right_drawer_open && ui->touch_text_focused) {
+        ui->touch_text_focused = false;
+        if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+      }
+      if (ui->d.host.haptic_impact) (void)ui->d.host.haptic_impact(ui->d.host.ud, 0);
+      ui->hover_members_btn = false;
+      ui->dirty = true;
+      return true;
+    }
     if (ui_panel_is_profile(ui)) {
       ui->dm_profile_hidden = !ui->dm_profile_hidden;
     } else {
@@ -7620,17 +7966,26 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
   if (!ui->msg_req_banner_visible && ui->mv.composer_btn.w <= 0.0f && !ui_is_dm_requests_view(ui) &&
       ui_in_rect(ev->x, ev->y, box)) {
     ui->chat_sel_active = false;
+    ui->touch_text_focused = true;
     ui->pending_click = true;
     ui->pending_extend = (ev->mods & CCORD_MOD_SHIFT) != 0;
     ui->pending_select_mode = ev->clicks >= 3 ? 2 : (ev->clicks == 2 ? 1 : 0);
     ui->pending_x = ev->x;
     ui->pending_y = ev->y;
-    ui->drag = DRAG_COMPOSER;
+    if (!ui->touch_mode) ui->drag = DRAG_COMPOSER;
     reset_caret_blink(ui);
     return true;
   }
   if ((ui->stage_channel == CCORD_ID_NONE || ui_stage_split_active(ui)) && !ui_is_dm_friends_view(ui) &&
       !ui_is_dm_requests_view(ui) && ui_in_rect(ev->x, ev->y, ui_rect(l->message_area))) {
+    if (ui->touch_mode) {
+      if (ui->touch_text_focused) {
+        ui->touch_text_focused = false;
+        if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+        ui->dirty = true;
+      }
+      return true;
+    }
     ui->chat_sel_active = true;
     ui->chat_sel_channel = ccord_store_selected_channel(ui->d.store);
     ui->chat_sel_ax = ui->chat_sel_cx = ev->x;
@@ -7654,6 +8009,38 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     ui_ime_preedit_set(ui, ev->text, ev->ime_start, ev->ime_length);
     return true;
   }
+  if (ev->type == CCORD_IN_TOUCH_DOWN || ev->type == CCORD_IN_TOUCH_MOVE ||
+      ev->type == CCORD_IN_TOUCH_UP || ev->type == CCORD_IN_TOUCH_CANCEL) {
+    float prev_lt = ui->left_drawer_t, prev_rt = ui->right_drawer_t;
+    bool handled = ui_touch_handle_input(ui, ev);
+    if (ui->left_drawer_t != prev_lt || ui->right_drawer_t != prev_rt) {
+      ui_compute_layout(ui);
+    }
+    return handled;
+  }
+  if (ev->type == CCORD_IN_SAFE_AREA) {
+    ccord_ui_set_safe_insets(ui, ev->inset_top, ev->inset_right, ev->inset_bottom, ev->inset_left);
+    return true;
+  }
+  if (ev->type == CCORD_IN_KEYBOARD_INSET) {
+    ccord_ui_set_keyboard_inset(ui, ev->inset_bottom);
+    return true;
+  }
+  if (ev->type == CCORD_IN_APP_BACKGROUND) {
+    ui_menu_close(ui);
+    ui->touch_text_focused = false;
+    return false;
+  }
+  if (ev->type == CCORD_IN_APP_FOREGROUND || ev->type == CCORD_IN_RENDER_RESET) {
+    ui->dirty = true;
+    return true;
+  }
+  if (ev->type == CCORD_IN_APP_LOW_MEMORY) {
+    return false;
+  }
+  if (ev->type == CCORD_IN_KEY_DOWN && ev->key == CCORD_KEY_BACK) {
+    return ccord_ui_handle_back(ui);
+  }
   if (ev->type != CCORD_IN_RESIZE) {   // composer overlays sit above the views; topmost modal first
     if (ui->report_open && ui_report_flow_input(ui, ev)) return true;
     if (ui->schedule_open && ui_schedule_dialog_input(ui, ev)) return true;
@@ -7666,7 +8053,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
   switch (ev->type) {
     case CCORD_IN_RESIZE:
       ccord_ui_set_viewport(ui, ev->x, ev->y);
-      if (ev->x >= 320.0f && ev->y >= 240.0f) {
+      if (!ui->mobile_layout && !ui->force_mobile_mode && ev->x >= 320.0f && ev->y >= 240.0f) {
         ui->settings_win_w = (int)ev->x;
         ui->settings_win_h = (int)ev->y;
         ui->settings_win_saved = true;
@@ -7677,6 +8064,10 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       ui->window_focused = ev->focused;
       if (!ev->focused) {
         ui_ime_preedit_clear(ui);
+        if (ui->touch_mode) {
+          ui->ime_active = false;
+          ui->touch_text_focused = false;
+        }
         if (s_suppress_next_text_ui == ui) s_suppress_next_text_ui = nullptr;
       }
       reset_caret_blink(ui);
@@ -7695,6 +8086,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       ui->dirty = true;
       return true;
     case CCORD_IN_MOUSE_MOVE: {
+      if (!ui->in_synthetic_mouse) ui->touch_mode = false;
       ui->mx = ev->x;
       ui->my = ev->y;
       ui->mouse_in = true;
@@ -8089,6 +8481,16 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
     case CCORD_IN_NONE:
+    case CCORD_IN_TOUCH_DOWN:
+    case CCORD_IN_TOUCH_MOVE:
+    case CCORD_IN_TOUCH_UP:
+    case CCORD_IN_TOUCH_CANCEL:
+    case CCORD_IN_APP_BACKGROUND:
+    case CCORD_IN_APP_FOREGROUND:
+    case CCORD_IN_APP_LOW_MEMORY:
+    case CCORD_IN_RENDER_RESET:
+    case CCORD_IN_SAFE_AREA:
+    case CCORD_IN_KEYBOARD_INSET:
       return false;
   }
   return false;
@@ -8309,6 +8711,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui->update_banner_install_rect = (ccord_rect){0};
   ui->update_banner_notes_rect = (ccord_rect){0};
   ui->update_banner_dismiss_rect = (ccord_rect){0};
+  ui->mobile_send_btn_rect = (ccord_rect){0};
   float box_h = ui_composer_measure(ui, r);
   if (box_h != ui->composer_box_h) {
     ui->composer_box_h = box_h;
@@ -8334,7 +8737,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui_anchor_remember(ui);
   ui_draw_stale_bar(ui, r);
   ui_draw_update_bar(ui, r);
-  if (!ui->discovery_open && ui->layout.member_list_visible) ui_draw_member_list(ui, r);
+  if (!ui->mobile_layout && !ui->discovery_open && ui->layout.member_list_visible) ui_draw_member_list(ui, r);
   if (ui->d.store && !ui->discovery_open &&
       ui_role_preview_active_for(ui, ccord_store_selected_guild(ui->d.store))) {
     ccord_id pg = ui->role_preview_guild;
@@ -8367,10 +8770,10 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
     ccord_text_draw(r, "Exit Preview", 12, exit_r.x + (exit_r.w - em.x) * 0.5f, exit_r.y + (exit_r.h - em.y) * 0.5f, &btns, 0.0f);
   }
   draw_overlay_popup(ui, r, UI_OVL_TIP, "tip",
-                     !ui->discovery_open && ui->hover_members_btn && !ui->menu.open && !ui->settings_open,
+                     !ui->touch_mode && !ui->discovery_open && ui->hover_members_btn && !ui->menu.open && !ui->settings_open,
                      &ui->hover_members_btn, 90, UI_TIP_CLOSE_MS, 0.0f, ui_draw_chat_header_tooltip);
   {
-    bool ts_open = !ui->discovery_open && ui->hover_ts_hit >= 0 && (size_t)ui->hover_ts_hit < ui->nts_hits &&
+    bool ts_open = !ui->touch_mode && !ui->discovery_open && ui->hover_ts_hit >= 0 && (size_t)ui->hover_ts_hit < ui->nts_hits &&
                    !ui->menu.open && !ui->settings_open && !ui->pins_open && !ui->search_open && !ui->inbox_open &&
                    !ui->shortcuts_open;
     if (ts_open) ui->tstip_last_hit = ui->hover_ts_hit;
@@ -8394,13 +8797,31 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
       ui_draw_timestamp_tooltip(ui, r);   // closed: clears the tooltip text
     }
   }
-  draw_overlay_popup(ui, r, UI_OVL_BARTIP, "bartip", ui_bar_edit_hovered(ui), nullptr, 90, UI_TIP_CLOSE_MS, 0.0f,
+  draw_overlay_popup(ui, r, UI_OVL_BARTIP, "bartip", !ui->touch_mode && ui_bar_edit_hovered(ui), nullptr, 90, UI_TIP_CLOSE_MS, 0.0f,
                      ui_draw_bar_edit_tooltip);
-  ui_draw_channel_list(ui, r);
-  ui_draw_server_list(ui, r);
-  ui_panels_draw(ui, r);
-  ui_draw_voice_bar(ui, r);
-  ui_draw_user_panel(ui, r);
+  if (ui->mobile_layout) {
+    float drawer_t = fmaxf(ui->left_drawer_t, ui->right_drawer_t);
+    if (drawer_t > 0.001f) {
+      ccord_draw_rect(r, (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h},
+                      ui_alpha(c->bg_tertiary, 0.56f * clampf(drawer_t, 0.0f, 1.0f)));
+    }
+    if (ui->layout.right_drawer_visible && !ui->discovery_open) {
+      ui_draw_member_list(ui, r);
+    }
+    if (ui->layout.left_drawer_visible) {
+      ui_draw_channel_list(ui, r);
+      ui_draw_server_list(ui, r);
+      ui_draw_voice_bar(ui, r);
+      ui_draw_user_panel(ui, r);
+    }
+    ui_panels_draw(ui, r);
+  } else {
+    ui_draw_channel_list(ui, r);
+    ui_draw_server_list(ui, r);
+    ui_panels_draw(ui, r);
+    ui_draw_voice_bar(ui, r);
+    ui_draw_user_panel(ui, r);
+  }
   ui_draw_notice(ui, r);
   draw_overlay_popup(ui, r, UI_OVL_SEARCH, "search", ui->search_open, &ui->search_open, UI_POPUP_MS, UI_POPUP_CLOSE_MS, 6.0f,
                      ui_draw_search_popover);
@@ -9072,4 +9493,266 @@ void ccord_ui_set_user_volume(ccord_ui *ui, ccord_id user_id, uint8_t pct)
     ui->user_volume_count++;
     ui->dirty = true;
   }
+}
+
+// ---- Responsive mobile UI, touch scroll bridge & Android Back navigation ---------------------------------------
+
+bool ui_scroll_at_px(ccord_ui *ui, float x, float y, float dy_px, bool direct)
+{
+  if (!ui || dy_px == 0.0f) return false;
+  float notch = 3.0f * ui_line_h(ui, M(font_size_base));
+  if (notch < 1.0f) notch = 48.0f;
+  ccord_input_event wev = {
+    .type = CCORD_IN_WHEEL,
+    .x = x,
+    .y = y,
+    .wheel = -(dy_px / notch),
+  };
+  int8_t prev_override = ui->touch_scroll_direct_override;
+  ui->touch_scroll_direct_override = direct ? 1 : -1;
+  bool r = ccord_ui_handle_input(ui, &wev);
+  ui->touch_scroll_direct_override = prev_override;
+  return r;
+}
+
+bool ui_dispatch_synthetic_mouse(ccord_ui *ui, ccord_input_type type, uint8_t button, float x, float y)
+{
+  if (!ui) return false;
+  ccord_input_event ev = {
+    .type = type,
+    .x = x,
+    .y = y,
+    .button = button,
+    .clicks = 1,
+  };
+  bool prev = ui->in_synthetic_mouse;
+  ui->in_synthetic_mouse = true;
+  bool r = ccord_ui_handle_input(ui, &ev);
+  ui->in_synthetic_mouse = prev;
+  return r;
+}
+
+void ccord_ui_set_mobile_mode(ccord_ui *ui, bool mobile)
+{
+  if (!ui) return;
+  if (ui->force_mobile_mode == mobile) return;
+  ui->force_mobile_mode = mobile;
+  if (!mobile) {
+    ui->left_drawer_open = false;
+    ui->right_drawer_open = false;
+    ui->left_drawer_t = 0.0f;
+    ui->right_drawer_t = 0.0f;
+  }
+  ui_compute_layout(ui);
+  ccord_vlist_invalidate_all(&ui->vlist);
+  ui->dirty = true;
+}
+
+bool ccord_ui_is_mobile_layout(const ccord_ui *ui)
+{
+  return ui && ui->mobile_layout;
+}
+
+void ccord_ui_set_safe_insets(ccord_ui *ui, float top, float right, float bottom, float left)
+{
+  if (!ui) return;
+  if (top < 0.0f) top = 0.0f;
+  if (right < 0.0f) right = 0.0f;
+  if (bottom < 0.0f) bottom = 0.0f;
+  if (left < 0.0f) left = 0.0f;
+  if (ui->safe_insets.top == top && ui->safe_insets.right == right &&
+      ui->safe_insets.bottom == bottom && ui->safe_insets.left == left) {
+    return;
+  }
+  ui->safe_insets = (ccord_layout_insets){top, right, bottom, left};
+  ui_compute_layout(ui);
+  ccord_vlist_invalidate_all(&ui->vlist);
+  ui->dirty = true;
+}
+
+void ccord_ui_set_keyboard_inset(ccord_ui *ui, float bottom_px)
+{
+  if (!ui) return;
+  if (bottom_px < 0.0f) bottom_px = 0.0f;
+  // If the OS soft keyboard was dismissed externally (e.g. system back/chevron), clear touch focus
+  // so tapping a text field again re-requests SDL_StartTextInput cleanly.
+  if (ui->touch_mode && ui->keyboard_inset > 1.0f && bottom_px <= 1.0f) {
+    ui->touch_text_focused = false;
+    ui->ime_active = false;
+  }
+  if (ui->keyboard_inset == bottom_px) return;
+  ui->keyboard_inset = bottom_px;
+  ui_compute_layout(ui);
+  ccord_vlist_invalidate_all(&ui->vlist);
+  ui->dirty = true;
+}
+
+void ccord_ui_set_touch_mode(ccord_ui *ui, bool touch)
+{
+  if (!ui) return;
+  ui->touch_mode = touch;
+  if (touch) ui->mouse_in = false;
+  ui->dirty = true;
+}
+
+void ccord_ui_set_left_drawer(ccord_ui *ui, bool open)
+{
+  if (!ui) return;
+  ui->left_drawer_open = open;
+  if (open) {
+    ui->right_drawer_open = false;
+    ui->right_drawer_t = 0.0f;
+    if (ui->touch_text_focused) {
+      ui->touch_text_focused = false;
+      if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+    }
+  }
+  if (ui->anim.reduced_motion || ui->last_anim_ms == 0) {
+    ui->left_drawer_t = open ? 1.0f : 0.0f;
+  }
+  ui_compute_layout(ui);
+  ui->dirty = true;
+}
+
+void ccord_ui_set_right_drawer(ccord_ui *ui, bool open)
+{
+  if (!ui) return;
+  ui->right_drawer_open = open;
+  if (open) {
+    ui->left_drawer_open = false;
+    ui->left_drawer_t = 0.0f;
+    if (ui->touch_text_focused) {
+      ui->touch_text_focused = false;
+      if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+    }
+  }
+  if (ui->anim.reduced_motion || ui->last_anim_ms == 0) {
+    ui->right_drawer_t = open ? 1.0f : 0.0f;
+  }
+  ui_compute_layout(ui);
+  ui->dirty = true;
+}
+
+bool ccord_ui_left_drawer_open(const ccord_ui *ui)
+{
+  return ui && ui->left_drawer_open;
+}
+
+bool ccord_ui_right_drawer_open(const ccord_ui *ui)
+{
+  return ui && ui->right_drawer_open;
+}
+
+bool ccord_ui_handle_back(ccord_ui *ui)
+{
+  if (!ui) return false;
+  ccord_input_event esc = {.type = CCORD_IN_KEY_DOWN, .key = CCORD_KEY_ESCAPE};
+
+  // 1. Soft keyboard / IME composition first.
+  if (ui->ime_preedit[0]) {
+    ui_ime_preedit_clear(ui);
+    return true;
+  }
+  if (ui->keyboard_inset > 1.0f || ui->touch_text_focused) {
+    ui->touch_text_focused = false;
+    if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+    ui->dirty = true;
+    return true;
+  }
+
+  // 2. Topmost composer & profile popovers/modals.
+  if (ui->report_open) { ui_report_flow_close(ui); ui->dirty = true; return true; }
+  if (ui->schedule_open) { ui_schedule_dialog_close(ui); ui->dirty = true; return true; }
+  if (ui->poll_open) { ui_poll_composer_close(ui); ui->dirty = true; return true; }
+  if (ui->plus_menu_open) { ui_plus_menu_close(ui); ui->dirty = true; return true; }
+  if (ui->clan_pop && ui_clan_popover_is_open(ui)) { (void)ui_clan_popover_input(ui, &esc); ui->dirty = true; return true; }
+  if (ui->prof_roles && ui_profile_roles_input(ui, &esc)) { ui->dirty = true; return true; }
+  if (ui->sc.open) { ui_status_card_close(ui); ui->dirty = true; return true; }
+
+  // 3. Lightbox, quick switcher, dropdowns, modals, shortcuts.
+  if (ui->shortcuts_open) { ui->shortcuts_open = false; ui->dirty = true; return true; }
+  if (ui->lightbox_open || ui->quick_switcher_open || ui->select_open || ui->modal_kind != UI_MODAL_NONE) {
+    (void)ui_overlays_handle(ui, &esc);
+    ui->dirty = true;
+    return true;
+  }
+
+  // 4. Context menu (sub-level unwinds back to top-level on mobile first).
+  if (ui->menu.open) {
+    if (ui->mobile_layout && ui->mobile_menu_in_sub && ui->menu.open_sub >= 0) {
+      ui->mobile_menu_in_sub = false;
+      ui->menu.open_sub = -1;
+      ui->menu.sub_scroll_y = 0.0f;
+      ui->dirty = true;
+      return true;
+    }
+    ui_menu_close(ui);
+    return true;
+  }
+
+  // 5. Header popovers, emoji picker, member popout, Go Live, autocomplete.
+  if (ui->emoji_picker_open) { ui_expr_picker_close(ui); return true; }
+  if (ui->autocomplete_open) { ui->autocomplete_open = false; ui->dirty = true; return true; }
+  if (ui->member_popover_open) { ui->member_popover_open = false; ui->dirty = true; return true; }
+  if (ui->inbox_open) { ui->inbox_open = false; ui->dirty = true; return true; }
+  if (ui->saved_popover_open) { ui->saved_popover_open = false; ui->dirty = true; return true; }
+  if (ui->reactions_open) { ui->reactions_open = false; ui->dirty = true; return true; }
+  if (ui->pins_open) { ui->pins_open = false; ui->dirty = true; return true; }
+  if (ui->search_open) {
+    ui->search_open = false;
+    ui->view_key = 0;
+    ui_compute_layout(ui);
+    ccord_vlist_invalidate_all(&ui->vlist);
+    ui_sync_messages(ui);
+    ui->dirty = true;
+    return true;
+  }
+  if (ui->go_live_open) { ui->go_live_open = false; ui->dirty = true; return true; }
+
+  // 6. Full-screen settings (mobile 2-level stack unwinds detail -> categories -> close).
+  if (ui_channel_settings_is_open(ui)) {
+    if (ui->mobile_layout && ui->mobile_channel_settings_detail) {
+      ui->mobile_channel_settings_detail = false;
+      ui->dirty = true;
+      return true;
+    }
+    ui_channel_settings_close(ui);
+    return true;
+  }
+  if (ui_server_settings_is_open(ui)) {
+    if (ui->mobile_layout && ui->mobile_server_settings_detail) {
+      ui->mobile_server_settings_detail = false;
+      ui->dirty = true;
+      return true;
+    }
+    ui_server_settings_close(ui);
+    return true;
+  }
+  if (ui->settings_open) {
+    if (ui_is_login_screen(ui)) return false;
+    if (ui->mobile_layout && ui->mobile_settings_detail) {
+      ui->mobile_settings_detail = false;
+      ui->dirty = true;
+      return true;
+    }
+    ui_open_settings(ui, false);
+    return true;
+  }
+
+  // 7. Discovery, edit/reply states, and open drawers.
+  if (ui->discovery_open) {
+    ui->discovery_open = false;
+    ui_compute_layout(ui);
+    ui->dirty = true;
+    return true;
+  }
+  if (ui->editing_message != CCORD_ID_NONE) { ui_cancel_edit(ui); return true; }
+  if (ui->reply_message != CCORD_ID_NONE) { ui_cancel_reply(ui); return true; }
+  if (ui->left_drawer_open || ui->right_drawer_open) {
+    ui->left_drawer_open = false;
+    ui->right_drawer_open = false;
+    ui->dirty = true;
+    return true;
+  }
+  return false;   // at root chat: let Android background the Activity
 }

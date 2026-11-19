@@ -241,6 +241,19 @@ void ui_expr_grid_layout_for_width(float popover_w, ui_expr_grid_layout *out)
 
 static void compute_picker_rect(ccord_ui *ui)
 {
+  if (ui->mobile_layout) {
+    float sl = ui->safe_insets.left;
+    float sr = ui->safe_insets.right;
+    float sb = maxf(ui->safe_insets.bottom, ui->keyboard_inset);
+    float st = ui->safe_insets.top;
+    float pw = maxf(ui->win_w - sl - sr - 2.0f * UIS_SP_2, 240.0f);
+    float max_h = maxf((ui->win_h - st - sb) * 0.58f, 220.0f);
+    float ph = fminf(EXPR_POPOVER_H, max_h);
+    float px = sl + UIS_SP_2;
+    float py = maxf(st + UIS_SP_2, ui->win_h - sb - UIS_SP_2 - ph);
+    ui->emoji_picker_rect = (ccord_rect){px, py, pw, ph};
+    return;
+  }
   float pw = EXPR_POPOVER_W;
   float ph = EXPR_POPOVER_H;
   if (pw > ui->win_w - 16.0f) pw = maxf(ui->win_w - 16.0f, 260.0f);
@@ -555,6 +568,19 @@ void ui_expr_draw_composer_buttons(ccord_ui *ui, ccord_renderer *r, ccord_rect b
 
   float btn_h = 24.0f;
   float by = box.y + (box.h - btn_h) * 0.5f;
+  if (ui->mobile_layout) {
+    // Compact mobile composer: single Emoji button (opens tabbed Emoji/GIFs/Stickers sheet) left of Send/Mic.
+    float right = box.x + box.w - 42.0f;
+    ccord_rect emoji_r = {right - 28.0f, box.y + (box.h - 28.0f) * 0.5f, 28.0f, 28.0f};
+    ep->composer_btn_rects[EXPR_TAB_GIFS] = (ccord_rect){0};
+    ep->composer_btn_rects[EXPR_TAB_STICKERS] = (ccord_rect){0};
+    ep->composer_btn_rects[EXPR_TAB_EMOJI] = emoji_r;
+    bool emj_active = ui->emoji_picker_open && ui->emoji_picker_msg_id == CCORD_ID_NONE;
+    ccord_color emj_col =
+        ui_state_mix(ui, "eemjbtn", 0, false, emj_active, COL(text_secondary), COL(status_idle), COL(brand));
+    ui_expr_draw_smiley(r, emoji_r.x + emoji_r.w * 0.5f, emoji_r.y + emoji_r.h * 0.5f, 19.0f, emj_col);
+    return;
+  }
   // The voice message mic button takes the rightmost 26px slot (ui_vm_mic_rect), so the trio starts 30px further left.
   float right = box.x + box.w - 8.0f - 30.0f;
 

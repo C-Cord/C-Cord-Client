@@ -421,7 +421,7 @@ void ui_draw_server_list(ccord_ui *ui, ccord_renderer *r)
   ccord_pop_clip(r);
 
   // Tooltip for the hovered rail item (drawn above everything in this column).
-  if (ui->hover_rail_slot >= 0 && (size_t)ui->hover_rail_slot < nslots && !ui->menu.open && !ui->settings_open &&
+  if (!ui->touch_mode && ui->hover_rail_slot >= 0 && (size_t)ui->hover_rail_slot < nslots && !ui->menu.open && !ui->settings_open &&
       !(ui->drag == DRAG_SERVER && ui->drag_active)) {
     const ui_rail_slot *sl = &slots[ui->hover_rail_slot];
     const char *name = nullptr;
@@ -901,8 +901,8 @@ void ui_draw_user_panel(ccord_ui *ui, ccord_renderer *r)
     ccord_rect vb = {cx - UIS_ICON_BTN * 0.5f, cym - UIS_ICON_BTN * 0.5f, UIS_ICON_BTN, UIS_ICON_BTN};
     ccord_color ic = uis_icon_button(ui, r, vb, (uis_state){.hover = hover}, "userbtn", (uint64_t)i);
     if ((i == 0 && muted) || (i == 1 && deafened)) ic = COL(danger);
-    if (hover) uis_tooltip(ui, r, vb, i == 0 ? (muted ? "Unmute" : "Mute") : i == 1 ? (deafened ? "Undeafen" : "Deafen") : "User Settings",
-                           UIS_TIP_ABOVE, 100u + (uint64_t)i);
+    if (hover && !ui->touch_mode) uis_tooltip(ui, r, vb, i == 0 ? (muted ? "Unmute" : "Mute") : i == 1 ? (deafened ? "Undeafen" : "Deafen") : "User Settings",
+                                              UIS_TIP_ABOVE, 100u + (uint64_t)i);
     if (i == 0) ui_icon_mic(r, cx, cym, 18.0f, ic, muted);
     else if (i == 1) ui_icon_headphones(r, cx, cym, 18.0f, ic, deafened);
     else ui_icon_gear(r, cx, cym, 18.0f, ic, hover ? COL(bg_item_hover) : COL(bg_user_panel));

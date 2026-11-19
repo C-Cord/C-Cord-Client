@@ -18,6 +18,9 @@
 #define MENU_MIN_H 96.0f
 // Gap between a panel and the window edge (the window clamp is [MENU_EDGE, win_h - MENU_EDGE]).
 #define MENU_EDGE 8.0f
+// Mobile bottom-sheet handle & sub-menu header heights.
+#define SHEET_HANDLE_H 20.0f
+#define SHEET_BACK_H   44.0f
 
 static float clampf(float v, float lo, float hi)
 {
@@ -27,6 +30,11 @@ static float clampf(float v, float lo, float hi)
 // The tallest a panel may be: the window minus its top and bottom margins, but never below MENU_MIN_H.
 static float menu_max_h(const ccord_ui *ui)
 {
+  if (ui->mobile_layout) {
+    float avail = ui->win_h - ui->safe_insets.top - ui->safe_insets.bottom - 2.0f * MENU_EDGE;
+    float max_h = avail * 0.72f;
+    return max_h > MENU_MIN_H ? max_h : MENU_MIN_H;
+  }
   float max_h = ui->win_h - 2.0f * MENU_EDGE;
   return max_h > MENU_MIN_H ? max_h : MENU_MIN_H;
 }
@@ -47,6 +55,7 @@ void ui_menu_release(ccord_ui *ui)
   ui->menu.open = false;
   ui->menu.hover = -1;
   ui->menu.open_sub = -1;
+  ui->mobile_menu_in_sub = false;
   ui->menu.content_h = 0.0f;
   ui->menu.scroll_y = 0.0f;
   ui->menu.sub_content_h = 0.0f;
@@ -70,6 +79,7 @@ void ui_menu_close(ccord_ui *ui)
   }
   ui->menu.open = false;
   ui->menu.hover = -1;
+  ui->mobile_menu_in_sub = false;
   ui->menu_folder_id = CCORD_ID_NONE;
   ui->dirty = true;
 }
@@ -146,12 +156,13 @@ static size_t child_count(const ccord_ui *ui, int parent)
 
 static float row_height(const ccord_ui *ui, const menu_item *it)
 {
-  return M(context_menu_item_height) + (it && it->sublabel ? 12.0f : 0.0f);
+  float base = ui->mobile_layout ? fmaxf(M(context_menu_item_height), 44.0f) : M(context_menu_item_height);
+  return base + (it && it->sublabel ? 12.0f : 0.0f);
 }
 
 static float menu_height(const ccord_ui *ui)
 {
-  float h = 2.0f * M(context_menu_pad);
+  float h = 2.0f * M(context_menu_pad) + (ui->mobile_layout ? SHEET_HANDLE_H : 0.0f);
   for (size_t i = 0; i < ui->menu.count; i++) {
     if (ui->menu.items[i].parent >= 0) continue;   // fly-out items have their own panel
     h += row_height(ui, &ui->menu.items[i]);
@@ -162,7 +173,8 @@ static float menu_height(const ccord_ui *ui)
 
 static ccord_rect top_item_rect(const ccord_ui *ui, size_t idx)
 {
-  float y = ui->menu.y + M(context_menu_pad) - ui->menu.scroll_y;
+  float top_pad = M(context_menu_pad) + (ui->mobile_layout ? SHEET_HANDLE_H : 0.0f);
+  float y = ui->menu.y + top_pad - ui->menu.scroll_y;
   for (size_t i = 0; i < idx; i++) {
     if (ui->menu.items[i].parent >= 0) continue;
     y += row_height(ui, &ui->menu.items[i]) + (ui->menu.items[i].sep_before ? SEP_H : 0.0f);
@@ -177,7 +189,7 @@ static float sub_content_height(const ccord_ui *ui)
 {
   int p = ui->menu.open_sub;
   if (p < 0 || (size_t)p >= ui->menu.count) return 0.0f;
-  float h = 2.0f * M(context_menu_pad);
+  float h = 2.0f * M(context_menu_pad) + (ui->mobile_layout ? (SHEET_HANDLE_H + SHEET_BACK_H) : 0.0f);
   for (size_t i = 0; i < ui->menu.count; i++) {
     if (ui->menu.items[i].parent != p) continue;
     h += row_height(ui, &ui->menu.items[i]) + (ui->menu.items[i].sep_before ? SEP_H : 0.0f);
@@ -185,13 +197,24 @@ static float sub_content_height(const ccord_ui *ui)
   return h;
 }
 
+static ccord_rect mobile_sheet_back_rect(const ccord_ui *ui)
+{
+  if (!ui->mobile_layout || !ui->mobile_menu_in_sub || ui->menu.open_sub < 0) return (ccord_rect){0};
+  return (ccord_rect){ui->menu.x + M(context_menu_pad), ui->menu.y + SHEET_HANDLE_H + M(context_menu_pad),
+                      ui->menu.w - 2.0f * M(context_menu_pad), SHEET_BACK_H};
+}
+
 // The panel of the open fly-out, beside its parent; a zero rectangle when none is open. It opens to the right and
 // flips to the left when the window has no room. Like the top-level panel, its visible height is capped to the
-// window and its rows scroll inside it.
+// window and its rows scroll inside it. On mobile, sub-menus drill down in-place inside the same bottom sheet.
 static ccord_rect sub_box(const ccord_ui *ui)
 {
   int p = ui->menu.open_sub;
   if (p < 0 || (size_t)p >= ui->menu.count || child_count(ui, p) == 0) return (ccord_rect){0};
+  if (ui->mobile_layout) {
+    if (!ui->mobile_menu_in_sub) return (ccord_rect){0};
+    return (ccord_rect){ui->menu.x, ui->menu.y, ui->menu.w, ui->menu.h};
+  }
   float h = sub_content_height(ui);
   float max_h = menu_max_h(ui);
   if (h > max_h) h = max_h;
@@ -211,7 +234,8 @@ static ccord_rect item_rect(const ccord_ui *ui, size_t idx)
   const menu_item *me = &ui->menu.items[idx];
   if (me->parent < 0) return top_item_rect(ui, idx);
   ccord_rect box = sub_box(ui);
-  float y = box.y + M(context_menu_pad) - ui->menu.sub_scroll_y;
+  float top_pad = M(context_menu_pad) + (ui->mobile_layout ? (SHEET_HANDLE_H + SHEET_BACK_H) : 0.0f);
+  float y = box.y + top_pad - ui->menu.sub_scroll_y;
   for (size_t i = 0; i < idx; i++) {
     if (ui->menu.items[i].parent != me->parent) continue;
     y += row_height(ui, &ui->menu.items[i]) + (ui->menu.items[i].sep_before ? SEP_H : 0.0f);
@@ -1867,6 +1891,7 @@ bool ui_menu_handle_mouse(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (ev->type == CCORD_IN_MOUSE_MOVE) {
+    if (ui->mobile_layout) return true;   // mobile uses explicit tap drill-down, not hover fly-outs
     int h = hit_item(ui, ev->x, ev->y);
     if (h >= 0 && ui->menu.items[h].parent < 0) {
       // Pointing at a parent opens its fly-out; pointing at any other top-level item closes it. Over a gap or the
@@ -1886,16 +1911,30 @@ bool ui_menu_handle_mouse(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (ev->type == CCORD_IN_MOUSE_DOWN) {
+    if (ev->button == 1 && ui->mobile_layout && ui->mobile_menu_in_sub && ui->menu.open_sub >= 0) {
+      ccord_rect back_r = mobile_sheet_back_rect(ui);
+      if (ui_in_rect(ev->x, ev->y, back_r)) {
+        ui->mobile_menu_in_sub = false;
+        ui->menu.open_sub = -1;
+        ui->menu.sub_scroll_y = 0.0f;
+        ccord_scroller_cancel(&ui->menu_sub_glide);
+        ui->dirty = true;
+        return true;
+      }
+    }
     int h = ev->button == 1 ? hit_item(ui, ev->x, ev->y) : -1;
     if (ev->button == 1 && h >= 0 && ui->menu.items[h].disabled) return true;
-    if (ev->button == 1 && h >= 0 && ui->menu.items[h].has_sub) {   // a parent only opens its fly-out
+    if (ev->button == 1 && h >= 0 && ui->menu.items[h].has_sub) {   // a parent only opens its fly-out / sub-sheet
       ui->menu.open_sub = h;
       ui->menu.sub_scroll_y = 0.0f;
+      if (ui->mobile_layout) ui->mobile_menu_in_sub = true;
       ccord_scroller_cancel(&ui->menu_sub_glide);   // a wheel glide of the old fly-out does not carry over
       ui->dirty = true;
       return true;
     }
-    if (ev->button == 1 && h < 0 && in_sub_box(ui, ev->x, ev->y)) return true;   // the fly-out's padding
+    if (ev->button == 1 && h < 0 && (in_sub_box(ui, ev->x, ev->y) || (ui->mobile_layout && in_menu_interior(ui, ev->x, ev->y)))) {
+      return true;   // padding / handle inside the sheet
+    }
     // Take copies: activation can change the registry, and closing frees the item strings.
     if (h >= 0) {
       size_t idx = (size_t)h;
@@ -2024,6 +2063,45 @@ void ui_menu_draw(ccord_ui *ui, ccord_renderer *r)
   if (ui->menu.open) {
     float enter = ui_enter(ui, "menu", ui->menu.seq, UI_POPUP_MS);
     if (enter > shown) shown = enter;
+  }
+  if (ui->mobile_layout) {
+    // Full-width bottom sheet anchored above safe_insets.bottom with dimmed backdrop scrim & handle bar.
+    float sl = ui->safe_insets.left + MENU_EDGE;
+    float sr = ui->safe_insets.right + MENU_EDGE;
+    float sb_pad = ui->safe_insets.bottom + MENU_EDGE;
+    ui->menu.w = fmaxf(ui->win_w - sl - sr, 200.0f);
+    ui->menu.sub_w = ui->menu.w;
+    bool in_sub = ui->mobile_menu_in_sub && ui->menu.open_sub >= 0 &&
+                  (size_t)ui->menu.open_sub < ui->menu.count && child_count(ui, ui->menu.open_sub) > 0;
+    float active_content_h = in_sub ? ui->menu.sub_content_h : ui->menu.content_h;
+    ui->menu.h = active_content_h > max_h ? max_h : active_content_h;
+    ui->menu.x = sl;
+    ui->menu.y = ui->win_h - sb_pad - ui->menu.h;
+    if (ui->menu.y < ui->safe_insets.top + MENU_EDGE) ui->menu.y = ui->safe_insets.top + MENU_EDGE;
+    ccord_rect sheet = {ui->menu.x, ui->menu.y, ui->menu.w, ui->menu.h};
+    ccord_draw_rect(r, (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h}, ui_alpha(COL(bg_tertiary), 0.50f * shown));
+    ui_overlay_begin(ui, r, UI_OVL_MENU, shown, 24.0f);
+    draw_panel(ui, r, sheet, in_sub ? ui->menu.open_sub : -1, &st);
+    // Centered grab handle bar at top of sheet.
+    ccord_draw_rrect(r, (ccord_rect){sheet.x + (sheet.w - 36.0f) * 0.5f, sheet.y + 8.0f, 36.0f, 4.0f},
+                     2.0f, ui_alpha(COL(text_muted), 0.5f));
+    if (in_sub) {
+      ccord_rect back_r = mobile_sheet_back_rect(ui);
+      const char *plbl = ui->menu.items[ui->menu.open_sub].label;
+      char blbl[96];
+      snprintf(blbl, sizeof blbl, "<  %.80s", plbl ? plbl : "Back");
+      ccord_text_style bts = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_control, COL(text_header));
+      float by = back_r.y + (back_r.h - ui_line_h(ui, bts.size)) * 0.5f;
+      ccord_text_draw_ellipsis(r, blbl, strlen(blbl), back_r.x + UIS_SP_2, by, back_r.w - 2.0f * UIS_SP_2, &bts);
+      uis_divider(ui, r, sheet.x + UIS_SP_2, back_r.y + back_r.h - 1.0f, sheet.w - 2.0f * UIS_SP_2);
+      draw_menu_scrollbar(ui, r, sheet, ui->menu.sub_content_h, ui->menu.sub_scroll_y, &ui->menu.sub_scrollbar_rect);
+      ui->menu.scrollbar_rect = (ccord_rect){0};
+    } else {
+      draw_menu_scrollbar(ui, r, sheet, ui->menu.content_h, ui->menu.scroll_y, &ui->menu.scrollbar_rect);
+      ui->menu.sub_scrollbar_rect = (ccord_rect){0};
+    }
+    ui_overlay_end(ui, r);
+    return;
   }
   ui_overlay_begin(ui, r, UI_OVL_MENU, shown, 6.0f);
   draw_panel(ui, r, box, -1, &st);

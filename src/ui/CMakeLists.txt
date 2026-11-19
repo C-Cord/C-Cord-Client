@@ -5,7 +5,7 @@ target_include_directories(ccord_ui_logic PUBLIC include)
 target_link_libraries(ccord_ui_logic PUBLIC ccord_core ccord_theme)
 ccord_strict_warnings(ccord_ui_logic)
 
-add_library(ccord_ui STATIC ui.c motion.c draw_nav.c draw_chat.c draw_forum.c draw_members.c context_menu.c settings.c settings_m6_devices.c settings_m6_prefs.c server_settings.c channel_settings.c icons.c expression_picker.c ui_call.c ui_dave.c ui_scheduled_events.c ui_saved_messages.c ui_voice_message.c ui_style.c scroll.c status_card.c settings_profile.c composer_plus_menu.c poll_composer.c schedule_dialog.c profile_view.c new_messages_bar.c profile_roles.c clan_popover.c report_flow.c md_ansi.c composer_format.c plugin_panels.c)
+add_library(ccord_ui STATIC ui.c motion.c touch.c draw_nav.c draw_chat.c draw_forum.c draw_members.c context_menu.c settings.c settings_m6_devices.c settings_m6_prefs.c server_settings.c channel_settings.c icons.c expression_picker.c ui_call.c ui_dave.c ui_scheduled_events.c ui_saved_messages.c ui_voice_message.c ui_style.c scroll.c status_card.c settings_profile.c composer_plus_menu.c poll_composer.c schedule_dialog.c profile_view.c new_messages_bar.c profile_roles.c clan_popover.c report_flow.c md_ansi.c composer_format.c plugin_panels.c)
 add_library(ccord::ui ALIAS ccord_ui)
 target_include_directories(ccord_ui PUBLIC include)
 target_include_directories(ccord_ui PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -23,6 +23,8 @@ endif()
 if(CCORD_BUILD_TESTS)
   ccord_add_test(NAME test_ui_scroll SOURCES tests/test_ui_scroll.c LIBS ccord_ui LABELS unit)
   ccord_add_test(NAME test_ui_interaction SOURCES tests/test_ui_interaction.c
+                 LIBS ccord_ui ccord_platform ccord_net SDL3::SDL3 LABELS ui)
+  ccord_add_test(NAME test_ui_mobile SOURCES tests/test_ui_mobile.c
                  LIBS ccord_ui ccord_platform ccord_net SDL3::SDL3 LABELS ui)
   ccord_add_test(NAME test_ui_components_v2 SOURCES tests/test_ui_components_v2.c
                  LIBS ccord_ui ccord_platform ccord_net SDL3::SDL3 LABELS ui)

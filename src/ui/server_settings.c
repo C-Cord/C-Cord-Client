@@ -1271,6 +1271,9 @@ void ui_server_settings_open(ccord_ui *ui, ccord_id guild)
   if (ss->open && ss->guild_id != guild) ui_server_settings_close(ui);
   ss->open = true;
   ss->guild_id = guild;
+  ui->mobile_server_settings_detail = false;
+  ui->left_drawer_open = false;
+  ui->right_drawer_open = false;
   ss->focus = SSF_NONE;
   ss->scroll = ss->list_scroll = 0.0f;
   ccord_scroller_cancel(&ss->scroll_glide);
@@ -1588,6 +1591,22 @@ typedef struct ss_geom {
 static ss_geom ss_layout(const ccord_ui *ui)
 {
   ss_geom g;
+  if (ui->mobile_layout) {
+    float sl = ui->safe_insets.left;
+    float sr = ui->safe_insets.right;
+    if (!ui->mobile_server_settings_detail) {
+      g.sb_w = ui->win_w;
+      g.x0 = ui->win_w;
+      g.col_x = ui->win_w;
+      g.col_w = 120.0f;
+      return g;
+    }
+    g.sb_w = 0.0f;
+    g.x0 = sl;
+    g.col_x = sl + UIS_SP_4;
+    g.col_w = fmaxf(ui->win_w - sl - sr - 2.0f * UIS_SP_4, 120.0f);
+    return g;
+  }
   g.sb_w = fminf(fmaxf(ui->win_w * 0.24f, 168.0f), 260.0f);
   g.x0 = g.sb_w;
   float avail = ui->win_w - g.x0;
@@ -4928,15 +4947,30 @@ static void draw_sidebar(ss_cx *c, const ss_geom *g)
   uis_vdivider(ui, c->r, g->sb_w - 1.0f, 0.0f, ui->win_h);
 }
 
+static ccord_rect ss_mobile_back_rect(const ccord_ui *ui)
+{
+  if (!ui->mobile_layout || !ui->mobile_server_settings_detail) return (ccord_rect){0};
+  return (ccord_rect){ui->safe_insets.left + UIS_SP_3, ui->safe_insets.top + UIS_SP_3, 76.0f, UIS_ICON_BTN};
+}
+
 static void draw_close(ss_cx *c)
 {
   ccord_ui *ui = c->ui;
-  ccord_rect cr = {ui->win_w - 64.0f, 32.0f, UIS_ICON_BTN, UIS_ICON_BTN};
+  ccord_rect br = ss_mobile_back_rect(ui);
+  if (br.w > 0.0f) {
+    uis_button(ui, c->r, br, "< Back", UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){0}, "ssback", 0);
+  }
+  ccord_rect cr = ui->mobile_layout
+                    ? (ccord_rect){ui->win_w - ui->safe_insets.right - UIS_ICON_BTN - UIS_SP_3,
+                                   ui->safe_insets.top + UIS_SP_3, UIS_ICON_BTN, UIS_ICON_BTN}
+                    : (ccord_rect){ui->win_w - 64.0f, 32.0f, UIS_ICON_BTN, UIS_ICON_BTN};
   bool hov = ss_hit_add(c, cr, A_CLOSE, 0, nullptr, "close");
   ccord_color ic = uis_icon_button(ui, c->r, cr, (uis_state){.hover = hov}, "ssclose", 0);
   ui_icon_close(c->r, cr.x + UIS_ICON_BTN * 0.5f, cr.y + UIS_ICON_BTN * 0.5f, 14.0f, ic);
-  ss_text_centered(c, "ESC", (ccord_rect){cr.x - 4.0f, cr.y + UIS_ICON_BTN + 4.0f, cr.w + 8.0f, 16.0f}, SS_CAP(c), true,
-                   COL(text_muted));
+  if (!ui->mobile_layout) {
+    ss_text_centered(c, "ESC", (ccord_rect){cr.x - 4.0f, cr.y + UIS_ICON_BTN + 4.0f, cr.w + 8.0f, 16.0f}, SS_CAP(c), true,
+                     COL(text_muted));
+  }
 }
 
 static void draw_unsaved_bar(ss_cx *c, const ss_geom *g)
@@ -5020,27 +5054,29 @@ void ui_server_settings_draw(ccord_ui *ui, ccord_renderer *r)
   ss->view = c.clip;
   ccord_draw_rect(r, (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h}, COL(bg_primary));
 
-  ccord_push_clip(r, c.clip);
-  ccord_push_alpha(r, ui_enter(ui, "sspagebody", (uint64_t)ss->page, 160));   // a page eases in when chosen
-  switch (ss->page) {
-    case SS_OVERVIEW: draw_overview(&c, &g); break;
-    case SS_ROLES: draw_roles(&c, &g); break;
-    case SS_INTEGRATIONS: draw_integrations(&c, &g); break;
-    case SS_COMMUNITY: draw_community(&c, &g); break;
-    case SS_EMOJI: draw_emoji(&c, &g); break;
-    case SS_STICKERS: draw_stickers(&c, &g); break;
-    case SS_SOUNDBOARD: draw_soundboard(&c, &g); break;
-    case SS_SAFETY: draw_safety(&c, &g); break;
-    case SS_AUTOMOD: draw_automod(&c, &g); break;
-    case SS_INVITES: draw_invites(&c, &g); break;
-    case SS_BANS: draw_bans(&c, &g); break;
-    case SS_MEMBERS: draw_members(&c, &g); break;
-    case SS_AUDIT: draw_audit(&c, &g); break;
-    case SS_DANGER: draw_danger(&c, &g); break;
-    case SS_PAGE_COUNT: break;
+  if (!(ui->mobile_layout && !ui->mobile_server_settings_detail)) {
+    ccord_push_clip(r, c.clip);
+    ccord_push_alpha(r, ui_enter(ui, "sspagebody", (uint64_t)ss->page, 160));   // a page eases in when chosen
+    switch (ss->page) {
+      case SS_OVERVIEW: draw_overview(&c, &g); break;
+      case SS_ROLES: draw_roles(&c, &g); break;
+      case SS_INTEGRATIONS: draw_integrations(&c, &g); break;
+      case SS_COMMUNITY: draw_community(&c, &g); break;
+      case SS_EMOJI: draw_emoji(&c, &g); break;
+      case SS_STICKERS: draw_stickers(&c, &g); break;
+      case SS_SOUNDBOARD: draw_soundboard(&c, &g); break;
+      case SS_SAFETY: draw_safety(&c, &g); break;
+      case SS_AUTOMOD: draw_automod(&c, &g); break;
+      case SS_INVITES: draw_invites(&c, &g); break;
+      case SS_BANS: draw_bans(&c, &g); break;
+      case SS_MEMBERS: draw_members(&c, &g); break;
+      case SS_AUDIT: draw_audit(&c, &g); break;
+      case SS_DANGER: draw_danger(&c, &g); break;
+      case SS_PAGE_COUNT: break;
+    }
+    ccord_pop_alpha(r);
+    ccord_pop_clip(r);
   }
-  ccord_pop_alpha(r);
-  ccord_pop_clip(r);
 
   // Keep the scroll positions inside what was measured.
   float view_h = ss->page == SS_ROLES ? ss->editor_view.h : ui->win_h;
@@ -5060,7 +5096,7 @@ void ui_server_settings_draw(ccord_ui *ui, ccord_renderer *r)
 
   ss_cx top = c;   // the chrome lives outside the scrolling content, so it is not clipped to it
   top.clip = (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h};
-  draw_sidebar(&top, &g);
+  if (g.sb_w > 0.0f) draw_sidebar(&top, &g);
   draw_close(&top);
   draw_unsaved_bar(&top, &g);
   draw_toast(&top, &g);
@@ -6718,7 +6754,10 @@ static void ss_activate(ccord_ui *ui, const ss_hit *h)
   char idbuf[24];
   switch (h->act) {
     case A_CLOSE: ss_try_close(ui); break;
-    case A_PAGE: ss_go_page(ui, (ss_page)h->arg); break;
+    case A_PAGE:
+      ss_go_page(ui, (ss_page)h->arg);
+      if (ui->mobile_layout) ui->mobile_server_settings_detail = true;
+      break;
     case A_FIELD: {
       ss->focus = (ss_field)h->arg;
       ccord_text_edit *ed = ss_edit_for(ss, ss->focus);
@@ -7212,6 +7251,17 @@ bool ui_server_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     case CCORD_IN_MOUSE_DOWN: {
       if (ev->button != 1) return true;
+      ccord_rect br = ss_mobile_back_rect(ui);
+      if (br.w > 0.0f && ui_in_rect(ev->x, ev->y, br)) {
+        if (ss_dirty(ss)) {
+          ss->flash_until_ms = ui->now_ms + 700u;
+        } else {
+          ui->mobile_server_settings_detail = false;
+          ss->focus = SSF_NONE;
+        }
+        ui->dirty = true;
+        return true;
+      }
       int h = ss_hit_at(ss, ev->x, ev->y);
       if (h < 0 || ss->hits[h].act != A_FIELD) ss->focus = SSF_NONE;   // a click anywhere else leaves the field
       if (h >= 0) {

@@ -1382,10 +1382,43 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
   ccord_draw_rect(r, ui_rect(*h), COL(bg_primary));
   ccord_draw_rect(r, (ccord_rect){h->x, h->y + h->h - 1.0f, h->w, 1.0f}, COL(border_subtle));
   bool is_1to1_dm_panel = ui_panel_is_profile(ui);
+  uint32_t tot_mentions = 0;
+  uint32_t tot_unreads = ui_guild_unread(ui, CCORD_DM_GUILD_ID, &tot_mentions);
+  {
+    size_t ng_hdr = ccord_store_guild_count(ui->d.store);
+    for (size_t gi = 0; gi < ng_hdr; gi++) {
+      const ccord_guild *gg = ccord_store_guild_at(ui->d.store, gi);
+      if (!gg) continue;
+      uint32_t gm = 0;
+      tot_unreads += ui_guild_unread(ui, gg->id, &gm);
+      tot_mentions += gm;
+    }
+  }
+  ccord_rect db = ui_drawer_btn_rect(ui);
+  if (db.w > 0.0f) {
+    ccord_color dic = uis_icon_button(ui, r, db, (uis_state){.selected = ui->left_drawer_open}, "hdrib", 5);
+    float dcx = db.x + db.w * 0.5f, dcy = db.y + db.h * 0.5f;
+    for (int bi = -1; bi <= 1; bi++) {
+      ccord_draw_rrect(r, (ccord_rect){dcx - 8.0f, dcy + (float)bi * 5.0f - 1.0f, 16.0f, 2.0f}, 1.0f, dic);
+    }
+    if (tot_mentions > 0) {
+      char blbl[16];
+      if (tot_mentions > 99u) snprintf(blbl, sizeof blbl, "99+");
+      else snprintf(blbl, sizeof blbl, "%u", (unsigned)tot_mentions);
+      ccord_text_style bst = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 5.0f, COL(text_on_brand));
+      ccord_vec2 bt = ccord_text_measure(r, blbl, strlen(blbl), &bst, 0.0f);
+      float bh = 14.0f, bw = maxf(bt.x + 8.0f, 14.0f);
+      float bx = db.x + db.w - bw + 2.0f, by = db.y + 1.0f;
+      ccord_draw_rrect(r, (ccord_rect){bx, by, bw, bh}, bh * 0.5f, COL(danger));
+      ccord_text_draw(r, blbl, strlen(blbl), bx + (bw - bt.x) * 0.5f, by + (bh - bt.y) * 0.5f, &bst, 0.0f);
+    } else if (tot_unreads > 0) {
+      ccord_draw_circle(r, db.x + db.w - 6.0f, db.y + 6.0f, 3.5f, COL(brand));
+    }
+  }
   ccord_rect mb = ui_members_btn_rect(ui);
   if (mb.w > 0.0f) {
     bool hover = ui->hover_members_btn && !ui->menu.open && !ui->settings_open;
-    bool hidden = ui_panel_hidden(ui);
+    bool hidden = ui->mobile_layout ? !ui->right_drawer_open : ui_panel_hidden(ui);
     // Shown panel: the button reads as active (selected fill); hidden: a plain secondary glyph.
     ccord_color ic = uis_icon_button(ui, r, mb, (uis_state){.hover = hover, .selected = !hidden}, "hdrib", 0);
     if (!hidden) ic = COL(text_header);
@@ -1404,20 +1437,10 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
                                     "hdrib", 2);
   ui_icon_pin(r, pr.x + pr.w * 0.5f, pr.y + pr.h * 0.5f, 18.0f, pic);
   ccord_rect ir = ui_inbox_rect(ui);
-  ccord_color iic = uis_icon_button(ui, r, ir, (uis_state){.hover = ui->hover_inbox && !ui->go_live_open, .selected = ui->inbox_open},
-                                    "hdrib", 3);
-  ui_icon_inbox(r, ir.x + ir.w * 0.5f, ir.y + ir.h * 0.5f, 18.0f, iic, COL(bg_primary));
-  {
-    uint32_t tot_mentions = 0;
-    uint32_t tot_unreads = ui_guild_unread(ui, CCORD_DM_GUILD_ID, &tot_mentions);
-    size_t ng_hdr = ccord_store_guild_count(ui->d.store);
-    for (size_t gi = 0; gi < ng_hdr; gi++) {
-      const ccord_guild *gg = ccord_store_guild_at(ui->d.store, gi);
-      if (!gg) continue;
-      uint32_t gm = 0;
-      tot_unreads += ui_guild_unread(ui, gg->id, &gm);
-      tot_mentions += gm;
-    }
+  if (ir.w > 0.0f) {
+    ccord_color iic = uis_icon_button(ui, r, ir, (uis_state){.hover = ui->hover_inbox && !ui->go_live_open, .selected = ui->inbox_open},
+                                      "hdrib", 3);
+    ui_icon_inbox(r, ir.x + ir.w * 0.5f, ir.y + ir.h * 0.5f, 18.0f, iic, COL(bg_primary));
     if (tot_mentions > 0) {
       char blbl[16];
       if (tot_mentions > 99u) snprintf(blbl, sizeof blbl, "99+");
@@ -1433,18 +1456,23 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
     }
   }
   ccord_rect bmr = ui_saved_messages_rect(ui);
-  ccord_color bic = uis_icon_button(
-      ui, r, bmr, (uis_state){.hover = ui->hover_saved_msgs && !ui->go_live_open, .selected = ui->saved_popover_open}, "hdrib", 4);
-  ui_icon_bookmark(r, bmr.x + bmr.w * 0.5f, bmr.y + bmr.h * 0.5f, 18.0f, bic);
-  if (ui->account_view.demo_chip_visible) {
+  if (bmr.w > 0.0f) {
+    ccord_color bic = uis_icon_button(
+        ui, r, bmr, (uis_state){.hover = ui->hover_saved_msgs && !ui->go_live_open, .selected = ui->saved_popover_open}, "hdrib", 4);
+    ui_icon_bookmark(r, bmr.x + bmr.w * 0.5f, bmr.y + bmr.h * 0.5f, 18.0f, bic);
+  }
+  float hdr_leftmost = bmr.w > 0.0f ? bmr.x : (ir.w > 0.0f ? ir.x : pr.x);
+  if (ui->account_view.demo_chip_visible && !(ui->mobile_layout && ui->win_w < 500.0f)) {
     ccord_text_style cs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 3.0f, COL(text_secondary));
     const char *label = "Demo data";
     ccord_vec2 ct = ccord_text_measure(r, label, strlen(label), &cs, 0.0f);
-    float right = bmr.x - 8.0f;
+    float right = hdr_leftmost - 8.0f;
     ccord_rect chip = {right - (ct.x + 18.0f), h->y + (h->h - 22.0f) * 0.5f, ct.x + 18.0f, 22.0f};
     ccord_draw_rrect(r, chip, 5.0f, COL(bg_tertiary));
     ccord_text_draw(r, label, strlen(label), chip.x + 9.0f, chip.y + (chip.h - ct.y) * 0.5f, &cs, 0.0f);
+    hdr_leftmost = chip.x;
   }
+  float left_x = db.w > 0.0f ? (db.x + db.w + 4.0f) : (h->x + 16.0f);
   ui->gdm_add_btn_rect = (ccord_rect){0, 0, 0, 0};
   ui->gdm_edit_btn_rect = (ccord_rect){0, 0, 0, 0};
   ui->dm_requests_tab_rects[0] = (ccord_rect){0, 0, 0, 0};
@@ -1452,11 +1480,11 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
   float cy = h->y + h->h * 0.5f;
   if (ui_is_dm_requests_view(ui)) {
     ui->add_friend_btn_rect = (ccord_rect){0, 0, 0, 0};
-    ui_icon_inbox(r, h->x + 26.0f, cy, 20.0f, COL(text_muted), COL(bg_primary));
+    ui_icon_inbox(r, left_x + 10.0f, cy, 20.0f, COL(text_muted), COL(bg_primary));
     ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
     float ty = cy - ui_line_h(ui, ns.size) * 0.5f;
-    float nw = ccord_text_draw_ellipsis(r, "Message Requests", 16, h->x + 46.0f, ty, 180.0f, &ns);
-    float dx = h->x + 46.0f + nw + 16.0f;
+    float nw = ccord_text_draw_ellipsis(r, "Message Requests", 16, left_x + 30.0f, ty, maxf(hdr_leftmost - (left_x + 36.0f), 60.0f), &ns);
+    float dx = left_x + 30.0f + nw + 16.0f;
     ccord_draw_rect(r, (ccord_rect){dx, cy - 12.0f, 1.0f, 24.0f}, COL(divider));
     uint32_t req_cnt = 0, spam_cnt = 0;
     size_t dmn = ccord_store_channel_count(ui->d.store, CCORD_DM_GUILD_ID);
@@ -1487,11 +1515,11 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
     return;
   }
   if (ui_is_dm_friends_view(ui)) {
-    ui_icon_members(r, h->x + 26.0f, cy, 20.0f, COL(text_muted), COL(bg_primary));
+    ui_icon_members(r, left_x + 10.0f, cy, 20.0f, COL(text_muted), COL(bg_primary));
     ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
     float ty = cy - ui_line_h(ui, ns.size) * 0.5f;
-    float nw = ccord_text_draw_ellipsis(r, "Friends", 7, h->x + 46.0f, ty, 120.0f, &ns);
-    float dx = h->x + 46.0f + nw + 16.0f;
+    float nw = ccord_text_draw_ellipsis(r, "Friends", 7, left_x + 30.0f, ty, 120.0f, &ns);
+    float dx = left_x + 30.0f + nw + 16.0f;
     ccord_draw_rect(r, (ccord_rect){dx, cy - 12.0f, 1.0f, 24.0f}, COL(divider));
     static const char *const k_tabs[4] = {"Online", "All", "Pending", "Blocked"};
     float tx = dx + 16.0f;
@@ -1545,31 +1573,33 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
                                      : nullptr;
   bool is_forum_parent = parent_ch && ccord_store_channel_is_forum(ui->d.store, parent_ch->id);
   if (voice_stage) {
-    ui_icon_speaker(r, h->x + 16.0f + 10.0f, cy, 20.0f, COL(text_muted));
+    ui_icon_speaker(r, left_x + 10.0f, cy, 20.0f, COL(text_muted));
   } else if (group_dm) {
-    ui_icon_members(r, h->x + 16.0f + 10.0f, cy, 20.0f, COL(text_muted), COL(bg_primary));
+    ui_icon_members(r, left_x + 10.0f, cy, 20.0f, COL(text_muted), COL(bg_primary));
   } else if (is_dm) {
     ccord_text_style ats = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large) + 2.0f, COL(text_muted));
     ccord_vec2 att = ccord_text_measure(r, "@", 1, &ats, 0.0f);
-    ccord_text_draw(r, "@", 1, h->x + 16.0f + 10.0f - att.x * 0.5f, cy - att.y * 0.5f, &ats, 0.0f);
+    ccord_text_draw(r, "@", 1, left_x + 10.0f - att.x * 0.5f, cy - att.y * 0.5f, &ats, 0.0f);
   } else if (is_forum_parent || ccord_store_channel_is_forum(ui->d.store, ch->id)) {
-    ui_icon_forum(r, h->x + 16.0f + 10.0f, cy, 20.0f, COL(text_muted));
+    ui_icon_forum(r, left_x + 10.0f, cy, 20.0f, COL(text_muted));
   } else {
-    ui_icon_hash(r, h->x + 16.0f + 10.0f, cy, 20.0f, COL(text_muted));
+    ui_icon_hash(r, left_x + 10.0f, cy, 20.0f, COL(text_muted));
   }
   ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
-  float tx = h->x + 16.0f + 30.0f;
+  float tx = left_x + 30.0f;
   float ty = cy - ui_line_h(ui, ns.size) * 0.5f;
   float nw = 0.0f;
+  float hdr_btn_left = hdr_leftmost - 8.0f;
+  float title_max_w = ui->mobile_layout ? maxf(hdr_btn_left - tx - 8.0f, 40.0f) : (h->w * 0.5f);
   if (parent_ch && parent_ch->name) {
     ccord_text_style ps = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_secondary));
     float pnw = ccord_text_draw_ellipsis(r, parent_ch->name, strlen(parent_ch->name), tx, ty, h->w * 0.25f, &ps);
-    ccord_rect bc_r = {h->x + 12.0f, h->y + 6.0f, (tx - (h->x + 12.0f)) + pnw + 6.0f, h->h - 12.0f};
+    ccord_rect bc_r = {left_x - 4.0f, h->y + 6.0f, (tx - (left_x - 4.0f)) + pnw + 6.0f, h->h - 12.0f};
     ui->thread_breadcrumb_rect = bc_r;
     ui_forum_set_breadcrumb_rect(ui, bc_r, parent_ch->id);
     ui_icon_chevron(r, tx + pnw + 10.0f, cy, 10.0f, ICON_RIGHT, COL(text_muted));
     float post_x = tx + pnw + 20.0f;
-    float post_w = ccord_text_draw_ellipsis(r, ch_name, strlen(ch_name), post_x, ty, h->w * 0.35f, &ns);
+    float post_w = ccord_text_draw_ellipsis(r, ch_name, strlen(ch_name), post_x, ty, maxf(hdr_btn_left - post_x - 8.0f, 30.0f), &ns);
     nw = (post_x - tx) + post_w;
     if (is_thread_ch && ch->thread_archived) {
       ccord_text_style abs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 3.0f, COL(text_muted));
@@ -1580,10 +1610,8 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
       nw += arch_tag.w + 8.0f;
     }
   } else {
-    nw = ccord_text_draw_ellipsis(r, ch_name, strlen(ch_name), tx, ty, h->w * 0.5f, &ns);
+    nw = ccord_text_draw_ellipsis(r, ch_name, strlen(ch_name), tx, ty, title_max_w, &ns);
   }
-  float hdr_btn_left = ui_saved_messages_rect(ui).x - 8.0f;
-  if (ui->account_view.demo_chip_visible) hdr_btn_left -= 88.0f;
   if (is_thread_ch) {
     ccord_id self_id = ccord_store_self_id(ui->d.store);
     ccord_id perm_ch = ch->parent_id != CCORD_ID_NONE ? ch->parent_id : ch->id;
@@ -4715,7 +4743,7 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
       ui->nephem_hits++;
     }
   }
-  if (row_hv > 0.004f && !message_send_unconfirmed(m)) {
+  if (!ui->touch_mode && row_hv > 0.004f && !message_send_unconfirmed(m)) {
     // Unconfirmed local echoes have no server-side message yet: reactions, reply, pin and the overflow
     // menu would all fail against their synthetic ids, so only Retry is offered.
     ccord_push_alpha(r, row_hv);
@@ -5430,8 +5458,10 @@ void ui_draw_messages(ccord_ui *ui, ccord_renderer *r)
 
 static float composer_wrap(const ccord_ui *ui)
 {
-  // The text area of ui_draw_composer: the box less its padding, the '+' button (28) and the emoji buttons (128).
-  return maxf(ui->layout.composer.w - 2.0f * M(composer_margin_x) - 2.0f * M(composer_pad_x) - 28.0f - 128.0f, 20.0f);
+  // The text area of ui_draw_composer: the box less its padding, the '+' button (28) and the right-hand buttons
+  // (desktop: GIF + Sticker + Emoji + Mic = 128px; mobile: Emoji + Send/Mic = 76px).
+  float right_reserve = ui->mobile_layout ? 76.0f : 128.0f;
+  return maxf(ui->layout.composer.w - 2.0f * M(composer_margin_x) - 2.0f * M(composer_pad_x) - 28.0f - right_reserve, 20.0f);
 }
 
 #define UI_UPLOAD_ROW_H 36.0f
@@ -5748,8 +5778,9 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
   ccord_vec2 plt = ccord_text_measure(r, "+", 1, &pls, 0.0f);
   ccord_text_draw(r, "+", 1, ui->composer_attach_rect.x + (attach_w - plt.x) * 0.5f,
                   ui->composer_attach_rect.y + (attach_w - plt.y) * 0.5f, &pls, 0.0f);
+  float right_reserve = ui->mobile_layout ? 76.0f : 128.0f;
   ccord_rect area = {box.x + M(composer_pad_x) + 28.0f, box.y + M(composer_pad_y),
-                     box.w - 2.0f * M(composer_pad_x) - 28.0f - 128.0f, box.h - 2.0f * M(composer_pad_y)};
+                     box.w - 2.0f * M(composer_pad_x) - 28.0f - right_reserve, box.h - 2.0f * M(composer_pad_y)};
   ccord_text_style st = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_base), COL(text_normal));
   float wrap = composer_wrap(ui);   // = max(area.w, 20); the styled layout wraps, measures and draws at this width
   const char *text = ccord_text_edit_cstr(&ui->edit);
@@ -5835,7 +5866,20 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
   }
   ccord_pop_clip(r);
   ui_expr_draw_composer_buttons(ui, r, box);
-  if (!ui_composer_lock_reason(ui)) ui_vm_draw_mic(ui, r, box);   // rightmost; the emoji trio sits left of it
+  bool mobile_send = ui->mobile_layout && !locked && (ui->edit.len > 0 || ui->staged_file_count > 0);
+  if (mobile_send) {
+    float sw = 32.0f, sh = 30.0f;
+    ccord_rect sb = {box.x + box.w - sw - 6.0f, box.y + (box.h - sh) * 0.5f, sw, sh};
+    ui->mobile_send_btn_rect = sb;
+    ccord_draw_rrect(r, sb, sh * 0.5f, COL(brand));
+    // Crisp send arrow icon centered in the pill.
+    float cx = sb.x + sb.w * 0.5f, cy = sb.y + sb.h * 0.5f;
+    ccord_draw_line(r, (ccord_vec2){cx - 5.5f, cy}, (ccord_vec2){cx + 5.0f, cy}, 2.0f, COL(text_on_brand));
+    ccord_draw_line(r, (ccord_vec2){cx + 1.0f, cy - 4.5f}, (ccord_vec2){cx + 5.5f, cy}, 2.0f, COL(text_on_brand));
+    ccord_draw_line(r, (ccord_vec2){cx + 1.0f, cy + 4.5f}, (ccord_vec2){cx + 5.5f, cy}, 2.0f, COL(text_on_brand));
+  } else if (!locked) {
+    ui_vm_draw_mic(ui, r, box);   // rightmost; the emoji button(s) sit left of it
+  }
   if (editing) {
     const char *hint = "Editing message - Enter saves, Esc cancels";
     ccord_text_style hs = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 3.0f, COL(text_muted));

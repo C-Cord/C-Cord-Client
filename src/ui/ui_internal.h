@@ -1289,6 +1289,43 @@ struct ccord_ui {
   ccord_rect update_banner_install_rect;
   ccord_rect update_banner_notes_rect;
   ccord_rect update_banner_dismiss_rect;
+
+  // Responsive mobile layout, drawers, safe area, IME keyboard inset & touch gesture state.
+  bool force_mobile_mode;
+  bool mobile_layout;
+  bool touch_mode;
+  bool touch_text_focused;
+  ccord_layout_insets safe_insets;
+  float keyboard_inset;
+  bool left_drawer_open;
+  bool right_drawer_open;
+  float left_drawer_t;
+  float right_drawer_t;
+  bool mobile_settings_detail;
+  bool mobile_server_settings_detail;
+  bool mobile_channel_settings_detail;
+  bool mobile_menu_in_sub;
+  int8_t touch_scroll_direct_override;  // 0=normal, 1=force direct 1:1 drag, -1=force eased fling
+  bool in_synthetic_mouse;              // true while touch.c dispatches a synthetic click/context-menu
+  ccord_rect mobile_send_btn_rect;
+  // Touch gesture state (owned by src/ui/touch.c).
+  struct {
+    bool active;
+    int64_t primary_id;
+    uint8_t mode;          // 0=none, 1=pending, 2=scroll, 3=swipe_left_drawer, 4=swipe_right_drawer, 5=long_press, 6=pinch
+    float down_x, down_y;
+    float last_x, last_y;
+    uint64_t down_ms;
+    uint64_t last_ms;
+    float vx_ema, vy_ema;  // px / sec smoothed velocity for fling & drawer snap
+    float drawer_start_t;
+    // Secondary finger for 2-finger pinch-to-zoom (lightbox).
+    bool second_active;
+    int64_t second_id;
+    float second_x, second_y;
+    float pinch_start_dist;
+    float pinch_start_zoom;
+  } touch;
 };
 
 // ---- ui.c ----
@@ -1556,7 +1593,16 @@ int ui_go_live_option_count(int category);
 bool ui_panel_is_profile(const ccord_ui *ui);   // right panel is a 1:1 DM user profile (not a member list / Active Now)
 bool ui_panel_hidden(const ccord_ui *ui);       // the user-hidden state of whichever panel the selection shows
 ccord_rect ui_members_btn_rect(const ccord_ui *ui);   // header "member list" toggle; empty when unavailable
+ccord_rect ui_drawer_btn_rect(const ccord_ui *ui);    // mobile header left hamburger drawer toggle; empty on desktop
 ccord_rect ui_composer_box(const ccord_ui *ui);
+
+// ---- touch.c: touch gestures, fling scrolling, drawer edge-swipes, long-press ----
+bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev);
+bool ui_touch_update(ccord_ui *ui, uint64_t now_ms, float dt_ms);
+// Shared pixel-based scroll dispatcher used by both wheel and touch scrolling (defined in ui.c).
+bool ui_scroll_at_px(ccord_ui *ui, float x, float y, float dy_px, bool direct);
+// Synthetic pointer helpers used by touch.c (tap -> click, long-press -> context menu).
+bool ui_dispatch_synthetic_mouse(ccord_ui *ui, ccord_input_type type, uint8_t button, float x, float y);
 const ccord_voice_state *ui_self_voice(const ccord_ui *ui);
 ccord_id ui_view_index(const ccord_ui *ui, size_t i);   // timeline index -> store index (identity; search keeps the timeline)
 size_t ui_view_count(const ccord_ui *ui);
@@ -1769,6 +1815,8 @@ extern const ui_sound_kind ui_sound_kinds[UI_SOUND_KIND_COUNT];
 // reduced motion apply at once. Same rule for every surface, so they all feel alike.
 static inline bool ui_wheel_direct(const ccord_ui *ui, const ccord_input_event *ev)
 {
+  if (ui->touch_scroll_direct_override > 0) return true;
+  if (ui->touch_scroll_direct_override < 0) return ui->anim.reduced_motion;
   float notches = fabsf(ev->wheel);
   return ui->anim.reduced_motion || notches >= 10.0f || notches < 0.999f;
 }

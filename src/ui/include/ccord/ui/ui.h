@@ -67,6 +67,10 @@ typedef struct ccord_ui_host {      // everything the UI needs from the OS; test
   bool (*scheduled_send_now)(void *ud, uint64_t id, char *err, size_t err_cap);   // send immediately; removed on success
   void (*update_check)(void *ud);                            // nullable: Settings > C-Cord "Check for Updates"
   void (*update_install)(void *ud);                          // nullable: apply / open downloaded update
+  // Optional mobile / touch UX callbacks (nullable on desktop).
+  bool (*haptic_impact)(void *ud, int style);                // 0=light, 1=medium, 2=heavy, 3=selection
+  bool (*share_text)(void *ud, const char *title, const char *text);
+  void (*dismiss_keyboard)(void *ud);
 } ccord_ui_host;
 typedef struct ccord_ui_deps {
   ccord_bus *bus; ccord_store *store; ccord_session *session; ccord_contrib *contrib;
@@ -476,3 +480,22 @@ uint8_t ccord_ui_user_volume(const ccord_ui *ui, ccord_id user_id);
 // Stores a per-user volume (clamped to 0..200); entries beyond CCORD_UI_USER_VOLUME_MAX are ignored.
 // Session forwarding and INI persistence are wired by m5-ui-settings / m5-ui-surfaces.
 void ccord_ui_set_user_volume(ccord_ui *ui, ccord_id user_id, uint8_t pct);
+
+// ---- Responsive mobile UI, touch ergonomics, safe areas & Android Back navigation ------------------------------
+// Forces mobile layout regardless of viewport width (desktop auto-enables below CCORD_MOBILE_BREAKPOINT_W).
+void ccord_ui_set_mobile_mode(ccord_ui *ui, bool mobile);
+bool ccord_ui_is_mobile_layout(const ccord_ui *ui);
+// Safe-area display cutouts / status bar / gesture navigation bar insets in logical px.
+void ccord_ui_set_safe_insets(ccord_ui *ui, float top, float right, float bottom, float left);
+// On-screen soft keyboard height in logical px (0 when hidden); lifts composer & modals above IME.
+void ccord_ui_set_keyboard_inset(ccord_ui *ui, float bottom_px);
+// Enables touch ergonomics (explicit text-focus gating, suppresses sticky hover tooltips/bars).
+void ccord_ui_set_touch_mode(ccord_ui *ui, bool touch);
+// Programmatic drawer control (mobile navigation & member drawers).
+void ccord_ui_set_left_drawer(ccord_ui *ui, bool open);
+void ccord_ui_set_right_drawer(ccord_ui *ui, bool open);
+bool ccord_ui_left_drawer_open(const ccord_ui *ui);
+bool ccord_ui_right_drawer_open(const ccord_ui *ui);
+// Unwinds one mobile layer (IME -> overlay/modal/menu -> settings detail -> settings -> drawer).
+// Returns true if consumed; false at root chat so Android can background/minimize the Activity.
+bool ccord_ui_handle_back(ccord_ui *ui);

@@ -411,7 +411,7 @@ static float s_sidebar_scroll;
 #define SIDEBAR_SCROLL_H 40.0f  // strip under the list that holds the scroll buttons, when the list overflows
 
 typedef struct sgeom {
-  ccord_rect panel, sidebar, close, content;
+  ccord_rect panel, sidebar, close, content, back;
   ccord_rect list;             // the scrolling page list in the sidebar; rows are clipped and hit-tested inside it
   ccord_rect sb_up, sb_down;   // sidebar scroll buttons (zero size when every page fits)
   float step;                  // one sidebar scroll step: one row pitch
@@ -481,6 +481,54 @@ static sgeom geometry(const ccord_ui *ui)
   // The settings page is full-window, like server and channel settings: no floating frame and no scrim.
   float pw = ui->win_w, ph = ui->win_h;
   g.panel = (ccord_rect){0.0f, 0.0f, pw, ph};
+  if (ui->mobile_layout) {
+    float sl = ui->safe_insets.left;
+    float sr = ui->safe_insets.right;
+    float st = ui->safe_insets.top;
+    float sb_in = ui->keyboard_inset > ui->safe_insets.bottom ? ui->keyboard_inset : ui->safe_insets.bottom;
+    float uw = pw - sl - sr;
+    float uh = ph - st - sb_in;
+    if (uw < 200.0f) uw = pw;
+    if (uh < 160.0f) uh = ph;
+    g.close = (ccord_rect){sl + uw - UIS_ICON_BTN - UIS_SP_3, st + UIS_SP_3, UIS_ICON_BTN, UIS_ICON_BTN};
+    if (ui->mobile_settings_detail) {
+      g.back = (ccord_rect){sl + UIS_SP_3, st + UIS_SP_3, 76.0f, UIS_ICON_BTN};
+      float top = st + UIS_SP_3 + UIS_ICON_BTN + UIS_SP_3;
+      g.content = (ccord_rect){sl + UIS_SP_4, top, uw - 2.0f * UIS_SP_4, uh - (top - st) - UIS_SP_4};
+      return g;
+    }
+    // Level 1: full-width category & page list.
+    g.sidebar = (ccord_rect){sl, st, uw, uh};
+    float row_h = M(channel_item_height);
+    if (row_h < 42.0f) row_h = 42.0f;
+    float pitch = row_h + 2.0f;
+    int order[SP_COUNT];
+    int n = sidebar_order(order);
+    float total = 0.0f;
+    for (int k = 0; k < n; k++) {
+      if (k == 0 || k_pages[order[k]].category != k_pages[order[k - 1]].category) total += (k != 0 ? 12.0f : 0.0f) + 24.0f;
+      total += pitch;
+    }
+    float top = st + UIS_SP_3 + UIS_ICON_BTN + UIS_SP_2;
+    float view_h = uh - (top - st) - UIS_SP_2;
+    g.list = (ccord_rect){sl, top, uw, view_h};
+    g.step = pitch;
+    float max_scroll = total > view_h ? total - view_h : 0.0f;
+    if (s_sidebar_scroll > max_scroll) s_sidebar_scroll = max_scroll;
+    if (s_sidebar_scroll < 0.0f) s_sidebar_scroll = 0.0f;
+    float x = sl + UIS_SP_4, w = uw - 2.0f * UIS_SP_4;
+    float y = top - s_sidebar_scroll;
+    for (int k = 0; k < n; k++) {
+      int i = order[k];
+      if (k == 0 || k_pages[i].category != k_pages[order[k - 1]].category) {
+        if (k != 0) y += 12.0f;
+        y += 24.0f;
+      }
+      g.page[i] = (ccord_rect){x, y, w, row_h};
+      y += pitch;
+    }
+    return g;
+  }
   float sb = M(settings_sidebar_width);
   if (sb > pw * 0.42f) sb = pw * 0.42f;
   if (sb < 120.0f) sb = 120.0f;
@@ -781,12 +829,19 @@ bool ui_is_login_screen(const ccord_ui *ui)
 
 static ccord_rect login_card_rect(const ccord_ui *ui)
 {
+  float sl = ui->mobile_layout ? ui->safe_insets.left : 0.0f;
+  float sr = ui->mobile_layout ? ui->safe_insets.right : 0.0f;
+  float st = ui->mobile_layout ? ui->safe_insets.top : 0.0f;
+  float sb = ui->mobile_layout ? (ui->keyboard_inset > ui->safe_insets.bottom ? ui->keyboard_inset : ui->safe_insets.bottom) : 0.0f;
+  float uw = ui->win_w - sl - sr;
+  float uh = ui->win_h - st - sb;
   float cw = 480.0f, ch = 420.0f;
-  if (cw > ui->win_w - 32.0f) cw = ui->win_w - 32.0f;
-  if (ch > ui->win_h - 32.0f) ch = ui->win_h - 32.0f;
-  if (cw < 240.0f) cw = ui->win_w;
-  if (ch < 240.0f) ch = ui->win_h;
-  return (ccord_rect){roundf((ui->win_w - cw) * 0.5f), roundf((ui->win_h - ch) * 0.5f), cw, ch};
+  float pad = ui->mobile_layout ? UIS_SP_3 : 16.0f;
+  if (cw > uw - 2.0f * pad) cw = uw - 2.0f * pad;
+  if (ch > uh - 2.0f * pad) ch = uh - 2.0f * pad;
+  if (cw < 240.0f) cw = uw > 0.0f ? uw : ui->win_w;
+  if (ch < 240.0f) ch = uh > 0.0f ? uh : ui->win_h;
+  return (ccord_rect){roundf(sl + (uw - cw) * 0.5f), roundf(st + (uh - ch) * 0.5f), cw, ch};
 }
 
 static ccord_rect login_tab_rect(const ccord_rect *card, int tab)
@@ -1343,6 +1398,13 @@ bool ui_settings_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
 {
   sgeom g = geometry(ui);
   if (!ui_in_rect(ev->x, ev->y, g.panel)) return false;
+  if (g.list.w > 0.0f && ui_in_rect(ev->x, ev->y, g.list)) {
+    s_sidebar_scroll -= ev->wheel * g.step;
+    if (s_sidebar_scroll < 0.0f) s_sidebar_scroll = 0.0f;
+    (void)geometry(ui);   // clamps s_sidebar_scroll to max_scroll
+    ui->dirty = true;
+    return true;
+  }
   if (ui->settings_page == SP_VOICE) {
     float max = voice_max_scroll(&g);
     if (max <= 0.0f) return false;
@@ -2033,23 +2095,29 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       if (ui_in_rect(ev->x, ev->y, login_tab_rect(&card, 0))) {
         ui->login_tab = 0;
         ui->account_focus_field = 1;
+        ui->touch_text_focused = false;
         ui->dirty = true;
         return true;
       }
       if (ui_in_rect(ev->x, ev->y, login_tab_rect(&card, 1))) {
         ui->login_tab = 1;
         ui->account_focus_field = ui->account_mfa_required ? 4 : 2;
+        ui->touch_text_focused = false;
         ui->dirty = true;
         return true;
       }
       if (ui->login_tab == 0) {
-        if (ui_in_rect(ev->x, ev->y, login_token_box_rect(&card))) {
+        ccord_rect tbox = login_token_box_rect(&card);
+        if (ui_in_rect(ev->x, ev->y, tbox)) {
           ui->account_focus_field = 1;
+          ui->touch_text_focused = true;
+          ui->text_area = tbox;
           ui->dirty = true;
           return true;
         }
         if (ui_in_rect(ev->x, ev->y, login_token_paste_rect(&card))) {
           ui->account_focus_field = 1;
+          ui->touch_text_focused = false;
           if (ui->d.host.clipboard_get) {
             char *clip = ui->d.host.clipboard_get(ui->d.host.ud);
             if (clip) {
@@ -2063,6 +2131,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
           return true;
         }
         if (ui_in_rect(ev->x, ev->y, login_token_save_rect(&card))) {
+          ui->touch_text_focused = false;
           if (ui->d.host.account_action) {
             ui->d.host.account_action(ui->d.host.ud, CCORD_ACCOUNT_ACTION_TOKEN_SIGN_IN);
           }
@@ -2070,22 +2139,32 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
           return true;
         }
       } else {
-        if (ui_in_rect(ev->x, ev->y, login_email_box_rect(&card))) {
+        ccord_rect em_box = login_email_box_rect(&card);
+        ccord_rect pw_box = login_password_box_rect(&card);
+        ccord_rect mfa_box = login_mfa_box_rect(&card);
+        if (ui_in_rect(ev->x, ev->y, em_box)) {
           ui->account_focus_field = 2;
+          ui->touch_text_focused = true;
+          ui->text_area = em_box;
           ui->dirty = true;
           return true;
         }
-        if (ui_in_rect(ev->x, ev->y, login_password_box_rect(&card))) {
+        if (ui_in_rect(ev->x, ev->y, pw_box)) {
           ui->account_focus_field = 3;
+          ui->touch_text_focused = true;
+          ui->text_area = pw_box;
           ui->dirty = true;
           return true;
         }
-        if (ui_in_rect(ev->x, ev->y, login_mfa_box_rect(&card))) {
+        if (ui_in_rect(ev->x, ev->y, mfa_box)) {
           ui->account_focus_field = 4;
+          ui->touch_text_focused = true;
+          ui->text_area = mfa_box;
           ui->dirty = true;
           return true;
         }
         if (ui_in_rect(ev->x, ev->y, login_credentials_btn_rect(&card))) {
+          ui->touch_text_focused = false;
           if (ui->d.host.account_action) {
             ui->d.host.account_action(ui->d.host.ud, CCORD_ACCOUNT_ACTION_CREDENTIALS_LOGIN);
           }
@@ -2093,6 +2172,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
           return true;
         }
       }
+      ui->touch_text_focused = false;
       return true;
     }
     if (ui->account_focus_field == 0) {
@@ -2185,6 +2265,12 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       ui_open_settings(ui, false);
       return true;
     }
+    if (g.back.w > 0.0f && ui_in_rect(ev->x, ev->y, g.back)) {
+      ui->mobile_settings_detail = false;
+      ui->account_focus_field = 0;
+      ui->dirty = true;
+      return true;
+    }
     if (s_ptt_armed || s_kb_armed >= 0) {
       // Any click cancels an armed keybind capture; clicking the row again re-arms it.
       s_ptt_armed = false;
@@ -2209,9 +2295,13 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       if (ui_in_rect(ev->x, ev->y, g.page[i]) && ui_in_rect(ev->x, ev->y, g.list)) {
         ui->settings_page = i;
         ui->settings_category = k_pages[i].category;
+        if (ui->mobile_layout) ui->mobile_settings_detail = true;
         ui->dirty = true;
         return true;
       }
+    }
+    if (ui->mobile_layout && !ui->mobile_settings_detail) {
+      return true;   // Level 1 categories screen: page content is not visible
     }
     if (ui->settings_page == SP_ACCOUNT) {
       for (int i = 0; i < 5; i++) {
@@ -3438,7 +3528,8 @@ static void draw_login_screen(ccord_ui *ui, ccord_renderer *r)
   } else {
     uis_card(ui, r, banner);
     ccord_text_style is = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_secondary));
-    const char *imsg = "Sign in with your Discord account to connect to the live Gateway.";
+    const char *imsg = ui->mobile_layout ? "Sign in to connect to Discord."
+                                         : "Sign in with your Discord account to connect to the live Gateway.";
     ccord_text_draw_ellipsis(r, imsg, strlen(imsg), banner.x + 10.0f,
                              banner.y + (banner.h - ui_line_h(ui, is.size)) * 0.5f, banner.w - 20.0f, &is);
   }
@@ -3449,8 +3540,9 @@ static void draw_login_screen(ccord_ui *ui, ccord_renderer *r)
     ccord_rect tbox = login_token_box_rect(&card);
     ccord_text_draw(r, "DISCORD USER TOKEN", 18, tbox.x, tbox.y - 16.0f, &ls, 0.0f);
     draw_input_field(ui, r, tbox, &ui->account_token_edit, ui->account_focus_field == 1, true,
-                     "Paste Discord user token or press Ctrl+V...");
-    draw_button(ui, r, login_token_paste_rect(&card), "Paste from Clipboard (Ctrl+V)", false);
+                     ui->mobile_layout ? "Paste Discord user token..." : "Paste Discord user token or press Ctrl+V...");
+    draw_button(ui, r, login_token_paste_rect(&card),
+                ui->mobile_layout ? "Paste from Clipboard" : "Paste from Clipboard (Ctrl+V)", false);
     draw_button(ui, r, login_token_save_rect(&card), connecting ? "Connecting to Discord Gateway..." : "Connect to Discord", true);
 #if defined(_WIN32)
     const char *h1 = "Token is saved locally in your Windows user profile at:";
@@ -3458,6 +3550,9 @@ static void draw_login_screen(ccord_ui *ui, ccord_renderer *r)
 #elif defined(__APPLE__)
     const char *h1 = "Token is saved locally with 0600 permissions at:";
     const char *h2 = "~/Library/Application Support/C-Cord/token";
+#elif defined(__ANDROID__)
+    const char *h1 = "Token is saved privately in app storage.";
+    const char *h2 = "Stored locally with 0600 permissions.";
 #else
     const char *h1 = "Token is saved locally with 0600 permissions at:";
     const char *h2 = "$XDG_CONFIG_HOME/ccord/token";
@@ -3477,7 +3572,8 @@ static void draw_login_screen(ccord_ui *ui, ccord_renderer *r)
     ccord_text_draw(r, mfa_lbl, strlen(mfa_lbl), mfa_box.x, mfa_box.y - 15.0f, &ls, 0.0f);
     draw_input_field(ui, r, mfa_box, &ui->account_mfa_edit, ui->account_focus_field == 4, false, "6-digit authenticator code");
     draw_button(ui, r, lbtn, connecting ? "Connecting to Discord Gateway..." : "Connect to Discord", true);
-    const char *h3 = "If Discord requires a browser CAPTCHA, switch to Token Sign-In.";
+    const char *h3 = ui->mobile_layout ? "CAPTCHA required? Switch to Token Sign-In."
+                                       : "If Discord requires a browser CAPTCHA, switch to Token Sign-In.";
     ccord_text_draw_ellipsis(r, h3, strlen(h3), cx, card.y + 390.0f, cw, &hs);
   }
 
@@ -3502,93 +3598,109 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
   }
   sgeom g = geometry(ui);
   ccord_draw_rect(r, g.panel, COL(bg_primary));
-  ccord_draw_rect(r, g.sidebar, COL(bg_secondary));
-
-  ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_overline, COL(text_muted));
-  int last_cat = -1;
-  int order[SP_COUNT];
-  int norder = sidebar_order(order);
-  s_drawn.count = 0;
-  s_drawn.body = ui->settings_page;
-  ccord_push_clip(r, g.list);
-  for (int k = 0; k < norder; k++) {
-    int i = order[k];
-    if (k_pages[i].category != last_cat) {
-      last_cat = k_pages[i].category;
-      float cy = g.page[i].y - 20.0f;
-      ccord_text_draw(r, k_categories[last_cat], strlen(k_categories[last_cat]), g.page[i].x + 6.0f, cy, &hs, 0.0f);
+  if (g.sidebar.w > 0.0f) {
+    ccord_draw_rect(r, g.sidebar, COL(bg_secondary));
+    if (ui->mobile_layout) {
+      ccord_text_style sts = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_title, COL(text_header));
+      ccord_text_draw(r, "Settings", 8, g.sidebar.x + UIS_SP_4, g.close.y + UIS_SP_1, &sts, 0.0f);
     }
-    if (s_drawn.count < 24) {
-      s_drawn.page[s_drawn.count] = i;
-      snprintf(s_drawn.label[s_drawn.count], sizeof s_drawn.label[0], "%s", k_pages[i].label);
-      s_drawn.rect[s_drawn.count] = g.page[i];
-      s_drawn.count++;
+    ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_overline, COL(text_muted));
+    int last_cat = -1;
+    int order[SP_COUNT];
+    int norder = sidebar_order(order);
+    s_drawn.count = 0;
+    s_drawn.body = ui->settings_page;
+    ccord_push_clip(r, g.list);
+    for (int k = 0; k < norder; k++) {
+      int i = order[k];
+      if (k_pages[i].category != last_cat) {
+        last_cat = k_pages[i].category;
+        float cy = g.page[i].y - 20.0f;
+        ccord_text_draw(r, k_categories[last_cat], strlen(k_categories[last_cat]), g.page[i].x + 6.0f, cy, &hs, 0.0f);
+      }
+      if (s_drawn.count < 24) {
+        s_drawn.page[s_drawn.count] = i;
+        snprintf(s_drawn.label[s_drawn.count], sizeof s_drawn.label[0], "%s", k_pages[i].label);
+        s_drawn.rect[s_drawn.count] = g.page[i];
+        s_drawn.count++;
+      }
+      uis_state st = {.hover = i == ui->hover_settings_page, .selected = !ui->mobile_layout && i == ui->settings_page};
+      uis_list_row_fill(ui, r, g.page[i], st, "spage", (uint64_t)i);
+      ccord_color tc = st.selected ? COL(text_interactive_active) : st.hover ? COL(text_interactive_hover) : COL(text_normal);
+      if (!ui->mobile_layout && !st.selected && !st.hover) tc = COL(text_muted);
+      ccord_text_style ps = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_body, tc);
+      ccord_text_draw_ellipsis(r, k_pages[i].label, strlen(k_pages[i].label), g.page[i].x + 10.0f,
+                               g.page[i].y + (g.page[i].h - ui_line_h(ui, ps.size)) * 0.5f, g.page[i].w - 16.0f, &ps);
+      if (ui->mobile_layout) {
+        ui_icon_chevron(r, g.page[i].x + g.page[i].w - UIS_SP_4, g.page[i].y + g.page[i].h * 0.5f, UIS_SP_3, ICON_RIGHT, COL(text_muted));
+      }
     }
-    uis_state st = {.hover = i == ui->hover_settings_page, .selected = i == ui->settings_page};
-    uis_list_row_fill(ui, r, g.page[i], st, "spage", (uint64_t)i);
-    ccord_color tc = st.selected ? COL(text_interactive_active) : st.hover ? COL(text_interactive_hover) : COL(text_muted);
-    ccord_text_style ps = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_body, tc);
-    ccord_text_draw_ellipsis(r, k_pages[i].label, strlen(k_pages[i].label), g.page[i].x + 10.0f,
-                             g.page[i].y + (g.page[i].h - ui_line_h(ui, ps.size)) * 0.5f, g.page[i].w - 16.0f, &ps);
-  }
-  ccord_pop_clip(r);
-  if (g.sb_up.w > 0.0f) {
-    sidebar_scroll_btn(ui, r, g.sb_up, true, 0);
-    sidebar_scroll_btn(ui, r, g.sb_down, false, 1);
+    ccord_pop_clip(r);
+    if (g.sb_up.w > 0.0f) {
+      sidebar_scroll_btn(ui, r, g.sb_up, true, 0);
+      sidebar_scroll_btn(ui, r, g.sb_down, false, 1);
+    }
   }
 
-  ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_title, COL(text_header));
-  const char *title = k_pages[ui->settings_page].label;
-  ccord_text_draw(r, title, strlen(title), g.content.x, g.content.y, &ts, 0.0f);
-  ccord_push_clip(r, g.panel);
-  ccord_push_alpha(r, ui_enter(ui, "spagebody", (uint64_t)ui->settings_page, 160));   // a page eases in when chosen
-  switch (ui->settings_page) {
-    case SP_ACCOUNT: draw_account(ui, r, &g); break;
-    case SP_PROFILE_EDIT: ui_settings_profile_draw(ui, r, g.content, g.panel); break;
-    case SP_APPEARANCE: draw_appearance(ui, r, &g); break;
-    case SP_VOICE: draw_voice(ui, r, &g); break;
-    case SP_STREAMING: draw_streaming(ui, r, &g); break;
-    case SP_TEXT_IMAGES: draw_text_images(ui, r, &g); break;
-    case SP_NOTIFICATIONS:
-      ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_NOTIFICATIONS, g.content, g.panel);
-      break;
-    case SP_ACCESSIBILITY:
-      ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_ACCESSIBILITY, g.content, g.panel);
-      break;
-    case SP_STREAMER:
-      ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_STREAMER, g.content, g.panel);
-      break;
-    case SP_LANGUAGE:
-      ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_LANGUAGE, g.content, g.panel);
-      break;
-    case SP_ADVANCED:
-      ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_ADVANCED, g.content, g.panel);
-      break;
-    case SP_CCORD:
-      ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_CCORD, g.content, g.panel);
-      break;
-    case SP_KEYBINDS: draw_keybinds(ui, r, &g); break;
-    case SP_PRIVACY:
-    case SP_DEVICES:
-    case SP_CONNECTIONS:
-      ui_settings_m6_draw(ui, r, ui->settings_page - SP_PRIVACY, g.content, g.panel);
-      break;
-    case SP_PLUGINS:
-      draw_extensions_row(ui, r, &g);
-      draw_plugins(ui, r, &g);
-      break;
-    default: break;
+  if (g.back.w > 0.0f) {
+    uis_button(ui, r, g.back, "< Back", UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){0}, "sback", 0);
   }
-  ccord_pop_alpha(r);
-  ccord_pop_clip(r);
+  if (g.content.w > 0.0f) {
+    ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_title, COL(text_header));
+    const char *title = k_pages[ui->settings_page].label;
+    ccord_text_draw(r, title, strlen(title), g.content.x, g.content.y, &ts, 0.0f);
+    ccord_push_clip(r, g.panel);
+    ccord_push_alpha(r, ui_enter(ui, "spagebody", (uint64_t)ui->settings_page, 160));   // a page eases in when chosen
+    switch (ui->settings_page) {
+      case SP_ACCOUNT: draw_account(ui, r, &g); break;
+      case SP_PROFILE_EDIT: ui_settings_profile_draw(ui, r, g.content, g.panel); break;
+      case SP_APPEARANCE: draw_appearance(ui, r, &g); break;
+      case SP_VOICE: draw_voice(ui, r, &g); break;
+      case SP_STREAMING: draw_streaming(ui, r, &g); break;
+      case SP_TEXT_IMAGES: draw_text_images(ui, r, &g); break;
+      case SP_NOTIFICATIONS:
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_NOTIFICATIONS, g.content, g.panel);
+        break;
+      case SP_ACCESSIBILITY:
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_ACCESSIBILITY, g.content, g.panel);
+        break;
+      case SP_STREAMER:
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_STREAMER, g.content, g.panel);
+        break;
+      case SP_LANGUAGE:
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_LANGUAGE, g.content, g.panel);
+        break;
+      case SP_ADVANCED:
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_ADVANCED, g.content, g.panel);
+        break;
+      case SP_CCORD:
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_CCORD, g.content, g.panel);
+        break;
+      case SP_KEYBINDS: draw_keybinds(ui, r, &g); break;
+      case SP_PRIVACY:
+      case SP_DEVICES:
+      case SP_CONNECTIONS:
+        ui_settings_m6_draw(ui, r, ui->settings_page - SP_PRIVACY, g.content, g.panel);
+        break;
+      case SP_PLUGINS:
+        draw_extensions_row(ui, r, &g);
+        draw_plugins(ui, r, &g);
+        break;
+      default: break;
+    }
+    ccord_pop_alpha(r);
+    ccord_pop_clip(r);
+  }
 
-  // Close control with an ESC badge.
+  // Close control with an ESC badge (desktop only).
   uis_tokens tk = uis_tokens_of(ui);
-  ccord_rect badge = {g.close.x - 34.0f, g.close.y + 8.0f, 26.0f, 16.0f};
-  uis_plate(ui, r, badge, tk.r_control, COL(bg_tertiary));
-  ccord_text_style es = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));
-  ccord_vec2 et = ccord_text_measure(r, "ESC", 3, &es, 0.0f);
-  ccord_text_draw(r, "ESC", 3, badge.x + (badge.w - et.x) * 0.5f, badge.y + (badge.h - et.y) * 0.5f, &es, 0.0f);
+  if (!ui->mobile_layout) {
+    ccord_rect badge = {g.close.x - 34.0f, g.close.y + 8.0f, 26.0f, 16.0f};
+    uis_plate(ui, r, badge, tk.r_control, COL(bg_tertiary));
+    ccord_text_style es = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));
+    ccord_vec2 et = ccord_text_measure(r, "ESC", 3, &es, 0.0f);
+    ccord_text_draw(r, "ESC", 3, badge.x + (badge.w - et.x) * 0.5f, badge.y + (badge.h - et.y) * 0.5f, &es, 0.0f);
+  }
   uis_state cst = {.hover = ui->hover_settings_close};
   ccord_color cc = uis_icon_button(ui, r, g.close, cst, "sclose", 0);
   ui_icon_close(r, g.close.x + g.close.w * 0.5f, g.close.y + g.close.h * 0.5f, UIS_ICON_GLYPH, cc);

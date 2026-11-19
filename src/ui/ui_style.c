@@ -113,15 +113,22 @@ void uis_modal_frame(ccord_ui *ui, ccord_renderer *r, ccord_rect box)
 
 ccord_rect uis_modal_box(const ccord_ui *ui, float w, float h)
 {
-  float maxw = ui->win_w - 2.0f * UIS_SP_8;
-  float maxh = ui->win_h - 2.0f * UIS_SP_8;
-  if (maxw < 240.0f) maxw = ui->win_w;
-  if (maxh < 160.0f) maxh = ui->win_h;
+  float sl = ui->mobile_layout ? ui->safe_insets.left : 0.0f;
+  float sr = ui->mobile_layout ? ui->safe_insets.right : 0.0f;
+  float st = ui->mobile_layout ? ui->safe_insets.top : 0.0f;
+  float sb = ui->mobile_layout ? fmaxf(ui->safe_insets.bottom, ui->keyboard_inset) : 0.0f;
+  float pad = ui->mobile_layout ? UIS_SP_3 : UIS_SP_8;
+  float uw = ui->win_w - sl - sr;
+  float uh = ui->win_h - st - sb;
+  float maxw = uw - 2.0f * pad;
+  float maxh = uh - 2.0f * pad;
+  if (maxw < 240.0f) maxw = uw > 0.0f ? uw : ui->win_w;
+  if (maxh < 160.0f) maxh = uh > 0.0f ? uh : ui->win_h;
   if (w > maxw) w = maxw;
   if (h > maxh) h = maxh;
-  float y = (ui->win_h - h) * UIS_MODAL_Y_BIAS;
-  if (y < UIS_SP_3) y = UIS_SP_3;
-  return (ccord_rect){(ui->win_w - w) * 0.5f, y, w, h};
+  float y = st + (uh - h) * UIS_MODAL_Y_BIAS;
+  if (y < st + UIS_SP_3) y = st + UIS_SP_3;
+  return (ccord_rect){sl + (uw - w) * 0.5f, y, w, h};
 }
 
 float uis_modal_title(ccord_ui *ui, ccord_renderer *r, ccord_rect box, const char *title)
@@ -598,10 +605,12 @@ void uis_plate(ccord_ui *ui, ccord_renderer *r, ccord_rect box, float radius, cc
 
 _Static_assert((int)CCORD_UI_STYLE_KIND_COUNT == (int)UIS_K_COUNT, "style_debug.h kinds must match uis_kind");
 _Static_assert(CCORD_UI_STYLE_RECORDS == UIS_AUDIT_MAX, "style_debug.h record table must match the audit table");
-_Static_assert((int)CCORD_UI_STYLE_BUTTON == (int)UIS_K_BUTTON && (int)CCORD_UI_STYLE_TOOLTIP == (int)UIS_K_TOOLTIP &&
-                 (int)CCORD_UI_STYLE_SCROLLBAR == (int)UIS_K_SCROLLBAR && (int)CCORD_UI_STYLE_CARD == (int)UIS_K_CARD &&
-                 (int)CCORD_UI_STYLE_SURFACE == (int)UIS_K_SURFACE && (int)CCORD_UI_STYLE_CHIP == (int)UIS_K_CHIP,
-               "style_debug.h kinds must keep the uis_kind order");
+_Static_assert((int)CCORD_UI_STYLE_BUTTON == (int)UIS_K_BUTTON, "style_debug.h button kind order");
+_Static_assert((int)CCORD_UI_STYLE_TOOLTIP == (int)UIS_K_TOOLTIP, "style_debug.h tooltip kind order");
+_Static_assert((int)CCORD_UI_STYLE_SCROLLBAR == (int)UIS_K_SCROLLBAR, "style_debug.h scrollbar kind order");
+_Static_assert((int)CCORD_UI_STYLE_CARD == (int)UIS_K_CARD, "style_debug.h card kind order");
+_Static_assert((int)CCORD_UI_STYLE_SURFACE == (int)UIS_K_SURFACE, "style_debug.h surface kind order");
+_Static_assert((int)CCORD_UI_STYLE_CHIP == (int)UIS_K_CHIP, "style_debug.h chip kind order");
 
 void ccord_ui_get_style_debug(const ccord_ui *ui, ccord_ui_style_debug *out)
 {

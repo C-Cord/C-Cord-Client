@@ -516,6 +516,9 @@ bool ui_channel_settings_open(ccord_ui *ui, ccord_id channel_id)
   cs->open = true;
   cs->guild_id = ch->guild_id;
   cs->channel_id = channel_id;
+  ui->mobile_channel_settings_detail = false;
+  ui->left_drawer_open = false;
+  ui->right_drawer_open = false;
   cs->focus = CSF_NONE;
   cs->scroll = 0.0f;
   ccord_scroller_cancel(&cs->glide);
@@ -1155,6 +1158,12 @@ static void draw_cs_invites(cs_cx *c, float x, float w, float *py)
 
 // ---------------------------------------------------------------- full draw
 
+static ccord_rect cs_mobile_back_rect(const ccord_ui *ui)
+{
+  if (!ui->mobile_layout || !ui->mobile_channel_settings_detail) return (ccord_rect){0};
+  return (ccord_rect){ui->safe_insets.left + UIS_SP_3, ui->safe_insets.top + UIS_SP_3, 76.0f, UIS_ICON_BTN};
+}
+
 void ui_channel_settings_draw(ccord_ui *ui, ccord_renderer *r)
 {
   if (!ui_channel_settings_is_open(ui)) return;
@@ -1170,73 +1179,99 @@ void ui_channel_settings_draw(ccord_ui *ui, ccord_renderer *r)
   float ww = ui->win_w, wh = ui->win_h;
   ccord_draw_rect(r, (ccord_rect){0, 0, ww, wh}, COL(bg_primary));
 
-  float side_w = fmaxf(210.0f, floorf(ww * 0.25f));
-  if (side_w > 280.0f) side_w = 280.0f;
-  ccord_draw_rect(r, (ccord_rect){0, 0, side_w, wh}, COL(bg_secondary));
+  bool show_side = !ui->mobile_layout || !ui->mobile_channel_settings_detail;
+  bool show_body = !ui->mobile_layout || ui->mobile_channel_settings_detail;
+  float side_w = ui->mobile_layout ? (show_side ? ww : 0.0f) : fmaxf(210.0f, floorf(ww * 0.25f));
+  if (!ui->mobile_layout && side_w > 280.0f) side_w = 280.0f;
 
-  cs_cx side_cx = {.ui = ui, .cs = cs, .r = r, .clip = {0, 0, side_w, wh}};
-  float sx = side_w - 192.0f;
-  if (sx < 12.0f) sx = 12.0f;
-  float sw = side_w - sx - 12.0f;
-  float sy = 44.0f;
+  if (show_side) {
+    ccord_draw_rect(r, (ccord_rect){0, 0, side_w, wh}, COL(bg_secondary));
+    cs_cx side_cx = {.ui = ui, .cs = cs, .r = r, .clip = {0, 0, side_w, wh}};
+    float sx = ui->mobile_layout ? (ui->safe_insets.left + UIS_SP_4) : (side_w - 192.0f);
+    if (!ui->mobile_layout && sx < 12.0f) sx = 12.0f;
+    float sw = ui->mobile_layout ? fmaxf(ww - ui->safe_insets.left - ui->safe_insets.right - 2.0f * UIS_SP_4, 160.0f)
+                                 : (side_w - sx - 12.0f);
+    float sy = ui->mobile_layout ? (ui->safe_insets.top + UIS_SP_4) : 44.0f;
 
-  char title[160];
-  const char *prefix = ch->kind == CCORD_CHANNEL_VOICE ? "" : (ch->kind == CCORD_CHANNEL_CATEGORY ? "" : "#");
-  (void)snprintf(title, sizeof title, "%s%s", prefix, ch->name ? ch->name : "channel");
-  (void)cs_text(&side_cx, title, sx + 8.0f, sy, uis_tokens_of(ui).fs_control, true, COL(text_header), sw - 16.0f);
-  sy += 26.0f;
+    char title[160];
+    const char *prefix = ch->kind == CCORD_CHANNEL_VOICE ? "" : (ch->kind == CCORD_CHANNEL_CATEGORY ? "" : "#");
+    (void)snprintf(title, sizeof title, "%s%s", prefix, ch->name ? ch->name : "channel");
+    (void)cs_text(&side_cx, title, sx + 8.0f, sy, uis_tokens_of(ui).fs_control, true, COL(text_header), sw - 48.0f);
+    sy += 26.0f;
 
-  for (cs_page p = CS_OVERVIEW; p < CS_PAGE_COUNT; p++) {
-    if (!cs_page_allowed(ui, ch, p)) continue;
-    ccord_rect pr = {sx, sy, sw, 32.0f};
-    char nm[CS_NAME_LEN];
-    bool hov = cs_add_hit(&side_cx, pr, CA_PAGE, (uint64_t)p, nullptr, NAME(nm, "page:%s", k_cs_page_names[p]));
-    ui_row_state rs = ui_row_state_of(ui, "cspage", (uint64_t)p, hov, cs->page == p, COL(bg_secondary));
-    uis_list_row_fill(ui, r, pr, (uis_state){.hover = hov, .selected = cs->page == p}, "cspage", (uint64_t)p);
-    ccord_color tc = ui_row_state_text(&rs, COL(text_secondary), COL(text_interactive_hover), COL(text_interactive_active));
-    (void)cs_text(&side_cx, k_cs_page_labels[p], pr.x + 10.0f, pr.y + 6.0f, uis_tokens_of(ui).fs_body, cs->page == p, tc, sw - 20.0f);
-    sy += 34.0f;
-  }
+    for (cs_page p = CS_OVERVIEW; p < CS_PAGE_COUNT; p++) {
+      if (!cs_page_allowed(ui, ch, p)) continue;
+      float row_h = ui->mobile_layout ? 42.0f : 32.0f;
+      ccord_rect pr = {sx, sy, sw, row_h};
+      char nm[CS_NAME_LEN];
+      bool hov = cs_add_hit(&side_cx, pr, CA_PAGE, (uint64_t)p, nullptr, NAME(nm, "page:%s", k_cs_page_names[p]));
+      bool sel = !ui->mobile_layout && cs->page == p;
+      ui_row_state rs = ui_row_state_of(ui, "cspage", (uint64_t)p, hov, sel, COL(bg_secondary));
+      uis_list_row_fill(ui, r, pr, (uis_state){.hover = hov, .selected = sel}, "cspage", (uint64_t)p);
+      ccord_color tc = ui_row_state_text(&rs, ui->mobile_layout ? COL(text_normal) : COL(text_secondary),
+                                         COL(text_interactive_hover), COL(text_interactive_active));
+      (void)cs_text(&side_cx, k_cs_page_labels[p], pr.x + 10.0f,
+                    pr.y + (pr.h - ui_line_h(ui, uis_tokens_of(ui).fs_body)) * 0.5f,
+                    uis_tokens_of(ui).fs_body, sel, tc, sw - 20.0f);
+      sy += row_h + 2.0f;
+    }
 
-  if (ccord_perm_has(cs_self_chan_perms(ui, cs->guild_id, cs->channel_id), CCORD_PERM_MANAGE_CHANNELS)) {
-    sy += 8.0f;
-    uis_divider(ui, r, sx + 8.0f, sy, sw - 16.0f);
-    sy += 10.0f;
-    ccord_rect dr = {sx, sy, sw, 32.0f};
-    bool hov = cs_add_hit(&side_cx, dr, CA_DELETE_CHANNEL, 0, nullptr, "delete_channel");
-    // A destructive menu row: red label, red fill on hover (the shared menu-row style).
-    uis_menu_row(ui, r, dr, "Delete Channel", (uis_state){.hover = hov}, false, false, true, "csdelete", 0);
+    if (ccord_perm_has(cs_self_chan_perms(ui, cs->guild_id, cs->channel_id), CCORD_PERM_MANAGE_CHANNELS)) {
+      sy += 8.0f;
+      uis_divider(ui, r, sx + 8.0f, sy, sw - 16.0f);
+      sy += 10.0f;
+      ccord_rect dr = {sx, sy, sw, ui->mobile_layout ? 42.0f : 32.0f};
+      bool hov = cs_add_hit(&side_cx, dr, CA_DELETE_CHANNEL, 0, nullptr, "delete_channel");
+      // A destructive menu row: red label, red fill on hover (the shared menu-row style).
+      uis_menu_row(ui, r, dr, "Delete Channel", (uis_state){.hover = hov}, false, false, true, "csdelete", 0);
+    }
   }
 
   // Content area + ESC close button
-  float content_x = side_w + 40.0f;
-  float content_w = fminf(660.0f, ww - content_x - 96.0f);
-  if (content_w < 260.0f) content_w = fmaxf(180.0f, ww - content_x - 24.0f);
+  float content_x = ui->mobile_layout ? (ui->safe_insets.left + UIS_SP_4) : (side_w + 40.0f);
+  float content_w = ui->mobile_layout
+                      ? fmaxf(ww - ui->safe_insets.left - ui->safe_insets.right - 2.0f * UIS_SP_4, 160.0f)
+                      : fminf(660.0f, ww - content_x - 96.0f);
+  if (!ui->mobile_layout && content_w < 260.0f) content_w = fmaxf(180.0f, ww - content_x - 24.0f);
   bool dirty = cs_unsaved(ui);
-  float view_top = 44.0f;
-  float view_h = wh - view_top - (dirty ? 76.0f : 24.0f);
-  if (view_h < 80.0f) view_h = 80.0f;
-  cs->view_h = view_h;
+  if (show_body) {
+    float view_top = ui->mobile_layout ? (ui->safe_insets.top + UIS_SP_3 + UIS_ICON_BTN + UIS_SP_3) : 44.0f;
+    float bottom_in = ui->mobile_layout ? fmaxf(ui->safe_insets.bottom, ui->keyboard_inset) : 0.0f;
+    float view_h = wh - bottom_in - view_top - (dirty ? 76.0f : 24.0f);
+    if (view_h < 80.0f) view_h = 80.0f;
+    cs->view_h = view_h;
 
-  ccord_rect clip = {side_w, view_top, ww - side_w - 72.0f, view_h};
-  ccord_push_clip(r, clip);
-  cs_cx cx = {.ui = ui, .cs = cs, .r = r, .clip = clip};
-  float y = view_top - cs->scroll;
-  if (cs->page == CS_OVERVIEW) draw_cs_overview(&cx, ch, content_x, content_w, &y);
-  else if (cs->page == CS_PERMISSIONS) draw_cs_permissions(&cx, content_x, content_w, &y);
-  else if (cs->page == CS_INVITES) draw_cs_invites(&cx, content_x, content_w, &y);
-  cs->content_h = (y + cs->scroll) - view_top + 24.0f;
-  float max_scroll = fmaxf(0.0f, cs->content_h - cs->view_h);
-  if (cs->scroll > max_scroll) cs->scroll = max_scroll;
-  ccord_pop_clip(r);
+    ccord_rect clip = ui->mobile_layout ? (ccord_rect){ui->safe_insets.left, view_top,
+                                                       ww - ui->safe_insets.left - ui->safe_insets.right, view_h}
+                                        : (ccord_rect){side_w, view_top, ww - side_w - 72.0f, view_h};
+    ccord_push_clip(r, clip);
+    cs_cx cx = {.ui = ui, .cs = cs, .r = r, .clip = clip};
+    float y = view_top - cs->scroll;
+    if (cs->page == CS_OVERVIEW) draw_cs_overview(&cx, ch, content_x, content_w, &y);
+    else if (cs->page == CS_PERMISSIONS) draw_cs_permissions(&cx, content_x, content_w, &y);
+    else if (cs->page == CS_INVITES) draw_cs_invites(&cx, content_x, content_w, &y);
+    cs->content_h = (y + cs->scroll) - view_top + 24.0f;
+    float max_scroll = fmaxf(0.0f, cs->content_h - cs->view_h);
+    if (cs->scroll > max_scroll) cs->scroll = max_scroll;
+    ccord_pop_clip(r);
+  }
 
-  // Close (ESC) button
+  // Close (ESC) & optional mobile Back button
   cs_cx top_cx = {.ui = ui, .cs = cs, .r = r, .clip = {0, 0, ww, wh}};
-  ccord_rect close_r = {ww - 60.0f, 40.0f, UIS_ICON_BTN, UIS_ICON_BTN};
+  ccord_rect back_r = cs_mobile_back_rect(ui);
+  if (back_r.w > 0.0f) {
+    uis_button(ui, r, back_r, "< Back", UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){0}, "csback", 0);
+  }
+  ccord_rect close_r = ui->mobile_layout
+                         ? (ccord_rect){ww - ui->safe_insets.right - UIS_ICON_BTN - UIS_SP_3,
+                                        ui->safe_insets.top + UIS_SP_3, UIS_ICON_BTN, UIS_ICON_BTN}
+                         : (ccord_rect){ww - 60.0f, 40.0f, UIS_ICON_BTN, UIS_ICON_BTN};
   bool close_hov = cs_add_hit(&top_cx, close_r, CA_CLOSE, 0, nullptr, "close");
   ccord_color close_ic = uis_icon_button(ui, r, close_r, (uis_state){.hover = close_hov}, "csclose", 0);
   ui_icon_close(r, close_r.x + UIS_ICON_BTN * 0.5f, close_r.y + UIS_ICON_BTN * 0.5f, 14.0f, close_ic);
-  (void)cs_text(&top_cx, "ESC", close_r.x + 4.0f, close_r.y + UIS_ICON_BTN + 4.0f, uis_tokens_of(ui).fs_caption, true, COL(text_muted), 36.0f);
+  if (!ui->mobile_layout) {
+    (void)cs_text(&top_cx, "ESC", close_r.x + 4.0f, close_r.y + UIS_ICON_BTN + 4.0f, uis_tokens_of(ui).fs_caption, true, COL(text_muted), 36.0f);
+  }
 
   // Unsaved Changes bar: a floating strip (popover frame, token radius), red while it flashes
   if (dirty) {
@@ -1377,6 +1412,7 @@ static void cs_activate(ccord_ui *ui, const cs_hit *h)
         cs->flash_until_ms = ui->now_ms + CS_FLASH_MS;
       } else {
         cs_enter_page(ui, (cs_page)h->arg);
+        if (ui->mobile_layout) ui->mobile_channel_settings_detail = true;
       }
       break;
     case CA_DELETE_CHANNEL: {
@@ -1616,6 +1652,17 @@ bool ui_channel_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     case CCORD_IN_MOUSE_DOWN: {
       if (ev->button != 1) return true;
+      ccord_rect br = cs_mobile_back_rect(ui);
+      if (br.w > 0.0f && ui_in_rect(ev->x, ev->y, br)) {
+        if (cs_unsaved(ui)) {
+          cs->flash_until_ms = ui->now_ms + CS_FLASH_MS;
+        } else {
+          ui->mobile_channel_settings_detail = false;
+          cs->focus = CSF_NONE;
+        }
+        ui->dirty = true;
+        return true;
+      }
       int h = cs_hit_at(cs, ev->x, ev->y);
       if (h < 0 || cs->hits[h].act != CA_FIELD) cs->focus = CSF_NONE;
       if (h >= 0) {
