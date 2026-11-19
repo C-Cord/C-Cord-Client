@@ -10,6 +10,7 @@
 #include <ccord/rpc/game_detect.h>
 
 #include <ctype.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,7 +18,7 @@
 #include <unistd.h>
 #endif
 
-typedef enum job_kind { JOB_NONE, JOB_LOAD_CACHE, JOB_LOAD_BODY, JOB_SCAN } job_kind;
+typedef enum job_kind { JOB_NONE, JOB_LOAD_CACHE, JOB_LOAD_BODY, JOB_SCAN, JOB_FREE_LIST } job_kind;
 
 typedef struct job_result {
   job_kind kind;
@@ -40,6 +41,7 @@ struct ccord_game_detect_app {
   bool cache_started;          // the cache load job was submitted
   bool cache_done;             // ... and answered (or there is no cache): only then is the refresh schedule consulted
   bool list_ready;
+  bool need_free_list;
   bool scan_due;
   uint64_t next_scan_ms;
   char *pending_body;          // fetched body waiting for a free worker
@@ -52,6 +54,11 @@ struct ccord_game_detect_app {
 
   // Worker.
   ccord_game_list *list;       // worker-owned (main thread in synchronous mode)
+#if !CCORD_OS_WINDOWS && !CCORD_OS_MACOS
+  long clk_tck;                // cached sysconf(_SC_CLK_TCK)
+  int64_t boot_unix_ms;        // cached boot wall-clock timestamp for this proc_root
+  bool boot_cached;
+#endif
   ccord_thread *thread;
   bool thread_started;
   ccord_mutex *mu;
@@ -60,6 +67,8 @@ struct ccord_game_detect_app {
   bool job_pending;
   bool running;
   bool result_ready;
+  _Atomic bool result_ready_atomic;
+  _Atomic bool worker_busy_atomic;
   job_kind job;
   char *job_body;
   size_t job_len;
@@ -90,7 +99,7 @@ static void replace_list(ccord_game_detect_app *g, ccord_game_list *nl)
 }
 
 // Process start as wall-clock ms.
-static int64_t start_unix_ms(const ccord_game_detect_app *g, uint64_t start_ticks)
+static int64_t start_unix_ms(ccord_game_detect_app *g, uint64_t start_ticks)
 {
   int64_t now = ccord_clock_unix_ms();
 #if CCORD_OS_WINDOWS
@@ -103,18 +112,24 @@ static int64_t start_unix_ms(const ccord_game_detect_app *g, uint64_t start_tick
   if (start_ticks > 0) return (int64_t)(start_ticks / 1000ULL);
   return now;
 #else
-  char p[4096];
-  (void)snprintf(p, sizeof p, "%s/uptime", g->proc_root);
-  FILE *f = fopen(p, "r");
-  if (!f) return now;
-  double up = 0;
-  int ok = fscanf(f, "%lf", &up);
-  fclose(f);
-  long hz = sysconf(_SC_CLK_TCK);
-  if (ok != 1 || hz <= 0 || up < 0) return now;
-  double age_s = up - (double)start_ticks / (double)hz;
-  if (age_s < 0) age_s = 0;
-  return now - (int64_t)(age_s * 1000.0);
+  if (!g->boot_cached) {
+    g->clk_tck = sysconf(_SC_CLK_TCK);
+    char p[4096];
+    (void)snprintf(p, sizeof p, "%s/uptime", g->proc_root);
+    FILE *f = fopen(p, "r");
+    if (f) {
+      double up = 0;
+      int ok = fscanf(f, "%lf", &up);
+      fclose(f);
+      if (ok == 1 && g->clk_tck > 0 && up >= 0.0) {
+        g->boot_unix_ms = now - (int64_t)(up * 1000.0);
+        g->boot_cached = true;
+      }
+    }
+  }
+  if (!g->boot_cached || g->clk_tck <= 0) return now;
+  int64_t start_ms = g->boot_unix_ms + (int64_t)(((double)start_ticks / (double)g->clk_tck) * 1000.0);
+  return start_ms > now ? now : start_ms;
 #endif
 }
 
@@ -158,6 +173,9 @@ static void run_job(ccord_game_detect_app *g, job_kind kind, char *body, size_t 
       res->ok = true;
       res->start_unix_ms = start_unix_ms(g, res->match.start_ticks);
     }
+  } else if (kind == JOB_FREE_LIST) {
+    replace_list(g, nullptr);
+    res->ok = true;
   }
   ccord_free(body);
 }
@@ -183,6 +201,8 @@ static void worker_main(void *arg)
     g->result = res;
     g->result_ready = true;
     g->running = false;
+    atomic_store_explicit(&g->result_ready_atomic, true, memory_order_release);
+    atomic_store_explicit(&g->worker_busy_atomic, true, memory_order_release);
   }
   ccord_mutex_unlock(g->mu);
 }
@@ -202,6 +222,8 @@ ccord_game_detect_app *ccord_game_detect_app_create(const ccord_game_detect_app_
     return nullptr;
   }
   g->cfg = *cfg;
+  atomic_init(&g->result_ready_atomic, false);
+  atomic_init(&g->worker_busy_atomic, false);
   g->mu = ccord_mutex_create();
   g->cv = ccord_cond_create();
   if (!g->mu || !g->cv) {
@@ -250,12 +272,9 @@ void ccord_game_detect_app_destroy(ccord_game_detect_app *g)
   ccord_free(g);
 }
 
-static bool worker_busy(ccord_game_detect_app *g)
+static bool worker_busy(const ccord_game_detect_app *g)
 {
-  ccord_mutex_lock(g->mu);
-  bool busy = g->job_pending || g->running || g->result_ready;
-  ccord_mutex_unlock(g->mu);
-  return busy;
+  return atomic_load_explicit(&g->worker_busy_atomic, memory_order_acquire);
 }
 
 // Hands one job to the worker (or runs it inline in synchronous mode). The caller checked the worker is idle.
@@ -266,6 +285,8 @@ static void submit(ccord_game_detect_app *g, job_kind kind, char *body, size_t l
     ccord_mutex_lock(g->mu);
     run_job(g, kind, body, len, g->epoch, &g->result);
     g->result_ready = true;
+    atomic_store_explicit(&g->result_ready_atomic, true, memory_order_release);
+    atomic_store_explicit(&g->worker_busy_atomic, true, memory_order_release);
     ccord_mutex_unlock(g->mu);
     return;
   }
@@ -284,6 +305,7 @@ static void submit(ccord_game_detect_app *g, job_kind kind, char *body, size_t l
   g->job_len = len;
   g->job_epoch = g->epoch;
   g->job_pending = true;
+  atomic_store_explicit(&g->worker_busy_atomic, true, memory_order_release);
   ccord_cond_signal(g->cv);
   ccord_mutex_unlock(g->mu);
 }
@@ -299,12 +321,16 @@ static void clear_detected(ccord_game_detect_app *g)
 // Moves a finished job into the main-thread state; returns true when the detected activity changed.
 static bool take_result(ccord_game_detect_app *g, uint64_t now_ms)
 {
+  if (!atomic_load_explicit(&g->result_ready_atomic, memory_order_acquire)) return false;
   ccord_mutex_lock(g->mu);
   bool have = g->result_ready;
   job_result r = g->result;
   g->result_ready = false;
+  atomic_store_explicit(&g->result_ready_atomic, false, memory_order_release);
+  atomic_store_explicit(&g->worker_busy_atomic, g->job_pending || g->running, memory_order_release);
   ccord_mutex_unlock(g->mu);
   if (!have) return false;
+  if (r.kind == JOB_FREE_LIST) return false;
   if (r.kind == JOB_LOAD_CACHE || r.kind == JOB_LOAD_BODY) {
     if (r.kind == JOB_LOAD_CACHE) g->cache_done = true;
     if (r.kind == JOB_LOAD_BODY) ccord_detectable_result(g->det, r.ok, now_ms);
@@ -349,11 +375,28 @@ bool ccord_game_detect_app_poll(ccord_game_detect_app *g, uint64_t now_ms)
     }
     g->was_enabled = false;
     if (take_result(g, now_ms)) changed = true;   // keeps the list/fetch bookkeeping moving
+    // Release the multi-megabyte detectable game list while detection is off; re-enabling reloads from disk cache.
+    if (g->pending_body) {
+      ccord_free(g->pending_body);
+      g->pending_body = nullptr;
+      g->pending_len = 0;
+    }
+    if (g->list_ready) g->need_free_list = true;
+    if (g->need_free_list && !worker_busy(g)) {
+      g->need_free_list = false;
+      g->list_ready = false;
+      g->cache_started = g->cache_done = (g->cache_dir == nullptr);
+      if (g->thread_started || g->cfg.synchronous) {
+        submit(g, JOB_FREE_LIST, nullptr, 0);
+        if (g->cfg.synchronous) (void)take_result(g, now_ms);
+      }
+    }
     ccord_detectable_poll(g->det, now_ms, ccord_clock_unix_ms() / 1000, false);
     return changed;
   }
   if (!g->was_enabled) {
     g->was_enabled = true;
+    g->need_free_list = false;
     g->scan_due = true;   // resume with a scan right away
   }
   for (int pass = 0; pass < 4; pass++) {

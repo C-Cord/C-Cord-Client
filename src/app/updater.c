@@ -14,6 +14,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -460,8 +461,8 @@ struct ccord_updater {
   char base_url[256];
 
   ccord_mutex *mtx;
-  ccord_cond *cv;
   ccord_thread *thr;
+  bool thr_alive;
   bool stop;
   updater_job pending_job;
 
@@ -469,6 +470,7 @@ struct ccord_updater {
   ccord_update_parsed latest;
   bool dirty;
   bool request_quit;
+  _Atomic bool has_update;
 };
 
 static void updater_do_check(ccord_updater *u)
@@ -506,6 +508,7 @@ static void updater_do_check(ccord_updater *u)
     snprintf(u->ui.status_text, sizeof u->ui.status_text, "C-Cord is up to date (v%s).", u->current_version);
   }
   u->dirty = true;
+  atomic_store_explicit(&u->has_update, true, memory_order_release);
   ccord_mutex_unlock(u->mtx);
   ccord_http_get_result_free(&res);
 }
@@ -518,12 +521,14 @@ static void updater_do_install(ccord_updater *u)
     u->ui.state = CCORD_UI_UPDATE_ERROR;
     snprintf(u->ui.status_text, sizeof u->ui.status_text, "No update package selected.");
     u->dirty = true;
+    atomic_store_explicit(&u->has_update, true, memory_order_release);
     ccord_mutex_unlock(u->mtx);
     return;
   }
   u->ui.state = CCORD_UI_UPDATE_DOWNLOADING;
   snprintf(u->ui.status_text, sizeof u->ui.status_text, "Downloading C-Cord %s...", target.tag);
   u->dirty = true;
+  atomic_store_explicit(&u->has_update, true, memory_order_release);
   ccord_mutex_unlock(u->mtx);
 
   char dir_path[CCORD_PATH_MAX];
@@ -535,6 +540,7 @@ static void updater_do_install(ccord_updater *u)
     u->ui.state = CCORD_UI_UPDATE_ERROR;
     snprintf(u->ui.status_text, sizeof u->ui.status_text, "Update path is too long.");
     u->dirty = true;
+    atomic_store_explicit(&u->has_update, true, memory_order_release);
     ccord_mutex_unlock(u->mtx);
     return;
   }
@@ -550,6 +556,7 @@ static void updater_do_install(ccord_updater *u)
     u->ui.state = CCORD_UI_UPDATE_ERROR;
     snprintf(u->ui.status_text, sizeof u->ui.status_text, "Download failed: %.120s", dl_err[0] ? dl_err : "network error");
     u->dirty = true;
+    atomic_store_explicit(&u->has_update, true, memory_order_release);
     ccord_mutex_unlock(u->mtx);
     return;
   }
@@ -563,6 +570,7 @@ static void updater_do_install(ccord_updater *u)
       u->ui.state = CCORD_UI_UPDATE_ERROR;
       snprintf(u->ui.status_text, sizeof u->ui.status_text, "Update verification failed (SHA-256 mismatch).");
       u->dirty = true;
+      atomic_store_explicit(&u->has_update, true, memory_order_release);
       ccord_mutex_unlock(u->mtx);
       return;
     }
@@ -577,28 +585,69 @@ static void updater_do_install(ccord_updater *u)
   snprintf(u->ui.status_text, sizeof u->ui.status_text, "%s", apply_status);
   if (req_quit) u->request_quit = true;
   u->dirty = true;
+  atomic_store_explicit(&u->has_update, true, memory_order_release);
   ccord_mutex_unlock(u->mtx);
 }
 
+// Worker runs any queued update jobs and exits immediately when idle (no permanent idle thread).
 static void updater_worker(void *arg)
 {
   ccord_updater *u = arg;
   for (;;) {
     ccord_mutex_lock(u->mtx);
-    while (!u->stop && u->pending_job == JOB_NONE) {
-      ccord_cond_wait(u->cv, u->mtx);
-    }
-    if (u->stop) {
+    updater_job job = u->stop ? JOB_NONE : u->pending_job;
+    u->pending_job = JOB_NONE;
+    if (job == JOB_NONE) {
+      u->thr_alive = false;
       ccord_mutex_unlock(u->mtx);
       break;
     }
-    updater_job job = u->pending_job;
-    u->pending_job = JOB_NONE;
     ccord_mutex_unlock(u->mtx);
 
     if (job == JOB_CHECK) updater_do_check(u);
     else if (job == JOB_INSTALL) updater_do_install(u);
   }
+}
+
+static void updater_schedule(ccord_updater *u, updater_job job)
+{
+  ccord_thread *old_thr = nullptr;
+  ccord_mutex_lock(u->mtx);
+  if (job == JOB_CHECK) {
+    if (u->ui.state == CCORD_UI_UPDATE_CHECKING || u->ui.state == CCORD_UI_UPDATE_DOWNLOADING) {
+      ccord_mutex_unlock(u->mtx);
+      return;
+    }
+    u->ui.state = CCORD_UI_UPDATE_CHECKING;
+    snprintf(u->ui.status_text, sizeof u->ui.status_text, "Checking for updates...");
+    u->dirty = true;
+    atomic_store_explicit(&u->has_update, true, memory_order_release);
+  } else if (job == JOB_INSTALL) {
+    if (u->ui.state != CCORD_UI_UPDATE_AVAILABLE) {
+      ccord_mutex_unlock(u->mtx);
+      return;
+    }
+  }
+  u->pending_job = job;
+  if (u->thr_alive) {
+    ccord_mutex_unlock(u->mtx);
+    return;
+  }
+  old_thr = u->thr;
+  u->thr = nullptr;
+  u->thr_alive = true;
+  ccord_mutex_unlock(u->mtx);
+
+  if (old_thr) ccord_thread_join(old_thr);
+  ccord_thread *nt = ccord_thread_create(updater_worker, u);
+  ccord_mutex_lock(u->mtx);
+  if (nt) {
+    u->thr = nt;
+  } else {
+    u->thr_alive = false;
+    u->pending_job = JOB_NONE;
+  }
+  ccord_mutex_unlock(u->mtx);
 }
 
 ccord_updater *ccord_updater_create(const char *current_version, const char *data_dir, bool auto_check)
@@ -619,15 +668,14 @@ ccord_updater *ccord_updater_create(const char *current_version, const char *dat
   u->ui.self_updatable = ccord_updater_is_self_updatable(u->kind);
   snprintf(u->ui.install_kind, sizeof u->ui.install_kind, "%s", ccord_updater_install_kind_label(u->kind));
   u->dirty = true;
+  atomic_init(&u->has_update, true);
 
   u->mtx = ccord_mutex_create();
-  u->cv = ccord_cond_create();
-  if (!u->mtx || !u->cv) {
+  if (!u->mtx) {
     ccord_updater_destroy(u);
     return nullptr;
   }
   if (u->ui.self_updatable) {
-    u->thr = ccord_thread_create(updater_worker, u);
     const char *no_auto = getenv("CCORD_NO_UPDATE_CHECK");
     if (auto_check && (!no_auto || strcmp(no_auto, "1") != 0)) {
       ccord_updater_check_now(u);
@@ -639,52 +687,51 @@ ccord_updater *ccord_updater_create(const char *current_version, const char *dat
 void ccord_updater_destroy(ccord_updater *u)
 {
   if (!u) return;
-  if (u->thr) {
+  ccord_thread *thr = nullptr;
+  if (u->mtx) {
     ccord_mutex_lock(u->mtx);
     u->stop = true;
-    ccord_cond_signal(u->cv);
+    thr = u->thr;
+    u->thr = nullptr;
     ccord_mutex_unlock(u->mtx);
-    ccord_thread_join(u->thr);
   }
-  ccord_cond_destroy(u->cv);
+  if (thr) ccord_thread_join(thr);
   ccord_mutex_destroy(u->mtx);
   ccord_free(u);
 }
 
 void ccord_updater_check_now(ccord_updater *u)
 {
-  if (!u || !u->thr) return;
-  ccord_mutex_lock(u->mtx);
-  if (u->ui.state != CCORD_UI_UPDATE_CHECKING && u->ui.state != CCORD_UI_UPDATE_DOWNLOADING) {
-    u->ui.state = CCORD_UI_UPDATE_CHECKING;
-    snprintf(u->ui.status_text, sizeof u->ui.status_text, "Checking for updates...");
-    u->pending_job = JOB_CHECK;
-    u->dirty = true;
-    ccord_cond_signal(u->cv);
-  }
-  ccord_mutex_unlock(u->mtx);
+  if (!u || !u->ui.self_updatable) return;
+  updater_schedule(u, JOB_CHECK);
 }
 
 void ccord_updater_install_now(ccord_updater *u)
 {
-  if (!u || !u->thr) return;
-  ccord_mutex_lock(u->mtx);
-  if (u->ui.state == CCORD_UI_UPDATE_AVAILABLE) {
-    u->pending_job = JOB_INSTALL;
-    ccord_cond_signal(u->cv);
-  }
-  ccord_mutex_unlock(u->mtx);
+  if (!u || !u->ui.self_updatable) return;
+  updater_schedule(u, JOB_INSTALL);
 }
 
 bool ccord_updater_poll(ccord_updater *u, ccord_ui_update_info *out_ui, bool *out_request_quit)
 {
   if (!u) return false;
+  if (!atomic_load_explicit(&u->has_update, memory_order_acquire)) {
+    if (out_request_quit) *out_request_quit = false;
+    return false;
+  }
+  ccord_thread *done_thr = nullptr;
   ccord_mutex_lock(u->mtx);
   bool changed = u->dirty || u->request_quit;
   if (out_ui && u->dirty) *out_ui = u->ui;
   if (out_request_quit) *out_request_quit = u->request_quit;
   u->dirty = false;
   u->request_quit = false;
+  atomic_store_explicit(&u->has_update, false, memory_order_release);
+  if (!u->thr_alive && u->thr) {
+    done_thr = u->thr;
+    u->thr = nullptr;
+  }
   ccord_mutex_unlock(u->mtx);
+  if (done_thr) ccord_thread_join(done_thr);
   return changed;
 }

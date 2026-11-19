@@ -30,6 +30,8 @@ struct ccord_rpc_app_lookup {
   uint64_t now_ms;
   bool changed;            // a lookup finished since the last poll()
   unsigned started;
+  unsigned pending_count;
+  unsigned failed_count;
 };
 
 static void on_done(void *ud, ccord_status st, const ccord_app_info *info)
@@ -37,6 +39,7 @@ static void on_done(void *ud, ccord_status st, const ccord_app_info *info)
   entry *e = ud;
   ccord_rpc_app_lookup *l = e->owner;
   if (e->state != E_PENDING) return;
+  l->pending_count--;
   l->changed = true;
   if (st == CCORD_OK && info) {
     e->state = E_OK;
@@ -45,6 +48,7 @@ static void on_done(void *ud, ccord_status st, const ccord_app_info *info)
     return;
   }
   e->state = E_FAILED;
+  l->failed_count++;
   e->fails++;
   uint64_t wait = CCORD_RPC_APP_LOOKUP_RETRY_MIN_MS;
   for (unsigned i = 1; i < e->fails && wait < CCORD_RPC_APP_LOOKUP_RETRY_MAX_MS; i++) wait *= 2u;
@@ -57,7 +61,9 @@ static void start(ccord_rpc_app_lookup *l, entry *e)
 {
   ccord_error err;
   l->started++;
+  if (e->state == E_FAILED) l->failed_count--;
   e->state = E_PENDING;
+  l->pending_count++;
   ccord_status st = l->src.get(l->src.ctx, e->client_id, on_done, e, &err);
   if (st != CCORD_OK) on_done(e, st, nullptr);   // could not even start: same path as a failed lookup
 }
@@ -77,6 +83,7 @@ static entry *entry_for(ccord_rpc_app_lookup *l, const char *client_id)
   }
   entry *e = free_e ? free_e : lru;
   if (!e) return nullptr;   // every entry is pending: nothing to evict
+  if (e->state == E_FAILED) l->failed_count--;
   memset(e, 0, sizeof *e);
   e->owner = l;
   e->state = E_NEW;
@@ -115,10 +122,13 @@ bool ccord_rpc_app_lookup_poll(ccord_rpc_app_lookup *l, uint64_t now_ms)
 {
   if (!l) return false;
   l->now_ms = now_ms;
-  if (l->src.pump) l->src.pump(l->src.ctx, now_ms);
-  for (size_t i = 0; i < ENTRY_MAX; i++) {
-    entry *e = &l->entries[i];
-    if (e->state == E_FAILED && now_ms >= e->retry_at && now_ms - e->last_used < STALE_MS) start(l, e);
+  if (l->pending_count == 0 && l->failed_count == 0 && !l->changed) return false;
+  if (l->pending_count > 0 && l->src.pump) l->src.pump(l->src.ctx, now_ms);
+  if (l->failed_count > 0) {
+    for (size_t i = 0; i < ENTRY_MAX; i++) {
+      entry *e = &l->entries[i];
+      if (e->state == E_FAILED && now_ms >= e->retry_at && now_ms - e->last_used < STALE_MS) start(l, e);
+    }
   }
   bool changed = l->changed;
   l->changed = false;

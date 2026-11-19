@@ -171,11 +171,32 @@ static void load_file(int64_t now_ms)
 {
   FILE *f = fopen(g.path, "rb");
   if (!f) return;   // no queue yet
-  char *text = ccord_malloc(SM_MAX_FILE + 1u);
-  size_t n = text ? fread(text, 1, SM_MAX_FILE, f) : 0;
-  bool too_big = text && !feof(f);
+  bool too_big = false;
+  char *text = nullptr;
+  size_t n = 0;
+  if (fseek(f, 0, SEEK_END) != 0) {
+    fclose(f);
+    return;
+  }
+  long fsz = ftell(f);
+  if (fsz < 0 || fseek(f, 0, SEEK_SET) != 0) {
+    fclose(f);
+    return;
+  }
+  if ((uint64_t)fsz > SM_MAX_FILE) {
+    too_big = true;
+  } else {
+    size_t want = (size_t)fsz;
+    text = ccord_malloc(want + 1u);
+    if (!text) {
+      fclose(f);
+      return;
+    }
+    if (want > 0) n = fread(text, 1, want, f);
+    if (fgetc(f) != EOF) too_big = true;
+    text[n] = '\0';
+  }
   fclose(f);
-  if (!text) return;
   ccord_arena arena;
   ccord_arena_init(&arena, 0);
   ccord_error err;
