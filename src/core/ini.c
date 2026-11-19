@@ -3,6 +3,7 @@
 #include <ccord/core/ini.h>
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <string.h>
 
 #include <ccord/core/alloc.h>
@@ -39,45 +40,85 @@ static const char *trim_right(const char *s, const char *end)
   return end;
 }
 
-typedef struct seen_list {
-  char **items;
-  size_t count;
-} seen_list;
+typedef struct seen_slot {
+  uint64_t hash;
+  char *key;
+} seen_slot;
 
-static void seen_free(seen_list *sl)
+typedef struct seen_set {
+  seen_slot *slots;
+  size_t count;
+  size_t cap;
+} seen_set;
+
+static uint64_t fnv1a64(const char *s, size_t n)
 {
-  for (size_t i = 0; i < sl->count; i++) ccord_free(sl->items[i]);
-  ccord_free(sl->items);
-  sl->items = nullptr;
-  sl->count = 0;
+  uint64_t h = 14695981039346656037ULL;
+  for (size_t i = 0; i < n; i++) {
+    h ^= (unsigned char)s[i];
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+static void seen_free(seen_set *sl)
+{
+  for (size_t i = 0; i < sl->cap; i++) ccord_free(sl->slots[i].key);
+  ccord_free(sl->slots);
+  *sl = (seen_set){0};
 }
 
 // Records "section.key"; CCORD_ERR_PARSE if that pair was already seen in this file.
-static ccord_status seen_add(seen_list *sl, const char *section, size_t sn, const char *key, size_t kn, ccord_error *err, int line)
+static ccord_status seen_add(seen_set *sl, const char *section, size_t sn, const char *key, size_t kn, ccord_error *err, int line)
 {
-  char *full = ccord_malloc(sn + 1 + kn + 1);
-  if (!full) return ccord_error_set(err, CCORD_ERR_NOMEM, "out of memory");
-  memcpy(full, section, sn);
-  full[sn] = '.';
-  memcpy(full + sn + 1, key, kn);
-  full[sn + 1 + kn] = '\0';
-  for (size_t i = 0; i < sl->count; i++) {
-    if (strcmp(sl->items[i], full) == 0) {
-      ccord_free(full);
-      return ccord_error_set(err, CCORD_ERR_PARSE, "line %d: duplicate key '%s' in [%s]", line, key, section);
+  if (sn > INI_NAME_MAX || kn > INI_NAME_MAX) {
+    return ccord_error_set(err, CCORD_ERR_RANGE, "line %d: name too long", line);
+  }
+  size_t flen = sn + 1u + kn;
+  char buf[INI_NAME_MAX * 2u + 2u];
+  memcpy(buf, section, sn);
+  buf[sn] = '.';
+  memcpy(buf + sn + 1u, key, kn);
+  buf[flen] = '\0';
+
+  uint64_t h = fnv1a64(buf, flen);
+  size_t at = 0;
+  if (sl->cap > 0) {
+    size_t mask = sl->cap - 1u;
+    at = (size_t)h & mask;
+    while (sl->slots[at].key != nullptr) {
+      if (sl->slots[at].hash == h && strcmp(sl->slots[at].key, buf) == 0) {
+        return ccord_error_set(err, CCORD_ERR_PARSE, "line %d: duplicate key '%s' in [%s]", line, key, section);
+      }
+      at = (at + 1u) & mask;
     }
   }
   if (sl->count >= INI_ENTRIES_MAX) {
-    ccord_free(full);
     return ccord_error_set(err, CCORD_ERR_RANGE, "line %d: too many entries", line);
   }
-  char **grown = ccord_realloc_array(sl->items, sl->count + 1, sizeof *grown);
-  if (!grown) {
-    ccord_free(full);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "out of memory");
+  if (sl->cap == 0 || (sl->count + 1u) * 2u > sl->cap) {
+    size_t ncap = sl->cap ? sl->cap * 2u : 32u;
+    seen_slot *ns = ccord_calloc(ncap, sizeof *ns);
+    if (!ns) return ccord_error_set(err, CCORD_ERR_NOMEM, "out of memory");
+    size_t nmask = ncap - 1u;
+    for (size_t i = 0; i < sl->cap; i++) {
+      if (!sl->slots[i].key) continue;
+      size_t slot_pos = (size_t)sl->slots[i].hash & nmask;
+      while (ns[slot_pos].key != nullptr) slot_pos = (slot_pos + 1u) & nmask;
+      ns[slot_pos] = sl->slots[i];
+    }
+    ccord_free(sl->slots);
+    sl->slots = ns;
+    sl->cap = ncap;
+    at = (size_t)h & nmask;
+    while (sl->slots[at].key != nullptr) at = (at + 1u) & nmask;
   }
-  sl->items = grown;
-  sl->items[sl->count++] = full;
+  char *full = ccord_malloc(flen + 1u);
+  if (!full) return ccord_error_set(err, CCORD_ERR_NOMEM, "out of memory");
+  memcpy(full, buf, flen + 1u);
+  sl->slots[at].hash = h;
+  sl->slots[at].key = full;
+  sl->count++;
   return CCORD_OK;
 }
 
@@ -88,8 +129,9 @@ ccord_status ccord_ini_parse(const char *text, size_t len, ccord_ini_visit visit
   if (!visit) return ccord_error_set(err, CCORD_ERR_INVALID, "ini: null visitor");
 
   char section[INI_NAME_MAX + 1] = "";
+  size_t section_len = 0;
   bool have_section = false;
-  seen_list seen = {nullptr, 0};
+  seen_set seen = {0};
   ccord_status st = CCORD_OK;
   size_t pos = 0;
   int line_no = 0;
@@ -124,12 +166,14 @@ ccord_status ccord_ini_parse(const char *text, size_t len, ccord_ini_visit visit
         break;
       }
       const char *name = s + 1, *name_end = e - 1;
-      if (!name_ok(name, (size_t)(name_end - name)) || (size_t)(name_end - name) > INI_NAME_MAX) {
+      size_t sn = (size_t)(name_end - name);
+      if (!name_ok(name, sn) || sn > INI_NAME_MAX) {
         st = ccord_error_set(err, CCORD_ERR_PARSE, "line %d: bad section name", line_no);
         break;
       }
-      memcpy(section, name, (size_t)(name_end - name));
-      section[name_end - name] = '\0';
+      memcpy(section, name, sn);
+      section[sn] = '\0';
+      section_len = sn;
       have_section = true;
       continue;
     }
@@ -162,7 +206,7 @@ ccord_status ccord_ini_parse(const char *text, size_t len, ccord_ini_visit visit
     memcpy(value, vb, vn);
     value[vn] = '\0';
 
-    st = seen_add(&seen, section, strlen(section), key, kn, err, line_no);
+    st = seen_add(&seen, section, section_len, key, kn, err, line_no);
     if (st != CCORD_OK) break;
 
     ccord_error inner;
