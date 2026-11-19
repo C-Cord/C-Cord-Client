@@ -16,6 +16,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 struct ccord_camera {
   SDL_Camera *cam;
@@ -35,9 +36,7 @@ size_t ccord_camera_list(ccord_camera_info *out, size_t max)
   size_t n = 0;
   if (ids && count > 0) {
     for (int i = 0; i < count && n < max; ++i) {
-      char idbuf[64];
-      snprintf(idbuf, sizeof idbuf, "%u", (unsigned)ids[i]);
-      ccord_devices_copy_utf8(out[n].id, sizeof out[n].id, idbuf);
+      snprintf(out[n].id, sizeof out[n].id, "%u", (unsigned)ids[i]);
       const char *name = SDL_GetCameraName(ids[i]);
       ccord_devices_copy_utf8(out[n].name, sizeof out[n].name, name ? name : "Camera");
       ++n;
@@ -109,12 +108,15 @@ bool ccord_camera_grab(ccord_camera *c, uint8_t *bgra, size_t cap, int *out_w, i
     size_t w = (size_t)use->w;
     size_t h = (size_t)use->h;
     size_t pitch = (size_t)use->pitch;
-    if (pitch >= w * 4 && cap >= w * h * 4) {
+    size_t row_bytes = w * 4u;
+    if (w <= SIZE_MAX / 4u && pitch >= row_bytes && h <= cap / row_bytes) {
       const uint8_t *src = (const uint8_t *)use->pixels;
-      for (size_t y = 0; y < h; ++y) {
-        uint8_t *dst = bgra + y * w * 4;
-        const uint8_t *row = src + y * pitch;
-        for (size_t x = 0; x < w * 4; ++x) dst[x] = row[x];
+      if (pitch == row_bytes) {
+        memcpy(bgra, src, row_bytes * h);
+      } else {
+        for (size_t y = 0; y < h; ++y) {
+          memcpy(bgra + y * row_bytes, src + y * pitch, row_bytes);
+        }
       }
       if (out_w) *out_w = use->w;
       if (out_h) *out_h = use->h;

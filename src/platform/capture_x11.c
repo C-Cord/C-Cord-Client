@@ -38,11 +38,40 @@ static bool x11_available(void)
   return true;
 }
 
-static bool x11_get_utf8_prop(Display *dpy, Window w, Atom prop, char *out, size_t cap)
+typedef struct x11_list_atoms {
+  Atom net_client_list_stacking;
+  Atom net_client_list;
+  Atom net_wm_pid;
+  Atom net_wm_visible_name;
+  Atom net_wm_name;
+  Atom utf8_string;
+} x11_list_atoms;
+
+static x11_list_atoms x11_intern_list_atoms(Display *dpy)
 {
-  if (!out || cap == 0) return false;
+  char n0[] = "_NET_CLIENT_LIST_STACKING";
+  char n1[] = "_NET_CLIENT_LIST";
+  char n2[] = "_NET_WM_PID";
+  char n3[] = "_NET_WM_VISIBLE_NAME";
+  char n4[] = "_NET_WM_NAME";
+  char n5[] = "UTF8_STRING";
+  char *names[6] = {n0, n1, n2, n3, n4, n5};
+  Atom atoms[6] = {None, None, None, None, None, None};
+  (void)XInternAtoms(dpy, names, 6, False, atoms);
+  return (x11_list_atoms){
+    .net_client_list_stacking = atoms[0],
+    .net_client_list = atoms[1],
+    .net_wm_pid = atoms[2],
+    .net_wm_visible_name = atoms[3],
+    .net_wm_name = atoms[4],
+    .utf8_string = atoms[5],
+  };
+}
+
+static bool x11_get_utf8_prop(Display *dpy, Window w, Atom prop, Atom utf8, char *out, size_t cap)
+{
+  if (!out || cap == 0 || prop == None) return false;
   out[0] = '\0';
-  Atom utf8 = XInternAtom(dpy, "UTF8_STRING", False);
   Atom actual_type = None;
   int actual_format = 0;
   unsigned long nitems = 0, bytes_after = 0;
@@ -85,15 +114,14 @@ static int x11_window_pid(Display *dpy, Window w, Atom net_wm_pid)
   return pid;
 }
 
-static void x11_window_title_and_app(Display *dpy, Window w, char *title, size_t title_cap, char *app, size_t app_cap)
+static void x11_window_title_and_app(Display *dpy, Window w, const x11_list_atoms *atoms, char *title,
+                                     size_t title_cap, char *app, size_t app_cap)
 {
   title[0] = '\0';
   app[0] = '\0';
-  Atom net_vis_name = XInternAtom(dpy, "_NET_WM_VISIBLE_NAME", False);
-  Atom net_name = XInternAtom(dpy, "_NET_WM_NAME", False);
-  if (!x11_get_utf8_prop(dpy, w, net_vis_name, title, title_cap) &&
-      !x11_get_utf8_prop(dpy, w, net_name, title, title_cap)) {
-    (void)x11_get_utf8_prop(dpy, w, XA_WM_NAME, title, title_cap);
+  if (!x11_get_utf8_prop(dpy, w, atoms->net_wm_visible_name, atoms->utf8_string, title, title_cap) &&
+      !x11_get_utf8_prop(dpy, w, atoms->net_wm_name, atoms->utf8_string, title, title_cap)) {
+    (void)x11_get_utf8_prop(dpy, w, XA_WM_NAME, atoms->utf8_string, title, title_cap);
   }
   XClassHint ch = {0};
   if (XGetClassHint(dpy, w, &ch)) {
@@ -163,39 +191,39 @@ static size_t x11_list_screens(Display *dpy, Window root, ccord_capture_source *
 
 static size_t x11_list_windows(Display *dpy, Window root, ccord_capture_source *out, size_t max)
 {
-  Atom list_atom = XInternAtom(dpy, "_NET_CLIENT_LIST_STACKING", False);
+  const x11_list_atoms atoms = x11_intern_list_atoms(dpy);
   Atom actual_type = None;
   int actual_format = 0;
   unsigned long nitems = 0, bytes_after = 0;
   unsigned char *data = nullptr;
-  if (XGetWindowProperty(dpy, root, list_atom, 0, 1024, False, XA_WINDOW, &actual_type, &actual_format, &nitems,
-                         &bytes_after, &data) != Success ||
+  if (atoms.net_client_list_stacking == None ||
+      XGetWindowProperty(dpy, root, atoms.net_client_list_stacking, 0, 1024, False, XA_WINDOW, &actual_type,
+                         &actual_format, &nitems, &bytes_after, &data) != Success ||
       !data || nitems == 0) {
     if (data) XFree(data);
     data = nullptr;
-    list_atom = XInternAtom(dpy, "_NET_CLIENT_LIST", False);
-    if (XGetWindowProperty(dpy, root, list_atom, 0, 1024, False, XA_WINDOW, &actual_type, &actual_format, &nitems,
-                           &bytes_after, &data) != Success ||
+    if (atoms.net_client_list == None ||
+        XGetWindowProperty(dpy, root, atoms.net_client_list, 0, 1024, False, XA_WINDOW, &actual_type, &actual_format,
+                           &nitems, &bytes_after, &data) != Success ||
         !data || nitems == 0) {
       if (data) XFree(data);
       return 0;
     }
   }
   Window *wins = (Window *)(void *)data;
-  Atom net_wm_pid = XInternAtom(dpy, "_NET_WM_PID", False);
   int own_pid = ccord_capture_own_pid();
   size_t count = 0;
   for (long i = (long)nitems - 1; i >= 0 && count < max; i--) {
     Window w = wins[i];
     if (w == None) continue;
-    if (own_pid > 0 && x11_window_pid(dpy, w, net_wm_pid) == own_pid) continue;
+    if (own_pid > 0 && x11_window_pid(dpy, w, atoms.net_wm_pid) == own_pid) continue;
     XWindowAttributes wa;
     g_x11_err = false;
     if (!XGetWindowAttributes(dpy, w, &wa) || g_x11_err) continue;
     if (wa.map_state != IsViewable || wa.width < 64 || wa.height < 64) continue;
     char title[CCORD_CAPTURE_TITLE_MAX];
     char app[CCORD_CAPTURE_APP_MAX];
-    x11_window_title_and_app(dpy, w, title, sizeof title, app, sizeof app);
+    x11_window_title_and_app(dpy, w, &atoms, title, sizeof title, app, sizeof app);
     if (!title[0]) continue;
     ccord_capture_source *s = &out[count++];
     memset(s, 0, sizeof *s);
@@ -240,6 +268,7 @@ typedef struct x11_cap {
   Window root;
   Window win;
   bool has_composite;
+  bool shm_supported;   // cached XShmQueryExtension result (probed once in x11_open)
   bool has_shm;
   XShmSegmentInfo shminfo;
   XImage *shm_img;
@@ -285,26 +314,51 @@ static bool x11_failed(const ccord_capture *base)
   return !c || c->dead;
 }
 
-static void copy_ximage_to_bgra(XImage *img, int w, int h, uint8_t *dst)
+static void copy_ximage_to_bgra(XImage *img, int w, int h, uint8_t *restrict dst)
 {
+  const size_t row_bytes = (size_t)w * 4u;
+  const size_t src_stride = (size_t)img->bytes_per_line;
+  if (img->bits_per_pixel == 32) {
+    if (src_stride == row_bytes) {
+      const uint8_t *restrict s = (const uint8_t *)img->data;
+      uint8_t *restrict d = dst;
+      const size_t total = (size_t)w * (size_t)h;
+      for (size_t i = 0; i < total; i++, s += 4, d += 4) {
+        uint32_t px;
+        memcpy(&px, s, 4u);
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        px |= 0x000000FFu;
+#else
+        px |= 0xFF000000u;
+#endif
+        memcpy(d, &px, 4u);
+      }
+      return;
+    }
+    for (int y = 0; y < h; y++) {
+      const uint8_t *restrict s = (const uint8_t *)img->data + (size_t)y * src_stride;
+      uint8_t *restrict d = dst + (size_t)y * row_bytes;
+      for (int x = 0; x < w; x++, s += 4, d += 4) {
+        uint32_t px;
+        memcpy(&px, s, 4u);
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+        px |= 0x000000FFu;
+#else
+        px |= 0xFF000000u;
+#endif
+        memcpy(d, &px, 4u);
+      }
+    }
+    return;
+  }
   for (int y = 0; y < h; y++) {
-    const uint8_t *src_row = (const uint8_t *)img->data + (size_t)y * (size_t)img->bytes_per_line;
-    uint8_t *dst_row = dst + (size_t)y * (size_t)w * 4u;
-    if (img->bits_per_pixel == 32) {
-      for (int x = 0; x < w; x++) {
-        dst_row[x * 4 + 0] = src_row[x * 4 + 0];
-        dst_row[x * 4 + 1] = src_row[x * 4 + 1];
-        dst_row[x * 4 + 2] = src_row[x * 4 + 2];
-        dst_row[x * 4 + 3] = 255;
-      }
-    } else {
-      for (int x = 0; x < w; x++) {
-        unsigned long px = XGetPixel(img, x, y);
-        dst_row[x * 4 + 0] = (uint8_t)(px & 0xffu);
-        dst_row[x * 4 + 1] = (uint8_t)((px >> 8) & 0xffu);
-        dst_row[x * 4 + 2] = (uint8_t)((px >> 16) & 0xffu);
-        dst_row[x * 4 + 3] = 255;
-      }
+    uint8_t *restrict dst_row = dst + (size_t)y * row_bytes;
+    for (int x = 0; x < w; x++) {
+      unsigned long px = XGetPixel(img, x, y);
+      dst_row[(size_t)x * 4u + 0u] = (uint8_t)(px & 0xffu);
+      dst_row[(size_t)x * 4u + 1u] = (uint8_t)((px >> 8) & 0xffu);
+      dst_row[(size_t)x * 4u + 2u] = (uint8_t)((px >> 16) & 0xffu);
+      dst_row[(size_t)x * 4u + 3u] = 255u;
     }
   }
 }
@@ -365,7 +419,7 @@ static bool x11_grab(ccord_capture *base, ccord_capture_frame *out)
   }
 
   bool grabbed = false;
-  if (XShmQueryExtension(c->dpy)) {
+  if (c->shm_supported) {
     if (!c->shm_img || c->shm_w != gw || c->shm_h != gh) {
       x11_free_shm(c);
       int scr = DefaultScreen(c->dpy);
@@ -383,7 +437,10 @@ static bool x11_grab(ccord_capture *base, ccord_capture_frame *out)
             c->shm_w = gw;
             c->shm_h = gh;
           } else {
-            shmdt(c->shminfo.shmaddr);
+            if (c->shminfo.shmaddr != (char *)-1) {
+              shmdt(c->shminfo.shmaddr);
+              c->shm_supported = false;   // e.g. remote X11 display: avoid retrying XShmAttach/XSync every frame
+            }
             shmctl(c->shminfo.shmid, IPC_RMID, nullptr);
             XDestroyImage(c->shm_img);
             c->shm_img = nullptr;
@@ -442,6 +499,7 @@ static ccord_capture *x11_open(const ccord_capture_source *src, ccord_error *err
   c->base.src = *src;
   c->dpy = dpy;
   c->root = DefaultRootWindow(dpy);
+  c->shm_supported = XShmQueryExtension(dpy) != 0;
   if (src->kind == CCORD_CAPTURE_SCREEN && (c->base.src.width <= 0 || c->base.src.height <= 0)) {
     int scr = DefaultScreen(dpy);
     c->base.src.x = 0;
