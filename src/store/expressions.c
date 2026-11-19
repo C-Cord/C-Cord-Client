@@ -6,13 +6,17 @@
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/arena.h>
+#include <ccord/core/idmap.h>
 #include <ccord/core/json.h>
 
 #include "expr_data.h"
 
 #define EXPR_BLOB_MAX 96u
 #define EXPR_BLOB_BYTES_MAX (6u * 1024u * 1024u)
+#define EXPR_BLOB_TOTAL_BYTES_MAX (8u * 1024u * 1024u)
 #define EXPR_KEY_MAX 160u
+#define EXPR_EMOJI_IDX_BITS 16u
+#define EXPR_EMOJI_IDX_MASK (((size_t)1u << EXPR_EMOJI_IDX_BITS) - 1u)
 #define EXPR_MAX_FREC_EMOJIS 128u
 #define EXPR_MAX_FAV_EMOJIS 128u
 #define EXPR_MAX_FREC_STICKERS 64u
@@ -35,11 +39,11 @@ typedef struct expr_sticker_frec {
 typedef struct expr_guild {
   ccord_id guild_id;
   ccord_emoji *emojis;
-  size_t nemojis;
+  size_t nemojis, capemojis;
   ccord_sticker *stickers;
-  size_t nstickers;
+  size_t nstickers, capstickers;
   ccord_soundboard_sound *sounds;
-  size_t nsounds;
+  size_t nsounds, capsounds;
   bool emojis_admin_loaded;
   bool stickers_admin_loaded;
   bool soundboard_admin_loaded;
@@ -47,7 +51,7 @@ typedef struct expr_guild {
 
 typedef struct expr_blob {
   unsigned kind;
-  char *key;
+  const char *key;
   char *body;
   size_t len;
   ccord_expr_blob_state state;
@@ -57,8 +61,13 @@ typedef struct expr_blob {
 struct ccord_expr_data {
   expr_guild *g;
   size_t ng, capg;
+  ccord_idmap guild_by_id;
+  bool guild_ix_ok;
+  ccord_idmap emoji_by_id;   // emoji_id -> (guild_idx << 16) | emoji_idx
+  bool emoji_ix_ok;
   expr_blob blobs[EXPR_BLOB_MAX];
   size_t nblobs;
+  size_t blob_bytes;
   expr_emoji_frec emoji_frec[EXPR_MAX_FREC_EMOJIS];
   size_t nemoji_frec;
   char fav_emojis[EXPR_MAX_FAV_EMOJIS][64];
@@ -69,21 +78,27 @@ struct ccord_expr_data {
   size_t nfav_stickers;
   ccord_sticker_pack sticker_packs[EXPR_MAX_STICKER_PACKS];
   size_t nsticker_packs;
-  ccord_gif_category gif_cats[EXPR_MAX_GIF_CATS];
+  ccord_gif_category *gif_cats;   // lazily allocated (EXPR_MAX_GIF_CATS) on first write
   size_t ngif_cats;
-  ccord_gif_item gif_trending[EXPR_MAX_GIFS];
+  ccord_gif_item *gif_trending;   // lazily allocated (EXPR_MAX_GIFS) on first write
   size_t ngif_trending;
-  ccord_gif_item gif_search[EXPR_MAX_GIFS];
+  ccord_gif_item *gif_search;     // lazily allocated (EXPR_MAX_GIFS) on first write
   size_t ngif_search;
-  ccord_gif_item fav_gifs[EXPR_MAX_FAV_GIFS];
+  ccord_gif_item *fav_gifs;       // lazily allocated (EXPR_MAX_FAV_GIFS) on first write
   size_t nfav_gifs;
   uint8_t *settings_proto;   // raw FrecencyUserSettings bytes, kept losslessly for the favorite-GIF PATCH
   size_t settings_proto_len;
   uint64_t revision, tick;
 };
 
+static const char k_empty_str[] = "";
+
 static void free_cstr(const char **p)
 {
+  if (!p || !*p || *p == k_empty_str) {
+    if (p) *p = nullptr;
+    return;
+  }
   union { const char *c; void *v; } u = {.c = *p};
   ccord_free(u.v);
   *p = nullptr;
@@ -116,6 +131,7 @@ static void guild_emojis_free(expr_guild *g)
   ccord_free(g->emojis);
   g->emojis = nullptr;
   g->nemojis = 0;
+  g->capemojis = 0;
 }
 
 static void guild_stickers_free(expr_guild *g)
@@ -124,6 +140,7 @@ static void guild_stickers_free(expr_guild *g)
   ccord_free(g->stickers);
   g->stickers = nullptr;
   g->nstickers = 0;
+  g->capstickers = 0;
 }
 
 static void guild_sounds_free(expr_guild *g)
@@ -132,11 +149,12 @@ static void guild_sounds_free(expr_guild *g)
   ccord_free(g->sounds);
   g->sounds = nullptr;
   g->nsounds = 0;
+  g->capsounds = 0;
 }
 
 static void blob_free(expr_blob *b)
 {
-  ccord_free(b->key);
+  free_cstr(&b->key);
   ccord_free(b->body);
   memset(b, 0, sizeof *b);
 }
@@ -162,8 +180,14 @@ void ccord_expr_data_free(ccord_expr_data *d)
     guild_sounds_free(&d->g[i]);
   }
   ccord_free(d->g);
+  ccord_idmap_free(&d->guild_by_id);
+  ccord_idmap_free(&d->emoji_by_id);
   sticker_packs_free(d);
   for (size_t i = 0; i < d->nblobs; i++) blob_free(&d->blobs[i]);
+  ccord_free(d->gif_cats);
+  ccord_free(d->gif_trending);
+  ccord_free(d->gif_search);
+  ccord_free(d->fav_gifs);
   ccord_free(d->settings_proto);
   ccord_free(d);
 }
@@ -172,7 +196,13 @@ static ccord_expr_data *data_get(ccord_store *s, bool create)
 {
   ccord_expr_data **slot = ccord_store_expr_slot_(s);
   if (!slot) return nullptr;
-  if (!*slot && create) *slot = ccord_calloc(1, sizeof **slot);
+  if (!*slot && create) {
+    *slot = ccord_calloc(1, sizeof **slot);
+    if (*slot) {
+      (*slot)->guild_ix_ok = true;
+      (*slot)->emoji_ix_ok = true;
+    }
+  }
   return *slot;
 }
 
@@ -185,6 +215,10 @@ static const ccord_expr_data *data_peek(const ccord_store *s)
 static expr_guild *guild_find(const ccord_expr_data *d, ccord_id gid)
 {
   if (!d) return nullptr;
+  if (d->guild_ix_ok && gid != CCORD_ID_NONE) {
+    size_t at = 0;
+    return ccord_idmap_find(&d->guild_by_id, gid, &at) ? &d->g[at] : nullptr;
+  }
   for (size_t i = 0; i < d->ng; i++) {
     if (d->g[i].guild_id == gid) return &d->g[i];
   }
@@ -202,17 +236,63 @@ static expr_guild *guild_get(ccord_expr_data *d, ccord_id gid)
     d->g = n;
     d->capg = ncap;
   }
-  g = &d->g[d->ng++];
+  size_t idx = d->ng++;
+  g = &d->g[idx];
   *g = (expr_guild){.guild_id = gid};
+  if (d->guild_ix_ok && gid != CCORD_ID_NONE && !ccord_idmap_put(&d->guild_by_id, gid, idx)) {
+    d->guild_ix_ok = false;
+  }
   return g;
 }
 
-static char *dup_or_empty(const char *s, size_t max)
+static void emoji_index_add(ccord_expr_data *d, size_t gi, size_t ei)
 {
-  if (!s) s = "";
+  if (!d->emoji_ix_ok) return;
+  if (ei > EXPR_EMOJI_IDX_MASK || gi >= (SIZE_MAX >> EXPR_EMOJI_IDX_BITS)) {
+    d->emoji_ix_ok = false;
+    return;
+  }
+  ccord_id eid = d->g[gi].emojis[ei].id;
+  if (eid == CCORD_ID_NONE) return;
+  size_t existing = 0;
+  if (!ccord_idmap_find(&d->emoji_by_id, eid, &existing)) {
+    size_t packed = (gi << EXPR_EMOJI_IDX_BITS) | ei;
+    if (!ccord_idmap_put(&d->emoji_by_id, eid, packed)) d->emoji_ix_ok = false;
+  }
+}
+
+static void emoji_reindex_all(ccord_expr_data *d)
+{
+  ccord_idmap_clear(&d->emoji_by_id);
+  size_t total = 0;
+  for (size_t gi = 0; gi < d->ng; gi++) total += d->g[gi].nemojis;
+  d->emoji_ix_ok = ccord_idmap_reserve(&d->emoji_by_id, total);
+  for (size_t gi = 0; d->emoji_ix_ok && gi < d->ng; gi++) {
+    for (size_t ei = 0; d->emoji_ix_ok && ei < d->g[gi].nemojis; ei++) {
+      emoji_index_add(d, gi, ei);
+    }
+  }
+}
+
+static ccord_gif_category *ensure_gif_cats(ccord_expr_data *d)
+{
+  if (!d->gif_cats) d->gif_cats = ccord_calloc(EXPR_MAX_GIF_CATS, sizeof *d->gif_cats);
+  return d->gif_cats;
+}
+
+static ccord_gif_item *ensure_gif_buf(ccord_gif_item **slot, size_t cap)
+{
+  if (!*slot) *slot = ccord_calloc(cap, sizeof **slot);
+  return *slot;
+}
+
+static const char *dup_or_empty(const char *s, size_t max)
+{
+  if (!s || s[0] == '\0' || max == 0) return k_empty_str;
   size_t n = 0;
   while (n < max && s[n] != '\0') n++;
   while (n > 0 && n < max && ((unsigned char)s[n] & 0xC0u) == 0x80u) n--;   // never cut a UTF-8 sequence
+  if (n == 0) return k_empty_str;
   return ccord_strndup(s, n);
 }
 
@@ -319,21 +399,60 @@ ccord_status ccord_store_set_guild_emojis(ccord_store *s, ccord_id guild_id, con
   if (!d) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   expr_guild *g = guild_get(d, guild_id);
   if (!g) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+  size_t gi = (size_t)(g - d->g);
+  size_t had_prev = g->nemojis;
   ccord_emoji *fresh = nullptr;
   size_t nfresh = 0;
   if (n > 0) {
     fresh = ccord_calloc(n, sizeof *fresh);
     if (!fresh) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    ccord_idmap prev_map = {0};
+    bool use_prev_map = false;
+    if (had_prev > 16u && !d->emoji_ix_ok && ccord_idmap_reserve(&prev_map, had_prev)) {
+      use_prev_map = true;
+      for (size_t i = 0; i < had_prev; i++) {
+        if (!ccord_idmap_put(&prev_map, g->emojis[i].id, i)) {
+          use_prev_map = false;
+          break;
+        }
+      }
+    }
     for (size_t i = 0; i < n; i++) {
       if (emojis[i].id == CCORD_ID_NONE) continue;
-      const ccord_emoji *prev = find_prev_emoji(g->emojis, g->nemojis, emojis[i].id);
+      const ccord_emoji *prev = nullptr;
+      if (had_prev > 0 && emojis[i].user_id == CCORD_ID_NONE) {
+        if (d->emoji_ix_ok) {
+          size_t packed = 0;
+          if (ccord_idmap_find(&d->emoji_by_id, emojis[i].id, &packed)) {
+            size_t pgi = packed >> EXPR_EMOJI_IDX_BITS;
+            size_t pei = packed & EXPR_EMOJI_IDX_MASK;
+            if (pgi == gi && pei < had_prev && g->emojis[pei].id == emojis[i].id) {
+              prev = &g->emojis[pei];
+            } else {
+              prev = find_prev_emoji(g->emojis, had_prev, emojis[i].id);
+            }
+          }
+        } else if (use_prev_map) {
+          size_t pei = 0;
+          if (ccord_idmap_find(&prev_map, emojis[i].id, &pei)) prev = &g->emojis[pei];
+        } else {
+          prev = find_prev_emoji(g->emojis, had_prev, emojis[i].id);
+        }
+      }
       if (!copy_emoji_item(&fresh[nfresh], &emojis[i], guild_id, prev)) break;
       nfresh++;
     }
+    ccord_idmap_free(&prev_map);
   }
   guild_emojis_free(g);
   g->emojis = fresh;
   g->nemojis = nfresh;
+  g->capemojis = fresh ? n : 0;
+  if (had_prev == 0) {
+    for (size_t i = 0; d->emoji_ix_ok && i < nfresh; i++) emoji_index_add(d, gi, i);
+  } else {
+    emoji_reindex_all(d);
+  }
   d->revision++;
   ccord_store_expr_mutated_(s);
   return CCORD_OK;
@@ -367,26 +486,51 @@ ccord_status ccord_store_upsert_guild_emoji(ccord_store *s, ccord_id guild_id, c
   if (!d) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   expr_guild *g = guild_get(d, guild_id);
   if (!g) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  for (size_t i = 0; i < g->nemojis; i++) {
-    if (g->emojis[i].id != emoji->id) continue;
+  size_t gi = (size_t)(g - d->g);
+  size_t found = SIZE_MAX;
+  if (d->emoji_ix_ok) {
+    size_t packed = 0;
+    if (ccord_idmap_find(&d->emoji_by_id, emoji->id, &packed)) {
+      size_t pgi = packed >> EXPR_EMOJI_IDX_BITS;
+      size_t pei = packed & EXPR_EMOJI_IDX_MASK;
+      if (pgi == gi && pei < g->nemojis && g->emojis[pei].id == emoji->id) {
+        found = pei;
+      } else {
+        for (size_t i = 0; i < g->nemojis; i++) {
+          if (g->emojis[i].id == emoji->id) { found = i; break; }
+        }
+      }
+    }
+  } else {
+    for (size_t i = 0; i < g->nemojis; i++) {
+      if (g->emojis[i].id == emoji->id) { found = i; break; }
+    }
+  }
+  if (found != SIZE_MAX) {
     ccord_emoji copy;
-    if (!copy_emoji_item(&copy, emoji, guild_id, &g->emojis[i])) {
+    if (!copy_emoji_item(&copy, emoji, guild_id, &g->emojis[found])) {
       return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
     }
-    emoji_item_free(&g->emojis[i]);
-    g->emojis[i] = copy;
+    emoji_item_free(&g->emojis[found]);
+    g->emojis[found] = copy;
     d->revision++;
     ccord_store_expr_mutated_(s);
     return CCORD_OK;
   }
   if (g->nemojis >= CCORD_MAX_EMOJIS_PER_GUILD) return ccord_error_set(err, CCORD_ERR_INVALID, "store: emoji limit");
-  ccord_emoji *grown = ccord_realloc_array(g->emojis, g->nemojis + 1u, sizeof *grown);
-  if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  g->emojis = grown;
+  if (g->nemojis == g->capemojis) {
+    size_t ncap = g->capemojis ? g->capemojis * 2u : 16u;
+    if (ncap > CCORD_MAX_EMOJIS_PER_GUILD) ncap = CCORD_MAX_EMOJIS_PER_GUILD;
+    ccord_emoji *grown = ccord_realloc_array(g->emojis, ncap, sizeof *grown);
+    if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    g->emojis = grown;
+    g->capemojis = ncap;
+  }
   if (!copy_emoji_item(&g->emojis[g->nemojis], emoji, guild_id, nullptr)) {
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
-  g->nemojis++;
+  size_t new_ei = g->nemojis++;
+  emoji_index_add(d, gi, new_ei);
   d->revision++;
   ccord_store_expr_mutated_(s);
   return CCORD_OK;
@@ -398,16 +542,34 @@ bool ccord_store_remove_guild_emoji(ccord_store *s, ccord_id guild_id, ccord_id 
   ccord_expr_data *d = data_get(s, false);
   expr_guild *g = guild_find(d, guild_id);
   if (!g) return false;
-  for (size_t i = 0; i < g->nemojis; i++) {
-    if (g->emojis[i].id != emoji_id) continue;
-    emoji_item_free(&g->emojis[i]);
-    memmove(&g->emojis[i], &g->emojis[i + 1], (g->nemojis - i - 1u) * sizeof *g->emojis);
-    g->nemojis--;
-    d->revision++;
-    ccord_store_expr_mutated_(s);
-    return true;
+  size_t gi = (size_t)(g - d->g);
+  size_t found = SIZE_MAX;
+  if (d->emoji_ix_ok) {
+    size_t packed = 0;
+    if (ccord_idmap_find(&d->emoji_by_id, emoji_id, &packed)) {
+      size_t pgi = packed >> EXPR_EMOJI_IDX_BITS;
+      size_t pei = packed & EXPR_EMOJI_IDX_MASK;
+      if (pgi == gi && pei < g->nemojis && g->emojis[pei].id == emoji_id) {
+        found = pei;
+      } else {
+        for (size_t i = 0; i < g->nemojis; i++) {
+          if (g->emojis[i].id == emoji_id) { found = i; break; }
+        }
+      }
+    }
+  } else {
+    for (size_t i = 0; i < g->nemojis; i++) {
+      if (g->emojis[i].id == emoji_id) { found = i; break; }
+    }
   }
-  return false;
+  if (found == SIZE_MAX) return false;
+  emoji_item_free(&g->emojis[found]);
+  memmove(&g->emojis[found], &g->emojis[found + 1], (g->nemojis - found - 1u) * sizeof *g->emojis);
+  g->nemojis--;
+  emoji_reindex_all(d);
+  d->revision++;
+  ccord_store_expr_mutated_(s);
+  return true;
 }
 
 ccord_status ccord_store_set_guild_stickers(ccord_store *s, ccord_id guild_id, const ccord_sticker *stickers, size_t n,
@@ -436,6 +598,7 @@ ccord_status ccord_store_set_guild_stickers(ccord_store *s, ccord_id guild_id, c
   guild_stickers_free(g);
   g->stickers = fresh;
   g->nstickers = nfresh;
+  g->capstickers = fresh ? n : 0;
   d->revision++;
   ccord_store_expr_mutated_(s);
   return CCORD_OK;
@@ -484,9 +647,14 @@ ccord_status ccord_store_upsert_guild_sticker(ccord_store *s, ccord_id guild_id,
   if (g->nstickers >= CCORD_MAX_STICKERS_PER_GUILD) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: sticker limit");
   }
-  ccord_sticker *grown = ccord_realloc_array(g->stickers, g->nstickers + 1u, sizeof *grown);
-  if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  g->stickers = grown;
+  if (g->nstickers == g->capstickers) {
+    size_t ncap = g->capstickers ? g->capstickers * 2u : 8u;
+    if (ncap > CCORD_MAX_STICKERS_PER_GUILD) ncap = CCORD_MAX_STICKERS_PER_GUILD;
+    ccord_sticker *grown = ccord_realloc_array(g->stickers, ncap, sizeof *grown);
+    if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    g->stickers = grown;
+    g->capstickers = ncap;
+  }
   if (!copy_sticker_item(&g->stickers[g->nstickers], sticker, guild_id, nullptr)) {
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
@@ -540,6 +708,7 @@ ccord_status ccord_store_set_guild_soundboard(ccord_store *s, ccord_id guild_id,
   guild_sounds_free(g);
   g->sounds = fresh;
   g->nsounds = nfresh;
+  g->capsounds = fresh ? n : 0;
   d->revision++;
   ccord_store_expr_mutated_(s);
   return CCORD_OK;
@@ -588,9 +757,14 @@ ccord_status ccord_store_upsert_guild_soundboard(ccord_store *s, ccord_id guild_
   if (g->nsounds >= CCORD_MAX_SOUNDBOARD_PER_GUILD) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: soundboard limit");
   }
-  ccord_soundboard_sound *grown = ccord_realloc_array(g->sounds, g->nsounds + 1u, sizeof *grown);
-  if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  g->sounds = grown;
+  if (g->nsounds == g->capsounds) {
+    size_t ncap = g->capsounds ? g->capsounds * 2u : 8u;
+    if (ncap > CCORD_MAX_SOUNDBOARD_PER_GUILD) ncap = CCORD_MAX_SOUNDBOARD_PER_GUILD;
+    ccord_soundboard_sound *grown = ccord_realloc_array(g->sounds, ncap, sizeof *grown);
+    if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    g->sounds = grown;
+    g->capsounds = ncap;
+  }
   if (!copy_sound_item(&g->sounds[g->nsounds], sound, guild_id, nullptr)) {
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
@@ -662,6 +836,10 @@ void ccord_store_clear_guild_expressions(ccord_store *s)
     guild_sounds_free(&d->g[i]);
   }
   d->ng = 0;
+  ccord_idmap_clear(&d->guild_by_id);
+  d->guild_ix_ok = true;
+  ccord_idmap_clear(&d->emoji_by_id);
+  d->emoji_ix_ok = true;
   d->revision++;
   ccord_store_expr_mutated_(s);
 }
@@ -679,9 +857,14 @@ void ccord_store_clear_all_expressions(ccord_store *s)
   d->g = nullptr;
   d->ng = 0;
   d->capg = 0;
+  ccord_idmap_free(&d->guild_by_id);
+  d->guild_ix_ok = true;
+  ccord_idmap_free(&d->emoji_by_id);
+  d->emoji_ix_ok = true;
   sticker_packs_free(d);
   for (size_t i = 0; i < d->nblobs; i++) blob_free(&d->blobs[i]);
   d->nblobs = 0;
+  d->blob_bytes = 0;
   memset(d->emoji_frec, 0, sizeof(d->emoji_frec));
   d->nemoji_frec = 0;
   memset(d->fav_emojis, 0, sizeof(d->fav_emojis));
@@ -690,13 +873,17 @@ void ccord_store_clear_all_expressions(ccord_store *s)
   d->nsticker_frec = 0;
   memset(d->fav_stickers, 0, sizeof(d->fav_stickers));
   d->nfav_stickers = 0;
-  memset(d->gif_cats, 0, sizeof(d->gif_cats));
+  ccord_free(d->gif_cats);
+  d->gif_cats = nullptr;
   d->ngif_cats = 0;
-  memset(d->gif_trending, 0, sizeof(d->gif_trending));
+  ccord_free(d->gif_trending);
+  d->gif_trending = nullptr;
   d->ngif_trending = 0;
-  memset(d->gif_search, 0, sizeof(d->gif_search));
+  ccord_free(d->gif_search);
+  d->gif_search = nullptr;
   d->ngif_search = 0;
-  memset(d->fav_gifs, 0, sizeof(d->fav_gifs));
+  ccord_free(d->fav_gifs);
+  d->fav_gifs = nullptr;
   d->nfav_gifs = 0;
   ccord_free(d->settings_proto);
   d->settings_proto = nullptr;
@@ -733,6 +920,15 @@ const ccord_emoji *ccord_store_find_emoji(const ccord_store *s, ccord_id emoji_i
 {
   const ccord_expr_data *d = data_peek(s);
   if (!d || emoji_id == CCORD_ID_NONE) return nullptr;
+  if (d->emoji_ix_ok) {
+    size_t packed = 0;
+    if (!ccord_idmap_find(&d->emoji_by_id, emoji_id, &packed)) return nullptr;
+    size_t gi = packed >> EXPR_EMOJI_IDX_BITS;
+    size_t ei = packed & EXPR_EMOJI_IDX_MASK;
+    if (gi < d->ng && ei < d->g[gi].nemojis && d->g[gi].emojis[ei].id == emoji_id) {
+      return &d->g[gi].emojis[ei];
+    }
+  }
   for (size_t i = 0; i < d->ng; i++) {
     for (size_t k = 0; k < d->g[i].nemojis; k++) {
       if (d->g[i].emojis[k].id == emoji_id) return &d->g[i].emojis[k];
@@ -1056,7 +1252,7 @@ size_t ccord_store_gif_category_count(const ccord_store *s)
 const ccord_gif_category *ccord_store_gif_category_at(const ccord_store *s, size_t i)
 {
   const ccord_expr_data *d = data_peek(s);
-  return (d && i < d->ngif_cats) ? &d->gif_cats[i] : nullptr;
+  return (d && d->gif_cats && i < d->ngif_cats) ? &d->gif_cats[i] : nullptr;
 }
 
 size_t ccord_store_gif_trending_count(const ccord_store *s)
@@ -1068,7 +1264,7 @@ size_t ccord_store_gif_trending_count(const ccord_store *s)
 const ccord_gif_item *ccord_store_gif_trending_at(const ccord_store *s, size_t i)
 {
   const ccord_expr_data *d = data_peek(s);
-  return (d && i < d->ngif_trending) ? &d->gif_trending[i] : nullptr;
+  return (d && d->gif_trending && i < d->ngif_trending) ? &d->gif_trending[i] : nullptr;
 }
 
 size_t ccord_store_gif_search_count(const ccord_store *s)
@@ -1080,7 +1276,7 @@ size_t ccord_store_gif_search_count(const ccord_store *s)
 const ccord_gif_item *ccord_store_gif_search_at(const ccord_store *s, size_t i)
 {
   const ccord_expr_data *d = data_peek(s);
-  return (d && i < d->ngif_search) ? &d->gif_search[i] : nullptr;
+  return (d && d->gif_search && i < d->ngif_search) ? &d->gif_search[i] : nullptr;
 }
 
 size_t ccord_store_favorite_gif_count(const ccord_store *s)
@@ -1092,13 +1288,13 @@ size_t ccord_store_favorite_gif_count(const ccord_store *s)
 const ccord_gif_item *ccord_store_favorite_gif_at(const ccord_store *s, size_t i)
 {
   const ccord_expr_data *d = data_peek(s);
-  return (d && i < d->nfav_gifs) ? &d->fav_gifs[i] : nullptr;
+  return (d && d->fav_gifs && i < d->nfav_gifs) ? &d->fav_gifs[i] : nullptr;
 }
 
 bool ccord_store_is_favorite_gif(const ccord_store *s, const char *url)
 {
   const ccord_expr_data *d = data_peek(s);
-  if (!d || !url || !url[0]) return false;
+  if (!d || !d->fav_gifs || !url || !url[0]) return false;
   for (size_t i = 0; i < d->nfav_gifs; i++) {
     if (strcmp(d->fav_gifs[i].url, url) == 0) return true;
   }
@@ -1130,6 +1326,7 @@ bool ccord_store_toggle_favorite_gif(ccord_store *s, const ccord_gif_item *gif)
     }
   }
   if (d->nfav_gifs >= EXPR_MAX_FAV_GIFS) return false;
+  if (!ensure_gif_buf(&d->fav_gifs, EXPR_MAX_FAV_GIFS)) return false;
   ccord_gif_item fav = *gif;
   if (!fav.src[0]) (void)snprintf(fav.src, sizeof fav.src, "%s", gif->url);
   if (fav.width == 0) fav.width = 320;
@@ -1154,7 +1351,7 @@ bool ccord_store_toggle_favorite_gif(ccord_store *s, const ccord_gif_item *gif)
 bool ccord_store_set_favorite_gif_order(ccord_store *s, const char *url, uint32_t order)
 {
   ccord_expr_data *d = data_get(s, false);
-  if (!d || !url || !url[0]) return false;
+  if (!d || !d->fav_gifs || !url || !url[0]) return false;
   for (size_t i = 0; i < d->nfav_gifs; i++) {
     if (strcmp(d->fav_gifs[i].url, url) != 0) continue;
     if (d->fav_gifs[i].order == order) return false;
@@ -1256,33 +1453,40 @@ static void parse_expr_blob_json(ccord_expr_data *d, unsigned kind, const char *
       if (cats && ccord_json_type_of(cats) == CCORD_JSON_ARRAY) {
         d->ngif_cats = 0;
         size_t n = ccord_json_array_len(cats);
-        for (size_t i = 0; i < n && d->ngif_cats < EXPR_MAX_GIF_CATS; i++) {
-          const ccord_json *c = ccord_json_array_at(cats, i);
-          if (!c || ccord_json_type_of(c) != CCORD_JSON_OBJECT) continue;
-          const char *name = j_str(c, "name");
-          const char *src = j_str(c, "src");
-          if (!name || !name[0]) continue;
-          ccord_gif_category *gc = &d->gif_cats[d->ngif_cats++];
-          memset(gc, 0, sizeof *gc);
-          strncpy(gc->name, name, sizeof gc->name - 1);
-          if (src) strncpy(gc->src, src, sizeof gc->src - 1);
+        if (n > 0 && ensure_gif_cats(d)) {
+          for (size_t i = 0; i < n && d->ngif_cats < EXPR_MAX_GIF_CATS; i++) {
+            const ccord_json *c = ccord_json_array_at(cats, i);
+            if (!c || ccord_json_type_of(c) != CCORD_JSON_OBJECT) continue;
+            const char *name = j_str(c, "name");
+            const char *src = j_str(c, "src");
+            if (!name || !name[0]) continue;
+            ccord_gif_category *gc = &d->gif_cats[d->ngif_cats++];
+            memset(gc, 0, sizeof *gc);
+            strncpy(gc->name, name, sizeof gc->name - 1);
+            if (src) strncpy(gc->src, src, sizeof gc->src - 1);
+          }
         }
       }
     }
     // /gifs/trending also carries the first trending page; use it only until trending-gifs answers with rows.
     const ccord_json *gifs = gif_list_from_json(root);
-    if (gifs && d->ngif_trending == 0) {
+    if (gifs && d->ngif_trending == 0 && ccord_json_array_len(gifs) > 0 &&
+        ensure_gif_buf(&d->gif_trending, EXPR_MAX_GIFS)) {
       parse_gif_array(gifs, d->gif_trending, EXPR_MAX_GIFS, &d->ngif_trending);
     }
   } else if (kind == 2u) { // CCORD_EXPR_GIF_TRENDING
     const ccord_json *arr = gif_list_from_json(root);
     // An empty answer must not wipe the fallback rows already ingested from /gifs/trending.
-    if (arr && ccord_json_array_len(arr) > 0) {
+    if (arr && ccord_json_array_len(arr) > 0 && ensure_gif_buf(&d->gif_trending, EXPR_MAX_GIFS)) {
       parse_gif_array(arr, d->gif_trending, EXPR_MAX_GIFS, &d->ngif_trending);
     }
   } else if (kind == 3u) { // CCORD_EXPR_GIF_SEARCH
     const ccord_json *arr = gif_list_from_json(root);
-    parse_gif_array(arr, d->gif_search, EXPR_MAX_GIFS, &d->ngif_search);
+    if (arr && ccord_json_array_len(arr) > 0 && ensure_gif_buf(&d->gif_search, EXPR_MAX_GIFS)) {
+      parse_gif_array(arr, d->gif_search, EXPR_MAX_GIFS, &d->ngif_search);
+    } else {
+      d->ngif_search = 0;
+    }
   } else if (kind == 4u || kind == 5u) { // CCORD_EXPR_STICKER_PACKS
     const ccord_json *packs = root;
     if (ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
@@ -1368,12 +1572,14 @@ static expr_blob *blob_get(ccord_expr_data *d, unsigned kind, const char *key)
     for (size_t i = 1; i < d->nblobs; i++) {
       if (d->blobs[i].tick < d->blobs[evict].tick) evict = i;
     }
+    if (d->blob_bytes >= d->blobs[evict].len) d->blob_bytes -= d->blobs[evict].len;
+    else d->blob_bytes = 0;
     blob_free(&d->blobs[evict]);
     d->blobs[evict] = d->blobs[d->nblobs - 1];
     memset(&d->blobs[d->nblobs - 1], 0, sizeof d->blobs[0]);
     d->nblobs--;
   }
-  char *k = dup_or_empty(key, EXPR_KEY_MAX);
+  const char *k = dup_or_empty(key, EXPR_KEY_MAX);
   if (!k) return nullptr;
   b = &d->blobs[d->nblobs++];
   *b = (expr_blob){.kind = kind, .key = k};
@@ -1406,10 +1612,33 @@ ccord_status ccord_store_set_expr_blob(ccord_store *s, unsigned kind, const char
   if (!d) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   expr_blob *b = blob_get(d, kind, key);
   if (!b) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+  if (d->blob_bytes >= b->len) d->blob_bytes -= b->len;
+  else d->blob_bytes = 0;
   ccord_free(b->body);
   b->body = nullptr;
   b->len = 0;
   if (ok) {
+    // Keep total cached REST blob bytes within EXPR_BLOB_TOTAL_BYTES_MAX via LRU eviction of other slots.
+    size_t bi = (size_t)(b - d->blobs);
+    while (d->blob_bytes + len > EXPR_BLOB_TOTAL_BYTES_MAX && d->nblobs > 1u) {
+      size_t evict = SIZE_MAX;
+      for (size_t i = 0; i < d->nblobs; i++) {
+        if (i == bi || d->blobs[i].len == 0) continue;
+        if (evict == SIZE_MAX || d->blobs[i].tick < d->blobs[evict].tick) evict = i;
+      }
+      if (evict == SIZE_MAX) break;
+      if (d->blob_bytes >= d->blobs[evict].len) d->blob_bytes -= d->blobs[evict].len;
+      else d->blob_bytes = 0;
+      blob_free(&d->blobs[evict]);
+      size_t last = d->nblobs - 1u;
+      if (evict != last) {
+        d->blobs[evict] = d->blobs[last];
+        if (bi == last) bi = evict;
+      }
+      memset(&d->blobs[last], 0, sizeof d->blobs[0]);
+      d->nblobs--;
+    }
+    b = &d->blobs[bi];
     b->body = ccord_alloc_array(len + 1u, 1);
     if (!b->body) {
       b->state = CCORD_EXPR_BLOB_FAILED;
@@ -1418,6 +1647,7 @@ ccord_status ccord_store_set_expr_blob(ccord_store *s, unsigned kind, const char
     if (len && body) memcpy(b->body, body, len);
     b->body[len] = '\0';
     b->len = len;
+    d->blob_bytes += len;
     b->state = CCORD_EXPR_BLOB_READY;
     parse_expr_blob_json(d, kind, b->body, b->len);
   } else {
