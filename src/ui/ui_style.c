@@ -545,8 +545,10 @@ void uis_slider(ccord_ui *ui, ccord_renderer *r, ccord_rect track, float fractio
 float uis_anim_value(const ccord_ui *ui, const char *ns, uint64_t id)
 {
   uint32_t key = ccord_anim_key(ns, id);
-  for (uint32_t i = 0; i < CCORD_ANIM_SLOTS; i++) {
-    if (ui->anim.slots[i].key == key) return ui->anim.slots[i].value;
+  size_t base = key % CCORD_ANIM_SLOTS;
+  for (size_t i = 0; i < 8u; i++) {
+    const ccord_anim_slot *s = &ui->anim.slots[(base + i) % CCORD_ANIM_SLOTS];
+    if (s->key == key) return s->value;
   }
   return -1.0f;
 }

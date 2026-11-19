@@ -23,7 +23,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CCORD_ANIM_SLOTS 2048u
+#define CCORD_ANIM_SLOTS 512u
 
 typedef struct ccord_anim_slot {
   uint32_t key;          // 0 = free
