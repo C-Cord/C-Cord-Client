@@ -40,6 +40,10 @@
 
 #include <SDL3/SDL_keyboard.h>
 #include <SDL3/SDL_scancode.h>
+#if CCORD_OS_ANDROID
+#include <SDL3/SDL_main.h>
+#include <SDL3/SDL_system.h>
+#endif
 
 #include "account.h"
 #include "app_desktop.h"
@@ -74,6 +78,7 @@
 #if CCORD_WITH_PLUGINS
 #include <ccord/plugins/plugins.h>
 int ccord_plugin_host_main(int argc, char **argv);
+int ccord_plugin_host_run_fd(ccord_socket_t fd, const _Atomic bool *cancel);
 #endif
 
 #define MAX_PLUGIN_DIRS 8
@@ -82,6 +87,7 @@ int ccord_plugin_host_main(int argc, char **argv);
 
 typedef struct options {
   bool headless;
+  bool mobile;                     // --mobile: force responsive mobile layout on desktop for testing
   const char *screenshot;
   const char *verify_slice;
   bool net_stats;
@@ -154,6 +160,12 @@ typedef struct app {
   bool saved_accounts_pushed;               // the saved-account roster was pushed to the UI at least once
   bool media_redraw;                        // a live video/camera texture was uploaded or evicted this pump
   char pending_open_url[512];               // invite / Discord URL passed at launch, opened once connected
+  ccord_safe_insets last_safe;              // last safe-area insets pushed to UI & plugins
+  float last_kb_inset;                      // last soft-keyboard height pushed to UI & plugins
+  bool voice_fg_active;                     // last voice state pushed to Android Foreground Service
+  bool voice_fg_muted;
+  bool voice_fg_deafened;
+  ccord_id voice_fg_channel;
 #if CCORD_LIVE_ACCOUNT
   uint64_t keyring_synced_id;               // last identity upserted into the multi-account keyring
   char keyring_synced_name[128];
@@ -268,6 +280,17 @@ static void host_tray_action(void *ud, ccord_tray_action action)
     case CCORD_TRAY_QUIT:
       a->quit = true;
       break;
+    case CCORD_TRAY_DISCONNECT_VOICE: {
+      if (a->store && a->session) {
+        ccord_id vch = ccord_store_active_voice_channel(a->store);
+        if (vch != CCORD_ID_NONE) {
+          const ccord_channel *vchan = ccord_store_channel(a->store, vch);
+          ccord_id g = vchan ? vchan->guild_id : ccord_store_selected_guild(a->store);
+          (void)ccord_session_leave_voice(a->session, g, &err);
+        }
+      }
+      break;
+    }
   }
 }
 
@@ -339,6 +362,26 @@ static bool host_get_clipboard_image(void *ud, uint8_t **out_png, size_t *out_le
   *out_len = 0;
   *out_png = ccord_platform_get_clipboard_image(a->platform, out_len);
   return *out_png != nullptr && *out_len > 0;
+}
+
+static bool host_haptic_impact(void *ud, int style)
+{
+  app *a = ud;
+  if (!a || !a->platform) return false;
+  if (style < 0 || style > CCORD_HAPTIC_SELECTION) style = CCORD_HAPTIC_LIGHT;
+  return ccord_platform_haptic_impact(a->platform, (ccord_haptic_style)style);
+}
+
+static bool host_share_text(void *ud, const char *title, const char *text)
+{
+  app *a = ud;
+  return a && a->platform && ccord_platform_share_text(a->platform, title, text);
+}
+
+static void host_dismiss_keyboard(void *ud)
+{
+  app *a = ud;
+  if (a && a->platform) ccord_platform_dismiss_keyboard(a->platform);
 }
 
 static uint64_t app_clock(void *ud)
@@ -894,6 +937,93 @@ static bool catalog_http_download_adapter(void *ud, const char *url, const char 
   return ccord_http_download_file(url, dest_path, max_bytes, err_buf, err_cap);
 }
 
+static bool plugin_op_haptic_impact(void *ud, int style)
+{
+  app *a = ud;
+  if (!a || !a->platform) return false;
+  if (style < 0 || style > CCORD_HAPTIC_SELECTION) style = CCORD_HAPTIC_LIGHT;
+  return ccord_platform_haptic_impact(a->platform, (ccord_haptic_style)style);
+}
+
+static bool plugin_op_haptic_notify(void *ud, int kind)
+{
+  app *a = ud;
+  if (!a || !a->platform) return false;
+  if (kind < 0 || kind > CCORD_HAPTIC_NOTIFY_ERROR) kind = CCORD_HAPTIC_NOTIFY_SUCCESS;
+  return ccord_platform_haptic_notify(a->platform, (ccord_haptic_notify_kind)kind);
+}
+
+static bool plugin_op_share_text(void *ud, const char *title, const char *text)
+{
+  app *a = ud;
+  return a && a->platform && ccord_platform_share_text(a->platform, title, text);
+}
+
+static void plugin_op_keyboard_dismiss(void *ud)
+{
+  app *a = ud;
+  if (a && a->platform) ccord_platform_dismiss_keyboard(a->platform);
+}
+
+static bool plugin_op_keep_screen_on(void *ud, bool on)
+{
+  app *a = ud;
+  return a && a->platform && ccord_platform_keep_screen_on(a->platform, on);
+}
+
+static bool plugin_op_set_orientation(void *ud, int mode)
+{
+  app *a = ud;
+  if (!a || !a->platform) return false;
+  if (mode < 0 || mode > CCORD_ORIENT_LANDSCAPE) mode = CCORD_ORIENT_AUTO;
+  return ccord_platform_set_orientation(a->platform, (ccord_orientation_mode)mode);
+}
+
+static bool plugin_op_open_url(void *ud, const char *url)
+{
+  (void)ud;
+  return url && url[0] && ccord_platform_open_url(url);
+}
+
+static bool plugin_op_notify(void *ud, const char *title, const char *body, const char *tag, bool silent)
+{
+  (void)tag;
+  (void)silent;
+  app *a = ud;
+  if (!a || !a->platform || !title) return false;
+  return ccord_platform_notify(a->platform, title, body ? body : "");
+}
+
+static char *plugin_op_clipboard_read(void *ud)
+{
+  app *a = ud;
+  return a && a->platform ? ccord_platform_clipboard_get(a->platform) : nullptr;
+}
+
+static ccord_plugin_platform_state plugins_current_state(const app *a)
+{
+  ccord_plugin_platform_state st = {
+    .safe_top = a->last_safe.top,
+    .safe_right = a->last_safe.right,
+    .safe_bottom = a->last_safe.bottom,
+    .safe_left = a->last_safe.left,
+    .viewport_w = a->viewport_w,
+    .viewport_h = a->viewport_h,
+    .viewport_scale = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f,
+    .keyboard_height = a->last_kb_inset,
+    .keyboard_visible = a->last_kb_inset > 1.0f,
+    .landscape = a->viewport_w > a->viewport_h,
+  };
+  return st;
+}
+
+static void plugins_push_platform_state(app *a)
+{
+  if (!a || !a->plugins) return;
+  ccord_plugin_platform_state st = plugins_current_state(a);
+  ccord_plugins_update_platform_state(a->plugins, &st);
+}
+
 static void plugins_start(app *a)
 {
   if (a->plugins || !a->opt) return;
@@ -901,7 +1031,7 @@ static void plugins_start(app *a)
   char probe[1100];
   snprintf(bundled, sizeof bundled, "%s", CCORD_EXTENSIONS_DIR);   // bundled extensions shipped in the repo
   snprintf(probe, sizeof probe, "%s/copy-message-id/plugin.json", bundled);
-  if (!ccord_path_is_file(probe)) {
+  if (!bundled[0] || !ccord_path_is_file(probe)) {
     const char *ddir = ccord_paths_data_dir();
     if (ddir && ddir[0] && (size_t)snprintf(bundled, sizeof bundled, "%s/bundled_extensions", ddir) < sizeof bundled) {
       (void)ccord_embedded_materialize_extensions(bundled);
@@ -918,14 +1048,53 @@ static void plugins_start(app *a)
   for (size_t i = 0; i < a->opt->plugin_dir_count; i++) dirs[nd++] = a->opt->plugin_dirs[i];
   const char *host_exe = getenv("CCORD_PLUGIN_HOST");
   const char *chosen_host = (host_exe && *host_exe) ? host_exe : CCORD_PLUGIN_HOST_PATH;
-  if ((!host_exe || !*host_exe) && !ccord_path_is_file(chosen_host)) {
+  if ((!host_exe || !*host_exe) && (!chosen_host[0] || !ccord_path_is_file(chosen_host))) {
     chosen_host = ccord_paths_exe_path();
   }
+  ccord_form_factor ff = a->platform ? ccord_platform_form_factor(a->platform) : CCORD_FORM_DESKTOP;
+  bool is_mob = (a->opt && a->opt->mobile) || (a->platform && ccord_platform_is_mobile(a->platform));
+  bool has_touch = (a->opt && a->opt->mobile) || (a->platform && ccord_platform_has_touch(a->platform));
+  const char *ff_str = ff == CCORD_FORM_PHONE ? "phone" : (ff == CCORD_FORM_TABLET ? "tablet" : (is_mob ? "phone" : "desktop"));
+  uint64_t caps = CCORD_CAP_NOTIFICATIONS | CCORD_CAP_SCREEN_CAPTURE | CCORD_CAP_PANELS;
+  if (has_touch) caps |= CCORD_CAP_TOUCH;
+  if (a->platform && ccord_platform_has_haptics(a->platform)) caps |= CCORD_CAP_HAPTICS;
+  if (a->platform && ccord_platform_has_share(a->platform)) caps |= CCORD_CAP_SHARE;
+#if CCORD_OS_ANDROID
+  caps |= CCORD_CAP_SAFE_AREA | CCORD_CAP_KEYBOARD_CONTROL | CCORD_CAP_ORIENTATION_CONTROL | CCORD_CAP_KEEP_SCREEN_ON;
+#else
+  caps |= CCORD_CAP_TRAY | CCORD_CAP_GLOBAL_SHORTCUTS | CCORD_CAP_RPC | CCORD_CAP_HOVER;
+  if (is_mob) caps |= CCORD_CAP_SAFE_AREA | CCORD_CAP_KEYBOARD_CONTROL;
+#endif
   ccord_plugins_config pcfg = {
     .host_exe = chosen_host,
+    .in_process = CCORD_OS_ANDROID ? true : false,
+    .in_process_host_fn = ccord_plugin_host_run_fd,
     .search_dirs = dirs, .search_dir_count = nd, .data_dir = ccord_paths_data_dir(),
     .bus = a->bus, .store = a->store, .session = a->session, .contrib = a->contrib,
     .clipboard_write = plugin_clipboard, .clipboard_ud = a,
+    .has_platform_info = true,
+    .platform_info = {
+      .os = ccord_os_name(),
+      .arch = ccord_os_arch(),
+      .form_factor = ff_str,
+      .is_mobile = is_mob,
+      .touch = has_touch,
+      .android_api_level = ccord_os_android_api_level(),
+      .capabilities = caps,
+    },
+    .platform_state = plugins_current_state(a),
+    .platform_ops = {
+      .ud = a,
+      .haptic_impact = plugin_op_haptic_impact,
+      .haptic_notify = plugin_op_haptic_notify,
+      .share_text = plugin_op_share_text,
+      .keyboard_dismiss = plugin_op_keyboard_dismiss,
+      .keep_screen_on = plugin_op_keep_screen_on,
+      .set_orientation = plugin_op_set_orientation,
+      .open_url = plugin_op_open_url,
+      .notify = plugin_op_notify,
+      .clipboard_read = plugin_op_clipboard_read,
+    },
   };
   if (!a->virtual_clock) {
     pcfg.catalog_http = (ccord_catalog_http){
@@ -969,6 +1138,7 @@ static void usage(FILE *out)
         "  --version, -v           print C-Cord version and exit\n"
         "  --help, -h              print this help message and exit\n"
         "  --headless              use the dummy video driver (no display needed)\n"
+        "  --mobile                force responsive mobile UI layout\n"
         "  --screenshot PATH       render one frame to PNG and exit\n"
         "  --verify-slice NAME     run end-to-end headless verification for slice NAME (m0, m4c, m4d, m5, m6, live-stream, stream-audio, expressions, messaging, settings-proto, events-stage, rich-presence, membership-screening, components-v2, activities, call-bar, search-view, picker-layout, voice-text-chat, earcons, reply-style, ui-style, panel-toggles, smooth-scroll, motion, media-load, hover-edit, status-card, jump-present, ccord-settings, game-detect, profile-edit, reaction-once, rpc-app-name)\n"
         "  --net-stats             print request-governor totals and per-route counters at exit\n"
@@ -1063,6 +1233,8 @@ static int parse_args(int argc, char **argv, options *o)
       exit(0);
     } else if (strcmp(a, "--headless") == 0) {
       o->headless = true;
+    } else if (strcmp(a, "--mobile") == 0) {
+      o->mobile = true;
     } else if (strcmp(a, "--live") == 0) {
       o->live = true;
     } else if (strcmp(a, "--mock") == 0) {
@@ -2060,6 +2232,11 @@ static int run_screenshot(app *a, const options *o)
     }
   }
   if (o->open_settings) {
+    if (ccord_ui_is_mobile_layout(a->ui)) {
+      ccord_ui_set_left_drawer(a->ui, true);
+      run_frames(a, 4);
+      lay = ccord_ui_get_layout(a->ui);
+    }
     inject_mouse(a, CCORD_IN_MOUSE_DOWN, 1, lay->user_panel.x + lay->user_panel.w - 24.0f, lay->user_panel.y + lay->user_panel.h * 0.5f);
     run_frames(a, 2);
   }
@@ -3481,10 +3658,101 @@ static void run_interactive(app *a)
           else ccord_error_clear(&herr);
           continue;
         }
-        if (ccord_ui_handle_input(a->ui, &ev)) redraw = true;
+        if (ev.type == CCORD_IN_APP_BACKGROUND) {
+          if (a->warm && a->session && !ccord_session_is_stale(a->session)) {
+            ccord_error werr;
+            (void)ccord_warm_save(a->warm, a->store, true, &werr);
+          }
+#if CCORD_WITH_PLUGINS
+          if (a->plugins) ccord_plugins_dispatch_lifecycle(a->plugins, "background");
+#endif
+          (void)ccord_ui_handle_input(a->ui, &ev);
+          continue;
+        }
+        if (ev.type == CCORD_IN_APP_FOREGROUND) {
+          if (a->session) {
+            ccord_error lerr;
+            (void)ccord_session_link_event(a->session, CCORD_LINK_RESUMED, &lerr);
+          }
+          if (a->renderer) {
+            ccord_vec2 sz = ccord_render_size(a->renderer);
+            if (sz.x > 0.0f && sz.y > 0.0f) {
+              a->viewport_w = sz.x;
+              a->viewport_h = sz.y;
+              ccord_ui_set_viewport(a->ui, sz.x, sz.y);
+            }
+          }
+          a->last_safe = ccord_platform_safe_area(a->platform);
+          ccord_ui_set_safe_insets(a->ui, a->last_safe.top, a->last_safe.right, a->last_safe.bottom, a->last_safe.left);
+#if CCORD_WITH_PLUGINS
+          plugins_push_platform_state(a);
+          if (a->plugins) ccord_plugins_dispatch_lifecycle(a->plugins, "foreground");
+#endif
+          (void)ccord_ui_handle_input(a->ui, &ev);
+          redraw = true;
+          continue;
+        }
+        if (ev.type == CCORD_IN_APP_LOW_MEMORY) {
+          ccord_render_evict_caches(a->renderer);
+#if CCORD_WITH_PLUGINS
+          if (a->plugins) ccord_plugins_dispatch_lifecycle(a->plugins, "low_memory");
+#endif
+          continue;
+        }
+        if (ev.type == CCORD_IN_RENDER_RESET) {
+          ccord_render_evict_caches(a->renderer);
+          redraw = true;
+          continue;
+        }
+        if (ev.type == CCORD_IN_SAFE_AREA) {
+          a->last_safe = (ccord_safe_insets){ev.inset_top, ev.inset_right, ev.inset_bottom, ev.inset_left};
+#if CCORD_WITH_PLUGINS
+          plugins_push_platform_state(a);
+#endif
+        } else if (ev.type == CCORD_IN_KEYBOARD_INSET) {
+          a->last_kb_inset = ev.inset_bottom;
+#if CCORD_WITH_PLUGINS
+          plugins_push_platform_state(a);
+#endif
+        } else if (ev.type == CCORD_IN_RESIZE) {
+          a->viewport_w = ev.x;
+          a->viewport_h = ev.y;
+#if CCORD_WITH_PLUGINS
+          plugins_push_platform_state(a);
+#endif
+        }
+        bool ui_consumed = ccord_ui_handle_input(a->ui, &ev);
+        if (ui_consumed) redraw = true;
+#if CCORD_OS_ANDROID
+        if (!ui_consumed && ev.type == CCORD_IN_KEY_DOWN && ev.key == CCORD_KEY_BACK) {
+          SDL_Window *sw = ccord_platform_sdl_window(a->platform);
+          if (sw) (void)SDL_MinimizeWindow(sw);
+        }
+#endif
       } while (ccord_platform_next_event(a->platform, &ev, 0));
     }
     if (a->quit) break;
+    // Sync Android Foreground Service + AudioManager comm mode whenever local voice state changes.
+    if (vstate.active != a->voice_fg_active ||
+        (vstate.active && (vstate.channel_id != a->voice_fg_channel ||
+                           vstate.muted != a->voice_fg_muted ||
+                           vstate.deafened != a->voice_fg_deafened))) {
+#if CCORD_OS_ANDROID
+      if (vstate.active && !a->voice_fg_active) {
+        (void)ccord_platform_request_permission(a->platform, "android.permission.RECORD_AUDIO");
+      }
+#endif
+      const char *vch_name = "Voice Call";
+      if (vstate.active && a->store && vstate.channel_id != CCORD_ID_NONE) {
+        const ccord_channel *vch = ccord_store_channel(a->store, vstate.channel_id);
+        if (vch && vch->name && vch->name[0]) vch_name = vch->name;
+      }
+      ccord_platform_set_voice_call_active(a->platform, vstate.active, vch_name, vstate.muted, vstate.deafened);
+      a->voice_fg_active = vstate.active;
+      a->voice_fg_channel = vstate.channel_id;
+      a->voice_fg_muted = vstate.muted;
+      a->voice_fg_deafened = vstate.deafened;
+    }
     // Single-instance control socket: CLI commands from a second ccord invocation.
     if (a->ipc) {
       char cmd[512];
@@ -3603,8 +3871,48 @@ static bool slice_scratch_make(void)
   return true;
 }
 
+#if CCORD_OS_ANDROID
+// Initializes Android private storage env vars before ccord_paths_init() so every module
+// (settings.ini, token store, warm cache, plugin storage, TLS CA bundle) lands inside the app sandbox.
+static void android_init_env(void)
+{
+  const char *internal = SDL_GetAndroidInternalStoragePath();
+  const char *cache = SDL_GetAndroidCachePath();
+  if (!internal || !internal[0]) return;
+  if (!cache || !cache[0]) cache = internal;
+  (void)setenv("HOME", internal, 1);
+  (void)setenv("CCORD_ANDROID_DATA_DIR", internal, 1);
+  char pbuf[CCORD_PATH_MAX];
+  ccord_error err = {0};
+  if (snprintf(pbuf, sizeof pbuf, "%s/config", internal) < (int)sizeof pbuf) {
+    (void)ccord_mkdir_p(pbuf, 0700, &err);
+    (void)setenv("XDG_CONFIG_HOME", pbuf, 1);
+  }
+  if (snprintf(pbuf, sizeof pbuf, "%s/data", internal) < (int)sizeof pbuf) {
+    (void)ccord_mkdir_p(pbuf, 0700, &err);
+    (void)setenv("XDG_DATA_HOME", pbuf, 1);
+  }
+  (void)setenv("XDG_CACHE_HOME", cache, 1);
+  if (snprintf(pbuf, sizeof pbuf, "%s/run", cache) < (int)sizeof pbuf) {
+    (void)ccord_mkdir_p(pbuf, 0700, &err);
+    (void)setenv("XDG_RUNTIME_DIR", pbuf, 1);
+  }
+  if (snprintf(pbuf, sizeof pbuf, "%s/tmp", cache) < (int)sizeof pbuf) {
+    (void)ccord_mkdir_p(pbuf, 0700, &err);
+    (void)setenv("TMPDIR", pbuf, 1);
+  }
+  if (snprintf(pbuf, sizeof pbuf, "%s/cacert.pem", internal) < (int)sizeof pbuf && ccord_path_is_file(pbuf)) {
+    (void)setenv("SSL_CERT_FILE", pbuf, 1);
+    (void)setenv("CCORD_CA_BUNDLE", pbuf, 1);
+  }
+}
+#endif
+
 int main(int argc, char **argv)
 {
+#if CCORD_OS_ANDROID
+  android_init_env();
+#endif
 #if CCORD_WITH_PLUGINS
   if (argc >= 2 && strcmp(argv[1], "--ipc-fd") == 0) {
     return ccord_plugin_host_main(argc, argv);
@@ -3613,6 +3921,9 @@ int main(int argc, char **argv)
   options opt;
   int rc = parse_args(argc, argv, &opt);
   if (rc != 0) return rc;
+#if CCORD_OS_ANDROID
+  opt.no_rpc = true;
+#endif
   ccord_log_set_level(opt.log_level);
   ccord_error err;
   if (ccord_paths_init(argc > 0 ? argv[0] : "ccord", &err) != CCORD_OK) {
@@ -3652,6 +3963,7 @@ int main(int argc, char **argv)
     return 1;
   }
   int result = 1;
+#if !CCORD_OS_ANDROID
   if (!opt.screenshot && !opt.verify_slice) {
     // Single-instance control socket: acquire BEFORE creating a second SDL window, DBus tray/portal
     // session, or live Discord Gateway connection. If a current, responsive primary instance owns the
@@ -3682,6 +3994,7 @@ int main(int argc, char **argv)
       if (!a.ipc) ccord_error_clear(&ierr);   // no runtime dir / permissions: run without single-instance IPC
     }
   }
+#endif
   if (opt.open_url) {
     snprintf(a.pending_open_url, sizeof a.pending_open_url, "%s", opt.open_url);
   }
@@ -3806,7 +4119,8 @@ int main(int argc, char **argv)
   }
 
   ccord_platform_config pc = {.title = "C-Cord", .width = opt.width, .height = opt.height,
-                              .min_width = (int)theme->m.min_window_width, .min_height = (int)theme->m.min_window_height,
+                              .min_width = (opt.mobile || CCORD_OS_ANDROID) ? 320 : (int)theme->m.min_window_width,
+                              .min_height = (opt.mobile || CCORD_OS_ANDROID) ? 400 : (int)theme->m.min_window_height,
                               .headless = opt.headless, .start_minimized = opt.start_minimized};
   a.platform = ccord_platform_create(&pc, &err);
   if (!a.platform) {
@@ -3849,7 +4163,9 @@ int main(int argc, char **argv)
              .set_close_to_tray = host_set_close_to_tray, .apply_quick_css = host_apply_quick_css,
              .keybinds_changed = host_keybinds_changed,
              .account_switch = host_account_switch, .account_remove = host_account_remove,
-             .update_check = host_update_check, .update_install = host_update_install},
+             .update_check = host_update_check, .update_install = host_update_install,
+             .haptic_impact = host_haptic_impact, .share_text = host_share_text,
+             .dismiss_keyboard = host_dismiss_keyboard},
     .fixed_now_unix_ms = fixed,
   };
 #if CCORD_WITH_PLUGINS
@@ -3863,13 +4179,19 @@ int main(int argc, char **argv)
   }
   ccord_vec2 logical = ccord_render_size(a.renderer);   // already divided by the saved UI zoom
   float lw = logical.x, lh = logical.y;
+  bool is_mobile_ui = opt.mobile || ccord_platform_form_factor(a.platform) == CCORD_FORM_PHONE;
   int saved_w = 0, saved_h = 0;
-  if (!opt.screenshot && !opt.verify_slice && ccord_ui_get_saved_window_size(a.ui, &saved_w, &saved_h)) {
+  if (!is_mobile_ui && !ccord_platform_is_mobile(a.platform) &&
+      !opt.screenshot && !opt.verify_slice && ccord_ui_get_saved_window_size(a.ui, &saved_w, &saved_h)) {
     lw = (float)saved_w;
     lh = (float)saved_h;
   }
   a.viewport_w = lw;
   a.viewport_h = lh;
+  if (is_mobile_ui) ccord_ui_set_mobile_mode(a.ui, true);
+  if (opt.mobile || ccord_platform_has_touch(a.platform)) ccord_ui_set_touch_mode(a.ui, true);
+  a.last_safe = ccord_platform_safe_area(a.platform);
+  ccord_ui_set_safe_insets(a.ui, a.last_safe.top, a.last_safe.right, a.last_safe.bottom, a.last_safe.left);
   ccord_ui_set_viewport(a.ui, lw, lh);
   if (warm_res.loaded) ccord_ui_set_stale_saved_ms(a.ui, warm_res.saved_ms);
   ccord_app_desktop_attach_ui(a.desktop, a.ui);

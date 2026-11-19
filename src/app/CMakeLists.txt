@@ -2,22 +2,32 @@ add_library(ccord_account STATIC account.c)
 target_link_libraries(ccord_account PUBLIC ccord_ui_logic)
 ccord_strict_warnings(ccord_account)
 
-add_executable(ccord main.c)
-if(WIN32)
-  target_sources(ccord PRIVATE ${CMAKE_SOURCE_DIR}/assets/windows/ccord.rc)
-endif()
-target_link_libraries(ccord PRIVATE ccord_core ccord_model ccord_store ccord_net ccord_session ccord_theme ccord_platform ccord_render ccord_ui
-                               ccord_account ccord_rpc SDL3::SDL3)
-ccord_strict_warnings(ccord)
-target_compile_definitions(ccord PRIVATE CCORD_BUILD_VERIFY=$<BOOL:${CCORD_BUILD_TESTS}>)
-if(CCORD_LIVE_ACCOUNT)
-  target_compile_definitions(ccord PRIVATE CCORD_LIVE_ACCOUNT=1)
+if(ANDROID)
+  # SDL3's Android SDLActivity loads libmain.so and calls SDL_main().
+  set(CCORD_APP_TARGET main)
+  add_library(main SHARED main.c)
+  # Static FFmpeg AArch64 NEON assembly references internal FFmpeg tables with PC-relative relocations;
+  # -Bsymbolic binds internal symbols locally inside libmain.so without disabling PIC or textrels.
+  target_link_options(main PRIVATE -Wl,-Bsymbolic)
 else()
-  target_compile_definitions(ccord PRIVATE CCORD_LIVE_ACCOUNT=0)
+  set(CCORD_APP_TARGET ccord)
+  add_executable(ccord main.c)
+endif()
+if(WIN32)
+  target_sources(${CCORD_APP_TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/assets/windows/ccord.rc)
+endif()
+target_link_libraries(${CCORD_APP_TARGET} PRIVATE ccord_core ccord_model ccord_store ccord_net ccord_session ccord_theme ccord_platform ccord_render ccord_ui
+                               ccord_account ccord_rpc SDL3::SDL3)
+ccord_strict_warnings(${CCORD_APP_TARGET})
+target_compile_definitions(${CCORD_APP_TARGET} PRIVATE CCORD_BUILD_VERIFY=$<BOOL:${CCORD_BUILD_TESTS}>)
+if(CCORD_LIVE_ACCOUNT)
+  target_compile_definitions(${CCORD_APP_TARGET} PRIVATE CCORD_LIVE_ACCOUNT=1)
+else()
+  target_compile_definitions(${CCORD_APP_TARGET} PRIVATE CCORD_LIVE_ACCOUNT=0)
 endif()
 
 # Core runtime app modules (built unconditionally).
-target_sources(ccord PRIVATE
+target_sources(${CCORD_APP_TARGET} PRIVATE
   voice_audio_thread.c
   app_media.c
   earcons.c
@@ -30,15 +40,15 @@ target_sources(ccord PRIVATE
   scheduled_messages.c
   updater.c)
 
-target_include_directories(ccord PRIVATE ${CMAKE_SOURCE_DIR}/src/ui)
+target_include_directories(${CCORD_APP_TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/src/ui)
 
 if(CCORD_BUILD_TESTS)
   if(CCORD_LIVE_ACCOUNT)
-    target_sources(ccord PRIVATE verify_live_stream.c verify_stream_audio.c verify_expressions.c verify_messaging_events.c verify_rich_presence.c
+    target_sources(${CCORD_APP_TARGET} PRIVATE verify_live_stream.c verify_stream_audio.c verify_expressions.c verify_messaging_events.c verify_rich_presence.c
                                   verify_membership_screening.c verify_components_v2.c verify_activities.c verify_voice_messages.c)
-    target_include_directories(ccord PRIVATE ${CMAKE_SOURCE_DIR}/tests/support)
+    target_include_directories(${CCORD_APP_TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/tests/support)
   endif()
-  target_sources(ccord PRIVATE
+  target_sources(${CCORD_APP_TARGET} PRIVATE
     verify_m5.c
     verify_gif_favorites.c
     verify_embed_video.c
@@ -60,25 +70,32 @@ if(CCORD_BUILD_TESTS)
     verify_composer_format.c verify_settings_profile.c verify_glyph_fallback.c verify_ansi_block.c)
 endif()
 
-# Extensions: the plugin manager and the sandboxed host are built directly into ccord (and standalone ccord-plugin-host).
-target_sources(ccord PRIVATE ../plugin_host/main.c ../plugin_host/sandbox.c)
+# Extensions: the plugin manager and the sandboxed host are built directly into the app
+# (and standalone ccord-plugin-host on desktop; Android runs the sandboxed host on in-process worker threads).
+target_sources(${CCORD_APP_TARGET} PRIVATE ../plugin_host/main.c ../plugin_host/sandbox.c)
 set_source_files_properties(../plugin_host/main.c PROPERTIES COMPILE_DEFINITIONS "CCORD_EMBEDDED_PLUGIN_HOST=1")
-target_include_directories(ccord PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin_host)
-target_link_libraries(ccord PRIVATE ccord_plugins ccord_ipc ccord_lua)
-target_compile_definitions(ccord PRIVATE CCORD_WITH_PLUGINS=1 CCORD_PLUGIN_HOST_PATH="$<IF:$<BOOL:${CCORD_BUILD_TESTS}>,$<TARGET_FILE:ccord-plugin-host>,${CMAKE_INSTALL_FULL_BINDIR}/ccord-plugin-host>" CCORD_EXTENSIONS_DIR="$<IF:$<BOOL:${CCORD_BUILD_TESTS}>,${CMAKE_SOURCE_DIR}/extensions,${CMAKE_INSTALL_FULL_DATADIR}/ccord/extensions>")
-add_dependencies(ccord ccord-plugin-host)
-if(UNIX)
-  add_custom_command(TARGET ccord POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ccord>" "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:ccord>"
-    COMMAND ${CMAKE_COMMAND} -E create_symlink ccord "${CMAKE_CURRENT_BINARY_DIR}/c-cord"
-    COMMAND ${CMAKE_COMMAND} -E create_symlink ccord "${CMAKE_BINARY_DIR}/c-cord"
-    BYPRODUCTS "${CMAKE_BINARY_DIR}/ccord" "${CMAKE_BINARY_DIR}/c-cord" "${CMAKE_CURRENT_BINARY_DIR}/c-cord"
-    COMMENT "Copying self-contained ccord binary (and c-cord alias) to ${CMAKE_BINARY_DIR}")
+target_include_directories(${CCORD_APP_TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/src/plugin_host)
+target_link_libraries(${CCORD_APP_TARGET} PRIVATE ccord_plugins ccord_ipc ccord_lua)
+if(ANDROID)
+  target_compile_definitions(${CCORD_APP_TARGET} PRIVATE CCORD_WITH_PLUGINS=1 CCORD_PLUGIN_HOST_PATH="" CCORD_EXTENSIONS_DIR="")
 else()
-  add_custom_command(TARGET ccord POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ccord>" "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:ccord>"
-    BYPRODUCTS "${CMAKE_BINARY_DIR}/ccord${CMAKE_EXECUTABLE_SUFFIX}"
-    COMMENT "Copying self-contained ccord binary to ${CMAKE_BINARY_DIR}")
+  target_compile_definitions(${CCORD_APP_TARGET} PRIVATE CCORD_WITH_PLUGINS=1 CCORD_PLUGIN_HOST_PATH="$<IF:$<BOOL:${CCORD_BUILD_TESTS}>,$<TARGET_FILE:ccord-plugin-host>,${CMAKE_INSTALL_FULL_BINDIR}/ccord-plugin-host>" CCORD_EXTENSIONS_DIR="$<IF:$<BOOL:${CCORD_BUILD_TESTS}>,${CMAKE_SOURCE_DIR}/extensions,${CMAKE_INSTALL_FULL_DATADIR}/ccord/extensions>")
+  add_dependencies(${CCORD_APP_TARGET} ccord-plugin-host)
+endif()
+if(NOT ANDROID)
+  if(UNIX)
+    add_custom_command(TARGET ccord POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ccord>" "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:ccord>"
+      COMMAND ${CMAKE_COMMAND} -E create_symlink ccord "${CMAKE_CURRENT_BINARY_DIR}/c-cord"
+      COMMAND ${CMAKE_COMMAND} -E create_symlink ccord "${CMAKE_BINARY_DIR}/c-cord"
+      BYPRODUCTS "${CMAKE_BINARY_DIR}/ccord" "${CMAKE_BINARY_DIR}/c-cord" "${CMAKE_CURRENT_BINARY_DIR}/c-cord"
+      COMMENT "Copying self-contained ccord binary (and c-cord alias) to ${CMAKE_BINARY_DIR}")
+  else()
+    add_custom_command(TARGET ccord POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:ccord>" "${CMAKE_BINARY_DIR}/$<TARGET_FILE_NAME:ccord>"
+      BYPRODUCTS "${CMAKE_BINARY_DIR}/ccord${CMAKE_EXECUTABLE_SUFFIX}"
+      COMMENT "Copying self-contained ccord binary to ${CMAKE_BINARY_DIR}")
+  endif()
 endif()
 
 if(CCORD_BUILD_TESTS)
@@ -213,20 +230,22 @@ if(CCORD_BUILD_TESTS)
   include(tests/m6_verify.cmake)
 endif()
 
-# Desktop integration, runtime assets, and bundled extensions (written under the install prefix).
-install(TARGETS ccord RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/assets/fonts ${CMAKE_SOURCE_DIR}/assets/themes
-        DESTINATION ${CMAKE_INSTALL_DATADIR}/ccord)
-install(DIRECTORY ${CMAKE_SOURCE_DIR}/extensions
-        DESTINATION ${CMAKE_INSTALL_DATADIR}/ccord)
-if(UNIX AND NOT APPLE)
-  install(FILES ${CMAKE_SOURCE_DIR}/assets/icons/C-Cord.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
-  foreach(sz 16 22 24 32 48 64 128 256 512)
-    install(FILES ${CMAKE_SOURCE_DIR}/assets/icons/ccord-${sz}.png
-            DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${sz}x${sz}/apps RENAME C-Cord.png)
-  endforeach()
-elseif(APPLE)
-  configure_file(${CMAKE_SOURCE_DIR}/assets/macos/Info.plist.in
-                 ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
-  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/Info.plist DESTINATION ${CMAKE_INSTALL_DATADIR}/ccord)
+if(NOT ANDROID)
+  # Desktop integration, runtime assets, and bundled extensions (written under the install prefix).
+  install(TARGETS ccord RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+  install(DIRECTORY ${CMAKE_SOURCE_DIR}/assets/fonts ${CMAKE_SOURCE_DIR}/assets/themes
+          DESTINATION ${CMAKE_INSTALL_DATADIR}/ccord)
+  install(DIRECTORY ${CMAKE_SOURCE_DIR}/extensions
+          DESTINATION ${CMAKE_INSTALL_DATADIR}/ccord)
+  if(UNIX AND NOT APPLE)
+    install(FILES ${CMAKE_SOURCE_DIR}/assets/icons/C-Cord.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+    foreach(sz 16 22 24 32 48 64 128 256 512)
+      install(FILES ${CMAKE_SOURCE_DIR}/assets/icons/ccord-${sz}.png
+              DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/${sz}x${sz}/apps RENAME C-Cord.png)
+    endforeach()
+  elseif(APPLE)
+    configure_file(${CMAKE_SOURCE_DIR}/assets/macos/Info.plist.in
+                   ${CMAKE_CURRENT_BINARY_DIR}/Info.plist @ONLY)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/Info.plist DESTINATION ${CMAKE_INSTALL_DATADIR}/ccord)
+  endif()
 endif()
