@@ -48,6 +48,17 @@ static void list_free(admin_list *l)
   *l = (admin_list){0};
 }
 
+static bool list_ensure_cap(admin_list *l, size_t elem)
+{
+  if (l->n < l->cap) return true;
+  size_t ncap = l->cap ? l->cap * 2u : 8u;
+  void *grown = ccord_realloc_array(l->items, ncap, elem);
+  if (!grown) return false;
+  l->items = grown;
+  l->cap = ncap;
+  return true;
+}
+
 static void guild_lists_free(admin_guild *g)
 {
   list_free(&g->bans);
@@ -397,11 +408,9 @@ static ccord_status list_upsert_invite(admin_list *l, const ccord_invite *invite
     *mutated = true;
     return CCORD_OK;
   }
-  ccord_invite *grown = ccord_realloc_array(l->items, l->n + 1u, sizeof *grown);
-  if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  l->items = grown;
-  l->cap = l->n + 1u;
-  if (!copy_invite(&l->arena, &grown[l->n], invite)) {
+  if (!list_ensure_cap(l, sizeof *items)) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+  items = l->items;
+  if (!copy_invite(&l->arena, &items[l->n], invite)) {
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
   l->n++;
@@ -655,11 +664,9 @@ ccord_status ccord_store_upsert_automod_rule(ccord_store *s, ccord_id guild_id, 
     ccord_store_roles_mutated(s);
     return CCORD_OK;
   }
-  ccord_automod_rule *grown = ccord_realloc_array(g->automod.items, g->automod.n + 1u, sizeof *grown);
-  if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  g->automod.items = grown;
-  g->automod.cap = g->automod.n + 1u;
-  if (!copy_automod(&g->automod.arena, &grown[g->automod.n], rule)) {
+  if (!list_ensure_cap(&g->automod, sizeof *items)) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+  items = g->automod.items;
+  if (!copy_automod(&g->automod.arena, &items[g->automod.n], rule)) {
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
   g->automod.n++;
@@ -737,11 +744,9 @@ ccord_status ccord_store_upsert_webhook(ccord_store *s, ccord_id guild_id, const
     ccord_store_roles_mutated(s);
     return CCORD_OK;
   }
-  ccord_webhook *grown = ccord_realloc_array(g->webhooks.items, g->webhooks.n + 1u, sizeof *grown);
-  if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  g->webhooks.items = grown;
-  g->webhooks.cap = g->webhooks.n + 1u;
-  if (!copy_webhook(&g->webhooks.arena, &grown[g->webhooks.n], item)) {
+  if (!list_ensure_cap(&g->webhooks, sizeof *items)) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+  items = g->webhooks.items;
+  if (!copy_webhook(&g->webhooks.arena, &items[g->webhooks.n], item)) {
     return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   }
   g->webhooks.n++;
@@ -817,11 +822,9 @@ ccord_status ccord_store_add_followed_channel(ccord_store *s, ccord_id guild_id,
       return CCORD_OK;
     }
   }
-  ccord_followed_channel *grown = ccord_realloc_array(g->followed.items, g->followed.n + 1u, sizeof *grown);
-  if (!grown) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  g->followed.items = grown;
-  g->followed.cap = g->followed.n + 1u;
-  grown[g->followed.n++] = *fc;
+  if (!list_ensure_cap(&g->followed, sizeof *items)) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+  items = g->followed.items;
+  items[g->followed.n++] = *fc;
   g->followed.loaded = true;
   ccord_store_roles_mutated(s);
   return CCORD_OK;
