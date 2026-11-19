@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -68,6 +69,14 @@ struct ui_forum_state {
   ui_forum_post_hit post_hits[UI_FORUM_MAX_VISIBLE_POSTS];
   size_t post_hit_count;
 
+  // Cached filtered & sorted post indices into store_posts
+  bool cache_valid;
+  uint64_t cache_store_rev;
+  ccord_id cache_forum_id;
+  ccord_forum_sort cache_sort;
+  size_t cached_indices[UI_FORUM_MAX_VISIBLE_POSTS];
+  size_t cached_count;
+
   // Chat header breadcrumb when viewing a forum post thread
   ccord_rect breadcrumb_rect;
   ccord_id breadcrumb_forum_id;
@@ -119,6 +128,22 @@ bool ui_forum_is_active(const ccord_ui *ui)
 
 void ui_forum_set_breadcrumb_rect(ccord_ui *ui, ccord_rect r, ccord_id forum_id)
 {
+  if (!ui) return;
+  if (forum_id == CCORD_ID_NONE && r.w == 0.0f && r.h == 0.0f) {
+    if (!ui->forum) return;
+    ui->forum->breadcrumb_rect = (ccord_rect){0};
+    ui->forum->breadcrumb_forum_id = CCORD_ID_NONE;
+    if (!ui_forum_is_active(ui)) {
+      ccord_id sel = ui->d.store ? ccord_store_selected_channel(ui->d.store) : CCORD_ID_NONE;
+      const ccord_channel *ch = (sel != CCORD_ID_NONE && ui->d.store) ? ccord_store_channel(ui->d.store, sel) : nullptr;
+      bool in_forum_thread =
+        ch && ch->parent_id != CCORD_ID_NONE && ccord_store_channel_is_forum(ui->d.store, ch->parent_id);
+      if (!in_forum_thread) {
+        ui_forum_destroy(ui);
+      }
+    }
+    return;
+  }
   struct ui_forum_state *f = forum_ensure(ui);
   if (!f) return;
   f->breadcrumb_rect = r;
@@ -328,8 +353,24 @@ static float draw_tag_pill(ccord_ui *ui, ccord_renderer *r, float x, float y, fl
   return w;
 }
 
+typedef struct forum_sort_entry {
+  size_t idx;
+  int64_t key;
+  bool pinned;
+} forum_sort_entry;
+
+static int forum_sort_cmp(const void *pa, const void *pb)
+{
+  const forum_sort_entry *a = pa;
+  const forum_sort_entry *b = pb;
+  if (a->pinned != b->pinned) return a->pinned ? -1 : 1;
+  if (a->key != b->key) return a->key > b->key ? -1 : 1;
+  return a->idx < b->idx ? -1 : (a->idx > b->idx ? 1 : 0);
+}
+
 void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
 {
+  if (!ui || !r || !ui_forum_is_active(ui)) return;
   struct ui_forum_state *f = forum_ensure(ui);
   if (!f) return;
 
@@ -347,6 +388,7 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
     ccord_text_edit_clear(&f->body_edit);
     const ccord_forum_meta *meta = ccord_store_forum_meta(ui->d.store, forum_id);
     if (meta) f->sort = (ccord_forum_sort)meta->default_sort;
+    f->cache_valid = false;
   }
 
   // Forum view occupies both message_area and composer area
@@ -539,38 +581,45 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
   }
   f->viewport_h = list_rect.h;
 
-  // Gather and sort matching posts
-  const ccord_forum_post *posts[UI_FORUM_MAX_VISIBLE_POSTS];
-  size_t nposts = 0;
+  // Gather and sort matching posts (cached across frames until filter, sort, channel, or store revision changes)
   size_t total_store_posts = 0;
   const ccord_forum_post *store_posts = ccord_store_forum_posts(ui->d.store, forum_id, &total_store_posts);
-  for (size_t i = 0; i < total_store_posts && nposts < UI_FORUM_MAX_VISIBLE_POSTS; i++) {
-    const ccord_forum_post *p = &store_posts[i];
-    if (post_matches_filter(ui, f, p)) {
-      posts[nposts++] = p;
-    }
-  }
-
-  // Insertion sort: pinned first, then by chosen sort key descending
-  for (size_t i = 1; i < nposts; i++) {
-    const ccord_forum_post *cur = posts[i];
-    int64_t cur_key = (f->sort == CCORD_FORUM_SORT_CREATION) ? cur->create_ts_ms : cur->last_activity_ms;
-    size_t j = i;
-    while (j > 0) {
-      const ccord_forum_post *prev = posts[j - 1];
-      int64_t prev_key = (f->sort == CCORD_FORUM_SORT_CREATION) ? prev->create_ts_ms : prev->last_activity_ms;
-      bool swap = false;
-      if (cur->pinned && !prev->pinned) {
-        swap = true;
-      } else if (cur->pinned == prev->pinned && cur_key > prev_key) {
-        swap = true;
+  uint64_t store_rev = ccord_store_revision(ui->d.store);
+  if (!f->cache_valid || f->cache_store_rev != store_rev || f->cache_forum_id != forum_id || f->cache_sort != f->sort) {
+    forum_sort_entry entries[UI_FORUM_MAX_VISIBLE_POSTS];
+    size_t nent = 0;
+    for (size_t i = 0; i < total_store_posts && nent < UI_FORUM_MAX_VISIBLE_POSTS; i++) {
+      const ccord_forum_post *p = &store_posts[i];
+      if (post_matches_filter(ui, f, p)) {
+        entries[nent++] = (forum_sort_entry){
+          .idx = i,
+          .key = (f->sort == CCORD_FORUM_SORT_CREATION) ? p->create_ts_ms : p->last_activity_ms,
+          .pinned = p->pinned,
+        };
       }
-      if (!swap) break;
-      posts[j] = prev;
-      j--;
     }
-    posts[j] = cur;
+    // Pinned first, then by chosen sort key descending (use qsort for >32 items, insertion sort for small lists)
+    if (nent > 32u) {
+      qsort(entries, nent, sizeof entries[0], forum_sort_cmp);
+    } else {
+      for (size_t i = 1; i < nent; i++) {
+        forum_sort_entry cur = entries[i];
+        size_t j = i;
+        while (j > 0 && forum_sort_cmp(&cur, &entries[j - 1]) < 0) {
+          entries[j] = entries[j - 1];
+          j--;
+        }
+        entries[j] = cur;
+      }
+    }
+    for (size_t i = 0; i < nent; i++) f->cached_indices[i] = entries[i].idx;
+    f->cached_count = nent;
+    f->cache_store_rev = store_rev;
+    f->cache_forum_id = forum_id;
+    f->cache_sort = f->sort;
+    f->cache_valid = true;
   }
+  size_t nposts = f->cached_count;
 
   float card_h = 96.0f;
   float card_gap = 10.0f;
@@ -593,7 +642,7 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
   ccord_push_clip(r, list_rect);
 
   int64_t now_ms = ui->d.fixed_now_unix_ms != 0 ? ui->d.fixed_now_unix_ms
-                                                 : (int64_t)time(nullptr) * 1000;
+                 : (ui->now_unix_ms != 0 ? ui->now_unix_ms : (int64_t)time(nullptr) * 1000);
   float fsz_base = M(font_size_base);
   float fsz_title = fsz_base + 1.5f;
   float lh_title = ui_line_h(ui, fsz_title);
@@ -611,7 +660,9 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
   }
 
   for (size_t i = 0; i < nposts; i++) {
-    const ccord_forum_post *post = posts[i];
+    size_t idx = f->cached_indices[i];
+    if (idx >= total_store_posts) continue;
+    const ccord_forum_post *post = &store_posts[idx];
     float cy = list_rect.y + (float)i * (card_h + card_gap) - f->scroll_y;
     ccord_rect card = {area.x + pad_x, cy, avail_w, card_h};
     if (card.y + card.h < list_rect.y || card.y > list_rect.y + list_rect.h) continue;
@@ -874,6 +925,7 @@ bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev)
             ccord_error err = {0};
             (void)ccord_text_edit_insert(&f->title_edit, f->search_edit.data, f->search_edit.len, &err);
             ccord_text_edit_clear(&f->search_edit);
+            f->cache_valid = false;
           }
         } else {
           f->active_field = 0;
@@ -890,17 +942,20 @@ bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev)
 
       if (ui_in_rect(mx, my, f->sort_activity_rect)) {
         f->sort = CCORD_FORUM_SORT_ACTIVITY;
+        f->cache_valid = false;
         ui_mark_dirty(ui);
         return true;
       }
       if (ui_in_rect(mx, my, f->sort_creation_rect)) {
         f->sort = CCORD_FORUM_SORT_CREATION;
+        f->cache_valid = false;
         ui_mark_dirty(ui);
         return true;
       }
       if (f->clear_filter_rect.w > 0.0f && ui_in_rect(mx, my, f->clear_filter_rect)) {
         f->filter_tag_count = 0;
         ccord_text_edit_clear(&f->search_edit);
+        f->cache_valid = false;
         ui_mark_dirty(ui);
         return true;
       }
@@ -911,6 +966,7 @@ bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev)
                           f->filter_tag_hits[i].tag_id);
           f->scroll_y = 0.0f;
           ccord_scroller_cancel(&f->glide);
+          f->cache_valid = false;
           ui_mark_dirty(ui);
           return true;
         }
@@ -982,6 +1038,7 @@ bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev)
       ccord_text_edit *ed = active_forum_edit(f);
       ccord_error err = {0};
       if (ccord_text_edit_insert(ed, ev->text, strlen(ev->text), &err) == CCORD_OK) {
+        if (ed == &f->search_edit) f->cache_valid = false;
         ui_mark_dirty(ui);
         return true;
       }
@@ -994,10 +1051,12 @@ bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev)
       switch (ev->key) {
         case CCORD_KEY_BACKSPACE:
           ccord_text_edit_backspace(ed);
+          if (ed == &f->search_edit) f->cache_valid = false;
           ui_mark_dirty(ui);
           return true;
         case CCORD_KEY_DELETE:
           ccord_text_edit_delete(ed);
+          if (ed == &f->search_edit) f->cache_valid = false;
           ui_mark_dirty(ui);
           return true;
         case CCORD_KEY_LEFT:
