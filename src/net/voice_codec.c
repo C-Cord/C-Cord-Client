@@ -38,13 +38,8 @@ ccord_voice_codec *ccord_voice_codec_create(ccord_error *err)
     ccord_free(c);
     return nullptr;
   }
-  c->dec = opus_decoder_create((opus_int32)CCORD_VOICE_SAMPLE_RATE, (int)CCORD_VOICE_CHANNELS, &opus_err);
-  if (opus_err != OPUS_OK || !c->dec) {
-    opus_encoder_destroy(c->enc);
-    ccord_error_set(err, CCORD_ERR_INTERNAL, "voice: opus decoder init failed");
-    ccord_free(c);
-    return nullptr;
-  }
+  // Decoder is created lazily on the first ccord_voice_decode() call (voice_gateway uses per-SSRC decoders).
+  c->dec = nullptr;
   (void)opus_encoder_ctl(c->enc, OPUS_SET_BITRATE(64000));
   (void)opus_encoder_ctl(c->enc, OPUS_SET_COMPLEXITY(5));
   (void)opus_encoder_ctl(c->enc, OPUS_SET_INBAND_FEC(1));
@@ -77,11 +72,19 @@ ccord_status ccord_voice_decode(ccord_voice_codec *c, const uint8_t *packet, siz
                                 int16_t *pcm, size_t samples, size_t *out_samples, ccord_error *err)
 {
   ccord_error_clear(err);
-  if (!c || !c->dec || !packet || !pcm || !out_samples) {
+  if (!c || !packet || !pcm || !out_samples) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "voice: decode fields");
   }
   if (samples < 120 || samples > 5760 || len > (size_t)INT32_MAX) {
     return ccord_error_set(err, CCORD_ERR_RANGE, "voice: opus frame size out of range");
+  }
+  if (!c->dec) {
+    int opus_err = OPUS_OK;
+    c->dec = opus_decoder_create((opus_int32)CCORD_VOICE_SAMPLE_RATE, (int)CCORD_VOICE_CHANNELS, &opus_err);
+    if (opus_err != OPUS_OK || !c->dec) {
+      c->dec = nullptr;
+      return ccord_error_set(err, CCORD_ERR_INTERNAL, "voice: opus decoder init failed");
+    }
   }
   int n = opus_decode(c->dec, packet, (opus_int32)len, pcm, (int)samples, 0);
   if (n < 0) return ccord_error_set(err, CCORD_ERR_INTERNAL, "voice: opus decode failed");
