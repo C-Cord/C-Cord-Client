@@ -53,6 +53,11 @@
 // buffer handed to sws_scale as a destination is over-allocated by this tail; sizes and copies stay w*h*4.
 #define PLATFORM_SWS_DST_PAD 128u
 
+typedef struct platform_drop_buf {
+  char queue[DROP_QUEUE_CAP][DROP_PATH_MAX];
+  char last[DROP_PATH_MAX];
+} platform_drop_buf;
+
 struct ccord_platform {
   SDL_Window *window;
   SDL_Cursor *cursors[CCORD_CURSOR_COUNT];       // indexed by ccord_cursor_kind, created lazily
@@ -79,13 +84,12 @@ struct ccord_platform {
   uint8_t *clip_image;
   size_t clip_image_len;
   SDL_Mutex *drop_mutex;
-  char drop_queue[DROP_QUEUE_CAP][DROP_PATH_MAX];
+  platform_drop_buf *drop_buf;    // lazily allocated on first file drop/pick/inject
   size_t drop_tail;
   size_t drop_ev_head;
   size_t drop_ev_count;
   size_t drop_pop_head;
   size_t drop_pop_count;
-  char last_drop[DROP_PATH_MAX];
   ccord_desktop *desktop;       // DBus notifications / SNI tray / GlobalShortcuts (offline-safe)
   char base_title[BASE_TITLE_MAX];
   uint32_t badge_unread;
@@ -101,6 +105,9 @@ struct ccord_platform {
   ccord_linkwatch *link;        // wake-from-sleep / default-route change detector
   ccord_link_event_fn link_fn;
   void *link_ud;
+  uint64_t last_bg_pump_ms;     // throttles DBus/link polling during rapid timeout=0 event drains
+  bool bg_pumped_once;
+  atomic_bool link_dirty;       // set on injected link events for immediate delivery
   atomic_bool global_ptt_held;   // push-to-talk shortcut held (portal Activated .. Deactivated / session lost)
   atomic_bool in_background;     // true while Android app is backgrounded (EGL surface paused)
   atomic_bool pending_bg_ev;
@@ -449,6 +456,7 @@ void ccord_platform_destroy(ccord_platform *p)
     if (p->cursors[i]) SDL_DestroyCursor(p->cursors[i]);
   }
   ccord_free(p->clip_image);
+  ccord_free(p->drop_buf);
   ccord_free(s_test_clip_image);
   s_test_clip_image = nullptr;
   s_test_clip_image_len = 0;
@@ -697,6 +705,12 @@ static void copy_utf8_prefix(char *dst, size_t cap, const char *src, size_t len)
   dst[n] = '\0';
 }
 
+static platform_drop_buf *drop_buf_ensure(ccord_platform *p)
+{
+  if (!p->drop_buf) p->drop_buf = ccord_calloc(1, sizeof *p->drop_buf);
+  return p->drop_buf;
+}
+
 ccord_status ccord_platform_inject_drop_file(ccord_platform *p, const char *path, ccord_error *err)
 {
   ccord_error_clear(err);
@@ -706,8 +720,13 @@ ccord_status ccord_platform_inject_drop_file(ccord_platform *p, const char *path
     return ccord_error_set(err, CCORD_ERR_INVALID, "drop file: invalid path");
   }
   if (p->drop_mutex) SDL_LockMutex(p->drop_mutex);
-  memcpy(p->last_drop, path, len + 1);
-  memcpy(p->drop_queue[p->drop_tail], path, len + 1);
+  platform_drop_buf *db = drop_buf_ensure(p);
+  if (!db) {
+    if (p->drop_mutex) SDL_UnlockMutex(p->drop_mutex);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "drop file: out of memory");
+  }
+  memcpy(db->last, path, len + 1);
+  memcpy(db->queue[p->drop_tail], path, len + 1);
   p->drop_tail = (p->drop_tail + 1) % DROP_QUEUE_CAP;
 
   if (p->drop_ev_count < DROP_QUEUE_CAP) {
@@ -754,8 +773,11 @@ void ccord_platform_open_file_dialog(ccord_platform *p)
 
 const char *ccord_platform_last_drop_file(const ccord_platform *p)
 {
-  if (!p || !p->last_drop[0]) return nullptr;
-  return p->last_drop;
+  if (!p) return nullptr;
+  if (p->drop_mutex) SDL_LockMutex(p->drop_mutex);
+  const char *res = (p->drop_buf && p->drop_buf->last[0]) ? p->drop_buf->last : nullptr;
+  if (p->drop_mutex) SDL_UnlockMutex(p->drop_mutex);
+  return res;
 }
 
 bool ccord_platform_pop_drop_file(ccord_platform *p, char *out, size_t cap)
@@ -764,12 +786,12 @@ bool ccord_platform_pop_drop_file(ccord_platform *p, char *out, size_t cap)
   out[0] = '\0';
   bool ok = false;
   if (p->drop_mutex) SDL_LockMutex(p->drop_mutex);
-  if (p->drop_pop_count > 0) {
-    const char *src = p->drop_queue[p->drop_pop_head];
+  if (p->drop_buf && p->drop_pop_count > 0) {
+    const char *src = p->drop_buf->queue[p->drop_pop_head];
     size_t len = strlen(src);
     if (len < cap) {
       memcpy(out, src, len + 1);
-      memcpy(p->last_drop, src, len + 1);
+      memcpy(p->drop_buf->last, src, len + 1);
       ok = true;
     }
     p->drop_pop_head = (p->drop_pop_head + 1) % DROP_QUEUE_CAP;
@@ -918,7 +940,9 @@ void ccord_platform_set_link_callback(ccord_platform *p, ccord_link_event_fn fn,
 
 void ccord_platform_inject_link_event(ccord_platform *p, ccord_link_event ev)
 {
-  if (p) ccord_linkwatch_inject(p->link, ev);
+  if (!p) return;
+  ccord_linkwatch_inject(p->link, ev);
+  atomic_store(&p->link_dirty, true);
 }
 
 // Samples the clocks and the route socket, then hands every pending event to the callback (main thread, no waiting).
@@ -1210,29 +1234,41 @@ void ccord_audio_clear(ccord_audio *a)
 
 // ---- video streaming codec pipeline ----
 
+// Mutable lazily-initialized state for ccord_video_stream (accessed via pointer so const getters
+// can lazily materialize last_rgba or probe PipeWire without casting away const).
+typedef struct video_stream_lazy {
+  bool pipewire_probed;
+  bool pipewire_available;
+  struct SwsContext *sws_to_rgba;
+  struct SwsContext *sws_preview_rgba;
+  uint8_t *last_rgba;
+  size_t last_rgba_cap;
+  int last_w;
+  int last_h;
+  bool preview_wanted;
+  bool enc_preview_dirty;
+} video_stream_lazy;
+
 struct ccord_video_stream {
   int width;
   int height;
   int fps;
   int bitrate;
-  bool pipewire_available;
+  bool use_pipewire;
   bool last_keyframe;
   bool force_keyframe;
   const AVCodec *enc_codec;
   const AVCodec *dec_codec;
   AVCodecContext *enc_ctx;
-  AVCodecContext *dec_ctx;
+  AVCodecContext *dec_ctx;   // opened lazily on first decode_rgba()
   AVFrame *enc_frame;
-  AVFrame *dec_frame;
+  AVFrame *dec_frame;        // allocated lazily on first decode_rgba()
   AVPacket *pkt;
   struct SwsContext *sws_to_yuv;
-  struct SwsContext *sws_to_rgba;
-  struct SwsContext *sws_preview_rgba;
   int64_t pts;
   uint32_t synth_step;
-  uint8_t *last_rgba;
-  int last_w;
-  int last_h;
+  video_stream_lazy *lazy;
+  video_stream_lazy lazy_storage;
 };
 
 void ccord_video_resolve_dimensions(int src_w, int src_h, int target_height, int *out_w, int *out_h)
@@ -1306,23 +1342,36 @@ static bool open_video_codec_pair(ccord_video_stream *v, const AVCodec *enc)
     avcodec_free_context(&ec);
     return false;
   }
-  AVCodecContext *dc = avcodec_alloc_context3(dec);
-  if (!dc) {
-    avcodec_free_context(&ec);
-    return false;
-  }
-  dc->flags |= AV_CODEC_FLAG_LOW_DELAY;
-  dc->thread_count = 1;
-  if (avcodec_open2(dc, dec, nullptr) < 0) {
-    avcodec_free_context(&dc);
-    avcodec_free_context(&ec);
-    return false;
-  }
+  // Decoder context is opened lazily in decode_rgba() so outbound-only streams never pay its memory cost.
   v->enc_codec = enc;
   v->dec_codec = dec;
   v->enc_ctx = ec;
-  v->dec_ctx = dc;
+  v->dec_ctx = nullptr;
   return true;
+}
+
+static ccord_status ensure_video_decoder(ccord_video_stream *v, ccord_error *err)
+{
+  if (v->dec_ctx && v->dec_frame) return CCORD_OK;
+  if (!v->dec_codec) {
+    return ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "video decode: no matching decoder");
+  }
+  if (!v->dec_ctx) {
+    AVCodecContext *dc = avcodec_alloc_context3(v->dec_codec);
+    if (!dc) return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: out of memory");
+    dc->flags |= AV_CODEC_FLAG_LOW_DELAY;
+    dc->thread_count = 1;
+    if (avcodec_open2(dc, v->dec_codec, nullptr) < 0) {
+      avcodec_free_context(&dc);
+      return ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "video decode: avcodec_open2 failed");
+    }
+    v->dec_ctx = dc;
+  }
+  if (!v->dec_frame) {
+    v->dec_frame = av_frame_alloc();
+    if (!v->dec_frame) return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: out of memory");
+  }
+  return CCORD_OK;
 }
 
 static bool probe_h264_encoders(ccord_video_stream *v, const char *preferred)
@@ -1424,9 +1473,8 @@ ccord_video_stream *ccord_video_stream_create(const ccord_video_config *cfg, cco
   v->height = (c.height + 1) & ~1;
   v->fps = c.fps;
   v->bitrate = c.bitrate;
-  if (c.use_pipewire) {
-    v->pipewire_available = probe_pipewire();
-  }
+  v->use_pipewire = c.use_pipewire;
+  v->lazy = &v->lazy_storage;
   bool opened = false;
   if (c.codec == CCORD_VIDEO_CODEC_H264) {
     opened = probe_h264_encoders(v, c.preferred_encoder);
@@ -1440,9 +1488,8 @@ ccord_video_stream *ccord_video_stream_create(const ccord_video_config *cfg, cco
     return nullptr;
   }
   v->enc_frame = av_frame_alloc();
-  v->dec_frame = av_frame_alloc();
   v->pkt = av_packet_alloc();
-  if (!v->enc_frame || !v->dec_frame || !v->pkt) {
+  if (!v->enc_frame || !v->pkt) {
     ccord_video_stream_destroy(v);
     ccord_error_set(err, CCORD_ERR_NOMEM, "video: cannot allocate AVFrame/AVPacket");
     return nullptr;
@@ -1462,14 +1509,16 @@ void ccord_video_stream_destroy(ccord_video_stream *v)
 {
   if (!v) return;
   if (v->sws_to_yuv) sws_freeContext(v->sws_to_yuv);
-  if (v->sws_to_rgba) sws_freeContext(v->sws_to_rgba);
-  if (v->sws_preview_rgba) sws_freeContext(v->sws_preview_rgba);
+  if (v->lazy) {
+    if (v->lazy->sws_to_rgba) sws_freeContext(v->lazy->sws_to_rgba);
+    if (v->lazy->sws_preview_rgba) sws_freeContext(v->lazy->sws_preview_rgba);
+    ccord_free(v->lazy->last_rgba);
+  }
   if (v->enc_frame) av_frame_free(&v->enc_frame);
   if (v->dec_frame) av_frame_free(&v->dec_frame);
   if (v->pkt) av_packet_free(&v->pkt);
   if (v->enc_ctx) avcodec_free_context(&v->enc_ctx);
   if (v->dec_ctx) avcodec_free_context(&v->dec_ctx);
-  ccord_free(v->last_rgba);
   ccord_free(v);
 }
 
@@ -1505,7 +1554,72 @@ void ccord_video_stream_force_keyframe(ccord_video_stream *v)
 
 bool ccord_video_stream_pipewire_available(const ccord_video_stream *v)
 {
-  return v ? v->pipewire_available : false;
+  if (!v || !v->use_pipewire || !v->lazy) return false;
+  if (!v->lazy->pipewire_probed) {
+    v->lazy->pipewire_probed = true;
+    v->lazy->pipewire_available = probe_pipewire();
+  }
+  return v->lazy->pipewire_available;
+}
+
+static bool video_stream_ensure_rgba_buf(video_stream_lazy *lz, int w, int h)
+{
+  size_t need = (size_t)w * (size_t)h * 4u + PLATFORM_SWS_DST_PAD;
+  if (!lz->last_rgba || need > lz->last_rgba_cap) {
+    uint8_t *nbuf = ccord_malloc(need);
+    if (!nbuf) return false;
+    ccord_free(lz->last_rgba);
+    lz->last_rgba = nbuf;
+    lz->last_rgba_cap = need;
+  }
+  lz->last_w = w;
+  lz->last_h = h;
+  return true;
+}
+
+static void video_stream_update_preview(ccord_video_stream *v, const uint8_t *pixels, int width, int height,
+                                        int src_stride, enum AVPixelFormat src_fmt)
+{
+  video_stream_lazy *lz = v->lazy;
+  if (!video_stream_ensure_rgba_buf(lz, v->width, v->height)) return;
+  if (width == v->width && height == v->height) {
+    const size_t row_bytes = (size_t)v->width * 4u;
+    if (src_fmt == AV_PIX_FMT_RGBA) {
+      if ((size_t)src_stride == row_bytes) {
+        memcpy(lz->last_rgba, pixels, row_bytes * (size_t)v->height);
+      } else {
+        for (int y = 0; y < v->height; y++) {
+          memcpy(lz->last_rgba + (size_t)y * row_bytes, pixels + (size_t)y * (size_t)src_stride, row_bytes);
+        }
+      }
+      lz->enc_preview_dirty = false;
+      return;
+    }
+    if (src_fmt == AV_PIX_FMT_BGRA) {
+      for (int y = 0; y < v->height; y++) {
+        const uint8_t *restrict s = pixels + (size_t)y * (size_t)src_stride;
+        uint8_t *restrict d = lz->last_rgba + (size_t)y * row_bytes;
+        for (int x = 0; x < v->width; x++, s += 4, d += 4) {
+          d[0] = s[2];
+          d[1] = s[1];
+          d[2] = s[0];
+          d[3] = s[3];
+        }
+      }
+      lz->enc_preview_dirty = false;
+      return;
+    }
+  }
+  lz->sws_preview_rgba = sws_getCachedContext(lz->sws_preview_rgba, width, height, src_fmt, v->width, v->height,
+                                              AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+  if (lz->sws_preview_rgba) {
+    const uint8_t *src_slices[1] = {pixels};
+    int src_linesize[1] = {src_stride};
+    uint8_t *dst_slices[1] = {lz->last_rgba};
+    int dst_linesize[1] = {v->width * 4};
+    sws_scale(lz->sws_preview_rgba, src_slices, src_linesize, 0, height, dst_slices, dst_linesize);
+    lz->enc_preview_dirty = false;
+  }
 }
 
 static ccord_status encode_pixels_internal(ccord_video_stream *v, const uint8_t *pixels, int width, int height,
@@ -1529,25 +1643,11 @@ static ccord_status encode_pixels_internal(ccord_video_stream *v, const uint8_t 
   int src_linesize[1] = {src_stride};
   sws_scale(v->sws_to_yuv, src_slices, src_linesize, 0, height, v->enc_frame->data, v->enc_frame->linesize);
 
-  // Also keep last_rgba updated with the scaled preview frame
-  size_t preview_bytes = (size_t)v->width * (size_t)v->height * 4u;
-  if (!v->last_rgba || v->last_w != v->width || v->last_h != v->height) {
-    uint8_t *nbuf = ccord_malloc(preview_bytes + PLATFORM_SWS_DST_PAD);
-    if (nbuf) {
-      ccord_free(v->last_rgba);
-      v->last_rgba = nbuf;
-      v->last_w = v->width;
-      v->last_h = v->height;
-    }
-  }
-  if (v->last_rgba && v->last_w == v->width && v->last_h == v->height) {
-    v->sws_preview_rgba = sws_getCachedContext(v->sws_preview_rgba, width, height, src_fmt, v->width, v->height,
-                                               AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-    if (v->sws_preview_rgba) {
-      uint8_t *dst_slices[1] = {v->last_rgba};
-      int dst_linesize[1] = {v->width * 4};
-      sws_scale(v->sws_preview_rgba, src_slices, src_linesize, 0, height, dst_slices, dst_linesize);
-    }
+  // Only allocate/update last_rgba when a caller actually reads the preview; otherwise defer lazily.
+  if (v->lazy->preview_wanted) {
+    video_stream_update_preview(v, pixels, width, height, src_stride, src_fmt);
+  } else {
+    v->lazy->enc_preview_dirty = true;
   }
 
   v->enc_frame->pts = v->pts++;
@@ -1600,6 +1700,8 @@ ccord_status ccord_video_stream_decode_rgba(ccord_video_stream *v, const uint8_t
   if (!v || !pkt || pkt_len == 0 || pkt_len > (size_t)INT_MAX) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "video decode: invalid argument");
   }
+  ccord_status dec_st = ensure_video_decoder(v, err);
+  if (dec_st != CCORD_OK) return dec_st;
   av_packet_unref(v->pkt);
   if (av_new_packet(v->pkt, (int)pkt_len) < 0) {
     return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: av_new_packet failed");
@@ -1614,28 +1716,31 @@ ccord_status ccord_video_stream_decode_rgba(ccord_video_stream *v, const uint8_t
   int dw = v->dec_frame->width;
   int dh = v->dec_frame->height;
   if (dw <= 0 || dh <= 0 || dw > 3840 || dh > 2160) {
+    av_frame_unref(v->dec_frame);
     return ccord_error_set(err, CCORD_ERR_PARSE, "video decode: invalid decoded dimensions");
   }
   size_t bytes = (size_t)dw * (size_t)dh * 4u;
-  if (!v->last_rgba || v->last_w != dw || v->last_h != dh) {
-    uint8_t *nbuf = ccord_malloc(bytes + PLATFORM_SWS_DST_PAD);
-    if (!nbuf) return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: out of memory");
-    ccord_free(v->last_rgba);
-    v->last_rgba = nbuf;
-    v->last_w = dw;
-    v->last_h = dh;
+  video_stream_lazy *lz = v->lazy;
+  if (!video_stream_ensure_rgba_buf(lz, dw, dh)) {
+    av_frame_unref(v->dec_frame);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: out of memory");
   }
-  v->sws_to_rgba = sws_getCachedContext(v->sws_to_rgba, dw, dh, (enum AVPixelFormat)v->dec_frame->format, dw, dh,
-                                        AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
-  if (!v->sws_to_rgba) return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: sws_getCachedContext failed");
-  uint8_t *dst_slices[1] = {v->last_rgba};
+  lz->sws_to_rgba = sws_getCachedContext(lz->sws_to_rgba, dw, dh, (enum AVPixelFormat)v->dec_frame->format, dw, dh,
+                                         AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+  if (!lz->sws_to_rgba) {
+    av_frame_unref(v->dec_frame);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: sws_getCachedContext failed");
+  }
+  uint8_t *dst_slices[1] = {lz->last_rgba};
   int dst_linesize[1] = {dw * 4};
-  sws_scale(v->sws_to_rgba, (const uint8_t *const *)v->dec_frame->data, v->dec_frame->linesize, 0, dh, dst_slices,
+  sws_scale(lz->sws_to_rgba, (const uint8_t *const *)v->dec_frame->data, v->dec_frame->linesize, 0, dh, dst_slices,
             dst_linesize);
+  av_frame_unref(v->dec_frame);
+  lz->enc_preview_dirty = false;
   if (out_rgba) {
     uint8_t *copy = ccord_malloc(bytes);
     if (!copy) return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: out of memory");
-    memcpy(copy, v->last_rgba, bytes);
+    memcpy(copy, lz->last_rgba, bytes);
     *out_rgba = copy;
   }
   if (out_w) *out_w = dw;
@@ -1678,14 +1783,29 @@ ccord_status ccord_video_stream_step_test_frame(ccord_video_stream *v, ccord_err
 
 const uint8_t *ccord_video_stream_last_rgba(const ccord_video_stream *v, int *out_w, int *out_h)
 {
-  if (!v || !v->last_rgba) {
-    if (out_w) *out_w = 0;
-    if (out_h) *out_h = 0;
-    return nullptr;
+  if (out_w) *out_w = 0;
+  if (out_h) *out_h = 0;
+  if (!v || !v->lazy) return nullptr;
+  video_stream_lazy *lz = v->lazy;
+  lz->preview_wanted = true;
+  if (lz->enc_preview_dirty && v->enc_frame && v->enc_frame->data[0]) {
+    if (video_stream_ensure_rgba_buf(lz, v->width, v->height)) {
+      lz->sws_to_rgba = sws_getCachedContext(lz->sws_to_rgba, v->width, v->height,
+                                             (enum AVPixelFormat)v->enc_frame->format, v->width, v->height,
+                                             AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+      if (lz->sws_to_rgba) {
+        uint8_t *dst_slices[1] = {lz->last_rgba};
+        int dst_linesize[1] = {v->width * 4};
+        sws_scale(lz->sws_to_rgba, (const uint8_t *const *)v->enc_frame->data, v->enc_frame->linesize, 0, v->height,
+                  dst_slices, dst_linesize);
+        lz->enc_preview_dirty = false;
+      }
+    }
   }
-  if (out_w) *out_w = v->last_w;
-  if (out_h) *out_h = v->last_h;
-  return v->last_rgba;
+  if (!lz->last_rgba || lz->last_w <= 0 || lz->last_h <= 0) return nullptr;
+  if (out_w) *out_w = lz->last_w;
+  if (out_h) *out_h = lz->last_h;
+  return lz->last_rgba;
 }
 
 // ---- event translation ----
@@ -1931,8 +2051,13 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
       size_t n = path ? strlen(path) : 0;
       if (n == 0 || n >= DROP_PATH_MAX || !ccord_utf8_valid(path, n)) return false;
       if (p->drop_mutex) SDL_LockMutex(p->drop_mutex);
-      memcpy(p->last_drop, path, n + 1);
-      memcpy(p->drop_queue[p->drop_tail], path, n + 1);
+      platform_drop_buf *db = drop_buf_ensure(p);
+      if (!db) {
+        if (p->drop_mutex) SDL_UnlockMutex(p->drop_mutex);
+        return false;
+      }
+      memcpy(db->last, path, n + 1);
+      memcpy(db->queue[p->drop_tail], path, n + 1);
       p->drop_tail = (p->drop_tail + 1) % DROP_QUEUE_CAP;
       if (p->drop_pop_count < DROP_QUEUE_CAP) {
         p->drop_pop_count++;
@@ -1960,10 +2085,21 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
 bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32_t timeout_ms)
 {
   if (!p || !out) return false;
-  // Dispatch pending DBus replies/signals first (portal Activated lands in the hotkey queue),
-  // then drain the queues before waiting on SDL events.
-  ccord_desktop_pump(p->desktop);
-  platform_pump_link(p);
+  // Dispatch pending DBus replies/signals and sample clocks/netlink on blocking waits, on first
+  // poll, or at most every 8 ms during rapid timeout=0 drains (e.g. mouse-motion bursts).
+  // Injected link events (tests / Android JNI) still pump immediately.
+  uint64_t now_ms = SDL_GetTicks();
+  bool need_bg_pump = timeout_ms > 0 || !p->bg_pumped_once ||
+                      (now_ms >= p->last_bg_pump_ms && now_ms - p->last_bg_pump_ms >= 8u);
+  if (need_bg_pump) {
+    p->bg_pumped_once = true;
+    p->last_bg_pump_ms = now_ms;
+    ccord_desktop_pump(p->desktop);
+    atomic_store(&p->link_dirty, false);
+    platform_pump_link(p);
+  } else if (atomic_exchange(&p->link_dirty, false)) {
+    platform_pump_link(p);
+  }
 
   if (atomic_exchange(&p->pending_bg_ev, false)) {
     memset(out, 0, sizeof *out);
@@ -2033,11 +2169,11 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
 
   bool queued_drop = false;
   if (p->drop_mutex) SDL_LockMutex(p->drop_mutex);
-  if (p->drop_ev_count > 0) {
+  if (p->drop_buf && p->drop_ev_count > 0) {
     memset(out, 0, sizeof *out);
-    const char *src = p->drop_queue[p->drop_ev_head];
+    const char *src = p->drop_buf->queue[p->drop_ev_head];
     size_t len = strlen(src);
-    memcpy(p->last_drop, src, len + 1);
+    memcpy(p->drop_buf->last, src, len + 1);
     p->drop_ev_head = (p->drop_ev_head + 1) % DROP_QUEUE_CAP;
     p->drop_ev_count--;
     if (p->drop_ev_count == 0 && p->drop_pop_count == 0) {
@@ -2046,21 +2182,23 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
       p->drop_pop_head = 0;
     }
     out->type = CCORD_EV_DROP_FILE;
-    copy_utf8_prefix(out->text, sizeof out->text, p->last_drop, len);
+    copy_utf8_prefix(out->text, sizeof out->text, p->drop_buf->last, len);
     queued_drop = true;
   }
   if (p->drop_mutex) SDL_UnlockMutex(p->drop_mutex);
   if (queued_drop) return true;
 
-  uint64_t deadline = SDL_GetTicks() + timeout_ms;
+  uint64_t deadline = timeout_ms > 0 ? SDL_GetTicks() + timeout_ms : 0;
   uint32_t wait = timeout_ms;
   for (;;) {
     SDL_Event e;
     bool got = wait > 0 ? SDL_WaitEventTimeout(&e, (int32_t)wait) : SDL_PollEvent(&e);
     if (!got) return false;
     if (translate(p, &e, out)) return true;   // unknown or malformed events are dropped
-    uint64_t now = SDL_GetTicks();
-    wait = now < deadline ? (uint32_t)(deadline - now) : 0;
+    if (wait > 0) {
+      uint64_t now = SDL_GetTicks();
+      wait = now < deadline ? (uint32_t)(deadline - now) : 0;
+    }
   }
 }
 
