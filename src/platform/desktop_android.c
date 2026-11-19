@@ -67,6 +67,17 @@ static float g_insets_bottom = 0.0f;
 static float g_insets_left = 0.0f;
 static float g_insets_ime = 0.0f;
 
+// Pending Autofill values pushed from Android AutofillManager (Bitwarden / password managers).
+#define ANDROID_AUTOFILL_CAP 8u
+#define ANDROID_AUTOFILL_TEXT_CAP 512u
+typedef struct android_autofill_item {
+  int field;
+  char text[ANDROID_AUTOFILL_TEXT_CAP];
+} android_autofill_item;
+static android_autofill_item g_autofill_q[ANDROID_AUTOFILL_CAP];
+static size_t g_autofill_head = 0;
+static size_t g_autofill_count = 0;
+
 static JNIEnv *android_env(bool *attached_out)
 {
   if (attached_out) *attached_out = false;
@@ -334,6 +345,76 @@ void ccord_android_stop_screen_capture(void)
   android_env_release(attached);
 }
 
+void ccord_android_on_first_frame(void)
+{
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls, "onFirstFrameRendered", "()V");
+    if (mid) (*env)->CallStaticVoidMethod(env, cls, mid);
+    clear_exception(env);
+  }
+  android_env_release(attached);
+}
+
+void ccord_android_set_auth_autofill(int mode, int active_field, bool commit,
+                                     int email_x, int email_y, int email_w, int email_h,
+                                     int pw_x, int pw_y, int pw_w, int pw_h,
+                                     int otp_x, int otp_y, int otp_w, int otp_h,
+                                     const char *email_text, const char *pw_text, const char *otp_text)
+{
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(
+        env, cls, "setAuthAutofill",
+        "(IIZ" "IIII" "IIII" "IIII" "Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+    if (mid) {
+      jstring jemail = (*env)->NewStringUTF(env, email_text ? email_text : "");
+      jstring jpw = (*env)->NewStringUTF(env, pw_text ? pw_text : "");
+      jstring jotp = (*env)->NewStringUTF(env, otp_text ? otp_text : "");
+      if (jemail && jpw && jotp) {
+        (*env)->CallStaticVoidMethod(
+            env, cls, mid, (jint)mode, (jint)active_field, commit ? JNI_TRUE : JNI_FALSE,
+            (jint)email_x, (jint)email_y, (jint)email_w, (jint)email_h,
+            (jint)pw_x, (jint)pw_y, (jint)pw_w, (jint)pw_h,
+            (jint)otp_x, (jint)otp_y, (jint)otp_w, (jint)otp_h,
+            jemail, jpw, jotp);
+      }
+      if (jemail) (*env)->DeleteLocalRef(env, jemail);
+      if (jpw) (*env)->DeleteLocalRef(env, jpw);
+      if (jotp) (*env)->DeleteLocalRef(env, jotp);
+    }
+    clear_exception(env);
+  }
+  android_env_release(attached);
+}
+
+bool ccord_android_poll_autofill(int *out_field, char *out_text, size_t cap)
+{
+  bool got = false;
+  ccord_spin_lock_acquire(&g_jni_lock);
+  if (g_autofill_count > 0) {
+    android_autofill_item *it = &g_autofill_q[g_autofill_head];
+    if (out_field) *out_field = it->field;
+    if (out_text && cap > 0) {
+      size_t len = strlen(it->text);
+      size_t n = len < cap - 1u ? len : cap - 1u;
+      while (n > 0 && !ccord_utf8_valid(it->text, n)) n--;
+      if (n > 0) memcpy(out_text, it->text, n);
+      out_text[n] = '\0';
+    }
+    memset(it, 0, sizeof *it);
+    g_autofill_head = (g_autofill_head + 1u) % ANDROID_AUTOFILL_CAP;
+    g_autofill_count--;
+    got = true;
+  }
+  ccord_spin_lock_release(&g_jni_lock);
+  return got;
+}
+
 bool ccord_android_poll_insets(float *top, float *right, float *bottom, float *left, float *ime_bottom)
 {
   ccord_spin_lock_acquire(&g_jni_lock);
@@ -366,6 +447,33 @@ Java_org_ccord_android_CCordBridge_nativeOnInsetsChanged(JNIEnv *env, jclass cls
   g_insets_ime = ime_bottom >= 0.0f ? ime_bottom : 0.0f;
   g_insets_dirty = true;
   ccord_spin_lock_release(&g_jni_lock);
+}
+
+JNIEXPORT void JNICALL
+Java_org_ccord_android_CCordBridge_nativeOnAutofillField(JNIEnv *env, jclass cls, jint field, jstring jtext)
+{
+  (void)cls;
+  if (!env || !jtext || field < 1 || field > 3) return;
+  const char *utf = (*env)->GetStringUTFChars(env, jtext, nullptr);
+  if (!utf) return;
+  size_t len = strlen(utf);
+  if (ccord_utf8_valid(utf, len)) {
+    ccord_spin_lock_acquire(&g_jni_lock);
+    size_t tail = (g_autofill_head + g_autofill_count) % ANDROID_AUTOFILL_CAP;
+    android_autofill_item *it = &g_autofill_q[tail];
+    it->field = (int)field;
+    size_t n = len < ANDROID_AUTOFILL_TEXT_CAP - 1u ? len : ANDROID_AUTOFILL_TEXT_CAP - 1u;
+    while (n > 0 && !ccord_utf8_valid(utf, n)) n--;
+    if (n > 0) memcpy(it->text, utf, n);
+    it->text[n] = '\0';
+    if (g_autofill_count < ANDROID_AUTOFILL_CAP) {
+      g_autofill_count++;
+    } else {
+      g_autofill_head = (g_autofill_head + 1u) % ANDROID_AUTOFILL_CAP;
+    }
+    ccord_spin_lock_release(&g_jni_lock);
+  }
+  (*env)->ReleaseStringUTFChars(env, jtext, utf);
 }
 
 JNIEXPORT void JNICALL

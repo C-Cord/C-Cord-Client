@@ -760,14 +760,9 @@ static ccord_rect account_password_box_rect(const sgeom *g)
   return (ccord_rect){x, g->content.y + 114.0f, w, UIS_H_INPUT};
 }
 
-static ccord_rect account_mfa_box_rect(const sgeom *g)
-{
-  return (ccord_rect){g->content.x, g->content.y + 176.0f, 160.0f, UIS_H_INPUT};
-}
-
 static ccord_rect account_login_btn_rect(const sgeom *g)
 {
-  return (ccord_rect){g->content.x + 168.0f, g->content.y + 176.0f, 168.0f, UIS_H_BTN};
+  return (ccord_rect){g->content.x, g->content.y + 168.0f, 180.0f, UIS_H_BTN};
 }
 
 static ccord_rect account_token_box_rect(const sgeom *g)
@@ -869,22 +864,87 @@ static ccord_rect login_token_save_rect(const ccord_rect *card)
 
 static ccord_rect login_email_box_rect(const ccord_rect *card)
 {
-  return (ccord_rect){card->x + 32.0f, card->y + 190.0f, card->w - 64.0f, UIS_H_INPUT};
+  return (ccord_rect){card->x + 32.0f, card->y + 196.0f, card->w - 64.0f, UIS_H_INPUT};
 }
 
 static ccord_rect login_password_box_rect(const ccord_rect *card)
 {
-  return (ccord_rect){card->x + 32.0f, card->y + 246.0f, card->w - 64.0f, UIS_H_INPUT};
-}
-
-static ccord_rect login_mfa_box_rect(const ccord_rect *card)
-{
-  return (ccord_rect){card->x + 32.0f, card->y + 302.0f, card->w - 64.0f, UIS_H_INPUT};
+  return (ccord_rect){card->x + 32.0f, card->y + 262.0f, card->w - 64.0f, UIS_H_INPUT};
 }
 
 static ccord_rect login_credentials_btn_rect(const ccord_rect *card)
 {
-  return (ccord_rect){card->x + 32.0f, card->y + 344.0f, card->w - 64.0f, UIS_H_BTN_LG};
+  return (ccord_rect){card->x + 32.0f, card->y + 320.0f, card->w - 64.0f, UIS_H_BTN_LG};
+}
+
+// Secondary 2FA / TOTP popup modal (only shown after Discord requests 2FA for the account).
+static ccord_rect mfa_popup_rect(const ccord_ui *ui)
+{
+  float sl = ui->mobile_layout ? ui->safe_insets.left : 0.0f;
+  float sr = ui->mobile_layout ? ui->safe_insets.right : 0.0f;
+  float st = ui->mobile_layout ? ui->safe_insets.top : 0.0f;
+  float sb = ui->mobile_layout ? (ui->keyboard_inset > ui->safe_insets.bottom ? ui->keyboard_inset : ui->safe_insets.bottom) : 0.0f;
+  float uw = ui->win_w - sl - sr;
+  float uh = ui->win_h - st - sb;
+  float cw = 400.0f, ch = 296.0f;
+  float pad = ui->mobile_layout ? UIS_SP_3 : 16.0f;
+  if (cw > uw - 2.0f * pad) cw = uw - 2.0f * pad;
+  if (ch > uh - 2.0f * pad) ch = uh - 2.0f * pad;
+  if (cw < 240.0f) cw = uw > 0.0f ? uw : ui->win_w;
+  if (ch < 220.0f) ch = uh > 0.0f ? uh : ui->win_h;
+  return (ccord_rect){roundf(sl + (uw - cw) * 0.5f), roundf(st + (uh - ch) * 0.5f), cw, ch};
+}
+
+static ccord_rect mfa_popup_input_rect(const ccord_rect *pop)
+{
+  return (ccord_rect){pop->x + 28.0f, pop->y + 148.0f, pop->w - 56.0f, UIS_H_INPUT};
+}
+
+static ccord_rect mfa_popup_verify_rect(const ccord_rect *pop)
+{
+  return (ccord_rect){pop->x + 28.0f, pop->y + 196.0f, pop->w - 56.0f, UIS_H_BTN_LG};
+}
+
+static ccord_rect mfa_popup_back_rect(const ccord_rect *pop)
+{
+  return (ccord_rect){pop->x + 28.0f, pop->y + 244.0f, pop->w - 56.0f, UIS_H_BTN};
+}
+
+void ui_settings_auth_autofill_rects(const ccord_ui *ui, ccord_rect *email_r, ccord_rect *pw_r, ccord_rect *otp_r)
+{
+  if (email_r) *email_r = (ccord_rect){0};
+  if (pw_r) *pw_r = (ccord_rect){0};
+  if (otp_r) *otp_r = (ccord_rect){0};
+  if (!ui) return;
+  if (ui->account_mfa_required) {
+    ccord_rect pop = mfa_popup_rect(ui);
+    if (otp_r) *otp_r = mfa_popup_input_rect(&pop);
+    return;
+  }
+  if (ui_is_login_screen(ui)) {
+    ccord_rect card = login_card_rect(ui);
+    if (email_r) *email_r = login_email_box_rect(&card);
+    if (pw_r) *pw_r = login_password_box_rect(&card);
+  } else if (ui->settings_open && ui->settings_page == SP_ACCOUNT && !ui->account_view.signed_in) {
+    sgeom g = geometry(ui);
+    if (email_r) *email_r = account_email_box_rect(&g);
+    if (pw_r) *pw_r = account_password_box_rect(&g);
+  }
+}
+
+void ui_settings_dismiss_mfa(ccord_ui *ui)
+{
+  if (!ui || !ui->account_mfa_required) return;
+  ccord_text_edit_clear(&ui->account_mfa_edit);
+  ui->account_mfa_required = false;
+  ui->account_login_is_error = false;
+  ui->account_login_status[0] = '\0';
+  ui->account_focus_field = 2;
+  ui->touch_text_focused = false;
+  if (ui->d.host.account_action) {
+    ui->d.host.account_action(ui->d.host.ud, CCORD_ACCOUNT_ACTION_MFA_CANCEL);
+  }
+  ui->dirty = true;
 }
 
 ccord_rect ui_settings_rect(const ccord_ui *ui, bool plugins_tab)
@@ -2141,6 +2201,141 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
   return false;
 }
 
+// Shared keyboard editing for single-line login/account fields (supports Copy/Cut/Paste/Select All/arrows).
+static bool handle_account_field_edit_key(ccord_ui *ui, ccord_text_edit *active, bool masked,
+                                          const ccord_input_event *ev)
+{
+  if (!active || ev->type != CCORD_IN_KEY_DOWN) return false;
+  bool mod = (ev->mods & (CCORD_MOD_CTRL | CCORD_MOD_SUPER)) != 0;
+  if (ev->key == CCORD_KEY_BACKSPACE) {
+    if (mod) ccord_text_edit_backspace_word(active);
+    else ccord_text_edit_backspace(active);
+    ui->dirty = true;
+    return true;
+  }
+  if (ev->key == CCORD_KEY_DELETE) {
+    if (mod) ccord_text_edit_delete_word(active);
+    else ccord_text_edit_delete(active);
+    ui->dirty = true;
+    return true;
+  }
+  if (ev->key == CCORD_KEY_LEFT) {
+    ccord_text_edit_move(active, mod ? -3 : -1, (ev->mods & CCORD_MOD_SHIFT) != 0);
+    ui->dirty = true;
+    return true;
+  }
+  if (ev->key == CCORD_KEY_RIGHT) {
+    ccord_text_edit_move(active, mod ? 3 : 1, (ev->mods & CCORD_MOD_SHIFT) != 0);
+    ui->dirty = true;
+    return true;
+  }
+  if (ev->key == CCORD_KEY_HOME) {
+    ccord_text_edit_move(active, -2, (ev->mods & CCORD_MOD_SHIFT) != 0);
+    ui->dirty = true;
+    return true;
+  }
+  if (ev->key == CCORD_KEY_END) {
+    ccord_text_edit_move(active, 2, (ev->mods & CCORD_MOD_SHIFT) != 0);
+    ui->dirty = true;
+    return true;
+  }
+  if (mod && ev->key == CCORD_KEY_A) {
+    ccord_text_edit_select_all(active);
+    ui->dirty = true;
+    return true;
+  }
+  if (mod && !masked && (ev->key == CCORD_KEY_C || ev->key == CCORD_KEY_X) && ui->d.host.clipboard_set) {
+    char *sel = ccord_text_edit_copy_selection(active);
+    if (sel) {
+      ui->d.host.clipboard_set(ui->d.host.ud, sel);
+      ccord_free(sel);
+      if (ev->key == CCORD_KEY_X) ccord_text_edit_backspace(active);
+    } else if (active->len > 0) {
+      ui->d.host.clipboard_set(ui->d.host.ud, ccord_text_edit_cstr(active));
+      if (ev->key == CCORD_KEY_X) ccord_text_edit_clear(active);
+    }
+    ui->dirty = true;
+    return true;
+  }
+  if (mod && ev->key == CCORD_KEY_V && ui->d.host.clipboard_get) {
+    char *clip = ui->d.host.clipboard_get(ui->d.host.ud);
+    if (clip) {
+      ccord_error ierr;
+      (void)ccord_text_edit_insert(active, clip, strlen(clip), &ierr);
+      ccord_free(clip);
+    }
+    ui->dirty = true;
+    return true;
+  }
+  return false;
+}
+
+static bool handle_mfa_popup(ccord_ui *ui, const ccord_input_event *ev)
+{
+  ccord_rect pop = mfa_popup_rect(ui);
+  ccord_rect mbox = mfa_popup_input_rect(&pop);
+  ccord_rect vbtn = mfa_popup_verify_rect(&pop);
+  ccord_rect bbtn = mfa_popup_back_rect(&pop);
+  if (ev->type == CCORD_IN_MOUSE_MOVE) {
+    ui->dirty = true;
+    return true;
+  }
+  if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 3) {
+    if (ui_in_rect(ev->x, ev->y, mbox)) {
+      ui->account_focus_field = 4;
+      ui->text_area = mbox;
+      ui_menu_open_text_field(ui, ev->x, ev->y, &ui->account_mfa_edit, false, false, false, false);
+      return true;
+    }
+    return true;
+  }
+  if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 1) {
+    if (ui_in_rect(ev->x, ev->y, mbox)) {
+      ui->account_focus_field = 4;
+      ui->touch_text_focused = true;
+      ui->text_area = mbox;
+      ui->dirty = true;
+      return true;
+    }
+    if (ui_in_rect(ev->x, ev->y, vbtn)) {
+      ui->touch_text_focused = false;
+      if (ui->d.host.account_action) {
+        ui->d.host.account_action(ui->d.host.ud, CCORD_ACCOUNT_ACTION_CREDENTIALS_LOGIN);
+      }
+      ui->dirty = true;
+      return true;
+    }
+    if (ui_in_rect(ev->x, ev->y, bbtn)) {
+      ui_settings_dismiss_mfa(ui);
+      return true;
+    }
+    ui->touch_text_focused = false;
+    return true;
+  }
+  if (ev->type == CCORD_IN_TEXT && ev->text[0]) {
+    ccord_error ierr;
+    (void)ccord_text_edit_insert(&ui->account_mfa_edit, ev->text, strlen(ev->text), &ierr);
+    ui->dirty = true;
+    return true;
+  }
+  if (ev->type == CCORD_IN_KEY_DOWN) {
+    if (ev->key == CCORD_KEY_ESCAPE) {
+      ui_settings_dismiss_mfa(ui);
+      return true;
+    }
+    if (ev->key == CCORD_KEY_RETURN) {
+      ui->touch_text_focused = false;
+      if (ui->d.host.account_action) {
+        ui->d.host.account_action(ui->d.host.ud, CCORD_ACCOUNT_ACTION_CREDENTIALS_LOGIN);
+      }
+      ui->dirty = true;
+      return true;
+    }
+    if (handle_account_field_edit_key(ui, &ui->account_mfa_edit, false, ev)) return true;
+  }
+  return true;
+}
+
 bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
 {
   if (!ui->settings_open) return false;
@@ -2158,12 +2353,42 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     if (ui->account_focus_field == 5) ui->account_focus_field = 0;
     ui->dirty = true;
   }
+  if (ui->account_mfa_required && (ui_is_login_screen(ui) || ui->settings_page == SP_ACCOUNT)) {
+    return handle_mfa_popup(ui, ev);
+  }
   if (ui_is_login_screen(ui)) {
     ccord_rect card = login_card_rect(ui);
     if (ev->type == CCORD_IN_MOUSE_MOVE) {
       ui->hover_settings_page = -1;
       ui->hover_settings_close = false;
       ui->dirty = true;
+      return true;
+    }
+    if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 3) {
+      if (ui->login_tab == 0) {
+        ccord_rect tbox = login_token_box_rect(&card);
+        if (ui_in_rect(ev->x, ev->y, tbox)) {
+          ui->account_focus_field = 1;
+          ui->text_area = tbox;
+          ui_menu_open_text_field(ui, ev->x, ev->y, &ui->account_token_edit, true, false, false, false);
+          return true;
+        }
+      } else {
+        ccord_rect em_box = login_email_box_rect(&card);
+        ccord_rect pw_box = login_password_box_rect(&card);
+        if (ui_in_rect(ev->x, ev->y, em_box)) {
+          ui->account_focus_field = 2;
+          ui->text_area = em_box;
+          ui_menu_open_text_field(ui, ev->x, ev->y, &ui->account_email_edit, false, false, false, false);
+          return true;
+        }
+        if (ui_in_rect(ev->x, ev->y, pw_box)) {
+          ui->account_focus_field = 3;
+          ui->text_area = pw_box;
+          ui_menu_open_text_field(ui, ev->x, ev->y, &ui->account_password_edit, true, false, false, false);
+          return true;
+        }
+      }
       return true;
     }
     if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 1) {
@@ -2180,7 +2405,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       }
       if (ui_in_rect(ev->x, ev->y, login_tab_rect(&card, 1))) {
         ui->login_tab = 1;
-        ui->account_focus_field = ui->account_mfa_required ? 4 : 2;
+        ui->account_focus_field = 2;
         ui->touch_text_focused = false;
         ui->dirty = true;
         return true;
@@ -2220,7 +2445,6 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       } else {
         ccord_rect em_box = login_email_box_rect(&card);
         ccord_rect pw_box = login_password_box_rect(&card);
-        ccord_rect mfa_box = login_mfa_box_rect(&card);
         if (ui_in_rect(ev->x, ev->y, em_box)) {
           ui->account_focus_field = 2;
           ui->touch_text_focused = true;
@@ -2232,13 +2456,6 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
           ui->account_focus_field = 3;
           ui->touch_text_focused = true;
           ui->text_area = pw_box;
-          ui->dirty = true;
-          return true;
-        }
-        if (ui_in_rect(ev->x, ev->y, mfa_box)) {
-          ui->account_focus_field = 4;
-          ui->touch_text_focused = true;
-          ui->text_area = mfa_box;
           ui->dirty = true;
           return true;
         }
@@ -2258,10 +2475,10 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       ui->account_focus_field = (ui->login_tab == 0) ? 1 : 2;
     }
     ccord_text_edit *active = nullptr;
-    if (ui->account_focus_field == 1) active = &ui->account_token_edit;
-    else if (ui->account_focus_field == 2) active = &ui->account_email_edit;
-    else if (ui->account_focus_field == 3) active = &ui->account_password_edit;
-    else if (ui->account_focus_field == 4) active = &ui->account_mfa_edit;
+    bool masked = false;
+    if (ui->account_focus_field == 1) { active = &ui->account_token_edit; masked = true; }
+    else if (ui->account_focus_field == 2) { active = &ui->account_email_edit; }
+    else if (ui->account_focus_field == 3) { active = &ui->account_password_edit; masked = true; }
     if (active) {
       if (ev->type == CCORD_IN_TEXT && ev->text[0]) {
         ccord_error ierr;
@@ -2270,23 +2487,11 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
         return true;
       }
       if (ev->type == CCORD_IN_KEY_DOWN) {
-        if (ev->key == CCORD_KEY_BACKSPACE) {
-          ccord_text_edit_backspace(active);
-          ui->dirty = true;
-          return true;
-        }
-        if (ev->key == CCORD_KEY_DELETE) {
-          ccord_text_edit_delete(active);
-          ui->dirty = true;
-          return true;
-        }
         if (ev->key == CCORD_KEY_TAB) {
           if (ui->login_tab == 0) {
             ui->account_focus_field = 1;
           } else {
-            if (ui->account_focus_field == 2) ui->account_focus_field = 3;
-            else if (ui->account_focus_field == 3) ui->account_focus_field = 4;
-            else ui->account_focus_field = 2;
+            ui->account_focus_field = (ui->account_focus_field == 2) ? 3 : 2;
           }
           ui->dirty = true;
           return true;
@@ -2301,21 +2506,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
           ui->dirty = true;
           return true;
         }
-        if ((ev->mods & (CCORD_MOD_CTRL | CCORD_MOD_SUPER)) && ev->key == CCORD_KEY_V && ui->d.host.clipboard_get) {
-          char *clip = ui->d.host.clipboard_get(ui->d.host.ud);
-          if (clip) {
-            ccord_error ierr;
-            (void)ccord_text_edit_insert(active, clip, strlen(clip), &ierr);
-            ccord_free(clip);
-          }
-          ui->dirty = true;
-          return true;
-        }
-        if ((ev->mods & (CCORD_MOD_CTRL | CCORD_MOD_SUPER)) && ev->key == CCORD_KEY_A) {
-          ccord_text_edit_select_all(active);
-          ui->dirty = true;
-          return true;
-        }
+        if (handle_account_field_edit_key(ui, active, masked, ev)) return true;
       }
     }
     return true;
@@ -2333,6 +2524,42 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     // Control hover is read from the pointer at draw time; redraw when inside.
     if (ui_in_rect(ev->x, ev->y, g.panel) && !changed) ui->dirty = true;
     if (changed) ui->dirty = true;
+    return true;
+  }
+  if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 3) {
+    if (ui->settings_page == SP_ACCOUNT && (!ui->mobile_layout || ui->mobile_settings_detail)) {
+      if (!ui->account_view.signed_in) {
+        ccord_rect em_box = account_email_box_rect(&g);
+        ccord_rect pw_box = account_password_box_rect(&g);
+        if (ui_in_rect(ev->x, ev->y, em_box)) {
+          ui->account_focus_field = 2;
+          ui->text_area = em_box;
+          ui_menu_open_text_field(ui, ev->x, ev->y, &ui->account_email_edit, false, false, false, false);
+          return true;
+        }
+        if (ui_in_rect(ev->x, ev->y, pw_box)) {
+          ui->account_focus_field = 3;
+          ui->text_area = pw_box;
+          ui_menu_open_text_field(ui, ev->x, ev->y, &ui->account_password_edit, true, false, false, false);
+          return true;
+        }
+      }
+      ccord_rect tbox = account_token_box_rect(&g);
+      if (ui_in_rect(ev->x, ev->y, tbox)) {
+        ui->account_focus_field = 1;
+        ui->text_area = tbox;
+        ui_menu_open_text_field(ui, ev->x, ev->y, &ui->account_token_edit, true, false, false, false);
+        return true;
+      }
+    } else if (ui->settings_page == SP_APPEARANCE && (!ui->mobile_layout || ui->mobile_settings_detail)) {
+      ccord_rect qbox = quickcss_box_rect(&g);
+      if (ui_in_rect(ev->x, ev->y, qbox)) {
+        ui->account_focus_field = 6;
+        ui->text_area = qbox;
+        ui_menu_open_text_field(ui, ev->x, ev->y, &ui->quickcss_edit, false, false, true, false);
+        return true;
+      }
+    }
     return true;
   }
   if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 1) {
@@ -2391,23 +2618,25 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
         }
       }
       if (!ui->account_view.signed_in) {
-        if (ui_in_rect(ev->x, ev->y, account_email_box_rect(&g))) {
+        ccord_rect em_box = account_email_box_rect(&g);
+        ccord_rect pw_box = account_password_box_rect(&g);
+        if (ui_in_rect(ev->x, ev->y, em_box)) {
           ui->account_focus_field = 2;
+          ui->touch_text_focused = true;
+          ui->text_area = em_box;
           ui->dirty = true;
           return true;
         }
-        if (ui_in_rect(ev->x, ev->y, account_password_box_rect(&g))) {
+        if (ui_in_rect(ev->x, ev->y, pw_box)) {
           ui->account_focus_field = 3;
-          ui->dirty = true;
-          return true;
-        }
-        if (ui_in_rect(ev->x, ev->y, account_mfa_box_rect(&g))) {
-          ui->account_focus_field = 4;
+          ui->touch_text_focused = true;
+          ui->text_area = pw_box;
           ui->dirty = true;
           return true;
         }
         if (ui_in_rect(ev->x, ev->y, account_login_btn_rect(&g))) {
           ui->account_focus_field = 0;
+          ui->touch_text_focused = false;
           if (ui->d.host.account_action) {
             ui->d.host.account_action(ui->d.host.ud, CCORD_ACCOUNT_ACTION_CREDENTIALS_LOGIN);
           }
@@ -2415,12 +2644,18 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
           return true;
         }
       }
-      if (ui_in_rect(ev->x, ev->y, account_token_box_rect(&g))) {
-        ui->account_focus_field = 1;
-        ui->dirty = true;
-        return true;
+      {
+        ccord_rect tbox = account_token_box_rect(&g);
+        if (ui_in_rect(ev->x, ev->y, tbox)) {
+          ui->account_focus_field = 1;
+          ui->touch_text_focused = true;
+          ui->text_area = tbox;
+          ui->dirty = true;
+          return true;
+        }
       }
       ui->account_focus_field = 0;
+      ui->touch_text_focused = false;
       if (ui_in_rect(ev->x, ev->y, account_token_paste_rect(&g))) {
         if (ui->d.host.clipboard_get) {
           char *clip = ui->d.host.clipboard_get(ui->d.host.ud);
@@ -2583,10 +2818,10 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
   }
   if (ui->settings_page == SP_ACCOUNT && ui->account_focus_field != 0) {
     ccord_text_edit *active = nullptr;
-    if (ui->account_focus_field == 1) active = &ui->account_token_edit;
-    else if (ui->account_focus_field == 2) active = &ui->account_email_edit;
-    else if (ui->account_focus_field == 3) active = &ui->account_password_edit;
-    else if (ui->account_focus_field == 4) active = &ui->account_mfa_edit;
+    bool masked = false;
+    if (ui->account_focus_field == 1) { active = &ui->account_token_edit; masked = true; }
+    else if (ui->account_focus_field == 2) { active = &ui->account_email_edit; }
+    else if (ui->account_focus_field == 3) { active = &ui->account_password_edit; masked = true; }
     if (active) {
       if (ev->type == CCORD_IN_TEXT && ev->text[0]) {
         ccord_error ierr;
@@ -2595,20 +2830,9 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
         return true;
       }
       if (ev->type == CCORD_IN_KEY_DOWN) {
-        if (ev->key == CCORD_KEY_BACKSPACE) {
-          ccord_text_edit_backspace(active);
-          ui->dirty = true;
-          return true;
-        }
-        if (ev->key == CCORD_KEY_DELETE) {
-          ccord_text_edit_delete(active);
-          ui->dirty = true;
-          return true;
-        }
         if (ev->key == CCORD_KEY_TAB && !ui->account_view.signed_in) {
           if (ui->account_focus_field == 2) ui->account_focus_field = 3;
-          else if (ui->account_focus_field == 3) ui->account_focus_field = 4;
-          else if (ui->account_focus_field == 4) ui->account_focus_field = 1;
+          else if (ui->account_focus_field == 3) ui->account_focus_field = 1;
           else ui->account_focus_field = 2;
           ui->dirty = true;
           return true;
@@ -2623,21 +2847,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
           ui->dirty = true;
           return true;
         }
-        if ((ev->mods & CCORD_MOD_CTRL) && ev->key == CCORD_KEY_V && ui->d.host.clipboard_get) {
-          char *clip = ui->d.host.clipboard_get(ui->d.host.ud);
-          if (clip) {
-            ccord_error ierr;
-            (void)ccord_text_edit_insert(active, clip, strlen(clip), &ierr);
-            ccord_free(clip);
-          }
-          ui->dirty = true;
-          return true;
-        }
-        if ((ev->mods & CCORD_MOD_CTRL) && ev->key == CCORD_KEY_A) {
-          ccord_text_edit_select_all(active);
-          ui->dirty = true;
-          return true;
-        }
+        if (handle_account_field_edit_key(ui, active, masked, ev)) return true;
       }
     }
   }
@@ -3458,7 +3668,7 @@ static void draw_account(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
   y += ui_line_h(ui, ss.size) + 4.0f;
   const char *detail_str = (ui->account_login_status[0] != '\0') ? ui->account_login_status : v->detail;
   if (detail_str && detail_str[0]) {
-    ccord_color dcol = (ui->account_login_status[0] != '\0' && !ui->account_mfa_required) ? COL(danger) : COL(text_secondary);
+    ccord_color dcol = (ui->account_login_status[0] != '\0' && ui->account_login_is_error) ? COL(danger) : COL(text_secondary);
     ccord_text_style dstyle = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, dcol);
     ccord_vec2 d = ccord_text_measure(r, detail_str, strlen(detail_str), &dstyle, w);
     ccord_text_draw(r, detail_str, strlen(detail_str), x, y, &dstyle, w);
@@ -3503,15 +3713,11 @@ static void draw_account(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
   } else {
     ccord_rect em_box = account_email_box_rect(g);
     ccord_rect pw_box = account_password_box_rect(g);
-    ccord_rect mfa_box = account_mfa_box_rect(g);
     ccord_rect login_btn = account_login_btn_rect(g);
     ccord_text_draw(r, "EMAIL OR PHONE", 14, em_box.x, em_box.y - 15.0f, &ls, 0.0f);
     ccord_text_draw(r, "PASSWORD", 8, pw_box.x, pw_box.y - 15.0f, &ls, 0.0f);
     draw_input_field(ui, r, em_box, &ui->account_email_edit, ui->account_focus_field == 2, false, "you@example.com");
     draw_input_field(ui, r, pw_box, &ui->account_password_edit, ui->account_focus_field == 3, true, "Password");
-    ccord_text_draw(r, ui->account_mfa_required ? "2FA CODE (REQUIRED)" : "2FA CODE (IF ENABLED)",
-                    ui->account_mfa_required ? 19 : 21, mfa_box.x, mfa_box.y - 15.0f, &ls, 0.0f);
-    draw_input_field(ui, r, mfa_box, &ui->account_mfa_edit, ui->account_focus_field == 4, false, "6-digit code");
     draw_button(ui, r, login_btn, "Log In to Discord", true);
   }
 
@@ -3602,6 +3808,51 @@ static void draw_account(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
   }
 }
 
+// Secondary modal popup for 6-digit TOTP / 2FA verification (shown only when Discord requires 2FA).
+static void draw_mfa_popup(ccord_ui *ui, ccord_renderer *r)
+{
+  ccord_draw_rect(r, (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h}, ui_alpha(COL(bg_tertiary), 0.72f));
+  ccord_rect pop = mfa_popup_rect(ui);
+  ccord_draw_rect(r, (ccord_rect){pop.x - 1.0f, pop.y - 1.0f, pop.w + 2.0f, pop.h + 2.0f}, COL(border_subtle));
+  uis_card(ui, r, pop);
+  ccord_push_clip(r, pop);
+
+  ccord_draw_rect(r, (ccord_rect){pop.x, pop.y, pop.w, 4.0f}, COL(brand));
+
+  const char *title = "Two-Factor Authentication";
+  ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_title, COL(text_header));
+  ccord_vec2 tt = ccord_text_measure(r, title, strlen(title), &ts, 0.0f);
+  ccord_text_draw(r, title, strlen(title), pop.x + (pop.w - tt.x) * 0.5f, pop.y + 22.0f, &ts, 0.0f);
+
+  const char *sub = "Enter the 6-digit code from your authenticator app.";
+  ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_secondary));
+  ccord_vec2 st = ccord_text_measure(r, sub, strlen(sub), &ss, 0.0f);
+  float sub_x = st.x < pop.w - 32.0f ? pop.x + (pop.w - st.x) * 0.5f : pop.x + 16.0f;
+  ccord_text_draw_ellipsis(r, sub, strlen(sub), sub_x, pop.y + 50.0f, pop.w - 32.0f, &ss);
+
+  ccord_rect banner = {pop.x + 28.0f, pop.y + 80.0f, pop.w - 56.0f, 34.0f};
+  if (ui->account_login_status[0] != '\0') {
+    uis_card(ui, r, banner);
+    ccord_color accent = ui->account_login_is_error ? COL(danger) : COL(brand);
+    ccord_draw_rect(r, (ccord_rect){banner.x, banner.y, 4.0f, banner.h}, accent);
+    ccord_text_style es = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_control,
+                                   ui->account_login_is_error ? COL(danger) : COL(text_header));
+    ccord_text_draw_ellipsis(r, ui->account_login_status, strlen(ui->account_login_status), banner.x + 12.0f,
+                             banner.y + (banner.h - ui_line_h(ui, es.size)) * 0.5f, banner.w - 18.0f, &es);
+  }
+
+  ccord_rect mbox = mfa_popup_input_rect(&pop);
+  ccord_rect vbtn = mfa_popup_verify_rect(&pop);
+  ccord_rect bbtn = mfa_popup_back_rect(&pop);
+  ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_overline, COL(text_muted));
+  ccord_text_draw(r, "6-DIGIT AUTHENTICATOR CODE", 26, mbox.x, mbox.y - 16.0f, &ls, 0.0f);
+  draw_input_field(ui, r, mbox, &ui->account_mfa_edit, ui->account_focus_field == 4, false, "000000");
+  draw_button(ui, r, vbtn, "Verify & Log In", true);
+  draw_button(ui, r, bbtn, "Back to Login", false);
+
+  ccord_pop_clip(r);
+}
+
 static void draw_login_screen(ccord_ui *ui, ccord_renderer *r)
 {
   ccord_draw_rect(r, (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h}, COL(bg_tertiary));
@@ -3653,11 +3904,11 @@ static void draw_login_screen(ccord_ui *ui, ccord_renderer *r)
     ccord_text_draw_ellipsis(r, cmsg, strlen(cmsg), banner.x + 12.0f,
                              banner.y + (banner.h - ui_line_h(ui, cs.size)) * 0.5f, banner.w - 20.0f, &cs);
   } else if (ui->account_login_status[0] != '\0') {
-    ccord_color accent = ui->account_mfa_required ? COL(brand) : COL(danger);
+    ccord_color accent = ui->account_login_is_error ? COL(danger) : COL(brand);
     uis_card(ui, r, banner);
     ccord_draw_rrect(r, (ccord_rect){banner.x, banner.y, 4.0f, banner.h}, 2.0f, accent);
     ccord_text_style es = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_control,
-                                   ui->account_mfa_required ? COL(text_header) : COL(danger));
+                                   ui->account_login_is_error ? COL(danger) : COL(text_header));
     ccord_text_draw_ellipsis(r, ui->account_login_status, strlen(ui->account_login_status), banner.x + 12.0f,
                              banner.y + (banner.h - ui_line_h(ui, es.size)) * 0.5f, banner.w - 20.0f, &es);
   } else {
@@ -3697,22 +3948,21 @@ static void draw_login_screen(ccord_ui *ui, ccord_renderer *r)
   } else {
     ccord_rect em_box = login_email_box_rect(&card);
     ccord_rect pw_box = login_password_box_rect(&card);
-    ccord_rect mfa_box = login_mfa_box_rect(&card);
     ccord_rect lbtn = login_credentials_btn_rect(&card);
-    ccord_text_draw(r, "EMAIL OR PHONE NUMBER", 21, em_box.x, em_box.y - 15.0f, &ls, 0.0f);
+    ccord_text_draw(r, "EMAIL OR PHONE NUMBER", 21, em_box.x, em_box.y - 16.0f, &ls, 0.0f);
     draw_input_field(ui, r, em_box, &ui->account_email_edit, ui->account_focus_field == 2, false, "you@example.com");
-    ccord_text_draw(r, "PASSWORD", 8, pw_box.x, pw_box.y - 15.0f, &ls, 0.0f);
+    ccord_text_draw(r, "PASSWORD", 8, pw_box.x, pw_box.y - 16.0f, &ls, 0.0f);
     draw_input_field(ui, r, pw_box, &ui->account_password_edit, ui->account_focus_field == 3, true, "Password");
-    const char *mfa_lbl = ui->account_mfa_required ? "2FA / TOTP CODE (REQUIRED)" : "2FA / TOTP CODE (6 DIGITS, IF ENABLED)";
-    ccord_text_draw(r, mfa_lbl, strlen(mfa_lbl), mfa_box.x, mfa_box.y - 15.0f, &ls, 0.0f);
-    draw_input_field(ui, r, mfa_box, &ui->account_mfa_edit, ui->account_focus_field == 4, false, "6-digit authenticator code");
     draw_button(ui, r, lbtn, connecting ? "Connecting to Discord Gateway..." : "Connect to Discord", true);
     const char *h3 = ui->mobile_layout ? "CAPTCHA required? Switch to Token Sign-In."
                                        : "If Discord requires a browser CAPTCHA, switch to Token Sign-In.";
-    ccord_text_draw_ellipsis(r, h3, strlen(h3), cx, card.y + 390.0f, cw, &hs);
+    ccord_text_draw_ellipsis(r, h3, strlen(h3), cx, card.y + 372.0f, cw, &hs);
   }
 
   ccord_pop_clip(r);
+  if (ui->account_mfa_required) {
+    draw_mfa_popup(ui, r);
+  }
 }
 
 // One sidebar scroll button: the shared scroll arrow (uis_scroll_arrow), with its own audit namespace.
@@ -3839,6 +4089,9 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
   uis_state cst = {.hover = ui->hover_settings_close};
   ccord_color cc = uis_icon_button(ui, r, g.close, cst, "sclose", 0);
   ui_icon_close(r, g.close.x + g.close.w * 0.5f, g.close.y + g.close.h * 0.5f, UIS_ICON_GLYPH, cc);
+  if (ui->settings_page == SP_ACCOUNT && ui->account_mfa_required) {
+    draw_mfa_popup(ui, r);
+  }
 }
 
 void ccord_ui_get_settings_debug(const ccord_ui *ui, ccord_ui_settings_debug *out)
@@ -3941,7 +4194,7 @@ void ccord_ui_get_settings_debug(const ccord_ui *ui, ccord_ui_settings_debug *ou
   out->account_token_clear_btn = account_token_clear_rect(&g);
   out->account_email_box = account_email_box_rect(&g);
   out->account_password_box = account_password_box_rect(&g);
-  out->account_mfa_box = account_mfa_box_rect(&g);
+  out->account_mfa_box = (ccord_rect){0};
   out->account_login_btn = account_login_btn_rect(&g);
   out->login_screen = ui_is_login_screen(ui);
   out->login_tab = ui->login_tab;
@@ -3958,8 +4211,14 @@ void ccord_ui_get_settings_debug(const ccord_ui *ui, ccord_ui_settings_debug *ou
     out->account_token_save_btn = login_token_save_rect(&card);
     out->account_email_box = login_email_box_rect(&card);
     out->account_password_box = login_password_box_rect(&card);
-    out->account_mfa_box = login_mfa_box_rect(&card);
     out->account_login_btn = login_credentials_btn_rect(&card);
+  }
+  if (ui->account_mfa_required) {
+    ccord_rect pop = mfa_popup_rect(ui);
+    out->mfa_popup_rect = pop;
+    out->account_mfa_box = mfa_popup_input_rect(&pop);
+    out->account_login_btn = mfa_popup_verify_rect(&pop);
+    out->mfa_back_btn = mfa_popup_back_rect(&pop);
   }
   out->account_token_focused = (ui->account_focus_field == 1);
   out->account_token_len = ui->account_token_edit.len;
@@ -4078,6 +4337,7 @@ void ccord_ui_clear_account_token_text(ccord_ui *ui)
   ccord_text_edit_clear(&ui->account_mfa_edit);
   ui->account_focus_field = 0;
   ui->account_mfa_required = false;
+  ui->account_login_is_error = false;
   ui->account_login_status[0] = '\0';
   ui->dirty = true;
 }
@@ -4090,10 +4350,34 @@ void ccord_ui_account_login_fields(const ccord_ui *ui, const char **out_email,
   if (out_mfa_code) *out_mfa_code = ui ? ccord_text_edit_cstr(&ui->account_mfa_edit) : "";
 }
 
+void ccord_ui_set_account_login_field(ccord_ui *ui, int field, const char *utf8)
+{
+  if (!ui || !utf8) return;
+  ccord_text_edit *dst = nullptr;
+  if (field == 1) {
+    dst = &ui->account_email_edit;
+    if (ui_is_login_screen(ui)) ui->login_tab = 1;
+  } else if (field == 2) {
+    dst = &ui->account_password_edit;
+    if (ui_is_login_screen(ui)) ui->login_tab = 1;
+  } else if (field == 3) {
+    dst = &ui->account_mfa_edit;
+  }
+  if (!dst) return;
+  ccord_text_edit_clear(dst);
+  if (utf8[0]) {
+    ccord_error ierr = {0};
+    (void)ccord_text_edit_insert(dst, utf8, strlen(utf8), &ierr);
+  }
+  ui->dirty = true;
+}
+
 void ccord_ui_set_login_status(ccord_ui *ui, const char *status_msg, bool mfa_required)
 {
   if (!ui) return;
+  bool was_mfa = ui->account_mfa_required;
   ui->account_mfa_required = mfa_required;
+  ui->account_login_is_error = (!mfa_required && status_msg && status_msg[0] != '\0');
   if (status_msg && status_msg[0]) {
     snprintf(ui->account_login_status, sizeof ui->account_login_status, "%s", status_msg);
   } else {
@@ -4102,6 +4386,38 @@ void ccord_ui_set_login_status(ccord_ui *ui, const char *status_msg, bool mfa_re
   if (mfa_required) {
     ui->login_tab = 1;
     ui->account_focus_field = 4;
+    if (!was_mfa) {
+      ccord_text_edit_clear(&ui->account_mfa_edit);
+      ccord_rect pop = mfa_popup_rect(ui);
+      ui->text_area = mfa_popup_input_rect(&pop);
+      if (ui->touch_mode) ui->touch_text_focused = true;
+    }
   }
+  ui->dirty = true;
+}
+
+void ccord_ui_set_login_busy(ccord_ui *ui, const char *status_msg)
+{
+  if (!ui) return;
+  ui->account_login_is_error = false;
+  if (status_msg && status_msg[0]) {
+    snprintf(ui->account_login_status, sizeof ui->account_login_status, "%s", status_msg);
+  } else {
+    ui->account_login_status[0] = '\0';
+  }
+  ui->dirty = true;
+}
+
+void ccord_ui_set_login_error(ccord_ui *ui, const char *status_msg, bool keep_mfa)
+{
+  if (!ui) return;
+  ui->account_mfa_required = keep_mfa;
+  ui->account_login_is_error = true;
+  if (status_msg && status_msg[0]) {
+    snprintf(ui->account_login_status, sizeof ui->account_login_status, "%s", status_msg);
+  } else {
+    ui->account_login_status[0] = '\0';
+  }
+  if (keep_mfa) ui->account_focus_field = 4;
   ui->dirty = true;
 }

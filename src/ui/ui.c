@@ -2905,20 +2905,94 @@ static bool composer_accepts_text(const ccord_ui *ui)
   return true;
 }
 
+static bool rect_eq(ccord_rect a, ccord_rect b)
+{
+  return a.x == b.x && a.y == b.y && a.w == b.w && a.h == b.h;
+}
+
+static void sync_auth_autofill(ccord_ui *ui)
+{
+  if (!ui->d.host.auth_autofill) return;
+  int mode = 0;
+  int active = 0;
+  bool on_auth = ui->settings_open &&
+                 (ui_is_login_screen(ui) || (ui->settings_page == 0 && !ui->account_view.signed_in));
+  if (on_auth) {
+    bool focused = !ui->touch_mode || ui->touch_text_focused;
+    if (ui->account_mfa_required) {
+      mode = 2;
+      active = (focused && ui->account_focus_field == 4) ? 3 : 0;
+    } else if (!ui_is_login_screen(ui) || ui->login_tab == 1) {
+      mode = 1;
+      if (focused && ui->account_focus_field == 2) active = 1;
+      else if (focused && ui->account_focus_field == 3) active = 2;
+    }
+  }
+  ccord_rect email_r = {0}, pw_r = {0}, otp_r = {0};
+  if (mode != 0) ui_settings_auth_autofill_rects(ui, &email_r, &pw_r, &otp_r);
+  size_t elen = ui->account_email_edit.len;
+  size_t plen = ui->account_password_edit.len;
+  size_t olen = ui->account_mfa_edit.len;
+  if (mode == ui->last_autofill_mode && active == ui->last_autofill_active &&
+      rect_eq(email_r, ui->last_autofill_email_r) &&
+      rect_eq(pw_r, ui->last_autofill_pw_r) &&
+      rect_eq(otp_r, ui->last_autofill_otp_r) &&
+      elen == ui->last_autofill_email_len &&
+      plen == ui->last_autofill_pw_len &&
+      olen == ui->last_autofill_otp_len) {
+    return;
+  }
+  bool commit = ui->last_autofill_mode != 0 && mode == 0 &&
+                (ui->account_view.signed_in ||
+                 (ui->d.store && ccord_store_self_id(ui->d.store) != CCORD_ID_NONE));
+  ui->last_autofill_mode = mode;
+  ui->last_autofill_active = active;
+  ui->last_autofill_email_r = email_r;
+  ui->last_autofill_pw_r = pw_r;
+  ui->last_autofill_otp_r = otp_r;
+  ui->last_autofill_email_len = elen;
+  ui->last_autofill_pw_len = plen;
+  ui->last_autofill_otp_len = olen;
+  ui->d.host.auth_autofill(ui->d.host.ud, mode, active, commit, email_r, pw_r, otp_r,
+                           ccord_text_edit_cstr(&ui->account_email_edit),
+                           ccord_text_edit_cstr(&ui->account_password_edit),
+                           ccord_text_edit_cstr(&ui->account_mfa_edit));
+}
+
 static void sync_text_input(ccord_ui *ui)
 {
   bool want = false;
+  int kind = 0;   // 0=text, 1=email, 2=password, 3=otp, 4=single_line
   if (ui->settings_open) {
-    bool field = (ui->settings_page == 0 && ui->account_focus_field != 0) || ui_settings_profile_wants_text(ui);
+    bool field = false;
+    if (ui->account_mfa_required) {
+      field = (ui->account_focus_field == 4);
+      kind = 3;
+    } else if (ui_is_login_screen(ui) || ui->settings_page == 0) {
+      field = (ui->account_focus_field != 0);
+      if (ui->account_focus_field == 2) kind = 1;
+      else if (ui->account_focus_field == 1 || ui->account_focus_field == 3) kind = 2;
+      else if (ui->account_focus_field == 4) kind = 3;
+    } else if (ui->settings_page == 2 && ui->account_focus_field == 6) {
+      field = true;
+      kind = 0;
+    } else if (ui_settings_profile_wants_text(ui)) {
+      field = true;
+      kind = 4;
+    }
     want = ui->touch_mode ? (ui->touch_text_focused && field) : field;
   } else if (ui_server_settings_is_open(ui)) {
     want = ui->touch_mode ? ui_server_settings_wants_caret(ui) : true;
+    kind = 4;
   } else if (ui_channel_settings_is_open(ui)) {
     want = ui->touch_mode ? ui_channel_settings_wants_caret(ui) : true;
+    kind = 4;
   } else if (ui->quick_switcher_open || ui->modal_kind != UI_MODAL_NONE) {
     want = true;
+    kind = 4;
   } else if (!ui->lightbox_open && !ui->select_open && !ui->menu.open && !ui->go_live_open &&
              !ui->pins_open && !ui->reactions_open && !ui->inbox_open && !ui->shortcuts_open) {
+    if (ui->search_open || ui->discovery_open) kind = 4;
     if (ui->touch_mode) {
       // On touchscreens, only bring up the soft keyboard when a text field was explicitly focused
       // (or search/discovery is active) and no navigation drawer is open over chat.
@@ -2930,11 +3004,15 @@ static void sync_text_input(ccord_ui *ui)
              ui_forum_is_active(ui) || composer_accepts_text(ui);
     }
   }
+  sync_auth_autofill(ui);
   ccord_rect box = ui->text_area;
   if (!ui->d.host.text_input) return;
-  if (want == ui->ime_active && (!want || (box.x == ui->ime_rect.x && box.y == ui->ime_rect.y && box.w == ui->ime_rect.w && box.h == ui->ime_rect.h))) return;
+  bool same_rect = box.x == ui->ime_rect.x && box.y == ui->ime_rect.y && box.w == ui->ime_rect.w && box.h == ui->ime_rect.h;
+  if (want == ui->ime_active && (!want || (same_rect && kind == ui->last_ime_kind))) return;
   ui->ime_active = want;
   ui->ime_rect = box;
+  ui->last_ime_kind = kind;
+  if (ui->d.host.text_input_kind) ui->d.host.text_input_kind(ui->d.host.ud, kind);
   ui->d.host.text_input(ui->d.host.ud, want, box.x, box.y, box.w, box.h);
 }
 
@@ -5407,6 +5485,10 @@ bool ui_search_handle(ccord_ui *ui, const ccord_input_event *ev)
 {
   if (!ui->search_open) return false;
   if (ev->type == CCORD_IN_MOUSE_MOVE) return false;
+  if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 3 && ui_in_rect(ev->x, ev->y, ui_search_popover_rect(ui))) {
+    ui_menu_open_text_field(ui, ev->x, ev->y, &ui->search_edit, false, false, false, true);
+    return true;
+  }
   if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 1) {
     if (ui_in_rect(ev->x, ev->y, ui_search_rect(ui))) {
       ui->search_open = false;
@@ -6027,7 +6109,9 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
     if (ui->settings_open) {
-      if (!ui_is_login_screen(ui)) {
+      if (ui->account_mfa_required) {
+        ui_settings_dismiss_mfa(ui);
+      } else if (!ui_is_login_screen(ui)) {
         ui_open_settings(ui, false);
       }
       return true;
@@ -6184,7 +6268,7 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
     ui->dirty = true;
     return true;
   }
-  if (ui->settings_open && ui->account_focus_field != 0) {
+  if (ui->settings_open && (ui->account_focus_field != 0 || ui->account_mfa_required)) {
     return ui_settings_handle(ui, ev);
   }
   // Up/Down step through the settings sidebar.
@@ -6920,6 +7004,9 @@ static bool handle_right_click(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
     return false;
+  } else if (!ui->discovery_open && composer_accepts_text(ui) && ui_in_rect(ev->x, ev->y, ui_rect(l->composer))) {
+    ui_menu_open_text_field(ui, ev->x, ev->y, &ui->edit, false, true, false, false);
+    return true;
   } else {
     return false;
   }
@@ -8641,7 +8728,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       }
       if (ui_server_settings_is_open(ui)) return ui_server_settings_handle(ui, ev);
       if (ui_channel_settings_is_open(ui)) return ui_channel_settings_handle(ui, ev);
-      if (ui->settings_open && ui->account_focus_field != 0) {
+      if (ui->settings_open && (ui->account_focus_field != 0 || ui->account_mfa_required)) {
         return ui_settings_handle(ui, ev);
       }
       if (ui->menu.open || ui->settings_open || ui->go_live_open || ui->pins_open || ui->reactions_open ||
@@ -8895,6 +8982,15 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
     ui_draw_loading_screen(ui, r);
     return;
   }
+  if (ui_is_login_screen(ui)) {
+    // Full-window opaque login screen: skip drawing the invisible workspace behind it so frame 1 is instant,
+    // and draw context menus / notices on top so mobile Copy/Paste sheets appear above login fields.
+    ui_settings_draw(ui, r);
+    ui_menu_draw(ui, r);
+    ui_draw_notice(ui, r);
+    update_hover(ui);
+    return;
+  }
   if (ui->stream_fullscreen && !ui_stream_is_active(ui)) {
     ui_stream_set_fullscreen(ui, false);
   }
@@ -9059,7 +9155,6 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   draw_popup(ui, r, autoc_show, "autoc", 90, 4.0f, ui_draw_autocomplete);
   draw_overlay_popup(ui, r, UI_OVL_MEMBER_POPOVER, "mpop", ui->member_popover_open, &ui->member_popover_open, UI_POPUP_MS,
                      UI_POPUP_CLOSE_MS, 6.0f, ui_draw_member_popover);
-  ui_menu_draw(ui, r);
   ui_status_card_draw(ui, r);
   ui_plus_menu_draw(ui, r);
   draw_popup(ui, r, ui->settings_open && !ui_is_login_screen(ui), "settings", UI_MODAL_MS, 0.0f, ui_settings_draw);
@@ -9073,6 +9168,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui_report_flow_draw(ui, r);
   ui_draw_overlays(ui, r);
   ui_profile_roles_draw(ui, r);   // above the popout / profile that anchors it
+  ui_menu_draw(ui, r);            // topmost: context menus & mobile Copy/Paste bottom sheets cover settings/modals
   update_hover(ui);   // rows moved under a stationary pointer
 }
 
@@ -9981,6 +10077,10 @@ bool ccord_ui_handle_back(ccord_ui *ui)
     return true;
   }
   if (ui->settings_open) {
+    if (ui->account_mfa_required) {
+      ui_settings_dismiss_mfa(ui);
+      return true;
+    }
     if (ui_is_login_screen(ui)) return false;
     if (ui->mobile_layout && ui->mobile_settings_detail) {
       ui->mobile_settings_detail = false;

@@ -569,7 +569,7 @@ static bool s1_notifications(us *s) { return s1_open_page(s, 6); }
    {CCORD_UI_STYLE_CHIP, c, true}, {CCORD_UI_STYLE_SELECT, se, true}, {CCORD_UI_STYLE_SLIDER, sl, true}, \
    {CCORD_UI_STYLE_PLATE, 1, true}}
 static const us_surface k_s1[] = {
-  {"settings:account", s1_account, s1_close, ui_settings_draw, S1_NEEDS(10, 4, 0, 0, 0, 0), CCORD_UI_STYLE_BUTTON, false,
+  {"settings:account", s1_account, s1_close, ui_settings_draw, S1_NEEDS(10, 3, 0, 0, 0, 0), CCORD_UI_STYLE_BUTTON, false,
    false, true},
   {"settings:appearance", s1_appearance, s1_close, ui_settings_draw, S1_NEEDS(3, 1, 2, 5, 0, 1), US_KIND_NONE, false,
    false, true},

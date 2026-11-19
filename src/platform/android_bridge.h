@@ -32,10 +32,19 @@ void ccord_android_set_voice_service(bool active, const char *channel_name, bool
 void ccord_android_set_audio_comm_mode(bool in_call);
 bool ccord_android_request_screen_capture(void);
 void ccord_android_stop_screen_capture(void);
+void ccord_android_on_first_frame(void);
+void ccord_android_set_auth_autofill(int mode, int active_field, bool commit,
+                                     int email_x, int email_y, int email_w, int email_h,
+                                     int pw_x, int pw_y, int pw_w, int pw_h,
+                                     int otp_x, int otp_y, int otp_w, int otp_h,
+                                     const char *email_text, const char *pw_text, const char *otp_text);
 
 // Consumes pending insets/IME updates pushed by CCordActivity's WindowInsetsListener.
 // Values are physical pixels; platform.c converts to logical px using display scale.
 bool ccord_android_poll_insets(float *top, float *right, float *bottom, float *left, float *ime_bottom);
+
+// Consumes one pending password-manager autofill value pushed by CCordActivity's AutofillOverlay.
+bool ccord_android_poll_autofill(int *out_field, char *out_text, size_t cap);
 
 // Called from desktop_android.c JNI entrypoints into capture_android.c.
 void ccord_capture_android_push_frame(const uint8_t *rgba, int width, int height, int stride);
@@ -44,6 +53,8 @@ void ccord_capture_android_mark_stopped(void);
 // JNI entrypoints invoked from Kotlin org.ccord.android.CCordBridge.
 JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnInsetsChanged(
     JNIEnv *env, jclass cls, jfloat top, jfloat right, jfloat bottom, jfloat left, jfloat ime_bottom);
+JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnAutofillField(
+    JNIEnv *env, jclass cls, jint field, jstring jtext);
 JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnFilePicked(
     JNIEnv *env, jclass cls, jstring jpath);
 JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnNotificationClicked(

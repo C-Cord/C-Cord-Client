@@ -2071,9 +2071,10 @@ static const ccord_transport_vtable k_ltt_vt = {
 };
 
 typedef struct login_host_state {
-  char clip[128];
+  char clip[256];
   int token_sign_ins;
   int cred_logins;
+  int mfa_cancels;
 } login_host_state;
 
 static char *login_clip_get(void *ud)
@@ -2085,11 +2086,18 @@ static char *login_clip_get(void *ud)
   return out;
 }
 
+static void login_clip_set(void *ud, const char *utf8)
+{
+  login_host_state *hs = ud;
+  snprintf(hs->clip, sizeof hs->clip, "%s", utf8 ? utf8 : "");
+}
+
 static void login_account_action(void *ud, ccord_account_action action)
 {
   login_host_state *hs = ud;
   if (action == CCORD_ACCOUNT_ACTION_TOKEN_SIGN_IN) hs->token_sign_ins++;
   if (action == CCORD_ACCOUNT_ACTION_CREDENTIALS_LOGIN) hs->cred_logins++;
+  if (action == CCORD_ACCOUNT_ACTION_MFA_CANCEL) hs->mfa_cancels++;
 }
 
 static bool surf_pixel_near(SDL_Surface *s, int x, int y, uint8_t r, uint8_t g, uint8_t b)
@@ -2119,7 +2127,7 @@ static void test_dedicated_login_screen(void)
     .session = sess,
     .contrib = F.contrib,
     .theme = &F.theme,
-    .host = {.ud = &hs, .clipboard_get = login_clip_get, .account_action = login_account_action},
+    .host = {.ud = &hs, .clipboard_set = login_clip_set, .clipboard_get = login_clip_get, .account_action = login_account_action},
     .fixed_now_unix_ms = 1793536200000LL,
   };
   ccord_ui *ui = ccord_ui_create(&deps, &err);
@@ -2176,13 +2184,25 @@ static void test_dedicated_login_screen(void)
                                                        .y = sd.account_token_save_btn.y + 12.0f});
   CT_CHECK(hs.token_sign_ins == 1);
 
-  // Tab 2 (Email & Password + 2FA auto-focus on MFA ticket)
+  // Tab 2 (Email & Password): 2FA input is NOT shown inline until Discord requests MFA
   (void)ccord_ui_handle_input(ui, &(ccord_input_event){.type = CCORD_IN_MOUSE_DOWN, .button = 1, .clicks = 1,
                                                        .x = sd.login_tab_credentials.x + 12.0f,
                                                        .y = sd.login_tab_credentials.y + 12.0f});
   ccord_ui_get_settings_debug(ui, &sd);
   CT_CHECK(sd.login_tab == 1 && sd.account_focus_field == 2);
+  CT_CHECK(!sd.account_mfa_required && sd.account_mfa_box.w == 0.0f && sd.mfa_popup_rect.w == 0.0f);
   (void)ccord_ui_handle_input(ui, &(ccord_input_event){.type = CCORD_IN_TEXT, .text = "dev@discord.test"});
+  // Right-click on Email box opens Copy/Cut/Paste/Select All/Clear menu and Copy works.
+  (void)ccord_ui_handle_input(ui, &(ccord_input_event){.type = CCORD_IN_MOUSE_DOWN, .button = 3, .clicks = 1,
+                                                       .x = sd.account_email_box.x + 12.0f,
+                                                       .y = sd.account_email_box.y + 12.0f});
+  ccord_rect copy_r = {0};
+  CT_CHECK(ccord_ui_context_menu_find(ui, "Copy", &copy_r));
+  CT_CHECK(ccord_ui_context_menu_find(ui, "Paste", nullptr));
+  (void)ccord_ui_handle_input(ui, &(ccord_input_event){.type = CCORD_IN_MOUSE_DOWN, .button = 1, .clicks = 1,
+                                                       .x = copy_r.x + 8.0f, .y = copy_r.y + 8.0f});
+  CT_CHECK(strcmp(hs.clip, "dev@discord.test") == 0);
+  // Tab switches cleanly between Email (2) and Password (3)
   (void)ccord_ui_handle_input(ui, &(ccord_input_event){.type = CCORD_IN_KEY_DOWN, .key = CCORD_KEY_TAB});
   (void)ccord_ui_handle_input(ui, &(ccord_input_event){.type = CCORD_IN_TEXT, .text = "correct_horse"});
   (void)ccord_ui_handle_input(ui, &(ccord_input_event){.type = CCORD_IN_MOUSE_DOWN, .button = 1, .clicks = 1,
@@ -2190,16 +2210,36 @@ static void test_dedicated_login_screen(void)
                                                        .y = sd.account_login_btn.y + 12.0f});
   CT_CHECK(hs.cred_logins == 1);
 
-  // Simulate MFA required response -> auto-focuses 6-digit 2FA box (field 4)
+  // Signing-in busy state must NOT prematurely open the 2FA popup
+  ccord_ui_set_login_busy(ui, "Signing in...");
+  ccord_ui_get_settings_debug(ui, &sd);
+  CT_CHECK(!sd.account_mfa_required && sd.mfa_popup_rect.w == 0.0f);
+
+  // Simulate MFA required response -> transitions to secondary 2FA popup and auto-focuses field 4
   ccord_ui_set_login_status(ui, "2FA required: enter 6-digit code", true);
   ccord_ui_get_settings_debug(ui, &sd);
   CT_CHECK(sd.account_mfa_required && sd.account_focus_field == 4);
+  CT_CHECK(sd.mfa_popup_rect.w > 200.0f && sd.account_mfa_box.w > 100.0f && sd.mfa_back_btn.w > 100.0f);
   (void)ccord_ui_handle_input(ui, &(ccord_input_event){.type = CCORD_IN_TEXT, .text = "654321"});
   const char *em = nullptr, *pw = nullptr, *mfa = nullptr;
   ccord_ui_account_login_fields(ui, &em, &pw, &mfa);
   CT_CHECK(em && strcmp(em, "dev@discord.test") == 0);
   CT_CHECK(pw && strcmp(pw, "correct_horse") == 0);
   CT_CHECK(mfa && strcmp(mfa, "654321") == 0);
+
+  // Wrong 2FA code error keeps the secondary 2FA popup open for retry
+  ccord_ui_set_login_error(ui, "Invalid two-factor code", true);
+  ccord_ui_get_settings_debug(ui, &sd);
+  CT_CHECK(sd.account_mfa_required && sd.account_focus_field == 4);
+
+  // Clicking "Back to Login" dismisses the 2FA popup, clears MFA code, and notifies host
+  (void)ccord_ui_handle_input(ui, &(ccord_input_event){.type = CCORD_IN_MOUSE_DOWN, .button = 1, .clicks = 1,
+                                                       .x = sd.mfa_back_btn.x + 12.0f,
+                                                       .y = sd.mfa_back_btn.y + 12.0f});
+  ccord_ui_get_settings_debug(ui, &sd);
+  CT_CHECK(!sd.account_mfa_required && hs.mfa_cancels == 1);
+  ccord_ui_account_login_fields(ui, &em, &pw, &mfa);
+  CT_CHECK(mfa && mfa[0] == '\0');
 
   // Connecting state -> Auth failure (4004/401) keeps Login Screen open with error banner
   ccord_ui_clear_account_token_text(ui);

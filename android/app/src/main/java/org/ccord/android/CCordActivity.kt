@@ -7,6 +7,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.PixelFormat
+import android.graphics.Rect
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -19,9 +20,19 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.provider.OpenableColumns
+import android.text.InputType
 import android.util.Log
+import android.util.SparseArray
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewGroup
+import android.view.ViewStructure
 import android.view.WindowManager
+import android.view.autofill.AutofillManager
+import android.view.autofill.AutofillValue
+import android.widget.FrameLayout
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -51,6 +62,14 @@ class CCordActivity : SDLActivity() {
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
+    // Startup backdrop overlay: hides SDL's uninitialized black SurfaceView hole until frame 1 presents.
+    private var splashBackdrop: View? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val splashTimeoutRunnable = Runnable { dismissSplashBackdrop() }
+
+    // Virtual Autofill overlay so Android password managers (Bitwarden, etc.) recognize email, password, and 2FA fields.
+    private var autofillOverlay: CCordAutofillOverlay? = null
+
     // MediaProjection screen capture state
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
@@ -73,6 +92,8 @@ class CCordActivity : SDLActivity() {
         super.onCreate(savedInstanceState)
         if (mBrokenLibraries) return
 
+        installSplashBackdrop()
+        installAutofillOverlay()
         CCordBridge.attach(this)
         configureEdgeToEdge()
         installInsetsListener()
@@ -90,10 +111,334 @@ class CCordActivity : SDLActivity() {
     }
 
     override fun onDestroy() {
+        mainHandler.removeCallbacks(splashTimeoutRunnable)
+        dismissSplashBackdrop()
         stopScreenCaptureInternal()
         unregisterNetworkCallback()
         CCordBridge.detach(this)
         super.onDestroy()
+    }
+
+    private fun installSplashBackdrop() {
+        try {
+            val content = findViewById<ViewGroup>(android.R.id.content) ?: return
+            val backdrop = View(this).apply {
+                setBackgroundColor(0xFF1E1F22.toInt())
+                isClickable = false
+                isFocusable = false
+                importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+            }
+            content.addView(
+                backdrop,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            splashBackdrop = backdrop
+            mainHandler.postDelayed(splashTimeoutRunnable, 1500L)
+        } catch (t: Throwable) {
+            Log.w(TAG, "installSplashBackdrop failed", t)
+        }
+    }
+
+    fun dismissSplashBackdrop() {
+        mainHandler.removeCallbacks(splashTimeoutRunnable)
+        val v = splashBackdrop ?: return
+        splashBackdrop = null
+        try {
+            (v.parent as? ViewGroup)?.removeView(v)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun installAutofillOverlay() {
+        try {
+            val content = findViewById<ViewGroup>(android.R.id.content) ?: return
+            val overlay = CCordAutofillOverlay(this)
+            content.addView(
+                overlay,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+                )
+            )
+            autofillOverlay = overlay
+        } catch (t: Throwable) {
+            Log.w(TAG, "installAutofillOverlay failed", t)
+        }
+    }
+
+    fun updateAuthAutofill(
+        mode: Int,
+        activeField: Int,
+        commit: Boolean,
+        emailX: Int,
+        emailY: Int,
+        emailW: Int,
+        emailH: Int,
+        pwX: Int,
+        pwY: Int,
+        pwW: Int,
+        pwH: Int,
+        otpX: Int,
+        otpY: Int,
+        otpW: Int,
+        otpH: Int,
+        emailText: String,
+        pwText: String,
+        otpText: String
+    ) {
+        val overlay = autofillOverlay ?: return
+        overlay.updateState(
+            mode, activeField, commit,
+            Rect(emailX, emailY, emailX + max(1, emailW), emailY + max(1, emailH)),
+            Rect(pwX, pwY, pwX + max(1, pwW), pwY + max(1, pwH)),
+            Rect(otpX, otpY, otpX + max(1, otpW), otpY + max(1, otpH)),
+            emailText, pwText, otpText
+        )
+    }
+
+    private fun suppressSdlDummyEditAutofill(root: View?) {
+        if (root == null || root === autofillOverlay) return
+        val name = root.javaClass.simpleName
+        if (name.contains("DummyEdit", ignoreCase = true)) {
+            if (root.importantForAutofill != View.IMPORTANT_FOR_AUTOFILL_NO) {
+                root.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+            }
+        }
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                suppressSdlDummyEditAutofill(root.getChildAt(i))
+            }
+        }
+    }
+
+    /**
+     * Non-interactive virtual View hierarchy exposing C-Cord's login (email/username, password)
+     * and 2FA/TOTP fields to Android's AutofillManager so password managers like Bitwarden
+     * recognize and autofill them natively.
+     */
+    private inner class CCordAutofillOverlay(context: Context) : View(context) {
+        private val VIRTUAL_ID_EMAIL = 1
+        private val VIRTUAL_ID_PASSWORD = 2
+        private val VIRTUAL_ID_OTP = 3
+
+        private var mode: Int = 0
+        private var activeField: Int = 0
+        private var emailRect: Rect = Rect(0, 0, 1, 1)
+        private var pwRect: Rect = Rect(0, 0, 1, 1)
+        private var otpRect: Rect = Rect(0, 0, 1, 1)
+        private var emailText: String = ""
+        private var pwText: String = ""
+        private var otpText: String = ""
+
+        init {
+            isClickable = false
+            isFocusable = false
+            isFocusableInTouchMode = false
+            importantForAutofill = IMPORTANT_FOR_AUTOFILL_YES
+            visibility = GONE
+        }
+
+        override fun onTouchEvent(event: MotionEvent?): Boolean = false
+
+        private fun rectForField(field: Int): Rect = when (field) {
+            VIRTUAL_ID_EMAIL -> emailRect
+            VIRTUAL_ID_PASSWORD -> pwRect
+            VIRTUAL_ID_OTP -> otpRect
+            else -> Rect(0, 0, 1, 1)
+        }
+
+        fun updateState(
+            newMode: Int,
+            newActive: Int,
+            commit: Boolean,
+            newEmailRect: Rect,
+            newPwRect: Rect,
+            newOtpRect: Rect,
+            newEmailText: String,
+            newPwText: String,
+            newOtpText: String
+        ) {
+            val afm = context.getSystemService(AutofillManager::class.java)
+            val prevMode = mode
+            val prevActive = activeField
+            val prevEmail = emailText
+            val prevPw = pwText
+            val prevOtp = otpText
+
+            mode = newMode
+            activeField = newActive
+            emailRect = newEmailRect
+            pwRect = newPwRect
+            otpRect = newOtpRect
+            emailText = newEmailText
+            pwText = newPwText
+            otpText = newOtpText
+
+            if (newMode == 0) {
+                if (prevActive != 0) {
+                    try {
+                        afm?.notifyViewExited(this, prevActive)
+                    } catch (_: Throwable) {
+                    }
+                }
+                if (prevMode != 0) {
+                    try {
+                        if (commit) afm?.commit() else afm?.cancel()
+                    } catch (_: Throwable) {
+                    }
+                }
+                visibility = GONE
+                return
+            }
+
+            visibility = VISIBLE
+            suppressSdlDummyEditAutofill(window?.decorView)
+
+            if (prevMode != 0 && prevMode != newMode) {
+                if (prevActive != 0) {
+                    try {
+                        afm?.notifyViewExited(this, prevActive)
+                    } catch (_: Throwable) {
+                    }
+                }
+                try {
+                    afm?.commit()
+                } catch (_: Throwable) {
+                }
+            } else if (prevActive != 0 && prevActive != newActive) {
+                try {
+                    afm?.notifyViewExited(this, prevActive)
+                } catch (_: Throwable) {
+                }
+            }
+
+            if (prevMode == newMode) {
+                try {
+                    if (newMode == 1) {
+                        if (prevEmail != newEmailText) {
+                            afm?.notifyValueChanged(this, VIRTUAL_ID_EMAIL, AutofillValue.forText(newEmailText))
+                        }
+                        if (prevPw != newPwText) {
+                            afm?.notifyValueChanged(this, VIRTUAL_ID_PASSWORD, AutofillValue.forText(newPwText))
+                        }
+                    } else if (newMode == 2 && prevOtp != newOtpText) {
+                        afm?.notifyValueChanged(this, VIRTUAL_ID_OTP, AutofillValue.forText(newOtpText))
+                    }
+                } catch (_: Throwable) {
+                }
+            }
+
+            if (newActive != 0 && (newActive != prevActive || newMode != prevMode)) {
+                val targetMode = newMode
+                val targetField = newActive
+                post {
+                    if (mode != targetMode || activeField != targetField) return@post
+                    suppressSdlDummyEditAutofill(window?.decorView)
+                    try {
+                        val loc = IntArray(2)
+                        getLocationOnScreen(loc)
+                        val r = Rect(rectForField(targetField))
+                        r.offset(loc[0], loc[1])
+                        afm?.notifyViewEntered(this, targetField, r)
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "notifyViewEntered failed", t)
+                    }
+                }
+            }
+        }
+
+        override fun onProvideAutofillVirtualStructure(structure: ViewStructure, flags: Int) {
+            super.onProvideAutofillVirtualStructure(structure, flags)
+            if (mode == 0) return
+            val rootAutofillId = autofillId ?: return
+            structure.setClassName("android.view.ViewGroup")
+
+            if (mode == 1) {
+                val idx = structure.addChildCount(2)
+                structure.newChild(idx).apply {
+                    setAutofillId(rootAutofillId, VIRTUAL_ID_EMAIL)
+                    setAutofillType(AUTOFILL_TYPE_TEXT)
+                    setAutofillHints(arrayOf(AUTOFILL_HINT_USERNAME, AUTOFILL_HINT_EMAIL_ADDRESS))
+                    setInputType(InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS)
+                    setClassName("android.widget.EditText")
+                    setId(VIRTUAL_ID_EMAIL, context.packageName, "id", "discord_login_email")
+                    setHint("Email or Phone Number")
+                    setDimens(
+                        emailRect.left, emailRect.top, 0, 0,
+                        max(1, emailRect.width()), max(1, emailRect.height())
+                    )
+                    setVisibility(VISIBLE)
+                    setEnabled(true)
+                    setFocusable(true)
+                    setFocused(activeField == VIRTUAL_ID_EMAIL)
+                    setAutofillValue(AutofillValue.forText(emailText))
+                }
+                structure.newChild(idx + 1).apply {
+                    setAutofillId(rootAutofillId, VIRTUAL_ID_PASSWORD)
+                    setAutofillType(AUTOFILL_TYPE_TEXT)
+                    setAutofillHints(arrayOf(AUTOFILL_HINT_PASSWORD))
+                    setInputType(InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD)
+                    setClassName("android.widget.EditText")
+                    setId(VIRTUAL_ID_PASSWORD, context.packageName, "id", "discord_login_password")
+                    setHint("Password")
+                    setDimens(
+                        pwRect.left, pwRect.top, 0, 0,
+                        max(1, pwRect.width()), max(1, pwRect.height())
+                    )
+                    setVisibility(VISIBLE)
+                    setEnabled(true)
+                    setFocusable(true)
+                    setFocused(activeField == VIRTUAL_ID_PASSWORD)
+                    setAutofillValue(AutofillValue.forText(pwText))
+                }
+            } else if (mode == 2) {
+                val idx = structure.addChildCount(1)
+                structure.newChild(idx).apply {
+                    setAutofillId(rootAutofillId, VIRTUAL_ID_OTP)
+                    setAutofillType(AUTOFILL_TYPE_TEXT)
+                    setAutofillHints(arrayOf("2faAppOTPCode", "smsOTPCode", "oneTimeCode"))
+                    setInputType(InputType.TYPE_CLASS_NUMBER)
+                    setClassName("android.widget.EditText")
+                    setId(VIRTUAL_ID_OTP, context.packageName, "id", "discord_login_2fa_code")
+                    setHint("6-digit authenticator code")
+                    setDimens(
+                        otpRect.left, otpRect.top, 0, 0,
+                        max(1, otpRect.width()), max(1, otpRect.height())
+                    )
+                    setVisibility(VISIBLE)
+                    setEnabled(true)
+                    setFocusable(true)
+                    setFocused(activeField == VIRTUAL_ID_OTP)
+                    setAutofillValue(AutofillValue.forText(otpText))
+                }
+            }
+        }
+
+        override fun autofill(values: SparseArray<AutofillValue>) {
+            val afm = context.getSystemService(AutofillManager::class.java)
+            for (i in 0 until values.size()) {
+                val id = values.keyAt(i)
+                val v = values.valueAt(i) ?: continue
+                if (!v.isText) continue
+                val text = v.textValue.toString()
+                when (id) {
+                    VIRTUAL_ID_EMAIL -> emailText = text
+                    VIRTUAL_ID_PASSWORD -> pwText = text
+                    VIRTUAL_ID_OTP -> otpText = text
+                    else -> continue
+                }
+                try {
+                    afm?.notifyValueChanged(this, id, v)
+                } catch (_: Throwable) {
+                }
+                if (CCordBridge.nativeReady) {
+                    CCordBridge.nativeOnAutofillField(id, text)
+                }
+            }
+        }
     }
 
     private fun extractCaBundle() {

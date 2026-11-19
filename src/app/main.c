@@ -166,6 +166,7 @@ typedef struct app {
   bool voice_fg_muted;
   bool voice_fg_deafened;
   ccord_id voice_fg_channel;
+  ccord_text_input_kind ime_kind;           // active field hint passed from UI to SDL_StartTextInputWithProperties
 #if CCORD_LIVE_ACCOUNT
   uint64_t keyring_synced_id;               // last identity upserted into the multi-account keyring
   char keyring_synced_name[128];
@@ -199,9 +200,40 @@ static void host_set_fullscreen(void *ud, bool fullscreen)
   (void)ccord_platform_set_fullscreen(((app *)ud)->platform, fullscreen);
 }
 
+static void host_text_input_kind(void *ud, int kind)
+{
+  app *a = ud;
+  if (!a) return;
+  if (kind < (int)CCORD_INPUT_TEXT || kind > (int)CCORD_INPUT_SINGLE_LINE) kind = (int)CCORD_INPUT_TEXT;
+  a->ime_kind = (ccord_text_input_kind)kind;
+}
+
 static void host_text_input(void *ud, bool active, float x, float y, float w, float h)
 {
-  ccord_platform_text_input(((app *)ud)->platform, active, x, y, w, h);
+  app *a = ud;
+  float z = (a && a->renderer) ? ccord_render_get_zoom(a->renderer) : 1.0f;
+  ccord_platform_text_input_ex(a->platform, active, a->ime_kind, x * z, y * z, w * z, h * z);
+}
+
+static void host_auth_autofill(void *ud, int mode, int active_field, bool commit,
+                               ccord_rect email_r, ccord_rect pw_r, ccord_rect otp_r,
+                               const char *email_text, const char *pw_text, const char *otp_text)
+{
+  app *a = ud;
+  if (!a || !a->platform) return;
+  float z = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f;
+  ccord_auth_autofill_state st = {
+    .mode = (mode >= 0 && mode <= 2) ? (ccord_auth_autofill_mode)mode : CCORD_AUTOFILL_NONE,
+    .active_field = (active_field >= 0 && active_field <= 3) ? (ccord_auth_autofill_field)active_field : CCORD_AUTOFILL_FIELD_NONE,
+    .commit = commit,
+    .email_x = email_r.x * z, .email_y = email_r.y * z, .email_w = email_r.w * z, .email_h = email_r.h * z,
+    .pw_x = pw_r.x * z, .pw_y = pw_r.y * z, .pw_w = pw_r.w * z, .pw_h = pw_r.h * z,
+    .otp_x = otp_r.x * z, .otp_y = otp_r.y * z, .otp_w = otp_r.w * z, .otp_h = otp_r.h * z,
+    .email_text = email_text,
+    .pw_text = pw_text,
+    .otp_text = otp_text,
+  };
+  ccord_platform_set_auth_autofill(a->platform, &st);
 }
 
 static void host_request_quit(void *ud)
@@ -784,8 +816,10 @@ static void host_auth_result(void *ud, ccord_status st, long http_status, const 
   if (!a->account || !a->auth_pending) return;
   a->auth_pending = false;
   if (st != CCORD_OK) {
-    ccord_ui_set_login_status(a->ui, st == CCORD_ERR_TIMEOUT ? "Login timed out; try again."
-                                                             : "Network error during login; try again.", false);
+    bool keep_mfa = a->mfa_ticket[0] != '\0';
+    ccord_ui_set_login_error(a->ui, st == CCORD_ERR_TIMEOUT ? "Login timed out; try again."
+                                                            : "Network error during login; try again.",
+                             keep_mfa);
     ccord_ui_set_account_view(a->ui, ccord_account_view_of(a->account));
     return;
   }
@@ -802,13 +836,14 @@ static void host_auth_result(void *ud, ccord_status st, long http_status, const 
       ccord_rest_queue_set_token(a->auth_q, token);
       app_connect_live(a);
     } else {
-      ccord_ui_set_login_status(a->ui, err.message[0] ? err.message : "Failed to save token", false);
+      ccord_ui_set_login_error(a->ui, err.message[0] ? err.message : "Failed to save token", false);
     }
   } else if (pst == CCORD_OK && ticket[0] != '\0') {
     memcpy(a->mfa_ticket, ticket, sizeof ticket);
-    ccord_ui_set_login_status(a->ui, "2FA required: enter your 6-digit authenticator code and click Log In.", true);
+    ccord_ui_set_login_status(a->ui, "Enter the 6-digit code from your authenticator app.", true);
   } else {
-    ccord_ui_set_login_status(a->ui, err.message[0] ? err.message : "Login failed", false);
+    bool keep_mfa = a->mfa_ticket[0] != '\0';
+    ccord_ui_set_login_error(a->ui, err.message[0] ? err.message : "Login failed", keep_mfa);
   }
   ccord_live_wipe(token, sizeof token);
   ccord_live_wipe(ticket, sizeof ticket);
@@ -890,22 +925,29 @@ static void host_account_action(void *ud, ccord_account_action action)
       const char *email = nullptr, *password = nullptr, *mfa_code = nullptr;
       ccord_ui_account_login_fields(a->ui, &email, &password, &mfa_code);
       ccord_status st;
-      if (a->mfa_ticket[0] != '\0' && mfa_code && mfa_code[0] != '\0') {
+      if (a->mfa_ticket[0] != '\0') {
         st = ccord_live_auth_mfa_totp(a->auth_q, a->mfa_ticket, mfa_code, host_auth_result, a, &err);
-        if (st == CCORD_OK) ccord_ui_set_login_status(a->ui, "Verifying 2FA code...", true);
+        if (st == CCORD_OK) ccord_ui_set_login_busy(a->ui, "Verifying 2FA code...");
       } else {
         ccord_live_wipe(a->mfa_ticket, sizeof a->mfa_ticket);
         st = ccord_live_auth_login(a->auth_q, email, password, host_auth_result, a, &err);
-        if (st == CCORD_OK) ccord_ui_set_login_status(a->ui, "Signing in...", true);
+        if (st == CCORD_OK) ccord_ui_set_login_busy(a->ui, "Signing in...");
       }
       if (st == CCORD_OK) {
         a->auth_pending = true;
       } else {
-        ccord_ui_set_login_status(a->ui, err.message[0] ? err.message : "Login failed", false);
+        bool keep_mfa = a->mfa_ticket[0] != '\0';
+        ccord_ui_set_login_error(a->ui, err.message[0] ? err.message : "Login failed", keep_mfa);
       }
 #endif
       break;
     }
+    case CCORD_ACCOUNT_ACTION_MFA_CANCEL:
+#if CCORD_LIVE_ACCOUNT
+      a->auth_pending = false;
+      ccord_live_wipe(a->mfa_ticket, sizeof a->mfa_ticket);
+#endif
+      break;
   }
   ccord_ui_set_account_view(a->ui, ccord_account_view_of(a->account));
   app_push_saved_accounts(a);   // sign-in/out changes which roster row is active
@@ -3760,6 +3802,18 @@ static void run_interactive(app *a)
       } while (ccord_platform_next_event(a->platform, &ev, 0));
     }
     if (a->quit) break;
+    // Drain native password-manager autofill values (Android AutofillManager -> email/password/2FA fields).
+    {
+      ccord_auth_autofill_field af_field = CCORD_AUTOFILL_FIELD_NONE;
+      char af_text[512];
+      while (ccord_platform_poll_autofill(a->platform, &af_field, af_text, sizeof af_text)) {
+        if (af_field != CCORD_AUTOFILL_FIELD_NONE) {
+          ccord_ui_set_account_login_field(a->ui, (int)af_field, af_text);
+          redraw = true;
+        }
+        memset(af_text, 0, sizeof af_text);
+      }
+    }
     // Sync Android Foreground Service + AudioManager comm mode whenever local voice state changes.
     if (vstate.active != a->voice_fg_active ||
         (vstate.active && (vstate.channel_id != a->voice_fg_channel ||
@@ -4194,6 +4248,8 @@ int main(int argc, char **argv)
              .update_check = host_update_check, .update_install = host_update_install,
              .haptic_impact = host_haptic_impact, .share_text = host_share_text,
              .dismiss_keyboard = host_dismiss_keyboard,
+             .text_input_kind = host_text_input_kind,
+             .auth_autofill = host_auth_autofill,
              .set_fullscreen = host_set_fullscreen},
     .fixed_now_unix_ms = fixed,
   };
@@ -4273,6 +4329,13 @@ int main(int argc, char **argv)
     ccord_ui_open_account_settings(a.ui);
   }
 
+  // Render and present the first UI frame BEFORE starting extensions so mobile & desktop show the UI immediately.
+  if (!opt.screenshot && !opt.verify_slice) {
+    (void)ccord_ui_update(a.ui, now_ms(&a));
+    draw_frame(&a);
+    ccord_platform_notify_first_frame(a.platform);
+  }
+
 #if CCORD_WITH_PLUGINS
   // --verify-slice runs the built-in pipeline hermetically: third-party extensions are non-deterministic
   // (the bundled copy-message-id adds an ungated "Copy Message ID" menu item) and are verified by their own
@@ -4283,11 +4346,6 @@ int main(int argc, char **argv)
   (void)opt.no_plugins;
   (void)opt.plugin_dirs;
 #endif
-
-  if (!opt.screenshot && !opt.verify_slice) {
-    (void)ccord_ui_update(a.ui, now_ms(&a));
-    draw_frame(&a);
-  }
   a.start_ms = now_ms(&a);
   a.warm_was_stale = ccord_session_is_stale(a.session);
   ccord_session_start(a.session, &err) == CCORD_OK ? (void)0 : (void)fprintf(stderr, "ccord: %s\n", err.message);

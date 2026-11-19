@@ -36,7 +36,17 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
 void ccord_platform_size(const ccord_platform *p, float *logical_w, float *logical_h, float *scale);   // scale = display scale * pixel density
 void ccord_platform_set_title(ccord_platform *p, const char *utf8);
 void ccord_platform_set_cursor(ccord_platform *p, ccord_cursor_kind kind);
+typedef enum ccord_text_input_kind : uint8_t {
+  CCORD_INPUT_TEXT = 0,         // general multiline text (chat composer)
+  CCORD_INPUT_EMAIL = 1,        // email / username login field
+  CCORD_INPUT_PASSWORD = 2,     // hidden password / token field (no autocorrect)
+  CCORD_INPUT_OTP = 3,          // 6-digit 2FA / TOTP code (numeric, no autocorrect)
+  CCORD_INPUT_SINGLE_LINE = 4,  // single-line plain text (search, modals)
+} ccord_text_input_kind;
+
 void ccord_platform_text_input(ccord_platform *p, bool active, float x, float y, float w, float h);   // IME area
+void ccord_platform_text_input_ex(ccord_platform *p, bool active, ccord_text_input_kind kind,
+                                  float x, float y, float w, float h);
 [[nodiscard]] ccord_status ccord_platform_clipboard_set(ccord_platform *p, const char *utf8, ccord_error *err);
 char *ccord_platform_clipboard_get(ccord_platform *p);       // ccord_free() it; nullptr if empty/unavailable; only valid UTF-8 returned
 void *ccord_platform_sdl_window(ccord_platform *p);           // SDL_Window*, for ccord_render only
@@ -363,3 +373,33 @@ void ccord_platform_dismiss_keyboard(ccord_platform *p);
 void ccord_platform_set_voice_call_active(ccord_platform *p, bool active, const char *channel_name,
                                           bool muted, bool deafened);
 bool ccord_platform_request_permission(ccord_platform *p, const char *permission);
+
+// Android / mobile startup splash handoff & native password-manager autofill bridge (no-ops on desktop).
+typedef enum ccord_auth_autofill_mode : uint8_t {
+  CCORD_AUTOFILL_NONE = 0,
+  CCORD_AUTOFILL_CREDENTIALS = 1,
+  CCORD_AUTOFILL_OTP = 2,
+} ccord_auth_autofill_mode;
+
+typedef enum ccord_auth_autofill_field : uint8_t {
+  CCORD_AUTOFILL_FIELD_NONE = 0,
+  CCORD_AUTOFILL_FIELD_EMAIL = 1,
+  CCORD_AUTOFILL_FIELD_PASSWORD = 2,
+  CCORD_AUTOFILL_FIELD_OTP = 3,
+} ccord_auth_autofill_field;
+
+typedef struct ccord_auth_autofill_state {
+  ccord_auth_autofill_mode mode;
+  ccord_auth_autofill_field active_field;
+  bool commit;
+  float email_x, email_y, email_w, email_h;
+  float pw_x, pw_y, pw_w, pw_h;
+  float otp_x, otp_y, otp_w, otp_h;
+  const char *email_text;
+  const char *pw_text;
+  const char *otp_text;
+} ccord_auth_autofill_state;
+
+void ccord_platform_notify_first_frame(ccord_platform *p);
+void ccord_platform_set_auth_autofill(ccord_platform *p, const ccord_auth_autofill_state *st);
+bool ccord_platform_poll_autofill(ccord_platform *p, ccord_auth_autofill_field *out_field, char *out_text, size_t cap);

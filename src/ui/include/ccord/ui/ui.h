@@ -18,6 +18,7 @@ typedef enum ccord_account_action {
   CCORD_ACCOUNT_ACTION_TOKEN_SIGN_IN,
   CCORD_ACCOUNT_ACTION_TOKEN_SIGN_OUT,
   CCORD_ACCOUNT_ACTION_CREDENTIALS_LOGIN,
+  CCORD_ACCOUNT_ACTION_MFA_CANCEL,
 } ccord_account_action;
 // Optional host capabilities reported to Settings (m6-ui-settings); absent host callback = 0.
 enum { CCORD_UI_CAP_AUDIO_PLAYBACK = 1, CCORD_UI_CAP_NOTIFICATIONS = 2,
@@ -72,6 +73,12 @@ typedef struct ccord_ui_host {      // everything the UI needs from the OS; test
   bool (*haptic_impact)(void *ud, int style);                // 0=light, 1=medium, 2=heavy, 3=selection
   bool (*share_text)(void *ud, const char *title, const char *text);
   void (*dismiss_keyboard)(void *ud);
+  // Optional hint for the active text field's input type (matches ccord_text_input_kind: 0=text, 1=email, 2=password, 3=otp, 4=single_line).
+  void (*text_input_kind)(void *ud, int kind);
+  // Optional native password-manager autofill sync (Android AutofillManager: mode 0=none, 1=credentials, 2=otp).
+  void (*auth_autofill)(void *ud, int mode, int active_field, bool commit,
+                        ccord_rect email_r, ccord_rect pw_r, ccord_rect otp_r,
+                        const char *email_text, const char *pw_text, const char *otp_text);
 } ccord_ui_host;
 typedef struct ccord_ui_deps {
   ccord_bus *bus; ccord_store *store; ccord_session *session; ccord_contrib *contrib;
@@ -379,6 +386,7 @@ typedef struct ccord_ui_settings_debug {
   ccord_rect account_token_box, account_token_save_btn, account_token_paste_btn, account_token_clear_btn;
   ccord_rect account_email_box, account_password_box, account_mfa_box, account_login_btn;
   ccord_rect login_card, login_tab_token, login_tab_credentials;
+  ccord_rect mfa_popup_rect, mfa_back_btn;
   bool account_token_focused, login_screen, account_mfa_required;
   int login_tab, account_focus_field;
   size_t account_token_len;
@@ -437,7 +445,10 @@ const char *ccord_ui_account_token_text(const ccord_ui *ui);
 void ccord_ui_clear_account_token_text(ccord_ui *ui);
 void ccord_ui_account_login_fields(const ccord_ui *ui, const char **out_email,
                                    const char **out_password, const char **out_mfa_code);
+void ccord_ui_set_account_login_field(ccord_ui *ui, int field, const char *utf8);
 void ccord_ui_set_login_status(ccord_ui *ui, const char *status_msg, bool mfa_required);
+void ccord_ui_set_login_busy(ccord_ui *ui, const char *status_msg);
+void ccord_ui_set_login_error(ccord_ui *ui, const char *status_msg, bool keep_mfa);
 // Opens a message from outside the UI (a clicked desktop notification): closes discovery, selects the channel (a server
 // channel, DM or thread) and scrolls to the message. A message the store does not hold yet is jumped to when its page
 // loads; one that is gone leaves the channel at the present, with no notice. An unknown channel does nothing.

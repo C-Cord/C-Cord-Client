@@ -327,6 +327,11 @@ typedef enum menu_builtin : uint8_t {
   MENU_BUILTIN_COPY_LINK,          // copy the message's discord.com/channels/... link
   MENU_BUILTIN_MARK_UNREAD,        // mark the channel unread from this message onward
   MENU_BUILTIN_SAVE_MESSAGE,       // arg = 1 save / 0 unsave (Saved Messages bookmark)
+  MENU_BUILTIN_TEXT_PASTE,
+  MENU_BUILTIN_TEXT_COPY,
+  MENU_BUILTIN_TEXT_CUT,
+  MENU_BUILTIN_TEXT_SELECT_ALL,
+  MENU_BUILTIN_TEXT_CLEAR,
   MENU_BUILTIN_APP_COMMAND,        // arg = application command id (USER / MESSAGE context-menu command)
   MENU_BUILTIN_REPORT_MESSAGE,     // open the report flow for the right-clicked message
   MENU_BUILTIN_REPORT_USER,        // open the report flow for the right-clicked user
@@ -1133,10 +1138,27 @@ struct ccord_ui {
   ccord_text_edit account_token_edit;
   int account_focus_field;   // 0=none, 1=token, 2=email, 3=password, 4=mfa
   bool account_mfa_required;
+  bool account_login_is_error;
   bool login_screen;
   int login_tab;             // 0=Token Sign-In, 1=Email & Password
   ccord_connection_state last_conn_state;
   char account_login_status[160];
+  // Last synced text-input kind & Android Autofill state (deduplicates host calls).
+  int last_ime_kind;
+  int last_autofill_mode;
+  int last_autofill_active;
+  ccord_rect last_autofill_email_r;
+  ccord_rect last_autofill_pw_r;
+  ccord_rect last_autofill_otp_r;
+  size_t last_autofill_email_len;
+  size_t last_autofill_pw_len;
+  size_t last_autofill_otp_len;
+  // Target text editor for the active text-field Copy/Cut/Paste/Select-All context menu.
+  ccord_text_edit *menu_text_edit;
+  bool menu_text_masked;
+  bool menu_text_is_composer;
+  bool menu_text_is_quickcss;
+  bool menu_text_is_search;
   struct ui_forum_state *forum;
   struct ui_server_settings *ss;    // Server Settings overlay; allocated on first open
   struct ui_channel_settings *cs;   // Channel Settings overlay; allocated on first open
@@ -1824,6 +1846,8 @@ void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r);
 void ui_menu_close(ccord_ui *ui);     // closes: the panel stays drawn while it fades out (ui_menu_draw)
 void ui_menu_release(ccord_ui *ui);   // frees the items at once, whatever is still fading
 void ui_menu_open(ccord_ui *ui, float x, float y, const ccord_menu_context *ctx);
+void ui_menu_open_text_field(ccord_ui *ui, float x, float y, ccord_text_edit *edit, bool masked,
+                             bool is_composer, bool is_quickcss, bool is_search);
 bool ui_menu_handle_mouse(ccord_ui *ui, const ccord_input_event *ev);
 void ui_menu_draw(ccord_ui *ui, ccord_renderer *r);
 void ui_menu_scroll_debug(const ccord_ui *ui, float *scroll, float *room);
@@ -1846,6 +1870,8 @@ void ui_settings_init(ccord_ui *ui);   // defaults plus the persisted INI on fir
 void ui_settings_save(ccord_ui *ui);
 void ui_settings_draw(ccord_ui *ui, ccord_renderer *r);
 bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev);
+void ui_settings_dismiss_mfa(ccord_ui *ui);
+void ui_settings_auth_autofill_rects(const ccord_ui *ui, ccord_rect *email_r, ccord_rect *pw_r, ccord_rect *otp_r);
 // True when the key event matches rebindable action keybind `which` (CCORD_UI_KEYBIND_MUTE..).
 // Bare-key binds never fire while the composer holds text or a message is being edited.
 bool ui_keybind_match(const ccord_ui *ui, int which, const ccord_input_event *ev);

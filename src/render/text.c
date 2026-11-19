@@ -407,6 +407,13 @@ static void ensure_coverage(ccord_renderer *r, TTF_Font *font, const char *s, si
     }
     i += (size_t)n;
     if (cp_default_ignorable(cp) || cp_hidden(cp) || TTF_FontHasGlyph(font, cp) || miss_known(r, cp)) continue;
+    // Lazily load bundled emoji/CJK subsets on the first code point NotoSans doesn't cover so cold start
+    // draws its first frame immediately without parsing ~16 MB of fallback font tables upfront.
+    if (!r->fallbacks_probed) {
+      fallback_fonts_init(r);
+      if (TTF_FontHasGlyph(font, cp)) continue;
+    }
+    if (r->glyph_fixes_off) continue;
     budget--;
     if (r->nfallbacks >= CCORD_MAX_FALLBACKS || !lookup_system_font(r, cp)) miss_add(r, cp);
   }
@@ -420,7 +427,6 @@ static int font_px(const ccord_renderer *r, const ccord_text_style *st)
 
 static TTF_Font *font_get(ccord_renderer *r, ccord_font_style style, int px)
 {
-  fallback_fonts_init(r);
   for (int i = 0; i < r->nfonts; i++) {
     if (r->fonts[i].style == style && r->fonts[i].px == px) return r->fonts[i].font;
   }
@@ -630,7 +636,7 @@ static text_entry *text_get(ccord_renderer *r, const char *s, size_t len, const 
   uint32_t *o2s = nullptr, *s2o = nullptr;
   if (!r->glyph_fixes_off) (void)sanitize_text(copy, len, &shaped, &slen, &o2s, &s2o);   // shaped stays null if nothing to cut
   const char *src = shaped ? shaped : copy;
-  if (!r->glyph_fixes_off) ensure_coverage(r, font, src, slen);
+  ensure_coverage(r, font, src, slen);
   TTF_Text *t = TTF_CreateText(r->engine, font, src, slen);
   if (!t) {
     CCORD_LOG_W("render: TTF_CreateText failed: %s", SDL_GetError());

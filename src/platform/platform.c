@@ -59,6 +59,11 @@ struct ccord_platform {
   bool cursor_unavailable[CCORD_CURSOR_COUNT];   // creation failed once (e.g. dummy driver): do not retry or log again
   ccord_cursor_kind cursor_kind;
   bool text_input_on;
+  ccord_text_input_kind text_input_kind;
+  bool first_frame_notified;
+  char *pending_text;
+  size_t pending_text_len;
+  size_t pending_text_off;
   bool headless;
   bool focused;
   bool window_visible;            // tracked even under the dummy video driver (start_minimized / tray)
@@ -130,6 +135,38 @@ static float window_density(SDL_Window *w)
 }
 
 static void copy_utf8_prefix(char *dst, size_t cap, const char *src, size_t len);
+
+#define PLATFORM_PENDING_TEXT_MAX 65536u
+
+static void pending_text_clear(ccord_platform *p)
+{
+  if (!p) return;
+  ccord_free(p->pending_text);
+  p->pending_text = nullptr;
+  p->pending_text_len = 0;
+  p->pending_text_off = 0;
+}
+
+static bool pending_text_pop(ccord_platform *p, ccord_input_event *out)
+{
+  if (!p || !p->pending_text || p->pending_text_off >= p->pending_text_len) return false;
+  const char *rem = p->pending_text + p->pending_text_off;
+  size_t rem_len = p->pending_text_len - p->pending_text_off;
+  size_t max_chunk = sizeof out->text - 1u;
+  size_t chunk = rem_len < max_chunk ? rem_len : max_chunk;
+  while (chunk > 0 && !ccord_utf8_valid(rem, chunk)) chunk--;
+  if (chunk == 0) {
+    pending_text_clear(p);
+    return false;
+  }
+  memset(out, 0, sizeof *out);
+  out->type = CCORD_IN_TEXT;
+  memcpy(out->text, rem, chunk);
+  out->text[chunk] = '\0';
+  p->pending_text_off += chunk;
+  if (p->pending_text_off >= p->pending_text_len) pending_text_clear(p);
+  return true;
+}
 
 // Global hotkey queue: fed by the portal Activated signal (during desktop pump) or test injection,
 // drained by ccord_platform_next_event as CCORD_EV_HOTKEY. Ring buffer, oldest dropped on overflow.
@@ -404,6 +441,7 @@ void ccord_platform_destroy(ccord_platform *p)
   ccord_android_register_platform(nullptr);
 #endif
   if (p->text_input_on) SDL_StopTextInput(p->window);
+  pending_text_clear(p);
   ccord_desktop_destroy(p->desktop);
   ccord_linkwatch_destroy(p->link);
   SDL_SetCursor(nullptr);
@@ -467,18 +505,73 @@ void ccord_platform_set_cursor(ccord_platform *p, ccord_cursor_kind kind)
   p->cursor_kind = kind;
 }
 
-void ccord_platform_text_input(ccord_platform *p, bool active, float x, float y, float w, float h)
+void ccord_platform_text_input_ex(ccord_platform *p, bool active, ccord_text_input_kind kind,
+                                  float x, float y, float w, float h)
 {
   if (!p) return;
   if (active) {
     float f = window_scale(p->window) / window_density(p->window);   // logical -> screen coordinates
     SDL_Rect r = {(int)(x * f), (int)(y * f), (int)(w * f), (int)(h * f)};
     SDL_SetTextInputArea(p->window, &r, 0);
-    if (!p->text_input_on && SDL_StartTextInput(p->window)) p->text_input_on = true;
+    if (!p->text_input_on || p->text_input_kind != kind) {
+      SDL_PropertiesID props = SDL_CreateProperties();
+      if (props) {
+        SDL_TextInputType stype = SDL_TEXTINPUT_TYPE_TEXT;
+        SDL_Capitalization scap = SDL_CAPITALIZE_SENTENCES;
+        bool autocorrect = true;
+        bool multiline = true;
+        switch (kind) {
+          case CCORD_INPUT_EMAIL:
+            stype = SDL_TEXTINPUT_TYPE_TEXT_EMAIL;
+            scap = SDL_CAPITALIZE_NONE;
+            autocorrect = false;
+            multiline = false;
+            break;
+          case CCORD_INPUT_PASSWORD:
+            stype = SDL_TEXTINPUT_TYPE_TEXT_PASSWORD_HIDDEN;
+            scap = SDL_CAPITALIZE_NONE;
+            autocorrect = false;
+            multiline = false;
+            break;
+          case CCORD_INPUT_OTP:
+            stype = SDL_TEXTINPUT_TYPE_NUMBER;
+            scap = SDL_CAPITALIZE_NONE;
+            autocorrect = false;
+            multiline = false;
+            break;
+          case CCORD_INPUT_SINGLE_LINE:
+            stype = SDL_TEXTINPUT_TYPE_TEXT;
+            scap = SDL_CAPITALIZE_NONE;
+            autocorrect = true;
+            multiline = false;
+            break;
+          case CCORD_INPUT_TEXT:
+          default:
+            break;
+        }
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTINPUT_TYPE_NUMBER, (Sint64)stype);
+        SDL_SetNumberProperty(props, SDL_PROP_TEXTINPUT_CAPITALIZATION_NUMBER, (Sint64)scap);
+        SDL_SetBooleanProperty(props, SDL_PROP_TEXTINPUT_AUTOCORRECT_BOOLEAN, autocorrect);
+        SDL_SetBooleanProperty(props, SDL_PROP_TEXTINPUT_MULTILINE_BOOLEAN, multiline);
+        if (SDL_StartTextInputWithProperties(p->window, props)) {
+          p->text_input_on = true;
+          p->text_input_kind = kind;
+        }
+        SDL_DestroyProperties(props);
+      } else if (!p->text_input_on && SDL_StartTextInput(p->window)) {
+        p->text_input_on = true;
+        p->text_input_kind = kind;
+      }
+    }
   } else if (p->text_input_on) {
     SDL_StopTextInput(p->window);
     p->text_input_on = false;
   }
+}
+
+void ccord_platform_text_input(ccord_platform *p, bool active, float x, float y, float w, float h)
+{
+  ccord_platform_text_input_ex(p, active, CCORD_INPUT_TEXT, x, y, w, h);
 }
 
 ccord_status ccord_platform_clipboard_set(ccord_platform *p, const char *utf8, ccord_error *err)
@@ -1789,9 +1882,33 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
       return out->key != CCORD_KEY_UNKNOWN;
     case SDL_EVENT_TEXT_INPUT: {
       size_t n = e->text.text ? strlen(e->text.text) : 0;
-      if (n == 0 || n >= sizeof out->text || !ccord_utf8_valid(e->text.text, n)) return false;
+      if (n == 0 || n > PLATFORM_PENDING_TEXT_MAX || !ccord_utf8_valid(e->text.text, n)) return false;
+      if (n < sizeof out->text) {
+        out->type = CCORD_IN_TEXT;
+        memcpy(out->text, e->text.text, n);
+        out->text[n] = '\0';
+        return true;
+      }
+      // Long IME commit / mobile clipboard paste (>= 32 bytes): emit the first valid UTF-8 chunk now
+      // and queue the remainder for subsequent ccord_platform_next_event() calls so nothing is dropped.
+      size_t first = sizeof out->text - 1u;
+      while (first > 0 && !ccord_utf8_valid(e->text.text, first)) first--;
+      if (first == 0) return false;
+      size_t rest = n - first;
+      if (rest > 0) {
+        char *buf = ccord_malloc(rest + 1u);
+        if (buf) {
+          memcpy(buf, e->text.text + first, rest);
+          buf[rest] = '\0';
+          pending_text_clear(p);
+          p->pending_text = buf;
+          p->pending_text_len = rest;
+          p->pending_text_off = 0;
+        }
+      }
       out->type = CCORD_IN_TEXT;
-      memcpy(out->text, e->text.text, n);
+      memcpy(out->text, e->text.text, first);
+      out->text[first] = '\0';
       return true;
     }
     case SDL_EVENT_TEXT_EDITING: {
@@ -1898,6 +2015,7 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
     out->inset_bottom = p->keyboard_inset;
     return true;
   }
+  if (pending_text_pop(p, out)) return true;
   bool queued_hotkey = false;
   if (p->hotkey_mutex) SDL_LockMutex(p->hotkey_mutex);
   if (p->hotkey_count > 0) {
@@ -2096,5 +2214,54 @@ bool ccord_platform_request_permission(ccord_platform *p, const char *permission
   return SDL_RequestAndroidPermission(permission, nullptr, nullptr);
 #else
   return true;
+#endif
+}
+
+void ccord_platform_notify_first_frame(ccord_platform *p)
+{
+  if (!p || p->first_frame_notified) return;
+  p->first_frame_notified = true;
+#if defined(__ANDROID__)
+  if (!p->headless) ccord_android_on_first_frame();
+#endif
+}
+
+void ccord_platform_set_auth_autofill(ccord_platform *p, const ccord_auth_autofill_state *st)
+{
+  if (!p || !st || p->headless) return;
+#if defined(__ANDROID__)
+  float s = p->window ? window_scale(p->window) : 1.0f;
+  if (s <= 0.0f) s = 1.0f;
+  ccord_android_set_auth_autofill(
+      (int)st->mode, (int)st->active_field, st->commit,
+      (int)lroundf(st->email_x * s), (int)lroundf(st->email_y * s),
+      (int)lroundf(st->email_w * s), (int)lroundf(st->email_h * s),
+      (int)lroundf(st->pw_x * s), (int)lroundf(st->pw_y * s),
+      (int)lroundf(st->pw_w * s), (int)lroundf(st->pw_h * s),
+      (int)lroundf(st->otp_x * s), (int)lroundf(st->otp_y * s),
+      (int)lroundf(st->otp_w * s), (int)lroundf(st->otp_h * s),
+      st->email_text ? st->email_text : "",
+      st->pw_text ? st->pw_text : "",
+      st->otp_text ? st->otp_text : "");
+#else
+  (void)st;
+#endif
+}
+
+bool ccord_platform_poll_autofill(ccord_platform *p, ccord_auth_autofill_field *out_field, char *out_text, size_t cap)
+{
+  if (!p || p->headless) return false;
+#if defined(__ANDROID__)
+  int field = 0;
+  if (!ccord_android_poll_autofill(&field, out_text, cap)) return false;
+  if (out_field) {
+    *out_field = (field >= 1 && field <= 3) ? (ccord_auth_autofill_field)field : CCORD_AUTOFILL_FIELD_NONE;
+  }
+  return true;
+#else
+  (void)out_field;
+  (void)out_text;
+  (void)cap;
+  return false;
 #endif
 }

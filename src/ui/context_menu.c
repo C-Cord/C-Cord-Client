@@ -65,6 +65,11 @@ void ui_menu_release(ccord_ui *ui)
   ui->menu.scrollbar_rect = (ccord_rect){0};
   ui->menu.sub_scrollbar_rect = (ccord_rect){0};
   ui->menu_folder_id = CCORD_ID_NONE;
+  ui->menu_text_edit = nullptr;
+  ui->menu_text_masked = false;
+  ui->menu_text_is_composer = false;
+  ui->menu_text_is_quickcss = false;
+  ui->menu_text_is_search = false;
   ui->dirty = true;
 }
 
@@ -1023,6 +1028,55 @@ void ui_menu_open(ccord_ui *ui, float x, float y, const ccord_menu_context *ctx)
   ui->dirty = true;
 }
 
+void ui_menu_open_text_field(ccord_ui *ui, float x, float y, ccord_text_edit *edit, bool masked,
+                             bool is_composer, bool is_quickcss, bool is_search)
+{
+  if (!ui || !edit) return;
+  ui_menu_release(ui);
+  ui->menu.seq++;
+  ui->menu.ctx = (ccord_menu_context){0};
+  ui->menu_text_edit = edit;
+  ui->menu_text_masked = masked;
+  ui->menu_text_is_composer = is_composer;
+  ui->menu_text_is_quickcss = is_quickcss;
+  ui->menu_text_is_search = is_search;
+
+  bool has_text = edit->len > 0;
+  // Never probe clipboard_get here: on Android 12+, reading the clipboard shows a system toast,
+  // so Paste stays enabled whenever the host provides clipboard_get and only reads on tap.
+  bool can_paste = ui->d.host.clipboard_get != nullptr || (is_composer && ui->d.host.get_clipboard_image != nullptr);
+  bool can_copy = !masked && has_text && ui->d.host.clipboard_set != nullptr;
+  (void)add_item_ex(ui, "Paste", nullptr, MENU_BUILTIN_TEXT_PASTE, nullptr, nullptr, false, !can_paste, false, 0);
+  if (!masked) {
+    (void)add_item_ex(ui, "Copy", nullptr, MENU_BUILTIN_TEXT_COPY, nullptr, nullptr, false, !can_copy, false, 0);
+    (void)add_item_ex(ui, "Cut", nullptr, MENU_BUILTIN_TEXT_CUT, nullptr, nullptr, false, !can_copy, false, 0);
+  }
+  (void)add_item_ex(ui, "Select All", nullptr, MENU_BUILTIN_TEXT_SELECT_ALL, nullptr, nullptr, false, !has_text, false, 0);
+  (void)add_item_ex(ui, "Clear", nullptr, MENU_BUILTIN_TEXT_CLEAR, nullptr, nullptr, true, !has_text, true, 0);
+
+  if (ui->menu.count == 0) return;
+  ui->menu.open = true;
+  ui->menu.hover = -1;
+  ui->menu.open_sub = -1;
+  ui->menu.sub_w = M(context_menu_min_width);
+  ui->menu.w = M(context_menu_min_width);
+  ui->menu.content_h = menu_height(ui);
+  ui->menu.h = ui->menu.content_h;
+  float max_h = menu_max_h(ui);
+  if (ui->menu.h > max_h) ui->menu.h = max_h;
+  ui->menu.scroll_y = 0.0f;
+  ui->menu.sub_scroll_y = 0.0f;
+  ccord_scroller_cancel(&ui->menu_glide);
+  ccord_scroller_cancel(&ui->menu_sub_glide);
+  ui->menu.x = x;
+  ui->menu.y = y;
+  if (ui->menu.x + ui->menu.w > ui->win_w - MENU_EDGE) ui->menu.x = ui->win_w - ui->menu.w - MENU_EDGE;
+  if (ui->menu.y + ui->menu.h > ui->win_h - MENU_EDGE) ui->menu.y = ui->win_h - MENU_EDGE - ui->menu.h;
+  if (ui->menu.x < MENU_EDGE) ui->menu.x = MENU_EDGE;
+  if (ui->menu.y < MENU_EDGE) ui->menu.y = MENU_EDGE;
+  ui->dirty = true;
+}
+
 ccord_rect ui_menu_item_rect(const ccord_ui *ui, size_t idx)
 {
   return idx < ui->menu.count ? item_rect(ui, idx) : (ccord_rect){0};
@@ -1075,6 +1129,71 @@ static void activate(ccord_ui *ui, size_t idx)
 {
   menu_item it = ui->menu.items[idx];
   ccord_menu_context ctx = ui->menu.ctx;
+  if (it.builtin >= MENU_BUILTIN_TEXT_PASTE && it.builtin <= MENU_BUILTIN_TEXT_CLEAR) {
+    ccord_text_edit *te = ui->menu_text_edit;
+    bool is_composer = ui->menu_text_is_composer;
+    bool is_quickcss = ui->menu_text_is_quickcss;
+    bool is_search = ui->menu_text_is_search;
+    if (!te) return;
+    if (it.builtin == MENU_BUILTIN_TEXT_PASTE) {
+      bool pasted = false;
+      if (ui->d.host.clipboard_get) {
+        char *clip = ui->d.host.clipboard_get(ui->d.host.ud);
+        if (clip && clip[0]) {
+          ccord_error ierr = {0};
+          ccord_status st = is_composer ? ccord_text_edit_paste(te, clip, strlen(clip), &ierr)
+                                        : ccord_text_edit_insert(te, clip, strlen(clip), &ierr);
+          if (st == CCORD_OK) {
+            pasted = true;
+            if (is_quickcss) ui_quickcss_changed(ui);
+          } else {
+            ui_notice(ui, "%s", ierr.message[0] ? ierr.message : "Could not paste text");
+          }
+        }
+        ccord_free(clip);
+      }
+      if (!pasted && is_composer && ui->d.host.get_clipboard_image) {
+        uint8_t *png = nullptr;
+        size_t png_len = 0;
+        if (ui->d.host.get_clipboard_image(ui->d.host.ud, &png, &png_len) && png && png_len > 0) {
+          (void)ccord_ui_attach_bytes(ui, "clipboard.png", png, png_len);
+          ccord_free(png);
+        }
+      }
+      (void)is_search;
+      ui->dirty = true;
+      return;
+    }
+    if (it.builtin == MENU_BUILTIN_TEXT_COPY || it.builtin == MENU_BUILTIN_TEXT_CUT) {
+      if (ui->d.host.clipboard_set && te->len > 0) {
+        char *sel = ccord_text_edit_copy_selection(te);
+        if (sel) {
+          ui->d.host.clipboard_set(ui->d.host.ud, sel);
+          ccord_free(sel);
+          if (it.builtin == MENU_BUILTIN_TEXT_CUT) ccord_text_edit_backspace(te);
+        } else {
+          ui->d.host.clipboard_set(ui->d.host.ud, ccord_text_edit_cstr(te));
+          if (it.builtin == MENU_BUILTIN_TEXT_CUT) ccord_text_edit_clear(te);
+        }
+        if (it.builtin == MENU_BUILTIN_TEXT_CUT && is_quickcss) ui_quickcss_changed(ui);
+        ui_notice(ui, it.builtin == MENU_BUILTIN_TEXT_CUT ? "Cut to clipboard" : "Copied to clipboard");
+      }
+      ui->dirty = true;
+      return;
+    }
+    if (it.builtin == MENU_BUILTIN_TEXT_SELECT_ALL) {
+      ccord_text_edit_select_all(te);
+      ui->dirty = true;
+      return;
+    }
+    if (it.builtin == MENU_BUILTIN_TEXT_CLEAR) {
+      ccord_text_edit_clear(te);
+      if (is_quickcss) ui_quickcss_changed(ui);
+      ui->dirty = true;
+      return;
+    }
+    return;
+  }
   if (it.builtin == MENU_BUILTIN_MENTION_USER) {
     if (ctx.user_id == CCORD_ID_NONE || !can_mention_in_composer(ui)) return;
     const ccord_user *u = ccord_store_user(ui->d.store, ctx.user_id);

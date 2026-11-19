@@ -1547,6 +1547,53 @@ static void test_live(void)
 
 #endif  // CCORD_HAVE_PORTAL
 
+static void test_long_text_input_chunking(void)
+{
+  ccord_error err;
+  ccord_platform_config cfg = {.title = "C-Cord", .width = 320, .height = 200, .headless = true};
+  ccord_platform *p = ccord_platform_create(&cfg, &err);
+  CT_CHECK(p != nullptr);
+  if (!p) return;
+  drain(p);
+
+  // Verify text_input_ex accepts every input kind (email, password, OTP, single-line, text) cleanly.
+  ccord_platform_text_input_ex(p, true, CCORD_INPUT_EMAIL, 10, 20, 200, 36);
+  ccord_platform_text_input_ex(p, true, CCORD_INPUT_PASSWORD, 10, 60, 200, 36);
+  ccord_platform_text_input_ex(p, true, CCORD_INPUT_OTP, 10, 100, 200, 36);
+  ccord_platform_text_input_ex(p, true, CCORD_INPUT_SINGLE_LINE, 10, 140, 200, 36);
+  ccord_platform_text_input_ex(p, false, CCORD_INPUT_TEXT, 0, 0, 0, 0);
+
+  // Push a long (>32 byte) UTF-8 string containing multi-byte code points (simulating mobile keyboard
+  // clipboard paste or password-manager commitText) and verify every byte arrives intact across chunks.
+  static const char long_paste[] =
+      "MySuperLongP@ssw0rd_FromBitwarden_AndClipboard_éèê_🚀✨_EndOfPaste_1234567890!";
+  SDL_Event e;
+  memset(&e, 0, sizeof e);
+  e.type = SDL_EVENT_TEXT_INPUT;
+  e.text.text = long_paste;
+  (void)SDL_PushEvent(&e);
+
+  char got[256] = {0};
+  size_t got_len = 0;
+  int chunks = 0;
+  ccord_input_event ev;
+  while (ccord_platform_next_event(p, &ev, 0)) {
+    if (ev.type == CCORD_IN_TEXT) {
+      size_t clen = strlen(ev.text);
+      CT_CHECK(clen > 0 && clen < sizeof ev.text);
+      if (got_len + clen < sizeof got) {
+        memcpy(got + got_len, ev.text, clen);
+        got_len += clen;
+        got[got_len] = '\0';
+      }
+      chunks++;
+    }
+  }
+  CT_CHECK(chunks >= 3);
+  CT_CHECK(strcmp(got, long_paste) == 0);
+  ccord_platform_destroy(p);
+}
+
 int main(void)
 {
   SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
@@ -1556,6 +1603,7 @@ int main(void)
   // push-one/poll-one checks below need immediate delivery, so disable the sentinel here.
   SDL_SetHint(SDL_HINT_POLL_SENTINEL, "0");
   test_offline();
+  test_long_text_input_chunking();
   test_window_lifecycle();
   test_dead_bus();
 #if CCORD_HAVE_PORTAL

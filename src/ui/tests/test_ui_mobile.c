@@ -27,10 +27,14 @@ typedef struct mob_fixture {
   ccord_ui *ui;
   uint64_t now;
   bool text_input_active;
+  int last_input_kind;
+  int last_autofill_mode;
+  int last_autofill_active;
   int haptic_calls;
   int last_haptic_style;
   int dismiss_kb_calls;
   int share_calls;
+  char clip[256];
 } mob_fixture;
 
 static mob_fixture F;
@@ -39,6 +43,35 @@ static uint64_t fake_clock(void *ud)
 {
   (void)ud;
   return F.now;
+}
+
+static void host_clip_set(void *ud, const char *utf8)
+{
+  (void)ud;
+  snprintf(F.clip, sizeof F.clip, "%s", utf8 ? utf8 : "");
+}
+
+static char *host_clip_get(void *ud)
+{
+  (void)ud;
+  if (!F.clip[0]) return nullptr;
+  return ccord_strdup(F.clip);
+}
+
+static void host_text_input_kind(void *ud, int kind)
+{
+  (void)ud;
+  F.last_input_kind = kind;
+}
+
+static void host_auth_autofill(void *ud, int mode, int active_field, bool commit,
+                               ccord_rect email_r, ccord_rect pw_r, ccord_rect otp_r,
+                               const char *email_text, const char *pw_text, const char *otp_text)
+{
+  (void)ud; (void)commit; (void)email_r; (void)pw_r; (void)otp_r;
+  (void)email_text; (void)pw_text; (void)otp_text;
+  F.last_autofill_mode = mode;
+  F.last_autofill_active = active_field;
 }
 
 static void host_text_input(void *ud, bool active, float x, float y, float w, float h)
@@ -123,7 +156,11 @@ static bool fixture_init(void)
     .bus = F.bus, .store = F.store, .session = F.session, .contrib = F.contrib, .theme = &F.theme,
     .host = {
       .ud = &F,
+      .clipboard_set = host_clip_set,
+      .clipboard_get = host_clip_get,
       .text_input = host_text_input,
+      .text_input_kind = host_text_input_kind,
+      .auth_autofill = host_auth_autofill,
       .haptic_impact = host_haptic_impact,
       .dismiss_keyboard = host_dismiss_keyboard,
       .share_text = host_share_text,
@@ -395,6 +432,148 @@ static void test_mobile_lightbox_pinch_and_back_cascade(void)
   CT_CHECK(!ccord_ui_handle_back(F.ui));
 }
 
+static void test_mobile_copy_paste_and_autofill_login(void)
+{
+  // 1. Long-press composer on mobile -> Paste from clipboard -> Copy back out.
+  snprintf(F.clip, sizeof F.clip, "Pasted on mobile!");
+  ccord_layout_rect comp = F.ui->layout.composer;
+  touch_ev(CCORD_IN_TOUCH_DOWN, 20, comp.x + comp.w * 0.5f, comp.y + comp.h * 0.5f);
+  step_frames(12, 50);
+  CT_CHECK(F.ui->menu.open);
+  touch_ev(CCORD_IN_TOUCH_UP, 20, comp.x + comp.w * 0.5f, comp.y + comp.h * 0.5f);
+  step_frames(2, 30);
+
+  ccord_rect paste_r = {0};
+  CT_CHECK(ccord_ui_context_menu_find(F.ui, "Paste", &paste_r));
+  touch_tap(paste_r.x + paste_r.w * 0.5f, paste_r.y + paste_r.h * 0.5f);
+  CT_CHECK(strcmp(ccord_ui_composer_text(F.ui), "Pasted on mobile!") == 0);
+
+  // Clear clipboard, long-press composer again, tap Copy -> clipboard gets composer text.
+  F.clip[0] = '\0';
+  touch_ev(CCORD_IN_TOUCH_DOWN, 21, comp.x + comp.w * 0.5f, comp.y + comp.h * 0.5f);
+  step_frames(12, 50);
+  CT_CHECK(F.ui->menu.open);
+  touch_ev(CCORD_IN_TOUCH_UP, 21, comp.x + comp.w * 0.5f, comp.y + comp.h * 0.5f);
+  step_frames(2, 30);
+  ccord_rect copy_r = {0};
+  CT_CHECK(ccord_ui_context_menu_find(F.ui, "Copy", &copy_r));
+  touch_tap(copy_r.x + copy_r.w * 0.5f, copy_r.y + copy_r.h * 0.5f);
+  CT_CHECK(strcmp(F.clip, "Pasted on mobile!") == 0);
+
+  // 2. Mobile Login screen (fresh unauthenticated store): input kinds (email/password/OTP),
+  //    Android Autofill virtual structure sync, long-press Copy/Paste on login fields, and 2FA popup Back.
+  ccord_error err = {0};
+  ccord_bus *lbus = ccord_bus_create(&err);
+  ccord_store *lstore = ccord_store_create(lbus, &err);
+  ccord_mock_config lmc = {.latency_ms = 0, .now_ms = fake_clock, .clock_ud = &F};
+  ccord_transport *ltr = ccord_mock_transport_create(&lmc, &err);
+  ccord_session *lsess = ccord_session_create(lbus, lstore, ltr, &err);
+  CT_CHECK(lbus && lstore && lsess);
+  ccord_ui_deps ldeps = {
+    .bus = lbus, .store = lstore, .session = lsess, .contrib = F.contrib, .theme = &F.theme,
+    .host = {
+      .ud = &F,
+      .clipboard_set = host_clip_set,
+      .clipboard_get = host_clip_get,
+      .text_input = host_text_input,
+      .text_input_kind = host_text_input_kind,
+      .auth_autofill = host_auth_autofill,
+      .haptic_impact = host_haptic_impact,
+      .dismiss_keyboard = host_dismiss_keyboard,
+      .share_text = host_share_text,
+    },
+    .fixed_now_unix_ms = 1793534400000LL,
+  };
+  ccord_ui *lui = ccord_ui_create(&ldeps, &err);
+  CT_CHECK(lui != nullptr);
+  ccord_ui_set_viewport(lui, 412.0f, 915.0f);
+  ccord_ui_set_mobile_mode(lui, true);
+  ccord_ui_set_touch_mode(lui, true);
+  ccord_ui_set_safe_insets(lui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_open_account_settings(lui);
+  ccord_ui_set_login_tab(lui, 1);
+  (void)ccord_ui_update(lui, F.now += 30);
+
+  ccord_ui_settings_debug sd = {0};
+  ccord_ui_get_settings_debug(lui, &sd);
+  CT_CHECK(sd.login_screen && sd.login_tab == 1);
+  CT_CHECK(!sd.account_mfa_required && sd.account_mfa_box.w == 0.0f);
+
+  // Tap Email field -> INPUT_EMAIL (1) + autofill mode=1, active=1.
+  ccord_input_event td = {.type = CCORD_IN_TOUCH_DOWN, .finger_id = 30,
+                          .x = sd.account_email_box.x + 20.0f, .y = sd.account_email_box.y + 12.0f};
+  ccord_input_event tu = {.type = CCORD_IN_TOUCH_UP, .finger_id = 30,
+                          .x = sd.account_email_box.x + 20.0f, .y = sd.account_email_box.y + 12.0f};
+  (void)ccord_ui_handle_input(lui, &td);
+  (void)ccord_ui_update(lui, F.now += 30);
+  (void)ccord_ui_handle_input(lui, &tu);
+  (void)ccord_ui_update(lui, F.now += 30);
+  CT_CHECK(F.text_input_active && F.last_input_kind == (int)CCORD_INPUT_EMAIL);
+  CT_CHECK(F.last_autofill_mode == 1 && F.last_autofill_active == 1);
+
+  // Long-press Email field -> mobile Paste bottom sheet -> pastes clipboard text into Email!
+  snprintf(F.clip, sizeof F.clip, "user@mobile.test");
+  ccord_input_event lp = {.type = CCORD_IN_TOUCH_DOWN, .finger_id = 31,
+                          .x = sd.account_email_box.x + 20.0f, .y = sd.account_email_box.y + 12.0f};
+  (void)ccord_ui_handle_input(lui, &lp);
+  for (int i = 0; i < 12; i++) (void)ccord_ui_update(lui, F.now += 50);
+  CT_CHECK(lui->menu.open);
+  lp.type = CCORD_IN_TOUCH_UP;
+  (void)ccord_ui_handle_input(lui, &lp);
+  ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+  ccord_ui_draw(lui, F.renderer);
+  ccord_render_end(F.renderer);
+  ccord_rect lpaste = {0};
+  CT_CHECK(ccord_ui_context_menu_find(lui, "Paste", &lpaste));
+  td = (ccord_input_event){.type = CCORD_IN_TOUCH_DOWN, .finger_id = 32,
+                           .x = lpaste.x + lpaste.w * 0.5f, .y = lpaste.y + lpaste.h * 0.5f};
+  tu = td; tu.type = CCORD_IN_TOUCH_UP;
+  (void)ccord_ui_handle_input(lui, &td);
+  (void)ccord_ui_update(lui, F.now += 30);
+  (void)ccord_ui_handle_input(lui, &tu);
+  (void)ccord_ui_update(lui, F.now += 30);
+  const char *em = nullptr, *pw = nullptr, *mfa = nullptr;
+  ccord_ui_account_login_fields(lui, &em, &pw, &mfa);
+  CT_CHECK(strcmp(em, "user@mobile.test") == 0);
+
+  // Tap Password field -> INPUT_PASSWORD (2) + autofill mode=1, active=2.
+  td = (ccord_input_event){.type = CCORD_IN_TOUCH_DOWN, .finger_id = 33,
+                           .x = sd.account_password_box.x + 20.0f, .y = sd.account_password_box.y + 12.0f};
+  tu = td; tu.type = CCORD_IN_TOUCH_UP;
+  (void)ccord_ui_handle_input(lui, &td);
+  (void)ccord_ui_update(lui, F.now += 30);
+  (void)ccord_ui_handle_input(lui, &tu);
+  (void)ccord_ui_update(lui, F.now += 30);
+  CT_CHECK(F.text_input_active && F.last_input_kind == (int)CCORD_INPUT_PASSWORD);
+  CT_CHECK(F.last_autofill_mode == 1 && F.last_autofill_active == 2);
+
+  // Simulate Bitwarden autofill populating Email + Password directly.
+  ccord_ui_set_account_login_field(lui, 1, "bitwarden@example.com");
+  ccord_ui_set_account_login_field(lui, 2, "s3cr3t-pass-from-bitwarden");
+  ccord_ui_account_login_fields(lui, &em, &pw, &mfa);
+  CT_CHECK(strcmp(em, "bitwarden@example.com") == 0);
+  CT_CHECK(strcmp(pw, "s3cr3t-pass-from-bitwarden") == 0);
+
+  // Transition to secondary 2FA popup -> INPUT_OTP (3) + autofill mode=2, active=3.
+  ccord_ui_set_login_status(lui, "Enter your 6-digit code.", true);
+  (void)ccord_ui_update(lui, F.now += 30);
+  CT_CHECK(F.last_input_kind == (int)CCORD_INPUT_OTP);
+  CT_CHECK(F.last_autofill_mode == 2 && F.last_autofill_active == 3);
+  ccord_ui_set_account_login_field(lui, 3, "987654");
+  ccord_ui_account_login_fields(lui, &em, &pw, &mfa);
+  CT_CHECK(strcmp(mfa, "987654") == 0);
+
+  // Android Back dismisses keyboard first (if focused), then dismisses the 2FA popup back to Email & Password.
+  lui->touch_text_focused = false;
+  CT_CHECK(ccord_ui_handle_back(lui));
+  CT_CHECK(!lui->account_mfa_required);
+
+  ccord_ui_destroy(lui);
+  ccord_session_destroy(lsess);
+  ccord_store_destroy(lstore);
+  ccord_bus_destroy(lbus);
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -406,6 +585,7 @@ int main(void)
   test_mobile_composer_and_send();
   test_mobile_scroll_and_long_press_sheet();
   test_mobile_lightbox_pinch_and_back_cascade();
+  test_mobile_copy_paste_and_autofill_login();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");
 }

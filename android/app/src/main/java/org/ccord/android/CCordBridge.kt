@@ -112,6 +112,9 @@ object CCordBridge {
     @JvmStatic
     external fun nativeOnCaptureStopped()
 
+    @JvmStatic
+    external fun nativeOnAutofillField(field: Int, text: String)
+
     // ---- Bridge methods called from C (desktop_android.c) ----
 
     @JvmStatic
@@ -339,6 +342,45 @@ object CCordBridge {
         } else {
             val ctx = appContext
             if (ctx != null) CCordVoiceService.updateScreenShareState(ctx, false)
+        }
+    }
+
+    @JvmStatic
+    fun onFirstFrameRendered() {
+        val act = activityRef?.get() ?: return
+        act.runOnUiThread { act.dismissSplashBackdrop() }
+    }
+
+    @JvmStatic
+    fun setAuthAutofill(
+        mode: Int,
+        activeField: Int,
+        commit: Boolean,
+        emailX: Int,
+        emailY: Int,
+        emailW: Int,
+        emailH: Int,
+        pwX: Int,
+        pwY: Int,
+        pwW: Int,
+        pwH: Int,
+        otpX: Int,
+        otpY: Int,
+        otpW: Int,
+        otpH: Int,
+        emailText: String,
+        pwText: String,
+        otpText: String
+    ) {
+        val act = activityRef?.get() ?: return
+        act.runOnUiThread {
+            act.updateAuthAutofill(
+                mode, activeField, commit,
+                emailX, emailY, emailW, emailH,
+                pwX, pwY, pwW, pwH,
+                otpX, otpY, otpW, otpH,
+                emailText, pwText, otpText
+            )
         }
     }
 }

@@ -112,6 +112,11 @@ android {
             useLegacyPackaging = false
         }
     }
+
+    androidResources {
+        // Keep bundled fallback fonts and CA roots uncompressed so AAssetManager can mmap them without decompression stalls.
+        noCompress += listOf("ttf", "pem")
+    }
 }
 
 if (ccordAbiSplits) {

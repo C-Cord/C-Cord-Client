@@ -74,6 +74,12 @@ ccord_renderer *ccord_render_create(ccord_platform *p, const ccord_theme *theme,
   if (!headless) SDL_SetRenderVSync(r->sdl, 1);   // headless dummy/offscreen skips simulated 60 Hz sleeps
   CCORD_LOG_I("render: SDL renderer '%s', video driver '%s'", SDL_GetRendererName(r->sdl), video ? video : "?");
   SDL_SetRenderDrawBlendMode(r->sdl, SDL_BLENDMODE_BLEND);
+  if (!headless) {
+    // Paint the theme backdrop immediately so Android/GLES surfaces never sit solid black while startup finishes.
+    SDL_SetRenderDrawColor(r->sdl, theme->c.bg_tertiary.r, theme->c.bg_tertiary.g, theme->c.bg_tertiary.b, 255);
+    SDL_RenderClear(r->sdl);
+    SDL_RenderPresent(r->sdl);
+  }
   if (!TTF_Init()) {
     ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "render: TTF_Init failed: %s", SDL_GetError());
     ccord_render_destroy(r);
@@ -104,7 +110,8 @@ ccord_renderer *ccord_render_create(ccord_platform *p, const ccord_theme *theme,
       return nullptr;
     }
   }
-  fallback_fonts_init(r);   // bundled OFL emoji/CJK subsets first, then system fonts
+  // Bundled emoji/CJK fallback fonts (~16 MB) are loaded lazily on the first glyph NotoSans doesn't cover,
+  // avoiding a cold-start stall before the first frame (especially on Android).
   r->tex_cap = CCORD_TEX_CACHE_SIZE;
   text_cache_init(r);
   float w, h, s;

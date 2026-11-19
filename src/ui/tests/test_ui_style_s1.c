@@ -91,7 +91,7 @@ typedef struct page_expect {
 
 static const page_expect k_expect[] = {
   // Signed out with no sign-in configured: the account page without a footer button (k_footer_* cover the footer).
-  {"My Account", TP_ACCOUNT, 10, 4, 0, 0, 0, 0},
+  {"My Account", TP_ACCOUNT, 10, 3, 0, 0, 0, 0},
   {"Appearance", TP_APPEARANCE, 3, 1, 2, 5, 0, 1},
   {"Voice & Video", TP_VOICE, 6, 0, 4, 2, 4, 3},
   {"Streaming", TP_STREAMING, 0, 0, 0, 22, 0, 0},
@@ -113,10 +113,12 @@ static const page_expect k_expect[] = {
   {"C-Cord", TP_CCORD, 2, 0, 4, 0, 0, 1},
 };
 
-// Signed out, both login tabs: the Token tab (default) draws two tab buttons, Paste and Save & Connect, and the
-// token input; the Email & Password tab draws two tab buttons, Log In, and the email, password and MFA inputs.
+// Signed out, both login tabs + secondary 2FA popup: the Token tab (default) draws two tab buttons, Paste and Save &
+// Connect, and the token input; the Email & Password tab draws two tab buttons, Connect, and email + password inputs;
+// the 2FA popup adds the 6-digit code input plus Verify and Back buttons on top.
 static const page_expect k_login_token = {"Login (token tab)", TP_ACCOUNT, 4, 1, 0, 0, 0, 0};
-static const page_expect k_login_creds = {"Login (email tab)", TP_ACCOUNT, 3, 3, 0, 0, 0, 0};
+static const page_expect k_login_creds = {"Login (email tab)", TP_ACCOUNT, 3, 2, 0, 0, 0, 0};
+static const page_expect k_login_mfa = {"Login (2FA popup)", TP_ACCOUNT, 5, 3, 0, 0, 0, 0};
 
 typedef struct fixture {
   ccord_theme theme;
@@ -376,6 +378,14 @@ static void test_login_page(void)
     CT_CHECK(sd.login_screen && sd.login_tab == tab);
     check_page(tab == 0 ? &k_login_token : &k_login_creds);
   }
+  ccord_ui_set_login_status(F.ui, "Enter your 6-digit code.", true);
+  uis_audit_reset();
+  draw_settings_page();
+  ccord_ui_settings_debug sd = {0};
+  ccord_ui_get_settings_debug(F.ui, &sd);
+  CT_CHECK(sd.login_screen && sd.account_mfa_required && sd.mfa_popup_rect.w > 0.0f);
+  check_page(&k_login_mfa);
+  ccord_ui_clear_account_token_text(F.ui);
 }
 
 // The My Account footer, drawn by settings.c account_buttons: a 156 px primary button and a 132 px secondary button
