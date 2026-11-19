@@ -27,7 +27,8 @@ target_sources(ccord PRIVATE
   app_profile_rest.c
   app_desktop.c
   warm_cache.c
-  scheduled_messages.c)
+  scheduled_messages.c
+  updater.c)
 
 target_include_directories(ccord PRIVATE ${CMAKE_SOURCE_DIR}/src/ui)
 
@@ -128,6 +129,9 @@ if(CCORD_BUILD_TESTS)
   ccord_add_test(NAME test_warm_cache SOURCES tests/test_warm_cache.c warm_cache.c
                  LIBS ccord_session ccord_store ccord_net LABELS unit)
   target_include_directories(test_warm_cache PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+  ccord_add_test(NAME test_updater SOURCES tests/test_updater.c updater.c
+                 LIBS ccord_core ccord_net ccord_ui LABELS unit)
+  target_include_directories(test_updater PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   if(CCORD_LIVE_ACCOUNT)
     target_compile_definitions(test_warm_cache PRIVATE CCORD_LIVE_ACCOUNT=1)
   else()

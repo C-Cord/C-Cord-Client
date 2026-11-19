@@ -1467,6 +1467,9 @@ void ui_stop_role_preview(ccord_ui *ui)
   ui->role_preview_role_id = CCORD_ID_NONE;
   ui->role_preview_cycle_rect = (ccord_rect){0};
   ui->role_preview_exit_rect = (ccord_rect){0};
+  ui->update_banner_install_rect = (ccord_rect){0};
+  ui->update_banner_notes_rect = (ccord_rect){0};
+  ui->update_banner_dismiss_rect = (ccord_rect){0};
   ui_invalidate_rows(ui);
   ui_compute_layout(ui);
   ccord_vlist_invalidate_all(&ui->vlist);
@@ -2724,6 +2727,17 @@ void ccord_ui_set_account_view(ccord_ui *ui, const ccord_account_view *view)
 {
   if (!ui || !view) return;
   ui->account_view = *view;
+  ui->dirty = true;
+}
+
+void ccord_ui_set_update_info(ccord_ui *ui, const ccord_ui_update_info *info)
+{
+  if (!ui || !info) return;
+  if (strcmp(ui->update_info.latest_version, info->latest_version) != 0 &&
+      info->state == CCORD_UI_UPDATE_AVAILABLE) {
+    ui->update_banner_dismissed = false;
+  }
+  ui->update_info = *info;
   ui->dirty = true;
 }
 
@@ -6808,6 +6822,24 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
       }
     }
   }
+  if (ui->update_banner_dismiss_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->update_banner_dismiss_rect)) {
+    ui->update_banner_dismissed = true;
+    ui->dirty = true;
+    return true;
+  }
+  if (ui->update_banner_install_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->update_banner_install_rect)) {
+    if (ui->update_info.state == CCORD_UI_UPDATE_AVAILABLE && ui->d.host.update_install) {
+      ui->d.host.update_install(ui->d.host.ud);
+    }
+    ui->dirty = true;
+    return true;
+  }
+  if (ui->update_banner_notes_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->update_banner_notes_rect)) {
+    if (ui->update_info.release_url[0] && ui->d.host.open_url) {
+      (void)ui->d.host.open_url(ui->d.host.ud, ui->update_info.release_url);
+    }
+    return true;
+  }
   if (!ui->discovery_open && ui_role_preview_active_for(ui, ccord_store_selected_guild(ui->d.store))) {
     if (ui->role_preview_exit_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->role_preview_exit_rect)) {
       ui_stop_role_preview(ui);
@@ -8184,6 +8216,53 @@ static void ui_draw_stale_bar(ccord_ui *ui, ccord_renderer *r)
   ccord_text_draw_ellipsis(r, text, strlen(text), bar.x + 12.0f, bar.y + (bar.h - lh) * 0.5f, bar.w - 24.0f, &st);
 }
 
+static void ui_draw_update_bar(ccord_ui *ui, ccord_renderer *r)
+{
+  if (!ui || !ui->update_info.self_updatable || ui->update_banner_dismissed) return;
+  if (ui_is_loading_screen(ui) || ui_is_login_screen(ui)) return;
+  ccord_ui_update_state st = ui->update_info.state;
+  if (st != CCORD_UI_UPDATE_AVAILABLE && st != CCORD_UI_UPDATE_DOWNLOADING && st != CCORD_UI_UPDATE_READY) return;
+  const ccord_theme_colors *c = &ui->theme->c;
+  const ccord_layout_rect *m = &ui->layout.message_area;
+  if (m->w < 260.0f || m->h < 80.0f) return;
+  float y = m->y + (ui_stale_bar_active(ui) ? 22.0f : 0.0f);
+  ccord_rect bar = {m->x, y, m->w, 34.0f};
+  ccord_draw_rect(r, bar, c->brand);
+  ccord_rect dismiss_r = {bar.x + bar.w - 32.0f, bar.y + 4.0f, 26.0f, 26.0f};
+  ui->update_banner_dismiss_rect = dismiss_r;
+  float right_x = dismiss_r.x - 6.0f;
+  if (ui->update_info.release_url[0]) {
+    ccord_rect notes_r = {right_x - 66.0f, bar.y + 4.0f, 66.0f, 26.0f};
+    ui->update_banner_notes_rect = notes_r;
+    uis_button(ui, r, notes_r, "Notes", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+               (uis_state){.hover = ui_in_rect(ui->mx, ui->my, notes_r)}, "updn", 0);
+    right_x = notes_r.x - 6.0f;
+  }
+  if (st == CCORD_UI_UPDATE_AVAILABLE || st == CCORD_UI_UPDATE_DOWNLOADING) {
+    const char *blbl = (st == CCORD_UI_UPDATE_DOWNLOADING) ? "Downloading..." : "Update";
+    float bw = (st == CCORD_UI_UPDATE_DOWNLOADING) ? 106.0f : 72.0f;
+    ccord_rect inst_r = {right_x - bw, bar.y + 4.0f, bw, 26.0f};
+    ui->update_banner_install_rect = inst_r;
+    uis_button(ui, r, inst_r, blbl, UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+               (uis_state){.hover = ui_in_rect(ui->mx, ui->my, inst_r),
+                           .disabled = st == CCORD_UI_UPDATE_DOWNLOADING},
+               "updi", 0);
+    right_x = inst_r.x - 10.0f;
+  }
+  uis_button(ui, r, dismiss_r, "x", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+             (uis_state){.hover = ui_in_rect(ui->mx, ui->my, dismiss_r)}, "updx", 0);
+  char msg[220];
+  if (ui->update_info.status_text[0]) {
+    snprintf(msg, sizeof msg, "%s", ui->update_info.status_text);
+  } else {
+    snprintf(msg, sizeof msg, "C-Cord %s is available.", ui->update_info.latest_version);
+  }
+  ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), c->text_on_brand);
+  float lh = ui_line_h(ui, ts.size);
+  float tw = right_x - (bar.x + 12.0f);
+  if (tw > 20.0f) ccord_text_draw_ellipsis(r, msg, strlen(msg), bar.x + 12.0f, bar.y + (bar.h - lh) * 0.5f, tw, &ts);
+}
+
 static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r);
 
 void ccord_ui_draw(ccord_ui *ui, ccord_renderer *r)
@@ -8227,6 +8306,9 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui->popover_full_profile_rect = (ccord_rect){0};
   ui->role_preview_cycle_rect = (ccord_rect){0};
   ui->role_preview_exit_rect = (ccord_rect){0};
+  ui->update_banner_install_rect = (ccord_rect){0};
+  ui->update_banner_notes_rect = (ccord_rect){0};
+  ui->update_banner_dismiss_rect = (ccord_rect){0};
   float box_h = ui_composer_measure(ui, r);
   if (box_h != ui->composer_box_h) {
     ui->composer_box_h = box_h;
@@ -8251,6 +8333,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   }
   ui_anchor_remember(ui);
   ui_draw_stale_bar(ui, r);
+  ui_draw_update_bar(ui, r);
   if (!ui->discovery_open && ui->layout.member_list_visible) ui_draw_member_list(ui, r);
   if (ui->d.store && !ui->discovery_open &&
       ui_role_preview_active_for(ui, ccord_store_selected_guild(ui->d.store))) {

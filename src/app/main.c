@@ -43,6 +43,7 @@
 
 #include "account.h"
 #include "app_desktop.h"
+#include "updater.h"
 #include "earcons.h"
 #include "app_media.h"
 #include "app_profile_rest.h"
@@ -147,6 +148,7 @@ typedef struct app {
   ccord_rpc_app_lookup *rpc_lookup;         // resolves each RPC client's application name (outlives `rpc`)
   ccord_theme *theme;                       // app-owned theme (non-owning mirror of main()'s theme; for --verify-slice m6)
   ccord_warm *warm;                         // warm-start disk cache of the account (null-safe everywhere)
+  ccord_updater *updater;                   // native in-app updater (AppImage, Windows, macOS)
   uint64_t start_ms;                        // now_ms() when the session was started (READY latency log)
   bool warm_was_stale;                      // the previous loop iteration saw the session stale
   bool saved_accounts_pushed;               // the saved-account roster was pushed to the UI at least once
@@ -233,6 +235,18 @@ static void host_keybinds_changed(void *ud)
 {
   app *a = ud;
   if (a && a->desktop) (void)ccord_app_desktop_bind_shortcuts(a->desktop);
+}
+
+static void host_update_check(void *ud)
+{
+  app *a = ud;
+  if (a && a->updater) ccord_updater_check_now(a->updater);
+}
+
+static void host_update_install(void *ud)
+{
+  app *a = ud;
+  if (a && a->updater) ccord_updater_install_now(a->updater);
 }
 
 // SNI tray menu / click actions. CCORD_TRAY_ACTIVATE already toggled window visibility in the
@@ -1820,6 +1834,14 @@ static void pump(app *a)
 #if CCORD_WITH_PLUGINS
   if (a->plugins) ccord_plugins_pump(a->plugins, now_ms(a));
 #endif
+  if (a->updater) {
+    ccord_ui_update_info uinfo = {0};
+    bool req_quit = false;
+    if (ccord_updater_poll(a->updater, &uinfo, &req_quit)) {
+      if (uinfo.install_kind[0]) ccord_ui_set_update_info(a->ui, &uinfo);
+      if (req_quit) a->quit = true;
+    }
+  }
   (void)ccord_bus_drain(a->bus);
 }
 
@@ -3826,7 +3848,8 @@ int main(int argc, char **argv)
              .desktop_capabilities = host_desktop_capabilities,
              .set_close_to_tray = host_set_close_to_tray, .apply_quick_css = host_apply_quick_css,
              .keybinds_changed = host_keybinds_changed,
-             .account_switch = host_account_switch, .account_remove = host_account_remove},
+             .account_switch = host_account_switch, .account_remove = host_account_remove,
+             .update_check = host_update_check, .update_install = host_update_install},
     .fixed_now_unix_ms = fixed,
   };
 #if CCORD_WITH_PLUGINS
@@ -3851,6 +3874,15 @@ int main(int argc, char **argv)
   if (warm_res.loaded) ccord_ui_set_stale_saved_ms(a.ui, warm_res.saved_ms);
   ccord_app_desktop_attach_ui(a.desktop, a.ui);
   (void)ccord_app_desktop_bind_shortcuts(a.desktop);
+  bool auto_upd = !opt.headless && !opt.mock && !opt.screenshot && !opt.verify_slice;
+  a.updater = ccord_updater_create(CCORD_VERSION_STRING, ccord_paths_data_dir(), auto_upd);
+  if (a.updater) {
+    ccord_ui_update_info uinfo = {0};
+    bool req_quit = false;
+    if (ccord_updater_poll(a.updater, &uinfo, &req_quit) && uinfo.install_kind[0]) {
+      ccord_ui_set_update_info(a.ui, &uinfo);
+    }
+  }
 
   // M5: runtime media coordinator (voice devices/PTT/DSP, Go Live send/receive, soundboard decode).
   ccord_app_media_config media_cfg = {.ops = &k_media_ops, .ud = &a};
@@ -3970,6 +4002,8 @@ done:
   // M6: the desktop glue owns the lazy audio probe/beep stream; close it before the SDL platform.
   ccord_app_desktop_destroy(a.desktop);
   a.desktop = nullptr;
+  ccord_updater_destroy(a.updater);
+  a.updater = nullptr;
   ccord_earcons_destroy(a.earcons);
   a.earcons = nullptr;
   ccord_app_ipc_destroy(a.ipc);   // closes + unlinks the single-instance control socket

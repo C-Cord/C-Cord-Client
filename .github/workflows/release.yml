@@ -1,0 +1,554 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  meta:
+    name: Resolve Release Tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - id: ver
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          VER="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+  build-arch:
+    name: Linux Arch (.pkg.tar.zst)
+    needs: meta
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel cmake ninja pkgconf git python curl \
+            sdl3 sdl3_ttf ffmpeg libpng libjpeg-turbo libwebp \
+            opus libsodium openssl zlib speexdsp nlohmann-json \
+            libpipewire libx11 libxext libxcomposite libxrandr libxfixes \
+            glib2 dbus fontconfig zstd
+      - uses: actions/checkout@v4
+      - name: Build & Package Arch (.pkg.tar.zst + repo DB)
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCCORD_WERROR=ON \
+            -DCCORD_BUILD_TESTS=OFF \
+            -DCCORD_VERSION="${VER}"
+          cmake --build build --parallel "$(nproc)"
+          DESTDIR="$PWD/pkgstage" cmake --install build
+          ln -sf ccord pkgstage/usr/bin/c-cord
+
+          # Build native Arch package (.pkg.tar.zst) with accurate .PKGINFO
+          ISIZE=$(du -sb pkgstage | awk '{print $1}')
+          BDATE=$(date +%s)
+          cat <<EOF > pkgstage/.PKGINFO
+          pkgname = c-cord
+          pkgbase = c-cord
+          pkgver = ${VER}-1
+          pkgdesc = Fast, lightweight native C23 Discord client
+          url = https://c-cord.org
+          builddate = ${BDATE}
+          packager = C-Cord Release CI <packages@c-cord.org>
+          size = ${ISIZE}
+          arch = x86_64
+          license = AGPL-3.0-only
+          depend = sdl3
+          depend = sdl3_ttf
+          depend = ffmpeg
+          depend = curl
+          depend = openssl
+          depend = opus
+          depend = libsodium
+          depend = speexdsp
+          depend = libpng
+          depend = libjpeg-turbo
+          depend = libwebp
+          depend = zlib
+          depend = fontconfig
+          optdepend = pipewire: Wayland screen capture and loopback audio
+          optdepend = xdg-desktop-portal: Wayland screen sharing and global shortcuts
+          EOF
+
+          mkdir -p out/assets out/repo-meta/arch/x86_64
+          PKG="c-cord-${VER}-1-x86_64.pkg.tar.zst"
+          (cd pkgstage && bsdtar -cf - .PKGINFO usr | zstd -19 -T0 -o "$OLDPWD/out/assets/${PKG}")
+          cp "out/assets/${PKG}" "out/repo-meta/arch/x86_64/${PKG}"
+          (cd out/repo-meta/arch/x86_64 && repo-add c-cord.db.tar.gz "${PKG}" && rm -f "${PKG}" c-cord.db c-cord.files *.old)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-arch
+          path: out/
+
+  build-deb:
+    name: Linux Debian/Ubuntu (.deb)
+    needs: meta
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git curl gcc g++ cmake ninja-build pkg-config python3 dpkg-dev \
+            libcurl4-openssl-dev libssl-dev zlib1g-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
+            libpng-dev libjpeg62-turbo-dev libwebp-dev \
+            libopus-dev libsodium-dev libspeexdsp-dev nlohmann-json3-dev \
+            libfreetype-dev libharfbuzz-dev libfontconfig1-dev \
+            libpipewire-0.3-dev libglib2.0-dev libdbus-1-dev \
+            libx11-dev libxext-dev libxcomposite-dev libxrandr-dev libxfixes-dev \
+            libwayland-dev libxkbcommon-dev libgl-dev libasound2-dev libpulse-dev libdrm-dev libgbm-dev
+      - uses: actions/checkout@v4
+      - name: Build & Package Debian (.deb + APT metadata)
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_INSTALL_RPATH='$ORIGIN/../lib/ccord' \
+            -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DCCORD_DEPS=fetch \
+            -DCCORD_WERROR=OFF \
+            -DCCORD_BUILD_TESTS=OFF \
+            -DCCORD_VERSION="${VER}"
+          cmake --build build --parallel "$(nproc)"
+          DESTDIR="$PWD/debstage" cmake --install build
+          ln -sf ccord debstage/usr/bin/c-cord
+
+          # Bundle fetched SDL3 & SDL3_ttf shared libraries so one .deb works across Debian & Ubuntu.
+          mkdir -p debstage/usr/lib/ccord debstage/DEBIAN
+          cp -av build/_deps/sdl3-build/libSDL3.so* debstage/usr/lib/ccord/
+          cp -av build/_deps/sdl3_ttf-build/libSDL3_ttf.so* debstage/usr/lib/ccord/
+          rm -f debstage/usr/lib/ccord/*.a
+
+          ISIZE_KB=$(du -sk debstage/usr | awk '{print $1}')
+          cat <<EOF > debstage/DEBIAN/control
+          Package: c-cord
+          Version: ${VER}
+          Section: net
+          Priority: optional
+          Architecture: amd64
+          Installed-Size: ${ISIZE_KB}
+          Maintainer: C-Cord Contributors <packages@c-cord.org>
+          Homepage: https://c-cord.org
+          Depends: libc6 (>= 2.38), libstdc++6, libcurl4t64 | libcurl4, libssl3t64 | libssl3, zlib1g, libopus0, libsodium23, libspeexdsp1, libpng16-16t64 | libpng16-16, libjpeg62-turbo | libjpeg-turbo8, libwebp7, libfreetype6, libharfbuzz0b, libfontconfig1, libavcodec61 | libavcodec60 | libavcodec-extra, libavformat61 | libavformat60, libavutil59 | libavutil58, libswscale8 | libswscale7, libswresample5 | libswresample4
+          Recommends: pipewire, xdg-desktop-portal
+          Description: Fast, lightweight native C23 Discord client
+           Native desktop Discord client written in C23 with built-in themes,
+           hardware-accelerated screen sharing, and sandboxed Lua plugins.
+          EOF
+          cat <<'EOF' > debstage/DEBIAN/postinst
+          #!/bin/sh
+          set -e
+          command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database /usr/share/applications || true
+          command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q /usr/share/icons/hicolor || true
+          EOF
+          chmod 0755 debstage/DEBIAN/postinst
+
+          mkdir -p out/assets out/repo-meta/deb/dists/stable/main/binary-amd64
+          DEB="c-cord_${VER}_amd64.deb"
+          dpkg-deb --root-owner-group --build debstage "out/assets/${DEB}"
+
+          # Generate APT Packages index pointing to pool/main/c/c-cord/<deb>
+          mkdir -p aptwork/pool/main/c/c-cord
+          cp "out/assets/${DEB}" "aptwork/pool/main/c/c-cord/${DEB}"
+          (cd aptwork && dpkg-scanpackages --multiversion pool/ > "$OLDPWD/out/repo-meta/deb/dists/stable/main/binary-amd64/Packages")
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-deb
+          path: out/
+
+  build-rpm:
+    name: Linux Fedora/RPM (.rpm)
+    needs: meta
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:42
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf install -y \
+            gcc gcc-c++ cmake ninja-build pkgconf-pkg-config python3 rpm-build createrepo_c \
+            SDL3-devel SDL3_ttf-devel \
+            ffmpeg-free-devel libcurl-devel openssl-devel zlib-devel \
+            libpng-devel libjpeg-turbo-devel libwebp-devel \
+            opus-devel libsodium-devel speexdsp-devel json-devel \
+            pipewire-devel glib2-devel dbus-devel fontconfig-devel \
+            libX11-devel libXext-devel libXcomposite-devel libXrandr-devel libXfixes-devel
+      - uses: actions/checkout@v4
+      - name: Build & Package RPM (.rpm + repodata)
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCCORD_WERROR=OFF \
+            -DCCORD_BUILD_TESTS=OFF \
+            -DCCORD_VERSION="${VER}"
+          cmake --build build --parallel "$(nproc)"
+          DESTDIR="$PWD/rpmstage" cmake --install build
+          ln -sf ccord rpmstage/usr/bin/c-cord
+
+          RPM_VER=$(echo "${VER}" | tr '-' '~')
+          mkdir -p "$PWD/rpmbuild"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+          rpmbuild -bb packaging/rpm/c-cord.spec \
+            --define "_topdir $PWD/rpmbuild" \
+            --define "ccord_version ${RPM_VER}" \
+            --define "ccord_stage $PWD/rpmstage"
+
+          mkdir -p out/assets out/repo-meta/rpm/x86_64
+          RPM_SRC=$(find rpmbuild/RPMS/x86_64 -name '*.rpm' | head -n1)
+          RPM_NAME="c-cord-${RPM_VER}-1.x86_64.rpm"
+          cp "${RPM_SRC}" "out/assets/${RPM_NAME}"
+
+          mkdir -p rpmrepo/packages
+          cp "out/assets/${RPM_NAME}" "rpmrepo/packages/${RPM_NAME}"
+          createrepo_c --simple-md-filenames rpmrepo
+          cp -a rpmrepo/repodata out/repo-meta/rpm/x86_64/repodata
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-rpm
+          path: out/
+
+  build-appimage:
+    name: Linux AppImage (.AppImage)
+    needs: meta
+    runs-on: ubuntu-latest
+    container:
+      image: debian:trixie
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git curl gcc g++ cmake ninja-build pkg-config python3 file \
+            libcurl4-openssl-dev libssl-dev zlib1g-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
+            libpng-dev libjpeg62-turbo-dev libwebp-dev \
+            libopus-dev libsodium-dev libspeexdsp-dev nlohmann-json3-dev \
+            libfreetype-dev libharfbuzz-dev libfontconfig1-dev \
+            libpipewire-0.3-dev libglib2.0-dev libdbus-1-dev \
+            libx11-dev libxext-dev libxcomposite-dev libxrandr-dev libxfixes-dev \
+            libwayland-dev libxkbcommon-dev libgl-dev libasound2-dev libpulse-dev libdrm-dev libgbm-dev
+      - uses: actions/checkout@v4
+      - name: Build & Package AppImage
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCCORD_DEPS=fetch \
+            -DCCORD_WERROR=OFF \
+            -DCCORD_BUILD_TESTS=OFF \
+            -DCCORD_VERSION="${VER}"
+          cmake --build build --parallel "$(nproc)"
+          DESTDIR="$PWD/AppDir" cmake --install build
+          mkdir -p AppDir/usr/lib
+
+          cp -av build/_deps/sdl3-build/libSDL3.so* AppDir/usr/lib/
+          cp -av build/_deps/sdl3_ttf-build/libSDL3_ttf.so* AppDir/usr/lib/
+
+          # Bundle non-base shared libraries (keep libc/libm/libGL/libwayland/libX11/libpipewire/libstdc++ from host).
+          for bin in AppDir/usr/bin/ccord AppDir/usr/bin/ccord-plugin-host; do
+            ldd "$bin" | awk '/=> \// {print $3}' | while read -r lib; do
+              base=$(basename "$lib")
+              case "$base" in
+                libc.so*|libm.so*|libdl.so*|librt.so*|libpthread.so*|libgcc_s.so*|libstdc++.so*|ld-linux*|libresolv.so*|\
+                libGL*|libEGL*|libGLX*|libdrm*|libgbm*|libvulkan*|libwayland*|libX11*|libXext*|libXcomposite*|libXrandr*|libXfixes*|libxcb*|libxkbcommon*|\
+                libasound*|libpulse*|libpipewire*|libdbus*|libglib*|libgio*|libgobject*|libgmodule*|libfontconfig*|libfreetype*|libharfbuzz*|libexpat*|libz.so*)
+                  continue ;;
+              esac
+              cp -nL "$lib" AppDir/usr/lib/ || true
+            done
+          done
+
+          cp assets/icons/C-Cord.desktop AppDir/C-Cord.desktop
+          cp assets/icons/ccord-256.png AppDir/C-Cord.png
+          ln -sf C-Cord.png AppDir/.DirIcon
+          cat <<'EOF' > AppDir/AppRun
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH:-}"
+          export CCORD_ASSET_DIR="${HERE}/usr/share/ccord"
+          export CCORD_PLUGIN_HOST="${HERE}/usr/bin/ccord-plugin-host"
+          exec "${HERE}/usr/bin/ccord" "$@"
+          EOF
+          chmod 0755 AppDir/AppRun
+
+          curl -fsSL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" -o appimagetool
+          chmod +x appimagetool
+          mkdir -p out/assets
+          ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir "out/assets/C-Cord-${VER}-linux-x86_64.AppImage"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-appimage
+          path: out/
+
+  build-flatpak:
+    name: Linux Flatpak (.flatpak + custom repo)
+    needs: meta
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Flatpak toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder ostree
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08
+      - uses: actions/checkout@v4
+      - name: Build Flatpak bundle & custom OSTree repo with static delta
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+        run: |
+          sed -i "s/-DCCORD_BUILD_TESTS=OFF/-DCCORD_BUILD_TESTS=OFF\n      - -DCCORD_VERSION=${VER}/" packaging/flatpak/org.ccord.CCord.yml
+          flatpak-builder --user --force-clean --repo=fp-repo fp-build packaging/flatpak/org.ccord.CCord.yml
+          flatpak build-update-repo --generate-static-deltas fp-repo
+
+          mkdir -p out/assets
+          # 1. Standalone single-file bundle
+          flatpak build-bundle fp-repo "out/assets/C-Cord-${VER}-linux-x86_64.flatpak" org.ccord.CCord stable
+
+          # 2. Extract static delta part 0 for GitHub Releases storage (c-cord.org 302-redirects delta/0 here)
+          DELTA_PART=$(find fp-repo/deltas -type f -name '0' | head -n1 || true)
+          if [ -n "$DELTA_PART" ]; then
+            cp "$DELTA_PART" "out/assets/ccord-flatpak-delta-0.bin"
+            # Pack lightweight OSTree metadata without the heavy delta/0 payload
+            tar --exclude='deltas/*/*/0' -czf "out/assets/ccord-flatpak-repo.tar.gz" -C fp-repo .
+          else
+            tar -czf "out/assets/ccord-flatpak-repo.tar.gz" -C fp-repo .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-flatpak
+          path: out/
+
+  build-windows:
+    name: Windows (x86_64 Installer + Portable ZIP)
+    needs: meta
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: CLANG64
+          update: true
+          install: >-
+            mingw-w64-clang-x86_64-clang
+            mingw-w64-clang-x86_64-cmake
+            mingw-w64-clang-x86_64-ninja
+            mingw-w64-clang-x86_64-pkgconf
+            mingw-w64-clang-x86_64-sdl3
+            mingw-w64-clang-x86_64-sdl3-ttf
+            mingw-w64-clang-x86_64-ffmpeg
+            mingw-w64-clang-x86_64-libpng
+            mingw-w64-clang-x86_64-libjpeg-turbo
+            mingw-w64-clang-x86_64-libwebp
+            mingw-w64-clang-x86_64-opus
+            mingw-w64-clang-x86_64-libsodium
+            mingw-w64-clang-x86_64-curl
+            mingw-w64-clang-x86_64-openssl
+            mingw-w64-clang-x86_64-nlohmann-json
+            mingw-w64-clang-x86_64-speexdsp
+            zip
+      - name: Build & Bundle Windows binaries + DLLs
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+        run: |
+          cmake -S . -B build-win -G Ninja \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCCORD_WERROR=ON \
+            -DCCORD_BUILD_TESTS=OFF \
+            -DCCORD_VERSION="${VER}" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/stage-win"
+          cmake --build build-win --parallel "$(nproc)"
+          cmake --install build-win
+
+          mkdir -p dist-win/assets out/assets
+          cp stage-win/bin/ccord.exe dist-win/
+          cp stage-win/bin/ccord-plugin-host.exe dist-win/
+          cp -r stage-win/share/ccord/* dist-win/assets/
+
+          # Collect full transitive closure of CLANG64 runtime DLLs
+          collect_dlls() {
+            local changed=1
+            while [ "$changed" -eq 1 ]; do
+              changed=0
+              for f in dist-win/*.exe dist-win/*.dll; do
+                [ -f "$f" ] || continue
+                while read -r dll; do
+                  [ -n "$dll" ] || continue
+                  base=$(basename "$dll")
+                  if [ ! -f "dist-win/$base" ]; then
+                    cp -f "$dll" "dist-win/$base"
+                    changed=1
+                  fi
+                done < <(ldd "$f" | awk '/=> \/clang64\/bin\// {print $3}')
+              done
+            done
+          }
+          collect_dlls
+          echo "Bundled $(ls dist-win/*.dll 2>/dev/null | wc -l) CLANG64 runtime DLLs"
+
+          (cd dist-win && zip -r -9 "$OLDPWD/out/assets/C-Cord-${VER}-windows-x86_64-portable.zip" .)
+      - name: Build Windows Installer (.exe via Inno Setup)
+        shell: pwsh
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+        run: |
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DCCordVersion=$env:VER" "/DCCordDistDir=$(Resolve-Path dist-win)" "/DCCordOutDir=$(Resolve-Path out\assets)" packaging\windows\ccord.iss
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: out/
+
+  build-macos:
+    name: macOS (Apple Silicon .dmg)
+    needs: meta
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          brew install llvm cmake ninja pkg-config dylibbundler \
+            sdl3 sdl3_ttf ffmpeg libpng jpeg-turbo webp opus libsodium curl openssl@3 nlohmann-json speexdsp
+      - name: Build & Package macOS C-Cord.app + .dmg
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+        run: |
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          export CMAKE_PREFIX_PATH="$(brew --prefix openssl@3):$(brew --prefix curl):$(brew --prefix)"
+          cmake -S . -B build-macos -G Ninja \
+            -DCMAKE_C_COMPILER="${LLVM_PREFIX}/bin/clang" \
+            -DCMAKE_CXX_COMPILER="${LLVM_PREFIX}/bin/clang++" \
+            -DCMAKE_OBJC_COMPILER="/usr/bin/clang" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCCORD_WERROR=ON \
+            -DCCORD_BUILD_TESTS=OFF \
+            -DCCORD_VERSION="${VER}" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/stage-macos"
+          cmake --build build-macos --parallel "$(sysctl -n hw.ncpu)"
+          cmake --install build-macos
+
+          APP="$PWD/dmg-stage/C-Cord.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks"
+          cp stage-macos/bin/ccord "$APP/Contents/MacOS/ccord"
+          cp stage-macos/bin/ccord-plugin-host "$APP/Contents/MacOS/ccord-plugin-host"
+          cp stage-macos/share/ccord/Info.plist "$APP/Contents/Info.plist"
+          cp -r stage-macos/share/ccord/fonts stage-macos/share/ccord/themes stage-macos/share/ccord/extensions "$APP/Contents/Resources/"
+
+          # Generate macOS .icns app icon from bundled PNGs
+          ICONSET="$PWD/C-Cord.iconset"
+          mkdir -p "$ICONSET"
+          cp assets/icons/ccord-16.png "$ICONSET/icon_16x16.png"
+          cp assets/icons/ccord-32.png "$ICONSET/icon_16x16@2x.png"
+          cp assets/icons/ccord-32.png "$ICONSET/icon_32x32.png"
+          cp assets/icons/ccord-64.png "$ICONSET/icon_32x32@2x.png"
+          cp assets/icons/ccord-128.png "$ICONSET/icon_128x128.png"
+          cp assets/icons/ccord-256.png "$ICONSET/icon_128x128@2x.png"
+          cp assets/icons/ccord-256.png "$ICONSET/icon_256x256.png"
+          cp assets/icons/ccord-512.png "$ICONSET/icon_256x256@2x.png"
+          cp assets/icons/ccord-512.png "$ICONSET/icon_512x512.png"
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/C-Cord.icns"
+
+          # Bundle and relocate all Homebrew dylibs into C-Cord.app/Contents/Frameworks
+          dylibbundler -od -b \
+            -x "$APP/Contents/MacOS/ccord" \
+            -x "$APP/Contents/MacOS/ccord-plugin-host" \
+            -d "$APP/Contents/Frameworks" \
+            -p "@executable_path/../Frameworks/"
+
+          codesign --deep --force --sign - "$APP"
+
+          ln -s /Applications "$PWD/dmg-stage/Applications"
+          mkdir -p out/assets
+          hdiutil create -volname "C-Cord ${VER}" -srcfolder "$PWD/dmg-stage" -ov -format UDZO \
+            "out/assets/C-Cord-${VER}-macos-arm64.dmg"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos
+          path: out/
+
+  publish:
+    name: Publish GitHub Release & Sync c-cord.org Repos
+    needs: [meta, build-arch, build-deb, build-rpm, build-appimage, build-flatpak, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+      - name: Assemble assets, repo metadata & SHA256SUMS
+        env:
+          TAG: ${{ needs.meta.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release-files repo-meta-combined
+          find all-artifacts -path '*/assets/*' -type f -exec cp -v {} release-files/ \;
+          for sub in arch deb rpm; do
+            for d in all-artifacts/*/repo-meta/"$sub"; do
+              if [ -d "$d" ]; then
+                mkdir -p "repo-meta-combined/$sub"
+                cp -a "$d/." "repo-meta-combined/$sub/"
+              fi
+            done
+          done
+          tar -czf release-files/ccord-repo-meta.tar.gz -C repo-meta-combined .
+          (cd release-files && sha256sum * > SHA256SUMS.txt)
+          ls -lh release-files/
+
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" release-files/* --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$TAG" release-files/* \
+              --repo "${{ github.repository }}" \
+              --title "C-Cord ${TAG}" \
+              --generate-notes
+          fi
+      - name: Announce release to c-cord.org (zero-secret OIDC)
+        run: |
+          OIDC_TOKEN=$(curl -fsSL \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=https://plugins.c-cord.org" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+          curl -fsSL -X POST "https://c-cord.org/api/v1/releases/announce" \
+            -H "Authorization: Bearer ${OIDC_TOKEN}" \
+            -H "Content-Type: application/json"

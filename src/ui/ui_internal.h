@@ -1282,6 +1282,13 @@ struct ccord_ui {
 
   // Retained plugin UI panels (src/ui/plugin_panels.c).
   ui_panel_mgr *panel_mgr;
+
+  // Native updater status & dismissible top banner rects.
+  ccord_ui_update_info update_info;
+  bool update_banner_dismissed;
+  ccord_rect update_banner_install_rect;
+  ccord_rect update_banner_notes_rect;
+  ccord_rect update_banner_dismiss_rect;
 };
 
 // ---- ui.c ----

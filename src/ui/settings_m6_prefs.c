@@ -1125,6 +1125,16 @@ size_t ui_settings_ccord_controls(const ui_settings_control **out)
   return sizeof k_ccord_controls / sizeof k_ccord_controls[0];
 }
 
+static ccord_rect p_update_primary_btn(ccord_rect c)
+{
+  return (ccord_rect){c.x, p_row_y(c, 5) + 46.0f, 152.0f, 30.0f};
+}
+
+static ccord_rect p_update_notes_btn(ccord_rect c)
+{
+  return (ccord_rect){c.x + 162.0f, p_row_y(c, 5) + 46.0f, 118.0f, 30.0f};
+}
+
 static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
 {
   uint32_t caps = prefs_caps(ui);
@@ -1152,7 +1162,36 @@ static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
                s_prefs.notify_focus_suppress, false, "m6pc", 3);
   p_toggle_row(ui, r, c, 4, k_ccord_controls[4].label, "Keep C-Cord running in the background when the window is closed",
                s_prefs.close_background, false, "m6pc", 4);
-  p_note(ui, r, c.x, p_row_y(c, 5) + 8.0f, c.w, "C-Cord v" CCORD_VERSION_STRING);
+  char ver_line[160];
+  if (ui->update_info.install_kind[0]) {
+    snprintf(ver_line, sizeof ver_line, "C-Cord v%s (%s)", CCORD_VERSION_STRING, ui->update_info.install_kind);
+  } else {
+    snprintf(ver_line, sizeof ver_line, "C-Cord v%s", CCORD_VERSION_STRING);
+  }
+  p_note(ui, r, c.x, p_row_y(c, 5) + 4.0f, c.w, ver_line);
+  if (ui->update_info.self_updatable) {
+    const char *status = ui->update_info.status_text[0] ? ui->update_info.status_text : "Automatic updates enabled via c-cord.org";
+    p_note(ui, r, c.x, p_row_y(c, 5) + 22.0f, c.w, status);
+    ccord_rect btn = p_update_primary_btn(c);
+    bool busy = ui->update_info.state == CCORD_UI_UPDATE_CHECKING || ui->update_info.state == CCORD_UI_UPDATE_DOWNLOADING;
+    const char *lbl = "Check for Updates";
+    uis_btn_kind kind = UIS_BTN_SECONDARY;
+    if (ui->update_info.state == CCORD_UI_UPDATE_CHECKING) lbl = "Checking...";
+    else if (ui->update_info.state == CCORD_UI_UPDATE_DOWNLOADING) lbl = "Downloading...";
+    else if (ui->update_info.state == CCORD_UI_UPDATE_AVAILABLE) {
+      lbl = "Update Now";
+      kind = UIS_BTN_PRIMARY;
+    }
+    uis_button(ui, r, btn, lbl, kind, UIS_BTN_S_SM,
+               (uis_state){.hover = ui_in_rect(ui->mx, ui->my, btn), .disabled = busy}, "m6up", 0);
+    if (ui->update_info.release_url[0]) {
+      ccord_rect nb = p_update_notes_btn(c);
+      uis_button(ui, r, nb, "Release Notes", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+                 (uis_state){.hover = ui_in_rect(ui->mx, ui->my, nb)}, "m6un", 0);
+    }
+  } else if (ui->update_info.install_kind[0]) {
+    p_note(ui, r, c.x, p_row_y(c, 5) + 22.0f, c.w, "Updates are managed by your system package manager.");
+  }
 }
 
 static bool p_click_ccord(ccord_ui *ui, ccord_rect c, float x, float y)
@@ -1187,6 +1226,19 @@ static bool p_click_ccord(ccord_ui *ui, ccord_rect c, float x, float y)
     ui->dirty = true;
     if (ui->d.host.set_close_to_tray) ui->d.host.set_close_to_tray(ui->d.host.ud, s_prefs.close_background);
     ui_settings_save(ui);
+    return true;
+  } else if (ui->update_info.self_updatable && ui_in_rect(x, y, p_update_primary_btn(c))) {
+    if (ui->update_info.state == CCORD_UI_UPDATE_AVAILABLE) {
+      if (ui->d.host.update_install) ui->d.host.update_install(ui->d.host.ud);
+    } else if (ui->update_info.state != CCORD_UI_UPDATE_CHECKING &&
+               ui->update_info.state != CCORD_UI_UPDATE_DOWNLOADING) {
+      if (ui->d.host.update_check) ui->d.host.update_check(ui->d.host.ud);
+    }
+    ui->dirty = true;
+    return true;
+  } else if (ui->update_info.self_updatable && ui->update_info.release_url[0] &&
+             ui_in_rect(x, y, p_update_notes_btn(c))) {
+    if (ui->d.host.open_url) (void)ui->d.host.open_url(ui->d.host.ud, ui->update_info.release_url);
     return true;
   } else {
     return false;

@@ -1,0 +1,70 @@
+id: org.ccord.CCord
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: ccord
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --device=dri
+  - --filesystem=xdg-run/pipewire-0
+  - --filesystem=xdg-run/discord-ipc-0:create
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --talk-name=org.freedesktop.portal.Desktop
+  - --talk-name=org.freedesktop.portal.ScreenCast
+  - --talk-name=org.freedesktop.portal.GlobalShortcuts
+  - --talk-name=org.freedesktop.secrets
+modules:
+  - name: libsodium
+    buildsystem: autotools
+    sources:
+      - type: archive
+        url: https://github.com/jedisct1/libsodium/releases/download/1.0.20-RELEASE/libsodium-1.0.20.tar.gz
+        sha256: ebb65ef6ca439333c2bb41a0c1990587288da07f6c7fd07cb3a18cc18d30ce19
+
+  - name: speexdsp
+    buildsystem: autotools
+    sources:
+      - type: archive
+        url: https://downloads.xiph.org/releases/speex/speexdsp-1.2.1.tar.gz
+        sha256: 8c777343e4a6399569c72abc38a95b24db56882c83dbdb6c6424a5f4aeb54d3d
+
+  - name: nlohmann-json
+    buildsystem: cmake-ninja
+    config-opts:
+      - -DJSON_BuildTests=OFF
+    sources:
+      - type: archive
+        url: https://github.com/nlohmann/json/releases/download/v3.11.3/json.tar.xz
+        sha256: d6c65aca6b1ed68e7a182f4757257b107ae403032760ed6ef121c9d55e81757d
+
+  - name: c-cord
+    buildsystem: cmake-ninja
+    build-options:
+      build-args:
+        - --share=network
+    config-opts:
+      - -DCMAKE_BUILD_TYPE=Release
+      - -DCCORD_WERROR=OFF
+      - -DCCORD_BUILD_TESTS=OFF
+      - -DCCORD_DEPS=fetch
+      - -DCMAKE_INSTALL_RPATH=/app/lib
+      - -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
+    post-install:
+      - |
+        install -Dm644 assets/icons/C-Cord.desktop /app/share/applications/org.ccord.CCord.desktop
+        sed -i 's/^Icon=.*/Icon=org.ccord.CCord/' /app/share/applications/org.ccord.CCord.desktop
+        rm -f /app/share/applications/C-Cord.desktop
+        for sz in 16 22 24 32 48 64 128 256 512; do
+          if [ -f "/app/share/icons/hicolor/${sz}x${sz}/apps/C-Cord.png" ]; then
+            mv "/app/share/icons/hicolor/${sz}x${sz}/apps/C-Cord.png" \
+               "/app/share/icons/hicolor/${sz}x${sz}/apps/org.ccord.CCord.png"
+          fi
+        done
+    sources:
+      - type: dir
+        path: ../..

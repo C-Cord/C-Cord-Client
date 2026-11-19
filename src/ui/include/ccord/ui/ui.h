@@ -65,6 +65,8 @@ typedef struct ccord_ui_host {      // everything the UI needs from the OS; test
   size_t (*scheduled_list)(void *ud, ccord_ui_scheduled_item *out, size_t cap);   // this account's, soonest first
   bool (*scheduled_cancel)(void *ud, uint64_t id);           // delete without sending
   bool (*scheduled_send_now)(void *ud, uint64_t id, char *err, size_t err_cap);   // send immediately; removed on success
+  void (*update_check)(void *ud);                            // nullable: Settings > C-Cord "Check for Updates"
+  void (*update_install)(void *ud);                          // nullable: apply / open downloaded update
 } ccord_ui_host;
 typedef struct ccord_ui_deps {
   ccord_bus *bus; ccord_store *store; ccord_session *session; ccord_contrib *contrib;
@@ -83,6 +85,26 @@ void ccord_ui_draw(ccord_ui *ui, ccord_renderer *r);
 void ccord_ui_set_extensions_enabled(ccord_ui *ui, bool on);
 // Copies the Account view model shown on the third Settings page. The app owns the live state.
 void ccord_ui_set_account_view(ccord_ui *ui, const ccord_account_view *view);
+
+// Native in-app updater status (used for AppImage, Windows, and macOS; system packages stay quiet).
+typedef enum ccord_ui_update_state {
+  CCORD_UI_UPDATE_IDLE = 0,
+  CCORD_UI_UPDATE_CHECKING,
+  CCORD_UI_UPDATE_UP_TO_DATE,
+  CCORD_UI_UPDATE_AVAILABLE,
+  CCORD_UI_UPDATE_DOWNLOADING,
+  CCORD_UI_UPDATE_READY,
+  CCORD_UI_UPDATE_ERROR,
+} ccord_ui_update_state;
+typedef struct ccord_ui_update_info {
+  ccord_ui_update_state state;
+  bool self_updatable;
+  char install_kind[32];
+  char latest_version[64];
+  char release_url[256];
+  char status_text[160];
+} ccord_ui_update_info;
+void ccord_ui_set_update_info(ccord_ui *ui, const ccord_ui_update_info *info);
 
 // Multi-account switcher (Settings > My Account). The app owns the keyring roster and pushes it
 // here; Switch/Remove clicks call host.account_switch / host.account_remove with the row's user id.
