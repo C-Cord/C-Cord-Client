@@ -32,9 +32,8 @@ typedef struct sd_row_rects {
   ccord_rect send, cancel;
 } sd_row_rects;
 
-// One dialog per process (one window); the text edits are created on the first open and kept.
-static struct {
-  bool inited;
+// One dialog per process (one window); lazily allocated on open and freed on close.
+typedef struct sd_state {
   ccord_text_edit msg, date, time;
   int focus;
   char status[160];
@@ -47,16 +46,30 @@ static struct {
   bool click_pending;                   // a click in the message box, resolved in draw (needs the renderer)
   float click_x, click_y;
   float msg_scroll;
-  size_t dbg_att_drawn;                 // attachment count shown on the first drawn pending row
-} sd;
+} sd_state;
 
-static void sd_init_once(void)
+static sd_state *sd;
+static size_t g_sd_dbg_att_drawn;       // attachment count shown on the first drawn pending row
+
+static bool sd_ensure(void)
 {
-  if (sd.inited) return;
-  ccord_text_edit_init(&sd.msg, CCORD_SEND_MAX_BYTES);
-  ccord_text_edit_init(&sd.date, 16);
-  ccord_text_edit_init(&sd.time, 8);
-  sd.inited = true;
+  if (sd) return true;
+  sd = ccord_calloc(1, sizeof *sd);
+  if (!sd) return false;
+  ccord_text_edit_init(&sd->msg, CCORD_SEND_MAX_BYTES);
+  ccord_text_edit_init(&sd->date, 16);
+  ccord_text_edit_init(&sd->time, 8);
+  return true;
+}
+
+static void sd_free_state(void)
+{
+  if (!sd) return;
+  ccord_text_edit_free(&sd->msg);
+  ccord_text_edit_free(&sd->date);
+  ccord_text_edit_free(&sd->time);
+  ccord_free(sd);
+  sd = nullptr;
 }
 
 // ---- time helpers ----------------------------------------------------------------------------------------------
@@ -81,8 +94,8 @@ static void sd_set_fields(const ccord_ui *ui, int64_t ms)
   char d[48], t[32];
   snprintf(d, sizeof d, "%04d-%02d-%02d", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
   snprintf(t, sizeof t, "%02d:%02d", tm.tm_hour, tm.tm_min);
-  sd_set_edit(&sd.date, d);
-  sd_set_edit(&sd.time, t);
+  sd_set_edit(&sd->date, d);
+  sd_set_edit(&sd->time, t);
 }
 
 static void sd_apply_preset(ccord_ui *ui, int preset)
@@ -103,7 +116,7 @@ static void sd_apply_preset(ccord_ui *ui, int preset)
     time_t t = ui->use_utc ? ccord_timegm(&tm) : mktime(&tm);
     sd_set_fields(ui, (int64_t)t * 1000);
   }
-  sd.status[0] = '\0';
+  sd->status[0] = '\0';
   ui->dirty = true;
 }
 
@@ -111,7 +124,7 @@ static void sd_apply_preset(ccord_ui *ui, int preset)
 static bool sd_parse_due(const ccord_ui *ui, int64_t *out_ms, char *why, size_t why_cap)
 {
   int y = 0, mo = 0, d = 0, h = 0, mi = 0, n1 = 0, n2 = 0;
-  const char *ds = ccord_text_edit_cstr(&sd.date), *ts = ccord_text_edit_cstr(&sd.time);
+  const char *ds = ccord_text_edit_cstr(&sd->date), *ts = ccord_text_edit_cstr(&sd->time);
   if (sscanf(ds, "%d-%d-%d%n", &y, &mo, &d, &n1) != 3 || ds[n1] != '\0' || y < 1970 || y > 2200) {
     snprintf(why, why_cap, "Enter the date as YYYY-MM-DD.");
     return false;
@@ -142,11 +155,11 @@ static void sd_fmt_time(const ccord_ui *ui, int64_t ms, char *out, size_t cap)
 static const char *sd_blocker(const ccord_ui *ui, int64_t *due, char *buf, size_t cap)
 {
   if (!ui->d.host.scheduled_add) return "Scheduling is not available in this build.";
-  if (sd.channel_id == CCORD_ID_NONE) return "Select a text channel first.";
+  if (sd->channel_id == CCORD_ID_NONE) return "Select a text channel first.";
   for (size_t k = 0; k < ui->staged_file_count; k++) {
     if (!ui->staged_files[k].path[0]) return "A pasted image cannot be scheduled: remove it or attach a file from disk.";
   }
-  const char *t = ccord_text_edit_cstr(&sd.msg);
+  const char *t = ccord_text_edit_cstr(&sd->msg);
   size_t i = 0;
   while (t[i] == ' ' || t[i] == '\n' || t[i] == '\t' || t[i] == '\r') i++;
   if (t[i] == '\0' && ui->staged_file_count == 0) return "Write a message to schedule.";
@@ -157,10 +170,10 @@ static const char *sd_blocker(const ccord_ui *ui, int64_t *due, char *buf, size_
 
 static void sd_refresh_items(const ccord_ui *ui)
 {
-  sd.nitems = ui->d.host.scheduled_list ? ui->d.host.scheduled_list(ui->d.host.ud, sd.items, CCORD_UI_SCHEDULED_MAX) : 0;
-  if (sd.nitems > CCORD_UI_SCHEDULED_MAX) sd.nitems = CCORD_UI_SCHEDULED_MAX;
-  size_t max_first = sd.nitems > SD_ROWS_MAX ? sd.nitems - SD_ROWS_MAX : 0;
-  if (sd.first_row > max_first) sd.first_row = max_first;
+  sd->nitems = ui->d.host.scheduled_list ? ui->d.host.scheduled_list(ui->d.host.ud, sd->items, CCORD_UI_SCHEDULED_MAX) : 0;
+  if (sd->nitems > CCORD_UI_SCHEDULED_MAX) sd->nitems = CCORD_UI_SCHEDULED_MAX;
+  size_t max_first = sd->nitems > SD_ROWS_MAX ? sd->nitems - SD_ROWS_MAX : 0;
+  if (sd->first_row > max_first) sd->first_row = max_first;
 }
 
 // ---- open / close ----------------------------------------------------------------------------------------------
@@ -168,26 +181,23 @@ static void sd_refresh_items(const ccord_ui *ui)
 void ui_schedule_dialog_free(ccord_ui *ui)
 {
   (void)ui;
-  if (!sd.inited) return;
-  ccord_text_edit_free(&sd.msg);
-  ccord_text_edit_free(&sd.date);
-  ccord_text_edit_free(&sd.time);
-  memset(&sd, 0, sizeof sd);
+  sd_free_state();
+  g_sd_dbg_att_drawn = 0;
 }
 
 void ui_schedule_dialog_open(ccord_ui *ui)
 {
   if (!ui) return;
-  sd_init_once();
+  if (!sd_ensure()) return;
   ui->plus_menu_open = false;
   const ccord_channel *ch = ui_selected_channel(ui);
-  sd.channel_id = ch && ui_channel_has_chat(ch) ? ch->id : CCORD_ID_NONE;
-  sd_set_edit(&sd.msg, ccord_text_edit_cstr(&ui->edit));
-  sd.focus = SD_FOCUS_MSG;
-  sd.status[0] = '\0';
-  sd.first_row = 0;
-  sd.msg_scroll = 0.0f;
-  sd.click_pending = false;
+  sd->channel_id = ch && ui_channel_has_chat(ch) ? ch->id : CCORD_ID_NONE;
+  sd_set_edit(&sd->msg, ccord_text_edit_cstr(&ui->edit));
+  sd->focus = SD_FOCUS_MSG;
+  sd->status[0] = '\0';
+  sd->first_row = 0;
+  sd->msg_scroll = 0.0f;
+  sd->click_pending = false;
   sd_apply_preset(ui, SD_PRESET_1H);
   sd_refresh_items(ui);
   ui->schedule_open = true;
@@ -198,11 +208,11 @@ void ui_schedule_dialog_close(ccord_ui *ui)
 {
   if (!ui) return;
   ui->schedule_open = false;
-  memset(&sd.box, 0, sizeof sd.box);
+  sd_free_state();
   ui->dirty = true;
 }
 
-size_t ui_schedule_dialog_debug_first_row_attachments(void) { return sd.dbg_att_drawn; }
+size_t ui_schedule_dialog_debug_first_row_attachments(void) { return g_sd_dbg_att_drawn; }
 bool ui_schedule_dialog_is_open(const ccord_ui *ui) { return ui && ui->schedule_open; }
 
 // ---- actions ---------------------------------------------------------------------------------------------------
@@ -213,8 +223,8 @@ static void sd_do_schedule(ccord_ui *ui)
   char buf[96];
   const char *why = sd_blocker(ui, &due, buf, sizeof buf);
   if (why) {
-    snprintf(sd.status, sizeof sd.status, "%s", why);
-    sd.status_ok = false;
+    snprintf(sd->status, sizeof sd->status, "%s", why);
+    sd->status_ok = false;
     ui->dirty = true;
     return;
   }
@@ -226,15 +236,15 @@ static void sd_do_schedule(ccord_ui *ui)
     paths[k] = ui->staged_files[k].path;
     spoilers[k] = ui->staged_files[k].spoiler;
   }
-  const ccord_channel *sch = ui->d.store ? ccord_store_channel(ui->d.store, sd.channel_id) : nullptr;
+  const ccord_channel *sch = ui->d.store ? ccord_store_channel(ui->d.store, sd->channel_id) : nullptr;
   ccord_id sgid = sch ? sch->guild_id : CCORD_ID_NONE;
   char serialized_msg[CCORD_SEND_MAX_BYTES + 1];
-  size_t sm_len = ccord_ui_serialize_mentions(ui->d.store, sgid, ccord_text_edit_cstr(&sd.msg), sd.msg.len,
+  size_t sm_len = ccord_ui_serialize_mentions(ui->d.store, sgid, ccord_text_edit_cstr(&sd->msg), sd->msg.len,
                                               serialized_msg, sizeof serialized_msg);
-  if (!ui->d.host.scheduled_add(ui->d.host.ud, sd.channel_id, serialized_msg, sm_len, due,
+  if (!ui->d.host.scheduled_add(ui->d.host.ud, sd->channel_id, serialized_msg, sm_len, due,
                                 ui->now_unix_ms, paths, spoilers, np, err, sizeof err)) {
-    snprintf(sd.status, sizeof sd.status, "%s", err[0] ? err : "Could not schedule the message.");
-    sd.status_ok = false;
+    snprintf(sd->status, sizeof sd->status, "%s", err[0] ? err : "Could not schedule the message.");
+    sd->status_ok = false;
     ui->dirty = true;
     return;
   }
@@ -242,32 +252,32 @@ static void sd_do_schedule(ccord_ui *ui)
   ccord_ui_clear_attachment(ui);
   ccord_text_edit_clear(&ui->edit);
   ui->composer_scroll = 0.0f;
-  ui_clear_channel_draft(ui, sd.channel_id);
-  ccord_text_edit_clear(&sd.msg);
-  sd.msg_scroll = 0.0f;
+  ui_clear_channel_draft(ui, sd->channel_id);
+  ccord_text_edit_clear(&sd->msg);
+  sd->msg_scroll = 0.0f;
   char when[48];
   sd_fmt_time(ui, due, when, sizeof when);
-  snprintf(sd.status, sizeof sd.status, "Scheduled for %s.", when);
-  sd.status_ok = true;
+  snprintf(sd->status, sizeof sd->status, "Scheduled for %s.", when);
+  sd->status_ok = true;
   sd_refresh_items(ui);
   ui->dirty = true;
 }
 
 static void sd_row_action(ccord_ui *ui, size_t item, bool send_now)
 {
-  if (item >= sd.nitems) return;
-  uint64_t id = sd.items[item].id;
+  if (item >= sd->nitems) return;
+  uint64_t id = sd->items[item].id;
   char err[128] = "";
   bool ok;
   if (send_now) {
     ok = ui->d.host.scheduled_send_now && ui->d.host.scheduled_send_now(ui->d.host.ud, id, err, sizeof err);
-    if (ok) snprintf(sd.status, sizeof sd.status, "Sent.");
-    else snprintf(sd.status, sizeof sd.status, "Could not send: %s", err[0] ? err : "not available");
+    if (ok) snprintf(sd->status, sizeof sd->status, "Sent.");
+    else snprintf(sd->status, sizeof sd->status, "Could not send: %s", err[0] ? err : "not available");
   } else {
     ok = ui->d.host.scheduled_cancel && ui->d.host.scheduled_cancel(ui->d.host.ud, id);
-    snprintf(sd.status, sizeof sd.status, ok ? "Removed." : "That message is no longer scheduled.");
+    snprintf(sd->status, sizeof sd->status, ok ? "Removed." : "That message is no longer scheduled.");
   }
-  sd.status_ok = ok;
+  sd->status_ok = ok;
   sd_refresh_items(ui);
   ui->dirty = true;
 }
@@ -292,34 +302,34 @@ static const char *sd_channel_name(const ccord_ui *ui, ccord_id id, char *buf, s
 static void sd_draw_message_box(ccord_ui *ui, ccord_renderer *r, ccord_rect box)
 {
   float rad = M(channel_item_radius);
-  bool focused = sd.focus == SD_FOCUS_MSG;
+  bool focused = sd->focus == SD_FOCUS_MSG;
   if (focused) ccord_draw_rrect(r, (ccord_rect){box.x - 1.0f, box.y - 1.0f, box.w + 2.0f, box.h + 2.0f}, rad + 1.0f, COL(brand));
   ccord_draw_rrect(r, box, rad, COL(bg_input));
   float fs = M(font_size_base);
   float lh = ui_line_h(ui, fs);
   float wrap = box.w - 2.0f * UIS_SP_3;
-  const char *text = ccord_text_edit_cstr(&sd.msg);
+  const char *text = ccord_text_edit_cstr(&sd->msg);
   ccord_text_style ts = ui_style(ui, CCORD_FONT_REGULAR, fs, COL(text_normal));
   float ox = box.x + UIS_SP_3, oy = box.y + UIS_SP_2;
-  if (sd.msg.len == 0) {
+  if (sd->msg.len == 0) {
     sd_text(ui, r, "Message to send later", ox, oy, wrap, CCORD_FONT_REGULAR, fs, COL(text_placeholder));
     if (focused && ui->caret_on) ccord_draw_rect(r, (ccord_rect){ox, oy, 1.5f, lh}, COL(caret));
     if (focused) ui->text_area = box;
     return;
   }
   float view_h = box.h - 2.0f * UIS_SP_2;
-  if (sd.click_pending) {
-    size_t pos = ccord_text_hit_test(r, text, sd.msg.len, &ts, wrap, sd.click_x - ox, sd.click_y - oy + sd.msg_scroll);
-    ccord_text_edit_set_caret(&sd.msg, pos, false);
-    sd.click_pending = false;
+  if (sd->click_pending) {
+    size_t pos = ccord_text_hit_test(r, text, sd->msg.len, &ts, wrap, sd->click_x - ox, sd->click_y - oy + sd->msg_scroll);
+    ccord_text_edit_set_caret(&sd->msg, pos, false);
+    sd->click_pending = false;
   }
-  ccord_rect cr = ccord_text_caret_rect(r, text, sd.msg.len, &ts, wrap, sd.msg.caret);
-  if (cr.y < sd.msg_scroll) sd.msg_scroll = cr.y;
-  if (cr.y + lh > sd.msg_scroll + view_h) sd.msg_scroll = cr.y + lh - view_h;
-  if (sd.msg_scroll < 0.0f) sd.msg_scroll = 0.0f;
+  ccord_rect cr = ccord_text_caret_rect(r, text, sd->msg.len, &ts, wrap, sd->msg.caret);
+  if (cr.y < sd->msg_scroll) sd->msg_scroll = cr.y;
+  if (cr.y + lh > sd->msg_scroll + view_h) sd->msg_scroll = cr.y + lh - view_h;
+  if (sd->msg_scroll < 0.0f) sd->msg_scroll = 0.0f;
   ccord_push_clip(r, (ccord_rect){box.x, box.y + UIS_SP_1, box.w, box.h - 2.0f * UIS_SP_1});
-  ccord_text_draw(r, text, sd.msg.len, ox, oy - sd.msg_scroll, &ts, wrap);
-  if (focused && ui->caret_on) ccord_draw_rect(r, (ccord_rect){ox + cr.x, oy + cr.y - sd.msg_scroll, 1.5f, lh}, COL(caret));
+  ccord_text_draw(r, text, sd->msg.len, ox, oy - sd->msg_scroll, &ts, wrap);
+  if (focused && ui->caret_on) ccord_draw_rect(r, (ccord_rect){ox + cr.x, oy + cr.y - sd->msg_scroll, 1.5f, lh}, COL(caret));
   ccord_pop_clip(r);
   if (focused) ui->text_area = box;
 }
@@ -327,31 +337,31 @@ static void sd_draw_message_box(ccord_ui *ui, ccord_renderer *r, ccord_rect box)
 void ui_schedule_dialog_draw(ccord_ui *ui, ccord_renderer *r)
 {
   if (!ui || !r || !ui->schedule_open) return;
-  sd_init_once();
+  if (!sd_ensure()) return;
   sd_refresh_items(ui);
   ccord_rect box = uis_modal_box(ui, UIS_MODAL_W_MD, SD_H);
-  sd.box = box;
+  sd->box = box;
   ui_popup_begin(ui, r, "schedlg", 0, UI_MODAL_MS, UIS_SLIDE_MODAL);
   uis_modal_frame(ui, r, box);
   float y = uis_modal_title(ui, r, box, "Schedule Message");
   float x0 = box.x + UIS_SP_5, w = box.w - 2.0f * UIS_SP_5;
   float fs_c = M(font_size_small);
 
-  sd.x_btn = (ccord_rect){box.x + box.w - UIS_SP_3 - UIS_ICON_BTN, box.y + UIS_SP_5 + ui_line_h(ui, M(font_size_large)) * 0.5f - UIS_ICON_BTN * 0.5f,
-                          UIS_ICON_BTN, UIS_ICON_BTN};
-  bool xh = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd.x_btn);
-  ccord_color xc = uis_icon_button(ui, r, sd.x_btn, (uis_state){.hover = xh}, "schedx", 0);
-  ui_icon_close(r, sd.x_btn.x + sd.x_btn.w * 0.5f, sd.x_btn.y + sd.x_btn.h * 0.5f, UIS_ICON_GLYPH, xc);
+  sd->x_btn = (ccord_rect){box.x + box.w - UIS_SP_3 - UIS_ICON_BTN, box.y + UIS_SP_5 + ui_line_h(ui, M(font_size_large)) * 0.5f - UIS_ICON_BTN * 0.5f,
+                           UIS_ICON_BTN, UIS_ICON_BTN};
+  bool xh = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd->x_btn);
+  ccord_color xc = uis_icon_button(ui, r, sd->x_btn, (uis_state){.hover = xh}, "schedx", 0);
+  ui_icon_close(r, sd->x_btn.x + sd->x_btn.w * 0.5f, sd->x_btn.y + sd->x_btn.h * 0.5f, UIS_ICON_GLYPH, xc);
 
   // target channel
   char name[128], line[200];
-  if (sd.channel_id != CCORD_ID_NONE) snprintf(line, sizeof line, "Sending to %s", sd_channel_name(ui, sd.channel_id, name, sizeof name));
+  if (sd->channel_id != CCORD_ID_NONE) snprintf(line, sizeof line, "Sending to %s", sd_channel_name(ui, sd->channel_id, name, sizeof name));
   else snprintf(line, sizeof line, "No text channel selected");
   sd_text(ui, r, line, x0, y, w, CCORD_FONT_BOLD, fs_c, COL(text_header));
   y += 22.0f;
 
-  sd.msg_rect = (ccord_rect){x0, y, w, SD_MSG_H};
-  sd_draw_message_box(ui, r, sd.msg_rect);
+  sd->msg_rect = (ccord_rect){x0, y, w, SD_MSG_H};
+  sd_draw_message_box(ui, r, sd->msg_rect);
   y += SD_MSG_H + UIS_SP_3;
 
   // date and time
@@ -359,10 +369,10 @@ void ui_schedule_dialog_draw(ccord_ui *ui, ccord_renderer *r)
   sd_text(ui, r, "DATE (YYYY-MM-DD)", x0, y, dw, CCORD_FONT_BOLD, fs_c - 3.0f, COL(text_muted));
   sd_text(ui, r, "TIME (HH:MM, LOCAL)", x0 + dw + gap, y, tw, CCORD_FONT_BOLD, fs_c - 3.0f, COL(text_muted));
   y += 16.0f;
-  sd.date_rect = (ccord_rect){x0, y, dw, UIS_H_INPUT};
-  sd.time_rect = (ccord_rect){x0 + dw + gap, y, tw, UIS_H_INPUT};
-  uis_input(ui, r, sd.date_rect, &sd.date, "YYYY-MM-DD", (uis_state){.focused = sd.focus == SD_FOCUS_DATE}, false, "scheddate", 0);
-  uis_input(ui, r, sd.time_rect, &sd.time, "HH:MM", (uis_state){.focused = sd.focus == SD_FOCUS_TIME}, false, "schedtime", 0);
+  sd->date_rect = (ccord_rect){x0, y, dw, UIS_H_INPUT};
+  sd->time_rect = (ccord_rect){x0 + dw + gap, y, tw, UIS_H_INPUT};
+  uis_input(ui, r, sd->date_rect, &sd->date, "YYYY-MM-DD", (uis_state){.focused = sd->focus == SD_FOCUS_DATE}, false, "scheddate", 0);
+  uis_input(ui, r, sd->time_rect, &sd->time, "HH:MM", (uis_state){.focused = sd->focus == SD_FOCUS_TIME}, false, "schedtime", 0);
   y += UIS_H_INPUT + UIS_SP_2;
 
   // presets
@@ -370,9 +380,9 @@ void ui_schedule_dialog_draw(ccord_ui *ui, ccord_renderer *r)
   float px = x0;
   for (int i = 0; i < SD_PRESET_COUNT; i++) {
     float bw = uis_label_width(ui, r, k_presets[i]);
-    sd.preset[i] = (ccord_rect){px, y, bw, UIS_H_BTN_SM};
-    bool hv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd.preset[i]);
-    uis_button(ui, r, sd.preset[i], k_presets[i], UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){.hover = hv}, "schedpre", (uint64_t)i);
+    sd->preset[i] = (ccord_rect){px, y, bw, UIS_H_BTN_SM};
+    bool hv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd->preset[i]);
+    uis_button(ui, r, sd->preset[i], k_presets[i], UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){.hover = hv}, "schedpre", (uint64_t)i);
     px += bw + UIS_SP_2;
   }
   y += UIS_H_BTN_SM + UIS_SP_2;
@@ -386,8 +396,8 @@ void ui_schedule_dialog_draw(ccord_ui *ui, ccord_renderer *r)
   int64_t due = 0;
   char buf[96];
   const char *why = sd_blocker(ui, &due, buf, sizeof buf);
-  if (sd.status[0]) {
-    sd_text(ui, r, sd.status, x0, y, w, CCORD_FONT_REGULAR, fs_c - 1.0f, sd.status_ok ? COL(text_normal) : COL(danger));
+  if (sd->status[0]) {
+    sd_text(ui, r, sd->status, x0, y, w, CCORD_FONT_REGULAR, fs_c - 1.0f, sd->status_ok ? COL(text_normal) : COL(danger));
   } else if (why) {
     sd_text(ui, r, why, x0, y, w, CCORD_FONT_REGULAR, fs_c - 1.0f, COL(text_muted));
   } else {
@@ -403,50 +413,50 @@ void ui_schedule_dialog_draw(ccord_ui *ui, ccord_renderer *r)
   sd_text(ui, r, "Sent locally while C-Cord is open", x0, y, w, CCORD_FONT_REGULAR, fs_c - 2.0f, COL(text_muted));
   y += 18.0f;
   // pending list
-  snprintf(line, sizeof line, "SCHEDULED MESSAGES (%zu)", sd.nitems);
+  snprintf(line, sizeof line, "SCHEDULED MESSAGES (%zu)", sd->nitems);
   sd_text(ui, r, line, x0, y, w, CCORD_FONT_BOLD, fs_c - 3.0f, COL(text_muted));
   y += 20.0f;
   int rows_fit = (int)((box.h - SD_H_FIXED) / SD_ROW_H);
   if (rows_fit > SD_ROWS_MAX) rows_fit = SD_ROWS_MAX;
-  memset(sd.rows, 0, sizeof sd.rows);
-  if (sd.nitems == 0) {
+  memset(sd->rows, 0, sizeof sd->rows);
+  if (sd->nitems == 0) {
     sd_text(ui, r, "Nothing scheduled.", x0, y + 4.0f, w, CCORD_FONT_REGULAR, fs_c, COL(text_muted));
   }
-  for (int i = 0; i < rows_fit && sd.first_row + (size_t)i < sd.nitems; i++) {
-    const ccord_ui_scheduled_item *it = &sd.items[sd.first_row + (size_t)i];
+  for (int i = 0; i < rows_fit && sd->first_row + (size_t)i < sd->nitems; i++) {
+    const ccord_ui_scheduled_item *it = &sd->items[sd->first_row + (size_t)i];
     ccord_rect row = {x0, y + (float)i * SD_ROW_H, w, SD_ROW_H - 4.0f};
     uis_card(ui, r, row);
     const char *cancel_label = it->missed ? "Delete" : "Cancel";
     float cw = uis_label_width(ui, r, cancel_label), sw = uis_label_width(ui, r, "Send now");
-    sd.rows[i].cancel = (ccord_rect){row.x + row.w - UIS_SP_2 - cw, row.y + (row.h - UIS_H_BTN_SM) * 0.5f, cw, UIS_H_BTN_SM};
-    sd.rows[i].send = (ccord_rect){sd.rows[i].cancel.x - UIS_SP_2 - sw, sd.rows[i].cancel.y, sw, UIS_H_BTN_SM};
-    bool sh = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd.rows[i].send);
-    bool ch = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd.rows[i].cancel);
-    uis_button(ui, r, sd.rows[i].send, "Send now", UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){.hover = sh}, "schedsend", (uint64_t)i);
-    uis_button(ui, r, sd.rows[i].cancel, cancel_label, UIS_BTN_DANGER_SOFT, UIS_BTN_S_SM, (uis_state){.hover = ch}, "schedcancel", (uint64_t)i);
-    float tx = row.x + UIS_SP_3, tmax = sd.rows[i].send.x - UIS_SP_2 - tx;
+    sd->rows[i].cancel = (ccord_rect){row.x + row.w - UIS_SP_2 - cw, row.y + (row.h - UIS_H_BTN_SM) * 0.5f, cw, UIS_H_BTN_SM};
+    sd->rows[i].send = (ccord_rect){sd->rows[i].cancel.x - UIS_SP_2 - sw, sd->rows[i].cancel.y, sw, UIS_H_BTN_SM};
+    bool sh = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd->rows[i].send);
+    bool ch = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd->rows[i].cancel);
+    uis_button(ui, r, sd->rows[i].send, "Send now", UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){.hover = sh}, "schedsend", (uint64_t)i);
+    uis_button(ui, r, sd->rows[i].cancel, cancel_label, UIS_BTN_DANGER_SOFT, UIS_BTN_S_SM, (uis_state){.hover = ch}, "schedcancel", (uint64_t)i);
+    float tx = row.x + UIS_SP_3, tmax = sd->rows[i].send.x - UIS_SP_2 - tx;
     sd_text(ui, r, it->preview, tx, row.y + 5.0f, tmax, CCORD_FONT_BOLD, fs_c, COL(text_header));
     char when[48], cn[128];
     sd_fmt_time(ui, it->due_unix_ms, when, sizeof when);
     char att[48] = "";
-    if (i == 0) sd.dbg_att_drawn = it->attachments;
+    if (i == 0) g_sd_dbg_att_drawn = it->attachments;
     if (it->attachments > 0) snprintf(att, sizeof att, "  %zu file%s", it->attachments, it->attachments == 1 ? "" : "s");
     snprintf(line, sizeof line, "%s%s  %s%s", it->missed ? "Missed, was due " : "", when, sd_channel_name(ui, it->channel_id, cn, sizeof cn), att);
     sd_text(ui, r, line, tx, row.y + 22.0f, tmax, CCORD_FONT_REGULAR, fs_c - 2.0f, it->missed ? COL(danger) : COL(text_muted));
     if (it->error[0]) sd_text(ui, r, it->error, tx, row.y + 37.0f, tmax, CCORD_FONT_REGULAR, fs_c - 2.0f, COL(danger));
   }
-  if (rows_fit > 0 && sd.nitems > (size_t)rows_fit) {
-    snprintf(line, sizeof line, "%zu-%zu of %zu (scroll)", sd.first_row + 1, sd.first_row + (size_t)rows_fit < sd.nitems ? sd.first_row + (size_t)rows_fit : sd.nitems, sd.nitems);
+  if (rows_fit > 0 && sd->nitems > (size_t)rows_fit) {
+    snprintf(line, sizeof line, "%zu-%zu of %zu (scroll)", sd->first_row + 1, sd->first_row + (size_t)rows_fit < sd->nitems ? sd->first_row + (size_t)rows_fit : sd->nitems, sd->nitems);
     sd_text(ui, r, line, x0 + w - 150.0f, y - 18.0f, 150.0f, CCORD_FONT_REGULAR, fs_c - 2.0f, COL(text_muted));
   }
 
   // footer: Schedule (right), Close
-  sd.schedule = uis_modal_footer_button(box, 0, 120.0f);
-  sd.close = uis_modal_footer_button(box, 1, 90.0f);
-  bool sch_h = ui->mouse_in && why == nullptr && ui_in_rect(ui->mx, ui->my, sd.schedule);
-  bool cl_h = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd.close);
-  uis_button(ui, r, sd.schedule, "Schedule", UIS_BTN_PRIMARY, UIS_BTN_S_MD, (uis_state){.hover = sch_h, .disabled = why != nullptr}, "schedgo", 0);
-  uis_button(ui, r, sd.close, "Close", UIS_BTN_SECONDARY, UIS_BTN_S_MD, (uis_state){.hover = cl_h}, "schedclose", 0);
+  sd->schedule = uis_modal_footer_button(box, 0, 120.0f);
+  sd->close = uis_modal_footer_button(box, 1, 90.0f);
+  bool sch_h = ui->mouse_in && why == nullptr && ui_in_rect(ui->mx, ui->my, sd->schedule);
+  bool cl_h = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd->close);
+  uis_button(ui, r, sd->schedule, "Schedule", UIS_BTN_PRIMARY, UIS_BTN_S_MD, (uis_state){.hover = sch_h, .disabled = why != nullptr}, "schedgo", 0);
+  uis_button(ui, r, sd->close, "Close", UIS_BTN_SECONDARY, UIS_BTN_S_MD, (uis_state){.hover = cl_h}, "schedclose", 0);
   ui_popup_end(r);
 }
 
@@ -454,7 +464,7 @@ void ui_schedule_dialog_draw(ccord_ui *ui, ccord_renderer *r)
 
 static ccord_text_edit *sd_focus_edit(void)
 {
-  return sd.focus == SD_FOCUS_DATE ? &sd.date : sd.focus == SD_FOCUS_TIME ? &sd.time : &sd.msg;
+  return sd->focus == SD_FOCUS_DATE ? &sd->date : sd->focus == SD_FOCUS_TIME ? &sd->time : &sd->msg;
 }
 
 // Date and time fields take digits, '-' and ':' only.
@@ -465,8 +475,8 @@ static void sd_insert(ccord_ui *ui, const char *s, size_t n)
   size_t m = 0;
   for (size_t i = 0; i < n && m < sizeof clean - 1; i++) {
     unsigned char c = (unsigned char)s[i];
-    if (sd.focus != SD_FOCUS_MSG && !((c >= '0' && c <= '9') || c == '-' || c == ':')) continue;
-    if (sd.focus == SD_FOCUS_MSG && (c < 0x20 && c != '\n' && c != '\t')) continue;
+    if (sd->focus != SD_FOCUS_MSG && !((c >= '0' && c <= '9') || c == '-' || c == ':')) continue;
+    if (sd->focus == SD_FOCUS_MSG && (c < 0x20 && c != '\n' && c != '\t')) continue;
     clean[m++] = (char)c;
   }
   if (m == 0) return;
@@ -475,7 +485,7 @@ static void sd_insert(ccord_ui *ui, const char *s, size_t n)
   if (valid_len == 0) return;
   ccord_error err;
   (void)ccord_text_edit_insert(e, clean, valid_len, &err);
-  sd.status[0] = '\0';
+  sd->status[0] = '\0';
   ui->caret_on = true;
   ui->dirty = true;
 }
@@ -486,19 +496,19 @@ static bool sd_key(ccord_ui *ui, const ccord_input_event *ev)
   bool ctrl = (ev->mods & (CCORD_MOD_CTRL | CCORD_MOD_SUPER)) != 0, shift = (ev->mods & CCORD_MOD_SHIFT) != 0;
   switch (ev->key) {
     case CCORD_KEY_ESCAPE: ui_schedule_dialog_close(ui); return true;
-    case CCORD_KEY_TAB: sd.focus = (sd.focus + (shift ? 2 : 1)) % 3; break;
+    case CCORD_KEY_TAB: sd->focus = (sd->focus + (shift ? 2 : 1)) % 3; break;
     case CCORD_KEY_RETURN:
-      if (sd.focus == SD_FOCUS_MSG && shift) sd_insert(ui, "\n", 1);
+      if (sd->focus == SD_FOCUS_MSG && shift) sd_insert(ui, "\n", 1);
       else sd_do_schedule(ui);
       break;
-    case CCORD_KEY_BACKSPACE: if (ctrl) ccord_text_edit_backspace_word(e); else ccord_text_edit_backspace(e); sd.status[0] = '\0'; break;
-    case CCORD_KEY_DELETE: if (ctrl) ccord_text_edit_delete_word(e); else ccord_text_edit_delete(e); sd.status[0] = '\0'; break;
+    case CCORD_KEY_BACKSPACE: if (ctrl) ccord_text_edit_backspace_word(e); else ccord_text_edit_backspace(e); sd->status[0] = '\0'; break;
+    case CCORD_KEY_DELETE: if (ctrl) ccord_text_edit_delete_word(e); else ccord_text_edit_delete(e); sd->status[0] = '\0'; break;
     case CCORD_KEY_LEFT: ccord_text_edit_move(e, ctrl ? -3 : -1, shift); break;
     case CCORD_KEY_RIGHT: ccord_text_edit_move(e, ctrl ? 3 : 1, shift); break;
     case CCORD_KEY_HOME: ccord_text_edit_move(e, ctrl ? -2 : -4, shift); break;
     case CCORD_KEY_END: ccord_text_edit_move(e, ctrl ? 2 : 4, shift); break;
     case CCORD_KEY_A:
-      if (ctrl && sd.focus != SD_FOCUS_MSG) ccord_text_edit_select_all(e);
+      if (ctrl && sd->focus != SD_FOCUS_MSG) ccord_text_edit_select_all(e);
       break;
     case CCORD_KEY_V:
       if (ctrl && ui->d.host.clipboard_get) {
@@ -519,36 +529,36 @@ static bool sd_key(ccord_ui *ui, const ccord_input_event *ev)
 
 static bool sd_click(ccord_ui *ui, float x, float y)
 {
-  if (!ui_in_rect(x, y, sd.box)) {   // a click outside the dialog dismisses it
+  if (!ui_in_rect(x, y, sd->box)) {   // a click outside the dialog dismisses it
     ui_schedule_dialog_close(ui);
     return true;
   }
-  if (ui_in_rect(x, y, sd.x_btn) || ui_in_rect(x, y, sd.close)) {
+  if (ui_in_rect(x, y, sd->x_btn) || ui_in_rect(x, y, sd->close)) {
     ui_schedule_dialog_close(ui);
     return true;
   }
-  if (ui_in_rect(x, y, sd.schedule)) {
+  if (ui_in_rect(x, y, sd->schedule)) {
     sd_do_schedule(ui);
     return true;
   }
-  if (ui_in_rect(x, y, sd.msg_rect)) {
-    sd.focus = SD_FOCUS_MSG;
-    sd.click_pending = true;
-    sd.click_x = x;
-    sd.click_y = y;
-  } else if (ui_in_rect(x, y, sd.date_rect)) {
-    sd.focus = SD_FOCUS_DATE;
-    ccord_text_edit_set_caret(&sd.date, sd.date.len, false);
-  } else if (ui_in_rect(x, y, sd.time_rect)) {
-    sd.focus = SD_FOCUS_TIME;
-    ccord_text_edit_set_caret(&sd.time, sd.time.len, false);
+  if (ui_in_rect(x, y, sd->msg_rect)) {
+    sd->focus = SD_FOCUS_MSG;
+    sd->click_pending = true;
+    sd->click_x = x;
+    sd->click_y = y;
+  } else if (ui_in_rect(x, y, sd->date_rect)) {
+    sd->focus = SD_FOCUS_DATE;
+    ccord_text_edit_set_caret(&sd->date, sd->date.len, false);
+  } else if (ui_in_rect(x, y, sd->time_rect)) {
+    sd->focus = SD_FOCUS_TIME;
+    ccord_text_edit_set_caret(&sd->time, sd->time.len, false);
   }
   for (int i = 0; i < SD_PRESET_COUNT; i++) {
-    if (ui_in_rect(x, y, sd.preset[i])) sd_apply_preset(ui, i);
+    if (ui_in_rect(x, y, sd->preset[i])) sd_apply_preset(ui, i);
   }
   for (int i = 0; i < SD_ROWS_MAX; i++) {
-    if (sd.rows[i].send.w > 0.0f && ui_in_rect(x, y, sd.rows[i].send)) sd_row_action(ui, sd.first_row + (size_t)i, true);
-    else if (sd.rows[i].cancel.w > 0.0f && ui_in_rect(x, y, sd.rows[i].cancel)) sd_row_action(ui, sd.first_row + (size_t)i, false);
+    if (sd->rows[i].send.w > 0.0f && ui_in_rect(x, y, sd->rows[i].send)) sd_row_action(ui, sd->first_row + (size_t)i, true);
+    else if (sd->rows[i].cancel.w > 0.0f && ui_in_rect(x, y, sd->rows[i].cancel)) sd_row_action(ui, sd->first_row + (size_t)i, false);
   }
   ui->dirty = true;
   return true;
@@ -556,7 +566,7 @@ static bool sd_click(ccord_ui *ui, float x, float y)
 
 bool ui_schedule_dialog_input(ccord_ui *ui, const ccord_input_event *ev)
 {
-  if (!ui || !ev || !ui->schedule_open) return false;
+  if (!ui || !ev || !ui->schedule_open || !sd) return false;
   switch (ev->type) {
     case CCORD_IN_KEY_DOWN:
       return sd_key(ui, ev);
@@ -568,10 +578,10 @@ bool ui_schedule_dialog_input(ccord_ui *ui, const ccord_input_event *ev)
     case CCORD_IN_MOUSE_UP:
       return true;
     case CCORD_IN_WHEEL:
-      if (sd.nitems > SD_ROWS_MAX) {
-        size_t max_first = sd.nitems - SD_ROWS_MAX;
-        if (ev->wheel > 0.0f && sd.first_row > 0) sd.first_row--;
-        else if (ev->wheel < 0.0f && sd.first_row < max_first) sd.first_row++;
+      if (sd->nitems > SD_ROWS_MAX) {
+        size_t max_first = sd->nitems - SD_ROWS_MAX;
+        if (ev->wheel > 0.0f && sd->first_row > 0) sd->first_row--;
+        else if (ev->wheel < 0.0f && sd->first_row < max_first) sd->first_row++;
         ui->dirty = true;
       }
       return true;

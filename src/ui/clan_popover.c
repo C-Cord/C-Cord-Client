@@ -25,8 +25,9 @@ typedef struct cp_hit {
 } cp_hit;
 
 struct ui_clan_popover {
-  cp_hit hits[CP_MAX_HITS];
+  cp_hit *hits;
   size_t nhits;
+  size_t caphits;
 
   bool open;
   bool swallow_up;
@@ -51,6 +52,7 @@ static struct ui_clan_popover *cp_get(ccord_ui *ui, bool create)
 void ui_clan_popover_destroy(ccord_ui *ui)
 {
   if (!ui || !ui->clan_pop) return;
+  ccord_free(ui->clan_pop->hits);
   ccord_free(ui->clan_pop);
   ui->clan_pop = nullptr;
 }
@@ -67,6 +69,14 @@ void ui_clan_popover_record_hit(ccord_ui *ui, ccord_rect rect, ccord_id guild_id
   if (!ui || !tag || !tag[0] || rect.w <= 0.0f || rect.h <= 0.0f) return;
   struct ui_clan_popover *cp = cp_get(ui, true);
   if (!cp || cp->nhits >= CP_MAX_HITS) return;
+  if (cp->nhits == cp->caphits) {
+    size_t ncap = cp->caphits ? cp->caphits * 2u : 4u;
+    if (ncap > CP_MAX_HITS) ncap = CP_MAX_HITS;
+    cp_hit *nh = ccord_realloc_array(cp->hits, ncap, sizeof *nh);
+    if (!nh) return;
+    cp->hits = nh;
+    cp->caphits = ncap;
+  }
   cp_hit *h = &cp->hits[cp->nhits++];
   h->rect = rect;
   h->guild_id = guild_id;
@@ -108,9 +118,17 @@ static void cp_close(ccord_ui *ui)
 {
   struct ui_clan_popover *cp = ui ? ui->clan_pop : nullptr;
   if (!cp || !cp->open) return;
+  bool keep_for_up = cp->swallow_up;
   cp->open = false;
   cp->box = (ccord_rect){0};
   cp->go_btn = (ccord_rect){0};
+  ccord_free(cp->hits);
+  cp->hits = nullptr;
+  cp->nhits = 0;
+  cp->caphits = 0;
+  if (!keep_for_up) {
+    ui_clan_popover_destroy(ui);
+  }
   ui->dirty = true;
 }
 
@@ -139,6 +157,9 @@ bool ui_clan_popover_input(ccord_ui *ui, const ccord_input_event *ev)
 
   if (ev->type == CCORD_IN_MOUSE_UP && ev->button == 1 && cp->swallow_up) {
     cp->swallow_up = false;
+    if (!cp->open && cp->nhits == 0) {
+      ui_clan_popover_destroy(ui);
+    }
     return true;
   }
 
@@ -224,7 +245,14 @@ static void guild_initials(const char *name, char out[4])
 void ui_clan_popover_draw(ccord_ui *ui, ccord_renderer *r)
 {
   struct ui_clan_popover *cp = ui ? ui->clan_pop : nullptr;
-  if (!cp || !cp->open || !r) return;
+  if (!cp) return;
+  if (!cp->open) {
+    if (!cp->swallow_up && cp->nhits == 0) {
+      ui_clan_popover_destroy(ui);
+    }
+    return;
+  }
+  if (!r) return;
 
   const ccord_guild_profile *gp =
     (ui->d.session && cp->guild_id != CCORD_ID_NONE) ? ccord_session_guild_profile(ui->d.session, cp->guild_id) : nullptr;

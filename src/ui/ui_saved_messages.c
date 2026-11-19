@@ -14,6 +14,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <ccord/core/alloc.h>
+
 #include "ui_internal.h"
 #include "ui_style.h"
 
@@ -438,33 +440,33 @@ typedef struct ui_forward_state {
   float content_h;
 } ui_forward_state;
 
-static ui_forward_state g_fwd;
+static ui_forward_state *g_fwd;
 
-static void fwd_reset(ui_forward_state *st)
+static void fwd_free(void)
 {
-  const ccord_ui *owner = st->owner;
-  if (st->search_init) ccord_text_edit_free(&st->search);
-  memset(st, 0, sizeof *st);
-  st->owner = owner;
+  if (!g_fwd) return;
+  if (g_fwd->search_init) ccord_text_edit_free(&g_fwd->search);
+  ccord_free(g_fwd);
+  g_fwd = nullptr;
 }
 
 void ui_saved_messages_free(ccord_ui *ui)
 {
   (void)ui;
-  fwd_reset(&g_fwd);
-  memset(&g_fwd, 0, sizeof g_fwd);
+  fwd_free();
 }
 
-// Owner-tracked static state (the M5 pattern): heals when the ui address is reused or the modal kind taken over.
-static ui_forward_state *fwd_state(const ccord_ui *ui)
+// Owner-tracked lazy heap state (the M5 pattern): heals when the ui address is reused or the modal kind taken over.
+static ui_forward_state *fwd_state(const ccord_ui *ui, bool create)
 {
-  if (g_fwd.owner != ui) {
-    fwd_reset(&g_fwd);
-    g_fwd.owner = ui;
-  } else if (g_fwd.open && ui->modal_kind != UI_MODAL_FORWARD_PICKER) {
-    fwd_reset(&g_fwd);
+  if (g_fwd && (g_fwd->owner != ui || (g_fwd->open && ui->modal_kind != UI_MODAL_FORWARD_PICKER))) {
+    fwd_free();
   }
-  return &g_fwd;
+  if (!g_fwd && create) {
+    g_fwd = ccord_calloc(1, sizeof *g_fwd);
+    if (g_fwd) g_fwd->owner = ui;
+  }
+  return g_fwd;
 }
 
 static void fwd_add_item(ui_forward_state *st, ccord_id guild_id, ccord_id channel_id, const char *label, const char *sub)
@@ -514,8 +516,8 @@ static void fwd_rebuild(ccord_ui *ui, ui_forward_state *st)
 
 bool ui_forward_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced)
 {
-  ui_forward_state *st = fwd_state(ui);
-  if (st->glide.pending == 0.0f) return false;
+  ui_forward_state *st = fwd_state(ui, false);
+  if (!st || st->glide.pending == 0.0f) return false;
   if (!st->open) {
     ccord_scroller_cancel(&st->glide);
     return false;
@@ -528,8 +530,9 @@ void ui_forward_picker_open(ccord_ui *ui, ccord_id source_channel_id, ccord_id m
 {
   if (!ui || source_channel_id == CCORD_ID_NONE || message_id == CCORD_ID_NONE) return;
   if (ui->modal_kind != UI_MODAL_NONE) return;
-  ui_forward_state *st = fwd_state(ui);
-  fwd_reset(st);
+  fwd_free();
+  ui_forward_state *st = fwd_state(ui, true);
+  if (!st) return;
   st->owner = ui;
   st->open = true;
   st->source_channel = source_channel_id;
@@ -547,12 +550,13 @@ void ui_forward_picker_open(ccord_ui *ui, ccord_id source_channel_id, ccord_id m
 bool ui_forward_picker_active(const ccord_ui *ui)
 {
   if (!ui || ui->modal_kind != UI_MODAL_FORWARD_PICKER) return false;
-  return fwd_state(ui)->open;
+  ui_forward_state *st = fwd_state(ui, false);
+  return st && st->open;
 }
 
-static void fwd_close(ccord_ui *ui, ui_forward_state *st)
+static void fwd_close(ccord_ui *ui)
 {
-  st->open = false;
+  fwd_free();
   if (ui->modal_kind == UI_MODAL_FORWARD_PICKER) ui->modal_kind = UI_MODAL_NONE;
   ui->dirty = true;
 }
@@ -562,19 +566,21 @@ static void fwd_do(ccord_ui *ui, ui_forward_state *st, size_t idx)
   if (idx >= st->nitems) return;
   ccord_id gid = st->items[idx].guild_id;
   ccord_id cid = st->items[idx].channel_id;
+  ccord_id src_ch = st->source_channel;
+  ccord_id src_msg = st->source_message;
   if (!ui->d.session) {
     ui_notice(ui, "Not connected");
-    fwd_close(ui, st);
+    fwd_close(ui);
     return;
   }
   ccord_error err;
-  if (ccord_session_forward_message(ui->d.session, cid, st->source_channel, st->source_message, &err) != CCORD_OK) {
+  if (ccord_session_forward_message(ui->d.session, cid, src_ch, src_msg, &err) != CCORD_OK) {
     ui_notice(ui, "Cannot forward: %s", err.message);
-    fwd_close(ui, st);
+    fwd_close(ui);
     return;
   }
   ui_notice(ui, "Message forwarded");
-  fwd_close(ui, st);
+  fwd_close(ui);
   ui_select_guild_and_channel(ui, gid, cid);
 }
 
@@ -582,14 +588,14 @@ static void fwd_do(ccord_ui *ui, ui_forward_state *st, size_t idx)
 
 void ui_forward_picker_draw(ccord_ui *ui, ccord_renderer *r)
 {
-  ui_forward_state *st = fwd_state(ui);
+  ui_forward_state *st = fwd_state(ui, false);
+  if (!st || !st->open) return;
   st->box = (ccord_rect){0};
   st->search_rect = (ccord_rect){0};
   st->close_rect = (ccord_rect){0};
   st->thumb = (ccord_rect){0};
   st->content_h = 0.0f;
   for (size_t i = 0; i < UI_FORWARD_PICKER_MAX; i++) st->item_rects[i] = (ccord_rect){0};
-  if (!st->open) return;
 
   ccord_rect box = uis_modal_box(ui, UIS_MODAL_W_SM, 480.0f);
   st->box = box;
@@ -663,11 +669,11 @@ static void fwd_scroll_to_sel(ui_forward_state *st)
 
 bool ui_forward_picker_handle(ccord_ui *ui, const ccord_input_event *ev)
 {
-  ui_forward_state *st = fwd_state(ui);
-  if (!st->open) return false;
+  ui_forward_state *st = fwd_state(ui, false);
+  if (!st || !st->open) return false;
   if (ev->type == CCORD_IN_KEY_DOWN) {
     if (ev->key == CCORD_KEY_ESCAPE) {
-      fwd_close(ui, st);
+      fwd_close(ui);
       return true;
     }
     if (ev->key == CCORD_KEY_DOWN && st->nitems > 0) {
@@ -728,7 +734,7 @@ bool ui_forward_picker_handle(ccord_ui *ui, const ccord_input_event *ev)
   }
   if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 1) {
     if (st->close_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, st->close_rect)) {
-      fwd_close(ui, st);
+      fwd_close(ui);
       return true;
     }
     for (size_t i = 0; i < st->nitems; i++) {
@@ -738,7 +744,7 @@ bool ui_forward_picker_handle(ccord_ui *ui, const ccord_input_event *ev)
       }
     }
     if (st->box.w > 0.0f && !ui_in_rect(ev->x, ev->y, st->box)) {
-      fwd_close(ui, st);
+      fwd_close(ui);
       return true;
     }
     return true;
@@ -749,7 +755,8 @@ bool ui_forward_picker_handle(ccord_ui *ui, const ccord_input_event *ev)
 ccord_cursor_kind ui_forward_picker_cursor(const ccord_ui *ui)
 {
   if (!ui_forward_picker_active(ui) || !ui->mouse_in) return CCORD_CURSOR_DEFAULT;
-  ui_forward_state *st = fwd_state(ui);
+  ui_forward_state *st = fwd_state(ui, false);
+  if (!st) return CCORD_CURSOR_DEFAULT;
   if (st->close_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, st->close_rect)) return CCORD_CURSOR_POINTER;
   if (st->search_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, st->search_rect)) return CCORD_CURSOR_TEXT;
   for (size_t i = 0; i < st->nitems; i++) {
@@ -788,7 +795,8 @@ void ui_forward_picker_get_debug(const ccord_ui *ui, ui_forward_picker_debug *ou
   if (!out) return;
   memset(out, 0, sizeof *out);
   if (!ui) return;
-  ui_forward_state *st = fwd_state(ui);
+  ui_forward_state *st = fwd_state(ui, false);
+  if (!st) return;
   out->open = st->open && ui->modal_kind == UI_MODAL_FORWARD_PICKER;
   out->source_channel = st->source_channel;
   out->source_message = st->source_message;

@@ -16,6 +16,7 @@
 #include "ui_internal.h"
 #include "ui_style.h"
 
+#include <ccord/core/alloc.h>
 #include <ccord/net/admin.h>
 
 #define M(name) (ui->theme->m.name)
@@ -58,34 +59,35 @@ typedef struct ui_events_state {
   ccord_rect ec_box, ec_ok, ec_cancel;
 } ui_events_state;
 
-static ui_events_state g_events;
+static ui_events_state *g_events;
 
-static void events_reset(ui_events_state *st)
+static void events_free(void)
 {
-  const ccord_ui *owner = st->owner;
-  if (st->edits_init) {
-    ccord_text_edit_free(&st->name);
-    ccord_text_edit_free(&st->location);
-    ccord_text_edit_free(&st->start);
-    ccord_text_edit_free(&st->end);
-    ccord_text_edit_free(&st->desc);
+  if (!g_events) return;
+  if (g_events->edits_init) {
+    ccord_text_edit_free(&g_events->name);
+    ccord_text_edit_free(&g_events->location);
+    ccord_text_edit_free(&g_events->start);
+    ccord_text_edit_free(&g_events->end);
+    ccord_text_edit_free(&g_events->desc);
   }
-  if (st->stage_topic_init) ccord_text_edit_free(&st->stage_topic);
-  memset(st, 0, sizeof *st);
-  st->owner = owner;
+  if (g_events->stage_topic_init) ccord_text_edit_free(&g_events->stage_topic);
+  ccord_free(g_events);
+  g_events = nullptr;
 }
 
-// Owner-tracked static state (the M5 pattern): a modal left open by a destroyed ui whose address
+// Owner-tracked lazy heap state (the M5 pattern): a modal left open by a destroyed ui whose address
 // got reused heals itself here, and so does one whose borrowed modal kind was taken over.
-static ui_events_state *events_state(const ccord_ui *ui)
+static ui_events_state *events_state(const ccord_ui *ui, bool create)
 {
-  if (g_events.owner != ui) {
-    events_reset(&g_events);
-    g_events.owner = ui;
-  } else if (g_events.open && ui->modal_kind != UI_MODAL_SCHEDULED_EVENTS) {
-    events_reset(&g_events);
+  if (g_events && (g_events->owner != ui || (g_events->open && ui->modal_kind != UI_MODAL_SCHEDULED_EVENTS))) {
+    events_free();
   }
-  return &g_events;
+  if (!g_events && create) {
+    g_events = ccord_calloc(1, sizeof *g_events);
+    if (g_events) g_events->owner = ui;
+  }
+  return g_events;
 }
 
 static float clampf(float v, float lo, float hi)
@@ -290,7 +292,7 @@ static ccord_id form_channel(const ccord_ui *ui, const ui_events_state *st)
 
 static void events_close(ccord_ui *ui)
 {
-  events_reset(events_state(ui));
+  events_free();
   if (ui->modal_kind == UI_MODAL_SCHEDULED_EVENTS) ui->modal_kind = UI_MODAL_NONE;
   ui->dirty = true;
 }
@@ -298,17 +300,16 @@ static void events_close(ccord_ui *ui)
 void ui_scheduled_events_free(ccord_ui *ui)
 {
   (void)ui;
-  events_reset(&g_events);
-  if (g_events.stage_topic_init) ccord_text_edit_free(&g_events.stage_topic);
-  memset(&g_events, 0, sizeof g_events);
+  events_free();
 }
 
 void ui_scheduled_events_open(ccord_ui *ui, ccord_id guild_id)
 {
   if (!ui || guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) return;
   if (ui->modal_kind != UI_MODAL_NONE) return;
-  ui_events_state *st = events_state(ui);
-  events_reset(st);
+  events_free();
+  ui_events_state *st = events_state(ui, true);
+  if (!st) return;
   st->open = true;
   st->view = UI_EVENTS_LIST;
   st->guild_id = guild_id;
@@ -327,12 +328,14 @@ void ui_scheduled_events_open(ccord_ui *ui, ccord_id guild_id)
 bool ui_scheduled_events_active(const ccord_ui *ui)
 {
   if (!ui || ui->modal_kind != UI_MODAL_SCHEDULED_EVENTS) return false;
-  return events_state(ui)->open;
+  ui_events_state *st = events_state(ui, false);
+  return st && st->open;
 }
 
 static void form_open(ccord_ui *ui, ccord_id event_id)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return;
   if (st->edits_init) {
     ccord_text_edit_free(&st->name);
     ccord_text_edit_free(&st->location);
@@ -382,7 +385,8 @@ static void form_open(ccord_ui *ui, ccord_id event_id)
 
 static void form_back_to_list(ccord_ui *ui)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return;
   st->view = UI_EVENTS_LIST;
   st->edit_id = CCORD_ID_NONE;
   st->form_error[0] = '\0';
@@ -393,8 +397,9 @@ void ui_stage_start_prompt_open(ccord_ui *ui, ccord_id guild_id, ccord_id channe
 {
   if (!ui || channel_id == CCORD_ID_NONE) return;
   if (ui->modal_kind != UI_MODAL_NONE) return;
-  ui_events_state *st = events_state(ui);
-  events_reset(st);
+  events_free();
+  ui_events_state *st = events_state(ui, true);
+  if (!st) return;
   st->open = true;
   st->view = UI_EVENTS_STAGE_START;
   st->guild_id = guild_id;
@@ -410,8 +415,9 @@ void ui_stage_end_confirm_open(ccord_ui *ui, ccord_id guild_id, ccord_id channel
 {
   if (!ui || channel_id == CCORD_ID_NONE) return;
   if (ui->modal_kind != UI_MODAL_NONE) return;
-  ui_events_state *st = events_state(ui);
-  events_reset(st);
+  events_free();
+  ui_events_state *st = events_state(ui, true);
+  if (!st) return;
   st->open = true;
   st->view = UI_EVENTS_STAGE_END;
   st->guild_id = guild_id;
@@ -431,7 +437,8 @@ static void ev_button(ccord_ui *ui, ccord_renderer *r, ccord_rect b, const char 
 
 static void ev_modal_begin(ccord_ui *ui, ccord_renderer *r, ccord_rect *box, float w, float h, const char *title)
 {
-  ui_popup_begin(ui, r, "events", (uint64_t)events_state(ui)->view, UI_MODAL_MS, 10.0f);
+  ui_events_state *st = events_state(ui, false);
+  ui_popup_begin(ui, r, "events", st ? (uint64_t)st->view : 0u, UI_MODAL_MS, 10.0f);
   float mw = fminf(fmaxf(ui->win_w - 64.0f, 300.0f), w);
   float mh = fminf(fmaxf(ui->win_h - 48.0f, 240.0f), h);
   ccord_rect m = uis_modal_box(ui, mw, mh);
@@ -459,7 +466,8 @@ static void ev_field_label(ccord_ui *ui, ccord_renderer *r, float x, float y, fl
 
 static void events_draw_list(ccord_ui *ui, ccord_renderer *r)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return;
   ccord_rect box;
   size_t total = ccord_store_scheduled_event_count(ui->d.store, st->guild_id);
   // Height follows the row count up to a cap; beyond it the list scrolls inside the modal.
@@ -588,7 +596,8 @@ static void events_draw_list(ccord_ui *ui, ccord_renderer *r)
 
 static void events_draw_form(ccord_ui *ui, ccord_renderer *r)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return;
   ccord_rect box;
   ev_modal_begin(ui, r, &box, 560.0f, 480.0f, st->edit_id != CCORD_ID_NONE ? "Edit Event" : "Create Event");
   st->box = box;
@@ -667,7 +676,8 @@ static void form_set_error(ui_events_state *st, const char *msg)
 
 static void form_submit(ccord_ui *ui)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return;
   const char *name = ccord_text_edit_cstr(&st->name);
   const char *desc = ccord_text_edit_cstr(&st->desc);
   const char *location = ccord_text_edit_cstr(&st->location);
@@ -754,7 +764,8 @@ static void form_submit(ccord_ui *ui)
 
 static void stage_start_draw(ccord_ui *ui, ccord_renderer *r)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return;
   ccord_rect box;
   ev_modal_begin(ui, r, &box, 480.0f, 190.0f, "Start Stage");
   st->sp_box = box;
@@ -772,7 +783,8 @@ static void stage_start_draw(ccord_ui *ui, ccord_renderer *r)
 
 static void stage_start_submit(ccord_ui *ui)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return;
   if (!ui->d.session) {
     ui_notice(ui, "Not connected");
     return;
@@ -788,7 +800,8 @@ static void stage_start_submit(ccord_ui *ui)
 
 static void stage_end_draw(ccord_ui *ui, ccord_renderer *r)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return;
   ccord_rect box;
   ev_modal_begin(ui, r, &box, 480.0f, 200.0f, "End Stage");
   st->ec_box = box;
@@ -810,7 +823,8 @@ static void stage_end_draw(ccord_ui *ui, ccord_renderer *r)
 
 static void stage_end_submit(ccord_ui *ui)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return;
   if (!ui->d.session) {
     ui_notice(ui, "Not connected");
     return;
@@ -828,7 +842,8 @@ static void stage_end_submit(ccord_ui *ui)
 void ui_scheduled_events_draw(ccord_ui *ui, ccord_renderer *r)
 {
   if (!ui_scheduled_events_active(ui)) return;
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return;
   // Geometry is rebuilt every draw; drop the previous frame's hits first.
   st->row_count = 0;
   memset(st->rows, 0, sizeof st->rows);
@@ -913,8 +928,8 @@ static int form_focus_next(const ui_events_state *st, int dir)
 // Ticks the list glide (scroll.h) by fdt_ms; the glide is dropped when the modal is shut.
 bool ui_events_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced)
 {
-  ui_events_state *st = events_state(ui);
-  if (st->glide.pending == 0.0f) return false;
+  ui_events_state *st = events_state(ui, false);
+  if (!st || st->glide.pending == 0.0f) return false;
   if (!st->open) {
     ccord_scroller_cancel(&st->glide);
     return false;
@@ -925,7 +940,8 @@ bool ui_events_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced)
 
 static bool events_handle_list(ccord_ui *ui, const ccord_input_event *ev)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return false;
   if (ev->type == CCORD_IN_KEY_DOWN && ev->key == CCORD_KEY_ESCAPE) {
     events_close(ui);
     return true;
@@ -994,7 +1010,8 @@ static bool events_handle_list(ccord_ui *ui, const ccord_input_event *ev)
 
 static bool events_handle_form(ccord_ui *ui, const ccord_input_event *ev)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return false;
   if (ev->type == CCORD_IN_KEY_DOWN) {
     bool shift = (ev->mods & CCORD_MOD_SHIFT) != 0;
     if (ev->key == CCORD_KEY_ESCAPE) {
@@ -1065,7 +1082,8 @@ static bool events_handle_form(ccord_ui *ui, const ccord_input_event *ev)
 
 static bool events_handle_stage_start(ccord_ui *ui, const ccord_input_event *ev)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return false;
   if (ev->type == CCORD_IN_KEY_DOWN) {
     if (ev->key == CCORD_KEY_ESCAPE) {
       events_close(ui);
@@ -1107,7 +1125,8 @@ static bool events_handle_stage_start(ccord_ui *ui, const ccord_input_event *ev)
 
 static bool events_handle_stage_end(ccord_ui *ui, const ccord_input_event *ev)
 {
-  ui_events_state *st = events_state(ui);
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return false;
   if (ev->type == CCORD_IN_KEY_DOWN) {
     if (ev->key == CCORD_KEY_ESCAPE) {
       events_close(ui);
@@ -1137,7 +1156,9 @@ static bool events_handle_stage_end(ccord_ui *ui, const ccord_input_event *ev)
 bool ui_scheduled_events_handle(ccord_ui *ui, const ccord_input_event *ev)
 {
   if (!ui_scheduled_events_active(ui) || !ev) return false;
-  switch (events_state(ui)->view) {
+  ui_events_state *st = events_state(ui, false);
+  if (!st) return false;
+  switch (st->view) {
     case UI_EVENTS_LIST: return events_handle_list(ui, ev);
     case UI_EVENTS_FORM: return events_handle_form(ui, ev);
     case UI_EVENTS_STAGE_START: return events_handle_stage_start(ui, ev);
@@ -1205,7 +1226,8 @@ void ui_scheduled_events_get_debug(const ccord_ui *ui, ui_events_debug *out)
   if (!out) return;
   memset(out, 0, sizeof *out);
   if (!ui) return;
-  const ui_events_state *st = events_state(ui);
+  const ui_events_state *st = events_state(ui, false);
+  if (!st) return;
   out->open = st->open;
   out->view = st->view;
   out->guild_id = st->guild_id;

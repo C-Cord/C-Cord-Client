@@ -57,8 +57,7 @@ typedef struct img_draft {
   bool uploaded;
 } img_draft;
 
-static struct state {
-  bool live;
+typedef struct profile_state {
   const ccord_ui *owner;
   ccord_text_edit ed[F_TEXT_COUNT];
   snap base;                         // the saved profile the drafts are compared with
@@ -83,7 +82,9 @@ static struct state {
   bool bar_visible;
   char pv_name[130], pv_pronouns[170], pv_bio[800];
   int pv_accent;
-} S;
+} profile_state;
+
+static profile_state *S;
 
 static uintptr_t s_gen = 1;          // bumped by every release: an answer for an older page state is dropped
 static unsigned s_img_seq;
@@ -144,19 +145,19 @@ static void ed_set(ccord_text_edit *t, const char *s)
 static void set_hex_text(void)
 {
   char hex[16] = "";
-  if (S.accent >= 0) snprintf(hex, sizeof hex, "%06X", (unsigned)S.accent);
-  ed_set(&S.ed[F_HEX], hex);
-  S.hex_bad = false;
+  if (S->accent >= 0) snprintf(hex, sizeof hex, "%06X", (unsigned)S->accent);
+  ed_set(&S->ed[F_HEX], hex);
+  S->hex_bad = false;
 }
 
 static void load_field(int f)
 {
   switch (f) {
-    case F_NAME: ed_set(&S.ed[F_NAME], S.base.name); break;
-    case F_PRONOUNS: ed_set(&S.ed[F_PRONOUNS], S.base.pronouns); break;
-    case F_BIO: ed_set(&S.ed[F_BIO], S.base.bio); break;
+    case F_NAME: ed_set(&S->ed[F_NAME], S->base.name); break;
+    case F_PRONOUNS: ed_set(&S->ed[F_PRONOUNS], S->base.pronouns); break;
+    case F_BIO: ed_set(&S->ed[F_BIO], S->base.bio); break;
     case F_HEX:
-      S.accent = S.base.accent;
+      S->accent = S->base.accent;
       set_hex_text();
       break;
     default: break;
@@ -171,26 +172,26 @@ static void img_free(img_draft *d)
 
 static void clear_errors(void)
 {
-  memset(S.err, 0, sizeof S.err);
-  S.general[0] = '\0';
+  memset(S->err, 0, sizeof S->err);
+  S->general[0] = '\0';
 }
 
 static void load_all(void)
 {
   for (int f = 0; f < F_TEXT_COUNT; f++) load_field(f);
-  img_free(&S.img[IMG_AVATAR]);
-  img_free(&S.img[IMG_BANNER]);
+  img_free(&S->img[IMG_AVATAR]);
+  img_free(&S->img[IMG_BANNER]);
 }
 
 static uint32_t changed_mask(void)
 {
   uint32_t m = 0;
-  if (strcmp(ccord_text_edit_cstr(&S.ed[F_NAME]), S.base.name) != 0) m |= 1u << CCORD_PROFILE_FIELD_DISPLAY_NAME;
-  if (strcmp(ccord_text_edit_cstr(&S.ed[F_PRONOUNS]), S.base.pronouns) != 0) m |= 1u << CCORD_PROFILE_FIELD_PRONOUNS;
-  if (strcmp(ccord_text_edit_cstr(&S.ed[F_BIO]), S.base.bio) != 0) m |= 1u << CCORD_PROFILE_FIELD_BIO;
-  if (S.accent != S.base.accent || S.hex_bad) m |= 1u << CCORD_PROFILE_FIELD_ACCENT;
-  if (S.img[IMG_AVATAR].mode != IMG_KEEP) m |= 1u << CCORD_PROFILE_FIELD_AVATAR;
-  if (S.img[IMG_BANNER].mode != IMG_KEEP) m |= 1u << CCORD_PROFILE_FIELD_BANNER;
+  if (strcmp(ccord_text_edit_cstr(&S->ed[F_NAME]), S->base.name) != 0) m |= 1u << CCORD_PROFILE_FIELD_DISPLAY_NAME;
+  if (strcmp(ccord_text_edit_cstr(&S->ed[F_PRONOUNS]), S->base.pronouns) != 0) m |= 1u << CCORD_PROFILE_FIELD_PRONOUNS;
+  if (strcmp(ccord_text_edit_cstr(&S->ed[F_BIO]), S->base.bio) != 0) m |= 1u << CCORD_PROFILE_FIELD_BIO;
+  if (S->accent != S->base.accent || S->hex_bad) m |= 1u << CCORD_PROFILE_FIELD_ACCENT;
+  if (S->img[IMG_AVATAR].mode != IMG_KEEP) m |= 1u << CCORD_PROFILE_FIELD_AVATAR;
+  if (S->img[IMG_BANNER].mode != IMG_KEEP) m |= 1u << CCORD_PROFILE_FIELD_BANNER;
   return m;
 }
 
@@ -199,38 +200,40 @@ static void sync_store(const ccord_ui *ui)
 {
   snap cur;
   read_snap(ui, &cur);
-  if (snap_eq(&cur, &S.base)) return;
+  if (snap_eq(&cur, &S->base)) return;
   bool clean = changed_mask() == 0;
-  S.base = cur;
+  S->base = cur;
   if (clean) load_all();
 }
 
-static void ensure_live(ccord_ui *ui)
+static bool ensure_live(ccord_ui *ui)
 {
-  if (S.live && S.owner != ui) ui_settings_profile_release(nullptr);
-  if (S.live) return;
-  memset(&S, 0, sizeof S);
-  S.live = true;
-  S.owner = ui;
-  S.awaiting = -1;
-  S.accent = -1;
-  S.pv_accent = -1;
-  ccord_text_edit_init(&S.ed[F_NAME], CCORD_PROFILE_DISPLAY_NAME_MAX * 4u);
-  ccord_text_edit_init(&S.ed[F_PRONOUNS], CCORD_PROFILE_PRONOUNS_MAX * 4u);
-  ccord_text_edit_init(&S.ed[F_BIO], CCORD_PROFILE_BIO_MAX * 4u);
-  ccord_text_edit_init(&S.ed[F_HEX], 16u);
-  read_snap(ui, &S.base);
+  if (S && S->owner != ui) ui_settings_profile_release(nullptr);
+  if (S) return true;
+  S = ccord_calloc(1, sizeof *S);
+  if (!S) return false;
+  S->owner = ui;
+  S->awaiting = -1;
+  S->accent = -1;
+  S->pv_accent = -1;
+  ccord_text_edit_init(&S->ed[F_NAME], CCORD_PROFILE_DISPLAY_NAME_MAX * 4u);
+  ccord_text_edit_init(&S->ed[F_PRONOUNS], CCORD_PROFILE_PRONOUNS_MAX * 4u);
+  ccord_text_edit_init(&S->ed[F_BIO], CCORD_PROFILE_BIO_MAX * 4u);
+  ccord_text_edit_init(&S->ed[F_HEX], 16u);
+  read_snap(ui, &S->base);
   load_all();
+  return true;
 }
 
 void ui_settings_profile_release(ccord_ui *ui)
 {
   (void)ui;
-  if (!S.live) return;
-  for (int f = 0; f < F_TEXT_COUNT; f++) ccord_text_edit_free(&S.ed[f]);
-  img_free(&S.img[IMG_AVATAR]);
-  img_free(&S.img[IMG_BANNER]);
-  memset(&S, 0, sizeof S);
+  if (!S) return;
+  for (int f = 0; f < F_TEXT_COUNT; f++) ccord_text_edit_free(&S->ed[f]);
+  img_free(&S->img[IMG_AVATAR]);
+  img_free(&S->img[IMG_BANNER]);
+  ccord_free(S);
+  S = nullptr;
   s_gen++;
 }
 
@@ -292,18 +295,18 @@ static void edited(ccord_ui *ui, int f)
 {
   static const int k_field[F_TEXT_COUNT] = {CCORD_PROFILE_FIELD_DISPLAY_NAME, CCORD_PROFILE_FIELD_PRONOUNS,
                                             CCORD_PROFILE_FIELD_BIO, CCORD_PROFILE_FIELD_ACCENT};
-  S.err[k_field[f]][0] = '\0';
+  S->err[k_field[f]][0] = '\0';
   if (f == F_HEX) {
-    const char *t = ccord_text_edit_cstr(&S.ed[F_HEX]);
+    const char *t = ccord_text_edit_cstr(&S->ed[F_HEX]);
     int32_t v;
     if (t[0] == '\0') {
-      S.accent = -1;
-      S.hex_bad = false;
+      S->accent = -1;
+      S->hex_bad = false;
     } else if (parse_hex(t, &v)) {
-      S.accent = v;
-      S.hex_bad = false;
+      S->accent = v;
+      S->hex_bad = false;
     } else {
-      S.hex_bad = true;
+      S->hex_bad = true;
     }
   }
   ui->caret_on = true;
@@ -314,7 +317,7 @@ static void edited(ccord_ui *ui, int f)
 // Inserts at the caret, cut to the field's character limit (a selection being replaced frees room).
 static void insert_capped(ccord_ui *ui, int f, const char *s, size_t len)
 {
-  ccord_text_edit *t = &S.ed[f];
+  ccord_text_edit *t = &S->ed[f];
   bool multi = f == F_BIO;
   char buf[1024];
   size_t o = 0;
@@ -370,29 +373,29 @@ static bool take_image(ccord_ui *ui, int slot, const char *name, const void *dat
   uint8_t *copy = ccord_malloc(size);
   if (!copy) return true;
   memcpy(copy, data, size);
-  img_draft *d = &S.img[slot];
+  img_draft *d = &S->img[slot];
   img_free(d);
   d->mode = IMG_NEW;
   d->data = copy;
   d->len = size;
   d->seq = ++s_img_seq;
   snprintf(d->key, sizeof d->key, "profile-draft:%s:%u", slot == IMG_BANNER ? "banner" : "avatar", d->seq);
-  S.err[slot == IMG_BANNER ? CCORD_PROFILE_FIELD_BANNER : CCORD_PROFILE_FIELD_AVATAR][0] = '\0';
-  S.awaiting = -1;
+  S->err[slot == IMG_BANNER ? CCORD_PROFILE_FIELD_BANNER : CCORD_PROFILE_FIELD_AVATAR][0] = '\0';
+  S->awaiting = -1;
   ui->dirty = true;
   return true;
 }
 
 bool ui_settings_profile_take_image(ccord_ui *ui, const char *filename, const void *data, size_t size)
 {
-  if (!ui || !S.live || S.awaiting < 0 || !ui->settings_open || ui->settings_page != UI_SETTINGS_PAGE_PROFILE) return false;
-  return take_image(ui, S.awaiting, filename, data, size);
+  if (!ui || !S || S->awaiting < 0 || !ui->settings_open || ui->settings_page != UI_SETTINGS_PAGE_PROFILE) return false;
+  return take_image(ui, S->awaiting, filename, data, size);
 }
 
 bool ui_settings_profile_set_image_file(ccord_ui *ui, bool banner, const char *path)
 {
   if (!ui || !path || !path[0]) return false;
-  ensure_live(ui);
+  if (!ensure_live(ui)) return false;
   FILE *f = fopen(path, "rb");
   if (!f) {
     ui_notice(ui, "Cannot open file: %s", path);
@@ -427,7 +430,7 @@ bool ui_settings_profile_set_image_file(ccord_ui *ui, bool banner, const char *p
 // back at once, or later as a file event that ccord_ui_attach_bytes routes to ui_settings_profile_take_image.
 static void pick_image(ccord_ui *ui, int slot)
 {
-  S.awaiting = slot;
+  S->awaiting = slot;
   if (!ui->d.host.open_file_dialog) {
     ui_notice(ui, "No file picker here: drop an image file onto the window");
     return;
@@ -442,80 +445,80 @@ static void pick_image(ccord_ui *ui, int slot)
 
 static void on_done(void *ud, const ccord_profile_edit_result *res)
 {
-  if ((uintptr_t)ud != s_gen || !S.live) return;   // the page was closed since: nothing to show
-  S.cb_res = *res;
-  S.cb_done = true;
+  if ((uintptr_t)ud != s_gen || !S) return;   // the page was closed since: nothing to show
+  S->cb_res = *res;
+  S->cb_done = true;
 }
 
 static void do_save(ccord_ui *ui)
 {
-  if (S.pending) return;
+  if (S->pending) return;
   clear_errors();
   ui->dirty = true;
   uint32_t m = changed_mask();
   if (!m) return;
-  if (S.hex_bad) {
-    copy_str(S.err[CCORD_PROFILE_FIELD_ACCENT], sizeof S.err[0], "Enter a 6-digit hex colour, e.g. 5865F2");
+  if (S->hex_bad) {
+    copy_str(S->err[CCORD_PROFILE_FIELD_ACCENT], sizeof S->err[0], "Enter a 6-digit hex colour, e.g. 5865F2");
     return;
   }
   ccord_profile_edit e = CCORD_PROFILE_EDIT_INIT;
   if (m & (1u << CCORD_PROFILE_FIELD_DISPLAY_NAME)) {
     e.has_display_name = true;
-    e.display_name = ccord_text_edit_cstr(&S.ed[F_NAME]);
+    e.display_name = ccord_text_edit_cstr(&S->ed[F_NAME]);
   }
   if (m & (1u << CCORD_PROFILE_FIELD_PRONOUNS)) {
     e.has_pronouns = true;
-    e.pronouns = ccord_text_edit_cstr(&S.ed[F_PRONOUNS]);
+    e.pronouns = ccord_text_edit_cstr(&S->ed[F_PRONOUNS]);
   }
   if (m & (1u << CCORD_PROFILE_FIELD_BIO)) {
     e.has_bio = true;
-    e.bio = ccord_text_edit_cstr(&S.ed[F_BIO]);
+    e.bio = ccord_text_edit_cstr(&S->ed[F_BIO]);
   }
   if (m & (1u << CCORD_PROFILE_FIELD_ACCENT)) {
     e.has_accent = true;
-    e.accent_color = S.accent;
+    e.accent_color = S->accent;
   }
   if (m & (1u << CCORD_PROFILE_FIELD_AVATAR)) {
     e.has_avatar = true;
-    e.avatar = S.img[IMG_AVATAR].mode == IMG_NEW ? S.img[IMG_AVATAR].data : nullptr;
-    e.avatar_len = S.img[IMG_AVATAR].mode == IMG_NEW ? S.img[IMG_AVATAR].len : 0;
+    e.avatar = S->img[IMG_AVATAR].mode == IMG_NEW ? S->img[IMG_AVATAR].data : nullptr;
+    e.avatar_len = S->img[IMG_AVATAR].mode == IMG_NEW ? S->img[IMG_AVATAR].len : 0;
   }
   if (m & (1u << CCORD_PROFILE_FIELD_BANNER)) {
     e.has_banner = true;
-    e.banner = S.img[IMG_BANNER].mode == IMG_NEW ? S.img[IMG_BANNER].data : nullptr;
-    e.banner_len = S.img[IMG_BANNER].mode == IMG_NEW ? S.img[IMG_BANNER].len : 0;
+    e.banner = S->img[IMG_BANNER].mode == IMG_NEW ? S->img[IMG_BANNER].data : nullptr;
+    e.banner_len = S->img[IMG_BANNER].mode == IMG_NEW ? S->img[IMG_BANNER].len : 0;
   }
   if (!ui->d.session) {
-    copy_str(S.general, sizeof S.general, "Not connected to Discord");
+    copy_str(S->general, sizeof S->general, "Not connected to Discord");
     return;
   }
   ccord_error err;
   if (ccord_session_edit_profile(ui->d.session, &e, on_done, (void *)s_gen, &err) != CCORD_OK) {
-    copy_str(S.general, sizeof S.general, err.message[0] ? err.message : "Couldn't save your profile");
+    copy_str(S->general, sizeof S->general, err.message[0] ? err.message : "Couldn't save your profile");
     return;
   }
-  S.pending = true;
-  S.sent = m;
+  S->pending = true;
+  S->sent = m;
 }
 
 // Discord's answer: fields it applied are no longer "changed" (the store already shows them); a refusal puts its
 // message under the field it names and leaves every draft in place.
 static void apply_result(ccord_ui *ui)
 {
-  const ccord_profile_edit_result *res = &S.cb_res;
-  S.cb_done = false;
-  S.pending = false;
+  const ccord_profile_edit_result *res = &S->cb_res;
+  S->cb_done = false;
+  S->pending = false;
   sync_store(ui);   // the store was updated before the callback ran
   uint32_t ap = res->applied.fields;
-  if (ap & (1u << CCORD_PROFILE_FIELD_AVATAR)) img_free(&S.img[IMG_AVATAR]);
-  if (ap & (1u << CCORD_PROFILE_FIELD_BANNER)) img_free(&S.img[IMG_BANNER]);
+  if (ap & (1u << CCORD_PROFILE_FIELD_AVATAR)) img_free(&S->img[IMG_AVATAR]);
+  if (ap & (1u << CCORD_PROFILE_FIELD_BANNER)) img_free(&S->img[IMG_BANNER]);
   if (ap & (1u << CCORD_PROFILE_FIELD_DISPLAY_NAME)) load_field(F_NAME);
   if (ap & (1u << CCORD_PROFILE_FIELD_PRONOUNS)) load_field(F_PRONOUNS);
   if (ap & (1u << CCORD_PROFILE_FIELD_BIO)) load_field(F_BIO);
   if (ap & (1u << CCORD_PROFILE_FIELD_ACCENT)) load_field(F_HEX);
   clear_errors();
   if (res->status == CCORD_OK) {
-    S.saved_until_ms = ui->now_ms + SAVED_MS;
+    S->saved_until_ms = ui->now_ms + SAVED_MS;
     ui->dirty = true;
     return;
   }
@@ -523,44 +526,44 @@ static void apply_result(ccord_ui *ui)
   for (size_t i = 0; i < res->field_error_count; i++) {
     const ccord_profile_field_error *fe = &res->field_errors[i];
     if (fe->field < CCORD_PROFILE_FIELD_COUNT) {
-      copy_str(S.err[fe->field], sizeof S.err[0], fe->message[0] ? fe->message : "Discord refused this change");
+      copy_str(S->err[fe->field], sizeof S->err[0], fe->message[0] ? fe->message : "Discord refused this change");
       named = true;
-    } else if (!S.general[0]) {
-      copy_str(S.general, sizeof S.general, fe->message);
+    } else if (!S->general[0]) {
+      copy_str(S->general, sizeof S->general, fe->message);
     }
   }
   if (res->password_required || res->mfa_required) {
-    copy_str(S.general, sizeof S.general, "Discord wants to verify your account: make this change on discord.com");
+    copy_str(S->general, sizeof S->general, "Discord wants to verify your account: make this change on discord.com");
   } else if (res->captcha_required) {
-    copy_str(S.general, sizeof S.general, "Discord asked for a captcha: make this change on discord.com");
+    copy_str(S->general, sizeof S->general, "Discord asked for a captcha: make this change on discord.com");
   } else if (res->rate_limited) {
-    snprintf(S.general, sizeof S.general, "Slow down: try again in %d s", (int)(res->retry_after_s + 0.5));
-  } else if (!named && !S.general[0]) {
-    copy_str(S.general, sizeof S.general, res->message[0] ? res->message : "Couldn't save your profile");
+    snprintf(S->general, sizeof S->general, "Slow down: try again in %d s", (int)(res->retry_after_s + 0.5));
+  } else if (!named && !S->general[0]) {
+    copy_str(S->general, sizeof S->general, res->message[0] ? res->message : "Couldn't save your profile");
   }
   ui->dirty = true;
 }
 
 bool ui_settings_profile_tick(ccord_ui *ui)
 {
-  if (!S.live) return false;
+  if (!S) return false;
   if (!ui->settings_open) {
     ui_settings_profile_release(ui);
     return false;
   }
   if (ui->settings_page != UI_SETTINGS_PAGE_PROFILE) {
-    S.awaiting = -1;
+    S->awaiting = -1;
     if (ui->account_focus_field >= UI_PROFILE_FOCUS_BASE && ui->account_focus_field < UI_PROFILE_FOCUS_BASE + F_TEXT_COUNT) {
       ui->account_focus_field = 0;
     }
     return false;
   }
-  if (S.cb_done) apply_result(ui);
-  if (S.saved_until_ms && ui->now_ms >= S.saved_until_ms) {
-    S.saved_until_ms = 0;
+  if (S->cb_done) apply_result(ui);
+  if (S->saved_until_ms && ui->now_ms >= S->saved_until_ms) {
+    S->saved_until_ms = 0;
     ui->dirty = true;
   }
-  return S.pending || S.saved_until_ms != 0;
+  return S->pending || S->saved_until_ms != 0;
 }
 
 // ---------------------------------------------------------------- input
@@ -569,7 +572,7 @@ static void focus_field(ccord_ui *ui, int f)
 {
   ui->account_focus_field = f < 0 ? 0 : UI_PROFILE_FOCUS_BASE + f;
   if (f >= 0) {
-    ccord_text_edit_move(&S.ed[f], 2, false);
+    ccord_text_edit_move(&S->ed[f], 2, false);
     ui->caret_on = true;
     ui->caret_epoch_ms = ui->now_ms;
   }
@@ -579,12 +582,12 @@ static void focus_field(ccord_ui *ui, int f)
 bool ui_settings_profile_click(ccord_ui *ui, ccord_rect content, ccord_rect panel, float x, float y)
 {
   (void)content;
-  ensure_live(ui);
+  if (!ensure_live(ui)) return false;
   if (!ui_in_rect(x, y, panel)) return false;
-  bool in_bar = S.bar_visible && ui_in_rect(x, y, S.bar);
-  bool in_view = ui_in_rect(x, y, S.view) && !in_bar;
-  for (size_t i = S.nitems; i-- > 0;) {
-    const ui_profile_item *it = &S.items[i];
+  bool in_bar = S->bar_visible && ui_in_rect(x, y, S->bar);
+  bool in_view = ui_in_rect(x, y, S->view) && !in_bar;
+  for (size_t i = S->nitems; i-- > 0;) {
+    const ui_profile_item *it = &S->items[i];
     bool bar_item = it->kind == UI_PROF_SAVE || it->kind == UI_PROF_RESET;
     if (!ui_in_rect(x, y, it->rect) || !(bar_item ? in_bar : in_view)) continue;
     switch (it->kind) {
@@ -594,9 +597,9 @@ bool ui_settings_profile_click(ccord_ui *ui, ccord_rect content, ccord_rect pane
       case UI_PROF_ACCENT_HEX:
         focus_field(ui, (int)it->kind);
         if (it->kind == UI_PROF_BIO) {
-          S.click_pending = true;
-          S.click_x = x;
-          S.click_y = y;
+          S->click_pending = true;
+          S->click_x = x;
+          S->click_y = y;
         }
         return true;
       case UI_PROF_AVATAR_CHANGE: focus_field(ui, -1); pick_image(ui, IMG_AVATAR); return true;
@@ -604,23 +607,23 @@ bool ui_settings_profile_click(ccord_ui *ui, ccord_rect content, ccord_rect pane
       case UI_PROF_AVATAR_REMOVE:
       case UI_PROF_BANNER_REMOVE: {
         int slot = it->kind == UI_PROF_BANNER_REMOVE ? IMG_BANNER : IMG_AVATAR;
-        const char *saved = slot == IMG_BANNER ? S.base.banner_url : S.base.avatar_url;
-        img_free(&S.img[slot]);
-        S.img[slot].mode = saved[0] ? IMG_REMOVE : IMG_KEEP;
-        S.err[slot == IMG_BANNER ? CCORD_PROFILE_FIELD_BANNER : CCORD_PROFILE_FIELD_AVATAR][0] = '\0';
+        const char *saved = slot == IMG_BANNER ? S->base.banner_url : S->base.avatar_url;
+        img_free(&S->img[slot]);
+        S->img[slot].mode = saved[0] ? IMG_REMOVE : IMG_KEEP;
+        S->err[slot == IMG_BANNER ? CCORD_PROFILE_FIELD_BANNER : CCORD_PROFILE_FIELD_AVATAR][0] = '\0';
         focus_field(ui, -1);
         return true;
       }
       case UI_PROF_ACCENT_SWATCH:
-        if (it->arg >= 0 && it->arg < ACCENT_PRESETS) S.accent = (int32_t)k_presets[it->arg];
+        if (it->arg >= 0 && it->arg < ACCENT_PRESETS) S->accent = (int32_t)k_presets[it->arg];
         set_hex_text();
-        S.err[CCORD_PROFILE_FIELD_ACCENT][0] = '\0';
+        S->err[CCORD_PROFILE_FIELD_ACCENT][0] = '\0';
         focus_field(ui, -1);
         return true;
       case UI_PROF_ACCENT_DEFAULT:
-        S.accent = -1;
+        S->accent = -1;
         set_hex_text();
-        S.err[CCORD_PROFILE_FIELD_ACCENT][0] = '\0';
+        S->err[CCORD_PROFILE_FIELD_ACCENT][0] = '\0';
         focus_field(ui, -1);
         return true;
       case UI_PROF_SAVE:
@@ -628,7 +631,7 @@ bool ui_settings_profile_click(ccord_ui *ui, ccord_rect content, ccord_rect pane
         do_save(ui);
         return true;
       case UI_PROF_RESET:
-        if (!S.pending) {
+        if (!S->pending) {
           load_all();
           clear_errors();
         }
@@ -652,10 +655,10 @@ static int focused_field(const ccord_ui *ui)
 
 bool ui_settings_profile_key(ccord_ui *ui, const ccord_input_event *ev)
 {
-  if (!S.live || ui->settings_page != UI_SETTINGS_PAGE_PROFILE) return false;
+  if (!S || ui->settings_page != UI_SETTINGS_PAGE_PROFILE) return false;
   int f = focused_field(ui);
   if (f < 0) return false;
-  ccord_text_edit *t = &S.ed[f];
+  ccord_text_edit *t = &S->ed[f];
   if (ev->type == CCORD_IN_TEXT) {
     if (ev->text[0]) insert_capped(ui, f, ev->text, strlen(ev->text));
     return true;
@@ -731,15 +734,15 @@ bool ui_settings_profile_key(ccord_ui *ui, const ccord_input_event *ev)
 
 bool ui_settings_profile_wheel(ccord_ui *ui, float wheel)
 {
-  if (!S.live) return false;
-  float max = S.content_h - S.view_h;
+  if (!S) return false;
+  float max = S->content_h - S->view_h;
   if (max <= 0.0f) return false;
-  float old = S.scroll;
-  S.scroll -= wheel * WHEEL_STEP;
-  if (S.scroll < 0.0f) S.scroll = 0.0f;
-  if (S.scroll > max) S.scroll = max;
+  float old = S->scroll;
+  S->scroll -= wheel * WHEEL_STEP;
+  if (S->scroll < 0.0f) S->scroll = 0.0f;
+  if (S->scroll > max) S->scroll = max;
   ui->dirty = true;
-  return S.scroll != old;
+  return S->scroll != old;
 }
 
 // ---------------------------------------------------------------- drawing
@@ -755,8 +758,8 @@ typedef struct dctx {
 
 static void add_item(ui_profile_kind kind, int arg, ccord_rect rc, const char *label)
 {
-  if (S.nitems >= UI_PROFILE_ITEMS_MAX) return;
-  ui_profile_item *it = &S.items[S.nitems++];
+  if (S->nitems >= UI_PROFILE_ITEMS_MAX) return;
+  ui_profile_item *it = &S->items[S->nitems++];
   it->kind = kind;
   it->arg = arg;
   it->rect = rc;
@@ -767,7 +770,7 @@ static bool hovered(const ccord_ui *ui, ccord_rect rc, bool in_bar)
 {
   if (!ui_in_rect(ui->mx, ui->my, rc)) return false;
   if (in_bar) return true;
-  return ui_in_rect(ui->mx, ui->my, S.view) && !(S.bar_visible && ui_in_rect(ui->mx, ui->my, S.bar));
+  return ui_in_rect(ui->mx, ui->my, S->view) && !(S->bar_visible && ui_in_rect(ui->mx, ui->my, S->bar));
 }
 
 
@@ -792,11 +795,11 @@ static void section_label(dctx *c, const char *label, const char *right, ccord_c
 // The error Discord (or validation) gave for `field`, under the control; nothing when there is none.
 static void field_error(dctx *c, int field)
 {
-  if (!S.err[field][0]) return;
+  if (!S->err[field][0]) return;
   ccord_text_style es = ui_style(c->ui, CCORD_FONT_REGULAR, c->tk.fs_caption, c->ui->theme->c.danger);
-  float h = ccord_text_measure(c->r, S.err[field], strlen(S.err[field]), &es, c->w).y;
-  ccord_text_draw(c->r, S.err[field], strlen(S.err[field]), c->x, c->top + c->y + UIS_SP_1, &es, c->w);
-  S.err_rect[field] = (ccord_rect){c->x, c->top + c->y + UIS_SP_1, c->w, h};
+  float h = ccord_text_measure(c->r, S->err[field], strlen(S->err[field]), &es, c->w).y;
+  ccord_text_draw(c->r, S->err[field], strlen(S->err[field]), c->x, c->top + c->y + UIS_SP_1, &es, c->w);
+  S->err_rect[field] = (ccord_rect){c->x, c->top + c->y + UIS_SP_1, c->w, h};
   c->y += h + UIS_SP_1;
 }
 
@@ -813,7 +816,7 @@ static void text_input(dctx *c, int f, ui_profile_kind kind, const char *placeho
   ccord_ui *ui = c->ui;
   ccord_rect box = {c->x, c->top + c->y, w, UIS_H_INPUT};
   uis_state st = {.hover = hovered(ui, box, false), .focused = focused_field(ui) == f};
-  (void)uis_input_padded(ui, c->r, box, pad_l, UIS_SP_3, &S.ed[f], placeholder, st, false, "pfld", (uint64_t)f);
+  (void)uis_input_padded(ui, c->r, box, pad_l, UIS_SP_3, &S->ed[f], placeholder, st, false, "pfld", (uint64_t)f);
   add_item(kind, f, box, placeholder);
   c->y += UIS_H_INPUT;
 }
@@ -823,7 +826,7 @@ static void bio_box(dctx *c)
 {
   ccord_ui *ui = c->ui;
   ccord_renderer *r = c->r;
-  ccord_text_edit *ed = &S.ed[F_BIO];
+  ccord_text_edit *ed = &S->ed[F_BIO];
   ccord_rect box = {c->x, c->top + c->y, c->w, BIO_BOX_H};
   bool focused = focused_field(ui) == F_BIO;
   float ring = ui_fade(ui, "pfld", F_BIO, focused);
@@ -839,12 +842,12 @@ static void bio_box(dctx *c)
   float view_h = box.h - 2.0f * UIS_SP_2, shift = 0.0f;
   if (focused && cr.y + lh > view_h) shift = cr.y + lh - view_h;
   float tx = box.x + UIS_SP_3, ty = box.y + UIS_SP_2 - shift;
-  if (S.click_pending && ui_in_rect(S.click_x, S.click_y, box)) {
-    size_t pos = ccord_text_hit_test(r, t, ed->len, &ts, inner_w, S.click_x - tx, S.click_y - ty);
+  if (S->click_pending && ui_in_rect(S->click_x, S->click_y, box)) {
+    size_t pos = ccord_text_hit_test(r, t, ed->len, &ts, inner_w, S->click_x - tx, S->click_y - ty);
     ccord_text_edit_set_caret(ed, pos, false);
     ui->caret_on = true;
     ui->caret_epoch_ms = ui->now_ms;
-    S.click_pending = false;
+    S->click_pending = false;
     cr = ccord_text_caret_rect(r, t, ed->len, &ts, inner_w, ed->caret);
   }
   ccord_push_clip(r, (ccord_rect){box.x, box.y + 1.0f, box.w, box.h - 2.0f});
@@ -895,11 +898,11 @@ static void image_row(dctx *c, int slot, const char *heading, const char *change
   float bh = uis_button_height(UIS_BTN_S_MD);
   float cw = uis_label_width(ui, c->r, change);
   ccord_rect crc = {c->x, c->top + c->y, cw, bh};
-  uis_state cst = {.hover = hovered(ui, crc, false), .selected = S.awaiting == slot};
+  uis_state cst = {.hover = hovered(ui, crc, false), .selected = S->awaiting == slot};
   uis_button(ui, c->r, crc, change, UIS_BTN_PRIMARY, UIS_BTN_S_MD, cst, "pbtn", (uint64_t)slot * 2u);
   add_item(slot == IMG_BANNER ? UI_PROF_BANNER_CHANGE : UI_PROF_AVATAR_CHANGE, 0, crc, change);
-  const char *saved = slot == IMG_BANNER ? S.base.banner_url : S.base.avatar_url;
-  img_draft *d = &S.img[slot];
+  const char *saved = slot == IMG_BANNER ? S->base.banner_url : S->base.avatar_url;
+  img_draft *d = &S->img[slot];
   if (d->mode == IMG_NEW || (d->mode == IMG_KEEP && saved[0])) {
     const char *rm = slot == IMG_BANNER ? "Remove Banner" : "Remove Avatar";
     float rw = uis_label_width(ui, c->r, rm);
@@ -911,7 +914,7 @@ static void image_row(dctx *c, int slot, const char *heading, const char *change
   c->y += bh;
   if (d->mode == IMG_NEW) caption(c, "New image chosen. Save Changes to apply it.");
   else if (d->mode == IMG_REMOVE) caption(c, "It will be removed when you save.");
-  else if (S.awaiting == slot) caption(c, "Choose an image file, or drop one onto the window.");
+  else if (S->awaiting == slot) caption(c, "Choose an image file, or drop one onto the window.");
   field_error(c, field);
 }
 
@@ -921,7 +924,7 @@ static void accent_rows(dctx *c)
   section_label(c, "ACCENT COLOUR", nullptr, COL(text_muted));
   for (int i = 0; i < ACCENT_PRESETS; i++) {
     ccord_rect rc = {c->x + (float)i * (UIS_SWATCH_D + UIS_SP_2), c->top + c->y, UIS_SWATCH_D, UIS_SWATCH_D};
-    uis_state st = {.hover = hovered(ui, rc, false), .selected = S.accent == (int32_t)k_presets[i]};
+    uis_state st = {.hover = hovered(ui, rc, false), .selected = S->accent == (int32_t)k_presets[i]};
     uis_swatch(ui, c->r, rc, rgb(k_presets[i]), st, "pswatch", (uint64_t)i);
     add_item(UI_PROF_ACCENT_SWATCH, i, rc, "Accent colour");
   }
@@ -962,18 +965,18 @@ static void draw_preview(dctx *c, float px, float py, float pw)
   ccord_user tmp = {0};
   if (u) tmp = *u;
   const char *username = tmp.handle ? tmp.handle : "";
-  const char *typed = ccord_text_edit_cstr(&S.ed[F_NAME]);
+  const char *typed = ccord_text_edit_cstr(&S->ed[F_NAME]);
   const char *shown = typed[0] ? typed : (username[0] ? username : "Your name");
-  const char *pron = ccord_text_edit_cstr(&S.ed[F_PRONOUNS]);
-  const char *bio = ccord_text_edit_cstr(&S.ed[F_BIO]);
-  copy_str(S.pv_name, sizeof S.pv_name, shown);
-  copy_str(S.pv_pronouns, sizeof S.pv_pronouns, pron);
-  copy_str(S.pv_bio, sizeof S.pv_bio, bio);
-  S.pv_accent = S.accent;
+  const char *pron = ccord_text_edit_cstr(&S->ed[F_PRONOUNS]);
+  const char *bio = ccord_text_edit_cstr(&S->ed[F_BIO]);
+  copy_str(S->pv_name, sizeof S->pv_name, shown);
+  copy_str(S->pv_pronouns, sizeof S->pv_pronouns, pron);
+  copy_str(S->pv_bio, sizeof S->pv_bio, bio);
+  S->pv_accent = S->accent;
   tmp.name = shown;
   tmp.display_name = shown;
-  if (S.img[IMG_AVATAR].mode == IMG_REMOVE) tmp.avatar_url = "";
-  if (S.img[IMG_BANNER].mode == IMG_REMOVE) tmp.banner_url = "";
+  if (S->img[IMG_AVATAR].mode == IMG_REMOVE) tmp.avatar_url = "";
+  if (S->img[IMG_BANNER].mode == IMG_REMOVE) tmp.banner_url = "";
   const ccord_user_profile *prof = (ui->d.store && u) ? ccord_store_user_profile(ui->d.store, u->id) : nullptr;
   float ph = preview_height(c, bio, pw);
   ccord_rect card = {px, py, pw, ph};
@@ -981,34 +984,34 @@ static void draw_preview(dctx *c, float px, float py, float pw)
   ccord_push_clip(r, card);
   ccord_rect banner = {px, py, pw, PV_BANNER_H};
   ui_profile_look look = {0};
-  bool use_theme = S.accent < 0 && prof && prof->has_theme;
+  bool use_theme = S->accent < 0 && prof && prof->has_theme;
   if (use_theme) {
     ccord_user lview = tmp;
-    if (S.img[IMG_BANNER].mode == IMG_KEEP && (!lview.banner_url || !lview.banner_url[0]) && prof->banner_url &&
+    if (S->img[IMG_BANNER].mode == IMG_KEEP && (!lview.banner_url || !lview.banner_url[0]) && prof->banner_url &&
         prof->banner_url[0]) {
       lview.banner_url = prof->banner_url;
     }
     ui_profile_resolve(prof, CCORD_ID_NONE, &lview, &look);
     ui_profile_draw_theme_bg(ui, r, &look, card, PV_BANNER_H, tk->r_surface);
-    if (ensure_img(ui, r, &S.img[IMG_BANNER])) {
+    if (ensure_img(ui, r, &S->img[IMG_BANNER])) {
       const float border = 4.0f;
       ccord_rect inner = {banner.x + border, banner.y + border, banner.w - border * 2.0f, banner.h - border};
       float ir = tk->r_surface > border ? tk->r_surface - border : 0.0f;
       ccord_push_clip(r, inner);
-      ccord_draw_texture_cover(r, S.img[IMG_BANNER].key, (ccord_rect){inner.x, inner.y, inner.w, inner.h + ir * 2.0f}, ir,
+      ccord_draw_texture_cover(r, S->img[IMG_BANNER].key, (ccord_rect){inner.x, inner.y, inner.w, inner.h + ir * 2.0f}, ir,
                                255, false);
       ccord_pop_clip(r);
-    } else if (S.img[IMG_BANNER].mode == IMG_KEEP) {
+    } else if (S->img[IMG_BANNER].mode == IMG_KEEP) {
       ui_profile_draw_banner(ui, r, &look, &lview, banner, tk->r_surface);
     }
   } else {
-    ccord_color bcol = S.accent >= 0 ? rgb((uint32_t)S.accent) : ui_mix(COL(bg_tertiary), COL(bg_secondary), 0.35f);
+    ccord_color bcol = S->accent >= 0 ? rgb((uint32_t)S->accent) : ui_mix(COL(bg_tertiary), COL(bg_secondary), 0.35f);
     ccord_push_clip(r, banner);   // rounded at the top only: the bar runs past the banner's bottom edge and is clipped
     ccord_draw_rrect(r, (ccord_rect){banner.x, banner.y, banner.w, banner.h + tk->r_surface * 2.0f}, tk->r_surface, bcol);
     char burl[256];
-    if (ensure_img(ui, r, &S.img[IMG_BANNER])) {
-      ccord_draw_texture_cover(r, S.img[IMG_BANNER].key, banner, 0.0f, 255, false);
-    } else if (S.img[IMG_BANNER].mode == IMG_KEEP && ui_user_banner_url(&tmp, burl, sizeof burl) &&
+    if (ensure_img(ui, r, &S->img[IMG_BANNER])) {
+      ccord_draw_texture_cover(r, S->img[IMG_BANNER].key, banner, 0.0f, 255, false);
+    } else if (S->img[IMG_BANNER].mode == IMG_KEEP && ui_user_banner_url(&tmp, burl, sizeof burl) &&
                ui_ensure_media(ui, r, burl)) {
       int btw = 0, bth = 0;
       if (ccord_render_has_texture(r, burl, &btw, &bth) && btw > 2 && bth > 2) {
@@ -1021,8 +1024,8 @@ static void draw_preview(dctx *c, float px, float py, float pw)
   ccord_color av_ring = use_theme ? ui_profile_card_bg(ui, &look, COL(bg_secondary)) : COL(bg_secondary);
   float acx = px + UIS_SP_4 + PV_AVATAR_D * 0.5f, acy = py + PV_BANNER_H;
   ccord_draw_circle(r, acx, acy, PV_AVATAR_D * 0.5f + UIS_SP_1, av_ring);
-  if (ensure_img(ui, r, &S.img[IMG_AVATAR])) {
-    ccord_draw_texture_rounded(r, S.img[IMG_AVATAR].key, (ccord_rect){acx - PV_AVATAR_D * 0.5f, acy - PV_AVATAR_D * 0.5f, PV_AVATAR_D, PV_AVATAR_D},
+  if (ensure_img(ui, r, &S->img[IMG_AVATAR])) {
+    ccord_draw_texture_rounded(r, S->img[IMG_AVATAR].key, (ccord_rect){acx - PV_AVATAR_D * 0.5f, acy - PV_AVATAR_D * 0.5f, PV_AVATAR_D, PV_AVATAR_D},
                                PV_AVATAR_D * 0.5f, 255);
   } else {
     ui_draw_avatar(ui, r, &tmp, acx, acy, PV_AVATAR_D, (ccord_color){0}, false);
@@ -1056,18 +1059,18 @@ static void draw_bar(dctx *c, uint32_t changed)
 {
   ccord_ui *ui = c->ui;
   ccord_renderer *r = c->r;
-  ccord_rect bar = S.bar;
+  ccord_rect bar = S->bar;
   uis_frame(ui, r, bar, c->tk.r_surface, COL(bg_floating), UIS_ELEV_POPOVER);
   float bh = uis_button_height(UIS_BTN_S_MD), by = bar.y + (bar.h - bh) * 0.5f;
   float right = bar.x + bar.w - UIS_SP_4;
   if (changed) {
     float sw = uis_label_width(ui, r, "Save Changes");
     ccord_rect src = {right - sw, by, sw, bh};
-    uis_state sst = {.hover = hovered(ui, src, true), .disabled = S.pending};
-    uis_button(ui, r, src, S.pending ? "Saving..." : "Save Changes", UIS_BTN_SUCCESS, UIS_BTN_S_MD, sst, "pbar", 1u);
+    uis_state sst = {.hover = hovered(ui, src, true), .disabled = S->pending};
+    uis_button(ui, r, src, S->pending ? "Saving..." : "Save Changes", UIS_BTN_SUCCESS, UIS_BTN_S_MD, sst, "pbar", 1u);
     float rw = uis_label_width(ui, r, "Reset");
     ccord_rect rrc = {src.x - UIS_SP_2 - rw, by, rw, bh};
-    uis_state rst = {.hover = hovered(ui, rrc, true), .disabled = S.pending};
+    uis_state rst = {.hover = hovered(ui, rrc, true), .disabled = S->pending};
     uis_button(ui, r, rrc, "Reset", UIS_BTN_LINK, UIS_BTN_S_MD, rst, "pbar", 0u);
     add_item(UI_PROF_RESET, 0, rrc, "Reset");
     add_item(UI_PROF_SAVE, 0, src, "Save Changes");
@@ -1076,10 +1079,10 @@ static void draw_bar(dctx *c, uint32_t changed)
   const char *msg = "You have unsaved changes";
   ccord_color mc = COL(text_header);
   float tx = bar.x + UIS_SP_4;
-  if (S.pending) {
+  if (S->pending) {
     msg = "Saving your profile...";
-  } else if (S.general[0]) {
-    msg = S.general;
+  } else if (S->general[0]) {
+    msg = S->general;
     mc = COL(danger);
   } else if (!changed) {
     msg = "Changes saved";
@@ -1102,33 +1105,33 @@ void ui_settings_profile_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect conten
     ccord_error perr;
     (void)ccord_session_request_profile_ex(ui->d.session, u_self->id, CCORD_ID_NONE, ui->now_ms, false, &perr);
   }
-  ensure_live(ui);
+  if (!ensure_live(ui)) return;
   sync_store(ui);
   uis_tokens tk = uis_tokens_of(ui);
-  S.nitems = 0;
-  memset(S.err_rect, 0, sizeof S.err_rect);
+  S->nitems = 0;
+  memset(S->err_rect, 0, sizeof S->err_rect);
   uint32_t changed = changed_mask();
   float top = content.y + 52.0f;
-  S.bar_visible = changed != 0 || S.pending || S.saved_until_ms != 0 || S.general[0] != '\0';
-  S.bar = (ccord_rect){content.x, panel.y + panel.h - UIS_SP_4 - BAR_H, content.w, BAR_H};
-  S.view = (ccord_rect){content.x - UIS_SP_2, top, content.w + 2.0f * UIS_SP_2, panel.y + panel.h - top};
-  S.view_h = S.view.h;
-  float max_scroll = S.content_h - S.view_h;
+  S->bar_visible = changed != 0 || S->pending || S->saved_until_ms != 0 || S->general[0] != '\0';
+  S->bar = (ccord_rect){content.x, panel.y + panel.h - UIS_SP_4 - BAR_H, content.w, BAR_H};
+  S->view = (ccord_rect){content.x - UIS_SP_2, top, content.w + 2.0f * UIS_SP_2, panel.y + panel.h - top};
+  S->view_h = S->view.h;
+  float max_scroll = S->content_h - S->view_h;
   if (max_scroll < 0.0f) max_scroll = 0.0f;
-  if (S.scroll > max_scroll) S.scroll = max_scroll;
+  if (S->scroll > max_scroll) S->scroll = max_scroll;
   bool two_col = content.w >= 700.0f;
   float fw = content.w;
   if (two_col) fw = content.w - PV_W - UIS_SP_8;
   if (fw > 480.0f) fw = 480.0f;
-  dctx c = {.ui = ui, .r = r, .tk = tk, .x = content.x, .w = fw, .top = top - S.scroll, .y = 0.0f};
+  dctx c = {.ui = ui, .r = r, .tk = tk, .x = content.x, .w = fw, .top = top - S->scroll, .y = 0.0f};
 
-  ccord_push_clip(r, S.view);
+  ccord_push_clip(r, S->view);
   if (two_col) {
     draw_preview(&c, content.x + fw + UIS_SP_8, top, PV_W);   // fixed: the preview stays in view while the fields scroll
   } else {
     float pw = content.w < PV_W ? content.w : PV_W;
     draw_preview(&c, content.x, c.top + c.y, pw);
-    c.y += preview_height(&c, ccord_text_edit_cstr(&S.ed[F_BIO]), pw) + UIS_SP_6;
+    c.y += preview_height(&c, ccord_text_edit_cstr(&S->ed[F_BIO]), pw) + UIS_SP_6;
   }
 
   section_label(&c, "DISPLAY NAME", nullptr, COL(text_muted));
@@ -1142,7 +1145,7 @@ void ui_settings_profile_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect conten
   c.y += UIS_SP_5;
 
   char left[32];
-  long remaining = (long)CCORD_PROFILE_BIO_MAX - (long)cp_count(ccord_text_edit_cstr(&S.ed[F_BIO]), S.ed[F_BIO].len);
+  long remaining = (long)CCORD_PROFILE_BIO_MAX - (long)cp_count(ccord_text_edit_cstr(&S->ed[F_BIO]), S->ed[F_BIO].len);
   snprintf(left, sizeof left, "%ld", remaining);
   section_label(&c, "ABOUT ME", left, remaining <= 10 ? COL(danger) : COL(text_muted));
   bio_box(&c);
@@ -1170,10 +1173,10 @@ void ui_settings_profile_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect conten
   uis_button(ui, r, wrc, "Open discord.com", UIS_BTN_SECONDARY, UIS_BTN_S_MD, wst, "pbtn", 5u);
   add_item(UI_PROF_WEB, 0, wrc, "Open discord.com");
   c.y += bh;
-  S.content_h = 52.0f + c.y + UIS_SP_6 + BAR_H + 2.0f * UIS_SP_4;
+  S->content_h = 52.0f + c.y + UIS_SP_6 + BAR_H + 2.0f * UIS_SP_4;
   ccord_pop_clip(r);
 
-  if (S.bar_visible) draw_bar(&c, changed);
+  if (S->bar_visible) draw_bar(&c, changed);
 }
 
 // ---------------------------------------------------------------- test seams
@@ -1181,8 +1184,8 @@ void ui_settings_profile_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect conten
 size_t ui_settings_profile_items(const ccord_ui *ui, const ui_profile_item **out)
 {
   (void)ui;
-  if (out) *out = S.items;
-  return S.live ? S.nitems : 0;
+  if (out) *out = S ? S->items : nullptr;
+  return S ? S->nitems : 0;
 }
 
 void ui_settings_profile_debug(const ccord_ui *ui, ui_profile_debug *out)
@@ -1190,27 +1193,27 @@ void ui_settings_profile_debug(const ccord_ui *ui, ui_profile_debug *out)
   (void)ui;
   *out = (ui_profile_debug){0};
   out->preview_accent = -1;
-  if (!S.live) return;
+  if (!S) return;
   out->live = true;
   out->changed = changed_mask();
-  out->pending = S.pending;
-  out->saved = S.saved_until_ms != 0;
-  out->bar_visible = S.bar_visible;
+  out->pending = S->pending;
+  out->saved = S->saved_until_ms != 0;
+  out->bar_visible = S->bar_visible;
   for (int i = 0; i < 6; i++) {
-    out->has_error[i] = S.err[i][0] != '\0';
-    copy_str(out->error[i], sizeof out->error[i], S.err[i]);
+    out->has_error[i] = S->err[i][0] != '\0';
+    copy_str(out->error[i], sizeof out->error[i], S->err[i]);
   }
-  copy_str(out->general, sizeof out->general, S.general);
-  for (int i = 0; i < 6; i++) out->error_rect[i] = S.err_rect[i];
-  copy_str(out->preview_name, sizeof out->preview_name, S.pv_name);
-  copy_str(out->preview_pronouns, sizeof out->preview_pronouns, S.pv_pronouns);
-  copy_str(out->preview_bio, sizeof out->preview_bio, S.pv_bio);
-  out->preview_accent = S.pv_accent;
-  out->avatar_mode = S.img[IMG_AVATAR].mode;
-  out->banner_mode = S.img[IMG_BANNER].mode;
-  out->bar = S.bar;
-  out->view = S.view;
-  out->scroll = S.scroll;
-  out->max_scroll = S.content_h > S.view_h ? S.content_h - S.view_h : 0.0f;
-  for (int f = 0; f < F_TEXT_COUNT; f++) out->text[f] = ccord_text_edit_cstr(&S.ed[f]);
+  copy_str(out->general, sizeof out->general, S->general);
+  for (int i = 0; i < 6; i++) out->error_rect[i] = S->err_rect[i];
+  copy_str(out->preview_name, sizeof out->preview_name, S->pv_name);
+  copy_str(out->preview_pronouns, sizeof out->preview_pronouns, S->pv_pronouns);
+  copy_str(out->preview_bio, sizeof out->preview_bio, S->pv_bio);
+  out->preview_accent = S->pv_accent;
+  out->avatar_mode = S->img[IMG_AVATAR].mode;
+  out->banner_mode = S->img[IMG_BANNER].mode;
+  out->bar = S->bar;
+  out->view = S->view;
+  out->scroll = S->scroll;
+  out->max_scroll = S->content_h > S->view_h ? S->content_h - S->view_h : 0.0f;
+  for (int f = 0; f < F_TEXT_COUNT; f++) out->text[f] = ccord_text_edit_cstr(&S->ed[f]);
 }
