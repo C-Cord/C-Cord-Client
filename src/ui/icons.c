@@ -290,3 +290,53 @@ void ui_icon_compass(ccord_renderer *r, float cx, float cy, float size, ccord_co
                       (ccord_vec2){cx + s * 0.14f, cy + s * 0.14f}, c);
   ccord_draw_circle(r, cx, cy, s * 0.10f, bg);
 }
+
+// Fullscreen toggle: four outward corner brackets (enter) or inward corner brackets (exit).
+void ui_icon_fullscreen(ccord_renderer *r, float cx, float cy, float size, ccord_color c, bool exit_mode)
+{
+  float s = size * 0.5f;
+  float t = size * 0.13f;
+  float o = s * 0.82f;   // outer corner extent
+  float arm = s * 0.48f; // bracket leg length
+  if (!exit_mode) {
+    // Top-left
+    ccord_draw_line(r, (ccord_vec2){cx - o, cy - o}, (ccord_vec2){cx - o + arm, cy - o}, t, c);
+    ccord_draw_line(r, (ccord_vec2){cx - o, cy - o}, (ccord_vec2){cx - o, cy - o + arm}, t, c);
+    // Top-right
+    ccord_draw_line(r, (ccord_vec2){cx + o, cy - o}, (ccord_vec2){cx + o - arm, cy - o}, t, c);
+    ccord_draw_line(r, (ccord_vec2){cx + o, cy - o}, (ccord_vec2){cx + o, cy - o + arm}, t, c);
+    // Bottom-left
+    ccord_draw_line(r, (ccord_vec2){cx - o, cy + o}, (ccord_vec2){cx - o + arm, cy + o}, t, c);
+    ccord_draw_line(r, (ccord_vec2){cx - o, cy + o}, (ccord_vec2){cx - o, cy + o - arm}, t, c);
+    // Bottom-right
+    ccord_draw_line(r, (ccord_vec2){cx + o, cy + o}, (ccord_vec2){cx + o - arm, cy + o}, t, c);
+    ccord_draw_line(r, (ccord_vec2){cx + o, cy + o}, (ccord_vec2){cx + o, cy + o - arm}, t, c);
+  } else {
+    float e = s * 0.88f;
+    float k = s * 0.34f; // inner corner vertex
+    // Top-left inward
+    ccord_draw_line(r, (ccord_vec2){cx - k, cy - k}, (ccord_vec2){cx - e, cy - k}, t, c);
+    ccord_draw_line(r, (ccord_vec2){cx - k, cy - k}, (ccord_vec2){cx - k, cy - e}, t, c);
+    // Top-right inward
+    ccord_draw_line(r, (ccord_vec2){cx + k, cy - k}, (ccord_vec2){cx + e, cy - k}, t, c);
+    ccord_draw_line(r, (ccord_vec2){cx + k, cy - k}, (ccord_vec2){cx + k, cy - e}, t, c);
+    // Bottom-left inward
+    ccord_draw_line(r, (ccord_vec2){cx - k, cy + k}, (ccord_vec2){cx - e, cy + k}, t, c);
+    ccord_draw_line(r, (ccord_vec2){cx - k, cy + k}, (ccord_vec2){cx - k, cy + e}, t, c);
+    // Bottom-right inward
+    ccord_draw_line(r, (ccord_vec2){cx + k, cy + k}, (ccord_vec2){cx + e, cy + k}, t, c);
+    ccord_draw_line(r, (ccord_vec2){cx + k, cy + k}, (ccord_vec2){cx + k, cy + e}, t, c);
+  }
+}
+
+// Return-to-stage icon for floating PiP: a frame with an arrow pointing up-left back to the main stage.
+void ui_icon_stage_return(ccord_renderer *r, float cx, float cy, float size, ccord_color c)
+{
+  float s = size * 0.5f;
+  float t = size * 0.13f;
+  float o = s * 0.78f;
+  // Arrow shaft from bottom-right to top-left + arrowhead
+  ccord_draw_line(r, (ccord_vec2){cx + o * 0.75f, cy + o * 0.75f}, (ccord_vec2){cx - o * 0.65f, cy - o * 0.65f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx - o * 0.75f, cy - o * 0.75f}, (ccord_vec2){cx + o * 0.15f, cy - o * 0.75f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx - o * 0.75f, cy - o * 0.75f}, (ccord_vec2){cx - o * 0.75f, cy + o * 0.15f}, t, c);
+}

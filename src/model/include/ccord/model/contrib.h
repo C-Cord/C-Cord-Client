@@ -102,11 +102,13 @@ typedef struct ccord_catalog_entry {
   const char *permissions;        // comma separated
   const char *changelog;
   uint64_t size_bytes;
+  uint64_t downloads;
   uint8_t api_class;              // 1, 2, or 3
   ccord_plugin_tier tier;
   ccord_catalog_warn_sev warning_sev;
   const char *warning_title;
   const char *warning_message;
+  bool has_detail;                // true when full detail (sha256/perms/changelog) is loaded
   // Local state cross-referenced by ccord_plugins
   bool installed;
   bool bundled;
@@ -126,9 +128,14 @@ typedef struct ccord_catalog_status {
   bool syncing;
   bool has_loaded;
   bool offline;
+  bool has_more;
+  bool loading_more;
+  bool detail_loading;
   int64_t last_sync_unix;
+  size_t total_count;
   size_t pending_updates;
   char status_msg[256];
+  char detail_error[192];
   char catalog_url[256];
 } ccord_catalog_status;
 typedef struct ccord_plugin_log_entry {
@@ -150,6 +157,9 @@ typedef struct ccord_contrib_handlers {
   bool (*plugin_import_package)(void *ud, const char *pkg_path, char *err_buf, size_t err_cap);
   bool (*plugin_uninstall)(void *ud, const char *id, char *err_buf, size_t err_cap);
   void (*catalog_refresh)(void *ud);
+  void (*catalog_query)(void *ud, const char *q, int tier, int api_class, const char *sort, bool append_next_page);
+  void (*catalog_fetch_detail)(void *ud, const char *id);
+  void (*catalog_check_updates)(void *ud);
   void (*catalog_install)(void *ud, const char *id);
   void (*catalog_set_prefs)(void *ud, const ccord_catalog_prefs *prefs);
   void (*catalog_set_plugin_auto_update)(void *ud, const char *id, bool enabled);
@@ -177,6 +187,8 @@ bool ccord_contrib_remove_plugin(ccord_contrib *c, const char *id);
 void ccord_contrib_remove_owner(ccord_contrib *c, const char *owner);   // menus + commands + panels of that plugin
 void ccord_contrib_set_catalog(ccord_contrib *c, const ccord_catalog_entry *entries, size_t count,
                                const ccord_catalog_status *status, const ccord_catalog_prefs *prefs);
+void ccord_contrib_set_catalog_detail(ccord_contrib *c, const ccord_catalog_entry *detail);
+void ccord_contrib_set_catalog_updates(ccord_contrib *c, const ccord_catalog_entry *entries, size_t count);
 void ccord_contrib_set_handlers(ccord_contrib *c, const ccord_contrib_handlers *h);
 void ccord_contrib_set_ui_hooks(ccord_contrib *c, const ccord_contrib_ui_hooks *h);
 // debug logs (per plugin id, ring buffer up to 500 entries)
@@ -197,6 +209,9 @@ const ccord_plugin_info *ccord_contrib_plugin_at(const ccord_contrib *c, size_t 
 size_t ccord_contrib_catalog_count(const ccord_contrib *c);
 const ccord_catalog_entry *ccord_contrib_catalog_at(const ccord_contrib *c, size_t i);
 const ccord_catalog_entry *ccord_contrib_catalog_find(const ccord_contrib *c, const char *id);
+const ccord_catalog_entry *ccord_contrib_catalog_detail(const ccord_contrib *c);
+size_t ccord_contrib_catalog_update_count(const ccord_contrib *c);
+const ccord_catalog_entry *ccord_contrib_catalog_update_at(const ccord_contrib *c, size_t i);
 const ccord_catalog_status *ccord_contrib_catalog_status(const ccord_contrib *c);
 const ccord_catalog_prefs *ccord_contrib_catalog_prefs(const ccord_contrib *c);
 // activation (ui -> plugins)
@@ -210,6 +225,10 @@ bool ccord_contrib_plugin_export_cce(ccord_contrib *c, const char *id, const cha
 bool ccord_contrib_plugin_import_package(ccord_contrib *c, const char *pkg_path, char *err_buf, size_t err_cap);
 bool ccord_contrib_plugin_uninstall(ccord_contrib *c, const char *id, char *err_buf, size_t err_cap);
 void ccord_contrib_catalog_refresh(ccord_contrib *c);
+void ccord_contrib_catalog_query(ccord_contrib *c, const char *q, int tier, int api_class, const char *sort,
+                                 bool append_next_page);
+void ccord_contrib_catalog_fetch_detail(ccord_contrib *c, const char *id);
+void ccord_contrib_catalog_check_updates(ccord_contrib *c);
 void ccord_contrib_catalog_install(ccord_contrib *c, const char *id);
 void ccord_contrib_catalog_set_prefs(ccord_contrib *c, const ccord_catalog_prefs *prefs);
 void ccord_contrib_catalog_set_plugin_auto_update(ccord_contrib *c, const char *id, bool enabled);

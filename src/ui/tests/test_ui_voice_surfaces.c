@@ -108,6 +108,14 @@ static bool host_open_url(void *ud, const char *url)
   return true;
 }
 static bool host_open_file(void *ud, char *out, size_t cap) { (void)ud; (void)out; (void)cap; return false; }
+static bool g_fullscreen_state;
+static int g_fullscreen_calls;
+static void host_set_fullscreen(void *ud, bool on)
+{
+  (void)ud;
+  g_fullscreen_state = on;
+  g_fullscreen_calls++;
+}
 
 static void frame(int n)
 {
@@ -220,7 +228,7 @@ remove("ui_vs_data/settings.ini");
   ccord_ui_deps d = {.bus = F.bus, .store = F.store, .session = F.session, .contrib = F.contrib, .theme = &F.theme,
                      .host = {.clipboard_set = host_clip_set, .text_input = host_text_input,
                               .set_extensions_enabled = host_set_ext, .open_url = host_open_url,
-                              .open_file_dialog = host_open_file},
+                              .open_file_dialog = host_open_file, .set_fullscreen = host_set_fullscreen},
                      .fixed_now_unix_ms = 1793534400000LL + 30 * 60 * 1000};
   F.ui = ccord_ui_create(&d, &err);
   if (!F.ui) return false;
@@ -1857,6 +1865,211 @@ static void test_vc_profile_click_and_right_click(void)
   leave_voice_and_close();
 }
 
+static void dblclick_at(float x, float y)
+{
+  mouse(CCORD_IN_MOUSE_MOVE, 0, x, y);
+  send((ccord_input_event){.type = CCORD_IN_MOUSE_DOWN, .button = 1, .clicks = 2, .x = x, .y = y});
+  mouse(CCORD_IN_MOUSE_UP, 1, x, y);
+  frame(2);
+}
+
+static void drag_from_to(float x0, float y0, float x1, float y1)
+{
+  mouse(CCORD_IN_MOUSE_MOVE, 0, x0, y0);
+  mouse(CCORD_IN_MOUSE_DOWN, 1, x0, y0);
+  mouse(CCORD_IN_MOUSE_MOVE, 0, (x0 + x1) * 0.5f, (y0 + y1) * 0.5f);
+  mouse(CCORD_IN_MOUSE_MOVE, 0, x1, y1);
+  mouse(CCORD_IN_MOUSE_UP, 1, x1, y1);
+  frame(2);
+}
+
+static void test_stream_resize_fullscreen_pip(void)
+{
+  ccord_error err;
+  join_and_open(HQ_VOICE);
+
+  // Watch Ada's remote stream and upload a 16:9 gradient test frame so aspect & visuals are verifiable.
+  CT_CHECK(ccord_session_watch_stream(F.session, HQ, HQ_VOICE, ADA, &err) == CCORD_OK);
+  uint8_t px[320 * 180 * 4];
+  for (int y = 0; y < 180; y++) {
+    for (int x = 0; x < 320; x++) {
+      uint8_t *p = &px[(size_t)(y * 320 + x) * 4u];
+      p[0] = (uint8_t)(40 + (x * 180) / 320);
+      p[1] = (uint8_t)(70 + (y * 140) / 180);
+      p[2] = (uint8_t)(190 - (x * 110) / 320);
+      p[3] = 255u;
+    }
+  }
+  CT_CHECK(ccord_render_upload_rgba(F.renderer, "__video_stream__", px, 320, 180, &err) == CCORD_OK);
+  frame(3);
+
+  ui_voice_surfaces_debug d = vsdbg();
+  CT_CHECK(d.stage.stream_player.h >= 280.0f);
+  CT_CHECK(d.stage.stream_resize_handle.w > 0.0f && d.stage.stream_resize_handle.h > 0.0f);
+  CT_CHECK(d.stage.stream_fs_btn.w > 0.0f && d.stage.stream_fs_btn.h > 0.0f);
+  CT_CHECK(!d.stage.stream_fullscreen && !d.stage.stream_pip_visible);
+  float def_h = d.stage.stream_player.h;
+
+  // 1. Default height is no longer artificially capped at 300 px on taller viewports.
+  ccord_ui_set_viewport(F.ui, 1920, 1080);
+  frame(2);
+  ui_voice_surfaces_debug d_big = vsdbg();
+  CT_CHECK(d_big.stage.stream_player.h > 450.0f);
+  ccord_ui_set_viewport(F.ui, 1280, 800);
+  frame(2);
+  d = vsdbg();
+
+  // 2. Vertical resize handle on the stage stream player: hover cursor, drag larger, drag smaller, double-click reset.
+  float hx = d.stage.stream_resize_handle.x + d.stage.stream_resize_handle.w * 0.5f;
+  float hy = d.stage.stream_resize_handle.y + d.stage.stream_resize_handle.h * 0.5f;
+  mouse(CCORD_IN_MOUSE_MOVE, 0, hx, hy);
+  CT_CHECK(F.ui->cursor == CCORD_CURSOR_NS_RESIZE);
+  drag_from_to(hx, hy, hx, hy + 200.0f);
+  d = vsdbg();
+  CT_CHECK(d.stage.stream_player.h > def_h + 120.0f);
+  shot("stream_stage_resized");
+
+  hx = d.stage.stream_resize_handle.x + d.stage.stream_resize_handle.w * 0.5f;
+  hy = d.stage.stream_resize_handle.y + d.stage.stream_resize_handle.h * 0.5f;
+  drag_from_to(hx, hy, hx, d.stage.stream_player.y + 150.0f);
+  d = vsdbg();
+  CT_CHECK(d.stage.stream_player.h <= 180.0f && d.stage.stream_player.h >= 159.0f);
+
+  hx = d.stage.stream_resize_handle.x + d.stage.stream_resize_handle.w * 0.5f;
+  hy = d.stage.stream_resize_handle.y + d.stage.stream_resize_handle.h * 0.5f;
+  dblclick_at(hx, hy);
+  d = vsdbg();
+  CT_CHECK(fabsf(d.stage.stream_player.h - def_h) < 2.0f);
+
+  // 3. Horizontal resize divider between Voice Stage and Text Chat split pane.
+  click_rect(ui_stage_chat_btn(F.ui));
+  frame(2);
+  CT_CHECK(F.ui->stage_chat_open);
+  d = vsdbg();
+  CT_CHECK(d.stage.stage_split_handle.w > 0.0f);
+  float def_stage_w = ccord_ui_get_layout(F.ui)->stage_pane.w;
+  float sx = d.stage.stage_split_handle.x + d.stage.stage_split_handle.w * 0.5f;
+  float sy = d.stage.stage_split_handle.y + 200.0f;
+  mouse(CCORD_IN_MOUSE_MOVE, 0, sx, sy);
+  CT_CHECK(F.ui->cursor == CCORD_CURSOR_EW_RESIZE);
+  drag_from_to(sx, sy, sx + 120.0f, sy);
+  float wider_stage_w = ccord_ui_get_layout(F.ui)->stage_pane.w;
+  CT_CHECK(wider_stage_w > def_stage_w + 80.0f);
+  shot("stream_stage_split_resized");
+  d = vsdbg();
+  sx = d.stage.stage_split_handle.x + d.stage.stage_split_handle.w * 0.5f;
+  dblclick_at(sx, sy);
+  CT_CHECK(fabsf(ccord_ui_get_layout(F.ui)->stage_pane.w - def_stage_w) < 2.0f);
+  click_rect(ui_stage_chat_btn(F.ui));   // close split chat
+  frame(2);
+
+  // 4. Fullscreen via stage button, resize-during-fullscreen guard, exit via Exit button, double-click, F & Esc.
+  g_fullscreen_calls = 0;
+  g_fullscreen_state = false;
+  int saved_w_before = F.ui->settings_win_w;
+  int saved_h_before = F.ui->settings_win_h;
+  d = vsdbg();
+  click_rect(d.stage.stream_fs_btn);
+  frame(2);
+  d = vsdbg();
+  CT_CHECK(d.stage.stream_fullscreen && g_fullscreen_state && g_fullscreen_calls == 1);
+  CT_CHECK(d.stage.stream_fs_video.w >= 1279.0f && d.stage.stream_fs_video.h >= 719.0f);
+  CT_CHECK(d.stage.stream_fs_exit_btn.w > 0.0f);
+  shot("stream_fullscreen");
+
+  // Fullscreen OS resize must not overwrite the saved windowed dimensions.
+  send((ccord_input_event){.type = CCORD_IN_RESIZE, .x = 2560.0f, .y = 1440.0f});
+  frame(1);
+  CT_CHECK(F.ui->settings_win_w == saved_w_before && F.ui->settings_win_h == saved_h_before);
+  ccord_ui_set_viewport(F.ui, 1280, 800);
+  frame(1);
+
+  d = vsdbg();
+  click_rect(d.stage.stream_fs_exit_btn);
+  frame(2);
+  d = vsdbg();
+  CT_CHECK(!d.stage.stream_fullscreen && !g_fullscreen_state);
+
+  // Double-click on video viewport enters fullscreen; double-click in fullscreen exits.
+  dblclick_at(d.stage.stream_vport.x + d.stage.stream_vport.w * 0.5f,
+              d.stage.stream_vport.y + d.stage.stream_vport.h * 0.5f);
+  CT_CHECK(vsdbg().stage.stream_fullscreen && g_fullscreen_state);
+  dblclick_at(640.0f, 400.0f);
+  CT_CHECK(!vsdbg().stage.stream_fullscreen && !g_fullscreen_state);
+
+  // Keyboard shortcuts: 'F' enters fullscreen on stage; Escape exits; 'F' again and 'F' exits.
+  key(CCORD_KEY_F, 0);
+  frame(2);
+  CT_CHECK(vsdbg().stage.stream_fullscreen && g_fullscreen_state);
+  key(CCORD_KEY_ESCAPE, 0);
+  frame(2);
+  CT_CHECK(!vsdbg().stage.stream_fullscreen && !g_fullscreen_state);
+  key(CCORD_KEY_F, 0);
+  frame(2);
+  CT_CHECK(vsdbg().stage.stream_fullscreen);
+  key(CCORD_KEY_F, 0);
+  frame(2);
+  CT_CHECK(!vsdbg().stage.stream_fullscreen && !g_fullscreen_state);
+
+  // 5. Floating Picture-in-Picture (PiP) when switching to a text channel: resize, drag-move, fullscreen, return-to-stage.
+  F.ui->stage_channel = CCORD_ID_NONE;
+  ui_compute_layout(F.ui);
+  frame(2);
+  d = vsdbg();
+  CT_CHECK(d.stage.stream_pip_visible);
+  CT_CHECK(d.stage.stream_pip_rect.w >= 319.0f && d.stage.stream_pip_rect.w <= 321.0f);
+  ccord_rect orig_pip = d.stage.stream_pip_rect;
+
+  // Hover and drag top-left corner outward to resize PiP larger (bottom-right stays anchored).
+  float tlx = orig_pip.x + 3.0f, tly = orig_pip.y + 3.0f;
+  mouse(CCORD_IN_MOUSE_MOVE, 0, tlx, tly);
+  CT_CHECK(F.ui->cursor == CCORD_CURSOR_NWSE_RESIZE);
+  drag_from_to(tlx, tly, tlx - 140.0f, tly - 80.0f);
+  d = vsdbg();
+  CT_CHECK(d.stage.stream_pip_visible);
+  CT_CHECK(d.stage.stream_pip_rect.w > orig_pip.w + 100.0f);
+  CT_CHECK(fabsf((d.stage.stream_pip_rect.x + d.stage.stream_pip_rect.w) - (orig_pip.x + orig_pip.w)) < 2.0f);
+  shot("stream_pip_resized");
+
+  // Drag body to move PiP left/up.
+  ccord_rect before_move = d.stage.stream_pip_rect;
+  float bx = before_move.x + before_move.w * 0.5f;
+  float by = before_move.y + before_move.h * 0.65f;
+  drag_from_to(bx, by, bx - 100.0f, by - 60.0f);
+  d = vsdbg();
+  CT_CHECK(d.stage.stream_pip_visible);
+  CT_CHECK(d.stage.stream_pip_rect.x < before_move.x - 80.0f);
+  CT_CHECK(d.stage.stream_pip_rect.y < before_move.y - 40.0f);
+
+  // Fullscreen directly from PiP, then auto-exit fullscreen when the watched stream stops!
+  click_rect(d.stage.stream_pip_fs_btn);
+  frame(2);
+  CT_CHECK(vsdbg().stage.stream_fullscreen && g_fullscreen_state);
+  CT_CHECK(ccord_session_stop_watching(F.session, &err) == CCORD_OK);
+  frame(3);
+  d = vsdbg();
+  CT_CHECK(!d.stage.stream_fullscreen && !g_fullscreen_state);
+  CT_CHECK(!d.stage.stream_pip_visible);
+
+  // Re-watch and verify PiP Return-to-Stage button reopens the voice stage.
+  CT_CHECK(ccord_session_watch_stream(F.session, HQ, HQ_VOICE, ADA, &err) == CCORD_OK);
+  frame(3);
+  d = vsdbg();
+  CT_CHECK(d.stage.stream_pip_visible && d.stage.stream_pip_stage_btn.w > 0.0f);
+  click_rect(d.stage.stream_pip_stage_btn);
+  frame(2);
+  CT_CHECK(F.ui->stage_channel == HQ_VOICE && !vsdbg().stage.stream_pip_visible);
+
+  // Clean up: stop watching and reset user-resized prefs so subsequent tests start cleanly.
+  CT_CHECK(ccord_session_stop_watching(F.session, &err) == CCORD_OK);
+  F.ui->stream_stage_height_frac = 0.0f;
+  F.ui->stage_split_ratio = 0.55f;
+  F.ui->stream_pip_w = 320.0f;
+  F.ui->stream_pip_positioned = false;
+  frame(2);
+  leave_voice_and_close();
+}
+
 int main(int argc, char **argv)
 {
   if (!setup(argc > 0 ? argv[0] : "test_ui_voice_surfaces")) return 77;
@@ -1881,6 +2094,7 @@ int main(int argc, char **argv)
   test_cam_tiles_state();
   test_prejoin_mute_deafen_and_voice_bar_layout();
   test_vc_profile_click_and_right_click();
+  test_stream_resize_fullscreen_pip();
   teardown();
   return CT_RESULT("test_ui_voice_surfaces");
 }

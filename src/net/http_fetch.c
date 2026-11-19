@@ -231,6 +231,62 @@ bool ccord_http_get(const char *url, const char *if_none_match, size_t max_bytes
   return true;
 }
 
+bool ccord_http_post_json(const char *url, const char *json_body, size_t body_len, size_t max_bytes,
+                          ccord_http_get_result *out)
+{
+  if (!out) return false;
+  memset(out, 0, sizeof *out);
+  if (!ccord_http_url_allowed(url)) {
+    set_err(out->error, sizeof out->error, "URL blocked by HTTPS catalog host allowlist");
+    return false;
+  }
+  CURL *curl = curl_easy_init();
+  if (!curl) {
+    set_err(out->error, sizeof out->error, "libcurl initialization failed");
+    return false;
+  }
+
+  mem_sink ms = {.max_bytes = max_bytes ? max_bytes : (2u * 1024u * 1024u)};
+  hdr_sink hs = {0};
+  struct curl_slist *hdrs = nullptr;
+  hdrs = curl_slist_append(hdrs, "Accept: application/json");
+  hdrs = curl_slist_append(hdrs, "Content-Type: application/json");
+
+  apply_common_tls(curl, url);
+  curl_easy_setopt(curl, CURLOPT_POST, 1L);
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body ? json_body : "{}");
+  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)(json_body ? body_len : 2u));
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_mem_cb);
+  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ms);
+  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+  curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hs);
+
+  CURLcode rc = curl_easy_perform(curl);
+  long code = 0;
+  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+  out->status_code = code;
+  if (hs.etag[0]) snprintf(out->etag, sizeof out->etag, "%s", hs.etag);
+
+  curl_slist_free_all(hdrs);
+  curl_easy_cleanup(curl);
+
+  if (rc != CURLE_OK) {
+    ccord_free(ms.data);
+    if (ms.overflow) set_err(out->error, sizeof out->error, "catalog response exceeded maximum size");
+    else snprintf(out->error, sizeof out->error, "network error: %s", curl_easy_strerror(rc));
+    return false;
+  }
+  if (code < 200 || code >= 300) {
+    ccord_free(ms.data);
+    snprintf(out->error, sizeof out->error, "catalog server returned HTTP %ld", code);
+    return false;
+  }
+  out->body = ms.data;
+  out->body_len = ms.len;
+  return true;
+}
+
 bool ccord_http_download_file(const char *url, const char *dest_path, size_t max_bytes, char *err_buf, size_t err_cap)
 {
   if (!dest_path || !dest_path[0]) {
@@ -285,6 +341,16 @@ bool ccord_http_download_file(const char *url, const char *dest_path, size_t max
 bool ccord_http_get(const char *url, const char *if_none_match, size_t max_bytes, ccord_http_get_result *out)
 {
   (void)url; (void)if_none_match; (void)max_bytes;
+  if (!out) return false;
+  memset(out, 0, sizeof *out);
+  set_err(out->error, sizeof out->error, "offline build: network catalog unavailable");
+  return false;
+}
+
+bool ccord_http_post_json(const char *url, const char *json_body, size_t body_len, size_t max_bytes,
+                          ccord_http_get_result *out)
+{
+  (void)url; (void)json_body; (void)body_len; (void)max_bytes;
   if (!out) return false;
   memset(out, 0, sizeof *out);
   set_err(out->error, sizeof out->error, "offline build: network catalog unavailable");

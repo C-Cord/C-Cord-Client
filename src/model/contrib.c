@@ -37,6 +37,10 @@ struct ccord_contrib {
   size_t nplugins, capplugins;
   ccord_catalog_entry *catalog;
   size_t ncatalog;
+  ccord_catalog_entry *catalog_updates;
+  size_t ncatalog_updates;
+  ccord_catalog_entry catalog_detail;
+  bool has_catalog_detail;
   ccord_catalog_status catalog_status;
   ccord_catalog_prefs catalog_prefs;
   ccord_contrib_handlers handlers;
@@ -153,11 +157,14 @@ void ccord_contrib_destroy(ccord_contrib *c)
   for (size_t i = 0; i < c->npanels; i++) free_panel(&c->panels[i]);
   for (size_t i = 0; i < c->nplugins; i++) free_plugin(&c->plugins[i]);
   for (size_t i = 0; i < c->ncatalog; i++) free_catalog_entry(&c->catalog[i]);
+  for (size_t i = 0; i < c->ncatalog_updates; i++) free_catalog_entry(&c->catalog_updates[i]);
+  if (c->has_catalog_detail) free_catalog_entry(&c->catalog_detail);
   ccord_free(c->menus);
   ccord_free(c->cmds);
   ccord_free(c->panels);
   ccord_free(c->plugins);
   ccord_free(c->catalog);
+  ccord_free(c->catalog_updates);
   ccord_free(c);
 }
 
@@ -382,6 +389,47 @@ bool ccord_contrib_remove_plugin(ccord_contrib *c, const char *id)
   return false;
 }
 
+static bool clone_catalog_entry(const ccord_catalog_entry *s, ccord_catalog_entry *out)
+{
+  ccord_catalog_entry d = {
+    .id = ccord_strdup(s->id ? s->id : ""),
+    .name = ccord_strdup(s->name ? s->name : ""),
+    .description = ccord_strdup(s->description ? s->description : ""),
+    .license = ccord_strdup(s->license ? s->license : ""),
+    .author = ccord_strdup(s->author ? s->author : ""),
+    .repo = ccord_strdup(s->repo ? s->repo : ""),
+    .repo_url = ccord_strdup(s->repo_url ? s->repo_url : ""),
+    .version = ccord_strdup(s->version ? s->version : ""),
+    .download_url = ccord_strdup(s->download_url ? s->download_url : ""),
+    .sha256 = ccord_strdup(s->sha256 ? s->sha256 : ""),
+    .permissions = ccord_strdup(s->permissions ? s->permissions : ""),
+    .changelog = ccord_strdup(s->changelog ? s->changelog : ""),
+    .size_bytes = s->size_bytes,
+    .downloads = s->downloads,
+    .api_class = s->api_class ? s->api_class : 1,
+    .tier = s->tier,
+    .warning_sev = s->warning_sev,
+    .warning_title = ccord_strdup(s->warning_title ? s->warning_title : ""),
+    .warning_message = ccord_strdup(s->warning_message ? s->warning_message : ""),
+    .has_detail = s->has_detail,
+    .installed = s->installed,
+    .bundled = s->bundled,
+    .installing = s->installing,
+    .update_available = s->update_available,
+    .update_needs_review = s->update_needs_review,
+    .auto_update = s->auto_update,
+    .installed_version = ccord_strdup(s->installed_version ? s->installed_version : ""),
+  };
+  if (!d.id || !d.name || !d.description || !d.license || !d.author || !d.repo ||
+      !d.repo_url || !d.version || !d.download_url || !d.sha256 || !d.permissions ||
+      !d.changelog || !d.warning_title || !d.warning_message || !d.installed_version) {
+    free_catalog_entry(&d);
+    return false;
+  }
+  *out = d;
+  return true;
+}
+
 void ccord_contrib_set_catalog(ccord_contrib *c, const ccord_catalog_entry *entries, size_t count,
                                const ccord_catalog_status *status, const ccord_catalog_prefs *prefs)
 {
@@ -396,41 +444,8 @@ void ccord_contrib_set_catalog(ccord_contrib *c, const ccord_catalog_entry *entr
       if (arr) {
         size_t ok = 0;
         for (size_t i = 0; i < count; i++) {
-          const ccord_catalog_entry *s = &entries[i];
-          ccord_catalog_entry d = {
-            .id = ccord_strdup(s->id ? s->id : ""),
-            .name = ccord_strdup(s->name ? s->name : ""),
-            .description = ccord_strdup(s->description ? s->description : ""),
-            .license = ccord_strdup(s->license ? s->license : ""),
-            .author = ccord_strdup(s->author ? s->author : ""),
-            .repo = ccord_strdup(s->repo ? s->repo : ""),
-            .repo_url = ccord_strdup(s->repo_url ? s->repo_url : ""),
-            .version = ccord_strdup(s->version ? s->version : ""),
-            .download_url = ccord_strdup(s->download_url ? s->download_url : ""),
-            .sha256 = ccord_strdup(s->sha256 ? s->sha256 : ""),
-            .permissions = ccord_strdup(s->permissions ? s->permissions : ""),
-            .changelog = ccord_strdup(s->changelog ? s->changelog : ""),
-            .size_bytes = s->size_bytes,
-            .api_class = s->api_class ? s->api_class : 1,
-            .tier = s->tier,
-            .warning_sev = s->warning_sev,
-            .warning_title = ccord_strdup(s->warning_title ? s->warning_title : ""),
-            .warning_message = ccord_strdup(s->warning_message ? s->warning_message : ""),
-            .installed = s->installed,
-            .bundled = s->bundled,
-            .installing = s->installing,
-            .update_available = s->update_available,
-            .update_needs_review = s->update_needs_review,
-            .auto_update = s->auto_update,
-            .installed_version = ccord_strdup(s->installed_version ? s->installed_version : ""),
-          };
-          if (!d.id || !d.name || !d.description || !d.license || !d.author || !d.repo ||
-              !d.repo_url || !d.version || !d.download_url || !d.sha256 || !d.permissions ||
-              !d.changelog || !d.warning_title || !d.warning_message || !d.installed_version) {
-            free_catalog_entry(&d);
-            break;
-          }
-          arr[ok++] = d;
+          if (!clone_catalog_entry(&entries[i], &arr[ok])) break;
+          ok++;
         }
         c->catalog = arr;
         c->ncatalog = ok;
@@ -439,6 +454,42 @@ void ccord_contrib_set_catalog(ccord_contrib *c, const ccord_catalog_entry *entr
   }
   if (status) c->catalog_status = *status;
   if (prefs) c->catalog_prefs = *prefs;
+  c->revision++;
+}
+
+void ccord_contrib_set_catalog_detail(ccord_contrib *c, const ccord_catalog_entry *detail)
+{
+  if (!c) return;
+  if (c->has_catalog_detail) {
+    free_catalog_entry(&c->catalog_detail);
+    memset(&c->catalog_detail, 0, sizeof c->catalog_detail);
+    c->has_catalog_detail = false;
+  }
+  if (detail && clone_catalog_entry(detail, &c->catalog_detail)) {
+    c->has_catalog_detail = true;
+  }
+  c->revision++;
+}
+
+void ccord_contrib_set_catalog_updates(ccord_contrib *c, const ccord_catalog_entry *entries, size_t count)
+{
+  if (!c) return;
+  for (size_t i = 0; i < c->ncatalog_updates; i++) free_catalog_entry(&c->catalog_updates[i]);
+  ccord_free(c->catalog_updates);
+  c->catalog_updates = nullptr;
+  c->ncatalog_updates = 0;
+  if (entries && count > 0) {
+    ccord_catalog_entry *arr = ccord_calloc(count, sizeof *arr);
+    if (arr) {
+      size_t ok = 0;
+      for (size_t i = 0; i < count; i++) {
+        if (!clone_catalog_entry(&entries[i], &arr[ok])) break;
+        ok++;
+      }
+      c->catalog_updates = arr;
+      c->ncatalog_updates = ok;
+    }
+  }
   c->revision++;
 }
 
@@ -574,10 +625,33 @@ const ccord_catalog_entry *ccord_contrib_catalog_at(const ccord_contrib *c, size
 const ccord_catalog_entry *ccord_contrib_catalog_find(const ccord_contrib *c, const char *id)
 {
   if (!c || !id) return nullptr;
+  if (c->has_catalog_detail && strcmp(c->catalog_detail.id, id) == 0) {
+    return &c->catalog_detail;
+  }
+  for (size_t i = 0; i < c->ncatalog_updates; i++) {
+    if (strcmp(c->catalog_updates[i].id, id) == 0) return &c->catalog_updates[i];
+  }
   for (size_t i = 0; i < c->ncatalog; i++) {
     if (strcmp(c->catalog[i].id, id) == 0) return &c->catalog[i];
   }
   return nullptr;
+}
+
+const ccord_catalog_entry *ccord_contrib_catalog_detail(const ccord_contrib *c)
+{
+  if (!c || !c->has_catalog_detail) return nullptr;
+  return &c->catalog_detail;
+}
+
+size_t ccord_contrib_catalog_update_count(const ccord_contrib *c)
+{
+  return c ? c->ncatalog_updates : 0;
+}
+
+const ccord_catalog_entry *ccord_contrib_catalog_update_at(const ccord_contrib *c, size_t i)
+{
+  if (!c || i >= c->ncatalog_updates) return nullptr;
+  return &c->catalog_updates[i];
 }
 
 const ccord_catalog_status *ccord_contrib_catalog_status(const ccord_contrib *c)
@@ -756,6 +830,24 @@ bool ccord_contrib_plugin_uninstall(ccord_contrib *c, const char *id, char *err_
 void ccord_contrib_catalog_refresh(ccord_contrib *c)
 {
   if (c && c->handlers.catalog_refresh) c->handlers.catalog_refresh(c->handlers.ud);
+}
+
+void ccord_contrib_catalog_query(ccord_contrib *c, const char *q, int tier, int api_class, const char *sort,
+                                 bool append_next_page)
+{
+  if (c && c->handlers.catalog_query) {
+    c->handlers.catalog_query(c->handlers.ud, q ? q : "", tier, api_class, sort ? sort : "popular", append_next_page);
+  }
+}
+
+void ccord_contrib_catalog_fetch_detail(ccord_contrib *c, const char *id)
+{
+  if (c && id && c->handlers.catalog_fetch_detail) c->handlers.catalog_fetch_detail(c->handlers.ud, id);
+}
+
+void ccord_contrib_catalog_check_updates(ccord_contrib *c)
+{
+  if (c && c->handlers.catalog_check_updates) c->handlers.catalog_check_updates(c->handlers.ud);
 }
 
 void ccord_contrib_catalog_install(ccord_contrib *c, const char *id)

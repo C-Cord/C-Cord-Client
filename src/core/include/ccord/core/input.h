@@ -43,4 +43,14 @@ typedef struct ccord_input_event {
   int64_t finger_id;   // TOUCH_*: stable touch pointer id
   float inset_top, inset_right, inset_bottom, inset_left;   // SAFE_AREA: logical px insets
 } ccord_input_event;
-typedef enum ccord_cursor_kind : uint8_t { CCORD_CURSOR_DEFAULT, CCORD_CURSOR_POINTER, CCORD_CURSOR_TEXT } ccord_cursor_kind;
+typedef enum ccord_cursor_kind : uint8_t {
+  CCORD_CURSOR_DEFAULT,
+  CCORD_CURSOR_POINTER,
+  CCORD_CURSOR_TEXT,
+  CCORD_CURSOR_NS_RESIZE,
+  CCORD_CURSOR_EW_RESIZE,
+  CCORD_CURSOR_NWSE_RESIZE,
+  CCORD_CURSOR_NESW_RESIZE,
+  CCORD_CURSOR_MOVE,
+  CCORD_CURSOR_COUNT
+} ccord_cursor_kind;

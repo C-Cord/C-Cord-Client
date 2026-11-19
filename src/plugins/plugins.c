@@ -2760,6 +2760,17 @@ static bool cb_uninstall(void *ud, const char *id, char *eb, size_t ec)
 }
 
 static void cb_cat_refresh(void *ud) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_refresh(m->catalog); }
+static void cb_cat_query(void *ud, const char *q, int tier, int api_class, const char *sort, bool append_next_page)
+{
+  ccord_plugins *m = ud;
+  if (m->catalog) ccord_catalog_query(m->catalog, q, tier, api_class, sort, append_next_page);
+}
+static void cb_cat_fetch_detail(void *ud, const char *id)
+{
+  ccord_plugins *m = ud;
+  if (m->catalog) ccord_catalog_fetch_detail(m->catalog, id);
+}
+static void cb_cat_check_updates(void *ud) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_check_updates(m->catalog); }
 static void cb_cat_install(void *ud, const char *id) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_install(m->catalog, id); }
 static void cb_cat_set_prefs(void *ud, const ccord_catalog_prefs *pr) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_set_prefs(m->catalog, pr); }
 static void cb_cat_set_auto(void *ud, const char *id, bool on) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_set_plugin_auto_update(m->catalog, id, on); }
@@ -2775,6 +2786,19 @@ static bool cat_get_local_plugin(void *ud, const char *id, char *ver_out, size_t
   if (consented_perms_out) *consented_perms_out = p->consented_perms;
   if (is_bundled_out) *is_bundled_out = p->is_bundled;
   return true;
+}
+
+static size_t cat_list_local_plugins(void *ud, char (*ids_out)[65], size_t cap)
+{
+  ccord_plugins *m = ud;
+  size_t n = 0;
+  for (size_t i = 0; i < m->nplugins && n < cap; i++) {
+    const plugin *p = &m->plugins[i];
+    if (p->used && !p->is_bundled && p->m.id[0]) {
+      set_text(ids_out[n++], 65, p->m.id);
+    }
+  }
+  return n;
 }
 
 static void cat_revoke_plugin(void *ud, const char *id, const char *reason)
@@ -2895,6 +2919,9 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     .plugin_import_package = cb_import_pkg,
     .plugin_uninstall = cb_uninstall,
     .catalog_refresh = cb_cat_refresh,
+    .catalog_query = cb_cat_query,
+    .catalog_fetch_detail = cb_cat_fetch_detail,
+    .catalog_check_updates = cb_cat_check_updates,
     .catalog_install = cb_cat_install,
     .catalog_set_prefs = cb_cat_set_prefs,
     .catalog_set_plugin_auto_update = cb_cat_set_auto,
@@ -2904,6 +2931,7 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
   ccord_catalog_host_cbs ccbs = {
     .ud = m,
     .get_local_plugin = cat_get_local_plugin,
+    .list_local_plugins = cat_list_local_plugins,
     .import_verified_cce = cb_import_pkg,
     .revoke_plugin = cat_revoke_plugin,
     .sync_installed_info = cat_sync_installed_info,

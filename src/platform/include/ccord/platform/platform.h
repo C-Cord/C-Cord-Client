@@ -175,6 +175,9 @@ void ccord_platform_set_window_visible(ccord_platform *p, bool visible);
 // Unconditionally shows, unminimizes (if minimized), and raises the window without ever toggling hide.
 void ccord_platform_show_window(ccord_platform *p);
 bool ccord_platform_window_visible(const ccord_platform *p);
+// Window fullscreen mode (borderless desktop fullscreen via SDL_SetWindowFullscreen). Tracked even headless.
+bool ccord_platform_set_fullscreen(ccord_platform *p, bool fullscreen);
+bool ccord_platform_window_fullscreen(const ccord_platform *p);
 // When enabled, a window-manager close request hides the window (to tray) instead of emitting
 // CCORD_IN_QUIT; SDL_EVENT_QUIT still quits. Disabled by default.
 void ccord_platform_set_close_to_tray(ccord_platform *p, bool enabled);

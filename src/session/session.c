@@ -1262,12 +1262,23 @@ static void apply_notify_rows(ccord_session *s, const ccord_notify_scope *rows, 
   }
 }
 
-// What applies to a channel right now. Where the user never chose a level, new messages notify for mentions and direct
-// messages only (a server's own default is not tracked, and a desktop popup per message would be unwelcome).
+// What applies to a channel right now. When the user never chose an override level, a guild channel falls back to its
+// server's default_message_notifications (0 = All Messages, 1 = Only @mentions) when guild settings are known, and
+// otherwise notifies for mentions and direct messages only.
 static ccord_notify_effective notify_effective(const ccord_session *s, ccord_id channel_id)
 {
   ccord_notify_effective eff = ccord_store_channel_notify(s->store, channel_id, ccord_clock_unix_ms());
-  if (!eff.level_set) eff.level = CCORD_NOTIFY_MENTIONS;
+  if (!eff.level_set) {
+    const ccord_channel *ch = ccord_store_channel(s->store, channel_id);
+    const ccord_guild *g = (ch && ch->guild_id != CCORD_ID_NONE && ch->guild_id != CCORD_DM_GUILD_ID)
+                               ? ccord_store_guild(s->store, ch->guild_id)
+                               : nullptr;
+    if (g && g->has_guild_settings) {
+      eff.level = g->default_message_notifications == 0 ? CCORD_NOTIFY_ALL : CCORD_NOTIFY_MENTIONS;
+    } else {
+      eff.level = CCORD_NOTIFY_MENTIONS;
+    }
+  }
   return eff;
 }
 

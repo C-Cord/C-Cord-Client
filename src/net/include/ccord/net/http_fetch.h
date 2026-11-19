@@ -18,6 +18,9 @@ typedef struct ccord_http_get_result {
 // HTTPS-only GET with strict TLS 1.2/1.3 verification, host allowlisting, and optional If-None-Match ETag.
 // Returns true on 200 OK or 304 Not Modified (in which case out->not_modified is true and out->body is nullptr).
 bool ccord_http_get(const char *url, const char *if_none_match, size_t max_bytes, ccord_http_get_result *out);
+// HTTPS-only JSON POST with strict TLS 1.2/1.3 verification and host allowlisting.
+bool ccord_http_post_json(const char *url, const char *json_body, size_t body_len, size_t max_bytes,
+                          ccord_http_get_result *out);
 void ccord_http_get_result_free(ccord_http_get_result *r);
 
 // HTTPS-only streaming file download to dest_path with strict TLS and size cap.

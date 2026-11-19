@@ -1656,6 +1656,91 @@ static void test_session_notify_settings(void)
   ccord_bus_destroy(bus);
 }
 
+// When the user has not chosen an override level on a guild or channel, the server's own
+// default_message_notifications setting (0 = All Messages, 1 = Only @mentions) governs plain messages.
+static void test_session_guild_default_notifications(void)
+{
+  ccord_error err;
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  CT_CHECK(bus && store);
+  if (!bus || !store) return;
+  enum { SELF = 1, ANN = 2, G_ALL = 10, G_MENT = 11, CH_LOBBY = 20, CH_ALL = 21, CH_MENT = 22 };
+  ccord_user users[2] = {{.id = SELF, .name = "You", .status_text = ""}, {.id = ANN, .name = "Ann", .status_text = ""}};
+  ccord_guild guilds[2] = {
+    {.id = G_ALL, .name = "AllDefault", .has_guild_settings = true, .default_message_notifications = 0},
+    {.id = G_MENT, .name = "MentionsDefault", .has_guild_settings = true, .default_message_notifications = 1},
+  };
+  ccord_channel chans[3] = {
+    {.id = CH_LOBBY, .guild_id = G_ALL, .kind = CCORD_CHANNEL_TEXT, .name = "lobby", .topic = "", .position = 0},
+    {.id = CH_ALL, .guild_id = G_ALL, .kind = CCORD_CHANNEL_TEXT, .name = "chat", .topic = "", .position = 1},
+    {.id = CH_MENT, .guild_id = G_MENT, .kind = CCORD_CHANNEL_TEXT, .name = "general", .topic = "", .position = 0},
+  };
+  ccord_snapshot snap = {.self_id = SELF, .users = users, .user_count = 2, .guilds = guilds, .guild_count = 2,
+                         .channels = chans, .channel_count = 3};
+  fake_transport *f = calloc(1, sizeof *f);
+  CT_CHECK(f != nullptr);
+  if (!f) {
+    ccord_store_destroy(store);
+    ccord_bus_destroy(bus);
+    return;
+  }
+  f->base.vt = &fake_vt;
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap};
+  ccord_session *s = ccord_session_create(bus, store, &f->base, &err);
+  CT_CHECK(s != nullptr);
+  if (!s) {
+    free(f);
+    ccord_store_destroy(store);
+    ccord_bus_destroy(bus);
+    return;
+  }
+  CT_CHECK(ccord_session_pump(s) >= 1);
+  CT_CHECK(ccord_store_selected_channel(store) == CH_LOBBY);
+
+  ccord_id got[8];
+  #define SEND_G(gid, msg) do { f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_MESSAGE_CREATE, .guild_id = (gid), \
+                                                                  .channel_id = (msg).channel_id, .messages = &(msg), .message_count = 1}; } while (0)
+
+  // No user override rows: G_ALL notifies on plain messages, G_MENT only notifies on mentions.
+  ccord_message m1 = {.id = 101, .channel_id = CH_ALL, .author_id = ANN, .timestamp_ms = 1, .content = "plain in all"};
+  ccord_message m2 = {.id = 102, .channel_id = CH_MENT, .author_id = ANN, .timestamp_ms = 2, .content = "plain in ment"};
+  ccord_message m3 = {.id = 103, .channel_id = CH_MENT, .author_id = ANN, .timestamp_ms = 3, .content = "ping <@1>"};
+  SEND_G(G_ALL, m1);
+  SEND_G(G_MENT, m2);
+  SEND_G(G_MENT, m3);
+  CT_CHECK(ccord_session_pump(s) == 3);
+  size_t n = drain_notifications(s, got, 8);
+  CT_CHECK(n == 2 && got[0] == CH_ALL && got[1] == CH_MENT);
+
+  // Explicit INHERIT row still defers to the guild's default_message_notifications.
+  ccord_notify_scope inh[1] = {{.guild_id = G_ALL, .channel_id = CCORD_ID_NONE, .level = CCORD_NOTIFY_INHERIT}};
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_NOTIFY_SETTINGS, .guild_id = G_ALL, .notify = inh, .notify_count = 1};
+  ccord_message m4 = {.id = 104, .channel_id = CH_ALL, .author_id = ANN, .timestamp_ms = 4, .content = "still all"};
+  SEND_G(G_ALL, m4);
+  CT_CHECK(ccord_session_pump(s) == 2);
+  n = drain_notifications(s, got, 8);
+  CT_CHECK(n == 1 && got[0] == CH_ALL);
+
+  // Explicit user override (Mentions on G_ALL, All Messages on G_MENT) beats the guild default.
+  ccord_notify_scope ov_ment[1] = {{.guild_id = G_ALL, .channel_id = CCORD_ID_NONE, .level = CCORD_NOTIFY_MENTIONS}};
+  ccord_notify_scope ov_all[1] = {{.guild_id = G_MENT, .channel_id = CCORD_ID_NONE, .level = CCORD_NOTIFY_ALL}};
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_NOTIFY_SETTINGS, .guild_id = G_ALL, .notify = ov_ment, .notify_count = 1};
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_NOTIFY_SETTINGS, .guild_id = G_MENT, .notify = ov_all, .notify_count = 1};
+  ccord_message m5 = {.id = 105, .channel_id = CH_ALL, .author_id = ANN, .timestamp_ms = 5, .content = "now quiet"};
+  ccord_message m6 = {.id = 106, .channel_id = CH_MENT, .author_id = ANN, .timestamp_ms = 6, .content = "now noisy"};
+  SEND_G(G_ALL, m5);
+  SEND_G(G_MENT, m6);
+  CT_CHECK(ccord_session_pump(s) == 4);
+  n = drain_notifications(s, got, 8);
+  CT_CHECK(n == 1 && got[0] == CH_MENT);
+
+  #undef SEND_G
+  ccord_session_destroy(s);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+}
+
 // Mentions are what Discord says they are: the user's id in the mention list (a reply that pings is one), @everyone / @here,
 // and a role the user holds. The server's "suppress" switches drop the broad ones, for the notification and the badge alike.
 static void test_session_structured_mentions(void)
@@ -5781,6 +5866,7 @@ int main(void)
   test_session_permission_data();
   test_session_server_settings();
   test_session_notify_settings();
+  test_session_guild_default_notifications();
   test_session_structured_mentions();
   test_session_mark_read();
   test_session_read_position();

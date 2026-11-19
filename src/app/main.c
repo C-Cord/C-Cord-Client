@@ -194,6 +194,11 @@ static void host_set_cursor(void *ud, ccord_cursor_kind kind)
   ccord_platform_set_cursor(((app *)ud)->platform, kind);
 }
 
+static void host_set_fullscreen(void *ud, bool fullscreen)
+{
+  (void)ccord_platform_set_fullscreen(((app *)ud)->platform, fullscreen);
+}
+
 static void host_text_input(void *ud, bool active, float x, float y, float w, float h)
 {
   ccord_platform_text_input(((app *)ud)->platform, active, x, y, w, h);
@@ -270,6 +275,10 @@ static void host_tray_action(void *ud, ccord_tray_action action)
   ccord_error err;
   switch (action) {
     case CCORD_TRAY_ACTIVATE:
+      if (a->ui && a->platform && !ccord_platform_window_focused(a->platform)) {
+        ccord_input_event unfocus = {.type = CCORD_IN_FOCUS, .focused = false};
+        (void)ccord_ui_handle_input(a->ui, &unfocus);
+      }
       break;   // visibility toggled by the platform; the next frame paints the restored window
     case CCORD_TRAY_TOGGLE_MUTE:
       (void)ccord_app_desktop_handle_hotkey(a->desktop, "toggle-mute", &err);
@@ -930,6 +939,24 @@ static bool catalog_http_get_adapter(void *ud, const char *url, const char *if_n
   return true;
 }
 
+static bool catalog_http_post_adapter(void *ud, const char *url, const char *json_body, size_t body_len,
+                                      size_t max_bytes, char **out_body, size_t *out_len,
+                                      char *err_buf, size_t err_cap)
+{
+  (void)ud;
+  ccord_http_get_result r = {0};
+  bool ok = ccord_http_post_json(url, json_body, body_len, max_bytes, &r);
+  if (!ok) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "%s", r.error);
+    ccord_http_get_result_free(&r);
+    return false;
+  }
+  if (out_body) *out_body = r.body;
+  else ccord_http_get_result_free(&r);
+  if (out_len) *out_len = r.body_len;
+  return true;
+}
+
 static bool catalog_http_download_adapter(void *ud, const char *url, const char *dest_path, size_t max_bytes,
                                           char *err_buf, size_t err_cap)
 {
@@ -1100,6 +1127,7 @@ static void plugins_start(app *a)
     pcfg.catalog_http = (ccord_catalog_http){
       .ud = a,
       .get = catalog_http_get_adapter,
+      .post_json = catalog_http_post_adapter,
       .download_file = catalog_http_download_adapter,
     };
   }
@@ -4165,7 +4193,8 @@ int main(int argc, char **argv)
              .account_switch = host_account_switch, .account_remove = host_account_remove,
              .update_check = host_update_check, .update_install = host_update_install,
              .haptic_impact = host_haptic_impact, .share_text = host_share_text,
-             .dismiss_keyboard = host_dismiss_keyboard},
+             .dismiss_keyboard = host_dismiss_keyboard,
+             .set_fullscreen = host_set_fullscreen},
     .fixed_now_unix_ms = fixed,
   };
 #if CCORD_WITH_PLUGINS
@@ -4193,6 +4222,10 @@ int main(int argc, char **argv)
   a.last_safe = ccord_platform_safe_area(a.platform);
   ccord_ui_set_safe_insets(a.ui, a.last_safe.top, a.last_safe.right, a.last_safe.bottom, a.last_safe.left);
   ccord_ui_set_viewport(a.ui, lw, lh);
+  if (!ccord_platform_window_focused(a.platform)) {
+    ccord_input_event unfocus = {.type = CCORD_IN_FOCUS, .focused = false};
+    (void)ccord_ui_handle_input(a.ui, &unfocus);
+  }
   if (warm_res.loaded) ccord_ui_set_stale_saved_ms(a.ui, warm_res.saved_ms);
   ccord_app_desktop_attach_ui(a.desktop, a.ui);
   (void)ccord_app_desktop_bind_shortcuts(a.desktop);

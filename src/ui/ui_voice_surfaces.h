@@ -56,6 +56,18 @@ typedef struct ui_stage_debug {
   } cam_tile[UI_CAM_TILE_MAX];
   ccord_rect stream_player;                            // Go Live player (zero size when none)
   ccord_rect stage_view;                               // the scroll viewport of the stage
+  ccord_rect stream_resize_handle;                     // bottom vertical resize handle of stage stream player
+  ccord_rect stream_fs_btn;                            // fullscreen button on stage stream player
+  ccord_rect stream_vport;                             // video viewport inside stage stream player
+  ccord_rect stage_split_handle;                       // vertical divider between stage_pane and text chat
+  bool stream_fullscreen;                              // fullscreen stream overlay active
+  ccord_rect stream_fs_exit_btn;                       // exit fullscreen button in fullscreen HUD
+  ccord_rect stream_fs_video;                          // video rect drawn in fullscreen mode
+  bool stream_pip_visible;                             // floating PiP stream window currently shown
+  ccord_rect stream_pip_rect;                          // floating PiP outer rect
+  ccord_rect stream_pip_fs_btn;                        // floating PiP fullscreen button
+  ccord_rect stream_pip_stage_btn;                     // floating PiP return-to-stage button
+  ccord_rect stream_pip_close_btn;                     // floating PiP close/stop button
 } ui_stage_debug;
 
 // ---- camera tile grid layout (pure; unit-tested) ------------------------------------------------

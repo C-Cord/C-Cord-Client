@@ -1152,6 +1152,15 @@ static bool settings_visit(const char *section, const char *key, const char *val
     clamp_int(&iv, 240, 4320);
     ui->settings_win_h = iv;
     ui->settings_win_saved = true;
+  } else if (strcmp(key, "stream_stage_height_pct") == 0 && ini_int(value, &iv)) {
+    clamp_int(&iv, 0, 100);
+    ui->stream_stage_height_frac = iv > 0 ? (float)iv / 100.0f : 0.0f;
+  } else if (strcmp(key, "stage_split_pct") == 0 && ini_int(value, &iv)) {
+    clamp_int(&iv, 15, 85);
+    ui->stage_split_ratio = (float)iv / 100.0f;
+  } else if (strcmp(key, "stream_pip_width") == 0 && ini_int(value, &iv)) {
+    clamp_int(&iv, 200, 960);
+    ui->stream_pip_w = (float)iv;
   } else if (strcmp(key, "last_guild_id") == 0 && value) {
     ccord_id gid = CCORD_ID_NONE;
     if (ccord_id_parse(value, strlen(value), &gid)) ui->saved_guild_id = gid;
@@ -1264,6 +1273,12 @@ static void settings_save(ccord_ui *ui)
   fprintf(f, "notify_desktop = %d\n", ui->settings_notify_desktop ? 1 : 0);
   fprintf(f, "window_width = %d\n", ui->settings_win_w);
   fprintf(f, "window_height = %d\n", ui->settings_win_h);
+  fprintf(f, "stream_stage_height_pct = %d\n",
+          ui->stream_stage_height_frac > 0.0f ? (int)lroundf(ui->stream_stage_height_frac * 100.0f) : 0);
+  fprintf(f, "stage_split_pct = %d\n",
+          (int)lroundf((ui->stage_split_ratio > 0.0f ? ui->stage_split_ratio : 0.55f) * 100.0f));
+  fprintf(f, "stream_pip_width = %d\n",
+          (int)lroundf(ui->stream_pip_w > 1.0f ? ui->stream_pip_w : 320.0f));
   if (ui->saved_guild_id != CCORD_ID_NONE) {
     fprintf(f, "last_guild_id = %llu\n", (unsigned long long)ui->saved_guild_id);
   }
@@ -1460,9 +1475,32 @@ static char s_plugin_log_id[65];
 static char s_plugin_consent_id[65];
 static char s_plugin_detail_id[65];
 static char s_plugin_status_msg[192];
+static char s_plugin_search[96];
+static bool s_plugin_search_focused;
 static int s_plugin_subtab;       // 0=Installed, 1=Discover, 2=Updates
 static int s_plugin_tier_filter;  // 0=All, 1=Official, 2=Verified, 3=Unverified
+static int s_plugin_sort_idx;     // 0=popular, 1=trending, 2=tier, 3=updated, 4=name
 static bool s_plugin_class1_only;
+
+static const char *plugin_sort_key(int idx)
+{
+  static const char *const k_keys[5] = {"popular", "trending", "tier", "updated", "name"};
+  return (idx >= 0 && idx < 5) ? k_keys[idx] : "popular";
+}
+
+static const char *plugin_sort_label(int idx)
+{
+  static const char *const k_lbls[5] = {"Popular", "Trending", "Tier", "Updated", "A-Z"};
+  return (idx >= 0 && idx < 5) ? k_lbls[idx] : "Popular";
+}
+
+static void trigger_plugin_discover_query(ccord_ui *ui, bool append_next_page)
+{
+  if (!ui || !ui->d.contrib) return;
+  ccord_contrib_catalog_query(ui->d.contrib, s_plugin_search, s_plugin_tier_filter,
+                              s_plugin_class1_only ? 1 : 0, plugin_sort_key(s_plugin_sort_idx),
+                              append_next_page);
+}
 
 typedef struct plugin_card_rects {
   ccord_rect card;
@@ -1821,17 +1859,21 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       ccord_rect r_inst, r_disc, r_upd, r_sync;
       plugin_subtab_rects(g, &r_inst, &r_disc, &r_upd, &r_sync);
       if (ui_in_rect(x, y, r_inst)) {
-        s_plugin_subtab = 0; s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_detail_id[0] = '\0';
+        s_plugin_subtab = 0; s_plugin_search_focused = false;
+        s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_detail_id[0] = '\0';
         return true;
       }
       if (ui_in_rect(x, y, r_disc)) {
-        s_plugin_subtab = 1; s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_detail_id[0] = '\0';
+        s_plugin_subtab = 1; s_plugin_search_focused = false;
+        s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_detail_id[0] = '\0';
         const ccord_catalog_status *cst = ccord_contrib_catalog_status(ui->d.contrib);
-        if (cst && !cst->has_loaded && !cst->syncing) ccord_contrib_catalog_refresh(ui->d.contrib);
+        if (cst && !cst->has_loaded && !cst->syncing) trigger_plugin_discover_query(ui, false);
         return true;
       }
       if (ui_in_rect(x, y, r_upd)) {
-        s_plugin_subtab = 2; s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_detail_id[0] = '\0';
+        s_plugin_subtab = 2; s_plugin_search_focused = false;
+        s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_detail_id[0] = '\0';
+        ccord_contrib_catalog_check_updates(ui->d.contrib);
         return true;
       }
       if (ui_in_rect(x, y, r_sync)) {
@@ -1869,7 +1911,11 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         return false;
       }
       if (s_plugin_detail_id[0]) {
-        const ccord_catalog_entry *e = ccord_contrib_catalog_find(ui->d.contrib, s_plugin_detail_id);
+        const ccord_catalog_entry *e = ccord_contrib_catalog_detail(ui->d.contrib);
+        if (!e || strcmp(e->id, s_plugin_detail_id) != 0) {
+          const ccord_catalog_entry *fb = ccord_contrib_catalog_find(ui->d.contrib, s_plugin_detail_id);
+          e = (fb && fb->has_detail) ? fb : nullptr;
+        }
         if (ui_in_rect(x, y, (ccord_rect){px, py, 86.0f, UIS_H_BTN_SM})) {
           s_plugin_detail_id[0] = '\0';
           return true;
@@ -1877,7 +1923,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         if (!e) {
           ccord_rect box = {px, py + 34.0f, pw, 128.0f};
           if (ui_in_rect(x, y, (ccord_rect){box.x + 16.0f, box.y + box.h - 44.0f, 120.0f, UIS_H_BTN})) {
-            ccord_contrib_catalog_refresh(ui->d.contrib);
+            ccord_contrib_catalog_fetch_detail(ui->d.contrib, s_plugin_detail_id);
             return true;
           }
           return false;
@@ -1906,34 +1952,58 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       }
 
       if (s_plugin_subtab == 1) {
-        // Discover Directory filter clicks
+        // Row 1: Search input + Search button + Sort toggle
+        ccord_rect r_q = {px, py, pw - 196.0f, UIS_H_BTN_SM};
+        ccord_rect r_go = {px + pw - 188.0f, py, 74.0f, UIS_H_BTN_SM};
+        ccord_rect r_sort = {px + pw - 106.0f, py, 106.0f, UIS_H_BTN_SM};
+        if (ui_in_rect(x, y, r_q)) {
+          s_plugin_search_focused = true;
+          return true;
+        }
+        s_plugin_search_focused = false;
+        if (ui_in_rect(x, y, r_go)) {
+          trigger_plugin_discover_query(ui, false);
+          return true;
+        }
+        if (ui_in_rect(x, y, r_sort)) {
+          s_plugin_sort_idx = (s_plugin_sort_idx + 1) % 5;
+          trigger_plugin_discover_query(ui, false);
+          return true;
+        }
+        py += 34.0f;
+
+        // Row 2: Tier filters + API Class 1 toggle (server-side query)
         float fx = px;
         static const float k_fw[4] = {54.0f, 76.0f, 76.0f, 88.0f};
         for (int t = 0; t < 4; t++) {
           if (ui_in_rect(x, y, (ccord_rect){fx, py, k_fw[t], UIS_H_BTN_SM})) {
             s_plugin_tier_filter = t;
+            trigger_plugin_discover_query(ui, false);
             return true;
           }
           fx += k_fw[t] + 6.0f;
         }
         if (ui_in_rect(x, y, (ccord_rect){fx + 4.0f, py, 126.0f, UIS_H_BTN_SM})) {
           s_plugin_class1_only = !s_plugin_class1_only;
+          trigger_plugin_discover_query(ui, false);
           return true;
         }
         py += 36.0f;
+
+        const ccord_catalog_status *cst = ccord_contrib_catalog_status(ui->d.contrib);
+        float bottom_lim = g->panel.y + g->panel.h - (cst && cst->has_more ? 52.0f : 16.0f);
         size_t cn = ui->d.contrib ? ccord_contrib_catalog_count(ui->d.contrib) : 0;
         for (size_t i = 0; i < cn; i++) {
           const ccord_catalog_entry *e = ccord_contrib_catalog_at(ui->d.contrib, i);
           if (!e) continue;
-          if (s_plugin_tier_filter > 0 && (int)e->tier != s_plugin_tier_filter) continue;
-          if (s_plugin_class1_only && e->api_class != 1) continue;
           bool has_w = e->warning_sev != CCORD_WARN_NONE && e->warning_title && e->warning_title[0];
           float ch = 98.0f + (has_w ? 20.0f : 0.0f);
-          if (py + ch > g->panel.y + g->panel.h - 16.0f) break;
+          if (py + ch > bottom_lim) break;
           ccord_rect btn_det = {px + pw - 200.0f, py + ch - 34.0f, 76.0f, UIS_H_BTN_SM};
           ccord_rect btn_act = {px + pw - 116.0f, py + ch - 34.0f, 102.0f, UIS_H_BTN_SM};
           if (ui_in_rect(x, y, btn_det)) {
             snprintf(s_plugin_detail_id, sizeof s_plugin_detail_id, "%s", e->id);
+            ccord_contrib_catalog_fetch_detail(ui->d.contrib, e->id);
             return true;
           }
           if (ui_in_rect(x, y, btn_act) && !e->installing && !e->bundled) {
@@ -1943,6 +2013,13 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
             }
           }
           py += ch + 10.0f;
+        }
+        if (cst && cst->has_more && !cst->loading_more) {
+          ccord_rect r_more = {px, g->panel.y + g->panel.h - 44.0f, 148.0f, UIS_H_BTN_SM};
+          if (ui_in_rect(x, y, r_more)) {
+            trigger_plugin_discover_query(ui, true);
+            return true;
+          }
         }
         return false;
       }
@@ -1974,9 +2051,9 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
           return true;
         }
         py += box.h + 28.0f;
-        size_t cn = ui->d.contrib ? ccord_contrib_catalog_count(ui->d.contrib) : 0;
-        for (size_t i = 0; i < cn; i++) {
-          const ccord_catalog_entry *e = ccord_contrib_catalog_at(ui->d.contrib, i);
+        size_t un = ui->d.contrib ? ccord_contrib_catalog_update_count(ui->d.contrib) : 0;
+        for (size_t i = 0; i < un; i++) {
+          const ccord_catalog_entry *e = ccord_contrib_catalog_update_at(ui->d.contrib, i);
           if (!e || !e->update_available) continue;
           float ch = 72.0f;
           if (py + ch > g->panel.y + g->panel.h - 16.0f) break;
@@ -1984,6 +2061,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
           if (ui_in_rect(x, y, btn_u) && !e->installing) {
             if (e->update_needs_review) {
               snprintf(s_plugin_detail_id, sizeof s_plugin_detail_id, "%s", e->id);
+              ccord_contrib_catalog_fetch_detail(ui->d.contrib, e->id);
             } else {
               ccord_contrib_catalog_install(ui->d.contrib, e->id);
             }
@@ -2034,6 +2112,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         if (rc.btn_update.w > 0.0f && ui_in_rect(x, y, rc.btn_update)) {
           if (p->update_needs_review) {
             snprintf(s_plugin_detail_id, sizeof s_plugin_detail_id, "%s", p->id);
+            ccord_contrib_catalog_fetch_detail(ui->d.contrib, p->id);
           } else {
             ccord_contrib_catalog_install(ui->d.contrib, p->id);
           }
@@ -2423,6 +2502,36 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (ui->settings_page == SP_PROFILE_EDIT && ui_settings_profile_key(ui, ev)) return true;
+  if (ui->settings_page == SP_PLUGINS && s_plugin_subtab == 1 && !s_plugin_detail_id[0] && s_plugin_search_focused) {
+    if (ev->type == CCORD_IN_TEXT && ev->text[0]) {
+      size_t cur = strlen(s_plugin_search);
+      size_t add = strlen(ev->text);
+      if (cur + add < sizeof s_plugin_search) {
+        memcpy(s_plugin_search + cur, ev->text, add + 1);
+        ui->dirty = true;
+      }
+      return true;
+    }
+    if (ev->type == CCORD_IN_KEY_DOWN) {
+      if (ev->key == CCORD_KEY_BACKSPACE) {
+        size_t cur = strlen(s_plugin_search);
+        while (cur > 0 && ((unsigned char)s_plugin_search[cur - 1] & 0xC0u) == 0x80u) cur--;
+        if (cur > 0) s_plugin_search[cur - 1] = '\0';
+        ui->dirty = true;
+        return true;
+      }
+      if (ev->key == CCORD_KEY_RETURN) {
+        trigger_plugin_discover_query(ui, false);
+        ui->dirty = true;
+        return true;
+      }
+      if (ev->key == CCORD_KEY_ESCAPE) {
+        s_plugin_search_focused = false;
+        ui->dirty = true;
+        return true;
+      }
+    }
+  }
   if (ui->settings_page == SP_APPEARANCE && ui->account_focus_field == 6) {
     // QuickCSS snippet editor: every edit applies live through the host and persists.
     ccord_text_edit *active = &ui->quickcss_edit;
@@ -2983,23 +3092,30 @@ static void draw_plugins(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 
   // Inline Catalog Plugin Detail view (also used by ccord://plugins/install/<id> deep links)
   if (s_plugin_detail_id[0]) {
-    const ccord_catalog_entry *e = ccord_contrib_catalog_find(ui->d.contrib, s_plugin_detail_id);
+    const ccord_catalog_entry *e = ccord_contrib_catalog_detail(ui->d.contrib);
+    if (!e || strcmp(e->id, s_plugin_detail_id) != 0) {
+      const ccord_catalog_entry *fb = ccord_contrib_catalog_find(ui->d.contrib, s_plugin_detail_id);
+      e = (fb && fb->has_detail) ? fb : nullptr;
+    }
     if (!e) {
       draw_button(ui, r, (ccord_rect){x, y, 86.0f, UIS_H_BTN_SM}, "Back", false);
       ccord_rect box = {x, y + 34.0f, w, 128.0f};
       uis_card(ui, r, box);
       char hdr[128];
-      if (!cst || !cst->has_loaded || cst->syncing) {
+      bool busy = cst && cst->detail_loading;
+      if (busy) {
         snprintf(hdr, sizeof hdr, "Loading %s from catalog...", s_plugin_detail_id);
       } else {
         snprintf(hdr, sizeof hdr, "Plugin not found in catalog: %s", s_plugin_detail_id);
       }
       ccord_text_draw_ellipsis(r, hdr, strlen(hdr), box.x + 16.0f, box.y + 18.0f, box.w - 32.0f, &ns);
-      const char *sub = (!cst || !cst->has_loaded || cst->syncing)
+      const char *sub = busy
                             ? "Fetching verified metadata and SHA-256 digest before prompting for install."
-                            : "Try refreshing the catalog, or verify the plugin ID on plugins.c-cord.org.";
+                            : (cst && cst->detail_error[0])
+                                  ? cst->detail_error
+                                  : "Verify the plugin ID on plugins.c-cord.org or click Retry.";
       ccord_text_draw_ellipsis(r, sub, strlen(sub), box.x + 16.0f, box.y + 46.0f, box.w - 32.0f, &ms);
-      draw_button(ui, r, (ccord_rect){box.x + 16.0f, box.y + box.h - 44.0f, 120.0f, UIS_H_BTN}, "Refresh", true);
+      draw_button(ui, r, (ccord_rect){box.x + 16.0f, box.y + box.h - 44.0f, 120.0f, UIS_H_BTN}, "Retry", true);
       return;
     } else {
       draw_button(ui, r, (ccord_rect){x, y, 86.0f, UIS_H_BTN_SM}, "Back", false);
@@ -3065,8 +3181,26 @@ static void draw_plugins(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
     }
   }
 
-  // Subtab 1: Discover Directory
+  // Subtab 1: Discover Directory (server-side FTS5 search + cursor pagination)
   if (s_plugin_subtab == 1) {
+    // Row 1: Search bar + Search button + Sort toggle
+    ccord_rect r_q = {x, y, w - 196.0f, UIS_H_BTN_SM};
+    ccord_rect r_go = {x + w - 188.0f, y, 74.0f, UIS_H_BTN_SM};
+    ccord_rect r_sort = {x + w - 106.0f, y, 106.0f, UIS_H_BTN_SM};
+    uis_plate(ui, r, r_q, uis_tokens_of(ui).r_control, COL(bg_input));
+    if (s_plugin_search_focused) {
+      ccord_draw_rect(r, (ccord_rect){r_q.x, r_q.y + r_q.h - 2.0f, r_q.w, 2.0f}, COL(brand));
+    }
+    const char *qdisp = s_plugin_search[0] ? s_plugin_search : "Search plugins (press Enter)...";
+    ccord_text_style qst = s_plugin_search[0] ? ns : ms;
+    ccord_text_draw_ellipsis(r, qdisp, strlen(qdisp), r_q.x + 10.0f, r_q.y + 6.0f, r_q.w - 20.0f, &qst);
+    draw_button(ui, r, r_go, "Search", true);
+    char slbl[32];
+    snprintf(slbl, sizeof slbl, "Sort: %s", plugin_sort_label(s_plugin_sort_idx));
+    draw_button(ui, r, r_sort, slbl, false);
+    y += 34.0f;
+
+    // Row 2: Tier chips + API Class 1 filter
     static const char *const k_flbl[4] = {"All", "Official", "Verified", "Unverified"};
     static const float k_fw[4] = {54.0f, 76.0f, 76.0f, 88.0f};
     float fx = x;
@@ -3081,20 +3215,17 @@ static void draw_plugins(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
     size_t cn = ui->d.contrib ? ccord_contrib_catalog_count(ui->d.contrib) : 0;
     if (cn == 0) {
       const char *msg = (cst && cst->status_msg[0]) ? cst->status_msg
-                      : "No plugins in catalog yet. Click Sync Catalog to fetch catalog.v1.json.";
+                      : "No plugins loaded yet. Click Sync Catalog or Search.";
       ccord_text_draw(r, msg, strlen(msg), x, y, &ms, w);
       return;
     }
-    size_t shown = 0;
+    float bottom_lim = g->panel.y + g->panel.h - (cst && cst->has_more ? 52.0f : 16.0f);
     for (size_t i = 0; i < cn; i++) {
       const ccord_catalog_entry *e = ccord_contrib_catalog_at(ui->d.contrib, i);
       if (!e) continue;
-      if (s_plugin_tier_filter > 0 && (int)e->tier != s_plugin_tier_filter) continue;
-      if (s_plugin_class1_only && e->api_class != 1) continue;
       bool has_w = e->warning_sev != CCORD_WARN_NONE && e->warning_title && e->warning_title[0];
       float ch = 98.0f + (has_w ? 20.0f : 0.0f);
-      if (y + ch > g->panel.y + g->panel.h - 16.0f) break;
-      shown++;
+      if (y + ch > bottom_lim) break;
       ccord_rect card = {x, y, w, ch};
       uis_card(ui, r, card);
       float nw = ccord_text_draw_ellipsis(r, e->name, strlen(e->name), card.x + 14.0f, card.y + 10.0f, w - 340.0f, &ns);
@@ -3113,8 +3244,9 @@ static void draw_plugins(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
       ccord_text_draw_ellipsis(r, e->description && e->description[0] ? e->description : "No description",
                                strlen(e->description && e->description[0] ? e->description : "No description"),
                                card.x + 14.0f, card.y + 34.0f, w - 28.0f, &ms);
-      char sub[192];
-      snprintf(sub, sizeof sub, "by @%s  |  %s", e->author, e->id);
+      char sub[224];
+      snprintf(sub, sizeof sub, "by @%s  |  %s  |  %llu downloads",
+               e->author, e->id, (unsigned long long)e->downloads);
       ccord_text_draw_ellipsis(r, sub, strlen(sub), card.x + 14.0f, card.y + ch - 28.0f, w - 224.0f, &vs);
       if (has_w) {
         ccord_color wc = e->warning_sev >= CCORD_WARN_DANGER ? COL(danger) : COL(status_idle);
@@ -3133,9 +3265,12 @@ static void draw_plugins(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
                   albl, !e->installed || e->update_available);
       y += ch + 10.0f;
     }
-    if (shown == 0) {
-      const char *none = "No catalog plugins match the selected filter.";
-      ccord_text_draw(r, none, strlen(none), x, y, &ms, w);
+    if (cst && cst->has_more) {
+      ccord_rect r_more = {x, g->panel.y + g->panel.h - 44.0f, 148.0f, UIS_H_BTN_SM};
+      draw_button(ui, r, r_more, cst->loading_more ? "Loading..." : "Load More", false);
+      char pinfo[96];
+      snprintf(pinfo, sizeof pinfo, "Loaded %zu of %zu plugins", cn, cst->total_count);
+      ccord_text_draw_ellipsis(r, pinfo, strlen(pinfo), x + 160.0f, r_more.y + 6.0f, w - 168.0f, &vs);
     }
     return;
   }
@@ -3170,10 +3305,10 @@ static void draw_plugins(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
     ccord_text_draw(r, uhdr, strlen(uhdr), x, y, &vs, 0.0f);
     y += 18.0f;
 
-    size_t cn = ui->d.contrib ? ccord_contrib_catalog_count(ui->d.contrib) : 0;
+    size_t un = ui->d.contrib ? ccord_contrib_catalog_update_count(ui->d.contrib) : 0;
     size_t listed = 0;
-    for (size_t i = 0; i < cn; i++) {
-      const ccord_catalog_entry *e = ccord_contrib_catalog_at(ui->d.contrib, i);
+    for (size_t i = 0; i < un; i++) {
+      const ccord_catalog_entry *e = ccord_contrib_catalog_update_at(ui->d.contrib, i);
       if (!e || !e->update_available) continue;
       float ch = 72.0f;
       if (y + ch > g->panel.y + g->panel.h - 16.0f) break;
@@ -3906,8 +4041,8 @@ bool ui_open_plugin_install_prompt(ccord_ui *ui, const char *plugin_id)
   s_plugin_log_id[0] = '\0';
   s_plugin_consent_id[0] = '\0';
   snprintf(s_plugin_detail_id, sizeof s_plugin_detail_id, "%s", plugin_id);
-  if (ui->d.contrib && !ccord_contrib_catalog_find(ui->d.contrib, plugin_id)) {
-    ccord_contrib_catalog_refresh(ui->d.contrib);
+  if (ui->d.contrib) {
+    ccord_contrib_catalog_fetch_detail(ui->d.contrib, plugin_id);
   }
   ui_notice(ui, "Review plugin before installing: %.48s", plugin_id);
   ui->dirty = true;

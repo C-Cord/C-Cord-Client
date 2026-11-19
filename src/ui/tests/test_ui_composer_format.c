@@ -560,6 +560,62 @@ static void test_spaces_caret_and_hit(void)
   ccord_text_edit_clear(&F.ui->edit);
 }
 
+static void test_mention_pills(void)
+{
+  ccord_error err;
+  CT_CHECK(ccord_session_select_guild(F.session, 2001, &err) == CCORD_OK);
+  CT_CHECK(ccord_session_select_channel(F.session, 3111, &err) == CCORD_OK);
+  frame(3);
+
+  const char *src = "hi @Ada @everyone #dev @nobody mail@Ada.org `@Ada` https://x.com/@Ada";
+  ccord_text_edit_clear(&F.ui->edit);
+  type_text(src);
+  if (F.ui->autocomplete_open) {
+    ccord_input_event esc = {.type = CCORD_IN_KEY_DOWN, .key = CCORD_KEY_ESCAPE};
+    (void)ccord_ui_handle_input(F.ui, &esc);
+  }
+  frame(2);
+  g_ntr = ui_composer_format_trace(g_tr, 256);
+  CT_CHECK(g_ntr > 0);
+
+  const ui_cf_trace_piece *p_ada = piece_of(src, "@Ada @everyone");
+  NEED(p_ada);
+  CT_CHECK((p_ada->flags & UI_CF_MENTION) && p_ada->has_bg && p_ada->st.font == CCORD_FONT_BOLD);
+  CT_CHECK(memcmp(&p_ada->st.color, &F.theme.c.text_link, sizeof(ccord_color)) == 0);
+
+  const ui_cf_trace_piece *p_ev = piece_of(src, "@everyone");
+  NEED(p_ev);
+  CT_CHECK((p_ev->flags & UI_CF_MENTION) && p_ev->has_bg);
+
+  const ui_cf_trace_piece *p_ch = piece_of(src, "#dev");
+  NEED(p_ch);
+  CT_CHECK((p_ch->flags & UI_CF_MENTION) && p_ch->has_bg);
+
+  const ui_cf_trace_piece *p_nob = piece_of(src, "@nobody");
+  NEED(p_nob);
+  CT_CHECK(!(p_nob->flags & UI_CF_MENTION) && !p_nob->has_bg);
+
+  const ui_cf_trace_piece *p_mail = piece_of(src, "mail@Ada.org");
+  NEED(p_mail);
+  CT_CHECK(!(p_mail->flags & UI_CF_MENTION) && !p_mail->has_bg);
+
+  const ui_cf_trace_piece *p_code = piece_of(src, "@Ada` https");
+  NEED(p_code);
+  CT_CHECK((p_code->flags & UI_CF_CODE) && !(p_code->flags & UI_CF_MENTION));
+
+  const ui_cf_trace_piece *p_url = piece_of(src, "https://x.com/@Ada");
+  NEED(p_url);
+  CT_CHECK(!(p_url->flags & UI_CF_MENTION) && !p_url->has_bg);
+
+  // Caret and hit-test stay aligned on the bold mention pill.
+  size_t ada_off = (size_t)(strstr(src, "@Ada") - src);
+  for (size_t pos = ada_off; pos <= ada_off + 4u; pos++) {
+    ccord_rect cr = ui_composer_format_caret(F.ui, F.renderer, src, strlen(src), 600.0f, pos);
+    CT_CHECK(ui_composer_format_hit(F.ui, F.renderer, src, strlen(src), 600.0f, cr.x + 0.2f, cr.y + cr.h * 0.5f) == pos);
+  }
+  ccord_text_edit_clear(&F.ui->edit);
+}
+
 int main(int argc, char **argv)
 {
   if (!setup(argc > 0 ? argv[0] : "test_ui_composer_format")) return 77;
@@ -571,6 +627,7 @@ int main(int argc, char **argv)
   test_cache_and_height();
   test_text_bytes_untouched();
   test_spaces_caret_and_hit();
+  test_mention_pills();
   teardown();
   return CT_RESULT("test_ui_composer_format");
 }

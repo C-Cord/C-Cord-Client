@@ -33,6 +33,9 @@ void ccord_layout_compute(const ccord_theme_metrics *m, float win_w, float win_h
 // Split variant: base layout plus a left stage pane carved out of the chat column. Falls back to
 // the plain layout (stage_split = false) when the column cannot hold both panes.
 void ccord_layout_compute_split(const ccord_theme_metrics *m, float win_w, float win_h, float composer_height, ccord_layout *out);
+// Split variant with an explicit stage width ratio (0..1; non-positive/out-of-range defaults to 0.55).
+void ccord_layout_compute_split_ratio(const ccord_theme_metrics *m, float win_w, float win_h,
+                                      float composer_height, float stage_ratio, ccord_layout *out);
 // Responsive mobile layout: chat fills the usable safe area above soft keyboard; server+channel navigation slides
 // from the left edge (left_drawer_t in 0..1) and member list slides from the right edge (right_drawer_t in 0..1).
 void ccord_layout_compute_mobile(const ccord_theme_metrics *m, float win_w, float win_h, float composer_height,
