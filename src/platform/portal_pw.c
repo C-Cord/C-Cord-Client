@@ -44,27 +44,99 @@ bool ccord_portal_pw_convert(uint8_t *dst, int dst_w, int dst_h, const ccord_por
   if (dst_w > INT_MAX / 4 || dst_h > INT_MAX / 4) return false;
   const int sw = src->width, sh = src->height;
   const size_t sstride = (size_t)src->stride;
-  // Same size + BGRA: rows are already in the target layout, just drop the padding.
-  if (dst_w == sw && dst_h == sh && src->format == CCORD_PORTAL_PW_BGRA) {
-    for (int y = 0; y < sh; y++)
-      memcpy(dst + (size_t)y * (size_t)sw * 4u, src->data + (size_t)y * sstride, (size_t)sw * 4u);
+  const size_t dstride = (size_t)dst_w * 4u;
+
+  // Fast 1:1 paths (zero per-pixel 64-bit divisions or per-pixel format branches).
+  if (dst_w == sw && dst_h == sh) {
+    if (src->format == CCORD_PORTAL_PW_BGRA) {
+      if (sstride == dstride) {
+        memcpy(dst, src->data, dstride * (size_t)sh);
+      } else {
+        for (int y = 0; y < sh; y++) memcpy(dst + (size_t)y * dstride, src->data + (size_t)y * sstride, dstride);
+      }
+      return true;
+    }
+    if (src->format == CCORD_PORTAL_PW_BGRX) {
+      if (sstride == dstride) {
+        const uint8_t *restrict p = src->data;
+        uint8_t *restrict o = dst;
+        const size_t total = (size_t)sw * (size_t)sh;
+        for (size_t i = 0; i < total; i++, p += 4, o += 4) {
+          uint32_t px;
+          memcpy(&px, p, 4u);
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+          px |= 0x000000FFu;
+#else
+          px |= 0xFF000000u;
+#endif
+          memcpy(o, &px, 4u);
+        }
+      } else {
+        for (int y = 0; y < sh; y++) {
+          const uint8_t *restrict p = src->data + (size_t)y * sstride;
+          uint8_t *restrict o = dst + (size_t)y * dstride;
+          for (int x = 0; x < sw; x++, p += 4, o += 4) {
+            uint32_t px;
+            memcpy(&px, p, 4u);
+#if defined(__BYTE_ORDER__) && defined(__ORDER_BIG_ENDIAN__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+            px |= 0x000000FFu;
+#else
+            px |= 0xFF000000u;
+#endif
+            memcpy(o, &px, 4u);
+          }
+        }
+      }
+      return true;
+    }
+    // CCORD_PORTAL_PW_RGBA -> BGRA (1:1 B<->R channel swap).
+    for (int y = 0; y < sh; y++) {
+      const uint8_t *restrict p = src->data + (size_t)y * sstride;
+      uint8_t *restrict o = dst + (size_t)y * dstride;
+      for (int x = 0; x < sw; x++, p += 4, o += 4) {
+        o[0] = p[2];
+        o[1] = p[1];
+        o[2] = p[0];
+        o[3] = p[3];
+      }
+    }
     return true;
   }
+
   for (int y = 0; y < dst_h; y++) {
     const int sy = (int)((int64_t)y * sh / dst_h);
     const uint8_t *srow = src->data + (size_t)sy * sstride;
-    uint8_t *drow = dst + (size_t)y * (size_t)dst_w * 4u;
-    for (int x = 0; x < dst_w; x++) {
-      const int sx = (int)((int64_t)x * sw / dst_w);
-      const uint8_t *p = srow + (size_t)sx * 4u;
-      uint8_t b, g, r, a;
-      switch (src->format) {
-        case CCORD_PORTAL_PW_RGBA: r = p[0]; g = p[1]; b = p[2]; a = p[3]; break;
-        case CCORD_PORTAL_PW_BGRX: b = p[0]; g = p[1]; r = p[2]; a = 255; break;
-        default:                   b = p[0]; g = p[1]; r = p[2]; a = p[3]; break;   // BGRA
+    uint8_t *drow = dst + (size_t)y * dstride;
+    if (src->format == CCORD_PORTAL_PW_RGBA) {
+      for (int x = 0; x < dst_w; x++) {
+        const int sx = (int)((int64_t)x * sw / dst_w);
+        const uint8_t *p = srow + (size_t)sx * 4u;
+        uint8_t *o = drow + (size_t)x * 4u;
+        o[0] = p[2];
+        o[1] = p[1];
+        o[2] = p[0];
+        o[3] = p[3];
       }
-      uint8_t *o = drow + (size_t)x * 4u;
-      o[0] = b; o[1] = g; o[2] = r; o[3] = a;
+    } else if (src->format == CCORD_PORTAL_PW_BGRX) {
+      for (int x = 0; x < dst_w; x++) {
+        const int sx = (int)((int64_t)x * sw / dst_w);
+        const uint8_t *p = srow + (size_t)sx * 4u;
+        uint8_t *o = drow + (size_t)x * 4u;
+        o[0] = p[0];
+        o[1] = p[1];
+        o[2] = p[2];
+        o[3] = 255u;
+      }
+    } else {
+      for (int x = 0; x < dst_w; x++) {
+        const int sx = (int)((int64_t)x * sw / dst_w);
+        const uint8_t *p = srow + (size_t)sx * 4u;
+        uint8_t *o = drow + (size_t)x * 4u;
+        o[0] = p[0];
+        o[1] = p[1];
+        o[2] = p[2];
+        o[3] = p[3];
+      }
     }
   }
   return true;
@@ -95,10 +167,17 @@ void ccord_portal_pw_staging_free(ccord_portal_pw_staging *st)
 
 // ---- reader -------------------------------------------------------------------------------------
 
+#if CCORD_HAVE_PIPEWIRE
+static void pw_swap_stage(void *ud, uint8_t **bgra, size_t *cap);
+#endif
+
 struct ccord_portal_pw {
   ccord_portal_pw_ops ops;
   bool started;
   bool failed;
+#if CCORD_HAVE_PIPEWIRE
+  bool own_remote;    // true only for ccord_portal_pw_open_remote() (enables O(1) stage/output buffer swap)
+#endif
   uint8_t *bgra;      // converted output, tightly packed
   size_t cap;         // bytes allocated in bgra (grows only)
   int w, h;
@@ -160,6 +239,17 @@ bool ccord_portal_pw_grab(ccord_portal_pw *pw, int timeout_ms, ccord_capture_fra
     ccord_error_set(err, CCORD_ERR_PROTOCOL, "portal-pw: malformed frame from producer");
     return false;
   }
+#if CCORD_HAVE_PIPEWIRE
+  if (pw->own_remote) {
+    // Real PipeWire backend converted directly into tightly packed BGRA in its staging buffer;
+    // swap buffer ownership in O(1) to eliminate the second full-screen copy.
+    pw_swap_stage(pw->ops.ud, &pw->bgra, &pw->cap);
+    pw->w = raw.width;
+    pw->h = raw.height;
+    *out = (ccord_capture_frame){.data = pw->bgra, .width = pw->w, .height = pw->h, .stride = pw->w * 4};
+    return true;
+  }
+#endif
   const size_t need = (size_t)raw.width * (size_t)raw.height * 4u;
   if (need > pw->cap) {
     uint8_t *nb = ccord_realloc(pw->bgra, need);
@@ -270,10 +360,26 @@ static void pw_process(void *ud)
       const uint32_t need = (uint32_t)((b->height - 1) * stride + b->width * 4);
       if (!((uint32_t)ch->flags & SPA_CHUNK_FLAG_CORRUPTED) && ch->size >= need && ch->offset <= d->maxsize &&
           need <= d->maxsize - ch->offset) {
-        // Copy while the buffer is still ours; the pointer dies at pw_stream_queue_buffer below.
-        if (ccord_portal_pw_stage(&b->stage, (const uint8_t *)d->data + ch->offset, need)) {
-          b->frame_stride = stride;
-          b->frame_seq++;
+        // Convert directly into owned tight BGRA storage while the buffer is still ours;
+        // the mmap pointer dies at pw_stream_queue_buffer below.
+        const size_t bgra_bytes = (size_t)b->width * (size_t)b->height * 4u;
+        if (bgra_bytes > b->stage.cap) {
+          uint8_t *nb = ccord_realloc(b->stage.data, bgra_bytes);
+          if (nb) {
+            b->stage.data = nb;
+            b->stage.cap = bgra_bytes;
+          }
+        }
+        if (b->stage.data && b->stage.cap >= bgra_bytes) {
+          ccord_portal_pw_raw raw_in = {.data = (const uint8_t *)d->data + ch->offset,
+                                        .width = b->width,
+                                        .height = b->height,
+                                        .stride = stride,
+                                        .format = b->format};
+          if (ccord_portal_pw_convert(b->stage.data, b->width, b->height, &raw_in)) {
+            b->frame_stride = b->width * 4;
+            b->frame_seq++;
+          }
         }
       }
     }
@@ -413,23 +519,58 @@ fail:
   return false;
 }
 
+static void pw_swap_stage(void *ud, uint8_t **bgra, size_t *cap)
+{
+  pw_backend *b = ud;
+  uint8_t *tmp = *bgra;
+  size_t tmp_cap = *cap;
+  *bgra = b->stage.data;
+  *cap = b->stage.cap;
+  b->stage.data = tmp;
+  b->stage.cap = tmp_cap;
+}
+
 static bool pw_read_frame(void *ud, int timeout_ms, ccord_portal_pw_raw *out, ccord_error *err)
 {
   pw_backend *b = ud;
-  const uint64_t deadline = ccord_clock_ms() + (uint64_t)(timeout_ms > 0 ? timeout_ms : 0);
-  while (b->seen_seq == b->frame_seq) {
+  if (timeout_ms == 0) {
+    // Non-blocking poll: drain already-queued PipeWire events without sleeping on the UI thread.
+    struct pw_loop *loop = pw_main_loop_get_loop(b->loop);
+    pw_loop_enter(loop);
+    for (int i = 0; i < 16 && b->seen_seq == b->frame_seq && !b->dead; i++) {
+      const int r = pw_loop_iterate(loop, 0);
+      if (r < 0) {
+        pw_loop_leave(loop);
+        ccord_error_set(err, CCORD_ERR_IO, "portal-pw: PipeWire loop error: %s", spa_strerror(r));
+        return false;
+      }
+      if (r == 0) break;
+    }
+    pw_loop_leave(loop);
     if (b->dead) {
       ccord_error_set(err, CCORD_ERR_IO, "portal-pw: PipeWire stream closed");
       return false;
     }
-    if (!pw_iterate_until(b, deadline, err)) return false;
+    if (b->seen_seq == b->frame_seq) {
+      ccord_error_set(err, CCORD_ERR_TIMEOUT, "portal-pw: no frame ready");
+      return false;
+    }
+  } else {
+    const uint64_t deadline = ccord_clock_ms() + (uint64_t)timeout_ms;
+    while (b->seen_seq == b->frame_seq) {
+      if (b->dead) {
+        ccord_error_set(err, CCORD_ERR_IO, "portal-pw: PipeWire stream closed");
+        return false;
+      }
+      if (!pw_iterate_until(b, deadline, err)) return false;
+    }
   }
   b->seen_seq = b->frame_seq;
   *out = (ccord_portal_pw_raw){.data = b->stage.data,
                                .width = b->width,
                                .height = b->height,
                                .stride = b->frame_stride,
-                               .format = b->format};
+                               .format = CCORD_PORTAL_PW_BGRA};
   return true;
 }
 
@@ -450,7 +591,11 @@ ccord_portal_pw *ccord_portal_pw_open_remote(ccord_error *err)
   b->fd = -1;
   const ccord_portal_pw_ops ops = {.ud = b, .connect = pw_connect, .read_frame = pw_read_frame, .destroy = pw_destroy};
   ccord_portal_pw *pw = ccord_portal_pw_create(&ops, err);
-  if (!pw) free(b);
+  if (!pw) {
+    free(b);
+    return nullptr;
+  }
+  pw->own_remote = true;
   return pw;
 }
 #else   // !CCORD_HAVE_PIPEWIRE

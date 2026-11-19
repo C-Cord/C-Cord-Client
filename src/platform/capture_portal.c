@@ -124,8 +124,8 @@ static bool portal_grab(ccord_capture *base, ccord_capture_frame *out)
   portal_cap *c = (portal_cap *)base;
   if (!c || !c->pw || !out) return false;
   ccord_error err;
-  // capture.h: grab never blocks longer than ~100 ms.
-  if (ccord_portal_pw_grab(c->pw, 100, out, &err)) return true;
+  // Non-blocking poll so Wayland frame grabs never stall the UI/media thread waiting on PipeWire.
+  if (ccord_portal_pw_grab(c->pw, 0, out, &err)) return true;
   // TIMEOUT (no frame yet) and NOMEM (transient allocation failure, portal_pw.h) are retryable;
   // only a dead stream latches the capture failed.
   if (err.code != CCORD_ERR_TIMEOUT && err.code != CCORD_ERR_NOMEM) c->failed = true;

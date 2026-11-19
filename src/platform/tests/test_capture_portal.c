@@ -776,7 +776,7 @@ static void test_wiring_happy(void)
     CT_CHECK(c->src.width == 64 && c->src.height == 48);   // negotiated size reported on the source
     ccord_capture_frame f;
     CT_CHECK(ccord_capture_grab(c, &f));
-    CT_CHECK(w.prod.read_timeouts[0] == 100);   // capture.h: grab blocks at most ~100 ms
+    CT_CHECK(w.prod.read_timeouts[0] == 0);   // non-blocking grab (never stalls the UI thread)
     CT_CHECK(f.width == 64 && f.height == 48 && f.stride == 64 * 4);
     for (int y = 0; y < 48; y += 7)
       for (int x = 0; x < 64; x += 9)
