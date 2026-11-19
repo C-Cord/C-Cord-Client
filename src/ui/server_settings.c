@@ -336,10 +336,26 @@ struct ui_server_settings {
   size_t audit_actor_count;
   ccord_id audit_actor_ids[SS_AUDIT_ACTORS_MAX];
   char audit_actor_names[SS_AUDIT_ACTORS_MAX][CCORD_NAME_MAX_BYTES + 1];
+  bool audit_actors_valid;
+  uint64_t audit_actors_rev;
+  ccord_id audit_actors_guild;
   ccord_id transfer_user_id;
   // Members & Prune & Mod View
   ccord_id member_role_filter;
   ccord_id member_role_picker_uid;
+  bool mem_cache_valid;
+  uint64_t mem_cache_rev;
+  ccord_id mem_cache_guild;
+  ccord_id mem_cache_role_filter;
+  char mem_cache_needle[68];
+  size_t *mem_cache_idx;
+  size_t mem_cache_count;
+  size_t mem_cache_cap;
+  uint64_t mem_role_w_rev;
+  float mem_role_w_fs;
+  float *mem_role_w;
+  size_t mem_role_w_count;
+  size_t mem_role_w_cap;
   ccord_id modview_uid;
   float modview_scroll, modview_content_h;
   ccord_rect modview_rect;
@@ -528,6 +544,8 @@ void ui_server_settings_destroy(ccord_ui *ui)
   ccord_text_edit_free(&ui->ss->ob_prompt_title);
   ccord_text_edit_free(&ui->ss->ob_opt_title);
   ccord_text_edit_free(&ui->ss->ob_opt_desc);
+  ccord_free(ui->ss->mem_cache_idx);
+  ccord_free(ui->ss->mem_role_w);
   ccord_free(ui->ss);
   ui->ss = nullptr;
 }
@@ -1205,6 +1223,7 @@ static void ss_request(ccord_ui *ui, ss_page p, bool force)
   ss->requested[p] = true;
   ss->failed[p] = false;
   ss->requested_ms[p] = ui->now_ms;
+  if (p == SS_AUDIT) ss->audit_actors_valid = false;
   ui_admin_submit(ui, &req);
 }
 
@@ -1266,9 +1285,9 @@ void ui_server_settings_scroll_debug(const ccord_ui *ui, float *scroll, float *r
 void ui_server_settings_open(ccord_ui *ui, ccord_id guild)
 {
   if (!ui || !ui_server_settings_available(ui, guild)) return;
+  if (ui->ss && ui->ss->open && ui->ss->guild_id != guild) ui_server_settings_close(ui);
   struct ui_server_settings *ss = ss_ensure(ui);
   if (!ss) return;
-  if (ss->open && ss->guild_id != guild) ui_server_settings_close(ui);
   ss->open = true;
   ss->guild_id = guild;
   ui->mobile_server_settings_detail = false;
@@ -1337,6 +1356,9 @@ void ui_server_settings_open(ccord_ui *ui, ccord_id guild)
   ss->audit_action = 0;
   ss->audit_expanded_id = CCORD_ID_NONE;
   ss->audit_actor_count = 0;
+  ss->audit_actors_valid = false;
+  ss->mem_cache_valid = false;
+  ss->mem_role_w_count = 0;
   ss->transfer_user_id = CCORD_ID_NONE;
   ss->member_role_filter = CCORD_ID_NONE;
   ss->member_role_picker_uid = CCORD_ID_NONE;
@@ -1386,7 +1408,8 @@ void ui_server_settings_open(ccord_ui *ui, ccord_id guild)
   ui_menu_close(ui);
   ui->member_popover_open = false;
   ss_sync(ui);
-  ss_request(ui, ss->page, false);
+  if (!ui_server_settings_is_open(ui)) return;
+  ss_request(ui, ui->ss->page, false);
   ui->dirty = true;
 }
 
@@ -1406,22 +1429,9 @@ void ui_server_settings_open_modview(ccord_ui *ui, ccord_id guild, ccord_id user
 void ui_server_settings_close(ccord_ui *ui)
 {
   if (!ui || !ui->ss || !ui->ss->open) return;
-  struct ui_server_settings *ss = ui->ss;
-  ss->open = false;
-  ss->focus = SSF_NONE;
-  ss->edit_expr_id = CCORD_ID_NONE;
-  ss->am_editing = false;
-  ss->am_edit_id = CCORD_ID_NONE;
-  ss->am_del_confirm_id = CCORD_ID_NONE;
-  ss->wh_edit_id = CCORD_ID_NONE;
-  ss->wh_del_confirm_id = CCORD_ID_NONE;
-  ss->ob_editing_prompt = false;
-  ss->modview_uid = CCORD_ID_NONE;
-  ss->prune_open = false;
-  ss->prune_confirm = false;
-  ss_free_ov_images(ss);
-  ss_free_expr_uploads(ss);
-  if (ui->d.store) ccord_store_forget_admin_lists(ui->d.store, ss->guild_id);   // lists are volatile, never kept around
+  ccord_id gid = ui->ss->guild_id;
+  if (ui->d.store) ccord_store_forget_admin_lists(ui->d.store, gid);   // lists are volatile, never kept around
+  ui_server_settings_destroy(ui);
   ui->dirty = true;
 }
 
@@ -2532,11 +2542,25 @@ static void ss_remember_audit_actor(struct ui_server_settings *ss, ccord_id uid,
   (void)snprintf(ss->audit_actor_names[idx], sizeof ss->audit_actor_names[idx], "%s", name ? name : "");
 }
 
+static bool ss_audit_actors_all_named(const struct ui_server_settings *ss)
+{
+  if (ss->audit_actor_count < SS_AUDIT_ACTORS_MAX) return false;
+  for (size_t i = 0; i < ss->audit_actor_count; i++) {
+    if (ss->audit_actor_names[i][0] == '\0') return false;
+  }
+  return true;
+}
+
 static void ss_populate_audit_actors(ccord_ui *ui)
 {
   struct ui_server_settings *ss = ui->ss;
+  uint64_t rev = ccord_store_revision(ui->d.store);
+  if (ss->audit_actors_valid && ss->audit_actors_rev == rev && ss->audit_actors_guild == ss->guild_id) {
+    return;
+  }
   size_t nm = ccord_store_member_count(ui->d.store, ss->guild_id);
   for (size_t i = 0; i < nm; i++) {
+    if (ss_audit_actors_all_named(ss)) break;
     const ccord_member *m = ccord_store_member_at(ui->d.store, ss->guild_id, i);
     if (!m) continue;
     ss_remember_audit_actor(ss, m->user_id, ui_member_display_name(ui, ss->guild_id, m->user_id));
@@ -2544,8 +2568,12 @@ static void ss_populate_audit_actors(ccord_ui *ui)
   size_t na = 0;
   const ccord_audit_entry *log = ccord_store_audit(ui->d.store, ss->guild_id, &na);
   for (size_t i = 0; log && i < na; i++) {
+    if (ss_audit_actors_all_named(ss)) break;
     ss_remember_audit_actor(ss, log[i].user_id, log[i].user_name);
   }
+  ss->audit_actors_rev = rev;
+  ss->audit_actors_guild = ss->guild_id;
+  ss->audit_actors_valid = true;
 }
 
 static const char *ss_audit_actor_label(const ccord_ui *ui, ccord_id uid)
@@ -3530,6 +3558,178 @@ static void draw_prune_panel(ss_cx *c, float x, float w, float *py)
   *py = y + 20.0f;
 }
 
+static void ss_ensure_member_cache(const ccord_ui *ui, struct ui_server_settings *ss, const char *needle)
+{
+  uint64_t rev = ccord_store_revision(ui->d.store);
+  if (ss->mem_cache_valid && ss->mem_cache_rev == rev && ss->mem_cache_guild == ss->guild_id &&
+      ss->mem_cache_role_filter == ss->member_role_filter &&
+      strncmp(ss->mem_cache_needle, needle, sizeof ss->mem_cache_needle) == 0) {
+    return;
+  }
+  ss->mem_cache_count = 0;
+  size_t total_members = ccord_store_member_count(ui->d.store, ss->guild_id);
+  bool has_needle = needle && needle[0] != '\0';
+  bool has_role_filter = ss->member_role_filter != CCORD_ID_NONE;
+  for (size_t i = 0; i < total_members; i++) {
+    const ccord_member *m = ccord_store_member_at(ui->d.store, ss->guild_id, i);
+    if (!m) continue;
+    if (has_needle) {
+      const ccord_user *u = ccord_store_user(ui->d.store, m->user_id);
+      const char *dname = ui_member_display_name(ui, ss->guild_id, m->user_id);
+      const char *uname = (u && u->name) ? u->name : "";
+      char idbuf[24];
+      (void)ccord_id_format(m->user_id, idbuf);
+      if (!ss_contains_ci(dname, needle) && !ss_contains_ci(uname, needle) &&
+          !ss_contains_ci(m->nick, needle) && !ss_contains_ci(idbuf, needle)) {
+        continue;
+      }
+    }
+    if (has_role_filter) {
+      const ccord_id *mroles = nullptr;
+      size_t nmroles = 0;
+      bool roles_known = ccord_store_member_roles(ui->d.store, ss->guild_id, m->user_id, &mroles, &nmroles);
+      if (!roles_known || !ss_id_in_array(mroles, nmroles, ss->member_role_filter)) continue;
+    }
+    if (ss->mem_cache_count == ss->mem_cache_cap) {
+      size_t ncap = ss->mem_cache_cap ? ss->mem_cache_cap * 2u : 64u;
+      size_t *nv = ccord_realloc(ss->mem_cache_idx, ncap * sizeof *nv);
+      if (!nv) break;
+      ss->mem_cache_idx = nv;
+      ss->mem_cache_cap = ncap;
+    }
+    ss->mem_cache_idx[ss->mem_cache_count++] = i;
+  }
+  ss->mem_cache_rev = rev;
+  ss->mem_cache_guild = ss->guild_id;
+  ss->mem_cache_role_filter = ss->member_role_filter;
+  (void)snprintf(ss->mem_cache_needle, sizeof ss->mem_cache_needle, "%s", needle ? needle : "");
+  ss->mem_cache_valid = true;
+}
+
+static void draw_member_row(ss_cx *c, const ccord_guild *gd, const ccord_member *m, const ccord_role *roles,
+                            size_t nroles, bool roles_known, const ccord_id *mroles, size_t nmroles,
+                            bool picker_open, bool is_owner, bool can_manage_roles, ccord_id self_id, ccord_rect row)
+{
+  ccord_ui *ui = c->ui;
+  struct ui_server_settings *ss = c->ss;
+  float w = row.w;
+  const ccord_user *u = ccord_store_user(ui->d.store, m->user_id);
+  const char *dname = ui_member_display_name(ui, ss->guild_id, m->user_id);
+  const char *uname = (u && u->name) ? u->name : "";
+  char idbuf[24];
+  (void)ccord_id_format(m->user_id, idbuf);
+
+  if (ss->modview_uid == m->user_id) {
+    uis_list_row_fill(ui, c->r, (ccord_rect){row.x - 4.0f, row.y + 2.0f, row.w + 8.0f, row.h - 4.0f},
+                      (uis_state){.selected = true}, "ssmodrow", m->user_id);
+  }
+
+  ui_draw_avatar(ui, c->r, u, row.x + 18.0f, row.y + 24.0f, 30.0f, (ccord_color){0, 0, 0, 0}, false);
+
+  // Top line: display name + badges + joined_at + account age
+  char title_line[CCORD_NAME_MAX_BYTES * 2 + 64];
+  bool timed_out = m->timeout_until_ms > ui->now_unix_ms;
+  (void)snprintf(title_line, sizeof title_line, "%s%s%s%s", dname,
+                 m->user_id == gd->owner_id ? " [Owner]" : "",
+                 (u && u->is_bot) ? " [BOT]" : "",
+                 timed_out ? " [Timed Out]" : "");
+  float act_bar_w = is_owner && m->user_id != self_id ? 298.0f : 236.0f;
+  (void)ss_text(c, title_line, row.x + 42.0f, row.y + 6.0f, M(font_size_base), true,
+                timed_out ? COL(danger) : COL(text_header), fmaxf(60.0f, w - 46.0f - act_bar_w));
+
+  char joined_str[32], acct_str[32], meta_line[160];
+  if (m->joined_at_ms > 0) ss_format_date_ms(m->joined_at_ms, joined_str, sizeof joined_str);
+  else (void)snprintf(joined_str, sizeof joined_str, "-");
+  int64_t acct_ms = 1420070400000LL + (int64_t)(m->user_id >> 22);
+  ss_format_date_ms(acct_ms, acct_str, sizeof acct_str);
+  (void)snprintf(meta_line, sizeof meta_line, "@%s  -  Joined: %s  -  Discord: %s",
+                 uname[0] ? uname : idbuf, joined_str, acct_str);
+  (void)ss_text(c, meta_line, row.x + 42.0f, row.y + 25.0f, SS_CAP(c), false, COL(text_muted),
+                fmaxf(60.0f, w - 46.0f - act_bar_w));
+
+  // Action buttons on right side of row
+  float bx = row.x + w;
+  char nm[SS_NAME_LEN];
+  if (is_owner && m->user_id != self_id) {
+    bx -= 58.0f;
+    const char *xf_why = (u && u->is_bot) ? "Bots cannot own a server." : nullptr;
+    ss_button(c, (ccord_rect){bx, row.y + 8.0f, 58.0f, 26.0f}, "Owner", BTN_SECONDARY, xf_why, A_MEM_TRANSFER,
+              m->user_id, NAME(nm, "member-transfer:%llu", (unsigned long long)m->user_id));
+    bx -= 4.0f;
+  }
+  bx -= 48.0f;
+  ss_button(c, (ccord_rect){bx, row.y + 8.0f, 48.0f, 26.0f}, "Ban", BTN_DANGER,
+            ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_BAN), A_MEM_BAN, m->user_id,
+            NAME(nm, "member-ban:%llu", (unsigned long long)m->user_id));
+  bx -= 52.0f;
+  ss_button(c, (ccord_rect){bx, row.y + 8.0f, 48.0f, 26.0f}, "Kick", BTN_SECONDARY,
+            ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_KICK), A_MEM_KICK, m->user_id,
+            NAME(nm, "member-kick:%llu", (unsigned long long)m->user_id));
+  bx -= 68.0f;
+  ss_button(c, (ccord_rect){bx, row.y + 8.0f, 64.0f, 26.0f}, timed_out ? "Unmute" : "Timeout", BTN_SECONDARY,
+            ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_TIMEOUT), A_MEM_TIMEOUT, m->user_id,
+            NAME(nm, "member-timeout:%llu", (unsigned long long)m->user_id));
+  bx -= 68.0f;
+  ss_button(c, (ccord_rect){bx, row.y + 8.0f, 64.0f, 26.0f}, "Mod View", BTN_SECONDARY, nullptr, A_MEM_MODVIEW,
+            m->user_id, NAME(nm, "member-modview:%llu", (unsigned long long)m->user_id));
+
+  // Inline role chips (+/-)
+  float rx = row.x + 42.0f, ry = row.y + 44.0f;
+  if (roles_known) {
+    for (size_t mi = 0; mi < nmroles; mi++) {
+      const ccord_role *ro = ccord_store_role(ui->d.store, ss->guild_id, mroles[mi]);
+      if (!ro || ro->id == ss->guild_id) continue;
+      ccord_perm_verdict rv = ss_role_verdict(ui, ss->guild_id, ro->id, true);
+      const char *rwhy = rv == CCORD_PERM_ALLOWED ? nullptr : ccord_perm_verdict_text(rv, CCORD_PERM_ACT_EDIT_ROLES);
+      char clbl[CCORD_NAME_MAX_BYTES + 8];
+      (void)snprintf(clbl, sizeof clbl, "%s%s", ro->name ? ro->name : "role", rwhy == nullptr ? " x" : "");
+      // The pill is a uis_chip; its inset holds the role colour dot on the left edge.
+      float cw = fminf(150.0f, ss_text_width(c, clbl, SS_CAP(c), false) + 16.0f) + 12.0f;
+      if (rx + cw > row.x + w - 58.0f) break;
+      ccord_rect pill = {rx, ry, cw, 21.0f};
+      bool phov = ss_hit_add(c, pill, A_MEM_ROLE_DEL, m->user_id, rwhy,
+                             NAME(nm, "member-role-del:%llu:%llu", (unsigned long long)m->user_id,
+                                  (unsigned long long)ro->id)) && rwhy == nullptr;
+      ccord_color pcol = ro->color ? ss_rgb(ro->color) : COL(text_secondary);
+      uis_chip(ui, c->r, pill, clbl, (uis_state){.hover = phov, .disabled = rwhy != nullptr}, "ssmrole", ro->id);
+      ccord_draw_circle(c->r, pill.x + 5.0f, pill.y + pill.h * 0.5f, 2.5f, pcol);
+      rx += cw + 5.0f;
+    }
+    if (can_manage_roles && roles && nroles > 1u) {
+      ccord_rect add_rc = {rx, ry, 52.0f, 21.0f};
+      ss_button(c, add_rc, picker_open ? "- Role" : "+ Role", BTN_SECONDARY, nullptr, A_MEM_ROLE_PICK, m->user_id,
+                NAME(nm, "member-role-pick:%llu", (unsigned long long)m->user_id));
+    }
+  } else {
+    (void)ss_text(c, "Roles not loaded", rx, ry + 3.0f, SS_CAP(c), false, COL(text_muted), 140.0f);
+  }
+
+  if (picker_open) {
+    float px = row.x + 42.0f, py_pick = row.y + 72.0f;
+    size_t offered = 0;
+    for (size_t ri = 0; ri < nroles; ri++) {
+      const ccord_role *ro = &roles[ri];
+      if (ro->id == ss->guild_id || ss_id_in_array(mroles, nmroles, ro->id)) continue;
+      ccord_perm_verdict rv = ss_role_verdict(ui, ss->guild_id, ro->id, true);
+      const char *rwhy = rv == CCORD_PERM_ALLOWED ? nullptr : ccord_perm_verdict_text(rv, CCORD_PERM_ACT_EDIT_ROLES);
+      char albl[CCORD_NAME_MAX_BYTES + 8];
+      (void)snprintf(albl, sizeof albl, "+ %s", ro->name ? ro->name : "role");
+      float cw = fminf(150.0f, ss_text_width(c, albl, SS_CAP(c), false) + 18.0f);
+      if (px + cw > row.x + w) break;
+      ss_button(c, (ccord_rect){px, py_pick, cw, 22.0f}, albl, BTN_SECONDARY, rwhy, A_MEM_ROLE_ADD, m->user_id,
+                NAME(nm, "member-role-add:%llu:%llu", (unsigned long long)m->user_id, (unsigned long long)ro->id));
+      px += cw + 6.0f;
+      offered++;
+    }
+    if (offered == 0) {
+      (void)ss_text(c, "Member already holds every role.", px, py_pick + 3.0f, SS_CAP(c), false,
+                    COL(text_muted), w - 48.0f);
+    }
+  }
+
+  uis_divider(ui, c->r, row.x, row.y + row.h - 1.0f, row.w);
+}
+
 static void draw_members(ss_cx *c, const ss_geom *g)
 {
   ccord_ui *ui = c->ui;
@@ -3568,19 +3768,45 @@ static void draw_members(ss_cx *c, const ss_geom *g)
                "Search by display name, username, or ID", nullptr, "member-search");
   y += 36.0f + 12.0f;
 
-  // Role filter chips
+  // Role filter chips (chip widths cached per store revision + font size to avoid 250x text measures/frame)
   size_t nroles = 0;
   const ccord_role *roles = ss_roles(ui, &nroles);
   if (roles && nroles > 1u) {
+    uint64_t rev = ccord_store_revision(ui->d.store);
+    float cap_fs = SS_CAP(c);
+    if (ss->mem_role_w_count != nroles || ss->mem_role_w_rev != rev || ss->mem_role_w_fs != cap_fs) {
+      if (nroles > ss->mem_role_w_cap) {
+        float *nw = ccord_realloc(ss->mem_role_w, nroles * sizeof *nw);
+        if (nw) {
+          ss->mem_role_w = nw;
+          ss->mem_role_w_cap = nroles;
+        }
+      }
+      if (ss->mem_role_w && ss->mem_role_w_cap >= nroles) {
+        for (size_t ri = 0; ri < nroles; ri++) {
+          if (roles[ri].id == ss->guild_id) {
+            ss->mem_role_w[ri] = 0.0f;
+          } else {
+            const char *rname = roles[ri].name && roles[ri].name[0] ? roles[ri].name : "role";
+            ss->mem_role_w[ri] = fminf(160.0f, ss_text_width(c, rname, cap_fs, false) + 22.0f);
+          }
+        }
+        ss->mem_role_w_rev = rev;
+        ss->mem_role_w_fs = cap_fs;
+        ss->mem_role_w_count = nroles;
+      }
+    }
     float cx = x;
-    float all_w = ss_text_width(c, "All Roles", SS_CAP(c), false) + 22.0f;
+    float all_w = ss_text_width(c, "All Roles", cap_fs, false) + 22.0f;
     ss_chip(c, (ccord_rect){cx, y, all_w, 25.0f}, "All Roles", ss->member_role_filter == CCORD_ID_NONE,
             A_MEM_ROLE_FILTER, CCORD_ID_NONE, "member-filter:0");
     cx += all_w + 6.0f;
     for (size_t ri = 0; ri < nroles; ri++) {
       if (roles[ri].id == ss->guild_id) continue;
       const char *rname = roles[ri].name && roles[ri].name[0] ? roles[ri].name : "role";
-      float cw = fminf(160.0f, ss_text_width(c, rname, SS_CAP(c), false) + 22.0f);
+      float cw = (ss->mem_role_w && ri < ss->mem_role_w_count)
+                   ? ss->mem_role_w[ri]
+                   : fminf(160.0f, ss_text_width(c, rname, cap_fs, false) + 22.0f);
       if (cx + cw > x + w && cx > x) { cx = x; y += 29.0f; }
       char nm[SS_NAME_LEN];
       ss_chip(c, (ccord_rect){cx, y, cw, 25.0f}, rname, ss->member_role_filter == roles[ri].id, A_MEM_ROLE_FILTER,
@@ -3591,145 +3817,56 @@ static void draw_members(ss_cx *c, const ss_geom *g)
   }
 
   const char *needle = ccord_text_edit_cstr(&ss->member_search);
-  size_t shown = 0;
+  ss_ensure_member_cache(ui, ss, needle);
+  size_t shown = ss->mem_cache_count;
   bool is_owner = ss_is_owner(ui, ss->guild_id);
   bool can_manage_roles = ccord_perm_has(self_perms, CCORD_PERM_MANAGE_ROLES);
 
-  for (size_t i = 0; i < total_members; i++) {
-    const ccord_member *m = ccord_store_member_at(ui->d.store, ss->guild_id, i);
-    if (!m) continue;
-    const ccord_user *u = ccord_store_user(ui->d.store, m->user_id);
-    const char *dname = ui_member_display_name(ui, ss->guild_id, m->user_id);
-    const char *uname = (u && u->name) ? u->name : "";
-    char idbuf[24];
-    (void)ccord_id_format(m->user_id, idbuf);
-    if (!ss_contains_ci(dname, needle) && !ss_contains_ci(uname, needle) &&
-        !ss_contains_ci(m->nick, needle) && !ss_contains_ci(idbuf, needle)) {
-      continue;
+  if (ss->member_role_picker_uid == CCORD_ID_NONE) {
+    // Fixed 72px rows: O(1) jump to the first visible row so off-screen members do zero store/chip work.
+    float list_y0 = y;
+    size_t first_k = 0;
+    if (list_y0 < c->clip.y) {
+      float skip = floorf((c->clip.y - list_y0) / 72.0f);
+      if (skip > 0.0f) first_k = (size_t)skip;
     }
-    const ccord_id *mroles = nullptr;
-    size_t nmroles = 0;
-    bool roles_known = ccord_store_member_roles(ui->d.store, ss->guild_id, m->user_id, &mroles, &nmroles);
-    if (ss->member_role_filter != CCORD_ID_NONE) {
-      if (!roles_known || !ss_id_in_array(mroles, nmroles, ss->member_role_filter)) continue;
+    if (first_k > shown) first_k = shown;
+    for (size_t k = first_k; k < shown; k++) {
+      float row_y = list_y0 + (float)k * 72.0f;
+      if (row_y >= c->clip.y + c->clip.h) break;
+      ccord_rect row = {x, row_y, w, 72.0f};
+      if (!ss_visible(c, row)) continue;
+      const ccord_member *m = ccord_store_member_at(ui->d.store, ss->guild_id, ss->mem_cache_idx[k]);
+      if (!m) continue;
+      const ccord_id *mroles = nullptr;
+      size_t nmroles = 0;
+      bool roles_known = ccord_store_member_roles(ui->d.store, ss->guild_id, m->user_id, &mroles, &nmroles);
+      draw_member_row(c, gd, m, roles, nroles, roles_known, mroles, nmroles, false, is_owner, can_manage_roles,
+                      self_id, row);
     }
-
-    shown++;
-    bool picker_open = (ss->member_role_picker_uid == m->user_id) && roles_known && roles && nroles > 1u;
-    float row_h = picker_open ? 108.0f : 72.0f;
-    ccord_rect row = {x, y, w, row_h};
-    y += row_h;
-    if (!ss_visible(c, row)) continue;
-
-    if (ss->modview_uid == m->user_id) {
-      uis_list_row_fill(ui, c->r, (ccord_rect){row.x - 4.0f, row.y + 2.0f, row.w + 8.0f, row.h - 4.0f},
-                        (uis_state){.selected = true}, "ssmodrow", m->user_id);
-    }
-
-    ui_draw_avatar(ui, c->r, u, row.x + 18.0f, row.y + 24.0f, 30.0f, (ccord_color){0, 0, 0, 0}, false);
-
-    // Top line: display name + badges + joined_at + account age
-    char title_line[CCORD_NAME_MAX_BYTES * 2 + 64];
-    bool timed_out = m->timeout_until_ms > ui->now_unix_ms;
-    (void)snprintf(title_line, sizeof title_line, "%s%s%s%s", dname,
-                   m->user_id == gd->owner_id ? " [Owner]" : "",
-                   (u && u->is_bot) ? " [BOT]" : "",
-                   timed_out ? " [Timed Out]" : "");
-    float act_bar_w = is_owner && m->user_id != self_id ? 298.0f : 236.0f;
-    (void)ss_text(c, title_line, row.x + 42.0f, row.y + 6.0f, M(font_size_base), true,
-                  timed_out ? COL(danger) : COL(text_header), fmaxf(60.0f, w - 46.0f - act_bar_w));
-
-    char joined_str[32], acct_str[32], meta_line[160];
-    if (m->joined_at_ms > 0) ss_format_date_ms(m->joined_at_ms, joined_str, sizeof joined_str);
-    else (void)snprintf(joined_str, sizeof joined_str, "-");
-    int64_t acct_ms = 1420070400000LL + (int64_t)(m->user_id >> 22);
-    ss_format_date_ms(acct_ms, acct_str, sizeof acct_str);
-    (void)snprintf(meta_line, sizeof meta_line, "@%s  -  Joined: %s  -  Discord: %s",
-                   uname[0] ? uname : idbuf, joined_str, acct_str);
-    (void)ss_text(c, meta_line, row.x + 42.0f, row.y + 25.0f, SS_CAP(c), false, COL(text_muted),
-                  fmaxf(60.0f, w - 46.0f - act_bar_w));
-
-    // Action buttons on right side of row
-    float bx = row.x + w;
-    char nm[SS_NAME_LEN];
-    if (is_owner && m->user_id != self_id) {
-      bx -= 58.0f;
-      const char *xf_why = (u && u->is_bot) ? "Bots cannot own a server." : nullptr;
-      ss_button(c, (ccord_rect){bx, row.y + 8.0f, 58.0f, 26.0f}, "Owner", BTN_SECONDARY, xf_why, A_MEM_TRANSFER,
-                m->user_id, NAME(nm, "member-transfer:%llu", (unsigned long long)m->user_id));
-      bx -= 4.0f;
-    }
-    bx -= 48.0f;
-    ss_button(c, (ccord_rect){bx, row.y + 8.0f, 48.0f, 26.0f}, "Ban", BTN_DANGER,
-              ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_BAN), A_MEM_BAN, m->user_id,
-              NAME(nm, "member-ban:%llu", (unsigned long long)m->user_id));
-    bx -= 52.0f;
-    ss_button(c, (ccord_rect){bx, row.y + 8.0f, 48.0f, 26.0f}, "Kick", BTN_SECONDARY,
-              ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_KICK), A_MEM_KICK, m->user_id,
-              NAME(nm, "member-kick:%llu", (unsigned long long)m->user_id));
-    bx -= 68.0f;
-    ss_button(c, (ccord_rect){bx, row.y + 8.0f, 64.0f, 26.0f}, timed_out ? "Unmute" : "Timeout", BTN_SECONDARY,
-              ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_TIMEOUT), A_MEM_TIMEOUT, m->user_id,
-              NAME(nm, "member-timeout:%llu", (unsigned long long)m->user_id));
-    bx -= 68.0f;
-    ss_button(c, (ccord_rect){bx, row.y + 8.0f, 64.0f, 26.0f}, "Mod View", BTN_SECONDARY, nullptr, A_MEM_MODVIEW,
-              m->user_id, NAME(nm, "member-modview:%llu", (unsigned long long)m->user_id));
-
-    // Inline role chips (+/-)
-    float rx = row.x + 42.0f, ry = row.y + 44.0f;
-    if (roles_known) {
-      for (size_t mi = 0; mi < nmroles; mi++) {
-        const ccord_role *ro = ccord_store_role(ui->d.store, ss->guild_id, mroles[mi]);
-        if (!ro || ro->id == ss->guild_id) continue;
-        ccord_perm_verdict rv = ss_role_verdict(ui, ss->guild_id, ro->id, true);
-        const char *rwhy = rv == CCORD_PERM_ALLOWED ? nullptr : ccord_perm_verdict_text(rv, CCORD_PERM_ACT_EDIT_ROLES);
-        char clbl[CCORD_NAME_MAX_BYTES + 8];
-        (void)snprintf(clbl, sizeof clbl, "%s%s", ro->name ? ro->name : "role", rwhy == nullptr ? " x" : "");
-        // The pill is a uis_chip; its inset holds the role colour dot on the left edge.
-        float cw = fminf(150.0f, ss_text_width(c, clbl, SS_CAP(c), false) + 16.0f) + 12.0f;
-        if (rx + cw > row.x + w - 58.0f) break;
-        ccord_rect pill = {rx, ry, cw, 21.0f};
-        bool phov = ss_hit_add(c, pill, A_MEM_ROLE_DEL, m->user_id, rwhy,
-                               NAME(nm, "member-role-del:%llu:%llu", (unsigned long long)m->user_id,
-                                    (unsigned long long)ro->id)) && rwhy == nullptr;
-        ccord_color pcol = ro->color ? ss_rgb(ro->color) : COL(text_secondary);
-        uis_chip(ui, c->r, pill, clbl, (uis_state){.hover = phov, .disabled = rwhy != nullptr}, "ssmrole", ro->id);
-        ccord_draw_circle(c->r, pill.x + 5.0f, pill.y + pill.h * 0.5f, 2.5f, pcol);
-        rx += cw + 5.0f;
+    y = list_y0 + (float)shown * 72.0f;
+  } else {
+    for (size_t k = 0; k < shown; k++) {
+      const ccord_member *m = ccord_store_member_at(ui->d.store, ss->guild_id, ss->mem_cache_idx[k]);
+      if (!m) continue;
+      const ccord_id *mroles = nullptr;
+      size_t nmroles = 0;
+      bool roles_known = false;
+      bool picker_open = false;
+      if (ss->member_role_picker_uid == m->user_id && roles && nroles > 1u) {
+        roles_known = ccord_store_member_roles(ui->d.store, ss->guild_id, m->user_id, &mroles, &nmroles);
+        picker_open = roles_known;
       }
-      if (can_manage_roles && roles && nroles > 1u) {
-        ccord_rect add_rc = {rx, ry, 52.0f, 21.0f};
-        ss_button(c, add_rc, picker_open ? "- Role" : "+ Role", BTN_SECONDARY, nullptr, A_MEM_ROLE_PICK, m->user_id,
-                  NAME(nm, "member-role-pick:%llu", (unsigned long long)m->user_id));
+      float row_h = picker_open ? 108.0f : 72.0f;
+      ccord_rect row = {x, y, w, row_h};
+      y += row_h;
+      if (!ss_visible(c, row)) continue;
+      if (!picker_open) {
+        roles_known = ccord_store_member_roles(ui->d.store, ss->guild_id, m->user_id, &mroles, &nmroles);
       }
-    } else {
-      (void)ss_text(c, "Roles not loaded", rx, ry + 3.0f, SS_CAP(c), false, COL(text_muted), 140.0f);
+      draw_member_row(c, gd, m, roles, nroles, roles_known, mroles, nmroles, picker_open, is_owner, can_manage_roles,
+                      self_id, row);
     }
-
-    if (picker_open) {
-      float px = row.x + 42.0f, py_pick = row.y + 72.0f;
-      size_t offered = 0;
-      for (size_t ri = 0; ri < nroles; ri++) {
-        const ccord_role *ro = &roles[ri];
-        if (ro->id == ss->guild_id || ss_id_in_array(mroles, nmroles, ro->id)) continue;
-        ccord_perm_verdict rv = ss_role_verdict(ui, ss->guild_id, ro->id, true);
-        const char *rwhy = rv == CCORD_PERM_ALLOWED ? nullptr : ccord_perm_verdict_text(rv, CCORD_PERM_ACT_EDIT_ROLES);
-        char albl[CCORD_NAME_MAX_BYTES + 8];
-        (void)snprintf(albl, sizeof albl, "+ %s", ro->name ? ro->name : "role");
-        float cw = fminf(150.0f, ss_text_width(c, albl, SS_CAP(c), false) + 18.0f);
-        if (px + cw > row.x + w) break;
-        ss_button(c, (ccord_rect){px, py_pick, cw, 22.0f}, albl, BTN_SECONDARY, rwhy, A_MEM_ROLE_ADD, m->user_id,
-                  NAME(nm, "member-role-add:%llu:%llu", (unsigned long long)m->user_id, (unsigned long long)ro->id));
-        px += cw + 6.0f;
-        offered++;
-      }
-      if (offered == 0) {
-        (void)ss_text(c, "Member already holds every role.", px, py_pick + 3.0f, SS_CAP(c), false,
-                      COL(text_muted), w - 48.0f);
-      }
-    }
-
-    uis_divider(ui, c->r, row.x, row.y + row.h - 1.0f, row.w);
   }
 
   ss->rows = shown;
@@ -5020,9 +5157,9 @@ static void draw_toast(ss_cx *c, const ss_geom *g)
 void ui_server_settings_draw(ccord_ui *ui, ccord_renderer *r)
 {
   if (!ui_server_settings_is_open(ui) || !r) return;
-  struct ui_server_settings *ss = ui->ss;
   ss_sync(ui);
-  if (!ss->open) return;
+  if (!ui_server_settings_is_open(ui)) return;
+  struct ui_server_settings *ss = ui->ss;
   const ccord_guild *cur_gd = ccord_store_guild(ui->d.store, ss->guild_id);
   if (ss->page == SS_COMMUNITY && cur_gd && cur_gd->feature_community && !ss->requested[SS_COMMUNITY]) {
     ss_request(ui, SS_COMMUNITY, false);
