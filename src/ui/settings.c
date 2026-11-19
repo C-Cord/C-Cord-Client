@@ -161,8 +161,11 @@ static const char *const k_web_urls[5] = {
 
 // ---- M5 voice & video: device cache, PTT capture, page scroll ------------------------------------
 // The settings modal is process-wide (one ccord_ui at a time); this transient state is reset by
-// ui_settings_init. Device lists are refreshed at most once per second while the page is open, and
-// immediately on interaction, so hot-plugged devices show up without a restart.
+// ui_settings_init. Device lists are probed when opening Voice & Video, when interacting with a
+// device selector, or after a long idle interval so hot-plugged devices appear without render-thread
+// stalls every second.
+#define VOICE_DEV_REFRESH_MS 15000u
+#define SETTINGS_SAVE_DEBOUNCE_MS 500u
 static struct {
   ccord_audio_device_info in[VOICE_DEV_MAX], out[VOICE_DEV_MAX];
   size_t n_in, n_out;
@@ -179,6 +182,11 @@ static float s_press_x, s_press_y;
 static uint64_t s_press_until_ms;
 static float s_voice_scroll;    // Voice & Video page scroll offset in px
 static ccord_scroller s_voice_glide;   // wheel glide of s_voice_scroll (scroll.h)
+static bool s_save_pending;
+static ccord_ui *s_save_ui;
+static uint64_t s_save_due_ms;
+static int64_t s_hover_key = -1;
+static int s_last_drawn_page = -1;
 
 // The persisted device id is the stable identity; the legacy dropdown index is presentation only.
 // After a refresh the index is reconciled from the id; an unplugged device falls back to Default.
@@ -202,7 +210,9 @@ static int voice_camera_index_of_id(const char *id, const ccord_camera_info *lis
 
 static void voice_devices_refresh(ccord_ui *ui, bool force)
 {
-  if (s_dev.valid && !force && ui->now_ms - s_dev.stamp_ms < 1000u) return;
+  if (s_dev.valid && !force && ui->now_ms >= s_dev.stamp_ms && ui->now_ms - s_dev.stamp_ms < VOICE_DEV_REFRESH_MS) {
+    return;
+  }
   s_dev.n_in = ccord_audio_devices_list(true, s_dev.in, VOICE_DEV_MAX);
   s_dev.n_out = ccord_audio_devices_list(false, s_dev.out, VOICE_DEV_MAX);
   s_dev.n_cam = ccord_camera_list(s_dev.cam, VOICE_DEV_MAX);
@@ -1262,6 +1272,11 @@ void ui_settings_init(ccord_ui *ui)
   s_voice_scroll = 0.0f;
   ccord_scroller_cancel(&s_voice_glide);
   s_dev.valid = false;
+  s_save_pending = false;
+  s_save_ui = nullptr;
+  s_save_due_ms = 0;
+  s_hover_key = -1;
+  s_last_drawn_page = -1;
   ui_settings_m6_reset();
   ui_settings_m6_prefs_reset();
   settings_init_defaults(ui);
@@ -1280,15 +1295,8 @@ void ui_settings_init(ccord_ui *ui)
   ui->anim.reduced_motion = ui->settings_reduced_motion;
 }
 
-static void settings_save(ccord_ui *ui)
+static void settings_write_ini(ccord_ui *ui, FILE *f)
 {
-  char path[PATH_MAX];
-  if (!settings_path(path, sizeof path)) return;
-  const char *dir = ccord_paths_data_dir();
-  ccord_error derr;
-  if (dir && dir[0] && ccord_mkdir_p(dir, 0700, &derr) != CCORD_OK) return;
-  FILE *f = fopen(path, "wb");
-  if (!f) return;
   fprintf(f, "[ui]\n");
   fprintf(f, "display_mode = %d\n", ui->settings_display_mode ? 1 : 0);
   fprintf(f, "embeds = %d\n", ui->settings_embeds ? 1 : 0);
@@ -1349,7 +1357,56 @@ static void settings_save(ccord_ui *ui)
   ui_settings_m6_prefs_ini_save(ui, f);   // M6 theme/zoom/streamer/notify keys
   ui_saved_messages_save_ini(ui, f);      // [saved_messages] bookmarks
   ui_dm_prefs_save_ini(ui, f);            // [pinned_dms], [favorite_dms], [friend_nicknames], [ignored_users]
+}
+
+static void settings_save(ccord_ui *ui)
+{
+  s_save_pending = false;
+  s_save_ui = nullptr;
+  char path[PATH_MAX];
+  if (!settings_path(path, sizeof path)) return;
+  const char *dir = ccord_paths_data_dir();
+  ccord_error derr;
+  if (dir && dir[0] && ccord_mkdir_p(dir, 0700, &derr) != CCORD_OK) return;
+#if !defined(_WIN32)
+  char *buf = nullptr;
+  size_t len = 0;
+  FILE *f = open_memstream(&buf, &len);
+  if (!f) return;
+  settings_write_ini(ui, f);
+  bool ok = !ferror(f) && fclose(f) == 0 && buf != nullptr;
+  if (ok) {
+    ccord_error werr;
+    (void)ccord_file_write_atomic(path, buf, len, 0600, false, &werr);
+  }
+  free(buf);
+#else
+  FILE *f = tmpfile();
+  if (!f) return;
+  settings_write_ini(ui, f);
+  if (!ferror(f) && fflush(f) == 0 && fseek(f, 0, SEEK_END) == 0) {
+    long sz = ftell(f);
+    if (sz >= 0 && fseek(f, 0, SEEK_SET) == 0) {
+      size_t len = (size_t)sz;
+      char *buf = ccord_malloc(len ? len : 1u);
+      if (buf) {
+        size_t got = len ? fread(buf, 1, len, f) : 0u;
+        if (got == len) {
+          ccord_error werr;
+          (void)ccord_file_write_atomic(path, buf, len, 0600, false, &werr);
+        }
+        ccord_free(buf);
+      }
+    }
+  }
   fclose(f);
+#endif
+}
+
+static void settings_save_flush(ccord_ui *ui)
+{
+  if (!s_save_pending || s_save_ui != ui) return;
+  settings_save(ui);
 }
 
 void ui_settings_save(ccord_ui *ui)
@@ -1360,7 +1417,7 @@ void ui_settings_save(ccord_ui *ui)
 }
 
 // QuickCSS edit/toggle path: mirror the editor into the persisted string, apply live through the
-// host (base theme restore + ccord_theme_apply_quick_css) and persist to settings.ini.
+// host (base theme restore + ccord_theme_apply_quick_css) and persist atomically to settings.ini.
 void ui_quickcss_changed(ccord_ui *ui)
 {
   snprintf(ui->settings_quickcss, sizeof ui->settings_quickcss, "%s", ccord_text_edit_cstr(&ui->quickcss_edit));
@@ -1499,6 +1556,17 @@ bool ui_settings_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced)
 {
   bool moving = ui_settings_m6_scroll_tick(ui, fdt_ms, reduced);
   if (ui_settings_profile_tick(ui)) moving = true;   // Discord's answer to Save, and the brief success state
+  if (s_save_pending && s_save_ui == ui) {
+    if (!ui->settings_open || ui->now_ms >= s_save_due_ms) {
+      settings_save(ui);
+    } else {
+      moving = true;
+    }
+  }
+  if (!ui->settings_open) {
+    s_hover_key = -1;
+    s_last_drawn_page = -1;
+  }
   if (s_voice_glide.pending == 0.0f) return moving;
   if (!ui->settings_open || ui->settings_page != SP_VOICE) {
     ccord_scroller_cancel(&s_voice_glide);
@@ -1662,6 +1730,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
     case SP_APPEARANCE:
       if (ui->account_focus_field == 6 && !ui_in_rect(x, y, quickcss_box_rect(g))) {
         ui->account_focus_field = 0;   // clicking away commits the snippet editor
+        settings_save_flush(ui);
         ui->dirty = true;
       }
       if (ui_settings_m6_appearance_click(ui, g->content, x, y)) return true;   // theme chips + zoom
@@ -1675,13 +1744,14 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       if (ui_in_rect(x, y, toggle_rect(g, 5))) {
         ui->settings_quickcss_enabled = !ui->settings_quickcss_enabled;
         ui_quickcss_changed(ui);   // live apply through the host + persist
+        settings_save_flush(ui);
         return true;
       }
       if (ui_in_rect(x, y, quickcss_box_rect(g))) {
         ui->account_focus_field = 6;   // sentinel: routes key/text events to the snippet editor
         ccord_text_edit_set_caret(&ui->quickcss_edit, ui->quickcss_edit.len, false);
         ui->dirty = true;
-        return true;
+        return false;   // focusing the box does not modify any persisted setting
       }
       if (ui_in_rect(x, y, toggle_rect(g, 7))) {
         ui->settings_reduced_motion = !ui->settings_reduced_motion;
@@ -1695,17 +1765,18 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       // (outside the content width), so answer it before clipping clicks to the content box.
       sgeom gu = *g;
       gu.content.y += s_voice_scroll;   // unshifted geometry for the fixed scrollbar
-      if (voice_scroll_click(ui, &gu, x, y)) return true;
+      if (voice_scroll_click(ui, &gu, x, y)) return false;   // scrolling does not change settings.ini
       if (!ui_in_rect(x, y, gu.content)) break;   // rows only answer inside the visible content box
-      voice_devices_refresh(ui, true);
       // Rows 0-8 keep the original Voice & Video layout; the M5 additions (camera, PTT key,
       // sensitivity, diagnostics) follow at rows 9-12 and are reached by scrolling.
       if (ui_in_rect(x, y, device_rect(g, 0))) {
+        voice_devices_refresh(ui, true);
         voice_select_input(ui, (ui->settings_mic_device + 1) % voice_in_count());
         ui->dirty = true;
         return true;
       }
       if (ui_in_rect(x, y, device_rect(g, 1))) {
+        voice_devices_refresh(ui, true);
         voice_select_output(ui, (ui->settings_speaker_device + 1) % voice_out_count());
         ui->dirty = true;
         return true;
@@ -1770,16 +1841,20 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         ui->dirty = true;
         return true;
       }
-      if (s_dev.n_cam > 0 && ui_in_rect(x, y, device_rect(g, 9))) {
-        voice_select_camera(ui, (ui->settings_camera_device + 1) % voice_cam_count());
-        ui->dirty = true;
-        return true;
+      if (ui_in_rect(x, y, device_rect(g, 9))) {
+        voice_devices_refresh(ui, true);
+        if (s_dev.n_cam > 0) {
+          voice_select_camera(ui, (ui->settings_camera_device + 1) % voice_cam_count());
+          ui->dirty = true;
+          return true;
+        }
+        return false;
       }
       if (ui_in_rect(x, y, device_rect(g, 10))) {   // Push to Talk key: arm live capture
         s_ptt_armed = true;
         ui->account_focus_field = 5;   // sentinel: routes key events to this modal (ui.c handle_key)
         ui->dirty = true;
-        return true;
+        return false;
       }
       if (ui->settings_voice_mode == 0) {   // sensitivity only applies to voice activity
         if (ui_in_rect(x, y, vol_minus_rect(g, 11))) {
@@ -2270,6 +2345,144 @@ static bool handle_account_field_edit_key(ccord_ui *ui, ccord_text_edit *active,
   return false;
 }
 
+static int64_t settings_hover_key(const ccord_ui *ui, const sgeom *g, float x, float y)
+{
+  if (g->back.w > 0.0f && ui_in_rect(x, y, g->back)) return 1;
+  if (g->sb_up.w > 0.0f) {
+    if (ui_in_rect(x, y, g->sb_up)) return 2;
+    if (ui_in_rect(x, y, g->sb_down)) return 3;
+  }
+  if (ui->mobile_layout && !ui->mobile_settings_detail) return 0;
+
+  switch (ui->settings_page) {
+    case SP_ACCOUNT: {
+      for (int i = 0; i < 5; i++) {
+        if (ui_in_rect(x, y, account_web_btn_rect(g, i))) return 100 + i;
+      }
+      if (!ui->account_view.signed_in) {
+        if (ui_in_rect(x, y, account_email_box_rect(g))) return 110;
+        if (ui_in_rect(x, y, account_password_box_rect(g))) return 111;
+        if (ui_in_rect(x, y, account_login_btn_rect(g))) return 112;
+      }
+      if (ui_in_rect(x, y, account_token_box_rect(g))) return 113;
+      if (ui_in_rect(x, y, account_token_paste_rect(g))) return 114;
+      if (ui_in_rect(x, y, account_token_save_rect(g))) return 115;
+      if (ui_in_rect(x, y, account_token_clear_rect(g))) return 116;
+      if (ui_in_rect(x, y, account_add_btn_rect(g))) return 117;
+      for (size_t i = 0; i < ui->saved_account_count && i < SAVED_ACCOUNT_ROWS; i++) {
+        if (ui_in_rect(x, y, saved_account_switch_rect(g, (int)i))) return 120 + (int64_t)i * 2;
+        if (ui_in_rect(x, y, saved_account_remove_rect(g, (int)i))) return 120 + (int64_t)i * 2 + 1;
+      }
+      ccord_rect primary, secondary;
+      account_buttons(ui, g, &primary, &secondary);
+      if (ui_in_rect(x, y, primary)) return 140;
+      if (ui_in_rect(x, y, secondary)) return 141;
+      return 0;
+    }
+    case SP_APPEARANCE: {
+      for (int i = 0; i < 2; i++) {
+        if (ui_in_rect(x, y, chips_rect(g, 0, i, 2))) return 200 + i;
+      }
+      for (int i = 0; i < 3; i++) {
+        if (ui_in_rect(x, y, chips_rect(g, 1, i, 3))) return 210 + i;
+      }
+      if (ui_in_rect(x, y, vol_minus_rect(g, 2))) return 220;
+      if (ui_in_rect(x, y, vol_plus_rect(g, 2))) return 221;
+      if (ui_in_rect(x, y, vol_track_rect(g, 2))) return 222;
+      ccord_rect reset_r = {g->content.x + 324.0f, row_y(g, 2) + 18.0f, 64.0f, UIS_H_BTN_SM};
+      if (ui_in_rect(x, y, reset_r)) return 223;
+      if (ui_in_rect(x, y, toggle_rect(g, 5))) return 225;
+      if (ui_in_rect(x, y, quickcss_box_rect(g))) return 226;
+      if (ui_in_rect(x, y, toggle_rect(g, 7))) return 227;
+      return 0;
+    }
+    case SP_VOICE: {
+      if (voice_max_scroll(g) > 0.0f) {
+        if (ui_in_rect(x, y, voice_scroll_up_rect(g))) return 300;
+        if (ui_in_rect(x, y, voice_scroll_down_rect(g))) return 301;
+        if (ui_in_rect(x, y, voice_scroll_track(g))) return 302;
+      }
+      if (!ui_in_rect(x, y, g->content)) return 0;
+      sgeom gv = *g;
+      gv.content.y -= s_voice_scroll;
+      if (ui_in_rect(x, y, device_rect(&gv, 0))) return 310;
+      if (ui_in_rect(x, y, device_rect(&gv, 1))) return 311;
+      if (ui_in_rect(x, y, vol_minus_rect(&gv, 2))) return 312;
+      if (ui_in_rect(x, y, vol_plus_rect(&gv, 2))) return 313;
+      if (ui_in_rect(x, y, vol_track_rect(&gv, 2))) return 314;
+      if (ui_in_rect(x, y, vol_minus_rect(&gv, 3))) return 315;
+      if (ui_in_rect(x, y, vol_plus_rect(&gv, 3))) return 316;
+      if (ui_in_rect(x, y, vol_track_rect(&gv, 3))) return 317;
+      for (int i = 0; i < 2; i++) {
+        if (ui_in_rect(x, y, chips_rect(&gv, 4, i, 2))) return 320 + i;
+      }
+      for (int r = 5; r <= 8; r++) {
+        if (ui_in_rect(x, y, toggle_rect(&gv, r))) return 320 + r;
+      }
+      if (ui_in_rect(x, y, device_rect(&gv, 9))) return 329;
+      if (ui_in_rect(x, y, device_rect(&gv, 10))) return 330;
+      if (ui_in_rect(x, y, vol_minus_rect(&gv, 11))) return 331;
+      if (ui_in_rect(x, y, vol_plus_rect(&gv, 11))) return 332;
+      if (ui_in_rect(x, y, vol_track_rect(&gv, 11))) return 333;
+      return 0;
+    }
+    case SP_STREAMING: {
+      if (ui_in_rect(x, y, auto_pill_rect(g, 0))) return 400;
+      if (ui_in_rect(x, y, auto_pill_rect(g, 1))) return 401;
+      for (int i = 0; i < STREAM_ENC_COUNT; i++) {
+        if (ui_in_rect(x, y, chips_rect(g, 0, i, STREAM_ENC_COUNT))) return 410 + i;
+      }
+      for (int i = 0; i < STREAM_FW_COUNT; i++) {
+        if (ui_in_rect(x, y, chips_rect(g, 1, i, STREAM_FW_COUNT))) return 420 + i;
+      }
+      for (int i = 0; i < 4; i++) {
+        if (ui_in_rect(x, y, chips_rect(g, 2, i, 4))) return 430 + i;
+      }
+      for (int i = 0; i < 3; i++) {
+        if (ui_in_rect(x, y, chips_rect(g, 3, i, 3))) return 440 + i;
+      }
+      for (int i = 0; i < 3; i++) {
+        if (ui_in_rect(x, y, chips_rect(g, 4, i, 3))) return 450 + i;
+      }
+      return 0;
+    }
+    case SP_TEXT_IMAGES: {
+      if (ui_in_rect(x, y, toggle_rect(g, 0))) return 500;
+      if (ui_in_rect(x, y, toggle_rect(g, 1))) return 501;
+      return 0;
+    }
+    case SP_KEYBINDS: {
+      for (int r = 0; r < 4; r++) {
+        if (ui_in_rect(x, y, keybind_rect(g, r))) return 550 + r;
+      }
+      return 0;
+    }
+    case SP_PLUGINS: {
+      if (ui_in_rect(x, y, extensions_toggle_rect(g))) return 600;
+      ccord_rect r_inst, r_disc, r_upd, r_sync;
+      plugin_subtab_rects(g, &r_inst, &r_disc, &r_upd, &r_sync);
+      if (ui_in_rect(x, y, r_inst)) return 601;
+      if (ui_in_rect(x, y, r_disc)) return 602;
+      if (ui_in_rect(x, y, r_upd)) return 603;
+      if (ui_in_rect(x, y, r_sync)) return 604;
+      if (ui_in_rect(x, y, g->content) && y >= g->content.y + 116.0f) {
+        int row_cell = (int)((y - (g->content.y + 116.0f)) / 24.0f);
+        int col_cell = (int)((x - g->content.x) / 64.0f);
+        return 650 + (int64_t)row_cell * 32 + (int64_t)col_cell;
+      }
+      return 0;
+    }
+    default: {
+      // External M6 preference / device / profile pages: quantize hover cells inside content so
+      // 1px pointer jitter in the same control or whitespace does not trigger redraws.
+      if (!ui_in_rect(x, y, g->content)) return 0;
+      int row_cell = (int)((y - g->content.y) / 26.0f);
+      int col_cell = (int)((x - g->content.x) / 44.0f);
+      return 1000 + (int64_t)ui->settings_page * 4096 + (int64_t)row_cell * 64 + (int64_t)col_cell;
+    }
+  }
+}
+
 static bool handle_mfa_popup(ccord_ui *ui, const ccord_input_event *ev)
 {
   ccord_rect pop = mfa_popup_rect(ui);
@@ -2277,7 +2490,14 @@ static bool handle_mfa_popup(ccord_ui *ui, const ccord_input_event *ev)
   ccord_rect vbtn = mfa_popup_verify_rect(&pop);
   ccord_rect bbtn = mfa_popup_back_rect(&pop);
   if (ev->type == CCORD_IN_MOUSE_MOVE) {
-    ui->dirty = true;
+    int64_t hk = ui_in_rect(ev->x, ev->y, vbtn) ? 901
+               : ui_in_rect(ev->x, ev->y, bbtn) ? 902
+               : ui_in_rect(ev->x, ev->y, mbox) ? 903
+                                                : 900;
+    if (hk != s_hover_key) {
+      s_hover_key = hk;
+      ui->dirty = true;
+    }
     return true;
   }
   if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 3) {
@@ -2359,9 +2579,23 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
   if (ui_is_login_screen(ui)) {
     ccord_rect card = login_card_rect(ui);
     if (ev->type == CCORD_IN_MOUSE_MOVE) {
+      int64_t hk = 800;
+      if (ui_in_rect(ev->x, ev->y, login_tab_rect(&card, 0))) hk = 801;
+      else if (ui_in_rect(ev->x, ev->y, login_tab_rect(&card, 1))) hk = 802;
+      else if (ui->login_tab == 0) {
+        if (ui_in_rect(ev->x, ev->y, login_token_box_rect(&card))) hk = 803;
+        else if (ui_in_rect(ev->x, ev->y, login_token_paste_rect(&card))) hk = 804;
+        else if (ui_in_rect(ev->x, ev->y, login_token_save_rect(&card))) hk = 805;
+      } else {
+        if (ui_in_rect(ev->x, ev->y, login_email_box_rect(&card))) hk = 806;
+        else if (ui_in_rect(ev->x, ev->y, login_password_box_rect(&card))) hk = 807;
+        else if (ui_in_rect(ev->x, ev->y, login_credentials_btn_rect(&card))) hk = 808;
+      }
+      bool changed = ui->hover_settings_page != -1 || ui->hover_settings_close || hk != s_hover_key;
       ui->hover_settings_page = -1;
       ui->hover_settings_close = false;
-      ui->dirty = true;
+      s_hover_key = hk;
+      if (changed) ui->dirty = true;
       return true;
     }
     if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 3) {
@@ -2518,11 +2752,11 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       if (ui_in_rect(ev->x, ev->y, g.page[i]) && ui_in_rect(ev->x, ev->y, g.list)) page = i;
     }
     bool close = ui_in_rect(ev->x, ev->y, g.close);
-    bool changed = page != ui->hover_settings_page || close != ui->hover_settings_close;
+    int64_t hk = ui_in_rect(ev->x, ev->y, g.panel) ? settings_hover_key(ui, &g, ev->x, ev->y) : -1;
+    bool changed = page != ui->hover_settings_page || close != ui->hover_settings_close || hk != s_hover_key;
     ui->hover_settings_page = page;
     ui->hover_settings_close = close;
-    // Control hover is read from the pointer at draw time; redraw when inside.
-    if (ui_in_rect(ev->x, ev->y, g.panel) && !changed) ui->dirty = true;
+    s_hover_key = hk;
     if (changed) ui->dirty = true;
     return true;
   }
@@ -2568,6 +2802,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     s_press_until_ms = ui->now_ms + SETTINGS_PRESS_MS;
     ui->dirty = true;
     if (ui_in_rect(ev->x, ev->y, g.close) || !ui_in_rect(ev->x, ev->y, g.panel)) {
+      settings_save_flush(ui);
       ui_open_settings(ui, false);
       return true;
     }
@@ -2599,8 +2834,10 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     for (int i = 0; i < SP_COUNT; i++) {
       if (ui_in_rect(ev->x, ev->y, g.page[i]) && ui_in_rect(ev->x, ev->y, g.list)) {
+        if (i == SP_VOICE && ui->settings_page != SP_VOICE) s_dev.valid = false;
         ui->settings_page = i;
         ui->settings_category = k_pages[i].category;
+        s_hover_key = -1;
         if (ui->mobile_layout) ui->mobile_settings_detail = true;
         ui->dirty = true;
         return true;
@@ -2726,14 +2963,23 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       }
       return true;
     }
+    bool handled = false;
     if (ui->settings_page == SP_VOICE) {
       sgeom gv = g;
       gv.content.y -= s_voice_scroll;   // rows scroll; hit-testing matches the drawn positions
-      handle_page_controls(ui, &gv, ev->x, ev->y);
+      handled = handle_page_controls(ui, &gv, ev->x, ev->y);
     } else {
-      handle_page_controls(ui, &g, ev->x, ev->y);
+      handled = handle_page_controls(ui, &g, ev->x, ev->y);
     }
-    settings_save(ui);
+    s_hover_key = -1;
+    if (handled &&
+        (ui->settings_page == SP_APPEARANCE || ui->settings_page == SP_VOICE ||
+         ui->settings_page == SP_STREAMING || ui->settings_page == SP_TEXT_IMAGES ||
+         ui->settings_page == SP_NOTIFICATIONS || ui->settings_page == SP_ACCESSIBILITY ||
+         ui->settings_page == SP_STREAMER || ui->settings_page == SP_LANGUAGE ||
+         ui->settings_page == SP_ADVANCED || ui->settings_page == SP_CCORD)) {
+      settings_save(ui);
+    }
     return true;
   }
   if (ui->settings_page == SP_PROFILE_EDIT && ui_settings_profile_key(ui, ev)) return true;
@@ -2779,6 +3025,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     if (ev->type == CCORD_IN_KEY_DOWN) {
       if (ev->key == CCORD_KEY_RETURN || ev->key == CCORD_KEY_TAB) {
         ui->account_focus_field = 0;   // commit and leave the editor
+        settings_save_flush(ui);
         ui->dirty = true;
         return true;
       }
@@ -3064,6 +3311,7 @@ static void draw_voice_scrollbar(ccord_ui *ui, ccord_renderer *r, const sgeom *g
 
 static void draw_voice(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 {
+  if (s_last_drawn_page != SP_VOICE) s_dev.valid = false;
   voice_devices_refresh(ui, false);
   draw_voice_scrollbar(ui, r, g);   // fixed, drawn against the unshifted geometry
   sgeom gv = *g;
@@ -4073,6 +4321,7 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
         break;
       default: break;
     }
+    s_last_drawn_page = ui->settings_page;
     ccord_pop_alpha(r);
     ccord_pop_clip(r);
   }
