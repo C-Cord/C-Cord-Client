@@ -22,10 +22,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #define SB_HOOK_STEP 1000
 #define SB_MAX_TEXT 65536u
+#define SB_MAX_FS_READ_BYTES (16u * 1024u * 1024u)
 #define SB_KEY_HANDLERS "ccord.handlers"
 #define SB_KEY_MENU "ccord.menu"
 #define SB_KEY_COMMANDS "ccord.commands"
@@ -1065,20 +1067,26 @@ static int api_encoding_b64_encode(lua_State *L)
   static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   size_t n = 0;
   const unsigned char *in = (const unsigned char *)luaL_checklstring(L, 1, &n);
-  ccord_buf b;
-  ccord_buf_init(&b, 0);
+  if (n == 0) {
+    lua_pushlstring(L, "", 0);
+    return 1;
+  }
+  size_t blocks = (n / 3u) + ((n % 3u) ? 1u : 0u);
+  if (blocks > SIZE_MAX / 4u) return luaL_error(L, "encoding.base64_encode: input too large");
+  size_t out_len = blocks * 4u;
+  char stack_buf[1024];
+  char *dst = out_len <= sizeof stack_buf ? stack_buf : ccord_malloc(out_len);
+  if (!dst) return luaL_error(L, "encoding.base64_encode: out of memory");
+  size_t o = 0;
   for (size_t i = 0; i < n; i += 3) {
     uint32_t v = ((uint32_t)in[i] << 16) | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) | (i + 2 < n ? (uint32_t)in[i + 2] : 0);
-    char out[4] = {
-      tbl[(v >> 18) & 63],
-      tbl[(v >> 12) & 63],
-      i + 1 < n ? tbl[(v >> 6) & 63] : '=',
-      i + 2 < n ? tbl[v & 63] : '=',
-    };
-    (void)ccord_buf_append(&b, out, 4);
+    dst[o++] = tbl[(v >> 18) & 63];
+    dst[o++] = tbl[(v >> 12) & 63];
+    dst[o++] = i + 1 < n ? tbl[(v >> 6) & 63] : '=';
+    dst[o++] = i + 2 < n ? tbl[v & 63] : '=';
   }
-  lua_pushlstring(L, b.data, b.len);
-  ccord_buf_free(&b);
+  lua_pushlstring(L, dst, o);
+  if (dst != stack_buf) ccord_free(dst);
   return 1;
 }
 
@@ -1097,25 +1105,32 @@ static int api_encoding_b64_decode(lua_State *L)
   size_t n = 0;
   const unsigned char *in = (const unsigned char *)luaL_checklstring(L, 1, &n);
   if (n % 4 != 0) { lua_pushnil(L); lua_pushliteral(L, "invalid base64 length"); return 2; }
-  ccord_buf b;
-  ccord_buf_init(&b, 0);
+  if (n == 0) {
+    lua_pushlstring(L, "", 0);
+    return 1;
+  }
+  size_t out_cap = (n / 4u) * 3u;
+  char stack_buf[1024];
+  char *dst = out_cap <= sizeof stack_buf ? stack_buf : ccord_malloc(out_cap);
+  if (!dst) { lua_pushnil(L); lua_pushliteral(L, "out of memory"); return 2; }
+  size_t o = 0;
   for (size_t i = 0; i < n; i += 4) {
     int a = b64_val(in[i]), c1 = b64_val(in[i + 1]);
     int c2 = in[i + 2] == '=' ? -2 : b64_val(in[i + 2]);
     int c3 = in[i + 3] == '=' ? -2 : b64_val(in[i + 3]);
     if (a < 0 || c1 < 0 || c2 == -1 || c3 == -1) {
-      ccord_buf_free(&b);
+      if (dst != stack_buf) ccord_free(dst);
       lua_pushnil(L);
       lua_pushliteral(L, "invalid base64");
       return 2;
     }
     uint32_t v = ((uint32_t)a << 18) | ((uint32_t)c1 << 12) | (c2 >= 0 ? (uint32_t)c2 << 6 : 0) | (c3 >= 0 ? (uint32_t)c3 : 0);
-    unsigned char out[3] = {(unsigned char)(v >> 16), (unsigned char)(v >> 8), (unsigned char)v};
-    size_t cnt = c2 < 0 ? 1 : (c3 < 0 ? 2 : 3);
-    (void)ccord_buf_append(&b, out, cnt);
+    dst[o++] = (char)(unsigned char)(v >> 16);
+    if (c2 >= 0) dst[o++] = (char)(unsigned char)(v >> 8);
+    if (c3 >= 0) dst[o++] = (char)(unsigned char)v;
   }
-  lua_pushlstring(L, b.data, b.len);
-  ccord_buf_free(&b);
+  lua_pushlstring(L, dst, o);
+  if (dst != stack_buf) ccord_free(dst);
   return 1;
 }
 
@@ -1152,23 +1167,24 @@ static int api_encoding_url_decode(lua_State *L)
 {
   size_t n = 0;
   const unsigned char *s = (const unsigned char *)luaL_checklstring(L, 1, &n);
-  ccord_buf b;
-  ccord_buf_init(&b, 0);
+  if (n == 0) { lua_pushlstring(L, "", 0); return 1; }
+  char stack_buf[1024];
+  char *dst = n <= sizeof stack_buf ? stack_buf : ccord_malloc(n);
+  if (!dst) return luaL_error(L, "encoding.url_decode: out of memory");
+  size_t o = 0;
   for (size_t i = 0; i < n; i++) {
     if (s[i] == '%' && i + 2 < n) {
       int hi = hex_val(s[i + 1]), lo = hex_val(s[i + 2]);
       if (hi >= 0 && lo >= 0) {
-        unsigned char c = (unsigned char)((hi << 4) | lo);
-        (void)ccord_buf_append(&b, &c, 1);
+        dst[o++] = (char)(unsigned char)((hi << 4) | lo);
         i += 2;
         continue;
       }
     }
-    unsigned char c = s[i] == '+' ? ' ' : s[i];
-    (void)ccord_buf_append(&b, &c, 1);
+    dst[o++] = s[i] == '+' ? ' ' : (char)s[i];
   }
-  lua_pushlstring(L, b.data, b.len);
-  ccord_buf_free(&b);
+  lua_pushlstring(L, dst, o);
+  if (dst != stack_buf) ccord_free(dst);
   return 1;
 }
 
@@ -1192,16 +1208,19 @@ static int api_markdown_strip(lua_State *L)
 {
   size_t n = 0;
   const char *s = luaL_checklstring(L, 1, &n);
-  ccord_buf b;
-  ccord_buf_init(&b, 0);
+  if (n == 0) { lua_pushlstring(L, "", 0); return 1; }
+  char stack_buf[1024];
+  char *dst = n <= sizeof stack_buf ? stack_buf : ccord_malloc(n);
+  if (!dst) return luaL_error(L, "markdown.strip: out of memory");
+  size_t o = 0;
   for (size_t i = 0; i < n; i++) {
     char c = s[i];
-    if (c == '\\' && i + 1 < n) { (void)ccord_buf_append(&b, &s[++i], 1); continue; }
+    if (c == '\\' && i + 1 < n) { dst[o++] = s[++i]; continue; }
     if (c == '*' || c == '_' || c == '~' || c == '`') continue;
-    (void)ccord_buf_append(&b, &c, 1);
+    dst[o++] = c;
   }
-  lua_pushlstring(L, b.data, b.len);
-  ccord_buf_free(&b);
+  lua_pushlstring(L, dst, o);
+  if (dst != stack_buf) ccord_free(dst);
   return 1;
 }
 
@@ -1235,13 +1254,29 @@ static int api_require(lua_State *L)
   if (!ccord_path_is_file(path)) return luaL_error(L, "require: module '%s' not found", mod);
   FILE *f = fopen(path, "rb");
   if (!f) return luaL_error(L, "require: module '%s' not found", mod);
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  if (sz < 0) { fclose(f); return luaL_error(L, "require: cannot read '%s'", mod); }
-  char *buf = ccord_malloc((size_t)sz + 1);
+  uint64_t fsz = 0;
+#if CCORD_OS_WINDOWS
+  struct __stat64 st;
+  if (_fstat64(_fileno(f), &st) != 0 || (st.st_mode & _S_IFREG) == 0 || st.st_size < 0) {
+    fclose(f);
+    return luaL_error(L, "require: cannot read '%s'", mod);
+  }
+  fsz = (uint64_t)st.st_size;
+#else
+  struct stat st;
+  if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
+    fclose(f);
+    return luaL_error(L, "require: cannot read '%s'", mod);
+  }
+  fsz = (uint64_t)st.st_size;
+#endif
+  if (fsz > SB_MAX_FS_READ_BYTES) {
+    fclose(f);
+    return luaL_error(L, "require: module '%s' exceeds 16 MiB limit", mod);
+  }
+  char *buf = ccord_malloc((size_t)fsz + 1u);
   if (!buf) { fclose(f); return luaL_error(L, "require: out of memory"); }
-  size_t rd = fread(buf, 1, (size_t)sz, f);
+  size_t rd = fsz ? fread(buf, 1, (size_t)fsz, f) : 0;
   fclose(f);
   buf[rd] = '\0';
 
@@ -1552,23 +1587,80 @@ static int api_fs_read(lua_State *L)
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_FS_READ, "fs.read")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
-  if (!ccord_path_is_file(path)) {
-    lua_pushnil(L);
-    lua_pushliteral(L, "not a regular file");
-    return 2;
-  }
   FILE *f = fopen(path, "rb");
   if (!f) { char eb[128]; lua_pushnil(L); lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb)); return 2; }
-  fseek(f, 0, SEEK_END);
-  long sz = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  if (sz < 0) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "stat failed"); return 2; }
-  char *buf = ccord_malloc((size_t)sz + 1);
-  if (!buf) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "out of memory"); return 2; }
-  size_t rd = fread(buf, 1, (size_t)sz, f);
+  uint64_t fsz = 0;
+#if CCORD_OS_WINDOWS
+  struct __stat64 st;
+  if (_fstat64(_fileno(f), &st) != 0) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "stat failed"); return 2; }
+  if ((st.st_mode & _S_IFREG) == 0) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "not a regular file"); return 2; }
+  if (st.st_size < 0) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "stat failed"); return 2; }
+  fsz = (uint64_t)st.st_size;
+#else
+  struct stat st;
+  if (fstat(fileno(f), &st) != 0) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "stat failed"); return 2; }
+  if (!S_ISREG(st.st_mode)) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "not a regular file"); return 2; }
+  if (st.st_size < 0) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "stat failed"); return 2; }
+  fsz = (uint64_t)st.st_size;
+#endif
+  if (fsz > SB_MAX_FS_READ_BYTES) {
+    fclose(f);
+    lua_pushnil(L);
+    lua_pushliteral(L, "file exceeds 16 MiB limit");
+    return 2;
+  }
+  if (fsz > 0) {
+    // Pre-reserve exact output buffer from fstat size (zero incremental reallocs).
+    size_t want = (size_t)fsz;
+    char *buf = ccord_malloc(want);
+    if (!buf) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "out of memory"); return 2; }
+    size_t rd = fread(buf, 1, want, f);
+    fclose(f);
+    lua_pushlstring(L, buf, rd);
+    ccord_free(buf);
+    return 1;
+  }
+  // st_size == 0: either an empty regular file or a virtual file (e.g. /proc). Read bounded chunks.
+  char chunk[4096];
+  size_t got = fread(chunk, 1, sizeof chunk, f);
+  if (got == 0) {
+    fclose(f);
+    lua_pushlstring(L, "", 0);
+    return 1;
+  }
+  if (got < sizeof chunk) {
+    fclose(f);
+    lua_pushlstring(L, chunk, got);
+    return 1;
+  }
+  ccord_buf b;
+  ccord_buf_init(&b, SB_MAX_FS_READ_BYTES + 1u);
+  if (ccord_buf_append(&b, chunk, got) != CCORD_OK) {
+    fclose(f);
+    ccord_buf_free(&b);
+    lua_pushnil(L);
+    lua_pushliteral(L, "out of memory");
+    return 2;
+  }
+  while ((got = fread(chunk, 1, sizeof chunk, f)) > 0) {
+    if (b.len + got > SB_MAX_FS_READ_BYTES) {
+      fclose(f);
+      ccord_buf_free(&b);
+      lua_pushnil(L);
+      lua_pushliteral(L, "file exceeds 16 MiB limit");
+      return 2;
+    }
+    if (ccord_buf_append(&b, chunk, got) != CCORD_OK) {
+      fclose(f);
+      ccord_buf_free(&b);
+      lua_pushnil(L);
+      lua_pushliteral(L, "out of memory");
+      return 2;
+    }
+  }
   fclose(f);
-  lua_pushlstring(L, buf, rd);
-  ccord_free(buf);
+  lua_pushlstring(L, b.data, b.len);
+  ccord_buf_free(&b);
   return 1;
 }
 
@@ -2329,4 +2421,25 @@ ccord_status ccord_sandbox_tick(ccord_sandbox *sb, uint64_t now_ms, ccord_error 
   sb->ntimers = w;
   lua_settop(L, top);
   return CCORD_OK;
+}
+
+// Milliseconds until the earliest active Lua timer fires, or -1 if no timers are pending.
+int ccord_sandbox_next_timer_ms(const ccord_sandbox *sb);
+int ccord_sandbox_next_timer_ms(const ccord_sandbox *sb)
+{
+  if (!sb || sb->ntimers == 0) return -1;
+  uint64_t now_ms = ccord_clock_ms();
+  bool found = false;
+  uint64_t earliest = 0;
+  for (size_t i = 0; i < sb->ntimers; i++) {
+    if (sb->timers[i].cancelled) continue;
+    if (!found || sb->timers[i].fire_at_ms < earliest) {
+      earliest = sb->timers[i].fire_at_ms;
+      found = true;
+    }
+  }
+  if (!found) return -1;
+  if (earliest <= now_ms) return 0;
+  uint64_t delta = earliest - now_ms;
+  return delta > (uint64_t)INT_MAX ? INT_MAX : (int)delta;
 }

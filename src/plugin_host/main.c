@@ -36,6 +36,9 @@
 #define EXIT_MEMORY 74
 #define EXIT_UNDECLARED 75
 
+// Defined in sandbox.c: returns ms until earliest active Lua timer, or -1 if none.
+extern int ccord_sandbox_next_timer_ms(const ccord_sandbox *sb);
+
 typedef struct host {
   ccord_ipc *ipc;
   ccord_sandbox *sb;
@@ -369,7 +372,7 @@ static void dispatch(host *h, const ccord_ipc_msg *msg)
 static int run_loop(host *h)
 {
   ccord_arena arena;
-  ccord_arena_init(&arena, 0);
+  ccord_arena_init(&arena, 4096u);
   while (!h->stop) {
     if (h->cancel && atomic_load_explicit(h->cancel, memory_order_relaxed)) {
       h->stop = true;
@@ -377,7 +380,9 @@ static int run_loop(host *h)
     }
     unsigned events = CCORD_POLL_IN;
     if (ccord_ipc_has_pending_output(h->ipc)) events |= CCORD_POLL_OUT;
-    if (ccord_sock_poll1(ccord_ipc_fd(h->ipc), events, 50) < 0) fatal(h, EXIT_INTERNAL);
+    int poll_ms = h->sb ? ccord_sandbox_next_timer_ms(h->sb) : -1;
+    if (h->cancel && (poll_ms < 0 || poll_ms > 1000)) poll_ms = 1000;
+    if (ccord_sock_poll1(ccord_ipc_fd(h->ipc), events, poll_ms) < 0) fatal(h, EXIT_INTERNAL);
     for (;;) {
       ccord_ipc_msg msg;
       ccord_error err = {0};
@@ -396,7 +401,7 @@ static int run_loop(host *h)
       if (h->stop) break;
     }
     if (!h->stop) {
-      if (h->sb) {
+      if (h->sb && ccord_sandbox_next_timer_ms(h->sb) == 0) {
         ccord_error terr = {0};
         (void)ccord_sandbox_tick(h->sb, ccord_clock_ms(), &terr);
         (void)limit_stop(h);
