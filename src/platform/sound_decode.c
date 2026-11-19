@@ -41,6 +41,8 @@ typedef struct sound_ctx {
   int swr_format;
   int swr_rate;
   int swr_channels;
+  uint8_t *tmp;
+  size_t tmp_cap;
   int16_t *out;
   size_t cap;
   size_t written;
@@ -97,27 +99,37 @@ static ccord_status convert_frame(sound_ctx *c, AVCodecContext *dec, AVFrame *fr
   if (max_out <= 0 || max_out > (int64_t)SOUND_RATE * SOUND_MAX_FRAME_SECONDS) {
     return ccord_error_set(err, CCORD_ERR_RANGE, "sound decode: resampler output overflow");
   }
-  size_t tmp_bytes = (size_t)max_out * 2u * sizeof(int16_t);
-  uint8_t *tmp = ccord_malloc(tmp_bytes);
-  if (!tmp) return ccord_error_set(err, CCORD_ERR_NOMEM, "sound decode: out of memory");
-  uint8_t *dst[1] = {tmp};
-  int got = swr_convert(c->swr, dst, (int)max_out, (const uint8_t *const *)frame->extended_data,
-                        frame->nb_samples);
-  if (got < 0) {
-    ccord_free(tmp);
-    return ccord_error_set(err, CCORD_ERR_PARSE, "sound decode: resample failed");
-  }
-  size_t samples = (size_t)got * 2u;
+  size_t max_samples = (size_t)max_out * 2u;
   size_t remaining = c->cap - c->written;
-  if (samples > remaining) {
-    memcpy(c->out + c->written, tmp, remaining * sizeof(int16_t));
-    c->written += remaining;
-    c->truncated = true;
+  int got = 0;
+  if (remaining >= max_samples) {
+    // Fast path: resample directly into the caller's output buffer (zero scratch alloc, zero memcpy).
+    uint8_t *dst[1] = {(uint8_t *)(c->out + c->written)};
+    got = swr_convert(c->swr, dst, (int)max_out, (const uint8_t *const *)frame->extended_data, frame->nb_samples);
+    if (got < 0) return ccord_error_set(err, CCORD_ERR_PARSE, "sound decode: resample failed");
+    c->written += (size_t)got * 2u;
   } else {
-    memcpy(c->out + c->written, tmp, samples * sizeof(int16_t));
-    c->written += samples;
+    // Near capacity: reuse grow-only scratch buffer across frames to truncate cleanly.
+    size_t tmp_bytes = max_samples * sizeof(int16_t);
+    if (tmp_bytes > c->tmp_cap) {
+      uint8_t *nb = ccord_realloc(c->tmp, tmp_bytes);
+      if (!nb) return ccord_error_set(err, CCORD_ERR_NOMEM, "sound decode: out of memory");
+      c->tmp = nb;
+      c->tmp_cap = tmp_bytes;
+    }
+    uint8_t *dst[1] = {c->tmp};
+    got = swr_convert(c->swr, dst, (int)max_out, (const uint8_t *const *)frame->extended_data, frame->nb_samples);
+    if (got < 0) return ccord_error_set(err, CCORD_ERR_PARSE, "sound decode: resample failed");
+    size_t samples = (size_t)got * 2u;
+    if (samples > remaining) {
+      memcpy(c->out + c->written, c->tmp, remaining * sizeof(int16_t));
+      c->written += remaining;
+      c->truncated = true;
+    } else {
+      memcpy(c->out + c->written, c->tmp, samples * sizeof(int16_t));
+      c->written += samples;
+    }
   }
-  ccord_free(tmp);
   c->frames += (size_t)got;
   if (c->frames > (size_t)SOUND_RATE * SOUND_MAX_SECONDS) {
     return ccord_error_set(err, CCORD_ERR_RANGE, "sound decode: clip too long");
@@ -246,6 +258,7 @@ ccord_status ccord_sound_decode(const uint8_t *data, size_t len, int16_t *out, s
 done:
   av_dict_free(&opts);
   swr_free(&c.swr);
+  ccord_free(c.tmp);
   av_packet_free(&pkt);
   av_frame_free(&frame);
   avcodec_free_context(&dec);

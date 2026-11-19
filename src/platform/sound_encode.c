@@ -34,6 +34,7 @@ struct ccord_sound_encoder {
   AVCodecContext *codec;
   AVFormatContext *fmt;  // fmt->pb is a dynamic buffer until finish/destroy closes it
   AVStream *stream;
+  AVFrame *frame;        // persistent S16 frame reused across encode_chunk() calls
   AVPacket *pkt;
   int16_t *pending;      // partial codec frame carried between feeds (frame_size * channels samples)
   size_t pending_frames;
@@ -69,20 +70,16 @@ static ccord_status drain_packets(ccord_sound_encoder *e, ccord_error *err)
 // Sends `nb` interleaved frames (at most one codec frame) to the codec and muxes the resulting packets.
 static ccord_status encode_chunk(ccord_sound_encoder *e, const int16_t *pcm, size_t nb, ccord_error *err)
 {
-  AVFrame *f = av_frame_alloc();
-  if (!f) return ccord_error_set(err, CCORD_ERR_NOMEM, "sound encode: out of memory");
-  f->nb_samples = (int)nb;
-  f->format = AV_SAMPLE_FMT_S16;
-  f->sample_rate = (int)ENC_RATE;
-  if (av_channel_layout_copy(&f->ch_layout, &e->codec->ch_layout) < 0 || av_frame_get_buffer(f, 0) < 0) {
-    av_frame_free(&f);
+  AVFrame *f = e->frame;
+  if (av_frame_make_writable(f) < 0) {
+    e->failed = true;
     return ccord_error_set(err, CCORD_ERR_NOMEM, "sound encode: out of memory");
   }
+  f->nb_samples = (int)nb;
   memcpy(f->data[0], pcm, nb * e->channels * sizeof(int16_t));
   f->pts = e->next_pts;
   e->next_pts += (int64_t)nb;
   int rc = avcodec_send_frame(e->codec, f);
-  av_frame_free(&f);
   if (rc < 0) {
     e->failed = true;
     return ccord_error_set(err, CCORD_ERR_INTERNAL, "sound encode: Opus encoder rejected audio");
@@ -137,9 +134,18 @@ ccord_sound_encoder *ccord_sound_encoder_create(uint32_t sample_rate, uint32_t c
     goto fail;
   }
   e->frame_size = (size_t)e->codec->frame_size;
+  e->frame = av_frame_alloc();
   e->pending = ccord_malloc(e->frame_size * channels * sizeof(int16_t));
   e->stream = avformat_new_stream(e->fmt, nullptr);
-  if (!e->pending || !e->stream) {
+  if (!e->frame || !e->pending || !e->stream) {
+    ccord_error_set(err, CCORD_ERR_NOMEM, "sound encode: out of memory");
+    goto fail;
+  }
+  e->frame->nb_samples = e->codec->frame_size;
+  e->frame->format = AV_SAMPLE_FMT_S16;
+  e->frame->sample_rate = (int)ENC_RATE;
+  if (av_channel_layout_copy(&e->frame->ch_layout, &e->codec->ch_layout) < 0 ||
+      av_frame_get_buffer(e->frame, 0) < 0) {
     ccord_error_set(err, CCORD_ERR_NOMEM, "sound encode: out of memory");
     goto fail;
   }
@@ -261,6 +267,7 @@ void ccord_sound_encoder_destroy(ccord_sound_encoder *e)
     avformat_free_context(e->fmt);
   }
   avcodec_free_context(&e->codec);
+  av_frame_free(&e->frame);
   av_packet_free(&e->pkt);
   ccord_free(e->pending);
   ccord_free(e);
