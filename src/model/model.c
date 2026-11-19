@@ -29,6 +29,11 @@ static uint64_t hash_id(ccord_id x)
   return x;
 }
 
+static uint64_t hash_pair(ccord_id a, ccord_id b)
+{
+  return hash_id(a ^ hash_id(b));
+}
+
 static bool id_map_init(id_map *m, size_t count)
 {
   size_t cap = 16;
@@ -170,6 +175,7 @@ ccord_status ccord_snapshot_validate(const ccord_snapshot *s, ccord_error *err)
   }
 
   id_map users = {0}, guilds = {0}, channels = {0}, rel_users = {0}, note_users = {0};
+  size_t *vs_slots = nullptr;
   size_t *members_per_guild = nullptr;
   ccord_status st = CCORD_OK;
   if (!id_map_init(&users, s->user_count) ||
@@ -247,29 +253,47 @@ ccord_status ccord_snapshot_validate(const ccord_snapshot *s, ccord_error *err)
     st = ccord_error_set(err, CCORD_ERR_RANGE, "snapshot: too many voice states");
     goto done;
   }
-  for (size_t i = 0; i < s->voice_state_count; i++) {
-    const ccord_voice_state *v = &s->voice_states[i];
-    if (!id_map_contains(&users, v->user_id)) { st = bad(err, "voice state user missing"); goto done; }
-    if (v->guild_id != CCORD_DM_GUILD_ID && !id_map_contains(&guilds, v->guild_id)) {
-      st = bad(err, "voice state guild missing");
+  if (s->voice_state_count > 0) {
+    size_t vs_cap = 16u;
+    while (vs_cap < s->voice_state_count * 2u + 1u) vs_cap <<= 1u;
+    vs_slots = ccord_calloc(vs_cap, sizeof *vs_slots);
+    if (!vs_slots) {
+      st = ccord_error_set(err, CCORD_ERR_NOMEM, "snapshot: out of memory");
       goto done;
     }
-    size_t c_idx = 0;
-    const ccord_channel *chan = id_map_find(&channels, v->channel_id, &c_idx) ? &s->channels[c_idx] : nullptr;
-    // Mirrors the store's voice_channel_ok: DM/group calls ride the DM channel itself (kind TEXT),
-    // and guild voice includes stage channels, where the audience joins suppressed until invited.
-    bool voice_chan_ok = chan && chan->guild_id == v->guild_id &&
-                         (v->guild_id == CCORD_DM_GUILD_ID ? chan->kind == CCORD_CHANNEL_TEXT
-                                                           : chan->kind == CCORD_CHANNEL_VOICE ||
-                                                             chan->kind == CCORD_CHANNEL_STAGE);
-    if (!voice_chan_ok) {
-      st = bad(err, "voice state channel is not a voice channel of the guild");
-      goto done;
-    }
-    for (size_t k = 0; k < i; k++) {
-      if (s->voice_states[k].guild_id == v->guild_id && s->voice_states[k].user_id == v->user_id) {
-        st = bad(err, "duplicate voice state user");
+    size_t vs_mask = vs_cap - 1u;
+    for (size_t i = 0; i < s->voice_state_count; i++) {
+      const ccord_voice_state *v = &s->voice_states[i];
+      if (!id_map_contains(&users, v->user_id)) { st = bad(err, "voice state user missing"); goto done; }
+      if (v->guild_id != CCORD_DM_GUILD_ID && !id_map_contains(&guilds, v->guild_id)) {
+        st = bad(err, "voice state guild missing");
         goto done;
+      }
+      size_t c_idx = 0;
+      const ccord_channel *chan = id_map_find(&channels, v->channel_id, &c_idx) ? &s->channels[c_idx] : nullptr;
+      // Mirrors the store's voice_channel_ok: DM/group calls ride the DM channel itself (kind TEXT),
+      // and guild voice includes stage channels, where the audience joins suppressed until invited.
+      bool voice_chan_ok = chan && chan->guild_id == v->guild_id &&
+                           (v->guild_id == CCORD_DM_GUILD_ID ? chan->kind == CCORD_CHANNEL_TEXT
+                                                             : chan->kind == CCORD_CHANNEL_VOICE ||
+                                                               chan->kind == CCORD_CHANNEL_STAGE);
+      if (!voice_chan_ok) {
+        st = bad(err, "voice state channel is not a voice channel of the guild");
+        goto done;
+      }
+      size_t slot = (size_t)hash_pair(v->guild_id, v->user_id) & vs_mask;
+      for (;;) {
+        size_t prev_plus_one = vs_slots[slot];
+        if (prev_plus_one == 0) {
+          vs_slots[slot] = i + 1u;
+          break;
+        }
+        const ccord_voice_state *prev = &s->voice_states[prev_plus_one - 1u];
+        if (prev->guild_id == v->guild_id && prev->user_id == v->user_id) {
+          st = bad(err, "duplicate voice state user");
+          goto done;
+        }
+        slot = (slot + 1u) & vs_mask;
       }
     }
   }
@@ -350,6 +374,7 @@ ccord_status ccord_snapshot_validate(const ccord_snapshot *s, ccord_error *err)
 
 done:
   ccord_free(members_per_guild);
+  ccord_free(vs_slots);
   id_map_free(&note_users);
   id_map_free(&rel_users);
   id_map_free(&users);
