@@ -2,7 +2,6 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include <ccord/core/json.h>
 
-#include <errno.h>
 #include <inttypes.h>
 #include <math.h>
 #include <stdckdint.h>
@@ -18,23 +17,30 @@
 #define JSON_DEFAULT_STRING (1024u * 1024u)
 #define JSON_NUMBER_MAX 64u
 #define JSON_WRITER_MAX_DEPTH 32u
+#define JSON_KEY_HT_THRESH 16u
 
 struct ccord_json {
-  ccord_json_type type;
-  bool b;
-  double num;
-  const char *str;    // string value, or raw NUMBER text (NUL-terminated)
-  size_t slen;
-  ccord_json **items; // array elements or object values
-  const char **keys;  // object keys
-  size_t count;
+  uint8_t type;    // ccord_json_type
+  uint8_t flags;   // BOOL: 0/1; NUMBER: 1 iff u.n.i64 is valid
+  uint32_t count;  // ARRAY / OBJECT element count
+  union {
+    struct { double num; int64_t i64; } n;
+    struct { const char *str; size_t slen; } s;
+    struct { ccord_json **items; const char **keys; } c;
+  } u;
 };
+
+static_assert(sizeof(struct ccord_json) <= 24, "ccord_json node must stay compact");
 
 typedef struct parser {
   const char *base, *p, *end;
   ccord_arena *a;
   size_t max_depth, max_nodes, max_string, nodes;
   ccord_error *err;
+  ccord_json **val_stk;
+  size_t val_top, val_cap;
+  const char **key_stk;
+  size_t key_top, key_cap;
 } parser;
 
 static ccord_json *fail(parser *ps, const char *what)
@@ -57,18 +63,13 @@ static ccord_json *node_new(parser *ps, ccord_json_type t)
     ccord_error_set(ps->err, CCORD_ERR_RANGE, "json: too many nodes");
     return nullptr;
   }
-  ccord_json *j = ccord_arena_alloc(ps->a, sizeof *j, alignof(ccord_json));
+  ccord_json *j = ccord_arena_alloc_uninit(ps->a, sizeof *j, alignof(ccord_json));
   if (!j) {
     ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
     return nullptr;
   }
-  j->type = t;
-  j->b = false;
-  j->num = 0;
-  j->str = nullptr;
-  j->slen = 0;
-  j->items = nullptr;
-  j->keys = nullptr;
+  j->type = (uint8_t)t;
+  j->flags = 0;
   j->count = 0;
   return j;
 }
@@ -100,6 +101,7 @@ static char *parse_string(parser *ps, size_t *len)
 {
   const char *start = ps->p + 1;
   const char *s = start;
+  bool has_escape = false;
   while (true) {
     if (s >= ps->end) {
       ps->p = s;
@@ -114,6 +116,7 @@ static char *parse_string(parser *ps, size_t *len)
       return nullptr;
     }
     if (c == '\\') {
+      has_escape = true;
       s++;
       if (s >= ps->end) {
         ps->p = s;
@@ -131,7 +134,31 @@ static char *parse_string(parser *ps, size_t *len)
     ccord_error_set(ps->err, CCORD_ERR_RANGE, "json: string too long");
     return nullptr;
   }
-  char *out = ccord_arena_alloc(ps->a, span + 1, 1);
+  size_t alloc_sz;
+  if (ckd_add(&alloc_sz, span, 1u)) {
+    ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
+    return nullptr;
+  }
+  if (!has_escape) {
+    if (!ccord_utf8_valid(start, span)) {
+      ps->p = start;
+      fail(ps, "invalid UTF-8");
+      return nullptr;
+    }
+    char *out = ccord_arena_alloc_uninit(ps->a, alloc_sz, 1);
+    if (!out) {
+      ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
+      return nullptr;
+    }
+    if (span > 0) {
+      memcpy(out, start, span);
+    }
+    out[span] = '\0';
+    *len = span;
+    ps->p = s + 1;
+    return out;
+  }
+  char *out = ccord_arena_alloc_uninit(ps->a, alloc_sz, 1);
   if (!out) {
     ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
     return nullptr;
@@ -214,6 +241,7 @@ static char *parse_string(parser *ps, size_t *len)
 static ccord_json *parse_number(parser *ps)
 {
   const char *q = ps->p;
+  bool is_int = true;
   if (q < ps->end && *q == '-') q++;
   if (q < ps->end && *q == '0') {
     q++;
@@ -223,11 +251,13 @@ static ccord_json *parse_number(parser *ps)
     return fail(ps, "bad number");
   }
   if (q < ps->end && *q == '.') {
+    is_int = false;
     q++;
     if (!(q < ps->end && *q >= '0' && *q <= '9')) return fail(ps, "bad number");
     while (q < ps->end && *q >= '0' && *q <= '9') q++;
   }
   if (q < ps->end && (*q == 'e' || *q == 'E')) {
+    is_int = false;
     q++;
     if (q < ps->end && (*q == '+' || *q == '-')) q++;
     if (!(q < ps->end && *q >= '0' && *q <= '9')) return fail(ps, "bad number");
@@ -235,17 +265,48 @@ static ccord_json *parse_number(parser *ps)
   }
   size_t n = (size_t)(q - ps->p);
   if (n > JSON_NUMBER_MAX) return fail(ps, "number too long");
+
+  bool has_i64 = false;
+  int64_t i64 = 0;
+  double num = 0.0;
+  if (is_int) {
+    bool neg = (*ps->p == '-');
+    const char *d = ps->p + (neg ? 1 : 0);
+    uint64_t limit = neg ? ((uint64_t)INT64_MAX + 1u) : (uint64_t)INT64_MAX;
+    uint64_t acc = 0;
+    bool overflow = false;
+    while (d < q) {
+      uint64_t digit = (uint64_t)(unsigned char)(*d - '0');
+      if (acc > (limit - digit) / 10u) {
+        overflow = true;
+        break;
+      }
+      acc = acc * 10u + digit;
+      d++;
+    }
+    if (!overflow) {
+      has_i64 = true;
+      if (neg) {
+        i64 = (acc == ((uint64_t)INT64_MAX + 1u)) ? INT64_MIN : -(int64_t)acc;
+        num = (acc == 0) ? -0.0 : (double)i64;
+      } else {
+        i64 = (int64_t)acc;
+        num = (double)i64;
+      }
+    }
+  }
+  if (!has_i64) {
+    char raw[JSON_NUMBER_MAX + 1u];
+    memcpy(raw, ps->p, n);
+    raw[n] = '\0';
+    num = strtod(raw, nullptr);
+    if (!isfinite(num)) return fail(ps, "number out of range");
+  }
   ccord_json *j = node_new(ps, CCORD_JSON_NUMBER);
   if (!j) return nullptr;
-  char *raw = ccord_arena_strndup(ps->a, ps->p, n);
-  if (!raw) {
-    ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
-    return nullptr;
-  }
-  j->str = raw;
-  j->slen = n;
-  j->num = strtod(raw, nullptr);
-  if (!isfinite(j->num)) return fail(ps, "number out of range");
+  j->flags = has_i64 ? 1u : 0u;
+  j->u.n.num = num;
+  j->u.n.i64 = i64;
   ps->p = q;
   return j;
 }
@@ -256,6 +317,100 @@ static bool match_word(parser *ps, const char *w)
   if ((size_t)(ps->end - ps->p) < n || memcmp(ps->p, w, n) != 0) return false;
   ps->p += n;
   return true;
+}
+
+static bool stk_push_val(parser *ps, ccord_json *v)
+{
+  if (ps->val_top == ps->val_cap) {
+    size_t ncap = ps->val_cap ? ps->val_cap * 2u : 32u;
+    if (ncap < ps->val_cap) {
+      ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
+      return false;
+    }
+    ccord_json **nv = ccord_realloc_array(ps->val_stk, ncap, sizeof *nv);
+    if (!nv) {
+      ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
+      return false;
+    }
+    ps->val_stk = nv;
+    ps->val_cap = ncap;
+  }
+  ps->val_stk[ps->val_top++] = v;
+  return true;
+}
+
+static bool stk_push_key(parser *ps, const char *k)
+{
+  if (ps->key_top == ps->key_cap) {
+    size_t ncap = ps->key_cap ? ps->key_cap * 2u : 32u;
+    if (ncap < ps->key_cap) {
+      ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
+      return false;
+    }
+    const char **nk = ccord_realloc_array(ps->key_stk, ncap, sizeof *nk);
+    if (!nk) {
+      ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
+      return false;
+    }
+    ps->key_stk = nk;
+    ps->key_cap = ncap;
+  }
+  ps->key_stk[ps->key_top++] = k;
+  return true;
+}
+
+typedef struct key_ht_slot {
+  uint64_t hash;
+  const char *key;
+} key_ht_slot;
+
+static uint64_t fnv1a64(const char *s, size_t n)
+{
+  uint64_t h = 14695981039346656037ULL;
+  for (size_t i = 0; i < n; i++) {
+    h ^= (unsigned char)s[i];
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+
+static bool key_ht_grow(key_ht_slot **ht, size_t *cap, size_t min_cap)
+{
+  size_t ncap = *cap ? *cap : 64u;
+  while (ncap < min_cap) {
+    if (ckd_mul(&ncap, ncap, 2u)) return false;
+  }
+  key_ht_slot *ns = ccord_calloc(ncap, sizeof *ns);
+  if (!ns) return false;
+  size_t mask = ncap - 1u;
+  for (size_t i = 0; i < *cap; i++) {
+    if (!(*ht)[i].key) continue;
+    size_t at = (size_t)(*ht)[i].hash & mask;
+    while (ns[at].key) at = (at + 1u) & mask;
+    ns[at] = (*ht)[i];
+  }
+  ccord_free(*ht);
+  *ht = ns;
+  *cap = ncap;
+  return true;
+}
+
+// Returns 1 if inserted, 0 if duplicate, -1 on OOM.
+static int key_ht_insert(key_ht_slot **ht, size_t *cap, size_t count, const char *key, size_t klen)
+{
+  size_t need;
+  if (ckd_add(&need, count, 1u) || ckd_mul(&need, need, 2u)) return -1;
+  if (*cap < need && !key_ht_grow(ht, cap, need)) return -1;
+  uint64_t h = fnv1a64(key, klen);
+  size_t mask = *cap - 1u;
+  size_t at = (size_t)h & mask;
+  while ((*ht)[at].key) {
+    if ((*ht)[at].hash == h && strcmp((*ht)[at].key, key) == 0) return 0;
+    at = (at + 1u) & mask;
+  }
+  (*ht)[at].hash = h;
+  (*ht)[at].key = key;
+  return 1;
 }
 
 static ccord_json *parse_value(parser *ps, size_t depth);
@@ -269,18 +424,23 @@ static ccord_json *parse_container(parser *ps, size_t depth, bool is_object)
   ps->p++; // opening bracket
   ccord_json *j = node_new(ps, is_object ? CCORD_JSON_OBJECT : CCORD_JSON_ARRAY);
   if (!j) return nullptr;
+  j->u.c.items = nullptr;
+  j->u.c.keys = nullptr;
   const char close = is_object ? '}' : ']';
-
-  size_t cap = 0, n = 0;
-  ccord_json **vals = nullptr;
-  const char **keys = nullptr;
-  ccord_json *result = nullptr;
 
   skip_ws(ps);
   if (ps->p < ps->end && *ps->p == close) {
     ps->p++;
     return j;
   }
+
+  size_t val_base = ps->val_top;
+  size_t key_base = ps->key_top;
+  size_t n = 0;
+  key_ht_slot *ht = nullptr;
+  size_t ht_cap = 0;
+  ccord_json *result = nullptr;
+
   while (true) {
     const char *key = nullptr;
     skip_ws(ps);
@@ -289,30 +449,39 @@ static ccord_json *parse_container(parser *ps, size_t depth, bool is_object)
       size_t klen;
       key = parse_string(ps, &klen);
       if (!key) goto done;
-      for (size_t i = 0; i < n; i++) {
-        if (strcmp(keys[i], key) == 0) { fail(ps, "duplicate key"); goto done; }
+      if (!ht && n == JSON_KEY_HT_THRESH) {
+        if (!key_ht_grow(&ht, &ht_cap, 64u)) {
+          ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
+          goto done;
+        }
+        size_t mask = ht_cap - 1u;
+        for (size_t i = 0; i < n; i++) {
+          const char *ek = ps->key_stk[key_base + i];
+          uint64_t eh = fnv1a64(ek, strlen(ek));
+          size_t at = (size_t)eh & mask;
+          while (ht[at].key) at = (at + 1u) & mask;
+          ht[at].hash = eh;
+          ht[at].key = ek;
+        }
+      }
+      if (ht) {
+        int ins = key_ht_insert(&ht, &ht_cap, n, key, klen);
+        if (ins < 0) { ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory"); goto done; }
+        if (ins == 0) { fail(ps, "duplicate key"); goto done; }
+      } else {
+        for (size_t i = 0; i < n; i++) {
+          if (strcmp(ps->key_stk[key_base + i], key) == 0) { fail(ps, "duplicate key"); goto done; }
+        }
       }
       skip_ws(ps);
       if (ps->p >= ps->end || *ps->p != ':') { fail(ps, "expected ':'"); goto done; }
       ps->p++;
       skip_ws(ps);
     }
-    if (n == cap) {
-      size_t ncap = cap ? cap * 2 : 8;
-      ccord_json **nv = ccord_realloc_array(vals, ncap, sizeof *nv);
-      if (!nv) { ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory"); goto done; }
-      vals = nv;
-      if (is_object) {
-        const char **nk = ccord_realloc_array(keys, ncap, sizeof *nk);
-        if (!nk) { ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory"); goto done; }
-        keys = nk;
-      }
-      cap = ncap;
-    }
     ccord_json *v = parse_value(ps, depth + 1);
     if (!v) goto done;
-    vals[n] = v;
-    if (is_object) keys[n] = key;
+    if (!stk_push_val(ps, v)) goto done;
+    if (is_object && !stk_push_key(ps, key)) goto done;
     n++;
     skip_ws(ps);
     if (ps->p >= ps->end) { fail(ps, "unterminated container"); goto done; }
@@ -328,21 +497,36 @@ static ccord_json *parse_container(parser *ps, size_t depth, bool is_object)
     goto done;
   }
 
-  j->count = n;
+  if (n > UINT32_MAX) {
+    ccord_error_set(ps->err, CCORD_ERR_RANGE, "json: container too large");
+    goto done;
+  }
+  j->count = (uint32_t)n;
   if (n > 0) {
-    j->items = ccord_arena_alloc(ps->a, n * sizeof *j->items, alignof(ccord_json *));
-    if (!j->items) { ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory"); goto done; }
-    memcpy(j->items, vals, n * sizeof *vals);
+    size_t item_bytes;
+    if (ckd_mul(&item_bytes, n, sizeof *j->u.c.items)) {
+      ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
+      goto done;
+    }
+    j->u.c.items = ccord_arena_alloc_uninit(ps->a, item_bytes, alignof(ccord_json *));
+    if (!j->u.c.items) { ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory"); goto done; }
+    memcpy(j->u.c.items, ps->val_stk + val_base, item_bytes);
     if (is_object) {
-      j->keys = ccord_arena_alloc(ps->a, n * sizeof *j->keys, alignof(const char *));
-      if (!j->keys) { ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory"); goto done; }
-      memcpy(j->keys, keys, n * sizeof *keys);
+      size_t key_bytes;
+      if (ckd_mul(&key_bytes, n, sizeof *j->u.c.keys)) {
+        ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory");
+        goto done;
+      }
+      j->u.c.keys = ccord_arena_alloc_uninit(ps->a, key_bytes, alignof(const char *));
+      if (!j->u.c.keys) { ccord_error_set(ps->err, CCORD_ERR_NOMEM, "json: out of memory"); goto done; }
+      memcpy(j->u.c.keys, ps->key_stk + key_base, key_bytes);
     }
   }
   result = j;
 done:
-  ccord_free(vals);
-  ccord_free(keys);
+  ccord_free(ht);
+  ps->val_top = val_base;
+  ps->key_top = key_base;
   return result;
 }
 
@@ -359,8 +543,8 @@ static ccord_json *parse_value(parser *ps, size_t depth)
     if (!s) return nullptr;
     ccord_json *j = node_new(ps, CCORD_JSON_STRING);
     if (!j) return nullptr;
-    j->str = s;
-    j->slen = len;
+    j->u.s.str = s;
+    j->u.s.slen = len;
     return j;
   }
   case 't':
@@ -368,7 +552,7 @@ static ccord_json *parse_value(parser *ps, size_t depth)
     bool v = *ps->p == 't';
     if (!match_word(ps, v ? "true" : "false")) return fail(ps, "bad literal");
     ccord_json *j = node_new(ps, CCORD_JSON_BOOL);
-    if (j) j->b = v;
+    if (j) j->flags = v ? 1u : 0u;
     return j;
   }
   case 'n': {
@@ -401,6 +585,8 @@ const ccord_json *ccord_json_parse(ccord_arena *a, const char *text, size_t len,
     return nullptr;
   }
   ccord_json *root = parse_value(&ps, 1);
+  ccord_free(ps.val_stk);
+  ccord_free(ps.key_stk);
   if (!root) return nullptr;
   skip_ws(&ps);
   if (ps.p != ps.end) {
@@ -412,63 +598,56 @@ const ccord_json *ccord_json_parse(ccord_arena *a, const char *text, size_t len,
 
 ccord_json_type ccord_json_type_of(const ccord_json *j)
 {
-  return j ? j->type : CCORD_JSON_NULL;
+  return j ? (ccord_json_type)j->type : CCORD_JSON_NULL;
 }
 
 bool ccord_json_bool(const ccord_json *j, bool fallback)
 {
   if (!j) return fallback;
-  return j->type == CCORD_JSON_BOOL ? j->b : fallback;
+  return j->type == CCORD_JSON_BOOL ? (j->flags != 0) : fallback;
 }
 
 double ccord_json_number(const ccord_json *j, double fallback)
 {
   if (!j) return fallback;
-  return j->type == CCORD_JSON_NUMBER ? j->num : fallback;
+  return j->type == CCORD_JSON_NUMBER ? j->u.n.num : fallback;
 }
 
 bool ccord_json_int64(const ccord_json *j, int64_t *out)
 {
-  if (!j || !out || j->type != CCORD_JSON_NUMBER || !j->str) return false;
-  for (size_t i = 0; i < j->slen; i++) {
-    char c = j->str[i];
-    if (c == '.' || c == 'e' || c == 'E') return false;
-  }
-  errno = 0;
-  long long v = strtoll(j->str, nullptr, 10);
-  if (errno == ERANGE) return false;
-  *out = (int64_t)v;
+  if (!j || !out || j->type != CCORD_JSON_NUMBER || !j->flags) return false;
+  *out = j->u.n.i64;
   return true;
 }
 
 const char *ccord_json_string(const ccord_json *j, size_t *len)
 {
   if (!j || j->type != CCORD_JSON_STRING) return nullptr;
-  if (len) *len = j->slen;
-  return j->str;
+  if (len) *len = j->u.s.slen;
+  return j->u.s.str;
 }
 
 size_t ccord_json_array_len(const ccord_json *j)
 {
-  return (j && j->type == CCORD_JSON_ARRAY) ? j->count : 0;
+  return (j && j->type == CCORD_JSON_ARRAY) ? (size_t)j->count : 0;
 }
 
 const ccord_json *ccord_json_array_at(const ccord_json *j, size_t i)
 {
   if (!j || j->type != CCORD_JSON_ARRAY || i >= j->count) return nullptr;
-  return j->items[i];
+  return j->u.c.items[i];
 }
 
 size_t ccord_json_object_len(const ccord_json *j)
 {
-  return (j && j->type == CCORD_JSON_OBJECT) ? j->count : 0;
+  return (j && j->type == CCORD_JSON_OBJECT) ? (size_t)j->count : 0;
 }
 
 const ccord_json *ccord_json_get(const ccord_json *obj, const char *key)
 {
   if (!obj || !key || obj->type != CCORD_JSON_OBJECT) return nullptr;
   for (size_t i = 0; i < obj->count; i++) {
-    if (strcmp(obj->keys[i], key) == 0) return obj->items[i];
+    if (strcmp(obj->u.c.keys[i], key) == 0) return obj->u.c.items[i];
   }
   return nullptr;
 }
@@ -476,8 +655,8 @@ const ccord_json *ccord_json_get(const ccord_json *obj, const char *key)
 const char *ccord_json_object_key(const ccord_json *obj, size_t i, const ccord_json **value)
 {
   if (!obj || obj->type != CCORD_JSON_OBJECT || i >= obj->count) return nullptr;
-  if (value) *value = obj->items[i];
-  return obj->keys[i];
+  if (value) *value = obj->u.c.items[i];
+  return obj->u.c.keys[i];
 }
 
 // ---- writer ----
@@ -554,8 +733,15 @@ void ccord_jw_string(ccord_jw *w, const char *s, size_t len)
     return;
   }
   jw_put(w, "\"", 1);
+  size_t span_start = 0;
   for (size_t i = 0; i < len; i++) {
     unsigned char c = (unsigned char)s[i];
+    if (c >= 0x20u && c != '"' && c != '\\') {
+      continue;
+    }
+    if (i > span_start) {
+      jw_put(w, s + span_start, i - span_start);
+    }
     switch (c) {
     case '"': jw_put(w, "\\\"", 2); break;
     case '\\': jw_put(w, "\\\\", 2); break;
@@ -564,15 +750,17 @@ void ccord_jw_string(ccord_jw *w, const char *s, size_t len)
     case '\t': jw_put(w, "\\t", 2); break;
     case '\b': jw_put(w, "\\b", 2); break;
     case '\f': jw_put(w, "\\f", 2); break;
-    default:
-      if (c < 0x20) {
-        char e[7];
-        snprintf(e, sizeof e, "\\u%04x", (unsigned)c);
-        jw_put(w, e, 6);
-      } else {
-        jw_put(w, s + i, 1);
-      }
+    default: {
+      char e[7];
+      snprintf(e, sizeof e, "\\u%04x", (unsigned)c);
+      jw_put(w, e, 6);
+      break;
     }
+    }
+    span_start = i + 1u;
+  }
+  if (len > span_start) {
+    jw_put(w, s + span_start, len - span_start);
   }
   jw_put(w, "\"", 1);
 }
