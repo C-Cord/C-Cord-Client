@@ -29,7 +29,7 @@
 static_assert(CCORD_STREAM_RANGE_BLOCKS * CCORD_STREAM_BLOCK_BYTES == CCORD_STREAM_RANGE_MAX_BYTES,
               "one range request is RANGE_BLOCKS blocks");
 
-typedef enum slot_state : uint8_t { SLOT_EMPTY = 0, SLOT_READY } slot_state;
+typedef enum slot_state : uint8_t { SLOT_EMPTY = 0, SLOT_FILLING, SLOT_READY } slot_state;
 typedef struct slot {
   uint8_t *data;      // allocated lazily, kept until close
   int64_t block;      // block index while READY
@@ -134,6 +134,7 @@ static slot *slot_acquire(ccord_media_stream *ms, int64_t blk)
   for (size_t i = 0; i < CCORD_STREAM_CACHE_BLOCKS; i++) {
     slot *c = &ms->slots[i];
     if (c->state == SLOT_EMPTY) return c;
+    if (c->state == SLOT_FILLING) continue;
     if (c->block >= cb - 1 && c->block <= cb + (int64_t)CCORD_STREAM_READAHEAD_BLOCKS) continue;
     if (!victim || c->last_use < victim->last_use) victim = c;
   }
@@ -391,29 +392,101 @@ static void log_range_locked(ccord_media_stream *ms, int64_t start, uint32_t len
   ms->st.log_count++;
 }
 
+typedef struct block_stage {
+  size_t slot_idx;
+  size_t off;
+  size_t chunk;
+  int64_t block;
+  uint8_t *buf;
+  bool already_ready;   // slot stayed SLOT_READY with existing data; swap under mtx and free old outside
+} block_stage;
+
 // Copies the complete blocks of an accepted body into the cache. A trailing partial block is stored only when it is
-// the last block of the file; otherwise it is dropped and fetched again. Returns the number of blocks stored.
+// the last block of the file; otherwise it is dropped and fetched again. Releases ms->mtx while allocating and
+// copying chunk buffers so the demux reader thread is never stalled on malloc/memcpy, then re-acquires ms->mtx to
+// commit ready slots. Caller enters and exits with ms->mtx held. Returns the number of blocks stored.
 static uint32_t store_body_locked(ccord_media_stream *ms, int64_t start, const uint8_t *data, size_t len)
 {
   const size_t B = CCORD_STREAM_BLOCK_BYTES;
   uint32_t stored = 0;
-  for (size_t off = 0; off < len; off += B) {
-    size_t chunk = len - off < B ? len - off : B;
-    int64_t pos = start + (int64_t)off;
-    if (chunk < B && !(ms->total >= 0 && pos + (int64_t)chunk == ms->total)) break;
-    slot *s = slot_acquire(ms, pos / (int64_t)B);
-    if (!s) continue;
-    if (!s->data) {
-      s->data = ccord_malloc(B);
-      if (!s->data) continue;
+
+  for (size_t batch_off = 0; batch_off < len; batch_off += CCORD_STREAM_RANGE_MAX_BYTES) {
+    if (ms->cancelled) break;
+    block_stage plan[CCORD_STREAM_RANGE_BLOCKS];
+    size_t nplan = 0;
+    size_t batch_end = batch_off + CCORD_STREAM_RANGE_MAX_BYTES;
+    if (batch_end > len) batch_end = len;
+
+    // Phase 1 (under ms->mtx): reserve target slots and detach reusable buffers from non-READY slots.
+    for (size_t off = batch_off; off < batch_end; off += B) {
+      size_t chunk = len - off < B ? len - off : B;
+      int64_t pos = start + (int64_t)off;
+      if (chunk < B && !(ms->total >= 0 && pos + (int64_t)chunk == ms->total)) break;
+      int64_t blk = pos / (int64_t)B;
+      slot *s = slot_acquire(ms, blk);
+      if (!s) continue;
+      if (s->state == SLOT_READY && s->block == blk && s->valid >= (uint32_t)chunk) {
+        s->last_use = ++ms->tick;
+        stored++;
+        continue;
+      }
+      block_stage st = {
+        .slot_idx = (size_t)(s - ms->slots),
+        .off = off,
+        .chunk = chunk,
+        .block = blk,
+        .buf = nullptr,
+        .already_ready = (s->state == SLOT_READY),
+      };
+      if (!st.already_ready) {
+        st.buf = s->data;
+        s->data = nullptr;
+        s->state = SLOT_FILLING;
+      }
+      plan[nplan++] = st;
     }
-    memcpy(s->data, data + off, chunk);
-    s->block = pos / (int64_t)B;
-    s->valid = (uint32_t)chunk;
-    s->state = SLOT_READY;
-    s->last_use = ++ms->tick;
-    stored++;
+
+    if (nplan == 0) continue;
+
+    // Phase 2 (unlocked): allocate missing block buffers and memcpy payload without stalling the demux thread.
+    ccord_mutex_unlock(ms->mtx);
+    for (size_t i = 0; i < nplan; i++) {
+      if (!plan[i].buf) plan[i].buf = ccord_malloc(B);
+      if (plan[i].buf) memcpy(plan[i].buf, data + plan[i].off, plan[i].chunk);
+    }
+
+    // Phase 3 (under ms->mtx): commit ready slots, or roll back cleanly on cancel/OOM.
+    uint8_t *to_free[CCORD_STREAM_RANGE_BLOCKS];
+    size_t nfree = 0;
+    ccord_mutex_lock(ms->mtx);
+    for (size_t i = 0; i < nplan; i++) {
+      slot *s = &ms->slots[plan[i].slot_idx];
+      if (ms->cancelled || !plan[i].buf) {
+        if (plan[i].already_ready) {
+          if (plan[i].buf) to_free[nfree++] = plan[i].buf;
+        } else {
+          s->data = plan[i].buf;
+          s->state = SLOT_EMPTY;
+        }
+        continue;
+      }
+      if (plan[i].already_ready && s->data) {
+        to_free[nfree++] = s->data;
+      }
+      s->data = plan[i].buf;
+      s->block = plan[i].block;
+      s->valid = (uint32_t)plan[i].chunk;
+      s->state = SLOT_READY;
+      s->last_use = ++ms->tick;
+      stored++;
+    }
+    if (nfree > 0) {
+      ccord_mutex_unlock(ms->mtx);
+      for (size_t i = 0; i < nfree; i++) ccord_free(to_free[i]);
+      ccord_mutex_lock(ms->mtx);
+    }
   }
+
   uint32_t r = resident_locked(ms);
   ms->st.resident_blocks = r;
   if (r > ms->st.peak_resident_blocks) ms->st.peak_resident_blocks = r;
@@ -503,6 +576,10 @@ static void handle_answer_locked(ccord_media_stream *ms, const ccord_net_event *
   if (ev->range_etag[0] && !ms->etag[0]) snprintf(ms->etag, sizeof ms->etag, "%s", ev->range_etag);
 
   uint32_t stored = store_body_locked(ms, asked_start, ev->media_data, len);
+  if (ms->cancelled) {
+    ms->flight = FLIGHT_IDLE;
+    return;
+  }
   bool at_end = ms->total >= 0 && asked_start >= ms->total;   // asked exactly at the end: nothing to store
   if (stored == 0 && !at_end && len > 0) {   // not one whole block: no progress, try again
     failed_attempt_locked(ms, now_ms, "short body");
