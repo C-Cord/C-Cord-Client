@@ -28,9 +28,12 @@
 #include <ccord/core/alloc.h>
 #include <ccord/core/atomic_file.h>
 #include <ccord/core/clock.h>
+#include <ccord/core/idmap.h>
 #include <ccord/core/json.h>
 #include <ccord/core/log.h>
 #include <ccord/core/utf8.h>
+
+#include "tls_internal.h"
 
 #define LIVE_QUEUE_SIZE 64u
 #define LIVE_API_MAX 512u
@@ -54,7 +57,7 @@ typedef struct live_user_vol {
   uint8_t pct;
 } live_user_vol;
 
-#define LIVE_CHAN_MSG_MAX 4096u
+#define LIVE_CHAN_MSG_MAX 512u
 
 typedef struct live_chan_guild {
   ccord_id channel_id;
@@ -141,8 +144,10 @@ typedef struct live {
   ccord_rest_config rest;
   ccord_rest_queue *restq;
   ccord_live_event pending[LIVE_QUEUE_SIZE];
+  char *pending_media[LIVE_QUEUE_SIZE];  // optional heap-owned media payload per pending slot (zero-copy)
   size_t head, tail, count;
   ccord_live_event current;
+  char *current_media;                   // optional heap-owned media payload for `current`
   bool have_current;
   ccord_connection_state state;
   ccord_connection_state reported;
@@ -178,6 +183,7 @@ typedef struct live {
   live_chan_guild *chan_guilds;
   size_t chan_guild_count;
   size_t chan_guild_cap;
+  ccord_idmap chan_guild_idx;   // channel_id -> slot in chan_guilds[]
   live_vstream_slot tx_stream;
   live_vstream_slot rx_stream;
   live_stream_meta stream_peers[LIVE_STREAM_PEERS_MAX];
@@ -216,14 +222,16 @@ static uint64_t live_now(const live *l)
 
 static void live_chan_guild_from_event(live *l, const ccord_net_event *ev);
 
-static bool live_push(live *l, ccord_live_event *ev)
+static bool live_push_with_media(live *l, ccord_live_event *ev, char *owned_media)
 {
   if (l->count == LIVE_QUEUE_SIZE) {
     CCORD_LOG_W("live: event queue full, dropping event");
     ccord_live_event_free(ev);
+    ccord_free(owned_media);
     return false;
   }
   l->pending[l->tail] = *ev;
+  l->pending_media[l->tail] = owned_media;
   if (l->pending[l->tail].ev.type == CCORD_NET_SNAPSHOT) {
     l->pending[l->tail].ev.snapshot = &l->pending[l->tail].snapshot;
   } else if (l->pending[l->tail].ev.type == CCORD_NET_USER_SETTINGS) {
@@ -238,36 +246,58 @@ static bool live_push(live *l, ccord_live_event *ev)
   return true;
 }
 
+static bool live_push(live *l, ccord_live_event *ev)
+{
+  return live_push_with_media(l, ev, nullptr);
+}
+
 static void live_clear_events(live *l)
 {
   if (l->have_current) {
     ccord_live_event_free(&l->current);
+    ccord_free(l->current_media);
+    l->current_media = nullptr;
     l->have_current = false;
   }
   for (size_t i = 0; i < l->count; i++) {
     size_t idx = (l->head + i) % LIVE_QUEUE_SIZE;
     ccord_live_event_free(&l->pending[idx]);
+    ccord_free(l->pending_media[idx]);
+    l->pending_media[idx] = nullptr;
   }
   l->head = l->tail = l->count = 0;
 }
 
-// Drop every queued viewer access unit and PCM sample. Caller holds media_mtx; slot buffers stay allocated for
-// reuse and are freed only in live_destroy.
+// Drop every queued viewer access unit and PCM sample and release the lazily allocated buffers and decoder.
+// Caller holds media_mtx.
 static void live_stream_rx_clear(live *l)
 {
-  for (size_t i = 0; i < LIVE_STREAM_FRAME_SLOTS; i++) l->rx_frames[i].len = 0;
+  for (size_t i = 0; i < LIVE_STREAM_FRAME_SLOTS; i++) {
+    ccord_free(l->rx_frames[i].data);
+    l->rx_frames[i].data = nullptr;
+    l->rx_frames[i].len = 0;
+  }
   l->rx_frame_head = 0;
   l->rx_frame_count = 0;
+  ccord_free(l->rx_pcm);
+  l->rx_pcm = nullptr;
   l->rx_pcm_head = 0;
   l->rx_pcm_count = 0;
-  if (l->stream_dec) (void)opus_decoder_ctl(l->stream_dec, OPUS_RESET_STATE);
+  if (l->stream_dec) {
+    opus_decoder_destroy(l->stream_dec);
+    l->stream_dec = nullptr;
+  }
 }
 
-// Reset the sender's partial PCM chunk and stream-audio timestamp. Caller holds media_mtx.
+// Reset the sender's partial PCM chunk and stream-audio timestamp and release the lazy encoder. Caller holds media_mtx.
 static void live_stream_tx_clear(live *l)
 {
   l->tx_pcm_acc_len = 0;
   l->tx_audio_ts48k = 0;
+  if (l->stream_enc) {
+    opus_encoder_destroy(l->stream_enc);
+    l->stream_enc = nullptr;
+  }
 }
 
 // Last-known voice flags keyed by (guild, user), fed by gateway VOICE_STATE_UPDATE. Stage REST answers are 204 with
@@ -347,14 +377,30 @@ static void live_chan_guild_clear_all(live *l)
     l->chan_guilds[i].msg_cap = 0;
   }
   l->chan_guild_count = 0;
+  ccord_idmap_clear(&l->chan_guild_idx);
+}
+
+static live_chan_guild *live_chan_guild_lookup(live *l, ccord_id channel_id)
+{
+  if (!l || channel_id == CCORD_ID_NONE) return nullptr;
+  size_t idx = 0;
+  if (!ccord_idmap_find(&l->chan_guild_idx, channel_id, &idx)) return nullptr;
+  return idx < l->chan_guild_count ? &l->chan_guilds[idx] : nullptr;
+}
+
+static const live_chan_guild *live_chan_guild_lookup_const(const live *l, ccord_id channel_id)
+{
+  if (!l || channel_id == CCORD_ID_NONE) return nullptr;
+  size_t idx = 0;
+  if (!ccord_idmap_find(&l->chan_guild_idx, channel_id, &idx)) return nullptr;
+  return idx < l->chan_guild_count ? &l->chan_guilds[idx] : nullptr;
 }
 
 static live_chan_guild *live_chan_guild_ensure(live *l, ccord_id channel_id)
 {
   if (!l || channel_id == CCORD_ID_NONE) return nullptr;
-  for (size_t i = 0; i < l->chan_guild_count; i++) {
-    if (l->chan_guilds[i].channel_id == channel_id) return &l->chan_guilds[i];
-  }
+  live_chan_guild *existing = live_chan_guild_lookup(l, channel_id);
+  if (existing) return existing;
   if (l->chan_guild_count == l->chan_guild_cap) {
     size_t ncap = l->chan_guild_cap ? l->chan_guild_cap * 2u : 64u;
     live_chan_guild *nbuf = ccord_alloc_array(ncap, sizeof *nbuf);
@@ -364,6 +410,8 @@ static live_chan_guild *live_chan_guild_ensure(live *l, ccord_id channel_id)
     l->chan_guilds = nbuf;
     l->chan_guild_cap = ncap;
   }
+  size_t slot = l->chan_guild_count;
+  if (!ccord_idmap_put(&l->chan_guild_idx, channel_id, slot)) return nullptr;
   live_chan_guild *row = &l->chan_guilds[l->chan_guild_count++];
   memset(row, 0, sizeof *row);
   row->channel_id = channel_id;
@@ -386,11 +434,8 @@ static void live_chan_set_ack(live *l, ccord_id channel_id, ccord_id ack_id)
 
 static ccord_id live_chan_last_ack(const live *l, ccord_id channel_id)
 {
-  if (!l || channel_id == CCORD_ID_NONE) return CCORD_ID_NONE;
-  for (size_t i = 0; i < l->chan_guild_count; i++) {
-    if (l->chan_guilds[i].channel_id == channel_id) return l->chan_guilds[i].last_ack_id;
-  }
-  return CCORD_ID_NONE;
+  const live_chan_guild *row = live_chan_guild_lookup_const(l, channel_id);
+  return row ? row->last_ack_id : CCORD_ID_NONE;
 }
 
 static void live_chan_msg_insert(live *l, ccord_id channel_id, ccord_id msg_id)
@@ -430,30 +475,26 @@ static void live_chan_msg_insert(live *l, ccord_id channel_id, ccord_id msg_id)
 static void live_chan_msg_remove(live *l, ccord_id channel_id, ccord_id msg_id)
 {
   if (!l || channel_id == CCORD_ID_NONE || msg_id == CCORD_ID_NONE) return;
-  for (size_t i = 0; i < l->chan_guild_count; i++) {
-    live_chan_guild *row = &l->chan_guilds[i];
-    if (row->channel_id != channel_id) continue;
-    size_t lo = 0, hi = row->msg_count;
-    while (lo < hi) {
-      size_t mid = lo + (hi - lo) / 2u;
-      if (row->msg_ids[mid] < msg_id) lo = mid + 1u; else hi = mid;
+  live_chan_guild *row = live_chan_guild_lookup(l, channel_id);
+  if (!row || row->msg_count == 0) return;
+  size_t lo = 0, hi = row->msg_count;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    if (row->msg_ids[mid] < msg_id) lo = mid + 1u; else hi = mid;
+  }
+  if (lo < row->msg_count && row->msg_ids[lo] == msg_id) {
+    if (lo + 1u < row->msg_count) {
+      memmove(&row->msg_ids[lo], &row->msg_ids[lo + 1u], (row->msg_count - lo - 1u) * sizeof *row->msg_ids);
     }
-    if (lo < row->msg_count && row->msg_ids[lo] == msg_id) {
-      if (lo + 1u < row->msg_count) {
-        memmove(&row->msg_ids[lo], &row->msg_ids[lo + 1u], (row->msg_count - lo - 1u) * sizeof *row->msg_ids);
-      }
-      row->msg_count--;
-    }
-    return;
+    row->msg_count--;
   }
 }
 
 static bool live_chan_prev_msg_id(const live *l, ccord_id channel_id, ccord_id message_id, ccord_id *out_ack_id)
 {
   if (!l || !out_ack_id || channel_id == CCORD_ID_NONE || message_id == CCORD_ID_NONE) return false;
-  for (size_t i = 0; i < l->chan_guild_count; i++) {
-    const live_chan_guild *row = &l->chan_guilds[i];
-    if (row->channel_id != channel_id || row->msg_count == 0) continue;
+  const live_chan_guild *row = live_chan_guild_lookup_const(l, channel_id);
+  if (row && row->msg_count > 0) {
     size_t lo = 0, hi = row->msg_count;
     while (lo < hi) {
       size_t mid = lo + (hi - lo) / 2u;
@@ -468,7 +509,6 @@ static bool live_chan_prev_msg_id(const live *l, ccord_id channel_id, ccord_id m
       *out_ack_id = message_id - 1u;
       return true;
     }
-    break;
   }
   if (message_id <= 1u) return false;
   *out_ack_id = message_id - 1u;
@@ -478,12 +518,14 @@ static bool live_chan_prev_msg_id(const live *l, ccord_id channel_id, ccord_id m
 static void live_chan_guild_remove(live *l, ccord_id channel_id)
 {
   if (!l || channel_id == CCORD_ID_NONE) return;
-  for (size_t i = 0; i < l->chan_guild_count; i++) {
-    if (l->chan_guilds[i].channel_id == channel_id) {
-      ccord_free(l->chan_guilds[i].msg_ids);
-      l->chan_guilds[i] = l->chan_guilds[--l->chan_guild_count];
-      return;
-    }
+  size_t idx = 0;
+  if (!ccord_idmap_find(&l->chan_guild_idx, channel_id, &idx) || idx >= l->chan_guild_count) return;
+  ccord_free(l->chan_guilds[idx].msg_ids);
+  (void)ccord_idmap_remove(&l->chan_guild_idx, channel_id);
+  size_t last = --l->chan_guild_count;
+  if (idx != last) {
+    l->chan_guilds[idx] = l->chan_guilds[last];
+    (void)ccord_idmap_put(&l->chan_guild_idx, l->chan_guilds[idx].channel_id, idx);
   }
 }
 
@@ -498,16 +540,18 @@ static void live_chan_guild_remove_guild(live *l, ccord_id guild_id)
       ccord_free(l->chan_guilds[i].msg_ids);
     }
   }
+  if (w == l->chan_guild_count) return;
   l->chan_guild_count = w;
+  ccord_idmap_clear(&l->chan_guild_idx);
+  for (size_t i = 0; i < w; i++) {
+    (void)ccord_idmap_put(&l->chan_guild_idx, l->chan_guilds[i].channel_id, i);
+  }
 }
 
 static ccord_id live_chan_guild_find(const live *l, ccord_id channel_id)
 {
-  if (!l || channel_id == CCORD_ID_NONE) return CCORD_ID_NONE;
-  for (size_t i = 0; i < l->chan_guild_count; i++) {
-    if (l->chan_guilds[i].channel_id == channel_id) return l->chan_guilds[i].guild_id;
-  }
-  return CCORD_ID_NONE;
+  const live_chan_guild *row = live_chan_guild_lookup_const(l, channel_id);
+  return row ? row->guild_id : CCORD_ID_NONE;
 }
 
 static void live_chan_guild_from_event(live *l, const ccord_net_event *ev)
@@ -517,10 +561,14 @@ static void live_chan_guild_from_event(live *l, const ccord_net_event *ev)
     case CCORD_NET_SNAPSHOT:
       live_chan_guild_clear_all(l);
       if (ev->snapshot && ev->snapshot->channels) {
+        if (ev->snapshot->channel_count > 0) (void)ccord_idmap_reserve(&l->chan_guild_idx, ev->snapshot->channel_count);
         for (size_t i = 0; i < ev->snapshot->channel_count; i++) {
           const ccord_channel *ch = &ev->snapshot->channels[i];
-          live_chan_guild_put(l, ch->id, ch->guild_id);
-          if (ch->last_read_id != CCORD_ID_NONE) live_chan_set_ack(l, ch->id, ch->last_read_id);
+          live_chan_guild *row = live_chan_guild_ensure(l, ch->id);
+          if (row) {
+            if (ch->guild_id != CCORD_ID_NONE) row->guild_id = ch->guild_id;
+            if (ch->last_read_id != CCORD_ID_NONE) row->last_ack_id = ch->last_read_id;
+          }
         }
       }
       break;
@@ -529,8 +577,11 @@ static void live_chan_guild_from_event(live *l, const ccord_net_event *ev)
         for (size_t i = 0; i < ev->guild_channel_count; i++) {
           const ccord_channel *ch = &ev->guild_channels[i];
           ccord_id gid = ch->guild_id != CCORD_ID_NONE ? ch->guild_id : ev->guild_id;
-          live_chan_guild_put(l, ch->id, gid);
-          if (ch->last_read_id != CCORD_ID_NONE) live_chan_set_ack(l, ch->id, ch->last_read_id);
+          live_chan_guild *row = live_chan_guild_ensure(l, ch->id);
+          if (row) {
+            if (gid != CCORD_ID_NONE) row->guild_id = gid;
+            if (ch->last_read_id != CCORD_ID_NONE) row->last_ack_id = ch->last_read_id;
+          }
         }
       }
       break;
@@ -539,13 +590,19 @@ static void live_chan_guild_from_event(live *l, const ccord_net_event *ev)
         for (size_t i = 0; i < ev->guild_channel_count; i++) {
           const ccord_channel *ch = &ev->guild_channels[i];
           ccord_id gid = ch->guild_id != CCORD_ID_NONE ? ch->guild_id : ev->guild_id;
-          live_chan_guild_put(l, ch->id, gid);
-          if (ch->last_read_id != CCORD_ID_NONE) live_chan_set_ack(l, ch->id, ch->last_read_id);
+          live_chan_guild *row = live_chan_guild_ensure(l, ch->id);
+          if (row) {
+            if (gid != CCORD_ID_NONE) row->guild_id = gid;
+            if (ch->last_read_id != CCORD_ID_NONE) row->last_ack_id = ch->last_read_id;
+          }
         }
       } else if (ev->channel) {
         ccord_id gid = ev->channel->guild_id != CCORD_ID_NONE ? ev->channel->guild_id : ev->guild_id;
-        live_chan_guild_put(l, ev->channel->id, gid);
-        if (ev->channel->last_read_id != CCORD_ID_NONE) live_chan_set_ack(l, ev->channel->id, ev->channel->last_read_id);
+        live_chan_guild *row = live_chan_guild_ensure(l, ev->channel->id);
+        if (row) {
+          if (gid != CCORD_ID_NONE) row->guild_id = gid;
+          if (ev->channel->last_read_id != CCORD_ID_NONE) row->last_ack_id = ev->channel->last_read_id;
+        }
       } else if (ev->channel_id != CCORD_ID_NONE && ev->guild_id != CCORD_ID_NONE) {
         live_chan_guild_put(l, ev->channel_id, ev->guild_id);
       }
@@ -980,6 +1037,36 @@ typedef enum live_rest_kind {
   LIVE_REST_MEDIA_RANGE,   // one byte range of a clicked video (CCORD_NET_MEDIA_RANGE)
 } live_rest_kind;
 
+// Heap-allocated only for LIVE_REST_UPLOAD_SLOT / PUT / SEND so normal REST ops stay < 1 KiB.
+typedef struct live_upload_state {
+  size_t file_count;
+  size_t upload_idx;
+  uint64_t upload_id;
+  size_t upload_orig_sizes[CCORD_RICH_MAX_ATTACHMENTS];
+  uint64_t upload_total_bytes;
+  uint64_t upload_completed_bytes;
+  uint64_t upload_cur_file_bytes;
+  bool upload_linked;
+  struct live_rest_op *upload_prev, *upload_next;
+  char *filenames[CCORD_RICH_MAX_ATTACHMENTS];
+  uint8_t *file_datas[CCORD_RICH_MAX_ATTACHMENTS];
+  size_t file_sizes[CCORD_RICH_MAX_ATTACHMENTS];
+  bool file_spoilers[CCORD_RICH_MAX_ATTACHMENTS];
+  uint32_t file_durations_ms[CCORD_RICH_MAX_ATTACHMENTS];   // voice message length; 0 for an ordinary file
+  char *file_waveforms[CCORD_RICH_MAX_ATTACHMENTS];         // voice message waveform (base64) or nullptr
+  char upload_urls[CCORD_RICH_MAX_ATTACHMENTS][2048];
+  char upload_filenames[CCORD_RICH_MAX_ATTACHMENTS][256];
+} live_upload_state;
+
+// Heap-allocated only for CCORD_ADMIN_REORDER_CHANNELS.
+typedef struct live_reorder_data {
+  size_t count;
+  ccord_id ids[CCORD_ADMIN_CHANNEL_REORDER_MAX];
+  int32_t positions[CCORD_ADMIN_CHANNEL_REORDER_MAX];
+  ccord_id parents[CCORD_ADMIN_CHANNEL_REORDER_MAX];
+  uint8_t has_parent[CCORD_ADMIN_CHANNEL_REORDER_MAX];
+} live_reorder_data;
+
 typedef struct live_rest_op {
   live *l;
   live_rest_kind kind;
@@ -1003,86 +1090,89 @@ typedef struct live_rest_op {
   char *expr_arg;
   uint32_t forum_offset;
   uint32_t search_offset;
-  uint32_t discovery_category_id;
-  uint32_t discovery_offset;
-  char discovery_query[128];
-  size_t reorder_count;
-  ccord_id reorder_ids[CCORD_ADMIN_CHANNEL_REORDER_MAX];
-  int32_t reorder_positions[CCORD_ADMIN_CHANNEL_REORDER_MAX];
-  ccord_id reorder_parents[CCORD_ADMIN_CHANNEL_REORDER_MAX];
-  uint8_t reorder_has_parent[CCORD_ADMIN_CHANNEL_REORDER_MAX];
   size_t folder_item_count;
   ccord_guild_folder_item *folder_items;
-  char user_note[CCORD_USER_NOTE_MAX_BYTES + 1];
-  char custom_status_emoji[CCORD_EMOJI_MAX_BYTES + 1];
-  char custom_status_text[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
-  ccord_id custom_status_emoji_id;
-  int64_t custom_status_expires_ms;
-  bool custom_status_clear;
-  int64_t invites_disabled_until_ms;
-  int64_t dms_disabled_until_ms;
-  char voice_status[CCORD_ADMIN_VOICE_STATUS_MAX * 4u + 1u];
+  live_reorder_data *reorder;   // CCORD_ADMIN_REORDER_CHANNELS (heap-allocated on demand)
+  char *voice_status;           // CCORD_ADMIN_VOICE_STATUS (heap-allocated on demand)
   int64_t request_to_speak_ms;
   bool stage_speaker;
   bool has_topic;
-  char topic[CCORD_ADMIN_TOPIC_MAX + 1u];
-  // M6 account state: 204 answers carry the request target so the UI can drop exactly what Discord accepted.
-  char connection_name[CCORD_ADMIN_CONNECTION_NAME_MAX + 1u];
-  char connection_id[CCORD_ADMIN_CONNECTION_ID_MAX + 1u];
-  char session_hashes[CCORD_ADMIN_SESSION_LOGOUT_MAX][64];
-  size_t session_hash_count;
+  char *topic;                  // CCORD_ADMIN_STAGE_TOPIC / STAGE_CREATE (heap-allocated on demand)
   char *text;
   size_t text_len;
-  size_t file_count;
-  size_t upload_idx;
-  uint64_t upload_id;
-  size_t upload_orig_sizes[CCORD_RICH_MAX_ATTACHMENTS];
-  uint64_t upload_total_bytes;
-  uint64_t upload_completed_bytes;
-  uint64_t upload_cur_file_bytes;
-  bool upload_linked;
-  struct live_rest_op *upload_prev, *upload_next;
-  char *filenames[CCORD_RICH_MAX_ATTACHMENTS];
-  uint8_t *file_datas[CCORD_RICH_MAX_ATTACHMENTS];
-  size_t file_sizes[CCORD_RICH_MAX_ATTACHMENTS];
-  bool file_spoilers[CCORD_RICH_MAX_ATTACHMENTS];
-  uint32_t file_durations_ms[CCORD_RICH_MAX_ATTACHMENTS];   // voice message length; 0 for an ordinary file
-  char *file_waveforms[CCORD_RICH_MAX_ATTACHMENTS];         // voice message waveform (base64) or nullptr
-  char upload_urls[CCORD_RICH_MAX_ATTACHMENTS][2048];
-  char upload_filenames[CCORD_RICH_MAX_ATTACHMENTS][256];
+  live_upload_state *upload;    // LIVE_REST_UPLOAD_* (heap-allocated on demand)
   char *media_url;
   char *media_path;
   uint8_t media_stage;   // LIVE_REST_MEDIA only: 0 first GET, 1 POST /attachments/refresh-urls in flight, 2 GET of the refreshed URL
   char *cache_path;
   uint8_t *proto_data;
   size_t proto_len;
-  // LIVE_REST_MEDIA_RANGE: the request as asked (echoed in the event) and the answer's headers (filled by the queue).
-  uint64_t range_id;
-  int64_t range_start;
-  size_t range_len;
-  ccord_rest_range_info range_info;
+  // Mutually exclusive op-specific value payloads (keyed by kind / admin_op).
+  union {
+    struct {
+      uint32_t discovery_category_id;
+      uint32_t discovery_offset;
+      char discovery_query[128];
+    };
+    char user_note[CCORD_USER_NOTE_MAX_BYTES + 1];
+    struct {
+      char custom_status_emoji[CCORD_EMOJI_MAX_BYTES + 1];
+      char custom_status_text[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
+      ccord_id custom_status_emoji_id;
+      int64_t custom_status_expires_ms;
+      bool custom_status_clear;
+    };
+    struct {
+      int64_t invites_disabled_until_ms;
+      int64_t dms_disabled_until_ms;
+    };
+    // M6 account state: 204 answers carry the request target so the UI can drop exactly what Discord accepted.
+    struct {
+      char connection_name[CCORD_ADMIN_CONNECTION_NAME_MAX + 1u];
+      char connection_id[CCORD_ADMIN_CONNECTION_ID_MAX + 1u];
+    };
+    struct {
+      char session_hashes[CCORD_ADMIN_SESSION_LOGOUT_MAX][64];
+      size_t session_hash_count;
+    };
+    // LIVE_REST_MEDIA_RANGE: the request as asked (echoed in the event) and the answer's headers (filled by the queue).
+    struct {
+      uint64_t range_id;
+      int64_t range_start;
+      size_t range_len;
+      ccord_rest_range_info range_info;
+    };
+  };
 } live_rest_op;
 
 static void live_rest_op_free(live_rest_op *op)
 {
   if (!op) return;
-  if (op->upload_linked && op->l) {
-    if (op->upload_prev) op->upload_prev->upload_next = op->upload_next;
-    else op->l->upload_head = op->upload_next;
-    if (op->upload_next) op->upload_next->upload_prev = op->upload_prev;
-    else op->l->upload_tail = op->upload_prev;
-    op->upload_linked = false;
-    op->upload_prev = op->upload_next = nullptr;
+  if (op->upload) {
+    live_upload_state *u = op->upload;
+    if (u->upload_linked && op->l) {
+      if (u->upload_prev) u->upload_prev->upload->upload_next = u->upload_next;
+      else op->l->upload_head = u->upload_next;
+      if (u->upload_next) u->upload_next->upload->upload_prev = u->upload_prev;
+      else op->l->upload_tail = u->upload_prev;
+      u->upload_linked = false;
+      u->upload_prev = u->upload_next = nullptr;
+    }
+    for (size_t i = 0; i < CCORD_RICH_MAX_ATTACHMENTS; i++) {
+      ccord_free(u->filenames[i]);
+      ccord_free(u->file_datas[i]);
+      ccord_free(u->file_waveforms[i]);
+    }
+    ccord_free(u);
+    op->upload = nullptr;
   }
+  ccord_free(op->reorder);
+  ccord_free(op->voice_status);
+  ccord_free(op->topic);
   ccord_free(op->expr_arg);
   ccord_free(op->emoji);
   ccord_free(op->text);
   ccord_free(op->folder_items);
-  for (size_t i = 0; i < CCORD_RICH_MAX_ATTACHMENTS; i++) {
-    ccord_free(op->filenames[i]);
-    ccord_free(op->file_datas[i]);
-    ccord_free(op->file_waveforms[i]);
-  }
   ccord_free(op->media_url);
   ccord_free(op->media_path);
   ccord_free(op->cache_path);
@@ -1207,9 +1297,10 @@ static void live_upload_progress_cb(void *ud, uint64_t uploaded_bytes, uint64_t 
 {
   (void)total_bytes;
   live_rest_op *op = ud;
-  if (!op || op->kind != LIVE_REST_UPLOAD_PUT || op->upload_idx >= op->file_count) return;
-  uint64_t cap = (uint64_t)op->upload_orig_sizes[op->upload_idx];
-  op->upload_cur_file_bytes = uploaded_bytes > cap ? cap : uploaded_bytes;
+  if (!op || !op->upload || op->kind != LIVE_REST_UPLOAD_PUT || op->upload->upload_idx >= op->upload->file_count) return;
+  live_upload_state *u = op->upload;
+  uint64_t cap = (uint64_t)u->upload_orig_sizes[u->upload_idx];
+  u->upload_cur_file_bytes = uploaded_bytes > cap ? cap : uploaded_bytes;
 }
 
 static ccord_status live_queue_add_raw(live *l, ccord_rest_method method, const char *url, const char *content_type,
@@ -1595,6 +1686,29 @@ static void live_api_cache_invalidate_channel_history(const live *l, ccord_id ch
   if (ccord_live_history_cache_path(l->cache_dir, channel_id, cpath, sizeof cpath)) (void)ccord_file_unlink(cpath);
 }
 
+// Zero-copy media event: takes ownership of `owned_data` (freed on failure or when the event expires on next poll).
+static bool push_media_event_owned(live *l, const char *url, const char *path, char *owned_data, size_t len)
+{
+  ccord_live_event ev;
+  ccord_live_event_init(&ev);
+  size_t ulen = url ? strlen(url) : 0;
+  size_t plen = path ? strlen(path) : 0;
+  ccord_arena_init(&ev.arena, ulen + plen + 64u);
+  char *ucopy = ccord_arena_strndup(&ev.arena, url ? url : "", ulen);
+  char *pcopy = ccord_arena_strndup(&ev.arena, path ? path : "", plen);
+  if (!ucopy || !pcopy) {
+    ccord_live_event_free(&ev);
+    ccord_free(owned_data);
+    return false;
+  }
+  ev.ev.type = CCORD_NET_MEDIA_LOADED;
+  ev.ev.media_url = ucopy;
+  ev.ev.media_path = pcopy;
+  ev.ev.media_data = (const uint8_t *)owned_data;
+  ev.ev.media_len = len;
+  return live_push_with_media(l, &ev, owned_data);
+}
+
 static bool push_media_event(live *l, const char *url, const char *path, const void *data, size_t len)
 {
   ccord_live_event ev;
@@ -1604,7 +1718,7 @@ static bool push_media_event(live *l, const char *url, const char *path, const v
   ccord_arena_init(&ev.arena, ulen + plen + len + 64u);
   char *ucopy = ccord_arena_strndup(&ev.arena, url ? url : "", ulen);
   char *pcopy = ccord_arena_strndup(&ev.arena, path ? path : "", plen);
-  uint8_t *dcopy = ccord_arena_alloc(&ev.arena, len ? len : 1u, 1u);
+  uint8_t *dcopy = len > 0 ? ccord_arena_alloc_uninit(&ev.arena, len, 1u) : ccord_arena_alloc(&ev.arena, 1u, 1u);
   if (!ucopy || !pcopy || !dcopy) {
     ccord_live_event_free(&ev);
     return false;
@@ -1620,25 +1734,37 @@ static bool push_media_event(live *l, const char *url, const char *path, const v
 
 // One answer to a ranged video fetch. `st` != OK is a failure (no data); `ri` is null when the queue gave no info.
 // Always carries the request echo (url, id) so the stream layer can match it, and the final HTTP status and hops.
+// If `owned_data` is non-null, takes ownership (zero-copy) instead of copying into `ev.arena`.
 static void push_media_range_event(live *l, const live_rest_op *op, ccord_status st, const ccord_rest_range_info *ri,
-                                   uint32_t flags, int64_t total, const void *data, size_t len)
+                                   uint32_t flags, int64_t total, const void *data, size_t len, char *owned_data)
 {
   ccord_live_event ev;
   ccord_live_event_init(&ev);
   size_t ulen = op->media_url ? strlen(op->media_url) : 0;
-  ccord_arena_init(&ev.arena, ulen + len + 64u);
+  ccord_arena_init(&ev.arena, ulen + (owned_data ? 0u : len) + 64u);
   char *ucopy = ccord_arena_strndup(&ev.arena, op->media_url ? op->media_url : "", ulen);
-  uint8_t *dcopy = ccord_arena_alloc(&ev.arena, len ? len : 1u, 1u);
-  if (!ucopy || !dcopy) {
+  const uint8_t *mdata = nullptr;
+  if (owned_data) {
+    mdata = (const uint8_t *)owned_data;
+  } else {
+    uint8_t *dcopy = len > 0 ? ccord_arena_alloc_uninit(&ev.arena, len, 1u) : ccord_arena_alloc(&ev.arena, 1u, 1u);
+    if (!dcopy) {
+      ccord_live_event_free(&ev);
+      return;
+    }
+    if (len > 0 && data) memcpy(dcopy, data, len);
+    mdata = dcopy;
+  }
+  if (!ucopy) {
     ccord_live_event_free(&ev);
+    ccord_free(owned_data);
     return;
   }
-  if (len > 0 && data) memcpy(dcopy, data, len);
   ev.ev.type = CCORD_NET_MEDIA_RANGE;
   ev.ev.status = st;
   ev.ev.media_url = ucopy;
   ev.ev.media_path = "";
-  ev.ev.media_data = dcopy;
+  ev.ev.media_data = mdata;
   ev.ev.media_len = len;
   ev.ev.range_id = op->range_id;
   ev.ev.range_start = ri && ri->http_status == 206 ? ri->range_start : op->range_start;
@@ -1647,7 +1773,7 @@ static void push_media_range_event(live *l, const live_rest_op *op, ccord_status
   ev.ev.range_http = ri ? (int32_t)ri->http_status : 0;
   ev.ev.range_redirects = ri ? ri->redirects : 0;
   if (ri) (void)snprintf(ev.ev.range_etag, sizeof ev.ev.range_etag, "%s", ri->etag);
-  (void)live_push(l, &ev);
+  (void)live_push_with_media(l, &ev, owned_data);
 }
 
 // Completion of a LIVE_REST_MEDIA_RANGE job (the queue already checked a 206 against the request).
@@ -1663,7 +1789,7 @@ static void live_media_range_done(live_rest_op *op, ccord_status status, long ht
   ccord_rest_range_info none = {.http_status = http_status, .entity_total = -1};
   if (ri->http_status == 0 && http_status != 0) ri = &none;   // the queue gave no info (for example a destroyed queue)
   if (status != CCORD_OK) {
-    push_media_range_event(l, op, status, ri, 0, -1, nullptr, 0);
+    push_media_range_event(l, op, status, ri, 0, -1, nullptr, 0, nullptr);
     log_media_failure(op->media_url, status, http_status);
     return;
   }
@@ -1696,11 +1822,18 @@ static void live_media_range_done(live_rest_op *op, ccord_status status, long ht
     st = CCORD_ERR_IO;
   }
   if (st != CCORD_OK) {
-    push_media_range_event(l, op, st, ri, 0, -1, nullptr, 0);
+    push_media_range_event(l, op, st, ri, 0, -1, nullptr, 0, nullptr);
     log_media_failure(op->media_url, CCORD_OK, http_status);
     return;
   }
-  push_media_range_event(l, op, CCORD_OK, ri, flags, total, data, dlen);
+  char *owned = nullptr;
+  if (data && dlen > 0 && l->restq) {
+    size_t taken = 0;
+    char *buf = ccord_rest_take_active_resp(l->restq, &taken);
+    if (buf && taken == dlen) owned = buf;
+    else ccord_free(buf);
+  }
+  push_media_range_event(l, op, CCORD_OK, ri, flags, total, data, dlen, owned);
 }
 
 // A media download that did not produce bytes: MEDIA_LOADED with a failure status and no data, so the session can
@@ -2135,18 +2268,18 @@ static void live_admin_done(live *l, const live_rest_op *op, const char *body, s
       }
       break;
     case CCORD_ADMIN_REORDER_CHANNELS:
-      if (op->reorder_count > 0) {
-        size_t n = op->reorder_count;
+      if (op->reorder && op->reorder->count > 0) {
+        size_t n = op->reorder->count;
         ccord_arena_init(&ev.arena, n * (sizeof(ccord_id) * 2u + sizeof(int32_t) + 1u) + 64u);
         ccord_id *ids = ccord_arena_alloc(&ev.arena, n * sizeof *ids, _Alignof(ccord_id));
         int32_t *pos = ccord_arena_alloc(&ev.arena, n * sizeof *pos, _Alignof(int32_t));
         ccord_id *pars = ccord_arena_alloc(&ev.arena, n * sizeof *pars, _Alignof(ccord_id));
         uint8_t *hpars = ccord_arena_alloc(&ev.arena, n, 1u);
         if (ids && pos && pars && hpars) {
-          memcpy(ids, op->reorder_ids, n * sizeof *ids);
-          memcpy(pos, op->reorder_positions, n * sizeof *pos);
-          memcpy(pars, op->reorder_parents, n * sizeof *pars);
-          memcpy(hpars, op->reorder_has_parent, n);
+          memcpy(ids, op->reorder->ids, n * sizeof *ids);
+          memcpy(pos, op->reorder->positions, n * sizeof *pos);
+          memcpy(pars, op->reorder->parents, n * sizeof *pars);
+          memcpy(hpars, op->reorder->has_parent, n);
           ev.ev.type = CCORD_NET_CHANNEL_POSITIONS;
           ev.ev.guild_id = op->guild_id;
           ev.ev.reorder_ids = ids;
@@ -2357,9 +2490,10 @@ static void live_admin_done(live *l, const live_rest_op *op, const char *body, s
       break;
     case CCORD_ADMIN_VOICE_STATUS:
       if (op->channel_id != CCORD_ID_NONE) {
-        size_t slen = strlen(op->voice_status);
+        const char *vs = op->voice_status ? op->voice_status : "";
+        size_t slen = strlen(vs);
         ccord_arena_init(&ev.arena, slen + 32u);
-        char *copy = ccord_arena_strndup(&ev.arena, op->voice_status, slen);
+        char *copy = ccord_arena_strndup(&ev.arena, vs, slen);
         if (copy) {
           ev.ev.type = CCORD_NET_VOICE_STATUS_UPDATE;
           ev.ev.guild_id = op->guild_id != CCORD_ID_NONE ? op->guild_id : l->selected_guild;
@@ -2471,7 +2605,8 @@ static void live_admin_done(live *l, const live_rest_op *op, const char *body, s
       if (body && len > 0) {
         have = ccord_live_json_stage_instance(body, len, ghint, op->channel_id, &ev, &err) == CCORD_OK;
       } else if (op->has_topic && op->channel_id != CCORD_ID_NONE) {
-        size_t tlen = strlen(op->topic);
+        const char *tp = op->topic ? op->topic : "";
+        size_t tlen = strlen(tp);
         ccord_arena_init(&ev.arena, sizeof(ccord_stage_instance) + 32u);
         ccord_stage_instance *si = ccord_arena_alloc(&ev.arena, sizeof *si, _Alignof(ccord_stage_instance));
         if (si && tlen < sizeof si->topic) {
@@ -2479,7 +2614,7 @@ static void live_admin_done(live *l, const live_rest_op *op, const char *body, s
           si->channel_id = op->channel_id;
           si->guild_id = ghint;
           if (op->admin_op == CCORD_ADMIN_STAGE_CREATE) si->privacy_level = 2u;
-          memcpy(si->topic, op->topic, tlen + 1u);
+          memcpy(si->topic, tp, tlen + 1u);
           ev.ev.type = CCORD_NET_STAGE_INSTANCE_UPDATE;
           ev.ev.guild_id = si->guild_id;
           ev.ev.channel_id = si->channel_id;
@@ -3189,7 +3324,6 @@ static void live_rest_done(void *ud, ccord_status status, long http_status, cons
     case LIVE_REST_RELATIONSHIP: {
       ccord_live_event ev;
       ccord_live_event_init(&ev);
-      ccord_live_event_init(&ev);
       ev.ev.type = CCORD_NET_RELATIONSHIP_UPDATE;
       ev.ev.user_id = op->user_id;
       ev.ev.relationship_kind = op->rel_kind;
@@ -3253,58 +3387,71 @@ static void live_rest_done(void *ud, ccord_status status, long http_status, cons
           CCORD_LOG_W("live: media cache write failed: %s", werr.message);
         }
       }
-      (void)push_media_event(l, op->media_url, op->media_path, body, len);
+      size_t taken_len = 0;
+      char *owned = l->restq ? ccord_rest_take_active_resp(l->restq, &taken_len) : nullptr;
+      if (owned && taken_len == len) {
+        (void)push_media_event_owned(l, op->media_url, op->media_path, owned, taken_len);
+      } else {
+        ccord_free(owned);
+        (void)push_media_event(l, op->media_url, op->media_path, body, len);
+      }
       break;
     }
     case LIVE_REST_UPLOAD_SLOT: {
-      if (ccord_live_json_upload_slots(body, len, op->file_count, op->upload_urls,
-                                       op->upload_filenames, &err) != CCORD_OK) {
+      live_upload_state *u = op->upload;
+      if (!u || ccord_live_json_upload_slots(body, len, u->file_count, u->upload_urls,
+                                             u->upload_filenames, &err) != CCORD_OK) {
         CCORD_LOG_W("live: upload slot parse failed: %s", err.message);
         push_action_failed(l, op, CCORD_ERR_PARSE, http_status, body, len);
         break;
       }
       op->kind = LIVE_REST_UPLOAD_PUT;
-      op->upload_idx = 0;
-      op->upload_completed_bytes = 0;
-      op->upload_cur_file_bytes = 0;
-      ccord_status pst = live_queue_add_raw(l, CCORD_REST_PUT, op->upload_urls[0],
-                                            "application/octet-stream", op->file_datas[0], op->file_sizes[0],
+      u->upload_idx = 0;
+      u->upload_completed_bytes = 0;
+      u->upload_cur_file_bytes = 0;
+      ccord_status pst = live_queue_add_raw(l, CCORD_REST_PUT, u->upload_urls[0],
+                                            "application/octet-stream", u->file_datas[0], u->file_sizes[0],
                                             op, &err);
-      ccord_free(op->file_datas[0]);
-      op->file_datas[0] = nullptr;
-      op->file_sizes[0] = 0;
+      ccord_free(u->file_datas[0]);
+      u->file_datas[0] = nullptr;
+      u->file_sizes[0] = 0;
       if (pst == CCORD_OK) return; // op stays alive for next step
       CCORD_LOG_W("live: upload put enqueue failed: %s", err.message);
       push_action_failed(l, op, pst, 0, nullptr, 0);
       break;
     }
     case LIVE_REST_UPLOAD_PUT: {
-      if (op->upload_idx < op->file_count) {
-        op->upload_completed_bytes += (uint64_t)op->upload_orig_sizes[op->upload_idx];
+      live_upload_state *u = op->upload;
+      if (!u) {
+        push_action_failed(l, op, CCORD_ERR_INTERNAL, 0, nullptr, 0);
+        break;
       }
-      op->upload_cur_file_bytes = 0;
-      op->upload_idx++;
-      if (op->upload_idx < op->file_count) {
-        size_t idx = op->upload_idx;
-        ccord_status pst = live_queue_add_raw(l, CCORD_REST_PUT, op->upload_urls[idx],
-                                              "application/octet-stream", op->file_datas[idx], op->file_sizes[idx],
+      if (u->upload_idx < u->file_count) {
+        u->upload_completed_bytes += (uint64_t)u->upload_orig_sizes[u->upload_idx];
+      }
+      u->upload_cur_file_bytes = 0;
+      u->upload_idx++;
+      if (u->upload_idx < u->file_count) {
+        size_t idx = u->upload_idx;
+        ccord_status pst = live_queue_add_raw(l, CCORD_REST_PUT, u->upload_urls[idx],
+                                              "application/octet-stream", u->file_datas[idx], u->file_sizes[idx],
                                               op, &err);
-        ccord_free(op->file_datas[idx]);
-        op->file_datas[idx] = nullptr;
-        op->file_sizes[idx] = 0;
+        ccord_free(u->file_datas[idx]);
+        u->file_datas[idx] = nullptr;
+        u->file_sizes[idx] = 0;
         if (pst == CCORD_OK) return;
         CCORD_LOG_W("live: upload put [%zu] enqueue failed: %s", idx, err.message);
         push_action_failed(l, op, pst, 0, nullptr, 0);
         break;
       }
-      op->upload_completed_bytes = op->upload_total_bytes;
+      u->upload_completed_bytes = u->upload_total_bytes;
       ccord_upload_file ufiles[CCORD_RICH_MAX_ATTACHMENTS];
       memset(ufiles, 0, sizeof ufiles);
-      for (size_t i = 0; i < op->file_count; i++) {
-        ufiles[i].filename = op->filenames[i] ? op->filenames[i] : "file.bin";
-        ufiles[i].spoiler = op->file_spoilers[i];
-        ufiles[i].duration_ms = op->file_durations_ms[i];
-        ufiles[i].waveform_b64 = op->file_waveforms[i];
+      for (size_t i = 0; i < u->file_count; i++) {
+        ufiles[i].filename = u->filenames[i] ? u->filenames[i] : "file.bin";
+        ufiles[i].spoiler = u->file_spoilers[i];
+        ufiles[i].duration_ms = u->file_durations_ms[i];
+        ufiles[i].waveform_b64 = u->file_waveforms[i];
       }
       ccord_buf path, jbody;
       ccord_buf_init(&path, 0);
@@ -3312,8 +3459,8 @@ static void live_rest_done(void *ud, ccord_status status, long http_status, cons
       (void)ccord_buf_appendf(&path, "/channels/%llu/messages", (unsigned long long)op->channel_id);
       ccord_status bst = ccord_live_build_upload_message_body(op->text ? op->text : "", op->text_len,
                                                               op->message_id, op->flag, ufiles,
-                                                              (const char (*)[256])op->upload_filenames,
-                                                              op->file_count, &jbody, &err);
+                                                              (const char (*)[256])u->upload_filenames,
+                                                              u->file_count, &jbody, &err);
       if (bst == CCORD_OK && !path.failed) {
         op->kind = LIVE_REST_UPLOAD_SEND;
         ccord_status sst = live_queue_add(l, CCORD_REST_POST, ccord_buf_cstr(&path),
@@ -3395,7 +3542,6 @@ static void live_rest_done(void *ud, ccord_status status, long http_status, cons
       live_api_cache_invalidate_channel_history(l, op->channel_id);
       ccord_live_event ev;
       ccord_live_event_init(&ev);
-      ccord_live_event_init(&ev);
       ev.ev.type = CCORD_NET_MESSAGE_DELETE;
       ev.ev.channel_id = op->channel_id;
       ev.ev.message_id = op->message_id;
@@ -3404,7 +3550,6 @@ static void live_rest_done(void *ud, ccord_status status, long http_status, cons
     }
     case LIVE_REST_TYPING: {
       ccord_live_event ev;
-      ccord_live_event_init(&ev);
       ccord_live_event_init(&ev);
       ev.ev.type = CCORD_NET_TYPING_START;
       ev.ev.channel_id = op->channel_id;
@@ -3445,7 +3590,6 @@ static void live_rest_done(void *ud, ccord_status status, long http_status, cons
     }
     case LIVE_REST_PIN: {
       ccord_live_event ev;
-      ccord_live_event_init(&ev);
       ccord_live_event_init(&ev);
       ev.ev.type = CCORD_NET_MESSAGE_PIN_UPDATE;
       ev.ev.channel_id = op->channel_id;
@@ -3627,6 +3771,8 @@ static bool live_poll(ccord_transport *t, ccord_net_event *out)
   if (!out) return false;
   if (l->have_current) {
     ccord_live_event_free(&l->current);
+    ccord_free(l->current_media);
+    l->current_media = nullptr;
     l->have_current = false;
   }
   uint64_t now = live_now(l);
@@ -3744,6 +3890,8 @@ static bool live_poll(ccord_transport *t, ccord_net_event *out)
   }
   if (l->count == 0) return false;
   l->current = l->pending[l->head];
+  l->current_media = l->pending_media[l->head];
+  l->pending_media[l->head] = nullptr;
   if (l->current.ev.type == CCORD_NET_SNAPSHOT) l->current.ev.snapshot = &l->current.snapshot;
   if (l->current.ev.type == CCORD_NET_USER_SETTINGS) l->current.ev.user_settings = &l->current.user_settings;
   memset(&l->pending[l->head], 0, sizeof l->pending[l->head]);
@@ -5578,19 +5726,28 @@ static ccord_status live_admin_action(ccord_transport *t, const ccord_admin_requ
   if (!l->restq) return ccord_error_set(err, CCORD_ERR_IO, "live: REST queue unavailable");
   // Launching an activity names the caller's gateway session in the body so Discord can join them to the
   // instance. The session layer never sees that id (it passes a stand-in), so rebuild the request with the real
-  // READY session id; without a gateway session nothing is sent.
-  ccord_admin_request launch;
+  // READY session id; without a gateway session nothing is sent. Heap-allocated only for this rare op so
+  // live_admin_action does not reserve ~98 KiB of stack on every admin call.
+  ccord_admin_request *launch_buf = nullptr;
   if (req->op == CCORD_ADMIN_ACTIVITY_LAUNCH) {
     const char *sid = l->gw_session_id[0] ? l->gw_session_id : (l->gw ? ccord_gateway_session_id(l->gw) : nullptr);
     if (!sid || sid[0] == '\0') {
       return ccord_error_set(err, CCORD_ERR_INVALID, "live: not connected to the gateway yet");
     }
-    ccord_status ls = ccord_admin_activity_launch(&launch, req->channel_id, req->application_id, sid, err);
-    if (ls != CCORD_OK) return ls;
-    req = &launch;
+    launch_buf = ccord_calloc(1, sizeof *launch_buf);
+    if (!launch_buf) return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
+    ccord_status ls = ccord_admin_activity_launch(launch_buf, req->channel_id, req->application_id, sid, err);
+    if (ls != CCORD_OK) {
+      ccord_free(launch_buf);
+      return ls;
+    }
+    req = launch_buf;
   }
   live_rest_op *op = live_action_op(l, LIVE_REST_ADMIN, req->channel_id, CCORD_ID_NONE, nullptr, 0);
-  if (!op) return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
+  if (!op) {
+    ccord_free(launch_buf);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
+  }
   op->guild_id = req->guild_id;
   op->user_id = req->user_id;
   op->role_id = req->role_id;
@@ -5605,16 +5762,23 @@ static ccord_status live_admin_action(ccord_transport *t, const ccord_admin_requ
     size_t n = req->reorder_count <= CCORD_ADMIN_CHANNEL_REORDER_MAX
                  ? req->reorder_count
                  : CCORD_ADMIN_CHANNEL_REORDER_MAX;
-    op->reorder_count = n;
-    memcpy(op->reorder_ids, req->reorder_ids, n * sizeof op->reorder_ids[0]);
-    memcpy(op->reorder_positions, req->reorder_positions, n * sizeof op->reorder_positions[0]);
-    memcpy(op->reorder_parents, req->reorder_parents, n * sizeof op->reorder_parents[0]);
-    memcpy(op->reorder_has_parent, req->reorder_has_parent, n);
+    op->reorder = ccord_calloc(1, sizeof *op->reorder);
+    if (!op->reorder) {
+      live_rest_op_free(op);
+      ccord_free(launch_buf);
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
+    }
+    op->reorder->count = n;
+    memcpy(op->reorder->ids, req->reorder_ids, n * sizeof op->reorder->ids[0]);
+    memcpy(op->reorder->positions, req->reorder_positions, n * sizeof op->reorder->positions[0]);
+    memcpy(op->reorder->parents, req->reorder_parents, n * sizeof op->reorder->parents[0]);
+    memcpy(op->reorder->has_parent, req->reorder_has_parent, n);
   }
   if (req->op == CCORD_ADMIN_SET_GUILD_FOLDERS && req->folder_item_count > 0) {
     op->folder_items = ccord_alloc_array(req->folder_item_count, sizeof *op->folder_items);
     if (!op->folder_items) {
       live_rest_op_free(op);
+      ccord_free(launch_buf);
       return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
     }
     memcpy(op->folder_items, req->folder_items, req->folder_item_count * sizeof *op->folder_items);
@@ -5634,8 +5798,13 @@ static ccord_status live_admin_action(ccord_transport *t, const ccord_admin_requ
     op->invites_disabled_until_ms = req->invites_disabled_until_ms;
     op->dms_disabled_until_ms = req->dms_disabled_until_ms;
   }
-  if (req->op == CCORD_ADMIN_VOICE_STATUS) {
-    live_copy_cstr(op->voice_status, sizeof op->voice_status, req->voice_status);
+  if (req->op == CCORD_ADMIN_VOICE_STATUS && req->voice_status[0] != '\0') {
+    op->voice_status = ccord_strdup(req->voice_status);
+    if (!op->voice_status) {
+      live_rest_op_free(op);
+      ccord_free(launch_buf);
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
+    }
   }
   if (req->op == CCORD_ADMIN_STAGE_REQUEST_SPEAK) {
     op->request_to_speak_ms = req->request_to_speak_ms;
@@ -5645,7 +5814,14 @@ static ccord_status live_admin_action(ccord_transport *t, const ccord_admin_requ
   }
   if (req->op == CCORD_ADMIN_STAGE_TOPIC || req->op == CCORD_ADMIN_STAGE_CREATE) {
     op->has_topic = req->has_topic;
-    memcpy(op->topic, req->topic, sizeof op->topic);
+    if (req->topic[0] != '\0') {
+      op->topic = ccord_strdup(req->topic);
+      if (!op->topic) {
+        live_rest_op_free(op);
+        ccord_free(launch_buf);
+        return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
+      }
+    }
   }
   if (req->op == CCORD_ADMIN_CONNECTION_EDIT || req->op == CCORD_ADMIN_CONNECTION_DELETE) {
     memcpy(op->connection_name, req->connection_name, sizeof op->connection_name);
@@ -5670,6 +5846,7 @@ static ccord_status live_admin_action(ccord_transport *t, const ccord_admin_requ
   r.cb = live_rest_done;
   r.ud = op;
   ccord_status st = ccord_rest_queue_submit(l->restq, &r, err);
+  ccord_free(launch_buf);
   if (st != CCORD_OK) live_rest_op_free(op);
   return st;
 }
@@ -5807,7 +5984,10 @@ static ccord_status live_send_message_with_files(ccord_transport *t, ccord_id ch
   }
 
   live_rest_op *op = ccord_calloc(1, sizeof *op);
-  if (!op) {
+  live_upload_state *u = op ? ccord_calloc(1, sizeof *u) : nullptr;
+  if (!op || !u) {
+    ccord_free(u);
+    ccord_free(op);
     ccord_buf_free(&path);
     ccord_buf_free(&body);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
@@ -5819,7 +5999,8 @@ static ccord_status live_send_message_with_files(ccord_transport *t, ccord_id ch
   op->flag = mention_author;
   op->text = len > 0 ? ccord_strndup(utf8, len) : ccord_strndup("", 0);
   op->text_len = len;
-  op->file_count = file_count;
+  op->upload = u;
+  u->file_count = file_count;
   if (!op->text) {
     live_rest_op_free(op);
     ccord_buf_free(&path);
@@ -5827,29 +6008,29 @@ static ccord_status live_send_message_with_files(ccord_transport *t, ccord_id ch
     return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
   }
   for (size_t i = 0; i < file_count; i++) {
-    op->filenames[i] = ccord_strndup(files[i].filename, strlen(files[i].filename));
-    op->file_datas[i] = ccord_alloc_array(files[i].size, 1);
-    op->file_sizes[i] = files[i].size;
-    op->upload_orig_sizes[i] = files[i].size;
-    op->upload_total_bytes += (uint64_t)files[i].size;
-    op->file_spoilers[i] = files[i].spoiler;
-    op->file_durations_ms[i] = files[i].duration_ms;
+    u->filenames[i] = ccord_strndup(files[i].filename, strlen(files[i].filename));
+    u->file_datas[i] = ccord_alloc_array(files[i].size, 1);
+    u->file_sizes[i] = files[i].size;
+    u->upload_orig_sizes[i] = files[i].size;
+    u->upload_total_bytes += (uint64_t)files[i].size;
+    u->file_spoilers[i] = files[i].spoiler;
+    u->file_durations_ms[i] = files[i].duration_ms;
     if (files[i].duration_ms != 0 && files[i].waveform_b64 && files[i].waveform_b64[0] != '\0') {
-      op->file_waveforms[i] = ccord_strndup(files[i].waveform_b64, strlen(files[i].waveform_b64));
-      if (!op->file_waveforms[i]) {
+      u->file_waveforms[i] = ccord_strndup(files[i].waveform_b64, strlen(files[i].waveform_b64));
+      if (!u->file_waveforms[i]) {
         live_rest_op_free(op);
         ccord_buf_free(&path);
         ccord_buf_free(&body);
         return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
       }
     }
-    if (!op->filenames[i] || !op->file_datas[i]) {
+    if (!u->filenames[i] || !u->file_datas[i]) {
       live_rest_op_free(op);
       ccord_buf_free(&path);
       ccord_buf_free(&body);
       return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
     }
-    memcpy(op->file_datas[i], files[i].data, files[i].size);
+    memcpy(u->file_datas[i], files[i].data, files[i].size);
   }
 
   st = live_queue_add(l, CCORD_REST_POST, ccord_buf_cstr(&path), ccord_buf_cstr(&body), op, err);
@@ -5859,13 +6040,13 @@ static ccord_status live_send_message_with_files(ccord_transport *t, ccord_id ch
     live_rest_op_free(op);
     return st;
   }
-  op->upload_id = ++l->next_upload_id;
-  op->upload_prev = l->upload_tail;
-  op->upload_next = nullptr;
-  if (l->upload_tail) l->upload_tail->upload_next = op;
+  u->upload_id = ++l->next_upload_id;
+  u->upload_prev = l->upload_tail;
+  u->upload_next = nullptr;
+  if (l->upload_tail) l->upload_tail->upload->upload_next = op;
   else l->upload_head = op;
   l->upload_tail = op;
-  op->upload_linked = true;
+  u->upload_linked = true;
   return CCORD_OK;
 }
 
@@ -5874,30 +6055,31 @@ static size_t live_active_uploads(ccord_transport *t, ccord_upload_progress *out
   live *l = (live *)t;
   if (!l) return 0;
   size_t total = 0;
-  for (const live_rest_op *op = l->upload_head; op; op = op->upload_next) {
+  for (const live_rest_op *op = l->upload_head; op; op = op->upload->upload_next) {
+    const live_upload_state *u = op->upload;
     if (out && total < max) {
       ccord_upload_progress *p = &out[total];
       memset(p, 0, sizeof *p);
-      p->upload_id = op->upload_id;
+      p->upload_id = u->upload_id;
       p->channel_id = op->channel_id;
       p->phase = op->kind == LIVE_REST_UPLOAD_SLOT  ? CCORD_UPLOAD_SLOT
                  : op->kind == LIVE_REST_UPLOAD_PUT ? CCORD_UPLOAD_PUT
                                                     : CCORD_UPLOAD_FINALIZE;
-      p->file_count = (uint32_t)op->file_count;
-      size_t fidx = op->upload_idx < op->file_count ? op->upload_idx
-                    : (op->file_count > 0 ? op->file_count - 1u : 0u);
+      p->file_count = (uint32_t)u->file_count;
+      size_t fidx = u->upload_idx < u->file_count ? u->upload_idx
+                    : (u->file_count > 0 ? u->file_count - 1u : 0u);
       p->file_index = (uint32_t)fidx;
-      uint64_t done = op->upload_completed_bytes + op->upload_cur_file_bytes;
-      if (done > op->upload_total_bytes) done = op->upload_total_bytes;
+      uint64_t done = u->upload_completed_bytes + u->upload_cur_file_bytes;
+      if (done > u->upload_total_bytes) done = u->upload_total_bytes;
       p->uploaded_bytes = done;
-      p->total_bytes = op->upload_total_bytes;
-      const char *raw_fn = (fidx < CCORD_RICH_MAX_ATTACHMENTS && op->filenames[fidx]) ? op->filenames[fidx] : "file";
+      p->total_bytes = u->upload_total_bytes;
+      const char *raw_fn = (fidx < CCORD_RICH_MAX_ATTACHMENTS && u->filenames[fidx]) ? u->filenames[fidx] : "file";
       const char *slash = strrchr(raw_fn, '/');
       const char *bslash = strrchr(raw_fn, '\\');
       const char *base = raw_fn;
       if (slash && slash + 1 > base) base = slash + 1;
       if (bslash && bslash + 1 > base) base = bslash + 1;
-      bool add_sp = fidx < CCORD_RICH_MAX_ATTACHMENTS && op->file_spoilers[fidx] && strncmp(base, "SPOILER_", 8) != 0;
+      bool add_sp = fidx < CCORD_RICH_MAX_ATTACHMENTS && u->file_spoilers[fidx] && strncmp(base, "SPOILER_", 8) != 0;
       (void)snprintf(p->filename, sizeof p->filename, "%s%s", add_sp ? "SPOILER_" : "", base[0] ? base : "file");
     }
     total++;
@@ -5962,13 +6144,12 @@ static ccord_status live_fetch_media_gated(ccord_transport *t, const char *url, 
     if (fseek(fp, 0, SEEK_END) == 0) {
       long sz = ftell(fp);
       if (sz > 0 && sz <= (long)CCORD_LIVE_MAX_MEDIA && fseek(fp, 0, SEEK_SET) == 0) {
-        uint8_t *buf = ccord_alloc_array((size_t)sz, 1);
+        char *buf = ccord_alloc_array((size_t)sz, 1);
         if (buf) {
           size_t rd = fread(buf, 1, (size_t)sz, fp);
           fclose(fp);
           if (rd == (size_t)sz) {
-            (void)push_media_event(l, url, cache_path, buf, rd);
-            ccord_free(buf);
+            (void)push_media_event_owned(l, url, cache_path, buf, rd);
             return CCORD_OK;
           }
           ccord_free(buf);
@@ -6493,10 +6674,12 @@ static ccord_status live_call_action(ccord_transport *t, ccord_id channel_id, cc
     // Ringing-only decline goes through the governed REST queue (POST /channels/{c}/call/stop-ringing). A Gateway
     // OP 4 {guild_id:null, channel_id:null} here would also drop any active guild voice. No local mutation: the
     // completion drops self from ringing[] only after Discord answers 204.
-    ccord_admin_request req;
-    ccord_status st = ccord_admin_call_stop_ringing(&req, channel_id, err);
-    if (st != CCORD_OK) return st;
-    return live_admin_action(t, &req, err);
+    ccord_admin_request *req = ccord_calloc(1, sizeof *req);
+    if (!req) return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
+    ccord_status st = ccord_admin_call_stop_ringing(req, channel_id, err);
+    if (st == CCORD_OK) st = live_admin_action(t, req, err);
+    ccord_free(req);
+    return st;
   }
   ccord_status st = ccord_gateway_send_voice_state(l->gw, CCORD_DM_GUILD_ID, CCORD_ID_NONE, l->self_mute,
                                                    l->self_deaf, false, false, err);
@@ -7713,7 +7896,7 @@ static size_t live_poll_stream_pcm(ccord_transport *t, int16_t *out_pcm, size_t 
     }
   }
   size_t take = cap_samples < l->rx_pcm_count ? cap_samples : l->rx_pcm_count;
-  if (take > 0) {
+  if (take > 0 && l->rx_pcm) {
     size_t first = take < LIVE_STREAM_PCM_CAP_SAMPLES - l->rx_pcm_head
                      ? take
                      : LIVE_STREAM_PCM_CAP_SAMPLES - l->rx_pcm_head;
@@ -7756,6 +7939,7 @@ static void live_destroy(ccord_transport *t)
   if (l->restq) ccord_rest_queue_destroy(l->restq);
   live_clear_events(l);
   live_chan_guild_clear_all(l);
+  ccord_idmap_free(&l->chan_guild_idx);
   ccord_free(l->chan_guilds);
   ccord_free(l->rich_json);
   ccord_free(l->status_base);
