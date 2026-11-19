@@ -152,6 +152,7 @@ typedef enum ccord_tray_action : uint8_t {
   CCORD_TRAY_TOGGLE_MUTE = 1,    // middle click / "Mute Microphone" menu item
   CCORD_TRAY_TOGGLE_DEAFEN = 2,  // "Deafen Audio" menu item
   CCORD_TRAY_QUIT = 3,           // "Quit" menu item
+  CCORD_TRAY_DISCONNECT_VOICE = 4, // Android voice notification "Disconnect" action
 } ccord_tray_action;
 typedef void (*ccord_tray_action_fn)(void *ud, ccord_tray_action action);
 // Invoked on the main thread during ccord_platform_next_event pumping for each tray action.
@@ -311,3 +312,51 @@ typedef struct ccord_sound_encoder ccord_sound_encoder;
 [[nodiscard]] ccord_status ccord_sound_encoder_finish(ccord_sound_encoder *enc, uint8_t **out, size_t *out_len,
                                                       ccord_error *err);
 void ccord_sound_encoder_destroy(ccord_sound_encoder *enc);
+
+// ---- Mobile & Cross-Platform Capabilities (Android JNI + desktop safe defaults) --------------------------------
+typedef enum ccord_form_factor : uint8_t {
+  CCORD_FORM_DESKTOP = 0,
+  CCORD_FORM_PHONE = 1,
+  CCORD_FORM_TABLET = 2,
+} ccord_form_factor;
+
+typedef enum ccord_haptic_style : uint8_t {
+  CCORD_HAPTIC_LIGHT = 0,
+  CCORD_HAPTIC_MEDIUM = 1,
+  CCORD_HAPTIC_HEAVY = 2,
+  CCORD_HAPTIC_SELECTION = 3,
+} ccord_haptic_style;
+
+typedef enum ccord_haptic_notify_kind : uint8_t {
+  CCORD_HAPTIC_NOTIFY_SUCCESS = 0,
+  CCORD_HAPTIC_NOTIFY_WARNING = 1,
+  CCORD_HAPTIC_NOTIFY_ERROR = 2,
+} ccord_haptic_notify_kind;
+
+typedef enum ccord_orientation_mode : uint8_t {
+  CCORD_ORIENT_AUTO = 0,
+  CCORD_ORIENT_PORTRAIT = 1,
+  CCORD_ORIENT_LANDSCAPE = 2,
+} ccord_orientation_mode;
+
+typedef struct ccord_safe_insets {
+  float top, right, bottom, left;
+} ccord_safe_insets;
+
+bool ccord_platform_is_mobile(const ccord_platform *p);
+ccord_form_factor ccord_platform_form_factor(const ccord_platform *p);
+bool ccord_platform_has_touch(const ccord_platform *p);
+bool ccord_platform_has_haptics(const ccord_platform *p);
+bool ccord_platform_has_share(const ccord_platform *p);
+bool ccord_platform_in_background(const ccord_platform *p);
+ccord_safe_insets ccord_platform_safe_area(const ccord_platform *p);
+float ccord_platform_keyboard_inset(const ccord_platform *p);
+bool ccord_platform_haptic_impact(ccord_platform *p, ccord_haptic_style style);
+bool ccord_platform_haptic_notify(ccord_platform *p, ccord_haptic_notify_kind kind);
+bool ccord_platform_share_text(ccord_platform *p, const char *title, const char *text);
+bool ccord_platform_keep_screen_on(ccord_platform *p, bool on);
+bool ccord_platform_set_orientation(ccord_platform *p, ccord_orientation_mode mode);
+void ccord_platform_dismiss_keyboard(ccord_platform *p);
+void ccord_platform_set_voice_call_active(ccord_platform *p, bool active, const char *channel_name,
+                                          bool muted, bool deafened);
+bool ccord_platform_request_permission(ccord_platform *p, const char *permission);

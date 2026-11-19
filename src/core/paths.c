@@ -51,6 +51,14 @@ static bool get_exe_path(char *out, size_t cap, const char *argv0)
 #elif defined(__APPLE__)
   uint32_t sz = (uint32_t)cap;
   if (_NSGetExecutablePath(out, &sz) == 0) return true;
+#elif defined(__ANDROID__)
+  const char *data = getenv("CCORD_ANDROID_DATA_DIR");
+  if (!data || !data[0]) data = getenv("HOME");
+  if (data && data[0]) {
+    int r = snprintf(out, cap, "%s/ccord", data);
+    if (r > 0 && (size_t)r < cap) return true;
+  }
+  return set_path(out, cap, argv0 && argv0[0] ? argv0 : "ccord");
 #else
   ssize_t n = readlink("/proc/self/exe", out, cap - 1);
   if (n > 0) {
@@ -145,6 +153,28 @@ ccord_status ccord_paths_init(const char *argv0, ccord_error *err)
   int r = snprintf(g_data_dir, sizeof g_data_dir, "%s/Library/Application Support/C-Cord", home);
   if (r < 0 || (size_t)r >= sizeof g_data_dir) {
     return ccord_error_set(err, CCORD_ERR_RANGE, "data directory path too long");
+  }
+#elif defined(__ANDROID__)
+  const char *adata = getenv("CCORD_ANDROID_DATA_DIR");
+  const char *xdg = getenv("XDG_DATA_HOME");
+  const char *home = getenv("HOME");
+  if (adata && adata[0] == '/') {
+    int r = snprintf(g_data_dir, sizeof g_data_dir, "%s/data", adata);
+    if (r < 0 || (size_t)r >= sizeof g_data_dir) {
+      return ccord_error_set(err, CCORD_ERR_RANGE, "data directory path too long");
+    }
+  } else if (xdg && xdg[0] == '/') {
+    int r = snprintf(g_data_dir, sizeof g_data_dir, "%s/ccord", xdg);
+    if (r < 0 || (size_t)r >= sizeof g_data_dir) {
+      return ccord_error_set(err, CCORD_ERR_RANGE, "data directory path too long");
+    }
+  } else if (home && home[0] == '/') {
+    int r = snprintf(g_data_dir, sizeof g_data_dir, "%s/data", home);
+    if (r < 0 || (size_t)r >= sizeof g_data_dir) {
+      return ccord_error_set(err, CCORD_ERR_RANGE, "data directory path too long");
+    }
+  } else {
+    return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "Android data directory is not set");
   }
 #else
   const char *xdg = getenv("XDG_DATA_HOME");

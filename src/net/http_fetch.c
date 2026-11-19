@@ -16,6 +16,7 @@
 
 #if defined(CCORD_HTTP_FETCH_LIVE)
 #include <curl/curl.h>
+#include "tls_internal.h"
 #endif
 
 static void set_err(char *dst, size_t cap, const char *msg)
@@ -162,8 +163,7 @@ static void apply_common_tls(CURL *curl, const char *url)
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+  ccord_curl_apply_tls(curl);
   curl_easy_setopt(curl, CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
   curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
   curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");

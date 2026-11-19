@@ -6,12 +6,16 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdatomic.h>
+#if defined(__ANDROID__)
+#include <android/log.h>
+#endif
 
 static _Atomic ccord_log_level g_min_level = CCORD_LOG_INFO;
 static ccord_log_sink g_sink;
 static void *g_sink_ud;
 static char g_prefix[64];
 
+#if !defined(__ANDROID__)
 static const char *level_name(ccord_log_level l)
 {
   switch (l) {
@@ -22,6 +26,7 @@ static const char *level_name(ccord_log_level l)
   }
   return "?";
 }
+#endif
 
 void ccord_log_set_level(ccord_log_level min)
 {
@@ -72,6 +77,14 @@ void ccord_logf(ccord_log_level level, const char *file, int line, const char *f
   if (g_sink) {
     g_sink(level, out, g_sink_ud);
   } else {
+#if defined(__ANDROID__)
+    int prio = ANDROID_LOG_INFO;
+    if (level == CCORD_LOG_DEBUG) prio = ANDROID_LOG_DEBUG;
+    else if (level == CCORD_LOG_WARN) prio = ANDROID_LOG_WARN;
+    else if (level == CCORD_LOG_ERROR) prio = ANDROID_LOG_ERROR;
+    __android_log_print(prio, "C-Cord", "%s", out);
+#else
     fprintf(stderr, "[%s] %s\n", level_name(level), out);
+#endif
   }
 }

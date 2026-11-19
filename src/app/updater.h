@@ -13,6 +13,7 @@ typedef enum ccord_install_kind {
   CCORD_INSTALL_APPIMAGE,         // Linux AppImage ($APPIMAGE set)
   CCORD_INSTALL_WINDOWS,          // Windows (.exe installer / portable)
   CCORD_INSTALL_MACOS,            // macOS (.app / .dmg)
+  CCORD_INSTALL_ANDROID,          // Android APK / Store install
 } ccord_install_kind;
 
 typedef struct ccord_update_parsed {

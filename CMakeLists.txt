@@ -43,7 +43,10 @@ ccord_check_c23()
 ccord_sanitize_setup()
 ccord_fuzz_setup()
 
-if(UNIX AND NOT APPLE AND NOT CCORD_SANITIZE)
+if(ANDROID)
+  # Android 15 (API 35+) requires 16 KB page-aligned ELF segments on arm64-v8a / x86_64.
+  add_link_options(-Wl,-z,relro,-z,now -Wl,-z,noexecstack -Wl,-z,max-page-size=16384)
+elseif(UNIX AND NOT APPLE AND NOT CCORD_SANITIZE)
   add_link_options(-Wl,-z,relro,-z,now -Wl,-z,noexecstack)
 endif()
 if(NOT CCORD_BUILD_TESTS)

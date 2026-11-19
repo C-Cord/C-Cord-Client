@@ -24,11 +24,16 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#if CCORD_OS_ANDROID
+#include <android/api-level.h>
+#endif
 
 const char *ccord_os_name(void)
 {
 #if CCORD_OS_MACOS
   return "macos";
+#elif CCORD_OS_ANDROID
+  return "android";
 #else
   return "linux";
 #endif
@@ -40,14 +45,45 @@ const char *ccord_os_arch(void)
   return "arm64";
 #elif defined(__x86_64__) || defined(_M_X64)
   return "x86_64";
+#elif defined(__arm__)
+  return "arm";
+#elif defined(__i386__)
+  return "x86";
 #else
+  static _Atomic bool inited = false;
   static char buf[64];
-  if (!buf[0]) {
+  if (!atomic_load_explicit(&inited, memory_order_acquire)) {
     struct utsname u;
     if (uname(&u) == 0 && u.machine[0]) snprintf(buf, sizeof buf, "%s", u.machine);
     else snprintf(buf, sizeof buf, "unknown");
+    atomic_store_explicit(&inited, true, memory_order_release);
   }
   return buf;
+#endif
+}
+
+bool ccord_os_is_mobile(void)
+{
+#if CCORD_OS_MOBILE
+  return true;
+#else
+  return false;
+#endif
+}
+
+int ccord_os_android_api_level(void)
+{
+#if CCORD_OS_ANDROID
+  int lvl = android_get_device_api_level();
+  if (lvl > 0) return lvl;
+  const char *env = getenv("CCORD_ANDROID_API_LEVEL");
+  if (env && env[0]) {
+    int parsed = atoi(env);
+    if (parsed > 0) return parsed;
+  }
+  return __ANDROID_API__;
+#else
+  return 0;
 #endif
 }
 
@@ -82,12 +118,23 @@ bool ccord_os_config_dir(char *out, size_t cap)
     int n = snprintf(out, cap, "%.*s/ccord", (int)xn, xdg);
     return n > 0 && (size_t)n < cap;
   }
+#if CCORD_OS_ANDROID
+  const char *adata = getenv("CCORD_ANDROID_DATA_DIR");
+  if (adata && adata[0] != '\0') {
+    size_t an = strlen(adata);
+    while (an > 1 && adata[an - 1] == '/') an--;
+    int n = snprintf(out, cap, "%.*s/config", (int)an, adata);
+    return n > 0 && (size_t)n < cap;
+  }
+#endif
   const char *home = getenv("HOME");
   if (!home || home[0] == '\0') return false;
   size_t hn = strlen(home);
   while (hn > 1 && home[hn - 1] == '/') hn--;
 #if CCORD_OS_MACOS
   int n = snprintf(out, cap, "%.*s/Library/Application Support/C-Cord", (int)hn, home);
+#elif CCORD_OS_ANDROID
+  int n = snprintf(out, cap, "%.*s/config", (int)hn, home);
 #else
   int n = snprintf(out, cap, "%.*s/.config/ccord", (int)hn, home);
 #endif
@@ -111,8 +158,19 @@ bool ccord_os_runtime_dir(char *out, size_t cap)
     int n = snprintf(out, cap, "%.*s/ccord-%lu", (int)tl, tmp, (unsigned long)getuid());
     return n > 0 && (size_t)n < cap;
   }
+#if CCORD_OS_ANDROID
+  const char *adata = getenv("CCORD_ANDROID_DATA_DIR");
+  if (adata && adata[0] != '\0') {
+    size_t an = strlen(adata);
+    while (an > 1 && adata[an - 1] == '/') an--;
+    int n = snprintf(out, cap, "%.*s/run", (int)an, adata);
+    return n > 0 && (size_t)n < cap;
+  }
+  return false;
+#else
   int n = snprintf(out, cap, "/tmp/ccord-%lu", (unsigned long)getuid());
   return n > 0 && (size_t)n < cap;
+#endif
 }
 
 void ccord_sleep_ms(uint32_t ms)

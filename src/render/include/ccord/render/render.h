@@ -14,6 +14,8 @@ typedef struct ccord_renderer ccord_renderer;
 // asset dir are attached as fallbacks first, then well-known system font paths (deduplicated by family name).
 ccord_renderer *ccord_render_create(ccord_platform *p, const ccord_theme *theme, ccord_error *err);
 void ccord_render_destroy(ccord_renderer *r);
+// Flushes GPU texture/disc/text caches (call on Android LOW_MEMORY or RENDER_TARGETS/DEVICE_RESET).
+void ccord_render_evict_caches(ccord_renderer *r);
 void ccord_render_begin(ccord_renderer *r, ccord_color clear);   // re-reads window size/scale; reopens fonts if scale changed
 void ccord_render_end(ccord_renderer *r);                         // present
 ccord_vec2 ccord_render_size(const ccord_renderer *r);            // logical px (window size / display scale / zoom)

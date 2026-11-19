@@ -152,7 +152,7 @@ void ccord_app_desktop_startup_defaults(ccord_app_startup *out)
 
 bool ccord_app_desktop_should_draw(const ccord_platform *p)
 {
-  return !p || (ccord_platform_window_visible(p) && !ccord_platform_window_minimized(p));
+  return !p || (!ccord_platform_in_background(p) && ccord_platform_window_visible(p) && !ccord_platform_window_minimized(p));
 }
 
 void ccord_app_desktop_handle_show(ccord_platform *p)

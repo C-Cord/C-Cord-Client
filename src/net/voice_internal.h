@@ -97,7 +97,8 @@ struct ccord_voice_gateway {
   ccord_id server_id, channel_id, user_id;
   CURL *curl;
   int udp_fd;
-  struct sockaddr_in peer_addr;
+  struct sockaddr_storage peer_addr;
+  socklen_t peer_addr_len;
   bool peer_valid;
   bool open;
   bool hello;

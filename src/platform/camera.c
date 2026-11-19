@@ -98,22 +98,30 @@ bool ccord_camera_grab(ccord_camera *c, uint8_t *bgra, size_t cap, int *out_w, i
   SDL_Surface *frame = SDL_AcquireCameraFrame(c->cam, &timestamp_ns);
   if (!frame) return false; /* no frame ready yet; not an error */
   bool ok = false;
-  if (frame->format == SDL_PIXELFORMAT_BGRA32 && frame->w > 0 && frame->h > 0 && frame->pitch >= 0) {
-    size_t w = (size_t)frame->w;
-    size_t h = (size_t)frame->h;
-    size_t pitch = (size_t)frame->pitch;
+  SDL_Surface *converted = nullptr;
+  SDL_Surface *use = frame;
+  if (frame->format != SDL_PIXELFORMAT_BGRA32 && frame->w > 0 && frame->h > 0) {
+    // Android Camera2 delivers NV21/IYUV frames; convert to BGRA32 so the UI pipeline stays uniform.
+    converted = SDL_ConvertSurface(frame, SDL_PIXELFORMAT_BGRA32);
+    if (converted) use = converted;
+  }
+  if (use->format == SDL_PIXELFORMAT_BGRA32 && use->w > 0 && use->h > 0 && use->pitch >= 0) {
+    size_t w = (size_t)use->w;
+    size_t h = (size_t)use->h;
+    size_t pitch = (size_t)use->pitch;
     if (pitch >= w * 4 && cap >= w * h * 4) {
-      const uint8_t *src = (const uint8_t *)frame->pixels;
+      const uint8_t *src = (const uint8_t *)use->pixels;
       for (size_t y = 0; y < h; ++y) {
         uint8_t *dst = bgra + y * w * 4;
         const uint8_t *row = src + y * pitch;
         for (size_t x = 0; x < w * 4; ++x) dst[x] = row[x];
       }
-      if (out_w) *out_w = frame->w;
-      if (out_h) *out_h = frame->h;
+      if (out_w) *out_w = use->w;
+      if (out_h) *out_h = use->h;
       ok = true;
     }
   }
+  if (converted) SDL_DestroySurface(converted);
   SDL_ReleaseCameraFrame(c->cam, frame);
   return ok;
 }

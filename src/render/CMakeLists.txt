@@ -12,7 +12,7 @@ pkg_check_modules(CCORD_SWSCALE_R REQUIRED IMPORTED_TARGET libswscale)
 # -DCCORD_FONTCONFIG=OFF) text.c scans the standard font directories instead.
 option(CCORD_FONTCONFIG "Use fontconfig for run-time font fallback when available" ON)
 set(CCORD_RENDER_HAVE_FONTCONFIG 0)
-if(CCORD_FONTCONFIG)
+if(CCORD_FONTCONFIG AND NOT ANDROID)
   pkg_check_modules(CCORD_FONTCONFIG_PKG QUIET IMPORTED_TARGET fontconfig)
   if(CCORD_FONTCONFIG_PKG_FOUND)
     set(CCORD_RENDER_HAVE_FONTCONFIG 1)

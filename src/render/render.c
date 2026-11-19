@@ -116,6 +116,21 @@ ccord_renderer *ccord_render_create(ccord_platform *p, const ccord_theme *theme,
   return r;
 }
 
+void ccord_render_evict_caches(ccord_renderer *r)
+{
+  if (!r) return;
+  text_cache_flush(r);
+  for (int i = 0; i < r->ntexs; i++) {
+    if (r->texs[i].dec) ccord_av_stream_close(r->texs[i].dec);
+    if (r->texs[i].has_anim) ccord_anim_free(&r->texs[i].anim);
+    if (r->texs[i].tex) SDL_DestroyTexture(r->texs[i].tex);
+    ccord_free(r->texs[i].key);
+  }
+  r->ntexs = 0;
+  for (int i = 0; i < r->ndiscs; i++) SDL_DestroyTexture(r->discs[i].tex);
+  r->ndiscs = 0;
+}
+
 void ccord_render_destroy(ccord_renderer *r)
 {
   if (!r) return;
@@ -804,9 +819,15 @@ ccord_status ccord_render_upload_rgba(ccord_renderer *r, const char *key, const 
 
 // ---- progressive animations ----
 
+#if defined(__ANDROID__)
+#define RENDER_ANIM_DEFAULT_DIM 512                                  // tighter mobile decode cap to avoid lmkd OOM
+#define RENDER_ANIM_DEFAULT_BUDGET ((size_t)8u * 1024u * 1024u)
+#define RENDER_ANIM_TOTAL_BUDGET ((size_t)48u * 1024u * 1024u)
+#else
 #define RENDER_ANIM_DEFAULT_DIM 800                                  // animated images are decoded no larger than this
 #define RENDER_ANIM_DEFAULT_BUDGET ((size_t)16u * 1024u * 1024u)     // decoded bytes kept per animation
 #define RENDER_ANIM_TOTAL_BUDGET ((size_t)320u * 1024u * 1024u)      // ... and across the whole cache
+#endif
 #define RENDER_ANIM_INLINE_MS 6u                                     // decode time spent inside the upload call
 
 static uint64_t tex_clock_ms(const ccord_renderer *r)

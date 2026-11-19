@@ -11,6 +11,10 @@
 #include <string.h>
 
 #include <SDL3/SDL.h>
+#if defined(__ANDROID__)
+#include <SDL3/SDL_system.h>
+#include "android_bridge.h"
+#endif
 #include <libavcodec/avcodec.h>
 #include <libavutil/dict.h>
 #include <libavutil/frame.h>
@@ -24,6 +28,7 @@
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/log.h>
+#include <ccord/core/os.h>
 #include <ccord/core/utf8.h>
 
 #include <ccord/platform/app_icon.h>
@@ -91,6 +96,17 @@ struct ccord_platform {
   ccord_link_event_fn link_fn;
   void *link_ud;
   atomic_bool global_ptt_held;   // push-to-talk shortcut held (portal Activated .. Deactivated / session lost)
+  atomic_bool in_background;     // true while Android app is backgrounded (EGL surface paused)
+  atomic_bool pending_bg_ev;
+  atomic_bool pending_fg_ev;
+  atomic_bool pending_lowmem_ev;
+  atomic_bool pending_reset_ev;
+  bool pending_safe_area_ev;
+  bool pending_keyboard_ev;
+  ccord_safe_insets safe_insets;
+  float keyboard_inset;
+  ccord_form_factor form_factor;
+  bool voice_service_active;
 };
 
 static char s_last_opened_url[1024];
@@ -188,6 +204,7 @@ static void apply_title_badge(ccord_platform *p)
   SDL_SetWindowTitle(p->window, buf);
 }
 
+#if !defined(__ANDROID__)
 // Sets the window icon from the embedded logo: the largest image is the base surface, the others are attached as
 // alternate images so the window system can pick the size it needs. Returns how many images were built; *accepted
 // tells whether the driver took the icon (the dummy/headless video driver refuses it).
@@ -217,6 +234,7 @@ static uint32_t set_window_icon(SDL_Window *w, bool *accepted)
   SDL_DestroySurface(base);
   return n;
 }
+#endif
 
 bool ccord_platform_window_icon_accepted(const ccord_platform *p)
 {
@@ -231,6 +249,53 @@ const char *ccord_platform_app_id(void)
 uint32_t ccord_platform_window_icon_sizes(const ccord_platform *p)
 {
   return p ? p->window_icon_sizes : 0;
+}
+
+static bool SDLCALL platform_lifecycle_watch(void *userdata, SDL_Event *event)
+{
+  ccord_platform *p = (ccord_platform *)userdata;
+  if (!p || !event) return true;
+  switch (event->type) {
+    case SDL_EVENT_WILL_ENTER_BACKGROUND:
+    case SDL_EVENT_DID_ENTER_BACKGROUND:
+      atomic_store(&p->in_background, true);
+      atomic_store(&p->pending_bg_ev, true);
+      break;
+    case SDL_EVENT_WILL_ENTER_FOREGROUND:
+    case SDL_EVENT_DID_ENTER_FOREGROUND:
+      atomic_store(&p->in_background, false);
+      atomic_store(&p->pending_fg_ev, true);
+      break;
+    case SDL_EVENT_LOW_MEMORY:
+      atomic_store(&p->pending_lowmem_ev, true);
+      break;
+    case SDL_EVENT_RENDER_TARGETS_RESET:
+    case SDL_EVENT_RENDER_DEVICE_RESET:
+      atomic_store(&p->pending_reset_ev, true);
+      break;
+    default:
+      break;
+  }
+  return true;
+}
+
+static void refresh_sdl_safe_area(ccord_platform *p)
+{
+  if (!p || !p->window || p->headless) return;
+  SDL_Rect safe = {0};
+  int win_w = 0, win_h = 0;
+  if (!SDL_GetWindowSafeArea(p->window, &safe) || !SDL_GetWindowSize(p->window, &win_w, &win_h)) return;
+  if (win_w <= 0 || win_h <= 0) return;
+  float ratio = window_density(p->window) / window_scale(p->window);
+  float top = (float)safe.y * ratio;
+  float left = (float)safe.x * ratio;
+  float right = (float)(win_w - (safe.x + safe.w)) * ratio;
+  float bottom = (float)(win_h - (safe.y + safe.h)) * ratio;
+  if (top < 0.0f) top = 0.0f;
+  if (left < 0.0f) left = 0.0f;
+  if (right < 0.0f) right = 0.0f;
+  if (bottom < 0.0f) bottom = 0.0f;
+  p->safe_insets = (ccord_safe_insets){.top = top, .right = right, .bottom = bottom, .left = left};
 }
 
 ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_error *err)
@@ -252,6 +317,12 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
     SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
   }
+#if defined(__ANDROID__)
+  // Use dedicated touch events in our gesture recognizer instead of double-firing synthetic mouse events.
+  SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
+  SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
+  ccord_android_init_ffmpeg_jni();
+#endif
   if (!SDL_Init(SDL_INIT_VIDEO)) {
     ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "platform: SDL_Init failed: %s", SDL_GetError());
     return nullptr;
@@ -267,7 +338,11 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
   p->window_visible = !c.start_minimized;
   p->drop_mutex = SDL_CreateMutex();
   SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
+#if defined(__ANDROID__)
+  window_flags |= SDL_WINDOW_FULLSCREEN;
+#else
   if (c.start_minimized) window_flags |= SDL_WINDOW_HIDDEN;   // tray-only start: never flash the window
+#endif
   // X11 WM_CLASS / Wayland app_id: must match StartupWMClass and C-Cord.desktop.
   SDL_SetHint(SDL_HINT_APP_ID, CCORD_PLATFORM_APP_ID);
   p->window = SDL_CreateWindow(c.title, c.width, c.height, window_flags);
@@ -278,6 +353,13 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
     SDL_QuitSubSystem(SDL_INIT_VIDEO);
     return nullptr;
   }
+#if defined(__ANDROID__)
+  int ff = ccord_android_get_form_factor();
+  p->form_factor = (ff == 2) ? CCORD_FORM_TABLET : CCORD_FORM_PHONE;
+  ccord_android_register_platform(p);
+  refresh_sdl_safe_area(p);
+#else
+  p->form_factor = CCORD_FORM_DESKTOP;
   p->window_icon_sizes = set_window_icon(p->window, &p->window_icon_accepted);
   // The window was created in screen coordinates; the requested size is in logical px. Fix it up once the
   // display scale is known (X11 with a content scale, Wayland fractional scaling).
@@ -290,6 +372,8 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
     SDL_SetWindowMinimumSize(p->window, (int)lroundf((float)c.min_width * scale / density),
                              (int)lroundf((float)c.min_height * scale / density));
   }
+#endif
+  SDL_AddEventWatch(platform_lifecycle_watch, p);
   copy_utf8_prefix(p->base_title, sizeof p->base_title, c.title, strlen(c.title));
   p->hotkey_mutex = SDL_CreateMutex();
   p->desktop = ccord_desktop_create(CCORD_PLATFORM_APP_ID, c.headless);
@@ -304,6 +388,14 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
 void ccord_platform_destroy(ccord_platform *p)
 {
   if (!p) return;
+  SDL_RemoveEventWatch(platform_lifecycle_watch, p);
+#if defined(__ANDROID__)
+  if (p->voice_service_active) {
+    ccord_android_set_voice_service(false, "", false, false);
+    ccord_android_set_audio_comm_mode(false);
+  }
+  ccord_android_register_platform(nullptr);
+#endif
   if (p->text_input_on) SDL_StopTextInput(p->window);
   ccord_desktop_destroy(p->desktop);
   ccord_linkwatch_destroy(p->link);
@@ -524,6 +616,7 @@ ccord_status ccord_platform_inject_drop_file(ccord_platform *p, const char *path
   return CCORD_OK;
 }
 
+#if !defined(__ANDROID__)
 static void SDLCALL on_file_dialog(void *userdata, const char *const *filelist, int filter)
 {
   (void)filter;
@@ -534,15 +627,20 @@ static void SDLCALL on_file_dialog(void *userdata, const char *const *filelist, 
     (void)ccord_platform_inject_drop_file(p, filelist[i], &err);
   }
 }
+#endif
 
 void ccord_platform_open_file_dialog(ccord_platform *p)
 {
   if (!p || p->headless) return;
+#if defined(__ANDROID__)
+  (void)ccord_android_open_file_picker();
+#else
   static const SDL_DialogFileFilter k_filters[] = {
     {"Images and files", "png;jpg;jpeg;webp;gif;txt;md;json;pdf;*"},
     {"All files", "*"},
   };
   SDL_ShowOpenFileDialog(on_file_dialog, p, p->window, k_filters, 2, nullptr, true);
+#endif
 }
 
 const char *ccord_platform_last_drop_file(const ccord_platform *p)
@@ -1042,14 +1140,17 @@ static bool open_video_codec_pair(ccord_video_stream *v, const AVCodec *enc)
   ec->height = v->height;
   ec->time_base = (AVRational){1, v->fps};
   ec->framerate = (AVRational){v->fps, 1};
-  ec->pix_fmt = AV_PIX_FMT_YUV420P;
+  ec->pix_fmt = (enc->name && strcmp(enc->name, "h264_mediacodec") == 0) ? AV_PIX_FMT_NV12 : AV_PIX_FMT_YUV420P;
   ec->bit_rate = v->bitrate;
   ec->gop_size = v->fps;
   ec->max_b_frames = 0;
   ec->thread_count = 1;
   AVDictionary *opts = nullptr;
   if (enc->id == AV_CODEC_ID_H264) {
-    if (enc->name && strcmp(enc->name, "libx264") == 0) {
+    if (enc->name && strcmp(enc->name, "h264_mediacodec") == 0) {
+      av_dict_set(&opts, "bitrate_mode", "cbr", 0);
+      av_dict_set(&opts, "i_frame_interval", "1", 0);
+    } else if (enc->name && strcmp(enc->name, "libx264") == 0) {
       av_dict_set(&opts, "preset", "ultrafast", 0);
       av_dict_set(&opts, "tune", "zerolatency", 0);
       av_dict_set(&opts, "annexb", "1", 0);
@@ -1112,6 +1213,10 @@ static bool probe_h264_encoders(ccord_video_stream *v, const char *preferred)
       "h264_amf",
       "h264_qsv",
       "h264_mf",
+      "libx264",
+      "libopenh264",
+#elif defined(__ANDROID__)
+      "h264_mediacodec",
       "libx264",
       "libopenh264",
 #else
@@ -1213,7 +1318,7 @@ ccord_video_stream *ccord_video_stream_create(const ccord_video_config *cfg, cco
     ccord_error_set(err, CCORD_ERR_NOMEM, "video: cannot allocate AVFrame/AVPacket");
     return nullptr;
   }
-  v->enc_frame->format = AV_PIX_FMT_YUV420P;
+  v->enc_frame->format = v->enc_ctx->pix_fmt;
   v->enc_frame->width = v->width;
   v->enc_frame->height = v->height;
   if (av_frame_get_buffer(v->enc_frame, 32) < 0) {
@@ -1289,7 +1394,7 @@ static ccord_status encode_pixels_internal(ccord_video_stream *v, const uint8_t 
     return ccord_error_set(err, CCORD_ERR_IO, "video encode: frame not writable");
   }
   v->sws_to_yuv = sws_getCachedContext(v->sws_to_yuv, width, height, src_fmt, v->width, v->height,
-                                       AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                       v->enc_ctx->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
   if (!v->sws_to_yuv) return ccord_error_set(err, CCORD_ERR_NOMEM, "video encode: sws_getCachedContext failed");
   const uint8_t *src_slices[1] = {pixels};
   int src_linesize[1] = {src_stride};
@@ -1503,6 +1608,7 @@ static ccord_key translate_key(SDL_Keycode k)
     case SDLK_L: return CCORD_KEY_L;
     case SDLK_Q: return CCORD_KEY_Q;
     case SDLK_SLASH: case SDLK_QUESTION: return CCORD_KEY_SLASH;
+    case SDLK_AC_BACK: return CCORD_KEY_BACK;
     default: return CCORD_KEY_UNKNOWN;
   }
 }
@@ -1572,17 +1678,34 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
       out->focused = e->type == SDL_EVENT_WINDOW_FOCUS_GAINED;
       p->focused = out->focused;
       if (p->focused && p->window) (void)SDL_FlashWindow(p->window, SDL_FLASH_CANCEL);
+#if defined(__ANDROID__)
+      if (!p->focused && p->text_input_on && p->window) {
+        SDL_StopTextInput(p->window);
+        p->text_input_on = false;
+      }
+#endif
       return true;
+    case SDL_EVENT_WINDOW_SAFE_AREA_CHANGED: {
+      refresh_sdl_safe_area(p);
+      out->type = CCORD_IN_SAFE_AREA;
+      out->inset_top = p->safe_insets.top;
+      out->inset_right = p->safe_insets.right;
+      out->inset_bottom = p->safe_insets.bottom;
+      out->inset_left = p->safe_insets.left;
+      return true;
+    }
     case SDL_EVENT_WINDOW_MOUSE_LEAVE:
       out->type = CCORD_IN_MOUSE_LEAVE;
       return true;
     case SDL_EVENT_MOUSE_MOTION:
+      if (e->motion.which == SDL_TOUCH_MOUSEID) return false;
       out->type = CCORD_IN_MOUSE_MOVE;
       out->x = to_logical(p, e->motion.x);
       out->y = to_logical(p, e->motion.y);
       return true;
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP:
+      if (e->button.which == SDL_TOUCH_MOUSEID) return false;
       out->button = translate_button(e->button.button);
       if (out->button == 0) return false;
       out->type = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN ? CCORD_IN_MOUSE_DOWN : CCORD_IN_MOUSE_UP;
@@ -1591,6 +1714,21 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
       out->x = to_logical(p, e->button.x);
       out->y = to_logical(p, e->button.y);
       return true;
+    case SDL_EVENT_FINGER_DOWN:
+    case SDL_EVENT_FINGER_MOTION:
+    case SDL_EVENT_FINGER_UP:
+    case SDL_EVENT_FINGER_CANCELED: {
+      float lw = 0.0f, lh = 0.0f, sc = 1.0f;
+      ccord_platform_size(p, &lw, &lh, &sc);
+      if (e->type == SDL_EVENT_FINGER_DOWN) out->type = CCORD_IN_TOUCH_DOWN;
+      else if (e->type == SDL_EVENT_FINGER_MOTION) out->type = CCORD_IN_TOUCH_MOVE;
+      else if (e->type == SDL_EVENT_FINGER_UP) out->type = CCORD_IN_TOUCH_UP;
+      else out->type = CCORD_IN_TOUCH_CANCEL;
+      out->finger_id = (int64_t)e->tfinger.fingerID;
+      out->x = e->tfinger.x * lw;
+      out->y = e->tfinger.y * lh;
+      return true;
+    }
     case SDL_EVENT_MOUSE_WHEEL:
       out->type = CCORD_IN_WHEEL;
       out->wheel = e->wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e->wheel.y : e->wheel.y;
@@ -1663,6 +1801,57 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
   // then drain the queues before waiting on SDL events.
   ccord_desktop_pump(p->desktop);
   platform_pump_link(p);
+
+  if (atomic_exchange(&p->pending_bg_ev, false)) {
+    memset(out, 0, sizeof *out);
+    out->type = CCORD_IN_APP_BACKGROUND;
+    return true;
+  }
+  if (atomic_exchange(&p->pending_fg_ev, false)) {
+    memset(out, 0, sizeof *out);
+    out->type = CCORD_IN_APP_FOREGROUND;
+    return true;
+  }
+  if (atomic_exchange(&p->pending_lowmem_ev, false)) {
+    memset(out, 0, sizeof *out);
+    out->type = CCORD_IN_APP_LOW_MEMORY;
+    return true;
+  }
+  if (atomic_exchange(&p->pending_reset_ev, false)) {
+    memset(out, 0, sizeof *out);
+    out->type = CCORD_IN_RENDER_RESET;
+    return true;
+  }
+#if defined(__ANDROID__)
+  {
+    float top = 0, right = 0, bottom = 0, left = 0, ime = 0;
+    if (ccord_android_poll_insets(&top, &right, &bottom, &left, &ime)) {
+      float s = p->window ? window_scale(p->window) : 1.0f;
+      if (s <= 0.0f) s = 1.0f;
+      p->safe_insets = (ccord_safe_insets){top / s, right / s, bottom / s, left / s};
+      p->keyboard_inset = ime / s;
+      p->pending_safe_area_ev = true;
+      p->pending_keyboard_ev = true;
+    }
+  }
+#endif
+  if (p->pending_safe_area_ev) {
+    p->pending_safe_area_ev = false;
+    memset(out, 0, sizeof *out);
+    out->type = CCORD_IN_SAFE_AREA;
+    out->inset_top = p->safe_insets.top;
+    out->inset_right = p->safe_insets.right;
+    out->inset_bottom = p->safe_insets.bottom;
+    out->inset_left = p->safe_insets.left;
+    return true;
+  }
+  if (p->pending_keyboard_ev) {
+    p->pending_keyboard_ev = false;
+    memset(out, 0, sizeof *out);
+    out->type = CCORD_IN_KEYBOARD_INSET;
+    out->inset_bottom = p->keyboard_inset;
+    return true;
+  }
   bool queued_hotkey = false;
   if (p->hotkey_mutex) SDL_LockMutex(p->hotkey_mutex);
   if (p->hotkey_count > 0) {
@@ -1709,4 +1898,157 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
     uint64_t now = SDL_GetTicks();
     wait = now < deadline ? (uint32_t)(deadline - now) : 0;
   }
+}
+
+// ---- Mobile & Cross-Platform Capabilities ----
+
+bool ccord_platform_is_mobile(const ccord_platform *p)
+{
+  if (p && p->form_factor != CCORD_FORM_DESKTOP) return true;
+  return ccord_os_is_mobile();
+}
+
+ccord_form_factor ccord_platform_form_factor(const ccord_platform *p)
+{
+  if (p) return p->form_factor;
+  return ccord_os_is_mobile() ? CCORD_FORM_PHONE : CCORD_FORM_DESKTOP;
+}
+
+bool ccord_platform_has_touch(const ccord_platform *p)
+{
+  if (ccord_platform_is_mobile(p)) return true;
+  int count = 0;
+  SDL_TouchID *devs = SDL_GetTouchDevices(&count);
+  SDL_free(devs);
+  return count > 0;
+}
+
+bool ccord_platform_has_haptics(const ccord_platform *p)
+{
+  (void)p;
+#if defined(__ANDROID__)
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool ccord_platform_has_share(const ccord_platform *p)
+{
+  (void)p;
+#if defined(__ANDROID__)
+  return true;
+#else
+  return false;
+#endif
+}
+
+bool ccord_platform_in_background(const ccord_platform *p)
+{
+  return p && atomic_load(&p->in_background);
+}
+
+ccord_safe_insets ccord_platform_safe_area(const ccord_platform *p)
+{
+  return p ? p->safe_insets : (ccord_safe_insets){0};
+}
+
+float ccord_platform_keyboard_inset(const ccord_platform *p)
+{
+  return p ? p->keyboard_inset : 0.0f;
+}
+
+bool ccord_platform_haptic_impact(ccord_platform *p, ccord_haptic_style style)
+{
+  if (!p || p->headless) return false;
+#if defined(__ANDROID__)
+  return ccord_android_haptic_impact((int)style);
+#else
+  (void)style;
+  return false;
+#endif
+}
+
+bool ccord_platform_haptic_notify(ccord_platform *p, ccord_haptic_notify_kind kind)
+{
+  if (!p || p->headless) return false;
+#if defined(__ANDROID__)
+  return ccord_android_haptic_notify((int)kind);
+#else
+  (void)kind;
+  return false;
+#endif
+}
+
+bool ccord_platform_share_text(ccord_platform *p, const char *title, const char *text)
+{
+  if (!p || p->headless || !text || !text[0]) return false;
+  if (!ccord_utf8_valid(text, strlen(text))) return false;
+  if (title && !ccord_utf8_valid(title, strlen(title))) return false;
+#if defined(__ANDROID__)
+  return ccord_android_share_text(title, text);
+#else
+  (void)title;
+  return false;
+#endif
+}
+
+bool ccord_platform_keep_screen_on(ccord_platform *p, bool on)
+{
+  if (!p || p->headless) return false;
+  if (on) (void)SDL_DisableScreenSaver();
+  else (void)SDL_EnableScreenSaver();
+#if defined(__ANDROID__)
+  return ccord_android_keep_screen_on(on);
+#else
+  return true;
+#endif
+}
+
+bool ccord_platform_set_orientation(ccord_platform *p, ccord_orientation_mode mode)
+{
+  if (!p || p->headless) return false;
+#if defined(__ANDROID__)
+  return ccord_android_set_orientation((int)mode);
+#else
+  (void)mode;
+  return false;
+#endif
+}
+
+void ccord_platform_dismiss_keyboard(ccord_platform *p)
+{
+  if (!p || !p->window) return;
+  if (p->text_input_on) {
+    SDL_StopTextInput(p->window);
+    p->text_input_on = false;
+  }
+}
+
+void ccord_platform_set_voice_call_active(ccord_platform *p, bool active, const char *channel_name,
+                                          bool muted, bool deafened)
+{
+  if (!p) return;
+  p->voice_service_active = active;
+#if defined(__ANDROID__)
+  if (!p->headless) {
+    ccord_android_set_voice_service(active, channel_name, muted, deafened);
+    ccord_android_set_audio_comm_mode(active);
+  }
+#else
+  (void)channel_name;
+  (void)muted;
+  (void)deafened;
+#endif
+}
+
+bool ccord_platform_request_permission(ccord_platform *p, const char *permission)
+{
+  if (!p || !permission || !permission[0]) return false;
+#if defined(__ANDROID__)
+  if (p->headless) return true;
+  return SDL_RequestAndroidPermission(permission, nullptr, nullptr);
+#else
+  return true;
+#endif
 }

@@ -139,7 +139,11 @@ static ccord_status scale_current_frame(ccord_video_decoder *d, ccord_error *err
 ccord_video_decoder *ccord_video_decoder_create(ccord_error *err)
 {
   ccord_error_clear(err);
-  const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+  const AVCodec *codec = nullptr;
+#if defined(__ANDROID__)
+  codec = avcodec_find_decoder_by_name("h264_mediacodec");
+#endif
+  if (!codec) codec = avcodec_find_decoder(AV_CODEC_ID_H264);
   if (!codec) {
     ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "video decode: no H.264 decoder");
     return nullptr;

@@ -12,12 +12,14 @@
 #include <ccord/core/log.h>
 #include <ccord/core/os.h>
 
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
 #include <linux/netlink.h>
 #include <linux/rtnetlink.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #define LINKWATCH_HAVE_NETLINK 1
+#elif defined(__ANDROID__)
+#define LINKWATCH_HAVE_NETLINK 0
 #elif defined(__APPLE__)
 #include <mach/mach_time.h>
 #define LINKWATCH_HAVE_NETLINK 0

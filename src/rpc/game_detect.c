@@ -541,6 +541,10 @@ ccord_status ccord_game_scan(const ccord_game_list *l, const char *proc_root, cc
   ccord_error_clear(err);
   if (!l || !out) return ccord_error_set(err, CCORD_ERR_INVALID, "game scan: bad arguments");
   memset(out, 0, sizeof *out);
+#if CCORD_OS_ANDROID
+  // Android mounts /proc with hidepid=2 and SELinux forbids scanning other app PIDs.
+  if (!proc_root) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "game scan: unavailable on Android");
+#endif
   int rootfd = open(proc_root ? proc_root : CCORD_GAME_DETECT_PROC_ROOT, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   if (rootfd < 0) return ccord_error_set(err, CCORD_ERR_IO, "game scan: cannot open proc root");
   DIR *dir = fdopendir(rootfd);

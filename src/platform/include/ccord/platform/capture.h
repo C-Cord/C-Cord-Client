@@ -19,6 +19,7 @@ typedef enum ccord_capture_backend_id : uint8_t {
   CCORD_CAPBE_FAKE,       // synthetic windows/screens with animated test patterns
   CCORD_CAPBE_WIN32,      // Windows DXGI / GDI desktop & window capture
   CCORD_CAPBE_MACOS,      // macOS ScreenCaptureKit / CoreGraphics capture
+  CCORD_CAPBE_ANDROID,    // Android MediaProjection screen capture
 } ccord_capture_backend_id;
 
 #define CCORD_CAPTURE_ID_MAX 64
@@ -128,6 +129,8 @@ typedef struct ccord_capture_backend {
 extern const ccord_capture_backend ccord_capture_win32_backend;    // capture_win32.c
 #elif defined(__APPLE__)
 extern const ccord_capture_backend ccord_capture_macos_backend;    // capture_macos.m
+#elif defined(__ANDROID__)
+extern const ccord_capture_backend ccord_capture_android_backend;  // capture_android.c
 #else
 extern const ccord_capture_backend ccord_capture_x11_backend;      // capture_x11.c
 extern const ccord_capture_backend ccord_capture_portal_backend;   // capture_portal.c

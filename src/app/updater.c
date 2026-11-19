@@ -26,10 +26,12 @@
 #include <shellapi.h>
 #else
 #include <fcntl.h>
+#if CCORD_OS_MACOS
 #include <spawn.h>
+extern char **environ;
+#endif
 #include <sys/stat.h>
 #include <unistd.h>
-extern char **environ;
 #endif
 
 #define UPDATER_BASE_URL "https://c-cord.org"
@@ -42,6 +44,8 @@ ccord_install_kind ccord_updater_detect_install_kind(void)
   return CCORD_INSTALL_WINDOWS;
 #elif CCORD_OS_MACOS
   return CCORD_INSTALL_MACOS;
+#elif CCORD_OS_ANDROID
+  return CCORD_INSTALL_ANDROID;
 #else
   const char *ai = getenv("APPIMAGE");
   if (ai && ai[0]) return CCORD_INSTALL_APPIMAGE;
@@ -55,6 +59,7 @@ const char *ccord_updater_install_kind_label(ccord_install_kind kind)
     case CCORD_INSTALL_APPIMAGE: return "AppImage";
     case CCORD_INSTALL_WINDOWS: return "Windows";
     case CCORD_INSTALL_MACOS: return "macOS";
+    case CCORD_INSTALL_ANDROID: return "Android";
     case CCORD_INSTALL_SYSTEM_PKG:
     default: return "System Package";
   }
@@ -390,6 +395,13 @@ static bool apply_downloaded_update(ccord_install_kind kind, const char *file_pa
   }
   snprintf(status_out, status_cap, "Update opened — drag C-Cord to Applications.");
   return true;
+#elif CCORD_OS_ANDROID
+  (void)kind;
+  (void)file_path;
+  (void)dir_path;
+  (void)request_quit;
+  snprintf(status_out, status_cap, "Install Android APK updates from Releases.");
+  return false;
 #else
   (void)dir_path;
   if (kind != CCORD_INSTALL_APPIMAGE) {

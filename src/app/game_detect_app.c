@@ -13,7 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if CCORD_OS_LINUX
+#if CCORD_OS_LINUX || CCORD_OS_ANDROID
 #include <unistd.h>
 #endif
 

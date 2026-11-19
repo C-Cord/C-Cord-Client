@@ -43,6 +43,16 @@ const char *ccord_os_arch(void)
 #endif
 }
 
+bool ccord_os_is_mobile(void)
+{
+  return false;
+}
+
+int ccord_os_android_api_level(void)
+{
+  return 0;
+}
+
 uint64_t ccord_os_pid(void)
 {
   return (uint64_t)GetCurrentProcessId();

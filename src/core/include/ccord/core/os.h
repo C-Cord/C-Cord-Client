@@ -13,22 +13,34 @@
 #define CCORD_OS_WINDOWS 1
 #define CCORD_OS_MACOS   0
 #define CCORD_OS_LINUX   0
+#define CCORD_OS_ANDROID 0
 #elif defined(__APPLE__)
 #define CCORD_OS_WINDOWS 0
 #define CCORD_OS_MACOS   1
 #define CCORD_OS_LINUX   0
+#define CCORD_OS_ANDROID 0
+#elif defined(__ANDROID__)
+#define CCORD_OS_WINDOWS 0
+#define CCORD_OS_MACOS   0
+#define CCORD_OS_LINUX   0
+#define CCORD_OS_ANDROID 1
 #else
 #define CCORD_OS_WINDOWS 0
 #define CCORD_OS_MACOS   0
 #define CCORD_OS_LINUX   1
+#define CCORD_OS_ANDROID 0
 #endif
+
+#define CCORD_OS_MOBILE (CCORD_OS_ANDROID)
 
 #ifndef CCORD_PATH_MAX
 #define CCORD_PATH_MAX 4096
 #endif
 
-const char *ccord_os_name(void);   // "linux", "macos", or "windows"
-const char *ccord_os_arch(void);   // "x86_64", "arm64", etc.
+const char *ccord_os_name(void);   // "linux", "macos", "windows", or "android"
+const char *ccord_os_arch(void);   // "x86_64", "arm64", "arm", "x86", etc.
+bool ccord_os_is_mobile(void);     // true on Android/mobile targets
+int ccord_os_android_api_level(void);   // Android SDK API level (e.g. 34), or 0 on non-Android
 uint64_t ccord_os_pid(void);
 bool ccord_os_hostname(char *out, size_t cap);
 bool ccord_os_getcwd(char *out, size_t cap);

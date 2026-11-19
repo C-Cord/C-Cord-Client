@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include <curl/curl.h>
+#include "tls_internal.h"
 #include <curl/websockets.h>
 #include <openssl/evp.h>
 #if defined(__has_include) && __has_include(<opus/opus.h>)
@@ -617,12 +618,14 @@ static void vg_open_udp_and_discover(ccord_voice_gateway *g)
 
   int fd = -1;
   struct sockaddr_storage peer = {0};
+  socklen_t peer_len = 0;
   for (struct addrinfo *rp = res; rp; rp = rp->ai_next) {
     ccord_socket_t s = (ccord_socket_t)socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
     if (s == CCORD_INVALID_SOCKET) continue;
     if (vg_sock_connect(s, rp->ai_addr, (size_t)rp->ai_addrlen) == 0) {
       fd = (int)s;
       memcpy(&peer, rp->ai_addr, rp->ai_addrlen);
+      peer_len = (socklen_t)rp->ai_addrlen;
       break;
     }
     ccord_sock_close(s);
@@ -642,17 +645,13 @@ static void vg_open_udp_and_discover(ccord_voice_gateway *g)
   }
 
   g->udp_fd = fd;
-  if (peer.ss_family == AF_INET) {
-    g->peer_addr = *(struct sockaddr_in *)&peer;
-  } else {
-    struct sockaddr_in *sin = (struct sockaddr_in *)&peer;
-    g->peer_addr = *sin;
-  }
+  g->peer_addr = peer;
+  g->peer_addr_len = peer_len;
   g->peer_valid = true;
 
   uint8_t req[CCORD_VOICE_IP_DISCOVERY_SIZE];
   ccord_voice_ip_discovery_build(g->ssrc, req);
-  (void)vg_sock_sendto(g->udp_fd, req, sizeof req, (const struct sockaddr *)&g->peer_addr, sizeof g->peer_addr);
+  (void)vg_sock_sendto(g->udp_fd, req, sizeof req, (const struct sockaddr *)&g->peer_addr, g->peer_addr_len);
   g->ip_discovery_deadline = vg_now(g) + 250u;
 
   // If connecting to loopback (tests) or a live socket, poll briefly for the 74-byte 0x0002 response.
@@ -887,8 +886,7 @@ static ccord_status vg_open(ccord_voice_gateway *g, ccord_error *err)
   curl_easy_setopt(g->curl, CURLOPT_CONNECTTIMEOUT_MS, (long)g->connect_timeout_ms);
   curl_easy_setopt(g->curl, CURLOPT_TIMEOUT_MS, (long)g->connect_timeout_ms);
   curl_easy_setopt(g->curl, CURLOPT_NOSIGNAL, 1L);
-  curl_easy_setopt(g->curl, CURLOPT_SSL_VERIFYPEER, 1L);
-  curl_easy_setopt(g->curl, CURLOPT_SSL_VERIFYHOST, 2L);
+  ccord_curl_apply_tls(g->curl);
   curl_easy_setopt(g->curl, CURLOPT_USERAGENT, ccord_live_user_agent());
   curl_easy_setopt(g->curl, CURLOPT_PROTOCOLS_STR, "wss,ws,https,http");
   CURLcode rc = curl_easy_perform(g->curl);
@@ -1410,7 +1408,7 @@ static ccord_status vg_seal_and_send_rtp(ccord_voice_gateway *g,
   if (g->udp_fd < 0 || !g->peer_valid) {
     return ccord_error_set(err, CCORD_ERR_IO, "voice: udp socket not ready");
   }
-  ptrdiff_t sent = vg_sock_sendto(g->udp_fd, pkt, pkt_len, (const struct sockaddr *)&g->peer_addr, sizeof g->peer_addr);
+  ptrdiff_t sent = vg_sock_sendto(g->udp_fd, pkt, pkt_len, (const struct sockaddr *)&g->peer_addr, g->peer_addr_len);
   if (sent < 0 || (size_t)sent != pkt_len) {
     return ccord_error_set(err, CCORD_ERR_IO, "voice: udp sendto failed");
   }
@@ -2045,7 +2043,13 @@ static void vg_pump_udp(ccord_voice_gateway *g)
       if (vg_open_srtcp(g, pkt, (size_t)n, rtcp_plain, sizeof rtcp_plain, &rtcp_len)) {
         rtcp_buf = rtcp_plain;
         rtcp_buf_len = rtcp_len;
-      } else if (g->peer_valid && from.ss_family == AF_INET && ((const struct sockaddr_in *)&from)->sin_addr.s_addr == g->peer_addr.sin_addr.s_addr && ((const struct sockaddr_in *)&from)->sin_port == g->peer_addr.sin_port) {
+      } else if (g->peer_valid && from.ss_family == g->peer_addr.ss_family &&
+                 ((from.ss_family == AF_INET &&
+                   ((const struct sockaddr_in *)&from)->sin_addr.s_addr == ((const struct sockaddr_in *)&g->peer_addr)->sin_addr.s_addr &&
+                   ((const struct sockaddr_in *)&from)->sin_port == ((const struct sockaddr_in *)&g->peer_addr)->sin_port) ||
+                  (from.ss_family == AF_INET6 &&
+                   memcmp(&((const struct sockaddr_in6 *)&from)->sin6_addr, &((const struct sockaddr_in6 *)&g->peer_addr)->sin6_addr, 16) == 0 &&
+                   ((const struct sockaddr_in6 *)&from)->sin6_port == ((const struct sockaddr_in6 *)&g->peer_addr)->sin6_port))) {
         // accept plaintext RTCP feedback from verified peer
       } else {
         continue;

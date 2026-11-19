@@ -22,7 +22,7 @@ ccord_status ccord_random_bytes(void *buf, size_t len)
   }
   return CCORD_OK;
 }
-#elif defined(__APPLE__)
+#elif defined(__APPLE__) || defined(__ANDROID__)
 #include <stdlib.h>
 
 ccord_status ccord_random_bytes(void *buf, size_t len)

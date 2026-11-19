@@ -23,7 +23,7 @@
 #include <ccord/platform/capture.h>
 #include <ccord/platform/platform.h>
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
 #include "loopback_pw.h"
 #elif defined(_WIN32)
 typedef struct ccord_loopback_win32 ccord_loopback_win32;
@@ -40,7 +40,7 @@ void ccord_loopback_win32_close(ccord_loopback_win32 *w);
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -228,7 +228,7 @@ struct ccord_loopback_audio {
   bool have_pending;
   SDL_AudioStream *sdl_stream;   // SDL monitor fallback stream when helpers are absent
   bool sdl_audio_init;
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
   ccord_loopback_pw *pw;         // PipeWire self-excluding capture when available
 #elif defined(_WIN32)
   ccord_loopback_win32 *win32;   // Windows WASAPI loopback capture
@@ -262,7 +262,7 @@ static size_t lb_fake_read(ccord_loopback_audio *l, int16_t *pcm, size_t max_sam
   return n;
 }
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
 
 // Mutable argv builder: -Wwrite-strings forbids handing string literals to exec's char *argv[].
 typedef struct lb_argv {
@@ -589,7 +589,7 @@ static size_t lb_sdl_read(ccord_loopback_audio *l, int16_t *pcm, size_t max_samp
   return (size_t)got / 2u;
 }
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
 // Backend preference. Default (unset / "auto" / "pipewire") tries the self-excluding
 // PipeWire capture first; "parec" / "pipe" / "sdl" / "legacy" force the whole-sink
 // fallback path (used by tests and as an escape hatch).
@@ -616,7 +616,7 @@ ccord_loopback_audio *ccord_loopback_audio_open(ccord_error *err)
     l->kind = LB_KIND_FAKE;
     return l;
   }
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
   // Self-excluding PipeWire capture first: it never folds our own playback back out.
   if (lb_pw_preferred()) {
     l->pw = ccord_loopback_pw_open();
@@ -646,13 +646,13 @@ size_t ccord_loopback_audio_read(ccord_loopback_audio *l, int16_t *pcm, size_t m
 {
   if (!l || !pcm || max_samples == 0) return 0;
   if (l->kind == LB_KIND_FAKE) return lb_fake_read(l, pcm, max_samples);
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
   if (l->kind == LB_KIND_PW) return ccord_loopback_pw_read(l->pw, pcm, max_samples);
 #elif defined(_WIN32)
   if (l->kind == LB_KIND_WIN32) return ccord_loopback_win32_read(l->win32, pcm, max_samples);
 #endif
   if (l->kind == LB_KIND_SDL) return lb_sdl_read(l, pcm, max_samples);
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
   return lb_pipe_read(l, pcm, max_samples);
 #else
   return 0;
@@ -662,7 +662,7 @@ size_t ccord_loopback_audio_read(ccord_loopback_audio *l, int16_t *pcm, size_t m
 bool ccord_loopback_audio_failed(const ccord_loopback_audio *l)
 {
   if (!l) return true;
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
   if (l->kind == LB_KIND_PW) return ccord_loopback_pw_failed(l->pw);
 #elif defined(_WIN32)
   if (l->kind == LB_KIND_WIN32) return ccord_loopback_win32_failed(l->win32);
@@ -673,7 +673,7 @@ bool ccord_loopback_audio_failed(const ccord_loopback_audio *l)
 void ccord_loopback_audio_close(ccord_loopback_audio *l)
 {
   if (!l) return;
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
   if (l->kind == LB_KIND_PIPE) lb_stop(l->fd, l->child, l->reaped);
   if (l->kind == LB_KIND_PW) ccord_loopback_pw_close(l->pw);
 #elif defined(_WIN32)

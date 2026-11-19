@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include <curl/curl.h>
+#include "tls_internal.h"
 #include <curl/websockets.h>
 #include <zlib.h>
 
@@ -1550,8 +1551,7 @@ static ccord_status gw_open(ccord_gateway *g, bool retrying, ccord_error *err)
   curl_easy_setopt(g->curl, CURLOPT_CONNECTTIMEOUT_MS, (long)g->connect_timeout_ms);
   curl_easy_setopt(g->curl, CURLOPT_TIMEOUT_MS, (long)g->connect_timeout_ms);
   curl_easy_setopt(g->curl, CURLOPT_NOSIGNAL, 1L);
-  curl_easy_setopt(g->curl, CURLOPT_SSL_VERIFYPEER, 1L);
-  curl_easy_setopt(g->curl, CURLOPT_SSL_VERIFYHOST, 2L);
+  ccord_curl_apply_tls(g->curl);
   curl_easy_setopt(g->curl, CURLOPT_USERAGENT, ccord_live_user_agent());
   CURLcode rc = curl_easy_perform(g->curl);
   if (rc != CURLE_OK) {

@@ -375,7 +375,24 @@ static ccord_status avs_setup(ccord_av_stream *s, ccord_error *err)
       if (threads < 1) threads = 1;
       if (threads > 4) threads = 4;
     }
+#if defined(__ANDROID__)
+    const char *hw_name = nullptr;
+    switch (vs->codecpar->codec_id) {
+      case AV_CODEC_ID_H264:  hw_name = "h264_mediacodec";  break;
+      case AV_CODEC_ID_HEVC:  hw_name = "hevc_mediacodec";  break;
+      case AV_CODEC_ID_VP9:   hw_name = "vp9_mediacodec";   break;
+      case AV_CODEC_ID_VP8:   hw_name = "vp8_mediacodec";   break;
+      case AV_CODEC_ID_MPEG4: hw_name = "mpeg4_mediacodec"; break;
+      default: break;
+    }
+    if (hw_name) {
+      const AVCodec *hw = avcodec_find_decoder_by_name(hw_name);
+      if (hw) s->vdec = avs_open_codec(hw, vs, 1);
+    }
+    if (!s->vdec) s->vdec = avs_open_codec(vcodec, vs, threads);
+#else
     s->vdec = avs_open_codec(vcodec, vs, threads);
+#endif
     if (s->vdec) {
       s->vsi = vsi;
       s->rot = avs_rotation_turns(vs);

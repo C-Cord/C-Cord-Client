@@ -24,6 +24,8 @@ if(WIN32)
   list(APPEND CCORD_PLATFORM_SOURCES desktop_win32.c capture_win32.c)
 elseif(APPLE)
   list(APPEND CCORD_PLATFORM_SOURCES desktop_macos.m capture_macos.m)
+elseif(ANDROID)
+  list(APPEND CCORD_PLATFORM_SOURCES desktop_android.c capture_android.c)
 else()
   # PipeWire is optional: portal video capture and the self-excluding Go Live audio
   # loopback use it when present; without it both fall back (portal reports unavailable,
@@ -60,6 +62,9 @@ elseif(APPLE)
     "-framework CoreVideo"
     "-framework CoreMedia"
     "-framework ScreenCaptureKit")
+elseif(ANDROID)
+  target_compile_definitions(ccord_platform PRIVATE CCORD_HAVE_PIPEWIRE=0 CCORD_HAVE_X11=0 CCORD_HAVE_PORTAL=0 CCORD_HAVE_DBUS=0)
+  target_link_libraries(ccord_platform PRIVATE android log)
 else()
   if(CCORD_PIPEWIRE_FOUND)
     target_compile_definitions(ccord_platform PRIVATE CCORD_HAVE_PIPEWIRE=1)
@@ -104,7 +109,7 @@ if(CCORD_BUILD_TESTS)
     SOURCES tests/test_link_watch.c
     LIBS ccord_platform SDL3::SDL3
     LABELS unit)
-  if(UNIX AND NOT APPLE)
+  if(UNIX AND NOT APPLE AND NOT ANDROID)
     # Self-excluding PipeWire loopback: pure node filter + fallback coverage.
     ccord_add_test(NAME test_loopback_pw
       SOURCES tests/test_loopback_pw.c
@@ -126,7 +131,7 @@ if(CCORD_BUILD_TESTS)
   # M5 test fragments.
   include(tests/m5_devices.cmake)
   include(tests/m5_codecs.cmake)
-  if(UNIX AND NOT APPLE)
+  if(UNIX AND NOT APPLE AND NOT ANDROID)
     include(tests/m5_portal.cmake)
   endif()
 endif()

@@ -92,8 +92,30 @@ void fallback_fonts_init(ccord_renderer *r)
   char path[1024];
   for (size_t i = 0; i < sizeof k_bundled_rel / sizeof k_bundled_rel[0]; i++) {
     ccord_error err;
-    if (ccord_paths_join(path, sizeof path, ccord_paths_asset_dir(), k_bundled_rel[i], &err) != CCORD_OK) continue;
-    (void)try_bundled(r, path);
+    bool loaded = false;
+    if (ccord_paths_join(path, sizeof path, ccord_paths_asset_dir(), k_bundled_rel[i], &err) == CCORD_OK) {
+      loaded = try_bundled(r, path);
+    }
+#if defined(__ANDROID__)
+    // On Android, SDL_IOFromFile reads directly from APK assets/ via AAssetManager.
+    if (!loaded) {
+      SDL_IOStream *io = SDL_IOFromFile(k_bundled_rel[i], "rb");
+      if (io) {
+        TTF_Font *fb = TTF_OpenFontIO(io, true, 16.0f);
+        if (fb) {
+          const char *fam = TTF_GetFontFamilyName(fb);
+          if (has_fallback_family(r, fam)) {
+            TTF_CloseFont(fb);
+          } else {
+            adopt_fallback(r, fb, k_bundled_rel[i]);
+            r->nbundled = r->nfallbacks;
+            loaded = true;
+          }
+        }
+      }
+    }
+#endif
+    (void)loaded;
   }
 }
 
@@ -330,6 +352,11 @@ static bool lookup_system_font(ccord_renderer *r, uint32_t cp)
     scan_font_dir("/Library/Fonts", 0);
     const char *home = getenv("HOME");
     if (home && home[0] && snprintf(user, sizeof user, "%s/Library/Fonts", home) < (int)sizeof user) scan_font_dir(user, 0);
+#elif defined(__ANDROID__)
+    (void)user;
+    scan_font_dir("/system/fonts", 0);
+    scan_font_dir("/product/fonts", 0);
+    scan_font_dir("/system_ext/fonts", 0);
 #else
     scan_font_dir("/usr/share/fonts", 0);
     scan_font_dir("/usr/local/share/fonts", 0);

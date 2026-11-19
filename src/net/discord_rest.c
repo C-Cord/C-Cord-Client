@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include <curl/curl.h>
+#include "tls_internal.h"
 
 #include <ccord/core/log.h>
 #include <ccord/core/alloc.h>
@@ -356,8 +357,7 @@ ccord_status ccord_live_rest_request(const ccord_rest_config *cfg, ccord_rest_me
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
   curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
   curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 0L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
-  curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 2L);
+  ccord_curl_apply_tls(curl);
   uint32_t timeout = cfg->timeout_ms ? cfg->timeout_ms : CCORD_LIVE_TIMEOUT_DEFAULT_MS;
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long)timeout);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout);
@@ -771,8 +771,7 @@ static ccord_status rest_job_prepare(ccord_rest_queue *q, ccord_rest_job *job, c
   curl_easy_setopt(job->easy, CURLOPT_NOSIGNAL, 1L);
   curl_easy_setopt(job->easy, CURLOPT_FOLLOWLOCATION, 0L);
   curl_easy_setopt(job->easy, CURLOPT_MAXREDIRS, 0L);
-  curl_easy_setopt(job->easy, CURLOPT_SSL_VERIFYPEER, 1L);
-  curl_easy_setopt(job->easy, CURLOPT_SSL_VERIFYHOST, 2L);
+  ccord_curl_apply_tls(job->easy);
   curl_easy_setopt(job->easy, CURLOPT_CONNECTTIMEOUT_MS, (long)q->timeout_ms);
   if (job->bulk) {
     // A large download is healthy for as long as bytes keep arriving: give up when it stalls, with a generous
@@ -798,9 +797,10 @@ static curl_socket_t rest_opensocket_cb(void *clientp, curlsocktype purpose, str
 {
   (void)clientp;
   (void)purpose;
-  if (address->family == AF_INET) {
-    const struct sockaddr_in *sin = (const struct sockaddr_in *)address;
-    uint32_t ip = ntohl(sin->sin_addr.s_addr);
+  if (address->family == AF_INET && address->addrlen >= sizeof(struct sockaddr_in)) {
+    struct sockaddr_in sin;
+    memcpy(&sin, &address->addr, sizeof sin);
+    uint32_t ip = ntohl(sin.sin_addr.s_addr);
     // 127.0.0.0/8
     if ((ip & 0xFF000000u) == 0x7F000000u) return CURL_SOCKET_BAD;
     // 10.0.0.0/8
@@ -813,9 +813,10 @@ static curl_socket_t rest_opensocket_cb(void *clientp, curlsocktype purpose, str
     if ((ip & 0xFFFF0000u) == 0xA9FE0000u) return CURL_SOCKET_BAD;
     // 0.0.0.0 (unspecified)
     if (ip == 0) return CURL_SOCKET_BAD;
-  } else if (address->family == AF_INET6) {
-    const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)address;
-    const uint8_t *b = sin6->sin6_addr.s6_addr;
+  } else if (address->family == AF_INET6 && address->addrlen >= sizeof(struct sockaddr_in6)) {
+    struct sockaddr_in6 sin6;
+    memcpy(&sin6, &address->addr, sizeof sin6);
+    const uint8_t *b = sin6.sin6_addr.s6_addr;
     // ::1 loopback
     if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 &&
         b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 &&

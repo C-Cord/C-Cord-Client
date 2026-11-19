@@ -171,6 +171,8 @@ static const ccord_capture_backend *backend_of(ccord_capture_backend_id id)
     case CCORD_CAPBE_WIN32: return &ccord_capture_win32_backend;
 #elif defined(__APPLE__)
     case CCORD_CAPBE_MACOS: return &ccord_capture_macos_backend;
+#elif defined(__ANDROID__)
+    case CCORD_CAPBE_ANDROID: return &ccord_capture_android_backend;
 #else
     case CCORD_CAPBE_X11: return &ccord_capture_x11_backend;
     case CCORD_CAPBE_PORTAL: return &ccord_capture_portal_backend;
@@ -201,6 +203,9 @@ ccord_capture_backend_id ccord_capture_resolve_backend(ccord_capture_backend_id 
   return CCORD_CAPBE_AUTO;
 #elif defined(__APPLE__)
   if (ccord_capture_backend_available(CCORD_CAPBE_MACOS)) return CCORD_CAPBE_MACOS;
+  return CCORD_CAPBE_AUTO;
+#elif defined(__ANDROID__)
+  if (ccord_capture_backend_available(CCORD_CAPBE_ANDROID)) return CCORD_CAPBE_ANDROID;
   return CCORD_CAPBE_AUTO;
 #else
   const char *session = getenv("XDG_SESSION_TYPE");

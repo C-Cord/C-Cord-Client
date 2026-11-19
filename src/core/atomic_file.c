@@ -227,8 +227,13 @@ ccord_status ccord_mkdir_p(const char *path, unsigned mode, ccord_error *err)
     } else if (errno == EEXIST) {
       struct stat st;
       if (stat(tmp, &st) != 0 || !S_ISDIR(st.st_mode)) {
-        return ccord_error_set(err, CCORD_ERR_IO, "mkdir_p: a path component is not a directory");
+        if (saved == '\0' || (errno != EACCES && errno != EPERM)) {
+          return ccord_error_set(err, CCORD_ERR_IO, "mkdir_p: a path component is not a directory");
+        }
       }
+    } else if (saved != '\0' && (errno == EACCES || errno == EPERM || errno == EROFS)) {
+      // Android SELinux denies mkdir/stat on intermediate system prefixes (/data, /data/user/0);
+      // continue downward and let the target subdirectory create or fail honestly.
     } else {
       return io_error(err, "mkdir_p: mkdir");
     }

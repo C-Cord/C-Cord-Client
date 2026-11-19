@@ -858,6 +858,11 @@ static void fill_default_capture_source(ccord_capture_source *src, bool portal)
   src->backend = CCORD_CAPBE_MACOS;
   snprintf(src->id, sizeof src->id, "macos:mon:main");
   snprintf(src->title, sizeof src->title, "Main Display");
+#elif CCORD_OS_ANDROID
+  (void)portal;
+  src->backend = CCORD_CAPBE_ANDROID;
+  snprintf(src->id, sizeof src->id, "android:screen");
+  snprintf(src->title, sizeof src->title, "Android Screen (MediaProjection)");
 #else
   if (portal) {
     src->backend = CCORD_CAPBE_PORTAL;
