@@ -1381,7 +1381,10 @@ static void settings_save(ccord_ui *ui)
   }
   free(buf);
 #else
-  FILE *f = tmpfile();
+  char stage[PATH_MAX];
+  int sn = snprintf(stage, sizeof stage, "%s/.settings_stage.tmp", (dir && dir[0]) ? dir : ".");
+  if (sn <= 0 || (size_t)sn >= sizeof stage) return;
+  FILE *f = fopen(stage, "wb+");
   if (!f) return;
   settings_write_ini(ui, f);
   if (!ferror(f) && fflush(f) == 0 && fseek(f, 0, SEEK_END) == 0) {
@@ -1400,6 +1403,7 @@ static void settings_save(ccord_ui *ui)
     }
   }
   fclose(f);
+  (void)remove(stage);
 #endif
 }
 
