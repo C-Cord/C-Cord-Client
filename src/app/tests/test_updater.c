@@ -73,6 +73,22 @@ static void test_parse_assets(void)
   CHECK(p.found);
   CHECK(strcmp(p.asset_name, "C-Cord-0.3.0-macos-arm64.dmg") == 0);
 
+  // Security regressions (P9): missing/malformed sha256 or traversal segment must be rejected.
+  static const char k_no_sha[] =
+      "{\"release\":{\"tag\":\"v0.3.0\",\"assets\":["
+      "{\"name\":\"C-Cord-0.3.0.AppImage\",\"os\":\"linux\",\"arch\":\"x86_64\",\"format\":\"appimage\","
+      "\"download_url\":\"https://evil.example/payload.AppImage\"}]}}";
+  CHECK(ccord_updater_parse_latest(k_no_sha, sizeof k_no_sha - 1, "linux", "x86_64", CCORD_INSTALL_APPIMAGE,
+                                   "https://c-cord.org", &p));
+  CHECK(!p.found);
+
+  static const char k_bad_seg[] =
+      "{\"release\":{\"tag\":\"../v0.3.0\",\"assets\":["
+      "{\"name\":\"C-Cord-0.3.0.AppImage\",\"os\":\"linux\",\"arch\":\"x86_64\",\"format\":\"appimage\","
+      "\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}]}}";
+  CHECK(ccord_updater_parse_latest(k_bad_seg, sizeof k_bad_seg - 1, "linux", "x86_64", CCORD_INSTALL_APPIMAGE,
+                                   "https://c-cord.org", &p));
+  CHECK(!p.found);
 }
 
 static void test_http_allowlist(void)

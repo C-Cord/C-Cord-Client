@@ -261,19 +261,26 @@ bool ccord_updater_parse_latest(const char *json, size_t json_len, const char *o
   if (best_node) {
     const char *aname = ccord_json_string(ccord_json_get(best_node, "name"), nullptr);
     const char *asha = ccord_json_string(ccord_json_get(best_node, "sha256"), nullptr);
-    const char *aurl = ccord_json_string(ccord_json_get(best_node, "download_url"), nullptr);
     int64_t sz = 0;
     (void)ccord_json_int64(ccord_json_get(best_node, "size_bytes"), &sz);
-    snprintf(out->asset_name, sizeof out->asset_name, "%s", aname ? aname : "");
-    if (asha && strlen(asha) == 64) snprintf(out->sha256, sizeof out->sha256, "%s", asha);
-    out->size_bytes = sz > 0 ? (uint64_t)sz : 0u;
-    // Prefer tracked c-cord.org redirect URL so update downloads are accurately counted.
-    if (base_url && base_url[0] && safe_url_segment(tag) && safe_url_segment(out->asset_name)) {
-      snprintf(out->download_url, sizeof out->download_url, "%s/download/%s/%s", base_url, tag, out->asset_name);
-    } else if (aurl && strncmp(aurl, "https://", 8) == 0) {
-      snprintf(out->download_url, sizeof out->download_url, "%s", aurl);
+    bool sha_valid = asha && strlen(asha) == 64;
+    if (sha_valid) {
+      for (size_t i = 0; i < 64; i++) {
+        char c = asha[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+          sha_valid = false;
+          break;
+        }
+      }
     }
-    out->found = out->download_url[0] != '\0';
+    if (aname && safe_url_segment(aname) && safe_url_segment(tag) && sha_valid && base_url && base_url[0]) {
+      snprintf(out->asset_name, sizeof out->asset_name, "%s", aname);
+      snprintf(out->sha256, sizeof out->sha256, "%s", asha);
+      out->size_bytes = sz > 0 ? (uint64_t)sz : 0u;
+      // Pin downloads strictly to the allowlisted update origin (never accept arbitrary manifest URLs).
+      snprintf(out->download_url, sizeof out->download_url, "%s/download/%s/%s", base_url, tag, out->asset_name);
+      out->found = true;
+    }
   }
 
   ccord_arena_free(&arena);
@@ -561,7 +568,18 @@ static void updater_do_install(ccord_updater *u)
     return;
   }
 
-  if (target.sha256[0]) {
+  if (strlen(target.sha256) != 64) {
+    (void)ccord_file_unlink(file_path);
+    CCORD_LOG_E("updater: missing SHA-256 digest for %s (refusing unverified execution)", target.asset_name);
+    ccord_mutex_lock(u->mtx);
+    u->ui.state = CCORD_UI_UPDATE_ERROR;
+    snprintf(u->ui.status_text, sizeof u->ui.status_text, "Update verification failed (missing SHA-256).");
+    u->dirty = true;
+    atomic_store_explicit(&u->has_update, true, memory_order_release);
+    ccord_mutex_unlock(u->mtx);
+    return;
+  }
+  {
     char actual[65] = {0};
     if (!ccord_updater_sha256_file(file_path, actual) || ccord_strcasecmp(actual, target.sha256) != 0) {
       (void)ccord_file_unlink(file_path);
