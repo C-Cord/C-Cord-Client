@@ -426,9 +426,9 @@ static bool reap_wait(plugin *p, uint32_t wait_ms, char *out, size_t cap)
 }
 
 // Moves a plugin to FAILED: kills the host, drops its contributions, announces the state.
-static void fail_plugin(ccord_plugins *m, plugin *p, const char *reason)
+static void set_plugin_failed(ccord_plugins *m, plugin *p, const char *reason, bool allow_from_stopped)
 {
-  if (p->state == CCORD_PLUGIN_FAILED || p->state == CCORD_PLUGIN_STOPPED) return;
+  if (p->state == CCORD_PLUGIN_FAILED || (!allow_from_stopped && p->state == CCORD_PLUGIN_STOPPED)) return;
   kill_host_process(p);
   if (p->ipc) {
     ccord_ipc_close(p->ipc);
@@ -444,6 +444,11 @@ static void fail_plugin(ccord_plugins *m, plugin *p, const char *reason)
   CCORD_LOG_E("plugin %s FAILED: %s", p->m.id, p->error);
   publish_state(m, p);
   ccord_contrib_add_plugin_log(m->contrib, p->m.id, m->now_ms, (uint8_t)CCORD_LOG_ERROR, p->error);
+}
+
+static void fail_plugin(ccord_plugins *m, plugin *p, const char *reason)
+{
+  set_plugin_failed(m, p, reason, false);
 }
 
 // Sends a notification; any send failure fails the plugin.
@@ -2786,7 +2791,7 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
     return;
   }
   for (size_t i = 0; i < m->nplugins; i++) {
-    if (strcmp(m->plugins[i]->m.id, man.id) == 0) {
+    if (m->plugins[i]->used && strcmp(m->plugins[i]->m.id, man.id) == 0) {
       CCORD_LOG_W("extensions: duplicate plugin id %s in %s skipped", man.id, dir_path);
       return;
     }
@@ -3082,16 +3087,38 @@ static void on_plugin_reload(void *ud, const char *id)
   snprintf(manifest_path, sizeof manifest_path, "%s/plugin.json", p->dir);
   char *mbuf = nullptr; size_t mlen = 0;
   if (!read_file(manifest_path, 16u << 20, &mbuf, &mlen, why, sizeof why)) {
-    fail_plugin(m, p, why);
+    set_plugin_failed(m, p, why, true);
     return;
   }
   ccord_manifest man; ccord_error err = {0};
   ccord_status st = ccord_manifest_parse(mbuf, mlen, &man, &err);
   ccord_free(mbuf);
-  if (st != CCORD_OK) { fail_plugin(m, p, err.message); return; }
-  snprintf(main_path, sizeof main_path, "%s/%s", p->dir, man.main);
+  if (st != CCORD_OK) { set_plugin_failed(m, p, err.message, true); return; }
+  if (strcmp(man.id, p->m.id) != 0) {
+    set_plugin_failed(m, p, "manifest id changed during reload (rejected)", true);
+    return;
+  }
+  char compat_why[160] = "";
+  if (!ccord_manifest_supports(&man, m->plat_bit, m->plat_capabilities, compat_why, sizeof compat_why)) {
+    set_plugin_failed(m, p, compat_why[0] ? compat_why : "plugin unsupported on this platform", true);
+    return;
+  }
+  char real_dir[CCORD_PATH_MAX], real_main[CCORD_PATH_MAX];
+  if (!resolve_real_path(p->dir, real_dir, sizeof real_dir)) {
+    set_plugin_failed(m, p, "plugin directory cannot be resolved", true);
+    return;
+  }
+  int mlen_p = snprintf(main_path, sizeof main_path, "%s/%s", p->dir, man.main);
+  if (mlen_p < 0 || (size_t)mlen_p >= sizeof main_path) {
+    set_plugin_failed(m, p, "main file path too long", true);
+    return;
+  }
+  if (!resolve_real_path(main_path, real_main, sizeof real_main) || !path_strictly_under(real_main, real_dir)) {
+    set_plugin_failed(m, p, "main file resolves outside the plugin directory", true);
+    return;
+  }
   char *src = nullptr; size_t slen = 0;
-  if (!read_file(main_path, 16u << 20, &src, &slen, why, sizeof why)) { fail_plugin(m, p, why); return; }
+  if (!read_file(real_main, 16u << 20, &src, &slen, why, sizeof why)) { set_plugin_failed(m, p, why, true); return; }
   ccord_free(p->source);
   p->source = src;
   p->source_len = slen;
@@ -3245,12 +3272,12 @@ bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, si
     return false;
   }
   stop_host(m, p);
-  ccord_contrib_remove_owner(m->contrib, p->m.id);
-  (void)ccord_contrib_remove_plugin(m->contrib, p->m.id);
+  ccord_contrib_remove_owner(m->contrib, id_copy);
+  (void)ccord_contrib_remove_plugin(m->contrib, id_copy);
 
   if (m->has_data_dir) {
     char inst_dir[PBUF + 128];
-    snprintf(inst_dir, sizeof inst_dir, "%s/plugins/installed/%s", m->data_dir, p->m.id);
+    snprintf(inst_dir, sizeof inst_dir, "%s/plugins/installed/%s", m->data_dir, id_copy);
     if (ccord_path_exists(inst_dir)) rm_dir_recursive(inst_dir);
   }
   for (size_t k = 0; k < p->nitems; k++) ccord_free(p->items[k].json);
@@ -3260,15 +3287,18 @@ bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, si
   ccord_free(p->storage_dir);
   ccord_free(p->perm_str);
   p->used = false;
+  p->m.id[0] = '\0';
   p->items = nullptr;
   p->nitems = 0;
+  p->cap_items = 0;
+  p->store_bytes = 0;
   p->source = nullptr;
   p->source_len = 0;
   p->dir = nullptr;
   p->storage_dir = nullptr;
   p->perm_str = nullptr;
   consent_save(m);
-  if (m->catalog) ccord_catalog_on_uninstalled(m->catalog, id);
+  if (m->catalog) ccord_catalog_on_uninstalled(m->catalog, id_copy);
   return true;
 }
 

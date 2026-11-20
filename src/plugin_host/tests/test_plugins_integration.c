@@ -27,7 +27,17 @@ typedef struct clip_state {
 typedef struct ui_hook_state {
   char view[32];
   char last_action[32];
+  char last_draft[128];
+  ccord_id last_draft_ch;
 } ui_hook_state;
+
+static bool it_ui_insert_draft(void *ud, ccord_id ch, const char *text)
+{
+  ui_hook_state *st = ud;
+  st->last_draft_ch = ch;
+  snprintf(st->last_draft, sizeof st->last_draft, "%s", text ? text : "");
+  return true;
+}
 
 static bool it_ui_nav(void *ud, ccord_id g, ccord_id c, ccord_id p, const char *name, const char *view)
 {
@@ -191,7 +201,7 @@ int main(void)
   clip_state clip = {0};
   ui_hook_state uih = {.view = "channel"};
   ccord_contrib_ui_hooks hooks = {
-    .ud = &uih, .navigate = it_ui_nav, .ui_action = it_ui_action, .get_view = it_ui_view
+    .ud = &uih, .navigate = it_ui_nav, .ui_action = it_ui_action, .get_view = it_ui_view, .insert_draft = it_ui_insert_draft
   };
   ccord_contrib_set_ui_hooks(contrib, &hooks);
 
@@ -355,6 +365,87 @@ int main(void)
     (void)nanosleep(&ts, nullptr);
   }
   CT_CHECK(clip.calls == 1 && strcmp(clip.text, "reloaded:a:2") == 0);
+
+  // Security regressions (P4, P5, B14):
+  // - Built-in slash command reservation + Class 1 command populates draft instead of auto-sending (P5).
+  // - Brokered fs.read denies protected host config/data paths (P4).
+  // - Uninstall + re-import runs cleanly without UAF (B14).
+  {
+    char sec_dir[1200];
+    snprintf(sec_dir, sizeof sec_dir, "%s/sec", plugins_dir);
+    CT_CHECK(mkdir(sec_dir, 0700) == 0);
+    write_file(sec_dir, "plugin.json",
+               "{\"schema\":1,\"id\":\"dev.test.sec\",\"name\":\"Sec\",\"version\":\"1.0.0\",\"api\":1,"
+               "\"main\":\"main.lua\",\"permissions\":[\"commands\",\"fs.read\",\"clipboard.write\"]}");
+    char sec_lua[2048];
+    snprintf(sec_lua, sizeof sec_lua,
+             "commands.register('tts', 'hijack', function() return 'bad' end)\n"
+             "commands.register('secping', 'Draft test', function(args) return 'draft:' .. args end)\n"
+             "local data, rerr = fs.read('%s/plugins.json')\n"
+             "clipboard.write(data ~= nil and 'fs:LEAKED' or 'fs:BLOCKED')\n",
+             data_dir);
+    write_file(sec_dir, "main.lua", sec_lua);
+    char sec_cce[1400], sebuf[256] = "";
+    snprintf(sec_cce, sizeof sec_cce, "%s/sec.cce", data_dir);
+    ccord_plugins_shutdown(pm);
+    ccord_plugins_destroy(pm);
+
+    clip.calls = 0;
+    clip.text[0] = '\0';
+    uih.last_draft[0] = '\0';
+    uih.last_draft_ch = CCORD_ID_NONE;
+    pm = ccord_plugins_create(&cfg2, &err);
+    CT_CHECK(pm != nullptr);
+    (void)ccord_plugins_load_all(pm);
+    CT_CHECK(pump_until(pm, bus, contrib, "dev.test.sec", CCORD_PLUGIN_NEEDS_CONSENT));
+    const ccord_plugin_info *sinfo = find_info(contrib, "dev.test.sec");
+    CT_CHECK(sinfo != nullptr && sinfo->perms_mask != 0);
+    // Accepting with a mismatched mask must NOT grant consent (P13).
+    ccord_contrib_plugin_consent_accept_for(contrib, "dev.test.sec", 0);
+    ccord_plugins_pump(pm, now_ms());
+    sinfo = find_info(contrib, "dev.test.sec");
+    CT_CHECK(sinfo && sinfo->state == CCORD_PLUGIN_NEEDS_CONSENT);
+    // Accepting with the exact mask enables the plugin.
+    ccord_contrib_plugin_consent_accept_for(contrib, "dev.test.sec", sinfo->perms_mask);
+    CT_CHECK(pump_until(pm, bus, contrib, "dev.test.sec", CCORD_PLUGIN_READY));
+    deadline = now_ms() + WAIT_MS;
+    while ((strncmp(clip.text, "fs:", 3) != 0 || !ccord_contrib_find_command(contrib, "secping")) && now_ms() < deadline) {
+      ccord_plugins_pump(pm, now_ms());
+      struct timespec ts = {.tv_sec = 0, .tv_nsec = 5 * 1000 * 1000};
+      (void)nanosleep(&ts, nullptr);
+    }
+    // Protected host path read must have been blocked by the broker; reserved 'tts' command must not register.
+    CT_CHECK(strcmp(clip.text, "fs:BLOCKED") == 0);
+    CT_CHECK(ccord_contrib_find_command(contrib, "tts") == nullptr);
+    CT_CHECK(ccord_contrib_find_command(contrib, "secping") != nullptr);
+
+    // Invoking 'secping' without messages.send routes output to the composer draft hook.
+    CT_CHECK(ccord_contrib_run_command(contrib, "secping", "hello", 100, 200, &err) == CCORD_OK);
+    deadline = now_ms() + WAIT_MS;
+    while (uih.last_draft[0] == '\0' && now_ms() < deadline) {
+      ccord_plugins_pump(pm, now_ms());
+      struct timespec ts = {.tv_sec = 0, .tv_nsec = 5 * 1000 * 1000};
+      (void)nanosleep(&ts, nullptr);
+    }
+    CT_CHECK(uih.last_draft_ch == 200 && strcmp(uih.last_draft, "draft:hello") == 0);
+
+    // Export, uninstall, and re-import without UAF (B14).
+    CT_CHECK(ccord_contrib_plugin_export_cce(contrib, "dev.test.sec", sec_cce, sebuf, sizeof sebuf));
+    CT_CHECK(ccord_contrib_plugin_uninstall(contrib, "dev.test.sec", sebuf, sizeof sebuf));
+    CT_CHECK(find_info(contrib, "dev.test.sec") == nullptr);
+    CT_CHECK(ccord_contrib_plugin_import_package(contrib, sec_cce, sebuf, sizeof sebuf));
+    CT_CHECK(find_info(contrib, "dev.test.sec") != nullptr);
+    (void)unlink(sec_cce);
+    char sp[1400];
+    snprintf(sp, sizeof sp, "%s/plugins/dev.test.sec/main.lua", data_dir); (void)unlink(sp);
+    snprintf(sp, sizeof sp, "%s/plugins/dev.test.sec/plugin.json", data_dir); (void)unlink(sp);
+    snprintf(sp, sizeof sp, "%s/plugins/dev.test.sec/storage.json", data_dir); (void)unlink(sp);
+    snprintf(sp, sizeof sp, "%s/plugins/dev.test.sec", data_dir); (void)rmdir(sp);
+    snprintf(sp, sizeof sp, "%s/main.lua", sec_dir); (void)unlink(sp);
+    snprintf(sp, sizeof sp, "%s/plugin.json", sec_dir); (void)unlink(sp);
+    (void)rmdir(sec_dir);
+  }
+
   ccord_plugins_shutdown(pm);
   ccord_plugins_destroy(pm);
   ccord_contrib_destroy(contrib);

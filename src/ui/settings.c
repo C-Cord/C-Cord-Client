@@ -2083,9 +2083,11 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         if (e->installed && !e->bundled) {
           float ux = box.x + ((!e->installed || e->update_available) ? 180.0f : 16.0f);
           if (ui_in_rect(x, y, (ccord_rect){ux, box.y + box.h - 44.0f, 96.0f, UIS_H_BTN})) {
-            char eb[128] = "";
-            if (ccord_contrib_plugin_uninstall(ui->d.contrib, e->id, eb, sizeof eb)) {
-              snprintf(s_plugin_status_msg, sizeof s_plugin_status_msg, "Uninstalled %s", e->name);
+            char id_copy[65], name_copy[96], eb[128] = "";
+            snprintf(id_copy, sizeof id_copy, "%s", e->id);
+            snprintf(name_copy, sizeof name_copy, "%s", e->name);
+            if (ccord_contrib_plugin_uninstall(ui->d.contrib, id_copy, eb, sizeof eb)) {
+              snprintf(s_plugin_status_msg, sizeof s_plugin_status_msg, "Uninstalled %s", name_copy);
               s_plugin_detail_id[0] = '\0';
             } else {
               snprintf(s_plugin_status_msg, sizeof s_plugin_status_msg, "Uninstall failed: %.150s", eb);
@@ -2270,9 +2272,11 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
           return true;
         }
         if (rc.btn_uninstall.w > 0.0f && ui_in_rect(x, y, rc.btn_uninstall)) {
-          char ebuf[128] = "";
-          if (ccord_contrib_plugin_uninstall(ui->d.contrib, p->id, ebuf, sizeof ebuf)) {
-            snprintf(s_plugin_status_msg, sizeof s_plugin_status_msg, "Uninstalled %s", p->name);
+          char id_copy[65], name_copy[96], ebuf[128] = "";
+          snprintf(id_copy, sizeof id_copy, "%s", p->id);
+          snprintf(name_copy, sizeof name_copy, "%s", p->name);
+          if (ccord_contrib_plugin_uninstall(ui->d.contrib, id_copy, ebuf, sizeof ebuf)) {
+            snprintf(s_plugin_status_msg, sizeof s_plugin_status_msg, "Uninstalled %s", name_copy);
           } else {
             snprintf(s_plugin_status_msg, sizeof s_plugin_status_msg, "Uninstall failed: %.150s", ebuf);
           }
