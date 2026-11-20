@@ -176,6 +176,9 @@ typedef struct session_fav_pending {
 struct ccord_session {
   ccord_mutex *audio_mtx;
   ccord_stream_hub *streams;   // chunked video streams (media_stream.c); lives with the session
+  ccord_video_resolved *video_resolved;   // lazy 8-slot ring of third-party video resolutions
+  size_t video_resolved_head, video_resolved_count;
+  uint64_t next_video_resolve_id;
   ccord_bus *bus;
   ccord_store *store;
   ccord_transport *transport;
@@ -506,6 +509,7 @@ void ccord_session_destroy(ccord_session *s)
   clear_reaction_users(s);
   reset_verification_cache(s);
   ccord_free(s->verification_cache);
+  ccord_free(s->video_resolved);
   ccord_free(s);
 }
 
@@ -553,6 +557,8 @@ ccord_status ccord_session_set_transport(ccord_session *s, ccord_transport *tran
   s->npins_in_flight = 0;
   s->notif_head = 0;
   s->notif_count = 0;
+  s->video_resolved_head = 0;
+  s->video_resolved_count = 0;
   clear_search_results(s);
   clear_reaction_users(s);
   s->has_invite_preview = false;
@@ -3167,6 +3173,31 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
     case CCORD_NET_MEDIA_RANGE:
       ccord_stream_hub_on_range(s->streams, ev, ccord_clock_ms());
       break;
+    case CCORD_NET_VIDEO_RESOLVED: {
+      enum { SESSION_VIDEO_RESOLVED_MAX = 8u };
+      if (!s->video_resolved) {
+        s->video_resolved = ccord_calloc(SESSION_VIDEO_RESOLVED_MAX, sizeof *s->video_resolved);
+      }
+      if (s->video_resolved) {
+        if (s->video_resolved_count == SESSION_VIDEO_RESOLVED_MAX) {
+          s->video_resolved_head = (s->video_resolved_head + 1u) % SESSION_VIDEO_RESOLVED_MAX;
+          s->video_resolved_count--;
+        }
+        ccord_video_resolved *dst =
+            &s->video_resolved[(s->video_resolved_head + s->video_resolved_count) % SESSION_VIDEO_RESOLVED_MAX];
+        memset(dst, 0, sizeof *dst);
+        dst->req_id = ev->resolve_id;
+        dst->status = ev->status;
+        dst->missing_helper = ev->resolved_missing_helper;
+        dst->duration_ms = ev->resolved_duration_ms;
+        if (ev->media_url) snprintf(dst->page_url, sizeof dst->page_url, "%s", ev->media_url);
+        if (ev->resolved_video_url) snprintf(dst->video_url, sizeof dst->video_url, "%s", ev->resolved_video_url);
+        if (ev->resolved_audio_url) snprintf(dst->audio_url, sizeof dst->audio_url, "%s", ev->resolved_audio_url);
+        if (ev->text) snprintf(dst->error, sizeof dst->error, "%s", ev->text);
+        s->video_resolved_count++;
+      }
+      break;
+    }
     case CCORD_NET_SEARCH_RESULTS:
       for (size_t u = 0; u < ev->user_count; u++) {
         (void)ccord_store_upsert_user(s->store, &ev->users[u], &err);
@@ -5262,6 +5293,28 @@ ccord_media_stream *ccord_session_open_media_stream(ccord_session *s, const char
 void ccord_session_close_media_stream(ccord_session *s, ccord_media_stream *ms)
 {
   if (s) ccord_stream_hub_close(s->streams, ms);
+}
+
+ccord_status ccord_session_resolve_video(ccord_session *s, const char *url, uint64_t *out_req_id, ccord_error *err)
+{
+  if (out_req_id) *out_req_id = 0;
+  if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "session: null session");
+  if (!url || url[0] == '\0') return ccord_error_set(err, CCORD_ERR_INVALID, "session: empty video url");
+  uint64_t id = ++s->next_video_resolve_id;
+  if (id == 0) id = ++s->next_video_resolve_id;
+  ccord_status st = ccord_transport_resolve_video(s->transport, id, url, err);
+  if (st == CCORD_OK && out_req_id) *out_req_id = id;
+  return st;
+}
+
+bool ccord_session_pop_video_resolved(ccord_session *s, ccord_video_resolved *out)
+{
+  enum { SESSION_VIDEO_RESOLVED_MAX = 8u };
+  if (!s || !out || !s->video_resolved || s->video_resolved_count == 0) return false;
+  *out = s->video_resolved[s->video_resolved_head];
+  s->video_resolved_head = (s->video_resolved_head + 1u) % SESSION_VIDEO_RESOLVED_MAX;
+  s->video_resolved_count--;
+  return true;
 }
 
 ccord_status ccord_session_fetch_media(ccord_session *s, const char *url, ccord_error *err)

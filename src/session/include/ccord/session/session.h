@@ -4,6 +4,7 @@
 #include <ccord/core/event_bus.h>
 #include <ccord/net/profile_edit.h>
 #include <ccord/net/transport.h>
+#include <ccord/net/video_resolve.h>
 #include <ccord/store/expressions.h>
 #include <ccord/store/store.h>
 // Controller: the only code allowed to call both the transport and the store.
@@ -235,6 +236,13 @@ const ccord_media_item *ccord_session_get_media(const ccord_session *s, const ch
 // True when the most recent attempt to load `url` failed (blocked host, HTTP error, too large, timed out). A failed
 // URL is no longer pending, so ccord_session_fetch_media asks the transport again: callers pace their retries.
 bool ccord_session_media_failed(const ccord_session *s, const char *url);
+
+// Resolves a third-party video page URL (YouTube, X/Twitter, etc.) into direct HTTPS stream URL(s).
+// Non-blocking: assigns `*out_req_id` and queues work on the transport; results arrive via
+// ccord_session_pop_video_resolved().
+[[nodiscard]] ccord_status ccord_session_resolve_video(ccord_session *s, const char *url, uint64_t *out_req_id,
+                                                       ccord_error *err);
+bool ccord_session_pop_video_resolved(ccord_session *s, ccord_video_resolved *out);
 
 // Posts a poll (POST /channels/{id}/messages {"poll":...}) with the same channel checks as an ordinary send. Returns
 // once the request is queued; a later refusal surfaces as the usual failed-send notice.

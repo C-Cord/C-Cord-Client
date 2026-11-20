@@ -984,6 +984,11 @@ static curl_socket_t rest_opensocket_cb(void *clientp, curlsocktype purpose, str
   return socket(address->family, address->socktype, address->protocol);
 }
 
+void ccord_curl_apply_public_opensocket(CURL *curl)
+{
+  if (curl) curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, rest_opensocket_cb);
+}
+
 static bool rest_job_prepare_stream(ccord_rest_queue *q, ccord_rest_job *job)
 {
   job->headers = curl_slist_append(job->headers, "Accept-Encoding: identity");
@@ -1170,13 +1175,14 @@ ccord_status ccord_rest_queue_submit(ccord_rest_queue *q, const ccord_rest_reque
   if (req->body_len > (size_t)LONG_MAX) return ccord_error_set(err, CCORD_ERR_RANGE, "rest: body too large");
   if (req->stream_range) {
     // A clicked video, one byte range: only the user-video gate (https, DNS host, port 443), or a loopback URL in
-    // tests. No byte <= 0x20 or 0x7f and at most 2048 bytes, so the URL cannot smuggle a header or a second request.
+    // tests. No byte <= 0x20 or 0x7f and at most 4096 bytes (matches STREAM_URL_MAX for signed video CDN URLs), so
+    // the URL cannot smuggle a header or a second request.
     if (!raw || req->method != CCORD_REST_GET || req->body_len > 0 || req->range_start < 0 || req->range_len < 1 ||
         req->range_len > CCORD_STREAM_RANGE_MAX_BYTES || req->range_start > INT64_MAX - (int64_t)req->range_len) {
       return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad range request");
     }
     size_t ul = strlen(req->full_url);
-    bool clean = ul > 0 && ul <= 2048u;
+    bool clean = ul > 0 && ul <= 4096u;
     for (size_t i = 0; clean && i < ul; i++) {
       unsigned char c = (unsigned char)req->full_url[i];
       if (c <= 0x20 || c == 0x7f) clean = false;

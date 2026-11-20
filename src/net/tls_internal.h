@@ -17,6 +17,10 @@ void ccord_curl_global_init_once(void);
 // Applies strict TLS verification and cached CA bundle / CA path to `curl`, implemented in discord_rest.c.
 void ccord_curl_apply_tls(CURL *curl);
 
+// Applies the public-IP-only opensocket filter (blocks loopback, RFC 1918, link-local, ULA, NAT64, multicast)
+// to `curl` so third-party video downloads/resolution can never reach private/local networks.
+void ccord_curl_apply_public_opensocket(CURL *curl);
+
 // Internal zero-copy handoff for non-sensitive, unshared REST responses (callable only from inside a
 // ccord_rest_callback on `q`). Caller takes ownership of the returned ccord_malloc'd buffer and frees it
 // with ccord_free. Returns nullptr if the response cannot be transferred.

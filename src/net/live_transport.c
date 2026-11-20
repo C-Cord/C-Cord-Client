@@ -4,6 +4,7 @@
 #include <ccord/net/live_transport.h>
 #include <ccord/net/discord_proto.h>
 #include <ccord/net/gateway_pace.h>
+#include <ccord/net/video_resolve.h>
 #include <ccord/net/voice_audio.h>
 #include <ccord/net/voice_camera.h>
 #include <ccord/net/voice_dsp.h>
@@ -213,6 +214,7 @@ typedef struct live {
   uint32_t interaction_seq;
   struct live_rest_op *upload_head, *upload_tail;
   uint64_t next_upload_id;
+  ccord_video_resolver *vresolve;
   uint64_t (*now_ms)(void *ud);
   void *clock_ud;
 } live;
@@ -3820,6 +3822,27 @@ static bool live_poll(ccord_transport *t, ccord_net_event *out)
   }
   uint64_t now = live_now(l);
   if (l->restq) ccord_rest_queue_pump(l->restq, now);
+  if (l->vresolve) {
+    ccord_video_resolved vr;
+    while (ccord_video_resolver_poll(l->vresolve, &vr)) {
+      ccord_live_event vev;
+      ccord_live_event_init(&vev);
+      vev.ev.type = CCORD_NET_VIDEO_RESOLVED;
+      vev.ev.status = vr.status;
+      vev.ev.resolve_id = vr.req_id;
+      vev.ev.resolved_duration_ms = vr.duration_ms;
+      vev.ev.resolved_missing_helper = vr.missing_helper;
+      vev.ev.media_url = ccord_arena_strndup(&vev.arena, vr.page_url, strlen(vr.page_url));
+      vev.ev.resolved_video_url = ccord_arena_strndup(&vev.arena, vr.video_url, strlen(vr.video_url));
+      vev.ev.resolved_audio_url = ccord_arena_strndup(&vev.arena, vr.audio_url, strlen(vr.audio_url));
+      vev.ev.text = ccord_arena_strndup(&vev.arena, vr.error, strlen(vr.error));
+      if (!vev.ev.media_url) vev.ev.media_url = "";
+      if (!vev.ev.resolved_video_url) vev.ev.resolved_video_url = "";
+      if (!vev.ev.resolved_audio_url) vev.ev.resolved_audio_url = "";
+      if (!vev.ev.text) vev.ev.text = "";
+      (void)live_push(l, &vev);
+    }
+  }
   if (l->voice) {
     if (atomic_load(&l->ptt_active) && now >= atomic_load(&l->ptt_release_ms)) {
       ccord_voice_gateway_set_ptt(l->voice, false);
@@ -6271,6 +6294,22 @@ static ccord_status live_fetch_media_range(ccord_transport *t, const ccord_media
   return st;
 }
 
+static ccord_status live_resolve_video(ccord_transport *t, uint64_t req_id, const char *url, ccord_error *err)
+{
+  live *l = (live *)t;
+  ccord_error_clear(err);
+  if (!live_is_authenticated(l)) return ccord_error_set(err, CCORD_ERR_INVALID, "live: not connected");
+  if (!url || url[0] == '\0') return ccord_error_set(err, CCORD_ERR_INVALID, "live: empty video url");
+  if (!ccord_video_resolve_url_safe(url, CCORD_VIDEO_RESOLVE_PAGE_URL_MAX)) {
+    return ccord_error_set(err, CCORD_ERR_PERMISSION, "live: video url blocked");
+  }
+  if (!l->vresolve) {
+    l->vresolve = ccord_video_resolver_create();
+    if (!l->vresolve) return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
+  }
+  return ccord_video_resolver_submit(l->vresolve, req_id, url, err);
+}
+
 ccord_status ccord_live_build_search_path(ccord_id guild_id, ccord_id channel_id,
                                           const ccord_search_query *query, ccord_buf *out,
                                           ccord_error *err)
@@ -7985,6 +8024,7 @@ static void live_destroy(ccord_transport *t)
   live_voice_stop(l);
   if (l->gw) ccord_gateway_destroy(l->gw);
   if (l->restq) ccord_rest_queue_destroy(l->restq);
+  if (l->vresolve) ccord_video_resolver_destroy(l->vresolve);
   live_clear_events(l);
   live_chan_guild_clear_all(l);
   ccord_idmap_free(&l->chan_guild_idx);
@@ -8084,6 +8124,7 @@ static const ccord_transport_vtable k_live_vt = {
   .set_status_proto = live_set_status_proto,
   .set_rich_activities = live_set_rich_activities,
   .active_uploads = live_active_uploads,
+  .resolve_video = live_resolve_video,
 };
 
 ccord_gov *ccord_live_transport_governor(ccord_transport *t)

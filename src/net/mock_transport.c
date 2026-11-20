@@ -74,6 +74,17 @@
 #define MOCK_RANGE_FILES_MAX 16u       // virtual files registered through ccord_mock_serve_range_file
 #define MOCK_RANGE_URL_PART_MAX 128u   // longest url_part kept (longer is refused, never truncated)
 #define MOCK_RANGE_LOG 16u             // ring size of ccord_mock_range_stats
+#define MOCK_VIDEO_RESOLVE_MAX 8u      // entries registered through ccord_mock_serve_video_resolve
+
+typedef struct mock_video_resolve_slot {
+  char url_part[MOCK_RANGE_URL_PART_MAX];
+  char video_url[2048];
+  char audio_url[2048];
+  char error[192];
+  uint32_t duration_ms;
+  ccord_status status;
+  bool missing_helper;
+} mock_video_resolve_slot;
 
 typedef struct mock_range_slot {
   ccord_mock_range_file f;             // f.url_part points at url_part below
@@ -382,6 +393,7 @@ typedef struct mock {
   // Ranged media: virtual files served by fetch_media_range (ccord_mock_serve_range_file) and the request stats.
   mock_range_slot range_files[MOCK_RANGE_FILES_MAX]; size_t nrange_files;
   ccord_mock_range_stats range_stats;
+  mock_video_resolve_slot video_resolves[MOCK_VIDEO_RESOLVE_MAX]; size_t nvideo_resolves;
   mock_link link;                          // gateway link model (ccord_mock_drop_gateway / network_event)
 } mock;
 static const char *const user_names[MOCK_NUM_USERS] = {
@@ -4003,6 +4015,74 @@ static ccord_status mock_fetch_media_range(ccord_transport *t, const ccord_media
   // With an unknown total a short body is the only sign of the end.
   if (unknown ? n < req->len : req->start + (int64_t)n == f->total) flags |= CCORD_RANGE_EOF;
   return mock_range_answer(m, req, CCORD_OK, bytes, n, shown_total, flags, 206, f->redirect_hops, f->etag, err);
+}
+
+ccord_status ccord_mock_serve_video_resolve(ccord_transport *t, const ccord_mock_video_resolve *r)
+{
+  mock *m = (mock *)t;
+  if (!m || !r || !r->url_part || !r->url_part[0]) return CCORD_ERR_INVALID;
+  if (strlen(r->url_part) >= MOCK_RANGE_URL_PART_MAX) return CCORD_ERR_INVALID;
+  mock_video_resolve_slot *slot = nullptr;
+  for (size_t i = 0; i < m->nvideo_resolves; i++) {
+    if (strcmp(m->video_resolves[i].url_part, r->url_part) == 0) slot = &m->video_resolves[i];
+  }
+  if (!slot) {
+    if (m->nvideo_resolves == MOCK_VIDEO_RESOLVE_MAX) return CCORD_ERR_NOMEM;
+    slot = &m->video_resolves[m->nvideo_resolves++];
+  }
+  memset(slot, 0, sizeof *slot);
+  snprintf(slot->url_part, sizeof slot->url_part, "%s", r->url_part);
+  if (r->video_url) snprintf(slot->video_url, sizeof slot->video_url, "%s", r->video_url);
+  if (r->audio_url) snprintf(slot->audio_url, sizeof slot->audio_url, "%s", r->audio_url);
+  if (r->error) snprintf(slot->error, sizeof slot->error, "%s", r->error);
+  slot->duration_ms = r->duration_ms;
+  slot->status = r->status;
+  slot->missing_helper = r->missing_helper;
+  return CCORD_OK;
+}
+
+static ccord_status mock_resolve_video(ccord_transport *t, uint64_t req_id, const char *url, ccord_error *err)
+{
+  mock *m = (mock *)t;
+  ccord_error_clear(err);
+  if (!m->connected) return ccord_error_set(err, CCORD_ERR_INVALID, "mock: not connected");
+  if (!url || !url[0]) return ccord_error_set(err, CCORD_ERR_INVALID, "mock: empty video url");
+  if (strncmp(url, "https://", 8) != 0) return ccord_error_set(err, CCORD_ERR_PERMISSION, "mock: video url blocked");
+
+  const mock_video_resolve_slot *slot = nullptr;
+  for (size_t i = 0; i < m->nvideo_resolves; i++) {
+    if (strstr(url, m->video_resolves[i].url_part)) {
+      slot = &m->video_resolves[i];
+      break;
+    }
+  }
+  const char *vurl = slot ? slot->video_url : "https://mock.ccord.invalid/resolved/clip.mp4";
+  const char *aurl = slot ? slot->audio_url : "";
+  const char *etext = slot ? slot->error : "";
+
+  char *page_copy = ccord_strdup(url);
+  char *v_copy = ccord_strdup(vurl);
+  char *a_copy = ccord_strdup(aurl);
+  char *e_copy = ccord_strdup(etext);
+  if (!page_copy || !v_copy || !a_copy || !e_copy) {
+    ccord_free(page_copy); ccord_free(v_copy); ccord_free(a_copy); ccord_free(e_copy);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "mock: out of memory");
+  }
+  retire_content(m, page_copy);
+  retire_content(m, v_copy);
+  retire_content(m, a_copy);
+  retire_content(m, e_copy);
+
+  mock_item it = make_item(CCORD_NET_VIDEO_RESOLVED, now_of(m) + m->cfg.latency_ms);
+  it.ev.status = slot ? slot->status : CCORD_OK;
+  it.ev.resolve_id = req_id;
+  it.ev.media_url = page_copy;
+  it.ev.resolved_video_url = v_copy;
+  it.ev.resolved_audio_url = a_copy;
+  it.ev.resolved_duration_ms = slot ? slot->duration_ms : 0u;
+  it.ev.resolved_missing_helper = slot ? slot->missing_helper : false;
+  it.ev.text = e_copy;
+  return push_item(m, &it, err);
 }
 
 typedef struct mock_search_ud {
@@ -11898,6 +11978,7 @@ static const ccord_transport_vtable mock_vtable = {
   .submit_report = mock_submit_report,
   .network_event = mock_network_event,
   .active_uploads = mock_active_uploads,
+  .resolve_video = mock_resolve_video,
 };
 
 ccord_transport *ccord_mock_transport_create(const ccord_mock_config *cfg, ccord_error *err)

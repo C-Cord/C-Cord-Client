@@ -136,7 +136,8 @@ typedef enum ccord_net_event_type : uint8_t {
                                       // a type-2 one carries raw_proto/raw_proto_len instead (+ settings_proto1_partial) and no settings_proto1
   CCORD_NET_SESSIONS_REPLACE,         // presence: the account's overall status from SESSIONS_REPLACE (the only place its own status is sent)
   CCORD_NET_GUILD_PROFILE,            // guild_id + guild_profile (GET /guilds/{g}/profile answer)
-  CCORD_NET_VOICE_STATES              // guild_id (0 = multi-guild) + voice_states + voice_state_count + replace_voice_states (+ optional users)
+  CCORD_NET_VOICE_STATES,             // guild_id (0 = multi-guild) + voice_states + voice_state_count + replace_voice_states (+ optional users)
+  CCORD_NET_VIDEO_RESOLVED            // resolve_id + media_url (page) + resolved_video_url + resolved_audio_url + resolved_duration_ms; status != OK = failed
 } ccord_net_event_type;
 
 // Voice connection health, as CCORD_NET_VOICE_LINK reports it.
@@ -480,6 +481,13 @@ typedef struct ccord_net_event {
       uint8_t  range_redirects;  // MEDIA_RANGE: hops followed
       char     range_etag[96];   // MEDIA_RANGE: strong ETag ("" if none or weak)
     };
+    struct {
+      uint64_t    resolve_id;              // VIDEO_RESOLVED: the req_id passed to resolve_video
+      const char *resolved_video_url;      // VIDEO_RESOLVED: direct HTTPS video URL ("" on failure)
+      const char *resolved_audio_url;      // VIDEO_RESOLVED: optional direct HTTPS audio URL ("" when muxed)
+      uint32_t    resolved_duration_ms;    // VIDEO_RESOLVED: duration in ms (0 when unknown)
+      bool        resolved_missing_helper; // VIDEO_RESOLVED: true when external helper (yt-dlp) is not installed
+    };
   };
   // Voice link (CCORD_NET_VOICE_LINK). Appended last; value-initialised everywhere.
   uint8_t  voice_link;          // VOICE_LINK: ccord_voice_link
@@ -696,6 +704,9 @@ typedef struct ccord_transport_vtable {
   // Optional. Active attachment/media uploads in flight (arrival order, writes up to `max` into `out` when non-null,
   // always returns the total active count). Main thread, non-blocking.
   size_t (*active_uploads)(ccord_transport *t, ccord_upload_progress *out, size_t max);
+  // Optional. Resolves a third-party video page URL (YouTube, X/Twitter, etc.) into direct HTTPS stream URL(s).
+  // Answer arrives through poll() as CCORD_NET_VIDEO_RESOLVED echoing `req_id` and `url`.
+  ccord_status (*resolve_video)(ccord_transport *t, uint64_t req_id, const char *url, ccord_error *err);
 } ccord_transport_vtable;
 struct ccord_transport { const ccord_transport_vtable *vt; };           // implementations embed this as first member
 [[nodiscard]] static inline ccord_status ccord_transport_connect(ccord_transport *t, ccord_error *e) { return t->vt->connect(t, e); }
@@ -1162,6 +1173,12 @@ static inline bool ccord_transport_poll_camera_frame(ccord_transport *t, ccord_i
 static inline size_t ccord_transport_active_uploads(ccord_transport *t, ccord_upload_progress *out, size_t max) {
   if (!CCORD_TRANSPORT_OPTIONAL(t, active_uploads)) return 0;
   return t->vt->active_uploads(t, out, max);
+}
+[[nodiscard]] static inline ccord_status ccord_transport_resolve_video(ccord_transport *t, uint64_t req_id,
+                                                                       const char *url, ccord_error *e) {
+  if (!CCORD_TRANSPORT_OPTIONAL(t, resolve_video))
+    return ccord_error_set(e, CCORD_ERR_UNSUPPORTED, "transport: video resolve not supported");
+  return t->vt->resolve_video(t, req_id, url, e);
 }
 [[nodiscard]] static inline ccord_status ccord_transport_create_poll(ccord_transport *t, ccord_id c,
                                                                      const ccord_poll_create *poll, ccord_error *e) {

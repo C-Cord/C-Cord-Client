@@ -491,8 +491,8 @@ static void test_refused_at_submit(const server *s, result *r)
     CT_CHECK(ccord_rest_queue_submit(q, &req, &err) == CCORD_ERR_PERMISSION);
     CT_CHECK(r->calls == 0 && ccord_rest_queue_pending(q) == 0);
   }
-  char longurl[2200] = "https://videos.example.org/";
-  memset(longurl + strlen(longurl), 'a', 2100);
+  char longurl[4200] = "https://videos.example.org/";
+  memset(longurl + strlen(longurl), 'a', 4100);
   ccord_rest_request req = ccord_rest_request_make(CCORD_REST_GET, nullptr, CCORD_GOV_USER);
   req.full_url = longurl;
   req.stream_range = true;

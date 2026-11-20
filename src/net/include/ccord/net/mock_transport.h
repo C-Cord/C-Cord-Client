@@ -235,6 +235,19 @@ typedef struct ccord_mock_range_stats {
 } ccord_mock_range_stats;
 void ccord_mock_range_stats_get(const ccord_transport *t, ccord_mock_range_stats *out);
 
+// Third-party embed video resolution stub for tests. Matched by strstr on the page URL passed to resolve_video.
+// At most 8 entries; registering the same url_part again replaces it.
+typedef struct ccord_mock_video_resolve {
+  const char *url_part;      // matched with strstr on the requested page URL (under 128 bytes)
+  const char *video_url;     // direct HTTPS video URL ("" on failure)
+  const char *audio_url;     // optional separate HTTPS audio URL ("" when muxed)
+  uint32_t duration_ms;      // 0 = unknown
+  ccord_status status;       // CCORD_OK or failure status
+  bool missing_helper;       // mirrors resolved_missing_helper
+  const char *error;         // optional error text
+} ccord_mock_video_resolve;
+[[nodiscard]] ccord_status ccord_mock_serve_video_resolve(ccord_transport *t, const ccord_mock_video_resolve *r);
+
 // ---- Gateway link model ----
 // The mock models the gateway connection just enough to drive the real ccord_gwpace on the mock clock (cfg.now_ms):
 // a heartbeat that notices a silently dead socket (zombie after one unanswered interval), reconnect planning,
