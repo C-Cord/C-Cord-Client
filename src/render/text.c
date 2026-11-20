@@ -167,7 +167,12 @@ static bool text_has_hidden(const char *s, size_t len)
     if (b < 0x20 && b != '\n') return true;   // includes \t: it becomes a space
     if (b == 0x7F) return true;
     if (b == 0xC2 && i + 1 < len && (uint8_t)s[i + 1] >= 0x80 && (uint8_t)s[i + 1] <= 0x9F) return true;
-    if (b == 0xE2 && i + 2 < len && (uint8_t)s[i + 1] == 0x80 && ((uint8_t)s[i + 2] == 0xA8 || (uint8_t)s[i + 2] == 0xA9)) return true;
+    if (b == 0xE2 && i + 2 < len) {
+      uint8_t b1 = (uint8_t)s[i + 1];
+      uint8_t b2 = (uint8_t)s[i + 2];
+      // U+2028..U+202E (line/para sep + BiDi overrides/embeddings) and U+2066..U+2069 (BiDi isolates)
+      if ((b1 == 0x80 && b2 >= 0xA8 && b2 <= 0xAE) || (b1 == 0x81 && b2 >= 0xA6 && b2 <= 0xA9)) return true;
+    }
   }
   return false;
 }

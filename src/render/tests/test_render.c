@@ -45,6 +45,14 @@ static void test_text(ccord_renderer *r)
   CT_CHECK(ccord_text_measure(r, "Hello world", 11, &bold, 0).x > b.x);
   // Empty text still has a line height.
   CT_CHECK(ccord_text_measure(r, "", 0, &st, 0).y > 10.0f);
+  // Security regression (P14): BiDi override/isolate controls (RLO U+202E, LRI U+2066, PDI U+2069) are stripped.
+  {
+    const char *clean = "hello.txt";
+    const char *bidi = "\xE2\x80\xAEhello\xE2\x81\xA6.txt\xE2\x81\xA9";
+    ccord_vec2 wc = ccord_text_measure(r, clean, strlen(clean), &st, 0);
+    ccord_vec2 wb = ccord_text_measure(r, bidi, strlen(bidi), &st, 0);
+    CT_CHECK(fabsf(wc.x - wb.x) < 0.5f && fabsf(wc.y - wb.y) < 0.5f);
+  }
   // Caret/hit-test round trip on every code point boundary of a multibyte string.
   const char *s = "ab\xC3\xA9" "cd";
   size_t len = strlen(s);
