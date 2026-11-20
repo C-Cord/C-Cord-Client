@@ -47,6 +47,8 @@
 #define MAX_SEARCH 16
 #define MAX_PENDING 8
 #define MAX_CLIPBOARD_BYTES 65536u
+#define MAX_STORE_KEYS 128u
+#define MAX_STORE_BYTES (256u * 1024u)
 #define MAX_FS_READ_BYTES (16u * 1024u * 1024u)
 #define MAX_FS_CHUNK_BYTES (384u * 1024u)
 #define INIT_DEADLINE_MS 5000u
@@ -508,18 +510,28 @@ static void store_remove_at(plugin *p, size_t i)
 
 static ccord_status store_put(plugin *p, const char *key, const char *json, size_t jlen)
 {
+  size_t klen = strlen(key);
   stored_value *old = store_find(p, key);
   if (old) {
-    p->store_bytes -= strlen(old->key) + old->json_len;
+    size_t old_entry = strlen(old->key) + old->json_len;
+    size_t base = p->store_bytes >= old_entry ? p->store_bytes - old_entry : 0;
+    if (jlen > MAX_STORE_BYTES || klen > MAX_STORE_BYTES - jlen || base > MAX_STORE_BYTES - (klen + jlen)) {
+      return CCORD_ERR_RANGE;
+    }
+    char *fresh = ccord_malloc(jlen + 1);
+    if (!fresh) return CCORD_ERR_NOMEM;
+    memcpy(fresh, json, jlen);
+    fresh[jlen] = '\0';
     ccord_free(old->json);
-    old->json = ccord_malloc(jlen + 1);
-    if (!old->json) return CCORD_ERR_NOMEM;
-    memcpy(old->json, json, jlen);
-    old->json[jlen] = '\0';
+    old->json = fresh;
     old->json_len = jlen;
-    p->store_bytes += strlen(old->key) + jlen;
+    p->store_bytes = base + klen + jlen;
     p->dirty = true;
     return CCORD_OK;
+  }
+  if (p->nitems >= MAX_STORE_KEYS) return CCORD_ERR_RANGE;
+  if (jlen > MAX_STORE_BYTES || klen > MAX_STORE_BYTES - jlen || p->store_bytes > MAX_STORE_BYTES - (klen + jlen)) {
+    return CCORD_ERR_RANGE;
   }
   if (p->nitems == p->cap_items) {
     size_t cap = p->cap_items ? p->cap_items * 2 : 8;
@@ -528,16 +540,17 @@ static ccord_status store_put(plugin *p, const char *key, const char *json, size
     p->items = n;
     p->cap_items = cap;
   }
+  char *fresh = ccord_malloc(jlen + 1);
+  if (!fresh) return CCORD_ERR_NOMEM;
+  memcpy(fresh, json, jlen);
+  fresh[jlen] = '\0';
   stored_value *v = &p->items[p->nitems];
   memset(v, 0, sizeof *v);
   snprintf(v->key, sizeof v->key, "%s", key);
-  v->json = ccord_malloc(jlen + 1);
-  if (!v->json) return CCORD_ERR_NOMEM;
-  memcpy(v->json, json, jlen);
-  v->json[jlen] = '\0';
+  v->json = fresh;
   v->json_len = jlen;
   p->nitems++;
-  p->store_bytes += strlen(key) + jlen;
+  p->store_bytes += klen + jlen;
   p->dirty = true;
   return CCORD_OK;
 }
@@ -1714,6 +1727,25 @@ static void handle_request(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg
     reply_ok(m, p, id, nullptr);
     return;
   }
+  if (strcmp(method, "presence.set") == 0) {
+    if (!has_perm(p, CCORD_PERM_PRESENCE_WRITE)) { fail_plugin(m, p, "undeclared restricted API called: presence.write"); return; }
+    size_t sl = 0, tl = 0;
+    const char *st_s = str_param(params, "status", &sl);
+    const char *txt = str_param(params, "text", &tl);
+    ccord_presence pr = CCORD_PRESENCE_ONLINE;
+    if (!st_s || strcmp(st_s, "online") == 0) pr = CCORD_PRESENCE_ONLINE;
+    else if (strcmp(st_s, "idle") == 0) pr = CCORD_PRESENCE_IDLE;
+    else if (strcmp(st_s, "dnd") == 0) pr = CCORD_PRESENCE_DND;
+    else if (strcmp(st_s, "invisible") == 0 || strcmp(st_s, "offline") == 0) pr = CCORD_PRESENCE_OFFLINE;
+    else { reply_err(m, p, id, "invalid_argument", "presence.set: status must be online|idle|dnd|invisible"); return; }
+    ccord_error err = {0};
+    if (!m->session || ccord_session_set_presence(m->session, pr, txt ? txt : "", &err) != CCORD_OK) {
+      reply_err(m, p, id, "internal", err.message[0] ? err.message : "presence update failed");
+    } else {
+      reply_ok(m, p, id, nullptr);
+    }
+    return;
+  }
   if (strncmp(method, "fs.", 3) == 0) {
     req_fs(m, p, id, method, params);
     return;
@@ -1887,7 +1919,7 @@ static void handle_hello(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg)
   ccord_jw_key(&w, "safe_left"); ccord_jw_int(&w, (int64_t)m->plat_state.safe_left);
   ccord_jw_key(&w, "viewport_w"); ccord_jw_int(&w, (int64_t)m->plat_state.viewport_w);
   ccord_jw_key(&w, "viewport_h"); ccord_jw_int(&w, (int64_t)m->plat_state.viewport_h);
-  ccord_jw_key(&w, "viewport_scale"); ccord_jw_int(&w, (int64_t)(m->plat_state.viewport_scale > 0.0f ? m->plat_state.viewport_scale : 1.0f));
+  ccord_jw_key(&w, "viewport_scale"); ccord_jw_double(&w, (double)(m->plat_state.viewport_scale > 0.0f ? m->plat_state.viewport_scale : 1.0f));
   ccord_jw_key(&w, "keyboard_height"); ccord_jw_int(&w, (int64_t)m->plat_state.keyboard_height);
   ccord_jw_key(&w, "keyboard_visible"); ccord_jw_bool(&w, m->plat_state.keyboard_visible);
   ccord_jw_key(&w, "landscape"); ccord_jw_bool(&w, m->plat_state.landscape);
@@ -2828,6 +2860,7 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
     return;
   }
   p->m = man;
+  p->is_bundled = (strncmp(man.id, "dev.ccord.", 10) == 0);
   char pbuf[512] = "";
   ccord_perm_list(man.perms, pbuf, sizeof pbuf);
   p->perm_str = ccord_strdup(pbuf);
@@ -3676,7 +3709,7 @@ void ccord_plugins_update_platform_state(ccord_plugins *m, const ccord_plugin_pl
   ccord_jw_key(&w, "safe_left"); ccord_jw_int(&w, (int64_t)st->safe_left);
   ccord_jw_key(&w, "viewport_w"); ccord_jw_int(&w, (int64_t)st->viewport_w);
   ccord_jw_key(&w, "viewport_h"); ccord_jw_int(&w, (int64_t)st->viewport_h);
-  ccord_jw_key(&w, "viewport_scale"); ccord_jw_int(&w, (int64_t)(st->viewport_scale > 0.0f ? st->viewport_scale : 1.0f));
+  ccord_jw_key(&w, "viewport_scale"); ccord_jw_double(&w, (double)(st->viewport_scale > 0.0f ? st->viewport_scale : 1.0f));
   ccord_jw_key(&w, "keyboard_height"); ccord_jw_int(&w, (int64_t)st->keyboard_height);
   ccord_jw_key(&w, "keyboard_visible"); ccord_jw_bool(&w, st->keyboard_visible);
   ccord_jw_key(&w, "landscape"); ccord_jw_bool(&w, st->landscape);
