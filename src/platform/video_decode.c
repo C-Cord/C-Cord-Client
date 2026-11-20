@@ -168,8 +168,8 @@ static bool materialize_rgba(const ccord_video_decoder *d)
   o->sws = sws_getCachedContext(o->sws, src_w, src_h, (enum AVPixelFormat)d->latest->format, w, h, AV_PIX_FMT_RGBA,
                                 SWS_BILINEAR, nullptr, nullptr, nullptr);
   if (!o->sws) return false;
-  uint8_t *dst_slices[1] = {o->last_rgba};
-  int dst_linesize[1] = {w * 4};
+  uint8_t *dst_slices[4] = {o->last_rgba, nullptr, nullptr, nullptr};
+  int dst_linesize[4] = {w * 4, 0, 0, 0};
   sws_scale(o->sws, (const uint8_t *const *)d->latest->data, d->latest->linesize, 0, src_h, dst_slices, dst_linesize);
   av_frame_unref(d->latest);
   o->rgba_dirty = false;

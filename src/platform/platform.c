@@ -1639,10 +1639,10 @@ static void video_stream_update_preview(ccord_video_stream *v, const uint8_t *pi
   lz->sws_preview_rgba = sws_getCachedContext(lz->sws_preview_rgba, width, height, src_fmt, v->width, v->height,
                                               AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
   if (lz->sws_preview_rgba) {
-    const uint8_t *src_slices[1] = {pixels};
-    int src_linesize[1] = {src_stride};
-    uint8_t *dst_slices[1] = {lz->last_rgba};
-    int dst_linesize[1] = {v->width * 4};
+    const uint8_t *src_slices[4] = {pixels, nullptr, nullptr, nullptr};
+    int src_linesize[4] = {src_stride, 0, 0, 0};
+    uint8_t *dst_slices[4] = {lz->last_rgba, nullptr, nullptr, nullptr};
+    int dst_linesize[4] = {v->width * 4, 0, 0, 0};
     sws_scale(lz->sws_preview_rgba, src_slices, src_linesize, 0, height, dst_slices, dst_linesize);
     lz->enc_preview_dirty = false;
   }
@@ -1665,8 +1665,8 @@ static ccord_status encode_pixels_internal(ccord_video_stream *v, const uint8_t 
   v->sws_to_yuv = sws_getCachedContext(v->sws_to_yuv, width, height, src_fmt, v->width, v->height,
                                        v->enc_ctx->pix_fmt, SWS_BILINEAR, nullptr, nullptr, nullptr);
   if (!v->sws_to_yuv) return ccord_error_set(err, CCORD_ERR_NOMEM, "video encode: sws_getCachedContext failed");
-  const uint8_t *src_slices[1] = {pixels};
-  int src_linesize[1] = {src_stride};
+  const uint8_t *src_slices[4] = {pixels, nullptr, nullptr, nullptr};
+  int src_linesize[4] = {src_stride, 0, 0, 0};
   sws_scale(v->sws_to_yuv, src_slices, src_linesize, 0, height, v->enc_frame->data, v->enc_frame->linesize);
 
   // Only allocate/update last_rgba when a caller actually reads the preview; otherwise defer lazily.
@@ -1757,8 +1757,8 @@ ccord_status ccord_video_stream_decode_rgba(ccord_video_stream *v, const uint8_t
     av_frame_unref(v->dec_frame);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "video decode: sws_getCachedContext failed");
   }
-  uint8_t *dst_slices[1] = {lz->last_rgba};
-  int dst_linesize[1] = {dw * 4};
+  uint8_t *dst_slices[4] = {lz->last_rgba, nullptr, nullptr, nullptr};
+  int dst_linesize[4] = {dw * 4, 0, 0, 0};
   sws_scale(lz->sws_to_rgba, (const uint8_t *const *)v->dec_frame->data, v->dec_frame->linesize, 0, dh, dst_slices,
             dst_linesize);
   av_frame_unref(v->dec_frame);
@@ -1820,8 +1820,8 @@ const uint8_t *ccord_video_stream_last_rgba(const ccord_video_stream *v, int *ou
                                              (enum AVPixelFormat)v->enc_frame->format, v->width, v->height,
                                              AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
       if (lz->sws_to_rgba) {
-        uint8_t *dst_slices[1] = {lz->last_rgba};
-        int dst_linesize[1] = {v->width * 4};
+        uint8_t *dst_slices[4] = {lz->last_rgba, nullptr, nullptr, nullptr};
+        int dst_linesize[4] = {v->width * 4, 0, 0, 0};
         sws_scale(lz->sws_to_rgba, (const uint8_t *const *)v->enc_frame->data, v->enc_frame->linesize, 0, v->height,
                   dst_slices, dst_linesize);
         lz->enc_preview_dirty = false;
