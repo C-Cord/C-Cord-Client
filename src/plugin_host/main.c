@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #include "sandbox.h"
 
 #include <ccord/core/alloc.h>
@@ -16,12 +19,26 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <fcntl.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/landlock.h>
+#include <linux/seccomp.h>
 #include <signal.h>
 #include <sys/prctl.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#elif defined(__linux__)
+#include <signal.h>
+#include <sys/prctl.h>
+#endif
+#if defined(__APPLE__) && !defined(CCORD_EMBEDDED_PLUGIN_HOST)
+#include <sandbox.h>
 #endif
 #if !CCORD_OS_WINDOWS
 #include <sys/resource.h>
@@ -293,6 +310,232 @@ static void handle_platform_state(host *h, const ccord_ipc_msg *msg)
   ccord_sandbox_set_platform_state(h->sb, &st);
 }
 
+// OS-level containment for out-of-process plugin hosts (Landlock + seccomp-bpf on Linux, Seatbelt on macOS).
+// All fs.* APIs are brokered over IPC through the main process, so the plugin host only needs read-only
+// access to its own plugin directory (for Lua require()) and zero network/write/exec capabilities.
+static void apply_os_sandbox(const char *plugin_dir)
+{
+#if defined(CCORD_EMBEDDED_PLUGIN_HOST)
+  (void)plugin_dir;
+#elif defined(__linux__) && !defined(__ANDROID__)
+  (void)prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+
+  // 1. Landlock filesystem sandbox (ABI v1+): read-only access limited strictly to plugin_dir.
+#ifdef SYS_landlock_create_ruleset
+  {
+    struct landlock_ruleset_attr attr = {0};
+    attr.handled_access_fs =
+      LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_FILE |
+      LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
+      LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG |
+      LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+      LANDLOCK_ACCESS_FS_MAKE_SYM;
+    long rfd = syscall(SYS_landlock_create_ruleset, &attr, sizeof attr, (uint32_t)0);
+    if (rfd >= 0) {
+      if (plugin_dir && plugin_dir[0]) {
+        int dfd = open(plugin_dir, O_PATH | O_CLOEXEC);
+        if (dfd >= 0) {
+          struct landlock_path_beneath_attr rule = {
+            .allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
+            .parent_fd = dfd,
+          };
+          (void)syscall(SYS_landlock_add_rule, (int)rfd, LANDLOCK_RULE_PATH_BENEATH, &rule, (uint32_t)0);
+          close(dfd);
+        }
+      }
+#ifdef CCORD_SANITIZED
+      // ASan/LSan reads /proc/self at process exit for leak reporting.
+      {
+        int pfd = open("/proc/self", O_PATH | O_CLOEXEC);
+        if (pfd >= 0) {
+          struct landlock_path_beneath_attr prule = {
+            .allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
+            .parent_fd = pfd,
+          };
+          (void)syscall(SYS_landlock_add_rule, (int)rfd, LANDLOCK_RULE_PATH_BENEATH, &prule, (uint32_t)0);
+          close(pfd);
+        }
+      }
+#endif
+      (void)syscall(SYS_landlock_restrict_self, (int)rfd, (uint32_t)0);
+      close((int)rfd);
+    }
+  }
+#endif
+
+  // 2. Seccomp-BPF denylist: block network sockets, process exec/spawn, ptrace, and fs mutation syscalls.
+#if defined(__x86_64__)
+#define CCORD_AUDIT_ARCH AUDIT_ARCH_X86_64
+#elif defined(__aarch64__)
+#define CCORD_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#elif defined(__i386__)
+#define CCORD_AUDIT_ARCH AUDIT_ARCH_I386
+#elif defined(__arm__)
+#define CCORD_AUDIT_ARCH AUDIT_ARCH_ARM
+#elif defined(__riscv) && (__riscv_xlen == 64)
+#define CCORD_AUDIT_ARCH AUDIT_ARCH_RISCV64
+#endif
+#ifdef CCORD_AUDIT_ARCH
+  {
+    static const uint32_t k_deny_nr[] = {
+#ifdef __NR_socket
+      __NR_socket,
+#endif
+#ifdef __NR_connect
+      __NR_connect,
+#endif
+#ifdef __NR_bind
+      __NR_bind,
+#endif
+#ifdef __NR_listen
+      __NR_listen,
+#endif
+#ifdef __NR_accept
+      __NR_accept,
+#endif
+#ifdef __NR_accept4
+      __NR_accept4,
+#endif
+#ifdef __NR_execve
+      __NR_execve,
+#endif
+#ifdef __NR_execveat
+      __NR_execveat,
+#endif
+#if !defined(CCORD_SANITIZED)
+#ifdef __NR_ptrace
+      __NR_ptrace,
+#endif
+#endif
+#ifdef __NR_process_vm_readv
+      __NR_process_vm_readv,
+#endif
+#ifdef __NR_process_vm_writev
+      __NR_process_vm_writev,
+#endif
+#ifdef __NR_fork
+      __NR_fork,
+#endif
+#ifdef __NR_vfork
+      __NR_vfork,
+#endif
+#ifdef __NR_mount
+      __NR_mount,
+#endif
+#ifdef __NR_umount2
+      __NR_umount2,
+#endif
+#ifdef __NR_chroot
+      __NR_chroot,
+#endif
+#ifdef __NR_pivot_root
+      __NR_pivot_root,
+#endif
+#ifdef __NR_unlink
+      __NR_unlink,
+#endif
+#ifdef __NR_unlinkat
+      __NR_unlinkat,
+#endif
+#ifdef __NR_rename
+      __NR_rename,
+#endif
+#ifdef __NR_renameat
+      __NR_renameat,
+#endif
+#ifdef __NR_renameat2
+      __NR_renameat2,
+#endif
+#ifdef __NR_mkdir
+      __NR_mkdir,
+#endif
+#ifdef __NR_mkdirat
+      __NR_mkdirat,
+#endif
+#ifdef __NR_rmdir
+      __NR_rmdir,
+#endif
+#ifdef __NR_chmod
+      __NR_chmod,
+#endif
+#ifdef __NR_fchmod
+      __NR_fchmod,
+#endif
+#ifdef __NR_fchmodat
+      __NR_fchmodat,
+#endif
+#ifdef __NR_chown
+      __NR_chown,
+#endif
+#ifdef __NR_fchown
+      __NR_fchown,
+#endif
+#ifdef __NR_fchownat
+      __NR_fchownat,
+#endif
+#ifdef __NR_symlink
+      __NR_symlink,
+#endif
+#ifdef __NR_symlinkat
+      __NR_symlinkat,
+#endif
+#ifdef __NR_link
+      __NR_link,
+#endif
+#ifdef __NR_linkat
+      __NR_linkat,
+#endif
+#ifdef __NR_creat
+      __NR_creat,
+#endif
+#ifdef __NR_truncate
+      __NR_truncate,
+#endif
+#ifdef __NR_ftruncate
+      __NR_ftruncate,
+#endif
+    };
+    const size_t ndeny = sizeof k_deny_nr / sizeof k_deny_nr[0];
+    struct sock_filter insns[6 + (sizeof k_deny_nr / sizeof k_deny_nr[0])];
+    size_t pc = 0;
+    // Load arch and kill on mismatch.
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)offsetof(struct seccomp_data, arch));
+    insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (uint32_t)CCORD_AUDIT_ARCH, 1, 0);
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+    // Load syscall number.
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)offsetof(struct seccomp_data, nr));
+    for (size_t i = 0; i < ndeny; i++) {
+      uint8_t jt = (uint8_t)(ndeny - i);   // jump to RET_ERRNO (after RET_ALLOW)
+      insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, k_deny_nr[i], jt, 0);
+    }
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
+    struct sock_fprog prog = {.len = (unsigned short)pc, .filter = insns};
+    (void)prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
+  }
+#endif
+#elif defined(__APPLE__)
+  {
+    static const char k_profile[] =
+      "(version 1)\n"
+      "(deny default)\n"
+      "(allow process-info-pidinfo (target self))\n"
+      "(allow sysctl-read)\n"
+      "(allow file-read* (subpath \"/usr/lib\") (subpath \"/System/Library\") (subpath \"/dev/urandom\"))\n"
+      "(allow file-read* (subpath (param \"PLUGIN_DIR\")))\n";
+    const char *params[3] = {"PLUGIN_DIR", (plugin_dir && plugin_dir[0]) ? plugin_dir : "/nonexistent", nullptr};
+    char *errbuf = nullptr;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    (void)sandbox_init_with_parameters(k_profile, 0, params, &errbuf);
+    if (errbuf) sandbox_free_error(errbuf);
+#pragma clang diagnostic pop
+  }
+#else
+  (void)plugin_dir;
+#endif
+}
+
 static void handle_init(host *h, const ccord_ipc_msg *msg)
 {
   const ccord_json *p = msg->params;
@@ -319,6 +562,7 @@ static void handle_init(host *h, const ccord_ipc_msg *msg)
   size_t dl = 0;
   const char *dir = str_of(pl, "dir", &dl);
   (void)dl;
+  if (!h->cancel) apply_os_sandbox(dir);
   ccord_sandbox_config cfg = {
     .plugin_id = id, .plugin_name = name, .plugin_version = version, .plugin_dir = dir,
     .perms = perms, .memory_bytes = h->cancel ? (32u << 20) : (64u << 20), .instructions = 0,
