@@ -1787,12 +1787,12 @@ static ccord_status media_op_play_soundboard(void *ud, ccord_id guild_id, ccord_
 }
 
 // Consumes arrived CDN soundboard media ("/soundboard-sounds/<id>.mp3") directly via O(1) filtered
-// pop without disturbing avatars/icons/attachments in the session media queue. Returns immediately
-// when not connected to a voice channel.
+// pop without disturbing avatars/icons/attachments in the session media queue. Also drains leftover
+// soundboard clips when discard_pending_soundboard() runs right after leaving voice.
 static bool media_op_pop_soundboard(void *ud, const uint8_t **data, size_t *len, uint8_t *vol_pct)
 {
   app *a = ud;
-  if (!a->session || !a->store || ccord_store_active_voice_channel(a->store) == CCORD_ID_NONE) return false;
+  if (!a->session || !a->store) return false;
   const char *url = nullptr;
   const uint8_t *mdata = nullptr;
   size_t mlen = 0;
@@ -3784,11 +3784,14 @@ static void run_interactive(app *a)
     if (a->session && a->store) media_op_voice(a, &vstate);
     // Live voice audio runs on its own dedicated pthread, so an audio-only call does not need 16 ms
     // UI event waits; only active video/camera/screen capture/decode (or mock inline audio) does.
+    ccord_ui_voice_prefs vp = {0};
+    if (vstate.active && a->ui) ccord_ui_voice_settings(a->ui, &vp);
     bool video_active = a->session && a->store &&
                         (media_op_stream_active(a) || media_op_watch_active(a) ||
                          (vstate.active && (vstate.camera || ccord_app_media_cam_count(a->media) > 0)));
     bool inline_voice = !a->live && a->session && a->store && vstate.active;
-    bool media_fast = video_active || inline_voice;
+    bool ptt_active = vstate.active && vp.ptt;
+    bool media_fast = video_active || inline_voice || ptt_active;
     bool should_draw = ccord_app_desktop_should_draw(a->platform);
     uint32_t timeout = 100;
     if (!should_draw) {
