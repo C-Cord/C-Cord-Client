@@ -932,6 +932,7 @@ typedef struct ccord_message {
   bool omit_content;                             // partial MESSAGE_UPDATE omitted "content"
   bool has_pinned;                               // partial MESSAGE_UPDATE carried explicit "pinned"
   bool omit_tts;                                 // partial MESSAGE_UPDATE omitted "tts"
+  uint32_t edit_rev;                             // monotonic store-managed mutation counter (invalidates UI layout caches)
 } ccord_message;
 #define CCORD_MSG_SEND_CONFIRMED 0u   // the server reported the message
 #define CCORD_MSG_SEND_PENDING 1u     // local echo, waiting for the server's nonce-matched MESSAGE_CREATE

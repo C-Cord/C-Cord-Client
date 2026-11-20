@@ -4332,8 +4332,16 @@ static void test_audit_regressions(void)
   (void)ccord_bus_drain(bus);
   CT_CHECK(ccord_store_selected_channel(s) == 100);
   CT_CHECK(evc.del_n == 1 && evc.sel_n == 0);
+  // Medium #3: edit_rev bumps on ccord_store_update_message even when edited_timestamp_ms stays 0.
   ccord_message m0 = {.id = 5000, .channel_id = 100, .author_id = 1, .timestamp_ms = 1, .content = "hello"};
   CT_CHECK(ccord_store_append_message(s, &m0, &err) == CCORD_OK);
+  const ccord_message *stored = ccord_store_find_message(s, 100, 5000);
+  CT_CHECK(stored && stored->edit_rev == 0);
+  ccord_message upd = m0;
+  upd.omit_content = true;
+  CT_CHECK(ccord_store_update_message(s, &upd, &err) == CCORD_OK);
+  stored = ccord_store_find_message(s, 100, 5000);
+  CT_CHECK(stored && stored->edit_rev == 1 && stored->edited_timestamp_ms == 0);
 
   // Low #5: duplicate message append at CCORD_MAX_MESSAGES_PER_CHANNEL must NOT evict the oldest message.
   for (ccord_id i = 1; i < CCORD_MAX_MESSAGES_PER_CHANNEL; i++) {

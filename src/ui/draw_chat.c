@@ -50,6 +50,7 @@ typedef struct chat_rowh_entry {
   uint64_t content_hash;
   ccord_id msg_id;
   int64_t edited_ts;
+  uint32_t edit_rev;
   size_t content_len;
   int width_q;
   int scale_q;
@@ -62,6 +63,7 @@ typedef struct chat_rowh_entry {
 #define CHAT_EMBEDH_CACHE_SLOTS 32u
 typedef struct chat_embedh_entry {
   ccord_id msg_id;
+  uint32_t edit_rev;
   uintptr_t emb_ptr;
   int width_q;
   int scale_q;
@@ -2202,6 +2204,7 @@ typedef struct decor_part {
   ccord_id msg_id;
   ccord_id author_id;
   char invite_code[CCORD_ADMIN_INVITE_CODE_MAX + 1];
+  uint32_t edit_rev;
 } decor_part;
 
 typedef struct decor_info {
@@ -2212,6 +2215,7 @@ typedef struct decor_info {
   ccord_id channel_id;
   ccord_id msg_id;
   ccord_id author_id;
+  uint32_t edit_rev;
   ccord_id reply_target_id;
   bool reply_deleted;
   bool reply_attach_only;   // the original has no text, only an attachment
@@ -2282,14 +2286,14 @@ static void decor_add(decor_info *d, decor_kind kind, const ccord_attachment *at
                       const ccord_msg_sticker *stk, const ccord_poll *poll, const char *text, size_t len, size_t count)
 {
   if (d->nparts >= DECOR_MAX_PARTS) return;
-  d->parts[d->nparts++] = (decor_part){kind, att, emb, stk, poll, nullptr, text, len, count, 0u, d->msg_id, d->author_id, ""};
+  d->parts[d->nparts++] = (decor_part){kind, att, emb, stk, poll, nullptr, text, len, count, 0u, d->msg_id, d->author_id, "", d->edit_rev};
 }
 
 static void decor_add_comp(decor_info *d, const ccord_message_rich *rich, size_t row_idx)
 {
   if (d->nparts >= DECOR_MAX_PARTS) return;
   d->parts[d->nparts++] = (decor_part){DECOR_COMPONENTS, nullptr, nullptr, nullptr, nullptr, rich,
-                                       nullptr, 0u, 1u, row_idx, d->msg_id, d->author_id, ""};
+                                       nullptr, 0u, 1u, row_idx, d->msg_id, d->author_id, "", d->edit_rev};
 }
 
 // Components v2: the whole tree is one part (the message's attachments stay reachable for attachment:// media).
@@ -2297,14 +2301,14 @@ static void decor_add_v2(decor_info *d, const ccord_message_rich *rich)
 {
   if (d->nparts >= DECOR_MAX_PARTS) return;
   d->parts[d->nparts++] = (decor_part){DECOR_COMPONENTS_V2, nullptr, nullptr, nullptr, nullptr, rich,
-                                       nullptr, 0u, 1u, 0u, d->msg_id, d->author_id, ""};
+                                       nullptr, 0u, 1u, 0u, d->msg_id, d->author_id, "", d->edit_rev};
 }
 
 static void decor_add_thread(decor_info *d, const ccord_message_rich *rich)
 {
   if (d->nparts >= DECOR_MAX_PARTS) return;
   d->parts[d->nparts++] = (decor_part){DECOR_THREAD, nullptr, nullptr, nullptr, nullptr, rich,
-                                       nullptr, 0u, 1u, 0u, d->msg_id, d->author_id, ""};
+                                       nullptr, 0u, 1u, 0u, d->msg_id, d->author_id, "", d->edit_rev};
 }
 
 static bool inv_ieq_at_n(const char *s, size_t rem, const char *lit, size_t n)
@@ -2499,6 +2503,7 @@ static void decor_scan(const ccord_ui *ui, const ccord_message *m, bool compact,
   d->channel_id = m->channel_id;
   d->msg_id = m->id;
   d->author_id = m->author_id;
+  d->edit_rev = m->edit_rev;
   d->reply_target_id = CCORD_ID_NONE;
   d->reply_deleted = false;
   d->reply_attach_only = false;
@@ -3010,7 +3015,8 @@ static float measure_row(size_t i, float width, void *ud)
     rowh_cache_sync(cc, ui, c->r);
     for (size_t k = 0; k < CHAT_ROWH_CACHE_SLOTS; k++) {
       chat_rowh_entry *e = &cc->rowh[k];
-      if (e->msg_id == m->id && e->edited_ts == m->edited_timestamp_ms && e->content_len == content_len &&
+      if (e->msg_id == m->id && e->edited_ts == m->edited_timestamp_ms && e->edit_rev == m->edit_rev &&
+          e->content_len == content_len &&
           e->content_hash == chash && e->width_q == width_q && e->scale_q == scale_q &&
           e->flags == flags && e->meta_sig == meta_sig) {
         e->lru_tick = ++cc->rh_tick;
@@ -3053,6 +3059,7 @@ static float measure_row(size_t i, float width, void *ud)
       .msg_id = m->id,
       .edited_ts = m->edited_timestamp_ms,
       .content_len = content_len,
+      .edit_rev = m->edit_rev,
       .width_q = width_q,
       .scale_q = scale_q,
       .flags = flags,
@@ -3842,7 +3849,7 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
       uintptr_t ep = (uintptr_t)e;
       for (size_t k = 0; k < CHAT_EMBEDH_CACHE_SLOTS; k++) {
         chat_embedh_entry *ce = &cc->embedh[k];
-        if (ce->msg_id == p->msg_id && ce->emb_ptr == ep && ce->width_q == emb_wq &&
+        if (ce->msg_id == p->msg_id && ce->edit_rev == p->edit_rev && ce->emb_ptr == ep && ce->width_q == emb_wq &&
             ce->scale_q == emb_sq && ce->streamer == emb_streamer) {
           ce->lru_tick = ++cc->rh_tick;
           total_h = ce->height;
@@ -4106,7 +4113,7 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
     bool matched = false;
     for (size_t k = 0; k < CHAT_EMBEDH_CACHE_SLOTS; k++) {
       chat_embedh_entry *ce = &cc->embedh[k];
-      if (ce->msg_id == p->msg_id && ce->emb_ptr == ep && ce->width_q == emb_wq &&
+      if (ce->msg_id == p->msg_id && ce->edit_rev == p->edit_rev && ce->emb_ptr == ep && ce->width_q == emb_wq &&
           ce->scale_q == emb_sq && ce->streamer == emb_streamer) {
         slot = k;
         matched = true;
@@ -4121,6 +4128,7 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
     if (!matched) {
       cc->embedh[slot] = (chat_embedh_entry){
         .msg_id = p->msg_id,
+        .edit_rev = p->edit_rev,
         .emb_ptr = ep,
         .width_q = emb_wq,
         .scale_q = emb_sq,

@@ -2004,6 +2004,7 @@ ccord_status ccord_store_update_message(ccord_store *s, const ccord_message *m, 
   updated.content = content;
   updated.edited = keep_text ? (old->edited || m->edited_timestamp_ms != 0) : true;
   if (updated.edited_timestamp_ms == 0) updated.edited_timestamp_ms = old->edited_timestamp_ms;
+  updated.edit_rev = old->edit_rev + 1u;
   const ccord_message_rich *prev_rich = old->rich;
   if (!rich_replaced) old->rich = nullptr;   // the block stays and moves to the updated message
   if (new_reactions) {
