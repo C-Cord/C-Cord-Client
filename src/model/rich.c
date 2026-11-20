@@ -362,6 +362,7 @@ static void write_rich(rich_writer *w, const ccord_message_rich *src, ccord_mess
     size_t n_ans = src->poll.answer_count < CCORD_RICH_MAX_POLL_ANSWERS
                      ? src->poll.answer_count
                      : CCORD_RICH_MAX_POLL_ANSWERS;
+    out->poll.answer_count = n_ans;
     for (size_t i = 0; i < n_ans; i++) {
       out->poll.answers[i].text = write_str(w, src->poll.answers[i].text);
       out->poll.answers[i].emoji = write_str(w, src->poll.answers[i].emoji);
