@@ -4109,7 +4109,8 @@ ccord_status ccord_store_delete_channel(ccord_store *s, ccord_id channel_id, cco
   voice_remove_channel(s, channel_id);
 
   ccord_id selected = s->sel_channel;
-  if (s->sel_channel == channel_id) {
+  bool sel_changed = (s->sel_channel == channel_id);
+  if (sel_changed) {
     s->sel_channel = default_channel(&s->d, guild_id);
     selected = s->sel_channel;
     if (guild_id == CCORD_DM_GUILD_ID) {
@@ -4121,7 +4122,7 @@ ccord_status ccord_store_delete_channel(ccord_store *s, ccord_id channel_id, cco
   }
   s->revision++;
   post(s, CCORD_EVT_CHANNEL_DELETE, guild_id, channel_id, CCORD_ID_NONE, CCORD_ID_NONE, 0);
-  if (selected != CCORD_ID_NONE && selected != channel_id) {
+  if (sel_changed && selected != CCORD_ID_NONE && selected != channel_id) {
     post(s, CCORD_EVT_CHANNEL_SELECT, guild_id, selected, CCORD_ID_NONE, CCORD_ID_NONE, 0);
   }
   return CCORD_OK;

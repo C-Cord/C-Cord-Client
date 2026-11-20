@@ -4293,6 +4293,49 @@ static void test_presence_authoritative_clearing_and_delete_mentions(void)
   ccord_bus_destroy(bus);
 }
 
+typedef struct b19_counts {
+  int del_n;
+  int sel_n;
+} b19_counts;
+
+static void on_b19_evt(const ccord_event *e, void *ud)
+{
+  b19_counts *c = ud;
+  if (e->type == CCORD_EVT_CHANNEL_DELETE) c->del_n++;
+  if (e->type == CCORD_EVT_CHANNEL_SELECT) c->sel_n++;
+}
+
+static void test_audit_regressions(void)
+{
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *s = ccord_store_create(bus, &err);
+  CT_CHECK(bus && s);
+
+  ccord_user u = {.id = 1, .name = "Ada", .status_text = "", .presence = CCORD_PRESENCE_ONLINE};
+  ccord_guild g = {.id = 10, .name = "Guild"};
+  ccord_channel chs[2] = {
+    {.id = 100, .guild_id = 10, .kind = CCORD_CHANNEL_TEXT, .name = "a", .topic = ""},
+    {.id = 200, .guild_id = 10, .kind = CCORD_CHANNEL_TEXT, .name = "b", .topic = ""},
+  };
+  ccord_snapshot snap = {.self_id = 1, .users = &u, .user_count = 1, .guilds = &g, .guild_count = 1,
+                         .channels = chs, .channel_count = 2};
+  CT_CHECK(ccord_store_set_snapshot(s, &snap, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_select_guild(s, 10, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_select_channel(s, 100, &err) == CCORD_OK);
+  (void)ccord_bus_drain(bus);
+
+  // B19: deleting a non-selected channel must NOT post CCORD_EVT_CHANNEL_SELECT.
+  b19_counts evc = {0, 0};
+  ccord_bus_subscribe(bus, CCORD_EVT_ANY, on_b19_evt, &evc);
+  CT_CHECK(ccord_store_delete_channel(s, 200, &err) == CCORD_OK);
+  (void)ccord_bus_drain(bus);
+  CT_CHECK(ccord_store_selected_channel(s) == 100);
+  CT_CHECK(evc.del_n == 1 && evc.sel_n == 0);
+  ccord_store_destroy(s);
+  ccord_bus_destroy(bus);
+}
+
 int main(void)
 {
   test_member_list_sizes();
@@ -4339,5 +4382,6 @@ int main(void)
   test_slash_nested_commands_validate();
   test_activity_instances_store();
   test_presence_authoritative_clearing_and_delete_mentions();
+  test_audit_regressions();
   return CT_RESULT("test_store");
 }
