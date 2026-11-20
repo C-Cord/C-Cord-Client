@@ -143,7 +143,8 @@ ccord_app_rpc *ccord_app_rpc_create(const ccord_app_rpc_config *cfg, ccord_error
     // Game detection does not need the RPC socket: without one the app still publishes the detected game.
     r->game = ccord_game_detect_app_create(cfg->game_detect, r->server ? err : nullptr);
     if (!r->server && r->game) {
-      CCORD_LOG_W("rich presence: RPC socket unavailable (%s); game detection only", err->message);
+      CCORD_LOG_W("rich presence: RPC socket unavailable (%s); game detection only",
+                  err && err->message[0] ? err->message : "unavailable");
       ccord_error_clear(err);
     }
   }
