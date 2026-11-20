@@ -6591,8 +6591,42 @@ static void test_embed_media_sources_video_and_retry(void)
   }
   remove_message(ch, mid);
 
-  // 3. A player page (no file we can fetch): the poster is a link to the page, there is nothing to play here,
-  // and the long page description is left out, as Discord does.
+  // 3. Third-party video embeds (YouTube & X/Twitter): resolve on click and play directly inside C-Cord (including
+  // dual-stream DASH video+audio for YouTube and thumbnail-only X video embeds), while keeping title/open links and
+  // omitting YouTube's long page description.
+  const ccord_media_item *v_item =
+    ccord_session_get_media(F.session, "https://images-ext-1.discordapp.net/external/v/https/video.example.test/clip.mp4");
+  const ccord_media_item *a_item = ccord_session_get_media(F.session, "https://cdn.discordapp.com/attachments/1/note.wav");
+  if (!a_item) {
+    CT_CHECK(ccord_session_fetch_media(F.session, "https://cdn.discordapp.com/attachments/1/note.wav", &err) == CCORD_OK);
+    frame(4);
+    a_item = ccord_session_get_media(F.session, "https://cdn.discordapp.com/attachments/1/note.wav");
+  }
+  static uint8_t dash_v_buf[65536], dash_a_buf[65536];
+  static stream_fixture dash_v_fx, dash_a_fx;
+  CT_CHECK(v_item && v_item->data && v_item->len > 0 && v_item->len <= sizeof dash_v_buf);
+  CT_CHECK(a_item && a_item->data && a_item->len > 0 && a_item->len <= sizeof dash_a_buf);
+  if (v_item && v_item->data && v_item->len <= sizeof dash_v_buf) {
+    memcpy(dash_v_buf, v_item->data, v_item->len);
+    dash_v_fx = (stream_fixture){.data = dash_v_buf, .len = v_item->len};
+  }
+  if (a_item && a_item->data && a_item->len <= sizeof dash_a_buf) {
+    memcpy(dash_a_buf, a_item->data, a_item->len);
+    dash_a_fx = (stream_fixture){.data = dash_a_buf, .len = a_item->len};
+  }
+  CT_CHECK(ccord_mock_serve_range_file(F.transport, &(ccord_mock_range_file){
+               .url_part = "yt_x_v.mp4", .total = (int64_t)dash_v_fx.len, .read = stream_fixture_read, .ud = &dash_v_fx}) ==
+           CCORD_OK);
+  CT_CHECK(ccord_mock_serve_range_file(F.transport, &(ccord_mock_range_file){
+               .url_part = "yt_x_a.wav", .total = (int64_t)dash_a_fx.len, .read = stream_fixture_read, .ud = &dash_a_fx}) ==
+           CCORD_OK);
+  CT_CHECK(ccord_mock_serve_video_resolve(F.transport, &(ccord_mock_video_resolve){
+               .url_part = "youtube.com/watch?v=x",
+               .video_url = "https://rr1---sn.googlevideo.com/videoplayback?itag=136&f=yt_x_v.mp4",
+               .audio_url = "https://rr1---sn.googlevideo.com/videoplayback?itag=140&f=yt_x_a.wav",
+               .duration_ms = 500u,
+               .status = CCORD_OK,
+           }) == CCORD_OK);
   ccord_embed tube = {
     .kind = CCORD_EMBED_VIDEO, .provider = "YouTube", .title = "A video", .url = "https://www.youtube.com/watch?v=x",
     .description = "A very long description that Discord never shows under a player.",
@@ -6604,14 +6638,75 @@ static void test_embed_media_sources_video_and_retry(void)
   ccord_message_rich r3 = {.present = CCORD_RICH_ALL, .embeds = &tube, .embed_count = 1};
   mid = append_rich_message(ch, "", &r3);
   frame(3);
-  CT_CHECK(F.ui->nmedia_hits == 0);
-  bool page_link = false;
+  CT_CHECK(F.ui->nmedia_hits == 1 && F.ui->media_hits[0].needs_resolve);
+  CT_CHECK(strcmp(F.ui->media_hits[0].url, "https://www.youtube.com/watch?v=x") == 0);
+  bool title_link = false;
   for (size_t i = 0; i < F.ui->nlinks; i++) {
-    if (strcmp(F.ui->links[i].url, "https://www.youtube.com/watch?v=x") == 0 && F.ui->links[i].rect.h > 100.0f) {
-      page_link = true;
-    }
+    if (strcmp(F.ui->links[i].url, "https://www.youtube.com/watch?v=x") == 0) title_link = true;
   }
-  CT_CHECK(page_link);
+  CT_CHECK(title_link);
+  ccord_rect yt_box = F.ui->media_hits[0].play_rect;
+  click(yt_box.x + yt_box.w * 0.5f, yt_box.y + yt_box.h * 0.5f);
+  CT_CHECK(wait_first_frame());
+  CT_CHECK(F.ui->media_loaded && !F.ui->media_failed && F.ui->media_stream != nullptr && F.ui->media_net != nullptr);
+  CT_CHECK(F.ui->media_audio_stream != nullptr && F.ui->media_audio_net != nullptr);
+  CT_CHECK(ccord_av_stream_info(F.ui->media_stream)->has_video);
+  CT_CHECK(ccord_av_stream_info(F.ui->media_audio_stream)->has_audio);
+  CT_CHECK(F.ui->nmedia_hits == 1 && F.ui->media_hits[0].scrub_rect.w > 50.0f);
+  click(F.ui->media_hits[0].scrub_rect.x + F.ui->media_hits[0].scrub_rect.w * 0.5f,
+        F.ui->media_hits[0].scrub_rect.y + F.ui->media_hits[0].scrub_rect.h * 0.5f);
+  frame(4);
+  CT_CHECK(!F.ui->media_failed);
+  remove_message(ch, mid);
+
+  // 3b. X/Twitter video embed with no `embed.video` (only `ext_tw_video_thumb/` in `image`): detected as playable
+  // inline, keeps tweet text readable, resolves to a muxed MP4, and plays.
+  CT_CHECK(ccord_mock_serve_video_resolve(F.transport, &(ccord_mock_video_resolve){
+               .url_part = "x.com/alice/status/999",
+               .video_url = "https://video.twimg.com/ext_tw_video/999/pu/vid/clip.mp4",
+               .status = CCORD_OK,
+           }) == CCORD_OK);
+  ccord_embed xvid = {
+    .kind = CCORD_EMBED_RICH, .provider = "X", .author_name = "Alice (@alice)",
+    .url = "https://x.com/alice/status/999", .description = "watch this X clip inline",
+    .image = {.url = "https://pbs.twimg.com/ext_tw_video_thumb/999/pu/img/poster.jpg",
+              .proxy_url = "https://images-ext-1.discordapp.net/external/x/https/pbs.twimg.com/ext_tw_video_thumb/999/pu/img/poster.jpg",
+              .width = 1280, .height = 720},
+  };
+  ccord_message_rich r3b = {.present = CCORD_RICH_ALL, .embeds = &xvid, .embed_count = 1};
+  mid = append_rich_message(ch, "", &r3b);
+  frame(3);
+  CT_CHECK(F.ui->nmedia_hits == 1 && F.ui->media_hits[0].needs_resolve);
+  CT_CHECK(strcmp(F.ui->media_hits[0].url, "https://x.com/alice/status/999") == 0);
+  ccord_rect xbox = F.ui->media_hits[0].play_rect;
+  bool x_text_kept = false;
+  for (size_t i = 0; i < F.ui->ntext_hits; i++) {
+    if (F.ui->text_hits[i].y + F.ui->text_hits[i].h <= xbox.y + 1.0f && F.ui->text_hits[i].w > 80.0f) x_text_kept = true;
+  }
+  CT_CHECK(x_text_kept);
+  click(xbox.x + xbox.w * 0.5f, xbox.y + xbox.h * 0.5f);
+  CT_CHECK(wait_first_frame());
+  CT_CHECK(F.ui->media_loaded && !F.ui->media_failed && F.ui->media_audio_stream == nullptr);
+  remove_message(ch, mid);
+
+  // 3c. Missing yt-dlp helper reports a clear inline failure hint.
+  CT_CHECK(ccord_mock_serve_video_resolve(F.transport, &(ccord_mock_video_resolve){
+               .url_part = "youtube.com/watch?v=missing",
+               .status = CCORD_ERR_UNSUPPORTED,
+               .missing_helper = true,
+               .error = "yt-dlp not found",
+           }) == CCORD_OK);
+  ccord_embed tube_miss = tube;
+  tube_miss.url = "https://www.youtube.com/watch?v=missing";
+  tube_miss.video.url = "https://www.youtube.com/embed/missing";
+  ccord_message_rich r3c = {.present = CCORD_RICH_ALL, .embeds = &tube_miss, .embed_count = 1};
+  mid = append_rich_message(ch, "", &r3c);
+  frame(3);
+  CT_CHECK(F.ui->nmedia_hits == 1 && F.ui->media_hits[0].needs_resolve);
+  click(F.ui->media_hits[0].play_rect.x + F.ui->media_hits[0].play_rect.w * 0.5f,
+        F.ui->media_hits[0].play_rect.y + F.ui->media_hits[0].play_rect.h * 0.5f);
+  frame(4);
+  CT_CHECK(F.ui->media_failed && strstr(F.ui->media_fail_hint, "yt-dlp") != nullptr);
   remove_message(ch, mid);
 
   // 4. GIF embeds (including Tenor with `provider = "Tenor"` as real Discord sends): play framelessly in place

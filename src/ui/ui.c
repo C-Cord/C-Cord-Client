@@ -3372,6 +3372,9 @@ void ccord_ui_destroy(ccord_ui *ui)
   ui_scheduled_events_free(ui);
   ui_saved_messages_free(ui);
   ui_call_free(ui);
+  media_player_close(ui);
+  ccord_free(ui->media_play_url);
+  ccord_free(ui->media_audio_url);
   ccord_audio_destroy(ui->media_audio);
   ui_track_free(&ui->trk_chan);
   ui_track_free(&ui->trk_member);
@@ -3563,14 +3566,39 @@ static void player_log_host(const char *url, char *out, size_t cap)
 
 static void media_player_close(ccord_ui *ui)
 {
-  // The render stream first: its demux thread reads from the byte source, and closing it wakes and joins that thread.
+  // The render streams first: their demux threads read from the byte sources, and closing joins them.
   if (ui->media_stream) ccord_av_stream_close(ui->media_stream);
   ui->media_stream = nullptr;
   if (ui->media_net) ccord_session_close_media_stream(ui->d.session, ui->media_net);
   ui->media_net = nullptr;
+  if (ui->media_audio_stream) ccord_av_stream_close(ui->media_audio_stream);
+  ui->media_audio_stream = nullptr;
+  if (ui->media_audio_net) ccord_session_close_media_stream(ui->d.session, ui->media_audio_net);
+  ui->media_audio_net = nullptr;
+  ui->media_resolving = false;
+  ui->media_resolve_req_id = 0;
+  ui->media_v_ready = false;
+  ui->media_a_ready = false;
   ui->media_loaded = false;
   ui->media_buffering = false;
   ui->media_frame_serial = 0;
+  ui->media_fail_hint[0] = '\0';
+}
+
+static bool media_player_set_url(char **slot, const char *url)
+{
+  if (!*slot) {
+    *slot = ccord_calloc(1, UI_STREAM_URL_MAX);
+    if (!*slot) return false;
+  }
+  ui_url_copy(*slot, UI_STREAM_URL_MAX, url ? url : "");
+  return true;
+}
+
+static const char *media_player_active_play_url(const ccord_ui *ui)
+{
+  if (ui->media_play_url && ui->media_play_url[0]) return ui->media_play_url;
+  return ui->media_url;
 }
 
 // The whole-file path: the clip is downloaded, then opened from memory (32 MiB cap). The user clicked this video, so
@@ -3587,29 +3615,64 @@ static void media_player_fetch_whole(ccord_ui *ui, const char *url)
   }
 }
 
-// Streams the clip: a ranged byte source in the session feeds a demux thread in the render stream, so playback starts
-// before the file is complete. False (nothing left open) when the transport cannot stream.
-static bool media_player_open_stream(ccord_ui *ui, const char *url)
+// Opens one ranged byte source + demux thread. False (nothing left open) when the transport cannot stream.
+static bool media_player_open_one_stream(ccord_ui *ui, const char *url, unsigned av_flags,
+                                         ccord_media_stream **net_out, ccord_av_stream **av_out)
 {
   ccord_error serr;
-  ui->media_net = ccord_session_open_media_stream(ui->d.session, url, &serr);
-  if (!ui->media_net) {
+  ccord_media_stream *net = ccord_session_open_media_stream(ui->d.session, url, &serr);
+  if (!net) {
     ccord_error_clear(&serr);
     return false;
   }
   const ccord_av_source src = {
-    .ud = ui->media_net,
+    .ud = net,
     .read_at = ccord_media_stream_read_at,
     .size = ccord_media_stream_size,
     .cancel = ccord_media_stream_cancel,
   };
-  ui->media_stream = ccord_av_stream_open_source(&src, UI_PLAYER_MAX_DIM, CCORD_AV_MEDIA, &serr);
-  if (!ui->media_stream) {
+  ccord_av_stream *av = ccord_av_stream_open_source(&src, UI_PLAYER_MAX_DIM, av_flags, &serr);
+  if (!av) {
     ccord_error_clear(&serr);
-    media_player_close(ui);
+    ccord_session_close_media_stream(ui->d.session, net);
     return false;
   }
+  *net_out = net;
+  *av_out = av;
   return true;
+}
+
+// Starts playback for resolved or direct stream URL(s). When `audio_url` is non-empty, opens a synchronized DASH pair
+// (video-only stream + audio-only stream); otherwise opens a single muxed stream (falling back to whole-file download).
+static void media_player_start_urls(ccord_ui *ui, const char *video_url, const char *audio_url)
+{
+  if (!video_url || !video_url[0]) {
+    ui->media_failed = true;
+    return;
+  }
+  if (!media_player_set_url(&ui->media_play_url, video_url) ||
+      !media_player_set_url(&ui->media_audio_url, audio_url ? audio_url : "")) {
+    ui->media_failed = true;
+    return;
+  }
+  if (!ui->d.session) return;
+  bool dual = audio_url && audio_url[0] != '\0';
+  if (dual) {
+    if (media_player_open_one_stream(ui, video_url, CCORD_AV_MEDIA | CCORD_AV_NO_AUDIO,
+                                     &ui->media_net, &ui->media_stream) &&
+        media_player_open_one_stream(ui, audio_url, CCORD_AV_MEDIA,
+                                     &ui->media_audio_net, &ui->media_audio_stream)) {
+      return;
+    }
+    // Transport lacks ranged streaming (e.g. mock fallback): play the primary clip whole-file.
+    media_player_close(ui);
+    if (ui->media_audio_url) ui->media_audio_url[0] = '\0';
+  }
+  if (ccord_session_get_media(ui->d.session, video_url) == nullptr) {
+    if (!media_player_open_one_stream(ui, video_url, CCORD_AV_MEDIA, &ui->media_net, &ui->media_stream)) {
+      media_player_fetch_whole(ui, video_url);
+    }
+  }
 }
 
 static void media_player_select(ccord_ui *ui, const ui_media_hit *mh)
@@ -3617,15 +3680,30 @@ static void media_player_select(ccord_ui *ui, const ui_media_hit *mh)
   if (!ui || !mh || !mh->url[0]) return;
   media_player_close(ui);
   ui_url_copy(ui->media_url, sizeof ui->media_url, mh->url);
+  if (ui->media_play_url) ui->media_play_url[0] = '\0';
+  if (ui->media_audio_url) ui->media_audio_url[0] = '\0';
   ui->media_att_id = mh->att_id;
   ui->media_failed = false;
   ui->media_pos_ms = 0;
   ui->media_audio_resync = true;
   ui->media_duration_known = false;
   ui->media_duration_ms = mh->duration_ms > 0 ? mh->duration_ms : 5000u;
-  if (ui->d.session && ccord_session_get_media(ui->d.session, mh->url) == nullptr) {
-    if (!media_player_open_stream(ui, mh->url)) media_player_fetch_whole(ui, mh->url);
+  if (!ui->d.session) return;
+  if (mh->needs_resolve) {
+    ccord_error rerr;
+    uint64_t req_id = 0;
+    if (ccord_session_resolve_video(ui->d.session, mh->url, &req_id, &rerr) == CCORD_OK) {
+      ui->media_resolving = true;
+      ui->media_resolve_req_id = req_id;
+      ui->media_buffering = true;
+    } else {
+      player_warn(mh->url, "resolve", "%s", rerr.message[0] ? rerr.message : "resolve failed");
+      ccord_error_clear(&rerr);
+      ui->media_failed = true;
+    }
+    return;
   }
+  media_player_start_urls(ui, mh->url, "");
 }
 
 // Moves the playhead; the picture and sound follow on the next tick.
@@ -3635,15 +3713,16 @@ static void media_player_seek(ccord_ui *ui, uint32_t pos_ms)
   ui->media_pos_ms = pos_ms;
   ui->media_audio_resync = true;
   if (ui->media_stream) ccord_av_stream_seek(ui->media_stream, pos_ms);
+  if (ui->media_audio_stream) ccord_av_stream_seek(ui->media_audio_stream, pos_ms);
 }
 
 // Queues decoded sound up to a little past the clock. After a start, resume or seek the queue is first lined up
 // with the clock again: silence when the decoder's audio is ahead, dropped samples when it is behind.
-static void media_player_feed_audio(ccord_ui *ui)
+static void media_player_feed_audio(ccord_ui *ui, ccord_av_stream *st)
 {
   static const int16_t k_silence[2u * 960u];
   int16_t buf[2u * 2048u];
-  ccord_av_stream *st = ui->media_stream;
+  if (!st) return;
   if (!ui->media_audio) {
     ccord_error aerr;
     ccord_audio_config acfg = {.sample_rate = CCORD_AV_SAMPLE_RATE, .channels = 2, .frame_samples = 960, .capture = false};
@@ -3683,13 +3762,18 @@ static void media_player_feed_audio(ccord_ui *ui)
   }
 }
 
-// The decoder is open: take the duration and line the audio up with the clock.
+// The decoder(s) are open: take the duration and line the audio up with the clock.
 static void media_player_opened(ccord_ui *ui, bool apply_pending_seek)
 {
-  const ccord_av_info *inf = ccord_av_stream_info(ui->media_stream);
+  const ccord_av_info *vinf = ccord_av_stream_info(ui->media_stream);
+  uint32_t dur = vinf->duration_ms;
+  if (ui->media_audio_stream) {
+    const ccord_av_info *ainf = ccord_av_stream_info(ui->media_audio_stream);
+    if (ainf->duration_ms > dur) dur = ainf->duration_ms;
+  }
   ui->media_loaded = true;
-  if (inf->duration_ms > 0) {
-    ui->media_duration_ms = inf->duration_ms;
+  if (dur > 0) {
+    ui->media_duration_ms = dur;
     ui->media_duration_known = true;
   }
   uint32_t asked_ms = ui->media_pos_ms;
@@ -3698,25 +3782,29 @@ static void media_player_opened(ccord_ui *ui, bool apply_pending_seek)
   // one past the real end is moved back to it.
   if ((apply_pending_seek && ui->media_pos_ms > 0) || ui->media_pos_ms != asked_ms) {
     ccord_av_stream_seek(ui->media_stream, ui->media_pos_ms);
+    if (ui->media_audio_stream) ccord_av_stream_seek(ui->media_audio_stream, ui->media_pos_ms);
   }
   ui->media_audio_resync = true;
 }
 
-// Follows a streamed clip. Never blocks: the stream's state is read, not waited for. A server (or a link) the stream
-// cannot use falls back to the whole-file download, which applies the same gate and logs its own refusal.
+// Follows a streamed clip (and optional separate DASH audio stream). Never blocks: state is read, not waited for.
+// A server (or a link) the stream cannot use falls back to the whole-file download, which applies the same gate.
 static void media_player_stream_poll(ccord_ui *ui)
 {
-  ccord_media_stream_stats st;
-  ccord_media_stream_stats_get(ui->media_net, &st);
-  ccord_error aerr;
-  memset(&aerr, 0, sizeof aerr);
-  ccord_av_state state = ccord_av_stream_state(ui->media_stream, &aerr);
+  const char *play_url = media_player_active_play_url(ui);
+  ccord_media_stream_stats vst;
+  ccord_media_stream_stats_get(ui->media_net, &vst);
+  ccord_error verr;
+  memset(&verr, 0, sizeof verr);
+  ccord_av_state vstate = ccord_av_stream_state(ui->media_stream, &verr);
+
   if (!ui->media_loaded) {
-    if (st.no_range || st.error == CCORD_ERR_PERMISSION || st.error == CCORD_ERR_UNSUPPORTED) {
-      char url[UI_URL_MAX];
-      ui_url_copy(url, sizeof url, ui->media_url);
-      bool too_big = st.no_range && st.total > (int64_t)CCORD_AV_MAX_INPUT;
+    if (vst.no_range || vst.error == CCORD_ERR_PERMISSION || vst.error == CCORD_ERR_UNSUPPORTED) {
+      char url[UI_STREAM_URL_MAX];
+      ui_url_copy(url, sizeof url, play_url);
+      bool too_big = vst.no_range && vst.total > (int64_t)CCORD_AV_MAX_INPUT;
       media_player_close(ui);
+      if (ui->media_audio_url) ui->media_audio_url[0] = '\0';
       ui->dirty = true;
       if (too_big) {
         player_warn(url, "stream", "server does not support Range requests and the file is larger than 32 MiB");
@@ -3724,7 +3812,7 @@ static void media_player_stream_poll(ccord_ui *ui)
         ui->media_playing = false;
         return;
       }
-      if (st.no_range) {
+      if (vst.no_range) {
         char host[256];
         player_log_host(url, host, sizeof host);
         CCORD_LOG_I("player: stream server ignores Range; downloading whole file host=%s", host);
@@ -3733,18 +3821,41 @@ static void media_player_stream_poll(ccord_ui *ui)
       if (ui->media_failed) ui->media_playing = false;
       return;
     }
-    if (state == CCORD_AV_READY) {
-      media_player_opened(ui, false);
-      ui->dirty = true;
-      return;
-    }
+    if (vstate == CCORD_AV_READY) ui->media_v_ready = true;
   }
-  if (state == CCORD_AV_FAILED) {
-    if (st.error != CCORD_OK) player_warn(ui->media_url, "stream", "%s", st.error_text[0] ? st.error_text : "failed");
-    else player_warn(ui->media_url, "decode", "not playable: %s", aerr.message[0] ? aerr.message : "decoder refused it");
+  if (vstate == CCORD_AV_FAILED) {
+    if (vst.error != CCORD_OK) player_warn(play_url, "stream", "%s", vst.error_text[0] ? vst.error_text : "failed");
+    else player_warn(play_url, "decode", "not playable: %s", verr.message[0] ? verr.message : "decoder refused it");
     ui->media_failed = true;
     ui->media_playing = false;
     ui->media_buffering = false;
+    ui->dirty = true;
+    return;
+  }
+
+  if (ui->media_audio_net && ui->media_audio_stream) {
+    const char *aurl = (ui->media_audio_url && ui->media_audio_url[0]) ? ui->media_audio_url : play_url;
+    ccord_media_stream_stats ast;
+    ccord_media_stream_stats_get(ui->media_audio_net, &ast);
+    ccord_error aerr;
+    memset(&aerr, 0, sizeof aerr);
+    ccord_av_state astate = ccord_av_stream_state(ui->media_audio_stream, &aerr);
+    if (!ui->media_loaded && astate == CCORD_AV_READY) ui->media_a_ready = true;
+    if (astate == CCORD_AV_FAILED ||
+        (!ui->media_loaded && (ast.no_range || ast.error == CCORD_ERR_PERMISSION || ast.error == CCORD_ERR_UNSUPPORTED))) {
+      // If the separate audio track fails, log it and drop audio rather than killing video playback unless video also failed.
+      if (ast.error != CCORD_OK) player_warn(aurl, "stream", "%s", ast.error_text[0] ? ast.error_text : "audio failed");
+      else player_warn(aurl, "decode", "audio not playable: %s", aerr.message[0] ? aerr.message : "decoder refused it");
+      ccord_av_stream_close(ui->media_audio_stream);
+      ui->media_audio_stream = nullptr;
+      ccord_session_close_media_stream(ui->d.session, ui->media_audio_net);
+      ui->media_audio_net = nullptr;
+      ui->media_a_ready = false;
+    }
+  }
+
+  if (!ui->media_loaded && ui->media_v_ready && (!ui->media_audio_stream || ui->media_a_ready)) {
+    media_player_opened(ui, false);
     ui->dirty = true;
   }
 }
@@ -3752,24 +3863,54 @@ static void media_player_stream_poll(ccord_ui *ui)
 static bool media_player_tick(ccord_ui *ui, uint64_t dt)
 {
   if (!ui || !ui->media_url[0]) return false;
+  if (ui->d.session) {
+    ccord_video_resolved vr;
+    while (ccord_session_pop_video_resolved(ui->d.session, &vr)) {
+      if (!ui->media_resolving || vr.req_id != ui->media_resolve_req_id) continue;
+      ui->media_resolving = false;
+      ui->media_resolve_req_id = 0;
+      if (vr.status != CCORD_OK || !vr.video_url[0]) {
+        player_warn(ui->media_url, "resolve", "%s", vr.error[0] ? vr.error : "could not resolve video");
+        if (vr.missing_helper) {
+          snprintf(ui->media_fail_hint, sizeof ui->media_fail_hint, "Install yt-dlp to play - click title to open");
+        }
+        ui->media_failed = true;
+        ui->media_playing = false;
+        ui->media_buffering = false;
+      } else {
+        if (vr.duration_ms > 0) {
+          ui->media_duration_ms = vr.duration_ms;
+          ui->media_duration_known = true;
+        }
+        media_player_start_urls(ui, vr.video_url, vr.audio_url);
+        if (ui->media_failed) ui->media_playing = false;
+      }
+      ui->dirty = true;
+    }
+  }
+  if (ui->media_resolving) {
+    ui->media_buffering = ui->media_playing;
+    return true;
+  }
   if (ui->media_net && !ui->media_failed) media_player_stream_poll(ui);
   if (!ui->media_loaded && !ui->media_failed && ui->d.session && !ui->media_net) {
-    const ccord_media_item *it = ccord_session_get_media(ui->d.session, ui->media_url);
+    const char *play_url = media_player_active_play_url(ui);
+    const ccord_media_item *it = ccord_session_get_media(ui->d.session, play_url);
     if (it && it->data && it->len > 0) {
       ccord_error cerr;
       ui->media_stream = ccord_av_stream_open(it->data, it->len, UI_PLAYER_MAX_DIM, CCORD_AV_MEDIA, &cerr);
       if (ui->media_stream) {
         media_player_opened(ui, true);
       } else {
-        player_warn(ui->media_url, "decode", "%zu bytes not playable: %s", it->len,
+        player_warn(play_url, "decode", "%zu bytes not playable: %s", it->len,
                     cerr.message[0] ? cerr.message : "decoder refused them");
         ccord_error_clear(&cerr);
         ui->media_failed = true;
         ui->media_playing = false;
       }
       ui->dirty = true;
-    } else if (ccord_session_media_failed(ui->d.session, ui->media_url)) {
-      player_warn(ui->media_url, "download", "failed (HTTP status, timeout or size cap; see the live: media line)");
+    } else if (ccord_session_media_failed(ui->d.session, play_url)) {
+      player_warn(play_url, "download", "failed (HTTP status, timeout or size cap; see the live: media line)");
       ui->media_failed = true;
       ui->media_playing = false;
       ui->dirty = true;
@@ -3782,7 +3923,9 @@ static bool media_player_tick(ccord_ui *ui, uint64_t dt)
     return ui->media_playing || (ui->media_net && !ui->media_failed);
   }
   ccord_av_stream *st = ui->media_stream;
+  ccord_av_stream *ast = ui->media_audio_stream ? ui->media_audio_stream : st;
   const ccord_av_info *inf = ccord_av_stream_info(st);
+  const ccord_av_info *ainf = ccord_av_stream_info(ast);
   if (ui->media_playing && !ui->media_buffering) {
     uint32_t step_ms = dt > 500u ? 500u : (uint32_t)dt;
     ui->media_pos_ms += step_ms;
@@ -3794,9 +3937,14 @@ static bool media_player_tick(ccord_ui *ui, uint64_t dt)
     }
     if (step_ms > 0) ui->dirty = true;
   }
-  // The clock only runs while the decoder keeps up; paused, this still brings up the frame at the playhead.
+  // The clock only runs while the decoder(s) keep up; paused, this still brings up the frame at the playhead.
   bool caught_up = ccord_av_stream_sync(st, ui->media_pos_ms, UI_PLAYER_SYNC_BUDGET_MS);
   if (ui->media_net && ccord_av_stream_starved(st)) caught_up = false;   // waiting on the network: the clock holds
+  if (ui->media_audio_stream) {
+    bool a_ok = ccord_av_stream_sync(ui->media_audio_stream, ui->media_pos_ms, UI_PLAYER_SYNC_BUDGET_MS);
+    if (ui->media_audio_net && ccord_av_stream_starved(ui->media_audio_stream)) a_ok = false;
+    caught_up = caught_up && a_ok;
+  }
   if (inf->has_video) {
     uint32_t serial = 0;
     if (ccord_av_stream_frame(st, &serial) && serial != ui->media_frame_serial) ui->dirty = true;
@@ -3806,10 +3954,11 @@ static bool media_player_tick(ccord_ui *ui, uint64_t dt)
     return !caught_up;
   }
   ui->media_buffering = !caught_up;
-  if (inf->has_audio) media_player_feed_audio(ui);
+  if (ainf->has_audio) media_player_feed_audio(ui, ast);
   // Decoded to the end is not played to the end: the sound queued ahead of the clock still has to be heard.
-  bool tail_heard = !inf->has_audio || ui->media_pos_ms >= ccord_av_stream_pcm_pos_ms(st);
-  if (caught_up && tail_heard && ccord_av_stream_ended(st)) {
+  bool tail_heard = !ainf->has_audio || ui->media_pos_ms >= ccord_av_stream_pcm_pos_ms(ast);
+  bool all_ended = ccord_av_stream_ended(st) && (!ui->media_audio_stream || ccord_av_stream_ended(ui->media_audio_stream));
+  if (caught_up && tail_heard && all_ended) {
     ui->media_playing = false;
     if (!ui->media_duration_known) {
       ui->media_duration_ms = ui->media_pos_ms > 0 ? ui->media_pos_ms : 1u;
@@ -5455,7 +5604,9 @@ void ui_pump_media(ccord_ui *ui, ccord_renderer *r)
   bool invalidate_vlist = false;
   ccord_media_item item;
   while (uploaded < max_uploads_per_frame && ccord_session_pop_media(ui->d.session, &item)) {
-    if (ui->media_url[0] && strcmp(item.url, ui->media_url) == 0) {
+    if ((ui->media_url[0] && strcmp(item.url, ui->media_url) == 0) ||
+        (ui->media_play_url && ui->media_play_url[0] && strcmp(item.url, ui->media_play_url) == 0) ||
+        (ui->media_audio_url && ui->media_audio_url[0] && strcmp(item.url, ui->media_audio_url) == 0)) {
       ui->dirty = true;
       continue;
     }
@@ -8550,11 +8701,11 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     if (mh->play_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, mh->play_rect)) {
       if (strcmp(ui->media_url, mh->url) != 0 || ui->media_att_id != mh->att_id) {
         media_player_select(ui, mh);
-        ui->media_playing = true;
+        ui->media_playing = !ui->media_failed;
       } else {
         if (ui->media_failed) {
           media_player_select(ui, mh);   // try the download again
-          ui->media_playing = true;
+          ui->media_playing = !ui->media_failed;
         } else {
           if (!ui->media_playing && ui->media_pos_ms >= ui->media_duration_ms) media_player_seek(ui, 0);
           ui->media_playing = !ui->media_playing;

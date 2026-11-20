@@ -45,6 +45,8 @@
 // Room for every URL the message parser accepts (CCORD_RICH_URL_MAX_BYTES) plus the NUL: ui_url_copy blanks a URL
 // that does not fit, which silently removes the play hit of a long signed CDN / media-proxy video URL.
 #define UI_URL_MAX (CCORD_RICH_URL_MAX_BYTES + 1u)
+// Resolved stream URLs (e.g. signed YouTube googlevideo.com DASH streams) may exceed 2048 bytes.
+#define UI_STREAM_URL_MAX 4096u
 #define UI_REACTION_HIT_MAX 64u
 #define UI_USER_HIT_MAX 128u
 #define UI_REPLY_HIT_MAX 32u
@@ -167,7 +169,8 @@ typedef struct ui_media_hit {
   ccord_rect open_rect;
   ccord_id att_id;
   uint32_t duration_ms;
-  const char *url;   // points into ui->hit_arena (or "" sentinel)
+  const char *url;     // points into ui->hit_arena (or "" sentinel)
+  bool needs_resolve;  // true for third-party video pages (YouTube, X, etc.) that resolve to stream URL(s) on click
 } ui_media_hit;
 
 // One requested media URL: what to decode it as, and when a failed download may be tried again.
@@ -810,7 +813,13 @@ struct ccord_ui {
   ui_media_hit media_hits[UI_MEDIA_HIT_MAX];
   size_t nmedia_hits;
   char media_url[UI_URL_MAX];
+  char *media_play_url;            // lazily allocated [UI_STREAM_URL_MAX]: actual stream URL (== media_url for direct clips)
+  char *media_audio_url;           // lazily allocated [UI_STREAM_URL_MAX]: optional separate audio stream URL (DASH)
+  char media_fail_hint[96];        // optional short error overlay text ("" = default retry prompt)
   ccord_id media_att_id;
+  uint64_t media_resolve_req_id;   // non-zero while waiting for ccord_session_resolve_video
+  bool media_resolving;
+  bool media_v_ready, media_a_ready;
   bool media_playing, media_loaded, media_failed;
   bool media_buffering;            // playing, but the decoder has not caught up with the clock
   bool media_audio_resync;         // re-anchor the audio queue to the clock (start, resume, seek)
@@ -819,6 +828,8 @@ struct ccord_ui {
   uint32_t media_frame_serial;     // serial of the video frame last uploaded as a texture
   ccord_av_stream *media_stream;   // open while a clip is selected (streamed: from the first request; whole file: once it arrived)
   ccord_media_stream *media_net;   // the ranged byte source behind media_stream; closed after it. nullptr for a whole-file clip
+  ccord_av_stream *media_audio_stream;   // optional separate audio stream for resolved DASH videos
+  ccord_media_stream *media_audio_net;   // ranged byte source behind media_audio_stream
   ccord_audio *media_audio;
   size_t dbg_gallery_cards, dbg_media_player_cards, dbg_embed_fields_drawn;
 

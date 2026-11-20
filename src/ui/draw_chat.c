@@ -3398,13 +3398,25 @@ static const char *embed_media_url(const ccord_embed_media *m)
   return m->url ? m->url : "";
 }
 
-// A video file an embed points at that the inline player can fetch: Discord's proxied copy, or a direct link to
-// a media file. "" for player pages (YouTube and the like), which open in the browser instead.
+// A video file an embed points at that the inline player can fetch directly: Discord's proxied copy, a direct media
+// file link, or a known direct-video CDN / tweet-fixer redirect host (excluding HLS/DASH manifests). "" for player
+// pages (YouTube, X/Twitter watch pages, etc.), which resolve via embed_resolvable_video_url().
 static const char *embed_video_url(const ccord_embed *e)
 {
   if (e->video.proxy_url && e->video.proxy_url[0]) return e->video.proxy_url;
   const char *u = e->video.url ? e->video.url : "";
-  return (ui_url_path_ends(u, ".mp4") || ui_url_path_ends(u, ".webm") || ui_url_path_ends(u, ".mov")) ? u : "";
+  if (!u[0]) return "";
+  if (ui_url_path_ends(u, ".mp4") || ui_url_path_ends(u, ".webm") || ui_url_path_ends(u, ".mov") ||
+      ui_url_path_ends(u, ".m4v") || ui_url_path_ends(u, ".mkv") || ui_url_path_ends(u, ".ogv")) {
+    return u;
+  }
+  if (!ui_url_path_ends(u, ".m3u8") && !ui_url_path_ends(u, ".mpd")) {
+    static const char *const k_direct_vid_hosts[] = {
+      "video.twimg.com", "d.fxtwitter.com", "t.fxtwitter.com", "dl.fxtwitter.com", "d.vxtwitter.com",
+    };
+    if (url_host_in_list(u, k_direct_vid_hosts, sizeof k_direct_vid_hosts / sizeof k_direct_vid_hosts[0])) return u;
+  }
+  return "";
 }
 
 // Looping clip URL for a GIF/GIFV embed, plus an optional origin fallback when proxy_url fails.
@@ -3422,6 +3434,45 @@ static const char *embed_gif_clip_url(const ccord_embed *e, const char **fallbac
     return vproxy;
   }
   return vurl_ok ? vurl : "";
+}
+
+static bool url_is_x_host(const char *u)
+{
+  static const char *const k_x[] = {
+    "x.com", "www.x.com", "mobile.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com",
+    "fxtwitter.com", "www.fxtwitter.com", "vxtwitter.com", "www.vxtwitter.com",
+    "fixupx.com", "www.fixupx.com", "fixvx.com", "www.fixvx.com", "twittpr.com", "xcancel.com",
+  };
+  return url_host_in_list(u, k_x, sizeof k_x / sizeof k_x[0]);
+}
+
+// Discord often sends X/Twitter video embeds without populating `embed.video`, putting Twitter's video thumbnail URL
+// (`ext_tw_video_thumb/`, `amplify_video_thumb/`, `tweet_video_thumb/`) in `image` or `thumbnail` instead.
+static bool embed_is_x_video_thumb(const ccord_embed *e)
+{
+  if (!e || !e->url || !e->url[0]) return false;
+  if (!url_is_x_host(e->url)) return false;
+  const char *urls[4] = {e->image.url, e->image.proxy_url, e->thumbnail.url, e->thumbnail.proxy_url};
+  for (size_t i = 0; i < 4; i++) {
+    if (!urls[i] || !urls[i][0]) continue;
+    if (strstr(urls[i], "ext_tw_video_thumb/") || strstr(urls[i], "amplify_video_thumb/") ||
+        strstr(urls[i], "tweet_video_thumb/")) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Canonical https:// page URL for a third-party video embed (YouTube, X/Twitter, Vimeo, etc.) that needs on-click
+// resolution before streaming inline. Returns "" when the embed is not a resolvable video page.
+static const char *embed_resolvable_video_url(const ccord_embed *e)
+{
+  if (!e) return "";
+  bool has_vid = (e->video.url && e->video.url[0]) || (e->video.proxy_url && e->video.proxy_url[0]);
+  if (!has_vid && !embed_is_x_video_thumb(e)) return "";
+  if (e->url && strncasecmp(e->url, "https://", 8) == 0) return e->url;
+  if (e->video.url && strncasecmp(e->video.url, "https://", 8) == 0) return e->video.url;
+  return "";
 }
 
 // Formats the media proxy must not convert to a WebP still.
@@ -3677,6 +3728,7 @@ static void draw_voice_message_card(ccord_ui *ui, ccord_renderer *r, const decor
     mh->att_id = att_id;
     mh->duration_ms = a->duration_ms;
     mh->url = strlen(url) < UI_URL_MAX ? ui_hit_cstr(ui, url) : "";
+    mh->needs_resolve = false;
   }
 }
 
@@ -3684,11 +3736,12 @@ static void draw_voice_message_card(ccord_ui *ui, ccord_renderer *r, const decor
 
 // A video the inline player can show in a picture box.
 typedef struct video_src {
-  const char *url;         // the file to play; "" = poster-only link
+  const char *url;         // the file (or page URL when needs_resolve) to play; "" = poster-only link
   const char *poster;      // still shown before playback, "" = none
   const char *poster_alt;  // asked for when `poster` fails to load
   ccord_id id;             // player identity (attachment id, or a hash for embeds)
   uint32_t duration_ms;    // 0 = unknown until the file is open
+  bool needs_resolve;      // true for third-party video pages (YouTube, X, etc.) resolved on click
 } video_src;
 
 static void draw_overlay_pill(ccord_ui *ui, ccord_renderer *r, ccord_rect vp, const char *text)
@@ -3747,8 +3800,8 @@ static void draw_video_surface(ccord_ui *ui, ccord_renderer *r, ccord_rect vp, f
   }
 
   if (active && ui->media_failed) {
-    draw_overlay_pill(ui, r, vp, "Couldn't load - click to retry");
-  } else if (playing && (ui->media_buffering || !ui->media_loaded)) {
+    draw_overlay_pill(ui, r, vp, ui->media_fail_hint[0] ? ui->media_fail_hint : "Couldn't load - click to retry");
+  } else if (playing && (ui->media_resolving || ui->media_buffering || !ui->media_loaded)) {
     draw_overlay_pill(ui, r, vp, "Loading...");
   } else if (!playing) {
     float cx = vp.x + vp.w * 0.5f, cy = vp.y + vp.h * 0.5f;
@@ -3790,6 +3843,7 @@ static void draw_video_surface(ccord_ui *ui, ccord_renderer *r, ccord_rect vp, f
     mh->att_id = v->id;
     mh->duration_ms = v->duration_ms;
     mh->url = (v->url && strlen(v->url) < UI_URL_MAX) ? ui_hit_cstr(ui, v->url) : "";
+    mh->needs_resolve = v->needs_resolve;
   }
 }
 
@@ -3898,6 +3952,7 @@ static float draw_media_player_card(ccord_ui *ui, ccord_renderer *r, const decor
     mh->att_id = att_id;
     mh->duration_ms = a->duration_ms;
     mh->url = strlen(url) < UI_URL_MAX ? ui_hit_cstr(ui, url) : "";
+    mh->needs_resolve = false;
     if (is_video && ui->nmedia_hits < UI_MEDIA_HIT_MAX) {
       ui_media_hit *vh = &ui->media_hits[ui->nmedia_hits++];
       *vh = *mh;
@@ -4019,10 +4074,13 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
   float cw = clampf(w, 120.0f, 432.0f);
   float pad_l = 14.0f, pad_r = 12.0f, pad_v = 8.0f;
   float full_w = maxf(cw - pad_l - pad_r, 48.0f);
+  const char *resolve_url = vid_url[0] ? "" : embed_resolvable_video_url(e);
+  const char *play_url = vid_url[0] ? vid_url : resolve_url;
+  bool needs_resolve = !vid_url[0] && resolve_url[0] != '\0';
   // The wide slot under the text holds, in this order of preference: the embed's video (its thumbnail is then the
   // poster), its image, or - for an article - the thumbnail as a lead picture. Only a thumbnail that is none of
   // these sits small in the corner.
-  bool video_box = has_vid && (vid_url[0] || thumb_url[0] || img_url[0]);
+  bool video_box = (has_vid || resolve_url[0]) && (play_url[0] || thumb_url[0] || img_url[0]);
   bool lead_thumb = !video_box && !img_url[0] && thumb_url[0] && e->kind == CCORD_EMBED_ARTICLE;
   const char *big_url = video_box ? "" : (img_url[0] ? img_url : (lead_thumb ? thumb_url : ""));
   const ccord_embed_media *big_m = img_url[0] ? &e->image : &e->thumbnail;
@@ -4034,9 +4092,9 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
     thumb_w = clampf((float)e->thumbnail.width * sc, 40.0f, 80.0f);
     thumb_h = clampf((float)e->thumbnail.height * sc, 40.0f, 80.0f);
   }
-  // A player page (YouTube and the like) comes with a long page description Discord leaves out; a video file
-  // shared through a link (tweet fixers, direct links) keeps its text.
-  if (video_box && !vid_url[0] && has_title) has_desc = false;
+  // Player pages (YouTube and the like) come with a long page description Discord leaves out; X/Twitter posts and
+  // tweet fixers keep their text readable above the video.
+  if (video_box && !vid_url[0] && has_title && (!needs_resolve || !url_is_x_host(play_url))) has_desc = false;
   float top_w = has_thumb ? maxf(full_w - thumb_w - 12.0f, 48.0f) : full_w;
   float tx = x + pad_l;
   float cy = y + pad_v;
@@ -4211,11 +4269,11 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
       if (ui_media_sized_url(poster, poster_m->width, poster_m->height, 800u, 600u, false, pbuf, sizeof pbuf)) {
         psized = pbuf;
       }
-      video_src vs = {.url = vid_url, .poster = psized, .poster_alt = poster,
-                      .id = p->msg_id ^ ui_name_id(vid_url), .duration_ms = 0};
+      video_src vs = {.url = play_url, .poster = psized, .poster_alt = poster,
+                      .id = p->msg_id ^ ui_name_id(play_url), .duration_ms = 0, .needs_resolve = needs_resolve};
       draw_video_surface(ui, r, vp, 4.0f, &vs, true);
-      // Not a file we can play: the picture is a link to the page that can.
-      if (!vid_url[0] && e->url && e->url[0]) record_link_hit(ui, vp, e->url, strlen(e->url));
+      // Not playable or resolvable (e.g. non-HTTPS): the picture opens the page in the browser instead.
+      if (!play_url[0] && e->url && e->url[0]) record_link_hit(ui, vp, e->url, strlen(e->url));
     }
     cy += bh + 2.0f + 6.0f;
   } else if (big_url[0]) {
