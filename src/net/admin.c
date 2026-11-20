@@ -4439,8 +4439,11 @@ static void fill_event_create(ccord_jw *w, const void *p)
     ccord_jw_id(w, ev->channel_id);
   }
   if (ev->location[0] != '\0') {
+    ccord_jw_key(w, "entity_metadata");
+    ccord_jw_begin_object(w);
     ccord_jw_key(w, "location");
     ccord_jw_cstr(w, ev->location);
+    ccord_jw_end_object(w);
   }
   ccord_jw_key(w, "entity_type");
   ccord_jw_int(w, ev->entity_type);
@@ -4541,9 +4544,15 @@ static void fill_event_modify(ccord_jw *w, const void *p)
     else ccord_jw_cstr(w, e->description);
   }
   if (e->location) {
-    ccord_jw_key(w, "location");
-    if (e->location[0] == '\0') ccord_jw_null(w);
-    else ccord_jw_cstr(w, e->location);
+    ccord_jw_key(w, "entity_metadata");
+    if (e->location[0] == '\0') {
+      ccord_jw_null(w);
+    } else {
+      ccord_jw_begin_object(w);
+      ccord_jw_key(w, "location");
+      ccord_jw_cstr(w, e->location);
+      ccord_jw_end_object(w);
+    }
   }
   if (e->channel_id >= 0) {
     ccord_jw_key(w, "channel_id");

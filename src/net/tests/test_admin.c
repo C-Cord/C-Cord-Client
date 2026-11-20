@@ -1919,7 +1919,8 @@ static void test_stage_lifecycle_and_scheduled_events(void)
   CT_CHECK(ccord_admin_event_create(&r, GUILD, &ext, nullptr, &err) == CCORD_OK);
   CT_CHECK(strcmp(r.body, "{\"name\":\"Meetup\",\"privacy_level\":2,"
                           "\"scheduled_start_time\":\"2026-11-10T12:00:00.000Z\","
-                          "\"scheduled_end_time\":\"2026-11-10T13:00:00.000Z\",\"location\":\"Berlin\","
+                          "\"scheduled_end_time\":\"2026-11-10T13:00:00.000Z\","
+                          "\"entity_metadata\":{\"location\":\"Berlin\"},"
                           "\"entity_type\":3}") == 0);
 
   // Create gates: name, type, start, and the per-type channel / location / end rules.
