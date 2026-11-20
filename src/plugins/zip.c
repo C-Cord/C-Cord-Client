@@ -15,8 +15,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <zlib.h>
-#if !CCORD_OS_WINDOWS
+#if CCORD_OS_WINDOWS
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -409,6 +415,18 @@ static bool pack_walk(pack_ctx *ctx, const char *base_dir)
                                  : snprintf(sc->rel, sizeof sc->rel, "%s", ename);
       if (rlen_s < 0 || (size_t)rlen_s >= sizeof sc->rel) continue;
       if (snprintf(sc->full, sizeof sc->full, "%s/%s", base_dir, sc->rel) >= (int)sizeof sc->full) continue;
+      // Never follow symlinks or Windows reparse points when packing a plugin archive.
+#if CCORD_OS_WINDOWS
+      {
+        DWORD attrs = GetFileAttributesA(sc->full);
+        if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) continue;
+      }
+#else
+      {
+        struct stat lst;
+        if (lstat(sc->full, &lst) != 0 || S_ISLNK(lst.st_mode)) continue;
+      }
+#endif
       if (is_dir || ccord_path_is_dir(sc->full)) {
         if (npending >= 4096u) { ok = false; break; }
         if (npending == cappending) {
