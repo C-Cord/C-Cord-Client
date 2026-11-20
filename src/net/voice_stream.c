@@ -161,6 +161,7 @@ static void vstream_maybe_inject_udp(ccord_vstream *s)
   if ((g->state == CCORD_VOICE_READY || g->state == CCORD_VOICE_ESTABLISHED) && g->peer_valid) {
     if (g->udp_fd >= 0 && g->udp_fd != s->params.udp_fd) ccord_sock_close((ccord_socket_t)g->udp_fd);
     g->udp_fd = s->params.udp_fd;
+    g->udp_connected = false;
     // The pump's recvfrom loop is non-blocking; an injected socket may not be.
     (void)ccord_sock_set_nonblock((ccord_socket_t)g->udp_fd);
     int big_buf = 4 * 1024 * 1024;
@@ -176,7 +177,7 @@ static void vstream_maybe_inject_udp(ccord_vstream *s)
     if (g->ssrc != 0) {
       uint8_t req[CCORD_VOICE_IP_DISCOVERY_SIZE];
       ccord_voice_ip_discovery_build(g->ssrc, req);
-      (void)vg_sock_sendto(g->udp_fd, req, sizeof req, (const struct sockaddr *)&g->peer_addr, sizeof g->peer_addr);
+      (void)vg_udp_send(g, req, sizeof req);
     }
   }
   ccord_mutex_unlock(g->mtx);
@@ -318,8 +319,7 @@ ccord_status ccord_vstream_send_audio(ccord_vstream *s, const uint8_t *opus, siz
                 g->speaking_active = true;
               }
             }
-            ptrdiff_t sent = vg_sock_sendto(g->udp_fd, pkt, pkt_len, (const struct sockaddr *)&g->peer_addr,
-                                            sizeof g->peer_addr);
+            ptrdiff_t sent = vg_udp_send(g, pkt, pkt_len);
             if (sent < 0 || (size_t)sent != pkt_len) {
               st = ccord_error_set(err, CCORD_ERR_IO, "vstream: udp sendto failed");
             }

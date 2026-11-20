@@ -248,6 +248,7 @@ struct ccord_voice_gateway {
   // run under an already-held lock use the unlocked vg_* variants.
   uint32_t lifecycle_gen;       // bumped on stop / WS drop / connect to guard unlocked WS I/O
   uint32_t udp_gen;             // bumped on UDP close / discover to guard unlocked DNS & discovery poll
+  bool udp_connected;           // true when udp_fd was connect()ed to peer_addr (macOS/BSD rejects sendto dst)
   bool ws_connecting;           // curl_easy_perform in flight outside g->mtx
   bool ws_tx_busy;              // curl_ws_send retry loop active (prevents WS frame interleaving)
   ccord_mutex *mtx;
@@ -306,6 +307,15 @@ static inline int vg_sock_setsockopt_int(int fd, int level, int optname, int val
 #endif
 }
 
+static inline ptrdiff_t vg_sock_send(int fd, const void *buf, size_t len)
+{
+#if defined(_WIN32)
+  return (ptrdiff_t)send((SOCKET)fd, (const char *)buf, (int)len, 0);
+#else
+  return (ptrdiff_t)send(fd, buf, len, 0);
+#endif
+}
+
 static inline ptrdiff_t vg_sock_sendto(int fd, const void *buf, size_t len, const struct sockaddr *dst, socklen_t dstlen)
 {
 #if defined(_WIN32)
@@ -313,6 +323,13 @@ static inline ptrdiff_t vg_sock_sendto(int fd, const void *buf, size_t len, cons
 #else
   return (ptrdiff_t)sendto(fd, buf, len, 0, dst, dstlen);
 #endif
+}
+
+static inline ptrdiff_t vg_udp_send(const ccord_voice_gateway *g, const void *buf, size_t len)
+{
+  if (!g || g->udp_fd < 0 || !g->peer_valid) return -1;
+  if (g->udp_connected) return vg_sock_send(g->udp_fd, buf, len);
+  return vg_sock_sendto(g->udp_fd, buf, len, (const struct sockaddr *)&g->peer_addr, g->peer_addr_len);
 }
 
 static inline ptrdiff_t vg_sock_recvfrom(int fd, void *buf, size_t cap, struct sockaddr *src, socklen_t *srclen)

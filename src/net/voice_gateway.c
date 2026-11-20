@@ -552,6 +552,7 @@ static void vg_close_udp(ccord_voice_gateway *g)
     g->udp_fd = -1;
   }
   g->peer_valid = false;
+  g->udp_connected = false;
   g->udp_video_buf = false;
   g->udp_gen++;
 }
@@ -848,7 +849,7 @@ static void vg_open_udp_and_discover(ccord_voice_gateway *g)
 
     uint8_t req[CCORD_VOICE_IP_DISCOVERY_SIZE];
     ccord_voice_ip_discovery_build(ssrc, req);
-    (void)vg_sock_sendto(fd, req, sizeof req, (const struct sockaddr *)&peer, peer_len);
+    (void)vg_sock_send(fd, req, sizeof req);
 
     // If connecting to loopback (tests) or a live socket, poll briefly for the 74-byte 0x0002 response.
     int wait_ms = (!has_send_hook || strcmp(ip, "127.0.0.1") == 0) ? 25 : 0;
@@ -886,6 +887,7 @@ static void vg_open_udp_and_discover(ccord_voice_gateway *g)
   g->peer_addr = peer;
   g->peer_addr_len = peer_len;
   g->peer_valid = true;
+  g->udp_connected = true;
   g->udp_video_buf = want_video;
   g->ip_discovery_deadline = vg_now(g) + 250u;
   if (dip[0] != '\0') {
@@ -1808,7 +1810,7 @@ static ccord_status vg_seal_and_send_rtp(ccord_voice_gateway *g,
   if (g->udp_fd < 0 || !g->peer_valid) {
     return ccord_error_set(err, CCORD_ERR_IO, "voice: udp socket not ready");
   }
-  ptrdiff_t sent = vg_sock_sendto(g->udp_fd, pkt, pkt_len, (const struct sockaddr *)&g->peer_addr, g->peer_addr_len);
+  ptrdiff_t sent = vg_udp_send(g, pkt, pkt_len);
   if (sent < 0 || (size_t)sent != pkt_len) {
     return ccord_error_set(err, CCORD_ERR_IO, "voice: udp sendto failed");
   }
