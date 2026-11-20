@@ -180,6 +180,7 @@ typedef struct app {
   uint64_t last_synced_self_id;
   size_t last_synced_gcount;
   char last_synced_name[128];
+  bool last_synced_connected;
 #endif
 } app;
 
@@ -679,6 +680,15 @@ static void app_reopen_warm_cache(app *a, const char *token_file)
 #endif
 }
 
+static void reset_account_sync_cache(app *a)
+{
+  if (!a) return;
+  a->last_synced_self_id = 0;
+  a->last_synced_gcount = 0;
+  a->last_synced_name[0] = '\0';
+  a->last_synced_connected = false;
+}
+
 static void app_sync_live_account(app *a)
 {
   if (!a || !a->account || !a->store) return;
@@ -691,13 +701,16 @@ static void app_sync_live_account(app *a)
     if (g && g->id != CCORD_DM_GUILD_ID) real_guilds++;
   }
   const char *name = (u && u->name && u->name[0]) ? u->name : "Discord User";
-  if (self_id == a->last_synced_self_id && real_guilds == a->last_synced_gcount && strcmp(name, a->last_synced_name) == 0) {
+  bool connected = ccord_session_state(a->session) == CCORD_CONN_CONNECTED;
+  if (self_id == a->last_synced_self_id && real_guilds == a->last_synced_gcount &&
+      connected == a->last_synced_connected && strcmp(name, a->last_synced_name) == 0) {
     return;
   }
   a->last_synced_self_id = self_id;
   a->last_synced_gcount = real_guilds;
+  a->last_synced_connected = connected;
   snprintf(a->last_synced_name, sizeof a->last_synced_name, "%s", name);
-  ccord_account_set_token_state(a->account, true, ccord_session_state(a->session) == CCORD_CONN_CONNECTED,
+  ccord_account_set_token_state(a->account, true, connected,
                                 name, name, self_id != CCORD_ID_NONE ? self_id : 1u, real_guilds);
   app_keyring_sync(a);
 }
@@ -705,6 +718,7 @@ static void app_sync_live_account(app *a)
 static void app_connect_live(app *a)
 {
   if (!a || !a->session || a->virtual_clock) return;
+  reset_account_sync_cache(a);
   app_reopen_warm_cache(a, a->token_file);
   ccord_error err = {0};
   ccord_live_config lc = {.token_file = a->token_file, .cache_dir = ccord_warm_dir(a->warm)};
@@ -732,6 +746,7 @@ static void app_disconnect_live(app *a)
 {
   if (!a || !a->session) return;
   a->live = false;
+  reset_account_sync_cache(a);
   if (!a->mock) ccord_app_profile_rest_detach(a->session);   // sign-out/switch: drop the old account's token
   if (a->virtual_clock && a->mock) return;
   ccord_error err = {0};
@@ -965,6 +980,7 @@ static void host_account_action(void *ud, ccord_account_action action)
       a->auth_pending = false;
       app_destroy_auth_q(a);
       ccord_live_wipe(a->mfa_ticket, sizeof a->mfa_ticket);
+      reset_account_sync_cache(a);
       if (ccord_account_has_token_session(a->account)) {
         (void)ccord_live_delete_token(a->token_file, &err);
       }
@@ -976,13 +992,16 @@ static void host_account_action(void *ud, ccord_account_action action)
     case CCORD_ACCOUNT_ACTION_TOKEN_SIGN_IN: {
 #if CCORD_LIVE_ACCOUNT
       const char *tok = ccord_ui_account_token_text(a->ui);
-      if (a->live) app_disconnect_live(a);   // a new token replaces the old session and its guilds
-      a->keyring_synced_id = 0;
-      a->keyring_synced_name[0] = '\0';
       if (ccord_live_save_token(a->token_file, tok, &err) == CCORD_OK) {
+        a->auth_pending = false;
+        app_destroy_auth_q(a);
+        ccord_live_wipe(a->mfa_ticket, sizeof a->mfa_ticket);
+        if (a->live) app_disconnect_live(a);   // a new token replaces the old session and its guilds
+        a->keyring_synced_id = 0;
+        a->keyring_synced_name[0] = '\0';
+        reset_account_sync_cache(a);
         ccord_account_set_token_state(a->account, true, false, "Discord User", "token_session", 1u, 0);
         ccord_ui_clear_account_token_text(a->ui);
-        if (!a->auth_pending) app_destroy_auth_q(a);
         app_connect_live(a);
       } else {
         ccord_ui_set_login_status(a->ui, err.message[0] ? err.message : "Invalid token", false);
@@ -996,6 +1015,7 @@ static void host_account_action(void *ud, ccord_account_action action)
       a->auth_pending = false;
       app_destroy_auth_q(a);
       ccord_live_wipe(a->mfa_ticket, sizeof a->mfa_ticket);
+      reset_account_sync_cache(a);
       (void)ccord_live_delete_token(a->token_file, &err);
       if (a->live) app_disconnect_live(a);
 #endif
@@ -2146,6 +2166,7 @@ static void pump(app *a)
     } else if (a->live && a->session && ccord_session_state(a->session) == CCORD_CONN_FAILED &&
                (ccord_store_self_id(a->store) == CCORD_ID_NONE || ccord_session_is_stale(a->session))) {
       a->live = false;
+      reset_account_sync_cache(a);
       ccord_account_set_token_state(a->account, false, false, nullptr, nullptr, 0, 0);
       app_sync_account_view(a);
       ccord_ui_open_account_settings(a->ui);
