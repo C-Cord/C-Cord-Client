@@ -4168,6 +4168,9 @@ ccord_status ccord_admin_build_sessions_logout(ccord_buf *out, const char hashes
 static ccord_status check_connection_segment(const char *s, const char *what, size_t max, ccord_error *err)
 {
   if (!s || s[0] == '\0') return ccord_error_set(err, CCORD_ERR_INVALID, "%s is required", what);
+  if (strcmp(s, ".") == 0 || strcmp(s, "..") == 0) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "%s has invalid characters", what);
+  }
   size_t n = strlen(s);
   if (n > max) return ccord_error_set(err, CCORD_ERR_RANGE, "%s is too long", what);
   for (size_t i = 0; i < n; i++) {
