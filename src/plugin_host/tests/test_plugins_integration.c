@@ -2,7 +2,12 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _POSIX_C_SOURCE 200809L
 #include <ccord/core/alloc.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <ccord/core/event_bus.h>
 #include <ccord/model/contrib.h>
 #include <ccord/plugins/plugins.h>
@@ -118,6 +123,431 @@ static bool error_has(const ccord_contrib *c, const char *id, const char *needle
 {
   const ccord_plugin_info *info = find_info(c, id);
   return info && info->error && strstr(info->error, needle) != nullptr;
+}
+
+typedef struct v3_clip_log {
+  char items[64][256];
+  size_t count;
+} v3_clip_log;
+
+typedef struct v3_comp_state {
+  char text[256];
+  ccord_id reply_id;
+  bool reply_ping;
+  char attached_name[64];
+  size_t attached_len;
+} v3_comp_state;
+
+typedef struct v3_local_srv {
+  int listen_fd;
+  uint16_t port;
+  volatile int stop;
+} v3_local_srv;
+
+static void v3_on_clip(void *ud, const char *utf8)
+{
+  v3_clip_log *cl = ud;
+  if (cl->count < 64u) snprintf(cl->items[cl->count++], 256u, "%s", utf8 ? utf8 : "");
+}
+
+static bool v3_has_clip(const v3_clip_log *cl, const char *needle)
+{
+  for (size_t i = 0; i < cl->count; i++) {
+    if (strstr(cl->items[i], needle) != nullptr) return true;
+  }
+  return false;
+}
+
+static bool v3_pump_clip(ccord_plugins *pm, ccord_bus *bus, const v3_clip_log *cl, const char *needle)
+{
+  uint64_t deadline = now_ms() + WAIT_MS;
+  while (now_ms() < deadline) {
+    ccord_plugins_pump(pm, now_ms());
+    ccord_bus_drain(bus);
+    if (v3_has_clip(cl, needle)) return true;
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 5 * 1000 * 1000};
+    (void)nanosleep(&ts, nullptr);
+  }
+  return false;
+}
+
+static bool v3_comp_get(void *ud, char *out, size_t cap, size_t *s0, size_t *s1, ccord_id *rid, bool *rp)
+{
+  v3_comp_state *cs = ud;
+  if (out && cap) snprintf(out, cap, "%s", cs->text);
+  if (s0) *s0 = 0;
+  if (s1) *s1 = strlen(cs->text);
+  if (rid) *rid = cs->reply_id;
+  if (rp) *rp = cs->reply_ping;
+  return true;
+}
+
+static bool v3_comp_set(void *ud, const char *text, bool ins, int pos)
+{
+  (void)pos;
+  v3_comp_state *cs = ud;
+  if (!text) text = "";
+  if (ins) {
+    size_t cur = strlen(cs->text);
+    snprintf(cs->text + cur, sizeof cs->text - cur, "%s", text);
+  } else {
+    snprintf(cs->text, sizeof cs->text, "%s", text);
+  }
+  return true;
+}
+
+static bool v3_comp_reply(void *ud, ccord_id mid, bool ping)
+{
+  v3_comp_state *cs = ud;
+  cs->reply_id = mid;
+  cs->reply_ping = ping;
+  return true;
+}
+
+static bool v3_comp_attach(void *ud, const char *fname, const uint8_t *data, size_t len, bool spoiler)
+{
+  (void)data;
+  (void)spoiler;
+  v3_comp_state *cs = ud;
+  snprintf(cs->attached_name, sizeof cs->attached_name, "%s", fname ? fname : "");
+  cs->attached_len = len;
+  return true;
+}
+
+static void *v3_srv_thread(void *arg)
+{
+  v3_local_srv *ctx = arg;
+  struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};
+  (void)setsockopt(ctx->listen_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  int handled = 0;
+  while (!ctx->stop && handled < 4) {
+    int cfd = accept(ctx->listen_fd, nullptr, nullptr);
+    if (cfd < 0) continue;
+    handled++;
+    struct timeval ctv = {.tv_sec = 2, .tv_usec = 0};
+    (void)setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &ctv, sizeof ctv);
+    char req[2048] = "";
+    ssize_t rn = recv(cfd, req, sizeof req - 1, 0);
+    if (rn > 0) {
+      req[rn] = '\0';
+      if (strstr(req, "Upgrade: websocket") != nullptr) {
+        const char *hs =
+          "HTTP/1.1 101 Switching Protocols\r\n"
+          "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+          "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
+        (void)send(cfd, hs, strlen(hs), 0);
+        uint8_t fh[2] = {0};
+        if (recv(cfd, fh, 2, MSG_WAITALL) == 2) {
+          bool masked = (fh[1] & 0x80u) != 0;
+          size_t plen = (size_t)(fh[1] & 0x7fu);
+          uint8_t mk[4] = {0};
+          if (masked) (void)recv(cfd, mk, 4, MSG_WAITALL);
+          uint8_t pay[128] = {0};
+          if (plen < sizeof pay && recv(cfd, pay, plen, MSG_WAITALL) == (ssize_t)plen) {
+            if (masked) { for (size_t i = 0; i < plen; i++) pay[i] ^= mk[i & 3u]; }
+            uint8_t resp[160];
+            char msg[140];
+            int mn = snprintf(msg, sizeof msg, "echo:%.*s", (int)plen, (const char *)pay);
+            resp[0] = 0x81u;
+            resp[1] = (uint8_t)mn;
+            memcpy(resp + 2, msg, (size_t)mn);
+            (void)send(cfd, resp, (size_t)mn + 2u, 0);
+            struct timespec ts = {.tv_sec = 0, .tv_nsec = 80 * 1000 * 1000};
+            (void)nanosleep(&ts, nullptr);
+          }
+        }
+      } else {
+        const char *http_resp =
+          "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 10\r\nConnection: close\r\n\r\npong-local";
+        (void)send(cfd, http_resp, strlen(http_resp), 0);
+      }
+    }
+    close(cfd);
+  }
+  return nullptr;
+}
+
+static void test_api_v3_integration(void)
+{
+  char root[] = "/tmp/ccord-it-v3-XXXXXX";
+  CT_CHECK(mkdtemp(root) != nullptr);
+  char plugins_dir[1100], data_dir[1100], watch_dir[1100];
+  char p1[1200], p2[1200], p3[1200];
+  snprintf(plugins_dir, sizeof plugins_dir, "%s/plugins", root);
+  snprintf(data_dir, sizeof data_dir, "%s/data", root);
+  snprintf(watch_dir, sizeof watch_dir, "%s/watch", root);
+  snprintf(p1, sizeof p1, "%s/v3c1", plugins_dir);
+  snprintf(p2, sizeof p2, "%s/v3c2", plugins_dir);
+  snprintf(p3, sizeof p3, "%s/v3c3", plugins_dir);
+  CT_CHECK(mkdir(plugins_dir, 0700) == 0);
+  CT_CHECK(mkdir(watch_dir, 0700) == 0);
+  CT_CHECK(mkdir(p1, 0700) == 0);
+  CT_CHECK(mkdir(p2, 0700) == 0);
+  CT_CHECK(mkdir(p3, 0700) == 0);
+
+  // Start local loopback HTTP + WebSocket server thread.
+  v3_local_srv srv = {.listen_fd = -1};
+  srv.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  CT_CHECK(srv.listen_fd >= 0);
+  int one = 1;
+  (void)setsockopt(srv.listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = 0};
+  CT_CHECK(bind(srv.listen_fd, (struct sockaddr *)&addr, sizeof addr) == 0);
+  socklen_t alen = sizeof addr;
+  CT_CHECK(getsockname(srv.listen_fd, (struct sockaddr *)&addr, &alen) == 0);
+  srv.port = ntohs(addr.sin_port);
+  CT_CHECK(listen(srv.listen_fd, 8) == 0);
+  pthread_t srv_tid;
+  CT_CHECK(pthread_create(&srv_tid, nullptr, v3_srv_thread, &srv) == 0);
+
+  // Set test env vars (one normal, one secret-blocked).
+  setenv("CCORD_TEST_V3_ENV", "hello-env-v3", 1);
+  setenv("DISCORD_TOKEN", "should-never-leak", 1);
+
+  // Plugin 1: Class 1 v3 features + RPC provider + anti-escalation caller.
+  write_file(p1, "note.txt", "asset-ok-v3");
+  write_file(p1, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.v3c1\",\"name\":\"V3C1\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"commands\",\"storage\",\"clipboard.write\"]}");
+  write_file(p1, "main.lua",
+             "local a = plugin.read_asset('note.txt')\n"
+             "clipboard.write('c1_asset:' .. tostring(a))\n"
+             "settings.schema({{key='flag', type='toggle', label='Flag', default=false}})\n"
+             "settings.on_change(function(k, v) clipboard.write('c1_set:' .. k .. '=' .. tostring(v)) end)\n"
+             "theme.register({id='cyber', name='Cyber', base='c-cord-dark', css=':root{--brand-experiment:#00ffcc;}'})\n"
+             "ui.actionButton.add({id='hdr1', slot='header', label='V3', action=function() clipboard.write('c1_btn:clicked') end})\n"
+             "keybinds.register({id='kb1', label='Test KB', default='CTRL+SHIFT+Y', action=function() clipboard.write('c1_kb:fired') end})\n"
+             "commands.register({\n"
+             "  name='v3cmd', description='V3 test',\n"
+             "  autocomplete=function(args) return {{label='opt_'..args, detail='d', insert_text='opt_'..args}} end,\n"
+             "  run=function(args)\n"
+             "    if args == 'esc' then\n"
+             "      plugin.call('dev.test.v3c3', 'c3_secret', function(res, err)\n"
+             "        clipboard.write(res ~= nil and 'c1_esc:LEAKED' or ('c1_esc:DENIED:' .. tostring(err)))\n"
+             "      end)\n"
+             "      return\n"
+             "    end\n"
+             "    return 'ran:' .. args\n"
+             "  end\n"
+             "})\n"
+             "plugin.expose('c1_echo', function(s) return 'echoed:' .. tostring(s) end)\n");
+
+  // Plugin 2: Class 2 v3 features (panel patch, decorators, theme, composer, hooks, gateway, local msg, earcon, RPC).
+  write_file(p2, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.v3c2\",\"name\":\"V3C2\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"ui.panel\",\"ui.decorate\",\"ui.composer\","
+             "\"theme.write\",\"messages.hook\",\"notifications.hook\",\"gateway.raw\","
+             "\"audio.earcons\",\"clipboard.write\",\"commands\"]}");
+  write_file(p2, "main.lua",
+             "ui.panel.mount({id='p2', slot='modal', width=360, height=200, title='P2',\n"
+             "  root={type='column', id='r', children={{type='text', id='t1', text='init'}}}})\n"
+             "ui.panel.patch('p2', {{op='set_text', id='t1', value='patched_v3'}})\n"
+             "ui.decorate.message_badge({id='b1', target_id='500', widget={type='badge', id='bb', text='VIP'},\n"
+             "  on_event=function(ev, tid) clipboard.write('c2_decor:' .. tostring(tid) .. ':' .. tostring(ev.id)) end})\n"
+             "ui.decorate.message_style({id='s1', target_id='500', accent='#ff00aa', tint='#11223344', collapsed=true, collapse_label='Folded'})\n"
+             "theme.inject_css('l1', '.chat { background-color: #101218; }')\n"
+             "theme.set_icon('mic', 'v3c2:mic')\n"
+             "ui.composer.set_text('draft_v3')\n"
+             "ui.composer.insert('_plus')\n"
+             "ui.composer.set_reply('999', false)\n"
+             "ui.composer.attach_bytes('hello.txt', 'abcde', true)\n"
+             "local ct = ui.composer.get_text()\n"
+             "clipboard.write('c2_comp:' .. tostring(ct))\n"
+             "ui.composer.register_autocomplete({id='sn', trigger='::', description='Snip',\n"
+             "  complete=function(q) return {{label='snip_'..q, detail='snip', insert_text='SNIP_'..q}} end})\n"
+             "hooks.on_before_send(function(d)\n"
+             "  if d.content == 'cancelme' then return {cancel=true, reason='blocked_v3'} end\n"
+             "  if d.content == 'hello' then return {content='HELLO_V3!'} end\n"
+             "end)\n"
+             "hooks.on_link_open(function(d)\n"
+             "  if d.url == 'https://x.com/test' then return {url='https://fxtwitter.com/test'} end\n"
+             "end)\n"
+             "hooks.on_notification(function(d)\n"
+             "  if d.content == 'mute-me' then return {suppress=true} end\n"
+             "  return {title='V3:' .. (d.title or '')}\n"
+             "end)\n"
+             "gateway.on_raw('TEST_V3_EVENT', function(d) clipboard.write('c2_gw:' .. tostring(d.val)) end)\n"
+             "messages.inject_local('200', {author='V3Bot', badge='BOT', content='Ephemeral hello', dismissible=true})\n"
+             "audio.override_earcon('mention', 'RIFFxxxx')\n"
+             "commands.register('callc1', 'RPC test', function()\n"
+             "  plugin.call('dev.test.v3c1', 'c1_echo', 'world', function(res, err)\n"
+             "    clipboard.write('c2_rpc:' .. tostring(res) .. ':' .. tostring(err))\n"
+             "  end)\n"
+             "end)\n");
+
+  // Plugin 3: Class 3 v3 features (fs.stat, fs.watch, system.exec, system.spawn, system.env, net.local, net.ws, RPC).
+  write_file(p3, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.v3c3\",\"name\":\"V3C3\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"fs.read\",\"fs.watch\",\"system.exec\","
+             "\"system.env\",\"network.local\",\"clipboard.write\"]}");
+  char p3_lua[4096];
+  snprintf(p3_lua, sizeof p3_lua,
+           "local st = fs.stat('%s')\n"
+           "clipboard.write('c3_stat:' .. tostring(st and st.is_dir))\n"
+           "fs.watch('%s', function(ev) clipboard.write('c3_watch:' .. tostring(ev.kind)) end)\n"
+           "local okv = system.env('CCORD_TEST_V3_ENV')\n"
+           "local tok = system.env('DISCORD_TOKEN')\n"
+           "clipboard.write('c3_env:' .. tostring(okv) .. ':' .. tostring(tok))\n"
+           "system.exec({cmd='/bin/sh', args={'-c', 'printf exec_ok_v3'}}, function(r, e)\n"
+           "  clipboard.write('c3_exec:' .. tostring(r and r.code) .. ':' .. tostring(r and r.stdout))\n"
+           "end)\n"
+           "local sp_out = ''\n"
+           "system.spawn({cmd='/bin/sh', args={'-c', 'printf spawn_ok_v3'},\n"
+           "  on_stdout=function(d) sp_out = sp_out .. (d.data or '') end,\n"
+           "  on_exit=function(d) clipboard.write('c3_spawn:' .. tostring(d.code) .. ':' .. sp_out) end})\n"
+           "net.local_net.request({url='http://127.0.0.1:%u/ping', method='GET'}, function(r, e)\n"
+           "  clipboard.write('c3_http:' .. tostring(r and r.status) .. ':' .. tostring(r and r.body))\n"
+           "end)\n"
+           "local ws = net.ws.connect('ws://127.0.0.1:%u/ws', {\n"
+           "  on_open=function() end,\n"
+           "  on_message=function(m) clipboard.write('c3_ws:' .. tostring(m.data)) end,\n"
+           "})\n"
+           "ws:on_open(function() ws:send('ping_ws') end)\n"
+           "plugin.expose('c3_secret', function() return 'TOP_SECRET' end)\n",
+           watch_dir, watch_dir, (unsigned)srv.port, (unsigned)srv.port);
+  write_file(p3, "main.lua", p3_lua);
+
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  ccord_contrib *contrib = ccord_contrib_create(&err);
+  CT_CHECK(bus && store && contrib);
+
+  v3_clip_log cl = {0};
+  v3_comp_state comp = {0};
+  ccord_contrib_ui_hooks uih = {
+    .ud = &comp,
+    .composer_get = v3_comp_get,
+    .composer_set = v3_comp_set,
+    .composer_set_reply = v3_comp_reply,
+    .composer_attach_bytes = v3_comp_attach,
+  };
+  ccord_contrib_set_ui_hooks(contrib, &uih);
+
+  const char *dirs[] = {plugins_dir};
+  ccord_plugins_config cfg = {
+    .store = store, .contrib = contrib, .bus = bus,
+    .search_dirs = dirs, .search_dir_count = 1,
+    .data_dir = data_dir, .host_exe = CCORD_PLUGIN_HOST_BIN,
+    .clipboard_write = v3_on_clip, .clipboard_ud = &cl,
+  };
+  ccord_plugins *pm = ccord_plugins_create(&cfg, &err);
+  CT_CHECK(pm != nullptr);
+  (void)ccord_plugins_load_all(pm);
+
+  // Class 1 loads immediately; Class 2 & Class 3 wait for consent.
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.v3c1", CCORD_PLUGIN_READY));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.v3c2", CCORD_PLUGIN_NEEDS_CONSENT));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.v3c3", CCORD_PLUGIN_NEEDS_CONSENT));
+
+  const ccord_plugin_info *i2 = find_info(contrib, "dev.test.v3c2");
+  const ccord_plugin_info *i3 = find_info(contrib, "dev.test.v3c3");
+  CT_CHECK(i2 && i3);
+  ccord_contrib_plugin_consent_accept_for(contrib, "dev.test.v3c2", i2->perms_mask);
+  ccord_contrib_plugin_consent_accept_for(contrib, "dev.test.v3c3", i3->perms_mask);
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.v3c2", CCORD_PLUGIN_READY));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.v3c3", CCORD_PLUGIN_READY));
+
+  // Verify Class 1 v3 startup contributions & callbacks.
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c1_asset:asset-ok-v3"));
+  CT_CHECK(ccord_contrib_find_theme_preset(contrib, "dev.test.v3c1", "cyber") != nullptr);
+  CT_CHECK(ccord_contrib_plugin_settings(contrib, "dev.test.v3c1") != nullptr);
+  ccord_contrib_notify_setting_changed(contrib, "dev.test.v3c1", "flag", "true");
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c1_set:flag=true"));
+  ccord_menu_context act_ctx = {.target = CCORD_MENU_CHANNEL, .channel_id = 200};
+  CT_CHECK(ccord_contrib_click_action_btn(contrib, "dev.test.v3c1", "hdr1", &act_ctx));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c1_btn:clicked"));
+  CT_CHECK(ccord_contrib_trigger_keybind(contrib, "dev.test.v3c1", "kb1"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c1_kb:fired"));
+  ccord_autocomplete_item cmd_items[4];
+  size_t ncmd = ccord_contrib_complete_command(contrib, "v3cmd", "abc", 100, 200, cmd_items, 4);
+  CT_CHECK(ncmd == 1 && strcmp(cmd_items[0].label, "opt_abc") == 0);
+
+  // Verify Class 2 v3 features: composer, panel patch, decorators, theme, hooks, gateway, local msg, earcon.
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c2_comp:draft_v3_plus"));
+  CT_CHECK(comp.reply_id == 999 && !comp.reply_ping);
+  CT_CHECK(strcmp(comp.attached_name, "hello.txt") == 0 && comp.attached_len == 5);
+  const ccord_panel_contribution *p2pan = ccord_contrib_find_panel(contrib, "dev.test.v3c2", "p2");
+  CT_CHECK(p2pan && strstr(p2pan->root_json, "patched_v3") != nullptr);
+  CT_CHECK(ccord_contrib_theme_layer_count(contrib) >= 1);
+  CT_CHECK(ccord_contrib_find_icon_override(contrib, "mic") != nullptr);
+  CT_CHECK(ccord_contrib_local_message_count(contrib, 200) == 1);
+  CT_CHECK(ccord_contrib_find_earcon_override(contrib, "mention") != nullptr);
+  ccord_panel_event dev = {.kind = CCORD_PANEL_EV_CLICK, .node_id = "bb"};
+  CT_CHECK(ccord_contrib_dispatch_decor_event(contrib, "dev.test.v3c2", "b1", 500, &dev, &err) == CCORD_OK);
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c2_decor:500:bb"));
+  ccord_autocomplete_item ac_items[4];
+  size_t nac = ccord_contrib_query_autocomplete(contrib, "dev.test.v3c2", "sn", "hi", 100, 200, ac_items, 4);
+  CT_CHECK(nac == 1 && strcmp(ac_items[0].insert_text, "SNIP_hi") == 0);
+
+  // Synchronous interception hooks (before_send rewrite & cancel, link_open rewrite, notification rewrite & suppress).
+  char out_txt[256] = "", reason[128] = "";
+  CT_CHECK(ccord_contrib_run_before_send(contrib, 200, 0, "hello", out_txt, sizeof out_txt, reason, sizeof reason));
+  CT_CHECK(strcmp(out_txt, "HELLO_V3!") == 0);
+  CT_CHECK(!ccord_contrib_run_before_send(contrib, 200, 0, "cancelme", out_txt, sizeof out_txt, reason, sizeof reason));
+  CT_CHECK(strcmp(reason, "blocked_v3") == 0);
+  char out_url[256] = "";
+  CT_CHECK(ccord_contrib_run_link_open_hook(contrib, "https://x.com/test", out_url, sizeof out_url));
+  CT_CHECK(strcmp(out_url, "https://fxtwitter.com/test") == 0);
+  char nt[128] = "Ping", nb[128] = "hi";
+  bool silent = false;
+  CT_CHECK(ccord_contrib_run_notification_hook(contrib, 100, 200, 300, 400, "hello", true, false, nt, sizeof nt, nb, sizeof nb, &silent));
+  CT_CHECK(strcmp(nt, "V3:Ping") == 0);
+  CT_CHECK(!ccord_contrib_run_notification_hook(contrib, 100, 200, 300, 400, "mute-me", true, false, nt, sizeof nt, nb, sizeof nb, &silent));
+
+  // Raw gateway event dispatch.
+  ccord_plugins_dispatch_raw_gateway(pm, "TEST_V3_EVENT", "{\"val\":42}");
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c2_gw:42"));
+
+  // Inter-plugin RPC: Class 2 -> Class 1 succeeds; Class 1 -> Class 3 blocked (anti-escalation)!
+  CT_CHECK(ccord_contrib_run_command(contrib, "callc1", "", 100, 200, &err) == CCORD_OK);
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c2_rpc:echoed:world:nil"));
+  CT_CHECK(ccord_contrib_run_command(contrib, "v3cmd", "esc", 100, 200, &err) == CCORD_OK);
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c1_esc:DENIED:"));
+  CT_CHECK(!v3_has_clip(&cl, "c1_esc:LEAKED"));
+
+  // Class 3 v3 features: fs.stat, fs.watch, system.env (with secret block), system.exec, system.spawn, net.local HTTP & WS.
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c3_stat:true"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c3_env:hello-env-v3:nil"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c3_exec:0:exec_ok_v3"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c3_spawn:0:spawn_ok_v3"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c3_http:200:pong-local"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c3_ws:echo:ping_ws"));
+
+  // Trigger fs.watch by writing a file inside watch_dir.
+  write_file(watch_dir, "touched.txt", "change");
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "c3_watch:"));
+
+  srv.stop = 1;
+  (void)pthread_join(srv_tid, nullptr);
+  close(srv.listen_fd);
+
+  ccord_plugins_shutdown(pm);
+  ccord_plugins_destroy(pm);
+  ccord_contrib_destroy(contrib);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+
+  // Cleanup temp tree.
+  char rm[1400];
+  snprintf(rm, sizeof rm, "%s/touched.txt", watch_dir); (void)unlink(rm);
+  (void)rmdir(watch_dir);
+  const char *fdel[] = {
+    "v3c1/note.txt", "v3c1/plugin.json", "v3c1/main.lua",
+    "v3c2/plugin.json", "v3c2/main.lua",
+    "v3c3/plugin.json", "v3c3/main.lua",
+  };
+  for (size_t i = 0; i < sizeof fdel / sizeof fdel[0]; i++) {
+    snprintf(rm, sizeof rm, "%s/%s", plugins_dir, fdel[i]);
+    (void)unlink(rm);
+  }
+  (void)rmdir(p1); (void)rmdir(p2); (void)rmdir(p3); (void)rmdir(plugins_dir);
+  snprintf(rm, sizeof rm, "%s/plugins/dev.test.v3c1/storage.json", data_dir); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/plugins/dev.test.v3c1", data_dir); (void)rmdir(rm);
+  snprintf(rm, sizeof rm, "%s/plugins", data_dir); (void)rmdir(rm);
+  snprintf(rm, sizeof rm, "%s/plugins.json", data_dir); (void)unlink(rm);
+  (void)rmdir(data_dir);
+  (void)rmdir(root);
 }
 
 int main(void)
@@ -486,5 +916,6 @@ int main(void)
   (void)rmdir(hog);
   (void)rmdir(plugins_dir);
   (void)rmdir(root);
+  test_api_v3_integration();
   return CT_RESULT("test_plugins_integration");
 }

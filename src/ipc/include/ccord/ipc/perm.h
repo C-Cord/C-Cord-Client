@@ -35,6 +35,14 @@ typedef enum ccord_perm : uint64_t {
   CCORD_PERM_UI_COMPOSER       = 1ull << 17,  // "ui.composer"
   CCORD_PERM_CLIPBOARD_READ    = 1ull << 18,  // "clipboard.read"
   CCORD_PERM_GATEWAY_RAW       = 1ull << 19,  // "gateway.raw"
+  CCORD_PERM_UI_DECORATE       = 1ull << 20,  // "ui.decorate"
+  CCORD_PERM_THEME_WRITE       = 1ull << 21,  // "theme.write"
+  CCORD_PERM_AUDIO_EARCONS     = 1ull << 22,  // "audio.earcons"
+  CCORD_PERM_NOTIFICATIONS_HOOK = 1ull << 23, // "notifications.hook"
+  CCORD_PERM_SOCIAL_WRITE      = 1ull << 32,  // "social.write"
+  CCORD_PERM_UI_WINDOW         = 1ull << 33,  // "ui.window"
+  CCORD_PERM_VOICE_LEVELS      = 1ull << 34,  // "voice.levels"
+  CCORD_PERM_VOICE_PCM         = 1ull << 35,  // "voice.pcm"
 
   // Class 3: System-level APIs (OS filesystem, network, notifications, processes)
   CCORD_PERM_FS_READ           = 1ull << 24,  // "fs.read"
@@ -45,6 +53,13 @@ typedef enum ccord_perm : uint64_t {
   CCORD_PERM_SYSTEM_OPEN       = 1ull << 29,  // "system.open"
   CCORD_PERM_SYSTEM_INFO       = 1ull << 30,  // "system.info"
   CCORD_PERM_SYSTEM_EXEC       = 1ull << 31,  // "system.exec"
+  CCORD_PERM_NETWORK_WS        = 1ull << 40,  // "network.ws"
+  CCORD_PERM_NETWORK_LOCAL     = 1ull << 41,  // "network.local"
+  CCORD_PERM_SYSTEM_ENV        = 1ull << 42,  // "system.env"
+  CCORD_PERM_SYSTEM_SHORTCUTS  = 1ull << 43,  // "system.shortcuts"
+  CCORD_PERM_SYSTEM_MEDIA      = 1ull << 44,  // "system.media"
+  CCORD_PERM_SYSTEM_PROCESSES  = 1ull << 45,  // "system.processes"
+  CCORD_PERM_CLIPBOARD_IMAGE   = 1ull << 46,  // "clipboard.image"
 } ccord_perm;
 
 typedef uint64_t ccord_perm_set;
@@ -55,3 +70,5 @@ const char *ccord_perm_description(ccord_perm p);
 ccord_perm_class ccord_perm_max_class(ccord_perm_set s);
 bool ccord_perm_from_name(const char *name, ccord_perm *out);
 size_t ccord_perm_list(ccord_perm_set s, char *out, size_t cap);   // "a,b,c" for display, always NUL-terminated
+size_t ccord_perm_count(void);
+ccord_perm ccord_perm_at(size_t index);

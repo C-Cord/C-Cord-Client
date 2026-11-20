@@ -19,8 +19,7 @@
 #include <unistd.h>
 
 #include "ccord_test.h"
-
-int ccord_plugin_host_run_fd(ccord_socket_t fd, const _Atomic bool *cancel);
+#include <ccord/plugin_host/host.h>
 
 #define WAIT_MS 10000u
 
@@ -166,12 +165,12 @@ static void test_manifest_platform_and_caps(void)
   CT_CHECK(ccord_manifest_supports(&m, CCORD_PLAT_ANDROID, 0, why, sizeof why));
   CT_CHECK(ccord_manifest_supports(&m, CCORD_PLAT_LINUX, 0, why, sizeof why));
 
-  // 2. Android-only API v2 plugin with haptics + share requirement.
+  // 2. Android-only API v1 plugin with haptics + share requirement.
   const char *j_android =
-      "{\"schema\":1,\"id\":\"dev.test.mob\",\"name\":\"Mob\",\"version\":\"1.0.0\",\"api\":2,"
+      "{\"schema\":1,\"id\":\"dev.test.mob\",\"name\":\"Mob\",\"version\":\"1.0.0\",\"api\":1,"
       "\"main\":\"main.lua\",\"platforms\":[\"android\"],\"requires_capabilities\":[\"haptics\",\"share\"]}";
   CT_CHECK(ccord_manifest_parse(j_android, strlen(j_android), &m, &err) == CCORD_OK);
-  CT_CHECK(m.api_version == 2);
+  CT_CHECK(m.api_version == 1);
   CT_CHECK(m.platforms == CCORD_PLAT_ANDROID);
   CT_CHECK((m.required_caps & (CCORD_CAP_HAPTICS | CCORD_CAP_SHARE)) == (CCORD_CAP_HAPTICS | CCORD_CAP_SHARE));
   CT_CHECK(!ccord_manifest_supports(&m, CCORD_PLAT_LINUX, CCORD_CAP_HAPTICS | CCORD_CAP_SHARE, why, sizeof why));
@@ -182,7 +181,7 @@ static void test_manifest_platform_and_caps(void)
 
   // 3. Desktop-only plugin rejected on Android, accepted on Linux/macOS/Windows.
   const char *j_desk =
-      "{\"schema\":1,\"id\":\"dev.test.desk\",\"name\":\"Desk\",\"version\":\"1.0.0\",\"api\":2,"
+      "{\"schema\":1,\"id\":\"dev.test.desk\",\"name\":\"Desk\",\"version\":\"1.0.0\",\"api\":1,"
       "\"main\":\"main.lua\",\"platforms\":[\"desktop\"]}";
   CT_CHECK(ccord_manifest_parse(j_desk, strlen(j_desk), &m, &err) == CCORD_OK);
   CT_CHECK(m.platforms == CCORD_PLAT_DESKTOP);
@@ -191,16 +190,20 @@ static void test_manifest_platform_and_caps(void)
   CT_CHECK(ccord_manifest_supports(&m, CCORD_PLAT_WINDOWS, 0, why, sizeof why));
   CT_CHECK(ccord_manifest_supports(&m, CCORD_PLAT_MACOS, 0, why, sizeof why));
 
-  // 4. Unknown platform or unknown capability fails strict manifest parse.
+  // 4. Unknown platform, unknown capability, or unsupported API version fails strict manifest parse.
   const char *j_bad_plat =
-      "{\"schema\":1,\"id\":\"dev.test.bad\",\"name\":\"Bad\",\"version\":\"1.0.0\",\"api\":2,"
+      "{\"schema\":1,\"id\":\"dev.test.bad\",\"name\":\"Bad\",\"version\":\"1.0.0\",\"api\":1,"
       "\"main\":\"main.lua\",\"platforms\":[\"templeos\"]}";
   CT_CHECK(ccord_manifest_parse(j_bad_plat, strlen(j_bad_plat), &m, &err) == CCORD_ERR_INVALID);
 
   const char *j_bad_cap =
-      "{\"schema\":1,\"id\":\"dev.test.bad\",\"name\":\"Bad\",\"version\":\"1.0.0\",\"api\":2,"
+      "{\"schema\":1,\"id\":\"dev.test.bad\",\"name\":\"Bad\",\"version\":\"1.0.0\",\"api\":1,"
       "\"main\":\"main.lua\",\"requires_capabilities\":[\"telepathy\"]}";
   CT_CHECK(ccord_manifest_parse(j_bad_cap, strlen(j_bad_cap), &m, &err) == CCORD_ERR_INVALID);
+
+  const char *j_bad_api =
+      "{\"schema\":1,\"id\":\"dev.test.bad\",\"name\":\"Bad\",\"version\":\"1.0.0\",\"api\":2,\"main\":\"main.lua\"}";
+  CT_CHECK(ccord_manifest_parse(j_bad_api, strlen(j_bad_api), &m, &err) == CCORD_ERR_UNSUPPORTED);
 }
 
 static void test_in_process_android_plugin_host(void)
@@ -220,19 +223,19 @@ static void test_in_process_android_plugin_host(void)
 
   // Desktop-only plugin -> skipped on simulated Android host.
   write_file(p_desk, "plugin.json",
-             "{\"schema\":1,\"id\":\"dev.test.deskonly\",\"name\":\"DeskOnly\",\"version\":\"1.0.0\",\"api\":2,"
+             "{\"schema\":1,\"id\":\"dev.test.deskonly\",\"name\":\"DeskOnly\",\"version\":\"1.0.0\",\"api\":1,"
              "\"main\":\"main.lua\",\"platforms\":[\"desktop\"]}");
   write_file(p_desk, "main.lua", "assert(false, 'desktop-only plugin must not execute on android')\n");
 
   // Capability-gated plugin requiring tray -> skipped when tray capability is absent.
   write_file(p_tray, "plugin.json",
-             "{\"schema\":1,\"id\":\"dev.test.needstray\",\"name\":\"NeedsTray\",\"version\":\"1.0.0\",\"api\":2,"
+             "{\"schema\":1,\"id\":\"dev.test.needstray\",\"name\":\"NeedsTray\",\"version\":\"1.0.0\",\"api\":1,"
              "\"main\":\"main.lua\",\"requires_capabilities\":[\"tray\"]}");
   write_file(p_tray, "main.lua", "assert(false, 'tray plugin must not execute without tray capability')\n");
 
   // Cross-platform Class 1 plugin exercising platform.*, mobile APIs, and live events (ZERO permissions needed!).
   write_file(p_mob, "plugin.json",
-             "{\"schema\":1,\"id\":\"dev.test.mobprobe\",\"name\":\"MobProbe\",\"version\":\"1.0.0\",\"api\":2,"
+             "{\"schema\":1,\"id\":\"dev.test.mobprobe\",\"name\":\"MobProbe\",\"version\":\"1.0.0\",\"api\":1,"
              "\"main\":\"main.lua\",\"platforms\":[\"android\",\"mobile\"],"
              "\"requires_capabilities\":[\"haptics\",\"share\"],\"permissions\":[]}");
   write_file(p_mob, "main.lua",
@@ -242,7 +245,7 @@ static void test_in_process_android_plugin_host(void)
              "assert(platform.is_mobile == true and platform.is_desktop == false)\n"
              "assert(platform.is_android == true and platform.is_linux == false)\n"
              "assert(platform.touch == true)\n"
-             "assert(platform.api_version == 2)\n"
+             "assert(platform.api_version == 1)\n"
              "assert(platform.android_api_level == 35)\n"
              "assert(platform.has('haptics') == true)\n"
              "assert(platform.has('share') == true)\n"

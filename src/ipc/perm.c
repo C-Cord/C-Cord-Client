@@ -30,19 +30,34 @@ static const struct {
   {CCORD_PERM_NAVIGATION_WRITE,  CCORD_PERM_CLASS_UNSAFE, "navigation.write",  "Switch active guilds and channels"},
   {CCORD_PERM_VOICE_CONTROL,     CCORD_PERM_CLASS_UNSAFE, "voice.control",     "Join/leave voice channels and toggle mute/deafen"},
   {CCORD_PERM_UI_PANEL,          CCORD_PERM_CLASS_UNSAFE, "ui.panel",          "Render custom UI panels inside C-Cord"},
-  {CCORD_PERM_UI_COMPOSER,       CCORD_PERM_CLASS_UNSAFE, "ui.composer",       "Read and modify the message composer draft"},
+  {CCORD_PERM_UI_COMPOSER,       CCORD_PERM_CLASS_UNSAFE, "ui.composer",       "Read and modify the message composer draft and autocomplete"},
   {CCORD_PERM_CLIPBOARD_READ,    CCORD_PERM_CLASS_UNSAFE, "clipboard.read",    "Read text from your clipboard"},
   {CCORD_PERM_GATEWAY_RAW,       CCORD_PERM_CLASS_UNSAFE, "gateway.raw",       "Inspect raw Discord gateway events"},
+  {CCORD_PERM_UI_DECORATE,       CCORD_PERM_CLASS_UNSAFE, "ui.decorate",       "Decorate messages, members, profiles, and channels"},
+  {CCORD_PERM_THEME_WRITE,       CCORD_PERM_CLASS_UNSAFE, "theme.write",       "Dynamically modify active theme colors, metrics, CSS, fonts, icons, and backgrounds"},
+  {CCORD_PERM_AUDIO_EARCONS,     CCORD_PERM_CLASS_UNSAFE, "audio.earcons",     "Override notification and voice earcon sounds"},
+  {CCORD_PERM_NOTIFICATIONS_HOOK,CCORD_PERM_CLASS_UNSAFE, "notifications.hook","Intercept or filter incoming notifications and link opens"},
+  {CCORD_PERM_SOCIAL_WRITE,      CCORD_PERM_CLASS_UNSAFE, "social.write",      "Open DMs, update user notes, vote on polls, RSVP events, and use threads/forums"},
+  {CCORD_PERM_UI_WINDOW,         CCORD_PERM_CLASS_UNSAFE, "ui.window",         "Modify window title, badge, attention flash, and tray menu items"},
+  {CCORD_PERM_VOICE_LEVELS,      CCORD_PERM_CLASS_UNSAFE, "voice.levels",      "Read live voice speaking and audio level meters"},
+  {CCORD_PERM_VOICE_PCM,         CCORD_PERM_CLASS_UNSAFE, "voice.pcm",         "Tap or inject raw voice call PCM audio"},
 
   // Class 3 (System) — OS filesystem, network, notifications, processes
   {CCORD_PERM_FS_READ,           CCORD_PERM_CLASS_SYSTEM, "fs.read",           "Read files and directories on your computer"},
   {CCORD_PERM_FS_WRITE,          CCORD_PERM_CLASS_SYSTEM, "fs.write",          "Create, modify, and delete files on your computer"},
   {CCORD_PERM_FS_WATCH,          CCORD_PERM_CLASS_SYSTEM, "fs.watch",          "Watch local files and directories for changes"},
   {CCORD_PERM_NETWORK_HTTP,      CCORD_PERM_CLASS_SYSTEM, "network.http",      "Make external HTTP/HTTPS requests"},
+  {CCORD_PERM_NETWORK_WS,        CCORD_PERM_CLASS_SYSTEM, "network.ws",        "Open external WebSocket connections"},
+  {CCORD_PERM_NETWORK_LOCAL,     CCORD_PERM_CLASS_SYSTEM, "network.local",     "Connect to localhost services and local Unix domain sockets"},
   {CCORD_PERM_SYSTEM_NOTIFY,     CCORD_PERM_CLASS_SYSTEM, "system.notify",     "Send native OS desktop notifications"},
   {CCORD_PERM_SYSTEM_OPEN,       CCORD_PERM_CLASS_SYSTEM, "system.open",       "Open URLs in your system web browser"},
-  {CCORD_PERM_SYSTEM_INFO,       CCORD_PERM_CLASS_SYSTEM, "system.info",       "Read OS platform details and environment variables"},
+  {CCORD_PERM_SYSTEM_INFO,       CCORD_PERM_CLASS_SYSTEM, "system.info",       "Read OS platform details"},
+  {CCORD_PERM_SYSTEM_ENV,        CCORD_PERM_CLASS_SYSTEM, "system.env",        "Read OS environment variables and system paths"},
   {CCORD_PERM_SYSTEM_EXEC,       CCORD_PERM_CLASS_SYSTEM, "system.exec",       "Run external programs on your computer"},
+  {CCORD_PERM_SYSTEM_SHORTCUTS,  CCORD_PERM_CLASS_SYSTEM, "system.shortcuts",  "Register global OS keyboard shortcuts"},
+  {CCORD_PERM_SYSTEM_MEDIA,      CCORD_PERM_CLASS_SYSTEM, "system.media",      "Read and control OS media playback (Now Playing)"},
+  {CCORD_PERM_SYSTEM_PROCESSES,  CCORD_PERM_CLASS_SYSTEM, "system.processes",  "Inspect running processes and active foreground window"},
+  {CCORD_PERM_CLIPBOARD_IMAGE,   CCORD_PERM_CLASS_SYSTEM, "clipboard.image",   "Read and write images on the system clipboard"},
 };
 
 const char *ccord_perm_name(ccord_perm p)
@@ -106,4 +121,14 @@ size_t ccord_perm_list(ccord_perm_set s, char *out, size_t cap)
     out[len] = '\0';
   }
   return len;
+}
+
+size_t ccord_perm_count(void)
+{
+  return sizeof k_perms / sizeof k_perms[0];
+}
+
+ccord_perm ccord_perm_at(size_t index)
+{
+  return index < (sizeof k_perms / sizeof k_perms[0]) ? k_perms[index].perm : (ccord_perm)0;
 }

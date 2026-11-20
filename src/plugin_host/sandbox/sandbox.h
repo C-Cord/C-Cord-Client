@@ -21,7 +21,7 @@ typedef enum ccord_sandbox_limit {
   CCORD_SB_LIMIT_UNDECLARED,     // undeclared Class 2 / Class 3 API called -> fatal
 } ccord_sandbox_limit;
 
-// Static platform/OS metadata injected at sandbox creation for Class 1 `platform.*` queries.
+// Static platform/OS metadata injected at sandbox creation for Class 1 `platform.*`.
 typedef struct ccord_sandbox_platform_info {
   char os[24];            // "linux", "macos", "windows", "android"
   char arch[24];          // "arm64", "x86_64", etc.
@@ -82,7 +82,40 @@ void ccord_sandbox_set_cancel_flag(ccord_sandbox *sb, const _Atomic bool *cancel
 // Calls a registered command. *out_text is a ccord_free-able copy of the returned string, or nullptr when nothing was returned.
 [[nodiscard]] ccord_status ccord_sandbox_command_run(ccord_sandbox *sb, const char *name, const char *args, const ccord_json *ctx,
                                                      char **out_text, ccord_error *err);
+// Extended command run supporting both string and table ({ text, local_notice, embeds }) results serialized as JSON.
+[[nodiscard]] ccord_status ccord_sandbox_command_run_ex(ccord_sandbox *sb, const char *name, const char *args,
+                                                        const ccord_json *ctx, char **out_json, ccord_error *err);
 // Fires any due time.after / time.every callbacks.
 [[nodiscard]] ccord_status ccord_sandbox_tick(ccord_sandbox *sb, uint64_t now_ms, ccord_error *err);
 // Sticky: only set if an explicit non-zero limit was configured and hit.
 ccord_sandbox_limit ccord_sandbox_limit_hit(const ccord_sandbox *sb);
+
+// ---- API v3 dispatchers (main -> plugin host) ----
+[[nodiscard]] ccord_status ccord_sandbox_async_reply(ccord_sandbox *sb, uint64_t req_id, bool ok,
+                                                     const ccord_json *result, const char *err_msg, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_hook_call(ccord_sandbox *sb, const char *hook_name, const ccord_json *data,
+                                                   char **out_json, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_raw_gateway(ccord_sandbox *sb, const char *event_name, const ccord_json *payload,
+                                                     ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_command_complete(ccord_sandbox *sb, const char *name, const char *args,
+                                                          const ccord_json *ctx, char **out_json, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_autocomplete(ccord_sandbox *sb, const char *provider_id, const char *query,
+                                                      const ccord_json *ctx, char **out_json, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_keybind_invoke(ccord_sandbox *sb, const char *bind_id, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_action_btn_click(ccord_sandbox *sb, const char *btn_id, const ccord_json *ctx,
+                                                          ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_decor_event(ccord_sandbox *sb, const char *decor_id, const char *target_id,
+                                                     const ccord_json *ev, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_setting_changed(ccord_sandbox *sb, const char *key, const ccord_json *value,
+                                                         ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_dialog_result(ccord_sandbox *sb, uint64_t req_id, bool accepted,
+                                                       const ccord_json *result, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_fs_watch_event(ccord_sandbox *sb, uint64_t watch_id, const ccord_json *ev,
+                                                        ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_ws_event(ccord_sandbox *sb, uint64_t ws_id, const char *kind,
+                                                  const ccord_json *data, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_proc_event(ccord_sandbox *sb, uint64_t proc_id, const char *kind,
+                                                    const ccord_json *data, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_rpc_call(ccord_sandbox *sb, const char *fn_name, const char *caller_id,
+                                                  int caller_class, const ccord_json *args, char **out_json, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_voice_pcm(ccord_sandbox *sb, const ccord_json *data, ccord_error *err);
