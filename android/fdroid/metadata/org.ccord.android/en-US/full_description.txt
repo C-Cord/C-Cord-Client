@@ -4,4 +4,4 @@ Highlights:
 • Native responsive mobile UI with drag-scroll & kinetic fling, long-press bottom sheets, slide-out navigation & member drawers, and edge-to-edge safe-area / soft-keyboard handling.
 • Voice channels with Opus audio, DAVE E2EE, MediaCodec hardware-accelerated video, camera & MediaProjection screen sharing, and foreground call notification controls.
 • Built-in Dark, Light, and AMOLED themes plus QuickCSS customization.
-• Sandboxed Lua 5.5 plugin runtime (Plugin API v2) with cross-platform OS/capability detection and native mobile haptics & share sheet support.
+• Sandboxed Lua 5.5 plugin runtime (Plugin API v1) with cross-platform OS/capability detection and native mobile haptics & share sheet support.

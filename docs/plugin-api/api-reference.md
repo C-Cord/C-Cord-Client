@@ -1,264 +1,199 @@
-# C-Cord Plugin API Reference (API v2)
+# C-Cord Plugin API Reference (API v1)
 
-All API tables are read-only. Standard Lua 5.5 libraries `base`, `table`, `string`, `math`, `utf8`, and `coroutine` are available (`os`, `io`, `package`, `debug`, `load`, `dofile`, `loadfile`, `print` are removed).
+All API tables are read-only (frozen metatables). Standard Lua 5.5 libraries `base`, `table`, `string`, `math`, `utf8`, and `coroutine` are available (`os`, `io`, `package`, `debug`, `load`, `dofile`, `loadfile`, `print`, `warn`, `collectgarbage` are removed).
 
 ---
 
-## Manifest Compatibility Fields (`plugin.json`)
+## Manifest Fields (`plugin.json`)
 
 | Field | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `"api"` | `integer` | required | Target API version (`1` or `2`). |
-| `"platforms"` | `string[]` | `["all"]` | Allowed targets: `"linux"`, `"macos"`, `"windows"`, `"android"`, `"desktop"`, `"mobile"`, `"all"`. Plugins incompatible with the current OS are skipped cleanly. |
+| `"schema"` | `integer` | required | Manifest schema version (`1`). |
+| `"id"` | `string` | required | Reverse-DNS unique identifier (e.g. `"com.example.myplugin"`). |
+| `"name"` | `string` | required | Display name shown in Settings and dialog attribution badges. |
+| `"version"` | `string` | required | Semantic version string (e.g. `"1.2.0"`). |
+| `"api"` | `integer` | required | Target API version (`1`). |
+| `"main"` | `string` | required | Entry Lua file relative to plugin directory (e.g. `"main.lua"`). |
+| `"platforms"` | `string[]` | `["all"]` | Allowed targets: `"linux"`, `"macos"`, `"windows"`, `"android"`, `"desktop"`, `"mobile"`, `"all"`. |
 | `"requires_capabilities"` | `string[]` | `[]` | Runtime capabilities required to load: `"touch"`, `"haptics"`, `"share"`, `"notifications"`, `"tray"`, `"global_shortcuts"`, `"screen_capture"`, `"rpc"`, `"hover"`, `"safe_area"`, `"keyboard_control"`, `"orientation_control"`, `"keep_screen_on"`, `"panels"`. |
+| `"allowed_hosts"` | `string[]` | `[]` | Optional domain allow-list for `network.http` and `network.ws` (exact hosts or `*.example.com`). Empty = unrestricted (when `network.http`/`network.ws` is declared). Displayed on consent prompts. |
+| `"permissions"` | `string[]` | `[]` | Required Class 2 / Class 3 permission identifiers. Class 1 APIs require no declaration. |
 
 ---
 
 ## Class 1 — Safe APIs (No Declaration Required)
 
-### `plugin`
-Read-only metadata table:
-- `plugin.id` (`string`)
-- `plugin.name` (`string`)
-- `plugin.version` (`string`)
-- `plugin.dir` (`string`) — absolute path to the plugin directory.
+### `plugin` (Metadata, Bundled Assets & Inter-Plugin RPC)
+- `plugin.id` (`string`), `plugin.name` (`string`), `plugin.version` (`string`), `plugin.dir` (`string`)
+- `plugin.read_asset(rel_path)` → `string | (nil, err)` — reads a bundled file inside `plugin.dir` (path traversal & symlink escapes blocked).
+- `plugin.asset_exists(rel_path)` → `boolean`
+- `plugin.list_assets(rel_dir?)` → `string[] | (nil, err)`
+- `plugin.expose(name, fn, opts?)` → `boolean` — exposes a JSON-callable RPC function to other plugins. `opts = { allow_lower_class = boolean }` (default `false`: prevents lower-class plugins from invoking higher-class plugins).
+- `plugin.call(target_plugin_id, name, ...args, cb?)` — invokes an exposed RPC function asynchronously (supports callback `cb(result, err)` or `async.spawn` coroutine yield).
+- `plugin.list_exposed(target_plugin_id?)` → `table` — lists exposed RPC methods.
 
 ### `platform`
-Read-only OS, form-factor, capability, and viewport inspection table (safe Class 1 — available without requesting `system.info`):
-- `platform.os` (`string`) — `"linux"`, `"macos"`, `"windows"`, or `"android"`.
-- `platform.arch` (`string`) — `"x86_64"`, `"arm64"`, etc.
-- `platform.form_factor` (`string`) — `"desktop"`, `"phone"`, or `"tablet"`.
-- `platform.is_mobile` (`boolean`) / `platform.is_desktop` (`boolean`)
-- `platform.is_android` (`boolean`) / `platform.is_linux` (`boolean`) / `platform.is_macos` (`boolean`) / `platform.is_windows` (`boolean`)
-- `platform.touch` (`boolean`) — `true` on touch-capable / mobile devices.
-- `platform.api_version` (`integer`) — Plugin API version supported by the host (`2`).
-- `platform.android_api_level` (`integer`) — Android SDK API level (e.g. `34`, `35`), or `0` on desktop.
-- `platform.capabilities` (`table`) — read-only map of capability name → `boolean`.
-- `platform.has(capability_name)` → `boolean` — checks whether a capability (e.g. `"haptics"`, `"share"`, `"tray"`, `"global_shortcuts"`, `"rpc"`, `"touch"`, `"safe_area"`) is supported at runtime.
-- `platform.safe_area()` → `{ top, right, bottom, left }` — current logical-pixel safe-area insets (notches, status bar, gesture bar).
-- `platform.orientation()` → `"portrait"` | `"landscape"`
-- `platform.keyboard()` → `{ visible, height }` — soft-keyboard visibility and logical-pixel occlusion height.
-- `platform.viewport()` → `{ width, height, scale }` — logical viewport size and display scale factor.
+- `platform.os` (`"linux" | "macos" | "windows" | "android"`), `platform.arch`, `platform.form_factor` (`"desktop" | "phone" | "tablet"`)
+- `platform.is_mobile`, `platform.is_desktop`, `platform.is_android`, `platform.is_linux`, `platform.is_macos`, `platform.is_windows`, `platform.touch` (`boolean`)
+- `platform.api_version` (`1`), `platform.android_api_level` (`integer`), `platform.capabilities` (`table<string, boolean>`)
+- `platform.has(cap)` → `boolean`
+- `platform.safe_area()` → `{ top, right, bottom, left }`
+- `platform.orientation()` → `"portrait" | "landscape"`
+- `platform.keyboard()` → `{ visible, height }`
+- `platform.viewport()` → `{ width, height, scale }`
 
-### `require(module_name)`
-Loads and caches `<plugin.dir>/<module_name>.lua` (dots are converted to `/`). Path traversal (`..`) is blocked.
+### `require(module_name)` & `log`
+- `require(module_name)` — loads & caches `<plugin.dir>/<module_name>.lua`. Symlink/traversal escapes blocked.
+- `log.debug(msg)`, `log.info(msg)`, `log.warn(msg)`, `log.error(msg)`
 
-### `log`
-- `log.debug(msg)`
-- `log.info(msg)`
-- `log.warn(msg)`
-- `log.error(msg)`
+### `settings` (Schema-Driven Native Settings UI)
+Registers a native settings modal accessible via **Settings → Plugins → Configure**, backed by plugin-scoped `storage`:
+- `settings.schema(fields)` → `boolean` — `fields` is an array of field descriptors:
+  - `type`: `"section"` | `"toggle"` | `"slider"` | `"select"` | `"color"` | `"text"` | `"secret"`
+  - Common fields: `key`, `label`, `description?`, `default?`, `placeholder?`, `min?`, `max?`, `step?`, `options?` (array of strings or `{ label, value }`).
+- `settings.get(key, default?)` → value
+- `settings.set(key, value)` — updates & persists a setting value.
+- `settings.all()` → shallow copy table of all stored key/values.
+- `settings.on_change(fn)` — `fn(key, new_value)` fires whenever the user modifies a setting in the UI.
 
-Writes to both the C-Cord log and the plugin's in-UI **Debug Log**.
+### `theme` (Class 1 Read & Selectable Presets)
+- `theme.current()` → `{ id, name, colors, metrics }`
+- `theme.color(token)` → `"#rrggbb"` or `"#rrggbbaa"` (or `nil`)
+- `theme.metric(name)` → `number` (or `nil`)
+- `theme.list()` → array of built-in and registered plugin theme presets.
+- `theme.register({ id, name, base?, css?, colors?, metrics?, font_regular?, font_bold? })` → `boolean` — registers a user-selectable preset under **Settings → Appearance → Plugin Themes**. Font paths must point to `.ttf`/`.otf`/`.ttc` files bundled inside `plugin.dir`.
+- `theme.unregister(id)` → `boolean`
 
-### `events` (Safe Lifecycle & Navigation)
+### `events` (Class 1 Safe Events)
 - `events.on(name, fn)` / `events.off(name)`
 - Safe events:
-  - `"app.ready"`
-  - `"app.quit"`
-  - `"app.lifecycle"` — `{ state }` (`"foreground"`, `"background"`, `"low_memory"`) — emitted on mobile/desktop app lifecycle transitions.
-  - `"platform.orientation"` — `{ orientation, width, height }` (`"portrait"` | `"landscape"`).
-  - `"platform.keyboard"` — `{ visible, height }` — emitted when the mobile soft keyboard opens, resizes, or closes.
-  - `"platform.safe_area"` — `{ top, right, bottom, left }` — emitted when system bars or display cutout insets change.
-  - `"connection.state"`
-  - `"guild.select"` — `{ guild_id, name, is_dm }`
-  - `"channel.select"` — `{ guild_id, channel_id, parent_id?, name, display_name, kind, unread_count, mention_count }`
-  - `"view.select"` — `{ guild_id, view }` (`"channel"`, `"friends"`, `"requests"`, `"discovery"`, `"guild"`, `"thread"`)
-  - `"navigation.aux_open"` — `{ guild_id, channel_id?, parent_id?, view, name? }` — emitted when the user middle-clicks or `Ctrl`/`Super`+clicks a channel, server, DM Home, Friends/Requests nav item, forum post card, or inline mention/thread card.
+  - `"app.ready"`, `"app.quit"`, `"app.lifecycle"` (`{ state }`), `"connection.state"`
+  - `"platform.orientation"`, `"platform.keyboard"`, `"platform.safe_area"`
+  - `"guild.select"`, `"channel.select"`, `"view.select"`, `"navigation.aux_open"`
+  - `"theme.change"` (`{ id, name }`), `"window.focus"` (`{ focused }`), `"window.resize"` (`{ width, height }`), `"streamer_mode.change"` (`{ enabled }`), `"settings.change"`
 
-### `ui.contextMenu`
-- `ui.contextMenu.add({ id, label, target, action })`
-  - `target`: `"message"` | `"channel"` | `"guild"` | `"member"` | `"nav"`
-  - `action(ctx)`: receives `{ kind, guild_id?, channel_id?, parent_id?, message_id?, user_id?, view? }` (`view` is `"dm_home"`, `"friends"`, or `"requests"` when `target == "nav"`; `parent_id` is present on thread channel menus).
-- `ui.contextMenu.remove(id)` — unregisters a context menu item added by this plugin.
+### `ui` (Class 1 Surfaces)
+- **`ui.contextMenu`**:
+  - `ui.contextMenu.add({ id, label, target, action, icon?, submenu?, when?, danger?, checked?, divider_before? })`
+    - `target`: `"message"` | `"channel"` | `"guild"` | `"member"` | `"nav"` | `"profile"` | `"attachment"` | `"embed"` | `"link"` | `"voice_channel"` | `"voice_user"` | `"composer"`
+    - `when`: optional predicate table (e.g. `{ has_url = true, is_self = false, has_user = true }`).
+  - `ui.contextMenu.remove(id)`
+- **`ui.actionButton`** (Scoped native buttons):
+  - `ui.actionButton.add({ id, slot, label?, icon?, tooltip?, badge?, action })`
+    - `slot`: `"header"` | `"composer_plus"` | `"message_hover"` | `"user_panel"` | `"tray"`
+  - `ui.actionButton.remove(id)`
+- **`ui.dialog`** (User-gesture-guarded native modal dialogs with `"Plugin: <name>"` attribution badge):
+  - `ui.dialog.confirm({ title, message?, confirm_label?, cancel_label? }, cb?)` → resolves `{ accepted = boolean }`
+  - `ui.dialog.prompt({ title, message?, default_value?, placeholder?, confirm_label?, cancel_label? }, cb?)` → resolves `{ accepted = boolean, value = { value = string } }`
+  - `ui.dialog.form({ title, message?, fields = [...], confirm_label?, cancel_label? }, cb?)` → resolves `{ accepted = boolean, value = { [key] = val } }`
+  - *Security guard:* For Class 1 plugins (without `ui.panel`), `ui.dialog.*` returns `nil, err` unless invoked inside a user-gesture callback (command, context menu, action button, or keybind).
+- **`ui.file`** (User-mediated OS file pickers):
+  - `ui.file.pick(opts?, cb?)` — `opts = { title?, filters?, multiple? }`
+  - `ui.file.save({ suggested_name, data }, cb?)`
+- **`ui.measure_text(text, opts?)`** → `{ width, height }` (`opts = { size?, bold?, wrap_width? }`)
+- **`ui.toast.show(text, level?)`**, **`ui.haptics.impact(style?)` / `notify(kind?)`**, **`ui.share.text(text, title?)` / `url(url, title?)`**, **`ui.keyboard.dismiss()`**, **`ui.mobile.keep_screen_on(bool)` / `set_orientation(mode)`**
 
-### `ui.toast`
-- `ui.toast.show(text, level?)` — `level` is `"info"`, `"warn"`, or `"error"`.
+### `commands`, `keybinds`, `audio` (Class 1)
+- `commands.register(name, description, fn)` **or** `commands.register({ name, description, args?, autocomplete?, run })`
+  - Returning a string populates the composer draft if the plugin lacks `messages.send`, or sends if permitted.
+  - `autocomplete(args, ctx)` returns an array of `{ label, detail?, insert_text, icon? }`.
+- `commands.unregister(name)` → `boolean`
+- `keybinds.register({ id, label?, default?, action })` → `boolean` — local in-app shortcut (rebindable by the user in **Settings → Keybinds**).
+- `keybinds.unregister(id)` → `boolean`
+- `audio.play_earcon(kind)` — plays a built-in C-Cord earcon (`"message"`, `"mention"`, `"mute"`, `"unmute"`, `"deafen"`, `"undeafen"`, `"voice_join"`, `"voice_leave"`, `"call_ring"`, `"stream_start"`, `"stream_stop"`).
+- `audio.play_asset(rel_path)` → `boolean | (false, err)` — plays a bundled WAV/OGG asset (<= 512 KiB).
 
-### `ui.haptics`
-Native tactile feedback (no-op returning `false` on devices without haptics):
-- `ui.haptics.impact(style?)` → `boolean` — `style` is `"light"` (default), `"medium"`, `"heavy"`, or `"selection"`.
-- `ui.haptics.notify(kind?)` → `boolean` — `kind` is `"success"` (default), `"warning"`, or `"error"`.
-
-### `ui.share`
-Native OS share sheet (Android `ACTION_SEND`; returns `false` on platforms without a native share sheet):
-- `ui.share.text(text, title?)` → `boolean` — shares UTF-8 text (1..65536 bytes).
-- `ui.share.url(url, title?)` → `boolean` — shares an `http://` or `https://` URL.
-
-### `ui.keyboard`
-- `ui.keyboard.dismiss()` → `boolean` — hides the on-screen soft keyboard if open.
-
-### `ui.mobile`
-- `ui.mobile.keep_screen_on(enabled)` → `boolean` — requests keeping the device screen awake (e.g., during calls or media viewing).
-- `ui.mobile.set_orientation(mode)` → `boolean` — sets preferred screen orientation: `"auto"`, `"portrait"`, or `"landscape"`.
-
-### `commands`
-- `commands.register(name, description, fn)`
-  - Registers `/name <args>`. `fn(args, ctx)` may return a UTF-8 string (sent to the active channel) or `nil`.
-
-### `storage`
-Plugin-scoped persistent JSON storage (`<data_dir>/plugins/<id>/storage.json`). Supports nested tables, arrays, strings, numbers, and booleans with no artificial key or byte limits:
-- `storage.get(key)` → value or `nil`
-- `storage.set(key, value)`
-- `storage.delete(key)`
-- `storage.keys()` → array of key strings
-- `storage.clear()`
-
-### `clipboard` (Write)
-- `clipboard.write(text)` — copies UTF-8 text (up to 64 KiB) to the clipboard.
-
-### `json`
-- `json.encode(value)` → JSON string (or `nil, err`)
-- `json.decode(str)` → Lua value (or `nil, err`)
-
-### `time`
-- `time.now_ms()` → Unix timestamp in milliseconds
-- `time.now_iso()` → UTC ISO-8601 string (`YYYY-MM-DDTHH:MM:SSZ`)
-- `time.after(ms, fn)` → timer ID
-- `time.every(ms, fn)` → timer ID
-- `time.cancel(id)` → `boolean`
-
-### `crypto` & `encoding` & `markdown`
-- `crypto.sha256(str)` → 64-char hex digest
-- `crypto.hmac_sha256(key, msg)` → 64-char hex HMAC
-- `crypto.uuid()` → UUID v4 string
-- `encoding.base64_encode(str)` / `encoding.base64_decode(str)`
-- `encoding.url_encode(str)` / `encoding.url_decode(str)`
-- `markdown.escape(str)` / `markdown.strip(str)`
+### `storage`, `clipboard.write`, `json`, `time`, `async`, `crypto`, `encoding`, `compress`, `color`, `semver`, `emoji`, `markdown`
+- **`storage`**: `get(k)`, `set(k, v)`, `delete(k)`, `keys()`, `clear()`
+- **`clipboard.write(text)`**: copies UTF-8 text (<= 64 KiB)
+- **`json`**: `encode(val)`, `decode(str)`
+- **`time`**: `now_ms()`, `now_iso()`, `after(ms, fn)`, `every(ms, fn)`, `cancel(id)`
+- **`async`**: `async.spawn(fn, ...args)` (runs `fn` in a coroutine where async APIs like `net.http.*`, `ui.dialog.*`, `system.exec`, `plugin.call`, and `async.sleep(ms)` yield cleanly without callbacks), `async.sleep(ms)`
+- **`crypto`**: `sha256(str)`, `hmac_sha256(key, msg)`, `uuid()`
+- **`encoding`**: `base64_encode(str)`, `base64_decode(str)`, `url_encode(str)`, `url_decode(str)`
+- **`compress`**: `deflate(str, level?)`, `inflate(str)`, `gzip(str, level?)`, `gunzip(str)` (zlib; 16 MiB decompressed cap)
+- **`color`**: `parse(str_or_tbl)` → `{r,g,b,a}`, `to_hex(col, include_alpha?)`, `to_hsl(col)` → `{h,s,l,a}`, `from_hsl(h, s, l, a?)`, `lighten(col, amt)`, `darken(col, amt)`, `mix(c1, c2, t?)`, `alpha(col, a)`, `luminance(col)`, `contrast(c1, c2)`
+- **`semver`**: `parse(str)`, `compare(a, b)` (`-1|0|1`), `satisfies(ver, range)` (`>=`, `<=`, `>`, `<`, `^`, `~`, `=`)
+- **`emoji`**: `lookup(shortcode)`, `to_shortcode(utf8)` → `(name, skin_tone)`, `search(query, limit?)`, `replace_shortcodes(text)`
+- **`markdown`**: `escape(str)`, `strip(str)`, `parse(str)` → token array (`text`, `bold`, `italic`, `underline`, `strike`, `code`, `codeblock`, `spoiler`, `user_mention`, `role_mention`, `channel_mention`, `link`)
 
 ---
 
 ## Class 2 — Unsafe APIs (Must Declare in `plugin.json`)
 
-Calling any Class 2 or Class 3 API without declaring it in `plugin.json` is a fatal error that immediately terminates the plugin and logs `[undeclared]` to its Debug Log.
+Calling any Class 2 or Class 3 API without declaring it in `plugin.json` is a fatal violation that immediately terminates the plugin host and logs `[undeclared]`.
 
 | Permission | APIs | Purpose |
 | :--- | :--- | :--- |
-| `"ui.panel"` | `ui.panel.mount(spec)`, `ui.panel.update(id, patch_or_root)`, `ui.panel.unmount(id)` | Mount retained declarative Flexbox & vector Canvas UI panels into client workspace slots. |
-| `"events.messages"` | `events.on("message.create" \| "message.update" \| "message.delete" \| "message.pin" \| "reaction.update" \| "typing.start", fn)` | Observe message & reaction events. |
-| `"events.presence"` | `events.on("presence.update", fn)` | Observe user status updates. |
-| `"events.voice"` | `events.on("voice.state" \| "voice.server" \| "stream.state", fn)` | Observe voice & stream state. |
-| `"events.channels"` | `events.on("channel.upsert" \| "channel.delete" \| "guilds.loaded" \| "notify.update", fn)` | Observe guild/channel & mute/notification changes. |
-| `"store.read"` | `store.self()`, `store.guilds()`, `store.guild(id)`, `store.channels(gid)`, `store.channel(id)`, `store.members(gid)`, `store.user(id)`, `store.messages(cid, limit?)`, `store.message(cid, mid)`, `store.selected()` | Read cached guilds (`"dm"` alias supported), channels, unread/mention counts, members, users, and messages. |
-| `"messages.send"` | `messages.send(channel_id, content)` | Send messages as the logged-in user. |
-| `"messages.manage"` | `messages.edit(cid, mid, content)`, `messages.delete(cid, mid)`, `messages.typing(cid)` | Edit/delete messages and send typing indicator. |
-| `"messages.hook"` | `hooks.on_before_send(fn)` | Register outgoing message hook. |
-| `"presence.write"` | `presence.set(status, custom_text?)` | Update user online status. |
-| `"navigation.write"` | `navigation.select_guild(gid)`, `navigation.select_channel(cid, opts?)`, `navigation.select_view(view)`, `navigation.action(act)`, `navigation.open_quick_switcher()` | Drive client navigation, special views, threads, and UI popovers. |
-| `"voice.control"` | `voice.join(gid, cid)`, `voice.leave(gid)`, `voice.set_mute(bool)`, `voice.set_deafen(bool)` | Join/leave voice and control mute/deafen. |
+| `"ui.panel"` | `ui.panel.mount(spec)`, `ui.panel.update(id, patch_or_root)`, `ui.panel.patch(id, ops)`, `ui.panel.unmount(id)`, `ui.texture.upload(key, bytes_or_asset, opts?)`, `ui.texture.upload_rgba(key, rgba, w, h)`, `ui.texture.evict(key)`, `ui.texture.exists(key)` | Panel Engine (19 slots, interactive widgets, incremental JSON patches, custom textures, extended 2D vector canvas). |
+| `"ui.decorate"` | `ui.decorate.message_badge(spec)`, `message_accessory(spec)`, `message_toolbar(spec)`, `message_style(spec)`, `member_badge(spec)`, `profile_section(spec)`, `channel_badge(spec)`, `guild_badge(spec)`, `remove(id)`, `clear()` | Attach custom badges, accessories, styles, and profile sections to native UI rows. |
+| `"ui.composer"` | `ui.composer.get_text()`, `set_text(s)`, `insert(s, pos?)`, `clear()`, `get_selection()`, `set_selection(s, e)`, `get_reply()`, `set_reply(mid, ping?)`, `attach_bytes(name, bytes, spoiler?)`, `register_autocomplete(spec)`, `unregister_autocomplete(id)`, `events.on("composer.change", fn)` | Read/mutate message composer draft, reply target, staged attachments, and custom trigger autocomplete providers. |
+| `"theme.write"` | `theme.set_base(id)`, `theme.patch_colors(tbl, layer?)`, `theme.patch_metrics(tbl, layer?)`, `theme.inject_css(layer_id, css)`, `theme.remove_css(layer_id)`, `theme.set_fonts({ regular?, bold? })`, `theme.set_icon(icon_name, tex_key)`, `theme.set_background(slot, opts?)`, `theme.reset()` | Live multi-layer theming, surface-scoped CSS (`.chat`, `.sidebar`, `.composer`, `.header`, `.modal`, `.user-panel`, `.member-list`, `.guild-rail`, `.message`), custom fonts, icon overrides, and wallpapers (`"window"`, `"chat"`, `"sidebar"`). Ignored on protected security surfaces. |
+| `"audio.earcons"` | `audio.override_earcon(kind, bytes_or_asset, is_asset?)`, `audio.reset_earcon(kind)` | Replace C-Cord's built-in notification/voice sound effects with custom WAV/OGG audio. |
+| `"events.messages"` | `events.on("message.create" \| "message.update" \| "message.delete" \| "message.pin" \| "reaction.update" \| "typing.start", fn)` | Observe message, pin, reaction, and typing events. |
+| `"events.presence"` | `events.on("presence.update", fn)` | Observe user status & activity updates. |
+| `"events.voice"` | `events.on("voice.state" \| "voice.server" \| "stream.state", fn)` | Observe voice & screen-share state. |
+| `"events.channels"` | `events.on("channel.upsert" \| "channel.delete" \| "guilds.loaded" \| "notify.update", fn)` | Observe guild, channel, and notification preference updates. |
+| `"store.read"` | `store.self()`, `guilds()`, `guild(id)`, `channels(gid)`, `channel(id)`, `members(gid)`, `user(id)`, `messages(cid, limit?)`, `message(cid, mid)`, `selected()`, `roles(gid)`, `has_permission(gid, cid, perm)`, `voice_states(gid)`, `speaking(gid)`, `rtc_stats()`, `dave_status()`, `relationships()`, `user_profile(uid)`, `user_note(uid)`, `emojis(gid)`, `forum_posts(fid)`, `scheduled_events(gid)`, `typing(cid)`, `active_call()`, `messages.fetch_pins(cid)`, `messages.fetch_history(cid, before?)`, `messages.search(gid, q, cid?)` | Full read access to cached Discord state, roles/permissions, RTC/DAVE stats, profiles, notes, emojis, forums, events, and message history/search. |
+| `"messages.send"` | `messages.send(cid, content)`, `messages.reply(cid, mid, content, ping?)`, `messages.forward(cid, from_cid, mid, comment?)`, `messages.send_file(cid, fname, bytes, content?)`, `messages.send_poll(cid, spec)`, `messages.schedule(cid, send_at_ms, content)`, `messages.scheduled_list()`, `messages.scheduled_cancel(id)` | Send messages, replies, forwards, files, polls, and scheduled messages. |
+| `"messages.manage"` | `messages.edit(cid, mid, content)`, `messages.delete(cid, mid)`, `messages.typing(cid)`, `messages.react(cid, mid, emoji)`, `messages.unreact(cid, mid, emoji)`, `messages.pin(cid, mid)`, `messages.unpin(cid, mid)`, `messages.ack(cid, mid)`, `messages.mark_unread(cid, mid)`, `messages.save(cid, mid, note?)`, `messages.unsave(mid)`, `messages.saved()` | Edit, delete, react, pin, ack/unread, and bookmark messages. |
+| `"messages.hook"` | `hooks.on_before_send(fn)`, `hooks.on_before_edit(fn)` | Bounded-timeout synchronous interception hooks to rewrite (`{ content = ... }` or string) or cancel (`{ cancel = true, reason = ... }` or `false`) outgoing sends/edits. |
+| `"notifications.hook"` | `hooks.on_notification(fn)`, `hooks.on_link_open(fn)` | Rewrite/suppress desktop notifications (`{ suppress = true }` or `{ title, body, silent }`) and rewrite/block clicked URLs (`{ url = "https://..." }` or `false`). |
+| `"presence.write"` | `presence.set(status, text?)`, `presence.set_activity(spec)`, `presence.clear_activity()`, `presence.set_custom_status(text, emoji?, expires_ms?)` | Update online status, Rich Presence activities, and custom status. |
+| `"navigation.write"` | `navigation.select_guild(gid)`, `select_channel(cid, opts?)`, `select_view(view)`, `action(act)`, `open_quick_switcher()` | Drive client navigation, views, threads, and popovers. |
+| `"social.write"` | `social.open_dm(uid)`, `set_user_note(uid, note)`, `open_thread(gid, parent_id, tid, name?)`, `create_forum_post(fid, title, content, tags?)`, `vote_poll(cid, mid, answer_ids)`, `rsvp_event(gid, eid, rsvp)` | Perform social actions (DMs, user notes, threads, forums, polls, events). |
+| `"voice.control"` | `voice.join(gid, cid)`, `leave(gid)`, `set_mute(b)`, `set_deafen(b)`, `set_camera(b)`, `set_user_volume(uid, vol)`, `set_user_local_mute(uid, b)`, `play_soundboard(gid, sid)`, `call_join(cid)`, `call_leave(cid)`, `watch_stream(gid, cid, uid)`, `stop_watching()`, `stats()`, `dave_status()` | Control voice calls, per-user local volume/mute, soundboard, and streams. |
+| `"voice.levels"` | `voice.levels()`, `events.on("voice.levels", fn)` | Read real-time per-user audio RMS/VAD speaking levels. |
+| `"voice.pcm"` | `voice.on_pcm(fn)`, `voice.push_pcm(pcm_bytes)` | Receive decoded 48 kHz voice PCM frames and inject synthetic PCM audio. |
+| `"ui.window"` | `window.set_title(title)`, `window.set_badge(count)`, `window.flash()`, `window.is_focused()`, `window.tray.add_item(spec)`, `window.tray.remove_item(id)` | Control window title, taskbar badge, urgency flash, and system tray menu items. |
 | `"clipboard.read"` | `clipboard.read()` | Read text from the system clipboard. |
-| `"gateway.raw"` | `gateway.on_raw(event_name, fn)` | Subscribe to raw gateway dispatch payloads. |
+| `"gateway.raw"` | `gateway.on_raw(event_name, fn)` | Subscribe to raw Discord Gateway op 0 dispatch payloads (`"*"` for all; `READY` & `READY_SUPPLEMENTAL` excluded for token safety). |
+
+*Note:* `messages.inject_local(channel_id, { author?, badge?, content, embed?, dismissible? })` and `messages.dismiss_local(local_id)` allow injecting client-local ephemeral cards into a channel timeline (requires `"ui.decorate"` or `"ui.panel"`).
 
 ---
 
-### Detailed Reference: `ui.panel` (`"ui.panel"` Permission)
+### Panel Engine Reference (`"ui.panel"`)
 
-`ui.panel` provides a two-layer retained UI system rendered natively at full framerate by C-Cord's renderer without per-frame IPC overhead:
-1. **Layer 1 — Declarative Flexbox Widgets**: `row`, `col`, `box`, `text`, `icon`, `button`, `spacer`, `divider`.
-2. **Layer 2 — Vector `canvas` Escape Hatch**: Arbitrary 2D draw commands (`rect`, `rrect`, `circle`, `line`, `triangle`, `text`, `icon`) plus custom interactive `hits` regions.
-
-#### Panel Lifecycle
-- `ui.panel.mount({ id, slot?, height?, root, on_event? })`
-  - `id` (`string`): `^[a-z0-9][a-z0-9_-]{0,31}$`.
-  - `slot` (`string`, default `"top"`):
-    - `"top"`: Above the chat header in the main workspace column.
-    - `"subheader"`: Immediately below the chat header, above the message timeline.
-    - `"bottom"`: Below the message composer at the bottom of the workspace column.
-  - `height` (`number`, default `34`, clamped `12..240`): Height in logical pixels; C-Cord automatically reflows the workspace around mounted panels and reclaims space on unmount.
-  - `root` (`table`): Root widget node.
-  - `on_event(ev)` (`function`, optional): Invoked on user interaction with any node or canvas hit carrying an `id` (and on `"wheel"` anywhere over the panel):
-    ```lua
-    -- ev = {
-    --   type = "click" | "double_click" | "middle_click" | "right_click" | "wheel",
-    --   id = "node-or-hit-id",   -- empty string on bare panel wheel
-    --   button = 1 | 2 | 3,
-    --   mods = { shift = bool, ctrl = bool, alt = bool, super = bool },
-    --   x = number, y = number,  -- panel-local coordinates
-    --   wheel = number,          -- vertical scroll delta on "wheel"
-    -- }
-    ```
-- `ui.panel.update(id, patch_or_root)`
-  - Accepts either `{ slot?, height?, root?, on_event? }` or a bare `root` widget table (when `patch_or_root.type` is a string).
-- `ui.panel.unmount(id)` — removes the panel and reclaims its layout space.
-
-#### Common Node Properties
-Every widget supports:
-- `id` (`string`): Marks the node interactive and delivers mouse events to `on_event`.
-- `w`, `h`, `min_w`, `max_w`, `flex` (`number`; `w = "100%"` sets `flex = 1`).
-- `tooltip` (`string`): Native hover tooltip.
-- `cursor`: `"default"` | `"pointer"` | `"text"` (defaults to `"pointer"` when `id` is set).
-- `show_on_hover` / `hide_on_hover` (`boolean`): Conditionally shows or hides a child when its enclosing interactive ancestor is hovered (ideal for close buttons vs. unread badges without IPC round-trips).
-
-#### Layer 1 Widgets
-- **`row` / `col` / `box`**:
-  - `direction`: `"row"` | `"col"` (on `box`), `gap` (`number`), `clip` (`boolean`).
-  - `padding`: `number`, `{ py, px }`, `{ top, right, bottom, left }`, or `pad_x`, `pad_y`, `pad_left`, `pad_right`, `pad_top`, `pad_bottom`.
-  - `align`: `"start"` | `"center"` | `"end"` | `"stretch"`.
-  - `justify`: `"start"` | `"center"` | `"end"` | `"space_between"`.
-  - `bg`, `hover_bg`, `border_color`, `hover_border_color` (color token or `#RRGGBB[AA]`).
-  - `radius` (`number`), `border_w` / `border_width` (`number`), `border_sides` (`"all"` | `"top"` | `"bottom"` | `"left"` | `"right"` | `"no_bottom"`).
-  - `children`: array of child widget tables.
-- **`text`**:
-  - `text` (`string`), `color`, `hover_color`, `size` (`"small"` | `"base"` | `"large"` or pixel number `8..48`), `bold` (`boolean`, or `font = "bold"`), `ellipsis` (`boolean`, default `true`), `align` (`"left"` | `"center"` | `"right"`).
-- **`icon`**:
-  - `name` (or `icon`): procedural icon name (see below), `size` (`6..64`, default `14`), `color`, `hover_color`.
-- **`button`**:
-  - `label` (`string`), `icon` (`string`), `icon_size` (`number`), `variant` (`"ghost"` | `"secondary"` | `"primary"` | `"danger"`), `size` (`"xs"` | `"sm"` | `"md"`), `selected` / `active` (`boolean`), `disabled` (`boolean`).
-- **`spacer`**: Expands along main axis (`flex = 1` by default, or fixed `w` / `h`).
-- **`divider`**: `orientation` (`"vertical"` | `"horizontal"`, or `vertical = true`), `inset` (`number`, default `6`), `thickness` (`1..8`), `color`.
-
-#### Layer 2 `canvas` Widget
-```lua
-{
-  type = "canvas",
-  w = "100%", h = 32, clip = true,
-  draw = {
-    { cmd = "rect", x = 0, y = 0, w = "100%", h = "100%", color = "bg_tertiary" },
-    { cmd = "rrect", x = 8, y = 4, w = 140, h = 24, radius = 6, color = "bg_primary" },
-    { cmd = "circle", cx = 20, cy = 16, r = 4, color = "status_online" },
-    { cmd = "icon", name = "hash", cx = 34, cy = 16, size = 13, color = "text_muted" },
-    { cmd = "text", x = 46, y = 8, max_w = 84, text = "general", bold = true, ellipsis = true, color = "text_normal" },
-    { cmd = "line", x1 = 0, y1 = 31, x2 = "100%", y2 = 31, thickness = 1, color = "divider" },
-    { cmd = "triangle", x1 = 4, y1 = 4, x2 = 10, y2 = 8, x3 = 4, y3 = 12, color = "brand" },
-  },
-  hits = {
-    { id = "item-1", x = 8, y = 4, w = 140, h = 24, cursor = "pointer", tooltip = "#general" },
-  },
-}
-```
-Coordinates and spans (`x`, `y`, `w`, `h`, `cx`, `cy`, `x1`, `y1`, `x2`, `y2`, `max_w`) accept either pixel numbers or percentage strings (`"50%"`, `"100%"`) relative to the canvas bounds.
-
-#### Colors & Procedural Icons
-- **Colors**: `#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`, or any active theme color token (automatically adapts to Dark, Light, AMOLED, and QuickCSS themes):
-  - Backgrounds: `bg_primary`, `bg_secondary`, `bg_tertiary`, `bg_floating`, `bg_input`, `bg_user_panel`, `bg_message_hover`, `bg_item_hover` (`bg_hover`), `bg_item_selected` (`bg_selected`), `bg_guild_idle`, `mention_bg`, `selection`, `overlay`.
-  - Borders & Scrollbars: `divider`, `border_subtle` (`border`), `scrollbar_thumb`, `scrollbar_track`, `pill`.
-  - Text & Accents: `text_normal` (`text_primary`), `text_muted`, `text_header`, `text_secondary`, `text_link`, `text_on_brand`, `text_placeholder`, `text_interactive_hover`, `text_interactive_active`, `brand`, `brand_hover`, `danger`, `caret`.
-  - Status: `status_online` (`online`), `status_idle` (`idle`), `status_dnd` (`dnd`), `status_offline` (`offline`).
-- **Icons**: `"hash"`, `"speaker"`, `"gear"`, `"chevron_up"`, `"chevron_down"`, `"chevron_left"`, `"chevron_right"`, `"close"`, `"members"`, `"mic"`, `"mic_muted"`, `"headphones"`, `"headphones_deaf"`, `"camera"`, `"screen"`, `"disconnect"`, `"search"`, `"pin"`, `"reply"`, `"edit"`, `"attachment"`, `"file"`, `"forum"`, `"user"`, `"inbox"`, `"folder"`, `"plus"`, `"compass"`, `"at"`.
-
----
-
-### Detailed Reference: `navigation` & `store` Extensions
-
-- `navigation.select_guild(guild_id)` — accepts a guild snowflake string or `"dm"` (`"1"`).
-- `navigation.select_channel(channel_id, opts?)` — switches to a text/DM/forum/thread channel. Optional `opts = { guild_id?, parent_id?, name? }` opens uncached or inline threads seamlessly.
-- `navigation.select_view(view)` — switches client view to `"friends"`, `"requests"`, or `"discovery"`.
-- `navigation.action(action)` — triggers `"quick_switcher"`, `"search"`, `"pins"`, or `"inbox"`.
-- `navigation.open_quick_switcher()` — convenience alias for `navigation.action("quick_switcher")`.
-- `store.selected()` → `{ guild_id, channel_id, view, is_dm }` (`view` is `"channel"`, `"friends"`, `"requests"`, `"discovery"`, or `"forum"`).
-- `store.guild(id)` / `store.guilds()` — accepts `"dm"` alias; includes `{ id, name, icon_url, muted, is_dm }`.
-- `store.channel(id)` / `store.channels(guild_id)` — accepts `"dm"` for `guild_id`; includes `{ id, guild_id, parent_id?, name, display_name, topic, kind, unread_count, mention_count, muted, is_dm }` (`kind` is `"text"`, `"dm"`, `"group_dm"`, `"forum"`, `"thread"`, `"voice"`, `"stage"`, or `"category"`).
+- **19 Panel Slots:**
+  - Docked workspace bars: `"top"`, `"subheader"`, `"bottom"`, `"right_sidebar"`, `"left_sidebar"`, `"channel_top"`, `"channel_bottom"`, `"rail_top"`, `"rail_bottom"`, `"header_right"`, `"composer_top"`, `"composer_left"`, `"composer_right"`, `"voice_bar"`, `"stage_overlay"`
+  - Full-view rail tab: `"full_view"` (adds an icon to the server rail; clicking toggles your full-area custom view)
+  - Overlays: `"modal"`, `"popover"`, `"floating"` (supports `width`, `height`, `x`, `y`, `title`, `icon`, `visible`)
+- **Incremental Patching (`ui.panel.patch(panel_id, ops)`):**
+  Avoids re-sending full widget trees. `ops` is an array (or single op) of:
+  - `{ op = "set_text", id = "node_id", value = "new text" }`
+  - `{ op = "set_prop", id = "node_id", prop = "value", value = 42 }`
+  - `{ op = "set_props", id = "node_id", props = { text = "hi", color = "brand" } }`
+  - `{ op = "append", id = "parent_id", node = { type = "text", text = "added" } }`
+  - `{ op = "replace", id = "node_id", node = { ... } }`
+  - `{ op = "remove", id = "node_id" }`
+- **Layer 1 Widgets:**
+  - Layout: `row`, `col` (`column`), `box`, `scroll`, `spacer`, `divider`
+  - Display: `text`, `markdown`, `icon`, `badge`, `progress`, `image` (uses `texture` key from `ui.texture.upload`), `avatar`
+  - Interactive: `button`, `toggle` (`value`), `slider` (`min`, `max`, `step`, `value`), `input` (`value`, `placeholder`), `select` (`options`, `value`), `tabs` (`tabs`, `active`)
+- **Layer 2 `canvas` Draw Commands:**
+  - `rect`, `rrect`, `rrect_stroke`, `circle`, `circle_stroke`, `arc` (`start`, `end`, `width`, `filled`), `line`, `triangle`, `polygon` (`points = {{x,y},...}`, `filled`, `width`), `gradient` (`from`, `to`, `vertical`), `text`, `icon`, `image` (`texture`, `radius`)
+- **Panel Events (`on_event(ev)`):**
+  - `"click"`, `"double_click"`, `"middle_click"`, `"right_click"`, `"wheel"`, `"hover_enter"`, `"hover_leave"`, `"mouse_move"`, `"drag_start"`, `"drag_move"`, `"drag_end"`, `"change"` (`value` bool/number/string), `"submit"` (`value` string), `"focus"`, `"blur"`, `"key_down"`, `"close"`.
 
 ---
 
 ## Class 3 — System-Level APIs (Must Declare in `plugin.json`)
 
-Calling any Class 2 or Class 3 API without declaring it in `plugin.json` is a fatal error that immediately terminates the plugin and logs `[undeclared]` to its Debug Log.
-
 | Permission | APIs | Purpose |
 | :--- | :--- | :--- |
-| `"fs.read"` | `fs.read(path)`, `fs.exists(path)`, `fs.list(path)` | Read files and list directories on disk. |
-| `"fs.write"` | `fs.write(path, data)`, `fs.append(path, data)`, `fs.mkdir(path)`, `fs.remove(path)` | Create, modify, or delete files/directories. |
+| `"fs.read"` | `fs.read(path)`, `fs.exists(path)`, `fs.list(path)`, `fs.stat(path)` → `{size, mtime, is_dir, is_file}`, `fs.read_chunk(path, offset?, len?)` → `(bytes, eof)` | Brokered file reading & metadata (C-Cord config/token/data directories are always protected). |
+| `"fs.write"` | `fs.write(path, data)`, `fs.append(path, data)`, `fs.mkdir(path)`, `fs.remove(path)`, `fs.write_chunk(path, bytes, append?)` | Brokered file writing (protected paths denied). |
+| `"fs.watch"` | `fs.watch(path, cb)` → `watch_id`, `fs.unwatch(watch_id)` | Real-time OS file/directory watching (`inotify` on Linux + portable polling fallback). `cb({ kind, path, name? })`. |
+| `"network.http"` | `net.http.request(opts, cb?)`, `net.http.get/post/put/patch/delete(url, body?, opts?, cb?)` | Async HTTPS client (strict TLS 1.2/1.3, respects manifest `allowed_hosts`, blocks private/link-local SSRF). Resolves `{ status, headers, body }`. |
+| `"network.ws"` | `net.ws.connect(url, opts?)` → handle (`:send(data, binary?)`, `:close(code?, reason?)`, `:on_open(fn)`, `:on_message(fn)`, `:on_close(fn)`, `:on_error(fn)`) | Persistent `wss://` (or loopback `ws://` with `network.local`) WebSocket client. |
+| `"network.local"` | `net.local_net.request(opts, cb?)` (also `net["local"].request`), `net.local_net.unix_send(socket_path, bytes, cb?)`, loopback `net.ws.connect("ws://127.0.0.1:...")` | Communicate with local daemons on `127.0.0.1`/`localhost`/`[::1]` or Unix domain sockets (OBS, MPD, Spotify, local LLMs). |
+| `"system.exec"` | `system.exec({ cmd, args?, cwd?, stdin?, timeout_ms? }, cb?)` → `{ code, stdout, stderr }`, `system.spawn({ cmd, args?, cwd?, on_stdout?, on_stderr?, on_exit? })` → handle (`:write(bytes)`, `:kill()`, `:on_stdout(fn)`, `:on_stderr(fn)`, `:on_exit(fn)`) | Spawn subprocesses using direct `argv` arrays (never invoked via `/bin/sh -c` implicitly). |
+| `"system.env"` | `system.env(name)` → `string | nil`, `system.paths()` → `{ home, temp, downloads, desktop }` | Read non-sensitive environment variables (token/secret/auth/key/password vars are automatically redacted) and standard OS folders. |
+| `"system.shortcuts"` | `system.shortcuts.register(id, combo, fn)`, `system.shortcuts.unregister(id)` | Register global OS-wide keyboard shortcuts (e.g. `"CTRL+SHIFT+M"`). |
+| `"system.media"` | `system.media.current()` → `{ title, artist, album, playing } | nil`, `system.media.control(action)` | Query and control system Now Playing media (Linux MPRIS D-Bus). |
+| `"system.processes"` | `system.processes.list()`, `system.processes.active_window()` | Inspect running processes and active window title (e.g. for custom game Rich Presence). |
+| `"clipboard.image"` | `clipboard.read_image()` → `png_bytes | nil`, `clipboard.write_image(png_bytes)` | Read and write PNG images on the system clipboard. |
 | `"system.info"` | `system.os()`, `system.arch()`, `system.hostname()` | Read OS name, CPU architecture, and hostname. |
-| `"system.open"` | `system.open_url(url)` | Open an `http://` or `https://` URL in the browser. |
-| `"system.notify"` | `system.notify(title, body)` | Send a native desktop notification. |
+| `"system.open"` | `system.open_url(url)` | Open an `http://` or `https://` URL in the default browser. |
+| `"system.notify"` | `system.notify(title, body)` | Send a native OS notification. |

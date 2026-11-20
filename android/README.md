@@ -6,7 +6,7 @@ Native C23 Android port of C-Cord using SDL3, SDL3_ttf, Lua 5.5.1 (in-process sa
 - **ABIs:** `arm64-v8a` (64-bit ARM phones/tablets) and `x86_64` (Android emulators / Chromebooks), minimum Android 9 (API 28), target Android 15 (API 35) with 16 KB ELF & APK page alignment.
 - **Native Mobile UI:** Responsive layout with edge-to-edge safe-area & soft-keyboard IME insets, touch drag-scroll & kinetic fling, long-press bottom-sheet context menus with in-place submenu drill-down, slide-out navigation & member drawers, 2-level mobile settings stacks, and Android Back navigation unwinding.
 - **Native Android Integration:** `CCordActivity` (`SDLActivity`), `CCordBridge` JNI bridge (haptics, `ACTION_SEND` share sheet, SAF document picker, message notifications with deep-link jump, orientation & keep-screen-on, `ConnectivityManager` link monitoring, `MediaProjection` screen sharing), and `CCordVoiceService` foreground service with persistent Mute / Deafen / Disconnect controls.
-- **Cross-Platform Plugins (API v2):** Runs Lua 5.5 plugins inside sandboxed worker threads with `platform.*` OS/capability detection, manifest `"platforms"` / `"requires_capabilities"` filtering, and mobile UX APIs (`ui.haptics.*`, `ui.share.*`, `ui.keyboard.*`, `ui.mobile.*`).
+- **Cross-Platform Plugins (API v1):** Runs Lua 5.5 plugins inside sandboxed worker threads with `platform.*` OS/capability detection, manifest `"platforms"` / `"requires_capabilities"` filtering, and mobile UX APIs (`ui.haptics.*`, `ui.share.*`, `ui.keyboard.*`, `ui.mobile.*`).
 
 ## Prerequisites
 - Android SDK (API 35/36 platform + build-tools) and Android NDK 27+

@@ -16,4 +16,4 @@ Description: |-
     * Responsive mobile UI with touch gestures, bottom-sheet menus, drawers, and safe-area / soft-keyboard support
     * Voice calls, DAVE E2EE, camera & MediaProjection screen sharing, and persistent foreground call controls
     * Built-in Dark, Light, and AMOLED themes plus QuickCSS
-    * Sandboxed Lua 5.5 plugin system (API v2) with OS/capability detection and mobile haptics & share APIs
+    * Sandboxed Lua 5.5 plugin system (API v1) with OS/capability detection and mobile haptics & share APIs
