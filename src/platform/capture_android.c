@@ -51,7 +51,7 @@ static void swizzle_rgba_to_bgra(uint8_t *restrict dst, const uint8_t *restrict 
 
 void ccord_capture_android_push_frame(const uint8_t *rgba, int width, int height, int stride)
 {
-  if (!rgba || width <= 0 || height <= 0 || width > INT_MAX / 4 || stride < width * 4) return;
+  if (!rgba || width <= 0 || height <= 0 || width > 8192 || height > 8192 || stride < width * 4) return;
   size_t need = (size_t)width * (size_t)height * 4u;
 
   // Check out a spare buffer (if any) under the spinlock; never hold the spinlock across malloc/swizzle.

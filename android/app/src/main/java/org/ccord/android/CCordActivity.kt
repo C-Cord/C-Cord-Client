@@ -698,25 +698,58 @@ class CCordActivity : SDLActivity() {
                 try {
                     val plane = img.planes[0]
                     val srcBuf = plane.buffer
+                    val pixelStride = plane.pixelStride
                     val rowStride = plane.rowStride
                     val w = img.width
                     val h = img.height
-                    val totalBytes = rowStride * h
-                    var dst = captureDirectBuf
-                    if (dst == null || dst.capacity() < totalBytes) {
-                        dst = ByteBuffer.allocateDirect(totalBytes)
-                        captureDirectBuf = dst
+                    if (w <= 0 || h <= 0 || w > 8192 || h > 8192 || pixelStride < 4 || rowStride < w * pixelStride) {
+                        return@setOnImageAvailableListener
                     }
-                    dst.clear()
                     srcBuf.rewind()
-                    val copyLen = minOf(srcBuf.remaining(), totalBytes)
-                    val savedLimit = srcBuf.limit()
-                    srcBuf.limit(srcBuf.position() + copyLen)
-                    dst.put(srcBuf)
-                    srcBuf.limit(savedLimit)
-                    dst.flip()
-                    if (CCordBridge.nativeReady) {
-                        CCordBridge.nativeOnCaptureFrame(dst, w, h, rowStride)
+                    if (pixelStride == 4) {
+                        val needed = (h - 1) * rowStride + w * 4
+                        if (srcBuf.remaining() < needed) return@setOnImageAvailableListener
+                        val totalBytes = rowStride * h
+                        var dst = captureDirectBuf
+                        if (dst == null || dst.capacity() < totalBytes) {
+                            dst = ByteBuffer.allocateDirect(totalBytes)
+                            captureDirectBuf = dst
+                        }
+                        dst.clear()
+                        val copyLen = minOf(srcBuf.remaining(), totalBytes)
+                        val savedLimit = srcBuf.limit()
+                        srcBuf.limit(srcBuf.position() + copyLen)
+                        dst.put(srcBuf)
+                        srcBuf.limit(savedLimit)
+                        dst.flip()
+                        if (CCordBridge.nativeReady) {
+                            CCordBridge.nativeOnCaptureFrame(dst, w, h, rowStride)
+                        }
+                    } else {
+                        val tightStride = w * 4
+                        val totalBytes = tightStride * h
+                        var dst = captureDirectBuf
+                        if (dst == null || dst.capacity() < totalBytes) {
+                            dst = ByteBuffer.allocateDirect(totalBytes)
+                            captureDirectBuf = dst
+                        }
+                        dst.clear()
+                        val needSrc = (h - 1) * rowStride + (w - 1) * pixelStride + 4
+                        if (srcBuf.remaining() < needSrc) return@setOnImageAvailableListener
+                        for (y in 0 until h) {
+                            val rowBase = y * rowStride
+                            for (x in 0 until w) {
+                                val off = rowBase + x * pixelStride
+                                dst.put(srcBuf.get(off))
+                                dst.put(srcBuf.get(off + 1))
+                                dst.put(srcBuf.get(off + 2))
+                                dst.put(srcBuf.get(off + 3))
+                            }
+                        }
+                        dst.flip()
+                        if (CCordBridge.nativeReady) {
+                            CCordBridge.nativeOnCaptureFrame(dst, w, h, tightStride)
+                        }
                     }
                 } catch (t: Throwable) {
                     Log.w(TAG, "capture frame copy failed", t)

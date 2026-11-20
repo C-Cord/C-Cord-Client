@@ -107,6 +107,23 @@ class CCordVoiceService : Service() {
         }
 
         if (!voiceActive && !screenShareActive) {
+            // Android O+ requires startForeground() after startForegroundService() even if stopping immediately.
+            CCordBridge.ensureNotificationChannels(this)
+            try {
+                val notification = buildNotification()
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    ServiceCompat.startForeground(
+                        this,
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                    )
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "startForeground before immediate stop failed", t)
+            }
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
