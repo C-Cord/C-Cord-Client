@@ -2388,7 +2388,12 @@ bool ui_expr_handle_event(ccord_ui *ui, const ccord_input_event *ev)
         if (b->tab_rects[t].w > 0.0f && ui_in_rect(ev->x, ev->y, b->tab_rects[t])) {
           ep->tab = t;
           b->skin_popup_open = false;
-          b->gif_search_pending = false;
+          if (t == EXPR_TAB_GIFS && b->search_edit.len >= 2) {
+            b->gif_search_pending = true;
+            b->gif_search_due_ms = 0;
+          } else {
+            b->gif_search_pending = false;
+          }
           b->last_hover_key = -1;
           ui->dirty = true;
           return true;
