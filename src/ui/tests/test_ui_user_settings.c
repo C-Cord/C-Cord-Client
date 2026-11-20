@@ -640,9 +640,10 @@ static void test_streamer_masking(void)
   CT_CHECK(pdbg().mask_last[0] == '\0');   // nothing masked when off
   F.ui->settings_streamer_mode = true;
   frame(1);
-  CT_CHECK(pdbg().mask_last[0] == '*');   // the drawn identity is masked
+  ccord_settings_m6_prefs_debug d = pdbg();
+  CT_CHECK(d.mask_last[0] == '*');   // the drawn identity is masked
   bool all_stars = true;
-  for (const char *p = pdbg().mask_last; *p; p++) {
+  for (const char *p = d.mask_last; *p; p++) {
     if (*p != '*') all_stars = false;
   }
   CT_CHECK(all_stars);

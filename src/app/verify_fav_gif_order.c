@@ -58,7 +58,7 @@ static const char fo_new_url[] = "https://tenor.com/view/fo-new-gif-12";
 static const ccord_verify_ui_parity_ctx *fo_ctx;
 static unsigned fo_checks;
 
-static int fo_fail(const char *fmt, ...)
+CCORD_PRINTF(1, 2) static int fo_fail(const char *fmt, ...)
 {
   char buf[400];
   va_list ap;

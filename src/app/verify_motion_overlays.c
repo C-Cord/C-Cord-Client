@@ -33,7 +33,7 @@ typedef struct mo {
   char fail[200];
 } mo;
 
-static bool mo_check(mo *m, bool ok, const char *fmt, ...)
+CCORD_PRINTF(3, 4) static bool mo_check(mo *m, bool ok, const char *fmt, ...)
 {
   if (ok) {
     (*m->checks)++;

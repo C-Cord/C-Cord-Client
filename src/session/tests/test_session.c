@@ -963,7 +963,7 @@ static void test_session_admin(void)
   CT_CHECK(other != 0);
   ccord_id chan = 3111;   // a text channel of server 2001
   CT_CHECK(ccord_store_channel(store, chan) && ccord_store_channel(store, chan)->guild_id == 2001);
-  ccord_admin_request r;
+  ccord_admin_request r = {0};
 
   // ---- rejected before the transport is involved ----
   CT_CHECK(ccord_session_admin(nullptr, &r, &err) == CCORD_ERR_INVALID);
@@ -1774,7 +1774,8 @@ static void test_session_structured_mentions(void)
   ccord_id got[8];
   ccord_id ids = 200;
   #define SEND_RICH(rich_ptr, text) do { \
-    ccord_message mm = {.id = ++ids, .channel_id = LOOSE, .author_id = ANN, .timestamp_ms = (int64_t)ids, .content = (text), .rich = (rich_ptr)}; \
+    ++ids; \
+    ccord_message mm = {.id = ids, .channel_id = LOOSE, .author_id = ANN, .timestamp_ms = (int64_t)ids, .content = (text), .rich = (rich_ptr)}; \
     f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_MESSAGE_CREATE, .guild_id = GUILD, .channel_id = LOOSE, .messages = &mm, .message_count = 1}; \
     CT_CHECK(ccord_session_pump(s) == 1); \
   } while (0)
@@ -1786,7 +1787,8 @@ static void test_session_structured_mentions(void)
   CT_CHECK(c && c->unread_count == 1 && c->mention_count == 0);
 
   // A direct message counts as a mention of the user whatever it says.
-  ccord_message dm = {.id = ++ids, .channel_id = DMCH, .author_id = ANN, .timestamp_ms = (int64_t)ids, .content = "psst"};
+  ++ids;
+  ccord_message dm = {.id = ids, .channel_id = DMCH, .author_id = ANN, .timestamp_ms = (int64_t)ids, .content = "psst"};
   f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_MESSAGE_CREATE, .guild_id = CCORD_DM_GUILD_ID, .channel_id = DMCH,
                                     .messages = &dm, .message_count = 1};
   CT_CHECK(ccord_session_pump(s) == 1);
@@ -1890,7 +1892,8 @@ static void test_session_structured_mentions(void)
   SEND_RICH(&other_role, "somebody else's role");
   CT_CHECK(ccord_session_pop_notification(s, &note) && !note.is_mention);
   // Whatever the level, the user's own messages (sent from another device, or the echo of a send) never notify.
-  ccord_message own = {.id = ++ids, .channel_id = LOOSE, .author_id = SELF, .timestamp_ms = (int64_t)ids, .content = "my own words",
+  ++ids;
+  ccord_message own = {.id = ids, .channel_id = LOOSE, .author_id = SELF, .timestamp_ms = (int64_t)ids, .content = "my own words",
                        .rich = &ping};
   f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_MESSAGE_CREATE, .guild_id = GUILD, .channel_id = LOOSE, .messages = &own,
                                     .message_count = 1};
@@ -2063,7 +2066,8 @@ static void test_session_read_position(void)
     CT_CHECK(ccord_session_pump(s) == 1); } while (0)
   ccord_id next_id = 900;
   #define ARRIVES(chan, who, text, rich_ptr) do { \
-    ccord_message mm = {.id = ++next_id, .channel_id = (chan), .author_id = (who), .timestamp_ms = (int64_t)next_id, .content = (text), .rich = (rich_ptr)}; \
+    ++next_id; \
+    ccord_message mm = {.id = next_id, .channel_id = (chan), .author_id = (who), .timestamp_ms = (int64_t)next_id, .content = (text), .rich = (rich_ptr)}; \
     f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_MESSAGE_CREATE, .guild_id = GUILD, .channel_id = (chan), .messages = &mm, .message_count = 1}; \
     CT_CHECK(ccord_session_pump(s) == 1); } while (0)
 

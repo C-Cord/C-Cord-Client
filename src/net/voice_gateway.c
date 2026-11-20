@@ -2796,7 +2796,20 @@ static bool vg_drain(ccord_voice_gateway *g, ccord_voice_event *out)
     if (!meta) return got;
     if ((meta->flags & CURLWS_CLOSE) != 0) {
       // Close frame payload: 2-byte big-endian code (RFC 6455), as discord_gateway.c reads it.
-      uint16_t close_code = (uint16_t)(n >= 2 ? (((unsigned)buf[0] << 8) | (unsigned)buf[1]) : 0u);
+      size_t clen = n;
+      curl_off_t left = meta->bytesleft;
+      for (int tries = 0; clen < 2u && left > 0 && tries < 8; tries++) {
+        size_t m = 0;
+        const struct curl_ws_frame *m2 = nullptr;
+        CURLcode rc2 = curl_ws_recv(g->curl, buf + clen, sizeof buf - clen, &m, &m2);
+        if (rc2 == CURLE_OK) {
+          clen += m;
+          left = m2 ? m2->bytesleft : 0;
+        } else {
+          break;
+        }
+      }
+      uint16_t close_code = (uint16_t)(clen >= 2 ? (((unsigned)buf[0] << 8) | (unsigned)buf[1]) : 0u);
       CCORD_LOG_W("voice: websocket closed (code=%u)", (unsigned)close_code);
       vg_on_ws_lost(g, close_code, close_code ? CCORD_VC_CAUSE_CLOSE : CCORD_VC_CAUSE_IO);
       return got;

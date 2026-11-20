@@ -13,6 +13,7 @@
 #pragma once
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
+#include <errno.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdbool.h>
@@ -151,7 +152,15 @@ static void fd_serve(int lfd, int wfd, fd_respond_fn fn, void *ud)
     (void)!write(wfd, &req, sizeof req);
     char out[262144];
     size_t n = fn(ud, idx, &req, out, sizeof out);
-    if (n > 0) (void)!write(cfd, out, n);
+    for (size_t off = 0; off < n;) {
+      ssize_t w = write(cfd, out + off, n - off);
+      if (w < 0) {
+        if (errno == EINTR) continue;
+        break;
+      }
+      if (w == 0) break;
+      off += (size_t)w;
+    }
     close(cfd);
   }
 }

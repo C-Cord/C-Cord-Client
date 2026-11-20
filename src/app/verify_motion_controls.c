@@ -48,7 +48,7 @@ typedef struct vc_probe {
   ccord_rect track;
 } vc_probe;
 
-static bool vc_check(vc *v, bool ok, const char *fmt, ...)
+CCORD_PRINTF(3, 4) static bool vc_check(vc *v, bool ok, const char *fmt, ...)
 {
   if (ok) {
     (*v->checks)++;

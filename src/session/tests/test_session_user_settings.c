@@ -564,8 +564,8 @@ static void test_live_status_set(void)
 
   const char *want_rest[] = {
     "{\"status\":\"idle\"}",
-    "{\"custom_status\":{\"text\":\"Deep work\",\"emoji_name\":\"\xF0\x9F\x8E\xAF\",\"emoji_id\":null,"
-    "\"expires_at\":\"2030-03-17T17:46:40.000Z\"}}",
+    ("{\"custom_status\":{\"text\":\"Deep work\",\"emoji_name\":\"\xF0\x9F\x8E\xAF\",\"emoji_id\":null,"
+     "\"expires_at\":\"2030-03-17T17:46:40.000Z\"}}"),
     "{\"custom_status\":null}",
     "{\"status\":\"dnd\"}",
   };
@@ -580,8 +580,8 @@ static void test_live_status_set(void)
 
   const char *want_op3[] = {
     "OP3 {\"op\":3,\"d\":{\"status\":\"idle\",\"since\":0,\"afk\":false,\"activities\":[]}}",
-    "OP3 {\"op\":3,\"d\":{\"status\":\"idle\",\"since\":0,\"afk\":false,\"activities\":[{\"name\":\"Custom Status\","
-    "\"type\":4,\"state\":\"Deep work\",\"emoji\":{\"name\":\"\xF0\x9F\x8E\xAF\"}}]}}",
+    ("OP3 {\"op\":3,\"d\":{\"status\":\"idle\",\"since\":0,\"afk\":false,\"activities\":[{\"name\":\"Custom Status\","
+     "\"type\":4,\"state\":\"Deep work\",\"emoji\":{\"name\":\"\xF0\x9F\x8E\xAF\"}}]}}"),
     "OP3 {\"op\":3,\"d\":{\"status\":\"idle\",\"since\":0,\"afk\":false,\"activities\":[]}}",
     "OP3 {\"op\":3,\"d\":{\"status\":\"dnd\",\"since\":0,\"afk\":false,\"activities\":[]}}",
   };

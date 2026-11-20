@@ -322,7 +322,7 @@ static void script_main_gw(void *ud, fg_conn *c)
       {.fd = c->fd, .events = POLLIN, .revents = 0},
       {.fd = m->cmd_rd, .events = POLLIN, .revents = 0},
     };
-    int pr = poll(pfds, 2, 5000);
+    int pr = poll(pfds, 2, 30000);
     if (pr <= 0) break;
 
     if ((pfds[1].revents & (POLLIN | POLLHUP)) != 0) {
@@ -427,6 +427,16 @@ static void script_voice_gw_drop(void *ud, fg_conn *c)
       {.fd = v->cmd_rd, .events = POLLIN, .revents = 0},
     };
     if (poll(pfds, 2, 30000) <= 0) return;
+    if ((pfds[0].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
+      int r = fg_recv(c, buf, sizeof buf, 200);
+      if (r != FG_GOT_TEXT) return;
+      if (strstr(buf, "\"op\":3") != nullptr) {
+        (void)fg_send(c, "{\"op\":6,\"d\":{\"t\":0}}");
+        continue;
+      }
+      fg_log(c, "VG_TX %s", buf);
+      continue;
+    }
     if ((pfds[1].revents & POLLIN) != 0) {
       char cmd[32];
       ssize_t n = read(v->cmd_rd, cmd, sizeof cmd - 1u);
@@ -439,15 +449,6 @@ static void script_voice_gw_drop(void *ud, fg_conn *c)
           return;
         }
       }
-    }
-    if ((pfds[0].revents & (POLLIN | POLLHUP | POLLERR)) != 0) {
-      int r = fg_recv(c, buf, sizeof buf, 200);
-      if (r != FG_GOT_TEXT) return;
-      if (strstr(buf, "\"op\":3") != nullptr) {
-        (void)fg_send(c, "{\"op\":6,\"d\":{\"t\":0}}");
-        continue;
-      }
-      fg_log(c, "VG_TX %s", buf);
     }
   }
 }

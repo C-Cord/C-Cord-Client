@@ -1412,11 +1412,24 @@ static void gw_drain(ccord_gateway *g)
     }
     if (!meta) return;
     if ((meta->flags & CURLWS_CLOSE) != 0) {
+      size_t clen = n;
+      curl_off_t left = meta->bytesleft;
+      for (int tries = 0; clen < sizeof buf && left > 0 && tries < 8; tries++) {
+        size_t m = 0;
+        const struct curl_ws_frame *m2 = nullptr;
+        CURLcode rc2 = curl_ws_recv(g->curl, buf + clen, sizeof buf - clen, &m, &m2);
+        if (rc2 == CURLE_OK) {
+          clen += m;
+          left = m2 ? m2->bytesleft : 0;
+        } else {
+          break;
+        }
+      }
       uint16_t close_code = 0;
       char reason[128] = {0};
-      if (n >= 2) {
+      if (clen >= 2) {
         close_code = (uint16_t)(((uint16_t)buf[0] << 8) | (uint16_t)buf[1]);
-        size_t rlen = n - 2;
+        size_t rlen = clen - 2;
         if (rlen >= sizeof reason) rlen = sizeof reason - 1;
         for (size_t i = 0; i < rlen; i++) {
           unsigned char c = buf[2 + i];

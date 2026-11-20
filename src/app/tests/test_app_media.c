@@ -29,7 +29,7 @@
 #define T_FRAME 960u
 
 // Opaque handle sentinels: app_media only passes these back to the ops, never dereferences them.
-static int h_audio, h_camera, h_capture, h_video, h_decoder, h_thread, h_loopback;
+alignas(max_align_t) static int h_audio, h_camera, h_capture, h_video, h_decoder, h_thread, h_loopback;
 
 typedef struct t_vol {
   ccord_id user;

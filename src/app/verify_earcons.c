@@ -40,7 +40,7 @@ typedef struct ev {
   int passed;
 } ev;
 
-static int ev_fail(const char *check, const char *fmt, ...)
+CCORD_PRINTF(2, 3) static int ev_fail(const char *check, const char *fmt, ...)
 {
   char msg[192];
   va_list ap;

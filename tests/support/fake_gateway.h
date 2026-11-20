@@ -15,6 +15,7 @@
 #pragma once
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
+#include <errno.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
@@ -68,6 +69,11 @@ typedef struct fg_server {
 }
 
 // Appends one line to the log the test reads back. Never contains a tab or newline.
+#if defined(__has_c_attribute)
+#if __has_c_attribute(gnu::format)
+[[gnu::format(printf, 2, 3)]]
+#endif
+#endif
 [[maybe_unused]] static void fg_log(const fg_conn *c, const char *fmt, ...)
 {
   char text[190];
@@ -143,6 +149,22 @@ static bool fg_read_exact(int fd, void *buf, size_t n, int timeout_ms)
   return rn > 0 && write(c->fd, resp, (size_t)rn) == rn;
 }
 
+static bool fg_write_all(int fd, const void *buf, size_t n)
+{
+  const char *p = buf;
+  size_t off = 0;
+  while (off < n) {
+    ssize_t w = write(fd, p + off, n - off);
+    if (w < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (w == 0) return false;
+    off += (size_t)w;
+  }
+  return true;
+}
+
 // Sends one unfragmented, unmasked frame (opcode 1 text, 8 close, 9 ping, 10 pong).
 static bool fg_send_frame(fg_conn *c, unsigned opcode, const void *data, size_t len)
 {
@@ -159,8 +181,14 @@ static bool fg_send_frame(fg_conn *c, unsigned opcode, const void *data, size_t 
     hdr[h++] = 127;
     for (int i = 7; i >= 0; i--) hdr[h++] = (unsigned char)((uint64_t)len >> (8 * i));
   }
-  if (write(c->fd, hdr, h) != (ssize_t)h) return false;
-  return len == 0 || write(c->fd, data, len) == (ssize_t)len;
+  if (len <= 512) {
+    unsigned char pkt[10 + 512];
+    memcpy(pkt, hdr, h);
+    if (len > 0) memcpy(pkt + h, data, len);
+    return fg_write_all(c->fd, pkt, h + len);
+  }
+  if (!fg_write_all(c->fd, hdr, h)) return false;
+  return len == 0 || fg_write_all(c->fd, data, len);
 }
 
 [[maybe_unused]] static bool fg_send(fg_conn *c, const char *json)
@@ -169,10 +197,29 @@ static bool fg_send_frame(fg_conn *c, unsigned opcode, const void *data, size_t 
 }
 
 // Closes with a WebSocket close code, as Discord does ("4004" = authentication failed, etc.).
+// Half-closes writes and drains any unread client bytes (e.g. an in-flight OP 15 / heartbeat / close echo) until
+// the peer closes so close(cfd) never triggers a Linux loopback TCP RST that drops the unread Close frame.
 [[maybe_unused]] static void fg_close(fg_conn *c, unsigned code)
 {
   unsigned char payload[2] = {(unsigned char)(code >> 8), (unsigned char)code};
   (void)fg_send_frame(c, 8, payload, 2);
+  (void)shutdown(c->fd, SHUT_WR);
+  uint64_t deadline = fg_now_ms() + 1000u;
+  char discard[1024];
+  for (;;) {
+    uint64_t now = fg_now_ms();
+    if (now >= deadline) break;
+    struct pollfd pfd = {.fd = c->fd, .events = POLLIN, .revents = 0};
+    int pr = poll(&pfd, 1, (int)(deadline - now));
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    if (pr == 0) break;
+    ssize_t r = read(c->fd, discard, sizeof discard);
+    if (r < 0 && errno == EINTR) continue;
+    if (r <= 0) break;
+  }
 }
 
 enum { FG_GOT_TEXT = 1, FG_TIMEOUT = 0, FG_GONE = -1, FG_CLIENT_CLOSE = -2 };

@@ -2132,16 +2132,19 @@ static void test_index_consistency(void)
       }
       case 5: {   // a channel appears (sorted into place) ...
         if (m.nchans[g] >= 50) break;
-        ccord_channel c = {.id = next_chan, .guild_id = gid, .kind = (NEXT() & 1u) ? CCORD_CHANNEL_TEXT : CCORD_CHANNEL_VOICE,
-                           .name = "n", .topic = "", .position = (int32_t)(NEXT() % 7)};
+        ccord_channel_kind kind = (NEXT() & 1u) ? CCORD_CHANNEL_TEXT : CCORD_CHANNEL_VOICE;
+        int32_t pos = (int32_t)(NEXT() % 7);
+        ccord_channel c = {.id = next_chan, .guild_id = gid, .kind = kind, .name = "n", .topic = "", .position = pos};
         CT_CHECK(ccord_store_upsert_channel(s, &c, &err) == CCORD_OK);
         m.chans[g][m.nchans[g]++] = next_chan++;
         break;
       }
       case 6: {   // ... is changed (a new position moves it) ...
         if (m.nchans[g] == 0) break;
-        ccord_channel c = {.id = m.chans[g][NEXT() % m.nchans[g]], .guild_id = gid, .kind = CCORD_CHANNEL_TEXT, .name = "renamed",
-                           .topic = "", .position = (int32_t)(NEXT() % 7)};
+        ccord_id cid = m.chans[g][NEXT() % m.nchans[g]];
+        int32_t pos = (int32_t)(NEXT() % 7);
+        ccord_channel c = {.id = cid, .guild_id = gid, .kind = CCORD_CHANNEL_TEXT, .name = "renamed", .topic = "",
+                           .position = pos};
         CT_CHECK(ccord_store_upsert_channel(s, &c, &err) == CCORD_OK);
         break;
       }
