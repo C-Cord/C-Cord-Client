@@ -33,13 +33,20 @@ static const char *const k_rule_name[R_COUNT] = {"shadow", "scrim", "ring", "fon
 
 typedef struct lint_package {
   const char *id;
-  const char *files[8];   // under src/ui/
+  const char *files[16];   // under src/ui/
 } lint_package;
 
 static const lint_package k_packages[] = {
-  {"S1", {"settings.c", "settings_m6_devices.c", "settings_m6_prefs.c"}},
-  {"S2", {"server_settings.c", "channel_settings.c"}},
-  {"X", {"expression_picker.c", "ui_saved_messages.c", "ui_voice_message.c"}},
+  {"S1", {"settings/settings_core.c", "settings/settings_ini.c", "settings/settings_input.c",
+          "settings/settings_pages.c", "settings/settings_plugins.c", "settings/settings_account.c",
+          "settings/settings_m6_devices.c", "settings/settings_m6_prefs.c", "settings/streamer_mask.c"}},
+  {"S2", {"settings/server_settings_core.c", "settings/server_settings_widgets.c",
+          "settings/server_settings_pages_a.c", "settings/server_settings_pages_b.c",
+          "settings/server_settings_pages_c.c", "settings/server_settings_actions_a.c",
+          "settings/server_settings_actions_b.c",
+          "settings/channel_settings.c", "settings/channel_settings_pages.c"}},
+  {"X", {"expressions/expr_picker.c", "expressions/expr_tabs.c",
+         "overlays/ui_saved_messages.c", "chat/ui_voice_message.c"}},
   // N: draw_nav.c, draw_members.c, context_menu.c (add when package N lands)
   // C: draw_forum.c (and draw_chat.c's chat part) (add when package C lands)
   // O: ui_scheduled_events.c, ui_call.c, ui_dave.c (and draw_chat.c's overlay part) (add when package O lands)
@@ -55,15 +62,17 @@ typedef struct lint_allow {
 
 static const lint_allow k_allow[] = {
   // Chrome that is not a control, drawn by hand on purpose.
-  {"settings.c", R_RING, 1, "login card: 1 px outset ring"},
-  {"settings.c", R_RADIUS, 7, "account progress bar, login card ring (token radius + 1), accent and badge, plugin banner accent rules"},
-  {"settings_m6_prefs.c", R_RADIUS, 1, "read-only theme palette preview: ring at token radius + 1"},
+  {"settings/settings_account.c", R_RING, 1, "login card: 1 px outset ring"},
+  {"settings/settings_account.c", R_RADIUS, 7, "account progress bar, login card ring (token radius + 1), accent and badge, plugin banner accent rules"},
+  {"settings/settings_m6_prefs.c", R_RADIUS, 1, "read-only theme palette preview: ring at token radius + 1"},
   // Picker content: emoji, GIF and sticker tiles, badges, hover plates and focus rings around media, and the mic glyph. Their
   // sizes are not control tokens; the controls of the picker (frame, search, tabs, buttons) are on the helpers.
-  {"expression_picker.c", R_RADIUS, 23, "tile plates, focus rings (token or literal radius + n), badges and glyph shapes"},
-  {"expression_picker.c", R_FONT, 12, "badge and caption text on GIF and sticker tiles"},
-  {"expression_picker.c", R_FONTSTEP, 1, "one caption on the picker rail still at font_size_small - 1 (debt: move to fs_caption)"},
-  {"ui_voice_message.c", R_RADIUS, 2, "mic capsule glyph and waveform bars"},
+  {"expressions/expr_picker.c", R_RADIUS, 10, "procedural icon & sticker art shapes and composer button glyphs"},
+  {"expressions/expr_picker.c", R_FONT, 2, "fallback monogram caption text on procedural art"},
+  {"expressions/expr_tabs.c", R_RADIUS, 13, "tile plates, focus rings (token or literal radius + n), badges and glyph shapes"},
+  {"expressions/expr_tabs.c", R_FONT, 10, "badge and caption text on GIF and sticker tiles"},
+  {"expressions/expr_tabs.c", R_FONTSTEP, 1, "one caption on the picker rail still at font_size_small - 1 (debt: move to fs_caption)"},
+  {"chat/ui_voice_message.c", R_RADIUS, 2, "mic capsule glyph and waveform bars"},
 };
 
 // ---- the scanner ---------------------------------------------------------------------------------------------------

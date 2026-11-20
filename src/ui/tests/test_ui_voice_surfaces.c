@@ -50,7 +50,6 @@ static void ccord_test_cleanup_dir(void) {
 #include <SDL3/SDL.h>
 
 #include <ccord/core/paths.h>
-#include <ccord/net/live_transport.h>
 #include <ccord/net/mock_transport.h>
 #include <ccord/platform/platform.h>
 #include <ccord/session/session.h>
@@ -58,7 +57,7 @@ static void ccord_test_cleanup_dir(void) {
 #include <ccord/ui/ui.h>
 
 #include "../ui_internal.h"
-#include "../ui_voice_surfaces.h"
+#include "ui_voice_surfaces.h"
 
 #include "ccord_test.h"
 
@@ -347,6 +346,32 @@ static void test_dm_call(void)
   frame(3);
   CT_CHECK(!vsdbg().ring_visible);
   CT_CHECK(ccord_store_voice_user(F.store, CCORD_DM_GUILD_ID, ME) == nullptr);
+
+  // Bot 1:1 DM: Discord does not show Start Call for bots.
+  ccord_user bot_u = {
+    .id = 1999,
+    .name = "HelperBot",
+    .status_text = "",
+    .presence = CCORD_PRESENCE_ONLINE,
+    .is_bot = true,
+  };
+  CT_CHECK(ccord_store_upsert_user(F.store, &bot_u, &err) == CCORD_OK);
+  ccord_channel bot_dm = {
+    .id = 901999,
+    .guild_id = CCORD_DM_GUILD_ID,
+    .name = "HelperBot",
+    .topic = "",
+    .kind = CCORD_CHANNEL_TEXT,
+    .discord_type = CCORD_DISCORD_CHANNEL_DM,
+    .user_id = 1999,
+    .recipient_count = 1,
+    .recipient_ids = {1999},
+  };
+  CT_CHECK(ccord_store_upsert_channel(F.store, &bot_dm, &err) == CCORD_OK);
+  CT_CHECK(ccord_session_select_channel(F.session, bot_dm.id, &err) == CCORD_OK);
+  frame(2);
+  d = vsdbg();
+  CT_CHECK(!d.header_call_visible && d.header_call.w == 0.0f);
 
   CT_CHECK(ccord_session_select_guild(F.session, HQ, &err) == CCORD_OK);
   frame(2);

@@ -79,10 +79,21 @@ typedef struct ccord_ui_host {      // everything the UI needs from the OS; test
   void (*auth_autofill)(void *ud, int mode, int active_field, bool commit,
                         ccord_rect email_r, ccord_rect pw_r, ccord_rect otp_r,
                         const char *email_text, const char *pw_text, const char *otp_text);
+  // Optional API v3 host callbacks (all nullable).
+  void (*window_set_title)(void *ud, const char *title);
+  void (*window_set_badge)(void *ud, int count);
+  void (*window_flash)(void *ud);
+  bool (*window_is_focused)(void *ud);
+  bool (*play_earcon)(void *ud, const char *kind_name);
+  bool (*play_audio_bytes)(void *ud, const uint8_t *data, size_t len);
+  bool (*save_file_dialog)(void *ud, const char *suggested_name, char *out_path, size_t cap);
+  void (*select_theme_preset)(void *ud, const char *owner, const char *preset_id);
+  void (*composer_changed)(void *ud, ccord_id channel_id, const char *text);
 } ccord_ui_host;
 typedef struct ccord_ui_deps {
   ccord_bus *bus; ccord_store *store; ccord_session *session; ccord_contrib *contrib;
   const ccord_theme *theme;                                   // must outlive the ui
+  const ccord_theme *protected_theme;                         // optional pristine theme for security modals (consent/login)
   ccord_ui_host host;
   int64_t fixed_now_unix_ms;                                  // !=0: use as "now" and format timestamps in UTC (deterministic screenshots/tests); 0: real clock + local TZ
 } ccord_ui_deps;
@@ -511,3 +522,10 @@ bool ccord_ui_right_drawer_open(const ccord_ui *ui);
 // Unwinds one mobile layer (IME -> overlay/modal/menu -> settings detail -> settings -> drawer).
 // Returns true if consumed; false at root chat so Android can background/minimize the Activity.
 bool ccord_ui_handle_back(ccord_ui *ui);
+
+// ---- App-level UI read seams (earcons, notifications, game detection) ------------------------------------------
+#define CCORD_UI_SOUND_KIND_COUNT 20u
+bool ccord_ui_sound_kind_enabled(const ccord_ui *ui, unsigned kind);
+bool ccord_ui_is_reading(const ccord_ui *ui);
+ccord_id ccord_ui_stage_channel(const ccord_ui *ui);
+bool ccord_ui_pref_game_detection(void);

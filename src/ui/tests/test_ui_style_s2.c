@@ -60,7 +60,7 @@ static void ccord_test_cleanup_dir(void) {
 #include <ccord/ui/ui.h>
 
 #include "../ui_internal.h"
-#include "../ui_style.h"
+#include "ui_style.h"
 
 #include "ccord_test.h"
 
@@ -357,44 +357,49 @@ static bool source_path(const char *name, char *out, size_t n)
 
 // Counts the lines of server_settings.c that draw by hand outside the allow-list, and the allow-list entries whose
 // count is wrong. Returns the number of problems found.
-static int scan_source(const char *path)
+static int scan_sources(const char *const *files, size_t nfiles)
 {
-  FILE *fp = fopen(path, "rb");
-  if (!fp) {
-    fprintf(stderr, "cannot open %s\n", path);
-    return 1;
-  }
   static const char *const banned[] = {"ui_draw_switch(", "ui_state_fill(", "ui_row_state_fill(", "COL(divider)",
                                        "uis_frame("};
   int seen[sizeof k_raw_allow / sizeof k_raw_allow[0]] = {0};
-  char line[2048];
-  int bad = 0, ln = 0;
-  while (fgets(line, sizeof line, fp)) {
-    ln++;
-    for (size_t i = 0; i < sizeof banned / sizeof banned[0]; i++) {
-      if (strstr(line, banned[i])) {
-        fprintf(stderr, "%s:%d: %s bypasses the shared style helpers\n", path, ln, banned[i]);
+  int bad = 0;
+  for (size_t f = 0; f < nfiles; f++) {
+    char path[1024];
+    if (!source_path(files[f], path, sizeof path)) return 1;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+      fprintf(stderr, "cannot open %s\n", path);
+      return 1;
+    }
+    char line[2048];
+    int ln = 0;
+    while (fgets(line, sizeof line, fp)) {
+      ln++;
+      for (size_t i = 0; i < sizeof banned / sizeof banned[0]; i++) {
+        if (strstr(line, banned[i])) {
+          fprintf(stderr, "%s:%d: %s bypasses the shared style helpers\n", path, ln, banned[i]);
+          bad++;
+        }
+      }
+      if (!strstr(line, "ccord_draw_rrect(") && !strstr(line, "ccord_draw_rect(")) continue;
+      bool allowed = false;
+      for (size_t i = 0; i < sizeof k_raw_allow / sizeof k_raw_allow[0]; i++) {
+        if (strstr(line, k_raw_allow[i].text)) {
+          seen[i]++;
+          allowed = true;
+          break;
+        }
+      }
+      if (!allowed) {
+        fprintf(stderr, "%s:%d: hand-drawn rect or rounded rect outside the allow-list; use a uis_ helper\n", path, ln);
         bad++;
       }
     }
-    if (!strstr(line, "ccord_draw_rrect(") && !strstr(line, "ccord_draw_rect(")) continue;
-    bool allowed = false;
-    for (size_t i = 0; i < sizeof k_raw_allow / sizeof k_raw_allow[0]; i++) {
-      if (strstr(line, k_raw_allow[i].text)) {
-        seen[i]++;
-        allowed = true;
-        break;
-      }
-    }
-    if (!allowed) {
-      fprintf(stderr, "%s:%d: hand-drawn rect or rounded rect outside the allow-list; use a uis_ helper\n", path, ln);
-      bad++;
-    }
+    fclose(fp);
   }
-  fclose(fp);
   for (size_t i = 0; i < sizeof k_raw_allow / sizeof k_raw_allow[0]; i++) {
     if (seen[i] != k_raw_allow[i].count) {
-      fprintf(stderr, "%s: allow-list entry '%s' (%s) found %d times, expected %d\n", path, k_raw_allow[i].text,
+      fprintf(stderr, "server_settings: allow-list entry '%s' (%s) found %d times, expected %d\n", k_raw_allow[i].text,
               k_raw_allow[i].why, seen[i], k_raw_allow[i].count);
       bad++;
     }
@@ -404,9 +409,13 @@ static int scan_source(const char *path)
 
 static void test_source_draws_use_helpers(void)
 {
-  char path[1024];
-  CT_CHECK(source_path("server_settings.c", path, sizeof path));
-  CT_CHECK(scan_source(path) == 0);
+  static const char *const files[] = {
+    "settings/server_settings_core.c",      "settings/server_settings_widgets.c",
+    "settings/server_settings_pages_a.c",   "settings/server_settings_pages_b.c",
+    "settings/server_settings_pages_c.c",   "settings/server_settings_actions_a.c",
+    "settings/server_settings_actions_b.c",
+  };
+  CT_CHECK(scan_sources(files, sizeof files / sizeof files[0]) == 0);
 }
 
 // ---- the pages ----

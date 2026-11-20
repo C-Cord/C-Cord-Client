@@ -64,7 +64,7 @@ static void ccord_test_cleanup_dir(void) {
 
 #include "../ui_internal.h"
 
-#include "../settings_m6_prefs.h"
+#include "settings_m6_prefs.h"
 
 #include "ccord_test.h"
 

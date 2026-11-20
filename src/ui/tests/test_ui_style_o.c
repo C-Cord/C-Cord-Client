@@ -61,7 +61,7 @@ static void ccord_test_cleanup_dir(void) {
 #include <ccord/ui/ui.h>
 
 #include "../ui_internal.h"
-#include "../ui_style.h"
+#include "ui_style.h"
 
 #include "ccord_test.h"
 
@@ -470,22 +470,22 @@ typedef struct allow {
 // Exact allowances. A function that draws one more (or one fewer) raw piece than listed fails, so a new raw frame, scrim,
 // fill or literal radius cannot slip in, and a removed one must lower its line.
 static const allow k_funcs[] = {
-  {"draw_chat.c", "ui_draw_search_popover", {0}, ""},
-  {"draw_chat.c", "ui_draw_pins_popover", {0}, ""},
-  {"draw_chat.c", "ui_draw_inbox_popover", {0, 0, 0, 2}, "mention and unread count pills (radius 9, round badges)"},
-  {"draw_chat.c", "ui_draw_shortcuts_modal", {0}, ""},
-  {"draw_chat.c", "ui_draw_autocomplete", {0}, ""},
-  {"draw_chat.c", "ui_draw_go_live", {0, 0, 0, 3}, "source thumbnail placeholder, audio checkbox, thumb tile"},
-  {"draw_chat.c", "draw_group_dm_modal", {0, 0, 0, 4}, "recipient check box shapes"},
-  {"draw_chat.c", "draw_edit_group_dm_modal", {0}, ""},
-  {"draw_chat.c", "draw_user_profile_modal", {0, 0, 0, 2}, "bot tag and server icon shapes inside the profile card"},
-  {"draw_chat.c", "ui_draw_overlays", {1, 0, 1, 13},
+  {"overlays/header_popovers.c", "ui_draw_search_popover", {0}, ""},
+  {"overlays/header_popovers.c", "ui_draw_pins_popover", {0}, ""},
+  {"overlays/header_popovers.c", "ui_draw_inbox_popover", {0, 0, 0, 2}, "mention and unread count pills (radius 9, round badges)"},
+  {"overlays/header_popovers.c", "ui_draw_shortcuts_modal", {0}, ""},
+  {"chat/composer_autocomplete.c", "ui_draw_autocomplete", {0}, ""},
+  {"voice/stream_viewer.c", "ui_draw_go_live", {0, 0, 0, 3}, "source thumbnail placeholder, audio checkbox, thumb tile"},
+  {"overlays/modals_draw.c", "draw_group_dm_modal", {0, 0, 0, 4}, "recipient check box shapes"},
+  {"overlays/modals_draw.c", "draw_edit_group_dm_modal", {0}, ""},
+  {"overlays/profile_surfaces.c", "dc_draw_user_profile_modal", {0, 0, 0, 2}, "bot tag and server icon shapes inside the profile card"},
+  {"overlays/modals_draw.c", "ui_draw_overlays", {1, 0, 1, 13},
    "lightbox scrim and its media chrome (full-bleed image viewer, not a dialog); multi-line interaction-modal field (no shared "
    "helper for it yet); select-dropdown checkbox and dot glyphs; invite preview icon"},
-  {"context_menu.c", "draw_panel", {0}, ""},
-  {"ui_scheduled_events.c", "ev_modal_begin", {0}, ""},
-  {"ui_scheduled_events.c", "ev_input", {0}, ""},
-  {"ui_scheduled_events.c", "ev_button", {0}, ""},
+  {"overlays/context_menu_actions.c", "draw_panel", {0}, ""},
+  {"voice/ui_scheduled_events.c", "ev_modal_begin", {0}, ""},
+  {"voice/ui_scheduled_events.c", "ev_input", {0}, ""},
+  {"voice/ui_scheduled_events.c", "ev_button", {0}, ""},
 };
 
 static void scan_function(const char *file, const char *src, const allow *al, bool verbose)
@@ -514,7 +514,15 @@ static void scan_function(const char *file, const char *src, const allow *al, bo
 static void test_source_scan(void)
 {
   const bool verbose = getenv("CCORD_UI_STYLE_VERBOSE") != nullptr;
-  const char *files[] = {"draw_chat.c", "context_menu.c", "ui_scheduled_events.c"};
+  const char *files[] = {
+    "overlays/header_popovers.c",
+    "chat/composer_autocomplete.c",
+    "voice/stream_viewer.c",
+    "overlays/modals_draw.c",
+    "overlays/profile_surfaces.c",
+    "overlays/context_menu_actions.c",
+    "voice/ui_scheduled_events.c",
+  };
   for (size_t f = 0; f < sizeof files / sizeof files[0]; f++) {
     char path[1024];
     snprintf(path, sizeof path, "%s/src/ui/%s", CCORD_SOURCE_DIR, files[f]);

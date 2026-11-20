@@ -60,7 +60,7 @@ static void ccord_test_cleanup_dir(void) {
 #include <ccord/ui/ui.h>
 
 #include "../ui_internal.h"
-#include "../ui_style.h"
+#include "ui_style.h"
 
 #include "ccord_test.h"
 
@@ -487,43 +487,48 @@ static bool source_path(const char *name, char *out, size_t n)
 
 // Counts the lines of channel_settings.c that break the rule: a rect or rounded-rect draw that is not on the allow-list,
 // a banned legacy helper, or an allow-list entry that no longer matches exactly once.
-static int scan_source(const char *path)
+static int scan_sources(const char *const *files, size_t nfiles)
 {
-  FILE *fp = fopen(path, "rb");
-  if (!fp) {
-    fprintf(stderr, "cannot open %s\n", path);
-    return 1;
-  }
   static const char *const banned[] = {"ui_draw_switch(", "ui_state_fill(", "ui_row_state_fill(", "COL(divider)"};
   const size_t nallow = sizeof k_allowed_draws / sizeof k_allowed_draws[0];
   unsigned used[sizeof k_allowed_draws / sizeof k_allowed_draws[0]] = {0};
-  char line[2048];
-  int bad = 0, ln = 0;
-  while (fgets(line, sizeof line, fp)) {
-    ln++;
-    for (size_t i = 0; i < sizeof banned / sizeof banned[0]; i++) {
-      if (strstr(line, banned[i])) {
-        fprintf(stderr, "%s:%d: %s bypasses the shared style helpers\n", path, ln, banned[i]);
+  int bad = 0;
+  for (size_t f = 0; f < nfiles; f++) {
+    char path[1024];
+    if (!source_path(files[f], path, sizeof path)) return 1;
+    FILE *fp = fopen(path, "rb");
+    if (!fp) {
+      fprintf(stderr, "cannot open %s\n", path);
+      return 1;
+    }
+    char line[2048];
+    int ln = 0;
+    while (fgets(line, sizeof line, fp)) {
+      ln++;
+      for (size_t i = 0; i < sizeof banned / sizeof banned[0]; i++) {
+        if (strstr(line, banned[i])) {
+          fprintf(stderr, "%s:%d: %s bypasses the shared style helpers\n", path, ln, banned[i]);
+          bad++;
+        }
+      }
+      if (!strstr(line, "ccord_draw_rect(") && !strstr(line, "ccord_draw_rrect(")) continue;
+      bool allowed = false;
+      for (size_t i = 0; i < nallow && !allowed; i++) {
+        if (strstr(line, k_allowed_draws[i])) {
+          used[i]++;
+          allowed = true;
+        }
+      }
+      if (!allowed) {
+        fprintf(stderr, "%s:%d: a raw rect draw is not a uis_ helper or an allow-listed backdrop\n", path, ln);
         bad++;
       }
     }
-    if (!strstr(line, "ccord_draw_rect(") && !strstr(line, "ccord_draw_rrect(")) continue;
-    bool allowed = false;
-    for (size_t i = 0; i < nallow && !allowed; i++) {
-      if (strstr(line, k_allowed_draws[i])) {
-        used[i]++;
-        allowed = true;
-      }
-    }
-    if (!allowed) {
-      fprintf(stderr, "%s:%d: a raw rect draw is not a uis_ helper or an allow-listed backdrop\n", path, ln);
-      bad++;
-    }
+    fclose(fp);
   }
-  fclose(fp);
   for (size_t i = 0; i < nallow; i++) {
     if (used[i] != 1) {
-      fprintf(stderr, "%s: allow-list entry \"%s\" matches %u line(s), want 1\n", path, k_allowed_draws[i], used[i]);
+      fprintf(stderr, "channel_settings: allow-list entry \"%s\" matches %u line(s), want 1\n", k_allowed_draws[i], used[i]);
       bad++;
     }
   }
@@ -532,9 +537,8 @@ static int scan_source(const char *path)
 
 static void test_source_draws_use_helpers(void)
 {
-  char path[1024];
-  CT_CHECK(source_path("channel_settings.c", path, sizeof path));
-  CT_CHECK(scan_source(path) == 0);
+  static const char *const files[] = {"settings/channel_settings.c", "settings/channel_settings_pages.c"};
+  CT_CHECK(scan_sources(files, sizeof files / sizeof files[0]) == 0);
 }
 
 int main(int argc, char **argv)

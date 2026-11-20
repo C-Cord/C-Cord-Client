@@ -66,7 +66,7 @@ static void ccord_test_cleanup_dir(void) {
 #include <ccord/ui/ui.h>
 
 #include "../ui_internal.h"
-#include "../ui_style.h"
+#include "ui_style.h"
 
 #include "ccord_test.h"
 
@@ -442,8 +442,8 @@ typedef struct raw_expect {
 
 // Clickable scrollbars (track, thumb, arrows) go through uis_scrollbar and uis_scroll_arrow and are not listed.
 static const raw_expect k_raw[] = {
-  {"draw_account", 2},                   // settings.c: account busy progress bar (track and fill), not clickable
-  {"draw_login_screen", 5},              // settings.c: login card ring, header accent, badge, banner accents, not clickable
+  {"st_draw_account", 2},                // settings_account.c: account busy progress bar (track and fill), not clickable
+  {"st_draw_login_screen", 5},           // settings_account.c: login card ring, header accent, badge, banner accents, not clickable
   {"ui_settings_m6_appearance_draw", 2}, // settings_m6_prefs.c: theme palette preview (ring and fill), read-only; the
                                          // theme chooser itself is uis_chip (p_chip_row)
 };
@@ -497,7 +497,13 @@ static bool src_path(char *out, size_t n, const char *name)
 
 static void test_raw_draws(void)
 {
-  static const char *const files[] = {"settings.c", "settings_m6_devices.c", "settings_m6_prefs.c"};
+  static const char *const files[] = {
+    "settings/settings_core.c",       "settings/settings_ini.c",
+    "settings/settings_input.c",      "settings/settings_pages.c",
+    "settings/settings_plugins.c",    "settings/settings_account.c",
+    "settings/settings_m6_devices.c", "settings/settings_m6_prefs.c",
+    "settings/streamer_mask.c",
+  };
   raw_count seen[RAW_FNS_MAX];
   int nseen = 0;
   for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {

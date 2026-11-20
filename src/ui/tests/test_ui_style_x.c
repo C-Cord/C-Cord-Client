@@ -57,7 +57,7 @@ static void ccord_test_cleanup_dir(void) {
 #include <ccord/ui/ui.h>
 
 #include "../ui_internal.h"
-#include "../ui_style.h"
+#include "ui_style.h"
 
 #include "ccord_test.h"
 

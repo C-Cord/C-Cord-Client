@@ -163,6 +163,61 @@ static void test_server_profile_and_dates(void)
   v = base_user();
   ui_profile_resolve(&empty, CCORD_ID_NONE, &v, &l);
   CT_CHECK(l.badge_count == 0 && l.deco_url[0] == '\0' && ui_profile_since_lines(&l, lines) == 1);
+  CT_CHECK(l.effect == nullptr && l.frame == nullptr && l.nameplate_asset[0] == '\0');
+}
+
+static void test_decor_nameplate_effect_frame(void)
+{
+  ccord_user_profile p = {0};
+  p.guild_id = GUILD;
+  p.avatar_decoration_url = "https://cdn.example/user_deco.png";
+  p.guild_avatar_decoration_url = "https://cdn.example/guild_deco.png";
+  snprintf(p.nameplate_asset, sizeof p.nameplate_asset, "nameplates/nameplates/american_flag/");
+  snprintf(p.nameplate_palette, sizeof p.nameplate_palette, "cobalt");
+  snprintf(p.guild_nameplate_asset, sizeof p.guild_nameplate_asset, "nameplates/nameplates/twilight/");
+  snprintf(p.guild_nameplate_palette, sizeof p.guild_nameplate_palette, "berry");
+  p.profile_effect_id = 555u;
+  p.profile_effect.id = 555u;
+  p.profile_effect.layer_count = 1;
+  snprintf(p.profile_effect.layers[0].src, sizeof p.profile_effect.layers[0].src,
+           "https://cdn.discordapp.com/assets/profile_effects/starry.png");
+  p.profile_frame_sku_id = 777u;
+  p.profile_frame.sku_id = 777u;
+  p.profile_frame.inner_width = 300;
+  p.profile_frame.overflow_top = 32;
+  p.profile_frame.layer_count = 1;
+  snprintf(p.profile_frame.layers[0].url, sizeof p.profile_frame.layers[0].url,
+           "https://cdn.discordapp.com/assets/collectibles/cat/top.png");
+
+  // In a guild: per-server avatar decoration & nameplate win; effect and frame resolve.
+  ccord_user v = base_user();
+  ui_profile_look l;
+  ui_profile_resolve(&p, GUILD, &v, &l);
+  CT_CHECK(strcmp(l.deco_url, "https://cdn.example/guild_deco.png") == 0);
+  CT_CHECK(strcmp(v.avatar_decoration_url, "https://cdn.example/guild_deco.png") == 0);
+  CT_CHECK(strcmp(l.nameplate_asset, "nameplates/nameplates/twilight/") == 0 && strcmp(l.nameplate_palette, "berry") == 0);
+  CT_CHECK(l.effect == &p.profile_effect && l.frame == &p.profile_frame);
+  ui_profile_view_debug_record(true, &l, &v, true);
+  ui_profile_view_debug dbg;
+  ui_profile_view_debug_get(nullptr, true, &dbg);
+  CT_CHECK(dbg.valid && dbg.has_deco && dbg.has_effect && dbg.has_frame);
+
+  // In a DM: user-level avatar decoration & nameplate win.
+  v = base_user();
+  ui_profile_resolve(&p, CCORD_ID_NONE, &v, &l);
+  CT_CHECK(strcmp(l.deco_url, "https://cdn.example/user_deco.png") == 0);
+  CT_CHECK(strcmp(l.nameplate_asset, "nameplates/nameplates/american_flag/") == 0 &&
+           strcmp(l.nameplate_palette, "cobalt") == 0);
+  CT_CHECK(l.effect == &p.profile_effect && l.frame == &p.profile_frame);
+
+  // Before GET /users/{id}/profile arrives (prof == nullptr): user's own avatar_decoration_url & nameplate carry through.
+  v = base_user();
+  v.avatar_decoration_url = "https://cdn.example/live_deco.png";
+  snprintf(v.nameplate_asset, sizeof v.nameplate_asset, "nameplates/nameplates/american_flag/");
+  snprintf(v.nameplate_palette, sizeof v.nameplate_palette, "cobalt");
+  ui_profile_resolve(nullptr, GUILD, &v, &l);
+  CT_CHECK(strcmp(l.deco_url, "https://cdn.example/live_deco.png") == 0);
+  CT_CHECK(strcmp(l.nameplate_asset, "nameplates/nameplates/american_flag/") == 0);
 }
 
 int main(void)
@@ -170,5 +225,6 @@ int main(void)
   test_banner_order();
   test_theme();
   test_server_profile_and_dates();
+  test_decor_nameplate_effect_frame();
   return CT_RESULT("test_ui_profile_view");
 }

@@ -3,7 +3,7 @@
 // The shared eased scroller (src/ui/scroll.h): curve, frame-rate independence, retarget, limits, reduced motion.
 #include <math.h>
 
-#include "../scroll.h"
+#include "scroll.h"
 #include "ccord_test.h"
 
 static bool near(float a, float b) { return fabsf(a - b) < 0.01f; }

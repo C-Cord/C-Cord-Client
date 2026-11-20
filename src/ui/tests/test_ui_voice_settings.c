@@ -52,7 +52,6 @@ static void ccord_test_cleanup_dir(void) {
 #include <ccord/core/event_bus.h>
 #include <ccord/core/paths.h>
 #include <ccord/model/contrib.h>
-#include <ccord/net/live_transport.h>
 #include <ccord/net/mock_transport.h>
 #include <ccord/net/voice_dsp.h>
 #include <ccord/platform/platform.h>
