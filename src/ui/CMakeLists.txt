@@ -50,6 +50,8 @@ if(CCORD_BUILD_TESTS)
                  LIBS ccord_ui ccord_platform ccord_net SDL3::SDL3 LABELS ui)
   ccord_add_test(NAME test_ui_md_ansi SOURCES tests/test_ui_md_ansi.c
                  LIBS ccord_ui ccord_platform ccord_net SDL3::SDL3 LABELS ui)
+  ccord_add_test(NAME test_ui_jumbo_emoji SOURCES tests/test_ui_jumbo_emoji.c
+                 LIBS ccord_ui ccord_platform ccord_net SDL3::SDL3 LABELS ui)
   ccord_add_test(NAME test_ui_composer_format SOURCES tests/test_ui_composer_format.c
                  LIBS ccord_ui ccord_platform ccord_net SDL3::SDL3 LABELS ui)
   ccord_add_test(NAME test_ui_style_lint SOURCES tests/test_ui_style_lint.c LABELS unit)

@@ -1908,6 +1908,21 @@ typedef struct ui_md_iter {
 void ui_md_iter_init(ui_md_iter *it, const char *text, size_t len);
 // Markers pair only when a closer follows on the line; `\\*` is a literal star; `_x_` is italic at word edges.
 bool ui_md_next(ui_md_iter *it, ui_md_token *out);   // false when the line has no more tokens
+// Enlarged ("jumbo") emoji detection for emoji-only chat messages (up to UI_JUMBO_EMOJI_MAX emojis).
+#define UI_JUMBO_EMOJI_MAX 8u
+typedef struct ui_jumbo_item {
+  bool custom;
+  bool animated;
+  bool line_break_before;
+  ccord_id id;
+  const char *text;   // Unicode UTF-8 slice OR custom emoji name slice
+  size_t len;
+  const char *raw;    // full original slice in message text for selection/copy
+  size_t raw_len;
+} ui_jumbo_item;
+// Returns 1..UI_JUMBO_EMOJI_MAX when `text[0..len)` consists exclusively of Unicode emojis, Discord custom emojis
+// (<:name:id> / <a:name:id>), and ASCII whitespace; 0 otherwise (empty, mixed text/markdown, or > UI_JUMBO_EMOJI_MAX).
+size_t ui_parse_jumbo_emojis(const char *text, size_t len, ui_jumbo_item out[static UI_JUMBO_EMOJI_MAX]);
 // ---- draw_members.c ----
 void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r);
 // ---- context_menu.c ----

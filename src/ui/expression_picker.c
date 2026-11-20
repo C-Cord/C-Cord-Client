@@ -871,7 +871,7 @@ static void draw_emoji_cell(ccord_ui *ui, ccord_renderer *r, ui_expr_body *b, cc
     ccord_rect img = {cell.x + 4.0f, cell.y + 4.0f, cell.w - 8.0f, cell.h - 8.0f};
     ui_expr_draw_custom_emoji(ui, r, custom_id, name, name ? strlen(name) : 0, animated, img);
   } else if (utf8 && utf8[0]) {
-    ccord_text_style es = ui_style(ui, CCORD_FONT_REGULAR, 22.0f, COL(text_normal));
+    ccord_text_style es = ui_style(ui, CCORD_FONT_EMOJI, 22.0f, COL(text_normal));
     ccord_vec2 et = ccord_text_measure(r, utf8, strlen(utf8), &es, 0.0f);
     ccord_text_draw(r, utf8, strlen(utf8), cell.x + (cell.w - et.x) * 0.5f,
                     cell.y + (cell.h - et.y) * 0.5f, &es, 0.0f);
@@ -1261,7 +1261,7 @@ static void draw_emoji_tab(ccord_ui *ui, ccord_renderer *r, struct ui_expr_picke
     if (preview->kind == EXPR_ITEM_CUSTOM_EMOJI) {
       ui_expr_draw_custom_emoji(ui, r, preview->id, preview->name, strlen(preview->name), preview->animated, picon);
     } else if (preview->utf8[0]) {
-      ccord_text_style es = ui_style(ui, CCORD_FONT_REGULAR, 22.0f, COL(text_normal));
+      ccord_text_style es = ui_style(ui, CCORD_FONT_EMOJI, 22.0f, COL(text_normal));
       ccord_vec2 et = ccord_text_measure(r, preview->utf8, strlen(preview->utf8), &es, 0.0f);
       ccord_text_draw(r, preview->utf8, strlen(preview->utf8),
                       picon.x + (picon.w - et.x) * 0.5f, picon.y + (picon.h - et.y) * 0.5f, &es, 0.0f);
@@ -2176,7 +2176,7 @@ void ui_expr_picker_draw(ccord_ui *ui, ccord_renderer *r)
     bool shov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, b->skin_btn_rect);
     uis_icon_button(ui, r, b->skin_btn_rect, (uis_state){.hover = shov, .selected = b->skin_popup_open}, "eskinbtn", 0);
     const char *sw = k_skin_tone_swatches[ep->skin_tone % 6u];
-    ccord_text_style sws = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_base), COL(text_normal));
+    ccord_text_style sws = ui_style(ui, CCORD_FONT_EMOJI, M(font_size_base), COL(text_normal));
     ccord_vec2 swm = ccord_text_measure(r, sw, strlen(sw), &sws, 0.0f);
     ccord_text_draw(r, sw, strlen(sw), b->skin_btn_rect.x + (b->skin_btn_rect.w - swm.x) * 0.5f,
                     b->skin_btn_rect.y + (b->skin_btn_rect.h - swm.y) * 0.5f, &sws, 0.0f);

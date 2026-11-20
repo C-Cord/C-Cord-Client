@@ -19,6 +19,7 @@
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/log.h>
+#include <ccord/core/utf8.h>
 #include <ccord/emoji/emoji.h>
 #include <ccord/net/admin.h>
 #include <ccord/store/expressions.h>
@@ -260,6 +261,58 @@ static bool try_parse_discord_angle_token(const char *p, const char *end, ui_md_
   }
 
   return false;
+}
+
+size_t ui_parse_jumbo_emojis(const char *text, size_t len, ui_jumbo_item out[static UI_JUMBO_EMOJI_MAX])
+{
+  if (!text || len == 0) return 0;
+  const char *p = text, *end = text + len;
+  size_t count = 0;
+  bool pending_nl = false;
+  while (p < end) {
+    if (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') {
+      if (*p == '\n') pending_nl = true;
+      p++;
+      continue;
+    }
+    if (count >= UI_JUMBO_EMOJI_MAX) return 0;
+    if (*p == '<') {
+      ui_md_token tok = {0};
+      const char *next = nullptr;
+      if (try_parse_discord_angle_token(p, end, &tok, &next) &&
+          tok.style == UI_MD_CUSTOM_EMOJI && tok.id != CCORD_ID_NONE) {
+        out[count++] = (ui_jumbo_item){
+          .custom = true,
+          .animated = tok.animated,
+          .line_break_before = count > 0 && pending_nl,
+          .id = tok.id,
+          .text = tok.text,
+          .len = tok.len,
+          .raw = p,
+          .raw_len = (size_t)(next - p),
+        };
+        pending_nl = false;
+        p = next;
+        continue;
+      }
+      return 0;
+    }
+    size_t el = ccord_emoji_match_prefix(p, (size_t)(end - p));
+    if (el == 0) return 0;
+    out[count++] = (ui_jumbo_item){
+      .custom = false,
+      .animated = false,
+      .line_break_before = count > 0 && pending_nl,
+      .id = CCORD_ID_NONE,
+      .text = p,
+      .len = el,
+      .raw = p,
+      .raw_len = el,
+    };
+    pending_nl = false;
+    p += el;
+  }
+  return count;
 }
 
 // ---- marker pairing. One set of rules for posted messages and the composer (composer_format.c runs this same
@@ -1083,6 +1136,81 @@ static void chat_sel_line_end(ccord_ui *ui, ccord_renderer *r, float end_x, floa
   }
 }
 
+// Finds the first Unicode emoji sequence in s[0..len). Fast-path rejects ASCII non-keycaps in O(1) per byte.
+static bool md_inline_find_emoji(const char *s, size_t len, size_t *out_off, size_t *out_len)
+{
+  size_t i = 0;
+  while (i < len) {
+    size_t ml = ccord_emoji_match_prefix(s + i, len - i);
+    if (ml > 0) {
+      *out_off = i;
+      *out_len = ml;
+      return true;
+    }
+    i = ccord_utf8_next(s, len, i);
+  }
+  return false;
+}
+
+static float md_inline_measure_token(const ccord_ui *ui, ccord_renderer *r, const char *s, size_t len,
+                                     const ccord_text_style *st, float emoji_px)
+{
+  size_t off = 0, elen = 0;
+  if (!md_inline_find_emoji(s, len, &off, &elen)) {
+    return ccord_text_measure(r, s, len, st, 0.0f).x;
+  }
+  float total = 0.0f;
+  size_t pos = 0;
+  ccord_text_style em_st = ui_style(ui, CCORD_FONT_EMOJI, emoji_px, st->color);
+  while (pos < len) {
+    size_t rel = 0, ml = 0;
+    if (!md_inline_find_emoji(s + pos, len - pos, &rel, &ml)) {
+      total += ccord_text_measure(r, s + pos, len - pos, st, 0.0f).x;
+      break;
+    }
+    if (rel > 0) total += ccord_text_measure(r, s + pos, rel, st, 0.0f).x;
+    total += ccord_text_measure(r, s + pos + rel, ml, &em_st, 0.0f).x;
+    pos += rel + ml;
+  }
+  return total;
+}
+
+static void md_inline_draw_token(ccord_ui *ui, ccord_renderer *r, const char *s, size_t len,
+                                 const ccord_text_style *st, float emoji_px, float x, float y, float inner_w,
+                                 float lh, float pad_x)
+{
+  size_t off = 0, elen = 0;
+  if (!md_inline_find_emoji(s, len, &off, &elen)) {
+    chat_sel_process_run(ui, r, s, len, st, x + pad_x, y, inner_w, lh, pad_x);
+    ccord_text_draw(r, s, len, x + pad_x, y, st, 0.0f);
+    return;
+  }
+  float rx = x + pad_x;
+  size_t pos = 0;
+  ccord_text_style em_st = ui_style(ui, CCORD_FONT_EMOJI, emoji_px, st->color);
+  while (pos < len) {
+    size_t rel = 0, ml = 0;
+    if (!md_inline_find_emoji(s + pos, len - pos, &rel, &ml)) {
+      size_t rem = len - pos;
+      float sw = ccord_text_measure(r, s + pos, rem, st, 0.0f).x;
+      chat_sel_process_run(ui, r, s + pos, rem, st, rx, y, sw, lh, pos == 0 ? pad_x : 0.0f);
+      ccord_text_draw(r, s + pos, rem, rx, y, st, 0.0f);
+      break;
+    }
+    if (rel > 0) {
+      float sw = ccord_text_measure(r, s + pos, rel, st, 0.0f).x;
+      chat_sel_process_run(ui, r, s + pos, rel, st, rx, y, sw, lh, pos == 0 ? pad_x : 0.0f);
+      ccord_text_draw(r, s + pos, rel, rx, y, st, 0.0f);
+      rx += sw;
+    }
+    ccord_vec2 em = ccord_text_measure(r, s + pos + rel, ml, &em_st, 0.0f);
+    chat_sel_process_run(ui, r, s + pos + rel, ml, &em_st, rx, y, em.x, lh, (pos + rel == 0) ? pad_x : 0.0f);
+    ccord_text_draw(r, s + pos + rel, ml, rx, y + (lh - em.y) * 0.5f, &em_st, 0.0f);
+    rx += em.x;
+    pos += rel + ml;
+  }
+}
+
 // Lays out one logical line (words with mixed styles), wrapping at the width. Returns its height. When
 // draw is true the runs are painted at (x, y).
 // mask_stars: Streamer Mode pre-masked line (see md_inline_walk_sized). text then carries
@@ -1136,12 +1264,13 @@ static float md_inline_walk_core(ccord_ui *ui, ccord_renderer *r, const char *te
     float tw = 0.0f;
     float pad_x = bg_pill ? 4.0f : 0.0f;
     float esz = font_size + 4.0f;
+    float inline_em_sz = (tok.style == UI_MD_CODE) ? st.size : esz;
     if (space) {
       tw = space_w * (float)tok.len;
     } else if (is_custom_emoji) {
       tw = esz + 2.0f;
     } else {
-      tw = ccord_text_measure(r, draw_str, draw_len, &st, 0.0f).x + pad_x * 2.0f;
+      tw = md_inline_measure_token(ui, r, draw_str, draw_len, &st, inline_em_sz) + pad_x * 2.0f;
     }
 
     if (!space && line_has && cx + tw > wrap) {
@@ -1192,8 +1321,7 @@ static float md_inline_walk_core(ccord_ui *ui, ccord_renderer *r, const char *te
         }
         if (!spoiler_hidden) {
           if (is_spoiler) st.color = COL(text_normal);
-          chat_sel_process_run(ui, r, draw_str, draw_len, &st, x + cx + pad_x, y + cy, tw - pad_x * 2.0f, lh, pad_x);
-          ccord_text_draw(r, draw_str, draw_len, x + cx + pad_x, y + cy, &st, 0.0f);
+          md_inline_draw_token(ui, r, draw_str, draw_len, &st, inline_em_sz, x + cx, y + cy, tw - pad_x * 2.0f, lh, pad_x);
         }
         if (tok.style == UI_MD_USER_MENTION || tok.style == UI_MD_MENTION) {
           ccord_id muid = resolve_mention_user_id(ui, &tok);
@@ -2071,11 +2199,13 @@ static float reaction_pills_walk(ccord_ui *ui, ccord_renderer *r, const ccord_me
     char label[24];
     int ll = snprintf(label, sizeof label, "%u", p.count);
     if (ll < 0) ll = 0;
-    ccord_text_style es = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 2.0f,
+    bool is_custom = (p.emoji_id != CCORD_ID_NONE);
+    bool is_uemoji = !is_custom && p.elen > 0 && ccord_emoji_match_prefix(p.emoji, p.elen) == p.elen;
+    ccord_text_style es = ui_style(ui, is_uemoji ? CCORD_FONT_EMOJI : CCORD_FONT_REGULAR,
+                                   is_uemoji ? M(font_size_small) : (M(font_size_small) - 2.0f),
                                    p.mine ? COL(text_on_brand) : COL(text_normal));
     ccord_text_style cs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 3.0f,
                                     p.mine ? COL(text_on_brand) : COL(text_secondary));
-    bool is_custom = (p.emoji_id != CCORD_ID_NONE);
     size_t custom_nlen = p.elen;
     if (is_custom) {
       const char *colon = strrchr(p.emoji, ':');
@@ -3124,6 +3254,94 @@ static void rowh_cache_sync(struct ui_chat_caches *cc, const ccord_ui *ui, const
   }
 }
 
+// Emoji-only chat messages (up to UI_JUMBO_EMOJI_MAX Unicode or custom emojis) render enlarged (3x base font = 48 px).
+static size_t chat_message_jumbo(const ccord_ui *ui, const ccord_message *m,
+                                 ui_jumbo_item out[static UI_JUMBO_EMOJI_MAX])
+{
+  if (!m || !m->content || m->content[0] == '\0') return 0;
+  if (m->rich && ccord_message_type_is_system(m->rich->type)) return 0;
+  if (message_should_hide_bare_link(ui, m)) return 0;
+  return ui_parse_jumbo_emojis(m->content, strlen(m->content), out);
+}
+
+static float chat_jumbo_emoji_walk(ccord_ui *ui, ccord_renderer *r, const ui_jumbo_item *items, size_t count,
+                                   float x, float y, float wrap, ccord_color base, bool show_edited,
+                                   bool show_tts, bool draw)
+{
+  float jumbo_sz = M(font_size_base) * 3.0f;   // 48 px at default 16 px base font
+  float gap = 4.0f;
+  float line_h = jumbo_sz + 4.0f;
+  float top_pad = 4.0f;
+  float cx = 0.0f, cy = top_pad;
+  bool line_has = false;
+  for (size_t i = 0; i < count; i++) {
+    const ui_jumbo_item *it = &items[i];
+    if (line_has && (it->line_break_before || cx + jumbo_sz > wrap)) {
+      if (draw) {
+        chat_sel_line_end(ui, r, x + cx, y + cy, 6.0f, line_h, it->line_break_before);
+        record_text_hit(ui, (ccord_rect){x, y + cy, cx, line_h});
+      }
+      cx = 0.0f;
+      cy += line_h;
+      line_has = false;
+    }
+    if (draw) {
+      ccord_rect er = {x + cx, y + cy + (line_h - jumbo_sz) * 0.5f, jumbo_sz, jumbo_sz};
+      if (it->custom) {
+        float sel_x0, sel_x1;
+        bool goes_on;
+        if (chat_sel_line(ui, y + cy, line_h, &sel_x0, &sel_x1, &goes_on) &&
+            sel_x1 > er.x && sel_x0 < er.x + er.w) {
+          chat_sel_fill(ui, r, (ccord_rect){er.x, y + cy, er.w, line_h});
+          chat_sel_append(ui, it->raw, it->raw_len, false);
+        }
+        ui_expr_draw_custom_emoji(ui, r, it->id, it->text, it->len, it->animated, er);
+      } else {
+        ccord_text_style es = ui_style(ui, CCORD_FONT_EMOJI, jumbo_sz, base);
+        ccord_vec2 et = ccord_text_measure(r, it->text, it->len, &es, 0.0f);
+        float ex = er.x + (er.w - et.x) * 0.5f;
+        float ey = er.y + (er.h - et.y) * 0.5f;
+        chat_sel_process_run(ui, r, it->text, it->len, &es, ex, y + cy, maxf(et.x, jumbo_sz), line_h, 0.0f);
+        ccord_text_draw(r, it->text, it->len, ex, ey, &es, 0.0f);
+      }
+    }
+    cx += jumbo_sz + gap;
+    line_has = true;
+  }
+  // Grouped/compact follow-up messages carry "(edited)" / "(tts)" inline at the end of the body.
+  if (show_edited || show_tts) {
+    ccord_text_style ts = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 2.0f, COL(text_muted));
+    float tag_lh = ui_line_h(ui, ts.size);
+    const char *tags[2] = {show_edited ? "(edited)" : nullptr, show_tts ? "(tts)" : nullptr};
+    for (int ti = 0; ti < 2; ti++) {
+      if (!tags[ti]) continue;
+      size_t tl = strlen(tags[ti]);
+      float tw = ccord_text_measure(r, tags[ti], tl, &ts, 0.0f).x;
+      if (line_has && cx + tw > wrap) {
+        if (draw) {
+          chat_sel_line_end(ui, r, x + cx, y + cy, 6.0f, line_h, false);
+          record_text_hit(ui, (ccord_rect){x, y + cy, cx, line_h});
+        }
+        cx = 0.0f;
+        cy += line_h;
+        line_has = false;
+      }
+      if (draw) {
+        float ty = y + cy + (line_h - tag_lh) - 4.0f;
+        chat_sel_process_run(ui, r, tags[ti], tl, &ts, x + cx, y + cy, tw, line_h, 0.0f);
+        ccord_text_draw(r, tags[ti], tl, x + cx, ty, &ts, 0.0f);
+      }
+      cx += tw + 6.0f;
+      line_has = true;
+    }
+  }
+  if (draw) {
+    chat_sel_line_end(ui, r, x + cx, y + cy, 6.0f, line_h, true);
+    record_text_hit(ui, (ccord_rect){x, y + cy, cx, line_h});
+  }
+  return cy + line_h;
+}
+
 static float measure_row(size_t i, float width, void *ud)
 {
   msg_ctx *c = ud;
@@ -3159,7 +3377,7 @@ static float measure_row(size_t i, float width, void *ud)
                    (ui->settings_attachments ? 256u : 0u) | (ui_streamer_invites_active(ui) ? 512u : 0u) |
                    (ccord_message_is_ephemeral(m) ? 1024u : 0u) | (((uint32_t)m->send_state & 3u) << 11) |
                    (tpad > 0.0f ? (1u << 13) : 0u) | (m->edited ? (1u << 14) : 0u) |
-                   (m->reply_to_id != CCORD_ID_NONE ? (1u << 15) : 0u);
+                   (m->reply_to_id != CCORD_ID_NONE ? (1u << 15) : 0u) | (m->tts ? (1u << 16) : 0u);
   uint32_t meta_sig = (uint32_t)(m->reaction_kind_count * 31u + m->reaction_count);
   if (m->rich) {
     meta_sig ^= (uint32_t)((m->rich->attachment_count << 8) ^ (m->rich->embed_count << 12) ^
@@ -3186,7 +3404,15 @@ static float measure_row(size_t i, float width, void *ud)
   float lh = ui_line_h(ui, M(font_size_base));
   float wrap = content_wrap(ui, width);
   bool no_body = d.body_len == 0 && decor_has_body_cards(&d);
-  float body_h = no_body ? 0.0f : maxf(md_body_walk(ui, c->r, d.body, d.body_len, 0.0f, 0.0f, wrap, COL(text_normal), false), lh);
+  ui_jumbo_item jumbo_items[UI_JUMBO_EMOJI_MAX];
+  size_t jumbo_n = no_body ? 0u : chat_message_jumbo(ui, m, jumbo_items);
+  float body_h = no_body
+                     ? 0.0f
+                     : (jumbo_n > 0u
+                            ? chat_jumbo_emoji_walk(ui, c->r, jumbo_items, jumbo_n, 0.0f, 0.0f, wrap,
+                                                    COL(text_normal), compact && message_edited(m),
+                                                    compact && m->tts, false)
+                            : maxf(md_body_walk(ui, c->r, d.body, d.body_len, 0.0f, 0.0f, wrap, COL(text_normal), false), lh));
   float top = compact ? M(message_line_gap)
                       : (ui_messages_compact(ui)
                              ? M(message_line_gap) + (M(message_group_gap) - M(message_line_gap)) * 0.35f
@@ -5332,15 +5558,20 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
     }
     chat_sel_line_end(ui, r, header_end, y + top, ts.size * 0.4f, lh, true);
     content_y += lh;
-  } else if (hover) {
+  }
+  bool no_body = d.body_len == 0 && decor_has_body_cards(&d);
+  ui_jumbo_item jumbo_items[UI_JUMBO_EMOJI_MAX];
+  size_t jumbo_n = no_body ? 0u : chat_message_jumbo(ui, m, jumbo_items);
+  if (compact && hover) {
     char clock[24];
     size_t cl = ccord_timefmt_clock(clock, sizeof clock, m->timestamp_ms, ui->use_utc);
     ccord_text_style ts = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 3.0f, COL(text_muted));
     ccord_vec2 tw = ccord_text_measure(r, clock, cl, &ts, 0.0f);
     float gutter = M(message_text_x) - M(message_pad_x);
     float clock_x = ma->x + M(message_pad_x) + (gutter - tw.x) * 0.5f - 4.0f;
-    ccord_text_draw(r, clock, cl, clock_x, content_y + (lh - ui_line_h(ui, ts.size)) * 0.5f, &ts, 0.0f);
-    if (m->timestamp_ms > 0) record_ts_hit(ui, (ccord_rect){clock_x, content_y, tw.x, lh}, m->timestamp_ms, false);
+    float first_h = jumbo_n > 0u ? (M(font_size_base) * 3.0f + 8.0f) : lh;
+    ccord_text_draw(r, clock, cl, clock_x, content_y + (first_h - ui_line_h(ui, ts.size)) * 0.5f, &ts, 0.0f);
+    if (m->timestamp_ms > 0) record_ts_hit(ui, (ccord_rect){clock_x, content_y, tw.x, first_h}, m->timestamp_ms, false);
   }
   float wrap = content_wrap(ui, ma->w);
   ui->current_drawing_msg_id = m->id;
@@ -5348,8 +5579,13 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
   if (m->send_state == CCORD_MSG_SEND_PENDING) body_c = ui_alpha(COL(text_normal), 0.55f);
   else if (m->send_state == CCORD_MSG_SEND_FAILED) body_c = COL(danger);
   if (compact && m->tts) ui->dbg_tts_badges++;   // the "(tts)" body marker is this row's badge
-  bool no_body = d.body_len == 0 && decor_has_body_cards(&d);
-  float body_h = no_body ? 0.0f : md_body_walk(ui, r, d.body, d.body_len, text_x, content_y, wrap, body_c, true);
+  float body_h = no_body
+                     ? 0.0f
+                     : (jumbo_n > 0u
+                            ? chat_jumbo_emoji_walk(ui, r, jumbo_items, jumbo_n, text_x, content_y, wrap,
+                                                    body_c, compact && message_edited(m),
+                                                    compact && m->tts, true)
+                            : md_body_walk(ui, r, d.body, d.body_len, text_x, content_y, wrap, body_c, true));
   ui->current_drawing_msg_id = CCORD_ID_NONE;
   float card_y = content_y + body_h + M(message_line_gap) * 0.5f;
   float card_w = maxf(ma->w - M(message_text_x) - M(message_pad_x), 40.0f);

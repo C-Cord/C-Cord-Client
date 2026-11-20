@@ -15,6 +15,8 @@
 #include "ui_internal.h"
 #include "ui_style.h"
 
+#include <ccord/emoji/emoji.h>
+
 #define M(name) (ui->theme->m.name)
 #define COL(name) (ui->theme->c.name)
 
@@ -348,9 +350,11 @@ void ui_status_card_draw(ccord_ui *ui, ccord_renderer *r)
   uis_state ebs = {.hover = hov(ui, eb), .selected = sc->emoji_row};
   ccord_color eic = uis_icon_button(ui, r, eb, ebs, "scemoji", 0);
   if (sc->emoji[0]) {
-    ccord_text_style es = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_large), COL(text_normal));
-    ccord_vec2 m = ccord_text_measure(r, sc->emoji, strlen(sc->emoji), &es, 0.0f);
-    ccord_text_draw(r, sc->emoji, strlen(sc->emoji), eb.x + (eb.w - m.x) * 0.5f, eb.y + (eb.h - m.y) * 0.5f, &es, 0.0f);
+    size_t elen = strlen(sc->emoji);
+    bool is_uemoji = ccord_emoji_match_prefix(sc->emoji, elen) == elen;
+    ccord_text_style es = ui_style(ui, is_uemoji ? CCORD_FONT_EMOJI : CCORD_FONT_REGULAR, M(font_size_large), COL(text_normal));
+    ccord_vec2 m = ccord_text_measure(r, sc->emoji, elen, &es, 0.0f);
+    ccord_text_draw(r, sc->emoji, elen, eb.x + (eb.w - m.x) * 0.5f, eb.y + (eb.h - m.y) * 0.5f, &es, 0.0f);
   } else {   // an empty smile
     float ex = eb.x + eb.w * 0.5f, ey = eb.y + eb.h * 0.5f;
     ccord_draw_circle(r, ex, ey, 9.0f, eic);
