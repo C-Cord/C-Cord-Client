@@ -51,6 +51,12 @@ void ccord_earcons_destroy(ccord_earcons *e);
 
 // The desktop glue the last ccord_earcons_pump received (nullptr before the first pump).
 [[nodiscard]] ccord_app_desktop *ccord_earcons_desktop(const ccord_earcons *e);
+// Optional plugin contribution registry for Class 2 earcon overrides.
+void ccord_earcons_set_contrib(ccord_earcons *e, const ccord_contrib *contrib);
+// Plays a named earcon ("message", "mention", "mute", ...) immediately on the earcon stream.
+bool ccord_earcons_play_kind(ccord_earcons *e, const char *kind_name, int64_t now_ms);
+// Decodes WAV/OGG/MP3 audio bytes and plays them immediately on the earcon stream.
+bool ccord_earcons_play_bytes(ccord_earcons *e, const uint8_t *data, size_t len, int64_t now_ms);
 
 // Call once per app frame, before ccord_app_desktop_pump. It pops the session notification queue (message and
 // mention sounds, then delivers the desktop notification like ccord_app_desktop_pump would unless

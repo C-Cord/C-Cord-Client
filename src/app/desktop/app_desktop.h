@@ -63,6 +63,7 @@ typedef struct ccord_app_desktop_deps {
   ccord_platform *platform;
   ccord_renderer *renderer;
   ccord_theme *theme;          // app-owned, mutated in place by apply_theme
+  ccord_contrib *contrib;      // optional plugin contribution registry (themes, notification hooks, global keybinds)
   const char *asset_dir;       // nullptr: ccord_paths_asset_dir()
 } ccord_app_desktop_deps;
 
@@ -70,14 +71,19 @@ ccord_app_desktop *ccord_app_desktop_create(const ccord_app_desktop_deps *deps, 
 void ccord_app_desktop_destroy(ccord_app_desktop *d);
 // The ui is created after this object (it needs the host callbacks up front); attach it afterwards.
 void ccord_app_desktop_attach_ui(ccord_app_desktop *d, ccord_ui *ui);
+// Returns the pristine base theme snapshot (immune to plugin theme layers; passed to ccord_ui_deps.protected_theme).
+const ccord_theme *ccord_app_desktop_base_theme(const ccord_app_desktop *d);
 
 // ccord_ui_host callbacks; pass the desktop handle as `ud`.
 void ccord_app_desktop_apply_theme(void *ud, const char *builtin_id);
+void ccord_app_desktop_select_theme_preset(void *ud, const char *owner, const char *preset_id);
 void ccord_app_desktop_set_zoom(void *ud, float zoom);
 uint32_t ccord_app_desktop_capabilities(void *ud);
 // QuickCSS: remembers enabled+snippet, reloads the current base theme and applies the snippet live
 // via ccord_theme_apply_quick_css. apply_theme re-applies the remembered snippet after a base swap.
 void ccord_app_desktop_apply_quick_css(void *ud, bool enabled, const char *css);
+// Rebuilds the active theme if plugin theme presets/layers changed since last check. Returns true when rebuilt.
+bool ccord_app_desktop_sync_plugin_theme(ccord_app_desktop *d);
 
 // Binds toggle-mute / toggle-deafen on the GlobalShortcuts portal (false when the portal is absent).
 // Preferred triggers follow the rebindable keybinds stored in the UI (defaults CTRL+SHIFT+M / D).
