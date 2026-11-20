@@ -201,6 +201,10 @@ ccord_status ccord_snapshot_validate(const ccord_snapshot *s, ccord_error *err)
     if (u->handle && !name_ok(u->handle, CCORD_NAME_MAX_BYTES)) { st = bad(err, "user handle"); goto done; }
     if (!name_ok(u->status_text, CCORD_STATUS_MAX_BYTES)) { st = bad(err, "user status text"); goto done; }
     if (u->avatar_url && !name_ok(u->avatar_url, CCORD_URL_MAX_BYTES)) { st = bad(err, "user avatar url"); goto done; }
+    if (u->avatar_decoration_url && !name_ok(u->avatar_decoration_url, CCORD_URL_MAX_BYTES)) {
+      st = bad(err, "user avatar decoration url");
+      goto done;
+    }
     if (u->banner_url && !name_ok(u->banner_url, CCORD_URL_MAX_BYTES)) { st = bad(err, "user banner url"); goto done; }
     if (u->accent_color > 0xFFFFFFu) { st = bad(err, "user accent color"); goto done; }
     if (u->bio && !name_ok(u->bio, CCORD_BIO_MAX_BYTES)) { st = bad(err, "user bio"); goto done; }
@@ -208,6 +212,14 @@ ccord_status ccord_snapshot_validate(const ccord_snapshot *s, ccord_error *err)
     if (u->presence > CCORD_PRESENCE_DND) { st = bad(err, "user presence"); goto done; }
     if (!inline_str_ok(u->clan_tag, sizeof u->clan_tag)) { st = bad(err, "user clan tag"); goto done; }
     if (!inline_str_ok(u->clan_badge, sizeof u->clan_badge)) { st = bad(err, "user clan badge"); goto done; }
+    if (!inline_str_ok(u->nameplate_asset, sizeof u->nameplate_asset)) {
+      st = bad(err, "user nameplate asset");
+      goto done;
+    }
+    if (!inline_str_ok(u->nameplate_palette, sizeof u->nameplate_palette)) {
+      st = bad(err, "user nameplate palette");
+      goto done;
+    }
     if (!inline_str_ok(u->custom_status_emoji, sizeof u->custom_status_emoji)) {
       st = bad(err, "user custom status emoji");
       goto done;
@@ -309,6 +321,15 @@ ccord_status ccord_snapshot_validate(const ccord_snapshot *s, ccord_error *err)
     if (!id_map_find(&guilds, m->guild_id, &g_idx)) { st = bad(err, "member guild missing"); goto done; }
     if (!id_map_contains(&users, m->user_id)) { st = bad(err, "member user missing"); goto done; }
     if (!name_ok(m->role_name, CCORD_NAME_MAX_BYTES)) { st = bad(err, "member role name"); goto done; }
+    if (!inline_str_ok(m->avatar_decoration_url, sizeof m->avatar_decoration_url)) {
+      st = bad(err, "member avatar decoration url");
+      goto done;
+    }
+    if (!inline_str_ok(m->nameplate_asset, sizeof m->nameplate_asset) ||
+        !inline_str_ok(m->nameplate_palette, sizeof m->nameplate_palette)) {
+      st = bad(err, "member nameplate");
+      goto done;
+    }
     if (m->joined_at_ms < 0) { st = bad(err, "member joined_at"); goto done; }
     if (++members_per_guild[g_idx] > CCORD_MAX_MEMBERS_PER_GUILD) {
       st = ccord_error_set(err, CCORD_ERR_RANGE, "snapshot: too many members in a guild");
@@ -436,6 +457,44 @@ ccord_status ccord_user_profile_validate(const ccord_user_profile *p, ccord_erro
   if (p->pronouns && !name_ok(p->pronouns, CCORD_PRONOUNS_MAX_BYTES)) return bad(err, "user profile pronouns");
   if (!inline_str_ok(p->clan_tag, sizeof p->clan_tag)) return bad(err, "user profile clan tag");
   if (!inline_str_ok(p->clan_badge, sizeof p->clan_badge)) return bad(err, "user profile clan badge");
+  if (p->avatar_decoration_url && !name_ok(p->avatar_decoration_url, CCORD_URL_MAX_BYTES)) {
+    return bad(err, "user profile avatar decoration url");
+  }
+  if (p->guild_avatar_decoration_url && !name_ok(p->guild_avatar_decoration_url, CCORD_URL_MAX_BYTES)) {
+    return bad(err, "user profile guild avatar decoration url");
+  }
+  if (!inline_str_ok(p->nameplate_asset, sizeof p->nameplate_asset) ||
+      !inline_str_ok(p->nameplate_palette, sizeof p->nameplate_palette) ||
+      !inline_str_ok(p->guild_nameplate_asset, sizeof p->guild_nameplate_asset) ||
+      !inline_str_ok(p->guild_nameplate_palette, sizeof p->guild_nameplate_palette)) {
+    return bad(err, "user profile nameplate");
+  }
+  if (p->profile_effect.layer_count > CCORD_PROFILE_EFFECT_MAX_LAYERS) {
+    return ccord_error_set(err, CCORD_ERR_RANGE, "user profile: too many effect layers");
+  }
+  if (!inline_str_ok(p->profile_effect.thumbnail_url, sizeof p->profile_effect.thumbnail_url) ||
+      !inline_str_ok(p->profile_effect.reduced_motion_url, sizeof p->profile_effect.reduced_motion_url) ||
+      !inline_str_ok(p->profile_effect.static_frame_url, sizeof p->profile_effect.static_frame_url)) {
+    return bad(err, "user profile effect url");
+  }
+  for (size_t i = 0; i < p->profile_effect.layer_count; i++) {
+    if (!inline_str_ok(p->profile_effect.layers[i].src, sizeof p->profile_effect.layers[i].src)) {
+      return bad(err, "user profile effect layer src");
+    }
+  }
+  if (p->profile_frame.layer_count > CCORD_PROFILE_FRAME_MAX_LAYERS) {
+    return ccord_error_set(err, CCORD_ERR_RANGE, "user profile: too many frame layers");
+  }
+  if (!inline_str_ok(p->profile_frame.static_url, sizeof p->profile_frame.static_url) ||
+      !inline_str_ok(p->profile_frame.animated_url, sizeof p->profile_frame.animated_url)) {
+    return bad(err, "user profile frame url");
+  }
+  for (size_t i = 0; i < p->profile_frame.layer_count; i++) {
+    if (!inline_str_ok(p->profile_frame.layers[i].url, sizeof p->profile_frame.layers[i].url) ||
+        !inline_str_ok(p->profile_frame.layers[i].static_url, sizeof p->profile_frame.layers[i].static_url)) {
+      return bad(err, "user profile frame layer url");
+    }
+  }
   if (p->connection_count > CCORD_PROFILE_MAX_CONNECTIONS) {
     return ccord_error_set(err, CCORD_ERR_RANGE, "user profile: too many connections");
   }

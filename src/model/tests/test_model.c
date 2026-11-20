@@ -578,12 +578,249 @@ static void test_m5_stage_and_dm_call_snapshot(void)
   CT_CHECK(ccord_snapshot_validate(&s, &err) == CCORD_OK);
 }
 
+typedef struct v3_handler_state {
+  int setting_changes;
+  char last_setting_key[64];
+  int keybind_triggers;
+  int actbtn_clicks;
+  int dialog_results;
+  bool last_dialog_ok;
+  char last_dialog_json[128];
+  int decor_events;
+} v3_handler_state;
+
+static void v3_on_setting(void *ud, const char *owner, const char *key, const char *value_json)
+{
+  (void)owner;
+  (void)value_json;
+  v3_handler_state *st = ud;
+  st->setting_changes++;
+  snprintf(st->last_setting_key, sizeof st->last_setting_key, "%s", key ? key : "");
+}
+
+static void v3_on_keybind(void *ud, const char *owner, const char *bind_id)
+{
+  (void)owner;
+  (void)bind_id;
+  ((v3_handler_state *)ud)->keybind_triggers++;
+}
+
+static void v3_on_actbtn(void *ud, const ccord_action_btn_contribution *btn, const ccord_menu_context *ctx)
+{
+  (void)btn;
+  (void)ctx;
+  ((v3_handler_state *)ud)->actbtn_clicks++;
+}
+
+static void v3_on_dialog(void *ud, const char *owner, uint64_t req_id, bool accepted, const char *result_json)
+{
+  (void)owner;
+  (void)req_id;
+  v3_handler_state *st = ud;
+  st->dialog_results++;
+  st->last_dialog_ok = accepted;
+  snprintf(st->last_dialog_json, sizeof st->last_dialog_json, "%s", result_json ? result_json : "");
+}
+
+static void v3_on_decor(void *ud, const ccord_decorator_contribution *decor, ccord_id target_id, const ccord_panel_event *ev)
+{
+  (void)decor;
+  (void)target_id;
+  (void)ev;
+  ((v3_handler_state *)ud)->decor_events++;
+}
+
+static void test_contrib_v3(void)
+{
+  ccord_error err;
+  ccord_contrib *c = ccord_contrib_create(&err);
+  CT_CHECK(c != nullptr);
+  v3_handler_state hs = {0};
+  ccord_contrib_handlers h = {
+    .ud = &hs,
+    .decor_event = v3_on_decor,
+    .plugin_setting_changed = v3_on_setting,
+    .keybind_triggered = v3_on_keybind,
+    .action_btn_click = v3_on_actbtn,
+    .dialog_result = v3_on_dialog,
+  };
+  ccord_contrib_set_handlers(c, &h);
+
+  // Extended menu metadata + new v3 targets.
+  ccord_menu_contribution mc = {
+    .owner = "p1",
+    .item_id = "voice_act",
+    .label = "Boost",
+    .target = CCORD_MENU_VOICE_USER,
+    .icon = "vol",
+    .submenu = "Audio",
+    .when_json = "{\"has_user\":true}",
+    .danger = true,
+    .checked = true,
+    .divider_before = true,
+  };
+  CT_CHECK(ccord_contrib_add_menu_ex(c, &mc, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_menu_count(c, CCORD_MENU_VOICE_USER) == 1);
+  const ccord_menu_contribution *mgot = ccord_contrib_menu_at(c, CCORD_MENU_VOICE_USER, 0);
+  CT_CHECK(mgot && mgot->danger && mgot->checked && mgot->divider_before && strcmp(mgot->submenu, "Audio") == 0);
+
+  // Extended command with schema + autocomplete flag.
+  CT_CHECK(ccord_contrib_add_command_ex(c, "p1", "deploy", "Deploy build", "[{\"name\":\"env\"}]", true, &err) == CCORD_OK);
+  const ccord_command_contribution *cmd = ccord_contrib_find_command(c, "deploy");
+  CT_CHECK(cmd && cmd->has_autocomplete && cmd->schema_json && strstr(cmd->schema_json, "env") != nullptr);
+
+  // Panel v2 spec + deep JSON patch by node id.
+  ccord_panel_spec ps = {
+    .slot = CCORD_PANEL_MODAL,
+    .width = 420.0f,
+    .height = 300.0f,
+    .x = 40.0f,
+    .y = 50.0f,
+    .title = "Inspector",
+    .icon = "eye",
+    .visible = true,
+    .root_json = "{\"type\":\"column\",\"id\":\"root\",\"children\":[{\"type\":\"text\",\"id\":\"lbl\",\"text\":\"before\"},{\"type\":\"text\",\"id\":\"drop\",\"text\":\"bye\"}]}",
+  };
+  CT_CHECK(ccord_contrib_set_panel_ex(c, "p1", "insp", &ps, &err) == CCORD_OK);
+  const ccord_panel_contribution *pan = ccord_contrib_find_panel(c, "p1", "insp");
+  CT_CHECK(pan && pan->slot == CCORD_PANEL_MODAL && pan->width == 420.0f && strcmp(pan->title, "Inspector") == 0);
+  uint64_t rev0 = pan->revision;
+  const char *patch =
+    "[{\"op\":\"set_text\",\"id\":\"lbl\",\"value\":\"after\"},"
+    "{\"op\":\"remove\",\"id\":\"drop\"},"
+    "{\"op\":\"append\",\"id\":\"root\",\"node\":{\"type\":\"badge\",\"id\":\"bnew\",\"text\":\"NEW\"}}]";
+  CT_CHECK(ccord_contrib_patch_panel(c, "p1", "insp", patch, &err) == CCORD_OK);
+  pan = ccord_contrib_find_panel(c, "p1", "insp");
+  CT_CHECK(pan && pan->revision > rev0 && strstr(pan->root_json, "after") != nullptr &&
+           strstr(pan->root_json, "before") == nullptr && strstr(pan->root_json, "bye") == nullptr &&
+           strstr(pan->root_json, "NEW") != nullptr);
+
+  // Decorators + dispatch_decor_event.
+  ccord_decorator_contribution dec = {
+    .owner = "p1",
+    .decor_id = "vip",
+    .target = CCORD_DECOR_MESSAGE_STYLE,
+    .target_id = 777,
+    .widget_json = "{\"type\":\"badge\",\"id\":\"b1\",\"text\":\"VIP\"}",
+    .accent_rgba = 0xFF00AAFFu,
+    .tint_rgba = 0x11223344u,
+    .collapsed = true,
+    .collapse_label = "Hidden",
+    .priority = 5,
+  };
+  CT_CHECK(ccord_contrib_set_decorator(c, &dec, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_decorator_count(c) == 1);
+  ccord_panel_event pev = {.kind = CCORD_PANEL_EV_CLICK, .node_id = "b1"};
+  CT_CHECK(ccord_contrib_dispatch_decor_event(c, "p1", "vip", 777, &pev, &err) == CCORD_OK);
+  CT_CHECK(hs.decor_events == 1);
+
+  // Settings schema + notify change.
+  CT_CHECK(ccord_contrib_set_settings_schema(c, "p1", "[{\"key\":\"k\",\"type\":\"toggle\"}]", "{\"k\":true}", &err) == CCORD_OK);
+  const ccord_plugin_settings_schema *sch = ccord_contrib_plugin_settings(c, "p1");
+  CT_CHECK(sch && strstr(sch->schema_json, "toggle") != nullptr);
+  ccord_contrib_notify_setting_changed(c, "p1", "k", "false");
+  CT_CHECK(hs.setting_changes == 1 && strcmp(hs.last_setting_key, "k") == 0);
+
+  // Theme presets, layers & icon overrides.
+  uint64_t trev = ccord_contrib_theme_revision(c);
+  ccord_theme_preset pre = {
+    .owner = "p1", .preset_id = "tokyo", .name = "Tokyo Night", .base_id = "c-cord-dark",
+    .css = ":root { --brand-experiment: #7aa2f7; }",
+  };
+  CT_CHECK(ccord_contrib_add_theme_preset(c, &pre, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_find_theme_preset(c, "p1", "tokyo") != nullptr);
+  ccord_theme_layer lay = {
+    .owner = "p1", .layer_id = "bg", .bg_slot = "chat", .bg_texture_key = "p1:wall",
+    .bg_opacity = 0.25f, .bg_fit = "cover", .priority = 10,
+  };
+  CT_CHECK(ccord_contrib_set_theme_layer(c, &lay, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_theme_layer_count(c) == 1);
+  CT_CHECK(ccord_contrib_set_icon_override(c, "p1", "mic", "p1:mic_tex", &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_find_icon_override(c, "mic") && strcmp(ccord_contrib_find_icon_override(c, "mic"), "p1:mic_tex") == 0);
+  CT_CHECK(ccord_contrib_theme_revision(c) > trev);
+
+  // Plugin textures.
+  const uint8_t rgba[16] = {255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255};
+  CT_CHECK(ccord_contrib_set_texture(c, "p1", "p1:wall", rgba, sizeof rgba, 2, 2, true, &err) == CCORD_OK);
+  const ccord_plugin_texture *tex = ccord_contrib_find_texture(c, "p1:wall");
+  CT_CHECK(tex && tex->is_rgba && tex->width == 2 && tex->height == 2 && tex->len == sizeof rgba);
+
+  // Keybinds + rebind + trigger.
+  ccord_keybind_contribution kb = {
+    .owner = "p1", .bind_id = "quick", .label = "Quick", .default_combo = "CTRL+K", .is_global = false,
+  };
+  CT_CHECK(ccord_contrib_add_keybind(c, &kb, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_rebind_keybind(c, "p1", "quick", "CTRL+SHIFT+K"));
+  CT_CHECK(strcmp(ccord_contrib_keybind_at(c, 0)->current_combo, "CTRL+SHIFT+K") == 0);
+  CT_CHECK(ccord_contrib_trigger_keybind(c, "p1", "quick") && hs.keybind_triggers == 1);
+
+  // Scoped action buttons.
+  ccord_action_btn_contribution ab = {
+    .owner = "p1", .btn_id = "pin_note", .slot = CCORD_ACTBTN_HEADER, .label = "Notes", .badge = "3",
+  };
+  CT_CHECK(ccord_contrib_add_action_btn(c, &ab, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_action_btn_count(c, CCORD_ACTBTN_HEADER) == 1);
+  ccord_menu_context ctx = {.target = CCORD_MENU_CHANNEL, .channel_id = 42};
+  CT_CHECK(ccord_contrib_click_action_btn(c, "p1", "pin_note", &ctx) && hs.actbtn_clicks == 1);
+
+  // Local ephemeral messages + dismiss.
+  ccord_local_message lm = {
+    .owner = "p1", .channel_id = 42, .author_name = "Bot", .author_badge = "PLUGIN",
+    .content = "Local notice", .dismissible = true,
+  };
+  uint64_t lid = 0;
+  CT_CHECK(ccord_contrib_add_local_message(c, &lm, &lid, &err) == CCORD_OK && lid != 0);
+  CT_CHECK(ccord_contrib_local_message_count(c, 42) == 1);
+  CT_CHECK(ccord_contrib_dismiss_local_message(c, lid));
+  CT_CHECK(ccord_contrib_local_message_count(c, 42) == 0);
+  CT_CHECK(ccord_contrib_add_local_message(c, &lm, &lid, &err) == CCORD_OK);
+
+  // Autocomplete provider + earcon override + dialog lifecycle.
+  ccord_autocomplete_provider ap = {.owner = "p1", .provider_id = "snips", .trigger = "::", .description = "Snippets"};
+  CT_CHECK(ccord_contrib_add_autocomplete(c, &ap, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_autocomplete_count(c) == 1);
+  const uint8_t wav[4] = {'R', 'I', 'F', 'F'};
+  CT_CHECK(ccord_contrib_set_earcon_override(c, "p1", "mention", wav, sizeof wav, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_find_earcon_override(c, "mention") != nullptr);
+  ccord_plugin_dialog dlg = {
+    .owner = "p1", .plugin_name = "Demo", .req_id = 99, .kind = CCORD_DIALOG_PROMPT,
+    .title = "Enter key", .message = "Value?", .default_value = "abc",
+  };
+  CT_CHECK(ccord_contrib_open_dialog(c, &dlg, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_active_dialog(c) != nullptr && ccord_contrib_active_dialog(c)->req_id == 99);
+  ccord_contrib_resolve_dialog(c, 99, true, "{\"value\":\"xyz\"}");
+  CT_CHECK(ccord_contrib_active_dialog(c) == nullptr);
+  CT_CHECK(hs.dialog_results == 1 && hs.last_dialog_ok && strstr(hs.last_dialog_json, "xyz") != nullptr);
+  CT_CHECK(ccord_contrib_open_dialog(c, &dlg, &err) == CCORD_OK);
+
+  // Removing owner must purge every single API v3 contribution cleanly.
+  ccord_contrib_remove_owner(c, "p1");
+  CT_CHECK(ccord_contrib_menu_count(c, CCORD_MENU_VOICE_USER) == 0);
+  CT_CHECK(ccord_contrib_command_count(c) == 0);
+  CT_CHECK(ccord_contrib_panel_count(c) == 0);
+  CT_CHECK(ccord_contrib_decorator_count(c) == 0);
+  CT_CHECK(ccord_contrib_plugin_settings(c, "p1") == nullptr);
+  CT_CHECK(ccord_contrib_theme_preset_count(c) == 0);
+  CT_CHECK(ccord_contrib_theme_layer_count(c) == 0);
+  CT_CHECK(ccord_contrib_find_icon_override(c, "mic") == nullptr);
+  CT_CHECK(ccord_contrib_texture_count(c) == 0);
+  CT_CHECK(ccord_contrib_keybind_count(c) == 0);
+  CT_CHECK(ccord_contrib_action_btn_count(c, CCORD_ACTBTN_HEADER) == 0);
+  CT_CHECK(ccord_contrib_local_message_count(c, 42) == 0);
+  CT_CHECK(ccord_contrib_autocomplete_count(c) == 0);
+  CT_CHECK(ccord_contrib_find_earcon_override(c, "mention") == nullptr);
+  CT_CHECK(ccord_contrib_active_dialog(c) == nullptr);
+
+  ccord_contrib_destroy(c);
+}
+
 int main(void)
 {
   test_ids();
   test_snapshot();
   test_message_reactions();
   test_contrib();
+  test_contrib_v3();
   test_search_parse_and_match();
   test_m3c_profiles_notes_and_activities();
   test_m4a_guild_settings_and_audit_changes();

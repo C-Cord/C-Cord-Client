@@ -38,7 +38,7 @@ endforeach()
 file(GLOB_RECURSE ccord_old_layer_files LIST_DIRECTORIES false
   "${CCORD_ROOT}/src/ipc/*" "${CCORD_ROOT}/src/plugins/*" "${CCORD_ROOT}/src/plugin_host/*"
   "${CCORD_ROOT}/src/store/*" "${CCORD_ROOT}/src/session/*" "${CCORD_ROOT}/src/net/*"
-  "${CCORD_ROOT}/src/model/*")
+  "${CCORD_ROOT}/src/model/*" "${CCORD_ROOT}/src/contrib/*")
 foreach(path IN LISTS ccord_old_layer_files)
   if(IS_DIRECTORY "${path}")
     continue()
