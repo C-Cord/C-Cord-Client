@@ -1718,27 +1718,29 @@ ccord_status ccord_store_append_message(ccord_store *s, const ccord_message *m, 
   if (ci < 0) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown channel");
   history *h = history_for(s, m->channel_id, err);
   if (!h) return CCORD_ERR_NOMEM;
-  if (h->n >= CCORD_MAX_MESSAGES_PER_CHANNEL) {
-    msg_free(&h->msgs[0]);
-    memmove(h->msgs, h->msgs + 1, (h->n - 1) * sizeof *h->msgs);
-    h->n--;
-  }
-
   // insertion point keeps ascending id order
   size_t pos = h->n;
   while (pos > 0 && h->msgs[pos - 1].id > m->id) pos--;
   if (pos > 0 && h->msgs[pos - 1].id == m->id) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: duplicate message id");
   }
-  if (h->n == h->cap) {
+  ccord_message copy;
+  if (!msg_copy(&copy, m, err)) return CCORD_ERR_NOMEM;
+  if (h->n >= CCORD_MAX_MESSAGES_PER_CHANNEL) {
+    msg_free(&h->msgs[0]);
+    memmove(h->msgs, h->msgs + 1, (h->n - 1) * sizeof *h->msgs);
+    h->n--;
+    if (pos > 0) pos--;
+  } else if (h->n == h->cap) {
     size_t ncap = h->cap ? h->cap * 2 : 16;
     ccord_message *g = ccord_realloc_array(h->msgs, ncap, sizeof *g);
-    if (!g) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    if (!g) {
+      msg_free(&copy);
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    }
     h->msgs = g;
     h->cap = ncap;
   }
-  ccord_message copy;
-  if (!msg_copy(&copy, m, err)) return CCORD_ERR_NOMEM;
   memmove(&h->msgs[pos + 1], &h->msgs[pos], (h->n - pos) * sizeof *h->msgs);
   h->msgs[pos] = copy;
   h->n++;

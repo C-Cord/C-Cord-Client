@@ -4332,6 +4332,20 @@ static void test_audit_regressions(void)
   (void)ccord_bus_drain(bus);
   CT_CHECK(ccord_store_selected_channel(s) == 100);
   CT_CHECK(evc.del_n == 1 && evc.sel_n == 0);
+  ccord_message m0 = {.id = 5000, .channel_id = 100, .author_id = 1, .timestamp_ms = 1, .content = "hello"};
+  CT_CHECK(ccord_store_append_message(s, &m0, &err) == CCORD_OK);
+
+  // Low #5: duplicate message append at CCORD_MAX_MESSAGES_PER_CHANNEL must NOT evict the oldest message.
+  for (ccord_id i = 1; i < CCORD_MAX_MESSAGES_PER_CHANNEL; i++) {
+    ccord_message fm = {.id = 5000 + i, .channel_id = 100, .author_id = 1, .timestamp_ms = (int64_t)(i + 1), .content = "m"};
+    CT_CHECK(ccord_store_append_message(s, &fm, &err) == CCORD_OK);
+  }
+  CT_CHECK(ccord_store_message_count(s, 100) == CCORD_MAX_MESSAGES_PER_CHANNEL);
+  ccord_message dup = {.id = 5000, .channel_id = 100, .author_id = 1, .timestamp_ms = 1, .content = "dup"};
+  CT_CHECK(ccord_store_append_message(s, &dup, &err) == CCORD_ERR_INVALID);
+  CT_CHECK(ccord_store_find_message(s, 100, 5000) != nullptr);
+  CT_CHECK(ccord_store_message_count(s, 100) == CCORD_MAX_MESSAGES_PER_CHANNEL);
+
   ccord_store_destroy(s);
   ccord_bus_destroy(bus);
 }
