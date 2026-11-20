@@ -733,7 +733,11 @@ static ccord_pv *pv_from_iter(DBusMessageIter *it)
       ccord_pv *child = pv_from_iter(&sub);
       if (!child) return nullptr;
       ccord_pv *v = ccord_pv_new(CCORD_PV_VARIANT);
-      if (!v || !ccord_pv_add(v, child)) {
+      if (!v) {
+        ccord_pv_free(child);
+        return nullptr;
+      }
+      if (!ccord_pv_add(v, child)) {
         ccord_pv_free(v);
         return nullptr;
       }
