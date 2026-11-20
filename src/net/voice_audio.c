@@ -206,6 +206,10 @@ bool ccord_jitter_push(ccord_jitter *j, uint16_t seq, const uint8_t *data, size_
   int16_t d = (int16_t)(uint16_t)(seq - j->base);
   if (d < 0) {
     if (d <= -(int16_t)CCORD_JITTER_SLOTS || slot->valid) return false;
+    // Also ensure expanding base downward keeps every already-buffered packet within CCORD_JITTER_SLOTS.
+    for (size_t i = 0; i < CCORD_JITTER_SLOTS; i++) {
+      if (j->slots[i].valid && (uint16_t)(j->slots[i].seq - seq) >= CCORD_JITTER_SLOTS) return false;
+    }
     j->base = seq;
   } else if (d >= (int16_t)CCORD_JITTER_SLOTS) {
     ccord_jitter_reset(j);
