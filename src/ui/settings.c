@@ -1605,6 +1605,8 @@ static void voice_config_apply(ccord_ui *ui)
 
 static char s_plugin_log_id[65];
 static char s_plugin_consent_id[65];
+static uint64_t s_plugin_consent_perms;
+static float s_plugin_consent_box_h = 224.0f;
 static char s_plugin_detail_id[65];
 static char s_plugin_status_msg[192];
 static char s_plugin_search[96];
@@ -1999,19 +2001,19 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       plugin_subtab_rects(g, &r_inst, &r_disc, &r_upd, &r_sync);
       if (ui_in_rect(x, y, r_inst)) {
         s_plugin_subtab = 0; s_plugin_search_focused = false;
-        s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_detail_id[0] = '\0';
+        s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_consent_perms = 0; s_plugin_consent_box_h = 224.0f; s_plugin_detail_id[0] = '\0';
         return true;
       }
       if (ui_in_rect(x, y, r_disc)) {
         s_plugin_subtab = 1; s_plugin_search_focused = false;
-        s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_detail_id[0] = '\0';
+        s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_consent_perms = 0; s_plugin_consent_box_h = 224.0f; s_plugin_detail_id[0] = '\0';
         const ccord_catalog_status *cst = ccord_contrib_catalog_status(ui->d.contrib);
         if (cst && !cst->has_loaded && !cst->syncing) trigger_plugin_discover_query(ui, false);
         return true;
       }
       if (ui_in_rect(x, y, r_upd)) {
         s_plugin_subtab = 2; s_plugin_search_focused = false;
-        s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_detail_id[0] = '\0';
+        s_plugin_log_id[0] = '\0'; s_plugin_consent_id[0] = '\0'; s_plugin_consent_perms = 0; s_plugin_consent_box_h = 224.0f; s_plugin_detail_id[0] = '\0';
         ccord_contrib_catalog_check_updates(ui->d.contrib);
         return true;
       }
@@ -2037,14 +2039,18 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         return false;
       }
       if (s_plugin_consent_id[0]) {
-        ccord_rect box = {px, py, pw, 224.0f};
+        ccord_rect box = {px, py, pw, s_plugin_consent_box_h};
         if (ui_in_rect(x, y, (ccord_rect){box.x + 16.0f, box.y + box.h - 46.0f, 184.0f, UIS_H_BTN})) {
-          ccord_contrib_plugin_consent_accept(ui->d.contrib, s_plugin_consent_id);
+          ccord_contrib_plugin_consent_accept_for(ui->d.contrib, s_plugin_consent_id, s_plugin_consent_perms);
           s_plugin_consent_id[0] = '\0';
+          s_plugin_consent_perms = 0;
+          s_plugin_consent_box_h = 224.0f;
           return true;
         }
         if (ui_in_rect(x, y, (ccord_rect){box.x + 212.0f, box.y + box.h - 46.0f, 96.0f, UIS_H_BTN})) {
           s_plugin_consent_id[0] = '\0';
+          s_plugin_consent_perms = 0;
+          s_plugin_consent_box_h = 224.0f;
           return true;
         }
         return false;
@@ -2223,6 +2229,8 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         if (ui_in_rect(x, y, rc.btn_toggle)) {
           if (p->state == CCORD_PLUGIN_NEEDS_CONSENT) {
             snprintf(s_plugin_consent_id, sizeof s_plugin_consent_id, "%s", p->id);
+            s_plugin_consent_perms = p->perms_mask;
+            s_plugin_consent_box_h = 224.0f;
           } else {
             bool on = !(p->state == CCORD_PLUGIN_READY || p->state == CCORD_PLUGIN_STARTING);
             ccord_contrib_plugin_set_enabled(ui->d.contrib, p->id, on);
@@ -3529,23 +3537,37 @@ static void draw_plugins(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
   // API Class Permission Review / Consent view
   if (s_plugin_consent_id[0]) {
     const ccord_plugin_info *p = find_plugin_info(ui->d.contrib, s_plugin_consent_id);
-    if (!p) { s_plugin_consent_id[0] = '\0'; }
-    else {
-      ccord_rect box = {x, y, w, 224.0f};
+    if (!p || p->perms_mask != s_plugin_consent_perms) {
+      if (p) snprintf(s_plugin_status_msg, sizeof s_plugin_status_msg,
+                      "Permissions changed for %s; review again before enabling.", p->name);
+      s_plugin_consent_id[0] = '\0';
+      s_plugin_consent_perms = 0;
+      s_plugin_consent_box_h = 224.0f;
+    } else {
+      char pmsg[512];
+      snprintf(pmsg, sizeof pmsg, "Declared permissions: %s", p->permissions && p->permissions[0] ? p->permissions : "none");
+      const char *warn = "Review the API permissions this plugin requests before enabling. Undeclared Class 2/3 APIs terminate the host.";
+      float text_w = fmaxf(80.0f, w - 32.0f);
+      float pmsg_h = fmaxf(20.0f, ccord_text_measure(r, pmsg, strlen(pmsg), &ms, text_w).y);
+      float warn_h = fmaxf(20.0f, ccord_text_measure(r, warn, strlen(warn), &vs, text_w).y);
+      float warn_y_off = 72.0f + pmsg_h + 12.0f;
+      float box_h = fmaxf(224.0f, warn_y_off + warn_h + 62.0f);
+      float max_h = g->panel.y + g->panel.h - y - 16.0f;
+      if (max_h >= 224.0f && box_h > max_h) box_h = max_h;
+      s_plugin_consent_box_h = box_h;
+
+      ccord_rect box = {x, y, w, box_h};
       uis_card(ui, r, box);
       uint8_t api_cls = (uint8_t)(p->risk_class + 1);
       ccord_text_style ws = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_body, plugin_api_class_color(ui, api_cls));
       const char *title = api_cls >= 3 ? "API CLASS 3: Host & Network Permissions Requested"
                                        : "API CLASS 2: C-Cord Internal Permissions Requested";
-      ccord_text_draw_ellipsis(r, title, strlen(title), box.x + 16.0f, box.y + 14.0f, box.w - 32.0f, &ws);
+      ccord_text_draw_ellipsis(r, title, strlen(title), box.x + 16.0f, box.y + 14.0f, text_w, &ws);
       char sub[256];
       snprintf(sub, sizeof sub, "Plugin: %s v%s (%s)", p->name, p->version, p->id);
-      ccord_text_draw_ellipsis(r, sub, strlen(sub), box.x + 16.0f, box.y + 42.0f, box.w - 32.0f, &ns);
-      char pmsg[512];
-      snprintf(pmsg, sizeof pmsg, "Declared permissions: %s", p->permissions && p->permissions[0] ? p->permissions : "none");
-      ccord_text_draw(r, pmsg, strlen(pmsg), box.x + 16.0f, box.y + 72.0f, &ms, box.w - 32.0f);
-      const char *warn = "Review the API permissions this plugin requests before enabling. Undeclared Class 2/3 APIs terminate the host.";
-      ccord_text_draw(r, warn, strlen(warn), box.x + 16.0f, box.y + 118.0f, &vs, box.w - 32.0f);
+      ccord_text_draw_ellipsis(r, sub, strlen(sub), box.x + 16.0f, box.y + 42.0f, text_w, &ns);
+      ccord_text_draw(r, pmsg, strlen(pmsg), box.x + 16.0f, box.y + 72.0f, &ms, text_w);
+      ccord_text_draw(r, warn, strlen(warn), box.x + 16.0f, box.y + warn_y_off, &vs, text_w);
       draw_button(ui, r, (ccord_rect){box.x + 16.0f, box.y + box.h - 46.0f, 184.0f, UIS_H_BTN}, "Approve & Enable", true);
       draw_button(ui, r, (ccord_rect){box.x + 212.0f, box.y + box.h - 46.0f, 96.0f, UIS_H_BTN}, "Cancel", false);
       return;
@@ -4552,6 +4574,8 @@ bool ui_open_plugin_install_prompt(ccord_ui *ui, const char *plugin_id)
   s_plugin_subtab = 1;
   s_plugin_log_id[0] = '\0';
   s_plugin_consent_id[0] = '\0';
+  s_plugin_consent_perms = 0;
+  s_plugin_consent_box_h = 224.0f;
   snprintf(s_plugin_detail_id, sizeof s_plugin_detail_id, "%s", plugin_id);
   if (ui->d.contrib) {
     ccord_contrib_catalog_fetch_detail(ui->d.contrib, plugin_id);

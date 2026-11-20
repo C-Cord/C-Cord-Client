@@ -278,18 +278,28 @@ ccord_status ccord_contrib_set_panel(ccord_contrib *c, const char *owner, const 
   if (jlen == 0 || jlen > CONTRIB_PANEL_JSON_MAX || !ccord_utf8_valid(root_json, jlen)) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: bad panel JSON");
   }
+  size_t owner_panels = 0;
   for (size_t i = 0; i < c->npanels; i++) {
-    if (strcmp(c->panels[i].owner, owner) == 0 && strcmp(c->panels[i].panel_id, panel_id) == 0) {
-      char *rj = ccord_strdup(root_json);
-      if (!rj) return ccord_error_set(err, CCORD_ERR_NOMEM, "contrib: out of memory");
-      free_str(c->panels[i].root_json);
-      c->panels[i].slot = slot;
-      c->panels[i].height = height;
-      c->panels[i].root_json = rj;
-      c->panels[i].revision = ++c->next_panel_rev;
-      c->revision++;
-      return CCORD_OK;
+    if (strcmp(c->panels[i].owner, owner) == 0) {
+      if (strcmp(c->panels[i].panel_id, panel_id) == 0) {
+        char *rj = ccord_strdup(root_json);
+        if (!rj) return ccord_error_set(err, CCORD_ERR_NOMEM, "contrib: out of memory");
+        free_str(c->panels[i].root_json);
+        c->panels[i].slot = slot;
+        c->panels[i].height = height;
+        c->panels[i].root_json = rj;
+        c->panels[i].revision = ++c->next_panel_rev;
+        c->revision++;
+        return CCORD_OK;
+      }
+      owner_panels++;
     }
+  }
+  if (owner_panels >= 3u) {
+    return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: plugin panel limit (3) reached");
+  }
+  if (c->npanels >= 6u) {
+    return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: global panel limit (6) reached");
   }
   if (c->npanels == c->cappanels) {
     size_t ncap = c->cappanels ? c->cappanels * 2 : 4;
@@ -344,6 +354,7 @@ ccord_status ccord_contrib_set_plugin(ccord_contrib *c, const ccord_plugin_info 
     .version = ccord_strdup(info->version ? info->version : ""),
     .description = ccord_strdup(info->description ? info->description : ""),
     .permissions = ccord_strdup(info->permissions ? info->permissions : ""),
+    .perms_mask = info->perms_mask,
     .risk_class = info->risk_class,
     .tier = info->tier,
     .is_bundled = info->is_bundled,
@@ -813,6 +824,16 @@ void ccord_contrib_plugin_set_enabled(ccord_contrib *c, const char *id, bool ena
 void ccord_contrib_plugin_consent_accept(ccord_contrib *c, const char *id)
 {
   if (c && id && c->handlers.plugin_consent_accept) c->handlers.plugin_consent_accept(c->handlers.ud, id);
+}
+
+void ccord_contrib_plugin_consent_accept_for(ccord_contrib *c, const char *id, uint64_t expected_perms)
+{
+  if (!c || !id) return;
+  if (c->handlers.plugin_consent_accept_for) {
+    c->handlers.plugin_consent_accept_for(c->handlers.ud, id, expected_perms);
+  } else if (c->handlers.plugin_consent_accept) {
+    c->handlers.plugin_consent_accept(c->handlers.ud, id);
+  }
 }
 
 void ccord_contrib_plugin_reload(ccord_contrib *c, const char *id)

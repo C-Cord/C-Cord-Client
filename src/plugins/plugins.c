@@ -203,7 +203,9 @@ static void set_text(char *dst, size_t cap, const char *src)
 
 static bool has_perm(const plugin *p, ccord_perm perm)
 {
-  return (p->m.perms & (ccord_perm_set)perm) != 0;
+  if ((p->m.perms & (ccord_perm_set)perm) == 0) return false;
+  if (ccord_perm_class_of(perm) == CCORD_PERM_CLASS_SAFE) return true;
+  return p->consent_granted && (p->consented_perms & (ccord_perm_set)perm) != 0;
 }
 
 static bool app_raw(ccord_buf *b, const char *s)
@@ -275,6 +277,7 @@ static void publish_state(ccord_plugins *m, plugin *p)
     .id = p->m.id, .name = p->m.name, .version = p->m.version,
     .description = p->m.description,
     .permissions = p->perm_str ? p->perm_str : "",
+    .perms_mask = p->m.perms,
     .risk_class = (uint8_t)ccord_perm_max_class(p->m.perms),
     .tier = tier,
     .is_bundled = p->is_bundled,
@@ -3043,16 +3046,29 @@ static void on_plugin_set_enabled(void *ud, const char *id, bool enabled)
   start_plugin_host(m, p);
 }
 
-static void on_plugin_consent_accept(void *ud, const char *id)
+static void on_plugin_consent_accept_for(void *ud, const char *id, uint64_t expected_perms)
 {
   ccord_plugins *m = ud;
   plugin *p = find_owner(m, id);
   if (!p) return;
+  if (expected_perms != UINT64_MAX && p->m.perms != expected_perms) {
+    // Manifest permissions changed while the consent dialog was open; keep NEEDS_CONSENT and refresh UI.
+    p->consent_granted = false;
+    p->enabled = false;
+    p->state = CCORD_PLUGIN_NEEDS_CONSENT;
+    publish_state(m, p);
+    return;
+  }
   p->consent_granted = true;
   p->consented_perms = p->m.perms;
   p->enabled = true;
   consent_save(m);
   start_plugin_host(m, p);
+}
+
+static void on_plugin_consent_accept(void *ud, const char *id)
+{
+  on_plugin_consent_accept_for(ud, id, UINT64_MAX);
 }
 
 static void on_plugin_reload(void *ud, const char *id)
@@ -3437,6 +3453,7 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     .panel_event = on_panel_event,
     .plugin_set_enabled = on_plugin_set_enabled,
     .plugin_consent_accept = on_plugin_consent_accept,
+    .plugin_consent_accept_for = on_plugin_consent_accept_for,
     .plugin_reload = on_plugin_reload,
     .plugin_export_cce = cb_export_cce,
     .plugin_import_package = cb_import_pkg,

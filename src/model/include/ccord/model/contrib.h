@@ -73,6 +73,7 @@ typedef struct ccord_plugin_info {
   const char *id, *name, *version;
   const char *description;        // optional summary
   const char *permissions;        // comma separated, display only
+  uint64_t perms_mask;            // declared permission bitmask (for TOCTOU-free consent approval)
   uint8_t risk_class;             // 0=API Class 1, 1=API Class 2, 2=API Class 3
   ccord_plugin_tier tier;         // 0=unknown/local, 1=official, 2=verified, 3=unverified
   bool is_bundled;
@@ -152,6 +153,7 @@ typedef struct ccord_contrib_handlers {
   void (*panel_event)(void *ud, const ccord_panel_contribution *panel, const ccord_panel_event *ev);
   void (*plugin_set_enabled)(void *ud, const char *id, bool enabled);
   void (*plugin_consent_accept)(void *ud, const char *id);
+  void (*plugin_consent_accept_for)(void *ud, const char *id, uint64_t expected_perms);
   void (*plugin_reload)(void *ud, const char *id);
   bool (*plugin_export_cce)(void *ud, const char *id, const char *dest_path, char *err_buf, size_t err_cap);
   bool (*plugin_import_package)(void *ud, const char *pkg_path, char *err_buf, size_t err_cap);
@@ -222,6 +224,7 @@ const ccord_catalog_prefs *ccord_contrib_catalog_prefs(const ccord_contrib *c);
 [[nodiscard]] ccord_status ccord_contrib_dispatch_panel_event(ccord_contrib *c, const char *owner, const char *panel_id, const ccord_panel_event *ev, ccord_error *err);
 void ccord_contrib_plugin_set_enabled(ccord_contrib *c, const char *id, bool enabled);
 void ccord_contrib_plugin_consent_accept(ccord_contrib *c, const char *id);
+void ccord_contrib_plugin_consent_accept_for(ccord_contrib *c, const char *id, uint64_t expected_perms);
 void ccord_contrib_plugin_reload(ccord_contrib *c, const char *id);
 bool ccord_contrib_plugin_export_cce(ccord_contrib *c, const char *id, const char *dest_path, char *err_buf, size_t err_cap);
 bool ccord_contrib_plugin_import_package(ccord_contrib *c, const char *pkg_path, char *err_buf, size_t err_cap);
