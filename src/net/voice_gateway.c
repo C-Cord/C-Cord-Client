@@ -2325,6 +2325,10 @@ static bool vg_open_srtcp(ccord_voice_gateway *g, const uint8_t *pkt, size_t len
 {
   if (!g || !pkt || !plain || !out_len || len < 8u + CCORD_VOICE_TAG_BYTES || cap < len) return false;
   if (g->aead_mode != CCORD_VOICE_MODE_NONE) {
+    if (!g->aead_ctx.ready && g->secret_len == CCORD_VOICE_MAX_SECRET) {
+      ccord_error ierr;
+      (void)ccord_voice_aead_init(&g->aead_ctx, g->aead_mode, g->secret, &ierr);
+    }
     if (g->aead_ctx.ready) {
       return ccord_voice_aead_open_srtcp(&g->aead_ctx, pkt, len, plain, cap, out_len);
     }

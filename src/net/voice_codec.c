@@ -138,7 +138,8 @@ ccord_status ccord_voice_decrypt(const uint8_t key[CCORD_VOICE_MAX_SECRET], cons
                                  size_t *out_len, ccord_error *err)
 {
   ccord_error_clear(err);
-  if (!key || !packet || !out || !out_len || header_len != CCORD_VOICE_RTP_HEADER_SIZE) {
+  if (!key || !packet || !out || !out_len ||
+      (header_len != 8u && header_len != CCORD_VOICE_RTP_HEADER_SIZE)) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "voice: decrypt fields");
   }
   if (len < header_len + crypto_secretbox_MACBYTES) {
