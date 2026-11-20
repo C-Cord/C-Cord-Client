@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include <ccord/core/secret.h>
 
+#include <stdckdint.h>
 #include <string.h>
 
 #include <ccord/core/alloc.h>
@@ -22,8 +23,10 @@ static void wipe_bytes(void *p, size_t n)
 
 ccord_secret *ccord_secret_create(size_t cap, ccord_error *e)
 {
-  if (cap == 0) {
-    ccord_error_set(e, CCORD_ERR_INVALID, "secret capacity must be nonzero");
+  size_t alloc_sz = 0;
+  if (cap == 0 || ckd_add(&alloc_sz, cap, (size_t)1)) {
+    ccord_error_set(e, cap == 0 ? CCORD_ERR_INVALID : CCORD_ERR_RANGE,
+                    cap == 0 ? "secret capacity must be nonzero" : "secret capacity overflow");
     return nullptr;
   }
   ccord_secret *s = ccord_calloc(1, sizeof *s);
@@ -31,13 +34,12 @@ ccord_secret *ccord_secret_create(size_t cap, ccord_error *e)
     ccord_error_set(e, CCORD_ERR_NOMEM, "secret allocation failed");
     return nullptr;
   }
-  s->data = ccord_malloc(cap + 1);
+  s->data = ccord_calloc(1, alloc_sz);
   if (!s->data) {
     ccord_free(s);
     ccord_error_set(e, CCORD_ERR_NOMEM, "secret buffer allocation failed");
     return nullptr;
   }
-  s->data[cap] = 0;
   s->cap = cap;
   s->len = 0;
   return s;

@@ -78,6 +78,7 @@ static void test_secret_basics(void)
   ccord_secret_destroy(s);
 
   CT_CHECK(ccord_secret_create(0, &err) == nullptr && err.code == CCORD_ERR_INVALID);
+  CT_CHECK(ccord_secret_create(SIZE_MAX, &err) == nullptr && err.code == CCORD_ERR_RANGE);
   CT_CHECK(ccord_secret_set(nullptr, "x", 1, &err) == CCORD_ERR_INVALID);
   ccord_secret_wipe(nullptr);
   ccord_secret_destroy(nullptr);
