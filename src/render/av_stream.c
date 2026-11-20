@@ -967,20 +967,21 @@ static void avs_append_audio(ccord_av_stream *s)
   }
   uint64_t out_n = ((uint64_t)f->nb_samples * (uint64_t)CCORD_AV_SAMPLE_RATE + (uint64_t)f->sample_rate - 1u) /
                    (uint64_t)f->sample_rate;
-  uint32_t dur_ms = (uint32_t)((out_n * 1000u) / (uint64_t)CCORD_AV_SAMPLE_RATE);
-  size_t skip = 0;
-  if (pts + dur_ms <= s->skip_before_ms) return;
+  uint64_t dur_ms = (out_n * 1000u) / (uint64_t)CCORD_AV_SAMPLE_RATE;
+  uint64_t skip = 0;
+  if ((uint64_t)pts + dur_ms <= (uint64_t)s->skip_before_ms) return;
   if (pts < s->skip_before_ms) {
-    skip = (size_t)(((uint64_t)(s->skip_before_ms - pts) * (uint64_t)CCORD_AV_SAMPLE_RATE) / 1000u);
+    skip = ((uint64_t)(s->skip_before_ms - pts) * (uint64_t)CCORD_AV_SAMPLE_RATE) / 1000u;
     if (skip >= out_n) return;
   }
-  size_t take = (size_t)out_n - skip;
-  if (s->pcm_len + take > AVS_MAX_PCM_FRAMES) return;   // nobody is reading: drop instead of growing forever
+  uint64_t take64 = out_n - skip;
+  if (take64 > (uint64_t)AVS_MAX_PCM_FRAMES || s->pcm_len > AVS_MAX_PCM_FRAMES - (size_t)take64) return;   // nobody is reading: drop instead of growing forever
+  size_t take = (size_t)take64;
   if (!avs_pcm_reserve(s, take)) return;
   double step = (double)f->sample_rate / (double)CCORD_AV_SAMPLE_RATE;
   int16_t *dst = s->pcm + (s->pcm_head + s->pcm_len) * 2u;
   for (size_t i = 0; i < take; i++) {
-    double src_pos = (double)(i + skip) * step;
+    double src_pos = (double)((uint64_t)i + skip) * step;
     int i0 = (int)src_pos;
     if (i0 >= f->nb_samples) i0 = f->nb_samples - 1;
     int i1 = i0 + 1 < f->nb_samples ? i0 + 1 : i0;
