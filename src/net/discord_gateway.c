@@ -1368,7 +1368,7 @@ static bool gw_inflate_message(ccord_gateway *g)
   }
   g->z_in.next_in = (Bytef *)g->z_buf.data;
   g->z_in.avail_in = (uInt)g->z_buf.len;
-  while (g->z_in.avail_in > 0) {
+  for (;;) {
     unsigned char chunk[16384];
     g->z_in.next_out = chunk;
     g->z_in.avail_out = (uInt)sizeof chunk;
