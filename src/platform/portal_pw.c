@@ -306,6 +306,7 @@ typedef struct pw_backend {
   ccord_portal_pw_format format;
   int width, height;
   ccord_portal_pw_staging stage;   // owned copy of the newest accepted frame
+  int frame_width, frame_height;
   int frame_stride;
   uint64_t frame_seq;          // bumped per accepted buffer
   uint64_t seen_seq;           // last seq handed to read_frame
@@ -377,6 +378,8 @@ static void pw_process(void *ud)
                                         .stride = stride,
                                         .format = b->format};
           if (ccord_portal_pw_convert(b->stage.data, b->width, b->height, &raw_in)) {
+            b->frame_width = b->width;
+            b->frame_height = b->height;
             b->frame_stride = b->width * 4;
             b->frame_seq++;
           }
@@ -567,8 +570,8 @@ static bool pw_read_frame(void *ud, int timeout_ms, ccord_portal_pw_raw *out, cc
   }
   b->seen_seq = b->frame_seq;
   *out = (ccord_portal_pw_raw){.data = b->stage.data,
-                               .width = b->width,
-                               .height = b->height,
+                               .width = b->frame_width,
+                               .height = b->frame_height,
                                .stride = b->frame_stride,
                                .format = CCORD_PORTAL_PW_BGRA};
   return true;
