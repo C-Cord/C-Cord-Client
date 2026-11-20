@@ -2627,15 +2627,15 @@ static void vg_pump_udp(ccord_voice_gateway *g)
       }
     } else {
       // Soft-knee limiter above +/-26000 when 2+ speakers overlap: unity below the knee, smooth saturation above.
-      const int32_t knee = 26000;
-      const int32_t head = 6767;
+      const int64_t knee = 26000;
+      const int64_t head = 6767;
       for (size_t s = 0; s < total; s++) {
-        int32_t v = acc[s];
+        int64_t v = acc[s];
         if (v > knee) {
-          int32_t ex = v - knee;
+          int64_t ex = v - knee;
           v = knee + (ex * head) / (ex + head);
         } else if (v < -knee) {
-          int32_t ex = -v - knee;
+          int64_t ex = -v - knee;
           v = -(knee + (ex * head) / (ex + head));
         }
         dst[s] = (int16_t)v;
