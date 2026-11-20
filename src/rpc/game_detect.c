@@ -158,9 +158,23 @@ static void add_app(ccord_game_list *l, const ccord_json *obj, size_t exe_cap_le
   const ccord_json *exes = ccord_json_get(obj, "executables");
   if (!id || !name || namelen == 0 || !valid_snowflake(id, idlen)) return;
   if (!exes || ccord_json_type_of(exes) != CCORD_JSON_ARRAY) return;
+  size_t n = ccord_json_array_len(exes);
+  bool has_usable = false;
+  for (size_t i = 0; i < n && exe_cap_left > 0; i++) {
+    const char *xname = nullptr;
+    size_t xlen = 0;
+    bool win = false;
+    if (usable_exe(ccord_json_array_at(exes, i), &xname, &xlen, &win)) {
+      has_usable = true;
+      break;
+    }
+  }
+  if (!has_usable) return;
+  char *id_copy = ccord_arena_strndup(&l->arena, id, idlen);
+  char *name_copy = dup_name(&l->arena, name, namelen);
+  if (!id_copy || !name_copy) return;
   uint32_t idx = (uint32_t)l->napps;
   size_t before = l->nentries;
-  size_t n = ccord_json_array_len(exes);
   for (size_t i = 0; i < n && l->nentries - before < exe_cap_left; i++) {
     const char *xname = nullptr;
     size_t xlen = 0;
@@ -169,9 +183,6 @@ static void add_app(ccord_game_list *l, const ccord_json *obj, size_t exe_cap_le
     add_entry(l, xname, xlen, win, idx);
   }
   if (l->nentries == before) return;                  // no usable executable: the app can never match
-  char *id_copy = ccord_arena_strndup(&l->arena, id, idlen);
-  char *name_copy = dup_name(&l->arena, name, namelen);
-  if (!id_copy || !name_copy) return;
   l->apps[l->napps].id = id_copy;
   l->apps[l->napps].name = name_copy;
   l->napps++;
