@@ -39,6 +39,16 @@
 // Defined in sandbox.c: returns ms until earliest active Lua timer, or -1 if none.
 extern int ccord_sandbox_next_timer_ms(const ccord_sandbox *sb);
 
+#define MAX_DEFERRED 32
+
+typedef struct deferred_msg {
+  ccord_ipc_kind kind;
+  uint32_t id;
+  char method[64];
+  char *params_json;
+  size_t params_len;
+} deferred_msg;
+
 typedef struct host {
   ccord_ipc *ipc;
   ccord_sandbox *sb;
@@ -46,7 +56,81 @@ typedef struct host {
   bool stop;
   int exit_code;
   const _Atomic bool *cancel;
+  deferred_msg deferred[MAX_DEFERRED];
+  size_t deferred_head;
+  size_t deferred_count;
 } host;
+
+static void jw_copy_json(ccord_jw *w, const ccord_json *j)
+{
+  if (!j) { ccord_jw_null(w); return; }
+  switch (ccord_json_type_of(j)) {
+    case CCORD_JSON_NULL: ccord_jw_null(w); break;
+    case CCORD_JSON_BOOL: ccord_jw_bool(w, ccord_json_bool(j, false)); break;
+    case CCORD_JSON_NUMBER: ccord_jw_double(w, ccord_json_number(j, 0)); break;
+    case CCORD_JSON_STRING: {
+      size_t sl = 0;
+      const char *s = ccord_json_string(j, &sl);
+      ccord_jw_string(w, s ? s : "", sl);
+      break;
+    }
+    case CCORD_JSON_ARRAY: {
+      ccord_jw_begin_array(w);
+      size_t n = ccord_json_array_len(j);
+      for (size_t i = 0; i < n; i++) jw_copy_json(w, ccord_json_array_at(j, i));
+      ccord_jw_end_array(w);
+      break;
+    }
+    case CCORD_JSON_OBJECT: {
+      ccord_jw_begin_object(w);
+      size_t n = ccord_json_object_len(j);
+      for (size_t i = 0; i < n; i++) {
+        const ccord_json *v = nullptr;
+        const char *k = ccord_json_object_key(j, i, &v);
+        ccord_jw_key(w, k);
+        jw_copy_json(w, v);
+      }
+      ccord_jw_end_object(w);
+      break;
+    }
+  }
+}
+
+static void host_free_deferred(host *h)
+{
+  while (h->deferred_count > 0) {
+    deferred_msg *d = &h->deferred[h->deferred_head];
+    ccord_free(d->params_json);
+    d->params_json = nullptr;
+    d->params_len = 0;
+    h->deferred_head = (h->deferred_head + 1u) % MAX_DEFERRED;
+    h->deferred_count--;
+  }
+}
+
+static void host_defer_msg(host *h, const ccord_ipc_msg *msg)
+{
+  if (!msg || !msg->method || h->deferred_count >= MAX_DEFERRED) return;
+  size_t tail = (h->deferred_head + h->deferred_count) % MAX_DEFERRED;
+  deferred_msg *d = &h->deferred[tail];
+  memset(d, 0, sizeof *d);
+  d->kind = msg->kind;
+  d->id = msg->id;
+  snprintf(d->method, sizeof d->method, "%s", msg->method);
+  if (msg->params) {
+    ccord_buf b;
+    ccord_buf_init(&b, 0);
+    ccord_jw w;
+    ccord_jw_init(&w, &b);
+    jw_copy_json(&w, msg->params);
+    if (ccord_jw_ok(&w)) {
+      d->params_len = b.len;
+      d->params_json = ccord_strndup(ccord_buf_cstr(&b), b.len);
+    }
+    ccord_buf_free(&b);
+  }
+  h->deferred_count++;
+}
 
 static const char *safe_text(const char *s)
 {
@@ -137,6 +221,7 @@ static bool svc_request_sync(void *ud, const char *method, const char *params, c
     return false;
   }
   for (;;) {
+    ccord_arena_reset(arena);
     ccord_ipc_msg msg;
     if (ccord_ipc_wait(h->ipc, arena, &msg, 3000, &err) != CCORD_OK) {
       snprintf(err_buf, err_cap, "%s", err.message[0] ? err.message : "ipc timeout");
@@ -158,6 +243,9 @@ static bool svc_request_sync(void *ud, const char *method, const char *params, c
       h->stop = true;
       snprintf(err_buf, err_cap, "shutting down");
       return false;
+    }
+    if (msg.kind == CCORD_IPC_REQ || msg.kind == CCORD_IPC_NTF) {
+      host_defer_msg(h, &msg);
     }
   }
 }
@@ -233,7 +321,7 @@ static void handle_init(host *h, const ccord_ipc_msg *msg)
   (void)dl;
   ccord_sandbox_config cfg = {
     .plugin_id = id, .plugin_name = name, .plugin_version = version, .plugin_dir = dir,
-    .perms = perms, .memory_bytes = 0, .instructions = 0,
+    .perms = perms, .memory_bytes = h->cancel ? (32u << 20) : (64u << 20), .instructions = 0,
   };
   const ccord_json *plat = p ? ccord_json_get(p, "platform") : nullptr;
   if (plat && ccord_json_type_of(plat) == CCORD_JSON_OBJECT) {
@@ -369,11 +457,33 @@ static void dispatch(host *h, const ccord_ipc_msg *msg)
   }
 }
 
+static void drain_deferred(host *h, ccord_arena *arena)
+{
+  static const ccord_json_limits k_lim = {16, 8192, (size_t)1u << 20};
+  while (h->deferred_count > 0 && !h->stop) {
+    deferred_msg d = h->deferred[h->deferred_head];
+    h->deferred[h->deferred_head] = (deferred_msg){0};
+    h->deferred_head = (h->deferred_head + 1u) % MAX_DEFERRED;
+    h->deferred_count--;
+    ccord_arena_reset(arena);
+    ccord_ipc_msg msg = {.kind = d.kind, .id = d.id, .method = d.method};
+    if (d.params_json) {
+      ccord_error perr = {0};
+      msg.params = ccord_json_parse(arena, d.params_json, d.params_len, &k_lim, &perr);
+    }
+    dispatch(h, &msg);
+    ccord_free(d.params_json);
+    ccord_arena_reset(arena);
+  }
+}
+
 static int run_loop(host *h)
 {
   ccord_arena arena;
   ccord_arena_init(&arena, 4096u);
   while (!h->stop) {
+    drain_deferred(h, &arena);
+    if (h->stop) break;
     if (h->cancel && atomic_load_explicit(h->cancel, memory_order_relaxed)) {
       h->stop = true;
       break;
@@ -382,6 +492,7 @@ static int run_loop(host *h)
     if (ccord_ipc_has_pending_output(h->ipc)) events |= CCORD_POLL_OUT;
     int poll_ms = h->sb ? ccord_sandbox_next_timer_ms(h->sb) : -1;
     if (h->cancel && (poll_ms < 0 || poll_ms > 1000)) poll_ms = 1000;
+    if (h->deferred_count > 0) poll_ms = 0;
     if (ccord_sock_poll1(ccord_ipc_fd(h->ipc), events, poll_ms) < 0) fatal(h, EXIT_INTERNAL);
     for (;;) {
       ccord_ipc_msg msg;
@@ -398,6 +509,7 @@ static int run_loop(host *h)
       }
       dispatch(h, &msg);
       ccord_arena_reset(&arena);
+      drain_deferred(h, &arena);
       if (h->stop) break;
     }
     if (!h->stop) {
@@ -410,6 +522,7 @@ static int run_loop(host *h)
       if (ccord_ipc_flush(h->ipc, h->stop ? 100 : 0, &err) != CCORD_OK && !h->stop) fatal(h, EXIT_PROTOCOL);
     }
   }
+  host_free_deferred(h);
   if (h->ipc) {
     ccord_error ferr = {0};
     (void)ccord_ipc_flush(h->ipc, 100, &ferr);
