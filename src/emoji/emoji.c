@@ -141,6 +141,116 @@ const ccord_emoji_entry *ccord_emoji_find_utf8(const char *s, size_t len, int *o
   return nullptr;
 }
 
+static size_t utf8_seq_len(const char *s, size_t avail);
+
+static bool utf8_has_prefix_entry(const char *s, size_t len)
+{
+  size_t lo = 0, hi = ccord_emoji_utf8_index_count;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2;
+    const ccord_emoji_utf8_key *k = &ccord_emoji_utf8_index[mid];
+    if (cmp_bytes(ccord_emoji_strtab + k->utf8_off, k->len, s, len) < 0) lo = mid + 1;
+    else hi = mid;
+  }
+  if (lo >= ccord_emoji_utf8_index_count) return false;
+  const ccord_emoji_utf8_key *k = &ccord_emoji_utf8_index[lo];
+  return k->len >= len && memcmp(ccord_emoji_strtab + k->utf8_off, s, len) == 0;
+}
+
+static bool is_skin_tone_utf8(const char *s, size_t l)
+{
+  return l == 4 && (unsigned char)s[0] == 0xF0 && (unsigned char)s[1] == 0x9F &&
+         (unsigned char)s[2] == 0x8F && (unsigned char)s[3] >= 0xBB && (unsigned char)s[3] <= 0xBF;
+}
+
+static bool is_zwj_utf8(const char *s, size_t l)
+{
+  return l == 3 && (unsigned char)s[0] == 0xE2 && (unsigned char)s[1] == 0x80 && (unsigned char)s[2] == 0x8D;
+}
+
+// Text-default symbols covered by the UI base font (©, ®, ‼, ⁉, ™, ℹ): without U+FE0F they stay text.
+static bool is_bare_text_symbol(const char *s, size_t len)
+{
+  if (len == 2 && (unsigned char)s[0] == 0xC2) {
+    unsigned char b1 = (unsigned char)s[1];
+    return b1 == 0xA9 || b1 == 0xAE;   // © (U+00A9), ® (U+00AE)
+  }
+  if (len == 3 && (unsigned char)s[0] == 0xE2) {
+    unsigned char b1 = (unsigned char)s[1], b2 = (unsigned char)s[2];
+    return (b1 == 0x80 && b2 == 0xBC) || (b1 == 0x81 && b2 == 0x89) ||   // ‼ (U+203C), ⁉ (U+2049)
+           (b1 == 0x84 && (b2 == 0xA2 || b2 == 0xB9));                   // ™ (U+2122), ℹ (U+2139)
+  }
+  return false;
+}
+
+size_t ccord_emoji_match_prefix(const char *s, size_t len)
+{
+  if (!s || len == 0) return 0;
+  unsigned char b0 = (unsigned char)s[0];
+  if (b0 < 0x80) {
+    // Only ASCII keycap starters ('0'..'9', '#', '*') followed by optional U+FE0F and U+20E3.
+    if (!((b0 >= '0' && b0 <= '9') || b0 == '#' || b0 == '*')) return 0;
+    if (len >= 7 && (unsigned char)s[1] == 0xEF && (unsigned char)s[2] == 0xB8 && (unsigned char)s[3] == 0x8F &&
+        (unsigned char)s[4] == 0xE2 && (unsigned char)s[5] == 0x83 && (unsigned char)s[6] == 0xA3) {
+      return 7;
+    }
+    if (len >= 4 && (unsigned char)s[1] == 0xE2 && (unsigned char)s[2] == 0x83 && (unsigned char)s[3] == 0xA3) {
+      return 4;
+    }
+    return 0;
+  }
+  if (b0 != 0xC2 && b0 != 0xE2 && b0 != 0xE3 && b0 != 0xF0) return 0;
+
+  char norm[64];
+  size_t nlen = 0;
+  size_t pos = 0;
+  size_t best = 0;
+  size_t prev_start = 0, prev_len = 0;
+  bool has_tone = false, has_zwj = false, norm_ok = true;
+
+  while (pos < len && pos < 64) {
+    size_t cl = utf8_seq_len(s + pos, len - pos);
+    if (pos + cl > 64) break;
+    bool tone = is_skin_tone_utf8(s + pos, cl);
+    if (tone) {
+      // Only allow a skin tone in the tone-stripped ZWJ path immediately after a toneable base emoji.
+      const ccord_emoji_entry *pe = prev_len > 0 ? ccord_emoji_find_utf8(s + prev_start, prev_len, nullptr) : nullptr;
+      if (!pe || !pe->has_skin_tones) norm_ok = false;
+      has_tone = true;
+    } else {
+      if (is_zwj_utf8(s + pos, cl)) has_zwj = true;
+      if (norm_ok && nlen + cl <= sizeof norm) {
+        memcpy(norm + nlen, s + pos, cl);
+        nlen += cl;
+      } else {
+        norm_ok = false;
+      }
+    }
+    prev_start = pos;
+    prev_len = cl;
+    pos += cl;
+
+    if (ccord_emoji_find_utf8(s, pos, nullptr) != nullptr) {
+      best = pos;
+    } else if (norm_ok && has_tone && has_zwj && nlen > 0 && ccord_emoji_find_utf8(norm, nlen, nullptr) != nullptr) {
+      best = pos;
+    }
+
+    bool more = utf8_has_prefix_entry(s, pos);
+    if (!more && norm_ok && has_tone && nlen > 0) more = utf8_has_prefix_entry(norm, nlen);
+    if (!more) break;
+  }
+
+  if (best == 0) return 0;
+  // U+FE0E (VS15) explicitly requests text presentation rather than color emoji.
+  if (best + 3 <= len && (unsigned char)s[best] == 0xEF && (unsigned char)s[best + 1] == 0xB8 &&
+      (unsigned char)s[best + 2] == 0x8E) {
+    return 0;
+  }
+  if (is_bare_text_symbol(s, best)) return 0;
+  return best;
+}
+
 // ---- search / completion ---------------------------------------------------------------------------------------
 
 // Case-insensitive helpers; the needle is already normalised, ' ' and '_' are equivalent in the haystack.

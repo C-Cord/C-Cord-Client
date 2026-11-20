@@ -47,6 +47,12 @@ const ccord_emoji_entry *ccord_emoji_find_shortcode(const char *name, size_t len
 // Exact lookup of a default or toned sequence, including unqualified/minimally-qualified spellings (e.g. missing
 // U+FE0F). *out_tone (may be null) receives 0 for the default tone or 1..5. O(log n).
 const ccord_emoji_entry *ccord_emoji_find_utf8(const char *s, size_t len, int *out_tone);
+// Longest Unicode emoji sequence starting at s[0..len), returning its byte length (0 when s does not start with
+// a known emoji). Matches single code points, skin-tone variants (including mixed-tone ZWJ sequences), flags,
+// keycaps (0..9/#/* + optional U+FE0F + U+20E3), ZWJ sequences, and unqualified/minimally-qualified spellings.
+// Characters with default text presentation covered by the UI base font (©, ®, ™, ‼, ⁉, ℹ) require U+FE0F so
+// plain prose stays text; sequences followed by U+FE0E (text presentation selector) are not matched.
+size_t ccord_emoji_match_prefix(const char *s, size_t len);
 
 // Ranked search (case-insensitive; ' ' and '_' are equivalent; surrounding colons ignored). Order: exact name/alias,
 // prefix of name, prefix of alias, substring of name/alias, substring of CLDR name; stable by dataset order inside a

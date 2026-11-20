@@ -363,6 +363,62 @@ static void test_replace_truncation(void)
   CT_CHECK(rep("a\xC3\xA9", b, 3) == 1 && eq(b, "a"));
 }
 
+static void test_match_prefix(void)
+{
+  // Plain ASCII and non-emoji UTF-8 never match.
+  CT_CHECK(ccord_emoji_match_prefix(nullptr, 4) == 0);
+  CT_CHECK(ccord_emoji_match_prefix("", 0) == 0);
+  CT_CHECK(ccord_emoji_match_prefix("hello", 5) == 0);
+  CT_CHECK(ccord_emoji_match_prefix("12345", 5) == 0);
+  CT_CHECK(ccord_emoji_match_prefix("#general", 8) == 0);
+  CT_CHECK(ccord_emoji_match_prefix("*bold*", 6) == 0);
+  CT_CHECK(ccord_emoji_match_prefix("caf\xC3\xA9", 5) == 0);
+  CT_CHECK(ccord_emoji_match_prefix("\xE4\xB8\xAD\xE6\x96\x87", 6) == 0);
+
+  // Text-default base-font symbols stay text without U+FE0F, match with U+FE0F.
+  CT_CHECK(ccord_emoji_match_prefix("\xC2\xA9 2026", 7) == 0);                      // ©
+  CT_CHECK(ccord_emoji_match_prefix("\xC2\xA9\xEF\xB8\x8F 2026", 10) == 5);         // ©️
+  CT_CHECK(ccord_emoji_match_prefix("\xE2\x84\xA2", 3) == 0);                       // ™
+  CT_CHECK(ccord_emoji_match_prefix("\xE2\x84\xA2\xEF\xB8\x8F", 6) == 6);           // ™️
+  // U+FE0E (VS15 text presentation) prevents matching as color emoji.
+  CT_CHECK(ccord_emoji_match_prefix("\xE2\x9D\xA4\xEF\xB8\x8E", 6) == 0);           // ❤︎
+  CT_CHECK(ccord_emoji_match_prefix("\xE2\x9D\xA4\xEF\xB8\x8F", 6) == 6);           // ❤️
+  CT_CHECK(ccord_emoji_match_prefix("\xE2\x9D\xA4!", 4) == 3);                      // ❤!
+
+  // Single emoji, toned emoji, adjacent emojis (only matches the first).
+  CT_CHECK(ccord_emoji_match_prefix("\xF0\x9F\x98\x80!", 5) == 4);                  // 😀!
+  CT_CHECK(ccord_emoji_match_prefix("\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBF!", 9) == 8);  // 👍🏿!
+  CT_CHECK(ccord_emoji_match_prefix("\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBB\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBF", 16) == 8);
+
+  // Keycaps (qualified and unqualified).
+  CT_CHECK(ccord_emoji_match_prefix("1\xEF\xB8\x8F\xE2\x83\xA3 two", 11) == 7);     // 1️⃣
+  CT_CHECK(ccord_emoji_match_prefix("1\xE2\x83\xA3", 4) == 4);                      // 1⃣
+  CT_CHECK(ccord_emoji_match_prefix("#\xEF\xB8\x8F\xE2\x83\xA3", 7) == 7);          // #️⃣
+  CT_CHECK(ccord_emoji_match_prefix("*\xEF\xB8\x8F\xE2\x83\xA3", 7) == 7);          // *️⃣
+
+  // Flags (country + subdivision tag sequence) and ZWJ sequences (including mixed skin tones).
+  CT_CHECK(ccord_emoji_match_prefix("\xF0\x9F\x87\xBA\xF0\x9F\x87\xB8!", 9) == 8);  // 🇺🇸
+  const char *eng = "\xF0\x9F\x8F\xB4\xF3\xA0\x81\xA7\xF3\xA0\x81\xA2\xF3\xA0\x81\xA5\xF3\xA0\x81\xAE\xF3\xA0\x81\xA7\xF3\xA0\x81\xBF!";
+  CT_CHECK(ccord_emoji_match_prefix(eng, strlen(eng)) == 28);                       // 🏴󠁧󠁢󠁥󠁮󠁧󠁿
+  const char *dev = "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x92\xBB hi";
+  CT_CHECK(ccord_emoji_match_prefix(dev, strlen(dev)) == 11);                       // 👨‍💻
+  const char *fam = "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x91\xA7\xE2\x80\x8D\xF0\x9F\x91\xA6";
+  CT_CHECK(ccord_emoji_match_prefix(fam, strlen(fam)) == 25);                       // 👨‍👩‍👧‍👦
+  const char *hof = "\xE2\x9D\xA4\xEF\xB8\x8F\xE2\x80\x8D\xF0\x9F\x94\xA5!";
+  CT_CHECK(ccord_emoji_match_prefix(hof, strlen(hof)) == 13);                       // ❤️‍🔥
+  const char *hof_unq = "\xE2\x9D\xA4\xE2\x80\x8D\xF0\x9F\x94\xA5!";
+  CT_CHECK(ccord_emoji_match_prefix(hof_unq, strlen(hof_unq)) == 10);               // ❤‍🔥
+  // Mixed skin-tone ZWJ sequence: people holding hands (light + dark).
+  const char *mixed = "\xF0\x9F\xA7\x91\xF0\x9F\x8F\xBB\xE2\x80\x8D\xF0\x9F\xA4\x9D\xE2\x80\x8D\xF0\x9F\xA7\x91\xF0\x9F\x8F\xBF!";
+  CT_CHECK(ccord_emoji_match_prefix(mixed, strlen(mixed)) == 26);                   // 🧑🏻‍🤝‍🧑🏿
+  // Every fully-qualified base emoji in the table matches itself completely.
+  for (size_t i = 0; i < ccord_emoji_count(); i++) {
+    const ccord_emoji_entry *e = ccord_emoji_at(i);
+    size_t elen = strlen(e->utf8);
+    CT_CHECK(ccord_emoji_match_prefix(e->utf8, elen) == elen);
+  }
+}
+
 int main(void)
 {
   test_categories();
@@ -370,6 +426,7 @@ int main(void)
   test_shortcodes();
   test_tones();
   test_find_utf8();
+  test_match_prefix();
   test_search();
   test_complete();
   test_replace();
