@@ -227,11 +227,12 @@ static bool eq(const char *s, size_t n, const char *lit)
   return n == l && memcmp(s, lit, l) == 0;
 }
 
-static void push_json(lua_State *L, const ccord_json *j)
+static bool push_json(lua_State *L, const ccord_json *j)
 {
+  if (!lua_checkstack(L, 4)) return false;
   if (!j) {
     lua_newtable(L);
-    return;
+    return true;
   }
   switch (ccord_json_type_of(j)) {
     case CCORD_JSON_NULL: lua_pushnil(L); break;
@@ -258,7 +259,10 @@ static void push_json(lua_State *L, const ccord_json *j)
       size_t n = ccord_json_array_len(j);
       lua_createtable(L, (int)n, 0);
       for (size_t i = 0; i < n; i++) {
-        push_json(L, ccord_json_array_at(j, i));
+        if (!push_json(L, ccord_json_array_at(j, i))) {
+          lua_pop(L, 1);
+          return false;
+        }
         lua_rawseti(L, -2, (lua_Integer)i + 1);
       }
       break;
@@ -269,17 +273,21 @@ static void push_json(lua_State *L, const ccord_json *j)
       for (size_t i = 0; i < n; i++) {
         const ccord_json *v = nullptr;
         const char *k = ccord_json_object_key(j, i, &v);
-        push_json(L, v);
+        if (!push_json(L, v)) {
+          lua_pop(L, 1);
+          return false;
+        }
         lua_setfield(L, -2, k);
       }
       break;
     }
   }
+  return true;
 }
 
 static bool encode_lua(lua_State *L, int idx, ccord_jw *w, int depth)
 {
-  if (depth > 32) return false;
+  if (depth > 32 || !lua_checkstack(L, 4)) return false;
   int abs_idx = lua_absindex(L, idx);
   switch (lua_type(L, abs_idx)) {
     case LUA_TNIL:
@@ -371,8 +379,14 @@ static int sync_call(lua_State *L, ccord_sandbox *sb, const char *method, const 
     lua_pushstring(L, ebuf[0] ? ebuf : "request failed");
     return 2;
   }
-  if (!res) lua_pushboolean(L, 1);
-  else push_json(L, res);
+  if (!res) {
+    lua_pushboolean(L, 1);
+  } else if (!push_json(L, res)) {
+    ccord_arena_free(&arena);
+    lua_pushnil(L);
+    lua_pushliteral(L, "stack overflow");
+    return 2;
+  }
   ccord_arena_free(&arena);
   return 1;
 }
@@ -929,7 +943,12 @@ static int api_json_decode(lua_State *L)
     lua_pushstring(L, err.message[0] ? err.message : "invalid JSON");
     return 2;
   }
-  push_json(L, j);
+  if (!push_json(L, j)) {
+    ccord_arena_free(&arena);
+    lua_pushnil(L);
+    lua_pushliteral(L, "stack overflow");
+    return 2;
+  }
   ccord_arena_free(&arena);
   return 1;
 }
@@ -2266,7 +2285,10 @@ ccord_status ccord_sandbox_seed_storage(ccord_sandbox *sb, const ccord_json *obj
       return ccord_error_set(err, CCORD_ERR_INVALID, "storage snapshot has an invalid key");
     }
     lua_pushstring(L, k);
-    push_json(L, v);
+    if (!push_json(L, v)) {
+      lua_settop(L, top);
+      return ccord_error_set(err, CCORD_ERR_RANGE, "storage snapshot exceeded stack depth");
+    }
     lua_rawset(L, -3);
   }
   lua_settop(L, top);
@@ -2304,7 +2326,10 @@ ccord_status ccord_sandbox_emit(ccord_sandbox *sb, const char *event, const ccor
       lua_settop(L, list);
       continue;
     }
-    push_json(L, data);
+    if (!push_json(L, data)) {
+      lua_settop(L, top);
+      return ccord_error_set(err, CCORD_ERR_RANGE, "event payload exceeded stack depth");
+    }
     ccord_error e = {0};
     if (call_guarded(sb, 1, 0, &e) != CCORD_OK) {
       sb_log(sb, CCORD_LOG_WARN, event, e.message);
@@ -2326,7 +2351,10 @@ ccord_status ccord_sandbox_menu_invoke(ccord_sandbox *sb, const char *item_id, c
     lua_settop(L, top);
     return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "menu item %s is not registered", item_id);
   }
-  push_json(L, ctx);
+  if (!push_json(L, ctx)) {
+    lua_settop(L, top);
+    return ccord_error_set(err, CCORD_ERR_RANGE, "menu context exceeded stack depth");
+  }
   ccord_status st = call_guarded(sb, 1, 0, err);
   lua_settop(L, top);
   return st;
@@ -2341,7 +2369,10 @@ ccord_status ccord_sandbox_panel_event(ccord_sandbox *sb, const char *panel_id, 
     lua_settop(L, top);
     return CCORD_OK;   // panel has no on_event handler; ignore silently
   }
-  push_json(L, ev);
+  if (!push_json(L, ev)) {
+    lua_settop(L, top);
+    return ccord_error_set(err, CCORD_ERR_RANGE, "panel event exceeded stack depth");
+  }
   ccord_status st = call_guarded(sb, 1, 0, err);
   lua_settop(L, top);
   return st;
@@ -2359,7 +2390,10 @@ ccord_status ccord_sandbox_command_run(ccord_sandbox *sb, const char *name, cons
     return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "command %s is not registered", name);
   }
   lua_pushstring(L, args ? args : "");
-  push_json(L, ctx);
+  if (!push_json(L, ctx)) {
+    lua_settop(L, top);
+    return ccord_error_set(err, CCORD_ERR_RANGE, "command context exceeded stack depth");
+  }
   ccord_status st = call_guarded(sb, 2, 1, err);
   if (st == CCORD_OK) {
     if (lua_isnil(L, -1)) {

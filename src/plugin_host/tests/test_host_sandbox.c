@@ -260,5 +260,19 @@ int main(void)
     ccord_sandbox_destroy(sb);
   }
 
+  // Security regressions (P1, P2, P6, P12, P16):
+  // 2. Deeply nested JSON/Lua stack round-trip under LUA_USE_APICHECK (P1).
+  {
+    ccord_sandbox *sb = make(&f, 0, 0, 0);
+    CT_CHECK(run(sb,
+                 "local s = string.rep('{\"a\":', 30) .. '1' .. string.rep('}', 30)\n"
+                 "local t = json.decode(s)\n"
+                 "local enc = json.encode(t)\n"
+                 "assert(type(enc) == 'string' and #enc > 60)",
+                 &err) == CCORD_OK);
+    ccord_sandbox_destroy(sb);
+  }
+
+
   return CT_RESULT("test_host_sandbox");
 }
