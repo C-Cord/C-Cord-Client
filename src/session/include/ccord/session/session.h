@@ -508,3 +508,7 @@ const ccord_activity_instance *ccord_session_activity_instances(const ccord_sess
 [[nodiscard]] ccord_status ccord_session_guild_profile_fetch(ccord_session *s, ccord_id guild_id, ccord_error *err);
 const ccord_guild_profile *ccord_session_guild_profile(const ccord_session *s, ccord_id guild_id);
 bool ccord_session_guild_profile_loading(const ccord_session *s, ccord_id guild_id);
+
+// ---- Plugin API v3 raw gateway dispatch tap ----
+typedef void (*ccord_session_raw_gateway_cb)(void *ud, const char *event_name, const char *payload_json);
+void ccord_session_set_raw_gateway_cb(ccord_session *s, ccord_session_raw_gateway_cb cb, void *ud);
