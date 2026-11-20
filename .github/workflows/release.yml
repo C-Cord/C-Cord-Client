@@ -43,12 +43,19 @@ jobs:
     steps:
       - name: Install build dependencies
         run: |
-          pacman -Syu --noconfirm --needed \
-            base-devel cmake ninja pkgconf git python curl \
-            sdl3 sdl3_ttf ffmpeg libpng libjpeg-turbo libwebp \
-            opus libsodium openssl zlib speexdsp nlohmann-json \
-            libpipewire libx11 libxext libxcomposite libxrandr libxfixes \
-            glib2 dbus fontconfig zstd
+          for attempt in 1 2 3; do
+            if pacman -Syu --noconfirm --needed \
+              base-devel cmake ninja pkgconf git python curl \
+              sdl3 sdl3_ttf ffmpeg libpng libjpeg-turbo libwebp \
+              opus libsodium openssl zlib speexdsp nlohmann-json \
+              libpipewire libx11 libxext libxcomposite libxrandr libxfixes \
+              glib2 dbus fontconfig zstd; then
+              break
+            fi
+            echo "pacman install attempt ${attempt} failed; retrying..."
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 5
+          done
       - uses: actions/checkout@v4
       - name: Build & Package Arch (.pkg.tar.zst + repo DB)
         env:
@@ -114,8 +121,9 @@ jobs:
     steps:
       - name: Install build dependencies
         run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            install -y --no-install-recommends \
             ca-certificates git curl gcc g++ cmake ninja-build pkg-config python3 dpkg-dev \
             libcurl4-openssl-dev libssl-dev zlib1g-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
@@ -197,14 +205,21 @@ jobs:
     steps:
       - name: Install build dependencies
         run: |
-          dnf install -y \
-            gcc gcc-c++ cmake ninja-build pkgconf-pkg-config python3 rpm-build createrepo_c \
-            SDL3-devel SDL3_ttf-devel \
-            ffmpeg-free-devel libcurl-devel openssl-devel zlib-devel \
-            libpng-devel libjpeg-turbo-devel libwebp-devel \
-            opus-devel libsodium-devel speexdsp-devel json-devel \
-            pipewire-devel glib2-devel dbus-devel fontconfig-devel \
-            libX11-devel libXext-devel libXcomposite-devel libXrandr-devel libXfixes-devel
+          for attempt in 1 2 3; do
+            if dnf install -y \
+              gcc gcc-c++ cmake ninja-build pkgconf-pkg-config python3 rpm-build createrepo_c \
+              SDL3-devel SDL3_ttf-devel \
+              ffmpeg-free-devel libcurl-devel openssl-devel zlib-devel \
+              libpng-devel libjpeg-turbo-devel libwebp-devel \
+              opus-devel libsodium-devel speexdsp-devel json-devel \
+              pipewire-devel glib2-devel dbus-devel fontconfig-devel \
+              libX11-devel libXext-devel libXcomposite-devel libXrandr-devel libXfixes-devel; then
+              break
+            fi
+            echo "dnf install attempt ${attempt} failed; retrying..."
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 5
+          done
       - uses: actions/checkout@v4
       - name: Build & Package RPM (.rpm + repodata)
         env:
@@ -250,8 +265,9 @@ jobs:
     steps:
       - name: Install build dependencies
         run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            install -y --no-install-recommends \
             ca-certificates git curl gcc g++ cmake ninja-build pkg-config python3 file \
             libcurl4-openssl-dev libssl-dev zlib1g-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
@@ -311,7 +327,7 @@ jobs:
           EOF
           chmod 0755 AppDir/AppRun
 
-          curl -fsSL "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" -o appimagetool
+          curl -fsSL --retry 3 --retry-delay 5 "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" -o appimagetool
           chmod +x appimagetool
           mkdir -p out/assets
           ARCH=x86_64 ./appimagetool --appimage-extract-and-run AppDir "out/assets/C-Cord-${VER}-linux-x86_64.AppImage"
@@ -499,9 +515,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
+        env:
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
         run: |
-          brew install llvm cmake ninja pkg-config dylibbundler \
-            sdl3 sdl3_ttf ffmpeg libpng jpeg-turbo webp opus libsodium curl openssl@3 nlohmann-json speexdsp
+          for attempt in 1 2 3; do
+            if brew install llvm cmake ninja pkg-config dylibbundler \
+              sdl3 sdl3_ttf ffmpeg libpng jpeg-turbo webp opus libsodium curl openssl@3 nlohmann-json speexdsp; then
+              break
+            fi
+            echo "brew install attempt ${attempt} failed; retrying..."
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 5
+          done
       - name: Build & Package macOS C-Cord.app + .dmg
         env:
           VER: ${{ needs.meta.outputs.version }}

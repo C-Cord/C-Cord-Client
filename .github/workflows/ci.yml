@@ -31,6 +31,9 @@ jobs:
           - name: normal
             build_dir: build
             cmake_args: ""
+          - name: clang
+            build_dir: build-clang
+            cmake_args: "-DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release"
           - name: asan-ubsan
             build_dir: build-asan
             cmake_args: "-DCCORD_SANITIZE=ON -DCMAKE_BUILD_TYPE=Debug"
@@ -43,11 +46,22 @@ jobs:
     steps:
       - name: Install build dependencies
         run: |
-          pacman -Syu --noconfirm --needed \
-            base-devel cmake ninja git nodejs python \
-            sdl3 sdl3_ttf ffmpeg pipewire libpng libjpeg-turbo libwebp \
-            opus libsodium curl openssl nlohmann-json glib2 speexdsp dbus \
-            libx11 libxext libxcomposite libxrandr libxfixes
+          EXTRA_PKGS=""
+          if [ "${{ matrix.name }}" = "clang" ]; then
+            EXTRA_PKGS="clang"
+          fi
+          for attempt in 1 2 3; do
+            if pacman -Syu --noconfirm --needed \
+              base-devel ${EXTRA_PKGS} cmake ninja git nodejs python \
+              sdl3 sdl3_ttf ffmpeg pipewire libpng libjpeg-turbo libwebp \
+              opus libsodium curl openssl nlohmann-json glib2 speexdsp dbus \
+              libx11 libxext libxcomposite libxrandr libxfixes; then
+              break
+            fi
+            echo "pacman install attempt ${attempt} failed; retrying..."
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 5
+          done
       - name: Check out
         uses: actions/checkout@v4
       - name: Configure (${{ matrix.name }})
@@ -71,7 +85,7 @@ jobs:
             (cd /tmp && /tmp/ccord-stage/bin/ccord --headless --mock --data-dir /tmp/stage-data --screenshot /tmp/stage-shot.png)
             test -s /tmp/stage-shot.png
           else
-            ctest --test-dir ${{ matrix.build_dir }} --output-on-failure
+            ctest --test-dir ${{ matrix.build_dir }} --output-on-failure --timeout 300
           fi
 
   macos-build:
@@ -85,10 +99,19 @@ jobs:
       - name: Check out
         uses: actions/checkout@v4
       - name: Install build dependencies
+        env:
+          HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: "1"
         run: |
-          brew install cmake ninja pkg-config llvm \
-            sdl3 sdl3_ttf ffmpeg libpng jpeg-turbo webp \
-            opus libsodium curl openssl@3 nlohmann-json speexdsp
+          for attempt in 1 2 3; do
+            if brew install cmake ninja pkg-config llvm \
+              sdl3 sdl3_ttf ffmpeg libpng jpeg-turbo webp \
+              opus libsodium curl openssl@3 nlohmann-json speexdsp; then
+              break
+            fi
+            echo "brew install attempt ${attempt} failed; retrying..."
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 5
+          done
       - name: Configure & Build (macOS)
         run: |
           LLVM_PREFIX="$(brew --prefix llvm)"
@@ -111,7 +134,7 @@ jobs:
         run: |
           cmake --install build-macos
           /tmp/ccord-macos-stage/bin/ccord --version
-          /tmp/ccord-macos-stage/bin/ccord --headless --mock --data-dir /tmp/ccord-macos-data --screenshot /tmp/ccord-macos-shot.png
+          (cd /tmp && /tmp/ccord-macos-stage/bin/ccord --headless --mock --data-dir /tmp/ccord-macos-data --screenshot /tmp/ccord-macos-shot.png)
           test -s /tmp/ccord-macos-shot.png
 
   windows-build:
@@ -165,5 +188,5 @@ jobs:
         run: |
           cmake --install build-win
           /tmp/ccord-win-stage/bin/ccord.exe --version
-          /tmp/ccord-win-stage/bin/ccord.exe --headless --mock --data-dir /tmp/ccord-win-data --screenshot /tmp/ccord-win-shot.png
+          (cd /tmp && /tmp/ccord-win-stage/bin/ccord.exe --headless --mock --data-dir /tmp/ccord-win-data --screenshot /tmp/ccord-win-shot.png)
           test -s /tmp/ccord-win-shot.png
