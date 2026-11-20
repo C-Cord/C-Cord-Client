@@ -353,6 +353,7 @@ static void reg_global(void *ud, uint32_t id, uint32_t permissions, const char *
     bool is_out = strcmp(dir, "out") == 0;
     for (int i = 0; i < LPW_MAX_PORTS; i++) {
       if (p->ports[i].used) continue;
+      memset(&p->ports[i], 0, sizeof p->ports[i]);
       p->ports[i].used = true;
       p->ports[i].id = id;
       p->ports[i].node_id = node_id;
