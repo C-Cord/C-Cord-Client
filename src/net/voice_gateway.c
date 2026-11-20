@@ -669,21 +669,30 @@ static vg_audio_stream *vg_get_audio_stream(ccord_voice_gateway *g, uint32_t ssr
   return s;
 }
 
+static void vg_io_leave(ccord_voice_gateway *g)
+{
+  g->inflight_io--;
+  if (g->inflight_io == 0 && g->io_cond) ccord_cond_broadcast(g->io_cond);
+}
+
 static ccord_status vg_send_ws_locked(ccord_voice_gateway *g, const void *data, size_t len,
                                       unsigned int ws_flags, ccord_error *err)
 {
-  if (!g->curl || !g->open) return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
+  if (g->destroying || !g->curl || !g->open) return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
   uint32_t gen = g->lifecycle_gen;
   int waits = 0;
   while (g->ws_tx_busy) {
+    if (g->destroying) return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
     if (++waits > 1000) {
       return ccord_error_set(err, CCORD_ERR_TIMEOUT,
                              ws_flags == CURLWS_BINARY ? "voice: binary send timed out" : "voice: send timed out");
     }
+    g->inflight_io++;
     ccord_mutex_unlock(g->mtx);
     ccord_sleep_ms(1);
     ccord_mutex_lock(g->mtx);
-    if (g->lifecycle_gen != gen || !g->curl || !g->open) {
+    vg_io_leave(g);
+    if (g->destroying || g->lifecycle_gen != gen || !g->curl || !g->open) {
       return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
     }
   }
@@ -695,15 +704,21 @@ static ccord_status vg_send_ws_locked(ccord_voice_gateway *g, const void *data, 
     size_t n = 0;
     CURLcode rc = curl_ws_send(g->curl, p + sent, len - sent, &n, 0, ws_flags);
     if (rc == CURLE_AGAIN) {
+      if (g->destroying) {
+        g->ws_tx_busy = false;
+        return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
+      }
       if (++waits > 1000) {
         st = ccord_error_set(err, CCORD_ERR_TIMEOUT,
                              ws_flags == CURLWS_BINARY ? "voice: binary send timed out" : "voice: send timed out");
         break;
       }
+      g->inflight_io++;
       ccord_mutex_unlock(g->mtx);
       ccord_sleep_ms(1);
       ccord_mutex_lock(g->mtx);
-      if (g->lifecycle_gen != gen) {
+      vg_io_leave(g);
+      if (g->destroying || g->lifecycle_gen != gen) {
         return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
       }
       if (!g->curl || !g->open) {
@@ -806,6 +821,7 @@ static void vg_open_udp_and_discover(ccord_voice_gateway *g)
   vg_close_udp(g);
   g->discovered_ip[0] = '\0';
   g->discovered_port = 0;
+  if (g->destroying) return;
 
   // Snapshot connection parameters and release g->mtx across blocking DNS resolution and UDP discovery poll.
   char ip[64];
@@ -815,6 +831,7 @@ static void vg_open_udp_and_discover(ccord_voice_gateway *g)
   bool want_video = g->video_only || g->video || g->cam_rx;
   bool has_send_hook = g->send != nullptr;
   uint32_t ugen = g->udp_gen;
+  g->inflight_io++;
   ccord_mutex_unlock(g->mtx);
 
   char port_str[16];
@@ -875,8 +892,9 @@ static void vg_open_udp_and_discover(ccord_voice_gateway *g)
   }
 
   ccord_mutex_lock(g->mtx);
+  vg_io_leave(g);
   if (fd < 0) return;
-  if (g->udp_gen != ugen || g->state != CCORD_VOICE_READY) {
+  if (g->destroying || g->udp_gen != ugen || g->state != CCORD_VOICE_READY) {
     ccord_sock_close((ccord_socket_t)fd);
     return;
   }
@@ -962,7 +980,10 @@ static ccord_voice_gateway *vg_create_internal(const ccord_voice_gateway_config 
   atomic_init(&g->keyframe_requested, false);
   ccord_buf_init(&g->frame, GW_MAX_FRAME);
   g->mtx = ccord_mutex_create();
-  if (!g->mtx) {
+  g->io_cond = ccord_cond_create();
+  if (!g->mtx || !g->io_cond) {
+    ccord_cond_destroy(g->io_cond);
+    ccord_mutex_destroy(g->mtx);
     ccord_buf_free(&g->frame);
     if (g->dave) ccord_dave_destroy(g->dave);
     ccord_live_wipe(g->token, sizeof g->token);
@@ -1104,11 +1125,16 @@ void ccord_voice_gateway_destroy(ccord_voice_gateway *g)
 {
   if (!g) return;
   ccord_mutex_lock(g->mtx);
+  g->destroying = true;
   vg_stop_unlocked(g, true);
+  while (g->inflight_io > 0 && g->io_cond) {
+    ccord_cond_wait(g->io_cond, g->mtx);
+  }
   ccord_buf_free(&g->frame);
   ccord_live_wipe(g->token, sizeof g->token);
   ccord_live_wipe(g->session_id, sizeof g->session_id);
   ccord_mutex_unlock(g->mtx);
+  ccord_cond_destroy(g->io_cond);
   ccord_mutex_destroy(g->mtx);
   g->mtx = nullptr;
   ccord_free(g);
@@ -1239,6 +1265,7 @@ static void vg_fail_protocol(ccord_voice_gateway *g)
 // Releases g->mtx across the blocking curl handshake so UDP audio keeps pumping. Op 7 goes out on Hello.
 static void vg_try_resume(ccord_voice_gateway *g)
 {
+  if (g->destroying) return;
   if (g->send) {
     g->open = true;
     g->state = CCORD_VOICE_RECONNECTING;
@@ -1251,6 +1278,7 @@ static void vg_try_resume(ccord_voice_gateway *g)
   vg_copy(url, sizeof url, g->url);
   uint32_t gen = ++g->lifecycle_gen;
   g->ws_connecting = true;
+  g->inflight_io++;
   ccord_mutex_unlock(g->mtx);
 
   CURL *curl = nullptr;
@@ -1258,8 +1286,9 @@ static void vg_try_resume(ccord_voice_gateway *g)
   ccord_status st = vg_curl_connect(url, timeout, &curl, &err);
 
   ccord_mutex_lock(g->mtx);
+  vg_io_leave(g);
   g->ws_connecting = false;
-  if (g->lifecycle_gen != gen || g->state != CCORD_VOICE_RECONNECTING) {
+  if (g->destroying || g->lifecycle_gen != gen || g->state != CCORD_VOICE_RECONNECTING) {
     if (curl) curl_easy_cleanup(curl);
     return;
   }
@@ -1329,7 +1358,7 @@ ccord_status ccord_voice_gateway_start(ccord_voice_gateway *g, ccord_error *err)
   if (!g) return ccord_error_set(err, CCORD_ERR_INVALID, "voice: null gateway");
   ccord_mutex_lock(g->mtx);
   ccord_status st;
-  if (g->open || g->ws_connecting || g->state != CCORD_VOICE_IDLE) {
+  if (g->destroying || g->open || g->ws_connecting || g->state != CCORD_VOICE_IDLE) {
     st = ccord_error_set(err, CCORD_ERR_INVALID, "voice: already connected");
   } else if (g->send) {
     g->has_failure = false;
@@ -1344,14 +1373,16 @@ ccord_status ccord_voice_gateway_start(ccord_voice_gateway *g, ccord_error *err)
     vg_copy(url, sizeof url, g->url);
     uint32_t timeout = g->connect_timeout_ms;
     uint32_t gen = ++g->lifecycle_gen;
+    g->inflight_io++;
     ccord_mutex_unlock(g->mtx);
 
     CURL *curl = nullptr;
     st = vg_curl_connect(url, timeout, &curl, err);
 
     ccord_mutex_lock(g->mtx);
+    vg_io_leave(g);
     g->ws_connecting = false;
-    if (g->lifecycle_gen != gen) {
+    if (g->destroying || g->lifecycle_gen != gen) {
       if (curl) curl_easy_cleanup(curl);
       st = ccord_error_set(err, CCORD_ERR_IO, "voice: connect cancelled");
     } else if (st != CCORD_OK) {
@@ -2662,10 +2693,11 @@ static void vg_pump_udp(ccord_voice_gateway *g)
   // 2. Transmit queued 20 ms capture + soundboard frames with DSP/VAD/PTT gating, SPEAKING flags
   //    (mic=1, soundboard=2) and 5 Opus silence frames on talk->quiet. The silence tail completes
   //    even after the capture queue drains, so SPEAKING never sticks on.
-  if (g->state != CCORD_VOICE_ESTABLISHED || g->secret_len != CCORD_VOICE_MAX_SECRET ||
-      !g->codec || !g->peer_valid) {
+  if (g->tx_pumping || g->destroying || g->state != CCORD_VOICE_ESTABLISHED ||
+      g->secret_len != CCORD_VOICE_MAX_SECRET || !g->codec || !g->peer_valid) {
     return;
   }
+  g->tx_pumping = true;
   while ((g->tx_pcm.len >= CCORD_VOICE_FRAME_SAMPLES || g->sb_pcm.len >= CCORD_VOICE_FRAME_SAMPLES ||
           g->silence_frames_left > 0) &&
          (g->next_audio_tx_ms == 0 || now >= g->next_audio_tx_ms)) {
@@ -2673,6 +2705,7 @@ static void vg_pump_udp(ccord_voice_gateway *g)
     bool have_mic = g->tx_pcm.len >= CCORD_VOICE_FRAME_SAMPLES && g->tx_pcm.data != nullptr;
     if (have_mic) {
       vg_pcm_peek(&g->tx_pcm, frame, CCORD_VOICE_FRAME_SAMPLES);
+      vg_pcm_drop(&g->tx_pcm, CCORD_VOICE_FRAME_SAMPLES);
     } else {
       memset(frame, 0, sizeof frame);
     }
@@ -2685,12 +2718,20 @@ static void vg_pump_udp(ccord_voice_gateway *g)
     bool sb_on = g->sb_pcm.len >= CCORD_VOICE_FRAME_SAMPLES && g->sb_pcm.data != nullptr;
     if (sb_on) {
       vg_pcm_mix_peek(&g->sb_pcm, frame, CCORD_VOICE_FRAME_SAMPLES);
+      vg_pcm_drop(&g->sb_pcm, CCORD_VOICE_FRAME_SAMPLES);
     }
+    g->next_audio_tx_ms = (g->next_audio_tx_ms == 0 ? now : g->next_audio_tx_ms) + 20u;
     uint8_t flags = (uint8_t)((mic_on ? 1u : 0u) | (sb_on ? 2u : 0u));
     if (flags != g->tx_speaking_flags) {
       ccord_error serr;
       if (vg_set_speaking(g, flags, 0u, &serr) == CCORD_OK) {
         g->tx_speaking_flags = flags;
+      }
+      // vg_set_speaking may drop and re-acquire g->mtx during WS retries; re-validate media state.
+      if (g->destroying || g->state != CCORD_VOICE_ESTABLISHED || g->secret_len != CCORD_VOICE_MAX_SECRET ||
+          !g->codec || !g->peer_valid || g->udp_fd < 0) {
+        g->tx_pumping = false;
+        return;
       }
     }
     if (mic_on) {
@@ -2718,13 +2759,6 @@ static void vg_pump_udp(ccord_voice_gateway *g)
       }
     }
     g->sb_speaking = sb_on;
-    if (have_mic) {
-      vg_pcm_drop(&g->tx_pcm, CCORD_VOICE_FRAME_SAMPLES);
-    }
-    if (sb_on) {
-      vg_pcm_drop(&g->sb_pcm, CCORD_VOICE_FRAME_SAMPLES);
-    }
-    g->next_audio_tx_ms = (g->next_audio_tx_ms == 0 ? now : g->next_audio_tx_ms) + 20u;
   }
   // Soundboard-only drain: the queue ran out with SPEAKING flags still asserted and no silence tail
   // pending (the tail only follows mic activity). Close the flags so the ring does not stay lit.
@@ -2734,12 +2768,15 @@ static void vg_pump_udp(ccord_voice_gateway *g)
     if (vg_set_speaking(g, 0u, 0u, &serr) == CCORD_OK) {
       g->tx_speaking_flags = 0;
     }
-    g->sb_speaking = false;
-    if (g->speaking_active) {
-      g->speaking_active = false;
-      ccord_speaking_set_forced(&g->speaking, g->user_id, false, now);
+    if (!g->destroying) {
+      g->sb_speaking = false;
+      if (g->speaking_active) {
+        g->speaking_active = false;
+        ccord_speaking_set_forced(&g->speaking, g->user_id, false, now);
+      }
     }
   }
+  g->tx_pumping = false;
 }
 
 static bool vg_drain(ccord_voice_gateway *g, ccord_voice_event *out)

@@ -319,9 +319,13 @@ ccord_status ccord_vstream_send_audio(ccord_vstream *s, const uint8_t *opus, siz
                 g->speaking_active = true;
               }
             }
-            ptrdiff_t sent = vg_udp_send(g, pkt, pkt_len);
-            if (sent < 0 || (size_t)sent != pkt_len) {
-              st = ccord_error_set(err, CCORD_ERR_IO, "vstream: udp sendto failed");
+            if (g->destroying || g->udp_fd < 0 || !g->peer_valid || g->state != CCORD_VOICE_ESTABLISHED) {
+              st = ccord_error_set(err, CCORD_ERR_IO, "vstream: udp socket not ready");
+            } else {
+              ptrdiff_t sent = vg_udp_send(g, pkt, pkt_len);
+              if (sent < 0 || (size_t)sent != pkt_len) {
+                st = ccord_error_set(err, CCORD_ERR_IO, "vstream: udp sendto failed");
+              }
             }
           }
         }

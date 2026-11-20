@@ -249,8 +249,12 @@ struct ccord_voice_gateway {
   uint32_t lifecycle_gen;       // bumped on stop / WS drop / connect to guard unlocked WS I/O
   uint32_t udp_gen;             // bumped on UDP close / discover to guard unlocked DNS & discovery poll
   bool udp_connected;           // true when udp_fd was connect()ed to peer_addr (macOS/BSD rejects sendto dst)
+  bool tx_pumping;              // guards vg_pump_udp TX loop across unlocked WS SPEAKING sends
+  bool destroying;              // set by ccord_voice_gateway_destroy; drains inflight_io before freeing
+  int inflight_io;              // active unlocked I/O calls outside g->mtx
   bool ws_connecting;           // curl_easy_perform in flight outside g->mtx
   bool ws_tx_busy;              // curl_ws_send retry loop active (prevents WS frame interleaving)
+  ccord_cond *io_cond;          // signalled when inflight_io drops to 0
   ccord_mutex *mtx;
 };
 
