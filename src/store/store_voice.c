@@ -1,58 +1,13 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
+#include "store_voice_internal.h"
+
 #include <stdlib.h>
 #include <string.h>
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/clock.h>
 #include <ccord/core/utf8.h>
-#include <ccord/store/store.h>
-
-#include "store_internal.h"
-
-// Private accessor defined in store.c so stage speaker/request counts iterate voices in a single pass.
-extern const ccord_voice_state *ccord_store_voices_raw_(const ccord_store *s, size_t *out_count);
-
-// M5 call / stage / voice-status / Go Live / audio / DAVE state.
-// Rows are few (one DM call per conversation, one stage per stage channel, one status per voice
-// channel, one broadcast per broadcaster) and looked up by id, so each list stays sorted by its
-// key. Call and stage rows are plain values (their strings are inline arrays); only the status
-// text is heap-owned. Every write here mirrors a transport answer; nothing is local optimism.
-#define VOICE_STATUS_MAX_CHARS 500u   // admin.h CCORD_ADMIN_VOICE_STATUS_MAX
-
-typedef struct status_row {
-  ccord_id channel_id;
-  char *text;
-} status_row;
-
-typedef struct stream_row {
-  ccord_stream_state state;
-  uint32_t viewer_count;
-} stream_row;
-
-typedef struct audio_row {
-  ccord_id user_id;
-  uint8_t volume_pct;
-  bool local_mute;
-} audio_row;
-
-struct voice_cache {
-  ccord_call_state *calls;
-  size_t ncalls, capcalls;
-  ccord_stage_instance *stages;
-  size_t nstages, capstages;
-  status_row *status;
-  size_t nstatus, capstatus;
-  stream_row *streams;
-  size_t nstreams, capstreams;
-  ccord_activity_instance *activities;
-  size_t nactivities, capactivities;
-  audio_row *audio;
-  size_t naudio, capaudio;
-  ccord_dave_status dave;
-  bool has_dave;
-  ccord_rtc_stats rtc;
-  bool has_rtc;
-};
 
 void ccord_store_voice_cache_destroy(struct voice_cache *c)
 {
@@ -67,7 +22,7 @@ void ccord_store_voice_cache_destroy(struct voice_cache *c)
   ccord_free(c);
 }
 
-static struct voice_cache *cache_get(ccord_store *s, bool create)
+struct voice_cache *store_voice_cache_get(ccord_store *s, bool create)
 {
   struct voice_cache **slot = ccord_store_voice_slot(s);
   if (!slot) return nullptr;
@@ -194,7 +149,7 @@ static long upsert_stage(struct voice_cache *c, const ccord_stage_instance *stag
   return (long)at;
 }
 
-static bool inline_text_ok(const char *text, size_t cap)
+bool store_voice_inline_text_ok(const char *text, size_t cap)
 {
   return memchr(text, '\0', cap) != nullptr;   // the inline arrays must stay NUL-terminated
 }
@@ -226,10 +181,10 @@ ccord_status ccord_store_set_call(ccord_store *s, const ccord_call_state *call, 
   if (!s || !call || call->channel_id == CCORD_ID_NONE) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: call arguments");
   }
-  if (call->ringing_count > 8u || !inline_text_ok(call->region, sizeof call->region)) {
+  if (call->ringing_count > 8u || !store_voice_inline_text_ok(call->region, sizeof call->region)) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: bad call state");
   }
-  struct voice_cache *c = cache_get(s, true);
+  struct voice_cache *c = store_voice_cache_get(s, true);
   if (!c) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   if (upsert_call(c, call) < 0) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   ccord_store_voice_mutated(s);
@@ -240,7 +195,7 @@ ccord_status ccord_store_remove_call(ccord_store *s, ccord_id channel_id, ccord_
 {
   ccord_error_clear(err);
   if (!s || channel_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "store: call arguments");
-  struct voice_cache *c = cache_get(s, false);
+  struct voice_cache *c = store_voice_cache_get(s, false);
   long i = find_call(c, channel_id);
   if (i < 0) return CCORD_OK;   // CALL_DELETE for a call we never saw: nothing to drop
   memmove(&c->calls[i], &c->calls[i + 1], (c->ncalls - (size_t)i - 1u) * sizeof *c->calls);
@@ -274,10 +229,10 @@ ccord_status ccord_store_set_stage_instance(ccord_store *s, const ccord_stage_in
   if (!s || !stage || stage->channel_id == CCORD_ID_NONE || stage->guild_id == CCORD_ID_NONE) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: stage arguments");
   }
-  if (!inline_text_ok(stage->topic, sizeof stage->topic)) {
+  if (!store_voice_inline_text_ok(stage->topic, sizeof stage->topic)) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: bad stage topic");
   }
-  struct voice_cache *c = cache_get(s, true);
+  struct voice_cache *c = store_voice_cache_get(s, true);
   if (!c) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   if (upsert_stage(c, stage) < 0) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   ccord_store_voice_mutated(s);
@@ -288,7 +243,7 @@ ccord_status ccord_store_remove_stage_instance(ccord_store *s, ccord_id channel_
 {
   ccord_error_clear(err);
   if (!s || channel_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "store: stage arguments");
-  struct voice_cache *c = cache_get(s, false);
+  struct voice_cache *c = store_voice_cache_get(s, false);
   long i = find_stage(c, channel_id);
   if (i < 0) return CCORD_OK;   // STAGE_INSTANCE_DELETE without a live instance: nothing to drop
   memmove(&c->stages[i], &c->stages[i + 1], (c->nstages - (size_t)i - 1u) * sizeof *c->stages);
@@ -359,7 +314,8 @@ size_t ccord_store_stage_speaker_count(const ccord_store *s, ccord_id guild_id, 
 {
   if (!s) return 0;
   size_t nv = 0;
-  const ccord_voice_state *voices = ccord_store_voices_raw_(s, &nv);
+  const ccord_voice_state *voices = s ? s->d.voices : nullptr;
+  nv = s ? s->d.nvoices : 0;
   size_t n = 0;
   for (size_t i = 0; i < nv; i++) {
     if (voices[i].channel_id == channel_id && voices[i].guild_id == guild_id && !voices[i].suppress) n++;
@@ -371,7 +327,8 @@ size_t ccord_store_stage_request_count(const ccord_store *s, ccord_id guild_id, 
 {
   if (!s) return 0;
   size_t nv = 0;
-  const ccord_voice_state *voices = ccord_store_voices_raw_(s, &nv);
+  const ccord_voice_state *voices = s ? s->d.voices : nullptr;
+  nv = s ? s->d.nvoices : 0;
   size_t n = 0;
   for (size_t i = 0; i < nv; i++) {
     if (voices[i].channel_id == channel_id && voices[i].guild_id == guild_id &&
@@ -392,7 +349,7 @@ ccord_status ccord_store_set_voice_status(ccord_store *s, ccord_id channel_id, c
 {
   ccord_error_clear(err);
   if (!s || channel_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "store: voice status arguments");
-  struct voice_cache *c = cache_get(s, false);
+  struct voice_cache *c = store_voice_cache_get(s, false);
   long i = find_status(c, channel_id);
   if (!status || status[0] == '\0') {   // the clear form of PUT voice-status
     if (i < 0) return CCORD_OK;
@@ -419,7 +376,7 @@ ccord_status ccord_store_set_voice_status(ccord_store *s, ccord_id channel_id, c
     return CCORD_OK;
   }
   if (!c) {
-    c = cache_get(s, true);
+    c = store_voice_cache_get(s, true);
     if (!c) {
       ccord_free(text);
       return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
@@ -459,7 +416,7 @@ ccord_status ccord_store_stream_upsert(ccord_store *s, const ccord_stream_state 
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: stream arguments");
   }
   if (!stream->active) return ccord_store_stream_remove(s, stream->channel_id, stream->user_id, err);
-  struct voice_cache *c = cache_get(s, true);
+  struct voice_cache *c = store_voice_cache_get(s, true);
   if (!c) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   long i = find_stream(c, stream->channel_id, stream->user_id);
   if (i >= 0) {
@@ -497,7 +454,7 @@ ccord_status ccord_store_stream_remove(ccord_store *s, ccord_id channel_id, ccor
   if (!s || channel_id == CCORD_ID_NONE || user_id == CCORD_ID_NONE) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: stream arguments");
   }
-  struct voice_cache *c = cache_get(s, false);
+  struct voice_cache *c = store_voice_cache_get(s, false);
   long i = find_stream(c, channel_id, user_id);
   if (i < 0) return CCORD_OK;   // stream we never saw: nothing to drop
   memmove(&c->streams[i], &c->streams[i + 1], (c->nstreams - (size_t)i - 1u) * sizeof *c->streams);
@@ -520,7 +477,7 @@ ccord_status ccord_store_stream_set_viewers(ccord_store *s, ccord_id channel_id,
   if (!s || channel_id == CCORD_ID_NONE || user_id == CCORD_ID_NONE) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: stream arguments");
   }
-  struct voice_cache *c = cache_get(s, false);
+  struct voice_cache *c = store_voice_cache_get(s, false);
   long i = find_stream(c, channel_id, user_id);
   if (i < 0) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown stream");
   if (c->streams[i].viewer_count == viewer_count) return CCORD_OK;
@@ -548,223 +505,13 @@ const ccord_stream_state *ccord_store_stream_list_at(const ccord_store *s, size_
   return c && index < c->nstreams ? &c->streams[index].state : nullptr;
 }
 
-// ---- embedded activity instances (per voice channel, keyed by channel id then instance id) ----
 
-static int activity_key_cmp(const ccord_activity_instance *row, ccord_id channel_id, ccord_id instance_id)
-{
-  if (row->channel_id != channel_id) return row->channel_id < channel_id ? -1 : 1;
-  if (row->instance_id != instance_id) return row->instance_id < instance_id ? -1 : 1;
-  return 0;
-}
-
-static long find_activity(const struct voice_cache *c, ccord_id channel_id, ccord_id instance_id)
-{
-  if (!c) return -1;
-  size_t lo = 0, hi = c->nactivities;
-  while (lo < hi) {
-    size_t mid = lo + (hi - lo) / 2u;
-    int cmp = activity_key_cmp(&c->activities[mid], channel_id, instance_id);
-    if (cmp == 0) return (long)mid;
-    if (cmp < 0) lo = mid + 1u;
-    else hi = mid;
-  }
-  return -1;
-}
-
-// The first row of `channel_id` (rows stay grouped by channel), or nactivities when the channel has none.
-static size_t activity_channel_start(const struct voice_cache *c, ccord_id channel_id)
-{
-  if (!c) return 0;
-  size_t lo = 0, hi = c->nactivities;
-  while (lo < hi) {
-    size_t mid = lo + (hi - lo) / 2u;
-    if (c->activities[mid].channel_id < channel_id) lo = mid + 1u;
-    else hi = mid;
-  }
-  return lo;
-}
-
-static bool same_activity(const ccord_activity_instance *a, const ccord_activity_instance *b)
-{
-  if (a->instance_id != b->instance_id || a->application_id != b->application_id ||
-      a->guild_id != b->guild_id || a->channel_id != b->channel_id || a->location_id != b->location_id ||
-      a->participant_count != b->participant_count) {
-    return false;
-  }
-  for (size_t i = 0; i < a->participant_count; i++) {
-    if (a->participants[i] != b->participants[i]) return false;
-  }
-  return true;
-}
-
-static bool activity_valid(const ccord_activity_instance *in)
-{
-  if (in->instance_id == CCORD_ID_NONE || in->application_id == CCORD_ID_NONE ||
-      in->guild_id == CCORD_ID_NONE || in->channel_id == CCORD_ID_NONE ||
-      in->participant_count > CCORD_ACTIVITY_MAX_PARTICIPANTS) {
-    return false;
-  }
-  for (size_t i = 0; i < in->participant_count; i++) {
-    if (in->participants[i] == CCORD_ID_NONE) return false;
-  }
-  return true;
-}
-
-static void activity_remove_at(struct voice_cache *c, size_t i)
-{
-  memmove(&c->activities[i], &c->activities[i + 1], (c->nactivities - i - 1u) * sizeof *c->activities);
-  c->nactivities--;
-}
-
-// Inserts `in` into the (channel, instance)-sorted array, replacing a row with the same key.
-// Returns the slot index or -1 on OOM.
-static long upsert_activity(struct voice_cache *c, const ccord_activity_instance *in)
-{
-  long i = find_activity(c, in->channel_id, in->instance_id);
-  if (i >= 0) {
-    c->activities[i] = *in;
-    return i;
-  }
-  if (c->nactivities == c->capactivities) {
-    size_t ncap = c->capactivities ? c->capactivities * 2u : 4u;
-    ccord_activity_instance *grown = ccord_realloc_array(c->activities, ncap, sizeof *grown);
-    if (!grown) return -1;
-    c->activities = grown;
-    c->capactivities = ncap;
-  }
-  size_t at = 0;
-  while (at < c->nactivities && activity_key_cmp(&c->activities[at], in->channel_id, in->instance_id) < 0) at++;
-  memmove(&c->activities[at + 1], &c->activities[at], (c->nactivities - at) * sizeof *c->activities);
-  c->activities[at] = *in;
-  c->nactivities++;
-  return (long)at;
-}
-
-ccord_status ccord_store_set_activity_instances(ccord_store *s, ccord_id channel_id,
-                                                const ccord_activity_instance *instances, size_t count,
-                                                ccord_error *err)
-{
-  ccord_error_clear(err);
-  if (!s || channel_id == CCORD_ID_NONE || (!instances && count > 0)) {
-    return ccord_error_set(err, CCORD_ERR_INVALID, "store: activity arguments");
-  }
-  for (size_t i = 0; i < count; i++) {
-    if (!activity_valid(&instances[i]) || instances[i].channel_id != channel_id) {
-      return ccord_error_set(err, CCORD_ERR_INVALID, "store: bad activity instance");
-    }
-    for (size_t j = 0; j < i; j++) {
-      if (instances[j].instance_id == instances[i].instance_id) {
-        return ccord_error_set(err, CCORD_ERR_INVALID, "store: duplicate activity instance");
-      }
-    }
-  }
-  struct voice_cache *c = cache_get(s, count > 0);
-  if (!c) {
-    if (count > 0) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-    return CCORD_OK;   // no cache and nothing to set: the channel already has no instances
-  }
-  // Drop the channel's current rows, then insert the answer's rows in order.
-  bool changed = false;
-  size_t start = activity_channel_start(c, channel_id);
-  size_t nold = 0;
-  while (start + nold < c->nactivities && c->activities[start + nold].channel_id == channel_id) nold++;
-  if (nold != count) changed = true;
-  for (size_t i = 0; i < count && !changed; i++) {   // rows are stored sorted, the answer may be in any order
-    long at = find_activity(c, channel_id, instances[i].instance_id);
-    if (at < 0 || !same_activity(&c->activities[at], &instances[i])) changed = true;
-  }
-  if (!changed) return CCORD_OK;   // idempotent: the same list again moves no revision
-  if (nold > 0) {
-    memmove(&c->activities[start], &c->activities[start + nold],
-            (c->nactivities - start - nold) * sizeof *c->activities);
-    c->nactivities -= nold;
-  }
-  for (size_t i = 0; i < count; i++) {
-    if (upsert_activity(c, &instances[i]) < 0) {
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-    }
-  }
-  ccord_store_voice_mutated(s);
-  return CCORD_OK;
-}
-
-ccord_status ccord_store_upsert_activity_instance(ccord_store *s, const ccord_activity_instance *instance,
-                                                  ccord_error *err)
-{
-  ccord_error_clear(err);
-  if (!s || !instance) return ccord_error_set(err, CCORD_ERR_INVALID, "store: activity arguments");
-  // participant_count 0 is the end-of-instance signal: it only needs the instance id to find the row (the channel
-  // may be absent from an end payload, then the row is found by instance id alone).
-  bool ended = instance->participant_count == 0;
-  if (instance->instance_id == CCORD_ID_NONE || (!ended && !activity_valid(instance))) {
-    return ccord_error_set(err, CCORD_ERR_INVALID, "store: bad activity instance");
-  }
-  struct voice_cache *c = cache_get(s, !ended);
-  if (!c) {
-    if (ended) return CCORD_OK;   // nothing cached: the instance already is gone
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  }
-  long i = -1;
-  if (instance->channel_id != CCORD_ID_NONE) {
-    i = find_activity(c, instance->channel_id, instance->instance_id);
-  } else if (ended) {
-    for (size_t k = 0; k < c->nactivities; k++) {
-      if (c->activities[k].instance_id == instance->instance_id) {
-        i = (long)k;
-        break;
-      }
-    }
-  }
-  if (ended) {
-    if (i < 0) return CCORD_OK;   // an end for an instance we never saw: nothing to drop
-    activity_remove_at(c, (size_t)i);
-    ccord_store_voice_mutated(s);
-    return CCORD_OK;
-  }
-  if (i >= 0 && same_activity(&c->activities[i], instance)) return CCORD_OK;   // idempotent
-  if (upsert_activity(c, instance) < 0) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-  ccord_store_voice_mutated(s);
-  return CCORD_OK;
-}
-
-size_t ccord_store_activity_instance_count(const ccord_store *s, ccord_id channel_id)
-{
-  const struct voice_cache *c = ccord_store_voice_slot_const(s);
-  if (!c) return 0;
-  size_t start = activity_channel_start(c, channel_id);
-  size_t n = 0;
-  while (start + n < c->nactivities && c->activities[start + n].channel_id == channel_id) n++;
-  return n;
-}
-
-const ccord_activity_instance *ccord_store_activity_instance_at(const ccord_store *s, ccord_id channel_id, size_t i)
-{
-  const struct voice_cache *c = ccord_store_voice_slot_const(s);
-  if (!c) return nullptr;
-  size_t start = activity_channel_start(c, channel_id);
-  if (start + i >= c->nactivities || c->activities[start + i].channel_id != channel_id) return nullptr;
-  return &c->activities[start + i];
-}
-
-const ccord_activity_instance *ccord_store_find_activity_instance(const ccord_store *s, ccord_id instance_id)
-{
-  const struct voice_cache *c = ccord_store_voice_slot_const(s);
-  if (!c || instance_id == CCORD_ID_NONE) return nullptr;
-  for (size_t i = 0; i < c->nactivities; i++) {
-    if (c->activities[i].instance_id == instance_id) return &c->activities[i];
-  }
-  return nullptr;
-}
-
-// Finds or creates the per-user audio row for `user_id` and hands back a settled pointer into the
-// cache, so callers never re-fetch (and never re-check) the cache after the upsert. The pointer
-// stays valid until the next audio insert on this store.
 static audio_row *audio_row_get(ccord_store *s, ccord_id user_id, ccord_error *err)
 {
-  struct voice_cache *c = cache_get(s, false);
+  struct voice_cache *c = store_voice_cache_get(s, false);
   long i = find_audio(c, user_id);
   if (c && i >= 0) return &c->audio[i];
-  c = cache_get(s, true);
+  c = store_voice_cache_get(s, true);
   if (!c) {
     (void)ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
     return nullptr;
@@ -833,7 +580,7 @@ ccord_status ccord_store_set_dave_status(ccord_store *s, const ccord_dave_status
 {
   ccord_error_clear(err);
   if (!s || !status) return ccord_error_set(err, CCORD_ERR_INVALID, "store: dave arguments");
-  struct voice_cache *c = cache_get(s, true);
+  struct voice_cache *c = store_voice_cache_get(s, true);
   if (!c) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   if (c->has_dave && same_dave(&c->dave, status)) return CCORD_OK;
   c->dave = *status;
@@ -857,7 +604,7 @@ ccord_status ccord_store_set_rtc_stats(ccord_store *s, const ccord_rtc_stats *st
 {
   ccord_error_clear(err);
   if (!s || !stats) return ccord_error_set(err, CCORD_ERR_INVALID, "store: rtc arguments");
-  struct voice_cache *c = cache_get(s, true);
+  struct voice_cache *c = store_voice_cache_get(s, true);
   if (!c) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   if (c->has_rtc && same_rtc(&c->rtc, stats)) return CCORD_OK;
   c->rtc = *stats;
@@ -879,7 +626,7 @@ void ccord_store_rtc_stats(const ccord_store *s, ccord_rtc_stats *out)
 
 void ccord_store_voice_reset(ccord_store *s)
 {
-  struct voice_cache *c = cache_get(s, false);
+  struct voice_cache *c = store_voice_cache_get(s, false);
   if (!c) return;
   bool had = c->ncalls || c->nstages || c->nstatus || c->nstreams || c->nactivities || c->has_dave || c->has_rtc;
   for (size_t i = 0; i < c->nstatus; i++) ccord_free(c->status[i].text);
@@ -907,7 +654,7 @@ void ccord_store_voice_reset(ccord_store *s)
 
 void ccord_store_voice_forget_guild(ccord_store *s, ccord_id guild_id)
 {
-  struct voice_cache *c = cache_get(s, false);
+  struct voice_cache *c = store_voice_cache_get(s, false);
   if (!c || guild_id == CCORD_ID_NONE) return;
   bool changed = false;
   size_t out = 0;
@@ -944,7 +691,7 @@ void ccord_store_voice_forget_guild(ccord_store *s, ccord_id guild_id)
 
 void ccord_store_voice_forget_channel(ccord_store *s, ccord_id channel_id)
 {
-  struct voice_cache *c = cache_get(s, false);
+  struct voice_cache *c = store_voice_cache_get(s, false);
   if (!c || channel_id == CCORD_ID_NONE) return;
   bool changed = false;
   long i = find_call(c, channel_id);
@@ -980,3 +727,319 @@ void ccord_store_voice_forget_channel(ccord_store *s, ccord_id channel_id)
   c->nactivities = out;
   if (changed) ccord_store_voice_mutated(s);
 }
+
+// ---- Consolidated voice states, voice servers, self stream & speaking (moved from store.c) ----
+static void wipe_bytes(void *p, size_t n)
+{
+  volatile unsigned char *b = p;
+  while (n--) *b++ = 0;
+}
+
+void store_voice_server_free(ccord_voice_server *srv)
+{
+  if (!srv) return;
+  union { const char *c; void *p; } tok = {.c = srv->token};
+  if (tok.p) {
+    wipe_bytes(tok.p, strlen(srv->token));
+    ccord_free(tok.p);
+  }
+  store_free_cstr(&srv->endpoint);
+  srv->token = nullptr;
+}
+
+
+
+void store_voice_servers_clear(ccord_store *s)
+{
+  for (size_t i = 0; i < s->nservers; i++) store_voice_server_free(&s->servers[i]);
+  s->nservers = 0;
+}
+
+
+void store_voice_remove_channel(ccord_store *s, ccord_id channel_id)
+{
+  ccord_store_voice_forget_channel(s, channel_id);   // M5 call/stage/status/stream rows of the channel
+  for (size_t i = 0; i < s->d.nvoices; ) {
+    if (s->d.voices[i].channel_id != channel_id) {
+      i++;
+      continue;
+    }
+    memmove(&s->d.voices[i], &s->d.voices[i + 1], (s->d.nvoices - i - 1) * sizeof *s->d.voices);
+    s->d.nvoices--;
+  }
+  if (s->has_stream && s->stream.channel_id == channel_id) {
+    s->has_stream = false;
+    atomic_store_explicit(&s->stream_active, false, memory_order_release);
+    memset(&s->stream, 0, sizeof s->stream);
+  }
+}
+
+
+// ---- voice / streaming / pins ----
+
+#define CCORD_STORE_VOICE_TEXT_MAX 1024u
+#define VOICE_FLAG_MUTE 0x1u
+#define VOICE_FLAG_DEAF 0x2u
+#define VOICE_FLAG_VIDEO 0x4u
+#define VOICE_FLAG_STREAM 0x8u
+#define VOICE_FLAG_SERVER_MUTE 0x10u
+#define VOICE_FLAG_SERVER_DEAF 0x20u
+
+static long find_voice(const store_data *d, ccord_id guild_id, ccord_id user_id)
+{
+  for (size_t i = 0; i < d->nvoices; i++) {
+    if (d->voices[i].guild_id == guild_id && d->voices[i].user_id == user_id) return (long)i;
+  }
+  return -1;
+}
+
+static int64_t voice_flags(const ccord_voice_state *v)
+{
+  return (v->self_mute ? VOICE_FLAG_MUTE : 0) | (v->self_deaf ? VOICE_FLAG_DEAF : 0) |
+         (v->self_video ? VOICE_FLAG_VIDEO : 0) | (v->self_stream ? VOICE_FLAG_STREAM : 0) |
+         (v->mute ? VOICE_FLAG_SERVER_MUTE : 0) | (v->deaf ? VOICE_FLAG_SERVER_DEAF : 0);
+}
+
+static bool voice_channel_ok(const store_data *d, ccord_id guild_id, ccord_id channel_id)
+{
+  long ci = store_find_channel(d, channel_id);
+  if (ci < 0 || d->channels[ci].guild_id != guild_id) return false;
+  // DM/group calls ride the DM channel itself (kind TEXT, discord type 1/3); guild voice also
+  // includes stage channels, where the audience joins suppressed until invited to speak.
+  if (guild_id == CCORD_DM_GUILD_ID) return d->channels[ci].kind == CCORD_CHANNEL_TEXT;
+  return d->channels[ci].kind == CCORD_CHANNEL_VOICE || d->channels[ci].kind == CCORD_CHANNEL_STAGE;
+}
+
+static bool user_known(const store_data *d, ccord_id user_id)
+{
+  return store_find_user(d, user_id) >= 0;
+}
+
+ccord_status ccord_store_set_voice_state(ccord_store *s, const ccord_voice_state *state, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "store: null");
+  if (!state || state->user_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "store: voice state user");
+  if (state->guild_id != CCORD_DM_GUILD_ID && store_find_guild(&s->d, state->guild_id) < 0) {
+    return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown guild");
+  }
+  if (!user_known(&s->d, state->user_id)) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown user");
+  long vi = find_voice(&s->d, state->guild_id, state->user_id);
+  if (state->channel_id == CCORD_ID_NONE) {
+    ccord_store_set_speaking(s, state->user_id, false);
+    if (vi < 0) return CCORD_OK; // already disconnected
+    ccord_voice_state removed = s->d.voices[vi];
+    removed.channel_id = CCORD_ID_NONE;
+    removed.self_video = false;
+    removed.self_stream = false;
+    memmove(&s->d.voices[vi], &s->d.voices[vi + 1], (s->d.nvoices - (size_t)vi - 1) * sizeof *s->d.voices);
+    s->d.nvoices--;
+    if (s->has_stream && s->stream.guild_id == state->guild_id && s->stream.user_id == state->user_id) {
+      s->has_stream = false;
+      atomic_store_explicit(&s->stream_active, false, memory_order_release);
+      memset(&s->stream, 0, sizeof s->stream);
+    }
+    s->revision++;
+    store_post(s, CCORD_EVT_VOICE_STATE, removed.guild_id, CCORD_ID_NONE, CCORD_ID_NONE, removed.user_id, voice_flags(&removed));
+    return CCORD_OK;
+  }
+  if (!voice_channel_ok(&s->d, state->guild_id, state->channel_id)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "store: voice state channel");
+  }
+  if (state->self_mute || state->mute) {
+    ccord_store_set_speaking(s, state->user_id, false);
+  }
+  ccord_voice_state copy = *state;
+  long mi = store_find_member(&s->d, state->guild_id, state->user_id);
+  if (mi >= 0 && s->d.members) {
+    s->d.members[mi].mute = state->mute;
+    s->d.members[mi].deaf = state->deaf;
+  }
+  if (vi >= 0) {
+    s->d.voices[vi] = copy;
+  } else {
+    if (!store_ensure_voices(&s->d, s->d.nvoices + 1u)) {
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    }
+    s->d.voices[s->d.nvoices++] = copy;
+  }
+  s->revision++;
+  store_post(s, CCORD_EVT_VOICE_STATE, copy.guild_id, copy.channel_id, CCORD_ID_NONE, copy.user_id, voice_flags(&copy));
+  return CCORD_OK;
+}
+
+ccord_status ccord_store_set_voice_server(ccord_store *s, const ccord_voice_server *server, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "store: null");
+  if (!server || server->guild_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "store: voice server guild");
+  if (server->guild_id != CCORD_DM_GUILD_ID && store_find_guild(&s->d, server->guild_id) < 0) {
+    return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown guild");
+  }
+  if (server->channel_id != CCORD_ID_NONE && !voice_channel_ok(&s->d, server->guild_id, server->channel_id)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "store: voice server channel");
+  }
+  if (!store_text_ok(server->token, CCORD_STORE_VOICE_TEXT_MAX) ||
+      !store_text_ok(server->endpoint, CCORD_STORE_VOICE_TEXT_MAX)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "store: voice server text");
+  }
+  char *token = ccord_strdup(server->token);
+  const char *endpoint = store_dup_cstr(server->endpoint);
+  if (!token || !endpoint) {
+    if (token) { wipe_bytes(token, strlen(token)); ccord_free(token); }
+    store_free_cstr(&endpoint);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+  }
+  size_t i = 0;
+  for (; i < s->nservers; i++) {
+    if (s->servers[i].guild_id == server->guild_id) break;
+  }
+  ccord_voice_server copy = {.guild_id = server->guild_id, .channel_id = server->channel_id,
+                             .token = token, .endpoint = endpoint};
+  if (i < s->nservers) {
+    store_voice_server_free(&s->servers[i]);
+    s->servers[i] = copy;
+  } else {
+    if (s->nservers == s->capservers) {
+      size_t ncap = s->capservers ? s->capservers * 2 : 4;
+      ccord_voice_server *grown = ccord_realloc_array(s->servers, ncap, sizeof *grown);
+      if (!grown) {
+        wipe_bytes(token, strlen(token));
+        ccord_free(token);
+        store_free_cstr(&endpoint);
+        return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+      }
+      s->servers = grown;
+      s->capservers = ncap;
+    }
+    s->servers[s->nservers++] = copy;
+  }
+  s->revision++;
+  store_post(s, CCORD_EVT_VOICE_SERVER, copy.guild_id, copy.channel_id, CCORD_ID_NONE, CCORD_ID_NONE, 0);
+  return CCORD_OK;
+}
+
+static void self_stream_flag(ccord_store *s, ccord_id guild_id, bool on)
+{
+  long vi = find_voice(&s->d, guild_id, s->d.self_id);
+  if (vi >= 0) s->d.voices[vi].self_stream = on;
+}
+
+ccord_status ccord_store_set_stream(ccord_store *s, const ccord_stream_state *state, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "store: null");
+  if (!state) return ccord_error_set(err, CCORD_ERR_INVALID, "store: null stream");
+  if (!state->active) {
+    if (!s->has_stream) return CCORD_OK;
+    ccord_stream_state old = s->stream;
+    s->has_stream = false;
+    atomic_store_explicit(&s->stream_active, false, memory_order_release);
+    memset(&s->stream, 0, sizeof s->stream);
+    self_stream_flag(s, old.guild_id, false);
+    s->revision++;
+    store_post(s, CCORD_EVT_STREAM_STATE, old.guild_id, old.channel_id, CCORD_ID_NONE, old.user_id, 0);
+    return CCORD_OK;
+  }
+  if (state->guild_id == CCORD_ID_NONE ||
+      (state->guild_id != CCORD_DM_GUILD_ID && store_find_guild(&s->d, state->guild_id) < 0)) {
+    return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown guild");
+  }
+  if (!voice_channel_ok(&s->d, state->guild_id, state->channel_id)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "store: stream channel");
+  }
+  s->stream = *state;
+  if (s->stream.user_id == CCORD_ID_NONE) s->stream.user_id = s->d.self_id;
+  s->has_stream = true;
+  atomic_store_explicit(&s->stream_active, s->stream.active, memory_order_release);
+  if (s->stream.user_id == s->d.self_id) self_stream_flag(s, s->stream.guild_id, true);
+  s->revision++;
+  store_post(s, CCORD_EVT_STREAM_STATE, s->stream.guild_id, s->stream.channel_id, CCORD_ID_NONE, s->stream.user_id, 1);
+  return CCORD_OK;
+}
+
+
+size_t ccord_store_voice_count(const ccord_store *s, ccord_id channel_id)
+{
+  size_t n = 0;
+  for (size_t i = 0; s && i < s->d.nvoices; i++) {
+    if (s->d.voices[i].channel_id == channel_id) n++;
+  }
+  return n;
+}
+
+const ccord_voice_state *ccord_store_voice_at(const ccord_store *s, ccord_id channel_id, size_t i)
+{
+  for (size_t k = 0; s && k < s->d.nvoices; k++) {
+    if (s->d.voices[k].channel_id != channel_id) continue;
+    if (i == 0) return &s->d.voices[k];
+    i--;
+  }
+  return nullptr;
+}
+
+const ccord_voice_state *ccord_store_voice_user(const ccord_store *s, ccord_id guild_id, ccord_id user_id)
+{
+  long i = s ? find_voice(&s->d, guild_id, user_id) : -1;
+  return i < 0 ? nullptr : &s->d.voices[i];
+}
+
+ccord_id ccord_store_active_voice_channel(const ccord_store *s)
+{
+  if (!s) return CCORD_ID_NONE;
+  const ccord_voice_state *v = ccord_store_voice_user(s, s->sel_guild, s->d.self_id);
+  if (v) return v->channel_id;
+  for (size_t i = 0; i < s->d.nvoices; i++) {
+    if (s->d.voices[i].user_id == s->d.self_id) return s->d.voices[i].channel_id;
+  }
+  return CCORD_ID_NONE;
+}
+
+const ccord_voice_server *ccord_store_voice_server(const ccord_store *s, ccord_id guild_id)
+{
+  for (size_t i = 0; s && i < s->nservers; i++) {
+    if (s->servers[i].guild_id == guild_id) return &s->servers[i];
+  }
+  return nullptr;
+}
+
+const ccord_stream_state *ccord_store_stream(const ccord_store *s)
+{
+  return (s && s->has_stream) ? &s->stream : nullptr;
+}
+
+bool ccord_store_stream_active(const ccord_store *s)
+{
+  return s && atomic_load_explicit(&s->stream_active, memory_order_acquire);
+}
+
+void ccord_store_set_speaking(ccord_store *s, ccord_id user_id, bool speaking)
+{
+  if (!s || user_id == CCORD_ID_NONE) return;
+  for (size_t i = 0; i < s->nspeaking; i++) {
+    if (s->speaking_users[i] == user_id) {
+      if (!speaking) {
+        s->speaking_users[i] = s->speaking_users[--s->nspeaking];
+        store_bump_traffic(s);   // read when drawing: no new rows
+        store_post(s, CCORD_EVT_VOICE_STATE, s->sel_guild, ccord_store_active_voice_channel(s), CCORD_ID_NONE, user_id, 0);
+      }
+      return;
+    }
+  }
+  if (speaking && s->nspeaking < (sizeof s->speaking_users / sizeof s->speaking_users[0])) {
+    s->speaking_users[s->nspeaking++] = user_id;
+    store_bump_traffic(s);
+    store_post(s, CCORD_EVT_VOICE_STATE, s->sel_guild, ccord_store_active_voice_channel(s), CCORD_ID_NONE, user_id, 1);
+  }
+}
+
+bool ccord_store_user_speaking(const ccord_store *s, ccord_id user_id)
+{
+  if (!s || user_id == CCORD_ID_NONE) return false;
+  for (size_t i = 0; i < s->nspeaking; i++) {
+    if (s->speaking_users[i] == user_id) return true;
+  }
+  return false;
+}
+
+

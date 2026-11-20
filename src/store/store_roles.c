@@ -795,3 +795,59 @@ ccord_status ccord_store_apply_member_role(ccord_store *s, ccord_id guild_id, cc
   ccord_free(next);
   return st;
 }
+
+// Channel permission overwrites (moved from store.c)
+ccord_status ccord_store_upsert_channel_overwrite(ccord_store *s, ccord_id channel_id, ccord_id guild_id,
+                                                  const ccord_overwrite *item, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!s || channel_id == CCORD_ID_NONE || !item || item->id == CCORD_ID_NONE ||
+      item->kind > CCORD_OVERWRITE_MEMBER) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "store: overwrite arguments");
+  }
+  if (guild_id == CCORD_ID_NONE) {
+    long ci = store_find_channel(&s->d, channel_id);
+    if (ci >= 0) guild_id = s->d.channels[ci].guild_id;
+  }
+  size_t n = 0;
+  const ccord_overwrite *cur = ccord_store_channel_overwrites(s, channel_id, &n);
+  ccord_overwrite buf[CCORD_MAX_OVERWRITES_PER_CHANNEL];
+  if (n > CCORD_MAX_OVERWRITES_PER_CHANNEL) n = CCORD_MAX_OVERWRITES_PER_CHANNEL;
+  if (cur && n > 0) memcpy(buf, cur, n * sizeof *buf);
+  for (size_t i = 0; i < n; i++) {
+    if (buf[i].id == item->id) {
+      buf[i] = *item;
+      return ccord_store_set_channel_overwrites(s, channel_id, guild_id, buf, n, err);
+    }
+  }
+  if (n >= CCORD_MAX_OVERWRITES_PER_CHANNEL) {
+    return ccord_error_set(err, CCORD_ERR_RANGE, "store: too many overwrites");
+  }
+  buf[n] = *item;
+  return ccord_store_set_channel_overwrites(s, channel_id, guild_id, buf, n + 1u, err);
+}
+
+bool ccord_store_remove_channel_overwrite(ccord_store *s, ccord_id channel_id, ccord_id overwrite_id)
+{
+  if (!s || channel_id == CCORD_ID_NONE || overwrite_id == CCORD_ID_NONE) return false;
+  size_t n = 0;
+  const ccord_overwrite *cur = ccord_store_channel_overwrites(s, channel_id, &n);
+  if (!cur || n == 0) return false;
+  size_t at = n;
+  for (size_t i = 0; i < n; i++) {
+    if (cur[i].id == overwrite_id) {
+      at = i;
+      break;
+    }
+  }
+  if (at == n) return false;
+  long ci = store_find_channel(&s->d, channel_id);
+  ccord_id guild_id = ci >= 0 ? s->d.channels[ci].guild_id : CCORD_ID_NONE;
+  ccord_overwrite buf[CCORD_MAX_OVERWRITES_PER_CHANNEL];
+  size_t w = 0;
+  for (size_t i = 0; i < n && w < CCORD_MAX_OVERWRITES_PER_CHANNEL; i++) {
+    if (i != at) buf[w++] = cur[i];
+  }
+  return ccord_store_set_channel_overwrites(s, channel_id, guild_id, w > 0 ? buf : nullptr, w, nullptr) == CCORD_OK;
+}
+
