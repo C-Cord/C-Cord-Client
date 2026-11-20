@@ -38,6 +38,7 @@
 #define SB_IDLE_HOOK_STEP 10000
 #define SB_MAX_TEXT 65536u
 #define SB_MAX_FS_READ_BYTES (16u * 1024u * 1024u)
+#define SB_FS_CHUNK_BYTES (384u * 1024u)
 #define SB_MAX_TIMERS 256u
 #define SB_MAX_REQUIRE_DEPTH 32
 #define SB_KEY_HANDLERS "ccord.handlers"
@@ -1736,13 +1737,106 @@ static int api_gateway_on_raw(lua_State *L)
 
 // ---------------------------------------------------------------- Class 3 (System) APIs
 
+static void b64_encode_into(const unsigned char *in, size_t n, ccord_buf *out)
+{
+  static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  char chunk[1024];
+  size_t o = 0;
+  for (size_t i = 0; i < n; i += 3) {
+    uint32_t v = ((uint32_t)in[i] << 16) | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) |
+                 (i + 2 < n ? (uint32_t)in[i + 2] : 0);
+    chunk[o++] = tbl[(v >> 18) & 63];
+    chunk[o++] = tbl[(v >> 12) & 63];
+    chunk[o++] = i + 1 < n ? tbl[(v >> 6) & 63] : '=';
+    chunk[o++] = i + 2 < n ? tbl[v & 63] : '=';
+    if (o == sizeof chunk) {
+      (void)ccord_buf_append(out, chunk, o);
+      o = 0;
+    }
+  }
+  if (o > 0) (void)ccord_buf_append(out, chunk, o);
+}
+
 static int api_fs_read(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_FS_READ, "fs.read")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
-  FILE *f = fopen(path, "rb");
+
+  if (sb->svc.request_sync) {
+    luaL_Buffer lb;
+    luaL_buffinit(L, &lb);
+    uint64_t offset = 0;
+    for (;;) {
+      ccord_buf req; ccord_buf_init(&req, 0); ccord_jw w; ccord_jw_init(&w, &req);
+      ccord_jw_begin_object(&w);
+      ccord_jw_key(&w, "path"); ccord_jw_cstr(&w, path);
+      ccord_jw_key(&w, "offset"); ccord_jw_int(&w, (int64_t)offset);
+      ccord_jw_key(&w, "max_bytes"); ccord_jw_int(&w, (int64_t)SB_FS_CHUNK_BYTES);
+      ccord_jw_end_object(&w);
+      ccord_arena ar; ccord_arena_init(&ar, 0);
+      const ccord_json *res = nullptr;
+      char ebuf[256] = "";
+      bool ok = ccord_jw_ok(&w) &&
+                sb->svc.request_sync(sb->svc.ud, "fs.read", ccord_buf_cstr(&req), &ar, &res, ebuf, sizeof ebuf);
+      ccord_buf_free(&req);
+      if (!ok || !res) {
+        ccord_arena_free(&ar);
+        lua_pushnil(L);
+        lua_pushstring(L, ebuf[0] ? ebuf : "fs.read failed");
+        return 2;
+      }
+      size_t b64_len = 0;
+      const ccord_json *bj = ccord_json_get(res, "b64");
+      const char *b64 = bj ? ccord_json_string(bj, &b64_len) : "";
+      bool eof = ccord_json_bool(ccord_json_get(res, "eof"), true);
+      if (b64 && b64_len > 0) {
+        size_t dec_cap = (b64_len / 4u) * 3u;
+        if (offset + dec_cap > SB_MAX_FS_READ_BYTES) {
+          ccord_arena_free(&ar);
+          lua_pushnil(L);
+          lua_pushliteral(L, "file exceeds 16 MiB limit");
+          return 2;
+        }
+        char *dst = luaL_prepbuffsize(&lb, dec_cap);
+        size_t got = 0;
+        if (!b64_decode_raw((const unsigned char *)b64, b64_len, dst, &got)) {
+          ccord_arena_free(&ar);
+          lua_pushnil(L);
+          lua_pushliteral(L, "invalid fs.read payload");
+          return 2;
+        }
+        luaL_addsize(&lb, got);
+        offset += got;
+      }
+      ccord_arena_free(&ar);
+      if (eof) break;
+      if (offset >= SB_MAX_FS_READ_BYTES) {
+        lua_pushnil(L);
+        lua_pushliteral(L, "file exceeds 16 MiB limit");
+        return 2;
+      }
+    }
+    luaL_pushresult(&lb);
+    return 1;
+  }
+
+  FILE *f = nullptr;
+#if CCORD_OS_WINDOWS
+  f = fopen(path, "rb");
   if (!f) { char eb[128]; lua_pushnil(L); lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb)); return 2; }
+#else
+  int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+  if (fd < 0) { char eb[128]; lua_pushnil(L); lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb)); return 2; }
+  struct stat st;
+  if (fstat(fd, &st) != 0) { close(fd); lua_pushnil(L); lua_pushliteral(L, "stat failed"); return 2; }
+  if (!S_ISREG(st.st_mode)) { close(fd); lua_pushnil(L); lua_pushliteral(L, "not a regular file"); return 2; }
+  if (st.st_size < 0) { close(fd); lua_pushnil(L); lua_pushliteral(L, "stat failed"); return 2; }
+  int fl = fcntl(fd, F_GETFL, 0);
+  if (fl >= 0) (void)fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+  f = fdopen(fd, "rb");
+  if (!f) { close(fd); char eb[128]; lua_pushnil(L); lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb)); return 2; }
+#endif
   uint64_t fsz = 0;
 #if CCORD_OS_WINDOWS
   struct __stat64 st;
@@ -1751,10 +1845,6 @@ static int api_fs_read(lua_State *L)
   if (st.st_size < 0) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "stat failed"); return 2; }
   fsz = (uint64_t)st.st_size;
 #else
-  struct stat st;
-  if (fstat(fileno(f), &st) != 0) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "stat failed"); return 2; }
-  if (!S_ISREG(st.st_mode)) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "not a regular file"); return 2; }
-  if (st.st_size < 0) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "stat failed"); return 2; }
   fsz = (uint64_t)st.st_size;
 #endif
   if (fsz > SB_MAX_FS_READ_BYTES) {
@@ -1763,58 +1853,31 @@ static int api_fs_read(lua_State *L)
     lua_pushliteral(L, "file exceeds 16 MiB limit");
     return 2;
   }
+  luaL_Buffer lb;
   if (fsz > 0) {
-    // Pre-reserve exact output buffer from fstat size (zero incremental reallocs).
     size_t want = (size_t)fsz;
-    char *buf = ccord_malloc(want);
-    if (!buf) { fclose(f); lua_pushnil(L); lua_pushliteral(L, "out of memory"); return 2; }
+    char *buf = luaL_buffinitsize(L, &lb, want);
     size_t rd = fread(buf, 1, want, f);
     fclose(f);
-    lua_pushlstring(L, buf, rd);
-    ccord_free(buf);
+    luaL_pushresultsize(&lb, rd);
     return 1;
   }
-  // st_size == 0: either an empty regular file or a virtual file (e.g. /proc). Read bounded chunks.
+  luaL_buffinit(L, &lb);
+  size_t total = 0;
   char chunk[4096];
-  size_t got = fread(chunk, 1, sizeof chunk, f);
-  if (got == 0) {
-    fclose(f);
-    lua_pushlstring(L, "", 0);
-    return 1;
-  }
-  if (got < sizeof chunk) {
-    fclose(f);
-    lua_pushlstring(L, chunk, got);
-    return 1;
-  }
-  ccord_buf b;
-  ccord_buf_init(&b, SB_MAX_FS_READ_BYTES + 1u);
-  if (ccord_buf_append(&b, chunk, got) != CCORD_OK) {
-    fclose(f);
-    ccord_buf_free(&b);
-    lua_pushnil(L);
-    lua_pushliteral(L, "out of memory");
-    return 2;
-  }
+  size_t got = 0;
   while ((got = fread(chunk, 1, sizeof chunk, f)) > 0) {
-    if (b.len + got > SB_MAX_FS_READ_BYTES) {
+    if (total + got > SB_MAX_FS_READ_BYTES) {
       fclose(f);
-      ccord_buf_free(&b);
       lua_pushnil(L);
       lua_pushliteral(L, "file exceeds 16 MiB limit");
       return 2;
     }
-    if (ccord_buf_append(&b, chunk, got) != CCORD_OK) {
-      fclose(f);
-      ccord_buf_free(&b);
-      lua_pushnil(L);
-      lua_pushliteral(L, "out of memory");
-      return 2;
-    }
+    luaL_addlstring(&lb, chunk, got);
+    total += got;
   }
   fclose(f);
-  lua_pushlstring(L, b.data, b.len);
-  ccord_buf_free(&b);
+  luaL_pushresult(&lb);
   return 1;
 }
 
@@ -1823,6 +1886,22 @@ static int api_fs_exists(lua_State *L)
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_FS_READ, "fs.exists")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
+  if (sb->svc.request_sync) {
+    ccord_buf req; ccord_buf_init(&req, 0); ccord_jw w; ccord_jw_init(&w, &req);
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "path"); ccord_jw_cstr(&w, path);
+    ccord_jw_end_object(&w);
+    ccord_arena ar; ccord_arena_init(&ar, 0);
+    const ccord_json *res = nullptr;
+    char ebuf[256] = "";
+    bool ok = ccord_jw_ok(&w) &&
+              sb->svc.request_sync(sb->svc.ud, "fs.exists", ccord_buf_cstr(&req), &ar, &res, ebuf, sizeof ebuf);
+    ccord_buf_free(&req);
+    bool exists = ok && res && ccord_json_bool(ccord_json_get(res, "exists"), false);
+    ccord_arena_free(&ar);
+    lua_pushboolean(L, exists ? 1 : 0);
+    return 1;
+  }
   lua_pushboolean(L, ccord_path_exists(path));
   return 1;
 }
@@ -1832,6 +1911,15 @@ static int api_fs_list(lua_State *L)
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_FS_READ, "fs.list")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
+  if (sb->svc.request_sync) {
+    ccord_buf req; ccord_buf_init(&req, 0); ccord_jw w; ccord_jw_init(&w, &req);
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "path"); ccord_jw_cstr(&w, path);
+    ccord_jw_end_object(&w);
+    int rc = sync_call(L, sb, "fs.list", ccord_buf_cstr(&req));
+    ccord_buf_free(&req);
+    return rc;
+  }
   ccord_dir *d = ccord_dir_open(path);
   if (!d) { char eb[128]; lua_pushnil(L); lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb)); return 2; }
   lua_newtable(L);
@@ -1852,6 +1940,41 @@ static int api_fs_write_impl(lua_State *L, const char *api, const char *mode)
   const char *path = luaL_checkstring(L, 1);
   size_t n = 0;
   const char *data = luaL_checklstring(L, 2, &n);
+  if (sb->svc.request_sync) {
+    bool is_append = (mode[0] == 'a');
+    size_t sent = 0;
+    size_t chunk_idx = 0;
+    do {
+      size_t take = n - sent;
+      if (take > SB_FS_CHUNK_BYTES) take = SB_FS_CHUNK_BYTES;
+      ccord_buf b64; ccord_buf_init(&b64, (take / 3u + 2u) * 4u);
+      b64_encode_into((const unsigned char *)data + sent, take, &b64);
+      ccord_buf req; ccord_buf_init(&req, b64.len + 256u);
+      ccord_jw w; ccord_jw_init(&w, &req);
+      ccord_jw_begin_object(&w);
+      ccord_jw_key(&w, "path"); ccord_jw_cstr(&w, path);
+      ccord_jw_key(&w, "b64"); ccord_jw_string(&w, b64.data ? b64.data : "", b64.len);
+      ccord_jw_key(&w, "append"); ccord_jw_bool(&w, is_append || chunk_idx > 0);
+      ccord_jw_end_object(&w);
+      ccord_buf_free(&b64);
+      ccord_arena ar; ccord_arena_init(&ar, 0);
+      const ccord_json *res = nullptr;
+      char ebuf[256] = "";
+      bool ok = ccord_jw_ok(&w) &&
+                sb->svc.request_sync(sb->svc.ud, "fs.write", ccord_buf_cstr(&req), &ar, &res, ebuf, sizeof ebuf);
+      ccord_buf_free(&req);
+      ccord_arena_free(&ar);
+      if (!ok) {
+        lua_pushnil(L);
+        lua_pushstring(L, ebuf[0] ? ebuf : "fs.write failed");
+        return 2;
+      }
+      sent += take;
+      chunk_idx++;
+    } while (sent < n);
+    lua_pushboolean(L, 1);
+    return 1;
+  }
   FILE *f = fopen(path, mode);
   if (!f) { char eb[128]; lua_pushnil(L); lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb)); return 2; }
   size_t wr = fwrite(data, 1, n, f);
@@ -1869,6 +1992,15 @@ static int api_fs_mkdir(lua_State *L)
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_FS_WRITE, "fs.mkdir")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
+  if (sb->svc.request_sync) {
+    ccord_buf req; ccord_buf_init(&req, 0); ccord_jw w; ccord_jw_init(&w, &req);
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "path"); ccord_jw_cstr(&w, path);
+    ccord_jw_end_object(&w);
+    int rc = sync_call(L, sb, "fs.mkdir", ccord_buf_cstr(&req));
+    ccord_buf_free(&req);
+    return rc;
+  }
   ccord_error err = {0};
   if (ccord_mkdir_p(path, 0755, &err) != CCORD_OK) { lua_pushnil(L); lua_pushstring(L, err.message); return 2; }
   lua_pushboolean(L, 1);
@@ -1880,6 +2012,15 @@ static int api_fs_remove(lua_State *L)
   ccord_sandbox *sb = sb_of(L);
   if (!check_perm(L, sb, CCORD_PERM_FS_WRITE, "fs.remove")) return push_undeclared(L);
   const char *path = luaL_checkstring(L, 1);
+  if (sb->svc.request_sync) {
+    ccord_buf req; ccord_buf_init(&req, 0); ccord_jw w; ccord_jw_init(&w, &req);
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "path"); ccord_jw_cstr(&w, path);
+    ccord_jw_end_object(&w);
+    int rc = sync_call(L, sb, "fs.remove", ccord_buf_cstr(&req));
+    ccord_buf_free(&req);
+    return rc;
+  }
   if (remove(path) != 0) { char eb[128]; lua_pushnil(L); lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb)); return 2; }
   lua_pushboolean(L, 1);
   return 1;

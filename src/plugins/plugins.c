@@ -15,6 +15,7 @@
 #include <ccord/core/json.h>
 #include <ccord/core/log.h>
 #include <ccord/core/os.h>
+#include <ccord/core/paths.h>
 #include <ccord/core/utf8.h>
 #include <ccord/ipc/ipc.h>
 #include <ccord/store/notify.h>
@@ -24,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 
 #if CCORD_OS_WINDOWS
@@ -45,6 +47,8 @@
 #define MAX_SEARCH 16
 #define MAX_PENDING 8
 #define MAX_CLIPBOARD_BYTES 65536u
+#define MAX_FS_READ_BYTES (16u * 1024u * 1024u)
+#define MAX_FS_CHUNK_BYTES (384u * 1024u)
 #define INIT_DEADLINE_MS 5000u
 #define CMD_DEADLINE_MS 2000u
 #define PING_INTERVAL_MS 5000u
@@ -1236,6 +1240,319 @@ static void req_store(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
   ccord_buf_free(&b);
 }
 
+static bool resolve_real_path(const char *in, char *out, size_t cap);
+
+static bool path_same_or_under(const char *path, const char *root)
+{
+  if (!path || !root || !root[0]) return false;
+  size_t rl = strlen(root);
+  while (rl > 1 && (root[rl - 1] == '/' || root[rl - 1] == '\\')) rl--;
+#if CCORD_OS_WINDOWS
+  if (_strnicmp(path, root, rl) != 0) return false;
+#else
+  if (strncmp(path, root, rl) != 0) return false;
+#endif
+  return path[rl] == '\0' || path[rl] == '/' || path[rl] == '\\';
+}
+
+// Resolves `raw_path` even if trailing components do not yet exist (by resolving the deepest existing ancestor).
+static bool resolve_canonical_target(const char *raw_path, char *out, size_t cap)
+{
+  if (!raw_path || !raw_path[0] || !out || cap == 0) return false;
+  if (resolve_real_path(raw_path, out, cap)) return true;
+
+  char cur[CCORD_PATH_MAX];
+  if (snprintf(cur, sizeof cur, "%s", raw_path) >= (int)sizeof cur) return false;
+  size_t clen = strlen(cur);
+  while (clen > 1 && (cur[clen - 1] == '/' || cur[clen - 1] == '\\')) cur[--clen] = '\0';
+
+  const char *tail_start = cur + clen;
+  for (;;) {
+    char *sep = nullptr;
+    for (char *q = cur + (size_t)(tail_start - cur); q > cur; q--) {
+      if (q[-1] == '/' || q[-1] == '\\') { sep = q - 1; break; }
+    }
+    if (!sep) {
+      // Relative path with no existing prefix: resolve against CWD.
+      char cwd[CCORD_PATH_MAX];
+      if (!resolve_real_path(".", cwd, sizeof cwd)) return false;
+      if (strstr(raw_path, "..")) return false;
+      return snprintf(out, cap, "%s/%s", cwd, raw_path) < (int)cap;
+    }
+    char saved = *sep;
+    if (sep == cur) {
+      // Root slash
+      char root_str[2] = {saved, '\0'};
+      const char *rest = sep + 1;
+      if (strstr(rest, "..")) return false;
+      char rbuf[CCORD_PATH_MAX];
+      if (!resolve_real_path(root_str, rbuf, sizeof rbuf)) return false;
+      return snprintf(out, cap, "%s%s", rbuf, rest) < (int)cap;
+    }
+    *sep = '\0';
+    char rbuf[CCORD_PATH_MAX];
+    if (resolve_real_path(cur, rbuf, sizeof rbuf)) {
+      const char *rest = sep + 1;
+      // Reject any ".." segment in the non-existent suffix.
+      const char *p = rest;
+      while (*p) {
+        const char *ns = p;
+        while (*ns && *ns != '/' && *ns != '\\') ns++;
+        size_t slen = (size_t)(ns - p);
+        if (slen == 2 && p[0] == '.' && p[1] == '.') return false;
+        p = *ns ? ns + 1 : ns;
+      }
+      int n = snprintf(out, cap, "%s/%s", rbuf, rest);
+      return n > 0 && (size_t)n < cap;
+    }
+    *sep = saved;
+    tail_start = sep;
+  }
+}
+
+static bool fs_path_is_protected(const ccord_plugins *m, const char *raw_path)
+{
+  char target[CCORD_PATH_MAX];
+  if (!resolve_canonical_target(raw_path, target, sizeof target)) return true;
+
+  char rdir[CCORD_PATH_MAX];
+  if (m->has_data_dir && m->data_dir && resolve_canonical_target(m->data_dir, rdir, sizeof rdir)) {
+    if (path_same_or_under(target, rdir)) return true;
+  }
+  const char *gdata = ccord_paths_data_dir();
+  if (gdata && gdata[0] && resolve_canonical_target(gdata, rdir, sizeof rdir)) {
+    if (path_same_or_under(target, rdir)) return true;
+  }
+  for (size_t i = 0; i < m->nsearch; i++) {
+    if (m->search[i] && resolve_canonical_target(m->search[i], rdir, sizeof rdir)) {
+      if (path_same_or_under(target, rdir)) return true;
+    }
+  }
+  // Protect C-Cord configuration / token directories across OS conventions.
+  char cfg_cand[4][CCORD_PATH_MAX];
+  size_t nc = 0;
+  const char *xdg = getenv("XDG_CONFIG_HOME");
+  if (xdg && xdg[0] && snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/ccord", xdg) < (int)sizeof cfg_cand[0]) nc++;
+  const char *home = getenv("HOME");
+  if (home && home[0]) {
+    if (nc < 4 && snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/.config/ccord", home) < (int)sizeof cfg_cand[0]) nc++;
+    if (nc < 4 && snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/Library/Application Support/ccord", home) < (int)sizeof cfg_cand[0]) nc++;
+  }
+  const char *appdata = getenv("APPDATA");
+  if (appdata && appdata[0] && nc < 4 &&
+      snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/ccord", appdata) < (int)sizeof cfg_cand[0]) nc++;
+  for (size_t i = 0; i < nc; i++) {
+    if (resolve_canonical_target(cfg_cand[i], rdir, sizeof rdir) && path_same_or_under(target, rdir)) return true;
+  }
+  return false;
+}
+
+static void fs_b64_encode(const unsigned char *in, size_t n, ccord_buf *out)
+{
+  static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  char chunk[1024];
+  size_t o = 0;
+  for (size_t i = 0; i < n; i += 3) {
+    uint32_t v = ((uint32_t)in[i] << 16) | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) |
+                 (i + 2 < n ? (uint32_t)in[i + 2] : 0);
+    chunk[o++] = tbl[(v >> 18) & 63];
+    chunk[o++] = tbl[(v >> 12) & 63];
+    chunk[o++] = i + 1 < n ? tbl[(v >> 6) & 63] : '=';
+    chunk[o++] = i + 2 < n ? tbl[v & 63] : '=';
+    if (o == sizeof chunk) {
+      (void)ccord_buf_append(out, chunk, o);
+      o = 0;
+    }
+  }
+  if (o > 0) (void)ccord_buf_append(out, chunk, o);
+}
+
+static int fs_b64_val(unsigned char c)
+{
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;
+}
+
+static bool fs_b64_decode(const unsigned char *in, size_t n, uint8_t *dst, size_t *out_len)
+{
+  if (n % 4u != 0) return false;
+  size_t o = 0;
+  for (size_t i = 0; i < n; i += 4) {
+    bool last = (i + 4u == n);
+    int a = fs_b64_val(in[i]), c1 = fs_b64_val(in[i + 1]);
+    int c2 = in[i + 2] == '=' ? -2 : fs_b64_val(in[i + 2]);
+    int c3 = in[i + 3] == '=' ? -2 : fs_b64_val(in[i + 3]);
+    if (a < 0 || c1 < 0 || c2 == -1 || c3 == -1) return false;
+    if ((c2 == -2 || c3 == -2) && !last) return false;
+    if (c2 == -2 && c3 != -2) return false;
+    uint32_t v = ((uint32_t)a << 18) | ((uint32_t)c1 << 12) | (c2 >= 0 ? (uint32_t)c2 << 6 : 0) | (c3 >= 0 ? (uint32_t)c3 : 0);
+    dst[o++] = (uint8_t)(v >> 16);
+    if (c2 >= 0) dst[o++] = (uint8_t)(v >> 8);
+    if (c3 >= 0) dst[o++] = (uint8_t)v;
+  }
+  *out_len = o;
+  return true;
+}
+
+static void req_fs(ccord_plugins *m, plugin *p, uint32_t id, const char *method, const ccord_json *params)
+{
+  bool is_write = (strcmp(method, "fs.write") == 0 || strcmp(method, "fs.mkdir") == 0 || strcmp(method, "fs.remove") == 0);
+  ccord_perm need = is_write ? CCORD_PERM_FS_WRITE : CCORD_PERM_FS_READ;
+  if (!has_perm(p, need)) {
+    fail_plugin(m, p, is_write ? "undeclared restricted API called: fs.write" : "undeclared restricted API called: fs.read");
+    return;
+  }
+  size_t plen = 0;
+  const char *path = str_param(params, "path", &plen);
+  if (!path || plen == 0 || plen >= CCORD_PATH_MAX) {
+    reply_err(m, p, id, "invalid_argument", "fs: invalid path");
+    return;
+  }
+  if (fs_path_is_protected(m, path)) {
+    reply_err(m, p, id, "permission_denied", "access to C-Cord internal config/plugin paths is forbidden");
+    return;
+  }
+
+  if (strcmp(method, "fs.exists") == 0) {
+    reply_ok(m, p, id, ccord_path_exists(path) ? "{\"exists\":true}" : "{\"exists\":false}");
+    return;
+  }
+  if (strcmp(method, "fs.list") == 0) {
+    ccord_dir *d = ccord_dir_open(path);
+    if (!d) { reply_err(m, p, id, "io", strerror(errno)); return; }
+    ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+    ccord_jw_begin_array(&w);
+    char name[256];
+    size_t count = 0;
+    while (ccord_dir_next(d, name, sizeof name, nullptr) && count < 4096u) {
+      ccord_jw_cstr(&w, name);
+      count++;
+    }
+    ccord_dir_close(d);
+    ccord_jw_end_array(&w);
+    if (ccord_jw_ok(&w)) reply_ok(m, p, id, ccord_buf_cstr(&b));
+    else reply_err(m, p, id, "internal", "fs.list encode failed");
+    ccord_buf_free(&b);
+    return;
+  }
+  if (strcmp(method, "fs.mkdir") == 0) {
+    ccord_error err = {0};
+    if (ccord_mkdir_p(path, 0755, &err) != CCORD_OK) {
+      reply_err(m, p, id, "io", err.message[0] ? err.message : "mkdir failed");
+    } else {
+      reply_ok(m, p, id, nullptr);
+    }
+    return;
+  }
+  if (strcmp(method, "fs.remove") == 0) {
+    if (remove(path) != 0) reply_err(m, p, id, "io", strerror(errno));
+    else reply_ok(m, p, id, nullptr);
+    return;
+  }
+  if (strcmp(method, "fs.write") == 0) {
+    size_t b64_len = 0;
+    const char *b64 = str_param(params, "b64", &b64_len);
+    bool append = ccord_json_bool(ccord_json_get(params, "append"), false);
+    if (!b64) { reply_err(m, p, id, "invalid_argument", "fs.write: missing data"); return; }
+    size_t raw_cap = (b64_len / 4u) * 3u;
+    if (raw_cap > MAX_FS_CHUNK_BYTES + 3u) { reply_err(m, p, id, "invalid_argument", "fs.write: chunk too large"); return; }
+    uint8_t *raw = raw_cap ? ccord_malloc(raw_cap) : nullptr;
+    if (raw_cap && !raw) { reply_err(m, p, id, "internal", "out of memory"); return; }
+    size_t raw_len = 0;
+    if (b64_len > 0 && !fs_b64_decode((const unsigned char *)b64, b64_len, raw, &raw_len)) {
+      ccord_free(raw);
+      reply_err(m, p, id, "invalid_argument", "fs.write: invalid base64");
+      return;
+    }
+    FILE *f = fopen(path, append ? "ab" : "wb");
+    if (!f) {
+      ccord_free(raw);
+      reply_err(m, p, id, "io", strerror(errno));
+      return;
+    }
+    size_t wr = raw_len ? fwrite(raw, 1, raw_len, f) : 0;
+    fclose(f);
+    ccord_free(raw);
+    if (wr != raw_len) reply_err(m, p, id, "io", "short write");
+    else reply_ok(m, p, id, nullptr);
+    return;
+  }
+  if (strcmp(method, "fs.read") == 0) {
+    int64_t off_i = 0, max_i = (int64_t)MAX_FS_CHUNK_BYTES;
+    const ccord_json *oj = ccord_json_get(params, "offset");
+    const ccord_json *mj = ccord_json_get(params, "max_bytes");
+    if (oj) (void)ccord_json_int64(oj, &off_i);
+    if (mj) (void)ccord_json_int64(mj, &max_i);
+    if (off_i < 0 || (uint64_t)off_i > MAX_FS_READ_BYTES) {
+      reply_err(m, p, id, "invalid_argument", "file exceeds 16 MiB limit");
+      return;
+    }
+    if (max_i <= 0 || (size_t)max_i > MAX_FS_CHUNK_BYTES) max_i = (int64_t)MAX_FS_CHUNK_BYTES;
+    FILE *f = nullptr;
+    uint64_t fsz = 0;
+#if CCORD_OS_WINDOWS
+    f = fopen(path, "rb");
+    if (!f) { reply_err(m, p, id, "io", strerror(errno)); return; }
+    struct __stat64 st;
+    if (_fstat64(_fileno(f), &st) != 0 || (st.st_mode & _S_IFREG) == 0 || st.st_size < 0) {
+      fclose(f);
+      reply_err(m, p, id, "io", "not a regular file");
+      return;
+    }
+    fsz = (uint64_t)st.st_size;
+#else
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) { reply_err(m, p, id, "io", strerror(errno)); return; }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
+      close(fd);
+      reply_err(m, p, id, "io", "not a regular file");
+      return;
+    }
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+    f = fdopen(fd, "rb");
+    if (!f) { close(fd); reply_err(m, p, id, "io", strerror(errno)); return; }
+    fsz = (uint64_t)st.st_size;
+#endif
+    if (fsz > MAX_FS_READ_BYTES) {
+      fclose(f);
+      reply_err(m, p, id, "invalid_argument", "file exceeds 16 MiB limit");
+      return;
+    }
+    if (off_i > 0 && fseek(f, (long)off_i, SEEK_SET) != 0) {
+      fclose(f);
+      reply_err(m, p, id, "io", "seek failed");
+      return;
+    }
+    size_t want = (size_t)max_i;
+    uint8_t *buf = ccord_malloc(want + 1u);
+    if (!buf) { fclose(f); reply_err(m, p, id, "internal", "out of memory"); return; }
+    size_t rd = fread(buf, 1, want, f);
+    bool eof = (rd < want) || feof(f) != 0 || (fsz > 0 && (uint64_t)off_i + rd >= fsz);
+    fclose(f);
+    ccord_buf b64; ccord_buf_init(&b64, (rd / 3u + 2u) * 4u);
+    fs_b64_encode(buf, rd, &b64);
+    ccord_free(buf);
+    ccord_buf out; ccord_buf_init(&out, b64.len + 64u);
+    ccord_jw w; ccord_jw_init(&w, &out);
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "b64"); ccord_jw_string(&w, b64.data ? b64.data : "", b64.len);
+    ccord_jw_key(&w, "eof"); ccord_jw_bool(&w, eof);
+    ccord_jw_end_object(&w);
+    ccord_buf_free(&b64);
+    if (ccord_jw_ok(&w)) reply_ok(m, p, id, ccord_buf_cstr(&out));
+    else reply_err(m, p, id, "internal", "fs.read encode failed");
+    ccord_buf_free(&out);
+    return;
+  }
+  reply_err(m, p, id, "unsupported", "unknown fs method");
+}
+
 static void handle_request(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg)
 {
   uint32_t id = msg->id;
@@ -1371,6 +1688,10 @@ static void handle_request(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg
       }
     }
     reply_ok(m, p, id, nullptr);
+    return;
+  }
+  if (strncmp(method, "fs.", 3) == 0) {
+    req_fs(m, p, id, method, params);
     return;
   }
   if (strcmp(method, "voice.join") == 0 || strcmp(method, "voice.leave") == 0 ||
@@ -2091,12 +2412,31 @@ static ccord_status spawn_host(ccord_plugins *m, plugin *p, ccord_error *err)
     ccord_error_set(err, CCORD_ERR_IO, "host path encoding failed");
     return CCORD_ERR_IO;
   }
-  STARTUPINFOW si = {.cb = sizeof si};
+  STARTUPINFOEXW siex = {0};
+  siex.StartupInfo.cb = sizeof siex;
+  HANDLE inherit_list[1] = {(HANDLE)sv[1]};
+  SIZE_T attr_sz = 0;
+  (void)InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_sz);
+  LPPROC_THREAD_ATTRIBUTE_LIST attr_list = attr_sz ? (LPPROC_THREAD_ATTRIBUTE_LIST)ccord_malloc(attr_sz) : nullptr;
+  bool attr_ok = attr_list &&
+                 InitializeProcThreadAttributeList(attr_list, 1, 0, &attr_sz) &&
+                 UpdateProcThreadAttribute(attr_list, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                           inherit_list, sizeof inherit_list, nullptr, nullptr);
+  if (!attr_ok) {
+    if (attr_list) { DeleteProcThreadAttributeList(attr_list); ccord_free(attr_list); }
+    ccord_sock_close(sv[0]);
+    ccord_sock_close(sv[1]);
+    ccord_error_set(err, CCORD_ERR_IO, "PROC_THREAD_ATTRIBUTE_HANDLE_LIST setup failed");
+    return CCORD_ERR_IO;
+  }
+  siex.lpAttributeList = attr_list;
   PROCESS_INFORMATION pi = {0};
   wchar_t empty_env[2] = {0, 0};
   BOOL ok = CreateProcessW(nullptr, wcmd, nullptr, nullptr, TRUE,
-                           CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
-                           empty_env, nullptr, &si, &pi);
+                           CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
+                           empty_env, nullptr, &siex.StartupInfo, &pi);
+  DeleteProcThreadAttributeList(attr_list);
+  ccord_free(attr_list);
   ccord_sock_close(sv[1]);
   if (!ok) {
     ccord_sock_close(sv[0]);
@@ -2358,11 +2698,40 @@ static bool resolve_real_path(const char *in, char *out, size_t cap)
 {
 #if CCORD_OS_WINDOWS
   if (!in || !out || cap == 0) return false;
-  return _fullpath(out, in, cap) != nullptr && ccord_path_exists(out);
+  int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, in, -1, nullptr, 0);
+  if (wlen <= 0 || wlen > 32768) return false;
+  wchar_t *wpath = ccord_malloc((size_t)wlen * sizeof(wchar_t));
+  if (!wpath) return false;
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, in, -1, wpath, wlen);
+  HANDLE h = CreateFileW(wpath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                         FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  ccord_free(wpath);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  wchar_t wout[CCORD_PATH_MAX];
+  DWORD got = GetFinalPathNameByHandleW(h, wout, (DWORD)(sizeof wout / sizeof wout[0]), FILE_NAME_NORMALIZED);
+  CloseHandle(h);
+  if (got == 0 || got >= (DWORD)(sizeof wout / sizeof wout[0])) return false;
+  const wchar_t *src = wout;
+  if (wcsncmp(src, L"\\\\?\\", 4) == 0) src += 4;
+  int n = WideCharToMultiByte(CP_UTF8, 0, src, -1, out, (int)cap, nullptr, nullptr);
+  return n > 0 && (size_t)n <= cap;
 #else
   if (!in || !out || cap < PATH_MAX) return false;
   return realpath(in, out) != nullptr;
 #endif
+}
+
+static bool path_strictly_under(const char *real_path, const char *real_dir)
+{
+  size_t dl = strlen(real_dir);
+  if (dl == 0) return false;
+  while (dl > 1 && (real_dir[dl - 1] == '/' || real_dir[dl - 1] == '\\')) dl--;
+#if CCORD_OS_WINDOWS
+  if (_strnicmp(real_path, real_dir, dl) != 0) return false;
+#else
+  if (strncmp(real_path, real_dir, dl) != 0) return false;
+#endif
+  return real_path[dl] == '/' || real_path[dl] == '\\';
 }
 
 static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir_name,
@@ -2413,7 +2782,7 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
     return;
   }
   size_t dl = strlen(real_dir);
-  bool under_dir = strncmp(real_main, real_dir, dl) == 0 && (real_main[dl] == '/' || real_main[dl] == '\\');
+  bool under_dir = path_strictly_under(real_main, real_dir);
   if (!under_dir) {
     record_failed(m, man.id, "main file resolves outside the plugin directory");
     return;
@@ -2593,8 +2962,7 @@ static bool reload_plugin_source(plugin *p, char *why, size_t why_cap)
     set_text(why, why_cap, "main file is missing");
     return false;
   }
-  size_t dl = strlen(real_dir);
-  if (strncmp(real_main, real_dir, dl) != 0 || (real_main[dl] != '/' && real_main[dl] != '\\')) {
+  if (!path_strictly_under(real_main, real_dir)) {
     set_text(why, why_cap, "main file resolves outside the plugin directory");
     return false;
   }
