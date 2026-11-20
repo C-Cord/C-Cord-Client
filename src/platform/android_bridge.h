@@ -39,6 +39,9 @@ void ccord_android_set_auth_autofill(int mode, int active_field, bool commit,
                                      int otp_x, int otp_y, int otp_w, int otp_h,
                                      const char *email_text, const char *pw_text, const char *otp_text);
 
+// Drains queued JNI events (picked files, voice notification actions, network changes) on the SDL main thread.
+void ccord_android_drain_events(ccord_platform *p);
+
 // Consumes pending insets/IME updates pushed by CCordActivity's WindowInsetsListener.
 // Values are physical pixels; platform.c converts to logical px using display scale.
 bool ccord_android_poll_insets(float *top, float *right, float *bottom, float *left, float *ime_bottom);

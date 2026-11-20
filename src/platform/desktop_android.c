@@ -78,6 +78,102 @@ static android_autofill_item g_autofill_q[ANDROID_AUTOFILL_CAP];
 static size_t g_autofill_head = 0;
 static size_t g_autofill_count = 0;
 
+// Queued main-thread events pushed from Kotlin UI / Service / Connectivity threads.
+#define ANDROID_FILE_Q_CAP 8u
+#define ANDROID_FILE_PATH_CAP 1024u
+static char g_file_q[ANDROID_FILE_Q_CAP][ANDROID_FILE_PATH_CAP];
+static size_t g_file_head = 0;
+static size_t g_file_count = 0;
+
+#define ANDROID_VOICE_ACTION_Q_CAP 16u
+static int g_voice_action_q[ANDROID_VOICE_ACTION_Q_CAP];
+static size_t g_voice_action_head = 0;
+static size_t g_voice_action_count = 0;
+
+static bool g_network_changed_pending = false;
+
+// Standard UTF-8 -> Java UTF-16 jstring (safe for astral code points / emojis unlike NewStringUTF).
+static jstring jni_new_string_utf8(JNIEnv *env, const char *utf8)
+{
+  if (!env) return nullptr;
+  if (!utf8 || !utf8[0]) return (*env)->NewString(env, nullptr, 0);
+  size_t len = strlen(utf8);
+  // Each UTF-8 byte maps to at most 1 UTF-16 code unit (4-byte astral -> 2 code units).
+  jchar stack_buf[256];
+  jchar *u16 = len <= 256u ? stack_buf : (jchar *)ccord_malloc(len * sizeof(jchar));
+  if (!u16) return nullptr;
+  size_t out_n = 0;
+  size_t pos = 0;
+  while (pos < len) {
+    uint32_t cp = 0;
+    size_t step = ccord_utf8_decode(utf8 + pos, len - pos, &cp);
+    if (step == 0) {
+      cp = 0xFFFDu;
+      step = 1u;
+    }
+    pos += step;
+    if (cp <= 0xFFFFu) {
+      u16[out_n++] = (jchar)cp;
+    } else if (cp <= 0x10FFFFu) {
+      cp -= 0x10000u;
+      u16[out_n++] = (jchar)(0xD800u + (cp >> 10));
+      u16[out_n++] = (jchar)(0xDC00u + (cp & 0x3FFu));
+    } else {
+      u16[out_n++] = (jchar)0xFFFDu;
+    }
+  }
+  jstring res = (*env)->NewString(env, u16, (jsize)out_n);
+  if (u16 != stack_buf) ccord_free(u16);
+  if ((*env)->ExceptionCheck(env)) {
+    (*env)->ExceptionClear(env);
+    return nullptr;
+  }
+  return res;
+}
+
+// Java UTF-16 jstring -> standard UTF-8 (merges surrogate pairs unlike GetStringUTFChars).
+static bool jni_copy_string_utf8(JNIEnv *env, jstring jstr, char *out, size_t cap)
+{
+  if (!env || !jstr || !out || cap == 0) return false;
+  out[0] = '\0';
+  jsize n16 = (*env)->GetStringLength(env, jstr);
+  if (n16 < 0 || (*env)->ExceptionCheck(env)) {
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    return false;
+  }
+  if (n16 == 0) return true;
+  const jchar *u16 = (*env)->GetStringChars(env, jstr, nullptr);
+  if (!u16 || (*env)->ExceptionCheck(env)) {
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    if (u16) (*env)->ReleaseStringChars(env, jstr, u16);
+    return false;
+  }
+  size_t w = 0;
+  for (jsize i = 0; i < n16; i++) {
+    uint32_t cp = u16[i];
+    if (cp >= 0xD800u && cp <= 0xDBFFu && i + 1 < n16) {
+      uint32_t lo = u16[i + 1];
+      if (lo >= 0xDC00u && lo <= 0xDFFFu) {
+        cp = 0x10000u + (((cp - 0xD800u) << 10) | (lo - 0xDC00u));
+        i++;
+      } else {
+        cp = 0xFFFDu;
+      }
+    } else if (cp >= 0xD800u && cp <= 0xDFFFu) {
+      cp = 0xFFFDu;
+    }
+    char enc[4];
+    size_t elen = ccord_utf8_encode(cp, enc);
+    if (elen == 0) continue;
+    if (w + elen >= cap) break;
+    memcpy(out + w, enc, elen);
+    w += elen;
+  }
+  out[w] = '\0';
+  (*env)->ReleaseStringChars(env, jstr, u16);
+  return true;
+}
+
 static JNIEnv *android_env(bool *attached_out)
 {
   if (attached_out) *attached_out = false;
@@ -199,8 +295,8 @@ bool ccord_android_share_text(const char *title, const char *text)
   if (env && cls) {
     jmethodID mid = (*env)->GetStaticMethodID(env, cls, "shareText", "(Ljava/lang/String;Ljava/lang/String;)Z");
     if (mid) {
-      jstring jtitle = (*env)->NewStringUTF(env, title ? title : "");
-      jstring jtext = (*env)->NewStringUTF(env, text);
+      jstring jtitle = jni_new_string_utf8(env, title ? title : "");
+      jstring jtext = jni_new_string_utf8(env, text);
       if (jtitle && jtext) {
         ok = (*env)->CallStaticBooleanMethod(env, cls, mid, jtitle, jtext) == JNI_TRUE;
       }
@@ -269,8 +365,8 @@ bool ccord_android_notify_message(uint32_t id, const char *title, const char *bo
     jmethodID mid = (*env)->GetStaticMethodID(env, cls, "notifyMessage",
                                               "(ILjava/lang/String;Ljava/lang/String;JJJ)Z");
     if (mid) {
-      jstring jtitle = (*env)->NewStringUTF(env, title ? title : "C-Cord");
-      jstring jbody = (*env)->NewStringUTF(env, body ? body : "");
+      jstring jtitle = jni_new_string_utf8(env, title ? title : "C-Cord");
+      jstring jbody = jni_new_string_utf8(env, body ? body : "");
       if (jtitle && jbody) {
         ok = (*env)->CallStaticBooleanMethod(env, cls, mid, (jint)id, jtitle, jbody,
                                              (jlong)guild_id, (jlong)channel_id, (jlong)message_id) == JNI_TRUE;
@@ -292,7 +388,7 @@ void ccord_android_set_voice_service(bool active, const char *channel_name, bool
   if (env && cls) {
     jmethodID mid = (*env)->GetStaticMethodID(env, cls, "setVoiceService", "(ZLjava/lang/String;ZZ)V");
     if (mid) {
-      jstring jch = (*env)->NewStringUTF(env, channel_name ? channel_name : "Voice");
+      jstring jch = jni_new_string_utf8(env, channel_name ? channel_name : "Voice");
       if (jch) {
         (*env)->CallStaticVoidMethod(env, cls, mid, active ? JNI_TRUE : JNI_FALSE, jch,
                                      muted ? JNI_TRUE : JNI_FALSE, deafened ? JNI_TRUE : JNI_FALSE);
@@ -372,9 +468,9 @@ void ccord_android_set_auth_autofill(int mode, int active_field, bool commit,
         env, cls, "setAuthAutofill",
         "(IIZ" "IIII" "IIII" "IIII" "Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
     if (mid) {
-      jstring jemail = (*env)->NewStringUTF(env, email_text ? email_text : "");
-      jstring jpw = (*env)->NewStringUTF(env, pw_text ? pw_text : "");
-      jstring jotp = (*env)->NewStringUTF(env, otp_text ? otp_text : "");
+      jstring jemail = jni_new_string_utf8(env, email_text ? email_text : "");
+      jstring jpw = jni_new_string_utf8(env, pw_text ? pw_text : "");
+      jstring jotp = jni_new_string_utf8(env, otp_text ? otp_text : "");
       if (jemail && jpw && jotp) {
         (*env)->CallStaticVoidMethod(
             env, cls, mid, (jint)mode, (jint)active_field, commit ? JNI_TRUE : JNI_FALSE,
@@ -413,6 +509,43 @@ bool ccord_android_poll_autofill(int *out_field, char *out_text, size_t cap)
   }
   ccord_spin_lock_release(&g_jni_lock);
   return got;
+}
+
+void ccord_android_drain_events(ccord_platform *p)
+{
+  if (!p) return;
+  char files[ANDROID_FILE_Q_CAP][ANDROID_FILE_PATH_CAP];
+  size_t nfiles = 0;
+  int vactions[ANDROID_VOICE_ACTION_Q_CAP];
+  size_t nvactions = 0;
+  bool net_changed = false;
+
+  ccord_spin_lock_acquire(&g_jni_lock);
+  while (g_file_count > 0 && nfiles < ANDROID_FILE_Q_CAP) {
+    memcpy(files[nfiles++], g_file_q[g_file_head], ANDROID_FILE_PATH_CAP);
+    g_file_q[g_file_head][0] = '\0';
+    g_file_head = (g_file_head + 1u) % ANDROID_FILE_Q_CAP;
+    g_file_count--;
+  }
+  while (g_voice_action_count > 0 && nvactions < ANDROID_VOICE_ACTION_Q_CAP) {
+    vactions[nvactions++] = g_voice_action_q[g_voice_action_head];
+    g_voice_action_head = (g_voice_action_head + 1u) % ANDROID_VOICE_ACTION_Q_CAP;
+    g_voice_action_count--;
+  }
+  net_changed = g_network_changed_pending;
+  g_network_changed_pending = false;
+  ccord_spin_lock_release(&g_jni_lock);
+
+  for (size_t i = 0; i < nfiles; i++) {
+    ccord_error err = {0};
+    (void)ccord_platform_inject_drop_file(p, files[i], &err);
+  }
+  for (size_t i = 0; i < nvactions; i++) {
+    ccord_platform_inject_tray_action(p, (ccord_tray_action)vactions[i]);
+  }
+  if (net_changed) {
+    ccord_platform_inject_link_event(p, CCORD_LINK_CHANGED);
+  }
 }
 
 bool ccord_android_poll_insets(float *top, float *right, float *bottom, float *left, float *ime_bottom)
@@ -454,26 +587,20 @@ Java_org_ccord_android_CCordBridge_nativeOnAutofillField(JNIEnv *env, jclass cls
 {
   (void)cls;
   if (!env || !jtext || field < 1 || field > 3) return;
-  const char *utf = (*env)->GetStringUTFChars(env, jtext, nullptr);
-  if (!utf) return;
-  size_t len = strlen(utf);
-  if (ccord_utf8_valid(utf, len)) {
-    ccord_spin_lock_acquire(&g_jni_lock);
-    size_t tail = (g_autofill_head + g_autofill_count) % ANDROID_AUTOFILL_CAP;
-    android_autofill_item *it = &g_autofill_q[tail];
-    it->field = (int)field;
-    size_t n = len < ANDROID_AUTOFILL_TEXT_CAP - 1u ? len : ANDROID_AUTOFILL_TEXT_CAP - 1u;
-    while (n > 0 && !ccord_utf8_valid(utf, n)) n--;
-    if (n > 0) memcpy(it->text, utf, n);
-    it->text[n] = '\0';
-    if (g_autofill_count < ANDROID_AUTOFILL_CAP) {
-      g_autofill_count++;
-    } else {
-      g_autofill_head = (g_autofill_head + 1u) % ANDROID_AUTOFILL_CAP;
-    }
-    ccord_spin_lock_release(&g_jni_lock);
+  char utf[ANDROID_AUTOFILL_TEXT_CAP];
+  if (!jni_copy_string_utf8(env, jtext, utf, sizeof utf)) return;
+  ccord_spin_lock_acquire(&g_jni_lock);
+  size_t tail = (g_autofill_head + g_autofill_count) % ANDROID_AUTOFILL_CAP;
+  android_autofill_item *it = &g_autofill_q[tail];
+  it->field = (int)field;
+  memcpy(it->text, utf, sizeof it->text);
+  if (g_autofill_count < ANDROID_AUTOFILL_CAP) {
+    g_autofill_count++;
+  } else {
+    g_autofill_head = (g_autofill_head + 1u) % ANDROID_AUTOFILL_CAP;
   }
-  (*env)->ReleaseStringUTFChars(env, jtext, utf);
+  ccord_spin_lock_release(&g_jni_lock);
+  memset(utf, 0, sizeof utf);
 }
 
 JNIEXPORT void JNICALL
@@ -481,16 +608,17 @@ Java_org_ccord_android_CCordBridge_nativeOnFilePicked(JNIEnv *env, jclass cls, j
 {
   (void)cls;
   if (!env || !jpath) return;
-  const char *path = (*env)->GetStringUTFChars(env, jpath, nullptr);
-  if (!path) return;
+  char path[ANDROID_FILE_PATH_CAP];
+  if (!jni_copy_string_utf8(env, jpath, path, sizeof path) || !path[0]) return;
   ccord_spin_lock_acquire(&g_jni_lock);
-  ccord_platform *p = g_platform;
-  ccord_spin_lock_release(&g_jni_lock);
-  if (p) {
-    ccord_error err = {0};
-    (void)ccord_platform_inject_drop_file(p, path, &err);
+  size_t tail = (g_file_head + g_file_count) % ANDROID_FILE_Q_CAP;
+  memcpy(g_file_q[tail], path, sizeof g_file_q[tail]);
+  if (g_file_count < ANDROID_FILE_Q_CAP) {
+    g_file_count++;
+  } else {
+    g_file_head = (g_file_head + 1u) % ANDROID_FILE_Q_CAP;
   }
-  (*env)->ReleaseStringUTFChars(env, jpath, path);
+  ccord_spin_lock_release(&g_jni_lock);
 }
 
 JNIEXPORT void JNICALL
@@ -522,12 +650,16 @@ Java_org_ccord_android_CCordBridge_nativeOnVoiceAction(JNIEnv *env, jclass cls, 
 {
   (void)env;
   (void)cls;
+  if (action < 0 || action > CCORD_TRAY_DISCONNECT_VOICE) return;
   ccord_spin_lock_acquire(&g_jni_lock);
-  ccord_platform *p = g_platform;
-  ccord_spin_lock_release(&g_jni_lock);
-  if (p && action >= 0 && action <= CCORD_TRAY_DISCONNECT_VOICE) {
-    ccord_platform_inject_tray_action(p, (ccord_tray_action)action);
+  size_t tail = (g_voice_action_head + g_voice_action_count) % ANDROID_VOICE_ACTION_Q_CAP;
+  g_voice_action_q[tail] = (int)action;
+  if (g_voice_action_count < ANDROID_VOICE_ACTION_Q_CAP) {
+    g_voice_action_count++;
+  } else {
+    g_voice_action_head = (g_voice_action_head + 1u) % ANDROID_VOICE_ACTION_Q_CAP;
   }
+  ccord_spin_lock_release(&g_jni_lock);
 }
 
 JNIEXPORT void JNICALL
@@ -536,9 +668,8 @@ Java_org_ccord_android_CCordBridge_nativeOnNetworkChanged(JNIEnv *env, jclass cl
   (void)env;
   (void)cls;
   ccord_spin_lock_acquire(&g_jni_lock);
-  ccord_platform *p = g_platform;
+  g_network_changed_pending = true;
   ccord_spin_lock_release(&g_jni_lock);
-  if (p) ccord_platform_inject_link_event(p, CCORD_LINK_CHANGED);
 }
 
 JNIEXPORT void JNICALL
@@ -546,7 +677,11 @@ Java_org_ccord_android_CCordBridge_nativeOnCaptureFrame(JNIEnv *env, jclass cls,
                                                         jint height, jint stride)
 {
   (void)cls;
-  if (!env || !buf || width <= 0 || height <= 0 || stride <= 0) return;
+  if (!env || !buf || width <= 0 || height <= 0 || width > 8192 || height > 8192 || stride < width * 4) return;
+  jlong cap = (*env)->GetDirectBufferCapacity(env, buf);
+  if (cap <= 0) return;
+  uint64_t needed = (uint64_t)(height - 1) * (uint64_t)stride + (uint64_t)width * 4u;
+  if (needed > (uint64_t)cap) return;
   const uint8_t *rgba = (const uint8_t *)(*env)->GetDirectBufferAddress(env, buf);
   if (rgba) ccord_capture_android_push_frame(rgba, (int)width, (int)height, (int)stride);
 }

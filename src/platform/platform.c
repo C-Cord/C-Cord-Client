@@ -2148,6 +2148,7 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
     return true;
   }
 #if defined(__ANDROID__)
+  ccord_android_drain_events(p);
   {
     float top = 0, right = 0, bottom = 0, left = 0, ime = 0;
     if (ccord_android_poll_insets(&top, &right, &bottom, &left, &ime)) {
