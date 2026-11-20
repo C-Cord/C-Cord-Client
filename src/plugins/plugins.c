@@ -3174,7 +3174,10 @@ bool ccord_plugins_export_cce(ccord_plugins *m, const char *id, const char *dest
   return ccord_zip_pack_dir(p->dir, dest_path, err_buf, err_cap);
 }
 
-bool ccord_plugins_import_package(ccord_plugins *m, const char *pkg_path, char *err_buf, size_t err_cap)
+static bool import_package_internal(ccord_plugins *m, const char *pkg_path,
+                                    const char *expected_id, const char *expected_version,
+                                    uint64_t expected_perms, bool from_catalog,
+                                    char *err_buf, size_t err_cap)
 {
   if (!m || !pkg_path || !m->has_data_dir) {
     if (err_buf && err_cap) snprintf(err_buf, err_cap, "plugin data directory unavailable");
@@ -3209,13 +3212,33 @@ bool ccord_plugins_import_package(ccord_plugins *m, const char *pkg_path, char *
     return false;
   }
 
-  plugin *existing = find_owner(m, man.id);
   if (strncmp(man.id, "dev.ccord.", 10) == 0) {
     rm_dir_recursive(tmp_dir);
     if (err_buf && err_cap) snprintf(err_buf, err_cap, "cannot overwrite bundled extension");
     return false;
   }
+  if (from_catalog) {
+    if (!expected_id || strcmp(man.id, expected_id) != 0) {
+      rm_dir_recursive(tmp_dir);
+      if (err_buf && err_cap) snprintf(err_buf, err_cap, "package id '%s' does not match catalog id '%s'",
+                                       man.id, expected_id ? expected_id : "");
+      return false;
+    }
+    if (expected_version && expected_version[0] && strcmp(man.version, expected_version) != 0) {
+      rm_dir_recursive(tmp_dir);
+      if (err_buf && err_cap) snprintf(err_buf, err_cap, "package version '%s' does not match catalog version '%s'",
+                                       man.version, expected_version);
+      return false;
+    }
+    // Reject packages declaring restricted permissions absent from the verified catalog listing.
+    if ((man.perms & ~expected_perms) != 0) {
+      rm_dir_recursive(tmp_dir);
+      if (err_buf && err_cap) snprintf(err_buf, err_cap, "package declares permissions absent from catalog entry");
+      return false;
+    }
+  }
 
+  plugin *existing = find_owner(m, man.id);
   char final_dir[PBUF + 128];
   snprintf(final_dir, sizeof final_dir, "%s/%s", inst_root, man.id);
   if (ccord_path_exists(final_dir)) {
@@ -3235,15 +3258,25 @@ bool ccord_plugins_import_package(ccord_plugins *m, const char *pkg_path, char *
     }
     ccord_free(existing->dir);
     existing->dir = nd;
+    if (!from_catalog) {
+      // Manual .cce overwrite must never silently inherit prior Class 2/3 consent.
+      existing->consent_granted = false;
+      existing->consented_perms = 0;
+    }
     on_plugin_reload(m, man.id);
     return true;
   }
   size_t started = 0;
   ccord_arena consent_ar = {.chunk_size = 4096u};
-  const ccord_json *consent_root = consent_parse_file(m, &consent_ar);
+  const ccord_json *consent_root = from_catalog ? consent_parse_file(m, &consent_ar) : nullptr;
   consider_dir(m, final_dir, man.id, consent_root, &started);
   if (consent_ar.head) ccord_arena_free(&consent_ar);
   return true;
+}
+
+bool ccord_plugins_import_package(ccord_plugins *m, const char *pkg_path, char *err_buf, size_t err_cap)
+{
+  return import_package_internal(m, pkg_path, nullptr, nullptr, 0, false, err_buf, err_cap);
 }
 
 static bool cb_export_cce(void *ud, const char *id, const char *dest, char *eb, size_t ec)
@@ -3256,13 +3289,22 @@ static bool cb_import_pkg(void *ud, const char *pkg, char *eb, size_t ec)
   return ccord_plugins_import_package(ud, pkg, eb, ec);
 }
 
+static bool cb_import_verified_cce(void *ud, const char *pkg, const char *expected_id,
+                                   const char *expected_version, uint64_t expected_perms,
+                                   char *eb, size_t ec)
+{
+  return import_package_internal(ud, pkg, expected_id, expected_version, expected_perms, true, eb, ec);
+}
+
 bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, size_t err_cap)
 {
   if (!m || !id || !id[0]) {
     if (err_buf && err_cap) snprintf(err_buf, err_cap, "invalid plugin id");
     return false;
   }
-  plugin *p = find_owner(m, id);
+  char id_copy[65];
+  set_text(id_copy, sizeof id_copy, id);
+  plugin *p = find_owner(m, id_copy);
   if (!p) {
     if (err_buf && err_cap) snprintf(err_buf, err_cap, "plugin not found");
     return false;
@@ -3502,7 +3544,7 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     .ud = m,
     .get_local_plugin = cat_get_local_plugin,
     .list_local_plugins = cat_list_local_plugins,
-    .import_verified_cce = cb_import_pkg,
+    .import_verified_cce = cb_import_verified_cce,
     .revoke_plugin = cat_revoke_plugin,
     .sync_installed_info = cat_sync_installed_info,
     .toast = cat_toast,

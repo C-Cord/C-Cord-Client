@@ -121,12 +121,15 @@ static size_t host_list_local(void *ud, char (*ids_out)[65], size_t cap)
   return 1;
 }
 
-static bool host_import(void *ud, const char *pkg_path, char *err_buf, size_t err_cap)
+static bool host_import(void *ud, const char *pkg_path, const char *expected_id,
+                        const char *expected_version, uint64_t expected_perms,
+                        char *err_buf, size_t err_cap)
 {
-  (void)pkg_path; (void)err_buf; (void)err_cap;
+  (void)pkg_path; (void)expected_id; (void)expected_perms; (void)err_buf; (void)err_cap;
   fake_host *h = ud;
   h->import_calls++;
-  snprintf(h->installed_ver, sizeof h->installed_ver, "1.2.0");
+  snprintf(h->installed_ver, sizeof h->installed_ver, "%s",
+           (expected_version && expected_version[0]) ? expected_version : "1.2.0");
   return true;
 }
 

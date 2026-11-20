@@ -174,6 +174,7 @@ typedef struct app {
   bool voice_fg_deafened;
   ccord_id voice_fg_channel;
   ccord_text_input_kind ime_kind;           // active field hint passed from UI to SDL_StartTextInputWithProperties
+  bool file_dialog_pending;                 // true while a chat "Upload a File" dialog's drop results are arriving
 #if CCORD_LIVE_ACCOUNT
   uint64_t keyring_synced_id;               // last identity upserted into the multi-account keyring
   char keyring_synced_name[128];
@@ -428,8 +429,10 @@ static bool host_open_file_dialog(void *ud, char *out_path, size_t cap)
   app *a = ud;
   if (!a || !a->platform) return false;
   if (out_path && cap > 0) out_path[0] = '\0';
+  a->file_dialog_pending = true;
   ccord_platform_open_file_dialog(a->platform);
   if (out_path && cap > 0 && ccord_platform_pop_drop_file(a->platform, out_path, cap)) {
+    a->file_dialog_pending = false;
     return true;
   }
   return false;
@@ -441,6 +444,7 @@ static void host_open_file_dialog_async(void *ud)
 {
   app *a = ud;
   if (!a || !a->platform) return;
+  a->file_dialog_pending = true;
   ccord_platform_open_file_dialog(a->platform);
 }
 
@@ -3807,6 +3811,7 @@ static void run_interactive(app *a)
     ccord_input_event ev;
     if (ccord_platform_next_event(a->platform, &ev, timeout)) {
       last_input_ms = now_ms(a);
+      bool saw_picker_drop = false;
       do {
         if (ev.type == CCORD_IN_QUIT) {
           a->quit = true;
@@ -3824,24 +3829,32 @@ static void run_interactive(app *a)
             snprintf(dpath, sizeof dpath, "%s", ev.text);
           }
           if (dpath[0]) {
+            bool from_picker = a->file_dialog_pending;
+            if (from_picker) saw_picker_drop = true;
             size_t dl = strlen(dpath);
-            bool is_pkg = (dl > 4 && ccord_strcasecmp(dpath + dl - 4, ".cce") == 0);
+            bool is_pkg = !from_picker && (dl > 4 && ccord_strcasecmp(dpath + dl - 4, ".cce") == 0);
             if (is_pkg && a->contrib) {
               char ebuf[256] = "";
 #if CCORD_WITH_PLUGINS
-              if (!a->plugins && (!a->opt || !a->opt->no_plugins)) plugins_start(a);
-#endif
-              if (ccord_contrib_plugin_import_package(a->contrib, dpath, ebuf, sizeof ebuf)) {
+              if (!a->plugins) {
+                CCORD_LOG_W("ignored dropped plugin package %s: Extensions are disabled in Settings", dpath);
+              } else if (ccord_contrib_plugin_import_package(a->contrib, dpath, ebuf, sizeof ebuf)) {
                 CCORD_LOG_I("imported plugin package: %s", dpath);
               } else {
                 CCORD_LOG_W("failed to import plugin package %s: %s", dpath, ebuf);
               }
+#else
+              (void)ebuf;
+#endif
             } else {
               (void)ccord_ui_attach_file(a->ui, dpath);
             }
             redraw = true;
           }
           continue;
+        }
+        if (ev.type == CCORD_IN_MOUSE_DOWN || ev.type == CCORD_IN_KEY_DOWN) {
+          a->file_dialog_pending = false;
         }
         if (ev.type == CCORD_EV_HOTKEY) {
           // GlobalShortcuts portal: toggle self mute/deafen through the session (no-op when not in voice).
@@ -3922,6 +3935,7 @@ static void run_interactive(app *a)
         }
 #endif
       } while (ccord_platform_next_event(a->platform, &ev, 0));
+      if (saw_picker_drop) a->file_dialog_pending = false;
     }
     if (a->quit) break;
     // Drain native password-manager autofill values (Android AutofillManager -> email/password/2FA fields).

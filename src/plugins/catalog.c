@@ -93,6 +93,7 @@ typedef struct worker_job {
   char *dest_path; // owned by job (JOB_INSTALL only), transferred to worker_result
   char *post_body; // owned by job until worker frees it
   size_t post_len;
+  uint64_t expected_perms;
   ccord_plugin_tier tier;
 } worker_job;
 
@@ -109,6 +110,7 @@ typedef struct worker_result {
   char sha256[65];
   char etag[128];
   char *dest_path; // owned until pump frees after handle_result
+  uint64_t expected_perms;
   ccord_plugin_tier tier;
   char *body;
   size_t body_len;
@@ -670,6 +672,34 @@ static void parse_warnings_array(const ccord_json *warns, cat_item *it)
   }
 }
 
+static bool valid_catalog_id(const char *s)
+{
+  if (!s || !s[0]) return false;
+  size_t n = strlen(s);
+  if (n > 64 || !((s[0] >= 'a' && s[0] <= 'z') || (s[0] >= '0' && s[0] <= '9'))) return false;
+  if (strstr(s, "..")) return false;
+  for (size_t i = 0; i < n; i++) {
+    char c = s[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+    if (!ok) return false;
+  }
+  return true;
+}
+
+static bool valid_catalog_version(const char *s)
+{
+  if (!s || !s[0]) return false;
+  size_t n = strlen(s);
+  if (n > 32 || s[0] == '.' || strstr(s, "..")) return false;
+  for (size_t i = 0; i < n; i++) {
+    char c = s[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == '.' || c == '-' || c == '_' || c == '+';
+    if (!ok) return false;
+  }
+  return true;
+}
+
 // Parse GET /api/v2/plugins slim card response
 static bool parse_discover_page_json(ccord_catalog *cat, const char *json, size_t len, bool append)
 {
@@ -724,7 +754,7 @@ static bool parse_discover_page_json(ccord_catalog *cat, const char *json, size_
     json_str_copy(o, "author_repo_url", it.repo_url, sizeof it.repo_url);
     json_str_copy(o, "version", it.version, sizeof it.version);
     json_str_copy(o, "warning_title", it.warning_title, sizeof it.warning_title);
-    if (!it.id[0] || !it.name[0] || !it.version[0]) continue;
+    if (!valid_catalog_id(it.id) || !it.name[0] || !valid_catalog_version(it.version)) continue;
 
     int64_t tv = 3;
     if (ccord_json_int64(ccord_json_get(o, "tier"), &tv) && tv >= 1 && tv <= 3) it.tier = (ccord_plugin_tier)tv;
@@ -798,7 +828,8 @@ static bool parse_detail_json(const char *json, size_t len, cat_item *out)
   json_str_copy(latest, "download_url", out->download_url, sizeof out->download_url);
   json_str_copy(latest, "sha256", out->sha256, sizeof out->sha256);
   json_str_copy(latest, "changelog", out->changelog, sizeof out->changelog);
-  if (!out->id[0] || !out->name[0] || !out->version[0] || !out->download_url[0] || strlen(out->sha256) != 64) {
+  if (!valid_catalog_id(out->id) || !out->name[0] || !valid_catalog_version(out->version) ||
+      !out->download_url[0] || strlen(out->sha256) != 64) {
     ccord_arena_free(&arena);
     return false;
   }
@@ -869,7 +900,8 @@ static bool parse_updates_check_json(ccord_catalog *cat, const char *json, size_
           json_str_copy(o, "download_url", it->download_url, sizeof it->download_url);
           json_str_copy(o, "sha256", it->sha256, sizeof it->sha256);
           json_str_copy(o, "changelog", it->changelog, sizeof it->changelog);
-          if (!it->id[0] || !it->name[0] || !it->version[0] || !it->download_url[0] || strlen(it->sha256) != 64) {
+          if (!valid_catalog_id(it->id) || !it->name[0] || !valid_catalog_version(it->version) ||
+              !it->download_url[0] || strlen(it->sha256) != 64) {
             continue;
           }
           int64_t tv = 3;
@@ -1170,6 +1202,7 @@ static void worker_main(void *arg)
     res.append_page = job.append_page;
     res.install_after_detail = job.install_after_detail;
     res.is_auto_update = job.is_auto_update;
+    res.expected_perms = job.expected_perms;
     res.tier = job.tier;
     copy_str(res.id, sizeof res.id, job.id);
     copy_str(res.version, sizeof res.version, job.version);
@@ -1231,7 +1264,8 @@ static void enqueue_revocations_fetch(ccord_catalog *cat)
 
 static void queue_install_item(ccord_catalog *cat, const cat_item *it, bool is_auto)
 {
-  if (!cat || !it || !cat->has_data_dir || !it->download_url[0] || strlen(it->sha256) != 64) return;
+  if (!cat || !it || !cat->has_data_dir || !valid_catalog_id(it->id) || !valid_catalog_version(it->version) ||
+      !it->download_url[0] || strlen(it->sha256) != 64) return;
   char tmp_dir[CCORD_PATH_MAX + 32], pdir[CCORD_PATH_MAX + 32];
   snprintf(pdir, sizeof pdir, "%s/plugins", cat->data_dir);
   snprintf(tmp_dir, sizeof tmp_dir, "%s/plugins/.download_tmp", cat->data_dir);
@@ -1239,7 +1273,12 @@ static void queue_install_item(ccord_catalog *cat, const cat_item *it, bool is_a
   mkdir_ok(pdir);
   mkdir_ok(tmp_dir);
 
-  worker_job job = {.kind = JOB_INSTALL, .tier = it->tier, .is_auto_update = is_auto};
+  worker_job job = {
+    .kind = JOB_INSTALL,
+    .tier = it->tier,
+    .is_auto_update = is_auto,
+    .expected_perms = it->perms_mask,
+  };
   copy_str(job.id, sizeof job.id, it->id);
   copy_str(job.url, sizeof job.url, it->download_url);
   copy_str(job.expected_sha256, sizeof job.expected_sha256, it->sha256);
@@ -1720,7 +1759,8 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
     }
     char err_buf[256] = "";
     bool imported = res->dest_path && cat->cbs.import_verified_cce &&
-                    cat->cbs.import_verified_cce(cat->cbs.ud, res->dest_path, err_buf, sizeof err_buf);
+                    cat->cbs.import_verified_cce(cat->cbs.ud, res->dest_path, res->id, res->version,
+                                                 res->expected_perms, err_buf, sizeof err_buf);
     if (res->dest_path) ccord_file_unlink(res->dest_path);
     if (!imported) {
       snprintf(cat->status.status_msg, sizeof cat->status.status_msg,

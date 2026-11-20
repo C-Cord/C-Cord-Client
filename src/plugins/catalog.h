@@ -18,8 +18,10 @@ typedef struct ccord_catalog_host_cbs {
                            uint64_t *consented_perms_out, bool *is_bundled_out);
   // Enumerate locally installed non-bundled plugin IDs for targeted update/revocation checks.
   size_t (*list_local_plugins)(void *ud, char (*ids_out)[65], size_t cap);
-  // Install a SHA-256-verified .cce file on the main thread.
-  bool (*import_verified_cce)(void *ud, const char *pkg_path, char *err_buf, size_t err_cap);
+  // Install a SHA-256-verified .cce file on the main thread, enforcing expected catalog id/version/perms.
+  bool (*import_verified_cce)(void *ud, const char *pkg_path, const char *expected_id,
+                              const char *expected_version, uint64_t expected_perms,
+                              char *err_buf, size_t err_cap);
   // Stop & disable a plugin whose installed SHA-256 was revoked for malware.
   void (*revoke_plugin)(void *ud, const char *id, const char *reason);
   // Re-publish installed plugin metadata (tier, warnings, update_version, auto_update) into contrib.
