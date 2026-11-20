@@ -77,7 +77,7 @@ static ccord_status seen_add(seen_set *sl, const char *section, size_t sn, const
   size_t flen = sn + 1u + kn;
   char buf[INI_NAME_MAX * 2u + 2u];
   memcpy(buf, section, sn);
-  buf[sn] = '.';
+  buf[sn] = '\x1f';
   memcpy(buf + sn + 1u, key, kn);
   buf[flen] = '\0';
 

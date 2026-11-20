@@ -99,6 +99,10 @@ static void test_ini(void)
   CT_CHECK(ccord_ini_parse(dup, strlen(dup), count_visit, &n, &err) == CCORD_ERR_PARSE);
   const char *orphan = "k = 1\n";
   CT_CHECK(ccord_ini_parse(orphan, strlen(orphan), count_visit, &n, &err) == CCORD_ERR_PARSE);
+  // Regression (Medium #19): dotted section/key names must not collide across section boundaries.
+  n = 0;
+  const char *dotted = "[a]\nb.c = 1\n[a.b]\nc = 2\n";
+  CT_CHECK(ccord_ini_parse(dotted, strlen(dotted), count_visit, &n, &err) == CCORD_OK && n == 2);
 }
 
 static void test_utf8_and_paths(void)
