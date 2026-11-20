@@ -912,6 +912,27 @@ static bool rest_method_valid(ccord_rest_method method)
 // engine, no netrc, TLS verified. Redirects are followed (5 hops) but only to https: a `file:`, `ftp:` or `http:`
 // target ends the job with CURLE_UNSUPPORTED_PROTOCOL. The two test_allow_http_streams settings are the only place
 // http is accepted, so a loopback server can be used. CURLOPT_RANGE is re-sent on every hop.
+static bool ipv4_is_blocked(uint32_t ip)
+{
+  // 0.0.0.0/8 (unspecified / "this network")
+  if ((ip & 0xFF000000u) == 0x00000000u) return true;
+  // 10.0.0.0/8 (RFC 1918)
+  if ((ip & 0xFF000000u) == 0x0A000000u) return true;
+  // 100.64.0.0/10 (RFC 6598 CGNAT)
+  if ((ip & 0xFFC00000u) == 0x64400000u) return true;
+  // 127.0.0.0/8 (loopback)
+  if ((ip & 0xFF000000u) == 0x7F000000u) return true;
+  // 169.254.0.0/16 (link-local / cloud metadata)
+  if ((ip & 0xFFFF0000u) == 0xA9FE0000u) return true;
+  // 172.16.0.0/12 (RFC 1918)
+  if ((ip & 0xFFF00000u) == 0xAC100000u) return true;
+  // 192.168.0.0/16 (RFC 1918)
+  if ((ip & 0xFFFF0000u) == 0xC0A80000u) return true;
+  // 224.0.0.0/4 (multicast) and 240.0.0.0/4 (reserved / broadcast)
+  if ((ip & 0xE0000000u) == 0xE0000000u) return true;
+  return false;
+}
+
 static curl_socket_t rest_opensocket_cb(void *clientp, curlsocktype purpose, struct curl_sockaddr *address)
 {
   (void)clientp;
@@ -920,34 +941,43 @@ static curl_socket_t rest_opensocket_cb(void *clientp, curlsocktype purpose, str
     struct sockaddr_in sin;
     memcpy(&sin, &address->addr, sizeof sin);
     uint32_t ip = ntohl(sin.sin_addr.s_addr);
-    // 127.0.0.0/8
-    if ((ip & 0xFF000000u) == 0x7F000000u) return CURL_SOCKET_BAD;
-    // 10.0.0.0/8
-    if ((ip & 0xFF000000u) == 0x0A000000u) return CURL_SOCKET_BAD;
-    // 172.16.0.0/12
-    if ((ip & 0xFFF00000u) == 0xAC100000u) return CURL_SOCKET_BAD;
-    // 192.168.0.0/16
-    if ((ip & 0xFFFF0000u) == 0xC0A80000u) return CURL_SOCKET_BAD;
-    // 169.254.0.0/16 (link-local)
-    if ((ip & 0xFFFF0000u) == 0xA9FE0000u) return CURL_SOCKET_BAD;
-    // 0.0.0.0 (unspecified)
-    if (ip == 0) return CURL_SOCKET_BAD;
+    if (ipv4_is_blocked(ip)) return CURL_SOCKET_BAD;
   } else if (address->family == AF_INET6 && address->addrlen >= sizeof(struct sockaddr_in6)) {
     struct sockaddr_in6 sin6;
     memcpy(&sin6, &address->addr, sizeof sin6);
-    const uint8_t *b = sin6.sin6_addr.s6_addr;
-    // ::1 loopback
-    if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 &&
-        b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 &&
-        b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 0 &&
-        b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 1) return CURL_SOCKET_BAD;
-    // :: unspecified
-    if (b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] == 0 &&
-        b[4] == 0 && b[5] == 0 && b[6] == 0 && b[7] == 0 &&
-        b[8] == 0 && b[9] == 0 && b[10] == 0 && b[11] == 0 &&
-        b[12] == 0 && b[13] == 0 && b[14] == 0 && b[15] == 0) return CURL_SOCKET_BAD;
+    const uint8_t *a = sin6.sin6_addr.s6_addr;
+    bool all_zero_12 = true;
+    for (int i = 0; i < 12; i++) {
+      if (a[i] != 0) { all_zero_12 = false; break; }
+    }
+    // :: unspecified and ::1 loopback
+    if (all_zero_12 && a[12] == 0 && a[13] == 0 && a[14] == 0 && (a[15] == 0 || a[15] == 1)) {
+      return CURL_SOCKET_BAD;
+    }
+    // ::ffff:0:0/96 IPv4-mapped IPv6
+    bool is_v4mapped = true;
+    for (int i = 0; i < 10; i++) {
+      if (a[i] != 0) { is_v4mapped = false; break; }
+    }
+    if (is_v4mapped && a[10] == 0xff && a[11] == 0xff) {
+      uint32_t v4 = ((uint32_t)a[12] << 24) | ((uint32_t)a[13] << 16) | ((uint32_t)a[14] << 8) | (uint32_t)a[15];
+      if (ipv4_is_blocked(v4)) return CURL_SOCKET_BAD;
+    }
+    // 64:ff9b::/96 NAT64 well-known prefix
+    if (a[0] == 0x00 && a[1] == 0x64 && a[2] == 0xff && a[3] == 0x9b &&
+        a[4] == 0 && a[5] == 0 && a[6] == 0 && a[7] == 0 &&
+        a[8] == 0 && a[9] == 0 && a[10] == 0 && a[11] == 0) {
+      uint32_t v4 = ((uint32_t)a[12] << 24) | ((uint32_t)a[13] << 16) | ((uint32_t)a[14] << 8) | (uint32_t)a[15];
+      if (ipv4_is_blocked(v4)) return CURL_SOCKET_BAD;
+    }
+    // fc00::/7 Unique Local Address (ULA)
+    if ((a[0] & 0xfe) == 0xfc) return CURL_SOCKET_BAD;
     // fe80::/10 link-local
-    if (b[0] == 0xfe && (b[1] & 0xc0) == 0x80) return CURL_SOCKET_BAD;
+    if (a[0] == 0xfe && (a[1] & 0xc0) == 0x80) return CURL_SOCKET_BAD;
+    // ff00::/8 multicast
+    if (a[0] == 0xff) return CURL_SOCKET_BAD;
+  } else {
+    return CURL_SOCKET_BAD;
   }
   return socket(address->family, address->socktype, address->protocol);
 }
