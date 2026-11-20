@@ -3929,6 +3929,8 @@ static ccord_status live_request_history(ccord_transport *t, ccord_id channel_id
         ccord_error cerr;
         if (ccord_live_json_history(cbody, clen, channel_id, &ev, &cerr) == CCORD_OK) {
           (void)live_push(l, &ev);
+        } else {
+          ccord_live_event_free(&ev);
         }
         ccord_free(cbody);
       }

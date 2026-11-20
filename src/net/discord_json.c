@@ -7242,6 +7242,7 @@ ccord_status ccord_live_json_history(const char *json, size_t len, ccord_id chan
   out->ev.users = users;
   out->ev.user_count = ukept;
 done:
+  if (st != CCORD_OK) ccord_live_event_free(out);
   ccord_arena_free(&scratch);
   return st;
 }
