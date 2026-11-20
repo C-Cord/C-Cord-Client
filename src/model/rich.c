@@ -919,7 +919,7 @@ static bool type_is(const char *mime, const char *prefix)
 
 bool ccord_attachment_is_image(const ccord_attachment *a)
 {
-  static const char *const exts[] = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "avif", nullptr};
+  static const char *const exts[] = {"png", "jpg", "jpeg", "gif", "webp", "apng", "bmp", "avif", nullptr};
   if (!a) return false;
   if (a->content_type && a->content_type[0] != '\0') return type_is(a->content_type, "image/");
   return ext_is(a->filename, exts);

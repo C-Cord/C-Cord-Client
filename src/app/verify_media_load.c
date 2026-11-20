@@ -838,9 +838,11 @@ int ccord_verify_media_load_slice(const ccord_verify_ui_parity_ctx *ctx)
   if (rc) return rc;
   ml_checks++;
 
-  // 2. A GIFV embed (a Tenor link): the clip plays from video.proxy_url, its still comes from the thumbnail.
+  // 2. A GIFV embed (a Tenor link, including the provider object Discord always sends): the clip plays framelessly
+  // from video.proxy_url, its still comes from the thumbnail, and it is never rendered as a video card.
   (void)snprintf(emb, sizeof emb,
                  "{\"type\":\"gifv\",\"url\":\"https://tenor.com/view/party-gif-1\","
+                 "\"provider\":{\"name\":\"Tenor\",\"url\":\"https://tenor.co\"},"
                  "\"thumbnail\":{\"url\":\"https://example.org/og/card.jpg\",\"proxy_url\":\"%s\",\"width\":600,"
                  "\"height\":600},"
                  "\"video\":{\"url\":\"https://media.tenor.com/Zk3x9PqLmNoAAAPo/party.mp4\",\"proxy_url\":\"%s\","

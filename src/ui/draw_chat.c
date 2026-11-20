@@ -2402,6 +2402,163 @@ static bool embed_is_extra_gallery_image(const ccord_embed *head, const ccord_em
   return true;
 }
 
+static bool url_host_in_list(const char *url, const char *const *hosts, size_t nhosts)
+{
+  if (!url || !url[0]) return false;
+  const char *p = nullptr;
+  if (strncasecmp(url, "https://", 8) == 0) p = url + 8;
+  else if (strncasecmp(url, "http://", 7) == 0) p = url + 7;
+  else return false;
+  const char *end = p;
+  while (*end && *end != '/' && *end != '?' && *end != '#') end++;
+  const char *colon = memchr(p, ':', (size_t)(end - p));
+  if (colon) end = colon;
+  size_t hlen = (size_t)(end - p);
+  if (hlen == 0) return false;
+  for (size_t i = 0; i < nhosts; i++) {
+    if (strlen(hosts[i]) == hlen && strncasecmp(p, hosts[i], hlen) == 0) return true;
+  }
+  return false;
+}
+
+// Formats that play inline as looping animated images (and must not be flattened to a WebP still by the proxy).
+static bool url_is_anim_image(const char *u)
+{
+  if (!u || !u[0]) return false;
+  return ui_url_path_ends(u, ".gif") || ui_url_path_ends(u, ".webp") || ui_url_path_ends(u, ".apng") ||
+         ui_url_path_ends(u, ".gifv");
+}
+
+static bool embed_is_gif_provider(const ccord_embed *e)
+{
+  if (!e) return false;
+  if (e->provider && e->provider[0]) {
+    static const char *const k_provs[] = {"Tenor", "GIPHY", "Klipy", "Gfycat", "RedGIFs"};
+    for (size_t i = 0; i < sizeof k_provs / sizeof k_provs[0]; i++) {
+      if (strcasecmp(e->provider, k_provs[i]) == 0) return true;
+    }
+  }
+  static const char *const k_gif_hosts[] = {
+    "tenor.com", "www.tenor.com", "c.tenor.com", "media.tenor.com", "media1.tenor.com", "media2.tenor.com",
+    "media.tenor.co", "giphy.com", "www.giphy.com", "media.giphy.com", "media0.giphy.com", "media1.giphy.com",
+    "media2.giphy.com", "media3.giphy.com", "media4.giphy.com", "i.giphy.com", "gph.is",
+    "klipy.com", "www.klipy.com", "static.klipy.com", "media.klipy.com",
+  };
+  return url_host_in_list(e->url, k_gif_hosts, sizeof k_gif_hosts / sizeof k_gif_hosts[0]) ||
+         url_host_in_list(e->video.url, k_gif_hosts, sizeof k_gif_hosts / sizeof k_gif_hosts[0]) ||
+         url_host_in_list(e->image.url, k_gif_hosts, sizeof k_gif_hosts / sizeof k_gif_hosts[0]) ||
+         url_host_in_list(e->thumbnail.url, k_gif_hosts, sizeof k_gif_hosts / sizeof k_gif_hosts[0]);
+}
+
+// Rich text chrome other than `provider`: Tenor/GIPHY/Klipy/Imgur GIFV and image embeds routinely carry a provider
+// name ("Tenor", "GIPHY", "Klipy") while still rendering framelessly in Discord.
+static bool embed_has_rich_chrome(const ccord_embed *e)
+{
+  if (!e) return false;
+  return (e->title && e->title[0]) || (e->description && e->description[0]) || (e->author_name && e->author_name[0]) ||
+         (e->footer_text && e->footer_text[0]) || e->timestamp_ms > 0 || e->field_count > 0;
+}
+
+static bool embed_has_visual_media(const ccord_embed *e)
+{
+  if (!e) return false;
+  return (e->video.proxy_url && e->video.proxy_url[0]) || (e->video.url && e->video.url[0]) ||
+         (e->image.proxy_url && e->image.proxy_url[0]) || (e->image.url && e->image.url[0]) ||
+         (e->thumbnail.proxy_url && e->thumbnail.proxy_url[0]) || (e->thumbnail.url && e->thumbnail.url[0]);
+}
+
+// True for GIFs and looping GIF-like embeds (Tenor/GIPHY/Klipy/Imgur gifv, direct .gif/.webp/.apng embeds, or
+// GIF-provider video embeds) that should play framelessly without video-player chrome.
+static bool embed_is_gif_like(const ccord_embed *e)
+{
+  if (!e || !embed_has_visual_media(e)) return false;
+  if (e->kind == CCORD_EMBED_GIFV) return true;
+  if (embed_has_rich_chrome(e)) return false;
+  if (e->kind == CCORD_EMBED_IMAGE) {
+    return url_is_anim_image(e->url) || url_is_anim_image(e->image.url) || url_is_anim_image(e->image.proxy_url) ||
+           url_is_anim_image(e->thumbnail.url) || url_is_anim_image(e->thumbnail.proxy_url) || embed_is_gif_provider(e);
+  }
+  if (e->kind == CCORD_EMBED_VIDEO) {
+    return embed_is_gif_provider(e) || url_is_anim_image(e->url) || url_is_anim_image(e->video.url) ||
+           url_is_anim_image(e->video.proxy_url) || url_is_anim_image(e->thumbnail.url) || url_is_anim_image(e->image.url);
+  }
+  return false;
+}
+
+// Pure frameless media embed (GIF/GIFV/animated image or bare image with no rich text frame).
+static bool embed_is_bare_media(const ccord_embed *e)
+{
+  if (!e || !embed_has_visual_media(e)) return false;
+  if (embed_is_gif_like(e)) return true;
+  return e->kind == CCORD_EMBED_IMAGE && !embed_has_rich_chrome(e);
+}
+
+static bool url_slice_matches_loose(const char *s, size_t slen, const char *cand)
+{
+  if (!s || slen == 0 || !cand || !cand[0]) return false;
+  const char *sp = s;
+  size_t sn = slen;
+  if (sn >= 8 && strncasecmp(sp, "https://", 8) == 0) { sp += 8; sn -= 8; }
+  else if (sn >= 7 && strncasecmp(sp, "http://", 7) == 0) { sp += 7; sn -= 7; }
+  else return false;
+  const char *cp = cand;
+  size_t cn = strlen(cp);
+  if (cn >= 8 && strncasecmp(cp, "https://", 8) == 0) { cp += 8; cn -= 8; }
+  else if (cn >= 7 && strncasecmp(cp, "http://", 7) == 0) { cp += 7; cn -= 7; }
+  else return false;
+  if (sn > 0 && sp[sn - 1] == '/') sn--;
+  if (cn > 0 && cp[cn - 1] == '/') cn--;
+  if (sn != cn || sn == 0) return false;
+  // Scheme-stripped host is case-insensitive; path/query are exact.
+  const char *s_slash = memchr(sp, '/', sn);
+  const char *c_slash = memchr(cp, '/', cn);
+  size_t s_hlen = s_slash ? (size_t)(s_slash - sp) : sn;
+  size_t c_hlen = c_slash ? (size_t)(c_slash - cp) : cn;
+  if (s_hlen != c_hlen) return false;
+  if (strncasecmp(sp, cp, s_hlen) != 0) return false;
+  return memcmp(sp + s_hlen, cp + c_hlen, sn - s_hlen) == 0;
+}
+
+// Hides the raw link text when a message consists solely of a single URL whose embed renders as a frameless GIF/media
+// item (like Discord does for Tenor/GIPHY/Klipy/direct-GIF posts with no accompanying text).
+static bool message_should_hide_bare_link(const ccord_ui *ui, const ccord_message *m)
+{
+  if (!ui || !m || !m->content || !m->content[0] || !m->rich) return false;
+  if (!ui->settings_embeds) return false;
+  const ccord_message_rich *rich = m->rich;
+  if ((rich->flags & (CCORD_MSGFLAG_SUPPRESS_EMBEDS | CCORD_MSGFLAG_IS_COMPONENTS_V2)) != 0) return false;
+  if (ccord_message_type_is_system(rich->type) || rich->forward.present) return false;
+  if (rich->embed_count != 1u) return false;
+
+  const char *s = m->content;
+  size_t slen = strlen(s);
+  while (slen > 0 && (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')) { s++; slen--; }
+  while (slen > 0 && (s[slen - 1] == ' ' || s[slen - 1] == '\t' || s[slen - 1] == '\r' || s[slen - 1] == '\n')) slen--;
+  if (slen <= 8u) return false;
+  if (strncasecmp(s, "https://", 8) != 0 && strncasecmp(s, "http://", 7) != 0) return false;
+  for (size_t i = 0; i < slen; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (c <= 0x20u || c == 0x7fu) return false;   // extra words / whitespace -> keep message text
+  }
+
+  const ccord_embed *e = &rich->embeds[0];
+  if (embed_is_gif_like(e)) return true;
+  if (embed_is_bare_media(e)) {
+    return url_slice_matches_loose(s, slen, e->url) || url_slice_matches_loose(s, slen, e->image.url) ||
+           url_slice_matches_loose(s, slen, e->thumbnail.url);
+  }
+  return false;
+}
+
+static bool decor_has_body_cards(const decor_info *d)
+{
+  if (!d) return false;
+  for (size_t i = 0; i < d->nparts; i++) {
+    if (d->parts[i].kind != DECOR_REPLY) return true;
+  }
+  return false;
+}
+
 static void decor_add_media(const ccord_ui *ui, decor_info *d, const ccord_attachment *atts, size_t natt,
                             const ccord_embed *embs, size_t nemb, const ccord_msg_sticker *stks, size_t nstk)
 {
@@ -2531,7 +2688,7 @@ static void decor_scan(const ccord_ui *ui, const ccord_message *m, bool compact,
     } else {
       body_put(d, &out, content, strlen(content));
     }
-  } else {
+  } else if (!message_should_hide_bare_link(ui, m)) {
     body_put(d, &out, content, strlen(content));
   }
   if (rich) {
@@ -3028,7 +3185,8 @@ static float measure_row(size_t i, float width, void *ud)
   decor_scan(ui, m, compact, &d);
   float lh = ui_line_h(ui, M(font_size_base));
   float wrap = content_wrap(ui, width);
-  float body_h = md_body_walk(ui, c->r, d.body, d.body_len, 0.0f, 0.0f, wrap, COL(text_normal), false);
+  bool no_body = d.body_len == 0 && decor_has_body_cards(&d);
+  float body_h = no_body ? 0.0f : maxf(md_body_walk(ui, c->r, d.body, d.body_len, 0.0f, 0.0f, wrap, COL(text_normal), false), lh);
   float top = compact ? M(message_line_gap)
                       : (ui_messages_compact(ui)
                              ? M(message_line_gap) + (M(message_group_gap) - M(message_line_gap)) * 0.35f
@@ -3043,7 +3201,7 @@ static float measure_row(size_t i, float width, void *ud)
   float div_h = has_div ? UI_CHAT_DIVIDER_H : 0.0f;
   float card_w = maxf(width - M(message_text_x) - M(message_pad_x), 40.0f);
   float blocked_strip = (br.blocked && br.first) ? UI_BLOCKED_ROW_H : 0.0f;
-  float total_h = intro + div_h + blocked_strip + top + decor_reply_h(&d) + header + maxf(body_h, lh) +
+  float total_h = intro + div_h + blocked_strip + top + decor_reply_h(&d) + header + body_h +
                   decor_total_h(ui, c->r, &d, card_w) + reactions + send_status + ephem + M(message_line_gap) + tpad;
   if (cc && m->id != CCORD_ID_NONE) {
     size_t victim = 0;
@@ -3249,11 +3407,28 @@ static const char *embed_video_url(const ccord_embed *e)
   return (ui_url_path_ends(u, ".mp4") || ui_url_path_ends(u, ".webm") || ui_url_path_ends(u, ".mov")) ? u : "";
 }
 
+// Looping clip URL for a GIF/GIFV embed, plus an optional origin fallback when proxy_url fails.
+static const char *embed_gif_clip_url(const ccord_embed *e, const char **fallback_out)
+{
+  if (fallback_out) *fallback_out = "";
+  if (!e) return "";
+  const char *vproxy = (e->video.proxy_url && e->video.proxy_url[0]) ? e->video.proxy_url : "";
+  const char *vurl = (e->video.url && e->video.url[0]) ? e->video.url : "";
+  bool vurl_ok = vurl[0] && (e->kind == CCORD_EMBED_GIFV || ui_url_path_ends(vurl, ".mp4") ||
+                             ui_url_path_ends(vurl, ".webm") || ui_url_path_ends(vurl, ".mov") ||
+                             ui_url_path_ends(vurl, ".m4v") || url_is_anim_image(vurl));
+  if (vproxy[0]) {
+    if (fallback_out && vurl_ok && strcmp(vproxy, vurl) != 0) *fallback_out = vurl;
+    return vproxy;
+  }
+  return vurl_ok ? vurl : "";
+}
+
 // Formats the media proxy must not convert to a WebP still.
 static bool att_keeps_format(const ccord_attachment *a)
 {
   const char *ct = a->content_type ? a->content_type : "";
-  return strstr(ct, "gif") || strstr(ct, "webp") || strstr(ct, "apng") || ui_url_path_ends(attachment_url(a), ".gif");
+  return strstr(ct, "gif") || strstr(ct, "webp") || strstr(ct, "apng") || url_is_anim_image(attachment_url(a));
 }
 
 // What to load for an attachment shown inline: the media proxy's screen-sized copy when there is one (a phone
@@ -3509,7 +3684,7 @@ static void draw_voice_message_card(ccord_ui *ui, ccord_renderer *r, const decor
 
 // A video the inline player can show in a picture box.
 typedef struct video_src {
-  const char *url;         // the file to play; "" = not playable here (the box is then only a poster)
+  const char *url;         // the file to play; "" = poster-only link
   const char *poster;      // still shown before playback, "" = none
   const char *poster_alt;  // asked for when `poster` fails to load
   ccord_id id;             // player identity (attachment id, or a hash for embeds)
@@ -3759,15 +3934,35 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
   const char *vid_url = embed_video_url(e);
   bool has_vid = (e->video.url && e->video.url[0]) || (e->video.proxy_url && e->video.proxy_url[0]);
 
-  // Pure image / GIFV embed with no rich text frame.
-  if ((e->kind == CCORD_EMBED_IMAGE || e->kind == CCORD_EMBED_GIFV) &&
-      !has_title && !has_desc && !has_prov && !has_auth && !has_foot && e->field_count == 0) {
+  // Pure image / GIF / GIFV embed rendered framelessly (no embed border, provider header, or video-card chrome).
+  if (embed_is_bare_media(e)) {
+    bool is_gif = embed_is_gif_like(e);
+    const char *clip_fb = "";
+    const char *clip_url = is_gif ? embed_gif_clip_url(e, &clip_fb) : "";
     const char *pic = img_url[0] ? img_url : (thumb_url[0] ? thumb_url : (e->url ? e->url : ""));
-    uint32_t mw = e->image.width ? e->image.width : e->thumbnail.width;
-    uint32_t mh = e->image.height ? e->image.height : e->thumbnail.height;
-    if (mw == 0 || mh == 0) {
+    uint32_t mw = 0, mh = 0;
+    if (is_gif && clip_url[0] && e->video.width > 0 && e->video.height > 0) {
       mw = e->video.width;
       mh = e->video.height;
+    } else if (e->image.width > 0 && e->image.height > 0) {
+      mw = e->image.width;
+      mh = e->image.height;
+    } else if (e->thumbnail.width > 0 && e->thumbnail.height > 0) {
+      mw = e->thumbnail.width;
+      mh = e->thumbnail.height;
+    } else {
+      mw = e->video.width;
+      mh = e->video.height;
+    }
+    if ((mw == 0 || mh == 0) && r) {
+      int tw_px = 0, th_px = 0;
+      const char *probe = (clip_url[0] && ccord_render_has_texture(r, clip_url, &tw_px, &th_px))
+                            ? clip_url
+                            : (pic[0] && ccord_render_has_texture(r, pic, &tw_px, &th_px) ? pic : nullptr);
+      if (probe && tw_px > 4 && th_px > 4) {
+        mw = (uint32_t)tw_px;
+        mh = (uint32_t)th_px;
+      }
     }
     float max_w = clampf(w, 80.0f, 400.0f), max_h = 300.0f;
     float iw = fminf(max_w, 260.0f), ih = 140.0f;
@@ -3779,28 +3974,40 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
     if (draw) {
       ccord_rect box = {x, y, iw, ih};
       ccord_draw_rrect(r, box, 6.0f, COL(bg_secondary));
-      // A "GIF" from Tenor, Klipy or Giphy is a short silent video: it plays in place like one, over its still.
-      bool gifv = e->kind == CCORD_EMBED_GIFV && vid_url[0];
+      // A "GIF" from Tenor, Klipy, Giphy or Imgur is a short silent clip or animated image: it plays inline as-is.
+      bool gifv = is_gif && clip_url[0] != '\0';
       bool animate = ui_media_animate(ui, box);
       char sbuf[UI_URL_MAX];
       const char *still = pic;
-      if (ui_media_sized_url(pic, mw, mh, 800u, 600u, ui_url_path_ends(pic, ".gif"), sbuf, sizeof sbuf)) still = sbuf;
+      if (ui_media_sized_url(pic, mw, mh, 800u, 600u, (is_gif && !gifv) || url_is_anim_image(pic), sbuf, sizeof sbuf)) {
+        still = sbuf;
+      }
       const char *shown = nullptr;
-      if (gifv && animate && ui_ensure_media_ex(ui, r, vid_url, 480, true)) shown = vid_url;
+      const char *active_clip = "";
+      if (gifv && animate) {
+        if (ui_ensure_media_ex(ui, r, clip_url, 480, true)) {
+          shown = clip_url;
+          active_clip = clip_url;
+        } else if (clip_fb[0] && ui_media_failed(ui, clip_url) && ui_ensure_media_ex(ui, r, clip_fb, 480, true)) {
+          shown = clip_fb;
+          active_clip = clip_fb;
+        }
+      }
       bool moving = shown != nullptr;
       if (!shown) shown = media_pick(ui, r, still, pic);
       if (shown) {
+        if (!moving && animate && r && ccord_render_texture_is_animated(r, shown, nullptr, nullptr)) moving = true;
         ccord_draw_texture_cover(r, shown, box, 6.0f, 255, animate);
         ui->dbg_attachment_textures_drawn++;
       }
-      if (e->kind == CCORD_EMBED_GIFV && !moving) {
+      if (is_gif && !moving) {
         ccord_text_style gs = ui_style(ui, CCORD_FONT_BOLD, 10.0f, COL(text_header));
         ccord_vec2 gt = ccord_text_measure(r, "GIF", 3, &gs, 0.0f);
         ccord_rect gp = {box.x + 8.0f, box.y + 8.0f, gt.x + 10.0f, 16.0f};
         ccord_draw_rrect(r, gp, 3.0f, ui_alpha(COL(overlay), 0.75f));
         ccord_text_draw(r, "GIF", 3, gp.x + 5.0f, gp.y + (gp.h - gt.y) * 0.5f, &gs, 0.0f);
       }
-      const char *big = gifv ? vid_url : pic;
+      const char *big = active_clip[0] ? active_clip : (gifv ? clip_url : pic);
       if (big[0]) {
         const char *one_url = big;
         record_img_hit(ui, box, &one_url, 1u, 0u);
@@ -3868,7 +4075,7 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
       char sbuf[UI_URL_MAX];
       const char *small = thumb_url;
       if (ui_media_sized_url(thumb_url, e->thumbnail.width, e->thumbnail.height, 160u, 160u,
-                             ui_url_path_ends(thumb_url, ".gif"), sbuf, sizeof sbuf)) {
+                             url_is_anim_image(thumb_url), sbuf, sizeof sbuf)) {
         small = sbuf;
       }
       const char *shown = media_pick(ui, r, small, thumb_url);
@@ -4019,7 +4226,7 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
       for (size_t k = 0; k < cnt; k++) {
         tmp_atts[k].url = embed_media_url(&p->emb[k].image);
         tmp_atts[k].proxy_url = tmp_atts[k].url;   // lets the gallery ask the proxy for a tile-sized copy
-        tmp_atts[k].content_type = ui_url_path_ends(tmp_atts[k].url, ".gif") ? "image/gif" : "image/png";
+        tmp_atts[k].content_type = url_is_anim_image(tmp_atts[k].url) ? "image/gif" : "image/png";
         tmp_atts[k].width = p->emb[k].image.width;
         tmp_atts[k].height = p->emb[k].image.height;
       }
@@ -4045,7 +4252,7 @@ static float embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *
         ccord_draw_rrect(r, ir, 4.0f, COL(bg_tertiary));
         char sbuf[UI_URL_MAX];
         const char *sized = big_url;
-        if (ui_media_sized_url(big_url, big_m->width, big_m->height, 800u, 600u, ui_url_path_ends(big_url, ".gif"),
+        if (ui_media_sized_url(big_url, big_m->width, big_m->height, 800u, 600u, url_is_anim_image(big_url),
                                sbuf, sizeof sbuf)) {
           sized = sbuf;
         }
@@ -5083,7 +5290,8 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
   if (m->send_state == CCORD_MSG_SEND_PENDING) body_c = ui_alpha(COL(text_normal), 0.55f);
   else if (m->send_state == CCORD_MSG_SEND_FAILED) body_c = COL(danger);
   if (compact && m->tts) ui->dbg_tts_badges++;   // the "(tts)" body marker is this row's badge
-  float body_h = md_body_walk(ui, r, d.body, d.body_len, text_x, content_y, wrap, body_c, true);
+  bool no_body = d.body_len == 0 && decor_has_body_cards(&d);
+  float body_h = no_body ? 0.0f : md_body_walk(ui, r, d.body, d.body_len, text_x, content_y, wrap, body_c, true);
   ui->current_drawing_msg_id = CCORD_ID_NONE;
   float card_y = content_y + body_h + M(message_line_gap) * 0.5f;
   float card_w = maxf(ma->w - M(message_text_x) - M(message_pad_x), 40.0f);
@@ -12584,7 +12792,9 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
 
     ui_popup_begin(ui, r, "lightbox", 0, UI_MODAL_MS, 8.0f);
     ccord_draw_rect(r, (ccord_rect){0, 0, ui->win_w, ui->win_h}, COL(overlay));
-    (void)ui_ensure_media(ui, r, ui->lightbox_url);
+    bool lb_vid = ui_url_path_ends(ui->lightbox_url, ".mp4") || ui_url_path_ends(ui->lightbox_url, ".webm") ||
+                  ui_url_path_ends(ui->lightbox_url, ".mov") || ui_url_path_ends(ui->lightbox_url, ".m4v");
+    (void)ui_ensure_media_ex(ui, r, ui->lightbox_url, 0, lb_vid);
     int tw = 0, th = 0;
     bool has_tex = ccord_render_has_texture(r, ui->lightbox_url, &tw, &th);
     float max_w = clampf(ui->win_w * 0.74f, 220.0f, 920.0f);

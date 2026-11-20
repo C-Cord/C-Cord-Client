@@ -6614,9 +6614,10 @@ static void test_embed_media_sources_video_and_retry(void)
   CT_CHECK(page_link);
   remove_message(ch, mid);
 
-  // 4. A GIF embed is a silent looping video: it plays in place from the proxied file, and the lightbox opens that.
+  // 4. GIF embeds (including Tenor with `provider = "Tenor"` as real Discord sends): play framelessly in place
+  // (never as a video card), hide the bare link when no other text is posted, and keep text when other text exists.
   ccord_embed gifv = {
-    .kind = CCORD_EMBED_GIFV, .url = "https://klipy.com/gifs/cat-1",
+    .kind = CCORD_EMBED_GIFV, .provider = "Tenor", .url = "https://tenor.com/view/cat-1",
     .thumbnail = {.url = "https://static.klipy.com/cat.png",
                   .proxy_url = "https://images-ext-1.discordapp.net/external/g/https/static.klipy.com/cat.png",
                   .width = 498, .height = 280},
@@ -6625,7 +6626,7 @@ static void test_embed_media_sources_video_and_retry(void)
               .width = 498, .height = 280},
   };
   ccord_message_rich r4 = {.present = CCORD_RICH_ALL, .embeds = &gifv, .embed_count = 1};
-  mid = append_rich_message(ch, "", &r4);
+  mid = append_rich_message(ch, "https://tenor.com/view/cat-1", &r4);
   mouse(CCORD_IN_MOUSE_MOVE, 0, 1270.0f, 40.0f);
   frame(4);
   const char *gif_vid = "https://images-ext-1.discordapp.net/external/g/https/static.klipy.com/cat.mp4";
@@ -6639,8 +6640,58 @@ static void test_embed_media_sources_video_and_retry(void)
   }
   CT_CHECK(top >= 1);   // it moves
   CT_CHECK(F.ui->nimg_hits == 1 && strcmp(F.ui->img_hits[0].urls[0], gif_vid) == 0);
-  CT_CHECK(F.ui->nmedia_hits == 0);   // no player chrome on a GIF
+  CT_CHECK(F.ui->nmedia_hits == 0);   // no video-card chrome on a Tenor GIF
+  {
+    const ccord_message *gm = ccord_store_find_message(F.store, ch, mid);
+    char disp[256], raw[256];
+    CT_CHECK(gm && ui_message_display_body(F.ui, gm, disp, sizeof disp) == 0 && disp[0] == '\0');
+    CT_CHECK(gm && ui_message_clean_body(F.ui, gm, raw, sizeof raw) > 0 &&
+             strcmp(raw, "https://tenor.com/view/cat-1") == 0);
+    bool bare_url_link = false;
+    for (size_t i = 0; i < F.ui->nlinks; i++) {
+      if (strcmp(F.ui->links[i].url, "https://tenor.com/view/cat-1") == 0) bare_url_link = true;
+    }
+    CT_CHECK(!bare_url_link);
+    // Turning embeds off restores the bare URL so the user can still see/open the link.
+    F.ui->settings_embeds = false;
+    CT_CHECK(ui_message_display_body(F.ui, gm, disp, sizeof disp) > 0 &&
+             strcmp(disp, "https://tenor.com/view/cat-1") == 0);
+    F.ui->settings_embeds = true;
+  }
   shot("embed_gifv");
+  remove_message(ch, mid);
+
+  // 4b. Tenor GIF with accompanying text keeps the message text visible.
+  mid = append_rich_message(ch, "check this out https://tenor.com/view/cat-1", &r4);
+  frame(3);
+  {
+    const ccord_message *gm = ccord_store_find_message(F.store, ch, mid);
+    char disp[256];
+    CT_CHECK(gm && ui_message_display_body(F.ui, gm, disp, sizeof disp) > 0 &&
+             strcmp(disp, "check this out https://tenor.com/view/cat-1") == 0);
+    CT_CHECK(F.ui->nmedia_hits == 0 && F.ui->nimg_hits == 1);
+  }
+  remove_message(ch, mid);
+
+  // 4c. Animated .webp image embed with a provider: renders framelessly, keeps format (no &format=webp flattening),
+  // and hides the bare link when posted alone.
+  ccord_embed webp_emb = {
+    .kind = CCORD_EMBED_IMAGE, .provider = "Imgur", .url = "https://i.imgur.example.test/anim.webp",
+    .thumbnail = {.url = "https://i.imgur.example.test/anim.webp",
+                  .proxy_url = "https://images-ext-1.discordapp.net/external/w/https/i.imgur.example.test/anim.webp",
+                  .width = 480, .height = 270},
+  };
+  ccord_message_rich r4c = {.present = CCORD_RICH_ALL, .embeds = &webp_emb, .embed_count = 1};
+  mid = append_rich_message(ch, "https://i.imgur.example.test/anim.webp", &r4c);
+  frame(3);
+  {
+    const ccord_message *wm = ccord_store_find_message(F.store, ch, mid);
+    char disp[256];
+    CT_CHECK(wm && ui_message_display_body(F.ui, wm, disp, sizeof disp) == 0);
+    CT_CHECK(F.ui->nmedia_hits == 0 && F.ui->nimg_hits == 1);
+    CT_CHECK(!media_url_requested(
+      "https://images-ext-1.discordapp.net/external/w/https/i.imgur.example.test/anim.webp?width=480&height=270&format=webp"));
+  }
   remove_message(ch, mid);
 
   // 5. A signed attachment URL far past 255 bytes is kept whole (it used to be cut, which broke the signature).

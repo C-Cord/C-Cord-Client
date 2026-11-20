@@ -85,8 +85,10 @@ static bool allowed_media_host(const char *host, size_t n)
     "images-ext-2.discordapp.net",
     // GIF providers behind Discord's picker (Klipy today, Tenor before it).
     "static.klipy.com",
+    "media.klipy.com",
     "media.tenor.com",
     "media1.tenor.com",
+    "media2.tenor.com",
     "c.tenor.com",
     // Third-party GIF providers the official client also loads (exact hosts only; no wildcard or suffix rule).
     "media.giphy.com",
