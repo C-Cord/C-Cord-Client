@@ -516,20 +516,46 @@ static void apply_os_sandbox(const char *plugin_dir)
 #endif
 #elif defined(__APPLE__)
   {
-    static const char k_profile[] =
+    char real_dir[PATH_MAX];
+    const char *dir = nullptr;
+    if (plugin_dir && plugin_dir[0]) {
+      dir = realpath(plugin_dir, real_dir) ? real_dir : plugin_dir;
+    }
+    ccord_buf prof;
+    ccord_buf_init(&prof, 8192);
+    (void)ccord_buf_append_str(
+      &prof,
       "(version 1)\n"
       "(deny default)\n"
       "(allow process-info-pidinfo (target self))\n"
       "(allow sysctl-read)\n"
-      "(allow file-read* (subpath \"/usr/lib\") (subpath \"/System/Library\") (subpath \"/dev/urandom\"))\n"
-      "(allow file-read* (subpath (param \"PLUGIN_DIR\")))\n";
-    const char *params[3] = {"PLUGIN_DIR", (plugin_dir && plugin_dir[0]) ? plugin_dir : "/nonexistent", nullptr};
-    char *errbuf = nullptr;
+      "(allow file-read* (subpath \"/usr/lib\") (subpath \"/System/Library\") (subpath \"/dev/urandom\"))\n");
+    if (dir && dir[0] == '/') {
+      bool safe = true;
+      for (const unsigned char *p = (const unsigned char *)dir; *p; p++) {
+        if (*p < 0x20 || *p == 0x7f) {
+          safe = false;
+          break;
+        }
+      }
+      if (safe) {
+        (void)ccord_buf_append_str(&prof, "(allow file-read* (subpath \"");
+        for (const char *p = dir; *p; p++) {
+          if (*p == '\\' || *p == '"') (void)ccord_buf_append(&prof, "\\", 1);
+          (void)ccord_buf_append(&prof, p, 1);
+        }
+        (void)ccord_buf_append_str(&prof, "\"))\n");
+      }
+    }
+    if (!prof.failed) {
+      char *errbuf = nullptr;
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-    (void)sandbox_init_with_parameters(k_profile, 0, params, &errbuf);
-    if (errbuf) sandbox_free_error(errbuf);
+      (void)sandbox_init(ccord_buf_cstr(&prof), 0u, &errbuf);
+      if (errbuf) sandbox_free_error(errbuf);
 #pragma clang diagnostic pop
+    }
+    ccord_buf_free(&prof);
   }
 #else
   (void)plugin_dir;

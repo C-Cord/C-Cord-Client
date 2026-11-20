@@ -750,7 +750,9 @@ static bool vr_run_ytdlp(ccord_video_resolver *r, uint64_t my_gen, const char *t
     };
     execvp("yt-dlp", argv);
     int e = errno;
-    (void)write(err_pipe[1], &e, sizeof e);
+    if (write(err_pipe[1], &e, sizeof e) < 0) {
+      // Best-effort errno handoff to parent before _exit.
+    }
     _exit(127);
   }
 

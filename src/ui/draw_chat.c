@@ -281,7 +281,7 @@ size_t ui_parse_jumbo_emojis(const char *text, size_t len, ui_jumbo_item out[sta
       const char *next = nullptr;
       if (try_parse_discord_angle_token(p, end, &tok, &next) &&
           tok.style == UI_MD_CUSTOM_EMOJI && tok.id != CCORD_ID_NONE) {
-        out[count++] = (ui_jumbo_item){
+        out[count] = (ui_jumbo_item){
           .custom = true,
           .animated = tok.animated,
           .line_break_before = count > 0 && pending_nl,
@@ -291,6 +291,7 @@ size_t ui_parse_jumbo_emojis(const char *text, size_t len, ui_jumbo_item out[sta
           .raw = p,
           .raw_len = (size_t)(next - p),
         };
+        count++;
         pending_nl = false;
         p = next;
         continue;
@@ -299,7 +300,7 @@ size_t ui_parse_jumbo_emojis(const char *text, size_t len, ui_jumbo_item out[sta
     }
     size_t el = ccord_emoji_match_prefix(p, (size_t)(end - p));
     if (el == 0) return 0;
-    out[count++] = (ui_jumbo_item){
+    out[count] = (ui_jumbo_item){
       .custom = false,
       .animated = false,
       .line_break_before = count > 0 && pending_nl,
@@ -309,6 +310,7 @@ size_t ui_parse_jumbo_emojis(const char *text, size_t len, ui_jumbo_item out[sta
       .raw = p,
       .raw_len = el,
     };
+    count++;
     pending_nl = false;
     p += el;
   }
