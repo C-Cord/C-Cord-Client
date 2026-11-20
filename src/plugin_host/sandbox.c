@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include "sandbox.h"
 
 #include <ccord/core/alloc.h>
@@ -24,12 +24,22 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
+#if CCORD_OS_WINDOWS
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #define SB_HOOK_STEP 1000
 #define SB_IDLE_HOOK_STEP 10000
 #define SB_MAX_TEXT 65536u
 #define SB_MAX_FS_READ_BYTES (16u * 1024u * 1024u)
 #define SB_MAX_TIMERS 256u
+#define SB_MAX_REQUIRE_DEPTH 32
 #define SB_KEY_HANDLERS "ccord.handlers"
 #define SB_KEY_MENU "ccord.menu"
 #define SB_KEY_COMMANDS "ccord.commands"
@@ -64,6 +74,7 @@ struct ccord_sandbox {
   ccord_sandbox_platform_info plat_info;
   ccord_sandbox_platform_state plat_state;
   const _Atomic bool *cancel;
+  int require_depth;
 };
 
 // ---------------------------------------------------------------- allocator and hook
@@ -1299,9 +1310,56 @@ static int api_markdown_strip(lua_State *L)
   return 1;
 }
 
+static bool sb_resolve_real_path(const char *in, char *out, size_t cap)
+{
+  if (!in || !out || cap == 0) return false;
+#if CCORD_OS_WINDOWS
+  int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, in, -1, nullptr, 0);
+  if (wlen <= 0 || wlen > 32768) return false;
+  wchar_t *wpath = ccord_malloc((size_t)wlen * sizeof(wchar_t));
+  if (!wpath) return false;
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, in, -1, wpath, wlen);
+  HANDLE h = CreateFileW(wpath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                         FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+  ccord_free(wpath);
+  if (h == INVALID_HANDLE_VALUE) return false;
+  wchar_t wout[CCORD_PATH_MAX];
+  DWORD got = GetFinalPathNameByHandleW(h, wout, (DWORD)(sizeof wout / sizeof wout[0]), FILE_NAME_NORMALIZED);
+  CloseHandle(h);
+  if (got == 0 || got >= (DWORD)(sizeof wout / sizeof wout[0])) return false;
+  const wchar_t *src = wout;
+  if (wcsncmp(src, L"\\\\?\\UNC\\", 8) == 0) {
+    src += 6;  // leave two chars we'll overwrite? simpler: skip \\?\ for drive paths
+  } else if (wcsncmp(src, L"\\\\?\\", 4) == 0) {
+    src += 4;
+  }
+  int n = WideCharToMultiByte(CP_UTF8, 0, src, -1, out, (int)cap, nullptr, nullptr);
+  return n > 0 && (size_t)n <= cap;
+#else
+  if (cap < PATH_MAX) return false;
+  return realpath(in, out) != nullptr;
+#endif
+}
+
+static bool sb_path_under_dir(const char *real_path, const char *real_dir)
+{
+  size_t dl = strlen(real_dir);
+  if (dl == 0) return false;
+  while (dl > 1 && (real_dir[dl - 1] == '/' || real_dir[dl - 1] == '\\')) dl--;
+#if CCORD_OS_WINDOWS
+  if (_strnicmp(real_path, real_dir, dl) != 0) return false;
+#else
+  if (strncmp(real_path, real_dir, dl) != 0) return false;
+#endif
+  return real_path[dl] == '/' || real_path[dl] == '\\';
+}
+
 static int api_require(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
+  if (sb->limit != CCORD_SB_LIMIT_NONE) return luaL_error(L, "plugin stopped");
+  if (sb->require_depth >= SB_MAX_REQUIRE_DEPTH) return luaL_error(L, "require: recursion limit exceeded");
+  if (!lua_checkstack(L, 6)) return luaL_error(L, "require: stack overflow");
   size_t mn = 0;
   const char *mod = luaL_checklstring(L, 1, &mn);
   if (!sb->dir[0]) return luaL_error(L, "require: plugin directory not set");
@@ -1314,7 +1372,8 @@ static int api_require(lua_State *L)
   if (strstr(mod, "..")) return luaL_error(L, "require: path traversal not allowed");
 
   lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_MODULES);
-  lua_getfield(L, -1, mod);
+  lua_pushlstring(L, mod, mn);
+  lua_rawget(L, -2);
   if (!lua_isnil(L, -1)) return 1;
   lua_pop(L, 1);
 
@@ -1326,8 +1385,29 @@ static int api_require(lua_State *L)
   int pn = snprintf(path, sizeof path, "%s/%s", sb->dir, rel);
   if (pn < 0 || (size_t)pn >= sizeof path) return luaL_error(L, "require: path too long");
 
-  if (!ccord_path_is_file(path)) return luaL_error(L, "require: module '%s' not found", mod);
-  FILE *f = fopen(path, "rb");
+  char real_dir[CCORD_PATH_MAX], real_path[CCORD_PATH_MAX];
+  if (!sb_resolve_real_path(sb->dir, real_dir, sizeof real_dir) ||
+      !sb_resolve_real_path(path, real_path, sizeof real_path) ||
+      !sb_path_under_dir(real_path, real_dir)) {
+    return luaL_error(L, "require: module '%s' not found", mod);
+  }
+
+  FILE *f = nullptr;
+#if CCORD_OS_WINDOWS
+  f = fopen(real_path, "rb");
+#else
+  int fd = open(real_path, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) return luaL_error(L, "require: module '%s' not found", mod);
+  struct stat st;
+  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
+    close(fd);
+    return luaL_error(L, "require: cannot read '%s'", mod);
+  }
+  int fl = fcntl(fd, F_GETFL, 0);
+  if (fl >= 0) (void)fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+  f = fdopen(fd, "rb");
+  if (!f) { close(fd); return luaL_error(L, "require: module '%s' not found", mod); }
+#endif
   if (!f) return luaL_error(L, "require: module '%s' not found", mod);
   uint64_t fsz = 0;
 #if CCORD_OS_WINDOWS
@@ -1338,11 +1418,6 @@ static int api_require(lua_State *L)
   }
   fsz = (uint64_t)st.st_size;
 #else
-  struct stat st;
-  if (fstat(fileno(f), &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
-    fclose(f);
-    return luaL_error(L, "require: cannot read '%s'", mod);
-  }
   fsz = (uint64_t)st.st_size;
 #endif
   if (fsz > SB_MAX_FS_READ_BYTES) {
@@ -1357,18 +1432,22 @@ static int api_require(lua_State *L)
 
   char chunkname[180];
   snprintf(chunkname, sizeof chunkname, "=%s", rel);
-  if (luaL_loadbufferx(L, buf, rd, chunkname, "t") != LUA_OK) {
-    ccord_free(buf);
-    return lua_error(L);
-  }
+  int lrc = luaL_loadbufferx(L, buf, rd, chunkname, "t");
   ccord_free(buf);
-  lua_call(L, 0, 1);
+  if (lrc != LUA_OK) return lua_error(L);
+
+  sb->require_depth++;
+  int crc = lua_pcall(L, 0, 1, 0);
+  sb->require_depth--;
+  if (crc != LUA_OK) return lua_error(L);
+
   if (lua_isnil(L, -1)) {
     lua_pop(L, 1);
     lua_pushboolean(L, 1);
   }
-  lua_pushvalue(L, -1);
-  lua_setfield(L, -3, mod);
+  lua_pushlstring(L, mod, mn);
+  lua_pushvalue(L, -2);
+  lua_rawset(L, -4);
   return 1;
 }
 

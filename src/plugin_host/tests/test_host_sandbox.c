@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
+#define _POSIX_C_SOURCE 200809L
 #include "sandbox.h"
 
 #include <ccord/core/alloc.h>
@@ -7,7 +8,10 @@
 #include <ccord/core/json.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "ccord_test.h"
 
@@ -318,6 +322,34 @@ int main(void)
                  "assert(not ok)",
                  &err) == CCORD_OK);
     ccord_sandbox_destroy(sb);
+  }
+
+  // 6. require() rejects symlinks escaping plugin_dir (P16a).
+  {
+    char pdir[] = "/tmp/ccord-sb-req-XXXXXX";
+    CT_CHECK(mkdtemp(pdir) != nullptr);
+    char outside[256], linkpath[256];
+    snprintf(outside, sizeof outside, "%s-outside.lua", pdir);
+    snprintf(linkpath, sizeof linkpath, "%s/escape.lua", pdir);
+    FILE *of = fopen(outside, "w");
+    CT_CHECK(of != nullptr);
+    if (of) {
+      fputs("return 42\n", of);
+      fclose(of);
+    }
+    CT_CHECK(symlink(outside, linkpath) == 0);
+    ccord_sandbox_config cfg = {
+      .plugin_id = "dev.test.req", .plugin_name = "Req", .plugin_version = "1.0.0",
+      .plugin_dir = pdir,
+    };
+    ccord_sandbox_services svc = {.ud = &f, .request = f_request, .log = f_log};
+    ccord_sandbox *sb = ccord_sandbox_create(&cfg, &svc, &err);
+    CT_CHECK(sb != nullptr);
+    CT_CHECK(run(sb, "require('escape')", &err) != CCORD_OK);
+    ccord_sandbox_destroy(sb);
+    unlink(linkpath);
+    unlink(outside);
+    rmdir(pdir);
   }
 
   return CT_RESULT("test_host_sandbox");
