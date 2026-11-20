@@ -6,7 +6,7 @@
  * SDL drivers report zero cameras, so list/open stay honest (empty list,
  * NOT_FOUND) instead of fabricating a device. A handle borrows the CAMERA
  * subsystem when nothing else has initialized it and returns it on close. */
-#include "devices_internal.h"
+#include "audio/devices_internal.h"
 
 #include <SDL3/SDL.h>
 #include <ccord/core/alloc.h>

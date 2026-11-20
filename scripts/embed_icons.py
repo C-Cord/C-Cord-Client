@@ -187,7 +187,7 @@ def main():
         lines.append(f"  {{{s}, k_tray_{s}, sizeof k_tray_{s}}},")
     lines.append("};")
     lines.append(f"const size_t ccord_tray_icon_image_count = {len(TRAY_SIZES)};")
-    out = ROOT / "src/platform/app_icon_data.c"
+    out = ROOT / "src/platform/icons/app_icon_data.c"
     out.write_text("\n".join(lines) + "\n")
     print(f"wrote {out.relative_to(ROOT)}")
 

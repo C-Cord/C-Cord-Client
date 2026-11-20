@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 // Android screen capture backend (MediaProjection + VirtualDisplay + ImageReader RGBA -> BGRA).
-#include "android_bridge.h"
+#include "desktop/android_bridge.h"
 #include <ccord/platform/capture.h>
 
 #include <ccord/core/alloc.h>

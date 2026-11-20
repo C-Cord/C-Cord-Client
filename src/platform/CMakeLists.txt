@@ -8,44 +8,47 @@ pkg_check_modules(CCORD_SWRESAMPLE REQUIRED IMPORTED_TARGET libswresample)
 pkg_check_modules(CCORD_AVFORMAT REQUIRED IMPORTED_TARGET libavformat)
 
 set(CCORD_PLATFORM_SOURCES
-  platform.c
-  audio_devices.c
-  camera.c
-  capture.c
-  video_decode.c
-  sound_decode.c
-  sound_encode.c
-  app_icon.c
-  app_icon_data.c
-  tray_icon.c
-  link_watch.c)
+  window/platform.c
+  window/platform_events.c
+  window/link_watch.c
+  audio/audio_stream.c
+  audio/audio_devices.c
+  audio/loopback.c
+  audio/sound_decode.c
+  audio/sound_encode.c
+  video/video_stream.c
+  video/video_decode.c
+  video/camera.c
+  capture/capture.c
+  icons/app_icon.c
+  icons/app_icon_data.c
+  icons/tray_icon.c)
 
 if(WIN32)
-  list(APPEND CCORD_PLATFORM_SOURCES desktop_win32.c capture_win32.c)
+  list(APPEND CCORD_PLATFORM_SOURCES desktop/desktop_win32.c capture/capture_win32.c)
 elseif(APPLE)
-  list(APPEND CCORD_PLATFORM_SOURCES desktop_macos.m capture_macos.m)
+  list(APPEND CCORD_PLATFORM_SOURCES desktop/desktop_macos.m capture/capture_macos.m)
 elseif(ANDROID)
-  list(APPEND CCORD_PLATFORM_SOURCES desktop_android.c capture_android.c)
+  list(APPEND CCORD_PLATFORM_SOURCES desktop/desktop_android.c capture/capture_android.c)
 else()
-  # PipeWire is optional: portal video capture and the self-excluding Go Live audio
-  # loopback use it when present; without it both fall back (portal reports unavailable,
-  # loopback uses the parec/SDL whole-sink path).
   pkg_check_modules(CCORD_PIPEWIRE QUIET IMPORTED_TARGET libpipewire-0.3)
   pkg_check_modules(CCORD_XCAP QUIET IMPORTED_TARGET x11 xext xcomposite xrandr xfixes)
   pkg_check_modules(CCORD_GIO QUIET IMPORTED_TARGET gio-2.0)
   pkg_check_modules(CCORD_DBUS QUIET IMPORTED_TARGET dbus-1)
   list(APPEND CCORD_PLATFORM_SOURCES
-    capture_x11.c
-    capture_portal.c
-    desktop_dbus.c
-    portal_dbus.c
-    portal_pw.c
-    loopback_pw.c)
+    capture/capture_x11.c
+    capture/capture_portal.c
+    capture/portal_dbus.c
+    capture/portal_pw.c
+    desktop/desktop_dbus.c
+    desktop/desktop_dbus_sni.c
+    desktop/desktop_dbus_shortcuts.c
+    audio/loopback_pw.c)
 endif()
 
 add_library(ccord_platform STATIC ${CCORD_PLATFORM_SOURCES})
 add_library(ccord::platform ALIAS ccord_platform)
-target_include_directories(ccord_platform PUBLIC include)
+target_include_directories(ccord_platform PUBLIC include PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ccord_platform
   PUBLIC ccord_core ${CCORD_MATH_LIB}
   PRIVATE SDL3::SDL3 PkgConfig::CCORD_AVCODEC PkgConfig::CCORD_AVUTIL PkgConfig::CCORD_SWSCALE PkgConfig::CCORD_SWRESAMPLE PkgConfig::CCORD_AVFORMAT)
@@ -104,34 +107,74 @@ if(CCORD_BUILD_TESTS)
   else()
     target_compile_definitions(test_platform_desktop PRIVATE CCORD_HAVE_PORTAL=0)
   endif()
-  # Resume-from-sleep / default-route change detection: pure feeds, no socket, no suspend.
+
   ccord_add_test(NAME test_link_watch
     SOURCES tests/test_link_watch.c
     LIBS ccord_platform SDL3::SDL3
     LABELS unit)
+
   if(UNIX AND NOT APPLE AND NOT ANDROID)
-    # Self-excluding PipeWire loopback: pure node filter + fallback coverage.
     ccord_add_test(NAME test_loopback_pw
       SOURCES tests/test_loopback_pw.c
       LIBS ccord_platform SDL3::SDL3
       LABELS unit)
-    # White-box access to loopback_pw.h (pure node filter).
-    target_include_directories(test_loopback_pw PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_include_directories(test_loopback_pw PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/audio")
     if(CCORD_PIPEWIRE_FOUND)
       target_compile_definitions(test_loopback_pw PRIVATE CCORD_HAVE_PIPEWIRE=1)
     else()
       target_compile_definitions(test_loopback_pw PRIVATE CCORD_HAVE_PIPEWIRE=0)
     endif()
   endif()
-  # Voice-message Ogg/Opus encoder (round-trips through the soundboard decoder).
+
   ccord_add_test(NAME test_sound_encode
     SOURCES tests/test_sound_encode.c
     LIBS ccord_platform ${CCORD_MATH_LIB}
     LABELS unit)
-  # M5 test fragments.
-  include(tests/m5_devices.cmake)
-  include(tests/m5_codecs.cmake)
+
+  ccord_add_test(NAME test_platform_devices
+    SOURCES tests/test_platform_devices.c
+    LIBS ccord_platform SDL3::SDL3
+    LABELS unit)
+  target_include_directories(test_platform_devices PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/audio")
+
+  ccord_add_test(NAME test_video_decode
+    SOURCES tests/test_video_decode.c
+    LIBS ccord_platform
+    LABELS unit)
+
+  ccord_add_test(NAME test_sound_decode
+    SOURCES tests/test_sound_decode.c
+    LIBS ccord_platform
+    LABELS unit)
+
   if(UNIX AND NOT APPLE AND NOT ANDROID)
-    include(tests/m5_portal.cmake)
+    ccord_add_test(NAME test_portal_dbus
+      SOURCES tests/test_portal_dbus.c
+      LIBS ccord_platform
+      LABELS unit)
+    target_include_directories(test_portal_dbus PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/capture")
+    if(CCORD_DBUS_FOUND)
+      target_compile_definitions(test_portal_dbus PRIVATE CCORD_HAVE_DBUS=1)
+      target_link_libraries(test_portal_dbus PRIVATE PkgConfig::CCORD_DBUS)
+    else()
+      target_compile_definitions(test_portal_dbus PRIVATE CCORD_HAVE_DBUS=0)
+    endif()
+
+    ccord_add_test(NAME test_capture_portal
+      SOURCES tests/test_capture_portal.c
+      LIBS ccord_platform
+      LABELS unit)
+    target_include_directories(test_capture_portal PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/capture")
+    if(CCORD_DBUS_FOUND)
+      target_compile_definitions(test_capture_portal PRIVATE CCORD_HAVE_DBUS=1)
+      target_link_libraries(test_capture_portal PRIVATE PkgConfig::CCORD_DBUS)
+    else()
+      target_compile_definitions(test_capture_portal PRIVATE CCORD_HAVE_DBUS=0)
+    endif()
+    if(CCORD_PIPEWIRE_FOUND)
+      target_compile_definitions(test_capture_portal PRIVATE CCORD_HAVE_PIPEWIRE=1)
+    else()
+      target_compile_definitions(test_capture_portal PRIVATE CCORD_HAVE_PIPEWIRE=0)
+    endif()
   endif()
 endif()
