@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #pragma once
+#include <ccord/assets/embedded_assets.h>
 #include <ccord/core/error.h>
 typedef struct ccord_color { uint8_t r, g, b, a; } ccord_color;
 // X-macro lists = the theme file schema. Key in the file == identifier. Section: [colors] / [metrics] / [fonts].
@@ -48,8 +49,6 @@ typedef struct ccord_theme {
 // Built-in themes compiled into the binary: "c-cord-dark", "c-cord-light", "c-cord-amoled".
 // `out` is fully replaced (safe to switch in place, no stale keys). Unknown id -> CCORD_ERR_NOT_FOUND.
 [[nodiscard]] ccord_status ccord_theme_load_builtin(ccord_theme *out, const char *id, ccord_error *err);
-// Embedded theme text by id (generated in ccord_core); nullptr for unknown/null id. out_len may be null.
-const char *ccord_embedded_theme_by_id(const char *id, size_t *out_len);
 [[nodiscard]] bool ccord_color_parse(const char *s, ccord_color *out);
 // Applies user QuickCSS custom-property overrides onto an initialized theme, in place.
 // Supported input: /* ... */ comments; rule blocks whose selectors are :root, body, *, .theme-dark
@@ -66,3 +65,21 @@ const char *ccord_embedded_theme_by_id(const char *id, size_t *out_len);
 // arguments are invalid, the text exceeds 64 KiB or allocation fails.
 [[nodiscard]] ccord_status ccord_theme_apply_quick_css(ccord_theme *theme, const char *css, size_t len,
                                                        size_t *applied, ccord_error *err);
+// Extended plugin CSS: supports all QuickCSS custom properties plus surface-scoped rules
+// (.chat, .sidebar, .composer, .member-list, .guild-rail, .message, .header, .modal, .user-panel)
+// mapping background/background-color/color/border-color/border-radius/width/height/font-size onto theme tokens.
+[[nodiscard]] ccord_status ccord_theme_apply_plugin_css(ccord_theme *theme, const char *css, size_t len,
+                                                        size_t *applied, ccord_error *err);
+// Applies JSON object patches ({ "bg_primary": "#112233", ... } and { "channel_list_width": 260, ... }) onto `theme`.
+// Either JSON string may be nullptr/empty. Unknown or malformed entries are skipped safely.
+[[nodiscard]] ccord_status ccord_theme_apply_json(ccord_theme *theme, const char *colors_json, const char *metrics_json,
+                                                  size_t *applied, ccord_error *err);
+// Token reflection & lookup by canonical key (accepts hyphens or underscores).
+size_t ccord_theme_color_count(void);
+const char *ccord_theme_color_name(size_t index);
+bool ccord_theme_color_get(const ccord_theme *theme, const char *name, ccord_color *out);
+bool ccord_theme_color_set(ccord_theme *theme, const char *name, ccord_color color);
+size_t ccord_theme_metric_count(void);
+const char *ccord_theme_metric_name(size_t index);
+bool ccord_theme_metric_get(const ccord_theme *theme, const char *name, float *out);
+bool ccord_theme_metric_set(ccord_theme *theme, const char *name, float value);

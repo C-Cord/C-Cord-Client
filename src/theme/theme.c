@@ -8,7 +8,9 @@
 #include <string.h>
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/arena.h>
 #include <ccord/core/ini.h>
+#include <ccord/core/json.h>
 
 #define THEME_FILE_MAX (64u * 1024u)
 #define THEME_FONT_MAX 127u
@@ -665,6 +667,305 @@ ccord_status ccord_theme_apply_quick_css(ccord_theme *theme, const char *css, si
   size_t count = 0;
   qcss_run(theme, buf, clean, &count);
   ccord_free(buf);
+  if (applied) *applied = count;
+  return CCORD_OK;
+}
+
+// ---------------------------------------------------------------- reflection & extended plugin theming
+
+static void norm_key(const char *name, char *out, size_t cap)
+{
+  size_t w = 0;
+  if (!name) { out[0] = '\0'; return; }
+  for (size_t i = 0; name[i] && w + 1 < cap; i++) {
+    char c = css_lower(name[i]);
+    out[w++] = (c == '-') ? '_' : c;
+  }
+  out[w] = '\0';
+}
+
+size_t ccord_theme_color_count(void) { return THEME_NCOLORS; }
+const char *ccord_theme_color_name(size_t index) { return index < THEME_NCOLORS ? color_names[index] : nullptr; }
+
+bool ccord_theme_color_get(const ccord_theme *theme, const char *name, ccord_color *out)
+{
+  if (!theme || !name || !out) return false;
+  char k[64];
+  norm_key(name, k, sizeof k);
+  for (size_t i = 0; i < THEME_NCOLORS; i++) {
+    if (strcmp(color_names[i], k) == 0) {
+      memcpy(out, (const char *)theme + color_offsets[i], sizeof *out);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ccord_theme_color_set(ccord_theme *theme, const char *name, ccord_color color)
+{
+  if (!theme || !name) return false;
+  char k[64];
+  norm_key(name, k, sizeof k);
+  for (size_t i = 0; i < THEME_NCOLORS; i++) {
+    if (strcmp(color_names[i], k) == 0) {
+      memcpy((char *)theme + color_offsets[i], &color, sizeof color);
+      return true;
+    }
+  }
+  return false;
+}
+
+size_t ccord_theme_metric_count(void) { return THEME_NMETRICS; }
+const char *ccord_theme_metric_name(size_t index) { return index < THEME_NMETRICS ? metric_names[index] : nullptr; }
+
+bool ccord_theme_metric_get(const ccord_theme *theme, const char *name, float *out)
+{
+  if (!theme || !name || !out) return false;
+  char k[64];
+  norm_key(name, k, sizeof k);
+  for (size_t i = 0; i < THEME_NMETRICS; i++) {
+    if (strcmp(metric_names[i], k) == 0) {
+      memcpy(out, (const char *)theme + metric_offsets[i], sizeof *out);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ccord_theme_metric_set(ccord_theme *theme, const char *name, float value)
+{
+  if (!theme || !name) return false;
+  char k[64];
+  norm_key(name, k, sizeof k);
+  for (size_t i = 0; i < THEME_NMETRICS; i++) {
+    if (strcmp(metric_names[i], k) == 0) {
+      double max = strcmp(metric_names[i], "message_merge_ms") == 0 ? THEME_MERGE_MAX : THEME_METRIC_MAX;
+      if (!((double)value >= 0.0 && (double)value <= max)) return false;
+      memcpy((char *)theme + metric_offsets[i], &value, sizeof value);
+      return true;
+    }
+  }
+  return false;
+}
+
+typedef struct surface_prop_map {
+  const char *sel;
+  const char *prop;
+  bool is_color;
+  const char *target;
+} surface_prop_map;
+
+static const surface_prop_map k_surface_maps[] = {
+  {".chat", "background", true, "bg_primary"},
+  {".chat", "background-color", true, "bg_primary"},
+  {".chat", "color", true, "text_normal"},
+  {".sidebar", "background", true, "bg_secondary"},
+  {".sidebar", "background-color", true, "bg_secondary"},
+  {".sidebar", "width", false, "channel_list_width"},
+  {".guild-rail", "background", true, "bg_tertiary"},
+  {".guild-rail", "background-color", true, "bg_tertiary"},
+  {".guild-rail", "width", false, "server_list_width"},
+  {".composer", "background", true, "bg_input"},
+  {".composer", "background-color", true, "bg_input"},
+  {".composer", "border-radius", false, "composer_radius"},
+  {".composer", "min-height", false, "composer_min_height"},
+  {".member-list", "background", true, "bg_secondary"},
+  {".member-list", "background-color", true, "bg_secondary"},
+  {".member-list", "width", false, "member_list_width"},
+  {".message", "color", true, "text_normal"},
+  {".message", "font-size", false, "font_size_base"},
+  {".message", "gap", false, "message_group_gap"},
+  {".header", "background", true, "bg_primary"},
+  {".header", "background-color", true, "bg_primary"},
+  {".header", "height", false, "header_height"},
+  {".header", "border-color", true, "divider"},
+  {".user-panel", "background", true, "bg_user_panel"},
+  {".user-panel", "background-color", true, "bg_user_panel"},
+  {".user-panel", "height", false, "user_panel_height"},
+  {".modal", "background", true, "bg_floating"},
+  {".modal", "background-color", true, "bg_floating"},
+  {".modal", "border-color", true, "border_subtle"},
+};
+
+static bool css_surface_selector(css_span sel, char *out_sel, size_t cap)
+{
+  span_trim(&sel);
+  for (size_t i = 0; i < sizeof k_surface_maps / sizeof k_surface_maps[0]; i++) {
+    if (span_is(sel, k_surface_maps[i].sel)) {
+      snprintf(out_sel, cap, "%s", k_surface_maps[i].sel);
+      return true;
+    }
+  }
+  return false;
+}
+
+static void pcss_apply_surface_decl(ccord_theme *t, const char *sel_name, css_span decl, size_t *applied)
+{
+  span_trim(&decl);
+  if (decl.n == 0) return;
+  size_t colon = decl.n;
+  for (size_t i = 0; i < decl.n; i++) {
+    if (decl.p[i] == ':') { colon = i; break; }
+  }
+  if (colon == decl.n) return;
+  css_span prop = {decl.p, colon};
+  css_span val = {decl.p + colon + 1, decl.n - colon - 1};
+  span_trim(&prop);
+  qcss_strip_important(&val);
+  // Custom properties inside surface blocks also work as theme overrides.
+  if (prop.n >= 3 && prop.p[0] == '-' && prop.p[1] == '-') {
+    qcss_apply_declaration(t, decl, applied);
+    return;
+  }
+  for (size_t i = 0; i < sizeof k_surface_maps / sizeof k_surface_maps[0]; i++) {
+    if (strcmp(k_surface_maps[i].sel, sel_name) != 0) continue;
+    if (!span_is(prop, k_surface_maps[i].prop)) continue;
+    if (k_surface_maps[i].is_color) {
+      ccord_color col;
+      if (css_color_value(val, &col) && ccord_theme_color_set(t, k_surface_maps[i].target, col)) {
+        if (applied) (*applied)++;
+      }
+    } else {
+      double max = strcmp(k_surface_maps[i].target, "message_merge_ms") == 0 ? THEME_MERGE_MAX : THEME_METRIC_MAX;
+      float fv = 0.0f;
+      if (css_metric_value(val, max, &fv) && ccord_theme_metric_set(t, k_surface_maps[i].target, fv)) {
+        if (applied) (*applied)++;
+      }
+    }
+    return;
+  }
+}
+
+static void pcss_apply_surface_decls(ccord_theme *t, const char *sel_name, const char *text, size_t len, size_t *applied)
+{
+  size_t start = 0, i = 0;
+  while (i < len) {
+    if (text[i] == ';') {
+      pcss_apply_surface_decl(t, sel_name, (css_span){text + start, i - start}, applied);
+      i++;
+      start = i;
+    } else if (text[i] == '{') {
+      size_t depth = 1;
+      i++;
+      while (i < len && depth) {
+        if (text[i] == '{') depth++;
+        else if (text[i] == '}') depth--;
+        i++;
+      }
+      start = i;
+    } else if (text[i] == '}') {
+      i++;
+      start = i;
+    } else {
+      i++;
+    }
+  }
+  pcss_apply_surface_decl(t, sel_name, (css_span){text + start, len - start}, applied);
+}
+
+ccord_status ccord_theme_apply_plugin_css(ccord_theme *theme, const char *css, size_t len,
+                                          size_t *applied, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (applied) *applied = 0;
+  if (!theme || (!css && len)) return ccord_error_set(err, CCORD_ERR_INVALID, "plugincss: null argument");
+  if (len == 0) return CCORD_OK;
+  if (len > QUICK_CSS_MAX) return ccord_error_set(err, CCORD_ERR_RANGE, "plugincss: text larger than 64 KiB");
+  char *buf = ccord_malloc(len + 1);
+  if (!buf) return ccord_error_set(err, CCORD_ERR_NOMEM, "plugincss: out of memory");
+  memcpy(buf, css, len);
+  buf[len] = '\0';
+  size_t clean = 0;
+  qcss_strip_comments(buf, len, &clean);
+  size_t count = 0;
+  size_t seg = 0, i = 0;
+  while (i < clean) {
+    if (buf[i] == ';') {
+      qcss_apply_declaration(theme, (css_span){buf + seg, i - seg}, &count);
+      i++;
+      seg = i;
+    } else if (buf[i] == '{') {
+      css_span sel = {buf + seg, i - seg};
+      size_t depth = 1, j = i + 1;
+      while (j < clean && depth) {
+        if (buf[j] == '{') depth++;
+        else if (buf[j] == '}') depth--;
+        j++;
+      }
+      size_t body_end = depth ? clean : j - 1;
+      if (css_selector_supported(sel)) {
+        qcss_apply_declarations(theme, buf + i + 1, body_end - (i + 1), &count);
+      } else {
+        // Support comma-separated surface selectors like `.chat, .header { ... }`
+        size_t sstart = 0;
+        for (size_t k = 0; k <= sel.n; k++) {
+          if (k != sel.n && sel.p[k] != ',') continue;
+          char sname[32];
+          if (css_surface_selector((css_span){sel.p + sstart, k - sstart}, sname, sizeof sname)) {
+            pcss_apply_surface_decls(theme, sname, buf + i + 1, body_end - (i + 1), &count);
+          }
+          sstart = k + 1;
+        }
+      }
+      i = depth ? clean : j;
+      seg = i;
+    } else if (buf[i] == '}') {
+      i++;
+      seg = i;
+    } else {
+      i++;
+    }
+  }
+  if (seg < clean) qcss_apply_declaration(theme, (css_span){buf + seg, clean - seg}, &count);
+  ccord_free(buf);
+  if (applied) *applied = count;
+  return CCORD_OK;
+}
+
+ccord_status ccord_theme_apply_json(ccord_theme *theme, const char *colors_json, const char *metrics_json,
+                                    size_t *applied, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (applied) *applied = 0;
+  if (!theme) return ccord_error_set(err, CCORD_ERR_INVALID, "theme json: null theme");
+  size_t count = 0;
+  static const ccord_json_limits k_lim = {8, 2048, QUICK_CSS_MAX};
+  ccord_arena arena;
+  ccord_arena_init(&arena, 2048u);
+  if (colors_json && colors_json[0]) {
+    ccord_error pe = {0};
+    const ccord_json *obj = ccord_json_parse(&arena, colors_json, strlen(colors_json), &k_lim, &pe);
+    if (obj && ccord_json_type_of(obj) == CCORD_JSON_OBJECT) {
+      size_t n = ccord_json_object_len(obj);
+      for (size_t i = 0; i < n; i++) {
+        const ccord_json *v = nullptr;
+        const char *k = ccord_json_object_key(obj, i, &v);
+        size_t sl = 0;
+        const char *s = v ? ccord_json_string(v, &sl) : nullptr;
+        ccord_color col;
+        if (k && s && css_color_value((css_span){s, sl}, &col) && ccord_theme_color_set(theme, k, col)) {
+          count++;
+        }
+      }
+    }
+  }
+  ccord_arena_reset(&arena);
+  if (metrics_json && metrics_json[0]) {
+    ccord_error pe = {0};
+    const ccord_json *obj = ccord_json_parse(&arena, metrics_json, strlen(metrics_json), &k_lim, &pe);
+    if (obj && ccord_json_type_of(obj) == CCORD_JSON_OBJECT) {
+      size_t n = ccord_json_object_len(obj);
+      for (size_t i = 0; i < n; i++) {
+        const ccord_json *v = nullptr;
+        const char *k = ccord_json_object_key(obj, i, &v);
+        if (k && v && ccord_json_type_of(v) == CCORD_JSON_NUMBER) {
+          float fv = (float)ccord_json_number(v, -1.0);
+          if (ccord_theme_metric_set(theme, k, fv)) count++;
+        }
+      }
+    }
+  }
+  ccord_arena_free(&arena);
   if (applied) *applied = count;
   return CCORD_OK;
 }

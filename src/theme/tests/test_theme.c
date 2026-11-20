@@ -311,6 +311,68 @@ static void test_quick_css_idempotent_and_args(void)
   CT_CHECK(ccord_theme_apply_quick_css(&t, nullptr, 0, &applied, &err) == CCORD_OK && applied == 0);
 }
 
+static void test_plugin_css_json_and_reflection(void)
+{
+  ccord_theme t;
+  ccord_error err;
+  size_t applied = 0;
+  CT_CHECK(fresh_dark(&t));
+
+  // Surface-scoped CSS rules + custom properties + !important + comma-separated selectors.
+  const char *pcss =
+    ":root { --brand-experiment: #ff3366 !important; }\n"
+    ".chat { background-color: #101218; color: rgb(230, 235, 240); }\n"
+    ".sidebar { background: #161820; width: 268px; }\n"
+    ".composer { background-color: #202430; border-radius: 14px; min-height: 48; }\n"
+    ".header { height: 54px; border-color: #303440; }\n"
+    ".modal { background: #0e1015; border-color: #404450; }\n"
+    ".user-panel { background: #12141a; height: 60px; --status-online: #22cc66; }\n"
+    ".unknown-surface { background: #ffffff; }\n";
+  CT_CHECK(ccord_theme_apply_plugin_css(&t, pcss, strlen(pcss), &applied, &err) == CCORD_OK);
+  CT_CHECK(applied == 15);
+  CT_CHECK(color_is(t.c.brand, 0xff, 0x33, 0x66, 255));
+  CT_CHECK(color_is(t.c.bg_primary, 0x10, 0x12, 0x18, 255));
+  CT_CHECK(color_is(t.c.text_normal, 230, 235, 240, 255));
+  CT_CHECK(color_is(t.c.bg_secondary, 0x16, 0x18, 0x20, 255));
+  CT_CHECK(t.m.channel_list_width == 268.0f);
+  CT_CHECK(color_is(t.c.bg_input, 0x20, 0x24, 0x30, 255));
+  CT_CHECK(t.m.composer_radius == 14.0f && t.m.composer_min_height == 48.0f);
+  CT_CHECK(t.m.header_height == 54.0f && color_is(t.c.divider, 0x30, 0x34, 0x40, 255));
+  CT_CHECK(color_is(t.c.bg_floating, 0x0e, 0x10, 0x15, 255));
+  CT_CHECK(color_is(t.c.border_subtle, 0x40, 0x44, 0x50, 255));
+  CT_CHECK(color_is(t.c.bg_user_panel, 0x12, 0x14, 0x1a, 255));
+  CT_CHECK(t.m.user_panel_height == 60.0f);
+  CT_CHECK(color_is(t.c.status_online, 0x22, 0xcc, 0x66, 255));
+
+  // JSON color + metric patching (unknown/invalid values safely skipped).
+  CT_CHECK(fresh_dark(&t));
+  const char *cjson = "{\"bg_primary\":\"#1a1b26\",\"text-link\":\"rgba(122,162,247,0.5)\",\"bogus\":\"#fff\",\"brand\":123}";
+  const char *mjson = "{\"channel_list_width\":275,\"header-height\":52,\"bogus\":10,\"server_list_width\":-5}";
+  CT_CHECK(ccord_theme_apply_json(&t, cjson, mjson, &applied, &err) == CCORD_OK);
+  CT_CHECK(applied == 4);
+  CT_CHECK(color_is(t.c.bg_primary, 0x1a, 0x1b, 0x26, 255));
+  CT_CHECK(color_is(t.c.text_link, 122, 162, 247, 128));
+  CT_CHECK(t.m.channel_list_width == 275.0f && t.m.header_height == 52.0f);
+  CT_CHECK(ccord_theme_apply_json(nullptr, cjson, mjson, &applied, &err) == CCORD_ERR_INVALID);
+
+  // Color & metric token reflection (underscore + hyphen normalization + range validation).
+  CT_CHECK(ccord_theme_color_count() > 20 && ccord_theme_color_name(0) != nullptr);
+  CT_CHECK(ccord_theme_color_name(ccord_theme_color_count()) == nullptr);
+  CT_CHECK(ccord_theme_metric_count() > 20 && ccord_theme_metric_name(0) != nullptr);
+  CT_CHECK(ccord_theme_metric_name(ccord_theme_metric_count()) == nullptr);
+  ccord_color got = {0};
+  CT_CHECK(ccord_theme_color_set(&t, "bg-primary", (ccord_color){10, 20, 30, 255}));
+  CT_CHECK(ccord_theme_color_get(&t, "bg_primary", &got) && color_is(got, 10, 20, 30, 255));
+  CT_CHECK(!ccord_theme_color_get(&t, "no_such_token", &got));
+  CT_CHECK(!ccord_theme_color_set(&t, "no_such_token", got));
+  float mv = 0.0f;
+  CT_CHECK(ccord_theme_metric_set(&t, "scrollbar-width", 9.5f));
+  CT_CHECK(ccord_theme_metric_get(&t, "scrollbar_width", &mv) && mv == 9.5f);
+  CT_CHECK(!ccord_theme_metric_set(&t, "scrollbar_width", -1.0f));
+  CT_CHECK(!ccord_theme_metric_set(&t, "scrollbar_width", 9999.0f));
+  CT_CHECK(!ccord_theme_metric_get(&t, "no_such_metric", &mv));
+}
+
 int main(void)
 {
   test_color_parse();
@@ -328,5 +390,6 @@ int main(void)
   test_quick_css_skips_bad();
   test_quick_css_color_forms();
   test_quick_css_idempotent_and_args();
+  test_plugin_css_json_and_reflection();
   return CT_RESULT("test_theme");
 }
