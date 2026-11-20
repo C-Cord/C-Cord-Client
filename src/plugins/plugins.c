@@ -160,7 +160,7 @@ struct ccord_plugins {
   bool has_data_dir;
   char **search;
   size_t nsearch;
-  plugin *plugins;
+  plugin **plugins;
   size_t nplugins, capplugins;
   ccord_catalog *catalog;
   ccord_sub_id sub;
@@ -1709,7 +1709,7 @@ static void on_bus_event(const ccord_event *ev, void *ud)
 
   bool any = false;
   for (size_t i = 0; i < m->nplugins; i++) {
-    plugin *p = &m->plugins[i];
+    plugin *p = m->plugins[i];
     if (p->state == CCORD_PLUGIN_READY && (p->subs & bit)) any = true;
   }
   if (!any) return;
@@ -1788,7 +1788,7 @@ static void on_bus_event(const ccord_event *ev, void *ud)
   }
   if (ccord_jw_ok(&w)) {
     for (size_t i = 0; i < m->nplugins; i++) {
-      plugin *p = &m->plugins[i];
+      plugin *p = m->plugins[i];
       if (p->state == CCORD_PLUGIN_READY && (p->subs & bit)) bus_send_event(m, p, name, &data);
     }
   }
@@ -1799,7 +1799,7 @@ static plugin *find_owner(ccord_plugins *m, const char *owner)
 {
   if (!owner) return nullptr;
   for (size_t i = 0; i < m->nplugins; i++) {
-    if (m->plugins[i].used && strcmp(m->plugins[i].m.id, owner) == 0) return &m->plugins[i];
+    if (m->plugins[i]->used && strcmp(m->plugins[i]->m.id, owner) == 0) return m->plugins[i];
   }
   return nullptr;
 }
@@ -1999,7 +1999,7 @@ void ccord_plugins_pump(ccord_plugins *m, uint64_t now_ms)
   if (!m) return;
   m->now_ms = now_ms;
   for (size_t i = 0; i < m->nplugins; i++) {
-    plugin *p = &m->plugins[i];
+    plugin *p = m->plugins[i];
     if (!p->ipc) continue;
     read_host(m, p);
     if (p->ipc) {
@@ -2213,13 +2213,14 @@ static plugin *new_record(ccord_plugins *m)
 {
   if (m->nplugins == m->capplugins) {
     size_t ncap = m->capplugins ? m->capplugins * 2 : 4;
-    plugin *np = ccord_realloc_array(m->plugins, ncap, sizeof *np);
+    plugin **np = ccord_realloc_array(m->plugins, ncap, sizeof *np);
     if (!np) return nullptr;
     m->plugins = np;
     m->capplugins = ncap;
   }
-  plugin *p = &m->plugins[m->nplugins++];
-  memset(p, 0, sizeof *p);
+  plugin *p = ccord_calloc(1, sizeof *p);
+  if (!p) return nullptr;
+  m->plugins[m->nplugins++] = p;
   p->used = true;
   p->enabled = true;
 #if !CCORD_OS_WINDOWS && !CCORD_OS_ANDROID
@@ -2288,7 +2289,7 @@ static void consent_save(const ccord_plugins *m)
   ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w);
   for (size_t i = 0; i < m->nplugins; i++) {
-    const plugin *p = &m->plugins[i];
+    const plugin *p = m->plugins[i];
     if (!p->used) continue;
     ccord_jw_key(&w, p->m.id);
     ccord_jw_begin_object(&w);
@@ -2391,7 +2392,7 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
     return;
   }
   for (size_t i = 0; i < m->nplugins; i++) {
-    if (strcmp(m->plugins[i].m.id, man.id) == 0) {
+    if (strcmp(m->plugins[i]->m.id, man.id) == 0) {
       CCORD_LOG_W("extensions: duplicate plugin id %s in %s skipped", man.id, dir_path);
       return;
     }
@@ -2540,7 +2541,7 @@ static void stop_host(ccord_plugins *m, plugin *p)
 void ccord_plugins_shutdown(ccord_plugins *m)
 {
   if (!m) return;
-  for (size_t i = 0; i < m->nplugins; i++) stop_host(m, &m->plugins[i]);
+  for (size_t i = 0; i < m->nplugins; i++) stop_host(m, m->plugins[i]);
 }
 
 void ccord_plugins_destroy(ccord_plugins *m)
@@ -2550,13 +2551,14 @@ void ccord_plugins_destroy(ccord_plugins *m)
   m->catalog = nullptr;
   ccord_plugins_shutdown(m);
   for (size_t i = 0; i < m->nplugins; i++) {
-    plugin *p = &m->plugins[i];
+    plugin *p = m->plugins[i];
     for (size_t k = 0; k < p->nitems; k++) ccord_free(p->items[k].json);
     ccord_free(p->items);
     ccord_free(p->source);
     ccord_free(p->dir);
     ccord_free(p->storage_dir);
     ccord_free(p->perm_str);
+    ccord_free(p);
   }
   ccord_free(m->plugins);
   if (m->search) {
@@ -2903,7 +2905,7 @@ static size_t cat_list_local_plugins(void *ud, char (*ids_out)[65], size_t cap)
   ccord_plugins *m = ud;
   size_t n = 0;
   for (size_t i = 0; i < m->nplugins && n < cap; i++) {
-    const plugin *p = &m->plugins[i];
+    const plugin *p = m->plugins[i];
     if (p->used && !p->is_bundled && p->m.id[0]) {
       set_text(ids_out[n++], 65, p->m.id);
     }
@@ -2928,7 +2930,7 @@ static void cat_sync_installed_info(void *ud)
 {
   ccord_plugins *m = ud;
   for (size_t i = 0; i < m->nplugins; i++) {
-    if (m->plugins[i].used) publish_state(m, &m->plugins[i]);
+    if (m->plugins[i]->used) publish_state(m, m->plugins[i]);
   }
 }
 
@@ -3082,7 +3084,7 @@ int ccord_plugins_host_pid(const ccord_plugins *m, const char *owner)
 {
   if (!m || !owner) return -1;
   for (size_t i = 0; i < m->nplugins; i++) {
-    const plugin *p = &m->plugins[i];
+    const plugin *p = m->plugins[i];
     if (p->used && strcmp(p->m.id, owner) == 0) {
       if (!p->ipc || !host_is_running(p)) return -1;
       if (p->in_process) return (int)ccord_os_pid();
@@ -3105,7 +3107,7 @@ static void broadcast_event_json(ccord_plugins *m, uint32_t bit, const char *nam
   int n = snprintf(payload, sizeof payload, "{\"name\":\"%s\",\"data\":%s}", name, data_json);
   if (n <= 0 || (size_t)n >= sizeof payload) return;
   for (size_t i = 0; i < m->nplugins; i++) {
-    plugin *p = &m->plugins[i];
+    plugin *p = m->plugins[i];
     if (!p->used || p->state != CCORD_PLUGIN_READY || !p->ipc) continue;
     if ((p->subs & bit) == 0) continue;
     ccord_error err = {0};
@@ -3122,7 +3124,7 @@ void ccord_plugins_update_platform_state(ccord_plugins *m, const ccord_plugin_pl
 
   bool any_ready = false;
   for (size_t i = 0; i < m->nplugins; i++) {
-    const plugin *p = &m->plugins[i];
+    const plugin *p = m->plugins[i];
     if (p->used && p->state == CCORD_PLUGIN_READY && p->ipc) {
       any_ready = true;
       break;
@@ -3145,7 +3147,7 @@ void ccord_plugins_update_platform_state(ccord_plugins *m, const ccord_plugin_pl
   ccord_jw_end_object(&w);
   if (ccord_jw_ok(&w)) {
     for (size_t i = 0; i < m->nplugins; i++) {
-      plugin *p = &m->plugins[i];
+      plugin *p = m->plugins[i];
       if (!p->used || p->state != CCORD_PLUGIN_READY || !p->ipc) continue;
       ccord_error err = {0};
       (void)ccord_ipc_send_notify(p->ipc, "platform.state", ccord_buf_cstr(&b), &err);
