@@ -44,6 +44,7 @@ struct ccord_game_detect_app {
   bool need_free_list;
   bool scan_due;
   uint64_t next_scan_ms;
+  uint64_t last_now_ms;
   char *pending_body;          // fetched body waiting for a free worker
   size_t pending_len;
   bool has_detected;
@@ -83,6 +84,7 @@ static void body_cb(void *ud, const char *body, size_t len)
   g->pending_body = ccord_malloc(len + 1u);
   if (!g->pending_body) {
     g->pending_len = 0;
+    ccord_detectable_result(g->det, false, g->last_now_ms);
     return;
   }
   memcpy(g->pending_body, body, len);
@@ -295,6 +297,7 @@ static void submit(ccord_game_detect_app *g, job_kind kind, char *body, size_t l
     if (!g->thread) {
       CCORD_LOG_W("game detect: cannot start the worker thread");
       ccord_free(body);
+      if (kind == JOB_LOAD_BODY) ccord_detectable_result(g->det, false, g->last_now_ms);
       return;
     }
     g->thread_started = true;
@@ -364,6 +367,7 @@ static bool take_result(ccord_game_detect_app *g, uint64_t now_ms)
 bool ccord_game_detect_app_poll(ccord_game_detect_app *g, uint64_t now_ms)
 {
   if (!g) return false;
+  g->last_now_ms = now_ms;
   bool changed = false;
   bool enabled = !g->cfg.enabled || g->cfg.enabled(g->cfg.enabled_ud);
   if (!enabled) {
@@ -380,6 +384,7 @@ bool ccord_game_detect_app_poll(ccord_game_detect_app *g, uint64_t now_ms)
       ccord_free(g->pending_body);
       g->pending_body = nullptr;
       g->pending_len = 0;
+      ccord_detectable_result(g->det, false, now_ms);
     }
     if (g->list_ready) g->need_free_list = true;
     if (g->need_free_list && !worker_busy(g)) {
