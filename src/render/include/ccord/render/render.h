@@ -30,6 +30,19 @@ void ccord_draw_rrect(ccord_renderer *r, ccord_rect rc, float radius, ccord_colo
 void ccord_draw_circle(ccord_renderer *r, float cx, float cy, float radius, ccord_color c);   // antialiased
 void ccord_draw_line(ccord_renderer *r, ccord_vec2 a, ccord_vec2 b, float thickness, ccord_color c);   // quad, for icons
 void ccord_draw_triangle(ccord_renderer *r, ccord_vec2 a, ccord_vec2 b, ccord_vec2 c, ccord_color col);
+void ccord_draw_rrect_stroke(ccord_renderer *r, ccord_rect rc, float radius, float thickness, ccord_color c);
+void ccord_draw_circle_stroke(ccord_renderer *r, float cx, float cy, float radius, float thickness, ccord_color c);
+// Draws an arc/ring stroke (filled == false) or pie wedge (filled == true). Angles in degrees (0 = right, clockwise).
+void ccord_draw_arc(ccord_renderer *r, float cx, float cy, float radius, float start_deg, float end_deg,
+                    float thickness, ccord_color c, bool filled);
+// Draws a polyline (filled == false) or convex/fan filled polygon (filled == true) through `pts[0..count)`.
+void ccord_draw_polygon(ccord_renderer *r, const ccord_vec2 *pts, size_t count, ccord_color c, bool filled,
+                        float thickness);
+// Draws an axis-aligned linear gradient rectangle (vertical == true: top->bottom, false: left->right).
+void ccord_draw_gradient_rect(ccord_renderer *r, ccord_rect rc, ccord_color c0, ccord_color c1, bool vertical);
+// Swaps the regular/bold base fonts to custom absolute paths (nullptr or "" restores the default theme font).
+// Flushes the text cache if changed. Returns false if a non-empty path could not be opened as a font.
+bool ccord_render_set_custom_fonts(ccord_renderer *r, const char *regular_path, const char *bold_path);
 // Group effects: everything drawn between a push and its pop is multiplied by `alpha` (0..1, nests by multiplying) or
 // shifted by (dx, dy) logical px (nests by adding). This is how a menu fades in or a toast slides up without every
 // widget knowing about it. Depth 8; extra pushes are ignored (and their pops too), and both stacks are reset by

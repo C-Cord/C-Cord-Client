@@ -1,0 +1,276 @@
+// SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
+// Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
+#include <ccord/render/render.h>
+#include <ccord/render/anim.h>
+#include <ccord/render/av_stream.h>
+
+#include <setjmp.h>
+#include <stdio.h>
+#include <string.h>
+
+#include <jpeglib.h>
+#include <png.h>
+#include <webp/decode.h>
+
+#include <ccord/core/alloc.h>
+
+// ---- image decoding (libpng, libjpeg, libwebp) ----
+
+#define MAX_IMAGE_DIM 4096   // the largest texture the cache holds, per side
+
+// What a still picture may be before it is refused: a phone photo, a long screenshot or a wallpaper is far larger
+// than MAX_IMAGE_DIM and is shrunk to it after decoding, so the expanded view of an embedded image still shows it.
+// The pixel cap bounds the decoder's memory (a PNG or WebP is decoded whole; a JPEG is shrunk while decoding).
+#define MAX_SOURCE_DIM 16384
+#define MAX_SOURCE_PIXELS ((uint64_t)64 * 1000 * 1000)
+#define MAX_JPEG_SOURCE_PIXELS ((uint64_t)400 * 1000 * 1000)
+
+// Shrinks *rgba (w x h) with an area average so that neither side exceeds MAX_IMAGE_DIM, keeping its shape. A picture
+// that already fits is left as it is.
+static ccord_status shrink_rgba_to_fit(uint8_t **rgba, int *w, int *h, ccord_error *err)
+{
+  int sw = *w, sh = *h;
+  if (sw <= MAX_IMAGE_DIM && sh <= MAX_IMAGE_DIM) return CCORD_OK;
+  int big = sw > sh ? sw : sh;
+  int dw = (int)(((int64_t)sw * MAX_IMAGE_DIM + big / 2) / big);
+  int dh = (int)(((int64_t)sh * MAX_IMAGE_DIM + big / 2) / big);
+  if (dw < 1) dw = 1;
+  if (dh < 1) dh = 1;
+  uint8_t *out = ccord_malloc((size_t)dw * (size_t)dh * 4u);
+  if (!out) return ccord_error_set(err, CCORD_ERR_NOMEM, "image: out of memory shrinking");
+  const uint8_t *src = *rgba;
+  for (int y = 0; y < dh; y++) {
+    int y0 = (int)((int64_t)y * sh / dh), y1 = (int)((int64_t)(y + 1) * sh / dh);
+    if (y1 <= y0) y1 = y0 + 1;
+    for (int x = 0; x < dw; x++) {
+      int x0 = (int)((int64_t)x * sw / dw), x1 = (int)((int64_t)(x + 1) * sw / dw);
+      if (x1 <= x0) x1 = x0 + 1;
+      uint64_t acc[4] = {0, 0, 0, 0};
+      for (int yy = y0; yy < y1; yy++) {
+        const uint8_t *p = src + ((size_t)yy * (size_t)sw + (size_t)x0) * 4u;
+        for (int xx = x0; xx < x1; xx++, p += 4) {
+          acc[0] += p[0];
+          acc[1] += p[1];
+          acc[2] += p[2];
+          acc[3] += p[3];
+        }
+      }
+      uint64_t n = (uint64_t)(y1 - y0) * (uint64_t)(x1 - x0);
+      uint8_t *d = out + ((size_t)y * (size_t)dw + (size_t)x) * 4u;
+      for (int k = 0; k < 4; k++) d[k] = (uint8_t)((acc[k] + n / 2u) / n);
+    }
+  }
+  ccord_free(*rgba);
+  *rgba = out;
+  *w = dw;
+  *h = dh;
+  return CCORD_OK;
+}
+
+static ccord_status decode_png_rgba(const uint8_t *data, size_t len, uint8_t **out_rgba, int *out_w, int *out_h,
+                                    ccord_error *err)
+{
+  png_image img;
+  memset(&img, 0, sizeof img);
+  img.version = PNG_IMAGE_VERSION;
+  if (!png_image_begin_read_from_memory(&img, data, len) || PNG_IMAGE_FAILED(img)) {
+    png_image_free(&img);
+    return ccord_error_set(err, CCORD_ERR_PARSE, "png: invalid image header");
+  }
+  if (img.width == 0 || img.height == 0 || img.width > MAX_SOURCE_DIM || img.height > MAX_SOURCE_DIM ||
+      (uint64_t)img.width * img.height > MAX_SOURCE_PIXELS) {
+    png_image_free(&img);
+    return ccord_error_set(err, CCORD_ERR_RANGE, "png: dimensions out of range");
+  }
+  img.format = PNG_FORMAT_RGBA;
+  size_t sz = PNG_IMAGE_SIZE(img);
+  uint8_t *rgba = ccord_malloc(sz);
+  if (!rgba) {
+    png_image_free(&img);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "png: out of memory");
+  }
+  if (!png_image_finish_read(&img, nullptr, rgba, 0, nullptr) || PNG_IMAGE_FAILED(img)) {
+    ccord_free(rgba);
+    png_image_free(&img);
+    return ccord_error_set(err, CCORD_ERR_PARSE, "png: decode failed");
+  }
+  int pw = (int)img.width, ph = (int)img.height;
+  png_image_free(&img);
+  ccord_status sst = shrink_rgba_to_fit(&rgba, &pw, &ph, err);
+  if (sst != CCORD_OK) {
+    ccord_free(rgba);
+    return sst;
+  }
+  *out_w = pw;
+  *out_h = ph;
+  *out_rgba = rgba;
+  return CCORD_OK;
+}
+
+struct jpeg_decode_ctx {
+  struct jpeg_error_mgr pub;
+  jmp_buf jb;
+  uint8_t *rgba;
+  uint8_t *row;
+};
+
+static void jpeg_error_exit_fn(j_common_ptr cinfo)
+{
+  struct jpeg_decode_ctx *ctx = (struct jpeg_decode_ctx *)(void *)cinfo->err;
+  longjmp(ctx->jb, 1);
+}
+
+static void jpeg_output_message_fn(j_common_ptr cinfo)
+{
+  (void)cinfo;
+}
+
+static ccord_status decode_jpeg_rgba(const uint8_t *data, size_t len, uint8_t **out_rgba, int *out_w, int *out_h,
+                                     ccord_error *err)
+{
+  struct jpeg_decompress_struct cinfo;
+  struct jpeg_decode_ctx jctx;
+  memset(&jctx, 0, sizeof jctx);
+  cinfo.err = jpeg_std_error(&jctx.pub);
+  jctx.pub.error_exit = jpeg_error_exit_fn;
+  jctx.pub.output_message = jpeg_output_message_fn;
+
+  if (setjmp(jctx.jb) != 0) {
+    jpeg_destroy_decompress(&cinfo);
+    ccord_free(jctx.row);
+    ccord_free(jctx.rgba);
+    return ccord_error_set(err, CCORD_ERR_PARSE, "jpeg: decode failed");
+  }
+
+  jpeg_create_decompress(&cinfo);
+  jpeg_mem_src(&cinfo, data, (unsigned long)len);
+  if (jpeg_read_header(&cinfo, TRUE) != JPEG_HEADER_OK) {
+    jpeg_destroy_decompress(&cinfo);
+    return ccord_error_set(err, CCORD_ERR_PARSE, "jpeg: invalid header");
+  }
+  cinfo.out_color_space = JCS_RGB;
+  if (cinfo.image_width == 0 || cinfo.image_height == 0 || cinfo.image_width > MAX_SOURCE_DIM ||
+      cinfo.image_height > MAX_SOURCE_DIM ||
+      (uint64_t)cinfo.image_width * cinfo.image_height > MAX_JPEG_SOURCE_PIXELS) {
+    jpeg_destroy_decompress(&cinfo);
+    return ccord_error_set(err, CCORD_ERR_RANGE, "jpeg: dimensions out of range");
+  }
+  // libjpeg shrinks by 1/2, 1/4 or 1/8 while decoding: a large photo never needs its full-size buffer.
+  cinfo.scale_num = 1;
+  cinfo.scale_denom = 1;
+  while (cinfo.scale_denom < 8u &&
+         (cinfo.image_width / cinfo.scale_denom > MAX_IMAGE_DIM || cinfo.image_height / cinfo.scale_denom > MAX_IMAGE_DIM)) {
+    cinfo.scale_denom *= 2u;
+  }
+  (void)jpeg_start_decompress(&cinfo);
+  if (cinfo.output_width == 0 || cinfo.output_height == 0 || cinfo.output_width > MAX_SOURCE_DIM ||
+      cinfo.output_height > MAX_SOURCE_DIM || cinfo.output_components != 3) {
+    jpeg_destroy_decompress(&cinfo);
+    return ccord_error_set(err, CCORD_ERR_RANGE, "jpeg: dimensions or components out of range");
+  }
+  int w = (int)cinfo.output_width;
+  int h = (int)cinfo.output_height;
+  jctx.rgba = ccord_malloc((size_t)w * (size_t)h * 4u);
+  jctx.row = ccord_malloc((size_t)w * 3u);
+  if (!jctx.rgba || !jctx.row) {
+    jpeg_destroy_decompress(&cinfo);
+    ccord_free(jctx.row);
+    ccord_free(jctx.rgba);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "jpeg: out of memory");
+  }
+  while (cinfo.output_scanline < cinfo.output_height) {
+    uint32_t y = cinfo.output_scanline;
+    JSAMPROW row_ptr[1] = {jctx.row};
+    if (jpeg_read_scanlines(&cinfo, row_ptr, 1) != 1) {
+      jpeg_destroy_decompress(&cinfo);
+      ccord_free(jctx.row);
+      ccord_free(jctx.rgba);
+      return ccord_error_set(err, CCORD_ERR_PARSE, "jpeg: truncated scanline");
+    }
+    uint8_t *dst = &jctx.rgba[(size_t)y * (size_t)w * 4u];
+    for (int x = 0; x < w; x++) {
+      dst[x * 4 + 0] = jctx.row[x * 3 + 0];
+      dst[x * 4 + 1] = jctx.row[x * 3 + 1];
+      dst[x * 4 + 2] = jctx.row[x * 3 + 2];
+      dst[x * 4 + 3] = 255u;
+    }
+  }
+  (void)jpeg_finish_decompress(&cinfo);
+  jpeg_destroy_decompress(&cinfo);
+  ccord_free(jctx.row);
+  ccord_status sst = shrink_rgba_to_fit(&jctx.rgba, &w, &h, err);
+  if (sst != CCORD_OK) {
+    ccord_free(jctx.rgba);
+    return sst;
+  }
+  *out_w = w;
+  *out_h = h;
+  *out_rgba = jctx.rgba;
+  return CCORD_OK;
+}
+
+static ccord_status decode_webp_rgba(const uint8_t *data, size_t len, uint8_t **out_rgba, int *out_w, int *out_h,
+                                     ccord_error *err)
+{
+  int w = 0, h = 0;
+  if (!WebPGetInfo(data, len, &w, &h) || w <= 0 || h <= 0 || w > MAX_SOURCE_DIM || h > MAX_SOURCE_DIM ||
+      (uint64_t)w * (uint64_t)h > MAX_SOURCE_PIXELS) {
+    return ccord_error_set(err, CCORD_ERR_PARSE, "webp: invalid header or dimensions");
+  }
+  size_t sz = (size_t)w * (size_t)h * 4u;
+  uint8_t *rgba = ccord_malloc(sz);
+  if (!rgba) return ccord_error_set(err, CCORD_ERR_NOMEM, "webp: out of memory");
+  if (!WebPDecodeRGBAInto(data, len, rgba, sz, w * 4)) {
+    ccord_free(rgba);
+    return ccord_error_set(err, CCORD_ERR_PARSE, "webp: decode failed");
+  }
+  ccord_status sst = shrink_rgba_to_fit(&rgba, &w, &h, err);
+  if (sst != CCORD_OK) {
+    ccord_free(rgba);
+    return sst;
+  }
+  *out_w = w;
+  *out_h = h;
+  *out_rgba = rgba;
+  return CCORD_OK;
+}
+
+// First frame of anything the ffmpeg path understands (GIF, APNG, animated WebP, BMP, TIFF, ...).
+static ccord_status decode_ffmpeg_first_frame(const uint8_t *data, size_t len, uint8_t **out_rgba, int *out_w,
+                                              int *out_h, ccord_error *err)
+{
+  ccord_anim a;
+  ccord_status st = ccord_anim_decode(data, len, MAX_IMAGE_DIM, 1, &a, err);
+  if (st != CCORD_OK) return st;
+  *out_rgba = a.frames[0];
+  *out_w = a.w;
+  *out_h = a.h;
+  a.frames[0] = nullptr;   // ownership moved to the caller
+  ccord_anim_free(&a);
+  return CCORD_OK;
+}
+
+ccord_status ccord_image_decode_rgba(const uint8_t *data, size_t len, uint8_t **out_rgba, int *out_w, int *out_h,
+                                     ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (out_rgba) *out_rgba = nullptr;
+  if (out_w) *out_w = 0;
+  if (out_h) *out_h = 0;
+  if (!data || len < 4 || !out_rgba || !out_w || !out_h) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "image decode: invalid argument");
+  }
+  if (len >= 8 && memcmp(data, "\x89PNG\r\n\x1a\n", 8) == 0) {
+    return decode_png_rgba(data, len, out_rgba, out_w, out_h, err);
+  }
+  if (len >= 3 && data[0] == 0xffu && data[1] == 0xd8u && data[2] == 0xffu) {
+    return decode_jpeg_rgba(data, len, out_rgba, out_w, out_h, err);
+  }
+  if (len >= 12 && memcmp(data, "RIFF", 4) == 0 && memcmp(data + 8, "WEBP", 4) == 0) {
+    // libwebp's simple decoder rejects animated WebP; the ffmpeg path yields its first frame.
+    if (decode_webp_rgba(data, len, out_rgba, out_w, out_h, err) == CCORD_OK) return CCORD_OK;
+    return decode_ffmpeg_first_frame(data, len, out_rgba, out_w, out_h, err);
+  }
+  return decode_ffmpeg_first_frame(data, len, out_rgba, out_w, out_h, err);
+}
+

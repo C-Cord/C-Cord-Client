@@ -745,6 +745,70 @@ static void test_platform_apis(ccord_platform *p, ccord_renderer *r)
   }
 }
 
+static void test_v3_primitives(ccord_renderer *r)
+{
+  ccord_color bg = {0x10, 0x12, 0x16, 255};
+  ccord_color red = {240, 40, 40, 255};
+  ccord_color green = {40, 220, 60, 255};
+  ccord_color blue = {40, 80, 240, 255};
+  ccord_color yellow = {245, 210, 30, 255};
+
+  ccord_render_begin(r, bg);
+  // 1. Rounded-rect stroke: border painted, interior remains bg.
+  ccord_draw_rrect_stroke(r, (ccord_rect){20, 20, 100, 60}, 10.0f, 4.0f, red);
+  // 2. Circle stroke: ring painted, center remains bg.
+  ccord_draw_circle_stroke(r, 200.0f, 50.0f, 30.0f, 4.0f, green);
+  // 3. Arc ring (top-right quadrant) and filled pie wedge (bottom half).
+  ccord_draw_arc(r, 320.0f, 50.0f, 30.0f, 0.0f, 90.0f, 5.0f, yellow, false);
+  ccord_draw_arc(r, 420.0f, 50.0f, 30.0f, 0.0f, 180.0f, 2.0f, blue, true);
+  // 4. Filled convex polygon (diamond) & open polyline.
+  ccord_vec2 diamond[4] = {{100, 140}, {140, 180}, {100, 220}, {60, 180}};
+  ccord_draw_polygon(r, diamond, 4, green, true, 1.0f);
+  ccord_vec2 poly[3] = {{200, 160}, {280, 160}, {280, 220}};
+  ccord_draw_polygon(r, poly, 3, red, false, 4.0f);
+  // 5. Vertical and horizontal linear gradient rectangles.
+  ccord_draw_gradient_rect(r, (ccord_rect){340, 140, 80, 80}, red, blue, true);
+  ccord_draw_gradient_rect(r, (ccord_rect){440, 140, 80, 80}, green, yellow, false);
+
+  const char *path = "test_render_v3_shot.png";
+  ccord_error err;
+  CT_CHECK(ccord_render_screenshot(r, path, &err) == CCORD_OK);
+  ccord_render_end(r);
+
+  SDL_Surface *s = SDL_LoadPNG(path);
+  CT_CHECK(s != nullptr);
+  if (s) {
+    // RRect stroke: top edge red, interior bg.
+    CT_CHECK(pixel_is(s, 70, 21, red, 12));
+    CT_CHECK(pixel_is(s, 70, 50, bg, 2));
+    // Circle stroke: perimeter green (cx+r, cy), center bg.
+    CT_CHECK(pixel_is(s, 229, 50, green, 25));
+    CT_CHECK(pixel_is(s, 200, 50, bg, 2));
+    // Pie wedge: lower half (cx, cy+15) blue, upper half (cx, cy-15) bg.
+    CT_CHECK(pixel_is(s, 420, 65, blue, 12));
+    CT_CHECK(pixel_is(s, 420, 35, bg, 2));
+    // Arc stroke: midpoint at 45 deg (320 + 21, 50 + 21) painted yellow, center bg.
+    CT_CHECK(pixel_is(s, 341, 71, yellow, 30));
+    CT_CHECK(pixel_is(s, 320, 50, bg, 2));
+    // Filled polygon center green; polyline horizontal segment red.
+    CT_CHECK(pixel_is(s, 100, 180, green, 8));
+    CT_CHECK(pixel_is(s, 240, 160, red, 12));
+    // Vertical gradient: top near red, bottom near blue, middle blended.
+    CT_CHECK(pixel_is(s, 380, 142, red, 16));
+    CT_CHECK(pixel_is(s, 380, 217, blue, 16));
+    // Horizontal gradient: left near green, right near yellow.
+    CT_CHECK(pixel_is(s, 442, 180, green, 16));
+    CT_CHECK(pixel_is(s, 517, 180, yellow, 16));
+    SDL_DestroySurface(s);
+  }
+  remove(path);
+
+  // Custom font swap: invalid path returns false; restoring defaults (nullptr/empty) succeeds.
+  CT_CHECK(!ccord_render_set_custom_fonts(r, "/no/such/ccord_font_missing.ttf", nullptr));
+  CT_CHECK(ccord_render_set_custom_fonts(r, nullptr, nullptr));
+  CT_CHECK(ccord_render_set_custom_fonts(r, "", ""));
+}
+
 int main(int argc, char **argv)
 {
   ccord_error err;
@@ -779,6 +843,7 @@ int main(int argc, char **argv)
   test_fallback_fonts_and_textures(r);
   test_zoom(r);
   test_platform_apis(p, r);
+  test_v3_primitives(r);
   ccord_render_destroy(r);
   ccord_platform_destroy(p);
   return CT_RESULT("test_render");

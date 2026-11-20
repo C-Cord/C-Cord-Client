@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #pragma once
+#include <math.h>
 #include <SDL3/SDL.h>
 #include <SDL3_ttf/SDL_ttf.h>
 
@@ -16,6 +17,7 @@
 #define CCORD_FONT_CACHE_SIZE 48
 #define CCORD_DISC_CACHE_SIZE 48
 #define CCORD_TEX_CACHE_SIZE 1024
+#define MAX_IMAGE_DIM 4096
 #define CCORD_TEX_HASH_SIZE 2048
 #define CCORD_TEX_HASH_MASK (CCORD_TEX_HASH_SIZE - 1u)
 // Bundled subsets (emoji + CJK, loaded lazily & independently) plus fonts found at run time on the first miss.
@@ -101,6 +103,8 @@ struct ccord_renderer {
   SDL_Renderer *sdl;
   TTF_TextEngine *engine;
   char font_path[2][1024];
+  char default_font_path[2][1024];
+  char default_font_rel[2][128];
   float line_factor;
   float scale;          // physical px per logical px = display_scale * zoom
   float display_scale;  // platform display scale without UI zoom
@@ -172,4 +176,16 @@ size_t av_stream_mem_bytes(const ccord_av_stream *s);
 static inline uint8_t ccord_fx_alpha(const ccord_renderer *r, uint8_t a)
 {
   return r->alpha >= 1.0f ? a : (uint8_t)((float)a * (r->alpha > 0.0f ? r->alpha : 0.0f) + 0.5f);
+}
+
+// texture_cache.c
+void tex_cache_init(ccord_renderer *r);
+void tex_free_slot(ccord_renderer *r, int slot);
+
+// Snaps a logical rect to whole physical pixels so neighbours sharing an edge never leave a seam.
+static inline SDL_FRect render_snap(const ccord_renderer *r, ccord_rect rc)
+{
+  float x0 = roundf((rc.x + r->ox) * r->scale), y0 = roundf((rc.y + r->oy) * r->scale);
+  float x1 = roundf((rc.x + r->ox + rc.w) * r->scale), y1 = roundf((rc.y + r->oy + rc.h) * r->scale);
+  return (SDL_FRect){x0, y0, x1 - x0, y1 - y0};
 }

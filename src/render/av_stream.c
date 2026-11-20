@@ -369,6 +369,20 @@ static ccord_status avs_setup(ccord_av_stream *s, ccord_error *err)
     if (cw > AVS_MAX_DIM || ch > AVS_MAX_DIM || (int64_t)cw * ch > AVS_MAX_SRC_PIXELS) {
       return ccord_error_set(err, CCORD_ERR_RANGE, "av_stream: video dimensions out of range");
     }
+    // WebM/Matroska VP8/VP9 streams with alpha_mode=1 carry the alpha plane in BlockAdditional side data, which
+    // FFmpeg's built-in vp8/vp9 decoders ignore; libvpx / libvpx-vp9 decode both planes into YUVA420P.
+    const AVCodec *fallback_vcodec = vcodec;
+    const AVDictionaryEntry *alpha_tag = av_dict_get(vs->metadata, "alpha_mode", nullptr, 0);
+    bool has_alpha = alpha_tag && alpha_tag->value && strcmp(alpha_tag->value, "1") == 0;
+    if (has_alpha) {
+      const char *vpx_name = nullptr;
+      if (vs->codecpar->codec_id == AV_CODEC_ID_VP9) vpx_name = "libvpx-vp9";
+      else if (vs->codecpar->codec_id == AV_CODEC_ID_VP8) vpx_name = "libvpx";
+      if (vpx_name) {
+        const AVCodec *vpx = avcodec_find_decoder_by_name(vpx_name);
+        if (vpx) vcodec = vpx;
+      }
+    }
     // Frame threads only for real video: they cost latency and memory that a GIF never earns back.
     int threads = 1;
     if (s->flags & CCORD_AV_MEDIA) {
@@ -377,23 +391,28 @@ static ccord_status avs_setup(ccord_av_stream *s, ccord_error *err)
       if (threads > 4) threads = 4;
     }
 #if defined(__ANDROID__)
-    const char *hw_name = nullptr;
-    switch (vs->codecpar->codec_id) {
-      case AV_CODEC_ID_H264:  hw_name = "h264_mediacodec";  break;
-      case AV_CODEC_ID_HEVC:  hw_name = "hevc_mediacodec";  break;
-      case AV_CODEC_ID_VP9:   hw_name = "vp9_mediacodec";   break;
-      case AV_CODEC_ID_VP8:   hw_name = "vp8_mediacodec";   break;
-      case AV_CODEC_ID_MPEG4: hw_name = "mpeg4_mediacodec"; break;
-      default: break;
-    }
-    if (hw_name) {
-      const AVCodec *hw = avcodec_find_decoder_by_name(hw_name);
-      if (hw) s->vdec = avs_open_codec(hw, vs, 1);
+    if (!has_alpha) {
+      const char *hw_name = nullptr;
+      switch (vs->codecpar->codec_id) {
+        case AV_CODEC_ID_H264:  hw_name = "h264_mediacodec";  break;
+        case AV_CODEC_ID_HEVC:  hw_name = "hevc_mediacodec";  break;
+        case AV_CODEC_ID_VP9:   hw_name = "vp9_mediacodec";   break;
+        case AV_CODEC_ID_VP8:   hw_name = "vp8_mediacodec";   break;
+        case AV_CODEC_ID_MPEG4: hw_name = "mpeg4_mediacodec"; break;
+        default: break;
+      }
+      if (hw_name) {
+        const AVCodec *hw = avcodec_find_decoder_by_name(hw_name);
+        if (hw) s->vdec = avs_open_codec(hw, vs, 1);
+      }
     }
     if (!s->vdec) s->vdec = avs_open_codec(vcodec, vs, threads);
 #else
     s->vdec = avs_open_codec(vcodec, vs, threads);
 #endif
+    if (!s->vdec && vcodec != fallback_vcodec) {
+      s->vdec = avs_open_codec(fallback_vcodec, vs, threads);
+    }
     if (s->vdec) {
       s->vsi = vsi;
       s->rot = avs_rotation_turns(vs);
