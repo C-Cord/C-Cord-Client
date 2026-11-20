@@ -179,17 +179,18 @@ void ccord_voice_audio_thread_set_controls(ccord_voice_audio_thread *t, bool mut
   if (!t) return;
   int iv = clamp_vol(in_vol);
   int ov = clamp_vol(out_vol);
+  ccord_mutex_lock(t->mtx);
   if (atomic_load_explicit(&t->muted, memory_order_relaxed) == muted &&
       atomic_load_explicit(&t->deafened, memory_order_relaxed) == deafened &&
       atomic_load_explicit(&t->in_vol, memory_order_relaxed) == iv &&
       atomic_load_explicit(&t->out_vol, memory_order_relaxed) == ov) {
+    ccord_mutex_unlock(t->mtx);
     return;
   }
   atomic_store_explicit(&t->muted, muted, memory_order_relaxed);
   atomic_store_explicit(&t->deafened, deafened, memory_order_relaxed);
   atomic_store_explicit(&t->in_vol, iv, memory_order_relaxed);
   atomic_store_explicit(&t->out_vol, ov, memory_order_relaxed);
-  ccord_mutex_lock(t->mtx);
   atomic_fetch_add_explicit(&t->ctrl_seq, 1u, memory_order_release);
   ccord_cond_signal(t->cv);
   ccord_mutex_unlock(t->mtx);
