@@ -261,6 +261,13 @@ int main(void)
   }
 
   // Security regressions (P1, P2, P6, P12, P16):
+  // 1. Frozen metatables on read-only API tables (P6).
+  {
+    ccord_sandbox *sb = make(&f, 0, 0, 0);
+    CT_CHECK(run(sb, "assert(getmetatable(messages) == false and getmetatable(events) == false and getmetatable(ui) == false)", &err) == CCORD_OK);
+    ccord_sandbox_destroy(sb);
+  }
+
   // 2. Deeply nested JSON/Lua stack round-trip under LUA_USE_APICHECK (P1).
   {
     ccord_sandbox *sb = make(&f, 0, 0, 0);
@@ -273,6 +280,18 @@ int main(void)
     ccord_sandbox_destroy(sb);
   }
 
+  // 3. __index metamethod returning fresh strings cannot cause popped-string UAF (P1).
+  {
+    ccord_sandbox *sb = make(&f, CCORD_PERM_UI_CONTEXTMENU | CCORD_PERM_UI_PANEL | CCORD_PERM_SYSTEM_NOTIFY, 0, 0);
+    CT_CHECK(run(sb,
+                 "local t = setmetatable({}, { __index = function(_, k) collectgarbage('collect'); return tostring(k) .. '_dyn' end })\n"
+                 "local ok1 = pcall(function() ui.contextMenu.add(t) end)\n"
+                 "local ok2 = pcall(function() ui.panel.mount(t) end)\n"
+                 "local ok3 = pcall(function() system.notify(t) end)\n"
+                 "assert(not ok1 and not ok2 and not ok3)",
+                 &err) == CCORD_OK);
+    ccord_sandbox_destroy(sb);
+  }
 
   return CT_RESULT("test_host_sandbox");
 }

@@ -417,8 +417,18 @@ static void make_readonly(lua_State *L)
   lua_setfield(L, -2, "__index");
   lua_pushcfunction(L, api_readonly);
   lua_setfield(L, -2, "__newindex");
+  lua_pushboolean(L, 0);
+  lua_setfield(L, -2, "__metatable");
   lua_setmetatable(L, -2);
   lua_remove(L, -2);
+}
+
+// Raw-reads table[key] without triggering __index metamethods (prevents GC UAF on popped strings).
+static int raw_getfield(lua_State *L, int tbl_idx, const char *key)
+{
+  int abs_idx = lua_absindex(L, tbl_idx);
+  lua_pushstring(L, key);
+  return lua_rawget(L, abs_idx);
 }
 
 static bool event_perm_for(const char *name, size_t n, ccord_perm *perm)
@@ -497,44 +507,63 @@ static int api_ui_menu_add(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
   luaL_checktype(L, 1, LUA_TTABLE);
-  const char *fields[] = {"id", "label", "target", "action"};
-  size_t lens[3] = {0, 0, 0};
-  const char *vals[3] = {nullptr, nullptr, nullptr};
-  for (int i = 0; i < 4; i++) {
-    lua_getfield(L, 1, fields[i]);
-    if (i < 3) {
-      if (lua_type(L, -1) != LUA_TSTRING) return luaL_error(L, "ui.contextMenu.add: '%s' must be a string", fields[i]);
-      vals[i] = lua_tolstring(L, -1, &lens[i]);
-    } else if (lua_type(L, -1) != LUA_TFUNCTION) {
-      return luaL_error(L, "ui.contextMenu.add: 'action' must be a function");
-    }
-    lua_pop(L, 1);
-  }
-  if (!valid_name(vals[0], lens[0], 32, true) || vals[0][0] == '_' || vals[0][0] == '-')
-    return luaL_error(L, "ui.contextMenu.add: id must match ^[a-z0-9][a-z0-9_-]{0,31}$");
-  if (!is_text(vals[1], lens[1], 64)) return luaL_error(L, "ui.contextMenu.add: label must be 1-64 bytes of text");
-  if (!eq(vals[2], lens[2], "message") && !eq(vals[2], lens[2], "channel") && !eq(vals[2], lens[2], "guild") &&
-      !eq(vals[2], lens[2], "member") && !eq(vals[2], lens[2], "nav"))
-    return luaL_error(L, "ui.contextMenu.add: target must be message, channel, guild, member or nav");
+  char id_buf[33] = "", label_buf[65] = "", target_buf[16] = "";
+  size_t id_len = 0, label_len = 0, target_len = 0;
 
+  raw_getfield(L, 1, "id");
+  if (lua_type(L, -1) != LUA_TSTRING) return luaL_error(L, "ui.contextMenu.add: 'id' must be a string");
+  {
+    const char *s = lua_tolstring(L, -1, &id_len);
+    if (!valid_name(s, id_len, 32, true) || s[0] == '_' || s[0] == '-')
+      return luaL_error(L, "ui.contextMenu.add: id must match ^[a-z0-9][a-z0-9_-]{0,31}$");
+    memcpy(id_buf, s, id_len);
+    id_buf[id_len] = '\0';
+  }
+  lua_pop(L, 1);
+
+  raw_getfield(L, 1, "label");
+  if (lua_type(L, -1) != LUA_TSTRING) return luaL_error(L, "ui.contextMenu.add: 'label' must be a string");
+  {
+    const char *s = lua_tolstring(L, -1, &label_len);
+    if (!is_text(s, label_len, 64)) return luaL_error(L, "ui.contextMenu.add: label must be 1-64 bytes of text");
+    memcpy(label_buf, s, label_len);
+    label_buf[label_len] = '\0';
+  }
+  lua_pop(L, 1);
+
+  raw_getfield(L, 1, "target");
+  if (lua_type(L, -1) != LUA_TSTRING) return luaL_error(L, "ui.contextMenu.add: 'target' must be a string");
+  {
+    const char *s = lua_tolstring(L, -1, &target_len);
+    if (!eq(s, target_len, "message") && !eq(s, target_len, "channel") && !eq(s, target_len, "guild") &&
+        !eq(s, target_len, "member") && !eq(s, target_len, "nav"))
+      return luaL_error(L, "ui.contextMenu.add: target must be message, channel, guild, member or nav");
+    memcpy(target_buf, s, target_len);
+    target_buf[target_len] = '\0';
+  }
+  lua_pop(L, 1);
+
+  raw_getfield(L, 1, "action");
+  if (lua_type(L, -1) != LUA_TFUNCTION) return luaL_error(L, "ui.contextMenu.add: 'action' must be a function");
+  // Stack: ..., action
   lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_MENU);
-  lua_getfield(L, 1, "id");
-  lua_gettable(L, -2);
-  if (!lua_isnil(L, -1)) return luaL_error(L, "ui.contextMenu.add: id '%s' already registered", vals[0]);
+  lua_pushlstring(L, id_buf, id_len);
+  lua_rawget(L, -2);
+  if (!lua_isnil(L, -1)) return luaL_error(L, "ui.contextMenu.add: id '%s' already registered", id_buf);
   lua_pop(L, 1);
-  lua_getfield(L, 1, "id");
-  lua_getfield(L, 1, "action");
-  lua_settable(L, -3);
-  lua_pop(L, 1);
+  lua_pushlstring(L, id_buf, id_len);
+  lua_pushvalue(L, -3);
+  lua_rawset(L, -3);
+  lua_pop(L, 2);
 
   ccord_buf b;
   ccord_buf_init(&b, 0);
   ccord_jw w;
   ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w);
-  ccord_jw_key(&w, "id"); ccord_jw_string(&w, vals[0], lens[0]);
-  ccord_jw_key(&w, "label"); ccord_jw_string(&w, vals[1], lens[1]);
-  ccord_jw_key(&w, "target"); ccord_jw_string(&w, vals[2], lens[2]);
+  ccord_jw_key(&w, "id"); ccord_jw_string(&w, id_buf, id_len);
+  ccord_jw_key(&w, "label"); ccord_jw_string(&w, label_buf, label_len);
+  ccord_jw_key(&w, "target"); ccord_jw_string(&w, target_buf, target_len);
   ccord_jw_end_object(&w);
   if (ccord_jw_ok(&w)) sb_request(sb, "ui.contextMenu.add", ccord_buf_cstr(&b));
   ccord_buf_free(&b);
@@ -568,27 +597,34 @@ static int api_ui_panel_mount(lua_State *L)
   if (!check_perm(L, sb, CCORD_PERM_UI_PANEL, "ui.panel.mount")) return push_undeclared(L);
   luaL_checktype(L, 1, LUA_TTABLE);
 
+  char id_buf[33] = "";
   size_t id_len = 0;
-  lua_getfield(L, 1, "id");
+  raw_getfield(L, 1, "id");
   if (lua_type(L, -1) != LUA_TSTRING) return luaL_error(L, "ui.panel.mount: 'id' must be a string");
-  const char *id = lua_tolstring(L, -1, &id_len);
-  if (!valid_name(id, id_len, 32, true) || id[0] == '_' || id[0] == '-')
-    return luaL_error(L, "ui.panel.mount: id must match ^[a-z0-9][a-z0-9_-]{0,31}$");
+  {
+    const char *s = lua_tolstring(L, -1, &id_len);
+    if (!valid_name(s, id_len, 32, true) || s[0] == '_' || s[0] == '-')
+      return luaL_error(L, "ui.panel.mount: id must match ^[a-z0-9][a-z0-9_-]{0,31}$");
+    memcpy(id_buf, s, id_len);
+    id_buf[id_len] = '\0';
+  }
   lua_pop(L, 1);
 
+  char slot_buf[16] = "top";
   size_t slot_len = 3;
-  const char *slot = "top";
-  lua_getfield(L, 1, "slot");
+  raw_getfield(L, 1, "slot");
   if (!lua_isnil(L, -1)) {
     if (lua_type(L, -1) != LUA_TSTRING) return luaL_error(L, "ui.panel.mount: 'slot' must be a string");
-    slot = lua_tolstring(L, -1, &slot_len);
-    if (!valid_panel_slot(slot, slot_len))
+    const char *s = lua_tolstring(L, -1, &slot_len);
+    if (!valid_panel_slot(s, slot_len))
       return luaL_error(L, "ui.panel.mount: slot must be 'top', 'subheader' or 'bottom'");
+    memcpy(slot_buf, s, slot_len);
+    slot_buf[slot_len] = '\0';
   }
   lua_pop(L, 1);
 
   double height = 34.0;
-  lua_getfield(L, 1, "height");
+  raw_getfield(L, 1, "height");
   if (!lua_isnil(L, -1)) {
     if (lua_type(L, -1) != LUA_TNUMBER) return luaL_error(L, "ui.panel.mount: 'height' must be a number");
     height = (double)lua_tonumber(L, -1);
@@ -597,18 +633,18 @@ static int api_ui_panel_mount(lua_State *L)
   }
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "on_event");
+  raw_getfield(L, 1, "on_event");
   if (!lua_isnil(L, -1)) {
     if (lua_type(L, -1) != LUA_TFUNCTION) return luaL_error(L, "ui.panel.mount: 'on_event' must be a function");
     lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_PANELS);
-    lua_getfield(L, 1, "id");
+    lua_pushlstring(L, id_buf, id_len);
     lua_pushvalue(L, -3);
-    lua_settable(L, -3);
+    lua_rawset(L, -3);
     lua_pop(L, 1);
   }
   lua_pop(L, 1);
 
-  lua_getfield(L, 1, "root");
+  raw_getfield(L, 1, "root");
   if (lua_type(L, -1) != LUA_TTABLE) return luaL_error(L, "ui.panel.mount: 'root' must be a table");
   int root_idx = lua_gettop(L);
 
@@ -617,8 +653,8 @@ static int api_ui_panel_mount(lua_State *L)
   ccord_jw w;
   ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w);
-  ccord_jw_key(&w, "id"); ccord_jw_string(&w, id, id_len);
-  ccord_jw_key(&w, "slot"); ccord_jw_string(&w, slot, slot_len);
+  ccord_jw_key(&w, "id"); ccord_jw_string(&w, id_buf, id_len);
+  ccord_jw_key(&w, "slot"); ccord_jw_string(&w, slot_buf, slot_len);
   ccord_jw_key(&w, "height"); ccord_jw_double(&w, height);
   ccord_jw_key(&w, "root");
   bool ok = encode_lua(L, root_idx, &w, 0);
@@ -645,37 +681,46 @@ static int api_ui_panel_update(lua_State *L)
   luaL_checktype(L, 2, LUA_TTABLE);
 
   // Shorthand: if argument 2 has a string `type` and no `root` table, treat argument 2 itself as `root`.
-  lua_getfield(L, 2, "root");
+  raw_getfield(L, 2, "root");
   bool has_root_field = !lua_isnil(L, -1);
-  if (has_root_field && lua_type(L, -1) != LUA_TTABLE) {
+  int root_stack_idx = 0;
+  if (has_root_field) {
+    if (lua_type(L, -1) != LUA_TTABLE) {
+      lua_pop(L, 1);
+      return luaL_error(L, "ui.panel.update: 'root' must be a table");
+    }
+    root_stack_idx = lua_gettop(L);
+  } else {
     lua_pop(L, 1);
-    return luaL_error(L, "ui.panel.update: 'root' must be a table");
   }
-  lua_pop(L, 1);
 
   bool direct_root = false;
   if (!has_root_field) {
-    lua_getfield(L, 2, "type");
+    raw_getfield(L, 2, "type");
     direct_root = (lua_type(L, -1) == LUA_TSTRING);
     lua_pop(L, 1);
   }
 
+  char slot_buf[16] = "";
   size_t slot_len = 0;
-  const char *slot = nullptr;
+  bool has_slot = false;
   double height = 0.0;
   bool has_height = false;
 
   if (!direct_root) {
-    lua_getfield(L, 2, "slot");
+    raw_getfield(L, 2, "slot");
     if (!lua_isnil(L, -1)) {
       if (lua_type(L, -1) != LUA_TSTRING) return luaL_error(L, "ui.panel.update: 'slot' must be a string");
-      slot = lua_tolstring(L, -1, &slot_len);
-      if (!valid_panel_slot(slot, slot_len))
+      const char *s = lua_tolstring(L, -1, &slot_len);
+      if (!valid_panel_slot(s, slot_len))
         return luaL_error(L, "ui.panel.update: slot must be 'top', 'subheader' or 'bottom'");
+      memcpy(slot_buf, s, slot_len);
+      slot_buf[slot_len] = '\0';
+      has_slot = true;
     }
     lua_pop(L, 1);
 
-    lua_getfield(L, 2, "height");
+    raw_getfield(L, 2, "height");
     if (!lua_isnil(L, -1)) {
       if (lua_type(L, -1) != LUA_TNUMBER) return luaL_error(L, "ui.panel.update: 'height' must be a number");
       height = (double)lua_tonumber(L, -1);
@@ -685,13 +730,13 @@ static int api_ui_panel_update(lua_State *L)
     }
     lua_pop(L, 1);
 
-    lua_getfield(L, 2, "on_event");
+    raw_getfield(L, 2, "on_event");
     if (!lua_isnil(L, -1)) {
       if (lua_type(L, -1) != LUA_TFUNCTION) return luaL_error(L, "ui.panel.update: 'on_event' must be a function");
       lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_PANELS);
       lua_pushlstring(L, id, id_len);
       lua_pushvalue(L, -3);
-      lua_settable(L, -3);
+      lua_rawset(L, -3);
       lua_pop(L, 1);
     }
     lua_pop(L, 1);
@@ -703,19 +748,18 @@ static int api_ui_panel_update(lua_State *L)
   ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w);
   ccord_jw_key(&w, "id"); ccord_jw_string(&w, id, id_len);
-  if (slot) { ccord_jw_key(&w, "slot"); ccord_jw_string(&w, slot, slot_len); }
+  if (has_slot) { ccord_jw_key(&w, "slot"); ccord_jw_string(&w, slot_buf, slot_len); }
   if (has_height) { ccord_jw_key(&w, "height"); ccord_jw_double(&w, height); }
   bool ok = true;
   if (direct_root) {
     ccord_jw_key(&w, "root");
     ok = encode_lua(L, 2, &w, 0);
   } else if (has_root_field) {
-    lua_getfield(L, 2, "root");
     ccord_jw_key(&w, "root");
-    ok = encode_lua(L, -1, &w, 0);
-    lua_pop(L, 1);
+    ok = encode_lua(L, root_stack_idx, &w, 0);
   }
   ccord_jw_end_object(&w);
+  if (has_root_field) lua_pop(L, 1);
   if (!ok || !ccord_jw_ok(&w)) {
     ccord_buf_free(&b);
     return luaL_error(L, "ui.panel.update: 'root' must be JSON-serializable");
@@ -1798,19 +1842,25 @@ static int api_system_notify(lua_State *L)
   if (!check_perm(L, sb, CCORD_PERM_SYSTEM_NOTIFY, "system.notify")) return push_undeclared(L);
   const char *title = luaL_checkstring(L, 1);
   const char *body = luaL_optstring(L, 2, "");
-  const char *tag = nullptr;
+  char tag_buf[128] = "";
+  size_t tag_len = 0;
   bool silent = false;
   if (lua_istable(L, 3)) {
-    if (lua_getfield(L, 3, "tag") == LUA_TSTRING) tag = lua_tostring(L, -1);
+    if (raw_getfield(L, 3, "tag") == LUA_TSTRING) {
+      const char *s = lua_tolstring(L, -1, &tag_len);
+      if (tag_len >= sizeof tag_buf) tag_len = sizeof tag_buf - 1u;
+      memcpy(tag_buf, s, tag_len);
+      tag_buf[tag_len] = '\0';
+    }
     lua_pop(L, 1);
-    if (lua_getfield(L, 3, "silent") == LUA_TBOOLEAN) silent = lua_toboolean(L, -1) != 0;
+    if (raw_getfield(L, 3, "silent") == LUA_TBOOLEAN) silent = lua_toboolean(L, -1) != 0;
     lua_pop(L, 1);
   }
   ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w);
   ccord_jw_key(&w, "title"); ccord_jw_cstr(&w, title);
   ccord_jw_key(&w, "body"); ccord_jw_cstr(&w, body);
-  if (tag && tag[0]) { ccord_jw_key(&w, "tag"); ccord_jw_cstr(&w, tag); }
+  if (tag_len > 0) { ccord_jw_key(&w, "tag"); ccord_jw_string(&w, tag_buf, tag_len); }
   if (silent) { ccord_jw_key(&w, "silent"); ccord_jw_bool(&w, true); }
   ccord_jw_end_object(&w);
   if (ccord_jw_ok(&w)) sb_request(sb, "system.notify", ccord_buf_cstr(&b));
