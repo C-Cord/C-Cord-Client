@@ -334,7 +334,11 @@ static bool send_frame_handle(HANDLE pipe, uint32_t op, const char *payload, siz
         if (GetLastError() == ERROR_IO_PENDING) {
           ok = WaitForSingleObject(ov.hEvent, 100) == WAIT_OBJECT_0 &&
                GetOverlappedResult(pipe, &ov, &written, FALSE) && written == (DWORD)total;
-          if (!ok) (void)CancelIoEx(pipe, &ov);
+          if (!ok) {
+            (void)CancelIoEx(pipe, &ov);
+            DWORD ignored = 0;
+            (void)GetOverlappedResult(pipe, &ov, &ignored, TRUE);
+          }
         } else {
           ok = false;
         }
@@ -766,7 +770,11 @@ static bool service_conn(ccord_rpc_server *s, ccord_rpc_conn *c, uint64_t now_ms
     if (!ok) {
       if (GetLastError() == ERROR_IO_PENDING) {
         ok = WaitForSingleObject(ov.hEvent, 50) == WAIT_OBJECT_0 && GetOverlappedResult(c->pipe, &ov, &got, FALSE);
-        if (!ok) (void)CancelIoEx(c->pipe, &ov);
+        if (!ok) {
+          (void)CancelIoEx(c->pipe, &ov);
+          DWORD ignored = 0;
+          (void)GetOverlappedResult(c->pipe, &ov, &ignored, TRUE);
+        }
       }
     }
     CloseHandle(ov.hEvent);
@@ -935,7 +943,12 @@ void ccord_rpc_server_destroy(ccord_rpc_server *s)
   }
 #if CCORD_OS_WINDOWS
   if (s->accept_pipe != INVALID_HANDLE_VALUE) {
-    (void)CancelIo(s->accept_pipe);
+    if (s->accept_pending) {
+      (void)CancelIoEx(s->accept_pipe, &s->accept_ov);
+      DWORD ignored = 0;
+      (void)GetOverlappedResult(s->accept_pipe, &s->accept_ov, &ignored, TRUE);
+      s->accept_pending = false;
+    }
     CloseHandle(s->accept_pipe);
   }
   if (s->accept_ev) CloseHandle(s->accept_ev);

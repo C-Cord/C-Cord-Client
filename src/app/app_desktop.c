@@ -878,7 +878,12 @@ void ccord_app_ipc_destroy(ccord_app_ipc *ipc)
 {
   if (!ipc) return;
   if (ipc->pipe != INVALID_HANDLE_VALUE) {
-    (void)CancelIo(ipc->pipe);
+    if (ipc->pending) {
+      (void)CancelIoEx(ipc->pipe, &ipc->ov);
+      DWORD ignored = 0;
+      (void)GetOverlappedResult(ipc->pipe, &ipc->ov, &ignored, TRUE);
+      ipc->pending = false;
+    }
     CloseHandle(ipc->pipe);
   }
   if (ipc->ev) CloseHandle(ipc->ev);
@@ -913,6 +918,8 @@ bool ccord_app_ipc_poll(ccord_app_ipc *ipc, char *out, size_t cap)
           rd = GetOverlappedResult(client, &rov, &n, FALSE);
         } else {
           (void)CancelIoEx(client, &rov);
+          DWORD ignored = 0;
+          (void)GetOverlappedResult(client, &rov, &ignored, TRUE);
         }
       }
       CloseHandle(rov.hEvent);
@@ -928,7 +935,10 @@ bool ccord_app_ipc_poll(ccord_app_ipc *ipc, char *out, size_t cap)
           if (wov.hEvent) {
             DWORD wr = 0;
             if (!WriteFile(client, ack, (DWORD)alen, &wr, &wov) && GetLastError() == ERROR_IO_PENDING) {
-              (void)WaitForSingleObject(wov.hEvent, 50);
+              if (WaitForSingleObject(wov.hEvent, 50) != WAIT_OBJECT_0) {
+                (void)CancelIoEx(client, &wov);
+              }
+              (void)GetOverlappedResult(client, &wov, &wr, TRUE);
             }
             CloseHandle(wov.hEvent);
           }
