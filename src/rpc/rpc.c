@@ -20,6 +20,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <sddl.h>
 typedef uint32_t ccord_rpc_pid_t;
 #else
 #include <fcntl.h>
@@ -95,12 +96,51 @@ struct ccord_rpc_server {
 // ---------------------------------------------------------------- listener
 
 #if CCORD_OS_WINDOWS
+static bool rpc_make_owner_sa(SECURITY_ATTRIBUTES *sa, PSECURITY_DESCRIPTOR *out_sd)
+{
+  *out_sd = nullptr;
+  HANDLE tok = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
+  DWORD need = 0;
+  (void)GetTokenInformation(tok, TokenUser, nullptr, 0, &need);
+  if (need == 0 || need > 4096) {
+    CloseHandle(tok);
+    return false;
+  }
+  unsigned char buf[4096];
+  bool ok = false;
+  if (GetTokenInformation(tok, TokenUser, buf, need, &need)) {
+    TOKEN_USER *tu = (TOKEN_USER *)buf;
+    LPSTR sid_str = nullptr;
+    if (ConvertSidToStringSidA(tu->User.Sid, &sid_str) && sid_str) {
+      char sddl[192];
+      int n = snprintf(sddl, sizeof sddl, "D:P(A;;GA;;;%s)", sid_str);
+      LocalFree(sid_str);
+      if (n > 0 && (size_t)n < sizeof sddl &&
+          ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl, SDDL_REVISION_1, out_sd, nullptr)) {
+        sa->nLength = sizeof *sa;
+        sa->lpSecurityDescriptor = *out_sd;
+        sa->bInheritHandle = FALSE;
+        ok = true;
+      }
+    }
+  }
+  CloseHandle(tok);
+  return ok;
+}
+
 static HANDLE create_pipe_instance(const char *path, bool first)
 {
+  SECURITY_ATTRIBUTES sa = {0};
+  PSECURITY_DESCRIPTOR sd = nullptr;
+  if (!rpc_make_owner_sa(&sa, &sd)) return INVALID_HANDLE_VALUE;
   DWORD open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
   if (first) open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
-  return CreateNamedPipeA(path, open_mode, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                          PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, nullptr);
+  HANDLE h = CreateNamedPipeA(path, open_mode,
+                              PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                              PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, &sa);
+  LocalFree(sd);
+  return h;
 }
 
 static bool arm_pipe_accept(ccord_rpc_server *s)
@@ -171,9 +211,12 @@ static bind_result bind_slot(const char *path, int *out_fd)
     (void)ccord_sock_set_cloexec(fd);
     (void)ccord_sock_set_nonblock(fd);
     (void)fchmod(fd, 0600);
+    mode_t old_umask = umask(0077);
     int rc = bind(fd, (struct sockaddr *)&addr, sizeof addr);
     int bind_errno = errno;
+    umask(old_umask);
     if (rc == 0) {
+      (void)chmod(path, 0600);
       if (listen(fd, (int)CCORD_RPC_MAX_CONNECTIONS) != 0) {
         close(fd);
         (void)unlink(path);

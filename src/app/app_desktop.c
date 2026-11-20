@@ -21,6 +21,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <sddl.h>
 #else
 #include <fcntl.h>
 #include <poll.h>
@@ -791,6 +792,65 @@ struct ccord_app_ipc {
   char path[CCORD_PATH_MAX];
 };
 
+static bool win_current_user_sid(char *out, size_t cap)
+{
+  if (!out || cap == 0) return false;
+  out[0] = '\0';
+  HANDLE tok = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
+  DWORD need = 0;
+  (void)GetTokenInformation(tok, TokenUser, nullptr, 0, &need);
+  if (need == 0 || need > 4096) {
+    CloseHandle(tok);
+    return false;
+  }
+  unsigned char buf[4096];
+  bool ok = false;
+  if (GetTokenInformation(tok, TokenUser, buf, need, &need)) {
+    TOKEN_USER *tu = (TOKEN_USER *)buf;
+    LPSTR sid_str = nullptr;
+    if (ConvertSidToStringSidA(tu->User.Sid, &sid_str) && sid_str) {
+      int n = snprintf(out, cap, "%s", sid_str);
+      ok = n > 0 && (size_t)n < cap;
+      LocalFree(sid_str);
+    }
+  }
+  CloseHandle(tok);
+  return ok;
+}
+
+static bool win_make_owner_sa(SECURITY_ATTRIBUTES *sa, PSECURITY_DESCRIPTOR *out_sd)
+{
+  *out_sd = nullptr;
+  char sid[128];
+  if (!win_current_user_sid(sid, sizeof sid)) return false;
+  char sddl[192];
+  int n = snprintf(sddl, sizeof sddl, "D:P(A;;GA;;;%s)", sid);
+  if (n <= 0 || (size_t)n >= sizeof sddl) return false;
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorA(sddl, SDDL_REVISION_1, out_sd, nullptr)) {
+    *out_sd = nullptr;
+    return false;
+  }
+  sa->nLength = sizeof *sa;
+  sa->lpSecurityDescriptor = *out_sd;
+  sa->bInheritHandle = FALSE;
+  return true;
+}
+
+static HANDLE win_create_ipc_pipe(const char *path, bool first)
+{
+  SECURITY_ATTRIBUTES sa = {0};
+  PSECURITY_DESCRIPTOR sd = nullptr;
+  if (!win_make_owner_sa(&sa, &sd)) return INVALID_HANDLE_VALUE;
+  DWORD open_mode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED;
+  if (first) open_mode |= FILE_FLAG_FIRST_PIPE_INSTANCE;
+  HANDLE h = CreateNamedPipeA(path, open_mode,
+                              PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                              PIPE_UNLIMITED_INSTANCES, 1024, 1024, 0, &sa);
+  LocalFree(sd);
+  return h;
+}
+
 void ccord_app_ipc_resolve_path(char *out, size_t cap, const char *override_path)
 {
   if (!out || cap == 0) return;
@@ -799,17 +859,18 @@ void ccord_app_ipc_resolve_path(char *out, size_t cap, const char *override_path
     snprintf(out, cap, "%s", override_path);
     return;
   }
-  const char *user = getenv("USERNAME");
-  if (!user || !user[0]) user = "user";
-  snprintf(out, cap, "\\\\.\\pipe\\ccord-control-%s", user);
+  char sid[128];
+  if (win_current_user_sid(sid, sizeof sid)) {
+    snprintf(out, cap, "\\\\.\\pipe\\ccord-control-%s", sid);
+    return;
+  }
+  snprintf(out, cap, "\\\\.\\pipe\\ccord-control-user");
 }
 
 static bool win_ipc_arm(ccord_app_ipc *ipc)
 {
   if (ipc->pipe == INVALID_HANDLE_VALUE) {
-    ipc->pipe = CreateNamedPipeA(ipc->path, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                                 PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                                 PIPE_UNLIMITED_INSTANCES, 1024, 1024, 0, nullptr);
+    ipc->pipe = win_create_ipc_pipe(ipc->path, false);
     if (ipc->pipe == INVALID_HANDLE_VALUE) return false;
   }
   ResetEvent(ipc->ev);
@@ -838,9 +899,7 @@ ccord_app_ipc *ccord_app_ipc_listen(const char *path, ccord_error *err)
     (void)ccord_error_set(err, CCORD_ERR_INVALID, "ipc: pipe path missing");
     return nullptr;
   }
-  HANDLE h = CreateNamedPipeA(path, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
-                              PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                              PIPE_UNLIMITED_INSTANCES, 1024, 1024, 0, nullptr);
+  HANDLE h = win_create_ipc_pipe(path, true);
   if (h == INVALID_HANDLE_VALUE) {
     DWORD e = GetLastError();
     if (e == ERROR_ACCESS_DENIED || e == ERROR_PIPE_BUSY) {
@@ -1094,8 +1153,10 @@ ccord_app_ipc *ccord_app_ipc_listen(const char *path, ccord_error *err)
   }
   (void)ccord_sock_set_cloexec(fd);
   (void)fchmod(fd, 0600);
+  mode_t old_umask = umask(0077);
   int rc = bind(fd, (struct sockaddr *)&addr, sizeof addr);
   int bind_errno = errno;
+  umask(old_umask);
   if (rc != 0) {
     if (bind_errno == EADDRINUSE) {
       if (ipc_probe_alive(path)) {
@@ -1104,10 +1165,12 @@ ccord_app_ipc *ccord_app_ipc_listen(const char *path, ccord_error *err)
         return nullptr;
       }
       struct stat st;
-      if (lstat(path, &st) == 0 && (S_ISSOCK(st.st_mode) || S_ISREG(st.st_mode)) && !S_ISLNK(st.st_mode) && st.st_uid == geteuid()) {
+      if (lstat(path, &st) == 0 && S_ISSOCK(st.st_mode) && st.st_uid == geteuid()) {
         (void)unlink(path);   // stale socket from a crashed instance: recover and re-bind
       }
+      old_umask = umask(0077);
       rc = bind(fd, (struct sockaddr *)&addr, sizeof addr);
+      umask(old_umask);
     }
     if (rc != 0) {
       close(fd);
@@ -1261,16 +1324,25 @@ bool ccord_app_ipc_handoff(const char *path, ccord_error *err)
   (void)ccord_sock_set_cloexec(fd);
   ccord_sock_set_nosigpipe(fd);
   if (connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
-    if (errno == ECONNREFUSED || errno == ENOENT) (void)unlink(path);
+    if (errno == ECONNREFUSED) {
+      struct stat st;
+      if (lstat(path, &st) == 0 && S_ISSOCK(st.st_mode) && st.st_uid == geteuid()) {
+        (void)unlink(path);
+      }
+    }
     close(fd);
     (void)ccord_error_set(err, CCORD_ERR_NOT_FOUND, "no running ccord instance on the control socket");
     return false;
   }
 
   pid_t peer_pid = 0;
-  bool same_uid = ipc_peer_same_user(fd, &peer_pid);
+  if (!ipc_peer_same_user(fd, &peer_pid)) {
+    close(fd);
+    (void)ccord_error_set(err, CCORD_ERR_PROTOCOL, "ipc: control socket owned by another user");
+    return false;
+  }
 
-  bool stale = same_uid && ipc_peer_is_stale_exe(peer_pid);
+  bool stale = ipc_peer_is_stale_exe(peer_pid);
   const char *cmd = stale ? "quit" : "show";
   char line[IPC_CMD_MAX + 2];
   int len = snprintf(line, sizeof line, "%s\n", cmd);
@@ -1293,14 +1365,17 @@ bool ccord_app_ipc_handoff(const char *path, ccord_error *err)
 
   if (!stale && ok) return true;   // healthy current primary surfaced its window
 
-  if (peer_pid > 1 && same_uid) {
+  if (peer_pid > 1) {
     for (int i = 0; i < 40 && kill(peer_pid, 0) == 0; i++) ccord_sleep_ms(20);
     if (kill(peer_pid, 0) == 0 && ipc_peer_is_ccord(peer_pid)) {
       (void)kill(peer_pid, SIGTERM);
       for (int i = 0; i < 20 && kill(peer_pid, 0) == 0; i++) ccord_sleep_ms(20);
     }
   }
-  (void)unlink(path);
+  struct stat st;
+  if (lstat(path, &st) == 0 && S_ISSOCK(st.st_mode) && st.st_uid == geteuid()) {
+    (void)unlink(path);
+  }
   (void)ccord_error_set(err, CCORD_ERR_PROTOCOL,
                         stale ? "replaced stale background ccord instance" : "evicted unresponsive ccord instance");
   return false;
@@ -1324,6 +1399,11 @@ bool ccord_app_ipc_send(const char *path, const char *cmd, ccord_error *err)
   if (connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
     close(fd);
     (void)ccord_error_set(err, CCORD_ERR_NOT_FOUND, "no running ccord instance on the control socket");
+    return false;
+  }
+  if (!ipc_peer_same_user(fd, nullptr)) {
+    close(fd);
+    (void)ccord_error_set(err, CCORD_ERR_PROTOCOL, "ipc: control socket owned by another user");
     return false;
   }
   char line[IPC_CMD_MAX + 2];

@@ -15,6 +15,7 @@ else()
 endif()
 if(WIN32)
   target_sources(${CCORD_APP_TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/assets/windows/ccord.rc)
+  target_link_libraries(${CCORD_APP_TARGET} PRIVATE advapi32)
 endif()
 target_link_libraries(${CCORD_APP_TARGET} PRIVATE ccord_core ccord_model ccord_store ccord_net ccord_session ccord_theme ccord_platform ccord_render ccord_ui
                                ccord_account ccord_rpc SDL3::SDL3)

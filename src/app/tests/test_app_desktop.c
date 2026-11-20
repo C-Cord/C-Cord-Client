@@ -12,7 +12,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -127,13 +129,13 @@ static ccord_app_desktop_debug dbg(void)
 
 // ---------------------------------------------------------------- settings UI input helpers
 
-static void send(ccord_input_event ev) { (void)ccord_ui_handle_input(F.ui, &ev); }
+static void send_ev(ccord_input_event ev) { (void)ccord_ui_handle_input(F.ui, &ev); }
 
 static void click_raw(float x, float y)
 {
-  send((ccord_input_event){.type = CCORD_IN_MOUSE_MOVE, .x = x, .y = y});
-  send((ccord_input_event){.type = CCORD_IN_MOUSE_DOWN, .button = 1, .clicks = 1, .x = x, .y = y});
-  send((ccord_input_event){.type = CCORD_IN_MOUSE_UP, .button = 1, .clicks = 1, .x = x, .y = y});
+  send_ev((ccord_input_event){.type = CCORD_IN_MOUSE_MOVE, .x = x, .y = y});
+  send_ev((ccord_input_event){.type = CCORD_IN_MOUSE_DOWN, .button = 1, .clicks = 1, .x = x, .y = y});
+  send_ev((ccord_input_event){.type = CCORD_IN_MOUSE_UP, .button = 1, .clicks = 1, .x = x, .y = y});
 }
 
 static void click_rect(ccord_rect r)
@@ -144,14 +146,14 @@ static void click_rect(ccord_rect r)
 
 static void key(ccord_key k, uint8_t mods)
 {
-  send((ccord_input_event){.type = CCORD_IN_KEY_DOWN, .key = k, .mods = mods});
+  send_ev((ccord_input_event){.type = CCORD_IN_KEY_DOWN, .key = k, .mods = mods});
 }
 
 static void text(const char *s)
 {
   ccord_input_event ev = {.type = CCORD_IN_TEXT};
   snprintf(ev.text, sizeof ev.text, "%s", s);
-  send(ev);
+  send_ev(ev);
 }
 
 static ccord_ui_settings_debug sdbg(void)
@@ -1165,8 +1167,23 @@ static void test_ipc(void)
   CT_CHECK(!ccord_app_ipc_send(sock, "show", &err2));
   CT_CHECK(err2.code == CCORD_ERR_NOT_FOUND);
 
+  // A regular file at the socket path must NOT be unlinked.
+  CT_CHECK(write_text(sock, "not-a-socket"));
+  CT_CHECK(ccord_app_ipc_listen(sock, &err) == nullptr);
+  CT_CHECK(stat(sock, &st) == 0 && S_ISREG(st.st_mode));
+  remove(sock);
+
   // A stale socket file (crashed instance, no listener) is recovered and re-bound.
-  CT_CHECK(write_text(sock, "stale"));
+  {
+    int sfd = socket(AF_UNIX, SOCK_STREAM, 0);
+    CT_CHECK(sfd >= 0);
+    struct sockaddr_un sa = {.sun_family = AF_UNIX};
+    size_t slen = strlen(sock);
+    CT_CHECK(slen < sizeof sa.sun_path);
+    if (slen < sizeof sa.sun_path) memcpy(sa.sun_path, sock, slen + 1u);
+    CT_CHECK(bind(sfd, (struct sockaddr *)&sa, sizeof sa) == 0);
+    close(sfd);
+  }
   ipc = ccord_app_ipc_listen(sock, &err);
   CT_CHECK(ipc != nullptr);
   if (ipc) ccord_app_ipc_destroy(ipc);
