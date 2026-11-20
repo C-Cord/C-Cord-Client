@@ -103,3 +103,13 @@ void ccord_free(void *p)
 {
   free(p);
 }
+
+void ccord_secure_wipe(void *p, size_t n)
+{
+  if (!p) return;
+  volatile unsigned char *v = p;
+  while (n > 0) {
+    *v++ = 0;
+    n--;
+  }
+}

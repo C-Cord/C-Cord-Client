@@ -10,5 +10,6 @@
 [[nodiscard]] char *ccord_strdup(const char *s);
 [[nodiscard]] char *ccord_strndup(const char *s, size_t n);
 void ccord_free(void *p);
+void ccord_secure_wipe(void *p, size_t n);                                // volatile zeroing (safe for credentials/tokens)
 // Test hook: the n-th next allocation (0 = the next one) returns nullptr; n < 0 disables.
 void ccord_alloc_test_fail_after(long n);

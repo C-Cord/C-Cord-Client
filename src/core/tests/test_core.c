@@ -4,6 +4,7 @@
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/arena.h>
+#include <ccord/core/base64.h>
 #include <ccord/core/buf.h>
 #include <ccord/core/ini.h>
 #include <ccord/core/json.h>
@@ -125,6 +126,46 @@ static void test_utf8_and_paths(void)
   CT_CHECK(ccord_paths_join(out, sizeof out, "/base", "/etc", &err) == CCORD_ERR_INVALID);
 }
 
+static void test_base64_and_wipe(void)
+{
+  char enc[32];
+  uint8_t dec[32];
+  size_t n = 0;
+  CT_CHECK(ccord_base64_encode((const uint8_t *)"", 0, enc, sizeof enc) == 0 && enc[0] == '\0');
+  CT_CHECK(ccord_base64_encode((const uint8_t *)"foobar", 6, enc, sizeof enc) == 8 && strcmp(enc, "Zm9vYmFy") == 0);
+  CT_CHECK(ccord_base64_encode((const uint8_t *)"fooba", 5, enc, sizeof enc) == 8 && strcmp(enc, "Zm9vYmE=") == 0);
+  CT_CHECK(ccord_base64_decode("Zm9vYmFy", 8, dec, sizeof dec, &n) && n == 6 && memcmp(dec, "foobar", 6) == 0);
+  // URL-safe & unpadded & whitespace
+  CT_CHECK(ccord_base64_decode("Zm9v\nYmE", 8, dec, sizeof dec, &n) && n == 5 && memcmp(dec, "fooba", 5) == 0);
+  CT_CHECK(!ccord_base64_decode("A", 1, dec, sizeof dec, &n));
+  CT_CHECK(!ccord_base64_decode("Zm=v", 4, dec, sizeof dec, &n));
+  char *ea = ccord_base64_encode_alloc((const uint8_t *)"\xfb\xff\xfe", 3, &n);
+  CT_CHECK(ea && n == 4 && strcmp(ea, "+//+") == 0);
+  uint8_t *da = ccord_base64_decode_alloc("-_-_", 4, &n);
+  CT_CHECK(da && n == 3 && da[0] == 0xfb && da[1] == 0xff && da[2] == 0xbf);
+  ccord_free(ea);
+  ccord_free(da);
+  unsigned char secret[8] = {1, 2, 3, 4, 5, 6, 7, 8};
+  ccord_secure_wipe(secret, sizeof secret);
+  for (size_t i = 0; i < sizeof secret; i++) CT_CHECK(secret[i] == 0);
+
+  // ccord_jw_copy_json roundtrip
+  ccord_arena a;
+  ccord_arena_init(&a, 0);
+  ccord_error err;
+  const char *src = "{\"a\":1,\"b\":[true,null,\"hi\"]}";
+  const ccord_json *parsed = ccord_json_parse(&a, src, strlen(src), nullptr, &err);
+  CT_CHECK(parsed != nullptr);
+  ccord_buf out;
+  ccord_buf_init(&out, 0);
+  ccord_jw w;
+  ccord_jw_init(&w, &out);
+  ccord_jw_copy_json(&w, parsed);
+  CT_CHECK(ccord_jw_ok(&w) && strcmp(ccord_buf_cstr(&out), src) == 0);
+  ccord_buf_free(&out);
+  ccord_arena_free(&a);
+}
+
 int main(void)
 {
   test_json_strict();
@@ -132,5 +173,6 @@ int main(void)
   test_buf_oom();
   test_ini();
   test_utf8_and_paths();
+  test_base64_and_wipe();
   return CT_RESULT("test_core");
 }

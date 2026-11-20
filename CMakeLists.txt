@@ -77,6 +77,7 @@ endif()
 
 # Every module is built unconditionally, in dependency order (layering is enforced by target_link_libraries).
 add_subdirectory(src/core)
+add_subdirectory(src/assets)
 add_subdirectory(src/model)
 add_subdirectory(src/emoji)
 add_subdirectory(src/store)

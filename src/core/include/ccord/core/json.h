@@ -34,4 +34,5 @@ void ccord_jw_double(ccord_jw *w, double v);                    // NaN/Inf -> fa
 void ccord_jw_bool(ccord_jw *w, bool v);
 void ccord_jw_null(ccord_jw *w);
 void ccord_jw_id(ccord_jw *w, uint64_t id);                     // decimal string
+void ccord_jw_copy_json(ccord_jw *w, const ccord_json *v);      // deep-copies a parsed JSON value into the writer
 bool ccord_jw_ok(const ccord_jw *w);
