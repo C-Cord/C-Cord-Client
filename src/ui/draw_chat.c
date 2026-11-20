@@ -7024,20 +7024,6 @@ void ui_send_composer(ccord_ui *ui)
       char name[64];
       memcpy(name, t + 1, n);
       name[n] = '\0';
-      if (ui->d.contrib && ccord_contrib_find_command(ui->d.contrib, name)) {
-        const char *args = t + 1 + n;
-        while (*args == ' ' || *args == '\n') args++;
-        if (ccord_contrib_run_command(ui->d.contrib, name, args, ch->guild_id, ch->id, &err) != CCORD_OK) {
-          ui_notice(ui, "/%s: %s", name, err.message);
-          return;
-        }
-        ccord_text_edit_clear(&ui->edit);
-        ui_clear_channel_draft(ui, ch->id);
-        ui->autocomplete_open = false;
-        ui->nautocomplete = 0;
-        ui->dirty = true;
-        return;
-      }
       if (strcasecmp(name, "tts") == 0) {
         // /tts sends a text-to-speech message; the session enforces SEND_TTS_MESSAGES.
         const char *body = t + 1 + n;
@@ -7156,6 +7142,21 @@ void ui_send_composer(ccord_ui *ui)
         ui->msg_scroll_vel = 0.0f;
         ccord_vlist_reset_bottom(&ui->vlist);
         ui->composer_scroll = 0.0f;
+        ui->dirty = true;
+        return;
+      }
+      // Dispatch plugin commands only after built-ins and Discord application commands (prevents hijacking).
+      if (ui->d.contrib && ccord_contrib_find_command(ui->d.contrib, name)) {
+        const char *args = t + 1 + n;
+        while (*args == ' ' || *args == '\n') args++;
+        if (ccord_contrib_run_command(ui->d.contrib, name, args, ch->guild_id, ch->id, &err) != CCORD_OK) {
+          ui_notice(ui, "/%s: %s", name, err.message);
+          return;
+        }
+        ccord_text_edit_clear(&ui->edit);
+        ui_clear_channel_draft(ui, ch->id);
+        ui->autocomplete_open = false;
+        ui->nautocomplete = 0;
         ui->dirty = true;
         return;
       }

@@ -3032,6 +3032,20 @@ static const char *ui_hook_get_view(void *ud)
   return "channel";
 }
 
+static bool ui_hook_insert_draft(void *ud, ccord_id channel_id, const char *text)
+{
+  ccord_ui *ui = ud;
+  if (!ui || !text || !text[0]) return false;
+  ccord_id cur = ccord_store_selected_channel(ui->d.store);
+  if (channel_id != CCORD_ID_NONE && cur != CCORD_ID_NONE && channel_id != cur) return false;
+  ccord_text_edit_clear(&ui->edit);
+  ccord_error err;
+  (void)ccord_text_edit_insert(&ui->edit, text, strlen(text), &err);
+  ui->composer_scroll = 0.0f;
+  ui->dirty = true;
+  return true;
+}
+
 static bool ui_hook_action(void *ud, const char *action)
 {
   ccord_ui *ui = ud;
@@ -3284,6 +3298,7 @@ ccord_ui *ccord_ui_create(const ccord_ui_deps *deps, ccord_error *err)
       .navigate = ui_hook_navigate,
       .ui_action = ui_hook_action,
       .get_view = ui_hook_get_view,
+      .insert_draft = ui_hook_insert_draft,
     };
     ccord_contrib_set_ui_hooks(deps->contrib, &uh);
   }

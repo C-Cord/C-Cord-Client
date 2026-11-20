@@ -171,6 +171,8 @@ typedef struct ccord_contrib_ui_hooks {
   bool (*navigate)(void *ud, ccord_id guild_id, ccord_id channel_id, ccord_id parent_id, const char *name, const char *view);
   bool (*ui_action)(void *ud, const char *action);
   const char *(*get_view)(void *ud);
+  // Populates the composer as an unsent draft (used when a Class 1 slash command lacks messages.send).
+  bool (*insert_draft)(void *ud, ccord_id channel_id, const char *text);
 } ccord_contrib_ui_hooks;
 
 ccord_contrib *ccord_contrib_create(ccord_error *err);
@@ -237,3 +239,4 @@ void ccord_contrib_catalog_run_auto_updates(ccord_contrib *c);
 bool ccord_contrib_ui_navigate(ccord_contrib *c, ccord_id guild_id, ccord_id channel_id, ccord_id parent_id, const char *name, const char *view);
 bool ccord_contrib_ui_action(ccord_contrib *c, const char *action);
 const char *ccord_contrib_ui_view(const ccord_contrib *c);
+bool ccord_contrib_ui_insert_draft(ccord_contrib *c, ccord_id channel_id, const char *text);

@@ -1012,6 +1012,17 @@ static void req_clipboard(ccord_plugins *m, plugin *p, uint32_t id, const ccord_
   reply_ok(m, p, id, nullptr);
 }
 
+static bool is_reserved_command(const char *name)
+{
+  static const char *const k_reserved[] = {
+    "tts", "me", "shrug", "tableflip", "unflip", "nick", "spoiler", "giphy", "tenor", "msg", "thread",
+  };
+  for (size_t i = 0; i < sizeof k_reserved / sizeof k_reserved[0]; i++) {
+    if (strcmp(name, k_reserved[i]) == 0) return true;
+  }
+  return false;
+}
+
 static void req_commands_register(ccord_plugins *m, plugin *p, uint32_t id, const ccord_json *params)
 {
   size_t nl = 0, dl = 0;
@@ -1022,6 +1033,10 @@ static void req_commands_register(ccord_plugins *m, plugin *p, uint32_t id, cons
   char name_s[40], desc_s[104];
   snprintf(name_s, sizeof name_s, "%.*s", (int)nl, name);
   snprintf(desc_s, sizeof desc_s, "%.*s", (int)dl, desc);
+  if (is_reserved_command(name_s)) {
+    reply_err(m, p, id, "invalid_argument", "command name is reserved by C-Cord");
+    return;
+  }
   ccord_error err = {0};
   if (ccord_contrib_add_command(m->contrib, p->m.id, name_s, desc_s, &err) != CCORD_OK) {
     { reply_err(m, p, id, "invalid_argument", err.message); return; }
@@ -1956,6 +1971,13 @@ static void handle_response(ccord_plugins *m, plugin *p, const ccord_ipc_msg *ms
     size_t tl = 0;
     const char *text = str_param(msg->result, "text", &tl);
     if (!text) return;
+    if (!has_perm(p, CCORD_PERM_MESSAGES_SEND)) {
+      // Class 1 commands without messages.send cannot silently transmit as the user; populate composer draft instead.
+      if (!ccord_contrib_ui_insert_draft(m->contrib, channel, text)) {
+        CCORD_LOG_W("plugin %s: command result requires messages.send permission or an attached composer", p->m.id);
+      }
+      return;
+    }
     if (!m->session) return;
     ccord_error err = {0};
     if (ccord_session_send_message(m->session, channel, text, tl, &err) != CCORD_OK) {

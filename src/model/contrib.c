@@ -911,3 +911,9 @@ const char *ccord_contrib_ui_view(const ccord_contrib *c)
   const char *v = c->ui_hooks.get_view(c->ui_hooks.ud);
   return (v && v[0]) ? v : "channel";
 }
+
+bool ccord_contrib_ui_insert_draft(ccord_contrib *c, ccord_id channel_id, const char *text)
+{
+  if (!c || !text || !c->ui_hooks.insert_draft) return false;
+  return c->ui_hooks.insert_draft(c->ui_hooks.ud, channel_id, text);
+}
