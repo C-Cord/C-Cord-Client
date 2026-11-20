@@ -199,6 +199,8 @@ typedef struct live {
   // a close.
   ccord_mutex *media_mtx;
   ccord_mutex *voice_mtx;
+  ccord_cond *voice_cond;
+  int voice_inflight;
   live_stream_frame rx_frames[LIVE_STREAM_FRAME_SLOTS];
   size_t rx_frame_head, rx_frame_count;
   int16_t *rx_pcm;   // LIVE_STREAM_PCM_CAP_SAMPLES mono ring, lazily allocated on the first stream-audio packet
@@ -218,6 +220,47 @@ typedef struct live {
 static uint64_t live_now(const live *l)
 {
   return l->now_ms ? l->now_ms(l->clock_ud) : ccord_clock_ms();
+}
+
+static ccord_voice_gateway *live_voice_acquire(live *l)
+{
+  if (!l || !l->voice_mtx) return nullptr;
+  ccord_mutex_lock(l->voice_mtx);
+  ccord_voice_gateway *vg = l->voice;
+  if (vg) l->voice_inflight++;
+  ccord_mutex_unlock(l->voice_mtx);
+  return vg;
+}
+
+static void live_voice_release(live *l)
+{
+  if (!l || !l->voice_mtx) return;
+  ccord_mutex_lock(l->voice_mtx);
+  l->voice_inflight--;
+  if (l->voice_inflight == 0 && l->voice_cond) ccord_cond_broadcast(l->voice_cond);
+  ccord_mutex_unlock(l->voice_mtx);
+}
+
+static void live_voice_publish(live *l, ccord_voice_gateway *vg)
+{
+  if (!l) return;
+  if (l->voice_mtx) ccord_mutex_lock(l->voice_mtx);
+  l->voice = vg;
+  if (l->voice_mtx) ccord_mutex_unlock(l->voice_mtx);
+}
+
+static void live_voice_detach_and_destroy(live *l)
+{
+  if (!l) return;
+  ccord_voice_gateway *old = nullptr;
+  if (l->voice_mtx) ccord_mutex_lock(l->voice_mtx);
+  old = l->voice;
+  l->voice = nullptr;
+  while (l->voice_inflight > 0 && l->voice_cond) {
+    ccord_cond_wait(l->voice_cond, l->voice_mtx);
+  }
+  if (l->voice_mtx) ccord_mutex_unlock(l->voice_mtx);
+  if (old) ccord_voice_gateway_destroy(old);
 }
 
 static void live_chan_guild_from_event(live *l, const ccord_net_event *ev);
@@ -4523,10 +4566,7 @@ static void live_voice_stop(live *l)
 {
   live_vstream_slot_reset(l, &l->tx_stream);
   live_vstream_slot_close_media(l, &l->rx_stream);
-  if (l->voice) {
-    ccord_voice_gateway_destroy(l->voice);
-    l->voice = nullptr;
-  }
+  live_voice_detach_and_destroy(l);
   l->voice_video_synced = false;
   ccord_live_wipe(l->voice_token, sizeof l->voice_token);
   l->voice_endpoint[0] = '\0';
@@ -4986,10 +5026,7 @@ static void live_voice_link_report(live *l, ccord_voice_link st, uint32_t attemp
 // reconnect with the same credentials.
 static void live_voice_gateway_drop(live *l)
 {
-  if (l->voice) {
-    ccord_voice_gateway_destroy(l->voice);
-    l->voice = nullptr;
-  }
+  live_voice_detach_and_destroy(l);
   l->voice_video_synced = false;   // the new gateway re-sends OP 12 once ESTABLISHED
   l->voice_attempted = false;
   l->vlink_gw_reported = false;
@@ -5135,7 +5172,7 @@ static void live_voice_maybe_start(live *l)
     (void)ccord_voice_gateway_set_video_desc(vg, &k_live_camera_desc, &derr);   // a new gateway starts without it
   }
   ccord_voice_gateway_set_camera_rx(vg, true);   // main voice gateway only: per-user remote cameras
-  l->voice = vg;
+  live_voice_publish(l, vg);
   l->vlink_gw_reported = false;
   if (l->vlink == LV_WAIT_SERVER) l->vlink = LV_IDLE;   // the new credentials arrived; the gateway takes over
 }
@@ -6451,21 +6488,27 @@ static ccord_status live_push_voice_pcm(ccord_transport *t, const int16_t *pcm, 
 {
   live *l = (live *)t;
   ccord_error_clear(err);
-  if (!l->voice) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "live: voice gateway not connected");
+  ccord_voice_gateway *vg = live_voice_acquire(l);
+  if (!vg) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "live: voice gateway not connected");
   // Audio-thread side of the PTT handshake: read the UI-published mode atomically and arm the release deadline.
   if (atomic_load(&l->ptt_enabled) && samples > 0) {
-    ccord_voice_gateway_set_ptt(l->voice, true);
+    ccord_voice_gateway_set_ptt(vg, true);
     atomic_store(&l->ptt_active, true);
     atomic_store(&l->ptt_release_ms, live_now(l) + 60u);
   }
-  return ccord_voice_gateway_push_pcm(l->voice, pcm, samples, err);
+  ccord_status st = ccord_voice_gateway_push_pcm(vg, pcm, samples, err);
+  live_voice_release(l);
+  return st;
 }
 
 static size_t live_pull_voice_pcm(ccord_transport *t, int16_t *pcm, size_t max_samples)
 {
   live *l = (live *)t;
-  if (!l || !l->voice) return 0;
-  return ccord_voice_gateway_pull_pcm(l->voice, pcm, max_samples);
+  ccord_voice_gateway *vg = live_voice_acquire(l);
+  if (!vg) return 0;
+  size_t n = ccord_voice_gateway_pull_pcm(vg, pcm, max_samples);
+  live_voice_release(l);
+  return n;
 }
 
 static uint16_t live_rd_u16le(const uint8_t *p)
@@ -7918,9 +7961,12 @@ static ccord_status live_send_voice_video(ccord_transport *t, const uint8_t *ann
   (void)keyframe;
   ccord_error_clear(err);
   if (!annexb || len == 0) return ccord_error_set(err, CCORD_ERR_INVALID, "live: empty voice video frame");
-  if (!l->voice) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "live: voice gateway not connected");
   if (!l->self_video) return ccord_error_set(err, CCORD_ERR_INVALID, "live: voice camera not enabled");
-  return ccord_voice_gateway_send_h264(l->voice, annexb, len, ts90k, err);
+  ccord_voice_gateway *vg = live_voice_acquire(l);
+  if (!vg) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "live: voice gateway not connected");
+  ccord_status st = ccord_voice_gateway_send_h264(vg, annexb, len, ts90k, err);
+  live_voice_release(l);
+  return st;
 }
 
 static bool live_consume_keyframe_request(ccord_transport *t)
@@ -7950,6 +7996,7 @@ static void live_destroy(ccord_transport *t)
   if (l->stream_enc) opus_encoder_destroy(l->stream_enc);
   if (l->stream_dec) opus_decoder_destroy(l->stream_dec);
   ccord_mutex_destroy(l->media_mtx);
+  ccord_cond_destroy(l->voice_cond);
   ccord_mutex_destroy(l->voice_mtx);
   ccord_live_wipe(l->token, sizeof l->token);
   ccord_free(l);
@@ -8082,6 +8129,13 @@ ccord_transport *ccord_live_transport_create(const ccord_live_config *cfg, ccord
   l->rx_stream.sender = false;
   l->media_mtx = ccord_mutex_create();
   l->voice_mtx = ccord_mutex_create();
+  l->voice_cond = ccord_cond_create();
+  if (!l->media_mtx || !l->voice_mtx || !l->voice_cond) {
+    if (!borrowed) ccord_live_wipe(loaded, sizeof loaded);
+    live_destroy((ccord_transport *)l);
+    ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
+    return nullptr;
+  }
   atomic_init(&l->ptt_active, false);
   atomic_init(&l->ptt_release_ms, 0);
   atomic_init(&l->ptt_enabled, false);
