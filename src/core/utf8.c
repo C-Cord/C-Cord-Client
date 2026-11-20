@@ -9,6 +9,7 @@
 // Returns the number of bytes of the sequence starting at s[0] (1..4), or 0 if malformed.
 static size_t seq_len(const unsigned char *s, size_t len, char32_t *cp)
 {
+  if (!s || len == 0 || !cp) return 0;
   unsigned char c = s[0];
   if (c < 0x80) {
     *cp = c;

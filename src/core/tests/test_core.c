@@ -103,6 +103,11 @@ static void test_ini(void)
 
 static void test_utf8_and_paths(void)
 {
+  // Regression (B18): zero-length or null decode must not read s[0].
+  char32_t cp = 0x1234u;
+  CT_CHECK(ccord_utf8_decode("abc", 0, &cp) == -1);
+  CT_CHECK(ccord_utf8_decode(nullptr, 3, &cp) == -1);
+  CT_CHECK(ccord_utf8_decode("abc", 3, nullptr) == -1);
   CT_CHECK(ccord_utf8_valid("\xc3\xa9", 2));
   CT_CHECK(!ccord_utf8_valid("\xc0\xaf", 2));     // overlong
   CT_CHECK(!ccord_utf8_valid("\xed\xa0\x80", 3)); // surrogate
