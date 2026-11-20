@@ -16,8 +16,8 @@
 #include <ccord/net/live_transport.h>
 #endif
 
-// Largest request body: a 10 MiB image as base64 plus the data-URI prefix and the JSON around it.
-#define PROFILE_BODY_MAX (((size_t)CCORD_PROFILE_IMAGE_MAX_BYTES / 3u + 1u) * 4u + 4096u)
+// Largest request body: two 10 MiB images (avatar + banner) as base64 plus data-URI prefixes and surrounding JSON.
+#define PROFILE_BODY_MAX (2u * (((size_t)CCORD_PROFILE_IMAGE_MAX_BYTES / 3u + 1u) * 4u) + 8192u)
 
 // ---- validation helpers ---------------------------------------------------------------------------------------
 
