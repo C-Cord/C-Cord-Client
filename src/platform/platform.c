@@ -1154,6 +1154,12 @@ ccord_audio *ccord_audio_create(const ccord_audio_config *cfg, ccord_error *err)
     ccord_error_set(err, CCORD_ERR_NOMEM, "audio: out of memory");
     return nullptr;
   }
+  a->stream_mtx = SDL_CreateMutex();
+  if (!a->stream_mtx) {
+    ccord_free(a);
+    ccord_error_set(err, CCORD_ERR_NOMEM, "audio: mutex create failed");
+    return nullptr;
+  }
   a->capture = c.capture;
   a->frame_bytes = (uint64_t)c.channels * sizeof(int16_t);
   const char *vdrv = SDL_GetCurrentVideoDriver();
@@ -1197,39 +1203,59 @@ void ccord_audio_destroy(ccord_audio *a)
 {
   if (!a) return;
   ccord_audio_devices_unregister(a);
-  if (a->stream) SDL_DestroyAudioStream(a->stream);
+  if (a->stream_mtx) SDL_LockMutex(a->stream_mtx);
+  if (a->stream) {
+    SDL_DestroyAudioStream(a->stream);
+    a->stream = nullptr;
+  }
+  if (a->stream_mtx) {
+    SDL_UnlockMutex(a->stream_mtx);
+    SDL_DestroyMutex(a->stream_mtx);
+  }
   if (a->audio_init) SDL_QuitSubSystem(SDL_INIT_AUDIO);
   ccord_free(a);
 }
 
 bool ccord_audio_available(const ccord_audio *a)
 {
-  return a && a->stream != nullptr;
+  if (!a) return false;
+  if (a->stream_mtx) SDL_LockMutex(a->stream_mtx);
+  bool ok = a->stream != nullptr;
+  if (a->stream_mtx) SDL_UnlockMutex(a->stream_mtx);
+  return ok;
 }
 
 size_t ccord_audio_read(ccord_audio *a, int16_t *pcm, size_t frames)
 {
-  if (!a || !a->stream || !pcm || frames == 0 || !a->capture || a->frame_bytes == 0) return 0;
+  if (!a || !pcm || frames == 0 || !a->capture || a->frame_bytes == 0) return 0;
   if (frames > (size_t)(INT_MAX / (int)a->frame_bytes)) return 0;
   int want = (int)(frames * (size_t)a->frame_bytes);
-  int got = SDL_GetAudioStreamData(a->stream, pcm, want);
+  int got = 0;
+  if (a->stream_mtx) SDL_LockMutex(a->stream_mtx);
+  if (a->stream) got = SDL_GetAudioStreamData(a->stream, pcm, want);
+  if (a->stream_mtx) SDL_UnlockMutex(a->stream_mtx);
   if (got <= 0) return 0;
   return (size_t)got / (size_t)a->frame_bytes;
 }
 
 size_t ccord_audio_write(ccord_audio *a, const int16_t *pcm, size_t frames)
 {
-  if (!a || !a->stream || !pcm || frames == 0 || a->capture || a->frame_bytes == 0) return 0;
+  if (!a || !pcm || frames == 0 || a->capture || a->frame_bytes == 0) return 0;
   if (frames > (size_t)(INT_MAX / (int)a->frame_bytes)) return 0;
   int bytes = (int)(frames * (size_t)a->frame_bytes);
-  if (!SDL_PutAudioStreamData(a->stream, pcm, bytes)) return 0;
-  return frames;
+  bool ok = false;
+  if (a->stream_mtx) SDL_LockMutex(a->stream_mtx);
+  if (a->stream) ok = SDL_PutAudioStreamData(a->stream, pcm, bytes);
+  if (a->stream_mtx) SDL_UnlockMutex(a->stream_mtx);
+  return ok ? frames : 0;
 }
 
 void ccord_audio_clear(ccord_audio *a)
 {
-  if (!a || !a->stream) return;
-  (void)SDL_ClearAudioStream(a->stream);
+  if (!a) return;
+  if (a->stream_mtx) SDL_LockMutex(a->stream_mtx);
+  if (a->stream) (void)SDL_ClearAudioStream(a->stream);
+  if (a->stream_mtx) SDL_UnlockMutex(a->stream_mtx);
 }
 
 // ---- video streaming codec pipeline ----

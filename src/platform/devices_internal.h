@@ -19,6 +19,7 @@
 // SDL_AUDIO_DEVICE_DEFAULT_* constant). On removal SDL emits events for both the
 // logical and the physical id, so the hot-plug matcher accepts either.
 struct ccord_audio {
+  SDL_Mutex *stream_mtx;            // guards `stream`/`device`/`opened_id` between audio thread & main-thread hot-plug
   SDL_AudioStream *stream;
   SDL_AudioDeviceID device;
   SDL_AudioDeviceID opened_id;

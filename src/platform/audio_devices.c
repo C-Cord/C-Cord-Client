@@ -124,6 +124,7 @@ size_t ccord_audio_devices_list(bool capture, ccord_audio_device_info *out, size
 static ccord_audio_hotplug_fn s_hotplug_fn;
 static void *s_hotplug_ud;
 static ccord_audio *s_registry;
+static SDL_InitState s_registry_init;
 static SDL_Mutex *s_registry_mutex;
 
 void ccord_audio_set_hotplug_callback(ccord_audio_hotplug_fn fn, void *ud)
@@ -134,7 +135,10 @@ void ccord_audio_set_hotplug_callback(ccord_audio_hotplug_fn fn, void *ud)
 
 static void registry_lock(void)
 {
-  if (!s_registry_mutex) s_registry_mutex = SDL_CreateMutex();
+  if (SDL_ShouldInit(&s_registry_init)) {
+    s_registry_mutex = SDL_CreateMutex();
+    SDL_SetInitialized(&s_registry_init, s_registry_mutex != nullptr);
+  }
   if (s_registry_mutex) SDL_LockMutex(s_registry_mutex);
 }
 
@@ -165,7 +169,8 @@ void ccord_audio_devices_unregister(ccord_audio *a)
 
 // Reopen a handle whose device went away on the system default device. The old
 // logical id dies with the stream; SDL assigns a fresh one on the new open.
-static void reopen_on_default(ccord_audio *a)
+// Caller holds a->stream_mtx.
+static void reopen_on_default_locked(ccord_audio *a)
 {
   SDL_DestroyAudioStream(a->stream);
   a->stream = nullptr;
@@ -193,13 +198,16 @@ bool ccord_audio_devices_handle_event(const SDL_Event *e)
   bool added = e->type == SDL_EVENT_AUDIO_DEVICE_ADDED;
   bool capture = e->adevice.recording;
   SDL_AudioDeviceID which = e->adevice.which;
-  if (!added && s_registry_mutex) {
+  if (!added) {
     registry_lock();
     for (ccord_audio *a = s_registry; a; a = a->hotplug_next) {
-      if (!a->stream || a->capture != capture) continue;
+      if (a->capture != capture) continue;
+      if (a->stream_mtx) SDL_LockMutex(a->stream_mtx);
       // SDL reports removals for both the logical stream id and the physical id.
-      if (a->device != which && a->opened_id != which) continue;
-      reopen_on_default(a);
+      if (a->stream && (a->device == which || a->opened_id == which)) {
+        reopen_on_default_locked(a);
+      }
+      if (a->stream_mtx) SDL_UnlockMutex(a->stream_mtx);
     }
     registry_unlock();
   }
