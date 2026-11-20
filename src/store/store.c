@@ -11,6 +11,7 @@
 #include "store_index.h"
 #include "store_internal.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -119,6 +120,7 @@ struct ccord_store {
   size_t nservers, capservers;
   ccord_stream_state stream;
   bool has_stream;
+  _Atomic bool stream_active;
   ccord_id speaking_users[64];
   size_t nspeaking;
   ccord_expr_data *expr;   // guild emojis/stickers + expression REST blobs (expressions.c)
@@ -860,6 +862,7 @@ void ccord_store_reset(ccord_store *s)
   s->sel_guild = CCORD_ID_NONE;
   s->sel_channel = CCORD_ID_NONE;
   s->has_stream = false;
+  atomic_store_explicit(&s->stream_active, false, memory_order_release);
   memset(&s->stream, 0, sizeof s->stream);
   s->nspeaking = 0;
   s->d.user_ix_ok = s->d.chan_ix_ok = s->d.mem_ix_ok = true;
@@ -1053,6 +1056,7 @@ static void voice_remove_channel(ccord_store *s, ccord_id channel_id)
   }
   if (s->has_stream && s->stream.channel_id == channel_id) {
     s->has_stream = false;
+    atomic_store_explicit(&s->stream_active, false, memory_order_release);
     memset(&s->stream, 0, sizeof s->stream);
   }
 }
@@ -1317,6 +1321,7 @@ ccord_status ccord_store_set_snapshot_ex(ccord_store *s, const ccord_snapshot *s
   s->ntyping = 0;
   voice_servers_clear(s);
   s->has_stream = false;
+  atomic_store_explicit(&s->stream_active, false, memory_order_release);
   memset(&s->stream, 0, sizeof s->stream);
   s->nspeaking = 0;
   s->sel_guild = guild;
@@ -3782,6 +3787,7 @@ ccord_status ccord_store_delete_guild(ccord_store *s, ccord_id guild_id, ccord_e
   s->nservers = srv_w;
   if (s->has_stream && s->stream.guild_id == guild_id) {
     s->has_stream = false;
+    atomic_store_explicit(&s->stream_active, false, memory_order_release);
     memset(&s->stream, 0, sizeof s->stream);
   }
   free_cstr(&s->d.guilds[gi].name);
@@ -4251,6 +4257,7 @@ ccord_status ccord_store_set_voice_state(ccord_store *s, const ccord_voice_state
     s->d.nvoices--;
     if (s->has_stream && s->stream.guild_id == state->guild_id && s->stream.user_id == state->user_id) {
       s->has_stream = false;
+      atomic_store_explicit(&s->stream_active, false, memory_order_release);
       memset(&s->stream, 0, sizeof s->stream);
     }
     s->revision++;
@@ -4348,6 +4355,7 @@ ccord_status ccord_store_set_stream(ccord_store *s, const ccord_stream_state *st
     if (!s->has_stream) return CCORD_OK;
     ccord_stream_state old = s->stream;
     s->has_stream = false;
+    atomic_store_explicit(&s->stream_active, false, memory_order_release);
     memset(&s->stream, 0, sizeof s->stream);
     self_stream_flag(s, old.guild_id, false);
     s->revision++;
@@ -4364,6 +4372,7 @@ ccord_status ccord_store_set_stream(ccord_store *s, const ccord_stream_state *st
   s->stream = *state;
   if (s->stream.user_id == CCORD_ID_NONE) s->stream.user_id = s->d.self_id;
   s->has_stream = true;
+  atomic_store_explicit(&s->stream_active, s->stream.active, memory_order_release);
   if (s->stream.user_id == s->d.self_id) self_stream_flag(s, s->stream.guild_id, true);
   s->revision++;
   post(s, CCORD_EVT_STREAM_STATE, s->stream.guild_id, s->stream.channel_id, CCORD_ID_NONE, s->stream.user_id, 1);
@@ -4551,9 +4560,7 @@ const ccord_stream_state *ccord_store_stream(const ccord_store *s)
 
 bool ccord_store_stream_active(const ccord_store *s)
 {
-  if (!s || !s->has_stream) return false;
-  const volatile bool *p = &s->stream.active;
-  return *p;
+  return s && atomic_load_explicit(&s->stream_active, memory_order_acquire);
 }
 
 void ccord_store_set_speaking(ccord_store *s, ccord_id user_id, bool speaking)

@@ -255,6 +255,7 @@ struct ccord_session {
   bool react_users_loading;
   ccord_arena react_users_arena;
   ccord_watched_stream watched;
+  _Atomic bool watched_active;
   ccord_id unsub_channel_id;   // stream switched away from (one-shot viewer-unsubscribe STREAM_DELETE guard)
   ccord_id unsub_user_id;
   ccord_stream_config pending_stream_cfg;
@@ -567,7 +568,9 @@ ccord_status ccord_session_set_transport(ccord_session *s, ccord_transport *tran
     memset(s->discovery_cache, 0, SESSION_DISCOVERY_CACHE_SLOTS * sizeof *s->discovery_cache);
   }
   s->discovery_cache_rr = 0;
-  s->has_voice_cfg = false;
+  ccord_mutex_lock(s->audio_mtx);
+  atomic_store_explicit(&s->has_voice_cfg, false, memory_order_release);
+  ccord_mutex_unlock(s->audio_mtx);
   s->ptt_held = false;
   reset_account_lists(s);
   s->state = CCORD_CONN_DISCONNECTED;
@@ -2325,6 +2328,7 @@ static void session_apply_voice_state(ccord_session *s, const ccord_voice_state 
   if (s->watched.active && vs.user_id == s->watched.user_id && vs.guild_id == s->watched.guild_id) {
     if (vs.channel_id != s->watched.channel_id || !vs.self_stream) {
       s->watched.active = false;
+      atomic_store_explicit(&s->watched_active, false, memory_order_release);
       s->watched.paused = false;
     }
   }
@@ -2529,7 +2533,9 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
         s->npins_in_flight = 0;
         s->retried_channel = CCORD_ID_NONE;
         s->has_pending_presence = false;
-        s->has_voice_cfg = false;
+        ccord_mutex_lock(s->audio_mtx);
+        atomic_store_explicit(&s->has_voice_cfg, false, memory_order_release);
+        ccord_mutex_unlock(s->audio_mtx);
         s->ptt_held = false;
         reset_account_lists(s);
         if (s->state != CCORD_CONN_CONNECTED) {
@@ -3298,6 +3304,7 @@ static void apply_event(ccord_session *s, const ccord_net_event *ev)
             (sig->channel_id == CCORD_ID_NONE || sig->channel_id == s->watched.channel_id)) {
           if (sig->deleted || sig->unavailable) {
             s->watched.active = false;
+            atomic_store_explicit(&s->watched_active, false, memory_order_release);
             s->watched.paused = false;
           } else if (!sig->server_update) {
             s->watched.paused = sig->paused;
@@ -4698,6 +4705,7 @@ ccord_status ccord_session_watch_stream(ccord_session *s, ccord_id guild_id, cco
       .active = true,
       .paused = known ? known->paused : false,
     };
+    atomic_store_explicit(&s->watched_active, true, memory_order_release);
   }
   return st;
 }
@@ -4712,6 +4720,7 @@ ccord_status ccord_session_stop_watching(ccord_session *s, ccord_error *err)
   ccord_status st = ccord_transport_stop_watching(s->transport, s->watched.guild_id, s->watched.channel_id,
                                                   s->watched.user_id, err);
   s->watched.active = false;
+  atomic_store_explicit(&s->watched_active, false, memory_order_release);
   s->watched.paused = false;
   return st;
 }
@@ -7476,8 +7485,10 @@ ccord_status ccord_session_set_voice_config(ccord_session *s, const ccord_voice_
   ccord_status st = ccord_transport_set_voice_config(s->transport, cfg, err);
   if (st == CCORD_OK) {
     // Remembered for the local push-to-talk gate on push_voice_pcm; no Discord traffic.
+    ccord_mutex_lock(s->audio_mtx);
     s->voice_cfg = *cfg;
-    s->has_voice_cfg = true;
+    atomic_store_explicit(&s->has_voice_cfg, true, memory_order_release);
+    ccord_mutex_unlock(s->audio_mtx);
   }
   return st;
 }
@@ -7600,7 +7611,7 @@ size_t ccord_session_stream_poll_pcm(ccord_session *s, int16_t *out_pcm, size_t 
 {
   if (!s || !out_pcm || cap_samples == 0) return 0;
   ccord_mutex_lock(s->audio_mtx);
-  if (!s->transport || !atomic_load((_Atomic bool *)&s->watched.active)) {
+  if (!s->transport || !atomic_load_explicit(&s->watched_active, memory_order_acquire)) {
     ccord_mutex_unlock(s->audio_mtx);
     return 0;
   }
