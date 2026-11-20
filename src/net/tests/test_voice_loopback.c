@@ -30,7 +30,7 @@
 #include <ccord/net/voice_crypto.h>
 #include <ccord/net/voice_stream.h>
 
-#include "../voice_internal.h"
+#include "../voice/voice_internal.h"
 #include "ccord_test.h"
 
 #define FRAME CCORD_VOICE_FRAME_SAMPLES

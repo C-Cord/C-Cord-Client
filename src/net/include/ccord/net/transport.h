@@ -10,6 +10,9 @@
 #include <ccord/model/search.h>
 #include <ccord/net/admin.h>
 #include <ccord/net/discord_proto.h>
+// Rich Presence (Discord RPC SET_ACTIVITY) wire limits (shared across live gateway, mock transport, and app RPC).
+#define CCORD_GATEWAY_RICH_MAX_BYTES 8192u
+#define CCORD_GATEWAY_RICH_MAX_ACTIVITIES 4u
 // Page request for a forum's posts (GET /channels/{id}/threads/search).
 typedef struct ccord_forum_query {
   ccord_id forum_id;
@@ -137,7 +140,8 @@ typedef enum ccord_net_event_type : uint8_t {
   CCORD_NET_SESSIONS_REPLACE,         // presence: the account's overall status from SESSIONS_REPLACE (the only place its own status is sent)
   CCORD_NET_GUILD_PROFILE,            // guild_id + guild_profile (GET /guilds/{g}/profile answer)
   CCORD_NET_VOICE_STATES,             // guild_id (0 = multi-guild) + voice_states + voice_state_count + replace_voice_states (+ optional users)
-  CCORD_NET_VIDEO_RESOLVED            // resolve_id + media_url (page) + resolved_video_url + resolved_audio_url + resolved_duration_ms; status != OK = failed
+  CCORD_NET_VIDEO_RESOLVED,           // resolve_id + media_url (page) + resolved_video_url + resolved_audio_url + resolved_duration_ms; status != OK = failed
+  CCORD_NET_RAW_GATEWAY               // expr_arg = gateway event name ("t"), expr_body/expr_body_len = raw "d" JSON (when raw tap enabled)
 } ccord_net_event_type;
 
 // Voice connection health, as CCORD_NET_VOICE_LINK reports it.
@@ -1210,5 +1214,17 @@ size_t ccord_gateway_member_ranges(uint32_t chunks, uint32_t ranges[3][2]);
                                                         ccord_error *err);
 [[nodiscard]] ccord_status ccord_live_json_user_profile(const char *json, size_t len, ccord_id user_id,
                                                         ccord_live_event *out, ccord_error *err);
+// Parses GET /user-profile-effects -> {"profile_effect_configs":[...]}. Caller frees *out_items with ccord_free.
+[[nodiscard]] ccord_status ccord_live_json_profile_effects(const char *json, size_t len,
+                                                           ccord_profile_effect_config **out_items,
+                                                           size_t *out_count, ccord_error *err);
+// Parses GET /collectibles-products/{sku_id} for PROFILE_EFFECT (type 1) or PROFILE_FRAME (type 3) items.
+[[nodiscard]] ccord_status ccord_live_json_collectible_product(const char *json, size_t len, ccord_id sku_id,
+                                                               ccord_profile_effect_config *out_effect, bool *has_effect,
+                                                               ccord_profile_frame_config *out_frame, bool *has_frame,
+                                                               ccord_error *err);
 // Resolves the deterministic disk cache path under $XDG_CACHE_HOME/ccord/media/ for a CDN URL.
 [[nodiscard]] ccord_status ccord_media_cache_path(const char *url, char *out_path, size_t cap, ccord_error *err);
+// Enables/disables emitting CCORD_NET_RAW_GATEWAY for op 0 dispatch frames (zero overhead while disabled).
+void ccord_gateway_set_raw_tap(bool enabled);
+bool ccord_gateway_raw_tap_enabled(void);

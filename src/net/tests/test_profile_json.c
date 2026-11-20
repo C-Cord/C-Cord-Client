@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <ccord/core/alloc.h>
 #include <ccord/net/live_transport.h>
 #include <ccord/net/mock_transport.h>
 #include <ccord/store/store.h>
@@ -220,6 +221,224 @@ static void test_store_owns_profile_extras(void)
   ccord_store_destroy(s);
 }
 
+static void test_profile_decor_parsing(void)
+{
+  // Nameplate, per-server avatar decoration, profile effect ID, and profile frame SKU ID.
+  static const char kDecor[] =
+    "{\"user\":{\"id\":\"601\",\"username\":\"gavin\",\"global_name\":\"Gavin\","
+    "\"avatar_decoration_data\":{\"asset\":\"a_user_deco\",\"sku_id\":\"10\"},"
+    "\"collectibles\":{\"nameplate\":{\"sku_id\":\"20\",\"asset\":\"nameplates/nameplates/american_flag/\",\"palette\":\"cobalt\"}}},"
+    "\"user_profile\":{\"bio\":\"hi\",\"profile_effect\":{\"id\":\"1139323093991575696\"},"
+    "\"profile_frame\":{\"sku_id\":\"1400000000000000001\"}},"
+    "\"guild_member_profile\":{\"guild_id\":\"2001\",\"profile_effect\":{\"id\":\"1139323093991575999\"}},"
+    "\"guild_member\":{\"nick\":\"Gavin\",\"avatar_decoration_data\":{\"asset\":\"a_guild_deco\"},"
+    "\"collectibles\":{\"nameplate\":{\"asset\":\"nameplates/nameplates/twilight/\",\"palette\":\"berry\"}}}}";
+  ccord_live_event ev;
+  ccord_error err;
+  CT_CHECK(ccord_live_json_user_profile(kDecor, strlen(kDecor), 601, &ev, &err) == CCORD_OK);
+  const ccord_user_profile *p = ev.ev.user_profile;
+  CT_CHECK(p != nullptr && ev.ev.user_count == 1 && ev.ev.users != nullptr);
+  if (p) {
+    CT_CHECK(strcmp(p->avatar_decoration_url,
+                    "https://cdn.discordapp.com/avatar-decoration-presets/a_user_deco.png?size=128&passthrough=true") == 0);
+    CT_CHECK(strcmp(p->guild_avatar_decoration_url,
+                    "https://cdn.discordapp.com/avatar-decoration-presets/a_guild_deco.png?size=128&passthrough=true") == 0);
+    CT_CHECK(strcmp(p->nameplate_asset, "nameplates/nameplates/american_flag/") == 0);
+    CT_CHECK(strcmp(p->nameplate_palette, "cobalt") == 0);
+    CT_CHECK(strcmp(p->guild_nameplate_asset, "nameplates/nameplates/twilight/") == 0);
+    CT_CHECK(strcmp(p->guild_nameplate_palette, "berry") == 0);
+    CT_CHECK(p->profile_effect_id == 1139323093991575696ULL);
+    CT_CHECK(p->guild_profile_effect_id == 1139323093991575999ULL);
+    CT_CHECK(p->profile_frame_sku_id == 1400000000000000001ULL);
+    // Also propagated onto the embedded user struct.
+    CT_CHECK(strcmp(ev.ev.users[0].avatar_decoration_url, p->avatar_decoration_url) == 0);
+    CT_CHECK(strcmp(ev.ev.users[0].nameplate_asset, "nameplates/nameplates/american_flag/") == 0);
+    CT_CHECK(strcmp(ev.ev.users[0].nameplate_palette, "cobalt") == 0);
+  }
+  ccord_live_event_free(&ev);
+
+  // Path traversal in nameplate asset is rejected while parse still succeeds.
+  static const char kBadNp[] =
+    "{\"user\":{\"id\":\"602\",\"username\":\"bad\","
+    "\"collectibles\":{\"nameplate\":{\"asset\":\"../secret/\",\"palette\":\"../bad\"}}}}";
+  CT_CHECK(ccord_live_json_user_profile(kBadNp, strlen(kBadNp), 602, &ev, &err) == CCORD_OK);
+  CT_CHECK(ev.ev.user_profile && ev.ev.user_profile->nameplate_asset[0] == '\0' &&
+           ev.ev.user_profile->nameplate_palette[0] == '\0');
+  ccord_live_event_free(&ev);
+
+  // GET /user-profile-effects catalog parsing: zIndex ordering, randomizedSources, hostile URL rejection.
+  static const char kEffects[] =
+    "{\"profile_effect_configs\":["
+    "{\"id\":\"1139323093991575696\",\"sku_id\":\"1139323093991575696\","
+    "\"thumbnailPreviewSrc\":\"https://cdn.discordapp.com/assets/profile_effects/thumb.png\","
+    "\"reducedMotionSrc\":\"https://cdn.discordapp.com/assets/profile_effects/rm.png\","
+    "\"staticFrameSrc\":\"https://cdn.discordapp.com/assets/profile_effects/static.png\","
+    "\"effects\":["
+    "{\"src\":\"https://cdn.discordapp.com/assets/profile_effects/idle.png\",\"loop\":true,\"width\":450,\"height\":880,"
+    "\"start\":2880,\"duration\":2880,\"loopDelay\":0,\"position\":{\"x\":0,\"y\":0},\"zIndex\":101},"
+    "{\"src\":\"https://evil.example/pwn.png\",\"loop\":true,\"zIndex\":50},"
+    "{\"src\":\"https://cdn.discordapp.com/assets/profile_effects/intro.png\",\"loop\":false,\"width\":450,\"height\":880,"
+    "\"start\":0,\"duration\":2880,\"position\":{\"x\":0,\"y\":0},\"zIndex\":100}"
+    "]}]}";
+  ccord_profile_effect_config *items = nullptr;
+  size_t count = 0;
+  CT_CHECK(ccord_live_json_profile_effects(kEffects, strlen(kEffects), &items, &count, &err) == CCORD_OK);
+  CT_CHECK(count == 1 && items != nullptr);
+  if (items && count == 1) {
+    CT_CHECK(items[0].id == 1139323093991575696ULL && items[0].sku_id == 1139323093991575696ULL);
+    CT_CHECK(strcmp(items[0].reduced_motion_url, "https://cdn.discordapp.com/assets/profile_effects/rm.png") == 0);
+    CT_CHECK(items[0].layer_count == 2);   // evil.example layer dropped
+    // Sorted by zIndex: 100 (intro) before 101 (idle).
+    CT_CHECK(items[0].layers[0].z_index == 100 && !items[0].layers[0].loop &&
+             strstr(items[0].layers[0].src, "intro.png") != nullptr);
+    CT_CHECK(items[0].layers[1].z_index == 101 && items[0].layers[1].loop && items[0].layers[1].start_ms == 2880);
+  }
+  ccord_free(items);
+
+  // GET /collectibles-products/{sku_id} for PROFILE_FRAME (type 3).
+  static const char kFrameProduct[] =
+    "{\"sku_id\":\"1400000000000000001\",\"items\":[{"
+    "\"type\":3,\"sku_id\":\"1400000000000000001\",\"inner_width\":300,"
+    "\"overflow_top\":36,\"overflow_bottom\":18,\"overflow_horizontal\":14,"
+    "\"assets\":{\"animated_image_url\":\"https://cdn.discordapp.com/assets/collectibles/cat/anim.png\","
+    "\"static_image_url\":\"https://cdn.discordapp.com/assets/collectibles/cat/static.png\"},"
+    "\"layers\":["
+    "{\"id\":\"200\",\"type\":1,\"order\":2,\"anchor\":1,\"assets\":{\"animated_image_url\":\"https://cdn.discordapp.com/assets/collectibles/cat/bottom.png\"}},"
+    "{\"id\":\"100\",\"type\":1,\"order\":1,\"anchor\":0,\"assets\":{\"animated_image_url\":\"https://cdn.discordapp.com/assets/collectibles/cat/top.png\"}}"
+    "]}]}";
+  ccord_profile_effect_config pe;
+  ccord_profile_frame_config pf;
+  bool has_pe = false, has_pf = false;
+  CT_CHECK(ccord_live_json_collectible_product(kFrameProduct, strlen(kFrameProduct), 1400000000000000001ULL,
+                                               &pe, &has_pe, &pf, &has_pf, &err) == CCORD_OK);
+  CT_CHECK(!has_pe && has_pf);
+  CT_CHECK(pf.sku_id == 1400000000000000001ULL && pf.inner_width == 300 && pf.overflow_top == 36 &&
+           pf.overflow_bottom == 18 && pf.overflow_horizontal == 14);
+  CT_CHECK(pf.layer_count == 2);
+  // Sorted by order: 1 (anchor 0 = top) before 2 (anchor 1 = bottom).
+  CT_CHECK(pf.layers[0].order == 1 && pf.layers[0].anchor == 0 && strstr(pf.layers[0].url, "top.png") != nullptr);
+  CT_CHECK(pf.layers[1].order == 2 && pf.layers[1].anchor == 1 && strstr(pf.layers[1].url, "bottom.png") != nullptr);
+
+  // Store propagation: profile upsert updates user avatar_decoration_url + nameplate and bumps revision.
+  ccord_store *s = ccord_store_create(nullptr, &err);
+  CT_CHECK(s != nullptr);
+  if (s) {
+    ccord_user_profile up = {
+      .user_id = 601,
+      .display_name = "Gavin",
+      .avatar_decoration_url = "https://cdn.discordapp.com/avatar-decoration-presets/a_user_deco.png?size=128&passthrough=true",
+      .profile_effect_id = 1139323093991575696ULL,
+      .profile_frame_sku_id = 1400000000000000001ULL,
+      .profile_frame = pf,
+    };
+    snprintf(up.nameplate_asset, sizeof up.nameplate_asset, "nameplates/nameplates/american_flag/");
+    snprintf(up.nameplate_palette, sizeof up.nameplate_palette, "cobalt");
+    CT_CHECK(ccord_store_upsert_user_profile(s, &up, &err) == CCORD_OK);
+    const ccord_user *su = ccord_store_user(s, 601);
+    CT_CHECK(su != nullptr && strstr(su->avatar_decoration_url, "a_user_deco") != nullptr);
+    CT_CHECK(su != nullptr && strcmp(su->nameplate_asset, "nameplates/nameplates/american_flag/") == 0 &&
+             strcmp(su->nameplate_palette, "cobalt") == 0);
+    uint64_t rev1 = ccord_store_revision(s);
+    // Re-upserting with same frame SKU but unresolved frame preserves the resolved frame AND bumps revision.
+    ccord_user_profile up2 = up;
+    up2.profile_frame = (ccord_profile_frame_config){0};
+    CT_CHECK(ccord_store_upsert_user_profile(s, &up2, &err) == CCORD_OK);
+    const ccord_user_profile *gp = ccord_store_user_profile(s, 601);
+    CT_CHECK(gp != nullptr && gp->profile_frame.sku_id == 1400000000000000001ULL && gp->profile_frame.layer_count == 2);
+    CT_CHECK(ccord_store_revision(s) > rev1);
+    ccord_store_destroy(s);
+  }
+}
+
+static void test_gateway_decor_parsing(void)
+{
+  // GUILD_MEMBER_LIST_UPDATE populates both user & member avatar decoration + nameplate without profile REST.
+  static const char kMemberList[] =
+    "{\"op\":0,\"t\":\"GUILD_MEMBER_LIST_UPDATE\",\"s\":1,\"d\":{"
+    "\"guild_id\":\"3001\",\"id\":\"everyone\",\"member_count\":1,\"online_count\":1,"
+    "\"ops\":[{\"op\":\"SYNC\",\"range\":[0,99],\"items\":[{\"member\":{"
+    "\"nick\":\"Gavin\",\"roles\":[],"
+    "\"avatar_decoration_data\":{\"asset\":\"a_srv_deco\"},"
+    "\"collectibles\":{\"nameplate\":{\"asset\":\"nameplates/nameplates/american_flag/\",\"palette\":\"cobalt\"}},"
+    "\"user\":{\"id\":\"701\",\"username\":\"gavin\",\"global_name\":\"Gavin\","
+    "\"avatar_decoration_data\":{\"asset\":\"a_usr_deco\"},"
+    "\"collectibles\":{\"nameplate\":{\"asset\":\"nameplates/nameplates/twilight/\",\"palette\":\"violet\"}}}"
+    "}}]}]}}";
+  ccord_live_event ev;
+  ccord_error err;
+  CT_CHECK(ccord_live_gateway_decode(kMemberList, strlen(kMemberList), &ev, &err) == CCORD_OK);
+  CT_CHECK(ev.user_count == 1 && ev.member_count == 1);
+  if (ev.user_count == 1 && ev.member_count == 1) {
+    CT_CHECK(strstr(ev.users[0].avatar_decoration_url, "a_usr_deco.png") != nullptr);
+    CT_CHECK(strcmp(ev.users[0].nameplate_asset, "nameplates/nameplates/twilight/") == 0);
+    CT_CHECK(strcmp(ev.users[0].nameplate_palette, "violet") == 0);
+    CT_CHECK(strstr(ev.members[0].avatar_decoration_url, "a_srv_deco.png") != nullptr);
+    CT_CHECK(strcmp(ev.members[0].nameplate_asset, "nameplates/nameplates/american_flag/") == 0);
+    CT_CHECK(strcmp(ev.members[0].nameplate_palette, "cobalt") == 0);
+  }
+  ccord_live_event_free(&ev);
+
+  // MESSAGE_CREATE populates author + partial member avatar decoration and nameplate.
+  static const char kMsgCreate[] =
+    "{\"op\":0,\"t\":\"MESSAGE_CREATE\",\"s\":2,\"d\":{"
+    "\"id\":\"9001\",\"channel_id\":\"8001\",\"guild_id\":\"3001\",\"content\":\"hello\","
+    "\"timestamp\":\"2026-10-25T12:00:00.000Z\","
+    "\"author\":{\"id\":\"702\",\"username\":\"peppermint\",\"global_name\":\"Peppermint\","
+    "\"avatar_decoration_data\":{\"asset\":\"a_pep_deco\"},"
+    "\"collectibles\":{\"nameplate\":{\"asset\":\"nameplates/nameplates/sakura/\",\"palette\":\"berry\"}}},"
+    "\"member\":{\"nick\":\"Pep\",\"roles\":[],\"avatar_decoration_data\":{\"asset\":\"a_pep_srv\"},"
+    "\"collectibles\":{\"nameplate\":{\"asset\":\"nameplates/nameplates/cat/\",\"palette\":\"rose\"}}}}}";
+  CT_CHECK(ccord_live_gateway_decode(kMsgCreate, strlen(kMsgCreate), &ev, &err) == CCORD_OK);
+  CT_CHECK(ev.user_count >= 1 && ev.member_count == 1);
+  if (ev.user_count >= 1) {
+    CT_CHECK(strstr(ev.users[0].avatar_decoration_url, "a_pep_deco.png") != nullptr);
+    CT_CHECK(strcmp(ev.users[0].nameplate_asset, "nameplates/nameplates/sakura/") == 0);
+    CT_CHECK(strcmp(ev.users[0].nameplate_palette, "berry") == 0);
+  }
+  if (ev.member_count == 1) {
+    CT_CHECK(strstr(ev.members[0].avatar_decoration_url, "a_pep_srv.png") != nullptr);
+    CT_CHECK(strcmp(ev.members[0].nameplate_asset, "nameplates/nameplates/cat/") == 0);
+    CT_CHECK(strcmp(ev.members[0].nameplate_palette, "rose") == 0);
+  }
+  ccord_live_event_free(&ev);
+
+  // GET /collectibles-products/{sku_id} for PROFILE_EFFECT (type 1) as well.
+  static const char kEffectProduct[] =
+    "{\"sku_id\":\"1500000000000000001\",\"items\":[{"
+    "\"type\":1,\"id\":\"1500000000000000001\",\"sku_id\":\"1500000000000000001\","
+    "\"reducedMotionSrc\":\"https://cdn.discordapp.com/assets/profile_effects/rm2.png\","
+    "\"effects\":[{\"randomizedSources\":[{\"src\":\"https://cdn.discordapp.com/assets/profile_effects/rand.png\"}],"
+    "\"loop\":true,\"width\":450,\"height\":880,\"start\":0,\"duration\":1500,\"zIndex\":10}]}]}";
+  ccord_profile_effect_config pe;
+  ccord_profile_frame_config pf;
+  bool has_pe = false, has_pf = false;
+  CT_CHECK(ccord_live_json_collectible_product(kEffectProduct, strlen(kEffectProduct), 1500000000000000001ULL,
+                                               &pe, &has_pe, &pf, &has_pf, &err) == CCORD_OK);
+  CT_CHECK(has_pe && !has_pf);
+  CT_CHECK(pe.id == 1500000000000000001ULL && pe.layer_count == 1 &&
+           strstr(pe.layers[0].src, "rand.png") != nullptr &&
+           strcmp(pe.reduced_motion_url, "https://cdn.discordapp.com/assets/profile_effects/rm2.png") == 0);
+
+  // Real Discord PROFILE_FRAME layer format: layers carry only asset snowflake `id` (no inline `assets`).
+  static const char kRealFrameProduct[] =
+    "{\"sku_id\":\"1411111111111111111\",\"items\":[{"
+    "\"type\":3,\"sku_id\":\"1411111111111111111\",\"inner_width\":300,"
+    "\"overflow_top\":36,\"overflow_bottom\":18,\"overflow_horizontal\":14,"
+    "\"layers\":["
+    "{\"id\":\"2222222222222222222\",\"type\":0,\"order\":1,\"anchor\":1,\"responsive\":false},"
+    "{\"id\":\"1111111111111111111\",\"type\":0,\"order\":0,\"anchor\":0,\"responsive\":false}"
+    "]}]}";
+  CT_CHECK(ccord_live_json_collectible_product(kRealFrameProduct, strlen(kRealFrameProduct), 1411111111111111111ULL,
+                                               &pe, &has_pe, &pf, &has_pf, &err) == CCORD_OK);
+  CT_CHECK(!has_pe && has_pf && pf.layer_count == 2);
+  CT_CHECK(strcmp(pf.layers[0].url,
+                  "https://cdn.discordapp.com/media/v1/collectibles-shop/1411111111111111111/1111111111111111111/animated") == 0);
+  CT_CHECK(strcmp(pf.layers[0].static_url,
+                  "https://cdn.discordapp.com/media/v1/collectibles-shop/1411111111111111111/1111111111111111111/static") == 0);
+  CT_CHECK(strcmp(pf.layers[1].url,
+                  "https://cdn.discordapp.com/media/v1/collectibles-shop/1411111111111111111/2222222222222222222/animated") == 0);
+}
+
 int main(void)
 {
   test_full_profile();
@@ -227,5 +446,7 @@ int main(void)
   test_mixed_profile();
   test_mock_profile_extras();
   test_store_owns_profile_extras();
+  test_profile_decor_parsing();
+  test_gateway_decor_parsing();
   return CT_RESULT("test_profile_json");
 }

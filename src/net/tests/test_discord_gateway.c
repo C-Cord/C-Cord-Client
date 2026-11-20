@@ -22,7 +22,7 @@
 #include <ccord/net/live_transport.h>
 #include <ccord/net/mock_transport.h>
 
-#include "../discord_gateway_internal.h"
+#include "../discord/discord_gateway_internal.h"
 #include "ccord_test.h"
 
 static uint64_t g_clock;

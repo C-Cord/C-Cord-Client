@@ -36,6 +36,7 @@
 
 #include <ccord/core/error.h>
 #include <ccord/model/model.h>
+#include <ccord/net/voice_gateway.h>
 
 #define CCORD_VSTREAM_AUDIO_PT 120u
 #define CCORD_VSTREAM_H264_PT_DEFAULT 101u
@@ -115,22 +116,3 @@ size_t ccord_vstream_pop_rx_audio(ccord_vstream *s, uint8_t *opus_out, size_t ca
 // Unregisters, closes the socket, wipes keys and frees. Safe on nullptr.
 void ccord_vstream_close(ccord_vstream *s);
 
-// Direct video helpers on ccord_voice_gateway (also declared in live_transport.h):
-#ifndef CCORD_VOICE_VIDEO_DESC_DECLARED
-#define CCORD_VOICE_VIDEO_DESC_DECLARED
-typedef struct ccord_voice_video_desc {
-  uint32_t width, height, fps, max_bitrate;
-  uint8_t payload_type, rtx_payload_type;
-} ccord_voice_video_desc;
-#endif
-#ifndef CCORD_VOICE_GATEWAY_VIDEO_DECLARED
-#define CCORD_VOICE_GATEWAY_VIDEO_DECLARED
-typedef struct ccord_voice_gateway ccord_voice_gateway;
-[[nodiscard]] ccord_status ccord_voice_gateway_send_video_op(ccord_voice_gateway *g, uint32_t video_ssrc,
-                                                             uint32_t rtx_ssrc, ccord_error *err);
-[[nodiscard]] ccord_status ccord_voice_gateway_send_h264(ccord_voice_gateway *g, const uint8_t *annexb, size_t len,
-                                                         uint32_t timestamp_90khz, ccord_error *err);
-bool ccord_voice_gateway_poll_video(ccord_voice_gateway *g, const uint8_t **out_annexb, size_t *out_len,
-                                    bool *out_keyframe);
-bool ccord_voice_gateway_consume_keyframe_request(ccord_voice_gateway *g);
-#endif

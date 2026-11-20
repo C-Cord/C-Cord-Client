@@ -7,12 +7,7 @@
 // functions below and hand it to the transport (`ccord_transport_admin_action`), which sends it through the request
 // governor at user priority. Nothing here changes local state: the store only changes when Discord answers.
 #pragma once
-#include <stdio.h>
-#include <string.h>
-
 #include <ccord/core/buf.h>
-#include <ccord/core/json.h>
-#include <ccord/core/utf8.h>
 #include <ccord/model/model.h>
 #include <ccord/model/forum.h>
 #include <ccord/model/notify.h>
@@ -692,259 +687,31 @@ typedef struct ccord_admin_channel_clone {
                                                          ccord_id channel_id, const char *reason, ccord_error *err);
 
 // ---- voice status & stage moderation ----
-// Defined inline here so the contract ships without editing admin.c (owned by m5-live-transport).
-// They mirror admin.c's init_request/set_path/set_body/check_reason behaviour exactly.
-
-// Same zeroing + "-1 = unchanged" sentinels as admin.c's init_request.
-static inline void ccord_admin_m5_init_request(ccord_admin_request *out, ccord_admin_op op, ccord_admin_method method)
-{
-  memset(out, 0, sizeof *out);
-  out->op = op;
-  out->method = method;
-  out->guild_system_flags = -1;
-  out->guild_default_notify = -1;
-  out->guild_afk_timeout = -1;
-  out->guild_verification_level = -1;
-  out->guild_explicit_filter = -1;
-  out->sound_volume_pct = -1;
-}
-
-// Code points of a valid-UTF-8 string (continuation bytes don't start a character).
-static inline size_t ccord_admin_m5_text_chars(const char *s, size_t len)
-{
-  size_t n = 0;
-  for (size_t i = 0; i < len; i++) {
-    if (((unsigned char)s[i] & 0xC0u) != 0x80u) n++;
-  }
-  return n;
-}
-
-static inline ccord_status ccord_admin_m5_reason(ccord_admin_request *out, const char *reason, ccord_error *err)
-{
-  if (!reason || reason[0] == '\0') return CCORD_OK;
-  size_t n = strlen(reason);
-  if (n > CCORD_ADMIN_REASON_MAX) return ccord_error_set(err, CCORD_ERR_RANGE, "reason is too long");
-  if (!ccord_utf8_valid_text(reason, n) || strpbrk(reason, "\r\n")) {
-    return ccord_error_set(err, CCORD_ERR_INVALID, "reason has invalid characters");
-  }
-  (void)snprintf(out->reason, sizeof out->reason, "%s", reason);
-  return CCORD_OK;
-}
-
-// Copies a finished JSON writer buffer into the request body (admin.c set_body semantics).
-static inline ccord_status ccord_admin_m5_commit_body(ccord_admin_request *out, ccord_buf *b, const ccord_jw *w,
-                                                      ccord_error *err)
-{
-  ccord_status st = CCORD_OK;
-  if (!ccord_jw_ok(w) || b->len >= sizeof out->body) {
-    st = ccord_error_set(err, CCORD_ERR_RANGE, "request body too large");
-  } else {
-    memcpy(out->body, ccord_buf_cstr(b), b->len + 1u);
-  }
-  ccord_buf_free(b);
-  return st;
-}
-
 // The PUT /channels/{c}/voice-status body: {"status":"..."} (nullptr / "" -> {"status":null}).
 // Validates the channel id and the 500-character limit; writes compact JSON into `out`.
-[[nodiscard]] static inline ccord_status ccord_admin_build_voice_status(ccord_buf *out, ccord_id channel_id,
-                                                                        const char *status, ccord_error *err)
-{
-  ccord_error_clear(err);
-  if (!out) return ccord_error_set(err, CCORD_ERR_INVALID, "null buffer");
-  if (channel_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "missing channel");
-  size_t len = 0;
-  if (status && status[0] != '\0') {
-    len = strlen(status);
-    if (!ccord_utf8_valid(status, len)) return ccord_error_set(err, CCORD_ERR_INVALID, "status has invalid characters");
-    if (ccord_admin_m5_text_chars(status, len) > CCORD_ADMIN_VOICE_STATUS_MAX) {
-      return ccord_error_set(err, CCORD_ERR_RANGE, "status is too long (max %u)", CCORD_ADMIN_VOICE_STATUS_MAX);
-    }
-  }
-  ccord_jw w;
-  ccord_jw_init(&w, out);
-  ccord_jw_begin_object(&w);
-  ccord_jw_key(&w, "status");
-  if (len == 0) ccord_jw_null(&w);
-  else ccord_jw_string(&w, status, len);
-  ccord_jw_end_object(&w);
-  if (!ccord_jw_ok(&w)) return ccord_error_set(err, CCORD_ERR_RANGE, "request body too large");
-  return CCORD_OK;
-}
-
+[[nodiscard]] ccord_status ccord_admin_build_voice_status(ccord_buf *out, ccord_id channel_id,
+                                                          const char *status, ccord_error *err);
 // PUT /channels/{c}/voice-status. `status` nullptr / "" clears it. No audit reason (Discord takes none here).
-[[nodiscard]] static inline ccord_status ccord_admin_set_voice_status(ccord_admin_request *out, ccord_id channel_id,
-                                                                      const char *status, ccord_error *err)
-{
-  ccord_error_clear(err);
-  if (!out) return ccord_error_set(err, CCORD_ERR_INVALID, "null request");
-  ccord_admin_m5_init_request(out, CCORD_ADMIN_VOICE_STATUS, CCORD_ADMIN_PUT);
-  ccord_buf b;
-  ccord_buf_init(&b, CCORD_ADMIN_BODY_MAX);
-  ccord_status st = ccord_admin_build_voice_status(&b, channel_id, status, err);
-  if (st != CCORD_OK) { ccord_buf_free(&b); return st; }
-  if (b.len >= sizeof out->body) {
-    ccord_buf_free(&b);
-    return ccord_error_set(err, CCORD_ERR_RANGE, "request body too large");
-  }
-  memcpy(out->body, ccord_buf_cstr(&b), b.len + 1u);
-  ccord_buf_free(&b);
-  int n = snprintf(out->path, sizeof out->path, "/channels/%llu/voice-status", (unsigned long long)channel_id);
-  if (n < 0 || (size_t)n >= sizeof out->path) {
-    out->body[0] = '\0';
-    return ccord_error_set(err, CCORD_ERR_RANGE, "request path too long");
-  }
-  out->channel_id = channel_id;
-  if (status && status[0] != '\0') (void)snprintf(out->voice_status, sizeof out->voice_status, "%s", status);
-  return CCORD_OK;
-}
-
+[[nodiscard]] ccord_status ccord_admin_set_voice_status(ccord_admin_request *out, ccord_id channel_id,
+                                                        const char *status, ccord_error *err);
 // PATCH /guilds/{g}/voice-states/@me: ask to speak on a stage (request_to_speak_ms > 0) or cancel the ask (0 -> null).
-[[nodiscard]] static inline ccord_status ccord_admin_stage_request_speak(ccord_admin_request *out, ccord_id guild_id,
-                                                                         ccord_id channel_id, int64_t request_to_speak_ms,
-                                                                         ccord_error *err)
-{
-  ccord_error_clear(err);
-  if (!out) return ccord_error_set(err, CCORD_ERR_INVALID, "null request");
-  ccord_admin_m5_init_request(out, CCORD_ADMIN_STAGE_REQUEST_SPEAK, CCORD_ADMIN_PATCH);
-  if (guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) {
-    return ccord_error_set(err, CCORD_ERR_INVALID, "that isn't a server");
-  }
-  if (channel_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "missing channel");
-  char iso[40];
-  if (request_to_speak_ms != 0 && !ccord_admin_format_iso(request_to_speak_ms, iso, sizeof iso)) {
-    return ccord_error_set(err, CCORD_ERR_RANGE, "bad time");
-  }
-  ccord_buf b;
-  ccord_buf_init(&b, CCORD_ADMIN_BODY_MAX);
-  ccord_jw w;
-  ccord_jw_init(&w, &b);
-  ccord_jw_begin_object(&w);
-  ccord_jw_key(&w, "channel_id");
-  ccord_jw_id(&w, channel_id);
-  ccord_jw_key(&w, "request_to_speak_timestamp");
-  if (request_to_speak_ms == 0) ccord_jw_null(&w);
-  else ccord_jw_string(&w, iso, strlen(iso));
-  ccord_jw_end_object(&w);
-  ccord_status st = ccord_admin_m5_commit_body(out, &b, &w, err);
-  if (st != CCORD_OK) return st;
-  int n = snprintf(out->path, sizeof out->path, "/guilds/%llu/voice-states/@me", (unsigned long long)guild_id);
-  if (n < 0 || (size_t)n >= sizeof out->path) {
-    out->body[0] = '\0';
-    return ccord_error_set(err, CCORD_ERR_RANGE, "request path too long");
-  }
-  out->guild_id = guild_id;
-  out->channel_id = channel_id;
-  out->request_to_speak_ms = request_to_speak_ms;
-  return CCORD_OK;
-}
-
+[[nodiscard]] ccord_status ccord_admin_stage_request_speak(ccord_admin_request *out, ccord_id guild_id,
+                                                           ccord_id channel_id, int64_t request_to_speak_ms,
+                                                           ccord_error *err);
 // PATCH /guilds/{g}/voice-states/{u}: speaker=true invites the member to speak (suppress=false),
 // speaker=false returns them to the audience (suppress=true).
-[[nodiscard]] static inline ccord_status ccord_admin_stage_set_speaker(ccord_admin_request *out, ccord_id guild_id,
-                                                                       ccord_id channel_id, ccord_id user_id,
-                                                                       bool speaker, const char *reason,
-                                                                       ccord_error *err)
-{
-  ccord_error_clear(err);
-  if (!out) return ccord_error_set(err, CCORD_ERR_INVALID, "null request");
-  ccord_admin_m5_init_request(out, CCORD_ADMIN_STAGE_SET_SPEAKER, CCORD_ADMIN_PATCH);
-  if (guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) {
-    return ccord_error_set(err, CCORD_ERR_INVALID, "that isn't a server");
-  }
-  if (channel_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "missing channel");
-  if (user_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "missing member");
-  ccord_status st = ccord_admin_m5_reason(out, reason, err);
-  if (st != CCORD_OK) return st;
-  ccord_buf b;
-  ccord_buf_init(&b, CCORD_ADMIN_BODY_MAX);
-  ccord_jw w;
-  ccord_jw_init(&w, &b);
-  ccord_jw_begin_object(&w);
-  ccord_jw_key(&w, "channel_id");
-  ccord_jw_id(&w, channel_id);
-  ccord_jw_key(&w, "suppress");
-  ccord_jw_bool(&w, !speaker);
-  ccord_jw_end_object(&w);
-  st = ccord_admin_m5_commit_body(out, &b, &w, err);
-  if (st != CCORD_OK) return st;
-  int n = snprintf(out->path, sizeof out->path, "/guilds/%llu/voice-states/%llu", (unsigned long long)guild_id,
-                   (unsigned long long)user_id);
-  if (n < 0 || (size_t)n >= sizeof out->path) {
-    out->body[0] = '\0';
-    return ccord_error_set(err, CCORD_ERR_RANGE, "request path too long");
-  }
-  out->guild_id = guild_id;
-  out->channel_id = channel_id;
-  out->user_id = user_id;
-  out->stage_speaker = speaker;
-  return CCORD_OK;
-}
-
+[[nodiscard]] ccord_status ccord_admin_stage_set_speaker(ccord_admin_request *out, ccord_id guild_id,
+                                                         ccord_id channel_id, ccord_id user_id,
+                                                         bool speaker, const char *reason,
+                                                         ccord_error *err);
 // PATCH /stage-instances/{channel_id}: set the stage topic (nullptr / "" clears it to null).
 // The topic rides on the shared topic[]/has_topic fields (has_topic && topic[0]=='\0' = clear).
-[[nodiscard]] static inline ccord_status ccord_admin_stage_topic(ccord_admin_request *out, ccord_id channel_id,
-                                                                 const char *topic, const char *reason,
-                                                                 ccord_error *err)
-{
-  ccord_error_clear(err);
-  if (!out) return ccord_error_set(err, CCORD_ERR_INVALID, "null request");
-  ccord_admin_m5_init_request(out, CCORD_ADMIN_STAGE_TOPIC, CCORD_ADMIN_PATCH);
-  if (channel_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "missing channel");
-  ccord_status st = ccord_admin_m5_reason(out, reason, err);
-  if (st != CCORD_OK) return st;
-  size_t len = 0;
-  if (topic && topic[0] != '\0') {
-    len = strlen(topic);
-    if (!ccord_utf8_valid(topic, len)) return ccord_error_set(err, CCORD_ERR_INVALID, "topic has invalid characters");
-    if (ccord_admin_m5_text_chars(topic, len) > CCORD_ADMIN_STAGE_TOPIC_MAX) {
-      return ccord_error_set(err, CCORD_ERR_RANGE, "topic is too long (max %u)", CCORD_ADMIN_STAGE_TOPIC_MAX);
-    }
-  }
-  ccord_buf b;
-  ccord_buf_init(&b, CCORD_ADMIN_BODY_MAX);
-  ccord_jw w;
-  ccord_jw_init(&w, &b);
-  ccord_jw_begin_object(&w);
-  ccord_jw_key(&w, "topic");
-  if (len == 0) ccord_jw_null(&w);
-  else ccord_jw_string(&w, topic, len);
-  ccord_jw_end_object(&w);
-  st = ccord_admin_m5_commit_body(out, &b, &w, err);
-  if (st != CCORD_OK) return st;
-  int n = snprintf(out->path, sizeof out->path, "/stage-instances/%llu", (unsigned long long)channel_id);
-  if (n < 0 || (size_t)n >= sizeof out->path) {
-    out->body[0] = '\0';
-    return ccord_error_set(err, CCORD_ERR_RANGE, "request path too long");
-  }
-  out->channel_id = channel_id;
-  out->has_topic = true;
-  if (len != 0) (void)snprintf(out->topic, sizeof out->topic, "%s", topic);
-  return CCORD_OK;
-}
-
+[[nodiscard]] ccord_status ccord_admin_stage_topic(ccord_admin_request *out, ccord_id channel_id,
+                                                   const char *topic, const char *reason,
+                                                   ccord_error *err);
 // POST /channels/{c}/call/stop-ringing: decline an incoming DM / group-DM call without touching voice state.
-// Discord answers 204; the live transport drops self from the cached ringing[] and emits CALL_UPDATE on completion.
-// This is deliberately NOT a Gateway OP 4 disconnect: sending {guild_id:null, channel_id:null} would also drop any
-// active guild voice the user is in while the phone rings.
-[[nodiscard]] static inline ccord_status ccord_admin_call_stop_ringing(ccord_admin_request *out, ccord_id channel_id,
-                                                                       ccord_error *err)
-{
-  ccord_error_clear(err);
-  if (!out) return ccord_error_set(err, CCORD_ERR_INVALID, "null request");
-  ccord_admin_m5_init_request(out, CCORD_ADMIN_CALL_STOP_RINGING, CCORD_ADMIN_POST);
-  if (channel_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "missing channel");
-  int n = snprintf(out->path, sizeof out->path, "/channels/%llu/call/stop-ringing", (unsigned long long)channel_id);
-  if (n < 0 || (size_t)n >= sizeof out->path) {
-    return ccord_error_set(err, CCORD_ERR_RANGE, "request path too long");
-  }
-  out->channel_id = channel_id;
-  out->guild_id = CCORD_DM_GUILD_ID;
-  out->body[0] = '{';
-  out->body[1] = '}';
-  out->body[2] = '\0';
-  return CCORD_OK;
-}
+[[nodiscard]] ccord_status ccord_admin_call_stop_ringing(ccord_admin_request *out, ccord_id channel_id,
+                                                         ccord_error *err);
 
 // ---- account settings, devices & connections ----
 // Pure body builders: write compact JSON into an already-initialised ccord_buf. Every unchanged

@@ -336,6 +336,30 @@ static void test_dm_call_session_flow(void)
   CT_CHECK(pump_all(s) > 0);
   CT_CHECK(ccord_store_call(store, dm_ch) == nullptr);
 
+  // Bot 1:1 DM: Discord does not support calling bots, so session refuses to join.
+  ccord_user bot_u = {
+    .id = 1999,
+    .name = "HelperBot",
+    .status_text = "",
+    .presence = CCORD_PRESENCE_ONLINE,
+    .is_bot = true,
+  };
+  CT_CHECK(ccord_store_upsert_user(store, &bot_u, &err) == CCORD_OK);
+  ccord_channel bot_dm = {
+    .id = 901999,
+    .guild_id = CCORD_DM_GUILD_ID,
+    .name = "HelperBot",
+    .topic = "",
+    .kind = CCORD_CHANNEL_TEXT,
+    .discord_type = CCORD_DISCORD_CHANNEL_DM,
+    .user_id = 1999,
+    .recipient_count = 1,
+    .recipient_ids = {1999},
+  };
+  CT_CHECK(ccord_store_upsert_channel(store, &bot_dm, &err) == CCORD_OK);
+  CT_CHECK(ccord_session_call_join(s, bot_dm.id, &err) == CCORD_ERR_UNSUPPORTED);
+  CT_CHECK(strcmp(err.message, "session: bots cannot be called") == 0);
+
   // ch2's remote side finally hangs up.
   CT_CHECK(ccord_mock_end_call(g_mock, ch2, &err) == CCORD_OK);
   CT_CHECK(pump_all(s) > 0);

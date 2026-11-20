@@ -28,3 +28,36 @@ bool ccord_http_download_file(const char *url, const char *dest_path, size_t max
 
 // Returns true when url is HTTPS and targets an allowlisted catalog / GitHub release host.
 bool ccord_http_url_allowed(const char *url);
+
+// Generalized HTTP request (used by Class 3 plugin network.http / network.local).
+// External URLs require strict HTTPS (TLS 1.2/1.3). Plain HTTP is permitted ONLY when
+// allow_localhost_http == true and the host is loopback (127.0.0.1, localhost, or ::1).
+typedef struct ccord_http_request_opts {
+  const char *url;
+  const char *method;            // "GET"|"POST"|"PUT"|"PATCH"|"DELETE"|"HEAD" (nullptr -> "GET")
+  const char *headers_json;      // optional JSON object of request headers
+  const uint8_t *body;
+  size_t body_len;
+  uint32_t timeout_ms;           // 0 -> 15000 ms
+  size_t max_bytes;              // 0 -> 16 MiB
+  bool allow_localhost_http;
+} ccord_http_request_opts;
+
+typedef struct ccord_http_response {
+  long status_code;
+  uint8_t *body;                 // owned (ccord_free), NUL-terminated when present
+  size_t body_len;
+  char *headers_json;            // owned (ccord_free), JSON object of response headers
+  char error[256];
+} ccord_http_response;
+
+bool ccord_http_request(const ccord_http_request_opts *req, ccord_http_response *out);
+void ccord_http_response_free(ccord_http_response *r);
+
+// External WebSocket client (strict WSS TLS 1.2/1.3, or ws:// on loopback only).
+typedef struct ccord_ws_client ccord_ws_client;
+ccord_ws_client *ccord_ws_client_open(const char *url, const char *headers_json, char *err_buf, size_t err_cap);
+bool ccord_ws_client_send(ccord_ws_client *ws, const uint8_t *data, size_t len, bool binary);
+// Returns >0 bytes received, 0 on timeout, -1 on close/error.
+int ccord_ws_client_recv(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *out_binary, int timeout_ms);
+void ccord_ws_client_close(ccord_ws_client *ws, uint16_t code, const char *reason);
