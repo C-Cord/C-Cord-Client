@@ -5159,11 +5159,13 @@ void ui_open_lightbox(ccord_ui *ui, const char *const *urls, size_t count, size_
 void ui_close_lightbox(ccord_ui *ui)
 {
   if (!ui) return;
+  bool was_open = ui->lightbox_open;
   ui->lightbox_open = false;
   ui->lightbox_count = 0;
   ui->lightbox_index = 0;
   ccord_free(ui->lightbox_urls);
   ui->lightbox_urls = nullptr;
+  if (was_open) ui->dirty = true;
 }
 
 bool ui_user_avatar_url(const ccord_user *u, char *out, size_t cap)
@@ -7576,12 +7578,14 @@ static bool handle_right_click(ccord_ui *ui, const ccord_input_event *ev)
 void ui_close_select_dropdown(ccord_ui *ui)
 {
   if (!ui) return;
+  bool was_open = ui->select_open;
   ui->select_open = false;
   ui->select_opt_count = 0;
   ccord_free(ui->select_opts);
   ui->select_opts = nullptr;
   ccord_free(ui->select_target);
   ui->select_target = nullptr;
+  if (was_open) ui->dirty = true;
 }
 
 static void select_add_opt(ccord_ui *ui, const char *label, const char *value, const char *desc, bool selected)

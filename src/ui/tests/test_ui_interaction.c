@@ -6157,7 +6157,10 @@ static void test_embeds_galleries_spoilers_lightbox_and_media_players(void)
   d = dbg();
   CT_CHECK(d.lightbox_open && d.lightbox_count == 1 && d.lightbox_index == 0);
   CT_CHECK(strcmp(d.lightbox_url, "https://cdn.discordapp.com/attachments/1/thumb.png") == 0);
+  // Regression (Medium #2): closing the lightbox via Escape must mark ui->dirty.
+  F.ui->dirty = false;
   key(CCORD_KEY_ESCAPE, 0);
+  CT_CHECK(F.ui->dirty);
   frame(2);
   CT_CHECK(!dbg().lightbox_open);
   remove_message(empty_ch, mid);
