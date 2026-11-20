@@ -370,6 +370,17 @@ static void test_v2_discover_updates_sha_and_revocations(void)
   pump_until(cat, 2000, pred_revoked, &host);
   CT_CHECK(host.revoke_calls == 1);
   CT_CHECK(strcmp(host.revoked_id, "org.ccord.demo") == 0);
+  // 7. Persisted revocations survive restart and enforce automatically on startup (P11).
+  CT_CHECK(ccord_catalog_is_revoked(cat, "org.ccord.demo", nullptr, 0));
+  ccord_catalog_destroy(cat);
+  host.revoke_calls = 0;
+  host.revoked_id[0] = '\0';
+  cat = ccord_catalog_create(dir, contrib, &http, &cbs);
+  CT_CHECK(cat != nullptr);
+  CT_CHECK(ccord_catalog_is_revoked(cat, "org.ccord.demo", nullptr, 0));
+  CT_CHECK(host.revoke_calls == 1 && strcmp(host.revoked_id, "org.ccord.demo") == 0);
+  ccord_catalog_enforce_revocations(cat);
+  CT_CHECK(host.revoke_calls == 2 && strcmp(host.revoked_id, "org.ccord.demo") == 0);
 
   ccord_catalog_destroy(cat);
   ccord_contrib_destroy(contrib);

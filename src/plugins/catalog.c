@@ -1107,6 +1107,43 @@ static void enforce_revocations(ccord_catalog *cat)
       }
     }
   }
+  for (size_t r = 0; r < cat->nrevoked; r++) {
+    if (cat->revoked[r].sha256[0] == '\0' && cat->revoked[r].plugin_id[0] != '\0') {
+      char msg[256];
+      snprintf(msg, sizeof msg, "Revoked by C-Cord moderators: %s",
+               cat->revoked[r].reason[0] ? cat->revoked[r].reason : "security policy");
+      cat->cbs.revoke_plugin(cat->cbs.ud, cat->revoked[r].plugin_id, msg);
+    }
+  }
+}
+
+void ccord_catalog_enforce_revocations(ccord_catalog *cat)
+{
+  enforce_revocations(cat);
+}
+
+bool ccord_catalog_is_revoked(const ccord_catalog *cat, const char *id, char *reason_out, size_t reason_cap)
+{
+  if (!cat || !id || !id[0] || cat->nrevoked == 0) return false;
+  const installed_meta *m = find_meta_const(cat, id);
+  for (size_t r = 0; r < cat->nrevoked; r++) {
+    bool hit = false;
+    if (m && strlen(m->sha256) == 64 && strlen(cat->revoked[r].sha256) == 64 &&
+        hex_equal_ci(m->sha256, cat->revoked[r].sha256)) {
+      hit = true;
+    } else if (cat->revoked[r].sha256[0] == '\0' && cat->revoked[r].plugin_id[0] != '\0' &&
+               strcmp(cat->revoked[r].plugin_id, id) == 0) {
+      hit = true;
+    }
+    if (hit) {
+      if (reason_out && reason_cap) {
+        snprintf(reason_out, reason_cap, "Revoked by C-Cord moderators: %s",
+                 cat->revoked[r].reason[0] ? cat->revoked[r].reason : "security policy");
+      }
+      return true;
+    }
+  }
+  return false;
 }
 
 // ---------------------------------------------------------------- worker thread

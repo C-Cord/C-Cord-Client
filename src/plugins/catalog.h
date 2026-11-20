@@ -49,6 +49,10 @@ void ccord_catalog_set_prefs(ccord_catalog *cat, const ccord_catalog_prefs *pref
 void ccord_catalog_set_plugin_auto_update(ccord_catalog *cat, const char *id, bool enabled);
 void ccord_catalog_run_auto_updates(ccord_catalog *cat);
 void ccord_catalog_on_uninstalled(ccord_catalog *cat, const char *id);
+// Re-run cached revocation checks against currently loaded plugins (must be called after load_all).
+void ccord_catalog_enforce_revocations(ccord_catalog *cat);
+// True if the installed SHA-256 recorded for `id` matches a moderator revocation entry.
+bool ccord_catalog_is_revoked(const ccord_catalog *cat, const char *id, char *reason_out, size_t reason_cap);
 
 // Metadata enrichment for installed plugin cards in ccord_plugins.
 typedef struct ccord_catalog_local_overlay {

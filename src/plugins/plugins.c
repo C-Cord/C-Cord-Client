@@ -136,6 +136,7 @@ typedef struct plugin {
   char *storage_dir;
   ccord_perm_set consented_perms;
   bool is_bundled;
+  bool revoked;
 } plugin;
 
 struct ccord_plugins {
@@ -2837,6 +2838,17 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
     publish_state(m, p);
     return;
   }
+  char rev_reason[256] = "";
+  if (m->catalog && ccord_catalog_is_revoked(m->catalog, man.id, rev_reason, sizeof rev_reason)) {
+    p->revoked = true;
+    p->enabled = false;
+    p->consent_granted = false;
+    p->consented_perms = 0;
+    p->state = CCORD_PLUGIN_FAILED;
+    set_text(p->error, sizeof p->error, rev_reason[0] ? rev_reason : "Revoked by C-Cord moderators");
+    publish_state(m, p);
+    return;
+  }
   if (!read_file(real_main, 16u << 20, &p->source, &p->source_len, why, sizeof why)) {
     p->state = CCORD_PLUGIN_FAILED;
     set_text(p->error, sizeof p->error, why);
@@ -2905,6 +2917,7 @@ size_t ccord_plugins_load_all(ccord_plugins *m)
     ccord_dir_close(d);
   }
   if (consent_ar.head) ccord_arena_free(&consent_ar);
+  if (m->catalog) ccord_catalog_enforce_revocations(m->catalog);
   return started;
 }
 
@@ -3002,6 +3015,15 @@ static bool reload_plugin_source(plugin *p, char *why, size_t why_cap)
 static void start_plugin_host(ccord_plugins *m, plugin *p)
 {
   if (!p || p->state == CCORD_PLUGIN_STARTING || p->state == CCORD_PLUGIN_READY) return;
+  char rev_reason[256] = "";
+  if (p->revoked || (m->catalog && ccord_catalog_is_revoked(m->catalog, p->m.id, rev_reason, sizeof rev_reason))) {
+    p->revoked = true;
+    p->enabled = false;
+    p->consent_granted = false;
+    p->consented_perms = 0;
+    set_plugin_failed(m, p, rev_reason[0] ? rev_reason : "Revoked by C-Cord moderators", true);
+    return;
+  }
   if (!p->source) {
     char why[256] = "";
     if (!reload_plugin_source(p, why, sizeof why)) {
@@ -3036,9 +3058,19 @@ static void on_plugin_set_enabled(void *ud, const char *id, bool enabled)
   if (!enabled) {
     p->enabled = false;
     stop_host(m, p);
-    p->state = p->consent_granted ? CCORD_PLUGIN_STOPPED : CCORD_PLUGIN_NEEDS_CONSENT;
+    p->state = p->revoked ? CCORD_PLUGIN_FAILED
+                          : (p->consent_granted ? CCORD_PLUGIN_STOPPED : CCORD_PLUGIN_NEEDS_CONSENT);
     publish_state(m, p);
     consent_save(m);
+    return;
+  }
+  char rev_reason[256] = "";
+  if (p->revoked || (m->catalog && ccord_catalog_is_revoked(m->catalog, p->m.id, rev_reason, sizeof rev_reason))) {
+    p->revoked = true;
+    p->enabled = false;
+    p->consent_granted = false;
+    p->consented_perms = 0;
+    set_plugin_failed(m, p, rev_reason[0] ? rev_reason : "Revoked by C-Cord moderators", true);
     return;
   }
   if (!p->consent_granted) {
@@ -3056,6 +3088,15 @@ static void on_plugin_consent_accept_for(void *ud, const char *id, uint64_t expe
   ccord_plugins *m = ud;
   plugin *p = find_owner(m, id);
   if (!p) return;
+  char rev_reason[256] = "";
+  if (p->revoked || (m->catalog && ccord_catalog_is_revoked(m->catalog, p->m.id, rev_reason, sizeof rev_reason))) {
+    p->revoked = true;
+    p->enabled = false;
+    p->consent_granted = false;
+    p->consented_perms = 0;
+    set_plugin_failed(m, p, rev_reason[0] ? rev_reason : "Revoked by C-Cord moderators", true);
+    return;
+  }
   if (expected_perms != UINT64_MAX && p->m.perms != expected_perms) {
     // Manifest permissions changed while the consent dialog was open; keep NEEDS_CONSENT and refresh UI.
     p->consent_granted = false;
@@ -3130,6 +3171,18 @@ static void on_plugin_reload(void *ud, const char *id)
     ccord_free(p->perm_str);
     p->perm_str = ps;
   }
+
+  char rev_reason[256] = "";
+  if (m->catalog && ccord_catalog_is_revoked(m->catalog, man.id, rev_reason, sizeof rev_reason)) {
+    p->revoked = true;
+    p->enabled = false;
+    p->consent_granted = false;
+    p->consented_perms = 0;
+    set_plugin_failed(m, p, rev_reason[0] ? rev_reason : "Revoked by C-Cord moderators", true);
+    consent_save(m);
+    return;
+  }
+  p->revoked = false;
 
   bool safe_class = ccord_perm_max_class(man.perms) == CCORD_PERM_CLASS_SAFE;
   if (safe_class) {
@@ -3330,6 +3383,7 @@ bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, si
   ccord_free(p->perm_str);
   p->used = false;
   p->m.id[0] = '\0';
+  p->revoked = false;
   p->items = nullptr;
   p->nitems = 0;
   p->cap_items = 0;
@@ -3397,7 +3451,10 @@ static void cat_revoke_plugin(void *ud, const char *id, const char *reason)
   plugin *p = find_owner(m, id);
   if (!p) return;
   stop_host(m, p);
+  p->revoked = true;
   p->enabled = false;
+  p->consent_granted = false;
+  p->consented_perms = 0;
   p->state = CCORD_PLUGIN_FAILED;
   set_text(p->error, sizeof p->error, reason ? reason : "Revoked by C-Cord moderators");
   consent_save(m);
