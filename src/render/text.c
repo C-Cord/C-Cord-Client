@@ -380,9 +380,10 @@ static void scan_font_dir(const char *dir, int depth)
       if (depth < 6) scan_font_dir(full, depth + 1);
     } else if (font_file_ext(name)) {
       char **grown = ccord_realloc(g_font_files, (size_t)(g_nfont_files + 1) * sizeof *g_font_files);
-      char *copy = grown ? ccord_strndup(full, strlen(full)) : nullptr;
-      if (!copy) break;
+      if (!grown) break;
       g_font_files = grown;
+      char *copy = ccord_strndup(full, strlen(full));
+      if (!copy) break;
       g_font_files[g_nfont_files++] = copy;
     }
   }
