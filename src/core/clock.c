@@ -5,15 +5,27 @@
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
+#include <stdatomic.h>
 #include <windows.h>
 
 uint64_t ccord_clock_ms(void)
 {
-  static LARGE_INTEGER freq;
-  if (freq.QuadPart == 0) QueryPerformanceFrequency(&freq);
+  static _Atomic int64_t s_freq = 0;
+  int64_t freq = atomic_load_explicit(&s_freq, memory_order_relaxed);
+  if (freq <= 0) {
+    LARGE_INTEGER li = {0};
+    if (QueryPerformanceFrequency(&li) && li.QuadPart > 0) {
+      freq = li.QuadPart;
+      atomic_store_explicit(&s_freq, freq, memory_order_relaxed);
+    } else {
+      freq = 1;
+    }
+  }
   LARGE_INTEGER now;
   QueryPerformanceCounter(&now);
-  return (uint64_t)((now.QuadPart * 1000LL) / (freq.QuadPart > 0 ? freq.QuadPart : 1LL));
+  uint64_t ticks = now.QuadPart > 0 ? (uint64_t)now.QuadPart : 0u;
+  uint64_t uf = (uint64_t)freq;
+  return (ticks / uf) * 1000u + ((ticks % uf) * 1000u) / uf;
 }
 
 int64_t ccord_clock_unix_ms(void)
