@@ -26,8 +26,10 @@
 #include <time.h>
 
 #define SB_HOOK_STEP 1000
+#define SB_IDLE_HOOK_STEP 10000
 #define SB_MAX_TEXT 65536u
 #define SB_MAX_FS_READ_BYTES (16u * 1024u * 1024u)
+#define SB_MAX_TIMERS 256u
 #define SB_KEY_HANDLERS "ccord.handlers"
 #define SB_KEY_MENU "ccord.menu"
 #define SB_KEY_COMMANDS "ccord.commands"
@@ -102,7 +104,9 @@ static void count_hook(lua_State *L, lua_Debug *ar)
   if (sb->cancel && atomic_load_explicit(sb->cancel, memory_order_relaxed)) {
     luaL_error(L, "plugin host stopped");
   }
+  if (sb->limit == CCORD_SB_LIMIT_UNDECLARED) luaL_error(L, "undeclared restricted API called");
   if (sb->limit == CCORD_SB_LIMIT_MEMORY) luaL_error(L, "memory limit exceeded");
+  if (sb->limit == CCORD_SB_LIMIT_INSTRUCTIONS) luaL_error(L, "instruction limit exceeded");
   if (sb->insn_per_call > 0) {
     sb->budget -= SB_HOOK_STEP;
     if (sb->budget < 0) {
@@ -123,7 +127,7 @@ void ccord_sandbox_set_cancel_flag(ccord_sandbox *sb, const _Atomic bool *cancel
   if (!sb) return;
   sb->cancel = cancel;
   if (sb->L && cancel && sb->insn_per_call == 0) {
-    lua_sethook(sb->L, count_hook, LUA_MASKCOUNT, 10000);
+    lua_sethook(sb->L, count_hook, LUA_MASKCOUNT, SB_IDLE_HOOK_STEP);
   }
 }
 
@@ -152,6 +156,7 @@ ccord_sandbox_limit ccord_sandbox_limit_hit(const ccord_sandbox *sb)
 
 static void sb_request(ccord_sandbox *sb, const char *method, const char *params)
 {
+  if (sb->limit != CCORD_SB_LIMIT_NONE) return;
   if (sb->svc.request) sb->svc.request(sb->svc.ud, method, params);
 }
 
@@ -165,6 +170,10 @@ static void sb_log(ccord_sandbox *sb, ccord_log_level lvl, const char *what, con
 // Class 2 / Class 3 permission check: undeclared calls are fatal and immediately stop the plugin.
 static bool check_perm(lua_State *L, ccord_sandbox *sb, ccord_perm perm, const char *api)
 {
+  if (sb->limit != CCORD_SB_LIMIT_NONE) {
+    (void)luaL_error(L, "plugin stopped");
+    return false;
+  }
   if (ccord_perm_class_of(perm) == CCORD_PERM_CLASS_SAFE) return true;
   if (sb->perms & (ccord_perm_set)perm) return true;
   lua_Debug ar;
@@ -363,6 +372,7 @@ static void request_pair(ccord_sandbox *sb, const char *method, const char *key,
 
 static int sync_call(lua_State *L, ccord_sandbox *sb, const char *method, const char *params_json)
 {
+  if (sb->limit != CCORD_SB_LIMIT_NONE) return luaL_error(L, "plugin stopped");
   if (!sb->svc.request_sync) {
     lua_pushnil(L);
     lua_pushliteral(L, "sync IPC unavailable");
@@ -1020,6 +1030,7 @@ static int add_timer(lua_State *L, bool repeat)
   lua_Integer ms = luaL_checkinteger(L, 1);
   if (ms < 0) ms = 0;
   luaL_checktype(L, 2, LUA_TFUNCTION);
+  if (sb->ntimers >= SB_MAX_TIMERS) return luaL_error(L, "time: timer limit exceeded");
   if (sb->ntimers == sb->captimers) {
     size_t ncap = sb->captimers ? sb->captimers * 2 : 8;
     sb_timer *nt = ccord_realloc_array(sb->timers, ncap, sizeof *nt);
@@ -1137,9 +1148,8 @@ static int api_encoding_b64_encode(lua_State *L)
   size_t blocks = (n / 3u) + ((n % 3u) ? 1u : 0u);
   if (blocks > SIZE_MAX / 4u) return luaL_error(L, "encoding.base64_encode: input too large");
   size_t out_len = blocks * 4u;
-  char stack_buf[1024];
-  char *dst = out_len <= sizeof stack_buf ? stack_buf : ccord_malloc(out_len);
-  if (!dst) return luaL_error(L, "encoding.base64_encode: out of memory");
+  luaL_Buffer lb;
+  char *dst = luaL_buffinitsize(L, &lb, out_len);
   size_t o = 0;
   for (size_t i = 0; i < n; i += 3) {
     uint32_t v = ((uint32_t)in[i] << 16) | (i + 1 < n ? (uint32_t)in[i + 1] << 8 : 0) | (i + 2 < n ? (uint32_t)in[i + 2] : 0);
@@ -1148,8 +1158,7 @@ static int api_encoding_b64_encode(lua_State *L)
     dst[o++] = i + 1 < n ? tbl[(v >> 6) & 63] : '=';
     dst[o++] = i + 2 < n ? tbl[v & 63] : '=';
   }
-  lua_pushlstring(L, dst, o);
-  if (dst != stack_buf) ccord_free(dst);
+  luaL_pushresultsize(&lb, o);
   return 1;
 }
 
@@ -1163,6 +1172,27 @@ static int b64_val(unsigned char c)
   return -1;
 }
 
+static bool b64_decode_raw(const unsigned char *in, size_t n, char *dst, size_t *out_len)
+{
+  if (n % 4u != 0) return false;
+  size_t o = 0;
+  for (size_t i = 0; i < n; i += 4) {
+    bool last = (i + 4u == n);
+    int a = b64_val(in[i]), c1 = b64_val(in[i + 1]);
+    int c2 = in[i + 2] == '=' ? -2 : b64_val(in[i + 2]);
+    int c3 = in[i + 3] == '=' ? -2 : b64_val(in[i + 3]);
+    if (a < 0 || c1 < 0 || c2 == -1 || c3 == -1) return false;
+    if ((c2 == -2 || c3 == -2) && !last) return false;
+    if (c2 == -2 && c3 != -2) return false;
+    uint32_t v = ((uint32_t)a << 18) | ((uint32_t)c1 << 12) | (c2 >= 0 ? (uint32_t)c2 << 6 : 0) | (c3 >= 0 ? (uint32_t)c3 : 0);
+    dst[o++] = (char)(unsigned char)(v >> 16);
+    if (c2 >= 0) dst[o++] = (char)(unsigned char)(v >> 8);
+    if (c3 >= 0) dst[o++] = (char)(unsigned char)v;
+  }
+  *out_len = o;
+  return true;
+}
+
 static int api_encoding_b64_decode(lua_State *L)
 {
   size_t n = 0;
@@ -1173,27 +1203,15 @@ static int api_encoding_b64_decode(lua_State *L)
     return 1;
   }
   size_t out_cap = (n / 4u) * 3u;
-  char stack_buf[1024];
-  char *dst = out_cap <= sizeof stack_buf ? stack_buf : ccord_malloc(out_cap);
-  if (!dst) { lua_pushnil(L); lua_pushliteral(L, "out of memory"); return 2; }
+  luaL_Buffer lb;
+  char *dst = luaL_buffinitsize(L, &lb, out_cap);
   size_t o = 0;
-  for (size_t i = 0; i < n; i += 4) {
-    int a = b64_val(in[i]), c1 = b64_val(in[i + 1]);
-    int c2 = in[i + 2] == '=' ? -2 : b64_val(in[i + 2]);
-    int c3 = in[i + 3] == '=' ? -2 : b64_val(in[i + 3]);
-    if (a < 0 || c1 < 0 || c2 == -1 || c3 == -1) {
-      if (dst != stack_buf) ccord_free(dst);
-      lua_pushnil(L);
-      lua_pushliteral(L, "invalid base64");
-      return 2;
-    }
-    uint32_t v = ((uint32_t)a << 18) | ((uint32_t)c1 << 12) | (c2 >= 0 ? (uint32_t)c2 << 6 : 0) | (c3 >= 0 ? (uint32_t)c3 : 0);
-    dst[o++] = (char)(unsigned char)(v >> 16);
-    if (c2 >= 0) dst[o++] = (char)(unsigned char)(v >> 8);
-    if (c3 >= 0) dst[o++] = (char)(unsigned char)v;
+  if (!b64_decode_raw(in, n, dst, &o)) {
+    lua_pushnil(L);
+    lua_pushliteral(L, "invalid base64");
+    return 2;
   }
-  lua_pushlstring(L, dst, o);
-  if (dst != stack_buf) ccord_free(dst);
+  luaL_pushresultsize(&lb, o);
   return 1;
 }
 
@@ -1202,19 +1220,18 @@ static int api_encoding_url_encode(lua_State *L)
   static const char hex[] = "0123456789ABCDEF";
   size_t n = 0;
   const unsigned char *s = (const unsigned char *)luaL_checklstring(L, 1, &n);
-  ccord_buf b;
-  ccord_buf_init(&b, 0);
+  luaL_Buffer lb;
+  luaL_buffinit(L, &lb);
   for (size_t i = 0; i < n; i++) {
     unsigned char c = s[i];
     if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
-      (void)ccord_buf_append(&b, &c, 1);
+      luaL_addchar(&lb, (char)c);
     } else {
       char esc[3] = {'%', hex[c >> 4], hex[c & 15]};
-      (void)ccord_buf_append(&b, esc, 3);
+      luaL_addlstring(&lb, esc, 3);
     }
   }
-  lua_pushlstring(L, b.data, b.len);
-  ccord_buf_free(&b);
+  luaL_pushresult(&lb);
   return 1;
 }
 
@@ -1231,9 +1248,8 @@ static int api_encoding_url_decode(lua_State *L)
   size_t n = 0;
   const unsigned char *s = (const unsigned char *)luaL_checklstring(L, 1, &n);
   if (n == 0) { lua_pushlstring(L, "", 0); return 1; }
-  char stack_buf[1024];
-  char *dst = n <= sizeof stack_buf ? stack_buf : ccord_malloc(n);
-  if (!dst) return luaL_error(L, "encoding.url_decode: out of memory");
+  luaL_Buffer lb;
+  char *dst = luaL_buffinitsize(L, &lb, n);
   size_t o = 0;
   for (size_t i = 0; i < n; i++) {
     if (s[i] == '%' && i + 2 < n) {
@@ -1246,8 +1262,7 @@ static int api_encoding_url_decode(lua_State *L)
     }
     dst[o++] = s[i] == '+' ? ' ' : (char)s[i];
   }
-  lua_pushlstring(L, dst, o);
-  if (dst != stack_buf) ccord_free(dst);
+  luaL_pushresultsize(&lb, o);
   return 1;
 }
 
@@ -1255,15 +1270,14 @@ static int api_markdown_escape(lua_State *L)
 {
   size_t n = 0;
   const char *s = luaL_checklstring(L, 1, &n);
-  ccord_buf b;
-  ccord_buf_init(&b, 0);
+  luaL_Buffer lb;
+  luaL_buffinit(L, &lb);
   for (size_t i = 0; i < n; i++) {
     char c = s[i];
-    if (strchr("\\*_~`|>[]()", c)) (void)ccord_buf_append(&b, "\\", 1);
-    (void)ccord_buf_append(&b, &c, 1);
+    if (strchr("\\*_~`|>[]()", c)) luaL_addchar(&lb, '\\');
+    luaL_addchar(&lb, c);
   }
-  lua_pushlstring(L, b.data, b.len);
-  ccord_buf_free(&b);
+  luaL_pushresult(&lb);
   return 1;
 }
 
@@ -1272,9 +1286,8 @@ static int api_markdown_strip(lua_State *L)
   size_t n = 0;
   const char *s = luaL_checklstring(L, 1, &n);
   if (n == 0) { lua_pushlstring(L, "", 0); return 1; }
-  char stack_buf[1024];
-  char *dst = n <= sizeof stack_buf ? stack_buf : ccord_malloc(n);
-  if (!dst) return luaL_error(L, "markdown.strip: out of memory");
+  luaL_Buffer lb;
+  char *dst = luaL_buffinitsize(L, &lb, n);
   size_t o = 0;
   for (size_t i = 0; i < n; i++) {
     char c = s[i];
@@ -1282,8 +1295,7 @@ static int api_markdown_strip(lua_State *L)
     if (c == '*' || c == '_' || c == '~' || c == '`') continue;
     dst[o++] = c;
   }
-  lua_pushlstring(L, dst, o);
-  if (dst != stack_buf) ccord_free(dst);
+  luaL_pushresultsize(&lb, o);
   return 1;
 }
 
@@ -2144,6 +2156,42 @@ static void reg_ro(lua_State *L, const char *name, const luaL_Reg *fns)
   lua_setglobal(L, name);
 }
 
+static int api_coroutine_create(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  luaL_checktype(L, 1, LUA_TFUNCTION);
+  lua_State *co = lua_newthread(L);
+  memcpy(lua_getextraspace(co), &sb, sizeof sb);
+  lua_sethook(co, count_hook, LUA_MASKCOUNT, sb->insn_per_call > 0 ? SB_HOOK_STEP : SB_IDLE_HOOK_STEP);
+  lua_pushvalue(L, 1);
+  lua_xmove(L, co, 1);
+  return 1;
+}
+
+static int api_coroutine_wrap_aux(lua_State *L)
+{
+  int nargs = lua_gettop(L);
+  if (!lua_checkstack(L, 3)) return luaL_error(L, "coroutine.wrap: stack overflow");
+  lua_pushvalue(L, lua_upvalueindex(1));  // coroutine.resume
+  lua_pushvalue(L, lua_upvalueindex(2));  // thread
+  lua_insert(L, 1);
+  lua_insert(L, 1);
+  lua_call(L, nargs + 1, LUA_MULTRET);
+  if (!lua_toboolean(L, 1)) {
+    return lua_error(L);
+  }
+  return lua_gettop(L) - 1;
+}
+
+static int api_coroutine_wrap(lua_State *L)
+{
+  api_coroutine_create(L);                 // pushes thread on top
+  lua_pushvalue(L, lua_upvalueindex(1));   // coroutine.resume
+  lua_insert(L, -2);                       // upvalue 1 = resume, upvalue 2 = thread
+  lua_pushcclosure(L, api_coroutine_wrap_aux, 2);
+  return 1;
+}
+
 static int open_all(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
@@ -2152,7 +2200,14 @@ static int open_all(lua_State *L)
   luaL_requiref(L, "string", luaopen_string, 1); lua_pop(L, 1);
   luaL_requiref(L, "math", luaopen_math, 1); lua_pop(L, 1);
   luaL_requiref(L, "utf8", luaopen_utf8, 1); lua_pop(L, 1);
-  luaL_requiref(L, "coroutine", luaopen_coroutine, 1); lua_pop(L, 1);
+  luaL_requiref(L, "coroutine", luaopen_coroutine, 1);
+  // Ensure child coroutines inherit count_hook (cancel/instruction/undeclared enforcement).
+  lua_pushcfunction(L, api_coroutine_create);
+  lua_setfield(L, -2, "create");
+  lua_getfield(L, -1, "resume");
+  lua_pushcclosure(L, api_coroutine_wrap, 1);
+  lua_setfield(L, -2, "wrap");
+  lua_pop(L, 1);
 
   static const char *const k_removed[] = {"dofile", "loadfile", "load", "print", "warn", "collectgarbage"};
   for (size_t i = 0; i < sizeof k_removed / sizeof k_removed[0]; i++) {
@@ -2290,7 +2345,7 @@ ccord_sandbox *ccord_sandbox_create(const ccord_sandbox_config *cfg, const ccord
   sb->insn_per_call = cfg->instructions;
   sb->budget = (int64_t)cfg->instructions;
   unsigned seed = 0;
-  if (!ccord_random_bytes(&seed, sizeof seed)) {
+  if (ccord_random_bytes(&seed, sizeof seed) != CCORD_OK) {
     seed = (unsigned)((uintptr_t)sb ^ (uintptr_t)time(nullptr));
   }
   sb->L = lua_newstate(sb_alloc, sb, seed);
@@ -2300,7 +2355,7 @@ ccord_sandbox *ccord_sandbox_create(const ccord_sandbox_config *cfg, const ccord
     return nullptr;
   }
   memcpy(lua_getextraspace(sb->L), &sb, sizeof sb);
-  if (sb->insn_per_call > 0) lua_sethook(sb->L, count_hook, LUA_MASKCOUNT, SB_HOOK_STEP);
+  lua_sethook(sb->L, count_hook, LUA_MASKCOUNT, sb->insn_per_call > 0 ? SB_HOOK_STEP : SB_IDLE_HOOK_STEP);
   lua_pushcfunction(sb->L, open_all);
   if (lua_pcall(sb->L, 0, 0, 0) != LUA_OK) {
     const char *msg = lua_tostring(sb->L, -1);
@@ -2474,7 +2529,9 @@ ccord_status ccord_sandbox_tick(ccord_sandbox *sb, uint64_t now_ms, ccord_error 
   lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_TIMERS);
   int t_idx = lua_gettop(L);
 
-  for (size_t i = 0; i < sb->ntimers; i++) {
+  // Snapshot count so timers added inside callbacks fire on the next tick instead of spinning indefinitely.
+  size_t count = sb->ntimers;
+  for (size_t i = 0; i < count; i++) {
     if (sb->timers[i].cancelled) continue;
     if (now_ms < sb->timers[i].fire_at_ms) continue;
     lua_rawgeti(L, t_idx, sb->timers[i].fn_ref);

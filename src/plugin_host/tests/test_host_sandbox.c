@@ -293,5 +293,32 @@ int main(void)
     ccord_sandbox_destroy(sb);
   }
 
+  // 4. Child coroutines inherit instruction limits & sticky undeclared-API termination (P2).
+  {
+    ccord_sandbox *sb = make(&f, 0, 0, 20000);
+    CT_CHECK(run(sb, "local co = coroutine.create(function() while true do end end); local ok, e = coroutine.resume(co); assert(not ok)", &err) != CCORD_OK ||
+             ccord_sandbox_limit_hit(sb) == CCORD_SB_LIMIT_INSTRUCTIONS);
+    CT_CHECK(ccord_sandbox_limit_hit(sb) == CCORD_SB_LIMIT_INSTRUCTIONS);
+    ccord_sandbox_destroy(sb);
+
+    sb = make(&f, CCORD_PERM_CLIPBOARD_WRITE, 0, 0);
+    f.nreq = 0;
+    CT_CHECK(run(sb, "pcall(function() messages.send('1', 'nope') end); clipboard.write('after'); for i = 1, 20000 do end", &err) != CCORD_OK);
+    CT_CHECK(ccord_sandbox_limit_hit(sb) == CCORD_SB_LIMIT_UNDECLARED);
+    CT_CHECK(f.nreq == 0);
+    ccord_sandbox_destroy(sb);
+  }
+
+  // 5. Timer count cap (SB_MAX_TIMERS = 256) rejects excess timers cleanly (P12).
+  {
+    ccord_sandbox *sb = make(&f, 0, 0, 0);
+    CT_CHECK(run(sb,
+                 "for i = 1, 256 do time.after(1000, function() end) end\n"
+                 "local ok = pcall(function() time.after(1000, function() end) end)\n"
+                 "assert(not ok)",
+                 &err) == CCORD_OK);
+    ccord_sandbox_destroy(sb);
+  }
+
   return CT_RESULT("test_host_sandbox");
 }
