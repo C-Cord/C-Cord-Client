@@ -8,6 +8,7 @@
 #include <ccord/core/arena.h>
 #include <ccord/core/idmap.h>
 #include <ccord/core/json.h>
+#include <ccord/core/utf8.h>
 
 #include "expr_data.h"
 
@@ -291,7 +292,7 @@ static const char *dup_or_empty(const char *s, size_t max)
   if (!s || s[0] == '\0' || max == 0) return k_empty_str;
   size_t n = 0;
   while (n < max && s[n] != '\0') n++;
-  while (n > 0 && n < max && ((unsigned char)s[n] & 0xC0u) == 0x80u) n--;   // never cut a UTF-8 sequence
+  while (n > 0 && !ccord_utf8_valid(s, n)) n--;   // never cut a UTF-8 sequence
   if (n == 0) return k_empty_str;
   return ccord_strndup(s, n);
 }
@@ -1545,23 +1546,38 @@ static void parse_expr_blob_json(ccord_expr_data *d, unsigned kind, const char *
   ccord_arena_free(&ar);
 }
 
+static void norm_expr_key(const char *key, char out[static EXPR_KEY_MAX + 1u])
+{
+  if (!key || key[0] == '\0') {
+    out[0] = '\0';
+    return;
+  }
+  size_t n = 0;
+  while (n < EXPR_KEY_MAX && key[n] != '\0') n++;
+  while (n > 0 && !ccord_utf8_valid(key, n)) n--;
+  if (n > 0) memcpy(out, key, n);
+  out[n] = '\0';
+}
+
 static const expr_blob *blob_find(const ccord_expr_data *d, unsigned kind, const char *key)
 {
   if (!d) return nullptr;
-  if (!key) key = "";
+  char nkey[EXPR_KEY_MAX + 1u];
+  norm_expr_key(key, nkey);
   for (size_t i = 0; i < d->nblobs; i++) {
     const expr_blob *b = &d->blobs[i];
-    if (b->kind == kind && strcmp(b->key, key) == 0) return b;
+    if (b->kind == kind && strcmp(b->key, nkey) == 0) return b;
   }
   return nullptr;
 }
 
 static expr_blob *blob_get(ccord_expr_data *d, unsigned kind, const char *key)
 {
-  if (!key) key = "";
+  char nkey[EXPR_KEY_MAX + 1u];
+  norm_expr_key(key, nkey);
   expr_blob *b = nullptr;
   for (size_t i = 0; i < d->nblobs; i++) {
-    if (d->blobs[i].kind == kind && strcmp(d->blobs[i].key, key) == 0) {
+    if (d->blobs[i].kind == kind && strcmp(d->blobs[i].key, nkey) == 0) {
       b = &d->blobs[i];
       break;
     }
@@ -1579,7 +1595,7 @@ static expr_blob *blob_get(ccord_expr_data *d, unsigned kind, const char *key)
     memset(&d->blobs[d->nblobs - 1], 0, sizeof d->blobs[0]);
     d->nblobs--;
   }
-  const char *k = dup_or_empty(key, EXPR_KEY_MAX);
+  const char *k = dup_or_empty(nkey, EXPR_KEY_MAX);
   if (!k) return nullptr;
   b = &d->blobs[d->nblobs++];
   *b = (expr_blob){.kind = kind, .key = k};
@@ -1607,6 +1623,7 @@ ccord_status ccord_store_set_expr_blob(ccord_store *s, unsigned kind, const char
 {
   ccord_error_clear(err);
   if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "store: null store");
+  if (ok && len > 0 && !body) return ccord_error_set(err, CCORD_ERR_INVALID, "store: null expression blob");
   if (len > EXPR_BLOB_BYTES_MAX) ok = false;
   ccord_expr_data *d = data_get(s, true);
   if (!d) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
