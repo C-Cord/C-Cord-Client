@@ -633,6 +633,16 @@ void ccord_store_forget_member_roles(ccord_store *s, ccord_id guild_id, ccord_id
 
 // ---- channel overwrites ----
 
+static bool overwrites_equal(const ccord_overwrite *a, const ccord_overwrite *b, size_t count)
+{
+  for (size_t i = 0; i < count; i++) {
+    if (a[i].id != b[i].id || a[i].kind != b[i].kind || a[i].allow != b[i].allow || a[i].deny != b[i].deny) {
+      return false;
+    }
+  }
+  return true;
+}
+
 ccord_status ccord_store_set_channel_overwrites(ccord_store *s, ccord_id channel_id, ccord_id guild_id,
                                                 const ccord_overwrite *items, size_t count, ccord_error *err)
 {
@@ -644,7 +654,8 @@ ccord_status ccord_store_set_channel_overwrites(ccord_store *s, ccord_id channel
   struct role_cache *r = cache_get(s, true);
   if (!r) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
   kv_slot *old = kv_find(&r->overwrites, channel_id, 0);
-  if (old && old->n == count && (count == 0 || memcmp(kv_slot_data_const(old), items, count * sizeof *items) == 0)) {
+  if (old && old->n == count &&
+      (count == 0 || overwrites_equal((const ccord_overwrite *)kv_slot_data_const(old), items, count))) {
     old->tag = guild_id;
     return CCORD_OK;
   }
