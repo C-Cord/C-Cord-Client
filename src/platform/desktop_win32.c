@@ -418,8 +418,42 @@ bool ccord_desktop_notify_target(ccord_desktop *d, const char *title, const char
     nid.uID = TRAY_ICON_UID;
     nid.uFlags = NIF_INFO;
     nid.dwInfoFlags = NIIF_INFO;
-    (void)MultiByteToWideChar(CP_UTF8, 0, t, -1, nid.szInfoTitle, (int)(sizeof nid.szInfoTitle / sizeof nid.szInfoTitle[0]));
-    (void)MultiByteToWideChar(CP_UTF8, 0, b, -1, nid.szInfo, (int)(sizeof nid.szInfo / sizeof nid.szInfo[0]));
+    // Truncate gracefully to the fixed UTF-16 buffer sizes (63/255 code units) instead of failing
+    // with ERROR_INSUFFICIENT_BUFFER and showing a blank balloon.
+    {
+      int cap_t = (int)(sizeof nid.szInfoTitle / sizeof nid.szInfoTitle[0]);
+      int need_t = MultiByteToWideChar(CP_UTF8, 0, t, -1, nullptr, 0);
+      if (need_t > 0 && need_t <= cap_t) {
+        (void)MultiByteToWideChar(CP_UTF8, 0, t, -1, nid.szInfoTitle, cap_t);
+      } else if (need_t > cap_t && cap_t > 1) {
+        wchar_t *tmp = ccord_malloc((size_t)need_t * sizeof(wchar_t));
+        if (tmp) {
+          if (MultiByteToWideChar(CP_UTF8, 0, t, -1, tmp, need_t) > 0) {
+            int keep = cap_t - 1;
+            if (keep > 0 && tmp[keep - 1] >= 0xD800 && tmp[keep - 1] <= 0xDBFF) keep--;
+            memcpy(nid.szInfoTitle, tmp, (size_t)keep * sizeof(wchar_t));
+            nid.szInfoTitle[keep] = L'\0';
+          }
+          ccord_free(tmp);
+        }
+      }
+      int cap_b = (int)(sizeof nid.szInfo / sizeof nid.szInfo[0]);
+      int need_b = MultiByteToWideChar(CP_UTF8, 0, b, -1, nullptr, 0);
+      if (need_b > 0 && need_b <= cap_b) {
+        (void)MultiByteToWideChar(CP_UTF8, 0, b, -1, nid.szInfo, cap_b);
+      } else if (need_b > cap_b && cap_b > 1) {
+        wchar_t *tmp = ccord_malloc((size_t)need_b * sizeof(wchar_t));
+        if (tmp) {
+          if (MultiByteToWideChar(CP_UTF8, 0, b, -1, tmp, need_b) > 0) {
+            int keep = cap_b - 1;
+            if (keep > 0 && tmp[keep - 1] >= 0xD800 && tmp[keep - 1] <= 0xDBFF) keep--;
+            memcpy(nid.szInfo, tmp, (size_t)keep * sizeof(wchar_t));
+            nid.szInfo[keep] = L'\0';
+          }
+          ccord_free(tmp);
+        }
+      }
+    }
     if (Shell_NotifyIconW(NIM_MODIFY, &nid)) {
       d->active_balloon_id = target ? id : 0;
     }
