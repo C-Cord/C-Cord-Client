@@ -725,6 +725,17 @@ bool ccord_warm_verify_file(const char *path, int64_t *saved_ms, size_t *body_le
 
 // ------------------------------------------------------------------------------------------------ open / close
 
+static bool is_warm_fp_dir(const char *name)
+{
+  if (!name) return false;
+  for (size_t i = 0; i < 32u; i++) {
+    char c = name[i];
+    bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+    if (!hex) return false;
+  }
+  return name[32] == '\0';
+}
+
 static void prune_account_dirs(const ccord_warm *w)
 {
   char root[1100];
@@ -739,8 +750,14 @@ static void prune_account_dirs(const ccord_warm *w)
   char ename[256];
   while (ccord_dir_next(d, ename, sizeof ename, nullptr) && n < 64) {
     if (ename[0] == '.' || strcmp(ename, w->fp) == 0 || strlen(ename) >= sizeof list[0].name) continue;
+    // Only prune warm-cache 32-hex fingerprint directories; leave per-user scheduled_messages directories intact.
+    if (!is_warm_fp_dir(ename)) continue;
     char p[1300];
     int64_t mtime_ns = 0;
+    if (snprintf(p, sizeof p, "%s/%s/scheduled_messages.json", root, ename) < (int)sizeof p &&
+        ccord_file_mtime_ns(p, &mtime_ns)) {
+      continue;
+    }
     if (snprintf(p, sizeof p, "%s/%s/meta.json", root, ename) >= (int)sizeof p || !ccord_file_mtime_ns(p, &mtime_ns)) {
       if (snprintf(p, sizeof p, "%s/%s", root, ename) >= (int)sizeof p || !ccord_file_mtime_ns(p, &mtime_ns)) continue;
     }
