@@ -34,17 +34,70 @@ static bool host_matches(const char *host, size_t hlen, const char *allowed)
   return true;
 }
 
+static bool extract_strict_https_host(const char *url, char *host_out, size_t host_cap)
+{
+  if (!url || strncmp(url, "https://", 8) != 0) return false;
+  const char *auth = url + 8;
+  const char *auth_end = auth;
+  while (*auth_end && *auth_end != '/' && *auth_end != '?' && *auth_end != '#') {
+    unsigned char c = (unsigned char)*auth_end;
+    // Reject userinfo ('@'), backslashes, whitespace, and control chars inside authority.
+    if (c == '@' || c == '\\' || c <= 0x20 || c >= 0x7f) return false;
+    auth_end++;
+  }
+  const char *colon = nullptr;
+  for (const char *p = auth; p < auth_end; p++) {
+    if (*p == ':') {
+      if (colon) return false;  // reject multiple colons / IPv6 literals
+      colon = p;
+    }
+  }
+  const char *host_end = colon ? colon : auth_end;
+  if (colon) {
+    // Only allow explicit :443 if a port is specified.
+    size_t plen = (size_t)(auth_end - (colon + 1));
+    if (plen != 3 || memcmp(colon + 1, "443", 3) != 0) return false;
+  }
+  size_t hlen = (size_t)(host_end - auth);
+  if (hlen == 0 || hlen > 253 || hlen >= host_cap) return false;
+  memcpy(host_out, auth, hlen);
+  host_out[hlen] = '\0';
+
+#if defined(CCORD_HTTP_FETCH_LIVE)
+  // Cross-check with libcurl's own RFC 3986 URL parser so host parsing can never disagree with libcurl.
+  CURLU *u = curl_url();
+  if (!u) return false;
+  bool curl_ok = false;
+  if (curl_url_set(u, CURLUPART_URL, url, 0) == CURLUE_OK) {
+    char *scheme = nullptr, *user = nullptr, *pass = nullptr, *chost = nullptr, *port = nullptr;
+    bool has_scheme = curl_url_get(u, CURLUPART_SCHEME, &scheme, 0) == CURLUE_OK;
+    bool has_user = curl_url_get(u, CURLUPART_USER, &user, 0) == CURLUE_OK;
+    bool has_pass = curl_url_get(u, CURLUPART_PASSWORD, &pass, 0) == CURLUE_OK;
+    bool has_host = curl_url_get(u, CURLUPART_HOST, &chost, 0) == CURLUE_OK;
+    bool has_port = curl_url_get(u, CURLUPART_PORT, &port, 0) == CURLUE_OK;
+    if (has_scheme && scheme && host_matches(scheme, strlen(scheme), "https") &&
+        !has_user && !has_pass && has_host && chost &&
+        (!has_port || (port && strcmp(port, "443") == 0)) &&
+        host_matches(chost, strlen(chost), host_out)) {
+      curl_ok = true;
+    }
+    curl_free(scheme);
+    curl_free(user);
+    curl_free(pass);
+    curl_free(chost);
+    curl_free(port);
+  }
+  curl_url_cleanup(u);
+  if (!curl_ok) return false;
+#endif
+  return true;
+}
+
 bool ccord_http_url_allowed(const char *url)
 {
-  if (!url) return false;
-  const char *p = url;
-  bool is_https = strncmp(p, "https://", 8) == 0;
-  if (!is_https) return false;
-  p += 8;
-  const char *end = p;
-  while (*end && *end != '/' && *end != ':' && *end != '?' && *end != '#') end++;
-  size_t hlen = (size_t)(end - p);
-  if (hlen == 0 || hlen > 253) return false;
+  char host[256];
+  if (!extract_strict_https_host(url, host, sizeof host)) return false;
+  size_t hlen = strlen(host);
 
   static const char *const k_hosts[] = {
     "plugins.c-cord.org",
@@ -57,16 +110,13 @@ bool ccord_http_url_allowed(const char *url)
     "release-assets.githubusercontent.com",
   };
   for (size_t i = 0; i < sizeof k_hosts / sizeof k_hosts[0]; i++) {
-    if (host_matches(p, hlen, k_hosts[i])) return true;
+    if (host_matches(host, hlen, k_hosts[i])) return true;
   }
   // Allow an explicit user/developer CCORD_CATALOG_URL host override if HTTPS.
   const char *override = getenv("CCORD_CATALOG_URL");
-  if (override && strncmp(override, "https://", 8) == 0) {
-    const char *op = override + 8;
-    const char *oe = op;
-    while (*oe && *oe != '/' && *oe != ':' && *oe != '?' && *oe != '#') oe++;
-    size_t olen = (size_t)(oe - op);
-    if (olen == hlen && strncasecmp(p, op, hlen) == 0) return true;
+  char ohost[256];
+  if (override && extract_strict_https_host(override, ohost, sizeof ohost)) {
+    if (host_matches(host, hlen, ohost)) return true;
   }
   return false;
 }
@@ -159,8 +209,8 @@ static void apply_common_tls(CURL *curl, const char *url)
 {
   curl_easy_setopt(curl, CURLOPT_URL, url);
   curl_easy_setopt(curl, CURLOPT_USERAGENT, "C-Cord-Catalog/1.0");
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
-  curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 5L);
+  // Never auto-follow redirects: each hop is validated against ccord_http_url_allowed() before connecting.
+  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
   curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
@@ -169,6 +219,11 @@ static void apply_common_tls(CURL *curl, const char *url)
   curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
   curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
   curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+}
+
+static bool is_redirect_status(long code)
+{
+  return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
 }
 
 bool ccord_http_get(const char *url, const char *if_none_match, size_t max_bytes, ccord_http_get_result *out)
@@ -180,57 +235,87 @@ bool ccord_http_get(const char *url, const char *if_none_match, size_t max_bytes
     return false;
   }
   ccord_curl_global_init_once();
-  CURL *curl = curl_easy_init();
-  if (!curl) {
-    set_err(out->error, sizeof out->error, "libcurl initialization failed");
+
+  char cur_url[2048];
+  if (snprintf(cur_url, sizeof cur_url, "%s", url) >= (int)sizeof cur_url) {
+    set_err(out->error, sizeof out->error, "URL too long");
     return false;
   }
 
-  mem_sink ms = {.max_bytes = max_bytes ? max_bytes : (8u * 1024u * 1024u)};
-  hdr_sink hs = {0};
-  struct curl_slist *hdrs = nullptr;
-  if (if_none_match && if_none_match[0]) {
-    char inm[192];
-    snprintf(inm, sizeof inm, "If-None-Match: %s", if_none_match);
-    hdrs = curl_slist_append(hdrs, inm);
-  }
-  hdrs = curl_slist_append(hdrs, "Accept: application/json");
+  for (int hop = 0; hop <= 5; hop++) {
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+      set_err(out->error, sizeof out->error, "libcurl initialization failed");
+      return false;
+    }
 
-  apply_common_tls(curl, url);
-  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_mem_cb);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ms);
-  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
-  curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hs);
+    mem_sink ms = {.max_bytes = max_bytes ? max_bytes : (8u * 1024u * 1024u)};
+    hdr_sink hs = {0};
+    struct curl_slist *hdrs = nullptr;
+    if (hop == 0 && if_none_match && if_none_match[0]) {
+      char inm[192];
+      snprintf(inm, sizeof inm, "If-None-Match: %s", if_none_match);
+      hdrs = curl_slist_append(hdrs, inm);
+    }
+    hdrs = curl_slist_append(hdrs, "Accept: application/json");
 
-  CURLcode rc = curl_easy_perform(curl);
-  long code = 0;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-  out->status_code = code;
-  if (hs.etag[0]) snprintf(out->etag, sizeof out->etag, "%s", hs.etag);
+    apply_common_tls(curl, cur_url);
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_mem_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ms);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, header_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hs);
 
-  curl_slist_free_all(hdrs);
-  curl_easy_cleanup(curl);
+    CURLcode rc = curl_easy_perform(curl);
+    long code = 0;
+    char *redir = nullptr;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    if (rc == CURLE_OK && is_redirect_status(code)) {
+      curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &redir);
+    }
+    out->status_code = code;
+    if (hs.etag[0]) snprintf(out->etag, sizeof out->etag, "%s", hs.etag);
 
-  if (rc != CURLE_OK) {
-    ccord_free(ms.data);
-    if (ms.overflow) set_err(out->error, sizeof out->error, "catalog response exceeded maximum size");
-    else snprintf(out->error, sizeof out->error, "network error: %s", curl_easy_strerror(rc));
-    return false;
-  }
-  if (code == 304) {
-    ccord_free(ms.data);
-    out->not_modified = true;
+    char next_url[2048] = "";
+    bool has_redir = false;
+    if (redir && redir[0]) {
+      if (snprintf(next_url, sizeof next_url, "%s", redir) < (int)sizeof next_url) has_redir = true;
+    }
+
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+
+    if (rc != CURLE_OK) {
+      ccord_free(ms.data);
+      if (ms.overflow) set_err(out->error, sizeof out->error, "catalog response exceeded maximum size");
+      else snprintf(out->error, sizeof out->error, "network error: %s", curl_easy_strerror(rc));
+      return false;
+    }
+    if (is_redirect_status(code)) {
+      ccord_free(ms.data);
+      if (hop == 5 || !has_redir || !ccord_http_url_allowed(next_url)) {
+        set_err(out->error, sizeof out->error, "redirect target blocked by HTTPS host allowlist");
+        return false;
+      }
+      snprintf(cur_url, sizeof cur_url, "%s", next_url);
+      continue;
+    }
+    if (code == 304) {
+      ccord_free(ms.data);
+      out->not_modified = true;
+      return true;
+    }
+    if (code < 200 || code >= 300) {
+      ccord_free(ms.data);
+      snprintf(out->error, sizeof out->error, "catalog server returned HTTP %ld", code);
+      return false;
+    }
+    out->body = ms.data;
+    out->body_len = ms.len;
     return true;
   }
-  if (code < 200 || code >= 300) {
-    ccord_free(ms.data);
-    snprintf(out->error, sizeof out->error, "catalog server returned HTTP %ld", code);
-    return false;
-  }
-  out->body = ms.data;
-  out->body_len = ms.len;
-  return true;
+  set_err(out->error, sizeof out->error, "too many redirects");
+  return false;
 }
 
 bool ccord_http_post_json(const char *url, const char *json_body, size_t body_len, size_t max_bytes,
@@ -300,44 +385,71 @@ bool ccord_http_download_file(const char *url, const char *dest_path, size_t max
     set_err(err_buf, err_cap, "download URL blocked by HTTPS host allowlist");
     return false;
   }
-  FILE *fp = fopen(dest_path, "wb");
-  if (!fp) {
-    set_err(err_buf, err_cap, "cannot create temporary download file");
-    return false;
-  }
   ccord_curl_global_init_once();
-  CURL *curl = curl_easy_init();
-  if (!curl) {
+
+  char cur_url[2048];
+  if (snprintf(cur_url, sizeof cur_url, "%s", url) >= (int)sizeof cur_url) {
+    set_err(err_buf, err_cap, "download URL too long");
+    return false;
+  }
+
+  for (int hop = 0; hop <= 5; hop++) {
+    FILE *fp = fopen(dest_path, "wb");
+    if (!fp) {
+      set_err(err_buf, err_cap, "cannot create temporary download file");
+      return false;
+    }
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+      fclose(fp);
+      remove(dest_path);
+      set_err(err_buf, err_cap, "libcurl initialization failed");
+      return false;
+    }
+
+    file_sink fs = {.fp = fp, .max_bytes = max_bytes ? max_bytes : (25u * 1024u * 1024u)};
+    apply_common_tls(curl, cur_url);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_file_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &fs);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long code = 0;
+    char *redir = nullptr;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    if (rc == CURLE_OK && is_redirect_status(code)) {
+      curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &redir);
+    }
+
+    char next_url[2048] = "";
+    bool has_redir = false;
+    if (redir && redir[0]) {
+      if (snprintf(next_url, sizeof next_url, "%s", redir) < (int)sizeof next_url) has_redir = true;
+    }
+
     fclose(fp);
-    remove(dest_path);
-    set_err(err_buf, err_cap, "libcurl initialization failed");
-    return false;
+    curl_easy_cleanup(curl);
+
+    if (rc == CURLE_OK && is_redirect_status(code)) {
+      remove(dest_path);
+      if (hop == 5 || !has_redir || !ccord_http_url_allowed(next_url)) {
+        set_err(err_buf, err_cap, "redirect target blocked by HTTPS host allowlist");
+        return false;
+      }
+      snprintf(cur_url, sizeof cur_url, "%s", next_url);
+      continue;
+    }
+    if (rc != CURLE_OK || code < 200 || code >= 300) {
+      remove(dest_path);
+      if (fs.overflow) set_err(err_buf, err_cap, "downloaded .cce package exceeds 25 MiB limit");
+      else if (rc != CURLE_OK) snprintf(err_buf, err_cap, "download failed: %s", curl_easy_strerror(rc));
+      else snprintf(err_buf, err_cap, "download failed: HTTP %ld", code);
+      return false;
+    }
+    return true;
   }
-
-  file_sink fs = {.fp = fp, .max_bytes = max_bytes ? max_bytes : (25u * 1024u * 1024u)};
-  apply_common_tls(curl, url);
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_file_cb);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &fs);
-
-  CURLcode rc = curl_easy_perform(curl);
-  long code = 0;
-  char *eff_url = nullptr;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-  curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &eff_url);
-
-  fclose(fp);
-  bool eff_ok = !eff_url || ccord_http_url_allowed(eff_url);
-  curl_easy_cleanup(curl);
-
-  if (rc != CURLE_OK || !eff_ok || code < 200 || code >= 300) {
-    remove(dest_path);
-    if (!eff_ok) set_err(err_buf, err_cap, "redirect target blocked by HTTPS host allowlist");
-    else if (fs.overflow) set_err(err_buf, err_cap, "downloaded .cce package exceeds 25 MiB limit");
-    else if (rc != CURLE_OK) snprintf(err_buf, err_cap, "download failed: %s", curl_easy_strerror(rc));
-    else snprintf(err_buf, err_cap, "download failed: HTTP %ld", code);
-    return false;
-  }
-  return true;
+  remove(dest_path);
+  set_err(err_buf, err_cap, "too many redirects");
+  return false;
 }
 
 #else

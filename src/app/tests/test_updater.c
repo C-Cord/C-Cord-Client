@@ -2,6 +2,8 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include "updater.h"
 
+#include <ccord/net/http_fetch.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,6 +72,21 @@ static void test_parse_assets(void)
                                    "https://c-cord.org", &p));
   CHECK(p.found);
   CHECK(strcmp(p.asset_name, "C-Cord-0.3.0-macos-arm64.dmg") == 0);
+
+}
+
+static void test_http_allowlist(void)
+{
+  // Security regression (P8): strict HTTPS host allowlist blocks userinfo/backslash/port tricks.
+  CHECK(ccord_http_url_allowed("https://c-cord.org/api/v1/latest"));
+  CHECK(ccord_http_url_allowed("https://plugins.c-cord.org/d/foo.cce"));
+  CHECK(ccord_http_url_allowed("https://github.com/C-Cord/C-Cord-Client/releases"));
+  CHECK(ccord_http_url_allowed("https://objects.githubusercontent.com/pkg"));
+  CHECK(!ccord_http_url_allowed("http://c-cord.org/api/v1/latest"));
+  CHECK(!ccord_http_url_allowed("https://c-cord.org@evil.example/x"));
+  CHECK(!ccord_http_url_allowed("https://c-cord.org\\@evil.example/x"));
+  CHECK(!ccord_http_url_allowed("https://c-cord.org:8443/x"));
+  CHECK(!ccord_http_url_allowed("https://evil.example/x"));
 }
 
 static void test_sha256_file(void)
@@ -91,6 +108,7 @@ int main(void)
 {
   test_semver();
   test_parse_assets();
+  test_http_allowlist();
   test_sha256_file();
   return failures == 0 ? 0 : 1;
 }
