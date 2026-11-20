@@ -6,6 +6,7 @@
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
+#import <os/lock.h>
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #define CCORD_HAVE_SCK 1
@@ -71,17 +72,46 @@ API_AVAILABLE(macos(12.3))
 @interface CCordSCOutput : NSObject <SCStreamOutput, SCStreamDelegate> {
 @public
   macos_cap *cap;
+@private
+  os_unfair_lock cap_lock;
 }
+- (void)detach;
 @end
 
 API_AVAILABLE(macos(12.3))
 @implementation CCordSCOutput
+- (instancetype)init {
+  self = [super init];
+  if (self) {
+    cap_lock = OS_UNFAIR_LOCK_INIT;
+  }
+  return self;
+}
+
+- (void)detach {
+  os_unfair_lock_lock(&cap_lock);
+  cap = NULL;
+  os_unfair_lock_unlock(&cap_lock);
+}
+
 - (void)stream:(SCStream *)stream didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer ofType:(SCStreamOutputType)type {
   (void)stream;
-  if (type != SCStreamOutputTypeScreen || !cap || !sampleBuffer) return;
+  if (type != SCStreamOutputTypeScreen || !sampleBuffer) return;
+  os_unfair_lock_lock(&cap_lock);
+  macos_cap *c = cap;
+  if (!c) {
+    os_unfair_lock_unlock(&cap_lock);
+    return;
+  }
   CVImageBufferRef img = CMSampleBufferGetImageBuffer(sampleBuffer);
-  if (!img) return;
-  if (CVPixelBufferLockBaseAddress(img, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) return;
+  if (!img) {
+    os_unfair_lock_unlock(&cap_lock);
+    return;
+  }
+  if (CVPixelBufferLockBaseAddress(img, kCVPixelBufferLock_ReadOnly) != kCVReturnSuccess) {
+    os_unfair_lock_unlock(&cap_lock);
+    return;
+  }
   size_t w = CVPixelBufferGetWidth(img);
   size_t h = CVPixelBufferGetHeight(img);
   size_t bpr = CVPixelBufferGetBytesPerRow(img);
@@ -89,50 +119,53 @@ API_AVAILABLE(macos(12.3))
   if (src && w > 0 && h > 0 && w <= SIZE_MAX / 4u && bpr >= w * 4u && h <= SIZE_MAX / (w * 4u)) {
     const size_t row_bytes = w * 4u;
     const size_t need = row_bytes * h;
-    // Grow and populate the producer-private back_buf outside cap->mtx (serial sc_queue only).
-    if (need > cap->back_cap) {
+    // Grow and populate the producer-private back_buf outside c->mtx (serial sc_queue only).
+    if (need > c->back_cap) {
       uint8_t *nb = (uint8_t *)ccord_malloc(need);
       if (nb) {
-        ccord_free(cap->back_buf);
-        cap->back_buf = nb;
-        cap->back_cap = need;
+        ccord_free(c->back_buf);
+        c->back_buf = nb;
+        c->back_cap = need;
       }
     }
-    if (cap->back_buf && cap->back_cap >= need) {
+    if (c->back_buf && c->back_cap >= need) {
       if (bpr == row_bytes) {
-        memcpy(cap->back_buf, src, need);
+        memcpy(c->back_buf, src, need);
       } else {
         for (size_t y = 0; y < h; y++) {
-          memcpy(cap->back_buf + y * row_bytes, src + y * bpr, row_bytes);
+          memcpy(c->back_buf + y * row_bytes, src + y * bpr, row_bytes);
         }
       }
       // Publish completed frame via O(1) pointer swap under mtx.
-      ccord_mutex_lock(cap->mtx);
-      uint8_t *old_ready = cap->ready_buf;
-      size_t old_ready_cap = cap->ready_cap;
-      cap->ready_buf = cap->back_buf;
-      cap->ready_cap = cap->back_cap;
-      cap->back_buf = old_ready;
-      cap->back_cap = old_ready_cap;
-      cap->ready_w = (int)w;
-      cap->ready_h = (int)h;
-      cap->ready_stride = (int)row_bytes;
-      cap->has_frame = true;
-      ccord_mutex_unlock(cap->mtx);
+      ccord_mutex_lock(c->mtx);
+      uint8_t *old_ready = c->ready_buf;
+      size_t old_ready_cap = c->ready_cap;
+      c->ready_buf = c->back_buf;
+      c->ready_cap = c->back_cap;
+      c->back_buf = old_ready;
+      c->back_cap = old_ready_cap;
+      c->ready_w = (int)w;
+      c->ready_h = (int)h;
+      c->ready_stride = (int)row_bytes;
+      c->has_frame = true;
+      ccord_mutex_unlock(c->mtx);
     }
   }
   CVPixelBufferUnlockBaseAddress(img, kCVPixelBufferLock_ReadOnly);
+  os_unfair_lock_unlock(&cap_lock);
 }
 
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
   (void)stream;
   (void)error;
+  os_unfair_lock_lock(&cap_lock);
   macos_cap *c = cap;
   if (c) {
     ccord_mutex_lock(c->mtx);
     c->dead = true;
     ccord_mutex_unlock(c->mtx);
   }
+  os_unfair_lock_unlock(&cap_lock);
 }
 @end
 
@@ -296,13 +329,11 @@ static void macos_close(ccord_capture *base)
       }
       if (c->sc_output) {
         CCordSCOutput *outp = (CCordSCOutput *)c->sc_output;
+        // Synchronously detach both SCStreamOutput (sc_queue) and SCStreamDelegate (arbitrary queue)
+        // callbacks before destroying c->mtx and freeing c.
+        [outp detach];
         if (c->sc_queue) {
-          // Drain any queued didOutputSampleBuffer callback on the serial queue before freeing c.
-          dispatch_sync(c->sc_queue, ^{
-            outp->cap = NULL;
-          });
-        } else {
-          outp->cap = NULL;
+          dispatch_sync(c->sc_queue, ^{});
         }
         [outp release];
         c->sc_output = nil;
@@ -532,8 +563,10 @@ static ccord_capture *macos_open(const ccord_capture_source *src, ccord_error *e
         ccord_free(sctx);
       }
       if (!started) {
+        [outp detach];
+        [stream stopCaptureWithCompletionHandler:^(NSError *stop_err) { (void)stop_err; }];
         [stream release];
-        dispatch_sync(q, ^{ outp->cap = NULL; });
+        dispatch_sync(q, ^{});
         [outp release];
         CCORD_DISPATCH_RELEASE(q);
         macos_close(&c->base);
