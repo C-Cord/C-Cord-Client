@@ -6162,6 +6162,24 @@ static void test_embeds_galleries_spoilers_lightbox_and_media_players(void)
   CT_CHECK(!dbg().lightbox_open);
   remove_message(empty_ch, mid);
 
+  // Regression (B1): code-block Copy button with Streamer Mode OFF copies exact text (no uninit stack read).
+  {
+    ccord_id cmid = 987654u;
+    ccord_message cmsg = {.id = cmid, .channel_id = empty_ch, .author_id = 1, .timestamp_ms = 2000,
+                          .content = "```c\nint answer = 42;\n```"};
+    CT_CHECK(ccord_store_append_message(F.store, &cmsg, &err) == CCORD_OK);
+    F.ui->settings_streamer_mode = false;
+    F.clip[0] = '\0';
+    frame(2);
+    CT_CHECK(F.ui->ncode_copy_hits >= 1);
+    if (F.ui->ncode_copy_hits >= 1) {
+      ccord_rect cr = F.ui->code_copy_hits[0].rect;
+      click(cr.x + cr.w * 0.5f, cr.y + cr.h * 0.5f);
+      CT_CHECK(strcmp(F.clip, "int answer = 42;") == 0);
+    }
+    remove_message(empty_ch, cmid);
+  }
+
   // Multi-image embed gallery (two embeds sharing the same URL).
   ccord_embed multi_emb[2] = {
     {.kind = CCORD_EMBED_RICH, .title = "Album", .url = "https://example.com/album",

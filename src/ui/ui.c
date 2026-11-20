@@ -8420,11 +8420,10 @@ static bool handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
         const char *to_copy = strip_buf;
         char stack_mask[1024];
         char *mask_heap = nullptr;
-        if (ui_streamer_get_opts(ui).hide_invites) {
+        if (ui_streamer_invites_active(ui)) {
           size_t mcap = w + 1u;
           char *mbuf = mcap <= sizeof stack_mask ? stack_mask : (mask_heap = ccord_malloc(mcap));
-          if (mbuf) {
-            (void)ui_streamer_mask_invites(ui, strip_buf, w, mbuf, mcap, false);
+          if (mbuf && ui_streamer_mask_invites(ui, strip_buf, w, mbuf, mcap, false) > 0) {
             to_copy = mbuf;
           }
         }
