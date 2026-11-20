@@ -2,7 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _POSIX_C_SOURCE 200809L
 
-#include "../catalog.h"
+#include "catalog.h"
 #include <ccord/core/alloc.h>
 #include <ccord/core/error.h>
 #include <ccord/ipc/perm.h>

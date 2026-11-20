@@ -33,6 +33,9 @@ enum {
   CCORD_CAP_PANELS              = 1ull << 13,
 };
 
+#define CCORD_MANIFEST_MAX_HOSTS 32u
+#define CCORD_MANIFEST_HOST_CAP  128u
+
 typedef struct ccord_manifest {
   char id[65], name[65], version[33], description[201], license[33], main[129];
   uint32_t schema_version;
@@ -40,12 +43,18 @@ typedef struct ccord_manifest {
   ccord_perm_set perms;        // Class 2 (Unsafe) + Class 3 (System) declarations; Class 1 (Safe) is always granted
   uint32_t platforms;          // CCORD_PLAT_* bitmask (defaults to CCORD_PLAT_ALL when omitted)
   uint64_t required_caps;      // CCORD_CAP_* bitmask required by the plugin (defaults to 0 when omitted)
+  char allowed_hosts[CCORD_MANIFEST_MAX_HOSTS][CCORD_MANIFEST_HOST_CAP]; // optional host patterns for network.http/ws
+  size_t allowed_host_count;   // 0 = unrestricted (for Class 3 network.http/ws)
   uint64_t memory_bytes;       // 0 = unlimited
   uint64_t instructions;       // 0 = unlimited
 } ccord_manifest;
 
-// Parses plugin.json (schema 1, api 1..CCORD_PLUGIN_API_VERSION). Strict on unknown keys/permissions and bad id/version/main.
+// Parses plugin.json (schema 1, api 1). Strict on unknown keys/permissions and bad id/version/main.
 [[nodiscard]] ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *out, ccord_error *err);
+
+// Returns true when `host` is permitted by `m->allowed_hosts` (always true when allowed_host_count == 0).
+// Supports exact matches (case-insensitive) and leading wildcard ("*.example.com").
+bool ccord_manifest_host_allowed(const ccord_manifest *m, const char *host);
 
 // Returns the CCORD_PLAT_* bit for the current host OS.
 uint32_t ccord_platform_current_bit(void);

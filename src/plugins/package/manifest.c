@@ -299,6 +299,66 @@ static ccord_status parse_required_caps(const ccord_json *arr, ccord_manifest *o
   return CCORD_OK;
 }
 
+static ccord_status parse_allowed_hosts(const ccord_json *arr, ccord_manifest *out, ccord_error *err)
+{
+  if (ccord_json_type_of(arr) != CCORD_JSON_ARRAY) {
+    return bad(err, CCORD_ERR_PARSE, "plugin.json: 'allowed_hosts' must be an array");
+  }
+  size_t n = ccord_json_array_len(arr);
+  if (n > CCORD_MANIFEST_MAX_HOSTS) {
+    return bad(err, CCORD_ERR_INVALID, "plugin.json: 'allowed_hosts' exceeds 32 entries");
+  }
+  out->allowed_host_count = 0;
+  for (size_t i = 0; i < n; i++) {
+    size_t sl = 0;
+    const char *s = ccord_json_string(ccord_json_array_at(arr, i), &sl);
+    if (!s || sl == 0 || sl >= CCORD_MANIFEST_HOST_CAP) {
+      return bad(err, CCORD_ERR_INVALID, "plugin.json: invalid entry in 'allowed_hosts'");
+    }
+    for (size_t k = 0; k < sl; k++) {
+      char c = s[k];
+      bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                c == '.' || c == '-' || (c == '*' && k == 0 && sl > 2 && s[1] == '.');
+      if (!ok) return bad(err, CCORD_ERR_INVALID, "plugin.json: invalid host pattern in 'allowed_hosts'");
+    }
+    memcpy(out->allowed_hosts[out->allowed_host_count], s, sl);
+    out->allowed_hosts[out->allowed_host_count][sl] = '\0';
+    out->allowed_host_count++;
+  }
+  return CCORD_OK;
+}
+
+static char host_lower(char c)
+{
+  return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+}
+
+static bool host_ieq(const char *a, const char *b)
+{
+  while (*a && *b) {
+    if (host_lower(*a++) != host_lower(*b++)) return false;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+bool ccord_manifest_host_allowed(const ccord_manifest *m, const char *host)
+{
+  if (!m || !host || !host[0]) return false;
+  if (m->allowed_host_count == 0) return true;
+  size_t hlen = strlen(host);
+  for (size_t i = 0; i < m->allowed_host_count; i++) {
+    const char *pat = m->allowed_hosts[i];
+    if (pat[0] == '*' && pat[1] == '.') {
+      const char *suf = pat + 1;   // ".example.com"
+      size_t slen = strlen(suf);
+      if (hlen > slen && host_ieq(host + hlen - slen, suf)) return true;
+    } else if (host_ieq(host, pat)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *out, ccord_error *err)
 {
   if (!out) return bad(err, CCORD_ERR_INVALID, "plugin.json: null output");
@@ -308,7 +368,7 @@ ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *
 
   static const char *const top_keys[] = {
     "schema", "id", "name", "version", "api", "main", "description", "license",
-    "permissions", "limits", "platforms", "requires_capabilities",
+    "permissions", "limits", "platforms", "requires_capabilities", "allowed_hosts",
   };
   ccord_arena arena;
   ccord_arena_init(&arena, len < 2048u ? 2048u : 0u);
@@ -340,8 +400,8 @@ ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *
   out->schema_version = (uint32_t)iv;
   if ((st = get_int(root, "api", &iv, &present, err)) != CCORD_OK) goto done;
   if (!present) { st = bad(err, CCORD_ERR_PARSE, "plugin.json: missing 'api'"); goto done; }
-  if (iv < 1 || iv > CCORD_PLUGIN_API_VERSION) {
-    ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "plugin needs API %lld, host provides 1..%d", (long long)iv, CCORD_PLUGIN_API_VERSION);
+  if (iv != CCORD_PLUGIN_API_VERSION) {
+    ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "plugin needs API %lld, host provides %d", (long long)iv, CCORD_PLUGIN_API_VERSION);
     st = CCORD_ERR_UNSUPPORTED;
     goto done;
   }
@@ -390,6 +450,10 @@ ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *
   const ccord_json *req_caps = ccord_json_get(root, "requires_capabilities");
   if (req_caps) {
     if ((st = parse_required_caps(req_caps, out, err)) != CCORD_OK) goto done;
+  }
+  const ccord_json *hosts = ccord_json_get(root, "allowed_hosts");
+  if (hosts) {
+    if ((st = parse_allowed_hosts(hosts, out, err)) != CCORD_OK) goto done;
   }
   out->memory_bytes = 0;
   out->instructions = 0;
