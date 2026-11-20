@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Regenerate the bundled OFL fallback-font subsets in assets/fonts/ (M6-C).
+"""Regenerate the bundled OFL CJK fallback-font subset in assets/fonts/ (M6-C).
 
-Sources (host packages, SIL OFL 1.1 — see assets/LICENSES.md):
-  /usr/share/fonts/noto/NotoColorEmoji.ttf            (Arch noto-fonts-emoji)
+(The bundled emoji font is Twemoji COLRv0 — regenerate it with
+`python3 scripts/build_twemoji_font.py`.)
+
+Source (host package, SIL OFL 1.1 — see assets/LICENSES.md):
   /usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc   (Arch noto-fonts-cjk, face 2 = SC)
-
-Emoji subset: every codepoint in the client's generated emoji table
-(src/emoji/emoji_data.c) plus ZWJ/variation-selector/skin-tone/regional-indicator
-and tag helpers, so all table emoji and flags shape correctly.
 
 CJK subset: GB2312 common simplified hanzi + CJK punctuation/fullwidth forms,
 hiragana/katakana, hangul compatibility jamo and all precomposed hangul
@@ -15,8 +13,8 @@ syllables. A single SC face is emitted as .ttf because TTF_OpenFont on a .ttc
 always opens face 0 (JP), which would give the wrong family name.
 
 Usage: python3 scripts/subset_fallback_fonts.py [repo_root] [out_dir]
-Requires: fontTools (python-fonttools). Outputs are deterministic given the
-same source fonts; sha256 sums are recorded in assets/LICENSES.md.
+Requires: fontTools (python-fonttools). Output is deterministic given the
+same source font; sha256 sum is recorded in assets/LICENSES.md.
 """
 import gzip
 import pathlib
@@ -30,25 +28,6 @@ ROOT = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else pathlib.Path(__file__
 OUT = pathlib.Path(sys.argv[2]) if len(sys.argv) > 2 else ROOT / "assets/fonts"
 OUT.mkdir(parents=True, exist_ok=True)
 
-# ---- emoji codepoints from the generated table ----
-src = (ROOT / "src/emoji/emoji_data.c").read_text()
-start = src.index("ccord_emoji_utf8_index[]")
-end = src.index("ccord_emoji_utf8_index_count")
-section = src[start:end]
-cps = set()
-for lit in re.findall(r'"((?:\\x[0-9a-fA-F]{2})+)"', section):
-    data = bytes(int(h, 16) for h in re.findall(r"\\x([0-9a-fA-F]{2})", lit))
-    for ch in data.decode("utf-8"):
-        cps.add(ord(ch))
-# shaping helpers that may not appear literally in the table
-for cp in [0x200D, 0xFE0F, 0xFE0E, 0x20E3, 0x2049, 0x203C]:
-    cps.add(cp)
-cps.update(range(0x1F3FB, 0x1F400))          # skin tone modifiers
-cps.update(range(0x1F1E6, 0x1F200))          # regional indicators
-cps.update(range(0xE0061, 0xE007F + 1))      # tag chars for subdivision flags
-cps.update(range(0xE0020, 0xE0061))          # remaining tag chars (cheap if present)
-print(f"emoji codepoints: {len(cps)}")
-
 # Keep layout features and name records (family name + OFL license text) intact.
 opts = subset.Options()
 opts.layout_features = ["*"]
@@ -56,14 +35,6 @@ opts.name_IDs = ["*"]
 opts.notdef_outline = True
 opts.recalc_bounds = True
 opts.drop_tables = []
-
-f = TTFont("/usr/share/fonts/noto/NotoColorEmoji.ttf", lazy=False)
-ss = subset.Subsetter(options=opts)
-ss.populate(unicodes=cps)
-ss.subset(f)
-emoji_out = OUT / "NotoColorEmoji-Subset.ttf"
-f.save(emoji_out)
-print(f"emoji subset: {emoji_out.stat().st_size} bytes")
 
 # ---- CJK charset ----
 cjk = set()

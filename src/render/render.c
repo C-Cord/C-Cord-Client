@@ -134,7 +134,7 @@ ccord_renderer *ccord_render_create(ccord_platform *p, const ccord_theme *theme,
       return nullptr;
     }
   }
-  // Bundled emoji/CJK fallback fonts (~16 MB) are loaded lazily on the first glyph NotoSans doesn't cover,
+  // Bundled Twemoji/CJK fallback fonts (~7 MB) are loaded lazily on the first glyph NotoSans doesn't cover,
   // avoiding a cold-start stall before the first frame (especially on Android).
   r->tex_cap = CCORD_TEX_CACHE_SIZE;
   float w, h, s;

@@ -7,11 +7,11 @@
 // Immediate-mode 2D API. ALL coordinates are logical px (float); the renderer multiplies by display scale * UI zoom.
 typedef struct ccord_rect { float x, y, w, h; } ccord_rect;
 typedef struct ccord_vec2 { float x, y; } ccord_vec2;
-typedef enum ccord_font_style : uint8_t { CCORD_FONT_REGULAR, CCORD_FONT_BOLD } ccord_font_style;
+typedef enum ccord_font_style : uint8_t { CCORD_FONT_REGULAR, CCORD_FONT_BOLD, CCORD_FONT_EMOJI } ccord_font_style;
 typedef struct ccord_text_style { ccord_font_style font; float size; ccord_color color; } ccord_text_style;
 typedef struct ccord_renderer ccord_renderer;
-// Fonts are opened from the asset dir using theme->font_regular / font_bold. Bundled OFL emoji/CJK subsets in the
-// asset dir are attached as fallbacks first, then well-known system font paths (deduplicated by family name).
+// Fonts are opened from the asset dir using theme->font_regular / font_bold. Bundled emoji (Twemoji) and CJK
+// subsets in the asset dir are attached as fallbacks first, then host system fonts on first miss (deduplicated by family name).
 ccord_renderer *ccord_render_create(ccord_platform *p, const ccord_theme *theme, ccord_error *err);
 void ccord_render_destroy(ccord_renderer *r);
 // Flushes GPU texture/disc/text caches (call on Android LOW_MEMORY or RENDER_TARGETS/DEVICE_RESET).

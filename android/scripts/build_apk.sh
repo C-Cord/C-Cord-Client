@@ -149,7 +149,7 @@ else
   exit 1
 fi
 
-for FONT in NotoColorEmoji-Subset.ttf NotoSansCJK-Subset.ttf; do
+for FONT in Twemoji.ttf NotoSansCJK-Subset.ttf; do
   if [[ -f "$ROOT_DIR/assets/fonts/$FONT" ]]; then
     cp -f "$ROOT_DIR/assets/fonts/$FONT" "$MAIN_RES/assets/fonts/$FONT"
   fi

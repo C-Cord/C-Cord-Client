@@ -71,13 +71,13 @@ static void adopt_sys_fallback(ccord_renderer *r, font_entry *fe, TTF_Font *fb, 
   if (fe) (void)attach_fallback_to_font(r, fe, fb, &fe->fallbacks[idx]);
 }
 
-// Opens one bundled OFL subset (CCORD_BUNDLED_EMOJI or CCORD_BUNDLED_CJK) independently on first use.
+// Opens one bundled fallback font (CCORD_BUNDLED_EMOJI = Twemoji, CCORD_BUNDLED_CJK = NotoSansCJK) on first use.
 static void bundled_fallback_ensure(ccord_renderer *r, int slot)
 {
   if (!r || slot < 0 || slot >= CCORD_BUNDLED_COUNT || r->bundled_probed[slot]) return;
   r->bundled_probed[slot] = true;
   static const char *const k_bundled_rel[CCORD_BUNDLED_COUNT] = {
-    "fonts/NotoColorEmoji-Subset.ttf",
+    "fonts/Twemoji.ttf",
     "fonts/NotoSansCJK-Subset.ttf",
   };
   const char *rel = k_bundled_rel[slot];
@@ -114,7 +114,7 @@ void fallback_fonts_init(ccord_renderer *r)
 
 // ---- code point classes ----
 
-// Code points covered by bundled NotoColorEmoji-Subset.ttf (non-ASCII symbols, dingbats, pictographs, emoji, flags).
+// Code points covered by bundled Twemoji.ttf (non-ASCII symbols, dingbats, pictographs, emoji, flags).
 static bool cp_is_emoji(uint32_t cp)
 {
   return (cp >= 0x1F000u && cp <= 0x1FAFFu) ||
@@ -468,7 +468,7 @@ static void ensure_coverage(ccord_renderer *r, font_entry *fe, const char *s, si
     if (cp_default_ignorable(cp) || cp_hidden(cp) || TTF_FontHasGlyph(font, cp) || miss_known(r, cp)) continue;
     // Lazily load bundled emoji and CJK subsets independently on first code point in each range, and attach
     // only to the sized font that actually renders it.
-    if (cp_is_emoji(cp)) {
+    if (fe->style != CCORD_FONT_EMOJI && cp_is_emoji(cp)) {
       bundled_fallback_ensure(r, CCORD_BUNDLED_EMOJI);
       TTF_Font *efb = r->bundled_base[CCORD_BUNDLED_EMOJI];
       if (efb && !fe->bundled_fb[CCORD_BUNDLED_EMOJI] && TTF_FontHasGlyph(efb, cp)) {
@@ -523,14 +523,22 @@ static font_entry *font_entry_get(ccord_renderer *r, ccord_font_style style, int
     CCORD_LOG_W("render: font cache full, flushing");
     text_cache_flush(r);
   }
-  TTF_Font *f = TTF_CopyFont(r->base[style == CCORD_FONT_BOLD ? 1 : 0]);
+  TTF_Font *src_base = nullptr;
+  if (style == CCORD_FONT_EMOJI) {
+    bundled_fallback_ensure(r, CCORD_BUNDLED_EMOJI);
+    src_base = r->bundled_base[CCORD_BUNDLED_EMOJI];
+  }
+  if (!src_base) src_base = r->base[style == CCORD_FONT_BOLD ? 1 : 0];
+  TTF_Font *f = TTF_CopyFont(src_base);
   if (!f) {
     CCORD_LOG_E("render: cannot copy font: %s", SDL_GetError());
     return nullptr;
   }
   TTF_SetFontSize(f, (float)px);
   TTF_SetFontHinting(f, TTF_HINTING_LIGHT);
-  int skip = (int)lroundf((float)px * r->line_factor);
+  int skip = (style == CCORD_FONT_EMOJI && src_base == r->bundled_base[CCORD_BUNDLED_EMOJI])
+                 ? px
+                 : (int)lroundf((float)px * r->line_factor);
   TTF_SetFontLineSkip(f, skip);
   int slot = r->nfonts++;
   r->fonts[slot] = (font_entry){.font = f, .style = style, .px = px};

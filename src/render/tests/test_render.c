@@ -337,7 +337,7 @@ static void test_fallback_fonts_and_textures(ccord_renderer *r)
   // (the host NotoSansCJK TTC would open face 0 = JP, so "SC" proves the bundled file was used).
   const char *fam0 = ccord_render_fallback_font_family(r, 0);
   const char *fam1 = ccord_render_fallback_font_family(r, 1);
-  CT_CHECK(fam0 && strcmp(fam0, "Noto Color Emoji") == 0);
+  CT_CHECK(fam0 && strcmp(fam0, "Twemoji") == 0);
   CT_CHECK(fam1 && strcmp(fam1, "Noto Sans CJK SC") == 0);
   CT_CHECK(ccord_render_fallback_font_family(r, -1) == nullptr);
   CT_CHECK(ccord_render_fallback_font_family(r, ccord_render_fallback_font_count(r)) == nullptr);
@@ -348,6 +348,17 @@ static void test_fallback_fonts_and_textures(ccord_renderer *r)
   CT_CHECK(m.x > 30.0f && m.y >= 18.0f && m.y < 50.0f);
   ccord_vec2 single_em = ccord_text_measure(r, "\xF0\x9F\x91\x8D", 4, &st, 0.0f);
   CT_CHECK(single_em.x > 10.0f && single_em.x < 40.0f && single_em.y >= 18.0f && single_em.y < 40.0f);
+  // Direct Twemoji font style (CCORD_FONT_EMOJI): ZWJ, dark skin tone (U+1F3FF), keycaps and jumbo sizes shape as 1 em.
+  ccord_text_style em_st = {CCORD_FONT_EMOJI, 20.0f, {255, 255, 255, 255}};
+  ccord_vec2 zwj_m = ccord_text_measure(r, "\xF0\x9F\x91\xA8\xE2\x80\x8D\xF0\x9F\x92\xBB", 11, &em_st, 0.0f);
+  CT_CHECK(zwj_m.x >= 18.0f && zwj_m.x <= 24.0f && zwj_m.y >= 18.0f && zwj_m.y <= 24.0f);
+  ccord_vec2 dark_m = ccord_text_measure(r, "\xF0\x9F\x91\x8D\xF0\x9F\x8F\xBF", 8, &em_st, 0.0f);
+  CT_CHECK(dark_m.x >= 18.0f && dark_m.x <= 24.0f && dark_m.y >= 18.0f && dark_m.y <= 24.0f);
+  ccord_vec2 keycap_m = ccord_text_measure(r, "1\xEF\xB8\x8F\xE2\x83\xA3", 7, &em_st, 0.0f);
+  CT_CHECK(keycap_m.x >= 18.0f && keycap_m.x <= 24.0f && keycap_m.y >= 18.0f && keycap_m.y <= 24.0f);
+  ccord_text_style jumbo_st = {CCORD_FONT_EMOJI, 48.0f, {255, 255, 255, 255}};
+  ccord_vec2 jumbo_m = ccord_text_measure(r, "\xF0\x9F\x98\x80", 4, &jumbo_st, 0.0f);
+  CT_CHECK(jumbo_m.x >= 44.0f && jumbo_m.x <= 52.0f && jumbo_m.y >= 44.0f && jumbo_m.y <= 52.0f);
 
   // Startup opens no system font: text the bundled fonts cover (Latin, Cyrillic, emoji, GB2312) attaches none.
   CT_CHECK(ccord_render_system_font_count(r) == 0);
@@ -435,6 +446,7 @@ static void test_fallback_fonts_and_textures(ccord_renderer *r)
   ccord_draw_texture_rounded(r, "img:webp", (ccord_rect){120, 20, 60, 60}, 30.0f, 255);
   ccord_draw_texture(r, "img:jpg", (ccord_rect){220, 20, 60, 60}, 255);
   ccord_text_draw(r, emoji_cjk, strlen(emoji_cjk), 20, 120, &st, 0.0f);
+  ccord_text_draw(r, "\xF0\x9F\x98\x80", 4, 20, 170, &jumbo_st, 0.0f);
   const char *shot = "test_render_tex_shot.png";
   CT_CHECK(ccord_render_screenshot(r, shot, &err) == CCORD_OK);
   ccord_render_end(r);
@@ -453,6 +465,15 @@ static void test_fallback_fonts_and_textures(ccord_renderer *r)
       }
     }
     CT_CHECK(glyph_lit > 25);
+    int emoji_color = 0;   // Twemoji COLRv0 renders full-colour pixels (yellow face, not monochrome)
+    for (int y = 170; y < 225; y++) {
+      for (int x = 20; x < 75; x++) {
+        uint8_t pr, pg, pb, pa;
+        SDL_ReadSurfacePixel(s, x, y, &pr, &pg, &pb, &pa);
+        if (pr > 180 && pg > 140 && pb < 120) emoji_color++;
+      }
+    }
+    CT_CHECK(emoji_color > 200);
     SDL_DestroySurface(s);
   }
   remove(shot);
