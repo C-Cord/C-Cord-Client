@@ -441,6 +441,10 @@ static bool apply_downloaded_update(ccord_install_kind kind, const char *file_pa
     }
   }
   pid_t pid = fork();
+  if (pid < 0) {
+    snprintf(status_out, status_cap, "Updated on disk, but failed to relaunch (please restart manually).");
+    return false;
+  }
   if (pid == 0) {
     (void)setsid();
     char exe_buf[CCORD_PATH_MAX];
@@ -617,6 +621,7 @@ static void updater_worker(void *arg)
     u->pending_job = JOB_NONE;
     if (job == JOB_NONE) {
       u->thr_alive = false;
+      atomic_store_explicit(&u->has_update, true, memory_order_release);
       ccord_mutex_unlock(u->mtx);
       break;
     }
@@ -645,6 +650,10 @@ static void updater_schedule(ccord_updater *u, updater_job job)
       ccord_mutex_unlock(u->mtx);
       return;
     }
+    u->ui.state = CCORD_UI_UPDATE_DOWNLOADING;
+    snprintf(u->ui.status_text, sizeof u->ui.status_text, "Preparing update...");
+    u->dirty = true;
+    atomic_store_explicit(&u->has_update, true, memory_order_release);
   }
   u->pending_job = job;
   if (u->thr_alive) {
@@ -664,6 +673,10 @@ static void updater_schedule(ccord_updater *u, updater_job job)
   } else {
     u->thr_alive = false;
     u->pending_job = JOB_NONE;
+    u->ui.state = CCORD_UI_UPDATE_ERROR;
+    snprintf(u->ui.status_text, sizeof u->ui.status_text, "Failed to start updater worker thread.");
+    u->dirty = true;
+    atomic_store_explicit(&u->has_update, true, memory_order_release);
   }
   ccord_mutex_unlock(u->mtx);
 }
