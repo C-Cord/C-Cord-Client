@@ -450,7 +450,9 @@ void ui_expr_picker_close(ccord_ui *ui)
   ui->emoji_picker_open = false;
   ui->emoji_picker_msg_id = CCORD_ID_NONE;
   ui->emoji_picker_for_status = false;
-  if (ui->expr) {
+  // Defer freeing ep->body until the close fade-out finishes so draw_overlay_popup doesn't re-allocate it
+  // every animation frame; free immediately under reduced motion or when no overlay presence is active.
+  if (ui->expr && (ui->anim.reduced_motion || ui->dbg_ovl_t[UI_OVL_PICKER] <= UI_PRESENCE_EPS)) {
     expr_body_free(ui->expr);
   }
   ui->dirty = true;
@@ -2073,7 +2075,13 @@ static void draw_grid_scrollbar(ccord_ui *ui, ccord_renderer *r, struct ui_expr_
 
 void ui_expr_picker_draw(ccord_ui *ui, ccord_renderer *r)
 {
-  if (!ui || !ui->emoji_picker_open) return;
+  if (!ui) return;
+  if (!ui->emoji_picker_open) {
+    if (ui->expr && ui->expr->body && ui->dbg_ovl_frame[UI_OVL_PICKER] != ui->anim.frame) {
+      expr_body_free(ui->expr);
+    }
+    return;
+  }
   struct ui_expr_picker *ep = ensure_expr(ui);
   ui_expr_body *b = ensure_expr_body(ui);
   if (!ep || !b) return;
