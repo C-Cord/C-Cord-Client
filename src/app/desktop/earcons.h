@@ -67,6 +67,9 @@ bool ccord_earcons_play_bytes(ccord_earcons *e, const uint8_t *data, size_t len,
 // toggle (Customize under Sounds, ui_sound_kind_enabled) is off is skipped while the others still play.
 void ccord_earcons_pump(ccord_earcons *e, ccord_session *session, const ccord_store *store, const ccord_ui *ui,
                         ccord_app_desktop *desktop, bool virtual_clock, int64_t now_ms);
+// Max ms before ccord_earcons_pump() needs to run again (e.g. closing an idle playback stream or repeating a ring).
+// Returns UINT32_MAX when idle with no open audio stream and no active call ring.
+uint32_t ccord_earcons_next_wait_ms(const ccord_earcons *e, int64_t now_ms);
 
 // The synthesized stereo 48 kHz PCM of one kind (static; valid until the process ends); *frames gets its length.
 [[nodiscard]] const int16_t *ccord_earcon_pcm(ccord_earcon_kind kind, size_t *frames);

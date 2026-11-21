@@ -837,6 +837,15 @@ void ccord_app_desktop_pump(ccord_app_desktop *d, bool virtual_clock, int64_t no
   desktop_sync_voice_state(d);
 }
 
+uint32_t ccord_app_desktop_next_wait_ms(const ccord_app_desktop *d, int64_t now_unix_ms)
+{
+  if (!d || !d->playback) return UINT32_MAX;
+  int64_t close_at = d->playback_busy_until_ms + APP_PLAYBACK_IDLE_MS;
+  if (now_unix_ms >= close_at) return 0u;
+  int64_t rem = close_at - now_unix_ms;
+  return rem > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
+}
+
 // ---------------------------------------------------------------- global shortcuts
 
 static ccord_id self_voice_guild(const ccord_app_desktop *d, ccord_id channel_id)

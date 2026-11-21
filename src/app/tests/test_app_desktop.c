@@ -1277,6 +1277,7 @@ int main(int argc, char **argv)
   test_keybinds();
   test_saved_accounts_ui();
   test_ipc();
+  CT_CHECK(ccord_app_desktop_next_wait_ms(F.desktop, 10000) == UINT32_MAX);
   teardown();
   return CT_RESULT("test_app_desktop");
 }

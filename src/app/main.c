@@ -34,6 +34,11 @@ uint64_t app_now_ms(const app *a)
   return a->virtual_clock ? a->virtual_ms : ccord_clock_ms();
 }
 
+static uint64_t app_boottime_ms(const app *a)
+{
+  return a->virtual_clock ? a->virtual_ms : ccord_clock_boottime_ms();
+}
+
 static void pump_voice_and_video(app *a)
 {
   if (!a || !a->media || !a->session || !a->store) return;
@@ -191,7 +196,7 @@ static void run_interactive(app *a)
     bool should_draw = ccord_app_desktop_should_draw(a->platform);
     uint32_t timeout = 100;
     if (!should_draw) {
-      // Hidden/minimized in the background: no frames, and a long wait unless active video/inline media needs pumping.
+      // Hidden/minimized in the background: no frames; active video/inline media still pumps at 60 Hz.
       timeout = media_fast ? 16 : 250;
     } else if (redraw || animating) {
       // Non-blocking poll while animations/redraws are active so VSync in SDL_RenderPresent paces
@@ -201,7 +206,56 @@ static void run_interactive(app *a)
       timeout = 16;
     }
     ccord_input_event ev;
-    if (ccord_platform_next_event(a->platform, &ev, timeout)) {
+    bool got_ev = false;
+    if (!should_draw && !media_fast) {
+      ccord_socket_t wait_fds[24];
+      size_t nfds = 0;
+      uint32_t bg_timeout = ccord_platform_is_mobile(a->platform) ? 60000u : 250u;
+      if (a->resume_needs_draw || a->resume_link_wake) {
+        bg_timeout = 0u;
+      } else {
+        if (a->session) {
+          ccord_wait_info wi;
+          bool has_wi = ccord_session_wait_info(a->session, &wi);
+          for (size_t i = 0; i < wi.fd_count && nfds < (sizeof wait_fds / sizeof wait_fds[0]); i++) {
+            wait_fds[nfds++] = wi.fds[i];
+          }
+          if (wi.immediate) {
+            bg_timeout = 0u;
+          } else if (has_wi) {
+            if (wi.timeout_ms < bg_timeout) bg_timeout = wi.timeout_ms;
+          } else if (a->mock) {
+            if (250u < bg_timeout) bg_timeout = 250u;
+          }
+        }
+#if CCORD_LIVE_ACCOUNT
+        if (a->auth_q && (a->auth_pending || ccord_rest_queue_pending(a->auth_q) > 0)) {
+          if (50u < bg_timeout) bg_timeout = 50u;
+        }
+#endif
+#if CCORD_WITH_PLUGINS
+        if (a->plugins) {
+          uint32_t pl_to = UINT32_MAX;
+          nfds += ccord_plugins_wait_info(a->plugins, wait_fds + nfds,
+                                          (sizeof wait_fds / sizeof wait_fds[0]) - nfds, &pl_to);
+          if (pl_to < bg_timeout) bg_timeout = pl_to;
+        }
+#endif
+        if (bg_timeout > 0u) {
+          uint32_t sm_to = ccord_scheduled_messages_next_due_ms(ccord_clock_unix_ms());
+          if (sm_to < bg_timeout) bg_timeout = sm_to;
+          int64_t now_i = (int64_t)app_now_ms(a);
+          uint32_t ear_to = ccord_earcons_next_wait_ms(a->earcons, now_i);
+          if (ear_to < bg_timeout) bg_timeout = ear_to;
+          uint32_t desk_to = ccord_app_desktop_next_wait_ms(a->desktop, now_i);
+          if (desk_to < bg_timeout) bg_timeout = desk_to;
+        }
+      }
+      got_ev = ccord_platform_wait_idle(a->platform, &ev, wait_fds, nfds, bg_timeout);
+    } else {
+      got_ev = ccord_platform_next_event(a->platform, &ev, timeout);
+    }
+    if (got_ev) {
       last_input_ms = app_now_ms(a);
       bool saw_picker_drop = false;
       do {
@@ -256,7 +310,7 @@ static void run_interactive(app *a)
           continue;
         }
         if (ev.type == CCORD_IN_APP_BACKGROUND) {
-          a->bg_since_ms = app_now_ms(a);
+          a->bg_since_ms = app_boottime_ms(a);
           a->resume_needs_draw = false;
           a->resume_link_wake = false;
           if (a->warm && a->session && !ccord_session_is_stale(a->session)) {
@@ -264,13 +318,16 @@ static void run_interactive(app *a)
             (void)ccord_warm_save(a->warm, a->store, true, &werr);
           }
 #if CCORD_WITH_PLUGINS
-          if (a->plugins) ccord_plugins_dispatch_lifecycle(a->plugins, "background");
+          if (a->plugins) {
+            ccord_plugins_set_background(a->plugins, true);
+            ccord_plugins_dispatch_lifecycle(a->plugins, "background");
+          }
 #endif
           (void)ccord_ui_handle_input(a->ui, &ev);
           continue;
         }
         if (ev.type == CCORD_IN_APP_FOREGROUND) {
-          uint64_t now_fg = app_now_ms(a);
+          uint64_t now_fg = app_boottime_ms(a);
           uint64_t bg_dur = (a->bg_since_ms > 0 && now_fg >= a->bg_since_ms) ? (now_fg - a->bg_since_ms) : 0u;
           a->bg_since_ms = 0;
           if (a->deferred_lowmem_evict) {
@@ -301,7 +358,10 @@ static void run_interactive(app *a)
           if (need_wake) a->resume_link_wake = true;
 #if CCORD_WITH_PLUGINS
           app_plugins_push_platform_state(a);
-          if (a->plugins) ccord_plugins_dispatch_lifecycle(a->plugins, "foreground");
+          if (a->plugins) {
+            ccord_plugins_set_background(a->plugins, false);
+            ccord_plugins_dispatch_lifecycle(a->plugins, "foreground");
+          }
 #endif
           (void)ccord_ui_handle_input(a->ui, &ev);
           a->resume_needs_draw = true;
@@ -481,7 +541,7 @@ static void run_interactive(app *a)
       if (was_visible && !visible && !stale) {
         ccord_error werr;
         (void)ccord_warm_save(a->warm, a->store, true, &werr);
-      } else if (app_now_ms(a) >= last_input_ms + 2000u) {
+      } else if (visible && app_now_ms(a) >= last_input_ms + 2000u) {
         (void)ccord_warm_maybe_save(a->warm, a->store, a->session, app_now_ms(a));
       }
       was_visible = visible;
@@ -491,26 +551,28 @@ static void run_interactive(app *a)
       a->media_redraw = false;
       redraw = true;
     }
-    bool upd = ccord_ui_update(a->ui, app_now_ms(a));
     if (!ccord_app_desktop_should_draw(a->platform)) {
       redraw = true;   // repaint once the window is shown again
       animating = false;
       fast_draws = 0;
-    } else if (upd || redraw) {
-      uint64_t dt0 = app_now_ms(a);
-      app_draw_frame(a);
-      ccord_platform_notify_first_frame(a->platform);
-      uint64_t dt = app_now_ms(a) - dt0;
-      if (dt < 2u) {
-        if (fast_draws < 8u) fast_draws++;
+    } else {
+      bool upd = ccord_ui_update(a->ui, app_now_ms(a));
+      if (upd || redraw) {
+        uint64_t dt0 = app_now_ms(a);
+        app_draw_frame(a);
+        ccord_platform_notify_first_frame(a->platform);
+        uint64_t dt = app_now_ms(a) - dt0;
+        if (dt < 2u) {
+          if (fast_draws < 8u) fast_draws++;
+        } else {
+          fast_draws = 0;
+        }
+        redraw = false;
+        animating = upd;   // keep VSync-paced cadence while animations run
       } else {
+        animating = false;
         fast_draws = 0;
       }
-      redraw = false;
-      animating = upd;   // keep VSync-paced cadence while animations run
-    } else {
-      animating = false;
-      fast_draws = 0;
     }
   }
   ccord_scheduled_messages_shutdown();

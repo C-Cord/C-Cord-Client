@@ -538,3 +538,18 @@ void ccord_scheduled_messages_tick(ccord_session *session, int64_t now_unix_ms)
     break;   // one send per tick keeps a backlog from flooding the channel
   }
 }
+
+uint32_t ccord_scheduled_messages_next_due_ms(int64_t now_unix_ms)
+{
+  if (g.count == 0) return UINT32_MAX;
+  uint32_t best = UINT32_MAX;
+  for (size_t i = 0; i < g.count; i++) {
+    const sm_entry *e = &g.items[i];
+    if (e->missed) continue;
+    int64_t target = e->due_ms > e->retry_at_ms ? e->due_ms : e->retry_at_ms;
+    if (target <= now_unix_ms) return 0u;
+    int64_t rem = target - now_unix_ms;
+    if (rem < (int64_t)best) best = (uint32_t)rem;
+  }
+  return best;
+}

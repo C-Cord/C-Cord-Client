@@ -123,6 +123,8 @@ bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n
 // Pops the session notification queue (always) and delivers unless `virtual_clock` (deterministic
 // screenshots/tests), then syncs the tray badge. Call from pump().
 void ccord_app_desktop_pump(ccord_app_desktop *d, bool virtual_clock, int64_t now_unix_ms);
+// Max ms before ccord_app_desktop_pump() needs to close an open notification playback stream (UINT32_MAX when closed).
+uint32_t ccord_app_desktop_next_wait_ms(const ccord_app_desktop *d, int64_t now_unix_ms);
 // Recomputes and pushes total unread/mention counts to the SNI tray only when the store revision moved.
 void ccord_app_desktop_sync_badge(ccord_app_desktop *d);
 // Applies a CCORD_EV_HOTKEY id to the session voice state; false when not in voice / unknown id.

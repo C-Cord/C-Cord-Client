@@ -391,10 +391,12 @@ static void pump_notifications(ccord_earcons *e, ccord_session *session, const c
   bool ctx_ready = false;
   ccord_id selected = CCORD_ID_NONE;
   bool reading_selected = false;
+  bool mobile_bg = false;
   while (ccord_session_pop_notification(session, &n)) {
     if (!ctx_ready) {
       ccord_platform *plat = desktop ? ccord_app_desktop_platform(desktop) : nullptr;
       bool focused = plat && ccord_platform_window_focused(plat);
+      mobile_bg = plat && ccord_platform_is_mobile(plat) && ccord_platform_in_background(plat);
       selected = store ? ccord_store_selected_channel(store) : CCORD_ID_NONE;
       reading_selected = focused && selected != CCORD_ID_NONE && (!ui || ccord_ui_is_reading(ui));
       ctx_ready = true;
@@ -403,6 +405,9 @@ static void pump_notifications(ccord_earcons *e, ccord_session *session, const c
     // every other case is ours.
     bool delivered = !virtual_clock && desktop && ccord_app_desktop_deliver(desktop, &n, now_ms);
     if (delivered || !notification_wants_sound(&n, store, now_ms)) continue;
+    // On mobile while backgrounded, native OS notifications handle sound/vibration; never spin up an
+    // SDL audio stream if OS notification delivery was suppressed (e.g. permissions or settings).
+    if (mobile_bg) continue;
     // Suppress the message earcon only when the user is actively reading that channel.
     if (!n.is_mention && reading_selected && n.channel_id == selected) continue;
     ear_emit(e, n.is_mention ? CCORD_EARCON_MENTION : CCORD_EARCON_MESSAGE, ui, store, now_ms);
@@ -624,4 +629,27 @@ void ccord_earcons_pump(ccord_earcons *e, ccord_session *session, const ccord_st
   e->last_store = store;
   e->last_store_rev = rev;
   e->store_rev_valid = true;
+}
+
+uint32_t ccord_earcons_next_wait_ms(const ccord_earcons *e, int64_t now_ms)
+{
+  if (!e) return UINT32_MAX;
+  uint32_t best = UINT32_MAX;
+  if (e->out) {
+    int64_t close_at = e->out_busy_until_ms + EAR_IDLE_CLOSE_MS;
+    if (now_ms >= close_at) return 0u;
+    int64_t rem = close_at - now_ms;
+    if (rem < (int64_t)best) best = (uint32_t)rem;
+  }
+  if (e->ringing) {
+    if (now_ms >= e->next_ring_ms) return 0u;
+    int64_t rem = e->next_ring_ms - now_ms;
+    if (rem < (int64_t)best) best = (uint32_t)rem;
+  }
+  if (e->out_ringing) {
+    if (now_ms >= e->next_out_ring_ms) return 0u;
+    int64_t rem = e->next_out_ring_ms - now_ms;
+    if (rem < (int64_t)best) best = (uint32_t)rem;
+  }
+  return best;
 }
