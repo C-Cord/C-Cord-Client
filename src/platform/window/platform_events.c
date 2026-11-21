@@ -110,24 +110,45 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
       out->focused = false;
       return true;
     case SDL_EVENT_WINDOW_RESTORED:
-    case SDL_EVENT_WINDOW_MAXIMIZED:
+    case SDL_EVENT_WINDOW_MAXIMIZED: {
+      bool was_min = p->minimized;
       p->minimized = false;
+      if (was_min) {
+        float w, h, s;
+        ccord_platform_size(p, &w, &h, &s);
+        out->type = CCORD_IN_RESIZE;
+        out->x = w;
+        out->y = h;
+        return true;
+      }
       return false;
+    }
     case SDL_EVENT_WINDOW_ENTER_FULLSCREEN:
       p->fullscreen = true;
       return false;
     case SDL_EVENT_WINDOW_LEAVE_FULLSCREEN:
       p->fullscreen = false;
       return false;
-    case SDL_EVENT_WINDOW_SHOWN:
+    case SDL_EVENT_WINDOW_SHOWN: {
+      bool was_hidden = !p->window_visible;
       p->window_visible = true;
+      if (was_hidden) {
+        float w, h, s;
+        ccord_platform_size(p, &w, &h, &s);
+        out->type = CCORD_IN_RESIZE;
+        out->x = w;
+        out->y = h;
+        return true;
+      }
       return false;
+    }
     case SDL_EVENT_WINDOW_HIDDEN:
       p->window_visible = false;
       p->focused = false;
       out->type = CCORD_IN_FOCUS;
       out->focused = false;
       return true;
+    case SDL_EVENT_WINDOW_RESIZED:
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
     case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
     case SDL_EVENT_WINDOW_EXPOSED: {
@@ -152,6 +173,11 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
 #endif
       return true;
     case SDL_EVENT_WINDOW_SAFE_AREA_CHANGED: {
+#if defined(__ANDROID__)
+      // Kotlin WindowInsetsListener provides exact systemBars|displayCutout insets relative to mSurface;
+      // ignore SDL's safe-area event once Kotlin insets arrive so systemGestures padding doesn't clobber them.
+      if (p->android_insets_seen) return false;
+#endif
       platform_refresh_sdl_safe_area(p);
       out->type = CCORD_IN_SAFE_AREA;
       out->inset_top = p->safe_insets.top;
@@ -289,6 +315,44 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
   }
 }
 
+static bool pop_lifecycle_event(ccord_platform *p, ccord_input_event *out)
+{
+  if (atomic_exchange(&p->pending_bg_ev, false)) {
+    p->focused = false;
+#if defined(__ANDROID__)
+    if (p->text_input_on && p->window) {
+      SDL_StopTextInput(p->window);
+      p->text_input_on = false;
+    }
+#endif
+    memset(out, 0, sizeof *out);
+    out->type = CCORD_IN_APP_BACKGROUND;
+    return true;
+  }
+  if (atomic_exchange(&p->pending_fg_ev, false)) {
+    p->minimized = false;
+    p->window_visible = true;
+    p->first_frame_notified = false;
+#if defined(__ANDROID__)
+    p->focused = true;
+#endif
+    memset(out, 0, sizeof *out);
+    out->type = CCORD_IN_APP_FOREGROUND;
+    return true;
+  }
+  if (atomic_exchange(&p->pending_lowmem_ev, false)) {
+    memset(out, 0, sizeof *out);
+    out->type = CCORD_IN_APP_LOW_MEMORY;
+    return true;
+  }
+  if (atomic_exchange(&p->pending_reset_ev, false)) {
+    memset(out, 0, sizeof *out);
+    out->type = CCORD_IN_RENDER_RESET;
+    return true;
+  }
+  return false;
+}
+
 bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32_t timeout_ms)
 {
   if (!p || !out) return false;
@@ -308,26 +372,7 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
     platform_pump_link(p);
   }
 
-  if (atomic_exchange(&p->pending_bg_ev, false)) {
-    memset(out, 0, sizeof *out);
-    out->type = CCORD_IN_APP_BACKGROUND;
-    return true;
-  }
-  if (atomic_exchange(&p->pending_fg_ev, false)) {
-    memset(out, 0, sizeof *out);
-    out->type = CCORD_IN_APP_FOREGROUND;
-    return true;
-  }
-  if (atomic_exchange(&p->pending_lowmem_ev, false)) {
-    memset(out, 0, sizeof *out);
-    out->type = CCORD_IN_APP_LOW_MEMORY;
-    return true;
-  }
-  if (atomic_exchange(&p->pending_reset_ev, false)) {
-    memset(out, 0, sizeof *out);
-    out->type = CCORD_IN_RENDER_RESET;
-    return true;
-  }
+  if (pop_lifecycle_event(p, out)) return true;
 #if defined(__ANDROID__)
   ccord_android_drain_events(p);
   {
@@ -337,6 +382,7 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
       if (s <= 0.0f) s = 1.0f;
       p->safe_insets = (ccord_safe_insets){top / s, right / s, bottom / s, left / s};
       p->keyboard_inset = ime / s;
+      p->android_insets_seen = true;
       p->pending_safe_area_ev = true;
       p->pending_keyboard_ev = true;
     }
@@ -401,8 +447,11 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
   for (;;) {
     SDL_Event e;
     bool got = wait > 0 ? SDL_WaitEventTimeout(&e, (int32_t)wait) : SDL_PollEvent(&e);
-    if (!got) return false;
+    if (!got) return pop_lifecycle_event(p, out);
     if (translate(p, &e, out)) return true;   // unknown or malformed events are dropped
+    // Lifecycle & render-reset events are captured by platform_lifecycle_watch and return false
+    // from translate(); wake immediately instead of sleeping out the rest of timeout_ms.
+    if (pop_lifecycle_event(p, out)) return true;
     if (wait > 0) {
       uint64_t now = SDL_GetTicks();
       wait = now < deadline ? (uint32_t)(deadline - now) : 0;

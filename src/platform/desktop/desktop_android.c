@@ -60,12 +60,19 @@ static JavaVM *g_jvm = nullptr;
 static jclass g_bridge_cls = nullptr;
 
 // Pending WindowInsets pushed from Kotlin UI thread.
+static bool g_insets_valid = false;
 static bool g_insets_dirty = false;
 static float g_insets_top = 0.0f;
 static float g_insets_right = 0.0f;
 static float g_insets_bottom = 0.0f;
 static float g_insets_left = 0.0f;
 static float g_insets_ime = 0.0f;
+
+// Cold-start notification clicks buffered if CCordActivity.onCreate delivers an intent before ccord_desktop_create().
+static uint32_t g_cold_click_ids[16];
+static size_t g_cold_click_count = 0;
+static ccord_notify_target g_cold_direct_targets[16];
+static size_t g_cold_direct_count = 0;
 
 // Pending Autofill values pushed from Android AutofillManager (Bitwarden / password managers).
 #define ANDROID_AUTOFILL_CAP 8u
@@ -105,13 +112,13 @@ static jstring jni_new_string_utf8(JNIEnv *env, const char *utf8)
   size_t out_n = 0;
   size_t pos = 0;
   while (pos < len) {
-    uint32_t cp = 0;
-    size_t step = ccord_utf8_decode(utf8 + pos, len - pos, &cp);
-    if (step == 0) {
+    char32_t cp = 0;
+    int step = ccord_utf8_decode(utf8 + pos, len - pos, &cp);
+    if (step <= 0) {
       cp = 0xFFFDu;
-      step = 1u;
+      step = 1;
     }
-    pos += step;
+    pos += (size_t)step;
     if (cp <= 0xFFFFu) {
       u16[out_n++] = (jchar)cp;
     } else if (cp <= 0x10FFFFu) {
@@ -400,6 +407,32 @@ void ccord_android_set_voice_service(bool active, const char *channel_name, bool
   android_env_release(attached);
 }
 
+void ccord_android_set_keep_alive(bool active)
+{
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls, "setKeepAliveService", "(Z)V");
+    if (mid) (*env)->CallStaticVoidMethod(env, cls, mid, active ? JNI_TRUE : JNI_FALSE);
+    clear_exception(env);
+  }
+  android_env_release(attached);
+}
+
+void ccord_android_on_fullscreen_changed(bool fullscreen)
+{
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls, "onFullscreenChanged", "(Z)V");
+    if (mid) (*env)->CallStaticVoidMethod(env, cls, mid, fullscreen ? JNI_TRUE : JNI_FALSE);
+    clear_exception(env);
+  }
+  android_env_release(attached);
+}
+
 void ccord_android_set_audio_comm_mode(bool in_call)
 {
   bool attached = false;
@@ -564,6 +597,22 @@ bool ccord_android_poll_insets(float *top, float *right, float *bottom, float *l
   return dirty;
 }
 
+bool ccord_android_get_latest_insets(float *top, float *right, float *bottom, float *left, float *ime_bottom)
+{
+  ccord_spin_lock_acquire(&g_jni_lock);
+  bool valid = g_insets_valid;
+  if (valid) {
+    if (top) *top = g_insets_top;
+    if (right) *right = g_insets_right;
+    if (bottom) *bottom = g_insets_bottom;
+    if (left) *left = g_insets_left;
+    if (ime_bottom) *ime_bottom = g_insets_ime;
+    g_insets_dirty = false;
+  }
+  ccord_spin_lock_release(&g_jni_lock);
+  return valid;
+}
+
 // ---- JNI entrypoints invoked from Kotlin org.ccord.android.CCordBridge ----
 
 JNIEXPORT void JNICALL
@@ -578,6 +627,7 @@ Java_org_ccord_android_CCordBridge_nativeOnInsetsChanged(JNIEnv *env, jclass cls
   g_insets_bottom = bottom >= 0.0f ? bottom : 0.0f;
   g_insets_left = left >= 0.0f ? left : 0.0f;
   g_insets_ime = ime_bottom >= 0.0f ? ime_bottom : 0.0f;
+  g_insets_valid = true;
   g_insets_dirty = true;
   ccord_spin_lock_release(&g_jni_lock);
 }
@@ -629,17 +679,22 @@ Java_org_ccord_android_CCordBridge_nativeOnNotificationClicked(JNIEnv *env, jcla
   (void)cls;
   ccord_spin_lock_acquire(&g_jni_lock);
   ccord_desktop *d = g_desktop;
-  if (d) {
-    if (guild_id != 0 || channel_id != 0 || message_id != 0) {
-      if (d->pending_direct_count < 16u) {
-        d->pending_direct_targets[d->pending_direct_count++] = (ccord_notify_target){
-          .guild_id = (uint64_t)guild_id,
-          .channel_id = (uint64_t)channel_id,
-          .message_id = (uint64_t)message_id,
-        };
-      }
-    } else if (id > 0 && d->pending_click_count < 16u) {
-      d->pending_click_ids[d->pending_click_count++] = (uint32_t)id;
+  if (guild_id != 0 || channel_id != 0 || message_id != 0) {
+    ccord_notify_target t = {
+      .guild_id = (uint64_t)guild_id,
+      .channel_id = (uint64_t)channel_id,
+      .message_id = (uint64_t)message_id,
+    };
+    if (d) {
+      if (d->pending_direct_count < 16u) d->pending_direct_targets[d->pending_direct_count++] = t;
+    } else if (g_cold_direct_count < 16u) {
+      g_cold_direct_targets[g_cold_direct_count++] = t;
+    }
+  } else if (id > 0) {
+    if (d) {
+      if (d->pending_click_count < 16u) d->pending_click_ids[d->pending_click_count++] = (uint32_t)id;
+    } else if (g_cold_click_count < 16u) {
+      g_cold_click_ids[g_cold_click_count++] = (uint32_t)id;
     }
   }
   ccord_spin_lock_release(&g_jni_lock);
@@ -719,6 +774,17 @@ ccord_desktop *ccord_desktop_create(const char *app_id, bool offline)
   d->next_id = 1u;
   ccord_spin_lock_acquire(&g_jni_lock);
   g_desktop = d;
+  if (g_cold_click_count > 0) {
+    memcpy(d->pending_click_ids, g_cold_click_ids, g_cold_click_count * sizeof g_cold_click_ids[0]);
+    d->pending_click_count = g_cold_click_count;
+    g_cold_click_count = 0;
+  }
+  if (g_cold_direct_count > 0) {
+    memcpy(d->pending_direct_targets, g_cold_direct_targets,
+           g_cold_direct_count * sizeof g_cold_direct_targets[0]);
+    d->pending_direct_count = g_cold_direct_count;
+    g_cold_direct_count = 0;
+  }
   ccord_spin_lock_release(&g_jni_lock);
   return d;
 }
@@ -789,10 +855,12 @@ bool ccord_desktop_notify_target(ccord_desktop *d, const char *title, const char
     d->last_actions[0] = '\0';
   }
   if (!d->offline) {
-    (void)ccord_android_notify_message(id, d->last_title, d->last_body,
-                                       target ? target->guild_id : 0,
-                                       target ? target->channel_id : 0,
-                                       target ? target->message_id : 0);
+    if (!ccord_android_notify_message(id, d->last_title, d->last_body,
+                                      target ? target->guild_id : 0,
+                                      target ? target->channel_id : 0,
+                                      target ? target->message_id : 0)) {
+      CCORD_LOG_W("android: notifyMessage failed (check POST_NOTIFICATIONS permission / notification settings)");
+    }
   }
   return true;
 }

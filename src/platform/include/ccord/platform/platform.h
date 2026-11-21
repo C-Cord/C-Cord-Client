@@ -372,6 +372,8 @@ bool ccord_platform_set_orientation(ccord_platform *p, ccord_orientation_mode mo
 void ccord_platform_dismiss_keyboard(ccord_platform *p);
 void ccord_platform_set_voice_call_active(ccord_platform *p, bool active, const char *channel_name,
                                           bool muted, bool deafened);
+// Keeps the mobile background connection service alive while signed in (no-op on desktop).
+void ccord_platform_set_keep_alive(ccord_platform *p, bool active);
 bool ccord_platform_request_permission(ccord_platform *p, const char *permission);
 
 // Android / mobile startup splash handoff & native password-manager autofill bridge (no-ops on desktop).

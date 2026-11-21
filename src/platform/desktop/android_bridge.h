@@ -29,6 +29,8 @@ bool ccord_android_keep_screen_on(bool on);
 bool ccord_android_notify_message(uint32_t id, const char *title, const char *body,
                                   uint64_t guild_id, uint64_t channel_id, uint64_t message_id);
 void ccord_android_set_voice_service(bool active, const char *channel_name, bool muted, bool deafened);
+void ccord_android_set_keep_alive(bool active);
+void ccord_android_on_fullscreen_changed(bool fullscreen);
 void ccord_android_set_audio_comm_mode(bool in_call);
 bool ccord_android_request_screen_capture(void);
 void ccord_android_stop_screen_capture(void);
@@ -45,6 +47,8 @@ void ccord_android_drain_events(ccord_platform *p);
 // Consumes pending insets/IME updates pushed by CCordActivity's WindowInsetsListener.
 // Values are physical pixels; platform.c converts to logical px using display scale.
 bool ccord_android_poll_insets(float *top, float *right, float *bottom, float *left, float *ime_bottom);
+// Reads the most recently received insets (even if pushed during onCreate before platform init).
+bool ccord_android_get_latest_insets(float *top, float *right, float *bottom, float *left, float *ime_bottom);
 
 // Consumes one pending password-manager autofill value pushed by CCordActivity's AutofillOverlay.
 bool ccord_android_poll_autofill(int *out_field, char *out_text, size_t cap);

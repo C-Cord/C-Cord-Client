@@ -1594,6 +1594,69 @@ static void test_long_text_input_chunking(void)
   ccord_platform_destroy(p);
 }
 
+static void test_mobile_background_lifecycle_and_notify(void)
+{
+  ccord_error err;
+  ccord_platform_config cfg = {.title = "C-Cord", .width = 412, .height = 915, .headless = true};
+  ccord_platform *p = ccord_platform_create(&cfg, &err);
+  CT_CHECK(p != nullptr);
+  if (!p) return;
+  drain(p);
+
+  ccord_platform_set_window_focused(p, true);
+  CT_CHECK(ccord_platform_window_focused(p));
+  ccord_platform_set_keep_alive(p, true);
+
+  // Entering background (even without a preceding FOCUS_LOST) must wake next_event immediately,
+  // clear window_focused, and allow message notifications to fire.
+  SDL_Event bg = {.type = SDL_EVENT_WILL_ENTER_BACKGROUND};
+  (void)SDL_PushEvent(&bg);
+  uint64_t t0 = SDL_GetTicks();
+  ccord_input_event ev;
+  bool got = ccord_platform_next_event(p, &ev, 250);
+  uint64_t elapsed = SDL_GetTicks() - t0;
+  CT_CHECK(got && ev.type == CCORD_IN_APP_BACKGROUND);
+  CT_CHECK(elapsed < 150u);
+  CT_CHECK(ccord_platform_in_background(p));
+  CT_CHECK(!ccord_platform_window_focused(p));
+
+  ccord_notify_target target = {.guild_id = 100, .channel_id = 200, .message_id = 300};
+  CT_CHECK(ccord_platform_notify_message(p, "Alice", "Ping while backgrounded", &target));
+  CT_CHECK(ccord_platform_notify_count(p) == 1u);
+  CT_CHECK(strcmp(ccord_platform_last_notify_title(p), "Alice") == 0);
+  CT_CHECK(strcmp(ccord_platform_last_notify_body(p), "Ping while backgrounded") == 0);
+
+  // Simulate minimized state (e.g. Android Back key) before returning to foreground.
+  SDL_Event min_ev = {.type = SDL_EVENT_WINDOW_MINIMIZED};
+  (void)SDL_PushEvent(&min_ev);
+  drain(p);
+  CT_CHECK(ccord_platform_window_minimized(p));
+
+  // Returning to foreground must wake immediately and clear minimized/background state so drawing resumes at once.
+  SDL_Event fg = {.type = SDL_EVENT_DID_ENTER_FOREGROUND};
+  (void)SDL_PushEvent(&fg);
+  t0 = SDL_GetTicks();
+  got = ccord_platform_next_event(p, &ev, 250);
+  elapsed = SDL_GetTicks() - t0;
+  CT_CHECK(got && ev.type == CCORD_IN_APP_FOREGROUND);
+  CT_CHECK(elapsed < 150u);
+  CT_CHECK(!ccord_platform_in_background(p));
+  CT_CHECK(!ccord_platform_window_minimized(p));
+  CT_CHECK(ccord_platform_window_visible(p));
+
+  // Render target reset must also wake immediately without waiting out timeout_ms.
+  SDL_Event rst = {.type = SDL_EVENT_RENDER_TARGETS_RESET};
+  (void)SDL_PushEvent(&rst);
+  t0 = SDL_GetTicks();
+  got = ccord_platform_next_event(p, &ev, 250);
+  elapsed = SDL_GetTicks() - t0;
+  CT_CHECK(got && ev.type == CCORD_IN_RENDER_RESET);
+  CT_CHECK(elapsed < 150u);
+
+  ccord_platform_set_keep_alive(p, false);
+  ccord_platform_destroy(p);
+}
+
 int main(void)
 {
   SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
@@ -1604,6 +1667,7 @@ int main(void)
   SDL_SetHint(SDL_HINT_POLL_SENTINEL, "0");
   test_offline();
   test_long_text_input_chunking();
+  test_mobile_background_lifecycle_and_notify();
   test_window_lifecycle();
   test_dead_bus();
 #if CCORD_HAVE_PORTAL

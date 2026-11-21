@@ -258,6 +258,8 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
     SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
   }
 #if defined(__ANDROID__)
+  // Keep SDL_main running while backgrounded so the Discord Gateway stays connected and OS notifications fire.
+  SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
   // Use dedicated touch events in our gesture recognizer instead of double-firing synthetic mouse events.
   SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
   SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
@@ -278,9 +280,7 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
   p->window_visible = !c.start_minimized;
   p->drop_mutex = SDL_CreateMutex();
   SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
-#if defined(__ANDROID__)
-  window_flags |= SDL_WINDOW_FULLSCREEN;
-#else
+#if !defined(__ANDROID__)
   if (c.start_minimized) window_flags |= SDL_WINDOW_HIDDEN;   // tray-only start: never flash the window
 #endif
   // X11 WM_CLASS / Wayland app_id: must match StartupWMClass and C-Cord.desktop.
@@ -300,10 +300,23 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
     }
   }
 #if defined(__ANDROID__)
+  // Re-assert edge-to-edge window styling after SDL_CreateWindow's async COMMAND_CHANGE_WINDOW_STYLE.
+  ccord_android_on_fullscreen_changed(false);
   int ff = ccord_android_get_form_factor();
   p->form_factor = (ff == 2) ? CCORD_FORM_TABLET : CCORD_FORM_PHONE;
   ccord_android_register_platform(p);
-  platform_refresh_sdl_safe_area(p);
+  {
+    float top = 0.0f, right = 0.0f, bottom = 0.0f, left = 0.0f, ime = 0.0f;
+    if (ccord_android_get_latest_insets(&top, &right, &bottom, &left, &ime)) {
+      float s = platform_window_scale(p->window);
+      if (s <= 0.0f) s = 1.0f;
+      p->safe_insets = (ccord_safe_insets){top / s, right / s, bottom / s, left / s};
+      p->keyboard_inset = ime / s;
+      p->android_insets_seen = true;
+    } else {
+      platform_refresh_sdl_safe_area(p);
+    }
+  }
 #else
   p->form_factor = CCORD_FORM_DESKTOP;
   p->window_icon_sizes = set_window_icon(p->window, &p->window_icon_accepted);
@@ -339,6 +352,9 @@ void ccord_platform_destroy(ccord_platform *p)
   if (p->voice_service_active) {
     ccord_android_set_voice_service(false, "", false, false);
     ccord_android_set_audio_comm_mode(false);
+  }
+  if (p->keep_alive_active) {
+    ccord_android_set_keep_alive(false);
   }
   ccord_android_register_platform(nullptr);
 #endif
@@ -703,7 +719,7 @@ bool ccord_platform_pop_drop_file(ccord_platform *p, char *out, size_t cap)
 
 bool ccord_platform_window_focused(const ccord_platform *p)
 {
-  return p ? p->focused : false;
+  return p && p->focused && !atomic_load(&p->in_background);
 }
 
 // Every window-attention call goes through here. C-Cord never asks the shell to highlight its taskbar entry:
@@ -769,6 +785,9 @@ bool ccord_platform_set_fullscreen(ccord_platform *p, bool fullscreen)
       CCORD_LOG_W("platform: fullscreen(%d) failed: %s", fullscreen ? 1 : 0, SDL_GetError());
       return false;
     }
+#if defined(__ANDROID__)
+    ccord_android_on_fullscreen_changed(fullscreen);
+#endif
   }
   p->fullscreen = fullscreen;
   return true;
@@ -864,7 +883,7 @@ bool ccord_platform_notify(ccord_platform *p, const char *title, const char *bod
 bool ccord_platform_notify_message(ccord_platform *p, const char *title, const char *body,
                                    const ccord_notify_target *target)
 {
-  if (!p || p->focused) return false;
+  if (!p || ccord_platform_window_focused(p)) return false;
   if (title && !ccord_utf8_valid(title, strlen(title))) return false;
   if (body && !ccord_utf8_valid(body, strlen(body))) return false;
   p->notify_count++;
@@ -1153,6 +1172,15 @@ void ccord_platform_set_voice_call_active(ccord_platform *p, bool active, const 
   (void)channel_name;
   (void)muted;
   (void)deafened;
+#endif
+}
+
+void ccord_platform_set_keep_alive(ccord_platform *p, bool active)
+{
+  if (!p || p->keep_alive_active == active) return;
+  p->keep_alive_active = active;
+#if defined(__ANDROID__)
+  if (!p->headless) ccord_android_set_keep_alive(active);
 #endif
 }
 

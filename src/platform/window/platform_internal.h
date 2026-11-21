@@ -83,10 +83,12 @@ struct ccord_platform {
   atomic_bool pending_reset_ev;
   bool pending_safe_area_ev;
   bool pending_keyboard_ev;
+  bool android_insets_seen;       // Kotlin WindowInsets arrived; ignore SDL's systemGestures-bloated safe area
   ccord_safe_insets safe_insets;
   float keyboard_inset;
   ccord_form_factor form_factor;
   bool voice_service_active;
+  bool keep_alive_active;
 };
 
 float platform_window_scale(SDL_Window *w);
