@@ -629,9 +629,18 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
   if (ev->type == CCORD_IN_APP_BACKGROUND) {
     ui_menu_close(ui);
     ui->touch_text_focused = false;
+    ui->ime_active = false;
+    ui->window_focused = false;
+    ui_sync_reading(ui);
     return false;
   }
-  if (ev->type == CCORD_IN_APP_FOREGROUND || ev->type == CCORD_IN_RENDER_RESET) {
+  if (ev->type == CCORD_IN_APP_FOREGROUND) {
+    ui->window_focused = true;
+    ui_sync_reading(ui);
+    ui->dirty = true;
+    return true;
+  }
+  if (ev->type == CCORD_IN_RENDER_RESET) {
     ui->dirty = true;
     return true;
   }

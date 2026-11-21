@@ -260,8 +260,14 @@ static uint64_t rail_slot_key(const ui_rail_slot *sl)
 void ui_draw_server_list(ccord_ui *ui, ccord_renderer *r)
 {
   const ccord_layout_rect *l = &ui->layout.server_list;
-  ccord_draw_rect(r, ui_rect(*l), COL(bg_tertiary));
-  ccord_draw_rect(r, (ccord_rect){l->x + l->w - 1.0f, l->y, 1.0f, l->h}, COL(border_subtle));
+  ccord_rect rail_bg = ui_rect(*l);
+  if (ui->mobile_layout) {
+    float lt = ui->left_drawer_t < 0.0f ? 0.0f : (ui->left_drawer_t > 1.0f ? 1.0f : ui->left_drawer_t);
+    float left_ext = ui->safe_insets.left * lt;
+    rail_bg = (ccord_rect){l->x - left_ext, 0.0f, l->w + left_ext, ui->win_h};
+  }
+  ccord_draw_rect(r, rail_bg, COL(bg_tertiary));
+  ccord_draw_rect(r, (ccord_rect){l->x + l->w - 1.0f, rail_bg.y, 1.0f, rail_bg.h}, COL(border_subtle));
   ccord_push_clip(r, ui_rect(*l));
 
   if (!ui->unread_cache) {
@@ -554,10 +560,15 @@ static uint64_t chan_row_key(const ccord_ui *ui, ccord_id g, const chan_row *row
 void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
 {
   const ccord_layout *lay = &ui->layout;
-  ccord_draw_rect(r, ui_rect(lay->channel_list), COL(bg_secondary));
-  ui_theme_bg_draw(ui, r, "sidebar", ui_rect(lay->channel_list));
-  ccord_draw_rect(r, (ccord_rect){lay->channel_list.x + lay->channel_list.w - 1.0f, lay->channel_list.y,
-                                  1.0f, lay->channel_list.h}, COL(border_subtle));
+  ccord_rect cbg = ui_rect(lay->channel_list);
+  if (ui->mobile_layout) {
+    cbg.y = 0.0f;
+    cbg.h = ui->win_h;
+  }
+  ccord_draw_rect(r, cbg, COL(bg_secondary));
+  ui_theme_bg_draw(ui, r, "sidebar", cbg);
+  ccord_draw_rect(r, (ccord_rect){lay->channel_list.x + lay->channel_list.w - 1.0f, cbg.y,
+                                  1.0f, cbg.h}, COL(border_subtle));
   ccord_id g = ccord_store_selected_guild(ui->d.store);
   const ccord_guild *gd = ccord_store_guild(ui->d.store, g);
 
@@ -913,9 +924,13 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
 void ui_draw_user_panel(ccord_ui *ui, ccord_renderer *r)
 {
   const ccord_layout_rect *p = &ui->layout.user_panel;
-  ccord_draw_rect(r, ui_rect(*p), COL(bg_user_panel));
+  ccord_rect pbg = ui_rect(*p);
+  if (ui->mobile_layout && ui->win_h > p->y) {
+    pbg.h = maxf(p->h, ui->win_h - p->y);
+  }
+  ccord_draw_rect(r, pbg, COL(bg_user_panel));
   ccord_draw_rect(r, (ccord_rect){p->x, p->y, p->w, 1.0f}, COL(border_subtle));
-  ccord_draw_rect(r, (ccord_rect){p->x + p->w - 1.0f, p->y, 1.0f, p->h}, COL(border_subtle));
+  ccord_draw_rect(r, (ccord_rect){p->x + p->w - 1.0f, p->y, 1.0f, pbg.h}, COL(border_subtle));
   ui->user_status_rect = ui_user_status_area_rect(ui);
   bool us_hover = ui->hover_user_status && !ui->menu.open && !ui->settings_open && !ui->go_live_open;
   float us_hv = ui_fade(ui, "ustatus", 1u, us_hover);

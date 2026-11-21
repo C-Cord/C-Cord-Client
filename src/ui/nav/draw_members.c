@@ -679,8 +679,12 @@ void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r)
   const ccord_layout_rect *l = &ui->layout.member_list;
   ui->ngdm_member_hits = 0;
   ui->dm_panel_full_profile_rect = (ccord_rect){0};
-  ccord_draw_rect(r, ui_rect(*l), COL(bg_secondary));
-  ccord_draw_rect(r, (ccord_rect){l->x, l->y, 1.0f, l->h}, COL(border_subtle));
+  ccord_rect mbg = ui_rect(*l);
+  if (ui->mobile_layout) {
+    mbg = (ccord_rect){l->x, 0.0f, l->w + ui->safe_insets.right, ui->win_h};
+  }
+  ccord_draw_rect(r, mbg, COL(bg_secondary));
+  ccord_draw_rect(r, (ccord_rect){l->x, mbg.y, 1.0f, mbg.h}, COL(border_subtle));
   ccord_push_clip(r, (ccord_rect){l->x + 1.0f, l->y, fmaxf(l->w - 1.0f, 0.0f), l->h});
   if (ui_search_panel_active(ui)) {
     draw_search_results_panel(ui, r, l);

@@ -414,12 +414,13 @@ const ui_rail_slot *ui_rail_slots_cached(const ccord_ui *ui, size_t *out_count, 
   uint64_t lrev = ui->d.store ? ccord_store_lists_revision(ui->d.store) : 0u;
   uint64_t ehash = rail_expand_hash(ui);
   float sl_x = ui->layout.server_list.x;
+  float sl_y = ui->layout.server_list.y;
   float sl_w = ui->layout.server_list.w;
   float sz = M(guild_icon_size);
   float gap = M(guild_icon_gap);
   float scroll = ui->server_scroll;
   if (c->valid && c->lists_rev == lrev && c->expand_hash == ehash &&
-      c->sl_x == sl_x && c->sl_w == sl_w && c->sz == sz && c->gap == gap) {
+      c->sl_x == sl_x && c->sl_y == sl_y && c->sl_w == sl_w && c->sz == sz && c->gap == gap) {
     if (c->scroll != scroll) {
       float dy = c->scroll - scroll;
       for (size_t i = 0; i < c->count; i++) c->slots[i].rect.y += dy;
@@ -449,6 +450,7 @@ const ui_rail_slot *ui_rail_slots_cached(const ccord_ui *ui, size_t *out_count, 
   c->lists_rev = lrev;
   c->expand_hash = ehash;
   c->sl_x = sl_x;
+  c->sl_y = sl_y;
   c->sl_w = sl_w;
   c->sz = sz;
   c->gap = gap;
@@ -470,7 +472,7 @@ size_t ui_rail_build_slots(const ccord_ui *ui, ui_rail_slot *out, size_t cap, fl
   float sz = M(guild_icon_size);
   float gap = M(guild_icon_gap);
   float x = l->server_list.x + (l->server_list.w - sz) * 0.5f;
-  float y = gap + 4.0f - ui->server_scroll;
+  float y = l->server_list.y + gap + 4.0f - ui->server_scroll;
   size_t n = 0;
 
   if (out && n < cap) {
@@ -585,7 +587,7 @@ size_t ui_rail_build_slots(const ccord_ui *ui, ui_rail_slot *out, size_t cap, fl
   n++;
   y += sz + gap;
 
-  if (out_total_h) *out_total_h = (y + ui->server_scroll) + 8.0f;
+  if (out_total_h) *out_total_h = (y - l->server_list.y + ui->server_scroll) + 8.0f;
   return n;
 }
 

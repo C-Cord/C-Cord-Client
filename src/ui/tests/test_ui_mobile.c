@@ -574,6 +574,64 @@ static void test_mobile_copy_paste_and_autofill_login(void)
   ccord_bus_destroy(lbus);
 }
 
+static void test_mobile_safe_area_rail_and_background_focus(void)
+{
+  ccord_ui_set_viewport(F.ui, 412.0f, 915.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_safe_insets(F.ui, 48.0f, 0.0f, 34.0f, 12.0f);
+  ccord_ui_set_left_drawer(F.ui, true);
+  for (int i = 0; i < 20; i++) (void)ccord_ui_update(F.ui, F.now += 25);
+
+  // Server rail DM Home icon must sit below safe_insets.top so it is never clipped at the top edge.
+  ccord_rect dm_r1 = ui_guild_icon_rect(F.ui, 0);
+  CT_CHECK(F.ui->layout.server_list.y >= 47.9f);
+  CT_CHECK(dm_r1.y >= F.ui->layout.server_list.y);
+
+  // Updating safe_insets.top must invalidate the rail slot cache and shift icons below the new top inset.
+  ccord_ui_set_safe_insets(F.ui, 64.0f, 0.0f, 34.0f, 12.0f);
+  (void)ccord_ui_update(F.ui, F.now += 25);
+  ccord_rect dm_r2 = ui_guild_icon_rect(F.ui, 0);
+  CT_CHECK(F.ui->layout.server_list.y >= 63.9f);
+  CT_CHECK(dm_r2.y >= F.ui->layout.server_list.y);
+  CT_CHECK(dm_r2.y > dm_r1.y + 15.0f);
+
+  // Draw left drawer, right drawer, and discovery overlay with non-zero safe insets cleanly.
+  ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+  ccord_ui_draw(F.ui, F.renderer);
+  ccord_render_end(F.renderer);
+
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, true);
+  for (int i = 0; i < 20; i++) (void)ccord_ui_update(F.ui, F.now += 25);
+  ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+  ccord_ui_draw(F.ui, F.renderer);
+  ccord_render_end(F.renderer);
+
+  ccord_ui_set_right_drawer(F.ui, false);
+  F.ui->discovery_open = true;
+  (void)ccord_ui_update(F.ui, F.now += 25);
+  ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+  ccord_ui_draw(F.ui, F.renderer);
+  ccord_render_end(F.renderer);
+  F.ui->discovery_open = false;
+
+  // Entering background must clear window_focused so reading_channel stops and background notifications aren't suppressed.
+  ccord_input_event focus_ev = {.type = CCORD_IN_FOCUS, .focused = true};
+  (void)ccord_ui_handle_input(F.ui, &focus_ev);
+  CT_CHECK(F.ui->window_focused);
+  ccord_input_event bg_ev = {.type = CCORD_IN_APP_BACKGROUND};
+  (void)ccord_ui_handle_input(F.ui, &bg_ev);
+  CT_CHECK(!F.ui->window_focused);
+  CT_CHECK(!ui_is_reading(F.ui));
+
+  // Returning to foreground restores window_focused and marks the UI dirty for immediate repaint.
+  ccord_input_event fg_ev = {.type = CCORD_IN_APP_FOREGROUND};
+  CT_CHECK(ccord_ui_handle_input(F.ui, &fg_ev));
+  CT_CHECK(F.ui->window_focused);
+  CT_CHECK(F.ui->dirty);
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -586,6 +644,7 @@ int main(void)
   test_mobile_scroll_and_long_press_sheet();
   test_mobile_lightbox_pinch_and_back_cascade();
   test_mobile_copy_paste_and_autofill_login();
+  test_mobile_safe_area_rail_and_background_focus();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");
 }

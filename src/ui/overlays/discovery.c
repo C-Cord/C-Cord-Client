@@ -17,13 +17,16 @@ void ui_draw_discovery(ccord_ui *ui, ccord_renderer *r)
   ui->discovery_content_h = 0.0f;
   if (!ui->discovery_open) return;
 
+  float top_in = ui->mobile_layout ? ui->safe_insets.top : 0.0f;
+  float bot_in = ui->mobile_layout ? ui->safe_insets.bottom : 0.0f;
   ccord_rect pane = {ui->layout.chat_header.x, 0.0f, ui->layout.chat_header.w, ui->win_h};
   if (pane.w <= 0.0f) pane.w = maxf(ui->win_w - pane.x, 0.0f);
-  ccord_draw_rect(r, pane, COL(bg_primary));
+  ccord_rect bg = ui->mobile_layout ? (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h} : pane;
+  ccord_draw_rect(r, bg, COL(bg_primary));
   ccord_push_clip(r, pane);
 
-  float pad_x = 24.0f;
-  ccord_rect hero = {pane.x + pad_x, 16.0f, maxf(pane.w - 2.0f * pad_x, 220.0f), 116.0f};
+  float pad_x = ui->mobile_layout ? 14.0f : 24.0f;
+  ccord_rect hero = {pane.x + pad_x, top_in + 16.0f, maxf(pane.w - 2.0f * pad_x, 220.0f), 116.0f};
   ccord_draw_rrect(r, hero, 10.0f, ui_mix(COL(bg_secondary), COL(brand), 0.16f));
 
   ccord_text_style hts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large) + 2.0f, COL(text_header));
@@ -90,7 +93,7 @@ void ui_draw_discovery(ccord_ui *ui, ccord_renderer *r)
   ccord_text_draw_ellipsis(r, hdr_buf, strlen(hdr_buf), hero.x, hdr_y, hero.w, &shs);
 
   float cards_y = hdr_y + 26.0f;
-  float view_h = maxf(pane.h - cards_y - 12.0f, 48.0f);
+  float view_h = maxf(pane.h - bot_in - cards_y - 12.0f, 48.0f);
   size_t cols = hero.w >= 540.0f ? 2u : 1u;
   float gap = 12.0f;
   float card_w = cols == 2u ? (hero.w - gap) * 0.5f : hero.w;
@@ -211,10 +214,12 @@ bool ui_discovery_handle(ccord_ui *ui, const ccord_input_event *ev)
         return true;
       }
     }
-    float cards_top = 204.0f;
+    float top_in = ui->mobile_layout ? ui->safe_insets.top : 0.0f;
+    float bot_in = ui->mobile_layout ? ui->safe_insets.bottom : 0.0f;
+    float cards_top = top_in + 204.0f;
     for (size_t i = 0; i < ui->ndiscovery_hits; i++) {
       ccord_rect jr = ui->discovery_hits[i].join_rect;
-      if (jr.w <= 0.0f || jr.y + jr.h < cards_top || jr.y > pane.h - 12.0f) continue;
+      if (jr.w <= 0.0f || jr.y + jr.h < cards_top || jr.y > pane.h - bot_in - 12.0f) continue;
       if (ui_in_rect(ev->x, ev->y, jr)) {
         ccord_id gid = ui->discovery_hits[i].guild_id;
         if (ui->d.store && ccord_store_guild(ui->d.store, gid) != nullptr) {

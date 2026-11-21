@@ -33,7 +33,7 @@ struct ui_rail_cache {
   bool valid;
   uint64_t lists_rev;
   uint64_t expand_hash;
-  float sl_x, sl_w, sz, gap, scroll, total_h;
+  float sl_x, sl_y, sl_w, sz, gap, scroll, total_h;
   ui_rail_slot *slots;
   size_t count;
   size_t cap;
