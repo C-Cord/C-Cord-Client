@@ -3,7 +3,7 @@
 #include <ccord/plugin_host/host.h>
 
 #include "host_internal.h"
-#include "sandbox.h"
+#include "sandbox/sandbox.h"
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/arena.h>

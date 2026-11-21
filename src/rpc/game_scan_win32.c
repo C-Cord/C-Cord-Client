@@ -6,6 +6,7 @@
 #include "game_detect_internal.h"
 #include <windows.h>
 #include <tlhelp32.h>
+#include <stdio.h>
 #include <string.h>
 
 ccord_status ccord_game_scan(const ccord_game_list *l, const char *proc_root, ccord_game_match *out, ccord_error *err)

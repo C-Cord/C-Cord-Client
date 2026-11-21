@@ -14,6 +14,7 @@
 #include <ccord/store/store.h>
 
 #include <signal.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -141,7 +142,7 @@ typedef struct v3_comp_state {
 typedef struct v3_local_srv {
   int listen_fd;
   uint16_t port;
-  volatile int stop;
+  _Atomic bool stop;
 } v3_local_srv;
 
 static void v3_on_clip(void *ud, const char *utf8)
@@ -220,11 +221,11 @@ static void *v3_srv_thread(void *arg)
   struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};
   (void)setsockopt(ctx->listen_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
   int handled = 0;
-  while (!ctx->stop && handled < 4) {
+  while (!atomic_load(&ctx->stop) && handled < 4) {
     int cfd = accept(ctx->listen_fd, nullptr, nullptr);
     if (cfd < 0) continue;
     handled++;
-    struct timeval ctv = {.tv_sec = 2, .tv_usec = 0};
+    struct timeval ctv = {.tv_sec = 5, .tv_usec = 0};
     (void)setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &ctv, sizeof ctv);
     char req[2048] = "";
     ssize_t rn = recv(cfd, req, sizeof req - 1, 0);
@@ -518,7 +519,7 @@ static void test_api_v3_integration(void)
   write_file(watch_dir, "touched.txt", "change");
   CT_CHECK(v3_pump_clip(pm, bus, &cl, "c3_watch:"));
 
-  srv.stop = 1;
+  atomic_store(&srv.stop, true);
   (void)pthread_join(srv_tid, nullptr);
   close(srv.listen_fd);
 
@@ -671,11 +672,14 @@ int main(void)
   ccord_contrib_plugin_consent_accept(contrib, "dev.test.consent");
   CT_CHECK(pump_until(pm, bus, contrib, "dev.test.consent", CCORD_PLUGIN_READY));
 
-  // Export .cce and re-import it.
+  // Export .cce and re-import it. Wait for dev.test.kept before and after so its initial storage write
+  // completes before reload and its reload clipboard write ("reloaded:a:2") cannot race later checks.
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.kept", CCORD_PLUGIN_READY));
   char cce_path[1400], ebuf[256] = "";
   snprintf(cce_path, sizeof cce_path, "%s/kept.cce", data_dir);
   CT_CHECK(ccord_contrib_plugin_export_cce(contrib, "dev.test.kept", cce_path, ebuf, sizeof ebuf));
   CT_CHECK(ccord_contrib_plugin_import_package(contrib, cce_path, ebuf, sizeof ebuf));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.kept", CCORD_PLUGIN_READY));
 
   // Copy Message ID: loads, registers its menu item, and writes the message id through the host.
   CT_CHECK(pump_until(pm, bus, contrib, "dev.ccord.copy-message-id", CCORD_PLUGIN_READY));
@@ -686,6 +690,8 @@ int main(void)
   }
   CT_CHECK(menu_found);
 
+  clip.calls = 0;
+  clip.text[0] = '\0';
   ccord_menu_context ctx = {.target = CCORD_MENU_MESSAGE, .guild_id = 1, .channel_id = 2, .message_id = 4242, .user_id = 7};
   CT_CHECK(ccord_contrib_activate_menu(contrib, "dev.ccord.copy-message-id", "copy-message-id", &ctx, &err) == CCORD_OK);
   uint64_t deadline = now_ms() + WAIT_MS;
@@ -827,6 +833,8 @@ int main(void)
     pm = ccord_plugins_create(&cfg2, &err);
     CT_CHECK(pm != nullptr);
     (void)ccord_plugins_load_all(pm);
+    // Let pre-existing dev.test.kept finish its startup clipboard write before consenting dev.test.sec.
+    CT_CHECK(pump_until(pm, bus, contrib, "dev.test.kept", CCORD_PLUGIN_READY));
     CT_CHECK(pump_until(pm, bus, contrib, "dev.test.sec", CCORD_PLUGIN_NEEDS_CONSENT));
     const ccord_plugin_info *sinfo = find_info(contrib, "dev.test.sec");
     CT_CHECK(sinfo != nullptr && sinfo->perms_mask != 0);
@@ -836,6 +844,8 @@ int main(void)
     sinfo = find_info(contrib, "dev.test.sec");
     CT_CHECK(sinfo && sinfo->state == CCORD_PLUGIN_NEEDS_CONSENT);
     // Accepting with the exact mask enables the plugin.
+    clip.calls = 0;
+    clip.text[0] = '\0';
     ccord_contrib_plugin_consent_accept_for(contrib, "dev.test.sec", sinfo->perms_mask);
     CT_CHECK(pump_until(pm, bus, contrib, "dev.test.sec", CCORD_PLUGIN_READY));
     deadline = now_ms() + WAIT_MS;

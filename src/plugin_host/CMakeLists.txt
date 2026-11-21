@@ -12,7 +12,7 @@ add_library(ccord_host_sandbox STATIC
   sandbox/sandbox_v3_discord.c
   sandbox/sandbox_v3_sys.c
 )
-target_include_directories(ccord_host_sandbox PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/sandbox)
+target_include_directories(ccord_host_sandbox PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ccord_host_sandbox PUBLIC ccord_lua ccord_core ccord_ipc ccord_emoji ZLIB::ZLIB)
 if(NOT MSVC)
   target_link_libraries(ccord_host_sandbox PRIVATE m)

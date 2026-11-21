@@ -92,7 +92,7 @@ typedef struct plugin_card_rects {
 } plugin_card_rects;
 
 #if defined(_WIN32)
-#define STREAM_ENC_COUNT 4
+#define STREAM_ENC_COUNT 5
 #define STREAM_FW_COUNT 3
 #elif defined(__APPLE__)
 #define STREAM_ENC_COUNT 3

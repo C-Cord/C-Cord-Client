@@ -283,6 +283,7 @@ bool pw_start_exec(plugin_workers *w, const char *owner, uint64_t req_id, const 
   return true;
 }
 
+#if !CCORD_OS_WINDOWS
 static void proc_emit(plugin_workers *w, const char *owner, uint64_t proc_id, const char *sub_kind, const char *json)
 {
   if (atomic_load(&w->shutting_down)) return;
@@ -297,7 +298,6 @@ static void *spawn_worker_fn(void *arg)
 {
   pw_proc_slot *s = arg;
   plugin_workers *w = s->parent;
-#if !CCORD_OS_WINDOWS
   bool open_out = s->stdout_fd >= 0, open_err = s->stderr_fd >= 0;
   while ((open_out || open_err) && !atomic_load(&s->stop) && !atomic_load(&w->shutting_down)) {
     struct pollfd pfs[2]; int np = 0;
@@ -334,9 +334,9 @@ static void *spawn_worker_fn(void *arg)
   int code = WIFEXITED(status) ? WEXITSTATUS(status) : (WIFSIGNALED(status) ? -WTERMSIG(status) : -1);
   char eb[64]; snprintf(eb, sizeof eb, "{\"code\":%d}", code);
   proc_emit(w, s->owner, s->proc_id, "exit", eb);
-#endif
   return nullptr;
 }
+#endif
 
 bool pw_start_spawn(plugin_workers *w, const char *owner, uint64_t proc_id, const char *cmd,
                     const char *const *args, size_t nargs, const char *cwd)

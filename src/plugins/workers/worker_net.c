@@ -6,6 +6,12 @@
 // ---------------------------------------------------------------- Built-in loopback TCP HTTP/1.1
 
 #if !CCORD_OS_WINDOWS
+#ifdef MSG_NOSIGNAL
+#define PW_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define PW_SEND_FLAGS 0
+#endif
+
 static int tcp_connect_timeout(const char *host, int port, uint32_t timeout_ms)
 {
   struct addrinfo hints = {.ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM};
@@ -17,6 +23,7 @@ static int tcp_connect_timeout(const char *host, int port, uint32_t timeout_ms)
   for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
     fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
     if (fd < 0) continue;
+    ccord_sock_set_nosigpipe(fd);
     int fl = fcntl(fd, F_GETFL, 0);
     if (fl >= 0) (void)fcntl(fd, F_SETFL, fl | O_NONBLOCK);
     int rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
@@ -83,7 +90,7 @@ static bool loopback_http_do(const char *host, int port, const char *path, const
 
   size_t sent = 0;
   while (sent < req.len) {
-    ssize_t n = send(fd, req.data + sent, req.len - sent, MSG_NOSIGNAL);
+    ssize_t n = send(fd, req.data + sent, req.len - sent, PW_SEND_FLAGS);
     if (n <= 0) { ccord_buf_free(&req); close(fd); snprintf(resp->error, sizeof resp->error, "send failed"); return false; }
     sent += (size_t)n;
   }
@@ -304,6 +311,7 @@ static void *unix_worker_fn(void *arg)
     }
   }
   if (fd >= 0) {
+    ccord_sock_set_nosigpipe(fd);
     struct sockaddr_un sa = {.sun_family = AF_UNIX};
     memcpy(sa.sun_path, j->path, strlen(j->path) + 1u);
     struct timeval tv = {.tv_sec = 3, .tv_usec = 0};
@@ -313,7 +321,7 @@ static void *unix_worker_fn(void *arg)
       size_t off = 0;
       bool wr_ok = true;
       while (off < j->len) {
-        ssize_t n = send(fd, j->data + off, j->len - off, MSG_NOSIGNAL);
+        ssize_t n = send(fd, j->data + off, j->len - off, PW_SEND_FLAGS);
         if (n <= 0) { wr_ok = false; break; }
         off += (size_t)n;
       }
@@ -404,7 +412,7 @@ bool pw_ws_send_tcp_frame(int fd, uint8_t opcode, const uint8_t *data, size_t le
   size_t off = 0;
   bool ok = true;
   while (off < hl + len) {
-    ssize_t n = send(fd, buf + off, hl + len - off, MSG_NOSIGNAL);
+    ssize_t n = send(fd, buf + off, hl + len - off, PW_SEND_FLAGS);
     if (n <= 0) { ok = false; break; }
     off += (size_t)n;
   }
@@ -511,7 +519,7 @@ static void *ws_worker_fn(void *arg)
                        "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
                        path, host, port, ccord_buf_cstr(&key_b64));
     ccord_buf_free(&key_b64);
-    if (send(fd, hs, (size_t)hsn, MSG_NOSIGNAL) != hsn) {
+    if (send(fd, hs, (size_t)hsn, PW_SEND_FLAGS) != hsn) {
       close(fd);
       ws_emit(w, s->owner, s->ws_id, "error", "{\"message\":\"handshake write failed\"}");
       ws_emit(w, s->owner, s->ws_id, "close", "{\"code\":1006,\"reason\":\"handshake failed\"}");

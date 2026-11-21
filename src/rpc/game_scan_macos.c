@@ -6,6 +6,7 @@
 #include <sys/proc.h>
 #include <sys/proc_info.h>
 #include <unistd.h>
+#include <stdio.h>
 #include <string.h>
 
 ccord_status ccord_game_scan(const ccord_game_list *l, const char *proc_root, ccord_game_match *out, ccord_error *err)
