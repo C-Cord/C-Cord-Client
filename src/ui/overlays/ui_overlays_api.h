@@ -149,9 +149,18 @@ void ui_draw_avatar_deco_url(ccord_ui *ui, ccord_renderer *r, const char *deco_u
 void ui_profile_draw_deco(ccord_ui *ui, ccord_renderer *r, const ui_profile_look *look, float cx, float cy, float avatar_size);
 // Collectible nameplate behind a member / DM / user-panel row. Returns true when a nameplate was painted.
 // When `animate` is true (and reduced motion is off), fetches and plays asset.webm (falling back to static.png);
-// otherwise only draws static.png.
+// otherwise only draws static.png (or an already-cached asset.webm frozen while fading out).
+typedef struct ui_nameplate_opts {
+  bool hover;
+  bool selected;
+  bool animate;
+  bool offline;
+  bool reveal_on_active; // DM sidebar: hidden at rest, fades smoothly 0 <-> 1 on hover/selected
+  const char *anim_ns;   // animation namespace for smooth hover/reveal/load fades
+  uint64_t anim_id;      // stable per-row id within anim_ns
+} ui_nameplate_opts;
 bool ui_draw_nameplate(ccord_ui *ui, ccord_renderer *r, const char *asset, const char *palette, ccord_rect row,
-                       float radius, bool hover, bool selected, bool animate, bool offline);
+                       float radius, ui_nameplate_opts opt);
 // Animated profile effect overlay (draw inside the card clip, over the profile card contents).
 void ui_profile_draw_effect(ccord_ui *ui, ccord_renderer *r, const ui_profile_look *look, ccord_rect box,
                             float radius, bool is_modal);

@@ -366,7 +366,14 @@ static void draw_dm_profile_panel(ccord_ui *ui, ccord_renderer *r, const ccord_l
                           (ui->modal_kind == UI_MODAL_USER_PROFILE && ui->modal_target_id == uid);
       if (mu->nameplate_asset[0] != '\0') {
         (void)ui_draw_nameplate(ui, r, mu->nameplate_asset, mu->nameplate_palette,
-                                item, M(channel_item_radius), hover, profile_open, profile_open, false);
+                                item, M(channel_item_radius),
+                                (ui_nameplate_opts){
+                                  .hover = hover,
+                                  .selected = profile_open,
+                                  .animate = profile_open,
+                                  .anim_ns = "gdmnp",
+                                  .anim_id = uid,
+                                });
       }
       if (ui->ngdm_member_hits < 16u) {
         ui->gdm_member_hits[ui->ngdm_member_hits].rect = item;
@@ -730,7 +737,14 @@ void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r)
     const char *np_pal = m->nameplate_asset[0] ? m->nameplate_palette : u->nameplate_palette;
     if (np_asset[0] != '\0') {
       (void)ui_draw_nameplate(ui, r, np_asset, np_pal, item, M(channel_item_radius),
-                              hover, profile_open, profile_open, offline);
+                              (ui_nameplate_opts){
+                                .hover = hover,
+                                .selected = profile_open,
+                                .animate = profile_open,
+                                .offline = offline,
+                                .anim_ns = "memnp",
+                                .anim_id = m->user_id,
+                              });
     }
     float cy = y + row->h * 0.5f;
     ccord_user draw_u = *u;

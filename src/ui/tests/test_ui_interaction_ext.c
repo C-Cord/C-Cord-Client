@@ -2556,6 +2556,19 @@ static void test_plugin_api_v3_ui(void)
   frame(2);
 }
 
+static float anim_slot_value(const char *ns, uint64_t id, bool *found)
+{
+  uint32_t key = ccord_anim_key(ns, id);
+  for (size_t i = 0; i < CCORD_ANIM_SLOTS; i++) {
+    if (F.ui->anim.slots[i].key == key) {
+      if (found) *found = true;
+      return F.ui->anim.slots[i].value;
+    }
+  }
+  if (found) *found = false;
+  return 0.0f;
+}
+
 static void test_nameplate_visibility_and_animation(void)
 {
   // Minimal 16x8 2-frame VP9 WebM with alpha_mode=1 (10 fps, 100 ms per frame) used to drive real video animation.
@@ -2673,16 +2686,27 @@ static void test_nameplate_visibility_and_animation(void)
   CT_CHECK(dm_row_y > cs->y && dm_row_y < cs->y + cs->h);
 
   // Idle (neither hovered nor selected): DM nameplate must NOT be displayed or fetched at all.
+  bool np_found = false;
+  float np_v = anim_slot_value("dmnp", dm_ch.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v == 0.0f);
   CT_CHECK(ccord_session_get_media(F.session, k_dm_static) == nullptr);
   CT_CHECK(ccord_session_get_media(F.session, k_dm_anim) == nullptr);
   CT_CHECK(!ccord_render_has_texture(F.renderer, k_dm_static, nullptr, nullptr));
   CT_CHECK(!ccord_render_has_texture(F.renderer, k_dm_anim, nullptr, nullptr));
 
-  // Hovering the DM row displays and requests the animated nameplate asset.
+  // Hovering the DM row smoothly fades the nameplate in (does not snap to 1.0) and requests asset.webm.
   mouse(CCORD_IN_MOUSE_MOVE, 0, dm_row_x, dm_row_y);
-  frame(2);
+  frame(1);
+  np_v = anim_slot_value("dmnp", dm_ch.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v == 0.0f && ccord_anim_active(&F.ui->anim));
+  frame(1);   // +50ms into the 200ms fade-in: strictly intermediate
+  np_v = anim_slot_value("dmnp", dm_ch.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v > 0.05f && np_v < 0.95f && ccord_anim_active(&F.ui->anim));
   CT_CHECK(ccord_session_get_media(F.session, k_dm_anim) != nullptr ||
            ccord_render_has_texture(F.renderer, k_dm_anim, nullptr, nullptr));
+  frame(4);   // settles at 1.0
+  np_v = anim_slot_value("dmnp", dm_ch.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v >= 0.99f);
 
   // Upload the real 2-frame VP9 alpha WebM under k_dm_anim and verify playback tracks hover & active view.
   ccord_media_opts vopts = {.max_dim = 512, .allow_video = true};
@@ -2695,23 +2719,81 @@ static void test_nameplate_visibility_and_animation(void)
   draw_only();
   CT_CHECK(F.ui->media_animating);
 
-  // Unhover while still on Friends view (not actively viewed): nameplate hides and animation stops.
+  // Unhover while still on Friends view (not actively viewed): animation stops immediately while opacity eases out.
   mouse(CCORD_IN_MOUSE_MOVE, 0, 5.0f, 5.0f);
-  frame(2);
-  draw_only();
-  CT_CHECK(!F.ui->media_animating);
+  frame(1);
+  np_v = anim_slot_value("dmnp", dm_ch.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v >= 0.95f && ccord_anim_active(&F.ui->anim) && !F.ui->media_animating);
+  frame(1);   // +50ms into the 150ms fade-out: strictly intermediate
+  np_v = anim_slot_value("dmnp", dm_ch.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v > 0.05f && np_v < 0.95f && !F.ui->media_animating);
+  frame(3);   // settles at 0.0
+  np_v = anim_slot_value("dmnp", dm_ch.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v <= 0.01f && !F.ui->media_animating);
+
+  // Reduced motion snaps DM nameplate immediately without fading.
+  F.ui->anim.reduced_motion = true;
+  mouse(CCORD_IN_MOUSE_MOVE, 0, dm_row_x, dm_row_y);
+  frame(1);
+  np_v = anim_slot_value("dmnp", dm_ch.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v >= 0.99f);
+  mouse(CCORD_IN_MOUSE_MOVE, 0, 5.0f, 5.0f);
+  frame(1);
+  np_v = anim_slot_value("dmnp", dm_ch.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v <= 0.01f);
+  F.ui->anim.reduced_motion = false;
 
   // Click the DM row to actively view it, then move mouse away: nameplate stays visible and animates.
   click(dm_row_x, dm_row_y);
   mouse(CCORD_IN_MOUSE_MOVE, 0, 5.0f, 5.0f);
-  frame(2);
+  frame(5);
   CT_CHECK(ccord_store_selected_channel(F.store) == dm_ch.id && !F.ui->dm_friends_view);
+  np_v = anim_slot_value("dmnp", dm_ch.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v >= 0.99f);
   ccord_render_set_anim_clock(F.renderer, 1000u);
   draw_only();
   CT_CHECK(F.ui->media_animating);
   ccord_render_set_anim_clock(F.renderer, 1120u);
   draw_only();
   CT_CHECK(ccord_render_texture_is_animated(F.renderer, k_dm_anim, &cur_f, &cnt_f) && cur_f == 1u);
+
+  // Async nameplate arrival on an already-selected DM transitions smoothly in instead of snapping.
+  ccord_user dm_u2 = {
+    .id = 880103u,
+    .name = "LateNameplateDM",
+    .handle = "latenameplatedm",
+    .bio = "",
+    .pronouns = "",
+    .presence = CCORD_PRESENCE_ONLINE,
+  };
+  CT_CHECK(ccord_store_upsert_user(F.store, &dm_u2, &err) == CCORD_OK);
+  ccord_channel dm_ch2 = {
+    .id = 880202u,
+    .guild_id = CCORD_DM_GUILD_ID,
+    .kind = CCORD_CHANNEL_TEXT,
+    .name = "LateNameplateDM",
+    .topic = "",
+    .user_id = dm_u2.id,
+    .last_message_id = 999999999998ULL,
+  };
+  CT_CHECK(ccord_store_upsert_channel(F.store, &dm_ch2, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_select_channel(F.store, dm_ch2.id, &err) == CCORD_OK);
+  F.ui->dm_friends_view = false;
+  frame(2);
+  np_v = anim_slot_value("dmnp", dm_ch2.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v == 0.0f);
+  snprintf(dm_u2.nameplate_asset, sizeof dm_u2.nameplate_asset, "%s", k_dm_asset);
+  snprintf(dm_u2.nameplate_palette, sizeof dm_u2.nameplate_palette, "cobalt");
+  CT_CHECK(ccord_store_upsert_user(F.store, &dm_u2, &err) == CCORD_OK);
+  frame(1);
+  np_v = anim_slot_value("dmnp", dm_ch2.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v == 0.0f && ccord_anim_active(&F.ui->anim));
+  frame(1);
+  np_v = anim_slot_value("dmnp", dm_ch2.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v > 0.05f && np_v < 0.95f);
+  frame(4);
+  np_v = anim_slot_value("dmnp", dm_ch2.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v >= 0.99f);
 
   // ---- Part 2: Members tab nameplate (static on idle/hover, animated only when profile clicked) ----
   ccord_guild np_guild = {.id = 880900u, .name = "Nameplate Guild", .icon_url = ""};
@@ -2759,9 +2841,19 @@ static void test_nameplate_visibility_and_animation(void)
   CT_CHECK(!ccord_render_has_texture(F.renderer, k_mem_anim, nullptr, nullptr));
   CT_CHECK(!F.ui->media_animating);
 
-  // Hovering the member row in Members tab stays NON-animated (still must NOT fetch asset.webm).
+  // Hovering the member row in Members tab eases hover intensity smoothly while staying NON-animated.
+  np_v = anim_slot_value("memnp", mem_u.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v == 0.0f);
   mouse(CCORD_IN_MOUSE_MOVE, 0, mem_row_x, mem_row_y);
-  frame(2);
+  frame(1);
+  np_v = anim_slot_value("memnp", mem_u.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v == 0.0f && ccord_anim_active(&F.ui->anim));
+  frame(1);   // +50ms into the 160ms hover boost
+  np_v = anim_slot_value("memnp", mem_u.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v > 0.05f && np_v < 0.95f);
+  frame(3);
+  np_v = anim_slot_value("memnp", mem_u.id * 2u, &np_found);
+  CT_CHECK(np_found && np_v >= 0.99f);
   CT_CHECK(ccord_session_get_media(F.session, k_mem_anim) == nullptr);
   CT_CHECK(!ccord_render_has_texture(F.renderer, k_mem_anim, nullptr, nullptr));
   CT_CHECK(!F.ui->media_animating);

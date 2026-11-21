@@ -800,9 +800,20 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
     if (g == CCORD_DM_GUILD_ID) {
       bool group = ui_channel_is_group_dm(ch);
       const ccord_user *store_u = ui_dm_recipient(ui, ch);
-      if (!group && store_u && store_u->nameplate_asset[0] != '\0' && (hover || selected)) {
-        (void)ui_draw_nameplate(ui, r, store_u->nameplate_asset, store_u->nameplate_palette,
-                                item, M(channel_item_radius), hover, selected, true, false);
+      if (!group) {
+        const char *np_asset = (store_u && store_u->nameplate_asset[0] != '\0') ? store_u->nameplate_asset : nullptr;
+        if (np_asset || hover || selected) {
+          (void)ui_draw_nameplate(ui, r, np_asset, store_u ? store_u->nameplate_palette : nullptr,
+                                  item, M(channel_item_radius),
+                                  (ui_nameplate_opts){
+                                    .hover = hover,
+                                    .selected = selected,
+                                    .animate = hover || selected,
+                                    .reveal_on_active = true,
+                                    .anim_ns = "dmnp",
+                                    .anim_id = ch->id,
+                                  });
+        }
       }
       const char *dm_name = ui_dm_display_name(ui, ch);
       const char *dm_avatar = (store_u && store_u->avatar_url && store_u->avatar_url[0]) ? store_u->avatar_url
@@ -939,7 +950,14 @@ void ui_draw_user_panel(ccord_ui *ui, ccord_renderer *r)
     bool np_anim = us_hover || ui->sc.open;
     (void)ui_draw_nameplate(ui, r, u->nameplate_asset, u->nameplate_palette,
                             (ccord_rect){p->x, p->y + 1.0f, fmaxf(p->w - 1.0f, 0.0f), fmaxf(p->h - 1.0f, 0.0f)},
-                            0.0f, us_hover, ui->sc.open, np_anim, false);
+                            0.0f,
+                            (ui_nameplate_opts){
+                              .hover = us_hover,
+                              .selected = ui->sc.open,
+                              .animate = np_anim,
+                              .anim_ns = "upnp",
+                              .anim_id = u->id,
+                            });
   }
   if (us_hv > 0.004f) {
     ccord_draw_rrect(r, ui->user_status_rect, 6.0f, ui_alpha(COL(bg_item_hover), us_hv));

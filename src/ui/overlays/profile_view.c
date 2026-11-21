@@ -208,6 +208,19 @@ ccord_color ui_profile_card_bg(const ccord_ui *ui, const ui_profile_look *look, 
   return ui_mix(base, scrim, look->light_text ? (178.0f / 255.0f) : (188.0f / 255.0f));
 }
 
+#define UI_PROFILE_BANNER_FADE_MS 180u
+#define UI_NAMEPLATE_IN_MS 200u
+#define UI_NAMEPLATE_OUT_MS 150u
+#define UI_NAMEPLATE_HOVER_MS 160u
+#define UI_NAMEPLATE_TEX_MS 160u
+
+static uint8_t clamp_u8_alpha(float v)
+{
+  if (v <= 0.0f) return 0u;
+  if (v >= 255.0f) return 255u;
+  return (uint8_t)roundf(v);
+}
+
 void ui_profile_draw_banner(ccord_ui *ui, ccord_renderer *r, const ui_profile_look *look, const ccord_user *u,
                             ccord_rect banner, float radius)
 {
@@ -217,24 +230,27 @@ void ui_profile_draw_banner(ccord_ui *ui, ccord_renderer *r, const ui_profile_lo
     int tw = 0, th = 0;
     have_img = ccord_render_has_texture(r, look->banner_url, &tw, &th) && tw > 2 && th > 2;
   }
+  uint64_t bkey = look->user_id ^ (look->guild_id * 0x9E3779B1ull);
+  float img_vis = ui_fade_ms(ui, "pban", bkey, have_img, UI_PROFILE_BANNER_FADE_MS);
+  uint8_t img_a = clamp_u8_alpha(255.0f * img_vis);
   if (look->has_theme) {
-    if (!have_img) return;   // ui_profile_draw_theme_bg already painted the seamless themed banner + 4px border
+    if (!have_img || img_a == 0) return;   // ui_profile_draw_theme_bg already painted the seamless themed banner + 4px border
     const float border = 4.0f;
     if (banner.w <= border * 2.0f || banner.h <= border) return;
     ccord_rect inner = {banner.x + border, banner.y + border, banner.w - border * 2.0f, banner.h - border};
     float ir = radius > border ? radius - border : 0.0f;
     ccord_push_clip(r, inner);
-    ccord_draw_texture_cover(r, look->banner_url, (ccord_rect){inner.x, inner.y, inner.w, inner.h + ir * 2.0f}, ir, 255,
-                             true);
+    ccord_draw_texture_cover(r, look->banner_url, (ccord_rect){inner.x, inner.y, inner.w, inner.h + ir * 2.0f}, ir,
+                             img_a, true);
     ccord_pop_clip(r);
     return;
   }
   ccord_push_clip(r, banner);
   ccord_draw_rrect(r, (ccord_rect){banner.x, banner.y, banner.w, banner.h + radius * 2.0f}, radius,
                    ui_profile_banner_fill(ui, look, u));
-  if (have_img) {
+  if (have_img && img_a > 0) {
     ccord_draw_texture_cover(r, look->banner_url, (ccord_rect){banner.x, banner.y, banner.w, banner.h + radius * 2.0f},
-                             radius, 255, true);
+                             radius, img_a, true);
   }
   ccord_pop_clip(r);
 }
@@ -424,10 +440,27 @@ static bool url_is_video_asset(const char *url)
 }
 
 bool ui_draw_nameplate(ccord_ui *ui, ccord_renderer *r, const char *asset, const char *palette, ccord_rect row,
-                       float radius, bool hover, bool selected, bool animate, bool offline)
+                       float radius, ui_nameplate_opts opt)
 {
-  if (!ui || !r || !has_text(asset) || row.w <= 0.0f || row.h <= 0.0f) return false;
-  bool play_anim = animate && !ui->anim.reduced_motion;
+  if (!ui || !r || row.w <= 0.0f || row.h <= 0.0f) return false;
+  bool has_asset = has_text(asset);
+  bool active = opt.hover || opt.selected;
+  const char *ns = opt.anim_ns ? opt.anim_ns : "np";
+  uint64_t id = opt.anim_id;
+  float vis = 1.0f;
+  float boost = 1.0f;
+  if (opt.reveal_on_active) {
+    bool want = has_asset && active;
+    vis = ui_fade_ms(ui, ns, id * 2u, want, want ? UI_NAMEPLATE_IN_MS : UI_NAMEPLATE_OUT_MS);
+    if (!has_asset || (vis <= UI_PRESENCE_EPS && !want)) return false;
+    // Reveal-only rows (DM sidebar) fade from full active intensity down to 0 without a mid-fade step drop.
+    boost = 1.0f;
+  } else {
+    if (!has_asset) return false;
+    boost = ui_fade_ms(ui, ns, id * 2u, active, UI_NAMEPLATE_HOVER_MS);
+  }
+  bool allow_fetch = !opt.reveal_on_active || active;
+  bool play_anim = opt.animate && !ui->anim.reduced_motion;
   char static_url[256] = {0};
   char anim_url[256] = {0};
   bool direct_http = is_http(asset);
@@ -441,14 +474,58 @@ bool ui_draw_nameplate(ccord_ui *ui, ccord_renderer *r, const char *asset, const
     snprintf(anim_url, sizeof anim_url, "https://cdn.discordapp.com/assets/collectibles/%.127s%sasset.webm",
              asset, slash ? "" : "/");
   }
+
+  const char *draw_url = nullptr;
+  bool draw_anim = false;
+  int tw = 0, th = 0;
+  if (direct_http) {
+    bool is_vid = url_is_video_asset(static_url);
+    bool ready = allow_fetch
+                     ? (is_vid ? ui_ensure_media_ex(ui, r, static_url, 512, true) : ui_ensure_media(ui, r, static_url))
+                     : true;
+    if (ready && ccord_render_has_texture(r, static_url, &tw, &th) && tw > 2 && th > 2) {
+      draw_url = static_url;
+      draw_anim = play_anim;
+    }
+  } else {
+    if (play_anim) {
+      if (allow_fetch && ui_ensure_media_ex(ui, r, anim_url, 512, true) &&
+          ccord_render_has_texture(r, anim_url, &tw, &th) && tw > 2 && th > 2) {
+        draw_url = anim_url;
+        draw_anim = true;
+      }
+    }
+    if (!draw_url) {
+      if (!allow_fetch) {
+        // Fading out on the DM list: keep any already-cached texture frozen instead of initiating new fetches.
+        if (ccord_render_has_texture(r, anim_url, &tw, &th) && tw > 2 && th > 2) {
+          draw_url = anim_url;
+          draw_anim = false;
+        } else if (ccord_render_has_texture(r, static_url, &tw, &th) && tw > 2 && th > 2) {
+          draw_url = static_url;
+          draw_anim = false;
+        }
+      } else if (ui_ensure_media(ui, r, static_url) &&
+                 ccord_render_has_texture(r, static_url, &tw, &th) && tw > 2 && th > 2) {
+        draw_url = static_url;
+        draw_anim = false;
+      } else if (ccord_render_has_texture(r, anim_url, &tw, &th) && tw > 2 && th > 2) {
+        draw_url = anim_url;
+        draw_anim = false;
+      }
+    }
+  }
+  float tex_vis = ui_fade_ms(ui, ns, id * 2u + 1u, draw_url != nullptr, UI_NAMEPLATE_TEX_MS);
+  if (vis <= UI_PRESENCE_EPS) return false;
+
   ccord_color bg = COL(bg_secondary);
   uint32_t bg_rgb = ((uint32_t)bg.r << 16) | ((uint32_t)bg.g << 8) | (uint32_t)bg.b;
   bool light_ui = rgb_luma(bg_rgb) > 0.50f;
   ccord_color tint = ui_rgb_color(nameplate_palette_rgb(palette, light_ui));
 
   // Subtle left-to-right palette gradient behind the row (matching Discord's nameplate backdrop).
-  float a0 = offline ? 0.05f : ((hover || selected) ? 0.20f : 0.11f);
-  float a1 = offline ? 0.13f : ((hover || selected) ? 0.38f : 0.26f);
+  float a0 = (opt.offline ? 0.05f : (0.11f + (0.20f - 0.11f) * boost)) * vis;
+  float a1 = (opt.offline ? 0.13f : (0.26f + (0.38f - 0.26f) * boost)) * vis;
   enum { NP_STEPS = 12 };
   float x1 = row.x + row.w;
   for (int i = 0; i < NP_STEPS; i++) {
@@ -467,39 +544,17 @@ bool ui_draw_nameplate(ccord_ui *ui, ccord_renderer *r, const char *asset, const
     }
   }
 
-  const char *draw_url = nullptr;
-  bool draw_anim = false;
-  int tw = 0, th = 0;
-  if (direct_http) {
-    bool is_vid = url_is_video_asset(static_url);
-    bool ready = is_vid ? ui_ensure_media_ex(ui, r, static_url, 512, true) : ui_ensure_media(ui, r, static_url);
-    if (ready && ccord_render_has_texture(r, static_url, &tw, &th) && tw > 2 && th > 2) {
-      draw_url = static_url;
-      draw_anim = play_anim;
-    }
-  } else {
-    if (play_anim) {
-      if (ui_ensure_media_ex(ui, r, anim_url, 512, true) &&
-          ccord_render_has_texture(r, anim_url, &tw, &th) && tw > 2 && th > 2) {
-        draw_url = anim_url;
-        draw_anim = true;
-      }
-    }
-    if (!draw_url) {
-      if (ui_ensure_media(ui, r, static_url) &&
-          ccord_render_has_texture(r, static_url, &tw, &th) && tw > 2 && th > 2) {
-        draw_url = static_url;
-        draw_anim = false;
-      }
-    }
-  }
   if (draw_url) {
     float img_w = row.h * ((float)tw / (float)th);
     ccord_rect dst = {row.x + row.w - img_w, row.y, img_w, row.h};
-    uint8_t img_a = offline ? 115 : ((hover || selected) ? 245 : 210);
-    ccord_push_clip(r, row);
-    ccord_draw_texture_rounded_anim(r, draw_url, dst, radius, img_a, draw_anim);
-    ccord_pop_clip(r);
+    float base_a = opt.offline ? 115.0f : (210.0f + (245.0f - 210.0f) * boost);
+    uint8_t img_a = clamp_u8_alpha(base_a * vis * tex_vis);
+    if (img_a == 0 && draw_anim) img_a = 1;
+    if (img_a > 0) {
+      ccord_push_clip(r, row);
+      ccord_draw_texture_rounded_anim(r, draw_url, dst, radius, img_a, draw_anim);
+      ccord_pop_clip(r);
+    }
   }
   return true;
 }
