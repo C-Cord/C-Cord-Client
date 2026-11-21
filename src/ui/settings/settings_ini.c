@@ -177,7 +177,7 @@ static bool settings_visit(const char *section, const char *key, const char *val
     clamp_int(&iv, 0, (int)CCORD_STREAM_ENCODER_AUTO);
     ui->settings_encoder = ui->gl_encoder = iv;
   } else if (strcmp(key, "codec") == 0 && ini_int(value, &iv)) {
-    clamp_int(&iv, 0, 2);
+    clamp_int(&iv, 0, (int)CCORD_STREAM_CODEC_AV1);
     ui->settings_codec = ui->gl_codec = iv;
   } else if (strcmp(key, "framework") == 0 && ini_int(value, &iv)) {
     clamp_int(&iv, 0, (int)CCORD_STREAM_FRAMEWORK_AUTO);

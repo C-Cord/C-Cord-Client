@@ -356,7 +356,7 @@ typedef struct ccord_ui_settings_debug {
   ccord_rect input_device, output_device;
   ccord_rect input_volume, output_volume;           // slider tracks
   ccord_rect voice_mode[2];                         // voice activity, push to talk
-  ccord_rect encoder[5], codec[3], framework[5], resolution[4], fps[3];
+  ccord_rect encoder[5], codec[2], framework[5], resolution[4], fps[3];
   ccord_rect embed_toggle, attachment_toggle, hardware_toggle, plugins_switch;
   ccord_rect billing_btn, nitro_btn, shop_btn, boost_btn;
   ccord_rect quickcss_toggle, notify_desktop_toggle, reduced_motion_toggle;

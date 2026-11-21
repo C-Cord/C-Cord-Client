@@ -369,7 +369,7 @@ static void test_voice_stream_and_pins(void)
   CT_CHECK(ccord_store_voice_server(s, 10) != nullptr);
   CT_CHECK(strcmp(ccord_store_voice_server(s, 10)->endpoint, "voice.example") == 0);
 
-  ccord_stream_config cfg = {.encoder = CCORD_STREAM_ENCODER_NVENC, .codec = CCORD_STREAM_CODEC_HEVC,
+  ccord_stream_config cfg = {.encoder = CCORD_STREAM_ENCODER_NVENC, .codec = CCORD_STREAM_CODEC_AV1,
                              .framework = CCORD_STREAM_FRAMEWORK_NVFBC,
                              .resolution = CCORD_STREAM_RES_1440P, .fps = CCORD_STREAM_FPS_60};
   ccord_stream_state stream = {.guild_id = 10, .channel_id = 21, .user_id = 1, .active = true, .config = cfg};

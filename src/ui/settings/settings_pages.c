@@ -236,7 +236,7 @@ static void draw_streaming(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
   draw_row_label(ui, r, g, 3, "FRAMERATE");
   draw_chip_row(ui, r, g, 3, 3, st_k_fps, ui->settings_fps);
   draw_row_label(ui, r, g, 4, "CODEC");
-  draw_chip_row(ui, r, g, 4, 3, st_k_codecs, ui->settings_codec);
+  draw_chip_row(ui, r, g, 4, 2, st_k_codecs, ui->settings_codec);
   const ccord_stream_state *st = ccord_store_stream(ui->d.store);
   ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_muted));
   char note[192];
@@ -482,10 +482,8 @@ void ccord_ui_get_settings_debug(const ccord_ui *ui, ccord_ui_settings_debug *ou
     out->encoder[i] = st_chips_rect(&g, 0, i, 5);
     out->framework[i] = st_chips_rect(&g, 1, i, 5);
   }
-  for (int i = 0; i < 3; i++) {
-    out->codec[i] = st_chips_rect(&g, 4, i, 3);
-    out->fps[i] = st_chips_rect(&g, 3, i, 3);
-  }
+  for (int i = 0; i < 2; i++) out->codec[i] = st_chips_rect(&g, 4, i, 2);
+  for (int i = 0; i < 3; i++) out->fps[i] = st_chips_rect(&g, 3, i, 3);
   for (int i = 0; i < 4; i++) out->resolution[i] = st_chips_rect(&g, 2, i, 4);
   out->embed_toggle = st_toggle_rect(&g, 0);
   out->attachment_toggle = st_toggle_rect(&g, 1);
@@ -501,7 +499,7 @@ void ccord_ui_get_settings_debug(const ccord_ui *ui, ccord_ui_settings_debug *ou
   for (int i = 0; i < 4; i++) out->notify_timeout[i] = st_chips_rect(&g, 4, i, 4);
 
   out->encoder_count = 5;
-  out->codec_count = 3;
+  out->codec_count = 2;
   out->framework_count = 5;
   out->resolution_count = 4;
   out->fps_count = 3;

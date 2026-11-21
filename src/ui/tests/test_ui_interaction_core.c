@@ -345,10 +345,10 @@ static void test_voice_and_stream(void)
   CT_CHECK(d.go_live_open);
   CT_CHECK(F.ui->go_live_source_count > 0);
   save_stream_screenshot("go_live_modal.png");
-  CT_CHECK(d.go_live_option_count[0] == 5 && d.go_live_option_count[1] == 3 &&
+  CT_CHECK(d.go_live_option_count[0] == 5 && d.go_live_option_count[1] == 2 &&
            d.go_live_option_count[2] == 5 && d.go_live_option_count[3] == 4 && d.go_live_option_count[4] == 3);
   // Pick AMF / AV1 / Vulkan / 1440p / 15 FPS.
-  ccord_rect picks[5] = {d.go_live_option[0][2], d.go_live_option[1][2], d.go_live_option[2][3],
+  ccord_rect picks[5] = {d.go_live_option[0][2], d.go_live_option[1][1], d.go_live_option[2][3],
                          d.go_live_option[3][2], d.go_live_option[4][0]};
   for (int i = 0; i < 5; i++) {
     click(picks[i].x + picks[i].w * 0.5f, picks[i].y + picks[i].h * 0.5f);
@@ -1191,17 +1191,20 @@ static void test_settings_categories(void)
   ccord_ui_get_settings_debug(F.ui, &s);
   CT_CHECK(s.hardware_accel == !hw);
 
-  // Streaming & Encoders: default encoder, framework, resolution and FPS.
+  // Streaming & Encoders: default encoder, framework, resolution, FPS and codec.
   click(s.tabs[4].x + 10.0f, s.tabs[4].y + 10.0f);
   ccord_ui_get_settings_debug(F.ui, &s);
   CT_CHECK(s.page == 4);
+  CT_CHECK(s.codec_count == 2);
   save_stream_screenshot("settings_streaming.png");
   click(s.encoder[2].x + 10.0f, s.encoder[2].y + 12.0f);
   click(s.framework[3].x + 10.0f, s.framework[3].y + 12.0f);
   click(s.resolution[1].x + 10.0f, s.resolution[1].y + 12.0f);
   click(s.fps[2].x + 10.0f, s.fps[2].y + 12.0f);
+  click(s.codec[1].x + 10.0f, s.codec[1].y + 12.0f);
   ccord_ui_get_settings_debug(F.ui, &s);
-  CT_CHECK(s.encoder_value == 2 && s.framework_value == 3 && s.resolution_value == 1 && s.fps_value == 2);
+  CT_CHECK(s.encoder_value == 2 && s.framework_value == 3 && s.resolution_value == 1 && s.fps_value == 2 &&
+           s.codec_value == CCORD_STREAM_CODEC_AV1);
 
   // Text & Images: inline embed and attachment cards.
   click(s.tabs[5].x + 10.0f, s.tabs[5].y + 10.0f);

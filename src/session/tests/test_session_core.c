@@ -142,6 +142,10 @@ static void test_flow(void)
   pump_all(s);
   CT_CHECK(!ccord_store_voice_user(store, guild, ccord_store_self_id(store))->self_video);
 
+  ccord_stream_config bad_codec = {.encoder = CCORD_STREAM_ENCODER_VAAPI, .codec = (ccord_stream_codec)2,
+                                   .framework = CCORD_STREAM_FRAMEWORK_PIPEWIRE,
+                                   .resolution = CCORD_STREAM_RES_1080P, .fps = CCORD_STREAM_FPS_30};
+  CT_CHECK(ccord_session_start_stream(s, guild, voice_ch, &bad_codec, &err) == CCORD_ERR_INVALID);
   ccord_stream_config scfg = {.encoder = CCORD_STREAM_ENCODER_VAAPI, .codec = CCORD_STREAM_CODEC_AV1,
                               .framework = CCORD_STREAM_FRAMEWORK_PIPEWIRE,
                               .resolution = CCORD_STREAM_RES_1080P, .fps = CCORD_STREAM_FPS_30};

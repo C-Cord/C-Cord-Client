@@ -811,7 +811,7 @@ int ui_go_live_option_count(int category)
 {
   switch (category) {
     case 0: return 5;   // encoder
-    case 1: return 3;   // codec
+    case 1: return 2;   // codec
     case 2: return 5;   // framework
     case 3: return 4;   // resolution
     case 4: return 3;   // fps

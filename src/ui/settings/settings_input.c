@@ -240,8 +240,8 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
           return true;
         }
       }
-      for (int i = 0; i < 3; i++) {
-        if (ui_in_rect(x, y, st_chips_rect(g, 4, i, 3))) {
+      for (int i = 0; i < 2; i++) {
+        if (ui_in_rect(x, y, st_chips_rect(g, 4, i, 2))) {
           ui->settings_codec = i;
           ui->gl_codec = i;
           ui->dirty = true;
@@ -681,8 +681,8 @@ static int64_t settings_hover_key(const ccord_ui *ui, const sgeom *g, float x, f
       for (int i = 0; i < 3; i++) {
         if (ui_in_rect(x, y, st_chips_rect(g, 3, i, 3))) return 440 + i;
       }
-      for (int i = 0; i < 3; i++) {
-        if (ui_in_rect(x, y, st_chips_rect(g, 4, i, 3))) return 450 + i;
+      for (int i = 0; i < 2; i++) {
+        if (ui_in_rect(x, y, st_chips_rect(g, 4, i, 2))) return 450 + i;
       }
       return 0;
     }

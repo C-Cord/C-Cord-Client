@@ -15,8 +15,8 @@ static const char *encoder_label(int v)
 
 static const char *codec_label(int v)
 {
-  static const char *const names[] = {"H.264", "HEVC", "AV1"};
-  return v >= 0 && v < 3 ? names[v] : "?";
+  static const char *const names[] = {"H.264", "AV1"};
+  return v >= 0 && v < 2 ? names[v] : "?";
 }
 
 [[maybe_unused]] static const char *framework_label(int v)

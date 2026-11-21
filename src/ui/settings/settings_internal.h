@@ -152,7 +152,7 @@ ccord_rect st_extensions_toggle_rect(const sgeom *g);
 int st_find_val_index(const int *vals, int count, int value);
 sgeom st_geometry(const ccord_ui *ui);
 extern const char *const st_k_categories[CAT_COUNT];
-extern const char *const st_k_codecs[3];
+extern const char *const st_k_codecs[2];
 extern const char *const st_k_display_mode[2];
 extern const int st_k_encoder_vals[STREAM_ENC_COUNT];
 extern const char *const st_k_encoders[STREAM_ENC_COUNT];

@@ -4,7 +4,7 @@
 #include <ccord/model/types.h>
 
 typedef enum ccord_stream_encoder : uint8_t {
-  CCORD_STREAM_ENCODER_NVENC = 0,     // NVIDIA NVENC (H.264/HEVC/AV1)
+  CCORD_STREAM_ENCODER_NVENC = 0,     // NVIDIA NVENC (H.264/AV1)
   CCORD_STREAM_ENCODER_VAAPI,         // Linux VA-API
   CCORD_STREAM_ENCODER_AMF,           // AMD AMF
   CCORD_STREAM_ENCODER_VULKAN,        // Vulkan video
@@ -17,7 +17,6 @@ typedef enum ccord_stream_encoder : uint8_t {
 } ccord_stream_encoder;
 typedef enum ccord_stream_codec : uint8_t {
   CCORD_STREAM_CODEC_H264 = 0,
-  CCORD_STREAM_CODEC_HEVC,
   CCORD_STREAM_CODEC_AV1,
 } ccord_stream_codec;
 typedef enum ccord_stream_framework : uint8_t {

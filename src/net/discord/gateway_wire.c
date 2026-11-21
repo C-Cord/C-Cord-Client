@@ -368,7 +368,6 @@ static const char *stream_codec_name(ccord_stream_codec c)
 {
   switch (c) {
     case CCORD_STREAM_CODEC_H264: return "H264";
-    case CCORD_STREAM_CODEC_HEVC: return "HEVC";
     case CCORD_STREAM_CODEC_AV1: return "AV1";
   }
   return "H264";

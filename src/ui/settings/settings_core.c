@@ -65,7 +65,7 @@ int st_find_val_index(const int *vals, int count, int value)
   }
   return -1;
 }
-const char *const st_k_codecs[3] = {"H.264", "HEVC", "AV1"};
+const char *const st_k_codecs[2] = {"H.264", "AV1"};
 const char *const st_k_resolutions[4] = {"720p", "1080p", "1440p", "Source"};
 const char *const st_k_fps[3] = {"15", "30", "60"};
 const char *const st_k_display_mode[2] = {"Compact", "Cozy"};

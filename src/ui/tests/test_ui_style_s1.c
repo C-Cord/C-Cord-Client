@@ -94,7 +94,7 @@ static const page_expect k_expect[] = {
   {"My Account", TP_ACCOUNT, 10, 3, 0, 0, 0, 0},
   {"Appearance", TP_APPEARANCE, 3, 1, 2, 5, 0, 1},
   {"Voice & Video", TP_VOICE, 6, 0, 4, 2, 4, 3},
-  {"Streaming", TP_STREAMING, 0, 0, 0, 22, 0, 0},
+  {"Streaming", TP_STREAMING, 0, 0, 0, 21, 0, 0},
   {"Text & Images", TP_TEXT_IMAGES, 0, 0, 2, 0, 0, 0},
   {"Notifications", TP_NOTIFICATIONS, 1, 0, 5, 4, 0, 0},
   {"Keybinds", TP_KEYBINDS, 5, 0, 0, 0, 0, 0},   // one key-cap button per keybind row: five rows

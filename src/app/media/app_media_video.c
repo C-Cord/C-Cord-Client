@@ -129,8 +129,8 @@ static void open_encoder(ccord_app_media *m, bool virtual_clock, uint64_t now)
                              .height = vh,
                              .fps = vfps,
                              .bitrate = 2000000,
-                             // The Go Live wire format is H.264 Annex-B: HEVC/AV1 stream
-                             // selections fall back to H.264 (the platform encodes H.264/MPEG4).
+                             // The Go Live wire format is H.264 Annex-B: AV1 stream selections
+                             // fall back to H.264 (the platform encodes H.264/MPEG4).
                              .codec = CCORD_VIDEO_CODEC_H264,
                              // Probe PipeWire frames only for the portal/auto capture frameworks;
                              // an explicit X11/GPU framework stays on software frames.

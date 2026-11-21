@@ -1462,9 +1462,9 @@ static void test_golive_encoder_config(void)
   ccord_app_media *m = make();
   F.stream_active = true;
   F.have_capture_source = true;
-  // Explicit X11 framework: no PipeWire probe; HEVC selection falls back to the H.264 wire codec.
+  // Explicit X11 framework: no PipeWire probe; AV1 selection falls back to the H.264 wire codec.
   F.stream_cfg.framework = CCORD_STREAM_FRAMEWORK_X11;
-  F.stream_cfg.codec = CCORD_STREAM_CODEC_HEVC;
+  F.stream_cfg.codec = CCORD_STREAM_CODEC_AV1;
   ccord_app_media_pump(m, false, true);
   CT_CHECK(F.video_opens == 1);
   CT_CHECK(F.last_vcfg.use_pipewire == false);
