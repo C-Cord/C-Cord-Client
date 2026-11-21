@@ -177,6 +177,7 @@ struct ccord_plugins {
   ccord_catalog *catalog;
   ccord_sub_id sub;
   uint64_t now_ms;
+  bool in_background;
   // API v3
   plugin_workers *workers;
   bool dev_auto_reload;

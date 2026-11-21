@@ -567,8 +567,9 @@ static int run_loop(host *h)
     }
     unsigned events = CCORD_POLL_IN;
     if (ccord_ipc_has_pending_output(h->ipc)) events |= CCORD_POLL_OUT;
+    // Block until IPC activity or the next sandbox timer; shutting down or killing an in-process
+    // plugin closes the peer socketpair end, waking poll() immediately without periodic 1 s ticks.
     int poll_ms = h->sb ? ccord_sandbox_next_timer_ms(h->sb) : -1;
-    if (h->cancel && (poll_ms < 0 || poll_ms > 1000)) poll_ms = 1000;
     if (h->deferred_count > 0) poll_ms = 0;
     if (ccord_sock_poll1(ccord_ipc_fd(h->ipc), events, poll_ms) < 0) fatal(h, EXIT_INTERNAL);
     for (;;) {

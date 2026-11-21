@@ -127,6 +127,10 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
 void ccord_plugins_destroy(ccord_plugins *p);                        // = shutdown + free
 size_t ccord_plugins_load_all(ccord_plugins *p);                      // discover, validate manifests, spawn hosts; returns started count
 void ccord_plugins_pump(ccord_plugins *p, uint64_t now_ms);           // read IPC, enforce permissions, send events, pings, reap children, flush storage
+// Pauses/resumes periodic keep-alive pings while the app is backgrounded so idle plugins sleep with zero wakeups.
+void ccord_plugins_set_background(ccord_plugins *p, bool background);
+// Collects active plugin IPC sockets for kernel poll() and reports the next pending deadline/flush timeout (UINT32_MAX = none).
+size_t ccord_plugins_wait_info(const ccord_plugins *p, ccord_socket_t *out_fds, size_t cap, uint32_t *out_timeout_ms);
 void ccord_plugins_shutdown(ccord_plugins *p);                        // send shutdown, wait <=1 s, SIGKILL leftovers
 int ccord_plugins_host_pid(const ccord_plugins *p, const char *owner);            // child pid of the running host, or -1 (diagnostics and tests)
 // Pushes updated safe-area/viewport/keyboard/orientation metrics to all active plugins and emits change events.

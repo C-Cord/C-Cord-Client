@@ -210,7 +210,7 @@ static void check_timers(ccord_plugins *m, plugin *p)
     s->kind = PEND_NONE;
   }
   if (!p->ipc || p->state != CCORD_PLUGIN_READY) return;
-  if (!pl_pend_slot(p, PEND_PING) && now - p->last_ping_sent_ms >= PING_INTERVAL_MS) {
+  if (!m->in_background && !pl_pend_slot(p, PEND_PING) && now - p->last_ping_sent_ms >= PING_INTERVAL_MS) {
     pending_req *slot = pl_pend_free(p);
     if (!slot) return;
     uint32_t id = pl_next_request_id(p);
@@ -249,6 +249,61 @@ void ccord_plugins_pump(ccord_plugins *m, uint64_t now_ms)
   if (m->workers) pw_pump(m->workers, plugins_ext_on_worker_event, m);
   if (m->dev_auto_reload) plugins_ext_dev_poll(m, now_ms);
   if (m->catalog) ccord_catalog_pump(m->catalog, now_ms);
+}
+
+void ccord_plugins_set_background(ccord_plugins *m, bool background)
+{
+  if (!m || m->in_background == background) return;
+  m->in_background = background;
+  if (!background) {
+    uint64_t now = m->now_ms ? m->now_ms : ccord_clock_ms();
+    for (size_t i = 0; i < m->nplugins; i++) {
+      if (m->plugins[i]) m->plugins[i]->last_ping_sent_ms = now;
+    }
+  }
+}
+
+size_t ccord_plugins_wait_info(const ccord_plugins *m, ccord_socket_t *out_fds, size_t cap, uint32_t *out_timeout_ms)
+{
+  if (out_timeout_ms) *out_timeout_ms = UINT32_MAX;
+  if (!m) return 0;
+  uint64_t now = m->now_ms ? m->now_ms : ccord_clock_ms();
+  uint32_t timeout = UINT32_MAX;
+  size_t n = 0;
+  for (size_t i = 0; i < m->nplugins; i++) {
+    const plugin *p = m->plugins[i];
+    if (!p || !p->ipc) continue;
+    ccord_socket_t fd = ccord_ipc_fd(p->ipc);
+    if (fd != CCORD_INVALID_SOCKET && out_fds && n < cap) out_fds[n++] = fd;
+    if (ccord_ipc_has_pending_output(p->ipc)) timeout = 0;
+    for (size_t k = 0; k < MAX_PENDING; k++) {
+      const pending_req *s = &p->pend[k];
+      if (s->kind == PEND_NONE) continue;
+      uint64_t rem = s->deadline_ms > now ? (s->deadline_ms - now) : 0u;
+      if (rem < (uint64_t)timeout) timeout = (uint32_t)rem;
+    }
+    if (p->storage_enabled && p->dirty) {
+      uint64_t due = p->last_save_ms + SAVE_INTERVAL_MS;
+      uint64_t rem = due > now ? (due - now) : 0u;
+      if (rem < (uint64_t)timeout) timeout = (uint32_t)rem;
+    }
+    if (!m->in_background && p->state == CCORD_PLUGIN_READY) {
+      bool has_ping = false;
+      for (size_t k = 0; k < MAX_PENDING; k++) {
+        if (p->pend[k].kind == PEND_PING) {
+          has_ping = true;
+          break;
+        }
+      }
+      if (!has_ping) {
+        uint64_t due = p->last_ping_sent_ms + PING_INTERVAL_MS;
+        uint64_t rem = due > now ? (due - now) : 0u;
+        if (rem < (uint64_t)timeout) timeout = (uint32_t)rem;
+      }
+    }
+  }
+  if (out_timeout_ms) *out_timeout_ms = timeout;
+  return n;
 }
 
 // ---------------------------------------------------------------- spawn and discovery

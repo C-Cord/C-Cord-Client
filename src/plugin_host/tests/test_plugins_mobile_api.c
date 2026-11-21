@@ -5,6 +5,7 @@
 // live platform/lifecycle events, and Android's in-process worker-thread Lua plugin host mode.
 #define _POSIX_C_SOURCE 200809L
 #include <ccord/core/alloc.h>
+#include <ccord/core/clock.h>
 #include <ccord/core/event_bus.h>
 #include <ccord/model/contrib.h>
 #include <ccord/plugins/manifest.h>
@@ -386,6 +387,18 @@ static void test_in_process_android_plugin_host(void)
 
   ccord_plugins_dispatch_lifecycle(pm, "low_memory");
   CT_CHECK(pump_until_clip(pm, bus, &ops, "|low_memory"));
+
+  // Background mode pauses keep-alive pings so idle in-process plugins sleep without timer wakeups.
+  ccord_plugins_set_background(pm, true);
+  ccord_plugins_pump(pm, ccord_clock_ms() + 60000u);   // well past PING_INTERVAL_MS: must not emit a ping
+  ccord_socket_t pfds[4];
+  uint32_t pto = 0;
+  size_t nf = ccord_plugins_wait_info(pm, pfds, 4, &pto);
+  CT_CHECK(nf == 1 && pfds[0] != CCORD_INVALID_SOCKET);
+  CT_CHECK(pto == UINT32_MAX);
+  ccord_plugins_set_background(pm, false);
+  nf = ccord_plugins_wait_info(pm, pfds, 4, &pto);
+  CT_CHECK(nf == 1 && pto <= 5000u);
 
   ccord_plugins_shutdown(pm);
   ccord_plugins_destroy(pm);
