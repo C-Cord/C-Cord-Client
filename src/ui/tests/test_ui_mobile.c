@@ -616,14 +616,29 @@ static void test_mobile_safe_area_rail_and_background_focus(void)
   ccord_render_end(F.renderer);
   F.ui->discovery_open = false;
 
-  // Entering background must clear window_focused so reading_channel stops and background notifications aren't suppressed.
+  // Entering background must clear window_focused, pause inline media playback, destroy open media_audio,
+  // cancel in-progress voice message recording, and flush dirty settings.
   ccord_input_event focus_ev = {.type = CCORD_IN_FOCUS, .focused = true};
   (void)ccord_ui_handle_input(F.ui, &focus_ev);
   CT_CHECK(F.ui->window_focused);
+  F.ui->media_playing = true;
+  {
+    ccord_error aerr = {0};
+    ccord_audio_config acfg = {.sample_rate = 48000, .channels = 2, .frame_samples = 960, .capture = false};
+    F.ui->media_audio = ccord_audio_create(&acfg, &aerr);
+    CT_CHECK(F.ui->media_audio != nullptr);
+  }
+  CT_CHECK(ui_vm_test_begin(F.ui));
+  CT_CHECK(F.ui->vm.recording);
+  F.ui->settings_save_dirty = true;
   ccord_input_event bg_ev = {.type = CCORD_IN_APP_BACKGROUND};
   (void)ccord_ui_handle_input(F.ui, &bg_ev);
   CT_CHECK(!F.ui->window_focused);
   CT_CHECK(!ui_is_reading(F.ui));
+  CT_CHECK(!F.ui->media_playing);
+  CT_CHECK(F.ui->media_audio == nullptr);
+  CT_CHECK(!F.ui->vm.recording);
+  CT_CHECK(!F.ui->settings_save_dirty);
 
   // Returning to foreground restores window_focused and marks the UI dirty for immediate repaint.
   ccord_input_event fg_ev = {.type = CCORD_IN_APP_FOREGROUND};

@@ -631,6 +631,17 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     ui->touch_text_focused = false;
     ui->ime_active = false;
     ui->window_focused = false;
+    if (ui->media_playing) ui->media_playing = false;
+    if (ui->media_audio) {
+      ccord_audio_destroy(ui->media_audio);
+      ui->media_audio = nullptr;
+      ui->media_audio_resync = true;
+    }
+    if (ui->vm.recording) ui_vm_cancel(ui);
+    if (ui->settings_save_dirty) {
+      ui->settings_save_dirty = false;
+      ui_settings_save(ui);
+    }
     ui_sync_reading(ui);
     return false;
   }

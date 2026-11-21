@@ -40,6 +40,15 @@ static void player_log_host(const char *url, char *out, size_t cap)
   CCORD_LOG_W("player: %s %s host=%s", stage, reason, host);
 }
 
+static void media_player_close_audio(ccord_ui *ui)
+{
+  if (ui->media_audio) {
+    ccord_audio_destroy(ui->media_audio);
+    ui->media_audio = nullptr;
+  }
+  ui->media_audio_resync = true;
+}
+
 void uc_media_player_close(ccord_ui *ui)
 {
   // The render streams first: their demux threads read from the byte sources, and closing joins them.
@@ -51,6 +60,7 @@ void uc_media_player_close(ccord_ui *ui)
   ui->media_audio_stream = nullptr;
   if (ui->media_audio_net) ccord_session_close_media_stream(ui->d.session, ui->media_audio_net);
   ui->media_audio_net = nullptr;
+  media_player_close_audio(ui);
   ui->media_resolving = false;
   ui->media_resolve_req_id = 0;
   ui->media_v_ready = false;
@@ -426,6 +436,7 @@ bool uc_media_player_tick(ccord_ui *ui, uint64_t dt)
     if (ccord_av_stream_frame(st, &serial) && serial != ui->media_frame_serial) ui->dirty = true;
   }
   if (!ui->media_playing) {
+    media_player_close_audio(ui);
     ui->media_buffering = false;
     return !caught_up;
   }
@@ -436,6 +447,7 @@ bool uc_media_player_tick(ccord_ui *ui, uint64_t dt)
   bool all_ended = ccord_av_stream_ended(st) && (!ui->media_audio_stream || ccord_av_stream_ended(ui->media_audio_stream));
   if (caught_up && tail_heard && all_ended) {
     ui->media_playing = false;
+    media_player_close_audio(ui);
     if (!ui->media_duration_known) {
       ui->media_duration_ms = ui->media_pos_ms > 0 ? ui->media_pos_ms : 1u;
       ui->media_duration_known = true;
