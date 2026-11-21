@@ -6,6 +6,7 @@
 #include <ccord/core/arena.h>
 #include <ccord/core/base64.h>
 #include <ccord/core/buf.h>
+#include <ccord/core/clock.h>
 #include <ccord/core/ini.h>
 #include <ccord/core/json.h>
 #include <ccord/core/paths.h>
@@ -166,6 +167,17 @@ static void test_base64_and_wipe(void)
   ccord_arena_free(&a);
 }
 
+static void test_clock_boottime(void)
+{
+  uint64_t b1 = ccord_clock_boottime_ms();
+  uint64_t m1 = ccord_clock_ms();
+  uint64_t b2 = ccord_clock_boottime_ms();
+  uint64_t m2 = ccord_clock_ms();
+  CT_CHECK(b2 >= b1);
+  CT_CHECK(m2 >= m1);
+  CT_CHECK(b1 > 0 || m1 > 0);
+}
+
 int main(void)
 {
   test_json_strict();
@@ -174,5 +186,6 @@ int main(void)
   test_ini();
   test_utf8_and_paths();
   test_base64_and_wipe();
+  test_clock_boottime();
   return CT_RESULT("test_core");
 }

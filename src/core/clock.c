@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
-#define _POSIX_C_SOURCE 200809L
+#define _GNU_SOURCE
 #include <ccord/core/clock.h>
 
 #if defined(_WIN32)
@@ -28,6 +28,11 @@ uint64_t ccord_clock_ms(void)
   return (ticks / uf) * 1000u + ((ticks % uf) * 1000u) / uf;
 }
 
+uint64_t ccord_clock_boottime_ms(void)
+{
+  return ccord_clock_ms();
+}
+
 int64_t ccord_clock_unix_ms(void)
 {
   FILETIME ft;
@@ -51,6 +56,15 @@ uint64_t ccord_clock_ms(void)
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return to_ms(&ts);
+}
+
+uint64_t ccord_clock_boottime_ms(void)
+{
+#if defined(CLOCK_BOOTTIME)
+  struct timespec ts;
+  if (clock_gettime(CLOCK_BOOTTIME, &ts) == 0) return to_ms(&ts);
+#endif
+  return ccord_clock_ms();
 }
 
 int64_t ccord_clock_unix_ms(void)
