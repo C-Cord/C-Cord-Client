@@ -18,8 +18,8 @@ import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 
 /**
- * Foreground service keeping voice calls and MediaProjection screen capture alive in the background,
- * exposing persistent notification controls (Mute, Deafen, Disconnect).
+ * Foreground service keeping the Discord Gateway connection (real-time messages/notifications),
+ * voice calls, and MediaProjection screen capture alive in the background.
  */
 class CCordVoiceService : Service() {
     companion object {
@@ -33,6 +33,8 @@ class CCordVoiceService : Service() {
         private const val ACTION_STOP_CAPTURE = "org.ccord.android.action.STOP_CAPTURE"
 
         @Volatile
+        private var keepAliveActive = false
+        @Volatile
         private var voiceActive = false
         @Volatile
         private var channelName = "Voice Call"
@@ -43,7 +45,19 @@ class CCordVoiceService : Service() {
         @Volatile
         private var screenShareActive = false
         @Volatile
+        private var serviceRunning = false
+        @Volatile
+        private var pendingStartRetry = false
+        @Volatile
         private var pendingCaptureReadyCallback: (() -> Unit)? = null
+
+        fun updateKeepAliveState(context: Context, active: Boolean) {
+            if (keepAliveActive == active && (active == serviceRunning || voiceActive || screenShareActive)) {
+                return
+            }
+            keepAliveActive = active
+            syncService(context)
+        }
 
         fun updateVoiceState(
             context: Context,
@@ -69,18 +83,30 @@ class CCordVoiceService : Service() {
             syncService(context)
         }
 
+        fun retrySyncIfNeeded(context: Context) {
+            if (pendingStartRetry && (keepAliveActive || voiceActive || screenShareActive)) {
+                pendingStartRetry = false
+                syncService(context)
+            }
+        }
+
+        private fun shouldRun(): Boolean = keepAliveActive || voiceActive || screenShareActive
+
         private fun syncService(context: Context) {
             try {
                 val intent = Intent(context, CCordVoiceService::class.java).apply {
                     action = ACTION_SYNC
                 }
-                if (voiceActive || screenShareActive) {
+                if (shouldRun()) {
+                    pendingStartRetry = false
                     ContextCompat.startForegroundService(context, intent)
                 } else {
+                    pendingStartRetry = false
                     context.stopService(intent)
                 }
             } catch (t: Throwable) {
-                Log.w(TAG, "syncService failed", t)
+                Log.w(TAG, "syncService failed (will retry on foreground)", t)
+                if (shouldRun()) pendingStartRetry = true
                 val cb = pendingCaptureReadyCallback
                 pendingCaptureReadyCallback = null
                 cb?.invoke()
@@ -106,24 +132,25 @@ class CCordVoiceService : Service() {
             }
         }
 
-        if (!voiceActive && !screenShareActive) {
+        if (!shouldRun()) {
             // Android O+ requires startForeground() after startForegroundService() even if stopping immediately.
             CCordBridge.ensureNotificationChannels(this)
             try {
                 val notification = buildNotification()
+                val stopType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
+                } else {
+                    0
+                }
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    ServiceCompat.startForeground(
-                        this,
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                    )
+                    ServiceCompat.startForeground(this, NOTIFICATION_ID, notification, stopType)
                 } else {
                     startForeground(NOTIFICATION_ID, notification)
                 }
             } catch (t: Throwable) {
                 Log.w(TAG, "startForeground before immediate stop failed", t)
             }
+            serviceRunning = false
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
@@ -138,8 +165,10 @@ class CCordVoiceService : Service() {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            serviceRunning = true
         } catch (t: Throwable) {
             Log.e(TAG, "startForeground failed", t)
+            serviceRunning = false
         }
 
         val cb = pendingCaptureReadyCallback
@@ -151,6 +180,7 @@ class CCordVoiceService : Service() {
     }
 
     override fun onDestroy() {
+        serviceRunning = false
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
     }
@@ -169,8 +199,8 @@ class CCordVoiceService : Service() {
         if (screenShareActive) {
             type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
         }
-        if (type == 0) {
-            type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && (keepAliveActive || type == 0)) {
+            type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING
         }
         return type
     }
@@ -196,6 +226,20 @@ class CCordVoiceService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        if (!voiceActive && !screenShareActive) {
+            return NotificationCompat.Builder(this, CCordBridge.CHANNEL_CONNECTION)
+                .setSmallIcon(R.drawable.ic_stat_ccord)
+                .setColor(0xFF5865F2.toInt())
+                .setContentTitle("C-Cord")
+                .setContentText("Connected · Listening for messages")
+                .setOngoing(true)
+                .setSilent(true)
+                .setCategory(NotificationCompat.CATEGORY_SERVICE)
+                .setPriority(NotificationCompat.PRIORITY_MIN)
+                .setContentIntent(openPi)
+                .build()
+        }
+
         val title = when {
             voiceActive && screenShareActive -> "Voice & Screen Share · $channelName"
             voiceActive -> "Voice Connected · $channelName"
@@ -209,7 +253,8 @@ class CCordVoiceService : Service() {
         }
 
         val builder = NotificationCompat.Builder(this, CCordBridge.CHANNEL_VOICE)
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_ccord)
+            .setColor(0xFF5865F2.toInt())
             .setContentTitle(title)
             .setContentText(statusText)
             .setOngoing(true)

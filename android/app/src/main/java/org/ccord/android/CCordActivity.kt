@@ -6,6 +6,8 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Rect
 import android.hardware.display.DisplayManager
@@ -26,6 +28,7 @@ import android.text.InputType
 import android.util.Log
 import android.util.SparseArray
 import android.view.MotionEvent
+import android.view.SurfaceView
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewStructure
@@ -62,10 +65,17 @@ class CCordActivity : SDLActivity() {
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
-    // Startup backdrop overlay: hides SDL's uninitialized black SurfaceView hole until frame 1 presents.
+    // Startup/resume backdrop overlay: hides SDL's uninitialized/recreating black SurfaceView hole until a frame presents.
     private var splashBackdrop: View? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private val splashTimeoutRunnable = Runnable { dismissSplashBackdrop() }
+
+    // Window & lifecycle tracking for edge-to-edge restoration and smooth foreground resume.
+    private var isFullscreenMode = false
+    private var wasStopped = false
+    private var notifPermissionRequested = false
+    private var lastInsets: WindowInsetsCompat? = null
+    private var lastDispatchedInsetsKey = ""
 
     // Virtual Autofill overlay so Android password managers (Bitwarden, etc.) recognize email, password, and 2FA fields.
     private var autofillOverlay: CCordAutofillOverlay? = null
@@ -92,14 +102,66 @@ class CCordActivity : SDLActivity() {
         super.onCreate(savedInstanceState)
         if (mBrokenLibraries) return
 
-        installSplashBackdrop()
+        installSplashBackdrop(1500L)
         installAutofillOverlay()
         CCordBridge.attach(this)
-        configureEdgeToEdge()
+        configureEdgeToEdge(fullscreen = false)
         installInsetsListener()
         registerNetworkCallback()
-        requestNotificationPermissionIfNeeded()
+        window.decorView.post { requestNotificationPermissionIfNeeded() }
         handleNotificationIntent(intent)
+    }
+
+    override fun onStop() {
+        wasStopped = true
+        super.onStop()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (mBrokenLibraries) return
+        if (wasStopped) {
+            wasStopped = false
+            // Cover the freshly recreating SurfaceView with our theme backdrop until the resumed frame presents.
+            installSplashBackdrop(450L)
+        }
+        CCordVoiceService.retrySyncIfNeeded(this)
+        configureEdgeToEdge(fullscreen = isFullscreenMode)
+        window.decorView.post {
+            configureEdgeToEdge(fullscreen = isFullscreenMode)
+            requestLatestInsets(force = true)
+            if (!notifPermissionRequested) requestNotificationPermissionIfNeeded()
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (!mBrokenLibraries && hasFocus) {
+            // Post after SDLActivity's command handler so our edge-to-edge flags win over SDL's SYSTEM_UI_FLAG_VISIBLE.
+            window.decorView.post {
+                configureEdgeToEdge(fullscreen = isFullscreenMode)
+                requestLatestInsets(force = false)
+            }
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (!mBrokenLibraries) {
+            window.decorView.post {
+                configureEdgeToEdge(fullscreen = isFullscreenMode)
+                requestLatestInsets(force = true)
+            }
+        }
+    }
+
+    fun onNativeFullscreenChanged(fullscreen: Boolean) {
+        isFullscreenMode = fullscreen
+        configureEdgeToEdge(fullscreen = fullscreen)
+        window.decorView.post {
+            configureEdgeToEdge(fullscreen = fullscreen)
+            requestLatestInsets(force = true)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -119,24 +181,27 @@ class CCordActivity : SDLActivity() {
         super.onDestroy()
     }
 
-    private fun installSplashBackdrop() {
+    private fun installSplashBackdrop(timeoutMs: Long) {
         try {
-            val content = findViewById<ViewGroup>(android.R.id.content) ?: return
-            val backdrop = View(this).apply {
-                setBackgroundColor(0xFF1E1F22.toInt())
-                isClickable = false
-                isFocusable = false
-                importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
-            }
-            content.addView(
-                backdrop,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT
+            mainHandler.removeCallbacks(splashTimeoutRunnable)
+            if (splashBackdrop == null) {
+                val content = findViewById<ViewGroup>(android.R.id.content) ?: return
+                val backdrop = View(this).apply {
+                    setBackgroundColor(0xFF1E1F22.toInt())
+                    isClickable = false
+                    isFocusable = false
+                    importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
+                }
+                content.addView(
+                    backdrop,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT
+                    )
                 )
-            )
-            splashBackdrop = backdrop
-            mainHandler.postDelayed(splashTimeoutRunnable, 1500L)
+                splashBackdrop = backdrop
+            }
+            mainHandler.postDelayed(splashTimeoutRunnable, timeoutMs)
         } catch (t: Throwable) {
             Log.w(TAG, "installSplashBackdrop failed", t)
         }
@@ -458,43 +523,154 @@ class CCordActivity : SDLActivity() {
         }
     }
 
-    private fun configureEdgeToEdge() {
+    private fun findSurfaceView(root: View?): SurfaceView? {
+        if (root is SurfaceView) return root
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                val found = findSurfaceView(root.getChildAt(i))
+                if (found != null) return found
+            }
+        }
+        return null
+    }
+
+    private fun clearEdgePadding(root: View?) {
+        if (root == null) return
+        if (root.fitsSystemWindows) root.fitsSystemWindows = false
+        if (root.paddingLeft != 0 || root.paddingTop != 0 || root.paddingRight != 0 || root.paddingBottom != 0) {
+            root.setPadding(0, 0, 0, 0)
+        }
+        if (root is ViewGroup) {
+            for (i in 0 until root.childCount) {
+                val child = root.getChildAt(i)
+                if (child !== autofillOverlay && child !== splashBackdrop) {
+                    clearEdgePadding(child)
+                }
+            }
+        }
+    }
+
+    private fun configureEdgeToEdge(fullscreen: Boolean) {
         try {
             WindowCompat.setDecorFitsSystemWindows(window, false)
+            window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
+            @Suppress("DEPRECATION")
+            window.clearFlags(
+                WindowManager.LayoutParams.FLAG_TRANSLUCENT_STATUS or
+                    WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION
+            )
+            @Suppress("DEPRECATION")
+            window.statusBarColor = Color.TRANSPARENT
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = Color.TRANSPARENT
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                window.isStatusBarContrastEnforced = false
+                window.isNavigationBarContrastEnforced = false
+            }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 val lp = window.attributes
-                lp.layoutInDisplayCutoutMode =
+                lp.layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                } else {
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                }
                 window.attributes = lp
             }
             val controller = WindowInsetsControllerCompat(window, window.decorView)
             controller.isAppearanceLightStatusBars = false
             controller.isAppearanceLightNavigationBars = false
+            if (fullscreen) {
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+            } else {
+                @Suppress("DEPRECATION")
+                window.clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
+                controller.show(WindowInsetsCompat.Type.systemBars())
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+                    @Suppress("DEPRECATION")
+                    window.decorView.systemUiVisibility =
+                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                            View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                            View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                }
+            }
+            val content = findViewById<ViewGroup>(android.R.id.content)
+            clearEdgePadding(content)
         } catch (t: Throwable) {
             Log.w(TAG, "configureEdgeToEdge failed", t)
         }
     }
 
-    private fun installInsetsListener() {
-        val root = window.decorView
-        ViewCompat.setOnApplyWindowInsetsListener(root) { view, insets ->
-            val sysBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
-            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+    private fun dispatchInsets(insets: WindowInsetsCompat, force: Boolean) {
+        lastInsets = insets
+        val sysBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+        val cutout = insets.getInsets(WindowInsetsCompat.Type.displayCutout())
+        val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
 
-            val top = max(sysBars.top, cutout.top).toFloat()
-            val right = max(sysBars.right, cutout.right).toFloat()
-            val bottom = max(sysBars.bottom, cutout.bottom).toFloat()
-            val left = max(sysBars.left, cutout.left).toFloat()
-            // IME bottom includes navigation bar on Android; report full keyboard occlusion height.
-            val imeBottom = max(0, ime.bottom).toFloat()
+        var top = max(sysBars.top, cutout.top)
+        var right = max(sysBars.right, cutout.right)
+        var bottom = max(sysBars.bottom, cutout.bottom)
+        var left = max(sysBars.left, cutout.left)
+        var imeBottom = max(0, ime.bottom)
 
-            if (CCordBridge.nativeReady) {
-                CCordBridge.nativeOnInsetsChanged(top, right, bottom, left, imeBottom)
-            }
-            ViewCompat.onApplyWindowInsets(view, insets)
+        // Express insets relative to SDL's SurfaceView so adjustResize, split-screen, or OEM window
+        // positioning can never double-count system bar or keyboard offsets.
+        val content = findViewById<ViewGroup>(android.R.id.content)
+        val surface = findSurfaceView(content)
+        val decor = window?.decorView
+        if (surface != null && decor != null && surface.width > 0 && surface.height > 0 &&
+            decor.width > 0 && decor.height > 0
+        ) {
+            val loc = IntArray(2)
+            surface.getLocationInWindow(loc)
+            val offLeft = max(0, loc[0])
+            val offTop = max(0, loc[1])
+            val offRight = max(0, decor.width - (loc[0] + surface.width))
+            val offBottom = max(0, decor.height - (loc[1] + surface.height))
+            top = max(0, top - offTop)
+            left = max(0, left - offLeft)
+            right = max(0, right - offRight)
+            bottom = max(0, bottom - offBottom)
+            imeBottom = max(0, imeBottom - offBottom)
         }
-        ViewCompat.requestApplyInsets(root)
+
+        val key = "$top:$right:$bottom:$left:$imeBottom"
+        if (!force && key == lastDispatchedInsetsKey) return
+        lastDispatchedInsetsKey = key
+        if (CCordBridge.nativeReady) {
+            CCordBridge.nativeOnInsetsChanged(
+                top.toFloat(),
+                right.toFloat(),
+                bottom.toFloat(),
+                left.toFloat(),
+                imeBottom.toFloat()
+            )
+        }
+    }
+
+    private fun requestLatestInsets(force: Boolean) {
+        val content = findViewById<ViewGroup>(android.R.id.content) ?: return
+        val cur = ViewCompat.getRootWindowInsets(content) ?: lastInsets
+        if (cur != null) {
+            dispatchInsets(cur, force = force)
+        }
+        ViewCompat.requestApplyInsets(content)
+    }
+
+    private fun installInsetsListener() {
+        val content = findViewById<ViewGroup>(android.R.id.content) ?: return
+        clearEdgePadding(content)
+        ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
+            clearEdgePadding(view)
+            dispatchInsets(insets, force = false)
+            insets
+        }
+        content.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            val cur = ViewCompat.getRootWindowInsets(content) ?: lastInsets
+            if (cur != null) dispatchInsets(cur, force = false)
+        }
+        ViewCompat.requestApplyInsets(content)
     }
 
     private fun registerNetworkCallback() {
@@ -536,6 +712,7 @@ class CCordActivity : SDLActivity() {
     }
 
     private fun requestNotificationPermissionIfNeeded() {
+        notifPermissionRequested = true
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
                 PackageManager.PERMISSION_GRANTED
@@ -551,6 +728,19 @@ class CCordActivity : SDLActivity() {
                 }
             }
         }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<String>,
+        grantResults: IntArray
+    ) {
+        if (requestCode == REQ_NOTIFICATIONS) {
+            val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+            Log.i(TAG, "POST_NOTIFICATIONS permission result: granted=$granted")
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 
     private fun handleNotificationIntent(intent: Intent?) {

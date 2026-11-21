@@ -30,6 +30,7 @@ object CCordBridge {
 
     const val CHANNEL_MESSAGES = "ccord_messages"
     const val CHANNEL_VOICE = "ccord_voice"
+    const val CHANNEL_CONNECTION = "ccord_connection"
 
     const val EXTRA_NOTIFY_ID = "org.ccord.android.NOTIFY_ID"
     const val EXTRA_GUILD_ID = "org.ccord.android.GUILD_ID"
@@ -76,6 +77,8 @@ object CCordBridge {
             NotificationManager.IMPORTANCE_HIGH
         ).apply {
             description = "Direct messages and mentions"
+            enableVibration(true)
+            setShowBadge(true)
         }
         val voiceChannel = NotificationChannel(
             CHANNEL_VOICE,
@@ -85,8 +88,19 @@ object CCordBridge {
             description = "Active voice call and screen sharing controls"
             setShowBadge(false)
         }
+        val connChannel = NotificationChannel(
+            CHANNEL_CONNECTION,
+            "Background Connection",
+            NotificationManager.IMPORTANCE_MIN
+        ).apply {
+            description = "Keeps C-Cord connected for real-time messages and notifications"
+            setShowBadge(false)
+            setSound(null, null)
+            enableVibration(false)
+        }
         nm.createNotificationChannel(msgChannel)
         nm.createNotificationChannel(voiceChannel)
+        nm.createNotificationChannel(connChannel)
     }
 
     // ---- Native (Kotlin -> C) JNI entrypoints ----
@@ -275,10 +289,18 @@ object CCordBridge {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             val granted = ContextCompat.checkSelfPermission(ctx, Manifest.permission.POST_NOTIFICATIONS) ==
                 PackageManager.PERMISSION_GRANTED
-            if (!granted) return false
+            if (!granted) {
+                Log.w(TAG, "notifyMessage skipped: POST_NOTIFICATIONS not granted")
+                return false
+            }
         }
         return try {
             ensureNotificationChannels(ctx)
+            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return false
+            if (!nm.areNotificationsEnabled()) {
+                Log.w(TAG, "notifyMessage skipped: notifications disabled in Android settings")
+                return false
+            }
             val intent = Intent(ctx, CCordActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
                 putExtra(EXTRA_NOTIFY_ID, id)
@@ -293,21 +315,36 @@ object CCordBridge {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             val notif = NotificationCompat.Builder(ctx, CHANNEL_MESSAGES)
-                .setSmallIcon(R.mipmap.ic_launcher)
+                .setSmallIcon(R.drawable.ic_stat_ccord)
+                .setColor(0xFF5865F2.toInt())
                 .setContentTitle(title.ifEmpty { "C-Cord" })
                 .setContentText(body)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+                .setDefaults(NotificationCompat.DEFAULT_ALL)
                 .setPriority(NotificationCompat.PRIORITY_HIGH)
                 .setAutoCancel(true)
                 .setContentIntent(pi)
                 .build()
-            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return false
             nm.notify(if (id > 0) id else 1001, notif)
             true
         } catch (t: Throwable) {
             Log.w(TAG, "notifyMessage failed", t)
             false
         }
+    }
+
+    @JvmStatic
+    fun setKeepAliveService(active: Boolean) {
+        val ctx = activityRef?.get() ?: appContext ?: return
+        CCordVoiceService.updateKeepAliveState(ctx, active)
+    }
+
+    @JvmStatic
+    fun onFullscreenChanged(fullscreen: Boolean) {
+        val act = activityRef?.get() ?: return
+        act.runOnUiThread { act.onNativeFullscreenChanged(fullscreen) }
     }
 
     @JvmStatic
