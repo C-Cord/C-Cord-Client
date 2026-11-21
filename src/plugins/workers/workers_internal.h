@@ -116,4 +116,16 @@ bool pw_is_localhost_host(const char *host);
 #if !CCORD_OS_WINDOWS
 bool pw_ws_send_tcp_frame(int fd, uint8_t opcode, const uint8_t *data, size_t len);
 #endif
+#if defined(__linux__) && !CCORD_OS_WINDOWS
+static inline void pw_inotify_rm_watch(int fd, int wd)
+{
+  if (fd >= 0 && wd >= 0) {
+#if defined(__ANDROID__)
+    (void)inotify_rm_watch(fd, (uint32_t)wd);
+#else
+    (void)inotify_rm_watch(fd, wd);
+#endif
+  }
+}
+#endif
 void pw_poll_watches(plugin_workers *w);

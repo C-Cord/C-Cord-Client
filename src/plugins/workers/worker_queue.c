@@ -99,7 +99,7 @@ void pw_remove_owner(plugin_workers *w, const char *owner)
   for (size_t i = 0; i < PW_MAX_WATCHES; i++) {
     if (w->watches[i].active && strcmp(w->watches[i].owner, owner) == 0) {
 #if defined(__linux__) && !CCORD_OS_WINDOWS
-      if (w->inotify_fd >= 0 && w->watches[i].wd >= 0) inotify_rm_watch(w->inotify_fd, w->watches[i].wd);
+      pw_inotify_rm_watch(w->inotify_fd, w->watches[i].wd);
 #endif
       w->watches[i].active = false;
     }

@@ -166,6 +166,7 @@ static bool vr_http_get_json(ccord_video_resolver *r, uint64_t my_gen, const cha
   return true;
 }
 
+#if !CCORD_OS_ANDROID
 static const char k_ytdlp_fmt[] =
     "best[height>=480][height<=720][protocol=https][ext=mp4][vcodec!=none][acodec!=none]"
     "/bestvideo[height<=720][protocol=https][vcodec^=avc]+bestaudio[protocol=https][acodec^=mp4a]"
@@ -175,6 +176,7 @@ static const char k_ytdlp_fmt[] =
     "/bestvideo[height<=1080][protocol=https][vcodec^=avc]+bestaudio[protocol=https][acodec^=mp4a]"
     "/best[protocol=https][vcodec!=none][acodec!=none]"
     "/best[protocol=https]";
+#endif
 
 #if !CCORD_OS_WINDOWS && !CCORD_OS_ANDROID
 static void vr_set_cloexec(int fd)
