@@ -439,6 +439,7 @@ static ccord_status media_op_upload_rgba(void *ud, const char *key, const uint8_
 {
   app *a = ud;
   if (!a->renderer) return ccord_error_set(err, CCORD_ERR_INVALID, "media: no renderer");
+  if (a->platform && ccord_platform_in_background(a->platform)) return CCORD_OK;
   ccord_status st = ccord_render_upload_rgba(a->renderer, key, rgba, w, h, err);
   if (st == CCORD_OK) a->media_redraw = true;
   return st;
@@ -458,6 +459,10 @@ static bool media_op_camera_poll(void *ud, ccord_id user_id, const uint8_t **ann
 static void media_op_texture_evict(void *ud, const char *key)
 {
   app *a = ud;
+  if (a->platform && ccord_platform_in_background(a->platform)) {
+    a->deferred_lowmem_evict = true;
+    return;
+  }
   if (a->renderer) {
     ccord_render_evict_texture(a->renderer, key);
     a->media_redraw = true;

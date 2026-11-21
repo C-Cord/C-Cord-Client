@@ -775,7 +775,11 @@ bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n
     return false;
   }
   d->dbg.notifications_delivered++;
-  app_beep(d, prefs.notify_sounds && !hook_silent, n, now_unix_ms);
+  // On mobile while backgrounded, the OS notification channel plays the native alert sound/vibration
+  // and respects system DND/vibrate mode without opening an SDL audio playback stream.
+  bool os_handles_sound = d->platform && ccord_platform_is_mobile(d->platform) &&
+                          ccord_platform_in_background(d->platform);
+  app_beep(d, prefs.notify_sounds && !hook_silent && !os_handles_sound, n, now_unix_ms);
   return true;
 }
 

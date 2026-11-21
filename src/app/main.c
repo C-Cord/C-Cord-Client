@@ -256,6 +256,9 @@ static void run_interactive(app *a)
           continue;
         }
         if (ev.type == CCORD_IN_APP_BACKGROUND) {
+          a->bg_since_ms = app_now_ms(a);
+          a->resume_needs_draw = false;
+          a->resume_link_wake = false;
           if (a->warm && a->session && !ccord_session_is_stale(a->session)) {
             ccord_error werr;
             (void)ccord_warm_save(a->warm, a->store, true, &werr);
@@ -267,51 +270,89 @@ static void run_interactive(app *a)
           continue;
         }
         if (ev.type == CCORD_IN_APP_FOREGROUND) {
-          if (a->session) {
-            ccord_error lerr;
-            (void)ccord_session_link_event(a->session, CCORD_LINK_RESUMED, &lerr);
+          uint64_t now_fg = app_now_ms(a);
+          uint64_t bg_dur = (a->bg_since_ms > 0 && now_fg >= a->bg_since_ms) ? (now_fg - a->bg_since_ms) : 0u;
+          a->bg_since_ms = 0;
+          if (a->deferred_lowmem_evict) {
+            a->deferred_lowmem_evict = false;
+            ccord_render_evict_caches(a->renderer);
           }
-          if (a->renderer) {
-            ccord_vec2 sz = ccord_render_size(a->renderer);
-            if (sz.x > 0.0f && sz.y > 0.0f) {
-              a->viewport_w = sz.x;
-              a->viewport_h = sz.y;
-              ccord_ui_set_viewport(a->ui, sz.x, sz.y);
-            }
+          float zoom = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f;
+          if (zoom <= 0.0f) zoom = 1.0f;
+          float pw = 0.0f, ph = 0.0f, ps = 1.0f;
+          ccord_platform_size(a->platform, &pw, &ph, &ps);
+          if (pw > 0.0f && ph > 0.0f) {
+            a->viewport_w = pw / zoom;
+            a->viewport_h = ph / zoom;
+            ccord_ui_set_viewport(a->ui, a->viewport_w, a->viewport_h);
           }
-          a->last_safe = ccord_platform_safe_area(a->platform);
+          ccord_safe_insets raw_safe = ccord_platform_safe_area(a->platform);
+          a->last_safe = (ccord_safe_insets){
+            .top = raw_safe.top / zoom,
+            .right = raw_safe.right / zoom,
+            .bottom = raw_safe.bottom / zoom,
+            .left = raw_safe.left / zoom,
+          };
           ccord_ui_set_safe_insets(a->ui, a->last_safe.top, a->last_safe.right, a->last_safe.bottom, a->last_safe.left);
+          // Only wake/reconnect the gateway if it dropped or we were backgrounded long enough for Doze
+          // to stall sockets; defer the wake until after the resumed UI frame is painted so resume never flashes black.
+          bool need_wake = a->session &&
+                           (ccord_session_state(a->session) != CCORD_CONN_CONNECTED || bg_dur >= 45000u);
+          if (need_wake) a->resume_link_wake = true;
 #if CCORD_WITH_PLUGINS
           app_plugins_push_platform_state(a);
           if (a->plugins) ccord_plugins_dispatch_lifecycle(a->plugins, "foreground");
 #endif
           (void)ccord_ui_handle_input(a->ui, &ev);
+          a->resume_needs_draw = true;
           redraw = true;
           continue;
         }
         if (ev.type == CCORD_IN_APP_LOW_MEMORY) {
-          ccord_render_evict_caches(a->renderer);
+          if (ccord_platform_in_background(a->platform)) {
+            a->deferred_lowmem_evict = true;
+          } else {
+            ccord_render_evict_caches(a->renderer);
+          }
 #if CCORD_WITH_PLUGINS
           if (a->plugins) ccord_plugins_dispatch_lifecycle(a->plugins, "low_memory");
 #endif
           continue;
         }
         if (ev.type == CCORD_IN_RENDER_RESET) {
-          ccord_render_evict_caches(a->renderer);
-          redraw = true;
+          if (ccord_platform_in_background(a->platform)) {
+            a->deferred_lowmem_evict = true;
+          } else {
+            ccord_render_evict_caches(a->renderer);
+            a->resume_needs_draw = true;
+            redraw = true;
+          }
           continue;
         }
         if (ev.type == CCORD_IN_SAFE_AREA) {
+          float zoom = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f;
+          if (zoom <= 0.0f) zoom = 1.0f;
+          ev.inset_top /= zoom;
+          ev.inset_right /= zoom;
+          ev.inset_bottom /= zoom;
+          ev.inset_left /= zoom;
           a->last_safe = (ccord_safe_insets){ev.inset_top, ev.inset_right, ev.inset_bottom, ev.inset_left};
 #if CCORD_WITH_PLUGINS
           app_plugins_push_platform_state(a);
 #endif
         } else if (ev.type == CCORD_IN_KEYBOARD_INSET) {
+          float zoom = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f;
+          if (zoom <= 0.0f) zoom = 1.0f;
+          ev.inset_bottom /= zoom;
           a->last_kb_inset = ev.inset_bottom;
 #if CCORD_WITH_PLUGINS
           app_plugins_push_platform_state(a);
 #endif
         } else if (ev.type == CCORD_IN_RESIZE) {
+          float zoom = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f;
+          if (zoom <= 0.0f) zoom = 1.0f;
+          ev.x /= zoom;
+          ev.y /= zoom;
           a->viewport_w = ev.x;
           a->viewport_h = ev.y;
 #if CCORD_WITH_PLUGINS
@@ -396,6 +437,31 @@ static void run_interactive(app *a)
       }
     }
     if (a->quit) break;
+    // Present the resumed frame BEFORE app_pump() so any network reconnect can never hold a black surface on screen.
+    if (a->resume_needs_draw && ccord_app_desktop_should_draw(a->platform)) {
+      a->resume_needs_draw = false;
+      (void)ccord_ui_update(a->ui, app_now_ms(a));
+      app_draw_frame(a);
+      ccord_platform_notify_first_frame(a->platform);
+      redraw = false;
+    }
+    if (a->resume_link_wake) {
+      a->resume_link_wake = false;
+      if (a->session) {
+        ccord_error lerr;
+        (void)ccord_session_link_event(a->session, CCORD_LINK_RESUMED, &lerr);
+      }
+    }
+    // Sync Android background keep-alive foreground service while signed in so messages & notifications arrive when tabbed out.
+    {
+      bool want_keep_alive = a->live && a->session && a->store &&
+                             ccord_store_self_id(a->store) != CCORD_ID_NONE &&
+                             ccord_session_state(a->session) != CCORD_CONN_FAILED;
+      if (want_keep_alive != a->keep_alive_active) {
+        a->keep_alive_active = want_keep_alive;
+        ccord_platform_set_keep_alive(a->platform, want_keep_alive);
+      }
+    }
     app_pump(a);
     if (a->pending_open_url[0] && ccord_session_state(a->session) == CCORD_CONN_CONNECTED) {
       (void)ccord_ui_open_url(a->ui, a->pending_open_url);
@@ -433,6 +499,7 @@ static void run_interactive(app *a)
     } else if (upd || redraw) {
       uint64_t dt0 = app_now_ms(a);
       app_draw_frame(a);
+      ccord_platform_notify_first_frame(a->platform);
       uint64_t dt = app_now_ms(a) - dt0;
       if (dt < 2u) {
         if (fast_draws < 8u) fast_draws++;
@@ -805,7 +872,15 @@ int main(int argc, char **argv)
   a.viewport_h = lh;
   if (is_mobile_ui) ccord_ui_set_mobile_mode(a.ui, true);
   if (opt.mobile || ccord_platform_has_touch(a.platform)) ccord_ui_set_touch_mode(a.ui, true);
-  a.last_safe = ccord_platform_safe_area(a.platform);
+  float init_zoom = ccord_render_get_zoom(a.renderer);
+  if (init_zoom <= 0.0f) init_zoom = 1.0f;
+  ccord_safe_insets raw_init_safe = ccord_platform_safe_area(a.platform);
+  a.last_safe = (ccord_safe_insets){
+    .top = raw_init_safe.top / init_zoom,
+    .right = raw_init_safe.right / init_zoom,
+    .bottom = raw_init_safe.bottom / init_zoom,
+    .left = raw_init_safe.left / init_zoom,
+  };
   ccord_ui_set_safe_insets(a.ui, a.last_safe.top, a.last_safe.right, a.last_safe.bottom, a.last_safe.left);
   ccord_ui_set_viewport(a.ui, lw, lh);
   if (!ccord_platform_window_focused(a.platform)) {
