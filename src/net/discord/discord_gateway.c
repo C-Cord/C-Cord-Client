@@ -40,7 +40,9 @@ struct ccord_gateway {
   uint64_t (*now_ms)(void *ud);
   void *clock_ud;
   CURL *curl;
+  ccord_socket_t sock;
   bool open;
+  bool drain_eof_eagain;  // true only after gw_drain hit CURLE_AGAIN (no TLS-buffered bytes left)
   bool hello;
   bool identified;
   bool resuming;
@@ -76,7 +78,13 @@ struct ccord_gateway {
 
 static uint64_t gw_now(const ccord_gateway *g)
 {
-  return g->now_ms ? g->now_ms(g->clock_ud) : ccord_clock_ms();
+  if (g->now_ms) return g->now_ms(g->clock_ud);
+#if defined(__ANDROID__)
+  // CLOCK_BOOTTIME keeps advancing through Android screen-off SoC naps so heartbeats stay on schedule.
+  return ccord_clock_boottime_ms();
+#else
+  return ccord_clock_ms();
+#endif
 }
 
 static void gw_push(ccord_gateway *g, ccord_live_event *ev)
@@ -138,7 +146,9 @@ static void gw_close_socket(ccord_gateway *g)
     curl_easy_cleanup(g->curl);
     g->curl = nullptr;
   }
+  g->sock = CCORD_INVALID_SOCKET;
   g->open = false;
+  g->drain_eof_eagain = false;
   // The deflate dictionary is shared only within one connection: a reconnect must start fresh.
   if (g->z_ready) {
     (void)inflateEnd(&g->z_in);
@@ -806,14 +816,21 @@ static bool gw_inflate_message(ccord_gateway *g)
 static void gw_drain(ccord_gateway *g)
 {
   uint64_t start_ms = ccord_clock_ms();
-  if (g->count > 0 && start_ms - g->last_heavy_ms < GW_DRAIN_BUDGET_MS) return;
+  if (g->count > 0 && start_ms - g->last_heavy_ms < GW_DRAIN_BUDGET_MS) {
+    g->drain_eof_eagain = false;
+    return;
+  }
+  g->drain_eof_eagain = false;
   for (size_t round = 0; round < 64; round++) {
     if (g->count + 2u >= GW_QUEUE_SIZE) return;
     unsigned char buf[16384];
     size_t n = 0;
     const struct curl_ws_frame *meta = nullptr;
     CURLcode rc = curl_ws_recv(g->curl, buf, sizeof buf, &n, &meta);
-    if (rc == CURLE_AGAIN) return;
+    if (rc == CURLE_AGAIN) {
+      g->drain_eof_eagain = true;
+      return;
+    }
     if (rc != CURLE_OK) {
       CCORD_LOG_W("gateway: receive failed (%s); reconnecting", curl_easy_strerror(rc));
       gw_schedule_reconnect(g, CCORD_GWPACE_NETWORK, true);
@@ -937,6 +954,7 @@ ccord_gateway *ccord_gateway_create(const ccord_live_config *cfg, const char *to
   } else {
     g->connect_timeout_ms = CCORD_LIVE_TIMEOUT_DEFAULT_MS;
   }
+  g->sock = CCORD_INVALID_SOCKET;
   g->seq = -1;
   g->state = CCORD_CONN_DISCONNECTED;
   g->compress = true;
@@ -1064,7 +1082,9 @@ static ccord_status gw_open(ccord_gateway *g, bool retrying, ccord_error *err)
     }
     g->z_ready = true;
   }
+  g->sock = (ccord_socket_t)sock;
   g->open = true;
+  g->drain_eof_eagain = false;
   g->hello = false;
   g->identified = false;
   g->subscribed_guild = CCORD_ID_NONE;
@@ -1215,6 +1235,56 @@ bool ccord_gateway_poll(ccord_gateway *g, ccord_net_event *out)
   g->have_current = true;
   *out = g->current.ev;
   return true;
+}
+
+ccord_socket_t ccord_gateway_wait_info(const ccord_gateway *g, uint32_t *out_timeout_ms, bool *out_has_pending)
+{
+  if (out_timeout_ms) *out_timeout_ms = UINT32_MAX;
+  if (out_has_pending) *out_has_pending = false;
+  if (!g) return CCORD_INVALID_SOCKET;
+  if (g->count > 0 || (g->open && !g->drain_eof_eagain)) {
+    if (out_timeout_ms) *out_timeout_ms = 0;
+    if (out_has_pending) *out_has_pending = true;
+    return g->open ? g->sock : CCORD_INVALID_SOCKET;
+  }
+  uint64_t now = gw_now(g);
+  uint32_t timeout = UINT32_MAX;
+  bool pending = false;
+  if (g->open) {
+    if (g->pace.hb_active) {
+      if (now >= g->pace.hb_next_ms) {
+        timeout = 0;
+        pending = true;
+      } else {
+        uint64_t rem = g->pace.hb_next_ms - now;
+        if (rem < (uint64_t)timeout) timeout = (uint32_t)rem;
+      }
+    } else if (!g->hello) {
+      if (15000u < timeout) timeout = 15000u;
+    }
+    if (g->state == CCORD_CONN_CONNECTED && g->lazy_guild != CCORD_ID_NONE &&
+        (g->subscribed_guild != g->lazy_guild || g->subscribed_channel != g->lazy_channel ||
+         g->subscribed_chunks != (g->lazy_chunks ? g->lazy_chunks : 1u))) {
+      if (now >= g->lazy_retry_ms) {
+        timeout = 0;
+        pending = true;
+      } else {
+        uint64_t rem = g->lazy_retry_ms - now;
+        if (rem < (uint64_t)timeout) timeout = (uint32_t)rem;
+      }
+    }
+  } else if (g->pace.reconnect_pending) {
+    if (now >= g->pace.reconnect_at_ms) {
+      timeout = 0;
+      pending = true;
+    } else {
+      uint64_t rem = g->pace.reconnect_at_ms - now;
+      if (rem < (uint64_t)timeout) timeout = (uint32_t)rem;
+    }
+  }
+  if (out_timeout_ms) *out_timeout_ms = timeout;
+  if (out_has_pending) *out_has_pending = pending;
+  return g->open ? g->sock : CCORD_INVALID_SOCKET;
 }
 
 ccord_connection_state ccord_gateway_state(const ccord_gateway *g)

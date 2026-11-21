@@ -146,6 +146,7 @@ const char *ccord_profile_rest_mock_last_body(const ccord_profile_rest *r);
 
 void ccord_profile_rest_destroy(ccord_profile_rest *r);   // pending edits call back with CCORD_ERR_IO
 void ccord_profile_rest_pump(ccord_profile_rest *r, uint64_t now_ms);
+bool ccord_profile_rest_pending(const ccord_profile_rest *r);
 
 // Validates, then queues the first request. Returns CCORD_OK once queued (the callback follows); on any error
 // nothing was sent and the callback will not run. A second request (/users/@me/profile) is sent only after the

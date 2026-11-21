@@ -1124,6 +1124,46 @@ void live_copy_cstr(char *dst, size_t cap, const char *src)
 }
 
 
+static bool live_wait_info(const ccord_transport *t, ccord_wait_info *out)
+{
+  const live *l = (const live *)t;
+  if (!l || !out) return false;
+  *out = (ccord_wait_info){.timeout_ms = UINT32_MAX};
+  if (l->count > 0 || (!l->gw && l->state != l->reported) ||
+      (l->gw && ccord_gateway_state(l->gw) != l->reported)) {
+    out->immediate = true;
+    out->timeout_ms = 0;
+    return true;
+  }
+  if (l->gw) {
+    uint32_t gw_to = UINT32_MAX;
+    bool gw_pending = false;
+    ccord_socket_t sock = ccord_gateway_wait_info(l->gw, &gw_to, &gw_pending);
+    if (sock != CCORD_INVALID_SOCKET && out->fd_count < CCORD_WAIT_MAX_FDS) {
+      out->fds[out->fd_count++] = sock;
+    }
+    if (gw_pending) {
+      out->immediate = true;
+      out->timeout_ms = 0;
+      return true;
+    }
+    if (gw_to < out->timeout_ms) out->timeout_ms = gw_to;
+  }
+  if (l->sb_pending_pcm != nullptr) {
+    if (out->timeout_ms > 20u) out->timeout_ms = 20u;
+  }
+  if (l->voice != nullptr || l->vlink != LV_IDLE || l->tx_stream.vs != nullptr || l->rx_stream.vs != nullptr) {
+    if (out->timeout_ms > 50u) out->timeout_ms = 50u;
+  }
+  if (l->restq && ccord_rest_queue_pending(l->restq) > 0) {
+    if (out->timeout_ms > 50u) out->timeout_ms = 50u;
+  }
+  if (l->vresolve && ccord_video_resolver_busy(l->vresolve)) {
+    if (out->timeout_ms > 50u) out->timeout_ms = 50u;
+  }
+  return true;
+}
+
 static void live_destroy(ccord_transport *t)
 {
   live *l = (live *)t;
@@ -1237,6 +1277,7 @@ static const ccord_transport_vtable k_live_vt = {
   .set_rich_activities = live_set_rich_activities,
   .active_uploads = live_active_uploads,
   .resolve_video = live_resolve_video,
+  .wait_info = live_wait_info,
 };
 
 ccord_gov *ccord_live_transport_governor(ccord_transport *t)

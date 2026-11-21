@@ -4,6 +4,7 @@
 #include <ccord/core/buf.h>
 #include <ccord/core/error.h>
 #include <ccord/core/link_event.h>
+#include <ccord/core/os.h>
 #include <ccord/net/discord_json.h>
 #include <ccord/net/discord_rest.h>
 #include <ccord/net/gateway_pace.h>
@@ -28,6 +29,10 @@ ccord_gwpace_wake_verdict ccord_gateway_wake(ccord_gateway *g, ccord_link_event 
 // Frees the previous returned event, drains the socket without blocking, and
 // returns the next queued event. Pointers are valid until the next call.
 bool ccord_gateway_poll(ccord_gateway *g, ccord_net_event *out);
+// Reports the gateway's active socket (or CCORD_INVALID_SOCKET), the maximum ms before ccord_gateway_poll()
+// must run again for heartbeat/reconnect/lazy-retry timers (UINT32_MAX = none), and whether already-queued or
+// buffered data requires immediate pumping without sleeping.
+ccord_socket_t ccord_gateway_wait_info(const ccord_gateway *g, uint32_t *out_timeout_ms, bool *out_has_pending);
 ccord_connection_state ccord_gateway_state(const ccord_gateway *g);
 const char *ccord_gateway_session_id(const ccord_gateway *g);
 const char *ccord_gateway_voice_session_id(const ccord_gateway *g);

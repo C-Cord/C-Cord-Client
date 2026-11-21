@@ -488,6 +488,33 @@ size_t ccord_session_pump(ccord_session *s)
   return n;
 }
 
+bool ccord_session_wait_info(const ccord_session *s, ccord_wait_info *out)
+{
+  if (!out) return false;
+  *out = (ccord_wait_info){.timeout_ms = UINT32_MAX};
+  if (!s || !s->transport) return false;
+  bool supported = ccord_transport_wait_info(s->transport, out);
+  if (s->notif_count > 0 || (s->rich_op3_dirty && s->state == CCORD_CONN_CONNECTED && !s->stale &&
+                             ccord_store_self_id(s->store) != CCORD_ID_NONE)) {
+    out->immediate = true;
+    out->timeout_ms = 0;
+    return supported;
+  }
+  if (s->profile_rest && ccord_profile_rest_pending(s->profile_rest)) {
+    if (out->timeout_ms > 50u) out->timeout_ms = 50u;
+  }
+  if (s->streams) {
+    uint32_t sm_wait = ccord_stream_hub_next_wait_ms(s->streams, ccord_clock_ms());
+    if (sm_wait == 0) {
+      out->immediate = true;
+      out->timeout_ms = 0;
+    } else if (sm_wait < out->timeout_ms) {
+      out->timeout_ms = sm_wait;
+    }
+  }
+  return supported;
+}
+
 ccord_status ccord_session_select_guild(ccord_session *s, ccord_id guild_id, ccord_error *err)
 {
   if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "session: null session");

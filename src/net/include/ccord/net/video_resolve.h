@@ -66,3 +66,5 @@ void ccord_video_resolver_destroy(ccord_video_resolver *r);
 
 // Pops the next completed resolution (non-blocking). Returns false when none is ready.
 bool ccord_video_resolver_poll(ccord_video_resolver *r, ccord_video_resolved *out);
+// True while a resolution job is queued, running, or waiting to be popped via poll().
+bool ccord_video_resolver_busy(const ccord_video_resolver *r);

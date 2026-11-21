@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #pragma once
 #include <ccord/core/link_event.h>
+#include <ccord/core/os.h>
 #include <ccord/model/model.h>
 #include <ccord/model/forum.h>
 #include <ccord/model/notify.h>
@@ -530,6 +531,14 @@ typedef struct ccord_camera_rx {
   bool decoding;         // false = waiting for one of the CCORD_CAM_DECODE_MAX slots
 } ccord_camera_rx;
 
+#define CCORD_WAIT_MAX_FDS 8u
+typedef struct ccord_wait_info {
+  ccord_socket_t fds[CCORD_WAIT_MAX_FDS];   // readable sockets that should wake an idle/background poll()
+  size_t fd_count;
+  uint32_t timeout_ms;                      // max ms before poll() must run again (UINT32_MAX = no timer)
+  bool immediate;                           // true: already-queued or buffered work must be pumped immediately
+} ccord_wait_info;
+
 typedef struct ccord_transport_vtable {
   const char *name;
   ccord_status (*connect)(ccord_transport *t, ccord_error *err);          // result arrives via poll(): STATE then SNAPSHOT
@@ -711,6 +720,9 @@ typedef struct ccord_transport_vtable {
   // Optional. Resolves a third-party video page URL (YouTube, X/Twitter, etc.) into direct HTTPS stream URL(s).
   // Answer arrives through poll() as CCORD_NET_VIDEO_RESOLVED echoing `req_id` and `url`.
   ccord_status (*resolve_video)(ccord_transport *t, uint64_t req_id, const char *url, ccord_error *err);
+  // Optional. Reports readable sockets and the next timer deadline so an idle/background main loop can sleep in
+  // kernel poll() instead of waking at a fixed interval. Main thread, non-blocking.
+  bool (*wait_info)(const ccord_transport *t, ccord_wait_info *out);
 } ccord_transport_vtable;
 struct ccord_transport { const ccord_transport_vtable *vt; };           // implementations embed this as first member
 [[nodiscard]] static inline ccord_status ccord_transport_connect(ccord_transport *t, ccord_error *e) { return t->vt->connect(t, e); }
@@ -1183,6 +1195,12 @@ static inline size_t ccord_transport_active_uploads(ccord_transport *t, ccord_up
   if (!CCORD_TRANSPORT_OPTIONAL(t, resolve_video))
     return ccord_error_set(e, CCORD_ERR_UNSUPPORTED, "transport: video resolve not supported");
   return t->vt->resolve_video(t, req_id, url, e);
+}
+static inline bool ccord_transport_wait_info(const ccord_transport *t, ccord_wait_info *out) {
+  if (!out) return false;
+  *out = (ccord_wait_info){.timeout_ms = UINT32_MAX};
+  if (!CCORD_TRANSPORT_OPTIONAL(t, wait_info)) return false;
+  return t->vt->wait_info(t, out);
 }
 [[nodiscard]] static inline ccord_status ccord_transport_create_poll(ccord_transport *t, ccord_id c,
                                                                      const ccord_poll_create *poll, ccord_error *e) {

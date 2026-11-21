@@ -68,6 +68,7 @@ struct ccord_video_resolver {
 
   // Pending job (single slot: a newer click supersedes an older pending/in-flight resolve).
   bool has_job;
+  bool in_flight;
   uint64_t job_req_id;
   uint64_t job_gen;
   char job_url[CCORD_VIDEO_RESOLVE_PAGE_URL_MAX];
@@ -522,6 +523,7 @@ static void vr_worker_fn(void *arg)
     char url[CCORD_VIDEO_RESOLVE_PAGE_URL_MAX];
     vr_copy_str(url, sizeof url, r->job_url);
     r->has_job = false;
+    r->in_flight = true;
     ccord_mutex_unlock(r->mx);
 
     ccord_video_resolved res;
@@ -531,6 +533,7 @@ static void vr_worker_fn(void *arg)
     vr_resolve_one(r, my_gen, url, &res);
 
     ccord_mutex_lock(r->mx);
+    r->in_flight = false;
     if (!r->stop && atomic_load_explicit(&r->gen, memory_order_acquire) == my_gen) {
       if (res.status == CCORD_OK && res.video_url[0]) {
         vr_cache_entry *ce = &r->cache[r->cache_next % VR_CACHE_SLOTS];
@@ -639,6 +642,15 @@ bool ccord_video_resolver_poll(ccord_video_resolver *r, ccord_video_resolved *ou
   return true;
 }
 
+bool ccord_video_resolver_busy(const ccord_video_resolver *r)
+{
+  if (!r) return false;
+  ccord_mutex_lock(r->mx);
+  bool busy = r->has_job || r->in_flight || r->done_count > 0;
+  ccord_mutex_unlock(r->mx);
+  return busy;
+}
+
 #else
 
 ccord_video_resolver *ccord_video_resolver_create(void) { return nullptr; }
@@ -651,6 +663,11 @@ ccord_status ccord_video_resolver_submit(ccord_video_resolver *r, uint64_t req_i
 bool ccord_video_resolver_poll(ccord_video_resolver *r, ccord_video_resolved *out)
 {
   (void)r; (void)out;
+  return false;
+}
+bool ccord_video_resolver_busy(const ccord_video_resolver *r)
+{
+  (void)r;
   return false;
 }
 

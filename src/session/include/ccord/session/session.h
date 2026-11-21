@@ -29,6 +29,9 @@ void ccord_session_set_stale(ccord_session *s, bool stale);
 bool ccord_session_is_stale(const ccord_session *s);
 // Applies up to 64 transport events to the store; posts connection.state. Call once per frame. Returns events applied.
 size_t ccord_session_pump(ccord_session *s);
+// Reports readable transport sockets and the next timer deadline so an idle/background loop can sleep in kernel poll().
+// Returns true when the underlying transport supports wait_info (false for mock/idle transports).
+bool ccord_session_wait_info(const ccord_session *s, ccord_wait_info *out);
 
 // A user action (send, edit, delete, react, pin, ...) that Discord did not accept. Actions run asynchronously, so
 // the call that started one already returned CCORD_OK; the failure is queued here and surfaces through pump().

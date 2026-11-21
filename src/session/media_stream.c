@@ -377,6 +377,36 @@ void ccord_stream_hub_pump(ccord_stream_hub *h, uint64_t now_ms)
   for (ccord_media_stream *ms = h->head; ms; ms = ms->next) stream_pump(h, ms, now_ms);
 }
 
+uint32_t ccord_stream_hub_next_wait_ms(const ccord_stream_hub *h, uint64_t now_ms)
+{
+  if (!h) return UINT32_MAX;
+  uint32_t best = UINT32_MAX;
+  for (ccord_media_stream *ms = h->head; ms; ms = ms->next) {
+    ccord_mutex_lock(ms->mtx);
+    if (!ms->cancelled && ms->error == CCORD_OK) {
+      uint32_t rem = UINT32_MAX;
+      if (ms->flight == FLIGHT_ACTIVE) {
+        uint64_t elapsed = now_ms >= ms->flight_ms ? (now_ms - ms->flight_ms) : 0u;
+        rem = elapsed >= STREAM_RANGE_STALL_MS ? 0u : (uint32_t)(STREAM_RANGE_STALL_MS - elapsed);
+      } else if (ms->flight == FLIGHT_RETRY) {
+        if (now_ms >= ms->retry_at_ms) rem = 0u;
+        else {
+          uint64_t d = ms->retry_at_ms - now_ms;
+          rem = d > UINT32_MAX ? UINT32_MAX : (uint32_t)d;
+        }
+      } else {
+        int64_t sb = 0;
+        uint32_t nb = 0;
+        if (choose_range(ms, &sb, &nb)) rem = 0u;
+      }
+      if (rem < best) best = rem;
+    }
+    ccord_mutex_unlock(ms->mtx);
+    if (best == 0u) break;
+  }
+  return best;
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Answers (session thread)
 

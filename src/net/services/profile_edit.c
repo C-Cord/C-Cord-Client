@@ -675,6 +675,17 @@ void ccord_profile_rest_pump(ccord_profile_rest *r, uint64_t now_ms)
   }
 }
 
+bool ccord_profile_rest_pending(const ccord_profile_rest *r)
+{
+  if (!r) return false;
+  if (r->is_mock) return r->mock && r->mock->pending_count > 0;
+#ifdef CCORD_PROFILE_LIVE
+  return r->queue && ccord_rest_queue_pending(r->queue) > 0;
+#else
+  return false;
+#endif
+}
+
 void ccord_profile_rest_destroy(ccord_profile_rest *r)
 {
   if (!r) return;

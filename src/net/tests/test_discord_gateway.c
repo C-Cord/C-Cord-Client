@@ -1911,6 +1911,59 @@ static void test_voice_gateway_fragmented_binary_frame(void)
   CT_CHECK(log_has(ev, n, "HB ", "\"seq_ack\":42"));
 }
 
+static void script_wait_info(void *ud, fg_conn *c)
+{
+  (void)ud;
+  if (!fg_handshake(c)) return;
+  z_stream zs;
+  if (!zinit(&zs)) return;
+  if (!zsend(&zs, c, "{\"op\":10,\"d\":{\"heartbeat_interval\":41250}}")) {
+    (void)deflateEnd(&zs);
+    return;
+  }
+  char buf[2048];
+  if (fg_recv(c, buf, sizeof buf, 5000) != FG_GOT_TEXT) {
+    (void)deflateEnd(&zs);
+    return;
+  }
+  char ready[512];
+  (void)snprintf(ready, sizeof ready, FG_READY, c->self_url);
+  if (!zsend(&zs, c, ready)) {
+    (void)deflateEnd(&zs);
+    return;
+  }
+  fg_serve_session(c, true, fg_now_ms() + 1500, 0);
+  (void)deflateEnd(&zs);
+}
+
+static void test_gateway_wait_info(void)
+{
+  fg_server srv;
+  CT_CHECK(fg_start(&srv, script_wait_info, nullptr));
+  client c;
+  CT_CHECK(client_start(&c, srv.url, true));
+  CT_CHECK(wait_connected(&c, 1, 4000) && c.snapshot);
+  // Drain to CURLE_AGAIN so wait_info reports the socket fd and heartbeat timeout without immediate spin.
+  ccord_net_event ev;
+  while (ccord_gateway_poll(c.g, &ev)) {}
+  uint32_t timeout_ms = 0;
+  bool has_pending = true;
+  ccord_socket_t sock = ccord_gateway_wait_info(c.g, &timeout_ms, &has_pending);
+  CT_CHECK(sock != CCORD_INVALID_SOCKET);
+  CT_CHECK(!has_pending);
+  CT_CHECK(timeout_ms > 0u && timeout_ms <= 41250u);
+
+  ccord_gateway_stop(c.g);
+  sock = ccord_gateway_wait_info(c.g, &timeout_ms, &has_pending);
+  CT_CHECK(sock == CCORD_INVALID_SOCKET);
+  CT_CHECK(!has_pending);
+  CT_CHECK(timeout_ms == UINT32_MAX);
+
+  finish(&c);
+  fg_event log[FG_MAX_EVENTS];
+  (void)fg_stop(&srv, log, FG_MAX_EVENTS);
+}
+
 int main(void)
 {
   test_compress_negotiation_and_handshake();
@@ -1945,5 +1998,6 @@ int main(void)
   test_rich_presence_transport_hooks();
   test_voice_session_id_ignores_other_users();
   test_voice_gateway_fragmented_binary_frame();
+  test_gateway_wait_info();
   return CT_RESULT("test_discord_gateway");
 }

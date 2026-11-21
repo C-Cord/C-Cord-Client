@@ -12,6 +12,8 @@ ccord_stream_hub *ccord_stream_hub_create(ccord_transport *t);
 void ccord_stream_hub_destroy(ccord_stream_hub *h);                                        // cancels + frees streams
 void ccord_stream_hub_on_range(ccord_stream_hub *h, const ccord_net_event *ev, uint64_t now_ms);   // MEDIA_RANGE
 void ccord_stream_hub_pump(ccord_stream_hub *h, uint64_t now_ms);   // issues the next range per stream, retries, expires
+// Max ms before ccord_stream_hub_pump() needs to run again (UINT32_MAX when all open streams are idle/buffered).
+uint32_t ccord_stream_hub_next_wait_ms(const ccord_stream_hub *h, uint64_t now_ms);
 // Used by ccord_session_open_media_stream / _close_media_stream / ccord_session_set_transport (session.c).
 #include <ccord/session/media_stream.h>
 ccord_media_stream *ccord_stream_hub_open(ccord_stream_hub *h, const char *url, ccord_error *err);
