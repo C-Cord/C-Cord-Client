@@ -105,6 +105,7 @@ class CCordActivity : SDLActivity() {
         installSplashBackdrop(1500L)
         installAutofillOverlay()
         CCordBridge.attach(this)
+        CCordBridge.nativeSetActivityActive(true)
         configureEdgeToEdge(fullscreen = false)
         installInsetsListener()
         registerNetworkCallback()
@@ -112,14 +113,32 @@ class CCordActivity : SDLActivity() {
         handleNotificationIntent(intent)
     }
 
+    override fun onStart() {
+        super.onStart()
+        if (!mBrokenLibraries && CCordBridge.nativeReady) {
+            CCordBridge.nativeSetActivityActive(true)
+        }
+    }
+
+    override fun onPause() {
+        if (!mBrokenLibraries && CCordBridge.nativeReady) {
+            CCordBridge.nativeSetActivityActive(false)
+        }
+        super.onPause()
+    }
+
     override fun onStop() {
         wasStopped = true
+        if (!mBrokenLibraries && CCordBridge.nativeReady) {
+            CCordBridge.nativeSetActivityActive(false)
+        }
         super.onStop()
     }
 
     override fun onResume() {
         super.onResume()
         if (mBrokenLibraries) return
+        if (CCordBridge.nativeReady) CCordBridge.nativeSetActivityActive(true)
         if (wasStopped) {
             wasStopped = false
             // Cover the freshly recreating SurfaceView with our theme backdrop until the resumed frame presents.
@@ -137,6 +156,7 @@ class CCordActivity : SDLActivity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (!mBrokenLibraries && hasFocus) {
+            if (CCordBridge.nativeReady) CCordBridge.nativeWakeMainLoop()
             // Post after SDLActivity's command handler so our edge-to-edge flags win over SDL's SYSTEM_UI_FLAG_VISIBLE.
             window.decorView.post {
                 configureEdgeToEdge(fullscreen = isFullscreenMode)
@@ -168,6 +188,7 @@ class CCordActivity : SDLActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         if (!mBrokenLibraries) {
+            if (CCordBridge.nativeReady) CCordBridge.nativeWakeMainLoop()
             handleNotificationIntent(intent)
         }
     }
@@ -177,6 +198,9 @@ class CCordActivity : SDLActivity() {
         dismissSplashBackdrop()
         stopScreenCaptureInternal()
         unregisterNetworkCallback()
+        if (!mBrokenLibraries && CCordBridge.nativeReady) {
+            CCordBridge.nativeSetActivityActive(true)
+        }
         CCordBridge.detach(this)
         super.onDestroy()
     }

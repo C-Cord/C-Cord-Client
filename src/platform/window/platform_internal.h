@@ -81,6 +81,9 @@ struct ccord_platform {
   atomic_bool pending_fg_ev;
   atomic_bool pending_lowmem_ev;
   atomic_bool pending_reset_ev;
+  atomic_bool pending_quit_ev;
+  int wake_pipe[2];               // POSIX/Android self-pipe to wake background poll() immediately
+  _Atomic int wake_wr_fd;         // mirror of wake_pipe[1] for thread-safe wakeups (-1 when closed)
   bool pending_safe_area_ev;
   bool pending_keyboard_ev;
   bool android_insets_seen;       // Kotlin WindowInsets arrived; ignore SDL's systemGestures-bloated safe area
@@ -99,3 +102,4 @@ void platform_refresh_sdl_safe_area(ccord_platform *p);
 void platform_copy_utf8_prefix(char *dst, size_t cap, const char *src, size_t len);
 platform_drop_buf *platform_drop_buf_ensure(ccord_platform *p);
 void platform_pump_link(ccord_platform *p);
+void platform_wake(ccord_platform *p);

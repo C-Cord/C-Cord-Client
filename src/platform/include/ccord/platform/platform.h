@@ -7,6 +7,7 @@
 #include <ccord/core/error.h>
 #include <ccord/core/input.h>
 #include <ccord/core/link_event.h>
+#include <ccord/core/os.h>
 // The only module (with render) that includes SDL headers. Public headers expose no SDL types.
 typedef struct ccord_platform ccord_platform;
 typedef struct ccord_platform_config {
@@ -33,6 +34,13 @@ void ccord_platform_destroy(ccord_platform *p);
 // Waits up to timeout_ms (0 = poll only) for the first event, then returns true and fills `out`; call
 // again with timeout_ms = 0 to drain. Events are translated to ccord_input_event; unknown SDL events are dropped.
 bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32_t timeout_ms);
+// Event-driven idle/background wait: on Android while backgrounded (and Activity paused), sleeps in kernel poll()
+// on the platform wake pipe plus `extra_fds` (e.g. Gateway socket and plugin IPC fds) up to `timeout_ms` instead of
+// polling SDL at a fixed cadence. Falls back to ccord_platform_next_event() on desktop or while foreground/active.
+// Returns true and fills `out` when an input/lifecycle event is ready; false when an extra fd woke, a non-input
+// callback ran, or timeout_ms elapsed.
+bool ccord_platform_wait_idle(ccord_platform *p, ccord_input_event *out, const ccord_socket_t *extra_fds,
+                              size_t extra_fd_count, uint32_t timeout_ms);
 void ccord_platform_size(const ccord_platform *p, float *logical_w, float *logical_h, float *scale);   // scale = display scale * pixel density
 void ccord_platform_set_title(ccord_platform *p, const char *utf8);
 void ccord_platform_set_cursor(ccord_platform *p, ccord_cursor_kind kind);

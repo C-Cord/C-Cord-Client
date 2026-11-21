@@ -16,6 +16,7 @@
 
 #include <ccord/core/error.h>
 #include <ccord/core/input.h>
+#include <ccord/core/os.h>
 
 #include "ccord_test.h"
 
@@ -1657,6 +1658,79 @@ static void test_mobile_background_lifecycle_and_notify(void)
   ccord_platform_destroy(p);
 }
 
+#if !defined(_WIN32)
+typedef struct wake_sock_arg {
+  ccord_socket_t fd;
+  uint32_t delay_ms;
+} wake_sock_arg;
+
+static void wake_sock_thread(void *ud)
+{
+  wake_sock_arg *a = (wake_sock_arg *)ud;
+  ccord_sleep_ms(a->delay_ms);
+  uint8_t b = 0x5Au;
+  bool wb = false;
+  (void)ccord_sock_send(a->fd, &b, 1, &wb);
+}
+
+static void wake_fg_thread(void *ud)
+{
+  uint32_t *delay = (uint32_t *)ud;
+  ccord_sleep_ms(*delay);
+  SDL_Event fg = {.type = SDL_EVENT_DID_ENTER_FOREGROUND};
+  (void)SDL_PushEvent(&fg);
+}
+
+static void test_background_wait_idle_poll(void)
+{
+  ccord_error err;
+  ccord_platform_config cfg = {.title = "C-Cord", .width = 412, .height = 915, .headless = true};
+  ccord_platform *p = ccord_platform_create(&cfg, &err);
+  CT_CHECK(p != nullptr);
+  if (!p) return;
+  drain(p);
+
+  // Move platform into background state so headless wait_idle exercises kernel poll() + wake_pipe.
+  SDL_Event bg = {.type = SDL_EVENT_DID_ENTER_BACKGROUND};
+  (void)SDL_PushEvent(&bg);
+  ccord_input_event ev;
+  CT_CHECK(ccord_platform_next_event(p, &ev, 250) && ev.type == CCORD_IN_APP_BACKGROUND);
+  CT_CHECK(ccord_platform_in_background(p));
+
+  // 1. Readable extra_fd must wake poll() immediately rather than sleeping out a 3000 ms timeout.
+  ccord_socket_t sv[2] = {CCORD_INVALID_SOCKET, CCORD_INVALID_SOCKET};
+  CT_CHECK(ccord_sock_pair(sv));
+  wake_sock_arg arg = {.fd = sv[1], .delay_ms = 30};
+  ccord_thread *th = ccord_thread_create(wake_sock_thread, &arg);
+  CT_CHECK(th != nullptr);
+  uint64_t t0 = SDL_GetTicks();
+  bool got = ccord_platform_wait_idle(p, &ev, &sv[0], 1, 3000);
+  uint64_t elapsed = SDL_GetTicks() - t0;
+  ccord_thread_join(th);
+  CT_CHECK(!got);          // extra_fd woke poll(), not an input event
+  CT_CHECK(elapsed < 1000u);
+  uint8_t rb = 0;
+  bool wb = false;
+  CT_CHECK(ccord_sock_recv(sv[0], &rb, 1, &wb) == 1 && rb == 0x5Au);
+  ccord_sock_close(sv[0]);
+  ccord_sock_close(sv[1]);
+
+  // 2. Foreground transition from another thread must wake wake_pipe immediately and deliver CCORD_IN_APP_FOREGROUND.
+  uint32_t fg_delay = 30;
+  ccord_thread *th2 = ccord_thread_create(wake_fg_thread, &fg_delay);
+  CT_CHECK(th2 != nullptr);
+  t0 = SDL_GetTicks();
+  got = ccord_platform_wait_idle(p, &ev, nullptr, 0, 3000);
+  elapsed = SDL_GetTicks() - t0;
+  ccord_thread_join(th2);
+  CT_CHECK(got && ev.type == CCORD_IN_APP_FOREGROUND);
+  CT_CHECK(elapsed < 1000u);
+  CT_CHECK(!ccord_platform_in_background(p));
+
+  ccord_platform_destroy(p);
+}
+#endif
+
 int main(void)
 {
   SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
@@ -1668,6 +1742,9 @@ int main(void)
   test_offline();
   test_long_text_input_chunking();
   test_mobile_background_lifecycle_and_notify();
+#if !defined(_WIN32)
+  test_background_wait_idle_poll();
+#endif
   test_window_lifecycle();
   test_dead_bus();
 #if CCORD_HAVE_PORTAL

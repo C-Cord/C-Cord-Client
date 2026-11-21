@@ -9,9 +9,11 @@
 #include <jni.h>
 #include <libavcodec/jni.h>
 
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/log.h>
@@ -58,6 +60,8 @@ static ccord_platform *g_platform = nullptr;
 static ccord_desktop *g_desktop = nullptr;
 static JavaVM *g_jvm = nullptr;
 static jclass g_bridge_cls = nullptr;
+static int g_wake_fd = -1;
+static atomic_bool g_activity_active = true;
 
 // Pending WindowInsets pushed from Kotlin UI thread.
 static bool g_insets_valid = false;
@@ -245,6 +249,35 @@ void ccord_android_register_platform(ccord_platform *p)
   ccord_spin_lock_acquire(&g_jni_lock);
   g_platform = p;
   ccord_spin_lock_release(&g_jni_lock);
+}
+
+static void wake_locked(void)
+{
+  if (g_wake_fd < 0) return;
+  uint8_t b = 1;
+  ssize_t r;
+  do {
+    r = write(g_wake_fd, &b, 1);
+  } while (r < 0 && errno == EINTR);
+}
+
+void ccord_android_set_wake_fd(int fd)
+{
+  ccord_spin_lock_acquire(&g_jni_lock);
+  g_wake_fd = fd;
+  ccord_spin_lock_release(&g_jni_lock);
+}
+
+void ccord_android_wake_main_loop(void)
+{
+  ccord_spin_lock_acquire(&g_jni_lock);
+  wake_locked();
+  ccord_spin_lock_release(&g_jni_lock);
+}
+
+bool ccord_android_is_activity_active(void)
+{
+  return atomic_load_explicit(&g_activity_active, memory_order_acquire);
 }
 
 int ccord_android_get_form_factor(void)
@@ -629,6 +662,7 @@ Java_org_ccord_android_CCordBridge_nativeOnInsetsChanged(JNIEnv *env, jclass cls
   g_insets_ime = ime_bottom >= 0.0f ? ime_bottom : 0.0f;
   g_insets_valid = true;
   g_insets_dirty = true;
+  wake_locked();
   ccord_spin_lock_release(&g_jni_lock);
 }
 
@@ -649,6 +683,7 @@ Java_org_ccord_android_CCordBridge_nativeOnAutofillField(JNIEnv *env, jclass cls
   } else {
     g_autofill_head = (g_autofill_head + 1u) % ANDROID_AUTOFILL_CAP;
   }
+  wake_locked();
   ccord_spin_lock_release(&g_jni_lock);
   memset(utf, 0, sizeof utf);
 }
@@ -668,6 +703,7 @@ Java_org_ccord_android_CCordBridge_nativeOnFilePicked(JNIEnv *env, jclass cls, j
   } else {
     g_file_head = (g_file_head + 1u) % ANDROID_FILE_Q_CAP;
   }
+  wake_locked();
   ccord_spin_lock_release(&g_jni_lock);
 }
 
@@ -697,6 +733,7 @@ Java_org_ccord_android_CCordBridge_nativeOnNotificationClicked(JNIEnv *env, jcla
       g_cold_click_ids[g_cold_click_count++] = (uint32_t)id;
     }
   }
+  wake_locked();
   ccord_spin_lock_release(&g_jni_lock);
 }
 
@@ -714,6 +751,7 @@ Java_org_ccord_android_CCordBridge_nativeOnVoiceAction(JNIEnv *env, jclass cls, 
   } else {
     g_voice_action_head = (g_voice_action_head + 1u) % ANDROID_VOICE_ACTION_Q_CAP;
   }
+  wake_locked();
   ccord_spin_lock_release(&g_jni_lock);
 }
 
@@ -724,6 +762,7 @@ Java_org_ccord_android_CCordBridge_nativeOnNetworkChanged(JNIEnv *env, jclass cl
   (void)cls;
   ccord_spin_lock_acquire(&g_jni_lock);
   g_network_changed_pending = true;
+  wake_locked();
   ccord_spin_lock_release(&g_jni_lock);
 }
 
@@ -747,6 +786,23 @@ Java_org_ccord_android_CCordBridge_nativeOnCaptureStopped(JNIEnv *env, jclass cl
   (void)env;
   (void)cls;
   ccord_capture_android_mark_stopped();
+}
+
+JNIEXPORT void JNICALL
+Java_org_ccord_android_CCordBridge_nativeWakeMainLoop(JNIEnv *env, jclass cls)
+{
+  (void)env;
+  (void)cls;
+  ccord_android_wake_main_loop();
+}
+
+JNIEXPORT void JNICALL
+Java_org_ccord_android_CCordBridge_nativeSetActivityActive(JNIEnv *env, jclass cls, jboolean active)
+{
+  (void)env;
+  (void)cls;
+  atomic_store_explicit(&g_activity_active, active == JNI_TRUE, memory_order_release);
+  ccord_android_wake_main_loop();
 }
 
 // ---- desktop.h implementation for Android ----

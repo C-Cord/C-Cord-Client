@@ -11,7 +11,13 @@
 #include <ccord/core/link_event.h>
 
 typedef struct ccord_linkwatch ccord_linkwatch;
+#if defined(__ANDROID__)
+// Android suspends the SoC opportunistically for 3-30 s naps with the screen off; only treat naps
+// exceeding a Discord heartbeat interval as a true suspend so we don't thrash TCP/TLS reconnects.
+#define CCORD_LINKWATCH_RESUME_GAP_MS 50000u
+#else
 #define CCORD_LINKWATCH_RESUME_GAP_MS 3000u   // skew growth that counts as a suspend
+#endif
 
 // offline=true: no netlink socket (headless platforms, slices, tests); feeds and inject still work. A socket that cannot
 // be created leaves the watcher in clock-only mode; creation itself fails only on out-of-memory (nullptr).

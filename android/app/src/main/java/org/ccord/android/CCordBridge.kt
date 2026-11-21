@@ -129,6 +129,12 @@ object CCordBridge {
     @JvmStatic
     external fun nativeOnAutofillField(field: Int, text: String)
 
+    @JvmStatic
+    external fun nativeWakeMainLoop()
+
+    @JvmStatic
+    external fun nativeSetActivityActive(active: Boolean)
+
     // ---- Bridge methods called from C (desktop_android.c) ----
 
     @JvmStatic

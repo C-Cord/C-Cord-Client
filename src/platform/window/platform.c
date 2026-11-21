@@ -8,6 +8,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#if !defined(_WIN32)
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
+
 #if defined(__ANDROID__)
 #include <SDL3/SDL_system.h>
 #include "desktop/android_bridge.h"
@@ -191,31 +197,66 @@ uint32_t ccord_platform_window_icon_sizes(const ccord_platform *p)
   return p ? p->window_icon_sizes : 0;
 }
 
+void platform_wake(ccord_platform *p)
+{
+#if !defined(_WIN32)
+  if (!p) return;
+  int fd = atomic_load_explicit(&p->wake_wr_fd, memory_order_acquire);
+  if (fd < 0) return;
+  uint8_t b = 1;
+  ssize_t r;
+  do {
+    r = write(fd, &b, 1);
+  } while (r < 0 && errno == EINTR);
+#else
+  (void)p;
+#endif
+}
+
 static bool SDLCALL platform_lifecycle_watch(void *userdata, SDL_Event *event)
 {
   ccord_platform *p = (ccord_platform *)userdata;
   if (!p || !event) return true;
+  bool wake = false;
   switch (event->type) {
     case SDL_EVENT_WILL_ENTER_BACKGROUND:
     case SDL_EVENT_DID_ENTER_BACKGROUND:
       atomic_store(&p->in_background, true);
       atomic_store(&p->pending_bg_ev, true);
+      wake = true;
       break;
     case SDL_EVENT_WILL_ENTER_FOREGROUND:
     case SDL_EVENT_DID_ENTER_FOREGROUND:
       atomic_store(&p->in_background, false);
       atomic_store(&p->pending_fg_ev, true);
+      wake = true;
       break;
     case SDL_EVENT_LOW_MEMORY:
       atomic_store(&p->pending_lowmem_ev, true);
+      wake = true;
       break;
     case SDL_EVENT_RENDER_TARGETS_RESET:
     case SDL_EVENT_RENDER_DEVICE_RESET:
       atomic_store(&p->pending_reset_ev, true);
+      wake = true;
+      break;
+    case SDL_EVENT_TERMINATING:
+      atomic_store(&p->pending_quit_ev, true);
+      wake = true;
+      break;
+    case SDL_EVENT_QUIT:
+      if (atomic_load_explicit(&p->in_background, memory_order_relaxed)) {
+        atomic_store(&p->pending_quit_ev, true);
+        wake = true;
+      }
+      break;
+    case SDL_EVENT_POLL_SENTINEL:
       break;
     default:
+      if (atomic_load_explicit(&p->in_background, memory_order_relaxed)) wake = true;
       break;
   }
+  if (wake) platform_wake(p);
   return true;
 }
 
@@ -260,6 +301,9 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
 #if defined(__ANDROID__)
   // Keep SDL_main running while backgrounded so the Discord Gateway stays connected and OS notifications fire.
   SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
+  // Work around SDL3 3.4.20 Android busy-loop (libsdl-org/SDL#16713): poll sentinel events signal
+  // Android_LifecycleEventSem inside SDL_WaitEventTimeout, preventing sleep and spinning 100% CPU.
+  SDL_SetHint(SDL_HINT_POLL_SENTINEL, "0");
   // Use dedicated touch events in our gesture recognizer instead of double-firing synthetic mouse events.
   SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
   SDL_SetHint(SDL_HINT_MOUSE_TOUCH_EVENTS, "0");
@@ -278,6 +322,9 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
   p->headless = c.headless;
   p->focused = !c.start_minimized;
   p->window_visible = !c.start_minimized;
+  p->wake_pipe[0] = -1;
+  p->wake_pipe[1] = -1;
+  atomic_init(&p->wake_wr_fd, -1);
   p->drop_mutex = SDL_CreateMutex();
   SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
 #if !defined(__ANDROID__)
@@ -299,11 +346,26 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
       p->focused = (SDL_GetWindowFlags(p->window) & SDL_WINDOW_INPUT_FOCUS) != 0;
     }
   }
+#if !defined(_WIN32)
+  if (pipe(p->wake_pipe) == 0) {
+    for (int i = 0; i < 2; i++) {
+      int fl = fcntl(p->wake_pipe[i], F_GETFL, 0);
+      if (fl >= 0) (void)fcntl(p->wake_pipe[i], F_SETFL, fl | O_NONBLOCK);
+      int fdfl = fcntl(p->wake_pipe[i], F_GETFD, 0);
+      if (fdfl >= 0) (void)fcntl(p->wake_pipe[i], F_SETFD, fdfl | FD_CLOEXEC);
+    }
+    atomic_store_explicit(&p->wake_wr_fd, p->wake_pipe[1], memory_order_release);
+  } else {
+    p->wake_pipe[0] = -1;
+    p->wake_pipe[1] = -1;
+  }
+#endif
 #if defined(__ANDROID__)
   // Re-assert edge-to-edge window styling after SDL_CreateWindow's async COMMAND_CHANGE_WINDOW_STYLE.
   ccord_android_on_fullscreen_changed(false);
   int ff = ccord_android_get_form_factor();
   p->form_factor = (ff == 2) ? CCORD_FORM_TABLET : CCORD_FORM_PHONE;
+  ccord_android_set_wake_fd(p->wake_pipe[1]);
   ccord_android_register_platform(p);
   {
     float top = 0.0f, right = 0.0f, bottom = 0.0f, left = 0.0f, ime = 0.0f;
@@ -356,7 +418,15 @@ void ccord_platform_destroy(ccord_platform *p)
   if (p->keep_alive_active) {
     ccord_android_set_keep_alive(false);
   }
+  ccord_android_set_wake_fd(-1);
   ccord_android_register_platform(nullptr);
+#endif
+#if !defined(_WIN32)
+  atomic_store_explicit(&p->wake_wr_fd, -1, memory_order_release);
+  if (p->wake_pipe[0] >= 0) close(p->wake_pipe[0]);
+  if (p->wake_pipe[1] >= 0) close(p->wake_pipe[1]);
+  p->wake_pipe[0] = -1;
+  p->wake_pipe[1] = -1;
 #endif
   if (p->text_input_on) SDL_StopTextInput(p->window);
   platform_pending_text_clear(p);
@@ -652,6 +722,7 @@ ccord_status ccord_platform_inject_drop_file(ccord_platform *p, const char *path
     p->drop_pop_head = (p->drop_pop_head + 1) % DROP_QUEUE_CAP;
   }
   if (p->drop_mutex) SDL_UnlockMutex(p->drop_mutex);
+  platform_wake(p);
   return CCORD_OK;
 }
 
@@ -857,6 +928,7 @@ void ccord_platform_inject_link_event(ccord_platform *p, ccord_link_event ev)
   if (!p) return;
   ccord_linkwatch_inject(p->link, ev);
   atomic_store(&p->link_dirty, true);
+  platform_wake(p);
 }
 
 // Samples the clocks and the route socket, then hands every pending event to the callback (main thread, no waiting).
@@ -1011,6 +1083,7 @@ ccord_status ccord_platform_inject_hotkey(ccord_platform *p, const char *shortcu
     return CCORD_OK;
   }
   hotkey_push(p, shortcut_id, len);
+  platform_wake(p);
   return CCORD_OK;
 }
 

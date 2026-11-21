@@ -3,8 +3,15 @@
 #define _POSIX_C_SOURCE 200809L
 #include "window/platform_internal.h"
 
+#include <limits.h>
 #include <math.h>
 #include <string.h>
+
+#if !defined(_WIN32)
+#include <errno.h>
+#include <poll.h>
+#include <unistd.h>
+#endif
 
 #if defined(__ANDROID__)
 #include "desktop/android_bridge.h"
@@ -350,12 +357,22 @@ static bool pop_lifecycle_event(ccord_platform *p, ccord_input_event *out)
     out->type = CCORD_IN_RENDER_RESET;
     return true;
   }
+  if (atomic_exchange(&p->pending_quit_ev, false)) {
+    memset(out, 0, sizeof *out);
+    out->type = CCORD_IN_QUIT;
+    return true;
+  }
   return false;
 }
 
 bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32_t timeout_ms)
 {
   if (!p || !out) return false;
+#if defined(__ANDROID__)
+  // Drain JNI-queued file picks, voice notification actions, and ConnectivityManager network changes BEFORE
+  // pumping link events so a network change wakes the gateway on the same iteration.
+  ccord_android_drain_events(p);
+#endif
   // Dispatch pending DBus replies/signals and sample clocks/netlink on blocking waits, on first
   // poll, or at most every 8 ms during rapid timeout=0 drains (e.g. mouse-motion bursts).
   // Injected link events (tests / Android JNI) still pump immediately.
@@ -374,7 +391,6 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
 
   if (pop_lifecycle_event(p, out)) return true;
 #if defined(__ANDROID__)
-  ccord_android_drain_events(p);
   {
     float top = 0, right = 0, bottom = 0, left = 0, ime = 0;
     if (ccord_android_poll_insets(&top, &right, &bottom, &left, &ime)) {
@@ -457,5 +473,59 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
       wait = now < deadline ? (uint32_t)(deadline - now) : 0;
     }
   }
+}
+
+bool ccord_platform_wait_idle(ccord_platform *p, ccord_input_event *out, const ccord_socket_t *extra_fds,
+                              size_t extra_fd_count, uint32_t timeout_ms)
+{
+  if (!p || !out) return false;
+#if !defined(_WIN32)
+#if defined(__ANDROID__)
+  bool use_poll = !p->headless && atomic_load(&p->in_background) && !ccord_android_is_activity_active();
+#else
+  bool use_poll = p->headless && atomic_load(&p->in_background);
+#endif
+  if (use_poll && p->wake_pipe[0] >= 0 && timeout_ms > 0) {
+    // Drain stale wake bytes BEFORE checking queued events and lifecycle state so any signal posted
+    // concurrently after this point remains unread in wake_pipe[0] and unblocks poll() immediately.
+    uint8_t drain[64];
+    while (read(p->wake_pipe[0], drain, sizeof drain) > 0) {}
+
+    p->bg_pumped_once = false;
+    if (ccord_platform_next_event(p, out, 0)) return true;
+
+#if defined(__ANDROID__)
+    if (!atomic_load(&p->in_background) || ccord_android_is_activity_active()) {
+      uint32_t sdl_timeout = (extra_fd_count > 0 && timeout_ms > 250u) ? 250u : timeout_ms;
+      return ccord_platform_next_event(p, out, sdl_timeout);
+    }
+#else
+    if (!atomic_load(&p->in_background)) {
+      uint32_t sdl_timeout = (extra_fd_count > 0 && timeout_ms > 250u) ? 250u : timeout_ms;
+      return ccord_platform_next_event(p, out, sdl_timeout);
+    }
+#endif
+
+    struct pollfd pfds[1 + 24];
+    nfds_t nfds = 0;
+    pfds[nfds++] = (struct pollfd){.fd = p->wake_pipe[0], .events = POLLIN};
+    for (size_t i = 0; i < extra_fd_count && nfds < (nfds_t)(sizeof pfds / sizeof pfds[0]); i++) {
+      if (extra_fds && extra_fds[i] >= 0) {
+        pfds[nfds++] = (struct pollfd){.fd = extra_fds[i], .events = POLLIN};
+      }
+    }
+    int wait_ms = timeout_ms > (uint32_t)INT_MAX ? INT_MAX : (int)timeout_ms;
+    int rc = poll(pfds, nfds, wait_ms);
+    if (rc > 0 && (pfds[0].revents & POLLIN) != 0) {
+      while (read(p->wake_pipe[0], drain, sizeof drain) > 0) {}
+    }
+    p->bg_pumped_once = false;
+    return ccord_platform_next_event(p, out, 0);
+  }
+#else
+  (void)extra_fds;
+#endif
+  uint32_t sdl_timeout = (extra_fd_count > 0 && timeout_ms > 250u) ? 250u : timeout_ms;
+  return ccord_platform_next_event(p, out, sdl_timeout);
 }
 

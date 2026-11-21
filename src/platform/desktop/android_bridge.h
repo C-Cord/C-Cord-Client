@@ -12,6 +12,12 @@
 // Registers the active ccord_platform instance so JNI callbacks (insets, file picker, network, voice actions)
 // can push into its thread-safe queues. Pass nullptr on ccord_platform_destroy().
 void ccord_android_register_platform(ccord_platform *p);
+// Registers the non-blocking write end of platform->wake_pipe so Kotlin/JNI callbacks wake background poll().
+// Pass -1 before closing the pipe in ccord_platform_destroy().
+void ccord_android_set_wake_fd(int fd);
+void ccord_android_wake_main_loop(void);
+// True while CCordActivity is between onStart/onResume and onPause/onStop (guards foreground surface creation).
+bool ccord_android_is_activity_active(void);
 
 // Initializes FFmpeg's Android JavaVM handle for MediaCodec hardware acceleration.
 void ccord_android_init_ffmpeg_jni(void);
@@ -74,4 +80,8 @@ JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnCaptureFrame(
     JNIEnv *env, jclass cls, jobject buf, jint width, jint height, jint stride);
 JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnCaptureStopped(
     JNIEnv *env, jclass cls);
+JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeWakeMainLoop(
+    JNIEnv *env, jclass cls);
+JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeSetActivityActive(
+    JNIEnv *env, jclass cls, jboolean active);
 #endif
