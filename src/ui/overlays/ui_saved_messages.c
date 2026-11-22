@@ -256,14 +256,20 @@ void ui_draw_saved_messages_popover(ccord_ui *ui, ccord_renderer *r)
 
   ccord_rect br = ui_saved_messages_rect(ui);
   const ccord_layout_rect *h = &ui->layout.chat_header;
+  float safe_l = 8.0f + ui->safe_insets.left;
+  float safe_r = 8.0f + ui->safe_insets.right;
+  float safe_b = 8.0f + fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
+  float top_y = h->y + h->h + 6.0f;
   float w = 420.0f, hgt = 420.0f;
-  if (w > ui->win_w - 16.0f && ui->win_w > 32.0f) w = ui->win_w - 16.0f;
-  if (hgt > ui->win_h - (h->y + h->h + 14.0f) && ui->win_h > 120.0f) hgt = ui->win_h - (h->y + h->h + 14.0f);
+  if (w > ui->win_w - safe_l - safe_r && ui->win_w > 32.0f) w = fmaxf(ui->win_w - safe_l - safe_r, 200.0f);
+  float max_hgt = ui->win_h - top_y - safe_b;
+  if (hgt > max_hgt && ui->win_h > 120.0f) hgt = fmaxf(max_hgt, 160.0f);
   if (hgt < 160.0f) hgt = 160.0f;
   float x = br.x + br.w - w;
-  if (x < h->x + 8.0f) x = h->x + 8.0f;
-  if (x + w > ui->win_w - 8.0f) x = ui->win_w - w - 8.0f;
-  ccord_rect box = {x, h->y + h->h + 6.0f, w, hgt};
+  float min_x = fmaxf(h->x + 8.0f, safe_l);
+  if (x < min_x) x = min_x;
+  if (x + w > ui->win_w - safe_r) x = ui->win_w - w - safe_r;
+  ccord_rect box = {x, top_y, w, hgt};
   ui->saved_popover_rect = box;
 
   ui_popup_begin(ui, r, "savedpop", 0, UI_POPUP_MS, UIS_SLIDE_POPOVER);

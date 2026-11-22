@@ -14,6 +14,7 @@
 #include <ccord/ui/ui.h>
 
 #include "../ui_internal.h"
+#include "status_card.h"
 #include "ccord_test.h"
 
 typedef struct mob_fixture {
@@ -865,6 +866,126 @@ static void test_mobile_drawer_occlusion(void)
   }
 }
 
+static void test_mobile_user_profile_modal(void)
+{
+  const ccord_id target_uid = 1002;   // Ada: has bio, activity, connections, mutual guilds, mutual friends
+  ccord_id g = ccord_store_selected_guild(F.store);
+  if (g == CCORD_DM_GUILD_ID || g == CCORD_ID_NONE) g = 1;
+
+  // Sync fixture IME shadow with F.ui (earlier test_mobile_copy_paste_and_autofill_login used a separate lui).
+  F.text_input_active = F.ui->ime_active;
+
+  // Test across standard portrait, compact portrait, ultra-narrow portrait, and landscape mobile viewports.
+  const struct { float w, h, top, bot; } cases[] = {
+    {412.0f, 915.0f, 44.0f, 34.0f},
+    {360.0f, 780.0f, 44.0f, 34.0f},
+    {320.0f, 568.0f, 20.0f, 0.0f},
+    {844.0f, 390.0f, 0.0f, 21.0f},
+  };
+  for (size_t ci = 0; ci < sizeof cases / sizeof cases[0]; ci++) {
+    ccord_ui_set_viewport(F.ui, cases[ci].w, cases[ci].h);
+    ccord_ui_set_mobile_mode(F.ui, true);
+    ccord_ui_set_touch_mode(F.ui, true);
+    ccord_ui_set_safe_insets(F.ui, cases[ci].top, 0.0f, cases[ci].bot, 0.0f);
+    ccord_ui_set_left_drawer(F.ui, false);
+    ccord_ui_set_right_drawer(F.ui, false);
+    step_frames(4, 25);
+
+    ui_open_user_profile_modal(F.ui, target_uid, g);
+    step_frames(6, 30);
+    ccord_ui_debug d = {0};
+    ccord_ui_get_debug(F.ui, &d);
+    CT_CHECK(d.profile_modal_open && d.profile_modal_tab == 0);
+    // Opening a user profile on touch must NOT pop up the soft keyboard uninvited.
+    CT_CHECK(!F.text_input_active);
+
+    ccord_rect m = d.profile_modal_rect;
+    CT_CHECK(m.x >= 0.0f && m.x + m.w <= cases[ci].w + 0.5f);
+    CT_CHECK(m.y >= cases[ci].top - 0.5f && m.y + m.h <= cases[ci].h - cases[ci].bot + 0.5f);
+    CT_CHECK(d.profile_modal_close_btn.x >= m.x &&
+             d.profile_modal_close_btn.x + d.profile_modal_close_btn.w <= m.x + m.w + 0.5f);
+    CT_CHECK(d.profile_modal_msg_btn.w >= 88.0f &&
+             d.profile_modal_msg_btn.x >= m.x &&
+             d.profile_modal_msg_btn.x + d.profile_modal_msg_btn.w <= m.x + m.w + 0.5f);
+
+    // All 3 profile tabs must sit strictly inside the modal without clipping or overlapping each other,
+    // regardless of which tab is selected.
+    for (int sel = 0; sel < 3; sel++) {
+      ccord_rect tr_target = d.profile_modal_tab_rects[sel];
+      CT_CHECK(tr_target.w >= 30.0f && tr_target.h >= 24.0f);
+      // Tap near the right side of the tab to confirm its right edge is inside the modal and clickable.
+      touch_tap(tr_target.x + tr_target.w - 4.0f, tr_target.y + tr_target.h * 0.5f);
+      step_frames(3, 30);
+      ccord_ui_get_debug(F.ui, &d);
+      CT_CHECK(d.profile_modal_open && d.profile_modal_tab == sel);
+      if (ci == 0 && sel == 1) save_mobile_screenshot("mobile_profile_servers.png");
+      if (ci == 0 && sel == 2) save_mobile_screenshot("mobile_profile_friends.png");
+      for (int t = 0; t < 3; t++) {
+        ccord_rect tr = d.profile_modal_tab_rects[t];
+        CT_CHECK(tr.w >= 30.0f && tr.h >= 24.0f);
+        CT_CHECK(tr.x >= m.x - 0.5f);
+        CT_CHECK(tr.x + tr.w <= m.x + m.w + 0.5f);
+        if (t > 0) {
+          ccord_rect prev = d.profile_modal_tab_rects[t - 1];
+          CT_CHECK(prev.x + prev.w <= tr.x + 0.5f);
+        }
+      }
+    }
+
+    // Back to User Info tab: scroll down to reveal Note & Connections and verify both fit within the modal.
+    touch_tap(d.profile_modal_tab_rects[0].x + d.profile_modal_tab_rects[0].w * 0.5f,
+              d.profile_modal_tab_rects[0].y + d.profile_modal_tab_rects[0].h * 0.5f);
+    step_frames(3, 30);
+    ccord_input_event wev = {.type = CCORD_IN_WHEEL, .x = m.x + m.w * 0.5f, .y = m.y + m.h * 0.7f, .wheel = -10.0f};
+    (void)ccord_ui_handle_input(F.ui, &wev);
+    step_frames(4, 30);
+    ccord_ui_get_debug(F.ui, &d);
+    if (ci == 0) save_mobile_screenshot("mobile_profile_info.png");
+    CT_CHECK(d.profile_modal_note_rect.w > 0.0f && d.profile_modal_note_save_btn.w >= 84.0f);
+    CT_CHECK(d.profile_modal_note_rect.x >= m.x &&
+             d.profile_modal_note_rect.x + d.profile_modal_note_rect.w <= m.x + m.w + 0.5f);
+    CT_CHECK(d.profile_modal_note_save_btn.x >= m.x &&
+             d.profile_modal_note_save_btn.x + d.profile_modal_note_save_btn.w <= m.x + m.w + 0.5f);
+    if (d.profile_modal_conn_count > 0) {
+      for (size_t k = 0; k < d.profile_modal_conn_count; k++) {
+        ccord_rect cr = d.profile_modal_conn_rects[k];
+        CT_CHECK(cr.x >= m.x && cr.x + cr.w <= m.x + m.w + 0.5f);
+      }
+    }
+
+    // Explicitly tapping the Note field opens the soft keyboard; tapping Save Note dismisses it.
+    if (ci == 0) {
+      touch_tap(d.profile_modal_note_rect.x + d.profile_modal_note_rect.w * 0.5f,
+                d.profile_modal_note_rect.y + d.profile_modal_note_rect.h * 0.5f);
+      CT_CHECK(F.text_input_active);
+      touch_tap(d.profile_modal_note_save_btn.x + d.profile_modal_note_save_btn.w * 0.5f,
+                d.profile_modal_note_save_btn.y + d.profile_modal_note_save_btn.h * 0.5f);
+      CT_CHECK(!F.text_input_active);
+    }
+
+    CT_CHECK(ccord_ui_handle_back(F.ui));
+    step_frames(2, 25);
+    CT_CHECK(F.ui->modal_kind == UI_MODAL_NONE);
+  }
+
+  // Opening full profile from the mobile right drawer and tapping Send Message closes both the modal and drawer.
+  ccord_ui_set_viewport(F.ui, 412.0f, 915.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_right_drawer(F.ui, true);
+  step_frames(12, 25);
+  CT_CHECK(ccord_ui_right_drawer_open(F.ui));
+  ui_open_user_profile_modal(F.ui, target_uid, g);
+  step_frames(4, 30);
+  ccord_ui_debug d = {0};
+  ccord_ui_get_debug(F.ui, &d);
+  CT_CHECK(d.profile_modal_open && d.profile_modal_msg_btn.w > 0.0f);
+  touch_tap(d.profile_modal_msg_btn.x + d.profile_modal_msg_btn.w * 0.5f,
+            d.profile_modal_msg_btn.y + d.profile_modal_msg_btn.h * 0.5f);
+  step_frames(12, 25);
+  CT_CHECK(F.ui->modal_kind == UI_MODAL_NONE);
+  CT_CHECK(!ccord_ui_right_drawer_open(F.ui));
+}
+
 static void test_mobile_anim_pacing(void)
 {
   // 16x8 2-frame GIF (100 ms per frame): verifies animated avatars/GIFs pace redraws to frame deadlines
@@ -1043,6 +1164,90 @@ static void test_mobile_header_search_friends_dm(void)
   F.ui->dm_requests_view = false;
 }
 
+static void test_mobile_overlays_and_popovers(void)
+{
+  ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+
+  ccord_error err;
+  const ccord_guild *g0 = ccord_store_guild_at(F.store, 0);
+  if (g0) {
+    F.ui->dm_friends_view = false;
+    F.ui->dm_requests_view = false;
+    CT_CHECK(ccord_session_select_guild(F.session, g0->id, &err) == CCORD_OK);
+  }
+  step_frames(6, 25);
+
+  // Wave 3: Inbox popover respects safe insets and Mark All Read never collides with tabs.
+  F.ui->inbox_open = true;
+  step_frames(8, 25);
+  save_mobile_screenshot("mobile_inbox_360.png");
+  CT_CHECK(rect_in_bounds(F.ui->inbox_popover_rect, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+  CT_CHECK(rect_in_bounds(F.ui->inbox_tab_rects[0], 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+  CT_CHECK(rect_in_bounds(F.ui->inbox_tab_rects[1], 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+  CT_CHECK(rects_disjoint(F.ui->inbox_tab_rects[0], F.ui->inbox_tab_rects[1]));
+  if (F.ui->inbox_mark_all_rect.w > 0.0f) {
+    CT_CHECK(rect_in_bounds(F.ui->inbox_mark_all_rect, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+    CT_CHECK(rects_disjoint(F.ui->inbox_tab_rects[1], F.ui->inbox_mark_all_rect));
+  }
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+  CT_CHECK(!F.ui->inbox_open);
+
+  // Wave 3: Shortcuts modal fits safe area and scrolls on wheel in 1-col mobile mode.
+  F.ui->shortcuts_open = true;
+  step_frames(6, 25);
+  CT_CHECK(rect_in_bounds(F.ui->shortcuts_modal_rect, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+  ccord_input_event wh = {.type = CCORD_IN_WHEEL, .x = 180.0f, .y = 380.0f, .wheel = -3.0f};
+  (void)ccord_ui_handle_input(F.ui, &wh);
+  step_frames(2, 25);
+  CT_CHECK(F.ui->shortcuts_scroll > 0.0f);
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+  CT_CHECK(!F.ui->shortcuts_open);
+
+  // Wave 3: Discovery shows mobile < Back button and exits when tapped.
+  F.ui->discovery_open = true;
+  step_frames(6, 25);
+  save_mobile_screenshot("mobile_discovery_360.png");
+  CT_CHECK(rect_in_bounds(F.ui->discovery_back_rect, 0.0f, 44.0f, 360.0f, 120.0f));
+  touch_tap(F.ui->discovery_back_rect.x + F.ui->discovery_back_rect.w * 0.5f,
+            F.ui->discovery_back_rect.y + F.ui->discovery_back_rect.h * 0.5f);
+  step_frames(4, 25);
+  CT_CHECK(!F.ui->discovery_open);
+
+  // Wave 3: Status Card, Poll Composer, and Schedule Dialog do not spuriously open touch IME on open, and unwind on Back.
+  ui_status_card_open(F.ui);
+  step_frames(4, 25);
+  CT_CHECK(F.ui->sc.open);
+  CT_CHECK(!F.text_input_active);
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+  CT_CHECK(!F.ui->sc.open);
+
+  ui_poll_composer_open(F.ui);
+  step_frames(4, 25);
+  save_mobile_screenshot("mobile_poll_360.png");
+  CT_CHECK(F.ui->poll_open);
+  CT_CHECK(!F.text_input_active);
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+  CT_CHECK(!F.ui->poll_open);
+
+  ui_schedule_dialog_open(F.ui);
+  step_frames(4, 25);
+  CT_CHECK(F.ui->schedule_open);
+  CT_CHECK(!F.text_input_active);
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+  CT_CHECK(!F.ui->schedule_open);
+}
+
 static void test_mobile_voice_stage_and_go_live(void)
 {
   ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
@@ -1129,7 +1334,9 @@ int main(void)
   test_mobile_copy_paste_and_autofill_login();
   test_mobile_safe_area_rail_and_background_focus();
   test_mobile_drawer_occlusion();
+  test_mobile_user_profile_modal();
   test_mobile_header_search_friends_dm();
+  test_mobile_overlays_and_popovers();
   test_mobile_voice_stage_and_go_live();
   test_mobile_anim_pacing();
   fixture_destroy();

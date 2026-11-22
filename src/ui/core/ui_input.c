@@ -1121,14 +1121,12 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       ui->mx = ev->x;
       ui->my = ev->y;
       if (ui->stream_fullscreen) return true;
-      if (ui->lightbox_open || ui->quick_switcher_open || ui->modal_kind == UI_MODAL_USER_PROFILE ||
-          ui->modal_kind == UI_MODAL_SCHEDULED_EVENTS || ui->modal_kind == UI_MODAL_FORWARD_PICKER ||
-          ui->modal_kind == UI_MODAL_MEMBER_VERIFICATION || ui->modal_kind == UI_MODAL_ACTIVITY_SHELF) {
+      if (ui->lightbox_open || ui->quick_switcher_open || ui->select_open || ui->modal_kind != UI_MODAL_NONE) {
         bool r = ui_overlays_handle(ui, ev);
         uc_update_hover(ui);
         return r;
       }
-      if (ui->modal_kind != UI_MODAL_NONE || ui->select_open || ui->shortcuts_open) return false;
+      if (ui->shortcuts_open) return ui_shortcuts_handle(ui, ev);
       if (ui_server_settings_is_open(ui)) return ui_server_settings_handle(ui, ev);
       if (ui_channel_settings_is_open(ui)) return ui_channel_settings_handle(ui, ev);
       if (ui->menu.open) {

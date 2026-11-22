@@ -783,7 +783,13 @@ static void sync_text_input(ccord_ui *ui)
 {
   bool want = false;
   int kind = 0;   // 0=text, 1=email, 2=password, 3=otp, 4=single_line
-  if (ui->settings_open) {
+  if (ui_profile_roles_picker_open(ui)) {
+    want = !ui->touch_mode || ui->touch_text_focused;
+    kind = 4;
+  } else if (ui->report_open || ui->schedule_open || ui->poll_open || ui->sc.open) {
+    want = !ui->touch_mode || ui->touch_text_focused;
+    kind = 4;
+  } else if (ui->settings_open) {
     bool field = false;
     if (ui->account_mfa_required) {
       field = (ui->account_focus_field == 4);
@@ -817,6 +823,10 @@ static void sync_text_input(ccord_ui *ui)
       want = false;
     } else if (ui_scheduled_events_active(ui)) {
       want = ui_scheduled_events_wants_text(ui);
+    } else if (ui->modal_kind == UI_MODAL_USER_PROFILE) {
+      want = ui->profile_modal_tab == 0 && (!ui->touch_mode || ui->touch_text_focused);
+    } else if (ui->modal_kind == UI_MODAL_CONFIRM) {
+      want = !ui->touch_mode || ui->touch_text_focused;
     } else {
       want = true;
     }
@@ -872,7 +882,7 @@ static bool ui_caret_wants_blink(const ccord_ui *ui)
       case UI_MODAL_ACTIVITY_SHELF:
         return false;
       case UI_MODAL_USER_PROFILE:
-        return ui->profile_modal_tab == 0;
+        return ui->profile_modal_tab == 0 && (!ui->touch_mode || ui->touch_text_focused);
       default:
         return true;
     }

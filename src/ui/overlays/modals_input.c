@@ -631,6 +631,11 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
     bool is_multi = ui->select_target->max_values > 1u;
+    if (ev->type == CCORD_IN_WHEEL) {
+      ui->select_scroll = clampf(ui->select_scroll - ev->wheel * 36.0f, 0.0f, ui->select_max);
+      ui->dirty = true;
+      return true;
+    }
     if (ev->type == CCORD_IN_KEY_DOWN) {
       if (ev->key == CCORD_KEY_ESCAPE) {
         ui_close_select_dropdown(ui);
@@ -701,6 +706,11 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
     bool shift = (ev->mods & CCORD_MOD_SHIFT) != 0;
     size_t nf = ui->inter_modal->field_count;
     size_t focus = nf > 0 && ui->inter_modal_focus < nf ? ui->inter_modal_focus : 0;
+    if (ev->type == CCORD_IN_WHEEL) {
+      ui->inter_modal_scroll = clampf(ui->inter_modal_scroll - ev->wheel * 36.0f, 0.0f, ui->inter_modal_max);
+      ui->dirty = true;
+      return true;
+    }
     if (ev->type == CCORD_IN_KEY_DOWN) {
       if (ev->key == CCORD_KEY_ESCAPE) {
         ui->modal_kind = UI_MODAL_NONE;
@@ -869,23 +879,34 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
       if (ui->modal_kind == UI_MODAL_USER_PROFILE) {
         if (ui->profile_modal_box.w > 0.0f && !ui_in_rect(ev->x, ev->y, ui->profile_modal_box)) {
           ui->modal_kind = UI_MODAL_NONE;
+          ui->touch_text_focused = false;
           ui->dirty = true;
           return true;
         }
         if (ui->profile_modal_close_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->profile_modal_close_rect)) {
           ui->modal_kind = UI_MODAL_NONE;
+          ui->touch_text_focused = false;
           ui->dirty = true;
           return true;
         }
         if (ui->profile_modal_msg_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->profile_modal_msg_rect)) {
           ccord_id uid = ui->modal_target_id;
           ui->modal_kind = UI_MODAL_NONE;
+          ui->touch_text_focused = false;
+          if (ui->mobile_layout) {
+            ui->left_drawer_open = false;
+            ui->right_drawer_open = false;
+          }
           ui_open_dm_with_user(ui, uid);
           ui->dirty = true;
           return true;
         }
         for (int t = 0; t < 3; t++) {
           if (ui->profile_modal_tab_rects[t].w > 0.0f && ui_in_rect(ev->x, ev->y, ui->profile_modal_tab_rects[t])) {
+            if (ui->touch_text_focused) {
+              ui->touch_text_focused = false;
+              if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+            }
             if (ui->profile_modal_tab != t) {
               ui->profile_modal_tab = t;
               ui->profile_modal_scroll = 0.0f;
@@ -895,9 +916,25 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
           }
         }
         if (ui->profile_modal_tab == 0) {
+          if (ui->profile_modal_note_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->profile_modal_note_rect)) {
+            if (ui->touch_mode) {
+              ui->touch_text_focused = true;
+              ui->dirty = true;
+            }
+            return true;
+          }
           if (ui->profile_modal_note_save_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->profile_modal_note_save_rect)) {
+            if (ui->touch_text_focused) {
+              ui->touch_text_focused = false;
+              if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+            }
             save_profile_modal_note(ui);
             return true;
+          }
+          if (ui->touch_text_focused) {
+            ui->touch_text_focused = false;
+            if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+            ui->dirty = true;
           }
           for (size_t ci = 0; ci < ui->nprofile_modal_conn_hits; ci++) {
             if (ui_in_rect(ev->x, ev->y, ui->profile_modal_conn_hits[ci].rect) &&
@@ -911,10 +948,15 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
             if (ui_in_rect(ev->x, ev->y, ui->profile_modal_mutual_hits[i].rect)) {
               ccord_id mgid = ui->profile_modal_mutual_hits[i].id;
               ui->modal_kind = UI_MODAL_NONE;
+              ui->touch_text_focused = false;
               ui->discovery_open = false;
               ui->dm_friends_view = false;
               ui->dm_requests_view = false;
               ui->stage_channel = CCORD_ID_NONE;
+              if (ui->mobile_layout) {
+                ui->left_drawer_open = false;
+                ui->right_drawer_open = false;
+              }
               ui_compute_layout(ui);
               ccord_error s_err;
               if (ui->d.session) (void)ccord_session_select_guild(ui->d.session, mgid, &s_err);
@@ -931,6 +973,11 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
             if (ui_in_rect(ev->x, ev->y, ui->profile_modal_mutual_hits[i].rect)) {
               ccord_id fuid = ui->profile_modal_mutual_hits[i].id;
               ui->modal_kind = UI_MODAL_NONE;
+              ui->touch_text_focused = false;
+              if (ui->mobile_layout) {
+                ui->left_drawer_open = false;
+                ui->right_drawer_open = false;
+              }
               ui_open_dm_with_user(ui, fuid);
               ui->dirty = true;
               return true;
@@ -1074,6 +1121,18 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
         return true;
       }
       if (ui->modal_kind == UI_MODAL_CONFIRM) {
+        if (mg.input.w > 0.0f && ui_in_rect(ev->x, ev->y, mg.input)) {
+          if (ui->touch_mode) {
+            ui->touch_text_focused = true;
+            ui->dirty = true;
+          }
+          return true;
+        }
+        if (ui->touch_text_focused) {
+          ui->touch_text_focused = false;
+          if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+          ui->dirty = true;
+        }
         for (size_t i = 0; i < mg.nchips; i++) {
           if (ui_in_rect(ev->x, ev->y, mg.chip[i])) {
             ui->modal_type_sel = (int)i;

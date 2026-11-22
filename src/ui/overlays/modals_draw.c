@@ -177,66 +177,85 @@ modal_geom dc_modal_layout(const ccord_ui *ui)
 {
   modal_geom g = {0};
   float mw = clampf(ui->win_w - 64.0f, 300.0f, ui->modal_kind == UI_MODAL_ADD_SERVER ? 460.0f : 440.0f);
+  float est_bw = uis_modal_box(ui, mw, 220.0f).w;
   float mh = 220.0f;
+  bool wrap_chips = false;
   if (ui->modal_kind == UI_MODAL_CONFIRM) {
     size_t n = 0;
     (void)dc_confirm_choices(ui->confirm_op, &n);
     bool no_input = (ui->confirm_op == CCORD_ADMIN_LEAVE_GUILD || ui->confirm_op == CCORD_ADMIN_TRANSFER_OWNERSHIP);
-    mh = 56.0f + 64.0f + (n ? 56.0f : 0.0f) + (no_input ? 0.0f : 52.0f) + 62.0f;   // title, body, choices, input, buttons
+    wrap_chips = (n > 3u && (est_bw - 40.0f) / (float)n < 56.0f);
+    float choices_h = n ? (wrap_chips ? 90.0f : 56.0f) : 0.0f;
+    mh = 56.0f + 64.0f + choices_h + (no_input ? 0.0f : 52.0f) + 62.0f;   // title, body, choices, input, buttons
   } else if (ui->modal_kind == UI_MODAL_ADD_SERVER) {
     mh = (ui->modal_type_sel == 0) ? 318.0f : 246.0f;
   } else if (ui->modal_kind == UI_MODAL_FOLDER_SETTINGS) {
     mh = 296.0f;
   }
   g.box = uis_modal_box(ui, mw, mh);
-  g.ok = (ccord_rect){g.box.x + g.box.w - 160.0f, g.box.y + g.box.h - 46.0f, 140.0f, UIS_H_BTN};
+  float bw = g.box.w;
+  float ok_w = fminf(140.0f, maxf(bw - 140.0f, 96.0f));
+  float cn_w = fminf(90.0f, maxf(bw - ok_w - 48.0f, 64.0f));
+  g.ok = (ccord_rect){g.box.x + bw - 20.0f - ok_w, g.box.y + g.box.h - 46.0f, ok_w, UIS_H_BTN};
   if (ui->modal_kind == UI_MODAL_ADD_SERVER) {
-    float tw = (mw - 48.0f) * 0.5f;
+    float tw = (bw - 48.0f) * 0.5f;
     g.tabs[0] = (ccord_rect){g.box.x + 20.0f, g.box.y + 55.0f, tw, UIS_H_BTN_SM};
     g.tabs[1] = (ccord_rect){g.tabs[0].x + tw + 8.0f, g.box.y + 55.0f, tw, UIS_H_BTN_SM};
     if (ui->modal_type_sel == 0) {
-      g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 114.0f, mw - 40.0f - 92.0f, 36.0f};
-      g.preview_btn = (ccord_rect){g.input.x + g.input.w + 8.0f, g.input.y + 2.0f, 84.0f, UIS_H_BTN};
+      float pw = fminf(84.0f, maxf(bw * 0.28f, 68.0f));
+      g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 114.0f, maxf(bw - 40.0f - pw - 8.0f, 80.0f), 36.0f};
+      g.preview_btn = (ccord_rect){g.input.x + g.input.w + 8.0f, g.input.y + 2.0f, pw, UIS_H_BTN};
     } else {
-      g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 114.0f, mw - 40.0f, 36.0f};
+      g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 114.0f, bw - 40.0f, 36.0f};
     }
-    g.cancel = (ccord_rect){g.ok.x - 100.0f, g.ok.y, 90.0f, 32.0f};
+    g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, UIS_H_BTN};
     return g;
   }
   if (ui->modal_kind == UI_MODAL_FOLDER_SETTINGS) {
-    g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 74.0f, mw - 40.0f, 36.0f};
-    g.input2 = (ccord_rect){g.box.x + 20.0f, g.box.y + 142.0f, mw - 40.0f, 36.0f};
-    float gap = 8.0f, inner = mw - 40.0f;
+    g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 74.0f, bw - 40.0f, 36.0f};
+    g.input2 = (ccord_rect){g.box.x + 20.0f, g.box.y + 142.0f, bw - 40.0f, 36.0f};
+    float gap = 8.0f, inner = bw - 40.0f;
     float cw = (inner - gap * 5.0f) / 6.0f;
     for (size_t i = 0; i < 6u; i++) {
       g.chip[i] = (ccord_rect){g.box.x + 20.0f + (float)i * (cw + gap), g.box.y + 190.0f, cw, 28.0f};
     }
     g.nchips = 6u;
-    g.cancel = (ccord_rect){g.ok.x - 100.0f, g.ok.y, 90.0f, 32.0f};
+    g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, UIS_H_BTN};
     return g;
   }
   if (ui->modal_kind != UI_MODAL_CONFIRM) {
-    g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 64.0f, g.box.w - 40.0f, 36.0f};
-    g.cancel = (ccord_rect){g.ok.x - 100.0f, g.ok.y, 90.0f, UIS_H_BTN};
+    g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 64.0f, bw - 40.0f, 36.0f};
+    g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, UIS_H_BTN};
     return g;
   }
-  g.cancel = (ccord_rect){g.ok.x - 100.0f, g.ok.y, 90.0f, 32.0f};
+  g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, UIS_H_BTN};
   size_t n = 0;
   (void)dc_confirm_choices(ui->confirm_op, &n);
   g.body_y = g.box.y + 54.0f;
   float y = g.body_y + 64.0f;
   if (n > 0 && n <= UI_CONFIRM_MAX_CHIPS) {
     g.choices_label_y = y;
-    float gap = 6.0f, inner = g.box.w - 40.0f;
-    float cw = (inner - gap * (float)(n - 1)) / (float)n;
-    for (size_t i = 0; i < n; i++) {
-      g.chip[i] = (ccord_rect){g.box.x + 20.0f + (float)i * (cw + gap), y + 20.0f, cw, 28.0f};
+    float gap = 6.0f, inner = bw - 40.0f;
+    if (wrap_chips) {
+      size_t cols = (n + 1u) / 2u;
+      float cw = (inner - gap * (float)(cols - 1u)) / (float)cols;
+      for (size_t i = 0; i < n; i++) {
+        size_t col = i % cols, row = i / cols;
+        g.chip[i] = (ccord_rect){g.box.x + 20.0f + (float)col * (cw + gap), y + 20.0f + (float)row * 34.0f, cw, 28.0f};
+      }
+      g.nchips = n;
+      y += 90.0f;
+    } else {
+      float cw = (inner - gap * (float)(n - 1u)) / (float)n;
+      for (size_t i = 0; i < n; i++) {
+        g.chip[i] = (ccord_rect){g.box.x + 20.0f + (float)i * (cw + gap), y + 20.0f, cw, 28.0f};
+      }
+      g.nchips = n;
+      y += 56.0f;
     }
-    g.nchips = n;
-    y += 56.0f;
   }
   if (ui->confirm_op != CCORD_ADMIN_LEAVE_GUILD && ui->confirm_op != CCORD_ADMIN_TRANSFER_OWNERSHIP) {
-    g.input = (ccord_rect){g.box.x + 20.0f, y, g.box.w - 40.0f, 36.0f};
+    g.input = (ccord_rect){g.box.x + 20.0f, y, bw - 40.0f, 36.0f};
   }
   return g;
 }
@@ -250,6 +269,7 @@ void ui_confirm_open(ccord_ui *ui, ccord_admin_op op, ccord_id guild_id, ccord_i
   ui->modal_type_sel = op == CCORD_ADMIN_TIMEOUT ? UI_CONFIRM_DEFAULT_TIMEOUT : 0;
   (void)snprintf(ui->confirm_name, sizeof ui->confirm_name, "%s", name ? name : "");
   ccord_text_edit_clear(&ui->modal_edit1);
+  ui->touch_text_focused = false;
   ui->dirty = true;
 }
 
@@ -509,8 +529,12 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     (void)ui_ensure_media_ex(ui, r, ui->lightbox_url, 0, lb_vid);
     int tw = 0, th = 0;
     bool has_tex = ccord_render_has_texture(r, ui->lightbox_url, &tw, &th);
-    float max_w = clampf(ui->win_w * 0.74f, 220.0f, 920.0f);
-    float max_h = clampf(ui->win_h * 0.68f, 160.0f, 680.0f);
+    float lb_l = ui->safe_insets.left, lb_r = ui->safe_insets.right;
+    float lb_t = ui->safe_insets.top, lb_b = ui->safe_insets.bottom;
+    float lb_aw = maxf(ui->win_w - lb_l - lb_r, 120.0f);
+    float lb_ah = maxf(ui->win_h - lb_t - lb_b, 120.0f);
+    float max_w = clampf(lb_aw * (ui->mobile_layout ? 0.88f : 0.74f), 200.0f, 920.0f);
+    float max_h = clampf(lb_ah * 0.68f, 160.0f, 680.0f);
     float base_w = fminf(max_w, 480.0f), base_h = fminf(max_h, 320.0f);
     if (has_tex && tw > 4 && th > 4) {
       float scale = fminf(max_w / (float)tw, max_h / (float)th);
@@ -520,7 +544,7 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     }
     float iw = base_w * ui->lightbox_zoom;
     float ih = base_h * ui->lightbox_zoom;
-    ccord_rect img_r = {(ui->win_w - iw) * 0.5f, (ui->win_h - ih) * 0.5f - 14.0f, iw, ih};
+    ccord_rect img_r = {lb_l + (lb_aw - iw) * 0.5f, lb_t + (lb_ah - ih) * 0.5f - 14.0f, iw, ih};
     ui->lightbox_img_rect = img_r;
     ccord_draw_rrect(r, (ccord_rect){img_r.x - 4.0f, img_r.y - 4.0f, img_r.w + 8.0f, img_r.h + 8.0f}, 8.0f,
                      COL(bg_secondary));
@@ -530,8 +554,8 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
       ui_icon_attachment(r, img_r.x + img_r.w * 0.5f, img_r.y + img_r.h * 0.5f, 32.0f, COL(text_secondary));
     }
 
-    float bar_y = clampf(img_r.y + img_r.h + 10.0f, 16.0f, maxf(ui->win_h - 42.0f, 16.0f));
-    float bar_x = clampf(img_r.x, 24.0f, maxf(ui->win_w - 280.0f, 24.0f));
+    float bar_y = clampf(img_r.y + img_r.h + 10.0f, lb_t + 16.0f, maxf(ui->win_h - lb_b - 42.0f, lb_t + 16.0f));
+    float bar_x = clampf(img_r.x, lb_l + 16.0f, maxf(ui->win_w - lb_r - 280.0f, lb_l + 16.0f));
     ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_link));
     const char *open_lbl = "Open in Browser";
     ccord_vec2 ot = ccord_text_measure(r, open_lbl, strlen(open_lbl), &ls, 0.0f);
@@ -548,7 +572,7 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     ccord_draw_rrect(r, ui->lightbox_zoom_btn, 5.0f, COL(bg_secondary));
     ccord_text_draw(r, zbuf, strlen(zbuf), ui->lightbox_zoom_btn.x + 9.0f, bar_y + (28.0f - zt.y) * 0.5f, &zs, 0.0f);
 
-    ui->lightbox_close_btn = (ccord_rect){ui->win_w - 48.0f, 16.0f, 32.0f, 32.0f};
+    ui->lightbox_close_btn = (ccord_rect){ui->win_w - lb_r - 48.0f, lb_t + 16.0f, 32.0f, 32.0f};
     ccord_draw_rrect(r, ui->lightbox_close_btn, 16.0f, COL(bg_secondary));
     ui_icon_close(r, ui->lightbox_close_btn.x + 16.0f, ui->lightbox_close_btn.y + 16.0f, 14.0f, COL(text_header));
 
@@ -561,8 +585,9 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
       ccord_draw_rrect(r, cpill, 5.0f, COL(bg_secondary));
       ccord_text_draw(r, cbuf, strlen(cbuf), cpill.x + 9.0f, bar_y + (28.0f - ct.y) * 0.5f, &cs, 0.0f);
 
-      ui->lightbox_prev_btn = (ccord_rect){20.0f, (ui->win_h - 44.0f) * 0.5f, 40.0f, 44.0f};
-      ui->lightbox_next_btn = (ccord_rect){ui->win_w - 60.0f, (ui->win_h - 44.0f) * 0.5f, 40.0f, 44.0f};
+      float arr_y = lb_t + (lb_ah - 44.0f) * 0.5f;
+      ui->lightbox_prev_btn = (ccord_rect){lb_l + 14.0f, arr_y, 40.0f, 44.0f};
+      ui->lightbox_next_btn = (ccord_rect){ui->win_w - lb_r - 54.0f, arr_y, 40.0f, 44.0f};
       ccord_draw_rrect(r, ui->lightbox_prev_btn, 8.0f, COL(bg_secondary));
       ccord_draw_rrect(r, ui->lightbox_next_btn, 8.0f, COL(bg_secondary));
       ccord_text_style as = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large) + 2.0f, COL(text_header));
@@ -635,29 +660,43 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
   if (ui->select_open && ui->select_target && ui->select_opts) {
     bool is_multi = ui->select_target->max_values > 1u;
     size_t nopt = ui->select_opt_count;
-    float row_h = 34.0f;
-    float list_h = (nopt > 0 ? (float)nopt : 1.0f) * row_h + 8.0f;
+    float row_h = ui->mobile_layout ? 40.0f : 34.0f;
+    float sl = 8.0f + ui->safe_insets.left, sr = 8.0f + ui->safe_insets.right;
+    float st = 8.0f + ui->safe_insets.top;
+    float sb = 8.0f + fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
+    float total_list_h = (nopt > 0 ? (float)nopt : 1.0f) * row_h + 8.0f;
     float foot_h = is_multi ? 38.0f : 0.0f;
-    float dw = clampf(maxf(ui->select_anchor_rect.w, 240.0f), 180.0f, maxf(ui->win_w - 24.0f, 180.0f));
-    float dh = list_h + foot_h;
-    float dx = clampf(ui->select_anchor_rect.x, 8.0f, maxf(ui->win_w - dw - 8.0f, 8.0f));
+    float max_dh = maxf(ui->win_h - st - sb, 120.0f);
+    float dw = clampf(maxf(ui->select_anchor_rect.w, 240.0f), 180.0f, maxf(ui->win_w - sl - sr, 180.0f));
+    float dh = fminf(total_list_h + foot_h, max_dh);
+    float vis_list_h = maxf(dh - foot_h, 40.0f);
+    ui->select_max = maxf(total_list_h - vis_list_h, 0.0f);
+    ui->select_scroll = clampf(ui->select_scroll, 0.0f, ui->select_max);
+    float dx = clampf(ui->select_anchor_rect.x, sl, maxf(ui->win_w - dw - sr, sl));
     float dy = ui->select_anchor_rect.y + ui->select_anchor_rect.h + 4.0f;
-    if (dy + dh > ui->win_h - 8.0f && ui->select_anchor_rect.y - dh - 4.0f >= 8.0f) {
+    if (dy + dh > ui->win_h - sb && ui->select_anchor_rect.y - dh - 4.0f >= st) {
       dy = ui->select_anchor_rect.y - dh - 4.0f;
     }
-    dy = clampf(dy, 8.0f, maxf(ui->win_h - dh - 8.0f, 8.0f));
+    dy = clampf(dy, st, maxf(ui->win_h - dh - sb, st));
     ccord_rect dbox = {dx, dy, dw, dh};
     ui->select_dropdown_rect = dbox;
     ui_popup_begin(ui, r, "seldd", ui->select_target->message_id ^ (uint64_t)ui->select_target->row_idx, UI_POPUP_MS, 4.0f);
     uis_popover_frame(ui, r, dbox);
     ccord_text_style lst = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
     ccord_text_style dst = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 3.0f, COL(text_muted));
-    float oy = dbox.y + 4.0f;
+    ccord_rect lclip = {dbox.x, dbox.y + 4.0f, dbox.w, maxf(vis_list_h - 8.0f, 0.0f)};
+    ccord_push_clip(r, lclip);
+    float oy = dbox.y + 4.0f - ui->select_scroll;
     if (nopt == 0) {
       ccord_text_draw(r, "No options available", 20, dbox.x + 12.0f, oy + 8.0f, &dst, 0.0f);
     }
     for (size_t i = 0; i < nopt; i++) {
       ccord_rect or_ = {dbox.x + 4.0f, oy, dbox.w - 8.0f, row_h - 2.0f};
+      if (or_.y + or_.h < lclip.y || or_.y > lclip.y + lclip.h) {
+        ui->select_opt_rects[i] = (ccord_rect){0, 0, 0, 0};
+        oy += row_h;
+        continue;
+      }
       ui->select_opt_rects[i] = or_;
       bool ohov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, or_);
       uis_list_row_fill(ui, r, or_, (uis_state){.hover = ohov, .selected = ui->select_opts[i].selected}, "selopt", i);
@@ -687,8 +726,12 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
       }
       oy += row_h;
     }
+    ccord_pop_clip(r);
+    if (ui->select_max > 0.0f) {
+      (void)ui_draw_list_scrollbar(ui, r, lclip, total_list_h - 8.0f, ui->select_scroll, "selscroll", 0);
+    }
     if (is_multi) {
-      float fy = dbox.y + list_h;
+      float fy = dbox.y + vis_list_h;
       uis_divider(ui, r, dbox.x + 6.0f, fy, dbox.w - 12.0f);
       ccord_rect abtn = {dbox.x + dbox.w - 76.0f, fy + 5.0f, 68.0f, UIS_H_BTN_SM};
       ui->select_confirm_btn = abtn;
@@ -728,19 +771,26 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     ui_popup_begin(ui, r, "imodal", 1u, UI_MODAL_MS, 10.0f);
     uis_tokens mtk = uis_tokens_of(ui);
     float mw = clampf(ui->win_w - 64.0f, 320.0f, 460.0f);
-    float mh = 56.0f + 56.0f;
+    float fields_h = 0.0f;
     for (size_t fi = 0; fi < ui->inter_modal->field_count; fi++) {
-      mh += 22.0f + (ui->inter_modal->fields[fi].style == 2 ? 72.0f : 36.0f) + 14.0f;
+      fields_h += 22.0f + (ui->inter_modal->fields[fi].style == 2 ? 72.0f : 36.0f) + 14.0f;
     }
+    float mh = 56.0f + fields_h + 56.0f;
     ccord_rect m = uis_modal_box(ui, mw, mh);
     ui->inter_modal_box = m;
     uis_modal_frame(ui, r, m);
     const char *mtitle = ui->inter_modal->title[0] ? ui->inter_modal->title : "Form";
     ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large), COL(text_header));
     ccord_text_draw_ellipsis(r, mtitle, strlen(mtitle), m.x + 20.0f, m.y + 18.0f, m.w - 40.0f, &ts);
-    float fy = m.y + 56.0f;
+    ccord_rect ok_r = uis_modal_footer_button(m, 0, 84.0f);
+    ccord_rect cn_r = {ok_r.x - UIS_SP_2 - 76.0f, ok_r.y, 76.0f, ok_r.h};
+    ccord_rect fclip = {m.x + 12.0f, m.y + 52.0f, m.w - 24.0f, maxf(ok_r.y - (m.y + 62.0f), 0.0f)};
+    ui->inter_modal_max = maxf(fields_h - fclip.h, 0.0f);
+    ui->inter_modal_scroll = clampf(ui->inter_modal_scroll, 0.0f, ui->inter_modal_max);
+    float fy = m.y + 56.0f - ui->inter_modal_scroll;
     ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(text_secondary));
     ccord_text_style rs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(danger));
+    ccord_push_clip(r, fclip);
     for (size_t fi = 0; fi < ui->inter_modal->field_count; fi++) {
       const ccord_modal_field *fld = &ui->inter_modal->fields[fi];
       const char *flbl = fld->label[0] ? fld->label : "Input";
@@ -751,7 +801,8 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
       fy += 22.0f;
       float fh = fld->style == 2 ? 72.0f : 36.0f;
       ccord_rect fbox = {m.x + 20.0f, fy, m.w - 40.0f, fh};
-      ui->inter_modal_field_rects[fi] = fbox;
+      bool vis = fbox.y + fbox.h >= fclip.y && fbox.y <= fclip.y + fclip.h;
+      ui->inter_modal_field_rects[fi] = vis ? fbox : (ccord_rect){0, 0, 0, 0};
       bool focused = (fi == ui->inter_modal_focus);
       if (fld->style != 2) {
         (void)uis_input(ui, r, fbox, &ui->inter_modal_edits[fi], fld->placeholder, (uis_state){.focused = focused}, false,
@@ -775,8 +826,10 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
       }
       fy += fh + 14.0f;
     }
-    ccord_rect ok_r = uis_modal_footer_button(m, 0, 84.0f);
-    ccord_rect cn_r = {ok_r.x - UIS_SP_2 - 76.0f, ok_r.y, 76.0f, ok_r.h};
+    ccord_pop_clip(r);
+    if (ui->inter_modal_max > 0.0f) {
+      (void)ui_draw_list_scrollbar(ui, r, fclip, fields_h, ui->inter_modal_scroll, "imodscroll", 0);
+    }
     ui->inter_modal_ok = ok_r;
     ui->inter_modal_cancel = cn_r;
     uis_button(ui, r, cn_r, "Cancel", UIS_BTN_LINK, UIS_BTN_S_MD,

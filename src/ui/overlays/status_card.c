@@ -201,6 +201,12 @@ void ui_status_card_close(ccord_ui *ui)
   ui->sc.open = false;
   ui->sc.card = (ccord_rect){0};
   ui->sc.nitems = 0;
+  ui->sc.scroll = 0.0f;
+  ui->sc.max_scroll = 0.0f;
+  if (ui->touch_text_focused) {
+    ui->touch_text_focused = false;
+    if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+  }
   ui->dirty = true;
 }
 
@@ -219,6 +225,9 @@ void ui_status_card_open(ccord_ui *ui)
   sc->last_caret_on = ui->caret_on;
   sc->card = (ccord_rect){0};
   sc->nitems = 0;
+  sc->scroll = 0.0f;
+  sc->max_scroll = 0.0f;
+  ui->touch_text_focused = false;
   ccord_text_edit_clear(&sc->text);
   const ccord_user *u = self_user(ui);
   if (custom_alive(ui, u)) {
@@ -252,20 +261,28 @@ void ui_status_card_draw(ccord_ui *ui, ccord_renderer *r)
   ui_status_card *sc = &ui->sc;
   if (!sc->open) return;
   const ccord_layout_rect *p = &ui->layout.user_panel;
-  if (p->w <= 0.0f || p->h <= 0.0f) {
+  if (!ui->mobile_layout && (p->w <= 0.0f || p->h <= 0.0f)) {
     ui_status_card_close(ui);
     return;
   }
-  float cw = SC_W;
-  if (cw > ui->win_w - 2.0f * SC_GAP) cw = ui->win_w - 2.0f * SC_GAP;
+  float sl = SC_GAP + ui->safe_insets.left, sr_in = SC_GAP + ui->safe_insets.right;
+  float st = SC_GAP + ui->safe_insets.top;
+  float sb = SC_GAP + fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
+  float avail_w = fmaxf(ui->win_w - sl - sr_in, 160.0f);
+  float avail_h = fmaxf(ui->win_h - st - sb, 140.0f);
+  float cw = fminf(SC_W, avail_w);
   sc_layout L;
   compute_layout(ui, cw, &L);
-  float cx = p->x + SC_GAP;
-  if (cx + cw > ui->win_w - SC_GAP) cx = ui->win_w - SC_GAP - cw;
-  if (cx < SC_GAP) cx = SC_GAP;
-  float cy = p->y - SC_GAP - L.h;
-  if (cy < SC_GAP) cy = SC_GAP;
-  ccord_rect card = {cx, cy, cw, L.h};
+  float ch = fminf(L.h, avail_h);
+  sc->max_scroll = L.h > ch ? (L.h - ch) : 0.0f;
+  sc->scroll = fminf(fmaxf(sc->scroll, 0.0f), sc->max_scroll);
+  float cx = ui->mobile_layout ? (sl + (avail_w - cw) * 0.5f) : (p->x + SC_GAP);
+  if (cx + cw > ui->win_w - sr_in) cx = ui->win_w - sr_in - cw;
+  if (cx < sl) cx = sl;
+  float cy = ui->mobile_layout ? (st + (avail_h - ch) * 0.5f) : (p->y - SC_GAP - ch);
+  if (cy + ch > ui->win_h - sb) cy = ui->win_h - sb - ch;
+  if (cy < st) cy = st;
+  ccord_rect card = {cx, cy, cw, ch};
   sc->card = card;
   sc->panel = (ccord_rect){p->x, p->y, p->w, p->h};
   sc->nitems = 0;
@@ -285,6 +302,7 @@ void ui_status_card_draw(ccord_ui *ui, ccord_renderer *r)
   uis_popover_frame(ui, r, card);
   float rad = ui->theme->m.composer_radius;
   ccord_push_clip(r, card);
+  float oy = card.y - sc->scroll;
 
   // Banner (accent colour strip, or the banner image) with the avatar and its presence dot.
   if (ui->d.session && u->id != CCORD_ID_NONE) {
@@ -304,24 +322,24 @@ void ui_status_card_draw(ccord_ui *ui, ccord_renderer *r)
   ui_profile_resolve(prof, CCORD_ID_NONE, &pview, &look);
   ui_profile_text ptx = ui_profile_text_colors(ui, &look);
   ui_profile_draw_theme_bg(ui, r, &look, card, L.banner_h, rad);
-  ccord_rect banner = {card.x, card.y, card.w, L.banner_h};
+  ccord_rect banner = {card.x, oy, card.w, L.banner_h};
   ui_profile_draw_banner(ui, r, &look, &pview, banner, rad);
-  float acx = card.x + L.avatar_cx, acy = card.y + L.avatar_cy;
+  float acx = card.x + L.avatar_cx, acy = oy + L.avatar_cy;
   ccord_color av_ring = ui_profile_card_bg(ui, &look, COL(bg_floating));
   ccord_draw_circle(r, acx, acy, SC_AVATAR_D * 0.5f + 4.0f, av_ring);
   ui_draw_avatar(ui, r, &pview, acx, acy, SC_AVATAR_D, av_ring, false);
   float tx = card.x + UIS_SP_4, tw = card.w - 2.0f * UIS_SP_4;
   ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), ptx.header);
   ccord_text_style us = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, ptx.muted);
-  ccord_text_draw_ellipsis(r, dname, strlen(dname), tx, card.y + L.name_y, tw, &ns);
-  ccord_text_draw_ellipsis(r, uname, strlen(uname), tx, card.y + L.user_y, tw, &us);
+  ccord_text_draw_ellipsis(r, dname, strlen(dname), tx, oy + L.name_y, tw, &ns);
+  ccord_text_draw_ellipsis(r, uname, strlen(uname), tx, oy + L.user_y, tw, &us);
 
-  for (int i = 0; i < 3; i++) uis_divider(ui, r, card.x + UIS_SP_3, card.y + L.div_y[i], card.w - 2.0f * UIS_SP_3);
+  for (int i = 0; i < 3; i++) uis_divider(ui, r, card.x + UIS_SP_3, oy + L.div_y[i], card.w - 2.0f * UIS_SP_3);
 
   float fs = M(font_size_small);
   ccord_color row_fg = look.has_theme ? ptx.secondary : COL(text_normal);
   // Edit Profile
-  ccord_rect er = off(L.edit, card.x, card.y);
+  ccord_rect er = off(L.edit, card.x, oy);
   add_item(sc, UI_SC_EDIT_PROFILE, 0, er, "Edit Profile");
   uis_list_row_fill(ui, r, er, (uis_state){.hover = hov(ui, er)}, "scrow", 100u);
   ui_icon_user_profile(r, er.x + 18.0f, er.y + er.h * 0.5f, 16.0f, row_fg, av_ring);
@@ -330,7 +348,7 @@ void ui_status_card_draw(ccord_ui *ui, ccord_renderer *r)
 
   // Presence rows: the marked one is the current status.
   for (int i = 0; i < 4; i++) {
-    ccord_rect pr = off(L.pres[i], card.x, card.y);
+    ccord_rect pr = off(L.pres[i], card.x, oy);
     add_item(sc, UI_SC_PRESENCE, i, pr, k_pres_labels[i]);
     bool on = i == cur;
     uis_list_row_fill(ui, r, pr, (uis_state){.hover = hov(ui, pr), .selected = on}, "scrow", (uint64_t)i);
@@ -344,7 +362,7 @@ void ui_status_card_draw(ccord_ui *ui, ccord_renderer *r)
   }
 
   // Custom status: emoji button + field, optional preset emoji, clear-after, clear (x), Set / confirmation.
-  ccord_rect eb = off(L.emoji_btn, card.x, card.y);
+  ccord_rect eb = off(L.emoji_btn, card.x, oy);
   add_item(sc, UI_SC_EMOJI_BUTTON, 0, eb, "Emoji");
   uis_state ebs = {.hover = hov(ui, eb), .selected = sc->emoji_row};
   ccord_color eic = uis_icon_button(ui, r, eb, ebs, "scemoji", 0);
@@ -362,30 +380,31 @@ void ui_status_card_draw(ccord_ui *ui, ccord_renderer *r)
     ccord_draw_circle(r, ex + 3.0f, ey - 2.0f, 1.3f, eic);
     ccord_draw_line(r, (ccord_vec2){ex - 3.5f, ey + 2.5f}, (ccord_vec2){ex + 3.5f, ey + 2.5f}, 1.5f, eic);
   }
-  ccord_rect ir = off(L.input, card.x, card.y);
+  ccord_rect ir = off(L.input, card.x, oy);
   add_item(sc, UI_SC_TEXT, 0, ir, "Custom status");
-  (void)uis_input(ui, r, ir, &sc->text, "Set a custom status", (uis_state){.focused = true}, false, "scinput", 0);
+  (void)uis_input(ui, r, ir, &sc->text, "Set a custom status",
+                  (uis_state){.focused = !ui->touch_mode || ui->touch_text_focused}, false, "scinput", 0);
   if (L.has_pick) {
     for (int i = 0; i < UI_SC_EMOJI_N; i++) {
-      ccord_rect pr = off(L.emoji_pick[i], card.x, card.y);
+      ccord_rect pr = off(L.emoji_pick[i], card.x, oy);
       add_item(sc, UI_SC_EMOJI_PICK, i, pr, "Emoji choice");
       uis_tab(ui, r, pr, k_emojis[i], (uis_state){.hover = hov(ui, pr), .selected = strcmp(sc->emoji, k_emojis[i]) == 0},
               "scpick", (uint64_t)i);
     }
   }
-  ccord_rect dr = off(L.dur, card.x, card.y);
+  ccord_rect dr = off(L.dur, card.x, oy);
   char dlabel[48];
   snprintf(dlabel, sizeof dlabel, "Clear after: %s", k_dur_labels[sc->duration]);
   add_item(sc, UI_SC_DURATION, 0, dr, dlabel);
   uis_button(ui, r, dr, dlabel, UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){.hover = hov(ui, dr)}, "scdur", 0);
   if (L.has_clear) {
-    ccord_rect cr = off(L.clear, card.x, card.y);
+    ccord_rect cr = off(L.clear, card.x, oy);
     add_item(sc, UI_SC_CLEAR, 0, cr, "Clear status");
     ccord_color cic = uis_icon_button(ui, r, cr, (uis_state){.hover = hov(ui, cr)}, "scclear", 0);
     ui_icon_close(r, cr.x + cr.w * 0.5f, cr.y + cr.h * 0.5f, 11.0f, cic);
     if (hov(ui, cr)) (void)uis_tooltip(ui, r, cr, "Clear status", UIS_TIP_ABOVE, 200u);
   }
-  ccord_rect sr = off(L.set, card.x, card.y);
+  ccord_rect sr = off(L.set, card.x, oy);
   if (ui_status_card_confirming(ui)) {
     ccord_draw_rrect(r, sr, uis_tokens_of(ui).r_control, COL(status_online));
     draw_check(r, sr.x + sr.w * 0.5f, sr.y + sr.h * 0.5f, 14.0f, COL(text_on_brand));
@@ -394,8 +413,11 @@ void ui_status_card_draw(ccord_ui *ui, ccord_renderer *r)
     uis_button(ui, r, sr, "Set", UIS_BTN_PRIMARY, UIS_BTN_S_SM, (uis_state){.hover = hov(ui, sr)}, "scset", 0);
   }
   if (L.has_err) {
-    ccord_rect rr = {card.x + UIS_SP_3, card.y + L.err_y, card.w - 2.0f * UIS_SP_3, line_of(ui, fs - 1.0f)};
+    ccord_rect rr = {card.x + UIS_SP_3, oy + L.err_y, card.w - 2.0f * UIS_SP_3, line_of(ui, fs - 1.0f)};
     text_row(ui, r, rr, sc->error, rr.x, rr.w, CCORD_FONT_REGULAR, fs - 1.0f, COL(danger));
+  }
+  if (sc->max_scroll > 0.0f) {
+    (void)ui_draw_list_scrollbar(ui, r, card, L.h, sc->scroll, "scscroll", 0);
   }
   ui_profile_draw_effect(ui, r, &look, card, rad, false);
   ccord_pop_clip(r);
@@ -554,10 +576,22 @@ static void activate(ccord_ui *ui, const ui_sc_item *it)
         else snprintf(sc->emoji, sizeof sc->emoji, "%s", k_emojis[it->arg]);
       }
       break;
-    case UI_SC_TEXT: ccord_text_edit_move(&sc->text, 2, false); break;
+    case UI_SC_TEXT:
+      ccord_text_edit_move(&sc->text, 2, false);
+      if (ui->touch_mode) {
+        ui->touch_text_focused = true;
+        if (sc->max_scroll > 0.0f) sc->scroll = sc->max_scroll;
+      }
+      break;
     case UI_SC_DURATION: sc->duration = (sc->duration + 1) % 5; break;
-    case UI_SC_SET: apply_set(ui); break;
-    case UI_SC_CLEAR: apply_clear(ui); break;
+    case UI_SC_SET:
+      ui->touch_text_focused = false;
+      apply_set(ui);
+      break;
+    case UI_SC_CLEAR:
+      ui->touch_text_focused = false;
+      apply_clear(ui);
+      break;
   }
   ui->dirty = true;
 }
@@ -602,7 +636,12 @@ bool ui_status_card_handle(ccord_ui *ui, const ccord_input_event *ev)
       }
       return true;
     case CCORD_IN_MOUSE_UP: return inside;
-    case CCORD_IN_WHEEL: return inside;
+    case CCORD_IN_WHEEL:
+      if (inside && sc->max_scroll > 0.0f) {
+        sc->scroll = fminf(fmaxf(sc->scroll - ev->wheel * 36.0f, 0.0f), sc->max_scroll);
+        ui->dirty = true;
+      }
+      return inside;
     case CCORD_IN_TEXT: {
       size_t n = strnlen(ev->text, sizeof ev->text);
       ccord_error err;

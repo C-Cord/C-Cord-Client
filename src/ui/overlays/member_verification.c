@@ -207,13 +207,12 @@ void ui_member_verification_draw(ccord_ui *ui, ccord_renderer *r)
   }
   ui_popup_begin(ui, r, "modal", (uint64_t)ui->modal_kind, UI_MODAL_MS, 10.0f);
   ccord_draw_rect(r, (ccord_rect){0, 0, ui->win_w, ui->win_h}, COL(overlay));
-  float mw = clampf(ui->win_w - 64.0f, 320.0f, 520.0f);
+  float mw = uis_modal_box(ui, 520.0f, 220.0f).w;
   float inner_w = mw - 40.0f;
   const float head_h = 66.0f, foot_h = 62.0f;
   float content_h = mv_body(ui, r, form, (ccord_rect){0, 0, inner_w, 0}, false);
-  float mh = clampf(head_h + content_h + foot_h, 220.0f, maxf(ui->win_h - 48.0f, 220.0f));
-  ccord_rect m = {((float)ui->win_w - mw) * 0.5f, maxf(((float)ui->win_h - mh) * 0.42f, 12.0f), mw, mh};
-  ccord_rect view = {m.x + 20.0f, m.y + head_h, inner_w, m.h - head_h - foot_h};
+  ccord_rect m = uis_modal_box(ui, 520.0f, maxf(head_h + content_h + foot_h, 220.0f));
+  ccord_rect view = {m.x + 20.0f, m.y + head_h, m.w - 40.0f, maxf(m.h - head_h - foot_h, 40.0f)};
   mv->box = m;
   mv->view = view;
   mv->content_h = content_h;

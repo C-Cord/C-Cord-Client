@@ -218,6 +218,7 @@ void ui_open_user_profile_modal(ccord_ui *ui, ccord_id user_id, ccord_id guild_i
   ui->profile_modal_tab = 0;
   ui->profile_modal_scroll = 0.0f;
   ui->modal_focus_field = 0;
+  ui->touch_text_focused = false;
   ccord_text_edit_clear(&ui->modal_edit1);
   if (ui->d.store) {
     const char *note = ccord_store_user_note(ui->d.store, user_id);

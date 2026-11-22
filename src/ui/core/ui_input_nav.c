@@ -1027,6 +1027,11 @@ bool ui_shortcuts_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     return true;
   }
+  if (ev->type == CCORD_IN_WHEEL) {
+    ui->shortcuts_scroll = uc_clampf(ui->shortcuts_scroll - ev->wheel * 36.0f, 0.0f, ui->shortcuts_max);
+    ui->dirty = true;
+    return true;
+  }
   if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 1) {
     if ((ui->shortcuts_close_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->shortcuts_close_rect)) ||
         (ui->shortcuts_modal_rect.w > 0.0f && !ui_in_rect(ev->x, ev->y, ui->shortcuts_modal_rect))) {

@@ -128,17 +128,14 @@ void ui_draw_reactions_popover(ccord_ui *ui, ccord_renderer *r)
     return;
   }
 
-  float w = 440.0f, h = 300.0f;
-  if (w > ui->win_w - 32.0f && ui->win_w > 64.0f) w = ui->win_w - 32.0f;
-  if (h > ui->win_h - 32.0f && ui->win_h > 64.0f) h = ui->win_h - 32.0f;
-  ccord_rect box = {(ui->win_w - w) * 0.5f, (ui->win_h - h) * 0.5f, w, h};
+  ccord_rect box = uis_modal_box(ui, 440.0f, 300.0f);
   ui->reactions_popover_rect = box;
 
   ccord_draw_rect(r, (ccord_rect){0, 0, ui->win_w, ui->win_h}, (ccord_color){0, 0, 0, 120});
   ccord_draw_rrect(r, (ccord_rect){box.x - 1.0f, box.y - 1.0f, box.w + 2.0f, box.h + 2.0f}, 8.0f, COL(border_subtle));
   ccord_draw_rrect(r, box, 7.0f, COL(bg_floating));
 
-  float side_w = 126.0f;
+  float side_w = box.w < 380.0f ? 96.0f : 126.0f;
   ccord_draw_rect(r, (ccord_rect){box.x + side_w, box.y, 1.0f, box.h}, COL(divider));
   ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
   ccord_text_draw(r, "Reactions", 9, box.x + 12.0f, box.y + 10.0f, &hs, 0.0f);
@@ -412,14 +409,20 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
 
   ccord_rect ir = ui_inbox_rect(ui);
   const ccord_layout_rect *h = &ui->layout.chat_header;
+  float safe_l = 8.0f + ui->safe_insets.left;
+  float safe_r = 8.0f + ui->safe_insets.right;
+  float safe_b = 8.0f + fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
+  float top_y = h->y + h->h + 6.0f;
   float w = 420.0f, hgt = 420.0f;
-  if (w > ui->win_w - 16.0f && ui->win_w > 32.0f) w = ui->win_w - 16.0f;
-  if (hgt > ui->win_h - (h->y + h->h + 14.0f) && ui->win_h > 120.0f) hgt = ui->win_h - (h->y + h->h + 14.0f);
+  if (w > ui->win_w - safe_l - safe_r && ui->win_w > 32.0f) w = maxf(ui->win_w - safe_l - safe_r, 200.0f);
+  float max_hgt = ui->win_h - top_y - safe_b;
+  if (hgt > max_hgt && ui->win_h > 120.0f) hgt = maxf(max_hgt, 160.0f);
   if (hgt < 160.0f) hgt = 160.0f;
   float x = ir.x + ir.w - w;
-  if (x < h->x + 8.0f) x = h->x + 8.0f;
-  if (x + w > ui->win_w - 8.0f) x = ui->win_w - w - 8.0f;
-  ccord_rect box = {x, h->y + h->h + 6.0f, w, hgt};
+  float min_x = fmaxf(h->x + 8.0f, safe_l);
+  if (x < min_x) x = min_x;
+  if (x + w > ui->win_w - safe_r) x = ui->win_w - w - safe_r;
+  ccord_rect box = {x, top_y, w, hgt};
   ui->inbox_popover_rect = box;
 
   uis_popover_frame(ui, r, box);
@@ -427,10 +430,12 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
   ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
   ccord_text_draw(r, "Inbox", 5, box.x + 14.0f, box.y + 12.0f, &hs, 0.0f);
 
+  bool compact_hdr = box.w < 390.0f;
   static const char *const k_tabs[2] = {"Unreads", "Mentions"};
-  float tx = box.x + 76.0f;
+  float tx = compact_hdr ? (box.x + 12.0f) : (box.x + 76.0f);
+  float ty = compact_hdr ? (box.y + 40.0f) : (box.y + 8.0f);
   for (int t = 0; t < 2; t++) {
-    ccord_rect tr = {tx, box.y + 8.0f, uis_label_width(ui, r, k_tabs[t]), UIS_H_BTN_SM};
+    ccord_rect tr = {tx, ty, uis_label_width(ui, r, k_tabs[t]), UIS_H_BTN_SM};
     ui->inbox_tab_rects[t] = tr;
     bool thv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, tr);
     uis_tab(ui, r, tr, k_tabs[t], (uis_state){.hover = thv, .selected = ui->inbox_tab == t}, "inboxtab", (uint64_t)t);
@@ -455,12 +460,13 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
   uis_button(ui, r, mar, malbl, UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){.hover = mahv, .disabled = !has_ackable},
              "inboxall", 0);
 
-  uis_divider(ui, r, box.x, box.y + 44.0f, box.w);
+  float div_y = compact_hdr ? (box.y + 74.0f) : (box.y + 44.0f);
+  uis_divider(ui, r, box.x, div_y, box.w);
 
   float list_x = box.x + 10.0f;
-  float list_y = box.y + 52.0f;
+  float list_y = div_y + 8.0f;
   float list_w = box.w - 20.0f;
-  float list_h = box.h - 60.0f;
+  float list_h = maxf((box.y + box.h) - list_y - 8.0f, 40.0f);
   float card_h = 62.0f, gap = 6.0f;
   ui->inbox_content_h = nentries > 0 ? (float)nentries * (card_h + gap) - gap : 0.0f;
   float max_s = ui->inbox_content_h > list_h ? ui->inbox_content_h - list_h : 0.0f;
@@ -552,17 +558,18 @@ void ui_draw_shortcuts_modal(ccord_ui *ui, ccord_renderer *r)
   ui->shortcuts_modal_rect = box;
   uis_modal_frame(ui, r, box);
 
-  ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large), COL(text_header));
-  ccord_text_draw(r, "Keyboard Shortcuts", 18, box.x + 22.0f, box.y + 16.0f, &ts, 0.0f);
-  ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(text_muted));
-  ccord_text_draw(r, "Navigate servers, channels, unreads, and chat without leaving the keyboard", 74,
-                  box.x + 22.0f, box.y + 40.0f, &ss, 0.0f);
-
   ccord_rect close_r = {box.x + box.w - UIS_SP_1 - UIS_ICON_BTN - UIS_SP_2, box.y + 12.0f, UIS_ICON_BTN, UIS_ICON_BTN};
   ui->shortcuts_close_rect = close_r;
   bool chv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, close_r);
   ccord_color cg = uis_icon_button(ui, r, close_r, (uis_state){.hover = chv}, "scclose", 0);
   ui_icon_close(r, close_r.x + close_r.w * 0.5f, close_r.y + close_r.h * 0.5f, 13.0f, cg);
+
+  float hdr_max_w = maxf(close_r.x - (box.x + 22.0f) - 8.0f, 80.0f);
+  ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large), COL(text_header));
+  ccord_text_draw_ellipsis(r, "Keyboard Shortcuts", 18, box.x + 22.0f, box.y + 16.0f, hdr_max_w, &ts);
+  ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(text_muted));
+  ccord_text_draw_ellipsis(r, "Navigate servers, channels, unreads, and chat without leaving the keyboard", 74,
+                           box.x + 22.0f, box.y + 40.0f, box.w - 44.0f, &ss);
 
   uis_divider(ui, r, box.x, box.y + 64.0f, box.w);
 
@@ -586,19 +593,25 @@ void ui_draw_shortcuts_modal(ccord_ui *ui, ccord_renderer *r)
     {"Ctrl + Shift + S / Ctrl + E", "Strikethrough / Inline Code"},
   };
   size_t total = sizeof k_shortcuts / sizeof k_shortcuts[0];
-  size_t half = (total + 1u) / 2u;
-  float col_w = (box.w - 52.0f) * 0.5f;
-  float y0 = box.y + 78.0f;
+  bool one_col = box.w < 440.0f;
+  size_t half = one_col ? total : ((total + 1u) / 2u);
+  float col_w = one_col ? (box.w - 40.0f) : ((box.w - 52.0f) * 0.5f);
   float row_h = 44.0f;
+  ccord_rect list_clip = {box.x + 12.0f, box.y + 72.0f, box.w - 24.0f, maxf(box.h - 80.0f, 40.0f)};
+  float content_h = (float)half * row_h;
+  ui->shortcuts_max = maxf(content_h - list_clip.h, 0.0f);
+  ui->shortcuts_scroll = clampf(ui->shortcuts_scroll, 0.0f, ui->shortcuts_max);
+  float y0 = list_clip.y + 4.0f - ui->shortcuts_scroll;
 
+  ccord_push_clip(r, list_clip);
   ccord_text_style ks = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_header));
   ccord_text_style ds = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(text_secondary));
   for (size_t i = 0; i < total; i++) {
-    size_t col = i / half;
-    size_t row = i % half;
+    size_t col = one_col ? 0u : (i / half);
+    size_t row = one_col ? i : (i % half);
     float rx = box.x + 20.0f + (float)col * (col_w + 12.0f);
     float ry = y0 + (float)row * row_h;
-    if (ry + row_h > box.y + box.h - 8.0f) continue;
+    if (ry + row_h < list_clip.y || ry > list_clip.y + list_clip.h) continue;
     ccord_text_draw_ellipsis(r, k_shortcuts[i].desc, strlen(k_shortcuts[i].desc), rx, ry + 2.0f, col_w, &ds);
     ccord_vec2 kt = ccord_text_measure(r, k_shortcuts[i].keys, strlen(k_shortcuts[i].keys), &ks, 0.0f);
     float kw = (kt.x + 14.0f < col_w) ? (kt.x + 14.0f) : col_w;
@@ -606,6 +619,10 @@ void ui_draw_shortcuts_modal(ccord_ui *ui, ccord_renderer *r)
     uis_plate(ui, r, cap_r, tk.r_control, COL(bg_tertiary));
     ccord_text_draw_ellipsis(r, k_shortcuts[i].keys, strlen(k_shortcuts[i].keys),
                              cap_r.x + 7.0f, cap_r.y + (cap_r.h - kt.y) * 0.5f, kw - 12.0f, &ks);
+  }
+  ccord_pop_clip(r);
+  if (ui->shortcuts_max > 0.0f) {
+    (void)ui_draw_list_scrollbar(ui, r, list_clip, content_h, ui->shortcuts_scroll, "scscroll", 0);
   }
 }
 

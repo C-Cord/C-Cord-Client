@@ -104,6 +104,8 @@ float ui_profile_roles_plus_width(void);
 void ui_profile_roles_plus_draw(ccord_ui *ui, ccord_renderer *r, ccord_id guild, ccord_id user, ccord_rect pill);
 void ui_profile_roles_draw(ccord_ui *ui, ccord_renderer *r);                           // the searchable list, last frame layer
 bool ui_profile_roles_input(ccord_ui *ui, const ccord_input_event *ev);
+bool ui_profile_roles_picker_open(const ccord_ui *ui);
+void ui_profile_roles_close_picker(ccord_ui *ui);
 void ui_profile_roles_destroy(ccord_ui *ui);
 typedef struct ui_profile_roles_debug {
   ccord_rect plus;                 // w == 0: no + drawn

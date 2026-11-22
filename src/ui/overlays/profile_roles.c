@@ -39,6 +39,7 @@ typedef struct pr_picker {
   size_t nrows;        // rows drawn
   size_t nmatches;     // roles passing the filter
   ccord_id match_ids[64];
+  float wheel_acc;     // accumulates fractional touch/trackpad wheel deltas before stepping a row
 } pr_picker;
 
 struct ui_profile_roles {
@@ -201,6 +202,7 @@ void ui_profile_roles_pill_overlay(ccord_ui *ui, ccord_renderer *r, ccord_id gui
   bool removable = ui_profile_roles_can_remove(ui, guild, role);
   ccord_rect xr = pr_clip_rect(pr, (ccord_rect){pill.x, pill.y, PR_X_W, pill.h});
   bool hover = removable && ui->mouse_in && !pr->picker && ui_in_rect(ui->mx, ui->my, pr_clip_rect(pr, pill));
+  bool show_x = hover || (removable && ui->touch_mode && !pr->picker);
   size_t i = pr->npills++;
   pr->pills[i].rect = pill;
   pr->pills[i].x_rect = removable ? xr : (ccord_rect){0};
@@ -208,8 +210,8 @@ void ui_profile_roles_pill_overlay(ccord_ui *ui, ccord_renderer *r, ccord_id gui
   pr->pills[i].guild = guild;
   pr->pills[i].user = user;
   pr->pills[i].removable = removable;
-  pr->pills[i].x_shown = hover;
-  if (!hover) return;
+  pr->pills[i].x_shown = show_x;
+  if (!show_x) return;
   float cx = pill.x + 9.0f, cy = pill.y + PR_PILL_H * 0.5f;
   ccord_draw_circle(r, cx, cy, 6.5f, COL(bg_tertiary));
   ccord_color c = COL(text_normal);
@@ -242,6 +244,10 @@ static void pr_close(ccord_ui *ui)
   struct ui_profile_roles *pr = ui->prof_roles;
   if (!pr || !pr->picker) return;
   pr_picker_free(pr);
+  if (ui->touch_text_focused) {
+    ui->touch_text_focused = false;
+    if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+  }
   if (!pr_surface_open(ui) && !pr->swallow_up) {
     pr_free_self(ui);
   }
@@ -301,22 +307,31 @@ void ui_profile_roles_draw(ccord_ui *ui, ccord_renderer *r)
   if (pk->sel >= pk->scroll + PR_VISIBLE_ROWS) pk->scroll = pk->sel + 1u - PR_VISIBLE_ROWS;
 
   uis_tokens t = uis_tokens_of(ui);
-  size_t shown = pk->nmatches > PR_VISIBLE_ROWS ? PR_VISIBLE_ROWS : pk->nmatches;
-  if (shown == 0) shown = 1;   // the "No roles match" row
+  float sl = 8.0f + ui->safe_insets.left, sr = 8.0f + ui->safe_insets.right;
+  float st = 8.0f + ui->safe_insets.top, sb = 8.0f + fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
+  float ww = (float)ui->win_w, wh = (float)ui->win_h;
+  float list_w = fminf(PR_LIST_W, fmaxf(ww - sl - sr, 140.0f));
   float in_h = 30.0f, pad = t.menu_pad;
+  float max_h = fmaxf(wh - st - sb, pad * 2.0f + in_h + 4.0f + t.menu_row_h);
+  size_t max_vis = (size_t)((max_h - pad * 2.0f - in_h - 4.0f) / t.menu_row_h);
+  if (max_vis < 1u) max_vis = 1u;
+  if (max_vis > PR_VISIBLE_ROWS) max_vis = PR_VISIBLE_ROWS;
+  size_t shown = pk->nmatches > max_vis ? max_vis : pk->nmatches;
+  if (shown == 0) shown = 1;   // the "No roles match" row
   float h = pad + in_h + 4.0f + (float)shown * t.menu_row_h + pad;
   float x = pr->plus.x, y = pr->plus.y + pr->plus.h + 4.0f;
-  float ww = (float)ui->win_w, wh = (float)ui->win_h;
-  if (y + h > wh - 8.0f) y = pr->plus.y - 4.0f - h;
-  if (y < 8.0f) y = 8.0f;
-  if (x + PR_LIST_W > ww - 8.0f) x = ww - 8.0f - PR_LIST_W;
-  if (x < 8.0f) x = 8.0f;
-  pk->box = (ccord_rect){x, y, PR_LIST_W, h};
-  pk->input = (ccord_rect){x + pad, y + pad, PR_LIST_W - 2.0f * pad, in_h};
+  if (y + h > wh - sb) y = pr->plus.y - 4.0f - h;
+  if (y + h > wh - sb) y = wh - sb - h;
+  if (y < st) y = st;
+  if (x + list_w > ww - sr) x = ww - sr - list_w;
+  if (x < sl) x = sl;
+  pk->box = (ccord_rect){x, y, list_w, h};
+  pk->input = (ccord_rect){x + pad, y + pad, list_w - 2.0f * pad, in_h};
 
   ui_popup_begin(ui, r, "profroles", 0, UI_POPUP_MS, 6.0f);
   uis_popover_frame(ui, r, pk->box);
-  (void)uis_input(ui, r, pk->input, &pk->filter, "Search roles", (uis_state){.focused = true}, false, "profrolesq", 0);
+  (void)uis_input(ui, r, pk->input, &pk->filter, "Search roles",
+                  (uis_state){.focused = !ui->touch_mode || ui->touch_text_focused}, false, "profrolesq", 0);
   float ry = pk->input.y + in_h + 4.0f;
   pk->nrows = 0;
   if (pk->nmatches == 0) {
@@ -328,7 +343,7 @@ void ui_profile_roles_draw(ccord_ui *ui, ccord_renderer *r)
   for (size_t k = 0; k < shown && pk->scroll + k < pk->nmatches; k++) {
     const ccord_role *rl = ccord_store_role(ui->d.store, pk->guild, ids[pk->scroll + k]);
     if (!rl) continue;
-    ccord_rect row = {x + pad, ry + (float)k * t.menu_row_h, PR_LIST_W - 2.0f * pad, t.menu_row_h};
+    ccord_rect row = {x + pad, ry + (float)k * t.menu_row_h, list_w - 2.0f * pad, t.menu_row_h};
     bool hv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, row);
     uis_menu_row(ui, r, row, rl->name, (uis_state){.hover = hv || pk->scroll + k == pk->sel}, false, false, false,
                  "profrolesrow", rl->id);
@@ -414,13 +429,27 @@ bool ui_profile_roles_input(ccord_ui *ui, const ccord_input_event *ev)
           return true;
         }
       }
-      if (ui_in_rect(ev->x, ev->y, pk->box)) return true;   // the search field or the list's padding
+      if (ui_in_rect(ev->x, ev->y, pk->input)) {
+        if (ui->touch_mode) {
+          ui->touch_text_focused = true;
+          ui->dirty = true;
+        }
+        return true;
+      }
+      if (ui_in_rect(ev->x, ev->y, pk->box)) return true;   // the list's padding
       pr_close(ui);   // outside (the + itself toggles): no request
       return true;
     case CCORD_IN_WHEEL:
       if (ui_in_rect(ui->mx, ui->my, pk->box)) {
-        if (ev->wheel < 0.0f && pk->scroll + PR_VISIBLE_ROWS < pk->nmatches) pk->scroll++;
-        else if (ev->wheel > 0.0f && pk->scroll > 0) pk->scroll--;
+        pk->wheel_acc += ev->wheel;
+        while (pk->wheel_acc <= -1.0f) {
+          if (pk->scroll + PR_VISIBLE_ROWS < pk->nmatches) pk->scroll++;
+          pk->wheel_acc += 1.0f;
+        }
+        while (pk->wheel_acc >= 1.0f) {
+          if (pk->scroll > 0) pk->scroll--;
+          pk->wheel_acc -= 1.0f;
+        }
         ui->dirty = true;
         return true;
       }
@@ -463,6 +492,17 @@ bool ui_profile_roles_input(ccord_ui *ui, const ccord_input_event *ev)
     }
     default: return false;
   }
+}
+
+bool ui_profile_roles_picker_open(const ccord_ui *ui)
+{
+  return ui && ui->prof_roles && ui->prof_roles->picker != nullptr;
+}
+
+void ui_profile_roles_close_picker(ccord_ui *ui)
+{
+  if (!ui) return;
+  pr_close(ui);
 }
 
 // ---- inspection (slices) ------------------------------------------------------------------------------------------

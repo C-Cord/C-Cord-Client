@@ -267,10 +267,12 @@ struct ccord_ui {
   ccord_rect select_opt_rects[CCORD_RICH_MAX_SELECT_OPTIONS];
   ui_select_opt *select_opts;          // lazily heap-allocated [CCORD_RICH_MAX_SELECT_OPTIONS]
   size_t select_opt_count;
+  float select_scroll, select_max;
   ui_select_target *select_target;     // lazily heap-allocated while select dropdown is open
   ccord_interaction_modal *inter_modal;           // lazily heap-allocated while interaction modal is open/fading
   ccord_text_edit *inter_modal_edits;             // lazily heap-allocated [CCORD_RICH_MAX_COMPONENT_ROWS]
   size_t inter_modal_focus;
+  float inter_modal_scroll, inter_modal_max;
   ccord_rect inter_modal_box, inter_modal_ok, inter_modal_cancel;
   ccord_rect inter_modal_field_rects[CCORD_RICH_MAX_COMPONENT_ROWS];
 
@@ -665,6 +667,7 @@ struct ccord_ui {
 
   bool shortcuts_open;
   ccord_rect shortcuts_modal_rect, shortcuts_close_rect;
+  float shortcuts_scroll, shortcuts_max;
 
   // M3b: Server folders, rail/channel drag-reorder, Add/Join Server modal & Server Discovery
   ccord_id expanded_folders[CCORD_MAX_GUILDS];
@@ -689,6 +692,8 @@ struct ccord_ui {
   uint64_t discovery_due_ms;
   ccord_id discovery_pending_guild_id;
   ccord_rect discovery_search_rect;
+  ccord_rect discovery_back_rect;
+  float discovery_cards_y;
   ccord_rect discovery_cat_rects[6];
   struct {
     ccord_rect join_rect;

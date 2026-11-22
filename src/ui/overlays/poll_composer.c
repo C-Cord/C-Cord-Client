@@ -49,8 +49,9 @@ typedef struct pc_state {
   char atext[PC_MAX_ANSWERS][CCORD_POLL_ANSWER_MAX * PC_TEXT_BYTES + 1];
   const char *aptr[PC_MAX_ANSWERS];
   // geometry of the last draw (input and the verify slice read it)
-  ccord_rect box, question_rect, answer_rect[PC_MAX_ANSWERS], remove_rect[PC_MAX_ANSWERS], add_rect, multi_rect,
+  ccord_rect box, body_view, question_rect, answer_rect[PC_MAX_ANSWERS], remove_rect[PC_MAX_ANSWERS], add_rect, multi_rect,
     dur_rect[PC_NDUR], post_rect, cancel_rect;
+  float scroll, max_scroll, content_h;
 } pc_state;
 
 static pc_state *g_pc;
@@ -282,25 +283,42 @@ static void pc_layout(ccord_ui *ui, ccord_renderer *r, pc_state *s)
   ccord_text_style tit = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large), COL(text_header));
   float title_h = UIS_SP_5 + ui_line_h(ui, tit.size) + UIS_SP_3;
   pc_target_text(ui, s);
-  float fixed = title_h + (label_h + UIS_H_INPUT + UIS_SP_3)       // question
-                + label_h                                          // answers label
-                + UIS_H_BTN_SM + UIS_SP_3                          // add answer
-                + (label_h + UIS_H_BTN_SM + UIS_SP_3)              // duration
-                + UIS_H_BTN + UIS_SP_2                             // toggle
-                + ui_line_h(ui, M(font_size_small)) + UIS_SP_2     // error line
-                + (s->target[0] ? ui_line_h(ui, M(font_size_small)) + UIS_SP_2 : 0.0f)   // target line
-                + UIS_SP_5 + UIS_H_BTN + UIS_SP_5;                 // footer
+  float est_w = uis_modal_box(ui, UIS_MODAL_W_MD, 200.0f).w - 2.0f * UIS_SP_5;
+  bool wrap_dur = ((est_w - UIS_SP_1 * (float)(PC_NDUR - 1u)) / (float)PC_NDUR) < 48.0f;
+  float dur_h = wrap_dur ? (UIS_H_BTN_SM * 2.0f + UIS_SP_1) : UIS_H_BTN_SM;
+  float foot_extra = ui_line_h(ui, M(font_size_small)) + UIS_SP_2
+                     + (s->target[0] ? ui_line_h(ui, M(font_size_small)) + UIS_SP_2 : 0.0f)
+                     + UIS_SP_5 + UIS_H_BTN + UIS_SP_5;
+  float body_fixed = (label_h + UIS_H_INPUT + UIS_SP_3)   // question
+                     + label_h                            // answers label
+                     + UIS_H_BTN_SM + UIS_SP_3            // add answer
+                     + (label_h + dur_h + UIS_SP_3)       // duration
+                     + UIS_H_BTN + UIS_SP_2;              // toggle
   float maxh = ui->win_h - 2.0f * UIS_SP_8;
   float row_h = UIS_H_INPUT;
   size_t n = s->nanswers;
-  float per = (maxh - fixed) / (float)n - UIS_SP_1;
-  if (per < row_h) row_h = per < 24.0f ? 24.0f : per;
-  float h = fixed + (float)n * (row_h + UIS_SP_1);
+  if (!ui->mobile_layout) {
+    float per = (maxh - (title_h + body_fixed + foot_extra)) / (float)n - UIS_SP_1;
+    if (per < row_h) row_h = per < 24.0f ? 24.0f : per;
+  }
+  float body_h = body_fixed + (float)n * (row_h + UIS_SP_1);
+  float h = title_h + body_h + foot_extra;
   ccord_rect box = uis_modal_box(ui, UIS_MODAL_W_MD, h);
   s->box = box;
+  s->post_rect = uis_modal_footer_button(box, 0, 96.0f);
+  s->cancel_rect = uis_modal_footer_button(box, 1, 96.0f);
 
+  float body_bottom = s->post_rect.y - UIS_SP_3
+                      - (s->error[0] ? ui_line_h(ui, M(font_size_small)) + UIS_SP_2 : 0.0f)
+                      - (s->target[0] ? ui_line_h(ui, M(font_size_small)) + UIS_SP_2 : 0.0f);
   float x = box.x + UIS_SP_5, w = box.w - 2.0f * UIS_SP_5;
-  float y = box.y + title_h + label_h;
+  s->body_view = (ccord_rect){box.x + UIS_SP_2, box.y + title_h, box.w - 2.0f * UIS_SP_2,
+                              fmaxf(body_bottom - (box.y + title_h), 0.0f)};
+  s->content_h = body_h;
+  s->max_scroll = body_h > s->body_view.h ? (body_h - s->body_view.h) : 0.0f;
+  s->scroll = fminf(fmaxf(s->scroll, 0.0f), s->max_scroll);
+
+  float y = box.y + title_h - s->scroll + label_h;
   s->question_rect = (ccord_rect){x, y, w, UIS_H_INPUT};
   y += UIS_H_INPUT + UIS_SP_3 + label_h;
   for (size_t i = 0; i < PC_MAX_ANSWERS; i++) {
@@ -314,14 +332,25 @@ static void pc_layout(ccord_ui *ui, ccord_renderer *r, pc_state *s)
   float aw = uis_label_width(ui, r, "+ Add Answer");
   s->add_rect = (ccord_rect){x, y, aw, UIS_H_BTN_SM};
   y += UIS_H_BTN_SM + UIS_SP_3 + label_h;
-  float gap = UIS_SP_1, cw = (w - gap * (float)(PC_NDUR - 1u)) / (float)PC_NDUR;
-  for (size_t i = 0; i < PC_NDUR; i++) {
-    s->dur_rect[i] = (ccord_rect){x + (float)i * (cw + gap), y, cw, UIS_H_BTN_SM};
+  float gap = UIS_SP_1;
+  if (wrap_dur) {
+    size_t r0 = 4u, r1 = PC_NDUR - r0;
+    float cw0 = (w - gap * (float)(r0 - 1u)) / (float)r0;
+    float cw1 = (w - gap * (float)(r1 - 1u)) / (float)r1;
+    for (size_t i = 0; i < r0; i++) {
+      s->dur_rect[i] = (ccord_rect){x + (float)i * (cw0 + gap), y, cw0, UIS_H_BTN_SM};
+    }
+    for (size_t i = 0; i < r1; i++) {
+      s->dur_rect[r0 + i] = (ccord_rect){x + (float)i * (cw1 + gap), y + UIS_H_BTN_SM + gap, cw1, UIS_H_BTN_SM};
+    }
+  } else {
+    float cw = (w - gap * (float)(PC_NDUR - 1u)) / (float)PC_NDUR;
+    for (size_t i = 0; i < PC_NDUR; i++) {
+      s->dur_rect[i] = (ccord_rect){x + (float)i * (cw + gap), y, cw, UIS_H_BTN_SM};
+    }
   }
-  y += UIS_H_BTN_SM + UIS_SP_3;
+  y += dur_h + UIS_SP_3;
   s->multi_rect = (ccord_rect){x, y, w, UIS_H_BTN};
-  s->post_rect = uis_modal_footer_button(box, 0, 96.0f);
-  s->cancel_rect = uis_modal_footer_button(box, 1, 96.0f);
 }
 
 static void pc_draw_label(ccord_ui *ui, ccord_renderer *r, float x, float y, const char *text)
@@ -344,6 +373,7 @@ void ui_poll_composer_draw(ccord_ui *ui, ccord_renderer *r)
   float label_h = ui_line_h(ui, over.size) + UIS_SP_1;
   float x = box.x + UIS_SP_5, w = box.w - 2.0f * UIS_SP_5;
 
+  ccord_push_clip(r, s->body_view);
   // question
   float ly = s->question_rect.y - label_h;
   pc_draw_label(ui, r, x, ly, "QUESTION");
@@ -383,6 +413,10 @@ void ui_poll_composer_draw(ccord_ui *ui, ccord_renderer *r)
   ccord_text_draw(r, "Allow multiple answers", 22, x, s->multi_rect.y + (s->multi_rect.h - ui_line_h(ui, body.size)) * 0.5f,
                   &body, 0.0f);
   uis_toggle(ui, r, s->multi_rect, s->multi, (uis_state){.hover = pc_hover(ui, s->multi_rect)}, "pollmulti", 0);
+  ccord_pop_clip(r);
+  if (s->max_scroll > 0.0f) {
+    (void)ui_draw_list_scrollbar(ui, r, s->body_view, s->content_h, s->scroll, "pollscroll", 0);
+  }
 
   if (s->error[0]) {
     ccord_text_style es = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(danger));
@@ -480,15 +514,20 @@ static void pc_key(ccord_ui *ui, pc_state *s, const ccord_input_event *ev)
 static void pc_click(ccord_ui *ui, pc_state *s, float x, float y)
 {
   if (ui_in_rect(x, y, s->cancel_rect)) {
+    ui->touch_text_focused = false;
     ui_poll_composer_close(ui);
     return;
   }
   if (ui_in_rect(x, y, s->post_rect)) {
+    ui->touch_text_focused = false;
     if (pc_can_post(s)) pc_post(ui);
     return;
   }
+  if (s->body_view.h > 0.0f && !ui_in_rect(x, y, s->body_view)) return;
+  bool focused_input = false;
   if (ui_in_rect(x, y, s->question_rect)) {
     s->focus = 0;
+    focused_input = true;
   } else if (ui_in_rect(x, y, s->add_rect)) {
     pc_add_answer(s);
   } else if (ui_in_rect(x, y, s->multi_rect)) {
@@ -498,12 +537,18 @@ static void pc_click(ccord_ui *ui, pc_state *s, float x, float y)
       if (ui_in_rect(x, y, s->dur_rect[i])) s->dur = i;
     }
     for (size_t i = 0; i < s->nanswers; i++) {
-      if (ui_in_rect(x, y, s->answer_rect[i])) s->focus = i + 1u;
-      else if (ui_in_rect(x, y, s->remove_rect[i])) {
+      if (ui_in_rect(x, y, s->answer_rect[i])) {
+        s->focus = i + 1u;
+        focused_input = true;
+      } else if (ui_in_rect(x, y, s->remove_rect[i])) {
         pc_remove_answer(s, i);
         break;
       }
     }
+  }
+  if (ui->touch_mode) {
+    ui->touch_text_focused = focused_input;
+    if (!focused_input && ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
   }
   s->error[0] = '\0';
   ui->dirty = true;
@@ -528,7 +573,12 @@ bool ui_poll_composer_input(ccord_ui *ui, const ccord_input_event *ev)
       if (ev->button == 1) pc_click(ui, s, ev->x, ev->y);
       return true;
     case CCORD_IN_MOUSE_UP:
+      return true;
     case CCORD_IN_WHEEL:
+      if (s->max_scroll > 0.0f) {
+        s->scroll = fminf(fmaxf(s->scroll - ev->wheel * 36.0f, 0.0f), s->max_scroll);
+        ui->dirty = true;
+      }
       return true;
     default:
       return false;

@@ -393,12 +393,16 @@ void ui_clan_popover_draw(ccord_ui *ui, ccord_renderer *r)
   h += pad;
 
   float ww = (float)ui->win_w, wh = (float)ui->win_h;
+  float sl = 8.0f + ui->safe_insets.left, sr = 8.0f + ui->safe_insets.right;
+  float st = 8.0f + ui->safe_insets.top, sb = 8.0f + fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
+  if (ww > sl + sr + 80.0f && w > ww - sl - sr) w = ww - sl - sr;
   float x = cp->anchor.x;
   float y = cp->anchor.y + cp->anchor.h + 6.0f;
-  if (ww > 16.0f && x + w > ww - 8.0f) x = ww - w - 8.0f;
-  if (x < 8.0f) x = 8.0f;
-  if (wh > 16.0f && y + h > wh - 8.0f) y = cp->anchor.y - h - 6.0f;
-  if (y < 8.0f) y = 8.0f;
+  if (ww > sl + sr && x + w > ww - sr) x = ww - w - sr;
+  if (x < sl) x = sl;
+  if (wh > st + sb && y + h > wh - sb) y = cp->anchor.y - h - 6.0f;
+  if (y + h > wh - sb) y = wh - h - sb;
+  if (y < st) y = st;
 
   ccord_rect box = {x, y, w, h};
   cp->box = box;

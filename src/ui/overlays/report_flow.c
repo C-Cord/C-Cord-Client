@@ -754,7 +754,16 @@ static void rf_layout(ccord_ui *ui, ccord_renderer *r, rf_state *s)
   float title_h = UIS_SP_5 + ui_line_h(ui, tit.size) + UIS_SP_3;
   ccord_text_style es = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(danger));
   float err_h = s->error[0] ? ccord_text_measure(r, s->error, strlen(s->error), &es, box_w - 2.0f * UIS_SP_5).y + UIS_SP_2 : 0.0f;
-  float foot_h = UIS_SP_3 + UIS_H_BTN + UIS_SP_5;
+  float hw = uis_label_width(ui, r, "How reporting works");
+  s->primary_label = rf_primary_label(s);
+  const ccord_report_node *cn_pre = rf_node(s);
+  bool closes_pre = s->phase == RF_SENT ||
+                    (s->phase == RF_NODE && cn_pre &&
+                     (cn_pre->button == CCORD_REPORT_BTN_DONE || cn_pre->button == CCORD_REPORT_BTN_CANCEL));
+  int nbtns = (s->primary_label ? 1 : 0) + ((s->phase == RF_NODE && s->path_len > 1) ? 1 : 0) + (!closes_pre ? 1 : 0);
+  float btns_w = nbtns > 0 ? ((float)nbtns * RF_BTN_W + (float)(nbtns - 1) * UIS_SP_2) : 0.0f;
+  bool stack_help = (UIS_SP_5 * 2.0f + hw + UIS_SP_2 + btns_w > box_w);
+  float foot_h = UIS_SP_3 + UIS_H_BTN + UIS_SP_5 + (stack_help ? (UIS_H_BTN_SM + UIS_SP_1) : 0.0f);
   ccord_rect box = uis_modal_box(ui, UIS_MODAL_W_MD, title_h + s->content_h + err_h + foot_h);
   s->box = box;
   s->view_h = box.h - title_h - err_h - foot_h;
@@ -770,17 +779,22 @@ static void rf_layout(ccord_ui *ui, ccord_renderer *r, rf_state *s)
   }
 
   s->primary = s->back = s->close = s->retry = (ccord_rect){0};
-  s->primary_label = rf_primary_label(s);
   int slot = 0;
-  if (s->primary_label) s->primary = uis_modal_footer_button(box, slot++, RF_BTN_W);
-  if (s->phase == RF_NODE && s->path_len > 1) s->back = uis_modal_footer_button(box, slot++, RF_BTN_W);
-  const ccord_report_node *cn = rf_node(s);
-  bool closes = s->phase == RF_SENT ||
-                (s->phase == RF_NODE && cn && (cn->button == CCORD_REPORT_BTN_DONE || cn->button == CCORD_REPORT_BTN_CANCEL));
-  if (!closes) s->close = uis_modal_footer_button(box, slot++, RF_BTN_W);
+  float bw = RF_BTN_W;
+  if (nbtns > 0 && UIS_SP_5 * 2.0f + (float)nbtns * bw + (float)(nbtns - 1) * UIS_SP_2 > box.w) {
+    bw = floorf((box.w - UIS_SP_5 * 2.0f - (float)(nbtns - 1) * UIS_SP_2) / (float)nbtns);
+    if (bw < 64.0f) bw = 64.0f;
+  }
+  if (s->primary_label) s->primary = uis_modal_footer_button(box, slot++, bw);
+  if (s->phase == RF_NODE && s->path_len > 1) s->back = uis_modal_footer_button(box, slot++, bw);
+  if (!closes_pre) s->close = uis_modal_footer_button(box, slot++, bw);
   s->retry = s->phase == RF_LOAD_FAILED ? s->primary : (ccord_rect){0};
-  float hw = uis_label_width(ui, r, "How reporting works");
-  s->help = (ccord_rect){box.x + UIS_SP_5, box.y + box.h - UIS_SP_5 - UIS_H_BTN, hw, UIS_H_BTN};
+  if (stack_help) {
+    s->help = (ccord_rect){box.x + UIS_SP_5, box.y + box.h - UIS_SP_5 - UIS_H_BTN - UIS_SP_1 - UIS_H_BTN_SM,
+                           fminf(hw, box.w - 2.0f * UIS_SP_5), UIS_H_BTN_SM};
+  } else {
+    s->help = (ccord_rect){box.x + UIS_SP_5, box.y + box.h - UIS_SP_5 - UIS_H_BTN, hw, UIS_H_BTN};
+  }
 }
 
 static bool rf_hover(const ccord_ui *ui, const rf_state *s, ccord_rect rc)
@@ -1084,6 +1098,7 @@ static void rf_click(ccord_ui *ui, rf_state *s, float x, float y)
           s->click_pending = true;
           s->click_x = x;
           s->click_y = y;
+          if (ui->touch_mode) ui->touch_text_focused = true;
         }
         return;
       case RFI_LINK:

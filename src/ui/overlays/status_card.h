@@ -50,6 +50,8 @@ typedef struct ui_status_card {
   bool last_caret_on;
   ccord_rect card;                 // whole card, from the last draw (w == 0 while closed)
   ccord_rect panel;                // the user panel it hangs above, from the last draw
+  float scroll;                    // vertical scroll when clamped (e.g., mobile keyboard open)
+  float max_scroll;
   ui_sc_item items[UI_SC_ITEMS_MAX];
   size_t nitems;
 } ui_status_card;

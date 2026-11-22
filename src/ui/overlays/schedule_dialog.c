@@ -42,11 +42,12 @@ typedef struct sd_state {
   ccord_id channel_id;
   ccord_ui_scheduled_item items[CCORD_UI_SCHEDULED_MAX];
   size_t nitems, first_row;
-  ccord_rect box, msg_rect, date_rect, time_rect, preset[SD_PRESET_COUNT], schedule, close, x_btn;
+  ccord_rect box, body_view, msg_rect, date_rect, time_rect, preset[SD_PRESET_COUNT], schedule, close, x_btn;
   sd_row_rects rows[SD_ROWS_MAX];
   bool click_pending;                   // a click in the message box, resolved in draw (needs the renderer)
   float click_x, click_y;
   float msg_scroll;
+  float body_scroll, body_max, body_content_h;
 } sd_state;
 
 static sd_state *sd;
@@ -354,6 +355,16 @@ void ui_schedule_dialog_draw(ccord_ui *ui, ccord_renderer *r)
   ccord_color xc = uis_icon_button(ui, r, sd->x_btn, (uis_state){.hover = xh}, "schedx", 0);
   ui_icon_close(r, sd->x_btn.x + sd->x_btn.w * 0.5f, sd->x_btn.y + sd->x_btn.h * 0.5f, UIS_ICON_GLYPH, xc);
 
+  // footer computed early so the scrollable body clips cleanly above it
+  sd->schedule = uis_modal_footer_button(box, 0, 120.0f);
+  sd->close = uis_modal_footer_button(box, 1, 90.0f);
+  float body_top = y;
+  sd->body_view = (ccord_rect){box.x + UIS_SP_2, body_top, box.w - 2.0f * UIS_SP_2,
+                               fmaxf(sd->schedule.y - UIS_SP_2 - body_top, 0.0f)};
+  sd->body_scroll = fminf(fmaxf(sd->body_scroll, 0.0f), sd->body_max);
+  ccord_push_clip(r, sd->body_view);
+  y -= sd->body_scroll;
+
   // target channel
   char name[128], line[200];
   if (sd->channel_id != CCORD_ID_NONE) snprintf(line, sizeof line, "Sending to %s", sd_channel_name(ui, sd->channel_id, name, sizeof name));
@@ -376,15 +387,19 @@ void ui_schedule_dialog_draw(ccord_ui *ui, ccord_renderer *r)
   uis_input(ui, r, sd->time_rect, &sd->time, "HH:MM", (uis_state){.focused = sd->focus == SD_FOCUS_TIME}, false, "schedtime", 0);
   y += UIS_H_INPUT + UIS_SP_2;
 
-  // presets
+  // presets (wrap to a second row on narrow phone viewports)
   static const char *k_presets[SD_PRESET_COUNT] = {"In 15 minutes", "In 1 hour", "Tomorrow 9:00"};
   float px = x0;
   for (int i = 0; i < SD_PRESET_COUNT; i++) {
     float bw = uis_label_width(ui, r, k_presets[i]);
-    sd->preset[i] = (ccord_rect){px, y, bw, UIS_H_BTN_SM};
+    if (px > x0 && px + bw > x0 + w + 1.0f) {
+      px = x0;
+      y += UIS_H_BTN_SM + UIS_SP_1;
+    }
+    sd->preset[i] = (ccord_rect){px, y, fminf(bw, w), UIS_H_BTN_SM};
     bool hv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd->preset[i]);
     uis_button(ui, r, sd->preset[i], k_presets[i], UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){.hover = hv}, "schedpre", (uint64_t)i);
-    px += bw + UIS_SP_2;
+    px += sd->preset[i].w + UIS_SP_2;
   }
   y += UIS_H_BTN_SM + UIS_SP_2;
 
@@ -418,10 +433,12 @@ void ui_schedule_dialog_draw(ccord_ui *ui, ccord_renderer *r)
   sd_text(ui, r, line, x0, y, w, CCORD_FONT_BOLD, fs_c - 3.0f, COL(text_muted));
   y += 20.0f;
   int rows_fit = (int)((box.h - SD_H_FIXED) / SD_ROW_H);
+  if (rows_fit < 1 && sd->nitems > 0) rows_fit = 1;
   if (rows_fit > SD_ROWS_MAX) rows_fit = SD_ROWS_MAX;
   memset(sd->rows, 0, sizeof sd->rows);
   if (sd->nitems == 0) {
     sd_text(ui, r, "Nothing scheduled.", x0, y + 4.0f, w, CCORD_FONT_REGULAR, fs_c, COL(text_muted));
+    y += 28.0f;
   }
   for (int i = 0; i < rows_fit && sd->first_row + (size_t)i < sd->nitems; i++) {
     const ccord_ui_scheduled_item *it = &sd->items[sd->first_row + (size_t)i];
@@ -435,7 +452,7 @@ void ui_schedule_dialog_draw(ccord_ui *ui, ccord_renderer *r)
     bool ch = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd->rows[i].cancel);
     uis_button(ui, r, sd->rows[i].send, "Send now", UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){.hover = sh}, "schedsend", (uint64_t)i);
     uis_button(ui, r, sd->rows[i].cancel, cancel_label, UIS_BTN_DANGER_SOFT, UIS_BTN_S_SM, (uis_state){.hover = ch}, "schedcancel", (uint64_t)i);
-    float tx = row.x + UIS_SP_3, tmax = sd->rows[i].send.x - UIS_SP_2 - tx;
+    float tx = row.x + UIS_SP_3, tmax = fmaxf(sd->rows[i].send.x - UIS_SP_2 - tx, 40.0f);
     sd_text(ui, r, it->preview, tx, row.y + 5.0f, tmax, CCORD_FONT_BOLD, fs_c, COL(text_header));
     char when[48], cn[128];
     sd_fmt_time(ui, it->due_unix_ms, when, sizeof when);
@@ -446,14 +463,23 @@ void ui_schedule_dialog_draw(ccord_ui *ui, ccord_renderer *r)
     sd_text(ui, r, line, tx, row.y + 22.0f, tmax, CCORD_FONT_REGULAR, fs_c - 2.0f, it->missed ? COL(danger) : COL(text_muted));
     if (it->error[0]) sd_text(ui, r, it->error, tx, row.y + 37.0f, tmax, CCORD_FONT_REGULAR, fs_c - 2.0f, COL(danger));
   }
+  if (rows_fit > 0 && sd->nitems > 0) {
+    size_t drawn = sd->nitems - sd->first_row;
+    if (drawn > (size_t)rows_fit) drawn = (size_t)rows_fit;
+    y += (float)drawn * SD_ROW_H;
+  }
   if (rows_fit > 0 && sd->nitems > (size_t)rows_fit) {
     snprintf(line, sizeof line, "%zu-%zu of %zu (scroll)", sd->first_row + 1, sd->first_row + (size_t)rows_fit < sd->nitems ? sd->first_row + (size_t)rows_fit : sd->nitems, sd->nitems);
-    sd_text(ui, r, line, x0 + w - 150.0f, y - 18.0f, 150.0f, CCORD_FONT_REGULAR, fs_c - 2.0f, COL(text_muted));
+    sd_text(ui, r, line, x0 + w - 150.0f, y - (float)rows_fit * SD_ROW_H - 18.0f, 150.0f, CCORD_FONT_REGULAR, fs_c - 2.0f, COL(text_muted));
+  }
+  sd->body_content_h = fmaxf((y + sd->body_scroll) - body_top + 6.0f, 0.0f);
+  sd->body_max = sd->body_content_h > sd->body_view.h ? (sd->body_content_h - sd->body_view.h) : 0.0f;
+  ccord_pop_clip(r);
+  if (sd->body_max > 0.0f) {
+    (void)ui_draw_list_scrollbar(ui, r, sd->body_view, sd->body_content_h, sd->body_scroll, "schedscroll", 0);
   }
 
   // footer: Schedule (right), Close
-  sd->schedule = uis_modal_footer_button(box, 0, 120.0f);
-  sd->close = uis_modal_footer_button(box, 1, 90.0f);
   bool sch_h = ui->mouse_in && why == nullptr && ui_in_rect(ui->mx, ui->my, sd->schedule);
   bool cl_h = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sd->close);
   uis_button(ui, r, sd->schedule, "Schedule", UIS_BTN_PRIMARY, UIS_BTN_S_MD, (uis_state){.hover = sch_h, .disabled = why != nullptr}, "schedgo", 0);
@@ -539,20 +565,30 @@ static bool sd_click(ccord_ui *ui, float x, float y)
     return true;
   }
   if (ui_in_rect(x, y, sd->schedule)) {
+    ui->touch_text_focused = false;
     sd_do_schedule(ui);
     return true;
   }
+  if (sd->body_view.h > 0.0f && !ui_in_rect(x, y, sd->body_view)) return true;
+  bool focused_input = false;
   if (ui_in_rect(x, y, sd->msg_rect)) {
     sd->focus = SD_FOCUS_MSG;
     sd->click_pending = true;
     sd->click_x = x;
     sd->click_y = y;
+    focused_input = true;
   } else if (ui_in_rect(x, y, sd->date_rect)) {
     sd->focus = SD_FOCUS_DATE;
     ccord_text_edit_set_caret(&sd->date, sd->date.len, false);
+    focused_input = true;
   } else if (ui_in_rect(x, y, sd->time_rect)) {
     sd->focus = SD_FOCUS_TIME;
     ccord_text_edit_set_caret(&sd->time, sd->time.len, false);
+    focused_input = true;
+  }
+  if (ui->touch_mode) {
+    ui->touch_text_focused = focused_input;
+    if (!focused_input && ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
   }
   for (int i = 0; i < SD_PRESET_COUNT; i++) {
     if (ui_in_rect(x, y, sd->preset[i])) sd_apply_preset(ui, i);
@@ -579,7 +615,10 @@ bool ui_schedule_dialog_input(ccord_ui *ui, const ccord_input_event *ev)
     case CCORD_IN_MOUSE_UP:
       return true;
     case CCORD_IN_WHEEL:
-      if (sd->nitems > SD_ROWS_MAX) {
+      if (sd->body_max > 0.0f) {
+        sd->body_scroll = fminf(fmaxf(sd->body_scroll - ev->wheel * 36.0f, 0.0f), sd->body_max);
+        ui->dirty = true;
+      } else if (sd->nitems > SD_ROWS_MAX) {
         size_t max_first = sd->nitems - SD_ROWS_MAX;
         if (ev->wheel > 0.0f && sd->first_row > 0) sd->first_row--;
         else if (ev->wheel < 0.0f && sd->first_row < max_first) sd->first_row++;

@@ -853,7 +853,7 @@ bool ccord_ui_handle_back(ccord_ui *ui)
   if (ui->poll_open) { ui_poll_composer_close(ui); ui->dirty = true; return true; }
   if (ui->plus_menu_open) { ui_plus_menu_close(ui); ui->dirty = true; return true; }
   if (ui->clan_pop && ui_clan_popover_is_open(ui)) { (void)ui_clan_popover_input(ui, &esc); ui->dirty = true; return true; }
-  if (ui->prof_roles && ui_profile_roles_input(ui, &esc)) { ui->dirty = true; return true; }
+  if (ui_profile_roles_picker_open(ui)) { ui_profile_roles_close_picker(ui); return true; }
   if (ui->sc.open) { ui_status_card_close(ui); ui->dirty = true; return true; }
 
   // 3. Stream fullscreen, lightbox, quick switcher, dropdowns, modals, shortcuts.

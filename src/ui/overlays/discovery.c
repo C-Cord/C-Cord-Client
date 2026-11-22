@@ -13,12 +13,13 @@ void ui_draw_discovery(ccord_ui *ui, ccord_renderer *r)
 {
   ui->ndiscovery_hits = 0;
   ui->discovery_search_rect = (ccord_rect){0};
+  ui->discovery_back_rect = (ccord_rect){0};
   for (size_t i = 0; i < 6u; i++) ui->discovery_cat_rects[i] = (ccord_rect){0};
   ui->discovery_content_h = 0.0f;
   if (!ui->discovery_open) return;
 
   float top_in = ui->mobile_layout ? ui->safe_insets.top : 0.0f;
-  float bot_in = ui->mobile_layout ? ui->safe_insets.bottom : 0.0f;
+  float bot_in = ui->mobile_layout ? fmaxf(ui->safe_insets.bottom, ui->keyboard_inset) : 0.0f;
   ccord_rect pane = {ui->layout.chat_header.x, 0.0f, ui->layout.chat_header.w, ui->win_h};
   if (pane.w <= 0.0f) pane.w = maxf(ui->win_w - pane.x, 0.0f);
   ccord_rect bg = ui->mobile_layout ? (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h} : pane;
@@ -26,7 +27,20 @@ void ui_draw_discovery(ccord_ui *ui, ccord_renderer *r)
   ccord_push_clip(r, pane);
 
   float pad_x = ui->mobile_layout ? 14.0f : 24.0f;
-  ccord_rect hero = {pane.x + pad_x, top_in + 16.0f, maxf(pane.w - 2.0f * pad_x, 220.0f), 116.0f};
+  float hero_y = top_in + 16.0f;
+  if (ui->mobile_layout) {
+    float nav_y = top_in + 6.0f;
+    ccord_rect back_r = {pane.x + pad_x, nav_y, 76.0f, 32.0f};
+    ui->discovery_back_rect = back_r;
+    bool bhv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, back_r);
+    uis_button(ui, r, back_r, "< Back", UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){.hover = bhv}, "discback", 0);
+    ccord_text_style nts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
+    ccord_text_draw_ellipsis(r, "Discover Servers", 16, back_r.x + back_r.w + 10.0f,
+                             nav_y + (32.0f - ui_line_h(ui, nts.size)) * 0.5f,
+                             maxf(pane.w - 2.0f * pad_x - back_r.w - 10.0f, 40.0f), &nts);
+    hero_y = nav_y + 40.0f;
+  }
+  ccord_rect hero = {pane.x + pad_x, hero_y, maxf(pane.w - 2.0f * pad_x, 220.0f), 116.0f};
   ccord_draw_rrect(r, hero, 10.0f, ui_mix(COL(bg_secondary), COL(brand), 0.16f));
 
   ccord_text_style hts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large) + 2.0f, COL(text_header));
@@ -38,7 +52,7 @@ void ui_draw_discovery(ccord_ui *ui, ccord_renderer *r)
   ccord_rect sbox = {hero.x + 20.0f, hero.y + 68.0f, clampf(hero.w - 40.0f, 160.0f, 480.0f), 34.0f};
   ui->discovery_search_rect = sbox;
   bool sfocused = !ui->settings_open && !ui->menu.open && ui->modal_kind == UI_MODAL_NONE &&
-                  !ui->quick_switcher_open && !ui->shortcuts_open;
+                  !ui->quick_switcher_open && !ui->shortcuts_open && (!ui->touch_mode || ui->touch_text_focused);
   if (sfocused) {
     ccord_draw_rrect(r, (ccord_rect){sbox.x - 1.0f, sbox.y - 1.0f, sbox.w + 2.0f, sbox.h + 2.0f}, 6.0f, COL(brand));
   }
@@ -60,12 +74,18 @@ void ui_draw_discovery(ccord_ui *ui, ccord_renderer *r)
 
   float chip_y = hero.y + hero.h + 12.0f;
   float chip_x = hero.x;
+  float chip_right = hero.x + hero.w;
   for (uint32_t c = 0; c < 6u; c++) {
     bool active = (ui->discovery_category == c);
     ccord_text_style cs = ui_style(ui, active ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR, M(font_size_small),
                                    active ? COL(text_on_brand) : COL(text_secondary));
     ccord_vec2 ct = ccord_text_measure(r, k_discovery_cat_names[c], strlen(k_discovery_cat_names[c]), &cs, 0.0f);
-    ccord_rect cr = {chip_x, chip_y, ct.x + 24.0f, 28.0f};
+    float cw = ct.x + 24.0f;
+    if (chip_x > hero.x && chip_x + cw > chip_right) {
+      chip_x = hero.x;
+      chip_y += 34.0f;
+    }
+    ccord_rect cr = {chip_x, chip_y, fminf(cw, hero.w), 28.0f};
     ui->discovery_cat_rects[c] = cr;
     bool chv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, cr);
     ccord_draw_rrect(r, cr, 14.0f, active ? COL(brand) : (chv ? COL(bg_item_hover) : COL(bg_secondary)));
@@ -93,6 +113,7 @@ void ui_draw_discovery(ccord_ui *ui, ccord_renderer *r)
   ccord_text_draw_ellipsis(r, hdr_buf, strlen(hdr_buf), hero.x, hdr_y, hero.w, &shs);
 
   float cards_y = hdr_y + 26.0f;
+  ui->discovery_cards_y = cards_y;
   float view_h = maxf(pane.h - bot_in - cards_y - 12.0f, 48.0f);
   size_t cols = hero.w >= 540.0f ? 2u : 1u;
   float gap = 12.0f;
@@ -110,9 +131,10 @@ void ui_draw_discovery(ccord_ui *ui, ccord_renderer *r)
   if (count == 0 && !loading) {
     const char *empty = "No discoverable servers matched your search.";
     ccord_text_style es = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_base), COL(text_muted));
-    ccord_vec2 et = ccord_text_measure(r, empty, strlen(empty), &es, 0.0f);
-    ccord_text_draw(r, empty, strlen(empty), hero.x + (hero.w - et.x) * 0.5f,
-                    cards_y + (view_h - et.y) * 0.42f, &es, 0.0f);
+    float wrap_w = hero.w > 48.0f ? hero.w - 24.0f : hero.w;
+    ccord_vec2 et = ccord_text_measure(r, empty, strlen(empty), &es, wrap_w);
+    float ex = hero.x + (hero.w > et.x ? (hero.w - et.x) * 0.5f : 12.0f);
+    ccord_text_draw(r, empty, strlen(empty), ex, cards_y + (view_h - et.y) * 0.42f, &es, wrap_w);
   } else {
     ccord_text_style nst = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
     ccord_text_style dst = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(text_secondary));
@@ -202,6 +224,22 @@ bool ui_discovery_handle(ccord_ui *ui, const ccord_input_event *ev)
   if (ev->type == CCORD_IN_MOUSE_DOWN) {
     if (!ui_in_rect(ev->x, ev->y, pane)) return false;
     if (ev->button != 1) return true;
+    if (ui->discovery_back_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->discovery_back_rect)) {
+      ui->discovery_open = false;
+      ui->touch_text_focused = false;
+      ui_compute_layout(ui);
+      ui->dirty = true;
+      return true;
+    }
+    if (ui->discovery_search_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->discovery_search_rect)) {
+      if (ui->touch_mode) ui->touch_text_focused = true;
+      ui->dirty = true;
+      return true;
+    }
+    if (ui->touch_text_focused) {
+      ui->touch_text_focused = false;
+      if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
+    }
     for (uint32_t c = 0; c < 6u; c++) {
       if (ui->discovery_cat_rects[c].w > 0.0f && ui_in_rect(ev->x, ev->y, ui->discovery_cat_rects[c])) {
         if (ui->discovery_category != c) {
@@ -215,8 +253,8 @@ bool ui_discovery_handle(ccord_ui *ui, const ccord_input_event *ev)
       }
     }
     float top_in = ui->mobile_layout ? ui->safe_insets.top : 0.0f;
-    float bot_in = ui->mobile_layout ? ui->safe_insets.bottom : 0.0f;
-    float cards_top = top_in + 204.0f;
+    float bot_in = ui->mobile_layout ? fmaxf(ui->safe_insets.bottom, ui->keyboard_inset) : 0.0f;
+    float cards_top = ui->discovery_cards_y > 0.0f ? ui->discovery_cards_y : (top_in + 204.0f);
     for (size_t i = 0; i < ui->ndiscovery_hits; i++) {
       ccord_rect jr = ui->discovery_hits[i].join_rect;
       if (jr.w <= 0.0f || jr.y + jr.h < cards_top || jr.y > pane.h - bot_in - 12.0f) continue;
