@@ -190,6 +190,8 @@ struct ccord_renderer {
   uint64_t frame_tick, prev_frame_tick;          // tex_tick at the last two ccord_render_begin calls
   int dec_cursor;                                // round-robin start for progressive decoding
   bool anim_activity;                            // an animated texture was drawn (animating) since the last take
+  bool has_anim_next;                            // earliest anim clock deadline recorded since the last take
+  uint64_t anim_next_ms;
 };
 
 // text.c

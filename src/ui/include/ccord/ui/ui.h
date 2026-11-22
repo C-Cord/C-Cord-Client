@@ -103,6 +103,9 @@ void ccord_ui_destroy(ccord_ui *ui);
 void ccord_ui_set_viewport(ccord_ui *ui, float logical_w, float logical_h);
 bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev);    // true -> redraw needed
 bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms);                      // animations, caret blink, store/contrib revision changes; true -> redraw
+// Milliseconds until the UI next needs a scheduled redraw (0 = smooth 60/120 Hz animation needed now;
+// UINT32_MAX = idle, no scheduled animation). Lets the main loop sleep between discrete GIF/avatar/typing frames.
+uint32_t ccord_ui_next_wait_ms(const ccord_ui *ui, uint64_t now_ms);
 void ccord_ui_draw(ccord_ui *ui, ccord_renderer *r);
 // Sets the Extensions switch state shown in Settings without calling host.set_extensions_enabled (the app owns the real state).
 void ccord_ui_set_extensions_enabled(ccord_ui *ui, bool on);

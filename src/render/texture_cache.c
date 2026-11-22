@@ -896,6 +896,16 @@ bool ccord_render_take_anim_activity(ccord_renderer *r)
   return a;
 }
 
+bool ccord_render_take_anim_next_ms(ccord_renderer *r, uint64_t *out_due_ms)
+{
+  if (out_due_ms) *out_due_ms = 0;
+  if (!r || !r->has_anim_next) return false;
+  if (out_due_ms) *out_due_ms = r->anim_next_ms;
+  r->has_anim_next = false;
+  r->anim_next_ms = 0;
+  return true;
+}
+
 bool ccord_render_has_texture(ccord_renderer *r, const char *key, int *out_w, int *out_h)
 {
   tex_entry *e = tex_find(r, key);
@@ -954,6 +964,14 @@ bool ccord_render_texture_is_animated(ccord_renderer *r, const char *key, size_t
   return true;
 }
 
+static void tex_note_anim_due(ccord_renderer *r, uint64_t due_ms)
+{
+  if (!r->has_anim_next || due_ms < r->anim_next_ms) {
+    r->anim_next_ms = due_ms;
+    r->has_anim_next = true;
+  }
+}
+
 static void tex_advance_anim(ccord_renderer *r, tex_entry *e, bool animate)
 {
   if (!e || !e->tex) return;
@@ -962,7 +980,10 @@ static void tex_advance_anim(ccord_renderer *r, tex_entry *e, bool animate)
     if (e->dec) av_stream_touch(e->dec, ccord_clock_ms());
     if (!animate || !e->dec) return;
     r->anim_activity = true;
-    if (now < e->stream_due_ms) return;
+    if (now < e->stream_due_ms) {
+      tex_note_anim_due(r, e->stream_due_ms);
+      return;
+    }
     const uint8_t *px = nullptr;
     uint32_t pts = 0, dur = 0;
     if (!ccord_av_stream_next_frame(e->dec, &px, &pts, &dur)) {
@@ -976,11 +997,15 @@ static void tex_advance_anim(ccord_renderer *r, tex_entry *e, bool animate)
     // Pace from the schedule, not from "now", so a late frame does not slow the clip; resync after a long gap.
     uint64_t base = now - e->stream_due_ms > 250u ? now : e->stream_due_ms;
     e->stream_due_ms = base + tex_frame_delay(e, dur);
+    tex_note_anim_due(r, e->stream_due_ms);
     return;
   }
   if (!e->has_anim) return;
   if (e->anim.frame_count <= 1) {
-    if (e->dec && animate) r->anim_activity = true;   // more frames are on their way
+    if (e->dec && animate) {
+      r->anim_activity = true;   // more frames are on their way
+      tex_note_anim_due(r, now);
+    }
     return;
   }
   if (!animate) {
@@ -999,6 +1024,12 @@ static void tex_advance_anim(ccord_renderer *r, tex_entry *e, bool animate)
   if (idx < e->anim.frame_count && idx != e->anim_cur_frame && e->anim.frames[idx]) {
     tex_update_entry_pixels(e, e->anim.frames[idx], e->premul);
     e->anim_cur_frame = idx;
+  }
+  if (e->dec && elapsed >= e->anim.total_ms) {
+    tex_note_anim_due(r, now);
+  } else {
+    uint32_t rem = ccord_anim_next_delay_ms(&e->anim, elapsed);
+    tex_note_anim_due(r, now + (rem ? rem : 16u));
   }
 }
 

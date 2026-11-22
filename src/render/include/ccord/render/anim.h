@@ -28,6 +28,8 @@ void ccord_anim_free(ccord_anim *a);
 
 // Index of the frame to show at time `t_ms` since the animation started; loops. Single frame => 0.
 size_t ccord_anim_frame_at(const ccord_anim *a, uint64_t t_ms);
+// Milliseconds remaining until the next frame transition at elapsed time `t_ms` (0 for single-frame / invalid).
+uint32_t ccord_anim_next_delay_ms(const ccord_anim *a, uint64_t t_ms);
 
 // Cheap header sniff: GIF87a/89a, APNG (PNG with acTL before IDAT), WebP with an ANIM chunk.
 bool ccord_anim_sniff(const uint8_t *data, size_t len);

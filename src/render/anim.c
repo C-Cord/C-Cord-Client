@@ -94,6 +94,21 @@ size_t ccord_anim_frame_at(const ccord_anim *a, uint64_t t_ms)
   return a->frame_count - 1;
 }
 
+uint32_t ccord_anim_next_delay_ms(const ccord_anim *a, uint64_t t_ms)
+{
+  if (!a || a->frame_count <= 1 || a->total_ms == 0 || !a->delay_ms) return 0;
+  uint64_t t = t_ms % a->total_ms;
+  uint64_t acc = 0;
+  for (size_t i = 0; i < a->frame_count; i++) {
+    acc += a->delay_ms[i];
+    if (t < acc) {
+      uint64_t rem = acc - t;
+      return rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
+    }
+  }
+  return a->delay_ms[0] ? a->delay_ms[0] : 1u;
+}
+
 void ccord_anim_free(ccord_anim *a)
 {
   if (!a) return;

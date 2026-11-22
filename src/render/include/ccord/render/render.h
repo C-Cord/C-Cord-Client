@@ -106,6 +106,9 @@ bool ccord_render_pump_media(ccord_renderer *r, uint32_t budget_ms);
 // True when an animated texture was drawn in its animating state since the last call (then cleared): the caller
 // must schedule another frame for the animation to advance.
 bool ccord_render_take_anim_activity(ccord_renderer *r);
+// Consumes the earliest frame-transition timestamp (in the anim clock domain) recorded by animated textures drawn
+// since the last call. Returns true and writes *out_due_ms when a deadline was recorded; false otherwise.
+bool ccord_render_take_anim_next_ms(ccord_renderer *r, uint64_t *out_due_ms);
 // Uploads raw RGBA32 pixels (width * height * 4 bytes) into the LRU SDL_Texture cache under `key`.
 [[nodiscard]] ccord_status ccord_render_upload_rgba(ccord_renderer *r, const char *key, const uint8_t *rgba,
                                                     int width, int height, ccord_error *err);

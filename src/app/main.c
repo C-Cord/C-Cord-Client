@@ -200,11 +200,17 @@ static void run_interactive(app *a)
       // Hidden/minimized in the background: no frames; active video/inline media still pumps at 60 Hz.
       timeout = media_fast ? 16 : 250;
     } else if (redraw || animating) {
-      // Non-blocking poll while animations/redraws are active so VSync in SDL_RenderPresent paces
+      // Non-blocking poll while smooth animations/redraws are active so VSync in SDL_RenderPresent paces
       // full native refresh rate instead of halving FPS via SDL_WaitEventTimeout(16).
       timeout = (!(a->opt && a->opt->headless) && fast_draws < 4u) ? 0u : 8u;
-    } else if (media_fast) {
-      timeout = 16;
+    } else {
+      uint32_t ui_wait = a->ui ? ccord_ui_next_wait_ms(a->ui, app_now_ms(a)) : UINT32_MAX;
+      if (ui_wait == 0u) {
+        timeout = (!(a->opt && a->opt->headless) && fast_draws < 4u) ? 0u : 8u;
+      } else if (ui_wait < timeout) {
+        timeout = ui_wait;
+      }
+      if (media_fast && timeout > 16u) timeout = 16u;
     }
     ccord_input_event ev;
     bool got_ev = false;
@@ -573,7 +579,8 @@ static void run_interactive(app *a)
           fast_draws = 0;
         }
         redraw = false;
-        animating = upd;   // keep VSync-paced cadence while animations run
+        animating = (ccord_ui_next_wait_ms(a->ui, app_now_ms(a)) == 0u);   // VSync only for smooth motion; sleep between GIF/typing frames
+        if (!animating) fast_draws = 0;
       } else {
         animating = false;
         fast_draws = 0;

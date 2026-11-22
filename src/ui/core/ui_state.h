@@ -73,6 +73,7 @@ struct ccord_ui {
   float pill_h[CCORD_MAX_GUILDS];
   uint64_t last_anim_ms;
   bool animating;
+  bool smooth_animating;  // true only when 60/120 Hz UI motion (scrolls/transitions/video) needs VSync cadence
   ccord_anim_set anim;   // eased state of every hover / selection / popup (see ccord/ui/anim.h)
   ui_track trk_chan, trk_member, trk_rail;   // row motion snapshots (src/ui/motion.c)
   // Values the draw pass last used, read by the motion verify slice. Written by draw_nav.c / draw_members.c only.
@@ -90,6 +91,8 @@ struct ccord_ui {
   ui_media_req *media_reqs;   // lazily heap-allocated [UI_MEDIA_REQ_SLOTS]
   size_t nmedia_reqs;
   bool media_animating;   // the last draw showed a moving image or left decoding to do: keep frames coming
+  bool has_media_anim_next;
+  uint64_t media_anim_next_ms;   // earliest anim-clock timestamp when an animated texture advances next
   ccord_rect text_hits[UI_TEXT_HIT_MAX];   // selectable message text drawn this frame (I-beam cursor)
   size_t ntext_hits;
   size_t dbg_media_requests, dbg_media_textures;

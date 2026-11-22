@@ -1077,8 +1077,10 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
   }
   // A transition left running by the last frame, or a moving image it showed (GIFs advance only when drawn).
   bool anim_pending = ccord_anim_active(&ui->anim);
-  bool typing_throttle = ui->typing_anim_only && !anim && !ui->media_animating && !ui->dirty;
-  ui->animating = anim || anim_pending || ui->media_animating;
+  bool smooth = anim || (anim_pending && !ui->typing_anim_only);
+  bool paced_media = ui->media_animating && ui->has_media_anim_next;
+  if (ui->media_animating && !ui->has_media_anim_next) smooth = true;
+  ui->animating = smooth || anim_pending || ui->media_animating;
 
   // caret blink: only dirty when window is focused and an editable text field is active.
   bool on = ((now_ms - ui->caret_epoch_ms) / UI_CARET_BLINK_MS) % 2 == 0;
@@ -1094,11 +1096,12 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
   }
   if (ui->notice[0] && now_ms < ui->notice_until_ms && ui->notice_until_ms - now_ms < 250) {
     ui->animating = true;   // fading out
-    typing_throttle = false;
+    smooth = true;
   }
   if (ui->jump_highlight_msg_id != CCORD_ID_NONE) {
     if (now_ms < ui->jump_highlight_until_ms) {
       ui->animating = true;
+      smooth = true;
       ui->dirty = true;
     } else {
       ui->jump_highlight_msg_id = CCORD_ID_NONE;
@@ -1109,13 +1112,35 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
   if (ui->vlist.count > 0 && ui->last_scroll_ms && now_ms >= ui->last_scroll_ms + 1200 && now_ms < ui->last_scroll_ms + 1200 + 64) {
     ui->dirty = true;   // scrollbar fade-out frame
   }
+  ui->smooth_animating = smooth;
   ui_status_card_tick(ui);
   sync_text_input(ui);
-  bool redraw = ui->dirty || ui->animating;
-  if (typing_throttle && !ui->dirty && now_ms < ui->typing_next_ms) {
-    redraw = false;
-  }
+  bool paced_due = false;
+  if (ui->typing_anim_only && ui->typing_next_ms != 0 && now_ms >= ui->typing_next_ms) paced_due = true;
+  if (paced_media && now_ms >= ui->media_anim_next_ms) paced_due = true;
+  bool redraw = ui->dirty || smooth || paced_due;
   ui->dirty = false;
   return redraw;
+}
+
+uint32_t ccord_ui_next_wait_ms(const ccord_ui *ui, uint64_t now_ms)
+{
+  if (!ui) return UINT32_MAX;
+  if (ui->dirty || ui->smooth_animating) return 0u;
+  if (ccord_anim_active(&ui->anim) && !ui->typing_anim_only) return 0u;
+  uint32_t wait = UINT32_MAX;
+  if (ui->media_animating) {
+    if (!ui->has_media_anim_next || now_ms >= ui->media_anim_next_ms) return 0u;
+    uint64_t rem = ui->media_anim_next_ms - now_ms;
+    uint32_t w = rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
+    if (w < wait) wait = w;
+  }
+  if (ui->typing_anim_only && ui->typing_next_ms != 0) {
+    if (now_ms >= ui->typing_next_ms) return 0u;
+    uint64_t rem = ui->typing_next_ms - now_ms;
+    uint32_t w = rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
+    if (w < wait) wait = w;
+  }
+  return wait;
 }
 

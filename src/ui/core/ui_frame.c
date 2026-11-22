@@ -181,10 +181,23 @@ void ccord_ui_draw(ccord_ui *ui, ccord_renderer *r)
 {
   if (!ui || !r) return;
   ui_draw_frame(ui, r);
-  // Animated images only advance when drawn, and long ones decode a little per frame: say so, and the next
-  // ccord_ui_update asks for another frame.
+  // Animated images only advance when drawn, and long ones decode a little per frame: record both activity
+  // and the earliest next frame deadline so the main loop can sleep between GIF/avatar frame transitions.
   bool decoding = ccord_render_pump_media(r, 5);
-  ui->media_animating = ccord_render_take_anim_activity(r) || decoding;
+  bool anim_act = ccord_render_take_anim_activity(r);
+  uint64_t anim_due = 0;
+  bool has_due = ccord_render_take_anim_next_ms(r, &anim_due);
+  ui->media_animating = anim_act || decoding;
+  if (decoding) {
+    ui->has_media_anim_next = true;
+    ui->media_anim_next_ms = ui->now_ms;
+  } else if (anim_act && has_due && ui->now_ms != 0) {
+    ui->has_media_anim_next = true;
+    ui->media_anim_next_ms = anim_due;
+  } else {
+    ui->has_media_anim_next = false;
+    ui->media_anim_next_ms = 0;
+  }
 }
 
 static bool overlay_enter_opaque(const ccord_ui *ui, const char *ns)

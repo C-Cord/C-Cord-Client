@@ -832,6 +832,94 @@ static void test_mobile_drawer_occlusion(void)
   }
 }
 
+static void test_mobile_anim_pacing(void)
+{
+  // 16x8 2-frame GIF (100 ms per frame): verifies animated avatars/GIFs pace redraws to frame deadlines
+  // instead of locking the main loop at 60-120 FPS (timeout = 0).
+  static const uint8_t k_anim_gif[] = {
+    0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x10, 0x00, 0x08, 0x00, 0x81, 0x00, 0x00, 0xff, 0xff, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21, 0xff, 0x0b, 0x4e, 0x45, 0x54, 0x53,
+    0x43, 0x41, 0x50, 0x45, 0x32, 0x2e, 0x30, 0x03, 0x01, 0x00, 0x00, 0x00, 0x21, 0xf9, 0x04, 0x04,
+    0x0a, 0x00, 0x00, 0x00, 0x2c, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x08, 0x00, 0x00, 0x08, 0x15,
+    0x00, 0x01, 0x08, 0x1c, 0x48, 0xb0, 0xa0, 0xc1, 0x83, 0x08, 0x13, 0x2a, 0x5c, 0xc8, 0xb0, 0xa1,
+    0xc3, 0x87, 0x08, 0x03, 0x02, 0x00, 0x21, 0xf9, 0x04, 0x05, 0x0a, 0x00, 0x02, 0x00, 0x2c, 0x02,
+    0x00, 0x02, 0x00, 0x04, 0x00, 0x04, 0x00, 0x81, 0xff, 0xff, 0x00, 0x00, 0x00, 0xff, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x08, 0x09, 0x00, 0x03, 0x08, 0x1c, 0x48, 0xb0, 0x60, 0x80, 0x80, 0x00,
+    0x3b,
+  };
+  ccord_ui_set_viewport(F.ui, 412.0f, 915.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+
+  // Select a guild channel with messages and give a visible chat author an animated avatar texture.
+  ccord_error err;
+  const ccord_guild *g0 = ccord_store_guild_at(F.store, 0);
+  CT_CHECK(g0 != nullptr);
+  if (g0) {
+    F.ui->dm_friends_view = false;
+    F.ui->dm_requests_view = false;
+    CT_CHECK(ccord_session_select_guild(F.session, g0->id, &err) == CCORD_OK);
+    step_frames(5, 25);
+  }
+  ccord_id ch = ccord_store_selected_channel(F.store);
+  size_t nm = ccord_store_message_count(F.store, ch);
+  ccord_id author_id = CCORD_ID_NONE;
+  for (size_t i = nm; i > 0; i--) {
+    const ccord_message *m = ccord_store_message_at(F.store, ch, i - 1);
+    if (m && m->author_id != CCORD_ID_NONE) {
+      author_id = m->author_id;
+      break;
+    }
+  }
+  CT_CHECK(author_id != CCORD_ID_NONE);
+  const ccord_user *u = author_id != CCORD_ID_NONE ? ccord_store_user(F.store, author_id) : nullptr;
+  CT_CHECK(u != nullptr);
+  if (!u) return;
+  const char *anim_url = "https://cdn.discordapp.com/avatars/1002/a_pacing_test.gif";
+  ccord_user upd = *u;
+  char n[128], dn[128], h[128], s[256], b[256], bio[512], pr[128];
+  snprintf(n, sizeof n, "%s", u->name ? u->name : "");
+  snprintf(dn, sizeof dn, "%s", u->display_name ? u->display_name : "");
+  snprintf(h, sizeof h, "%s", u->handle ? u->handle : "");
+  snprintf(s, sizeof s, "%s", u->status_text ? u->status_text : "");
+  snprintf(b, sizeof b, "%s", u->banner_url ? u->banner_url : "");
+  snprintf(bio, sizeof bio, "%s", u->bio ? u->bio : "");
+  snprintf(pr, sizeof pr, "%s", u->pronouns ? u->pronouns : "");
+  upd.name = n;
+  upd.display_name = dn;
+  upd.handle = h;
+  upd.status_text = s;
+  upd.avatar_url = anim_url;
+  upd.banner_url = b;
+  upd.bio = bio;
+  upd.pronouns = pr;
+  CT_CHECK(ccord_store_upsert_user(F.store, &upd, &err) == CCORD_OK);
+  ccord_media_opts opts = {.max_dim = 128};
+  CT_CHECK(ccord_render_upload_media(F.renderer, anim_url, k_anim_gif, sizeof k_anim_gif, &opts, nullptr, nullptr, &err) == CCORD_OK);
+
+  // Settle all smooth UI transitions first, then draw one frame at F.now.
+  step_frames(20, 40);
+  F.now += 100u;
+  (void)ccord_ui_update(F.ui, F.now);
+  ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+  ccord_ui_draw(F.ui, F.renderer);
+  ccord_render_end(F.renderer);
+
+  CT_CHECK(F.ui->media_animating);
+  uint32_t wait = ccord_ui_next_wait_ms(F.ui, F.now);
+  CT_CHECK(wait > 0u && wait <= 100u);
+  // Before the next frame boundary, update must not request a redundant redraw.
+  if (wait > 15u) {
+    CT_CHECK(!ccord_ui_update(F.ui, F.now + 10u));
+    uint32_t wait2 = ccord_ui_next_wait_ms(F.ui, F.now + 10u);
+    CT_CHECK(wait2 == wait - 10u);
+  }
+  // At the exact frame transition deadline, update requests a redraw so the GIF advances on schedule.
+  CT_CHECK(ccord_ui_update(F.ui, F.now + wait));
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -846,6 +934,7 @@ int main(void)
   test_mobile_copy_paste_and_autofill_login();
   test_mobile_safe_area_rail_and_background_focus();
   test_mobile_drawer_occlusion();
+  test_mobile_anim_pacing();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");
 }

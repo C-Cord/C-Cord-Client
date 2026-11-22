@@ -183,7 +183,20 @@ static void test_gif(void)
   ccord_anim_free(&a);
   CT_CHECK(ccord_anim_decode(rgb_gif, sizeof rgb_gif, 0, 1, &a, &err) == CCORD_OK);
   CT_CHECK(a.frame_count == 1 && ccord_anim_frame_at(&a, 123456) == 0);
+  CT_CHECK(ccord_anim_next_delay_ms(&a, 0) == 0);
   ccord_anim_free(&a);
+
+  // Next-frame transition delay matches remaining time in current frame across wrap-around.
+  CT_CHECK(ccord_anim_decode(rgb_gif, sizeof rgb_gif, 0, 0, &a, &err) == CCORD_OK);
+  CT_CHECK(a.frame_count == 3 && a.delay_ms[0] == 50 && a.delay_ms[1] == 100 && a.delay_ms[2] == 200);
+  CT_CHECK(ccord_anim_next_delay_ms(&a, 0) == 50);
+  CT_CHECK(ccord_anim_next_delay_ms(&a, 20) == 30);
+  CT_CHECK(ccord_anim_next_delay_ms(&a, 50) == 100);
+  CT_CHECK(ccord_anim_next_delay_ms(&a, 149) == 1);
+  CT_CHECK(ccord_anim_next_delay_ms(&a, 150) == 200);
+  CT_CHECK(ccord_anim_next_delay_ms(&a, 350) == 50);   // wrapped back to frame 0
+  ccord_anim_free(&a);
+  CT_CHECK(ccord_anim_next_delay_ms(nullptr, 0) == 0);
 
   // Sub-frame composition with "keep" disposal: the second frame is the first one plus a blue 4x4 patch.
   CT_CHECK(ccord_anim_decode(patch_gif, sizeof patch_gif, 0, 0, &a, &err) == CCORD_OK);
