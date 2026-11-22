@@ -239,7 +239,7 @@ float ui_decor_draw_message_badges(ccord_ui *ui, ccord_renderer *r, ccord_id msg
     if (sz.x <= 0.0f) continue;
     float h = sz.y > 0.0f ? (sz.y < line_h ? sz.y : line_h) : line_h;
     ccord_rect rc = {cur_x, y + (line_h - h) * 0.5f, sz.x, h};
-    ui_panels_draw_widget_json(ui, r, d->owner, d->decor_id, msg_id, d->widget_json, rc, bg);
+    ui_panels_draw_widget_json(ui, r, d->owner, d->decor_id, CCORD_DECOR_MESSAGE_BADGE, msg_id, d->widget_json, rc, bg);
     cur_x += sz.x + UIS_SP_1;
   }
   return cur_x - x;
@@ -280,7 +280,7 @@ float ui_decor_draw_message_accessories(ccord_ui *ui, ccord_renderer *r, ccord_i
     if (sz.y <= 0.0f) continue;
     float w = sz.x > 0.0f && sz.x < max_w ? sz.x : max_w;
     ccord_rect rc = {x, cur_y, w, sz.y};
-    ui_panels_draw_widget_json(ui, r, d->owner, d->decor_id, msg_id, d->widget_json, rc, bg);
+    ui_panels_draw_widget_json(ui, r, d->owner, d->decor_id, CCORD_DECOR_MESSAGE_ACCESSORY, msg_id, d->widget_json, rc, bg);
     cur_y += sz.y + UIS_SP_1;
   }
   return cur_y - y;
@@ -303,7 +303,7 @@ float ui_decor_draw_inline_badges(ccord_ui *ui, ccord_renderer *r, ccord_decor_t
     if (sz.x <= 0.0f) continue;
     float bh = sz.y > 0.0f && sz.y < h ? sz.y : h;
     ccord_rect rc = {cur_x, y + (h - bh) * 0.5f, sz.x, bh};
-    ui_panels_draw_widget_json(ui, r, d->owner, d->decor_id, id, d->widget_json, rc, bg);
+    ui_panels_draw_widget_json(ui, r, d->owner, d->decor_id, target, id, d->widget_json, rc, bg);
     cur_x += sz.x + UIS_SP_1;
   }
   return cur_x - x;
@@ -327,14 +327,48 @@ float ui_decor_draw_profile_sections(ccord_ui *ui, ccord_renderer *r, ccord_id u
     ccord_rect card = {x, cur_y, w, sz.y + UIS_SP_2 * 2.0f};
     uis_card(ui, r, card);
     ccord_rect inner = {x + UIS_SP_2, cur_y + UIS_SP_2, w - UIS_SP_2 * 2.0f, sz.y};
-    ui_panels_draw_widget_json(ui, r, d->owner, d->decor_id, user_id, d->widget_json, inner, bg);
+    ui_panels_draw_widget_json(ui, r, d->owner, d->decor_id, CCORD_DECOR_PROFILE_SECTION, user_id, d->widget_json, inner, bg);
     cur_y += card.h + UIS_SP_2;
   }
   return cur_y - y;
 }
 
-void ui_decor_record_hit(ccord_ui *ui, const char *owner, const char *decor_id, ccord_id target_id,
-                         const char *node_id, ccord_rect rc)
+static bool v3_decor_target_interactive(const ccord_ui *ui, ccord_decor_target target, float x)
+{
+  if (!ui->mobile_layout || (!ui->layout.left_drawer_visible && !ui->layout.right_drawer_visible)) {
+    return true;
+  }
+  switch (target) {
+    case CCORD_DECOR_PROFILE_SECTION:
+      return ui->member_popover_open;
+    case CCORD_DECOR_GUILD_BADGE:
+    case CCORD_DECOR_CHANNEL_BADGE:
+      return ui->layout.left_drawer_visible && x <= ui->layout.channel_list.x + ui->layout.channel_list.w;
+    case CCORD_DECOR_MEMBER_BADGE:
+      return ui->layout.right_drawer_visible && x >= ui->layout.member_list.x;
+    case CCORD_DECOR_MESSAGE_BADGE:
+    case CCORD_DECOR_MESSAGE_ACCESSORY:
+    case CCORD_DECOR_MESSAGE_TOOLBAR:
+    case CCORD_DECOR_MESSAGE_STYLE:
+    case CCORD_DECOR__COUNT:
+      return false;
+  }
+  return false;
+}
+
+static bool v3_actbtn_slot_interactive(const ccord_ui *ui, ccord_action_btn_slot slot, float x)
+{
+  if (!ui->mobile_layout || (!ui->layout.left_drawer_visible && !ui->layout.right_drawer_visible)) {
+    return true;
+  }
+  if (slot == CCORD_ACTBTN_USER_PANEL) {
+    return ui->layout.left_drawer_visible && x <= ui->layout.channel_list.x + ui->layout.channel_list.w;
+  }
+  return false;
+}
+
+void ui_decor_record_hit(ccord_ui *ui, const char *owner, const char *decor_id, ccord_decor_target target,
+                         ccord_id target_id, const char *node_id, ccord_rect rc)
 {
   ui_plugin_v3 *v = pv3_v3_ensure(ui);
   if (!v || v->ndecor_hits >= V3_MAX_DECOR_HITS || !owner || !decor_id || !node_id) return;
@@ -342,6 +376,7 @@ void ui_decor_record_hit(ccord_ui *ui, const char *owner, const char *decor_id, 
   snprintf(h->owner, sizeof h->owner, "%s", owner);
   snprintf(h->decor_id, sizeof h->decor_id, "%s", decor_id);
   snprintf(h->node_id, sizeof h->node_id, "%s", node_id);
+  h->target = target;
   h->target_id = target_id;
   h->rect = rc;
 }
@@ -353,6 +388,7 @@ bool ui_decor_handle_click(ccord_ui *ui, const ccord_input_event *ev)
   ui_plugin_v3 *v = ui->plugin_v3;
   for (size_t k = v->ndecor_hits; k > 0; k--) {
     const v3_decor_hit *h = &v->decor_hits[k - 1u];
+    if (!v3_decor_target_interactive(ui, h->target, ev->x)) continue;
     if (!ui_in_rect(ev->x, ev->y, h->rect)) continue;
     ccord_panel_event_kind kind = CCORD_PANEL_EV_CLICK;
     if (ev->button == 1 && ev->clicks >= 2) kind = CCORD_PANEL_EV_DOUBLE_CLICK;
@@ -410,7 +446,7 @@ float ui_actbtns_draw_slot(ccord_ui *ui, ccord_renderer *r, ccord_action_btn_slo
     }
     used += w + UIS_SP_1;
 
-    bool hov = ui_in_rect(ui->mx, ui->my, rc);
+    bool hov = ui->mouse_in && v3_actbtn_slot_interactive(ui, slot, ui->mx) && ui_in_rect(ui->mx, ui->my, rc);
     uint64_t aid = ui_name_id(b->owner) ^ ui_name_id(b->btn_id);
     uis_state st = {.hover = hov};
     ccord_color fg = uis_icon_button(ui, r, rc, st, "actbtn", aid);
@@ -443,6 +479,7 @@ float ui_actbtns_draw_slot(ccord_ui *ui, ccord_renderer *r, ccord_action_btn_slo
       snprintf(h->owner, sizeof h->owner, "%s", b->owner);
       snprintf(h->btn_id, sizeof h->btn_id, "%s", b->btn_id);
       snprintf(h->tooltip, sizeof h->tooltip, "%s", b->tooltip ? b->tooltip : "");
+      h->slot = slot;
       if (ctx) h->ctx = *ctx;
       else memset(&h->ctx, 0, sizeof h->ctx);
       h->rect = rc;
@@ -459,6 +496,7 @@ bool ui_actbtns_handle_click(ccord_ui *ui, const ccord_input_event *ev)
   ui_plugin_v3 *v = ui->plugin_v3;
   for (size_t k = v->nactbtn_hits; k > 0; k--) {
     const v3_actbtn_hit *h = &v->actbtn_hits[k - 1u];
+    if (!v3_actbtn_slot_interactive(ui, h->slot, ev->x)) continue;
     if (!ui_in_rect(ev->x, ev->y, h->rect)) continue;
     (void)ccord_contrib_click_action_btn(ui->d.contrib, h->owner, h->btn_id, &h->ctx);
     return true;
@@ -544,6 +582,9 @@ void ui_local_messages_draw(ccord_ui *ui, ccord_renderer *r, ccord_id channel_id
 bool ui_local_messages_handle_click(ccord_ui *ui, const ccord_input_event *ev)
 {
   if (!ui || !ui->plugin_v3 || !ui->d.contrib || !ev || ev->type != CCORD_IN_MOUSE_DOWN || ev->button != 1) {
+    return false;
+  }
+  if (ui->mobile_layout && (ui->layout.left_drawer_visible || ui->layout.right_drawer_visible)) {
     return false;
   }
   ui_plugin_v3 *v = ui->plugin_v3;
@@ -705,6 +746,7 @@ void ui_plugin_full_views_draw_rail(ccord_ui *ui, ccord_renderer *r, float rail_
 bool ui_plugin_full_views_handle_rail_click(ccord_ui *ui, float x, float y)
 {
   if (!ui || !ui->plugin_v3) return false;
+  if (ui->mobile_layout && !ui->layout.left_drawer_visible) return false;
   ui_plugin_v3 *v = ui->plugin_v3;
   for (size_t i = 0; i < v->nrail_hits; i++) {
     if (ui_in_rect(x, y, v->rail_hits[i].rect)) {
@@ -713,6 +755,7 @@ bool ui_plugin_full_views_handle_rail_click(ccord_ui *ui, float x, float y)
       } else {
         ui_panels_set_active_full_view(ui, v->rail_hits[i].owner, v->rail_hits[i].panel_id);
       }
+      if (ui->mobile_layout) ui->left_drawer_open = false;
       ui->dirty = true;
       return true;
     }

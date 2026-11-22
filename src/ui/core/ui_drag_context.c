@@ -445,6 +445,34 @@ bool uc_handle_right_click(ccord_ui *ui, const ccord_input_event *ev)
         uc_open_menu_at(ui, ev, (ccord_menu_context){CCORD_MENU_CHANNEL, g, c->id, 0, uid, nullptr, nullptr});
       }
     }
+  } else if (ui->mobile_layout && l->left_drawer_visible) {
+    // Open left drawer owns all right-clicks/long-presses; do not fall through to chat/views behind it.
+    return false;
+  } else if (ui->mobile_layout && l->right_drawer_visible) {
+    if (!ui->discovery_open && g == CCORD_DM_GUILD_ID && l->member_list_visible &&
+        ui_in_rect(ev->x, ev->y, ui_rect(l->member_list))) {
+      for (size_t i = 0; i < ui->ngdm_member_hits; i++) {
+        if (ui_in_rect(ev->x, ev->y, ui->gdm_member_hits[i].rect)) {
+          uc_open_menu_at(ui, ev, (ccord_menu_context){CCORD_MENU_MEMBER, CCORD_DM_GUILD_ID, ch, 0, ui->gdm_member_hits[i].user_id, nullptr, nullptr});
+          return true;
+        }
+      }
+      if (ui_panel_is_profile(ui)) {
+        const ccord_channel *dch = ui_selected_channel(ui);
+        const ccord_user *du = dch ? ui_dm_recipient(ui, dch) : nullptr;
+        ccord_id puid = du ? du->id : (dch ? dch->user_id : CCORD_ID_NONE);
+        if (puid != CCORD_ID_NONE) {
+          uc_open_menu_at(ui, ev, (ccord_menu_context){CCORD_MENU_MEMBER, CCORD_DM_GUILD_ID, ch, 0, puid, nullptr, nullptr});
+          return true;
+        }
+      }
+      return false;
+    }
+    if (!ui->discovery_open && h.mrow >= 0) {
+      uc_open_menu_at(ui, ev, (ccord_menu_context){CCORD_MENU_MEMBER, g, 0, 0, h.user, nullptr, nullptr});
+      return true;
+    }
+    return false;
   } else if (!ui->discovery_open && ui_is_dm_friends_view(ui)) {
     for (size_t i = 0; i < ui->nfriend_row_hits; i++) {
       if (ui_in_rect(ev->x, ev->y, ui->friend_row_hits[i].row_rect)) {

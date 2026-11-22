@@ -585,7 +585,8 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
       ui->dbg_tts_badges++;
     }
     if (u && u->clan_tag[0] != '\0') {
-      x += ui_draw_clan_badge_ex(ui, r, u->clan_guild_id, u->clan_tag, u->clan_badge, x, y + top, lh, true) + 6.0f;
+      x += ui_draw_clan_badge_ex(ui, r, u->clan_guild_id, u->clan_tag, u->clan_badge, x, y + top, lh,
+                                 UI_CLAN_LAYER_CHAT) + 6.0f;
     }
     x += ui_decor_draw_message_badges(ui, r, m->id, x, y + top, lh, COL(bg_primary));
     char when[48];

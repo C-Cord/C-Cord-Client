@@ -20,6 +20,7 @@
 typedef struct cp_hit {
   ccord_rect rect;
   ccord_id guild_id;
+  ui_clan_hit_layer layer;
   char tag[16];
   char badge_url[256];
 } cp_hit;
@@ -64,9 +65,86 @@ void ui_clan_popover_begin_frame(ccord_ui *ui)
   cp->nhits = 0;
 }
 
-void ui_clan_popover_record_hit(ccord_ui *ui, ccord_rect rect, ccord_id guild_id, const char *tag, const char *badge_url)
+static ccord_rect cp_rect_clip(ccord_rect a, ccord_rect b)
+{
+  float x0 = a.x > b.x ? a.x : b.x;
+  float y0 = a.y > b.y ? a.y : b.y;
+  float x1 = a.x + a.w < b.x + b.w ? a.x + a.w : b.x + b.w;
+  float y1 = a.y + a.h < b.y + b.h ? a.y + a.h : b.y + b.h;
+  if (x1 <= x0 || y1 <= y0) return (ccord_rect){0};
+  return (ccord_rect){x0, y0, x1 - x0, y1 - y0};
+}
+
+static bool cp_layer_bounds(const ccord_ui *ui, ui_clan_hit_layer layer, ccord_rect *out)
+{
+  if (!ui || !out) return false;
+  switch (layer) {
+    case UI_CLAN_LAYER_CHAT:
+      *out = ui_rect(ui->layout.message_area);
+      return out->w > 0.0f && out->h > 0.0f;
+    case UI_CLAN_LAYER_DM_PANEL:
+      *out = ui_rect(ui->layout.member_list);
+      return out->w > 0.0f && out->h > 0.0f;
+    case UI_CLAN_LAYER_MEMBER_POPOVER:
+      *out = ui->member_popover_rect;
+      return out->w > 0.0f && out->h > 0.0f;
+    case UI_CLAN_LAYER_PROFILE_MODAL:
+    case UI_CLAN_LAYER_NONE:
+      return false;
+  }
+  return false;
+}
+
+bool ui_clan_popover_layer_interactive(const ccord_ui *ui, ui_clan_hit_layer layer)
+{
+  if (!ui || layer == UI_CLAN_LAYER_NONE) return false;
+  if (ui->settings_open || ui_server_settings_is_open(ui) || ui_channel_settings_is_open(ui) ||
+      ui->lightbox_open || ui->quick_switcher_open || ui->shortcuts_open || ui->go_live_open ||
+      ui->select_open || ui->stream_fullscreen || ui->menu.open || ui->report_open ||
+      ui->schedule_open || ui->poll_open || ui->plus_menu_open ||
+      ui_plugin_dialog_is_open(ui) || ui_plugin_settings_is_open(ui)) {
+    return false;
+  }
+  if (layer == UI_CLAN_LAYER_PROFILE_MODAL) {
+    return ui->modal_kind == UI_MODAL_USER_PROFILE;
+  }
+  if (ui->modal_kind != UI_MODAL_NONE) return false;
+  if (ui->sc.open || ui->inbox_open || ui->saved_popover_open || ui->pins_open ||
+      ui->reactions_open || ui->search_open || ui->emoji_picker_open) {
+    return false;
+  }
+  if (layer == UI_CLAN_LAYER_MEMBER_POPOVER) {
+    return ui->member_popover_open;
+  }
+  if (ui->member_popover_open || ui->discovery_open) return false;
+  if (layer == UI_CLAN_LAYER_DM_PANEL) {
+    if (ui->mobile_layout) {
+      return ui->layout.right_drawer_visible && ui->right_drawer_open &&
+             !ui->layout.left_drawer_visible && !ui->left_drawer_open;
+    }
+    return ui->layout.member_list_visible;
+  }
+  if (layer == UI_CLAN_LAYER_CHAT) {
+    if (ui->mobile_layout &&
+        (ui->layout.left_drawer_visible || ui->layout.right_drawer_visible ||
+         ui->left_drawer_open || ui->right_drawer_open)) {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+void ui_clan_popover_record_hit(ccord_ui *ui, ccord_rect rect, ccord_id guild_id, const char *tag, const char *badge_url,
+                                ui_clan_hit_layer layer)
 {
   if (!ui || !tag || !tag[0] || rect.w <= 0.0f || rect.h <= 0.0f) return;
+  if (!ui_clan_popover_layer_interactive(ui, layer)) return;
+  ccord_rect bounds = {0};
+  if (cp_layer_bounds(ui, layer, &bounds)) {
+    rect = cp_rect_clip(rect, bounds);
+    if (rect.w <= 0.0f || rect.h <= 0.0f) return;
+  }
   struct ui_clan_popover *cp = cp_get(ui, true);
   if (!cp || cp->nhits >= CP_MAX_HITS) return;
   if (cp->nhits == cp->caphits) {
@@ -80,6 +158,7 @@ void ui_clan_popover_record_hit(ccord_ui *ui, ccord_rect rect, ccord_id guild_id
   cp_hit *h = &cp->hits[cp->nhits++];
   h->rect = rect;
   h->guild_id = guild_id;
+  h->layer = layer;
   snprintf(h->tag, sizeof h->tag, "%s", tag);
   snprintf(h->badge_url, sizeof h->badge_url, "%s", badge_url ? badge_url : "");
 }
@@ -174,6 +253,8 @@ bool ui_clan_popover_input(ccord_ui *ui, const ccord_input_event *ev)
         ccord_id gid = cp->guild_id;
         cp_close(ui);
         ui->member_popover_open = false;
+        ui->left_drawer_open = false;
+        ui->right_drawer_open = false;
         if (ui->modal_kind == UI_MODAL_USER_PROFILE) {
           ui->modal_kind = UI_MODAL_NONE;
           ui->modal_target_id = CCORD_ID_NONE;
@@ -198,19 +279,21 @@ bool ui_clan_popover_input(ccord_ui *ui, const ccord_input_event *ev)
   }
 
   if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 1) {
-    if (ui->settings_open || ui_server_settings_is_open(ui) || ui_channel_settings_is_open(ui) ||
-        ui->lightbox_open || ui->quick_switcher_open || ui->shortcuts_open || ui->go_live_open ||
-        ui->menu.open || ui->inbox_open || ui->saved_popover_open || ui->pins_open ||
-        ui->reactions_open || (ui->modal_kind != UI_MODAL_NONE && ui->modal_kind != UI_MODAL_USER_PROFILE)) {
-      return false;
-    }
     for (size_t i = cp->nhits; i > 0; i--) {
       const cp_hit *h = &cp->hits[i - 1u];
-      if (ui_in_rect(ev->x, ev->y, h->rect)) {
-        cp->swallow_up = true;
-        cp_open_hit(ui, h);
-        return true;
+      if (!ui_clan_popover_layer_interactive(ui, h->layer)) continue;
+      if (!ui_in_rect(ev->x, ev->y, h->rect)) continue;
+      ccord_rect bounds = {0};
+      if (cp_layer_bounds(ui, h->layer, &bounds) && !ui_in_rect(ev->x, ev->y, bounds)) continue;
+      if (h->layer == UI_CLAN_LAYER_CHAT || h->layer == UI_CLAN_LAYER_DM_PANEL) {
+        if (ui->autocomplete_open && ui_in_rect(ev->x, ev->y, ui->autocomplete_rect)) continue;
+        if (ui_stream_pip_active(ui) && ui->stream_pip_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->stream_pip_rect)) {
+          continue;
+        }
       }
+      cp->swallow_up = true;
+      cp_open_hit(ui, h);
+      return true;
     }
   }
   return false;

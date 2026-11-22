@@ -65,14 +65,24 @@ bool ui_is_reading(const ccord_ui *ui);
 void ui_open_user_profile_modal(ccord_ui *ui, ccord_id user_id, ccord_id guild_id);
 ccord_rect ui_user_status_area_rect(const ccord_ui *ui);
 bool ui_format_user_activity_line(const ccord_ui *ui, const ccord_user *u, char *out, size_t cap);
+typedef enum ui_clan_hit_layer : uint8_t {
+  UI_CLAN_LAYER_NONE = 0,
+  UI_CLAN_LAYER_CHAT = 1,
+  UI_CLAN_LAYER_DM_PANEL = 2,
+  UI_CLAN_LAYER_MEMBER_POPOVER = 3,
+  UI_CLAN_LAYER_PROFILE_MODAL = 4,
+} ui_clan_hit_layer;
+
 float ui_clan_badge_width(ccord_ui *ui, ccord_renderer *r, const char *tag, bool has_badge);
 float ui_draw_clan_badge_ex(ccord_ui *ui, ccord_renderer *r, ccord_id guild_id, const char *tag, const char *badge,
-                            float x, float y, float line_h, bool clickable);
+                            float x, float y, float line_h, ui_clan_hit_layer layer);
 float ui_draw_clan_badge(ccord_ui *ui, ccord_renderer *r, const char *tag, float x, float y, float line_h);
 
 // Clickable clan tag info popover (clan_popover.c), hooked via profile_roles.c at the top overlay layer.
 void ui_clan_popover_begin_frame(ccord_ui *ui);
-void ui_clan_popover_record_hit(ccord_ui *ui, ccord_rect rect, ccord_id guild_id, const char *tag, const char *badge_url);
+bool ui_clan_popover_layer_interactive(const ccord_ui *ui, ui_clan_hit_layer layer);
+void ui_clan_popover_record_hit(ccord_ui *ui, ccord_rect rect, ccord_id guild_id, const char *tag, const char *badge_url,
+                                ui_clan_hit_layer layer);
 void ui_clan_popover_draw(ccord_ui *ui, ccord_renderer *r);
 bool ui_clan_popover_input(ccord_ui *ui, const ccord_input_event *ev);
 void ui_clan_popover_destroy(ccord_ui *ui);

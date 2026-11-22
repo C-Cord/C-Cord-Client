@@ -29,6 +29,7 @@ typedef struct v3_decor_hit {
   char owner[65];
   char decor_id[65];
   char node_id[65];
+  ccord_decor_target target;
   ccord_id target_id;
   ccord_rect rect;
 } v3_decor_hit;
@@ -37,6 +38,7 @@ typedef struct v3_actbtn_hit {
   char owner[65];
   char btn_id[65];
   char tooltip[128];
+  ccord_action_btn_slot slot;
   ccord_menu_context ctx;
   ccord_rect rect;
 } v3_actbtn_hit;

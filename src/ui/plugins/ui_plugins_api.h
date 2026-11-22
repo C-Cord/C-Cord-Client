@@ -21,7 +21,8 @@ bool ui_panels_find_hit_rect(const ccord_ui *ui, const char *owner, const char *
 // Inline widget tree measurement & rendering (shared with UI decorators)
 ccord_vec2 ui_panels_measure_widget_json(ccord_ui *ui, ccord_renderer *r, const char *json, float max_w);
 void ui_panels_draw_widget_json(ccord_ui *ui, ccord_renderer *r, const char *owner, const char *decor_id,
-                                ccord_id target_id, const char *json, ccord_rect rc, ccord_color surface_bg);
+                                ccord_decor_target target, ccord_id target_id, const char *json, ccord_rect rc,
+                                ccord_color surface_bg);
 bool ui_panels_try_draw_icon_override(ccord_ui *ui, ccord_renderer *r, const char *icon_name, float cx, float cy, float size);
 
 // ---- plugin_v3_ui.c ----
@@ -39,7 +40,8 @@ float ui_decor_draw_message_accessories(ccord_ui *ui, ccord_renderer *r, ccord_i
 float ui_decor_draw_inline_badges(ccord_ui *ui, ccord_renderer *r, ccord_decor_target target, ccord_id id,
                                   float x, float y, float h, ccord_color bg);
 float ui_decor_draw_profile_sections(ccord_ui *ui, ccord_renderer *r, ccord_id user_id, float x, float y, float w, ccord_color bg);
-void ui_decor_record_hit(ccord_ui *ui, const char *owner, const char *decor_id, ccord_id target_id, const char *node_id, ccord_rect rc);
+void ui_decor_record_hit(ccord_ui *ui, const char *owner, const char *decor_id, ccord_decor_target target,
+                         ccord_id target_id, const char *node_id, ccord_rect rc);
 bool ui_decor_handle_click(ccord_ui *ui, const ccord_input_event *ev);
 // Scoped Class 1 Action Buttons
 float ui_actbtns_draw_slot(ccord_ui *ui, ccord_renderer *r, ccord_action_btn_slot slot, ccord_rect anchor_bar,

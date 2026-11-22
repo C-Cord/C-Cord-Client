@@ -278,15 +278,10 @@ void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
     ui->dirty = true;
     return;
   }
-  if (ui_forum_is_active(ui) && ui_forum_handle_event(ui, ev)) {
-    ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
-    ui->dirty = true;
-    return;
-  }
   // Jumps (10+ notches), precise (trackpad / hi-res wheel) deltas and reduced motion apply at once; whole notches glide.
   const ccord_layout *l = &ui->layout;
   if (ui->mobile_layout) {
-    // Open mobile drawers overlap message_area and own scroll gestures inside their bounds.
+    // Open mobile drawers overlap message_area and forum views, and own scroll gestures inside their bounds.
     if (l->left_drawer_visible) {
       if (ui_in_rect(ev->x, ev->y, ui_rect(l->channel_scroll))) {
         float max = ui->chan_content_h - l->channel_scroll.h;
@@ -317,6 +312,11 @@ void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
       }
       return;
     }
+  }
+  if (ui_forum_is_active(ui) && ui_forum_handle_event(ui, ev)) {
+    ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
+    ui->dirty = true;
+    return;
   }
   if (ui_is_dm_requests_view(ui) && ui_in_rect(ev->x, ev->y, ui_rect(l->message_area))) {
     float max = ui->dm_requests_content_h - l->message_area.h;

@@ -18,19 +18,6 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (ui_stream_pip_handle(ui, ev)) return true;
-  ccord_rect split_h = ui_stage_split_handle_rect(ui);
-  if (split_h.w > 0.0f && ui_in_rect(ev->x, ev->y, split_h)) {
-    if (ev->clicks >= 2) {
-      ui->stage_split_ratio = 0.55f;
-      ui_compute_layout(ui);
-      ccord_vlist_invalidate_all(&ui->vlist);
-      ui_settings_save(ui);
-    } else {
-      ui->drag = DRAG_STAGE_SPLIT;
-    }
-    ui->dirty = true;
-    return true;
-  }
   const ccord_layout *l = &ui->layout;
   if (ui->mobile_layout && (l->left_drawer_visible || l->right_drawer_visible)) {
     bool in_left = l->left_drawer_visible && ev->x <= l->channel_list.x + l->channel_list.w;
@@ -165,41 +152,23 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
       }
       return true;
     }
-    if (ui->gdm_add_btn_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->gdm_add_btn_rect)) {
-      const ccord_channel *gch = ui_selected_channel(ui);
-      if (gch) {
-        ui->right_drawer_open = false;
-        ui->modal_kind = UI_MODAL_ADD_DM_RECIPIENT;
-        ui->modal_target_id = gch->id;
-        ui->modal_focus_field = 0;
-        ui->new_dm_recipient_count = 0;
-        ccord_text_edit_clear(&ui->modal_edit1);
-        uc_reset_caret_blink(ui);
-        ui->dirty = true;
-      }
-      return true;
-    }
-    if (ui->gdm_edit_btn_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->gdm_edit_btn_rect)) {
-      const ccord_channel *gch = ui_selected_channel(ui);
-      if (gch) {
-        ui->right_drawer_open = false;
-        ui->modal_kind = UI_MODAL_EDIT_GROUP_DM;
-        ui->modal_target_id = gch->id;
-        ui->modal_focus_field = 0;
-        ccord_text_edit_clear(&ui->modal_edit1);
-        ccord_text_edit_clear(&ui->modal_edit2);
-        ccord_error eerr;
-        if (gch->name && gch->name[0]) (void)ccord_text_edit_insert(&ui->modal_edit1, gch->name, strlen(gch->name), &eerr);
-        if (gch->icon_url && gch->icon_url[0]) (void)ccord_text_edit_insert(&ui->modal_edit2, gch->icon_url, strlen(gch->icon_url), &eerr);
-        uc_reset_caret_blink(ui);
-        ui->dirty = true;
-      }
-      return true;
-    }
     if (hd.user != CCORD_ID_NONE) {
       ui_open_member_popover(ui, hd.user, ev->x, ev->y, true);
       return true;
     }
+    return true;
+  }
+  ccord_rect split_h = ui_stage_split_handle_rect(ui);
+  if (split_h.w > 0.0f && ui_in_rect(ev->x, ev->y, split_h)) {
+    if (ev->clicks >= 2) {
+      ui->stage_split_ratio = 0.55f;
+      ui_compute_layout(ui);
+      ccord_vlist_invalidate_all(&ui->vlist);
+      ui_settings_save(ui);
+    } else {
+      ui->drag = DRAG_STAGE_SPLIT;
+    }
+    ui->dirty = true;
     return true;
   }
   if (ui->mobile_layout && ui_in_rect(ev->x, ev->y, ui_drawer_btn_rect(ui))) {

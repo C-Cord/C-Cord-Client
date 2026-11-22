@@ -647,6 +647,191 @@ static void test_mobile_safe_area_rail_and_background_focus(void)
   CT_CHECK(F.ui->dirty);
 }
 
+static void test_mobile_drawer_occlusion(void)
+{
+  ccord_ui_set_viewport(F.ui, 390.0f, 844.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_safe_insets(F.ui, 0.0f, 0.0f, 0.0f, 0.0f);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+  F.ui->discovery_open = false;
+  step_frames(15, 25);
+
+  // Give self a Server Tag (clan tag) and send a fresh ungrouped message (past the 5-min grouping window)
+  // so its Server Tag pill is guaranteed visible in the chat timeline behind the mobile left drawer.
+  ccord_error err = {0};
+  ccord_id g = ccord_store_selected_guild(F.store);
+  ccord_id ch = ccord_store_selected_channel(F.store);
+  ccord_id self_id = ccord_store_self_id(F.store);
+  const ccord_user *author = ccord_store_user(F.store, self_id);
+  CT_CHECK(author != nullptr);
+  if (!author) return;
+
+  ccord_user tagged = *author;
+  char a_name[128], a_dname[128], a_handle[128], a_status[256], a_avatar[256], a_banner[256], a_bio[512], a_pronouns[128];
+  snprintf(a_name, sizeof a_name, "%s", author->name ? author->name : "");
+  snprintf(a_dname, sizeof a_dname, "%s", author->display_name ? author->display_name : "");
+  snprintf(a_handle, sizeof a_handle, "%s", author->handle ? author->handle : "");
+  snprintf(a_status, sizeof a_status, "%s", author->status_text ? author->status_text : "");
+  snprintf(a_avatar, sizeof a_avatar, "%s", author->avatar_url ? author->avatar_url : "");
+  snprintf(a_banner, sizeof a_banner, "%s", author->banner_url ? author->banner_url : "");
+  snprintf(a_bio, sizeof a_bio, "%s", author->bio ? author->bio : "");
+  snprintf(a_pronouns, sizeof a_pronouns, "%s", author->pronouns ? author->pronouns : "");
+  tagged.name = a_name;
+  tagged.display_name = a_dname;
+  tagged.handle = a_handle;
+  tagged.status_text = a_status;
+  tagged.avatar_url = a_avatar;
+  tagged.banner_url = a_banner;
+  tagged.bio = a_bio;
+  tagged.pronouns = a_pronouns;
+  snprintf(tagged.clan_tag, sizeof tagged.clan_tag, "MOBS");
+  tagged.clan_guild_id = g;
+  CT_CHECK(ccord_store_upsert_user(F.store, &tagged, &err) == CCORD_OK);
+
+  F.now += 10ULL * 60ULL * 1000ULL;
+  const char *tag_msg = "Server tag occlusion check";
+  CT_CHECK(ccord_session_send_message(F.session, ch, tag_msg, strlen(tag_msg), &err) == CCORD_OK);
+  ccord_vlist_reset_bottom(&F.ui->vlist);
+  step_frames(6, 25);
+
+  // 1. With drawers closed, tapping the Server Tag in chat opens the Server Tag popover, and Back closes it.
+  ccord_rect tag_rect = {0};
+  CT_CHECK(ui_clan_popover_hit_rect(F.ui, "MOBS", &tag_rect));
+  CT_CHECK(tag_rect.w > 0.0f && tag_rect.h > 0.0f);
+  touch_tap(tag_rect.x + tag_rect.w * 0.5f, tag_rect.y + tag_rect.h * 0.5f);
+  CT_CHECK(ui_clan_popover_is_open(F.ui));
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+  CT_CHECK(!ui_clan_popover_is_open(F.ui));
+
+  // 2. Open the left drawer (DM / servers side menu): tapping the exact coordinates of the chat Server Tag
+  //    underneath must NOT open the Server Tag popover.
+  ccord_ui_set_left_drawer(F.ui, true);
+  step_frames(15, 25);
+  CT_CHECK(F.ui->layout.left_drawer_visible);
+  CT_CHECK(tag_rect.x < F.ui->layout.channel_list.x + F.ui->layout.channel_list.w);
+  CT_CHECK(!ui_clan_popover_hit_rect(F.ui, "MOBS", nullptr));
+  touch_tap(tag_rect.x + tag_rect.w * 0.5f, tag_rect.y + tag_rect.h * 0.5f);
+  CT_CHECK(!ui_clan_popover_is_open(F.ui));
+
+  // 3. Even if the drawer flips open before the next frame redraws stale chat hits, input-time occlusion blocks it.
+  ccord_ui_set_left_drawer(F.ui, false);
+  step_frames(15, 25);
+  CT_CHECK(ui_clan_popover_hit_rect(F.ui, "MOBS", &tag_rect));
+  F.ui->left_drawer_open = true;
+  touch_ev(CCORD_IN_TOUCH_DOWN, 30, tag_rect.x + tag_rect.w * 0.5f, tag_rect.y + tag_rect.h * 0.5f);
+  touch_ev(CCORD_IN_TOUCH_UP, 30, tag_rect.x + tag_rect.w * 0.5f, tag_rect.y + tag_rect.h * 0.5f);
+  CT_CHECK(!ui_clan_popover_is_open(F.ui));
+  F.ui->left_drawer_open = false;
+  step_frames(4, 25);
+
+  // 4. Right drawer open also blocks chat Server Tag hits behind it / its scrim.
+  ccord_ui_set_right_drawer(F.ui, true);
+  step_frames(15, 25);
+  CT_CHECK(F.ui->layout.right_drawer_visible);
+  CT_CHECK(!ui_clan_popover_hit_rect(F.ui, "MOBS", nullptr));
+  touch_tap(tag_rect.x + tag_rect.w * 0.5f, tag_rect.y + tag_rect.h * 0.5f);
+  CT_CHECK(!ui_clan_popover_is_open(F.ui));
+  ccord_ui_set_right_drawer(F.ui, false);
+  step_frames(15, 25);
+
+  // 5. Long-pressing inside the open left drawer (over the user panel, overlapping the composer behind it)
+  //    must NOT open a chat/composer context menu underneath.
+  ccord_ui_set_left_drawer(F.ui, true);
+  step_frames(15, 25);
+  ccord_layout_rect up = F.ui->layout.user_panel;
+  touch_ev(CCORD_IN_TOUCH_DOWN, 31, up.x + up.w * 0.5f, up.y + up.h * 0.5f);
+  step_frames(12, 50);
+  CT_CHECK(!F.ui->menu.open);
+  touch_ev(CCORD_IN_TOUCH_UP, 31, up.x + up.w * 0.5f, up.y + up.h * 0.5f);
+  step_frames(2, 25);
+
+  // 6. With Server Discovery open and the left drawer open over it, tapping the DM Home rail icon works
+  //    instead of being swallowed by Discovery behind the drawer.
+  F.ui->discovery_open = true;
+  step_frames(2, 25);
+  ccord_rect dm_r = ui_guild_icon_rect(F.ui, 0);
+  CT_CHECK(dm_r.w > 0.0f && dm_r.h > 0.0f);
+  touch_tap(dm_r.x + dm_r.w * 0.5f, dm_r.y + dm_r.h * 0.5f);
+  CT_CHECK(ccord_store_selected_guild(F.store) == CCORD_DM_GUILD_ID);
+  CT_CHECK(!F.ui->discovery_open);
+
+  // 7. Closing the DM left drawer clears dm_header_plus_rect so tapping chat where '+' used to sit
+  //    does not open the New DM modal.
+  step_frames(4, 25);
+  ccord_rect old_plus = F.ui->dm_header_plus_rect;
+  CT_CHECK(old_plus.w > 0.0f && old_plus.h > 0.0f);
+  ccord_ui_set_left_drawer(F.ui, false);
+  step_frames(15, 25);
+  CT_CHECK(F.ui->dm_header_plus_rect.w == 0.0f);
+  touch_tap(old_plus.x + old_plus.w * 0.5f, old_plus.y + old_plus.h * 0.5f);
+  CT_CHECK(F.ui->modal_kind != UI_MODAL_NEW_DM);
+
+  // 8. A Server Tag inside the open mobile right drawer (1:1 DM profile panel) remains clickable,
+  //    and Back closes the Server Tag popover without dismissing the right drawer.
+  size_t ndm = ccord_store_channel_count(F.store, CCORD_DM_GUILD_ID);
+  ccord_id dm_ch_id = CCORD_ID_NONE;
+  ccord_id dm_uid = CCORD_ID_NONE;
+  for (size_t i = 0; i < ndm; i++) {
+    const ccord_channel *dc = ccord_store_channel_at(F.store, CCORD_DM_GUILD_ID, i);
+    if (dc && !ui_channel_is_group_dm(dc)) {
+      const ccord_user *du = ui_dm_recipient(F.ui, dc);
+      ccord_id uid = du ? du->id : dc->user_id;
+      if (uid != CCORD_ID_NONE && ccord_store_user(F.store, uid) != nullptr) {
+        dm_ch_id = dc->id;
+        dm_uid = uid;
+        break;
+      }
+    }
+  }
+  CT_CHECK(dm_ch_id != CCORD_ID_NONE && dm_uid != CCORD_ID_NONE);
+  if (dm_ch_id != CCORD_ID_NONE && dm_uid != CCORD_ID_NONE) {
+    const ccord_user *du = ccord_store_user(F.store, dm_uid);
+    if (du) {
+      ccord_user dm_tagged = *du;
+      char dn[128], ddn[128], dh[128], ds[256], da[256], db[256], dbio[512], dpr[128];
+      snprintf(dn, sizeof dn, "%s", du->name ? du->name : "");
+      snprintf(ddn, sizeof ddn, "%s", du->display_name ? du->display_name : "");
+      snprintf(dh, sizeof dh, "%s", du->handle ? du->handle : "");
+      snprintf(ds, sizeof ds, "%s", du->status_text ? du->status_text : "");
+      snprintf(da, sizeof da, "%s", du->avatar_url ? du->avatar_url : "");
+      snprintf(db, sizeof db, "%s", du->banner_url ? du->banner_url : "");
+      snprintf(dbio, sizeof dbio, "%s", du->bio ? du->bio : "");
+      snprintf(dpr, sizeof dpr, "%s", du->pronouns ? du->pronouns : "");
+      dm_tagged.name = dn;
+      dm_tagged.display_name = ddn;
+      dm_tagged.handle = dh;
+      dm_tagged.status_text = ds;
+      dm_tagged.avatar_url = da;
+      dm_tagged.banner_url = db;
+      dm_tagged.bio = dbio;
+      dm_tagged.pronouns = dpr;
+      snprintf(dm_tagged.clan_tag, sizeof dm_tagged.clan_tag, "DMTG");
+      dm_tagged.clan_guild_id = g;
+      CT_CHECK(ccord_store_upsert_user(F.store, &dm_tagged, &err) == CCORD_OK);
+    }
+    F.ui->dm_friends_view = false;
+    F.ui->dm_requests_view = false;
+    CT_CHECK(ccord_session_select_channel(F.session, dm_ch_id, &err) == CCORD_OK);
+    ccord_ui_set_right_drawer(F.ui, true);
+    step_frames(15, 25);
+    const ccord_user_profile *dprof = ccord_store_user_profile(F.store, dm_uid);
+    const char *want_dm_tag = (dprof && dprof->clan_tag[0]) ? dprof->clan_tag : "DMTG";
+    ccord_rect dm_tag = {0};
+    CT_CHECK(ui_clan_popover_hit_rect(F.ui, want_dm_tag, &dm_tag));
+    touch_tap(dm_tag.x + dm_tag.w * 0.5f, dm_tag.y + dm_tag.h * 0.5f);
+    CT_CHECK(ui_clan_popover_is_open(F.ui));
+    CT_CHECK(ccord_ui_handle_back(F.ui));
+    step_frames(2, 25);
+    CT_CHECK(!ui_clan_popover_is_open(F.ui));
+    CT_CHECK(ccord_ui_right_drawer_open(F.ui));
+    ccord_ui_set_right_drawer(F.ui, false);
+    step_frames(15, 25);
+  }
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -660,6 +845,7 @@ int main(void)
   test_mobile_lightbox_pinch_and_back_cascade();
   test_mobile_copy_paste_and_autofill_login();
   test_mobile_safe_area_rail_and_background_focus();
+  test_mobile_drawer_occlusion();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");
 }

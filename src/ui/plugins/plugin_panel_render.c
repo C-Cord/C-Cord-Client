@@ -159,6 +159,7 @@ typedef struct draw_ctx {
   const char *owner;
   const char *panel_id;
   bool is_decor;
+  ccord_decor_target decor_target;
   ccord_id decor_target_id;
 } draw_ctx;
 
@@ -169,7 +170,7 @@ static void record_hit_ex(ccord_ui *ui, ui_panel_mgr *m, const draw_ctx *dctx, c
 {
   if (!node_id || !node_id[0] || rc.w <= 0.0f || rc.h <= 0.0f) return;
   if (dctx->is_decor) {
-    ui_decor_record_hit(ui, dctx->owner, dctx->panel_id, dctx->decor_target_id, node_id, rc);
+    ui_decor_record_hit(ui, dctx->owner, dctx->panel_id, dctx->decor_target, dctx->decor_target_id, node_id, rc);
     return;
   }
   if (!m || m->nhits >= PANEL_MAX_HITS) return;
@@ -773,12 +774,13 @@ ccord_vec2 ui_panels_measure_widget_json(ccord_ui *ui, ccord_renderer *r, const 
 }
 
 void ui_panels_draw_widget_json(ccord_ui *ui, ccord_renderer *r, const char *owner, const char *decor_id,
-                                ccord_id target_id, const char *json, ccord_rect rc, ccord_color surface_bg)
+                                ccord_decor_target target, ccord_id target_id, const char *json, ccord_rect rc,
+                                ccord_color surface_bg)
 {
   pnode *root = get_cached_decor_node(ui, json);
   if (!root || !r) return;
   draw_ctx dctx = {.owner = owner ? owner : "", .panel_id = decor_id ? decor_id : "",
-                   .is_decor = true, .decor_target_id = target_id};
+                   .is_decor = true, .decor_target = target, .decor_target_id = target_id};
   draw_node(ui, r, ui->panel_mgr, &dctx, root, rc, false, false, surface_bg);
 }
 

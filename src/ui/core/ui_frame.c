@@ -256,6 +256,10 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui->dbg_tts_badges = 0;
   ui->ngdm_member_hits = 0;
   ui->dm_panel_full_profile_rect = (ccord_rect){0};
+  ui->dm_header_plus_rect = (ccord_rect){0};
+  ui->dm_requests_nav_rect = (ccord_rect){0};
+  ui->ndm_close_rects = 0;
+  ui->nchan_gear_rects = 0;
   ui->gdm_add_btn_rect = (ccord_rect){0};
   ui->gdm_edit_btn_rect = (ccord_rect){0};
   ui->dm_requests_tab_rects[0] = (ccord_rect){0};

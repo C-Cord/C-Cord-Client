@@ -98,7 +98,8 @@ void dc_draw_user_profile_modal(ccord_ui *ui, ccord_renderer *r)
   float nw = ccord_text_draw_ellipsis(r, u->display_name, strlen(u->display_name), hx, hy, hw - 110.0f, &ns);
   float bx = hx + nw + 8.0f;
   if (u->clan_tag[0]) {
-    bx += ui_draw_clan_badge_ex(ui, r, u->clan_guild_id, u->clan_tag, u->clan_badge, bx, hy, nlh, true) + 6.0f;
+    bx += ui_draw_clan_badge_ex(ui, r, u->clan_guild_id, u->clan_tag, u->clan_badge, bx, hy, nlh,
+                                UI_CLAN_LAYER_PROFILE_MODAL) + 6.0f;
   }
   if (u->is_bot) {
     ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, 10.0f, COL(text_on_brand));

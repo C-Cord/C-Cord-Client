@@ -35,7 +35,8 @@ static bool overlays_block_drawers(const ccord_ui *ui)
          ui->modal_kind != UI_MODAL_NONE || ui->select_open || ui_is_login_screen(ui) ||
          ui_is_loading_screen(ui) || ui->report_open || ui->schedule_open || ui->poll_open ||
          ui->plus_menu_open || ui->pins_open || ui->inbox_open || ui->saved_popover_open ||
-         ui->reactions_open || ui->member_popover_open || ui->sc.open;
+         ui->reactions_open || ui->member_popover_open || ui->sc.open ||
+         ui_clan_popover_is_open(ui) || ui_plugin_dialog_is_open(ui) || ui_plugin_settings_is_open(ui);
 }
 
 static bool tap_in_drawer_scrim(const ccord_ui *ui, float x, float y)

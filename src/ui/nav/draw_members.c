@@ -31,7 +31,7 @@ float ui_clan_badge_width(ccord_ui *ui, ccord_renderer *r, const char *tag, bool
 }
 
 float ui_draw_clan_badge_ex(ccord_ui *ui, ccord_renderer *r, ccord_id guild_id, const char *tag, const char *badge,
-                            float x, float y, float line_h, bool clickable)
+                            float x, float y, float line_h, ui_clan_hit_layer layer)
 {
   if (!tag || !tag[0]) return 0.0f;
   char badge_url[256];
@@ -42,7 +42,8 @@ float ui_draw_clan_badge_ex(ccord_ui *ui, ccord_renderer *r, ccord_id guild_id, 
   float ph = 15.0f, isz = 12.0f;
   float pw = has_badge ? (5.0f + isz + 4.0f + bt.x + 6.0f) : (bt.x + 12.0f);
   ccord_rect pill = {x, y + (line_h - ph) * 0.5f, pw, ph};
-  bool hov = clickable && ui->mouse_in && ui_in_rect(ui->mx, ui->my, pill);
+  bool active = ui_clan_popover_layer_interactive(ui, layer);
+  bool hov = active && ui->mouse_in && ui_in_rect(ui->mx, ui->my, pill);
   ccord_draw_rrect(r, (ccord_rect){pill.x - 0.5f, pill.y - 0.5f, pill.w + 1.0f, pill.h + 1.0f}, 4.0f,
                    ui_alpha(COL(brand), hov ? 0.75f : 0.45f));
   ccord_draw_rrect(r, pill, 3.5f, hov ? COL(bg_item_hover) : COL(bg_tertiary));
@@ -55,8 +56,8 @@ float ui_draw_clan_badge_ex(ccord_ui *ui, ccord_renderer *r, ccord_id guild_id, 
     tx = br.x + isz + 4.0f;
   }
   ccord_text_draw(r, tag, strlen(tag), tx, pill.y + (pill.h - bt.y) * 0.5f, &bs, 0.0f);
-  if (clickable) {
-    ui_clan_popover_record_hit(ui, pill, guild_id, tag, badge_url);
+  if (active) {
+    ui_clan_popover_record_hit(ui, pill, guild_id, tag, badge_url, layer);
   }
   ui->dbg_clan_badges++;
   return pw;
@@ -64,7 +65,7 @@ float ui_draw_clan_badge_ex(ccord_ui *ui, ccord_renderer *r, ccord_id guild_id, 
 
 float ui_draw_clan_badge(ccord_ui *ui, ccord_renderer *r, const char *tag, float x, float y, float line_h)
 {
-  return ui_draw_clan_badge_ex(ui, r, CCORD_ID_NONE, tag, nullptr, x, y, line_h, false);
+  return ui_draw_clan_badge_ex(ui, r, CCORD_ID_NONE, tag, nullptr, x, y, line_h, UI_CLAN_LAYER_NONE);
 }
 
 float ui_draw_activity_card(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float x, float y, float w,
@@ -399,7 +400,8 @@ static void draw_dm_profile_panel(ccord_ui *ui, ccord_renderer *r, const ccord_l
       float nw = ccord_text_draw_ellipsis(r, mname, strlen(mname), tx, ny, name_w, &ns);
       float bx = tx + nw + 6.0f;
       if (mu->clan_tag[0] && bx + 32.0f <= item.x + item.w - 4.0f) {
-        bx += ui_draw_clan_badge_ex(ui, r, mu->clan_guild_id, mu->clan_tag, mu->clan_badge, bx, ny, nh, false) + 4.0f;
+        bx += ui_draw_clan_badge_ex(ui, r, mu->clan_guild_id, mu->clan_tag, mu->clan_badge, bx, ny, nh,
+                                    UI_CLAN_LAYER_NONE) + 4.0f;
       }
       if (is_owner && bx + 38.0f <= item.x + item.w - 4.0f) {
         ccord_text_style os = ui_style(ui, CCORD_FONT_BOLD, 9.5f, COL(status_idle));
@@ -495,7 +497,8 @@ static void draw_dm_profile_panel(ccord_ui *ui, ccord_renderer *r, const ccord_l
   float clan_res = (dm_u.clan_tag[0]) ? 64.0f : 0.0f;
   float nw = ccord_text_draw_ellipsis(r, dname, strlen(dname), x, y, w - clan_res, &ns);
   if (dm_u.clan_tag[0]) {
-    (void)ui_draw_clan_badge_ex(ui, r, dm_u.clan_guild_id, dm_u.clan_tag, dm_u.clan_badge, x + nw + 6.0f, y, nlh, true);
+    (void)ui_draw_clan_badge_ex(ui, r, dm_u.clan_guild_id, dm_u.clan_tag, dm_u.clan_badge, x + nw + 6.0f, y, nlh,
+                                UI_CLAN_LAYER_DM_PANEL);
   }
   y += nlh + 2.0f;
 
@@ -768,7 +771,8 @@ void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r)
     float nw = ccord_text_draw_ellipsis(r, mname, strlen(mname), tx, ny, name_avail, &ns);
     float bx = tx + nw + 6.0f;
     if (u->clan_tag[0] && bx + 32.0f <= item.x + item.w - 4.0f) {
-      bx += ui_draw_clan_badge_ex(ui, r, u->clan_guild_id, u->clan_tag, u->clan_badge, bx, ny, nh, false) + 4.0f;
+      bx += ui_draw_clan_badge_ex(ui, r, u->clan_guild_id, u->clan_tag, u->clan_badge, bx, ny, nh,
+                                  UI_CLAN_LAYER_NONE) + 4.0f;
     }
     if (u->is_bot && bx + 26.0f <= item.x + item.w - 4.0f) {
       ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, 10.0f, COL(text_on_brand));
@@ -983,7 +987,8 @@ void ui_draw_member_popover(ccord_ui *ui, ccord_renderer *r)
   float clan_res = u->clan_tag[0] ? 64.0f : 0.0f;
   float nw = ccord_text_draw_ellipsis(r, dname, strlen(dname), x, y, w - clan_res, &ns);
   if (u->clan_tag[0]) {
-    (void)ui_draw_clan_badge_ex(ui, r, u->clan_guild_id, u->clan_tag, u->clan_badge, x + nw + 6.0f, y, nlh, true);
+    (void)ui_draw_clan_badge_ex(ui, r, u->clan_guild_id, u->clan_tag, u->clan_badge, x + nw + 6.0f, y, nlh,
+                                UI_CLAN_LAYER_MEMBER_POPOVER);
   }
   y += nlh + 2.0f;
 

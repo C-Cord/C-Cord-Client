@@ -788,6 +788,11 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         changed = ui_pins_handle(ui, ev);
       } else if (ui->emoji_picker_open) {
         changed = ui_expr_handle_event(ui, ev);
+      } else if (ui->mobile_layout && (ui->layout.left_drawer_visible || ui->layout.right_drawer_visible)) {
+        // Mobile drawers sit above discovery and forum views; let drawer hover/panels run below.
+        if (ui->drag == DRAG_NONE && !ui->menu.open && !ui->settings_open) {
+          if (ui_panels_handle_input(ui, ev)) changed = true;
+        }
       } else if (ui->discovery_open) {
         check_ovl_hover = true;
       } else if (ui_forum_is_active(ui)) {
@@ -946,7 +951,8 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         ui->dirty = true;
         return true;
       }
-      if (ui->discovery_open && ev->button != 4 && ev->button != 5 && ui_discovery_handle(ui, ev)) {
+      bool mobile_drawer_vis = ui->mobile_layout && (ui->layout.left_drawer_visible || ui->layout.right_drawer_visible);
+      if (!mobile_drawer_vis && ui->discovery_open && ev->button != 4 && ev->button != 5 && ui_discovery_handle(ui, ev)) {
         uc_update_hover(ui);
         ui->dirty = true;
         return true;
@@ -970,7 +976,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         ui->dirty = true;
         return true;
       }
-      if (ui_local_messages_handle_click(ui, ev) || ui_actbtns_handle_click(ui, ev) ||
+      if ((!mobile_drawer_vis && ui_local_messages_handle_click(ui, ev)) || ui_actbtns_handle_click(ui, ev) ||
           ui_decor_handle_click(ui, ev) || (ev->button == 1 && ui_plugin_full_views_handle_rail_click(ui, ev->x, ev->y))) {
         uc_update_hover(ui);
         ui->dirty = true;
@@ -1008,7 +1014,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
           ui->dirty = true;
           return true;
         }
-        if (!ui->discovery_open && ui_is_dm_requests_view(ui)) {
+        if (!mobile_drawer_vis && !ui->discovery_open && ui_is_dm_requests_view(ui)) {
           for (size_t i = 0; i < ui->ndm_request_hits; i++) {
             if (ui_in_rect(ev->x, ev->y, ui->dm_request_hits[i].card_rect)) {
               ui_post_nav_aux(ui, CCORD_DM_GUILD_ID, ui->dm_request_hits[i].channel_id, CCORD_ID_NONE,
@@ -1019,12 +1025,12 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
             }
           }
         }
-        if (!ui->discovery_open && ui_forum_is_active(ui) && ui_forum_handle_event(ui, ev)) {
+        if (!mobile_drawer_vis && !ui->discovery_open && ui_forum_is_active(ui) && ui_forum_handle_event(ui, ev)) {
           uc_update_hover(ui);
           ui->dirty = true;
           return true;
         }
-        if (!ui->discovery_open && ui_in_rect(ev->x, ev->y, ui_rect(ui->layout.message_area))) {
+        if (!mobile_drawer_vis && !ui->discovery_open && ui_in_rect(ev->x, ev->y, ui_rect(ui->layout.message_area))) {
           for (size_t i = 0; i < ui->nchan_hits; i++) {
             if (ui_in_rect(ev->x, ev->y, ui->chan_hits[i].rect)) {
               const ccord_channel *mc = ccord_store_channel(ui->d.store, ui->chan_hits[i].channel_id);
@@ -1139,7 +1145,8 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         uc_update_hover(ui);
         return true;
       }
-      if (ui->discovery_open && ui_discovery_handle(ui, ev)) {
+      bool mobile_drawer_vis_w = ui->mobile_layout && (ui->layout.left_drawer_visible || ui->layout.right_drawer_visible);
+      if (!mobile_drawer_vis_w && ui->discovery_open && ui_discovery_handle(ui, ev)) {
         uc_update_hover(ui);
         return true;
       }
