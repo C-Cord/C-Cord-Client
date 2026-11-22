@@ -239,7 +239,7 @@ bool ccord_profile_cdn_url(const char *kind, ccord_id user_id, const char *hash,
   (void)ccord_id_format(user_id, idbuf);
   bool anim = hlen > 2u && hash[0] == 'a' && hash[1] == '_';
   int n = snprintf(out, cap, "https://cdn.discordapp.com/%s/%s/%s%s", kind, idbuf, hash,
-                   anim ? ".gif?size=64" : ".png?size=64");
+                   anim ? ".gif?size=128" : ".png?size=128");
   if (n < 0 || (size_t)n >= cap) {
     out[0] = '\0';
     return false;

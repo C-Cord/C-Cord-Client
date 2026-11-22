@@ -2578,12 +2578,12 @@ static void test_m6_devmode_copy_ids_and_animation_settings(void)
 
   // Animated custom emoji use the .gif asset; static ones keep the .png one.
   ui_expr_draw_custom_emoji(F.ui, F.renderer, 987654321u, "anim", 4, true, far);
-  CT_CHECK(media_url_requested("https://cdn.discordapp.com/emojis/987654321.gif?size=48"));
+  CT_CHECK(media_url_requested("https://cdn.discordapp.com/emojis/987654321.gif?size=128"));
   ui_expr_draw_custom_emoji(F.ui, F.renderer, 987654322u, "still", 5, false, far);
-  CT_CHECK(media_url_requested("https://cdn.discordapp.com/emojis/987654322.png?size=48"));
+  CT_CHECK(media_url_requested("https://cdn.discordapp.com/emojis/987654322.png?size=128"));
 
   char emoji_gif[128];
-  snprintf(emoji_gif, sizeof emoji_gif, "https://cdn.discordapp.com/emojis/%llu.gif?size=48",
+  snprintf(emoji_gif, sizeof emoji_gif, "https://cdn.discordapp.com/emojis/%llu.gif?size=128",
            (unsigned long long)5004u);
   CT_CHECK(ccord_render_upload_image(F.renderer, emoji_gif, k_m6_anim_gif, sizeof k_m6_anim_gif, nullptr, nullptr,
                                      &err) == CCORD_OK);

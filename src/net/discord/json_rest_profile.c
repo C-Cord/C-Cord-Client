@@ -46,7 +46,7 @@ static const char *guild_member_asset_url(ccord_arena *a, ccord_id gid, ccord_id
   (void)snprintf(path, sizeof path, "guilds/%llu/users/%llu/%s", (unsigned long long)gid,
                  (unsigned long long)uid, kind);
   bool anim = hash[0] == 'a' && hash[1] == '_';
-  const char *sz = (kind && strcmp(kind, "banners") == 0) ? "512" : "64";
+  const char *sz = (kind && strcmp(kind, "banners") == 0) ? "512" : "128";
   char suffix[24];
   snprintf(suffix, sizeof suffix, "%s?size=%s", anim ? ".gif" : ".png", sz);
   return dj_cdn_asset_url(a, path, hash, suffix);

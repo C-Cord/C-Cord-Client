@@ -66,7 +66,7 @@ static void test_full_profile(void)
     CT_CHECK(strcmp(p->guild_nick, "Ada The Builder") == 0);
     CT_CHECK(strcmp(p->guild_bio, "server bio") == 0 && strcmp(p->guild_pronouns, "they/them") == 0);
     CT_CHECK(strcmp(p->guild_avatar_url,
-                    "https://cdn.discordapp.com/guilds/2001/users/501/avatars/gav_hash.png?size=64") == 0);
+                    "https://cdn.discordapp.com/guilds/2001/users/501/avatars/gav_hash.png?size=128") == 0);
     CT_CHECK(strcmp(p->guild_banner_url,
                     "https://cdn.discordapp.com/guilds/2001/users/501/banners/gbn_hash.png?size=512") == 0);
     CT_CHECK(p->guild_joined_at_ms == 1709632800000LL);   // 2024-03-05T10:00:00Z

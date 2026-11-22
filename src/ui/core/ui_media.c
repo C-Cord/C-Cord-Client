@@ -749,18 +749,39 @@ void ui_close_lightbox(ccord_ui *ui)
   if (was_open) ui->dirty = true;
 }
 
+// Rewrites a trailing "?size=64" (or "?size=128" for banners) on a cdn.discordapp.com URL to `want_suffix`.
+static bool copy_upgraded_cdn_url(const char *src, char *out, size_t cap, const char *want_suffix, bool upgrade_128)
+{
+  static const char k_cdn[] = "https://cdn.discordapp.com/";
+  static const char k_64[] = "?size=64";
+  static const char k_128[] = "?size=128";
+  size_t len = strlen(src);
+  if (strncmp(src, k_cdn, sizeof(k_cdn) - 1) == 0) {
+    if (len >= sizeof(k_64) - 1 && strcmp(src + len - (sizeof(k_64) - 1), k_64) == 0) {
+      size_t prefix = len - (sizeof(k_64) - 1);
+      snprintf(out, cap, "%.*s%s", (int)prefix, src, want_suffix);
+      return true;
+    }
+    if (upgrade_128 && len >= sizeof(k_128) - 1 && strcmp(src + len - (sizeof(k_128) - 1), k_128) == 0) {
+      size_t prefix = len - (sizeof(k_128) - 1);
+      snprintf(out, cap, "%.*s%s", (int)prefix, src, want_suffix);
+      return true;
+    }
+  }
+  if (len >= cap) len = cap - 1;
+  memcpy(out, src, len);
+  out[len] = '\0';
+  return true;
+}
+
 bool ui_user_avatar_url(const ccord_user *u, char *out, size_t cap)
 {
   if (!u || !u->avatar_url || !u->avatar_url[0] || !out || cap == 0) return false;
   if (strncmp(u->avatar_url, "https://", 8) == 0 || strncmp(u->avatar_url, "http://", 7) == 0) {
-    size_t len = strlen(u->avatar_url);
-    if (len >= cap) len = cap - 1;
-    memcpy(out, u->avatar_url, len);
-    out[len] = '\0';
-    return true;
+    return copy_upgraded_cdn_url(u->avatar_url, out, cap, "?size=128", false);
   }
   const char *ext = (strncmp(u->avatar_url, "a_", 2) == 0) ? "gif" : "png";
-  snprintf(out, cap, "https://cdn.discordapp.com/avatars/%llu/%.96s.%s?size=64",
+  snprintf(out, cap, "https://cdn.discordapp.com/avatars/%llu/%.96s.%s?size=128",
            (unsigned long long)u->id, u->avatar_url, ext);
   return true;
 }
@@ -769,21 +790,7 @@ bool ui_user_banner_url(const ccord_user *u, char *out, size_t cap)
 {
   if (!u || !u->banner_url || !u->banner_url[0] || !out || cap == 0) return false;
   if (strncmp(u->banner_url, "https://", 8) == 0 || strncmp(u->banner_url, "http://", 7) == 0) {
-    static const char k_cdn[] = "https://cdn.discordapp.com/";
-    static const char k_old[] = "?size=64";
-    static const char k_new[] = "?size=512";
-    size_t len = strlen(u->banner_url);
-    if (strncmp(u->banner_url, k_cdn, sizeof(k_cdn) - 1) == 0 &&
-        len >= sizeof(k_old) - 1 &&
-        strcmp(u->banner_url + len - (sizeof(k_old) - 1), k_old) == 0) {
-      size_t prefix = len - (sizeof(k_old) - 1);
-      snprintf(out, cap, "%.*s%s", (int)prefix, u->banner_url, k_new);
-      return true;
-    }
-    if (len >= cap) len = cap - 1;
-    memcpy(out, u->banner_url, len);
-    out[len] = '\0';
-    return true;
+    return copy_upgraded_cdn_url(u->banner_url, out, cap, "?size=512", true);
   }
   const char *ext = (strncmp(u->banner_url, "a_", 2) == 0) ? "gif" : "png";
   snprintf(out, cap, "https://cdn.discordapp.com/banners/%llu/%.96s.%s?size=512",
@@ -811,13 +818,15 @@ void ui_snowflake_date(ccord_id id, char *out, size_t cap)
 bool ui_guild_icon_url(const ccord_guild *g, char *out, size_t cap)
 {
   if (!g || !g->icon_url || !g->icon_url[0] || !out || cap == 0) return false;
-  if (strncmp(g->icon_url, "https://", 8) == 0 || strncmp(g->icon_url, "http://", 7) == 0 ||
-      strncmp(g->icon_url, "data:", 5) == 0) {
+  if (strncmp(g->icon_url, "https://", 8) == 0 || strncmp(g->icon_url, "http://", 7) == 0) {
+    return copy_upgraded_cdn_url(g->icon_url, out, cap, "?size=128", false);
+  }
+  if (strncmp(g->icon_url, "data:", 5) == 0) {
     snprintf(out, cap, "%.250s", g->icon_url);
     return true;
   }
   const char *ext = (strncmp(g->icon_url, "a_", 2) == 0) ? "gif" : "png";
-  snprintf(out, cap, "https://cdn.discordapp.com/icons/%llu/%.96s.%s?size=64",
+  snprintf(out, cap, "https://cdn.discordapp.com/icons/%llu/%.96s.%s?size=128",
            (unsigned long long)g->id, g->icon_url, ext);
   return true;
 }

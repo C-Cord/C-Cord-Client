@@ -379,13 +379,25 @@ void ui_expr_draw_custom_emoji(ccord_ui *ui, ccord_renderer *r, ccord_id id, con
   if (!ui || !r || rect.w <= 0.0f || rect.h <= 0.0f) return;
   char url[128];
   const char *ext = animated ? "gif" : "png";
-  snprintf(url, sizeof url, "https://cdn.discordapp.com/emojis/%llu.%s?size=48", (unsigned long long)id, ext);
+  snprintf(url, sizeof url, "https://cdn.discordapp.com/emojis/%llu.%s?size=128", (unsigned long long)id, ext);
   bool ready = ui_ensure_media(ui, r, url);
   int tw = 0, th = 0;
   bool real_tex = ready && ccord_render_has_texture(r, url, &tw, &th) && tw > 1 && th > 1;
   if (ready) {
     bool animate = animated && (expr_animate_emoji(ui) || expr_pointer_over(ui, rect));
-    ccord_draw_texture_rounded_anim(r, url, rect, 4.0f, 255, animate || !animated);
+    ccord_rect draw_r = rect;
+    if (tw > 1 && th > 1 && tw != th) {
+      if (tw > th) {
+        float dh = rect.w * ((float)th / (float)tw);
+        draw_r.y += (rect.h - dh) * 0.5f;
+        draw_r.h = dh;
+      } else {
+        float dw = rect.h * ((float)tw / (float)th);
+        draw_r.x += (rect.w - dw) * 0.5f;
+        draw_r.w = dw;
+      }
+    }
+    ccord_draw_texture_rounded_anim(r, url, draw_r, 0.0f, 255, animate || !animated);
   }
   if (real_tex) return;
 

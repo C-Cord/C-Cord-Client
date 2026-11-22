@@ -40,13 +40,19 @@ static void cdn_url(char *out, size_t cap, const char *v, const char *prefix, co
 
 static void upgrade_banner_size(char *url, size_t cap)
 {
+  size_t old_len = 8u;
   char *p = strstr(url, "?size=64");
   if (!p) p = strstr(url, "&size=64");
+  if (!p) {
+    old_len = 9u;
+    p = strstr(url, "?size=128");
+    if (!p) p = strstr(url, "&size=128");
+  }
   if (!p) return;
-  if (p[8] != '\0' && p[8] != '&') return;
+  if (p[old_len] != '\0' && p[old_len] != '&') return;
   size_t prefix_len = (size_t)(p + 6 - url);
   char tail[128];
-  snprintf(tail, sizeof tail, "%s", p + 8);
+  snprintf(tail, sizeof tail, "%s", p + old_len);
   snprintf(url + prefix_len, cap - prefix_len, "512%s", tail);
 }
 

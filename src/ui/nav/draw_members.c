@@ -17,7 +17,7 @@ static void build_clan_badge_url(ccord_id guild_id, const char *badge, char *out
   if (strncmp(badge, "https://", 8) == 0 || strncmp(badge, "http://", 7) == 0) {
     snprintf(out, cap, "%s", badge);
   } else {
-    snprintf(out, cap, "https://cdn.discordapp.com/guild-tag-badges/%llu/%.60s.png?size=32",
+    snprintf(out, cap, "https://cdn.discordapp.com/guild-tag-badges/%llu/%.60s.png?size=64",
              (unsigned long long)guild_id, badge);
   }
 }

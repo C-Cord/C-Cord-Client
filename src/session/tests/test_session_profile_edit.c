@@ -151,7 +151,7 @@ static void test_avatar_set_and_remove(void)
   CT_CHECK(wait_done(&e, &r));
   CT_CHECK(r.res.status == CCORD_OK);
   char want[256];
-  (void)snprintf(want, sizeof want, "https://cdn.discordapp.com/avatars/%llu/fakeav1.png?size=64", (unsigned long long)e.self);
+  (void)snprintf(want, sizeof want, "https://cdn.discordapp.com/avatars/%llu/fakeav1.png?size=128", (unsigned long long)e.self);
   CT_CHECK(self_user(&e) && strcmp(self_user(&e)->avatar_url, want) == 0);
   CT_CHECK(strcmp(r.res.applied.avatar_hash, "fakeav1") == 0);
 

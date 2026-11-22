@@ -24,10 +24,17 @@ static bool ensure_app_logo_texture(ccord_renderer *r)
 {
   if (!r) return false;
   if (ccord_render_has_texture(r, k_app_logo_key, nullptr, nullptr)) return true;
-  uint8_t rgba[64 * 64 * 4];
-  if (!ccord_app_icon_rgba(64, rgba, sizeof rgba)) return false;
-  ccord_error err = {0};
-  return ccord_render_upload_rgba(r, k_app_logo_key, rgba, 64, 64, &err) == CCORD_OK;
+  enum { LOGO_SZ = 128 };
+  const size_t nbytes = (size_t)LOGO_SZ * (size_t)LOGO_SZ * 4u;
+  uint8_t *rgba = ccord_malloc(nbytes);
+  if (!rgba) return false;
+  bool ok = ccord_app_icon_rgba(LOGO_SZ, rgba, nbytes);
+  if (ok) {
+    ccord_error err = {0};
+    ok = ccord_render_upload_rgba(r, k_app_logo_key, rgba, LOGO_SZ, LOGO_SZ, &err) == CCORD_OK;
+  }
+  ccord_free(rgba);
+  return ok;
 }
 
 static ccord_color presence_color(const ccord_ui *ui, ccord_presence p)
@@ -363,7 +370,7 @@ void ui_draw_server_list(ccord_ui *ui, ccord_renderer *r)
         if (ensure_app_logo_texture(r)) {
           float inset = 2.0f;
           ccord_rect logo_rc = {ic.x + inset, ic.y + inset, ic.w - 2.0f * inset, ic.h - 2.0f * inset};
-          ccord_draw_texture_rounded(r, k_app_logo_key, logo_rc, fmaxf(radius - 1.5f, 4.0f), 255);
+          ccord_draw_texture(r, k_app_logo_key, logo_rc, 255);
         } else {
           draw_dm_home_fallback(r, ic, ui_mix(COL(text_normal), COL(text_header), a), icon_bg);
         }

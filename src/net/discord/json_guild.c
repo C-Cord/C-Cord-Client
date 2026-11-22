@@ -100,7 +100,7 @@ const char *dj_build_cdn_url_sized(ccord_arena *a, const char *kind, ccord_id id
   int idlen = ccord_id_format(id, idbuf);
   const char *prefix = "https://cdn.discordapp.com/";
   bool is_anim = (hlen > 2u && hash[0] == 'a' && hash[1] == '_');
-  const char *sz = size_str ? size_str : (strcmp(kind, "banners") == 0 ? "512" : "64");
+  const char *sz = size_str ? size_str : (strcmp(kind, "banners") == 0 ? "512" : "128");
   char suffix[24];
   snprintf(suffix, sizeof suffix, "%s?size=%s", is_anim ? ".gif" : ".png", sz);
   size_t plen = strlen(prefix), klen = strlen(kind), slen = strlen(suffix);

@@ -525,7 +525,7 @@ static void test_smooth_scroll_hover_anim_loading_and_restore(void)
   char icon_url[256] = {0};
   const ccord_guild *g1_after = ccord_store_guild(F.store, anim_g.id);
   CT_CHECK(ui_guild_icon_url(g1_after, icon_url, sizeof icon_url));
-  CT_CHECK(strstr(icon_url, "/icons/") != nullptr && strstr(icon_url, "a_serveranim99.gif?size=64") != nullptr);
+  CT_CHECK(strstr(icon_url, "/icons/") != nullptr && strstr(icon_url, "a_serveranim99.gif?size=128") != nullptr);
 
   CT_CHECK(ccord_render_upload_image(F.renderer, icon_url, k_rgb_gif, sizeof k_rgb_gif, nullptr, nullptr, &err) == CCORD_OK);
   size_t cur_frame = 99, frame_count = 0;
