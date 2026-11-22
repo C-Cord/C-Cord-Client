@@ -471,6 +471,8 @@ typedef struct {
   guint names_acquired;
   guint notify_count;
   char notify_app[64];
+  char notify_icon[64];
+  char notify_desktop_entry[64];
   char notify_summary[256];
   char notify_body[256];
   char notify_actions[64];   // the action list of the last Notify: keys and labels joined by ','
@@ -645,12 +647,13 @@ static void mock_notify_call(GDBusConnection *connection, const gchar *sender, c
   GVariant *actions = nullptr, *hints = nullptr;
   g_variant_get(parameters, "(&su&s&s&s@as@a{sv}i)", &app, &replaces, &icon, &summary, &body, &actions, &hints, &timeout);
   (void)replaces;
-  (void)icon;
   (void)timeout;
   m->notify_count++;
   snprintf(m->notify_app, sizeof m->notify_app, "%s", app ? app : "");
+  snprintf(m->notify_icon, sizeof m->notify_icon, "%s", icon ? icon : "");
   snprintf(m->notify_summary, sizeof m->notify_summary, "%s", summary ? summary : "");
   snprintf(m->notify_body, sizeof m->notify_body, "%s", body ? body : "");
+  m->notify_desktop_entry[0] = '\0';
   m->notify_actions[0] = '\0';
   if (actions) {
     GVariantIter it;
@@ -662,7 +665,13 @@ static void mock_notify_call(GDBusConnection *connection, const gchar *sender, c
     }
     g_variant_unref(actions);
   }
-  if (hints) g_variant_unref(hints);
+  if (hints) {
+    const gchar *de = nullptr;
+    if (g_variant_lookup(hints, "desktop-entry", "&s", &de) && de) {
+      snprintf(m->notify_desktop_entry, sizeof m->notify_desktop_entry, "%s", de);
+    }
+    g_variant_unref(hints);
+  }
   g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", (guint32)42));
 }
 
@@ -1400,18 +1409,20 @@ static void test_live(void)
       CT_CHECK(g_mock.tray_registrations == 1);
       CT_CHECK(g_mock.tray_service[0] == ':');
 
-      // Notify round-trip: the mock server sees app id, summary and body.
+      // Notify round-trip: the mock server sees app id, icon, desktop-entry hint, summary and body.
       ccord_platform_set_window_focused(p, false);
       CT_CHECK(ccord_platform_notify(p, "Ping", "Body text"));
       CT_CHECK(wait_for(p, cond_notify, 5000));
       CT_CHECK(g_mock.notify_count == 1);
       CT_CHECK(strcmp(g_mock.notify_app, "C-Cord") == 0);
+      CT_CHECK(strcmp(g_mock.notify_icon, "C-Cord") == 0);
+      CT_CHECK(strcmp(g_mock.notify_desktop_entry, "C-Cord") == 0);
       CT_CHECK(strcmp(g_mock.notify_summary, "Ping") == 0);
       CT_CHECK(strcmp(g_mock.notify_body, "Body text") == 0);
       CT_CHECK(strcmp(ccord_platform_last_notify_title(p), "Ping") == 0);
       CT_CHECK(g_mock.notify_actions[0] == '\0');   // a plain notification has no click action
 
-      // Click routing: the mock server answers Notify with id 42, then signals ActionInvoked / NotificationClosed.
+      // Click routing: the mock server answers Notify with id 42, emits ActivationToken + ActionInvoked / NotificationClosed.
       g_clicks = 0;
       ccord_platform_set_notify_click_callback(p, on_notify_click, nullptr);
       ccord_notify_target tgt = {.guild_id = 5, .channel_id = 6, .message_id = 7};
@@ -1421,6 +1432,7 @@ static void test_live(void)
       CT_CHECK(wait_for(p, cond_id42, 5000));
       ccord_notify_target got = {0};
       CT_CHECK(ccord_platform_notify_target_for(p, 42, &got) && got.channel_id == 6 && got.message_id == 7);
+      mock_emit_notify_signal("ActivationToken", g_variant_new("(us)", (guint32)42, "plasma_live_TIME98765"));
       mock_emit_notify_signal("ActionInvoked", g_variant_new("(us)", (guint32)42, "default"));
       CT_CHECK(wait_for(p, cond_click, 5000));
       CT_CHECK(g_clicks == 1 && g_click_target.guild_id == 5 && g_click_target.channel_id == 6 &&

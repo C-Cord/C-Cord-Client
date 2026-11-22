@@ -974,6 +974,21 @@ void ccord_desktop_inject_notify_closed(ccord_desktop *d, uint32_t id)
   }
 }
 
+void ccord_desktop_inject_activation_token(ccord_desktop *d, uint32_t id, const char *token)
+{
+  (void)d;
+  (void)id;
+  (void)token;
+}
+
+bool ccord_desktop_take_activation_token(ccord_desktop *d, char *out, size_t cap)
+{
+  (void)d;
+  (void)out;
+  (void)cap;
+  return false;
+}
+
 bool ccord_desktop_tray_available(const ccord_desktop *d) { (void)d; return false; }
 void ccord_desktop_set_badge(ccord_desktop *d, uint32_t unread, uint32_t mentions, uint32_t count)
 {

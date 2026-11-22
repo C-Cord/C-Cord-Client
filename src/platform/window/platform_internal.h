@@ -86,6 +86,8 @@ struct ccord_platform {
   _Atomic int wake_wr_fd;         // mirror of wake_pipe[1] for thread-safe wakeups (-1 when closed)
   bool pending_safe_area_ev;
   bool pending_keyboard_ev;
+  bool pending_focus_ev;          // deferred CCORD_IN_FOCUS synthesized when SDL focus flag recovers without an event
+  bool pending_focus_val;
   bool android_insets_seen;       // Kotlin WindowInsets arrived; ignore SDL's systemGestures-bloated safe area
   ccord_safe_insets safe_insets;
   float keyboard_inset;

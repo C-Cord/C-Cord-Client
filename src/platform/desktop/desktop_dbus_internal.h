@@ -20,6 +20,7 @@
 #define DESKTOP_TRIGGER_MAX 64u
 #define DESKTOP_DESC_MAX 128u
 #define DESKTOP_NOTIFY_MAP_MAX 32u   // notifications whose click target is remembered (oldest evicted)
+#define DESKTOP_TOKEN_MAX 256u       // ActivationToken signal payload (Wayland xdg-activation / X11 _TIME)
 #define NOTIFY_ACTION_KEY "default"
 #define NOTIFY_NAME "org.freedesktop.Notifications"
 #define NOTIFY_PATH "/org/freedesktop/Notifications"
@@ -72,6 +73,8 @@ struct ccord_desktop {
   uint32_t last_notify_id;
   uint32_t local_notify_id;        // ids handed out when no server answers
   char last_actions[16];           // "default" when the last notification carried the click action
+  uint32_t pending_activation_id;  // notification id associated with pending_activation_token (0 = none)
+  char pending_activation_token[DESKTOP_TOKEN_MAX];
   bool muted, deafened;            // local voice state: menu checkmarks + tray icon overlay
 #if CCORD_HAVE_PORTAL
   GDBusConnection *bus;
@@ -102,6 +105,7 @@ struct ccord_desktop {
   guint session_closed_sub_id;
   guint notify_action_sub_id;      // org.freedesktop.Notifications ActionInvoked
   guint notify_closed_sub_id;      // org.freedesktop.Notifications NotificationClosed
+  guint notify_token_sub_id;       // org.freedesktop.Notifications ActivationToken
   desktop_shortcut shortcuts[DESKTOP_SHORTCUT_MAX];
   size_t shortcut_count;
 #endif

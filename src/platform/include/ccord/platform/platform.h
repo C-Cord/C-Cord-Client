@@ -110,9 +110,10 @@ uint32_t ccord_platform_last_notify_id(const ccord_platform *p);
 const char *ccord_platform_last_notify_actions(const ccord_platform *p);
 bool ccord_platform_notify_target_for(const ccord_platform *p, uint32_t notification_id, ccord_notify_target *out);
 size_t ccord_platform_notify_map_count(const ccord_platform *p);
-// Test hooks: act as the ActionInvoked / NotificationClosed signals of the notification server.
+// Test hooks: act as the ActionInvoked / NotificationClosed / ActivationToken signals of the notification server.
 void ccord_platform_inject_notify_action(ccord_platform *p, uint32_t notification_id, const char *action_key);
 void ccord_platform_inject_notify_closed(ccord_platform *p, uint32_t notification_id);
+void ccord_platform_inject_notify_activation_token(ccord_platform *p, uint32_t notification_id, const char *token);
 
 // Desktop services: DBus notifications, SNI tray/unread badge, GlobalShortcuts portal ----
 // Honest capability queries: false when no session bus / service is reachable (e.g. headless).

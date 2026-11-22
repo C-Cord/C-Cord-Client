@@ -6,6 +6,7 @@
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if !defined(_WIN32)
@@ -24,6 +25,11 @@
 #include <ccord/core/os.h>
 #include <ccord/core/utf8.h>
 #include <ccord/platform/app_icon.h>
+
+#if CCORD_HAVE_X11
+#include <X11/Xatom.h>
+#include <X11/Xlib.h>
+#endif
 
 static char s_last_opened_url[1024];
 static uint8_t *s_test_clip_image;
@@ -817,18 +823,131 @@ void ccord_platform_set_window_focused(ccord_platform *p, bool focused)
 {
   if (!p) return;
   p->focused = focused;
+  p->pending_focus_ev = false;
   if (focused) platform_flash(p, SDL_FLASH_CANCEL);
+}
+
+#if CCORD_HAVE_X11
+// Extracts the X11 server timestamp from a startup-notification / ActivationToken string ("..._TIME<u32>").
+static unsigned long x11_parse_token_time(const char *token)
+{
+  if (!token || !token[0]) return 0ul;
+  const char *t = strstr(token, "_TIME");
+  if (!t) return 0ul;
+  t += 5;
+  if (*t < '0' || *t > '9') return 0ul;
+  char *end = nullptr;
+  unsigned long long val = strtoull(t, &end, 10);
+  if (end == t || val == 0ull || val > 0xFFFFFFFFull) return 0ul;
+  return (unsigned long)val;
+}
+#endif
+
+static void platform_reveal_window(ccord_platform *p, bool restore_if_min)
+{
+  if (!p || !p->window) return;
+  char token[256];
+  bool has_token = ccord_desktop_take_activation_token(p->desktop, token, sizeof token);
+  const char *drv = !p->headless ? SDL_GetCurrentVideoDriver() : nullptr;
+
+  SDL_Environment *env = nullptr;
+  bool set_wayland_token = false;
+  if (has_token && drv && strcmp(drv, "wayland") == 0) {
+    env = SDL_GetEnvironment();
+    if (env) set_wayland_token = SDL_SetEnvironmentVariable(env, "XDG_ACTIVATION_TOKEN", token, true);
+  }
+
+#if CCORD_HAVE_X11
+  Display *x_dpy = nullptr;
+  int x_screen = 0;
+  Window x_win = 0;
+  unsigned long x_ts = 0ul;
+  if (drv && strcmp(drv, "x11") == 0) {
+    SDL_PropertiesID props = SDL_GetWindowProperties(p->window);
+    x_dpy = (Display *)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_X11_DISPLAY_POINTER, nullptr);
+    x_screen = (int)SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_SCREEN_NUMBER, 0);
+    x_win = (Window)SDL_GetNumberProperty(props, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+    if (has_token) x_ts = x11_parse_token_time(token);
+    if (x_dpy && x_win && x_ts != 0ul) {
+      Atom user_time = XInternAtom(x_dpy, "_NET_WM_USER_TIME", False);
+      if (user_time != None) {
+        (void)XChangeProperty(x_dpy, x_win, user_time, XA_CARDINAL, 32, PropModeReplace,
+                              (const unsigned char *)&x_ts, 1);
+      }
+    }
+  }
+#endif
+
+  SDL_ShowWindow(p->window);
+  if (restore_if_min) {
+    SDL_RestoreWindow(p->window);
+  }
+
+#if defined(_WIN32)
+  char prev_force[16] = {0};
+  bool had_force = false;
+  if (!p->headless) {
+    const char *pf = SDL_GetHint(SDL_HINT_FORCE_RAISEWINDOW);
+    if (pf) {
+      had_force = true;
+      snprintf(prev_force, sizeof prev_force, "%s", pf);
+    }
+    (void)SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, "1");
+  }
+  SDL_RaiseWindow(p->window);
+  if (!p->headless) {
+    if (had_force) (void)SDL_SetHint(SDL_HINT_FORCE_RAISEWINDOW, prev_force);
+    else (void)SDL_ResetHint(SDL_HINT_FORCE_RAISEWINDOW);
+  }
+#else
+  SDL_RaiseWindow(p->window);
+#endif
+
+#if CCORD_HAVE_X11
+  if (x_dpy && x_win) {
+    // SDL_RaiseWindow sends _NET_ACTIVE_WINDOW with source=1 (normal app), which KWin/Mutter focus-stealing
+    // prevention rejects when triggered from a desktop notification or tray click. Use source=2 (user-initiated
+    // desktop activation) and XMapRaised so hidden/minimized/background windows reliably reveal and focus.
+    (void)XMapRaised(x_dpy, x_win);
+    Atom net_active = XInternAtom(x_dpy, "_NET_ACTIVE_WINDOW", False);
+    if (net_active != None) {
+      XEvent xev;
+      memset(&xev, 0, sizeof xev);
+      xev.xclient.type = ClientMessage;
+      xev.xclient.window = x_win;
+      xev.xclient.message_type = net_active;
+      xev.xclient.format = 32;
+      xev.xclient.data.l[0] = 2;
+      xev.xclient.data.l[1] = (long)x_ts;
+      xev.xclient.data.l[2] = 0;
+      (void)XSendEvent(x_dpy, RootWindow(x_dpy, x_screen), False,
+                       SubstructureRedirectMask | SubstructureNotifyMask, &xev);
+    }
+    (void)XFlush(x_dpy);
+  }
+#endif
+
+  if (set_wayland_token && env) {
+    const char *cur = SDL_GetEnvironmentVariable(env, "XDG_ACTIVATION_TOKEN");
+    if (cur && strcmp(cur, token) == 0) {
+      (void)SDL_UnsetEnvironmentVariable(env, "XDG_ACTIVATION_TOKEN");
+    }
+  }
 }
 
 void ccord_platform_set_window_visible(ccord_platform *p, bool visible)
 {
   if (!p || p->window_visible == visible) return;
   p->window_visible = visible;
-  if (!visible) p->focused = false;
+  if (!visible) {
+    p->focused = false;
+    p->pending_focus_ev = false;
+  }
   if (!p->window) return;
   if (visible) {
-    SDL_ShowWindow(p->window);
-    SDL_RaiseWindow(p->window);
+    bool is_min = p->minimized || (SDL_GetWindowFlags(p->window) & SDL_WINDOW_MINIMIZED) != 0;
+    p->minimized = false;
+    platform_reveal_window(p, is_min);
   } else {
     SDL_HideWindow(p->window);
   }
@@ -841,11 +960,8 @@ void ccord_platform_show_window(ccord_platform *p)
   p->minimized = false;
   p->window_visible = true;
   if (!p->window) return;
-  SDL_ShowWindow(p->window);
-  if (was_min || (SDL_GetWindowFlags(p->window) & SDL_WINDOW_MINIMIZED) != 0) {
-    SDL_RestoreWindow(p->window);
-  }
-  SDL_RaiseWindow(p->window);
+  bool restore = was_min || (SDL_GetWindowFlags(p->window) & SDL_WINDOW_MINIMIZED) != 0;
+  platform_reveal_window(p, restore);
 }
 
 bool ccord_platform_window_visible(const ccord_platform *p)
@@ -884,6 +1000,7 @@ bool ccord_platform_request_close(ccord_platform *p)
 {
   if (!p || !p->close_to_tray) return true;
   p->focused = false;
+  p->pending_focus_ev = false;
   if (ccord_platform_tray_available(p)) {
     ccord_platform_set_window_visible(p, false);
   } else {
@@ -1005,6 +1122,11 @@ void ccord_platform_inject_notify_action(ccord_platform *p, uint32_t notificatio
 void ccord_platform_inject_notify_closed(ccord_platform *p, uint32_t notification_id)
 {
   if (p) ccord_desktop_inject_notify_closed(p->desktop, notification_id);
+}
+
+void ccord_platform_inject_notify_activation_token(ccord_platform *p, uint32_t notification_id, const char *token)
+{
+  if (p) ccord_desktop_inject_activation_token(p->desktop, notification_id, token);
 }
 
 uint32_t ccord_platform_notify_count(const ccord_platform *p)

@@ -94,6 +94,46 @@ static float to_logical(const ccord_platform *p, float v)
   return v * platform_window_density(p->window) / platform_window_scale(p->window);
 }
 
+static bool platform_can_reconcile_focus(const ccord_platform *p)
+{
+  if (!p || p->headless || !p->window) return false;
+  const char *drv = SDL_GetCurrentVideoDriver();
+  if (!drv || strcmp(drv, "dummy") == 0 || strcmp(drv, "offscreen") == 0) return false;
+  return true;
+}
+
+// On X11/KWin, minimizing or hiding a window sets p->focused = false even if SDL kept SDL_WINDOW_INPUT_FOCUS
+// on the window (or restored it without emitting a fresh FocusIn). Reconcile against SDL's real window flags
+// so UI focus, auto-ack, and notification dismissal never stay stuck false after restoring the window.
+static void platform_reconcile_focus(ccord_platform *p)
+{
+  if (!platform_can_reconcile_focus(p)) return;
+  if (atomic_load(&p->in_background)) return;
+  SDL_WindowFlags fl = SDL_GetWindowFlags(p->window);
+  bool has_focus = (fl & SDL_WINDOW_INPUT_FOCUS) != 0;
+  bool is_min = (fl & SDL_WINDOW_MINIMIZED) != 0;
+  bool is_hidden = (fl & SDL_WINDOW_HIDDEN) != 0;
+  if (p->minimized && !is_min && !is_hidden && has_focus) {
+    p->minimized = false;
+  }
+  if (!p->focused && !p->minimized && p->window_visible && has_focus && !is_min && !is_hidden) {
+    p->focused = true;
+    p->pending_focus_ev = true;
+    p->pending_focus_val = true;
+    (void)SDL_FlashWindow(p->window, SDL_FLASH_CANCEL);
+  }
+}
+
+static bool pop_pending_focus(ccord_platform *p, ccord_input_event *out)
+{
+  if (!p->pending_focus_ev) return false;
+  p->pending_focus_ev = false;
+  memset(out, 0, sizeof *out);
+  out->type = CCORD_IN_FOCUS;
+  out->focused = p->pending_focus_val;
+  return true;
+}
+
 static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *out)
 {
   memset(out, 0, sizeof *out);
@@ -104,6 +144,7 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
     case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
       // Close-to-tray: hide the window and keep running; the tray icon restores it.
       if (!ccord_platform_request_close(p)) {
+        p->pending_focus_ev = false;
         out->type = CCORD_IN_FOCUS;
         out->focused = false;
         return true;
@@ -113,6 +154,7 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
     case SDL_EVENT_WINDOW_MINIMIZED:
       p->minimized = true;
       p->focused = false;
+      p->pending_focus_ev = false;
       out->type = CCORD_IN_FOCUS;
       out->focused = false;
       return true;
@@ -120,6 +162,7 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
     case SDL_EVENT_WINDOW_MAXIMIZED: {
       bool was_min = p->minimized;
       p->minimized = false;
+      platform_reconcile_focus(p);
       if (was_min) {
         float w, h, s;
         ccord_platform_size(p, &w, &h, &s);
@@ -139,6 +182,7 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
     case SDL_EVENT_WINDOW_SHOWN: {
       bool was_hidden = !p->window_visible;
       p->window_visible = true;
+      platform_reconcile_focus(p);
       if (was_hidden) {
         float w, h, s;
         ccord_platform_size(p, &w, &h, &s);
@@ -152,6 +196,7 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
     case SDL_EVENT_WINDOW_HIDDEN:
       p->window_visible = false;
       p->focused = false;
+      p->pending_focus_ev = false;
       out->type = CCORD_IN_FOCUS;
       out->focused = false;
       return true;
@@ -159,6 +204,13 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
     case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
     case SDL_EVENT_WINDOW_DISPLAY_SCALE_CHANGED:
     case SDL_EVENT_WINDOW_EXPOSED: {
+      if (e->type == SDL_EVENT_WINDOW_EXPOSED) {
+        if (platform_can_reconcile_focus(p) && p->minimized &&
+            (SDL_GetWindowFlags(p->window) & SDL_WINDOW_MINIMIZED) == 0) {
+          p->minimized = false;
+        }
+        platform_reconcile_focus(p);
+      }
       float w, h, s;
       ccord_platform_size(p, &w, &h, &s);
       out->type = CCORD_IN_RESIZE;
@@ -168,9 +220,14 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
     }
     case SDL_EVENT_WINDOW_FOCUS_GAINED:
     case SDL_EVENT_WINDOW_FOCUS_LOST:
+      p->pending_focus_ev = false;
       out->type = CCORD_IN_FOCUS;
       out->focused = e->type == SDL_EVENT_WINDOW_FOCUS_GAINED;
       p->focused = out->focused;
+      if (p->focused && platform_can_reconcile_focus(p) && p->minimized &&
+          (SDL_GetWindowFlags(p->window) & SDL_WINDOW_MINIMIZED) == 0) {
+        p->minimized = false;
+      }
       if (p->focused && p->window) (void)SDL_FlashWindow(p->window, SDL_FLASH_CANCEL);
 #if defined(__ANDROID__)
       if (!p->focused && p->text_input_on && p->window) {
@@ -205,6 +262,7 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
     case SDL_EVENT_MOUSE_BUTTON_DOWN:
     case SDL_EVENT_MOUSE_BUTTON_UP:
       if (e->button.which == SDL_TOUCH_MOUSEID) return false;
+      if (e->type == SDL_EVENT_MOUSE_BUTTON_DOWN) platform_reconcile_focus(p);
       out->button = translate_button(e->button.button);
       if (out->button == 0) return false;
       out->type = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN ? CCORD_IN_MOUSE_DOWN : CCORD_IN_MOUSE_UP;
@@ -236,11 +294,13 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
       out->mods = translate_mods(SDL_GetModState());
       return out->wheel != 0.0f;
     case SDL_EVENT_KEY_DOWN:
+      platform_reconcile_focus(p);
       out->type = CCORD_IN_KEY_DOWN;
       out->key = translate_key(e->key.key);
       out->mods = translate_mods(e->key.mod);
       return out->key != CCORD_KEY_UNKNOWN;
     case SDL_EVENT_TEXT_INPUT: {
+      platform_reconcile_focus(p);
       size_t n = e->text.text ? strlen(e->text.text) : 0;
       if (n == 0 || n > PLATFORM_PENDING_TEXT_MAX || !ccord_utf8_valid(e->text.text, n)) return false;
       if (n < sizeof out->text) {
@@ -326,6 +386,7 @@ static bool pop_lifecycle_event(ccord_platform *p, ccord_input_event *out)
 {
   if (atomic_exchange(&p->pending_bg_ev, false)) {
     p->focused = false;
+    p->pending_focus_ev = false;
 #if defined(__ANDROID__)
     if (p->text_input_on && p->window) {
       SDL_StopTextInput(p->window);
@@ -390,6 +451,8 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
   }
 
   if (pop_lifecycle_event(p, out)) return true;
+  platform_reconcile_focus(p);
+  if (pop_pending_focus(p, out)) return true;
 #if defined(__ANDROID__)
   {
     float top = 0, right = 0, bottom = 0, left = 0, ime = 0;
@@ -463,11 +526,15 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
   for (;;) {
     SDL_Event e;
     bool got = wait > 0 ? SDL_WaitEventTimeout(&e, (int32_t)wait) : SDL_PollEvent(&e);
-    if (!got) return pop_lifecycle_event(p, out);
+    if (!got) {
+      if (pop_lifecycle_event(p, out)) return true;
+      return pop_pending_focus(p, out);
+    }
     if (translate(p, &e, out)) return true;   // unknown or malformed events are dropped
     // Lifecycle & render-reset events are captured by platform_lifecycle_watch and return false
     // from translate(); wake immediately instead of sleeping out the rest of timeout_ms.
     if (pop_lifecycle_event(p, out)) return true;
+    if (pop_pending_focus(p, out)) return true;
     if (wait > 0) {
       uint64_t now = SDL_GetTicks();
       wait = now < deadline ? (uint32_t)(deadline - now) : 0;

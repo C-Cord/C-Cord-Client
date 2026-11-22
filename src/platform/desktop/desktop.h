@@ -43,6 +43,10 @@ size_t ccord_desktop_notify_map_count(const ccord_desktop *d);
 // Same handlers the bus signals call (test hooks).
 void ccord_desktop_inject_notify_action(ccord_desktop *d, uint32_t id, const char *action_key);
 void ccord_desktop_inject_notify_closed(ccord_desktop *d, uint32_t id);
+void ccord_desktop_inject_activation_token(ccord_desktop *d, uint32_t id, const char *token);
+// Consumes the most recent ActivationToken delivered before ActionInvoked (Wayland xdg-activation token
+// or X11 "_TIME<ts>"). Returns true and writes a NUL-terminated string into `out` when one was pending.
+bool ccord_desktop_take_activation_token(ccord_desktop *d, char *out, size_t cap);
 
 bool ccord_desktop_tray_available(const ccord_desktop *d);
 // unread/mentions are the store totals; count is the number shown on the tray icon (mentions + unread DMs).

@@ -175,19 +175,61 @@ static const desktop_notify_entry *notify_map_find(const ccord_desktop *d, uint3
   return nullptr;
 }
 
+void ccord_desktop_inject_activation_token(ccord_desktop *d, uint32_t id, const char *token)
+{
+  if (!d || id == 0 || !token || !token[0]) return;
+  size_t len = strlen(token);
+  if (len >= sizeof d->pending_activation_token || !ccord_utf8_valid(token, len)) return;
+  d->pending_activation_id = id;
+  memcpy(d->pending_activation_token, token, len + 1u);
+}
+
+bool ccord_desktop_take_activation_token(ccord_desktop *d, char *out, size_t cap)
+{
+  if (!d || !out || cap == 0 || !d->pending_activation_token[0]) return false;
+  size_t len = strlen(d->pending_activation_token);
+  if (len >= cap) {
+    d->pending_activation_id = 0;
+    d->pending_activation_token[0] = '\0';
+    return false;
+  }
+  memcpy(out, d->pending_activation_token, len + 1u);
+  d->pending_activation_id = 0;
+  d->pending_activation_token[0] = '\0';
+  return true;
+}
+
 void ccord_desktop_inject_notify_action(ccord_desktop *d, uint32_t id, const char *action_key)
 {
   if (!d || !action_key || strcmp(action_key, NOTIFY_ACTION_KEY) != 0) return;
   const desktop_notify_entry *e = notify_map_find(d, id);
-  if (!e || !d->notify_fn) return;
+  if (!e || !d->notify_fn) {
+    if (d->pending_activation_id == id) {
+      d->pending_activation_id = 0;
+      d->pending_activation_token[0] = '\0';
+    }
+    return;
+  }
+  if (d->pending_activation_id != 0 && d->pending_activation_id != id) {
+    d->pending_activation_id = 0;
+    d->pending_activation_token[0] = '\0';
+  }
   ccord_notify_target t = e->target;   // the callback may send more notifications and move the table
   d->notify_fn(d->notify_ud, &t);
+  if (d->pending_activation_id == id) {
+    d->pending_activation_id = 0;
+    d->pending_activation_token[0] = '\0';
+  }
 }
 
 void ccord_desktop_inject_notify_closed(ccord_desktop *d, uint32_t id)
 {
   if (!d) return;
   if (id == 0) return;
+  if (d->pending_activation_id == id) {
+    d->pending_activation_id = 0;
+    d->pending_activation_token[0] = '\0';
+  }
   for (size_t i = 0; i < DESKTOP_NOTIFY_MAP_MAX; i++) {
     if (d->notify_map[i].id == id) memset(&d->notify_map[i], 0, sizeof d->notify_map[i]);
   }
@@ -255,6 +297,23 @@ static void notify_closed_signal(GDBusConnection *connection, const gchar *sende
   g_variant_get(parameters, "(uu)", &id, &reason);
   ccord_desktop_inject_notify_closed(d, id);
 }
+
+static void notify_token_signal(GDBusConnection *connection, const gchar *sender_name, const gchar *object_path,
+                                const gchar *interface_name, const gchar *signal_name, GVariant *parameters,
+                                gpointer user_data)
+{
+  (void)connection;
+  (void)sender_name;
+  (void)object_path;
+  (void)interface_name;
+  (void)signal_name;
+  ccord_desktop *d = user_data;
+  if (d->dead || !g_variant_is_of_type(parameters, G_VARIANT_TYPE("(us)"))) return;
+  guint32 id = 0;
+  const gchar *token = nullptr;
+  g_variant_get(parameters, "(u&s)", &id, &token);
+  ccord_desktop_inject_activation_token(d, id, token);
+}
 #endif
 
 
@@ -279,6 +338,9 @@ ccord_desktop *ccord_desktop_create(const char *app_id, bool offline)
   d->notify_closed_sub_id = g_dbus_connection_signal_subscribe(d->bus, NOTIFY_NAME, NOTIFY_NAME, "NotificationClosed",
                                                                NOTIFY_PATH, nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
                                                                notify_closed_signal, d, nullptr);
+  d->notify_token_sub_id = g_dbus_connection_signal_subscribe(d->bus, NOTIFY_NAME, NOTIFY_NAME, "ActivationToken",
+                                                              NOTIFY_PATH, nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
+                                                              notify_token_signal, d, nullptr);
   dbus_sni_export(d);
   d->watcher_watch_id = g_bus_watch_name_on_connection(d->bus, WATCHER_NAME, G_BUS_NAME_WATCHER_FLAGS_NONE,
                                                        dbus_watcher_appeared, dbus_watcher_vanished, d, nullptr);
@@ -306,6 +368,7 @@ void ccord_desktop_destroy(ccord_desktop *d)
     if (d->session_closed_sub_id) g_dbus_connection_signal_unsubscribe(d->bus, d->session_closed_sub_id);
     if (d->notify_action_sub_id) g_dbus_connection_signal_unsubscribe(d->bus, d->notify_action_sub_id);
     if (d->notify_closed_sub_id) g_dbus_connection_signal_unsubscribe(d->bus, d->notify_closed_sub_id);
+    if (d->notify_token_sub_id) g_dbus_connection_signal_unsubscribe(d->bus, d->notify_token_sub_id);
     if (d->sni_reg_id) g_dbus_connection_unregister_object(d->bus, d->sni_reg_id);
     if (d->menu_reg_id) g_dbus_connection_unregister_object(d->bus, d->menu_reg_id);
     // Flush cancelled/aborted call callbacks so their refs are released before the bus goes away.
@@ -361,13 +424,17 @@ bool ccord_desktop_notify_target(ccord_desktop *d, const char *title, const char
       g_variant_builder_add(&actions, "s", "Open");
     }
     g_variant_builder_init(&hints, G_VARIANT_TYPE("a{sv}"));
+    if (d->app_id[0]) {
+      g_variant_builder_add(&hints, "{sv}", "desktop-entry", g_variant_new_string(d->app_id));
+    }
     notify_call *call = ccord_calloc(1, sizeof *call);
     if (call) {
       call->d = dbus_desktop_ref(d);
       call->has_target = target != nullptr;
       if (target) call->target = *target;
+      const char *icon = d->app_id[0] ? d->app_id : "ccord";
       g_dbus_connection_call(d->bus, NOTIFY_NAME, NOTIFY_PATH, NOTIFY_NAME, "Notify",
-                             g_variant_new("(susssasa{sv}i)", d->app_id, (guint32)0, "ccord", title ? title : "",
+                             g_variant_new("(susssasa{sv}i)", d->app_id, (guint32)0, icon, title ? title : "",
                                            body ? body : "", &actions, &hints, (gint32)-1),
                              G_VARIANT_TYPE("(u)"), G_DBUS_CALL_FLAGS_NONE, -1, d->cancellable, notify_done, call);
       sent = true;
