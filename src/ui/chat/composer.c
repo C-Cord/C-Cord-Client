@@ -272,7 +272,8 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
     }
   }
   if (ui->staged_file_count > 0) {
-    size_t cols = ui->staged_file_count <= 2u ? ui->staged_file_count : (ui->staged_file_count <= 6u ? 3u : 5u);
+    size_t max_cols = box.w < 260.0f ? 1u : (box.w < 460.0f ? 2u : (ui->staged_file_count <= 6u ? 3u : 5u));
+    size_t cols = ui->staged_file_count < max_cols ? ui->staged_file_count : max_cols;
     size_t frows = (ui->staged_file_count + cols - 1u) / cols;
     float fbanner_h = 28.0f * (float)frows;
     ccord_rect fbanner = {box.x, box.y, box.w, fbanner_h};
@@ -430,9 +431,10 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
     ui_vm_draw_mic(ui, r, box);   // rightmost; the emoji button(s) sit left of it
   }
   if (editing) {
-    const char *hint = "Editing message - Enter saves, Esc cancels";
+    const char *hint = ui->mobile_layout ? "Editing message (press Back to cancel)"
+                                         : "Editing message - Enter saves, Esc cancels";
     ccord_text_style hs = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 3.0f, COL(text_muted));
-    ccord_text_draw(r, hint, strlen(hint), box.x + 2.0f, box.y + box.h + 5.0f, &hs, box.w);
+    ccord_text_draw_ellipsis(r, hint, strlen(hint), box.x + 2.0f, box.y + box.h + 5.0f, box.w, &hs);
   } else if (ch && ch->rate_limit_per_user > 0) {
     uint32_t rem_s = ui_slowmode_remaining_s(ui, ch);
     char shint[96];

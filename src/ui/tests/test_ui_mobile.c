@@ -114,6 +114,19 @@ static void step_frames(int n, uint64_t dt_ms)
   }
 }
 
+static void save_mobile_screenshot(const char *filename)
+{
+  const char *dir = getenv("CCORD_MOBILE_SCREENSHOT_DIR");
+  if (!dir || !dir[0]) return;
+  char path[512];
+  snprintf(path, sizeof path, "%s/%s", dir, filename);
+  ccord_error err = {0};
+  ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+  ccord_ui_draw(F.ui, F.renderer);
+  (void)ccord_render_screenshot(F.renderer, path, &err);
+  ccord_render_end(F.renderer);
+}
+
 static void touch_ev(ccord_input_type type, int64_t finger, float x, float y)
 {
   ccord_input_event ev = {.type = type, .finger_id = finger, .x = x, .y = y};
@@ -772,10 +785,26 @@ static void test_mobile_drawer_occlusion(void)
   CT_CHECK(F.ui->dm_header_plus_rect.w == 0.0f);
   touch_tap(old_plus.x + old_plus.w * 0.5f, old_plus.y + old_plus.h * 0.5f);
   CT_CHECK(F.ui->modal_kind != UI_MODAL_NEW_DM);
+  if (F.ui->modal_kind != UI_MODAL_NONE) {
+    F.ui->modal_kind = UI_MODAL_NONE;
+    step_frames(2, 25);
+  }
 
   // 8. A Server Tag inside the open mobile right drawer (1:1 DM profile panel) remains clickable,
   //    and Back closes the Server Tag popover without dismissing the right drawer.
   size_t ndm = ccord_store_channel_count(F.store, CCORD_DM_GUILD_ID);
+  if (ndm == 0) {
+    size_t nrel = ccord_store_relationship_count(F.store);
+    for (size_t i = 0; i < nrel; i++) {
+      const ccord_relationship *rel = ccord_store_relationship_at(F.store, i);
+      if (rel && rel->kind == CCORD_RELATIONSHIP_FRIEND) {
+        CT_CHECK(ccord_session_open_dm(F.session, rel->user_id, &err) == CCORD_OK);
+        step_frames(4, 25);
+        break;
+      }
+    }
+    ndm = ccord_store_channel_count(F.store, CCORD_DM_GUILD_ID);
+  }
   ccord_id dm_ch_id = CCORD_ID_NONE;
   ccord_id dm_uid = CCORD_ID_NONE;
   for (size_t i = 0; i < ndm; i++) {
@@ -924,6 +953,168 @@ static void test_mobile_anim_pacing(void)
   CT_CHECK(ccord_ui_update(F.ui, F.now + wait));
 }
 
+static bool rect_in_bounds(ccord_rect r, float x0, float y0, float x1, float y1)
+{
+  return r.w > 0.0f && r.h > 0.0f && r.x >= x0 - 0.5f && r.y >= y0 - 0.5f &&
+         r.x + r.w <= x1 + 0.5f && r.y + r.h <= y1 + 0.5f;
+}
+
+static bool rects_disjoint(ccord_rect a, ccord_rect b)
+{
+  return (a.x + a.w <= b.x + 0.5f) || (b.x + b.w <= a.x + 0.5f) ||
+         (a.y + a.h <= b.y + 0.5f) || (b.y + b.h <= a.y + 0.5f);
+}
+
+static void test_mobile_header_search_friends_dm(void)
+{
+  ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+
+  ccord_error err;
+  const ccord_guild *g0 = ccord_store_guild_at(F.store, 0);
+  CT_CHECK(g0 != nullptr);
+  if (g0) {
+    F.ui->dm_friends_view = false;
+    F.ui->dm_requests_view = false;
+    CT_CHECK(ccord_session_select_guild(F.session, g0->id, &err) == CCORD_OK);
+  }
+  step_frames(6, 25);
+
+  // Wave 1: Inbox & Saved Messages header icons stay reachable and non-overlapping at 360dp.
+  ccord_rect inbox_r = ui_inbox_rect(F.ui);
+  ccord_rect saved_r = ui_saved_messages_rect(F.ui);
+  ccord_rect pins_r = ui_pin_rect(F.ui);
+  ccord_rect search_r = ui_search_rect(F.ui);
+  ccord_rect members_r = ui_members_btn_rect(F.ui);
+  CT_CHECK(rect_in_bounds(inbox_r, 0.0f, 44.0f, 360.0f, 120.0f));
+  CT_CHECK(rect_in_bounds(saved_r, 0.0f, 44.0f, 360.0f, 120.0f));
+  CT_CHECK(rects_disjoint(inbox_r, saved_r));
+  CT_CHECK(rects_disjoint(saved_r, pins_r));
+  CT_CHECK(rects_disjoint(pins_r, search_r));
+  CT_CHECK(rects_disjoint(search_r, members_r));
+
+  // Wave 1: Tapping Search on mobile opens the right drawer automatically; Back closes both.
+  touch_tap(search_r.x + search_r.w * 0.5f, search_r.y + search_r.h * 0.5f);
+  step_frames(10, 25);
+  CT_CHECK(F.ui->search_open);
+  CT_CHECK(ccord_ui_right_drawer_open(F.ui));
+  // Dismiss keyboard if focused, then Back closes search + drawer.
+  if (F.ui->touch_text_focused) CT_CHECK(ccord_ui_handle_back(F.ui));
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(10, 25);
+  CT_CHECK(!F.ui->search_open);
+  CT_CHECK(!ccord_ui_right_drawer_open(F.ui));
+
+  // Wave 2: Friends 4-tab sub-bar + Add Friend button fit inside 360dp with no overlap.
+  CT_CHECK(ccord_session_select_guild(F.session, CCORD_DM_GUILD_ID, &err) == CCORD_OK);
+  F.ui->dm_friends_view = true;
+  F.ui->dm_requests_view = false;
+  step_frames(6, 25);
+  save_mobile_screenshot("mobile_friends_360.png");
+  for (int i = 0; i < 4; i++) {
+    CT_CHECK(rect_in_bounds(F.ui->dm_friends_tab_rects[i], 0.0f, 44.0f, 360.0f, 220.0f));
+    if (i > 0) CT_CHECK(rects_disjoint(F.ui->dm_friends_tab_rects[i - 1], F.ui->dm_friends_tab_rects[i]));
+  }
+  CT_CHECK(rect_in_bounds(F.ui->add_friend_btn_rect, 0.0f, 44.0f, 360.0f, 220.0f));
+  CT_CHECK(rects_disjoint(F.ui->dm_friends_tab_rects[3], F.ui->add_friend_btn_rect));
+
+  // Tapping Add Friend opens UI_MODAL_ADD_FRIEND; Back closes it.
+  touch_tap(F.ui->add_friend_btn_rect.x + F.ui->add_friend_btn_rect.w * 0.5f,
+            F.ui->add_friend_btn_rect.y + F.ui->add_friend_btn_rect.h * 0.5f);
+  step_frames(4, 25);
+  CT_CHECK(F.ui->modal_kind == UI_MODAL_ADD_FRIEND);
+  if (F.ui->touch_text_focused) CT_CHECK(ccord_ui_handle_back(F.ui));
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+  CT_CHECK(F.ui->modal_kind == UI_MODAL_NONE);
+
+  // Wave 2: Message Requests 2-tab sub-bar fits inside 360dp with no overlap.
+  F.ui->dm_friends_view = false;
+  F.ui->dm_requests_view = true;
+  step_frames(4, 25);
+  CT_CHECK(rect_in_bounds(F.ui->dm_requests_tab_rects[0], 0.0f, 44.0f, 360.0f, 220.0f));
+  CT_CHECK(rect_in_bounds(F.ui->dm_requests_tab_rects[1], 0.0f, 44.0f, 360.0f, 220.0f));
+  CT_CHECK(rects_disjoint(F.ui->dm_requests_tab_rects[0], F.ui->dm_requests_tab_rects[1]));
+  F.ui->dm_requests_view = false;
+}
+
+static void test_mobile_voice_stage_and_go_live(void)
+{
+  ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+
+  ccord_error err;
+  const ccord_guild *g0 = ccord_store_guild_at(F.store, 0);
+  CT_CHECK(g0 != nullptr);
+  if (!g0) return;
+  F.ui->dm_friends_view = false;
+  F.ui->dm_requests_view = false;
+  CT_CHECK(ccord_session_select_guild(F.session, g0->id, &err) == CCORD_OK);
+  step_frames(4, 25);
+
+  ccord_id voice_ch = CCORD_ID_NONE;
+  size_t nc = ccord_store_channel_count(F.store, g0->id);
+  for (size_t i = 0; i < nc; i++) {
+    const ccord_channel *c = ccord_store_channel_at(F.store, g0->id, i);
+    if (c && (c->kind == CCORD_CHANNEL_VOICE || c->kind == CCORD_CHANNEL_STAGE)) {
+      voice_ch = c->id;
+      break;
+    }
+  }
+  CT_CHECK(voice_ch != CCORD_ID_NONE);
+  if (voice_ch == CCORD_ID_NONE) return;
+
+  CT_CHECK(ccord_session_join_voice(F.session, g0->id, voice_ch, &err) == CCORD_OK);
+  F.ui->stage_channel = voice_ch;
+  F.ui->stage_chat_open = false;
+  ui_compute_layout(F.ui);
+  step_frames(6, 25);
+  save_mobile_screenshot("mobile_voice_stage_360.png");
+
+  // Wave 4: Voice Stage "Text Chat" toggles full-screen mobile chat view and shows "< Voice" pill in header.
+  ccord_rect chat_btn = ui_stage_chat_btn(F.ui);
+  CT_CHECK(rect_in_bounds(chat_btn, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+  touch_tap(chat_btn.x + chat_btn.w * 0.5f, chat_btn.y + chat_btn.h * 0.5f);
+  step_frames(4, 25);
+  CT_CHECK(F.ui->stage_chat_open);
+  CT_CHECK(ui_stage_mobile_chat_active(F.ui));
+  ccord_rect back_pill = ui_stage_chat_btn(F.ui);
+  CT_CHECK(rect_in_bounds(back_pill, 0.0f, 44.0f, 360.0f, 120.0f));
+  touch_tap(back_pill.x + back_pill.w * 0.5f, back_pill.y + back_pill.h * 0.5f);
+  step_frames(4, 25);
+  CT_CHECK(!F.ui->stage_chat_open);
+
+  // Wave 4: Go Live modal fits 360dp with non-crushed resolution chips (>= 50dp wide each).
+  F.ui->go_live_open = true;
+  step_frames(6, 25);
+  save_mobile_screenshot("mobile_golive_360.png");
+  ccord_rect gl = ui_go_live_rect(F.ui);
+  CT_CHECK(rect_in_bounds(gl, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+  for (int i = 0; i < 4; i++) {
+    ccord_rect opt = ui_go_live_option_rect(F.ui, 3, i);
+    CT_CHECK(opt.w >= 50.0f);
+    CT_CHECK(rect_in_bounds(opt, gl.x, gl.y, gl.x + gl.w, gl.y + gl.h));
+  }
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+  CT_CHECK(!F.ui->go_live_open);
+
+  (void)ccord_session_leave_voice(F.session, g0->id, &err);
+  F.ui->stage_channel = CCORD_ID_NONE;
+  ui_compute_layout(F.ui);
+  step_frames(4, 25);
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -938,6 +1129,8 @@ int main(void)
   test_mobile_copy_paste_and_autofill_login();
   test_mobile_safe_area_rail_and_background_focus();
   test_mobile_drawer_occlusion();
+  test_mobile_header_search_friends_dm();
+  test_mobile_voice_stage_and_go_live();
   test_mobile_anim_pacing();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");

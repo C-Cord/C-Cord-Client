@@ -1228,14 +1228,32 @@ void ui_draw_voice_bar(ccord_ui *ui, ccord_renderer *r)
 void ui_draw_notice(ccord_ui *ui, ccord_renderer *r)
 {
   if (!ui->notice[0] || ui->settings_open) return;
-  const ccord_layout_rect *p = &ui->layout.user_panel;
-  ccord_rect bar = ui_voice_bar_rect(ui);
-  float base = bar.h > 0.0f ? bar.y : p->y;
   ccord_text_style st = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(text_normal));
-  float wrap = p->w - 16.0f - 20.0f;
-  ccord_vec2 t = ccord_text_measure(r, ui->notice, strlen(ui->notice), &st, wrap);
-  float h = t.y + 20.0f;
-  ccord_rect box = {p->x + 8.0f, base - h - 8.0f, p->w - 16.0f, h};
+  ccord_rect box;
+  float wrap;
+  if (ui->mobile_layout) {
+    float sl = ui->safe_insets.left, sr = ui->safe_insets.right;
+    float sb = fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
+    float uw = fmaxf(ui->win_w - sl - sr, 120.0f);
+    float bw = fminf(uw - 24.0f, 360.0f);
+    wrap = fmaxf(bw - 20.0f, 60.0f);
+    ccord_vec2 t = ccord_text_measure(r, ui->notice, strlen(ui->notice), &st, wrap);
+    float h = t.y + 20.0f;
+    float base = (ui->layout.composer.h > 0.0f && ui->layout.composer.y > 0.0f &&
+                  !ui_server_settings_is_open(ui) && !ui_channel_settings_is_open(ui))
+                   ? fminf(ui->layout.composer.y, ui->win_h - sb)
+                   : (ui->win_h - sb);
+    float by = fmaxf(ui->safe_insets.top + 8.0f, base - h - 10.0f);
+    box = (ccord_rect){sl + (uw - bw) * 0.5f, by, bw, h};
+  } else {
+    const ccord_layout_rect *p = &ui->layout.user_panel;
+    ccord_rect bar = ui_voice_bar_rect(ui);
+    float base = bar.h > 0.0f ? bar.y : p->y;
+    wrap = p->w - 16.0f - 20.0f;
+    ccord_vec2 t = ccord_text_measure(r, ui->notice, strlen(ui->notice), &st, wrap);
+    float h = t.y + 20.0f;
+    box = (ccord_rect){p->x + 8.0f, base - h - 8.0f, p->w - 16.0f, h};
+  }
   float ta, tslide;
   ui_toast_look(ui, &ta, &tslide);
   ccord_push_alpha(r, ta);

@@ -676,11 +676,12 @@ void ui_draw_autocomplete(ccord_ui *ui, ccord_renderer *r)
     return;
   }
   ccord_rect cbox = ui_composer_box(ui);
-  float row_h = 26.0f;
+  float row_h = ui->mobile_layout ? 38.0f : 26.0f;
+  float top_lim = ui->mobile_layout ? (ui->safe_insets.top + 6.0f) : 6.0f;
   float h = (float)ui->nautocomplete * row_h + 12.0f;
   float max_w = ui->autocomplete_trigger == '/' ? 380.0f : 280.0f;
   float w = clampf(cbox.w, 180.0f, max_w);
-  ccord_rect pop = {cbox.x, fmaxf(cbox.y - h - 6.0f, 6.0f), w, h};
+  ccord_rect pop = {cbox.x, fmaxf(cbox.y - h - 6.0f, top_lim), w, h};
   ui->autocomplete_rect = pop;
   uis_popover_frame(ui, r, pop);
   ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_normal));

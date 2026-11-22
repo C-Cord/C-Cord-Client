@@ -6,6 +6,7 @@
 void ui_expr_picker_destroy(ccord_ui *ui);
 void ui_expr_picker_open(ccord_ui *ui, int tab, ccord_id channel_id, ccord_id reaction_msg_id);
 void ui_expr_picker_close(ccord_ui *ui);
+bool ui_expr_wants_text(const ccord_ui *ui);
 void ui_expr_picker_draw(ccord_ui *ui, ccord_renderer *r);
 void ui_expr_draw_composer_buttons(ccord_ui *ui, ccord_renderer *r, ccord_rect box);
 void ui_expr_draw_smiley(ccord_renderer *r, float cx, float cy, float size, ccord_color c);

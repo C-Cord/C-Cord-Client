@@ -895,6 +895,7 @@ bool ccord_ui_handle_back(ccord_ui *ui)
   if (ui->pins_open) { ui->pins_open = false; ui->dirty = true; return true; }
   if (ui->search_open) {
     ui->search_open = false;
+    if (ui->mobile_layout) ui->right_drawer_open = false;
     ui->view_key = 0;
     ui_compute_layout(ui);
     ccord_vlist_invalidate_all(&ui->vlist);
@@ -938,13 +939,19 @@ bool ccord_ui_handle_back(ccord_ui *ui)
     return true;
   }
 
-  // 7. Discovery, edit/reply states, and open drawers.
+  // 7. Discovery, voice message recorder/review, forum composer, voice stage, edit/reply states, and open drawers.
   if (ui->discovery_open) {
     ui->discovery_open = false;
     ui_compute_layout(ui);
     ui->dirty = true;
     return true;
   }
+  if (ui->vm.recording || ui->vm.reviewing) {
+    ui_vm_cancel(ui);
+    ui->dirty = true;
+    return true;
+  }
+  if (ui_forum_handle_back(ui)) return true;
   if (ui->stage_channel != CCORD_ID_NONE) {
     if (ui->stage_chat_open) {
       ui->stage_chat_open = false;

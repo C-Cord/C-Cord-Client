@@ -308,6 +308,7 @@ void uis_tooltip_end(ccord_renderer *r)
 ccord_rect uis_tooltip(ccord_ui *ui, ccord_renderer *r, ccord_rect anchor, const char *text, uis_tip_side side,
                        uint64_t id)
 {
+  if (!ui || ui->touch_mode) return (ccord_rect){0};
   float fs = TH(font_size_small);
   ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, fs, CO(text_header));
   ccord_vec2 t = ccord_text_measure(r, text, strlen(text), &st, 0.0f);

@@ -750,42 +750,61 @@ void ui_stream_set_fullscreen(ccord_ui *ui, bool on)
   ui->dirty = true;
 }
 
+static float header_icon_size(const ccord_ui *ui)
+{
+  return (ui && ui->mobile_layout && ui->win_w < 520.0f) ? 28.0f : 32.0f;
+}
+
+static float header_icon_gap(const ccord_ui *ui)
+{
+  return (ui && ui->mobile_layout && ui->win_w < 520.0f) ? 2.0f : 4.0f;
+}
+
 ccord_rect ui_search_rect(const ccord_ui *ui)
 {
   ccord_rect mb = ui_members_btn_rect(ui);
   const ccord_layout_rect *h = &ui->layout.chat_header;
-  float sz = 32.0f;
-  float right = mb.w > 0.0f ? mb.x - 4.0f : h->x + h->w - 8.0f;
+  float sz = header_icon_size(ui);
+  float gap = header_icon_gap(ui);
+  float right = mb.w > 0.0f ? mb.x - gap : h->x + h->w - 6.0f;
   return (ccord_rect){right - sz, h->y + (h->h - sz) * 0.5f, sz, sz};
 }
 
 ccord_rect ui_pin_rect(const ccord_ui *ui)
 {
   ccord_rect s = ui_search_rect(ui);
-  return (ccord_rect){s.x - 4.0f - 32.0f, s.y, 32.0f, 32.0f};
+  float sz = header_icon_size(ui);
+  float gap = header_icon_gap(ui);
+  return (ccord_rect){s.x - gap - sz, s.y, sz, sz};
 }
 
 ccord_rect ui_inbox_rect(const ccord_ui *ui)
 {
-  if (ui->mobile_layout && ui->win_w < 520.0f) return (ccord_rect){0.0f, 0.0f, 0.0f, 0.0f};
   ccord_rect p = ui_pin_rect(ui);
-  return (ccord_rect){p.x - 4.0f - 32.0f, p.y, 32.0f, 32.0f};
+  float sz = header_icon_size(ui);
+  float gap = header_icon_gap(ui);
+  return (ccord_rect){p.x - gap - sz, p.y, sz, sz};
 }
 
 ccord_rect ui_saved_messages_rect(const ccord_ui *ui)
 {
-  if (ui->mobile_layout && ui->win_w < 520.0f) return (ccord_rect){0.0f, 0.0f, 0.0f, 0.0f};
   ccord_rect i = ui_inbox_rect(ui);
-  return (ccord_rect){i.x - 4.0f - 32.0f, i.y, 32.0f, 32.0f};
+  float sz = header_icon_size(ui);
+  float gap = header_icon_gap(ui);
+  return (ccord_rect){i.x - gap - sz, i.y, sz, sz};
 }
 
 ccord_rect ui_search_popover_rect(const ccord_ui *ui){
   ccord_rect s = ui_search_rect(ui);
   const ccord_layout_rect *h = &ui->layout.chat_header;
-  float w = 280.0f;
+  float sl = ui->mobile_layout ? ui->safe_insets.left : 0.0f;
+  float sr = ui->mobile_layout ? ui->safe_insets.right : 0.0f;
+  float maxw = fmaxf(ui->win_w - sl - sr - 16.0f, 180.0f);
+  float w = fminf(280.0f, maxw);
   float x = s.x + s.w - w;
   if (x < h->x + 8.0f) x = h->x + 8.0f;
-  if (x + w > ui->win_w - 8.0f) x = ui->win_w - w - 8.0f;
+  if (x < sl + 8.0f) x = sl + 8.0f;
+  if (x + w > ui->win_w - sr - 8.0f) x = ui->win_w - sr - w - 8.0f;
   return (ccord_rect){x, h->y + h->h + 6.0f, w, 68.0f};
 }
 
@@ -793,10 +812,15 @@ ccord_rect ui_pins_popover_rect(const ccord_ui *ui)
 {
   ccord_rect p = ui_pin_rect(ui);
   const ccord_layout_rect *h = &ui->layout.chat_header;
-  float w = 320.0f;
+  float sl = ui->mobile_layout ? ui->safe_insets.left : 0.0f;
+  float sr = ui->mobile_layout ? ui->safe_insets.right : 0.0f;
+  float sb = ui->mobile_layout ? fmaxf(ui->safe_insets.bottom, ui->keyboard_inset) : 0.0f;
+  float maxw = fmaxf(ui->win_w - sl - sr - 16.0f, 200.0f);
+  float w = fminf(320.0f, maxw);
   float x = p.x + p.w - w;
   if (x < h->x + 8.0f) x = h->x + 8.0f;
-  if (x + w > ui->win_w - 8.0f) x = ui->win_w - w - 8.0f;
+  if (x < sl + 8.0f) x = sl + 8.0f;
+  if (x + w > ui->win_w - sr - 8.0f) x = ui->win_w - sr - w - 8.0f;
   size_t n = 0;
   ccord_id ch = ccord_store_selected_channel(ui->d.store);
   if (ccord_store_channel_pins_loaded(ui->d.store, ch)) {
@@ -811,7 +835,10 @@ ccord_rect ui_pins_popover_rect(const ccord_ui *ui)
   size_t vis = n > UI_PIN_POPOVER_MAX ? UI_PIN_POPOVER_MAX : n;
   float extra_h = (vis > 0 && ccord_store_channel_pins_has_more(ui->d.store, ch)) ? 34.0f : 0.0f;
   float hgt = 34.0f + (vis ? (float)vis * 44.0f : 38.0f) + 10.0f + extra_h;
-  return (ccord_rect){x, h->y + h->h + 6.0f, w, hgt};
+  float y = h->y + h->h + 6.0f;
+  float maxh = ui->win_h - sb - y - 8.0f;
+  if (maxh >= 96.0f && hgt > maxh) hgt = maxh;
+  return (ccord_rect){x, y, w, hgt};
 }
 
 ccord_rect ui_pins_item_rect(const ccord_ui *ui, size_t index)
@@ -1158,8 +1185,9 @@ ccord_rect ui_members_btn_rect(const ccord_ui *ui)
 {
   if (!ui->members_available) return (ccord_rect){0.0f, 0.0f, 0.0f, 0.0f};
   const ccord_layout_rect *h = &ui->layout.chat_header;
-  float sz = 32.0f;
-  return (ccord_rect){h->x + h->w - 8.0f - sz, h->y + (h->h - sz) * 0.5f, sz, sz};
+  float sz = header_icon_size(ui);
+  float edge = (ui->mobile_layout && ui->win_w < 520.0f) ? 6.0f : 8.0f;
+  return (ccord_rect){h->x + h->w - edge - sz, h->y + (h->h - sz) * 0.5f, sz, sz};
 }
 
 ccord_rect ui_drawer_btn_rect(const ccord_ui *ui)

@@ -250,10 +250,12 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
       case CCORD_KEY_A: if (!ctrl) return false; ccord_text_edit_select_all(&ui->search_edit); break;
       case CCORD_KEY_RETURN:
         uc_search_send(ui, true);
+        if (ui->mobile_layout && ui->search_edit.len >= 2) ui->right_drawer_open = true;
         return true;
       default: return false;
     }
     uc_search_schedule(ui);
+    if (ui->mobile_layout) ui->right_drawer_open = (ui->search_edit.len >= 2);
     ui->view_key = 0;
     ui_compute_layout(ui);
     ui_sync_messages(ui);
@@ -1197,6 +1199,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       if (ui->search_open) {
         if (ccord_text_edit_insert(&ui->search_edit, ev->text, n, &err) != CCORD_OK) ui_notice(ui, "%s", err.message);
         uc_search_schedule(ui);
+        if (ui->mobile_layout && ui->search_edit.len >= 2) ui->right_drawer_open = true;
         ui->view_key = 0;
         ui_compute_layout(ui);
         ui_sync_messages(ui);

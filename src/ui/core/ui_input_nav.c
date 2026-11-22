@@ -467,6 +467,7 @@ bool ui_search_panel_handle_click(ccord_ui *ui, float mx, float my)
       ccord_id cid = hit->channel_id;
       ccord_id mid = hit->message_id;
       ui->search_open = false;
+      if (ui->mobile_layout) ui->right_drawer_open = false;
       ui->view_key = 0;
       ui_compute_layout(ui);
       ccord_vlist_invalidate_all(&ui->vlist);
@@ -507,6 +508,7 @@ bool ui_search_handle(ccord_ui *ui, const ccord_input_event *ev)
   if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 1) {
     if (ui_in_rect(ev->x, ev->y, ui_search_rect(ui))) {
       ui->search_open = false;
+      if (ui->mobile_layout) ui->right_drawer_open = false;
       ui->view_key = 0;
       ui_compute_layout(ui);
       ccord_vlist_invalidate_all(&ui->vlist);
@@ -516,6 +518,7 @@ bool ui_search_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     if (ui_in_rect(ev->x, ev->y, ui_pin_rect(ui))) {
       ui->search_open = false;
+      if (ui->mobile_layout) ui->right_drawer_open = false;
       ui->pins_open = true;
       uc_request_pins(ui);
       ui->view_key = 0;
@@ -527,6 +530,7 @@ bool ui_search_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     if (ui_in_rect(ev->x, ev->y, ui_inbox_rect(ui))) {
       ui->search_open = false;
+      if (ui->mobile_layout) ui->right_drawer_open = false;
       ui->inbox_open = true;
       ui->inbox_scroll = 0.0f;
       ui->view_key = 0;
@@ -541,6 +545,7 @@ bool ui_search_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     if (!ui_in_rect(ev->x, ev->y, ui_search_popover_rect(ui))) {
       ui->search_open = false;
+      if (ui->mobile_layout) ui->right_drawer_open = false;
       ui->view_key = 0;
       ui_compute_layout(ui);
       ccord_vlist_invalidate_all(&ui->vlist);
@@ -939,6 +944,11 @@ bool ui_inbox_handle(ccord_ui *ui, const ccord_input_event *ev)
     if (ui_in_rect(ev->x, ev->y, ui_search_rect(ui))) {
       ui->inbox_open = false;
       ui->search_open = true;
+      if (ui->mobile_layout) {
+        ui->right_drawer_open = true;
+        ui->left_drawer_open = false;
+        ui_compute_layout(ui);
+      }
       ccord_text_edit_clear(&ui->search_edit);
       uc_search_reset(ui);
       ui->view_key = 0;

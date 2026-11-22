@@ -643,9 +643,9 @@ static void draw_gif_card(ccord_ui *ui, ccord_renderer *r, ui_expr_body *b, cons
     ccord_text_draw_ellipsis(r, title_buf, strlen(title_buf), cap_r.x + 7.0f,
                              cap_r.y + (cap_r.h - ui_line_h(ui, ts.size)) * 0.5f, cap_r.w - 14.0f, &ts);
   }
-  // Favorite star button in top-right corner: always shown on a favorite, eased in on hover otherwise.
+  // Favorite star button in top-right corner: always shown on a favorite (and subtly on touch), eased in on hover otherwise.
   bool is_fav = ccord_store_is_favorite_gif(ui->d.store, g->url);
-  float star_a = is_fav ? 1.0f : gh_cap;
+  float star_a = is_fav ? 1.0f : (ui->touch_mode ? 0.72f : gh_cap);
   if (star_a > 0.004f && hit) {
     ccord_draw_rrect(r, hit->star_rect, 4.0f, ui_alpha((ccord_color){0x11, 0x12, 0x14, 210}, star_a));
     ccord_color scol = is_fav ? (ccord_color){0xf0, 0xb2, 0x32, 255} : (ccord_color){220, 222, 228, 255};
@@ -920,10 +920,10 @@ static void draw_sticker_cell(ccord_ui *ui, ccord_renderer *r, ui_expr_body *b, 
   }
   ui_expr_draw_sticker_art(ui, r, st->id, st->name, strlen(st->name), (uint8_t)st->format, cell, false);
 
-  // The star eases in and out on the pointer (its own fade, so the plate and the star can be told apart).
+  // The star eases in and out on the pointer (always subtly visible on touch so users can favorite without hover).
   bool is_fav = ccord_store_is_favorite_sticker(ui->d.store, st->id);
   float star_h = ui_fade(ui, "sstar", inst, hov && hit);
-  float star_a = is_fav ? 1.0f : star_h;
+  float star_a = is_fav ? 1.0f : (ui->touch_mode ? 0.72f : star_h);
   if (star_a > 0.004f && hit) {
     ccord_draw_rrect(r, hit->star_rect, 4.0f, ui_alpha((ccord_color){0x11, 0x12, 0x14, 210}, star_a));
     ccord_color scol = is_fav ? (ccord_color){0xf0, 0xb2, 0x32, 255} : (ccord_color){220, 222, 228, 255};
@@ -941,6 +941,8 @@ void ep_draw_stickers_tab(ccord_ui *ui, ccord_renderer *r, struct ui_expr_picker
   ccord_rect rail_rect = {body.x, body.y, rail_w, body.h - preview_h};
   ccord_rect grid_area = {body.x + rail_w, body.y, body.w - rail_w, body.h - preview_h};
   ccord_rect prev_rect = {body.x, body.y + body.h - preview_h, body.w, preview_h};
+  b->rail_rect = rail_rect;
+  b->rail_view = rail_rect;
   b->hits_clip = grid_area;
 
   ccord_draw_rect(r, rail_rect, COL(bg_tertiary));
@@ -961,7 +963,7 @@ void ep_draw_stickers_tab(ccord_ui *ui, ccord_renderer *r, struct ui_expr_picker
   float gw = grid_area.w - pad * 2.0f;
 
   b->nrail = 0;
-  float ry = rail_rect.y + 8.0f;
+  float ry = rail_rect.y + 8.0f - ep->sticker_rail_scroll_y;
 
   ccord_push_clip(r, grid_area);
 
@@ -1147,6 +1149,8 @@ void ep_draw_stickers_tab(ccord_ui *ui, ccord_renderer *r, struct ui_expr_picker
   }
 
   b->content_h[EXPR_TAB_STICKERS] = ep_maxf((gy + scroll) - grid_area.y + 12.0f, grid_area.h);
+  b->rail_content_h = ep_maxf((ry + ep->sticker_rail_scroll_y) - rail_rect.y + 8.0f, 0.0f);
+  ep_expr_rail_set_scroll(ep, ep->sticker_rail_scroll_y);
   ccord_pop_clip(r);
 
   // Left rail icons for Stickers tab (clipped: the shared rail cap allows more items than fit)

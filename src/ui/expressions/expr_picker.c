@@ -20,12 +20,13 @@ void ep_expr_rail_set_scroll(struct ui_expr_picker *ep, float scroll)
 {
   if (!ep || !ep->body) return;
   ui_expr_body *b = ep->body;
+  float *cur = (ep->tab == EXPR_TAB_STICKERS) ? &ep->sticker_rail_scroll_y : &ep->rail_scroll_y;
   float max_s = ep_maxf(b->rail_content_h - b->rail_view.h, 0.0f);
   scroll = clampf(scroll, 0.0f, max_s);
-  float delta = ep->rail_scroll_y - scroll;
+  float delta = *cur - scroll;
   if (delta == 0.0f) return;
   for (size_t i = 0; i < b->nrail; i++) b->rail[i].rect.y += delta;
-  ep->rail_scroll_y = scroll;
+  *cur = scroll;
 }
 
 static struct ui_expr_picker *ensure_expr(ccord_ui *ui)
@@ -245,7 +246,7 @@ bool ui_expr_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced)
     if (!open) {
       ccord_scroller_cancel(&b->rail_glide);
     } else {
-      float off = ep->rail_scroll_y;   // the rail's rects follow its offset (ep_expr_rail_set_scroll)
+      float off = (ep->tab == EXPR_TAB_STICKERS) ? ep->sticker_rail_scroll_y : ep->rail_scroll_y;
       moving = ccord_scroller_tick(&b->rail_glide, &off, fdt_ms, CCORD_SCROLL_UNBOUNDED, reduced) || moving;
       ep_expr_rail_set_scroll(ep, off);
       ui->dirty = true;
@@ -265,12 +266,19 @@ void ui_expr_scroll_debug(const ccord_ui *ui, float *scroll, float *room)
   if (room) *room = b ? ep_maxf(b->content_h[t] - (ui->emoji_picker_rect.h - 125.0f), 0.0f) : 0.0f;
 }
 
+bool ui_expr_wants_text(const ccord_ui *ui)
+{
+  if (!ui || !ui->emoji_picker_open || !ui->expr || !ui->expr->body) return false;
+  return ui->expr->body->search_focused;
+}
+
 void ui_expr_picker_close(ccord_ui *ui)
 {
   if (!ui) return;
   ui->emoji_picker_open = false;
   ui->emoji_picker_msg_id = CCORD_ID_NONE;
   ui->emoji_picker_for_status = false;
+  if (ui->touch_mode) ui->touch_text_focused = false;
   // Defer freeing ep->body until the close fade-out finishes so draw_overlay_popup doesn't re-allocate it
   // every animation frame; free immediately under reduced motion or when no overlay presence is active.
   if (ui->expr && (ui->anim.reduced_motion || ui->dbg_ovl_t[UI_OVL_PICKER] <= UI_PRESENCE_EPS)) {
@@ -872,9 +880,10 @@ bool ui_expr_handle_event(ccord_ui *ui, const ccord_input_event *ev)
     float step = 42.0f * 2.5f;
     float dy = -ev->wheel * step;
     bool direct = ui_wheel_direct(ui, ev);
-    if (ep->tab == EXPR_TAB_EMOJI && b->rail_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, b->rail_rect)) {
-      // Wheel over the 40px rail scrolls only the rail, never the emoji grid. The rail's rects move with its offset.
-      float off = ep->rail_scroll_y;
+    if ((ep->tab == EXPR_TAB_EMOJI || ep->tab == EXPR_TAB_STICKERS) &&
+        b->rail_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, b->rail_rect)) {
+      // Wheel over the 40px rail scrolls only the rail, never the grid. The rail's rects move with its offset.
+      float off = (ep->tab == EXPR_TAB_STICKERS) ? ep->sticker_rail_scroll_y : ep->rail_scroll_y;
       ccord_scroller_scroll(&b->rail_glide, &off, dy, ep_maxf(b->rail_content_h - b->rail_view.h, 0.0f), direct);
       ep_expr_rail_set_scroll(ep, off);
     } else {
@@ -941,6 +950,7 @@ bool ui_expr_handle_event(ccord_ui *ui, const ccord_input_event *ev)
       }
       if (ui_in_rect(ev->x, ev->y, b->search_rect)) {
         b->search_focused = true;
+        if (ui->touch_mode) ui->touch_text_focused = true;
         ui->dirty = true;
         return true;
       }

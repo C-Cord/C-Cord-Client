@@ -142,6 +142,11 @@ static bool ui_hook_action(void *ud, const char *action)
     ui->search_open = true;
     ui->pins_open = false;
     ui->inbox_open = false;
+    if (ui->mobile_layout) {
+      ui->right_drawer_open = true;
+      ui->left_drawer_open = false;
+      ui_compute_layout(ui);
+    }
     ccord_text_edit_clear(&ui->search_edit);
     ui->view_key = 0;
     ui_sync_messages(ui);
@@ -818,13 +823,15 @@ static void sync_text_input(ccord_ui *ui)
     kind = 4;
   } else if (!ui->lightbox_open && !ui->select_open && !ui->menu.open && !ui->go_live_open &&
              !ui->pins_open && !ui->reactions_open && !ui->inbox_open && !ui->shortcuts_open) {
-    if (ui->search_open || ui->discovery_open) kind = 4;
+    if (ui->search_open || ui->discovery_open || ui->emoji_picker_open) kind = 4;
     if (ui->touch_mode) {
       // On touchscreens, only bring up the soft keyboard when a text field was explicitly focused
-      // (or search/discovery is active) and no navigation drawer is open over chat.
+      // (or Search is open) and no navigation drawer covers chat.
       bool drawer_open = ui->mobile_layout && (ui->left_drawer_open || ui->right_drawer_open);
-      want = !drawer_open && (ui->search_open || ui->discovery_open ||
-                              (ui->touch_text_focused && (ui_forum_is_active(ui) || uc_composer_accepts_text(ui))));
+      want = ui->search_open ||
+             (ui->emoji_picker_open && ui_expr_wants_text(ui) && ui->touch_text_focused) ||
+             (!drawer_open && ui->touch_text_focused &&
+              (ui->discovery_open || ui_forum_is_active(ui) || uc_composer_accepts_text(ui)));
     } else {
       want = ui->emoji_picker_open || ui->discovery_open || ui->search_open ||
              ui_forum_is_active(ui) || uc_composer_accepts_text(ui);

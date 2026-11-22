@@ -11,7 +11,8 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     return ui_expr_handle_event(ui, ev);
   }
   if (ui->autocomplete_open && ui_in_rect(ev->x, ev->y, ui->autocomplete_rect)) {
-    float row = (ev->y - (ui->autocomplete_rect.y + 6.0f)) / 26.0f;   // 26 px rows, 6 px top padding
+    float row_h = ui->mobile_layout ? 38.0f : 26.0f;
+    float row = (ev->y - (ui->autocomplete_rect.y + 6.0f)) / row_h;
     if (row >= 0.0f && row < (float)ui->nautocomplete && ui_accept_autocomplete(ui, (size_t)row)) {
       uc_reset_caret_blink(ui);
     }
@@ -959,6 +960,11 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     ui->inbox_open = false;
     ui->saved_popover_open = false;
     ui->go_live_open = false;
+    if (ui->mobile_layout) {
+      ui->right_drawer_open = ui->search_open;
+      if (ui->search_open) ui->left_drawer_open = false;
+      ui_compute_layout(ui);
+    }
     ccord_text_edit_clear(&ui->search_edit);
     uc_search_reset(ui);
     ui->view_key = 0;

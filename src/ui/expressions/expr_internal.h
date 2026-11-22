@@ -170,6 +170,7 @@ struct ui_expr_picker {
   ccord_rect composer_btn_rects[3]; // 0=GIF, 1=Sticker, 2=Emoji
   float scroll_y[4];                // grid scroll per tab (persists across close/open)
   float rail_scroll_y;              // emoji rail scroll (persists across close/open)
+  float sticker_rail_scroll_y;      // sticker rail scroll (persists across close/open)
   ui_expr_body *body;               // heavy picker body (~215 KiB), allocated only while open
 };
 

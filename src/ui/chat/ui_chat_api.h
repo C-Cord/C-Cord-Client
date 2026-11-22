@@ -147,6 +147,7 @@ void ui_forum_destroy(ccord_ui *ui);
 bool ui_forum_is_active(const ccord_ui *ui);
 void ui_draw_forum(ccord_ui *ui, ccord_renderer *r);
 bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev);
+bool ui_forum_handle_back(ccord_ui *ui);
 bool ui_forum_handle_header_click(ccord_ui *ui, float mx, float my);
 void ui_forum_set_breadcrumb_rect(ccord_ui *ui, ccord_rect r, ccord_id forum_id);
 ccord_rect ui_forum_breadcrumb_rect(const ccord_ui *ui);

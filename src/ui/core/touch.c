@@ -31,7 +31,7 @@ static bool overlays_block_drawers(const ccord_ui *ui)
 {
   return ui->settings_open || ui_server_settings_is_open(ui) || ui_channel_settings_is_open(ui) ||
          ui->go_live_open || ui->lightbox_open || ui->stream_fullscreen || ui->shortcuts_open ||
-         ui->quick_switcher_open || ui->menu.open || ui->emoji_picker_open ||
+         ui->quick_switcher_open || ui->menu.open || ui->emoji_picker_open || ui->search_open ||
          ui->modal_kind != UI_MODAL_NONE || ui->select_open || ui_is_login_screen(ui) ||
          ui_is_loading_screen(ui) || ui->report_open || ui->schedule_open || ui->poll_open ||
          ui->plus_menu_open || ui->pins_open || ui->inbox_open || ui->saved_popover_open ||

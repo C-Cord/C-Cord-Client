@@ -337,6 +337,18 @@ static bool post_matches_filter(const ccord_ui *ui, const struct ui_forum_state 
   return true;
 }
 
+static float measure_tag_pill(ccord_ui *ui, ccord_renderer *r, const ccord_forum_tag *tag)
+{
+  char label[96];
+  if (tag->emoji_name[0] != '\0') {
+    snprintf(label, sizeof(label), "%s %s", tag->emoji_name, tag->name);
+  } else {
+    snprintf(label, sizeof(label), "%s", tag->name);
+  }
+  ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_caption, COL(text_header));
+  return ccord_text_measure(r, label, strlen(label), &st, 0.0f).x + 2.0f * UIS_SP_2;
+}
+
 static float draw_tag_pill(ccord_ui *ui, ccord_renderer *r, float x, float y, float h,
                            const ccord_forum_tag *tag, bool selected, bool hovered)
 {
@@ -421,14 +433,16 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
   }
 
   // ---- Row 1: Search bar + New Post button ----
-  float btn_w = 108.0f;
+  bool compact_forum = ui->mobile_layout || avail_w < 460.0f;
+  const char *new_lbl = f->composer_open ? "Close" : (compact_forum ? "+ Post" : "+ New Post");
+  float btn_w = compact_forum ? 78.0f : 108.0f;
   float row1_h = UIS_H_INPUT;
-  ccord_rect search_r = {area.x + pad_x, cur_y, avail_w - btn_w - 10.0f, row1_h};
+  ccord_rect search_r = {area.x + pad_x, cur_y, fmaxf(avail_w - btn_w - 10.0f, 80.0f), row1_h};
   ccord_rect new_btn_r = {search_r.x + search_r.w + 10.0f, cur_y, btn_w, row1_h};
   f->search_rect = search_r;
   f->new_post_btn_rect = new_btn_r;
 
-  bool search_focus = (!f->composer_open && f->active_field == 0);
+  bool search_focus = (!f->composer_open && f->active_field == 0 && (!ui->touch_mode || ui->touch_text_focused));
   uis_input_padded(ui, r, search_r, 32.0f, UIS_SP_3, &f->search_edit, "Search or create a post...",
                    (uis_state){.focused = search_focus}, false, "fsearch", 0);
   ui_icon_search(r, search_r.x + 16.0f, search_r.y + row1_h * 0.5f, 14.0f, COL(text_muted));
@@ -437,14 +451,15 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
   new_btn_r.y += (row1_h - UIS_H_BTN) * 0.5f;
   new_btn_r.h = UIS_H_BTN;
   f->new_post_btn_rect = new_btn_r;
-  uis_button(ui, r, new_btn_r, f->composer_open ? "Close" : "+ New Post",
+  uis_button(ui, r, new_btn_r, new_lbl,
              f->composer_open ? UIS_BTN_SECONDARY : UIS_BTN_PRIMARY, UIS_BTN_S_MD, (uis_state){.hover = new_hover}, "fnew", 0);
 
   cur_y += row1_h + 10.0f;
 
-  // ---- Row 2: Sort chips + Filter tag pills ----
+  // ---- Row 2: Sort chips + Filter tag pills (wraps cleanly on narrow mobile viewports) ----
   float row2_h = 24.0f;
   float rx = area.x + pad_x;
+  float row_right = area.x + pad_x + avail_w;
   float fsz_sm = M(font_size_small);
   float lh_sm = ui_line_h(ui, fsz_sm);
 
@@ -458,29 +473,46 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
   rx += s1_r.w + 6.0f;
 
   const char *s2 = "Creation Date";
-  ccord_rect s2_r = {rx, cur_y, ccord_text_measure(r, s2, strlen(s2), &chip_st, 0.0f).x + 2.0f * UIS_SP_2, row2_h};
+  float s2_w = ccord_text_measure(r, s2, strlen(s2), &chip_st, 0.0f).x + 2.0f * UIS_SP_2;
+  if (rx + s2_w > row_right && rx > area.x + pad_x) {
+    rx = area.x + pad_x;
+    cur_y += row2_h + 6.0f;
+  }
+  ccord_rect s2_r = {rx, cur_y, s2_w, row2_h};
   f->sort_creation_rect = s2_r;
   uis_chip(ui, r, s2_r, s2,
            (uis_state){.hover = ui_in_rect(f->mouse_x, f->mouse_y, s2_r), .selected = f->sort == CCORD_FORUM_SORT_CREATION},
            "fsort", 1);
   rx += s2_r.w + 10.0f;
 
-  // Vertical divider between sort chips and filter tags
-  ccord_draw_rect(r, (ccord_rect){rx, cur_y + 4.0f, 1.0f, row2_h - 8.0f}, COL(divider));
-  rx += 10.0f;
+  if (compact_forum) {
+    // On narrow mobile screens put tag filters on their own wrapping row(s) so all tags stay reachable.
+    if (meta && meta->tag_count > 0) {
+      rx = area.x + pad_x;
+      cur_y += row2_h + 6.0f;
+    }
+  } else {
+    // Vertical divider between sort chips and filter tags
+    ccord_draw_rect(r, (ccord_rect){rx, cur_y + 4.0f, 1.0f, row2_h - 8.0f}, COL(divider));
+    rx += 10.0f;
+  }
 
   if (meta) {
     for (uint8_t i = 0; i < meta->tag_count && f->filter_tag_hit_count < UI_FORUM_MAX_TAG_HITS; i++) {
       const ccord_forum_tag *tag = &meta->tags[i];
       bool sel = tag_list_has(f->filter_tags, f->filter_tag_count, tag->id);
-      float pw = draw_tag_pill(ui, r, rx, cur_y, row2_h, tag, sel, false);
+      float pw = measure_tag_pill(ui, r, tag);
+      if (rx + pw > row_right && rx > area.x + pad_x) {
+        rx = area.x + pad_x;
+        cur_y += row2_h + 6.0f;
+      }
+      pw = draw_tag_pill(ui, r, rx, cur_y, row2_h, tag, sel, false);
       ccord_rect pr = {rx, cur_y, pw, row2_h};
       if (ui_in_rect(f->mouse_x, f->mouse_y, pr) && !sel) {
         (void)draw_tag_pill(ui, r, rx, cur_y, row2_h, tag, sel, true);
       }
       f->filter_tag_hits[f->filter_tag_hit_count++] = (ui_forum_tag_hit){.tag_id = tag->id, .rect = pr};
       rx += pw + 6.0f;
-      if (rx > area.x + area.w - 80.0f) break;
     }
   }
 
@@ -488,7 +520,12 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
     const char *clr = "Clear";
     ccord_text_style clr_st = ui_style(ui, CCORD_FONT_BOLD, fsz_sm, COL(brand));
     ccord_vec2 cm = ccord_text_measure(r, clr, strlen(clr), &clr_st, 0.0f);
-    ccord_rect cr = {rx + 2.0f, cur_y, cm.x + 12.0f, row2_h};
+    float clrw = cm.x + 12.0f;
+    if (rx + 2.0f + clrw > row_right && rx > area.x + pad_x) {
+      rx = area.x + pad_x;
+      cur_y += row2_h + 6.0f;
+    }
+    ccord_rect cr = {rx + 2.0f, cur_y, clrw, row2_h};
     f->clear_filter_rect = cr;
     ccord_text_draw(r, clr, strlen(clr), cr.x + 6.0f, cr.y + (row2_h - lh_sm) * 0.5f, &clr_st, 0.0f);
   }
@@ -499,7 +536,25 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
 
   // ---- Expandable New Post Composer Card ----
   if (f->composer_open) {
-    float comp_h = 160.0f;
+    float cw = avail_w - 24.0f;
+    // Measure wrapped tag rows in narrow mode before drawing the card frame so card height fits cleanly.
+    float tag_extra_h = 0.0f;
+    if (compact_forum) {
+      float tx_m = 38.0f;
+      int rows = 1;
+      if (meta && meta->tag_count > 0) {
+        for (uint8_t i = 0; i < meta->tag_count && i < UI_FORUM_MAX_TAG_HITS; i++) {
+          float pw = measure_tag_pill(ui, r, &meta->tags[i]);
+          if (tx_m + pw > cw && tx_m > 0.0f) {
+            tx_m = 0.0f;
+            rows++;
+          }
+          tx_m += pw + 6.0f;
+        }
+      }
+      tag_extra_h = (float)rows * 30.0f + 6.0f;   // dedicated bottom row for Cancel + Post
+    }
+    float comp_h = 160.0f + tag_extra_h;
     ccord_rect card = {area.x + pad_x, cur_y, avail_w, comp_h};
     f->composer_card_rect = card;
     ccord_draw_rrect(r, card, 8.0f, COL(border_subtle));
@@ -508,7 +563,6 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
 
     float cx = card.x + 12.0f;
     float cy = card.y + 10.0f;
-    float cw = card.w - 24.0f;
 
     const char *hdr = "Create a New Post";
     ccord_text_style hdr_st = ui_style(ui, CCORD_FONT_BOLD, fsz_sm, COL(text_header));
@@ -518,14 +572,14 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
     // Title input
     ccord_rect title_r = {cx, cy, cw, UIS_H_INPUT};
     f->composer_title_rect = title_r;
-    bool t_focus = (f->active_field == 1);
+    bool t_focus = (f->active_field == 1 && (!ui->touch_mode || ui->touch_text_focused));
     uis_input(ui, r, title_r, &f->title_edit, "Post title...", (uis_state){.focused = t_focus}, false, "ftitle", 0);
     cy += title_r.h + 8.0f;
 
     // Body input
     ccord_rect body_r = {cx, cy, cw, UIS_H_INPUT};
     f->composer_body_rect = body_r;
-    bool b_focus = (f->active_field == 2);
+    bool b_focus = (f->active_field == 2 && (!ui->touch_mode || ui->touch_text_focused));
     uis_input(ui, r, body_r, &f->body_edit, "Enter a message to start the discussion...", (uis_state){.focused = b_focus},
               false, "fbody", 0);
     cy += body_r.h + 8.0f;
@@ -541,16 +595,25 @@ void ui_draw_forum(ccord_ui *ui, ccord_renderer *r)
       for (uint8_t i = 0; i < meta->tag_count && f->composer_tag_hit_count < UI_FORUM_MAX_TAG_HITS; i++) {
         const ccord_forum_tag *tag = &meta->tags[i];
         bool sel = tag_list_has(f->composer_tags, f->composer_tag_count, tag->id);
-        float pw = draw_tag_pill(ui, r, tx, cy + 1.0f, 24.0f, tag, sel, false);
+        float pw = measure_tag_pill(ui, r, tag);
+        if (compact_forum) {
+          if (tx + pw > cx + cw && tx > cx) {
+            tx = cx;
+            cy += 30.0f;
+          }
+        } else if (tx > cx + cw - 170.0f) {
+          break;
+        }
+        pw = draw_tag_pill(ui, r, tx, cy + 1.0f, 24.0f, tag, sel, false);
         ccord_rect pr = {tx, cy + 1.0f, pw, 24.0f};
         f->composer_tag_hits[f->composer_tag_hit_count++] = (ui_forum_tag_hit){.tag_id = tag->id, .rect = pr};
         tx += pw + 6.0f;
-        if (tx > cx + cw - 170.0f) break;
       }
     }
 
-    ccord_rect post_btn = {cx + cw - 76.0f, cy, 76.0f, UIS_H_BTN_SM};
-    ccord_rect cancel_btn = {post_btn.x - 76.0f - 8.0f, cy, 76.0f, UIS_H_BTN_SM};
+    float btn_y = compact_forum ? (card.y + card.h - UIS_H_BTN_SM - 10.0f) : cy;
+    ccord_rect post_btn = {cx + cw - 76.0f, btn_y, 76.0f, UIS_H_BTN_SM};
+    ccord_rect cancel_btn = {post_btn.x - 76.0f - 8.0f, btn_y, 76.0f, UIS_H_BTN_SM};
     f->composer_submit_rect = post_btn;
     f->composer_cancel_rect = cancel_btn;
 
@@ -874,6 +937,19 @@ static void submit_new_forum_post(ccord_ui *ui, struct ui_forum_state *f)
   ui_mark_dirty(ui);
 }
 
+bool ui_forum_handle_back(ccord_ui *ui)
+{
+  if (!ui_forum_is_active(ui) || !ui->forum) return false;
+  if (ui->forum->composer_open) {
+    ui->forum->composer_open = false;
+    ui->forum->active_field = 0;
+    ui->touch_text_focused = false;
+    ui_mark_dirty(ui);
+    return true;
+  }
+  return false;
+}
+
 bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev)
 {
   if (!ui_forum_is_active(ui)) return false;
@@ -921,6 +997,7 @@ bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev)
         f->composer_open = !f->composer_open;
         if (f->composer_open) {
           f->active_field = 1;
+          if (ui->touch_mode) ui->touch_text_focused = true;
           if (f->title_edit.len == 0 && f->search_edit.len > 0) {
             ccord_error err = {0};
             (void)ccord_text_edit_insert(&f->title_edit, f->search_edit.data, f->search_edit.len, &err);
@@ -929,6 +1006,7 @@ bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev)
           }
         } else {
           f->active_field = 0;
+          ui->touch_text_focused = false;
         }
         ui_mark_dirty(ui);
         return true;
@@ -936,6 +1014,7 @@ bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev)
 
       if (ui_in_rect(mx, my, f->search_rect)) {
         f->active_field = 0;
+        if (ui->touch_mode) ui->touch_text_focused = true;
         ui_mark_dirty(ui);
         return true;
       }
@@ -975,17 +1054,20 @@ bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev)
       if (f->composer_open && ui_in_rect(mx, my, f->composer_card_rect)) {
         if (ui_in_rect(mx, my, f->composer_title_rect)) {
           f->active_field = 1;
+          if (ui->touch_mode) ui->touch_text_focused = true;
           ui_mark_dirty(ui);
           return true;
         }
         if (ui_in_rect(mx, my, f->composer_body_rect)) {
           f->active_field = 2;
+          if (ui->touch_mode) ui->touch_text_focused = true;
           ui_mark_dirty(ui);
           return true;
         }
         if (ui_in_rect(mx, my, f->composer_cancel_rect)) {
           f->composer_open = false;
           f->active_field = 0;
+          ui->touch_text_focused = false;
           ui_mark_dirty(ui);
           return true;
         }

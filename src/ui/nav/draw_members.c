@@ -488,6 +488,11 @@ static void draw_dm_profile_panel(ccord_ui *ui, ccord_renderer *r, const ccord_l
   ccord_draw_rrect(r, card, 8.0f, card_bg);
   ccord_push_clip(r, card);
 
+  bool show_full_btn = (target_uid != CCORD_ID_NONE && card.y + card.h - 38.0f > card.y + 40.0f);
+  float body_clip_h = show_full_btn ? (card.h - 44.0f) : card.h;
+  if (body_clip_h < 0.0f) body_clip_h = 0.0f;
+  ccord_push_clip(r, (ccord_rect){card.x, card.y, card.w, body_clip_h});
+
   float x = card.x + 12.0f;
   float w = card.w - 24.0f;
   float y = card.y + 12.0f;
@@ -542,8 +547,9 @@ static void draw_dm_profile_panel(ccord_ui *ui, ccord_renderer *r, const ccord_l
   char since_date[48];
   ui_snowflake_date(dm_u.id, since_date, sizeof since_date);
   ccord_text_draw_ellipsis(r, since_date, strlen(since_date), x, y, w, &body);
+  ccord_pop_clip(r);
 
-  if (target_uid != CCORD_ID_NONE && card.y + card.h - 38.0f > card.y + 40.0f) {
+  if (show_full_btn) {
     ccord_rect fbtn = {x, card.y + card.h - 38.0f, w, UIS_H_BTN_SM};
     ui->dm_panel_full_profile_rect = fbtn;
     bool fhv = ui->mouse_in && !ui->menu.open && !ui->settings_open && ui_in_rect(ui->mx, ui->my, fbtn);
@@ -575,14 +581,20 @@ static void draw_search_results_panel(ccord_ui *ui, ccord_renderer *r, const cco
   } else {
     snprintf(hdr, sizeof hdr, "%u Result%s", (unsigned)total, total == 1u ? "" : "s");
   }
+  float top_y = l->y;
+  if (ui->mobile_layout && ui->search_open) {
+    ccord_rect sp = ui_search_popover_rect(ui);
+    float below_sp = sp.y + sp.h + 4.0f;
+    if (below_sp > top_y) top_y = below_sp;
+  }
   ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
-  ccord_text_draw_ellipsis(r, hdr, strlen(hdr), l->x + 12.0f, l->y + 11.0f, l->w - 24.0f, &hs);
-  ccord_draw_rect(r, (ccord_rect){l->x, l->y + 36.0f, l->w, 1.0f}, COL(border_subtle));
+  ccord_text_draw_ellipsis(r, hdr, strlen(hdr), l->x + 12.0f, top_y + 11.0f, l->w - 24.0f, &hs);
+  ccord_draw_rect(r, (ccord_rect){l->x, top_y + 36.0f, l->w, 1.0f}, COL(border_subtle));
 
   bool show_pager = use_session && (total > CCORD_SEARCH_PAGE_SIZE || offset > 0u);
   float footer_h = show_pager ? 38.0f : 0.0f;
-  float body_y = l->y + 37.0f;
-  float body_h = l->h - 37.0f - footer_h;
+  float body_y = top_y + 37.0f;
+  float body_h = (l->y + l->h) - body_y - footer_h;
   if (body_h < 0.0f) body_h = 0.0f;
 
   float card_h = 62.0f, gap = 6.0f;
@@ -847,17 +859,26 @@ void ui_draw_member_popover(ccord_ui *ui, ccord_renderer *r)
   ui_profile_text ptx = ui_profile_text_colors(ui, &look);
   const ccord_user *u = &view;
 
+  float safe_l = 8.0f + ui->safe_insets.left;
+  float safe_r = 8.0f + ui->safe_insets.right;
+  float safe_t = 8.0f + ui->safe_insets.top;
+  float safe_b = 8.0f + fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
+  float avail_w = (float)ui->win_w - safe_l - safe_r;
+  float avail_h = (float)ui->win_h - safe_t - safe_b;
+
   ccord_rect card = ui->member_popover_rect;
   if (card.w <= 0.0f || card.h <= 0.0f) {
     // Opened without a click position (a programmatic open): place it beside the member list, as a row click does.
-    float cw = fminf(280.0f, (float)ui->win_w - 16.0f);
-    float ch = fminf(280.0f, (float)ui->win_h - 16.0f);
+    float cw = fminf(280.0f, avail_w);
+    float ch = fminf(280.0f, avail_h);
     if (cw <= 0.0f || ch <= 0.0f) return;
-    float cx = fmaxf(8.0f, fminf(ui->layout.member_list.x - cw - 8.0f, (float)ui->win_w - cw - 8.0f));
-    card = (ccord_rect){cx, fmaxf(8.0f, ((float)ui->win_h - ch) * 0.5f), cw, ch};
+    float cx = ui->mobile_layout
+                   ? safe_l + fmaxf(0.0f, (avail_w - cw) * 0.5f)
+                   : fmaxf(safe_l, fminf(ui->layout.member_list.x - cw - 8.0f, (float)ui->win_w - cw - safe_r));
+    card = (ccord_rect){cx, safe_t + fmaxf(0.0f, (avail_h - ch) * 0.5f), cw, ch};
   }
+  if (avail_w > 0.0f && card.w > avail_w) card.w = avail_w;
 
-  ui_profile_roles_set_clip(ui, card);   // the role + / x hit only inside the card
   float w = card.w - 28.0f;
   if (w < 60.0f) w = 60.0f;
 
@@ -938,33 +959,39 @@ void ui_draw_member_popover(ccord_ui *ui, ccord_renderer *r)
   needed_h += UIS_H_BTN_SM + 12.0f;
   if (needed_h < 260.0f) needed_h = 260.0f;
   needed_h = ceilf(needed_h / UIS_SP_1) * UIS_SP_1;   // popover heights sit on the spacing grid
-  if (ui->win_h > 32.0f && needed_h > (float)ui->win_h - 16.0f) {
-    needed_h = (float)ui->win_h - 16.0f;
+  if (avail_h > 32.0f && needed_h > avail_h) {
+    needed_h = avail_h;
   }
   card.h = needed_h;
-  float pad_t = 8.0f, pad_b = 8.0f, pad_h = 8.0f;
+  float pad_t = safe_t, pad_b = safe_b, pad_l = safe_l, pad_r = safe_r;
   if (look.frame && look.frame->sku_id != CCORD_ID_NONE) {
     float fscale = card.w / (look.frame->inner_width > 0 ? (float)look.frame->inner_width : 300.0f);
     float ft = (float)look.frame->overflow_top * fscale;
     float fb = (float)look.frame->overflow_bottom * fscale;
     float fh = (float)look.frame->overflow_horizontal * fscale;
-    if ((float)ui->win_h > card.h + ft + fb + 16.0f) {
+    if (avail_h > card.h + ft + fb) {
       pad_t += ft;
       pad_b += fb;
     }
-    if ((float)ui->win_w > card.w + fh * 2.0f + 16.0f) {
-      pad_h += fh;
+    if (avail_w > card.w + fh * 2.0f) {
+      pad_l += fh;
+      pad_r += fh;
     }
   }
   if (ui->win_w > 16.0f) {
-    if (card.x + card.w > (float)ui->win_w - pad_h) card.x = (float)ui->win_w - card.w - pad_h;
-    if (card.x < pad_h) card.x = pad_h;
+    if (card.x + card.w > (float)ui->win_w - pad_r) card.x = (float)ui->win_w - card.w - pad_r;
+    if (card.x < pad_l) card.x = pad_l;
   }
   if (ui->win_h > 16.0f) {
     if (card.y + card.h > (float)ui->win_h - pad_b) card.y = (float)ui->win_h - card.h - pad_b;
     if (card.y < pad_t) card.y = pad_t;
   }
   ui->member_popover_rect = card;
+
+  float by = card.y + card.h - 12.0f - UIS_H_BTN_SM;
+  float full_btn_y = by - UIS_H_BTN_SM - 6.0f;
+  float body_clip_bottom = fmaxf(card.y + 80.0f, full_btn_y - 6.0f);
+  ui_profile_roles_set_clip(ui, (ccord_rect){card.x, card.y, card.w, body_clip_bottom - card.y});
 
   uis_popover_frame(ui, r, card);
   float pop_rad = uis_tokens_of(ui).r_surface;
@@ -1032,26 +1059,30 @@ void ui_draw_member_popover(ccord_ui *ui, ccord_renderer *r)
   ccord_draw_rect(r, (ccord_rect){x, y + 2.0f, w, 1.0f}, COL(divider));
   y += 10.0f;
 
-  if (act_card_h > 0.0f) {
-    y += ui_draw_activity_card(ui, r, u, x, y, w, false) + 8.0f;
-  }
+  float body_avail_h = body_clip_bottom - y;
+  if (body_avail_h > 0.0f) {
+    ccord_push_clip(r, (ccord_rect){card.x, y, card.w, body_avail_h});
+    if (act_card_h > 0.0f) {
+      y += ui_draw_activity_card(ui, r, u, x, y, w, false) + 8.0f;
+    }
 
-  if (active_tab == 1 && gm && roles_h > 0.0f) {
-    y += ui_draw_member_role_pills(ui, r, g, u->id, x, y, w, false) + 4.0f;
-  } else {
-    ccord_push_clip(r, (ccord_rect){x, y, w, bio_h + 2.0f});
-    ccord_text_draw(r, bio, strlen(bio), x, y, &bs, w);
+    if (active_tab == 1 && gm && roles_h > 0.0f) {
+      y += ui_draw_member_role_pills(ui, r, g, u->id, x, y, w, false) + 4.0f;
+    } else {
+      ccord_push_clip(r, (ccord_rect){x, y, w, bio_h + 2.0f});
+      ccord_text_draw(r, bio, strlen(bio), x, y, &bs, w);
+      ccord_pop_clip(r);
+      y += bio_h + 6.0f;
+    }
+
+    y += ui_profile_draw_since(ui, r, &look, x, y, w, &sub, false);
+    if (plugin_sec_h > 0.0f) {
+      y += ui_decor_draw_profile_sections(ui, r, u->id, x, y + 4.0f, w, av_ring);
+    }
     ccord_pop_clip(r);
-    y += bio_h + 6.0f;
   }
 
-  y += ui_profile_draw_since(ui, r, &look, x, y, w, &sub, false);
-  if (plugin_sec_h > 0.0f) {
-    y += ui_decor_draw_profile_sections(ui, r, u->id, x, y + 4.0f, w, av_ring);
-  }
-
-  float by = card.y + card.h - 12.0f - UIS_H_BTN_SM;
-  ui->popover_full_profile_rect = (ccord_rect){x, by - UIS_H_BTN_SM - 6.0f, w, UIS_H_BTN_SM};
+  ui->popover_full_profile_rect = (ccord_rect){x, full_btn_y, w, UIS_H_BTN_SM};
   uis_button(ui, r, ui->popover_full_profile_rect, "View Full Profile", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
              (uis_state){.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, ui->popover_full_profile_rect)}, "mpfull", 0);
 
@@ -1096,6 +1127,10 @@ bool ui_member_popover_handle(ccord_ui *ui, const ccord_input_event *ev)
     if (ui_in_rect(ev->x, ev->y, ui->member_popover_msg_btn)) {
       ccord_id uid = ui->member_popover_user_id;
       ui->member_popover_open = false;
+      if (ui->mobile_layout) {
+        ui->right_drawer_open = false;
+        ui->left_drawer_open = false;
+      }
       ui_open_dm_with_user(ui, uid);
       ui->dirty = true;
       return true;
@@ -1111,7 +1146,7 @@ bool ui_member_popover_handle(ccord_ui *ui, const ccord_input_event *ev)
     if (!ui_in_rect(ev->x, ev->y, ui->member_popover_rect)) {
       ui->member_popover_open = false;
       ui->dirty = true;
-      return false;
+      return ui->mobile_layout || ui->touch_mode;
     }
     return true;
   }

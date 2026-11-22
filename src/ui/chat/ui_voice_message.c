@@ -404,7 +404,8 @@ void ui_vm_draw_bar(ccord_ui *ui, ccord_renderer *r, ccord_rect box)
   } else {
     char t[16];
     fmt_mmss(ui->vm.clip_ms, t, sizeof t);
-    snprintf(label, sizeof label, "Voice message ready (%s)", t);
+    if (box.w < 420.0f) snprintf(label, sizeof label, "Voice (%s)", t);
+    else snprintf(label, sizeof label, "Voice message ready (%s)", t);
   }
   ccord_vec2 lw = ccord_text_measure(r, label, strlen(label), &ts, 0.0f);
   ccord_text_draw(r, label, strlen(label), x, box.y + (box.h - lw.y) * 0.5f, &ts, 0.0f);

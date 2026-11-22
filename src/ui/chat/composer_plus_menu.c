@@ -18,15 +18,27 @@ static int pm_total_count(const ccord_ui *ui)
   return PM_COUNT + (int)extra;
 }
 
+static float pm_row_h(const ccord_ui *ui)
+{
+  uis_tokens t = uis_tokens_of(ui);
+  return ui->mobile_layout ? fmaxf(t.menu_row_h, 42.0f) : t.menu_row_h;
+}
+
 static ccord_rect pm_box(const ccord_ui *ui)
 {
   uis_tokens t = uis_tokens_of(ui);
   int total = pm_total_count(ui);
-  float w = t.menu_min_w + 40.0f, h = (float)total * t.menu_row_h + 2.0f * t.menu_pad;
+  float rh = pm_row_h(ui);
+  float sl = ui->mobile_layout ? ui->safe_insets.left : 0.0f;
+  float sr = ui->mobile_layout ? ui->safe_insets.right : 0.0f;
+  float st = ui->mobile_layout ? ui->safe_insets.top : 0.0f;
+  float maxw = fmaxf(ui->win_w - sl - sr - 16.0f, 180.0f);
+  float w = fminf(t.menu_min_w + 40.0f, maxw), h = (float)total * rh + 2.0f * t.menu_pad;
   ccord_rect a = ui->composer_attach_rect;
-  float x = a.x < 8.0f ? 8.0f : a.x;
+  float x = a.x < sl + 8.0f ? sl + 8.0f : a.x;
+  if (x + w > ui->win_w - sr - 8.0f) x = ui->win_w - sr - 8.0f - w;
   float y = a.y - 8.0f - h;
-  if (y < 8.0f) y = 8.0f;
+  if (y < st + 8.0f) y = st + 8.0f;
   return (ccord_rect){x, y, w, h};
 }
 
@@ -34,7 +46,8 @@ ccord_rect ui_plus_menu_row_rect(const ccord_ui *ui, size_t idx)
 {
   uis_tokens t = uis_tokens_of(ui);
   ccord_rect b = pm_box(ui);
-  return (ccord_rect){b.x + t.menu_pad, b.y + t.menu_pad + (float)idx * t.menu_row_h, b.w - 2.0f * t.menu_pad, t.menu_row_h};
+  float rh = pm_row_h(ui);
+  return (ccord_rect){b.x + t.menu_pad, b.y + t.menu_pad + (float)idx * rh, b.w - 2.0f * t.menu_pad, rh};
 }
 
 static bool pm_disabled(const ccord_ui *ui, int i) { return i == PM_POLL && ui_composer_lock_reason(ui) != nullptr; }

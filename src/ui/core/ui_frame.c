@@ -344,31 +344,44 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
       ccord_id pg = ui->role_preview_guild;
       const ccord_role *pr = ccord_store_role(ui->d.store, pg, ui->role_preview_role_id);
       const char *rname = (pr && pr->name && pr->name[0]) ? pr->name : "@everyone";
-      ccord_rect bar = {ui->layout.chat_header.x, ui_panels_slot_height(ui, CCORD_PANEL_TOP),
-                        ui->win_w - ui->layout.chat_header.x, 36.0f};
+      float top_y = ui->mobile_layout ? (ui->safe_insets.top + ui_panels_slot_height(ui, CCORD_PANEL_TOP))
+                                      : ui_panels_slot_height(ui, CCORD_PANEL_TOP);
+      float bar_w = ui->mobile_layout ? ui->layout.chat_header.w : (ui->win_w - ui->layout.chat_header.x);
+      ccord_rect bar = {ui->layout.chat_header.x, top_y, bar_w, 36.0f};
       ccord_draw_rect(r, bar, c->brand);
+      bool compact_rpb = ui->mobile_layout || bar.w < 440.0f;
       char lbl[160];
-      if (rname[0] == '@') snprintf(lbl, sizeof lbl, "Viewing server as role: %s", rname);
-      else snprintf(lbl, sizeof lbl, "Viewing server as role: @%s", rname);
+      if (compact_rpb) {
+        if (rname[0] == '@') snprintf(lbl, sizeof lbl, "As %s", rname);
+        else snprintf(lbl, sizeof lbl, "As @%s", rname);
+      } else {
+        if (rname[0] == '@') snprintf(lbl, sizeof lbl, "Viewing server as role: %s", rname);
+        else snprintf(lbl, sizeof lbl, "Viewing server as role: @%s", rname);
+      }
       ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), c->text_on_brand);
       float blh = ui_line_h(ui, bs.size);
-      ccord_rect exit_r = {bar.x + bar.w - 104.0f, bar.y + 5.0f, 92.0f, 26.0f};
-      ccord_rect cyc_r = {exit_r.x - 104.0f, bar.y + 5.0f, 96.0f, 26.0f};
+      const char *cyc_lbl = compact_rpb ? "Switch" : "Switch Role";
+      const char *exit_lbl = compact_rpb ? "Exit" : "Exit Preview";
+      float exit_w = compact_rpb ? 54.0f : 92.0f;
+      float cyc_w = compact_rpb ? 68.0f : 96.0f;
+      float pad_r = compact_rpb ? 8.0f : 12.0f;
+      ccord_rect exit_r = {bar.x + bar.w - pad_r - exit_w, bar.y + 5.0f, exit_w, 26.0f};
+      ccord_rect cyc_r = {exit_r.x - 8.0f - cyc_w, bar.y + 5.0f, cyc_w, 26.0f};
       ui->role_preview_exit_rect = exit_r;
       ui->role_preview_cycle_rect = cyc_r;
-      float text_max = cyc_r.x - (bar.x + 16.0f) - 10.0f;
+      float text_max = cyc_r.x - (bar.x + 12.0f) - 8.0f;
       if (text_max > 24.0f) {
-        ccord_text_draw_ellipsis(r, lbl, strlen(lbl), bar.x + 14.0f, bar.y + (bar.h - blh) * 0.5f, text_max, &bs);
+        ccord_text_draw_ellipsis(r, lbl, strlen(lbl), bar.x + 12.0f, bar.y + (bar.h - blh) * 0.5f, text_max, &bs);
       }
       bool chv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, cyc_r);
       bool ehv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, exit_r);
       ccord_draw_rrect(r, cyc_r, 4.0f, ui_alpha(c->bg_tertiary, chv ? 0.55f : 0.35f));
       ccord_draw_rrect(r, exit_r, 4.0f, ui_alpha(c->bg_tertiary, ehv ? 0.70f : 0.45f));
       ccord_text_style btns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, c->text_on_brand);
-      ccord_vec2 cm = ccord_text_measure(r, "Switch Role", 11, &btns, 0.0f);
-      ccord_text_draw(r, "Switch Role", 11, cyc_r.x + (cyc_r.w - cm.x) * 0.5f, cyc_r.y + (cyc_r.h - cm.y) * 0.5f, &btns, 0.0f);
-      ccord_vec2 em = ccord_text_measure(r, "Exit Preview", 12, &btns, 0.0f);
-      ccord_text_draw(r, "Exit Preview", 12, exit_r.x + (exit_r.w - em.x) * 0.5f, exit_r.y + (exit_r.h - em.y) * 0.5f, &btns, 0.0f);
+      ccord_vec2 cm = ccord_text_measure(r, cyc_lbl, strlen(cyc_lbl), &btns, 0.0f);
+      ccord_text_draw(r, cyc_lbl, strlen(cyc_lbl), cyc_r.x + (cyc_r.w - cm.x) * 0.5f, cyc_r.y + (cyc_r.h - cm.y) * 0.5f, &btns, 0.0f);
+      ccord_vec2 em = ccord_text_measure(r, exit_lbl, strlen(exit_lbl), &btns, 0.0f);
+      ccord_text_draw(r, exit_lbl, strlen(exit_lbl), exit_r.x + (exit_r.w - em.x) * 0.5f, exit_r.y + (exit_r.h - em.y) * 0.5f, &btns, 0.0f);
     }
     draw_overlay_popup(ui, r, UI_OVL_TIP, "tip",
                        !ui->touch_mode && !ui->discovery_open && ui->hover_members_btn && !ui->menu.open && !ui->settings_open,

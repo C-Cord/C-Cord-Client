@@ -117,8 +117,10 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
   float left_x = db.w > 0.0f ? (db.x + db.w + 4.0f) : (h->x + 16.0f);
   ui->gdm_add_btn_rect = (ccord_rect){0, 0, 0, 0};
   ui->gdm_edit_btn_rect = (ccord_rect){0, 0, 0, 0};
-  ui->dm_requests_tab_rects[0] = (ccord_rect){0, 0, 0, 0};
-  ui->dm_requests_tab_rects[1] = (ccord_rect){0, 0, 0, 0};
+  if (!(ui->mobile_layout && ui_is_dm_requests_view(ui))) {
+    ui->dm_requests_tab_rects[0] = (ccord_rect){0, 0, 0, 0};
+    ui->dm_requests_tab_rects[1] = (ccord_rect){0, 0, 0, 0};
+  }
   float cy = h->y + h->h * 0.5f;
   if (ui_is_dm_requests_view(ui)) {
     ui->add_friend_btn_rect = (ccord_rect){0, 0, 0, 0};
@@ -126,6 +128,10 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
     ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
     float ty = cy - ui_line_h(ui, ns.size) * 0.5f;
     float nw = ccord_text_draw_ellipsis(r, "Message Requests", 16, left_x + 30.0f, ty, maxf(hdr_leftmost - (left_x + 36.0f), 60.0f), &ns);
+    if (ui->mobile_layout) {
+      // Tabs move into a dedicated full-width sub-bar inside dc_draw_dm_requests_view on mobile.
+      return;
+    }
     float dx = left_x + 30.0f + nw + 16.0f;
     ccord_draw_rect(r, (ccord_rect){dx, cy - 12.0f, 1.0f, 24.0f}, COL(divider));
     uint32_t req_cnt = 0, spam_cnt = 0;
@@ -160,7 +166,11 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
     ui_icon_members(r, left_x + 10.0f, cy, 20.0f, COL(text_muted), COL(bg_primary));
     ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
     float ty = cy - ui_line_h(ui, ns.size) * 0.5f;
-    float nw = ccord_text_draw_ellipsis(r, "Friends", 7, left_x + 30.0f, ty, 120.0f, &ns);
+    float nw = ccord_text_draw_ellipsis(r, "Friends", 7, left_x + 30.0f, ty, maxf(hdr_leftmost - (left_x + 36.0f), 60.0f), &ns);
+    if (ui->mobile_layout) {
+      // Tabs + Add Friend move into dc_draw_dm_friends_view on mobile so none overflow or disappear.
+      return;
+    }
     float dx = left_x + 30.0f + nw + 16.0f;
     ccord_draw_rect(r, (ccord_rect){dx, cy - 12.0f, 1.0f, 24.0f}, COL(divider));
     static const char *const k_tabs[4] = {"Online", "All", "Pending", "Blocked"};
@@ -182,7 +192,7 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
     ccord_vec2 aft = ccord_text_measure(r, "Add Friend", 10, &afs, 0.0f);
     ccord_rect af_r = {tx + 4.0f, cy - 13.0f, aft.x + 20.0f, 26.0f};
     ui->add_friend_btn_rect = (ccord_rect){0, 0, 0, 0};
-    if (af_r.x + af_r.w < ir.x - 12.0f) {
+    if (af_r.x + af_r.w < hdr_leftmost - 12.0f) {
       ui->add_friend_btn_rect = af_r;
       ccord_draw_rrect(r, af_r, 4.0f, COL(status_online));
       ccord_text_draw(r, "Add Friend", 10, af_r.x + 10.0f, af_r.y + (af_r.h - aft.y) * 0.5f, &afs, 0.0f);
@@ -232,7 +242,15 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
   float ty = cy - ui_line_h(ui, ns.size) * 0.5f;
   float nw = 0.0f;
   float hdr_btn_left = hdr_leftmost - 8.0f;
-  float title_max_w = ui->mobile_layout ? maxf(hdr_btn_left - tx - 8.0f, 40.0f) : (h->w * 0.5f);
+  // On mobile reserve room for compact header action buttons (DM Call, Thread Join, Group DM Add/Edit) before drawing title.
+  float mob_action_res = 0.0f;
+  if (ui->mobile_layout) {
+    if (ui_stage_mobile_chat_active(ui)) mob_action_res = 76.0f;
+    else if (is_dm && !group_dm) mob_action_res = 54.0f;
+    else if (group_dm) mob_action_res = 92.0f;
+    else if (is_thread_ch) mob_action_res = 64.0f;
+  }
+  float title_max_w = ui->mobile_layout ? maxf(hdr_btn_left - tx - 8.0f - mob_action_res, 40.0f) : (h->w * 0.5f);
   if (parent_ch && parent_ch->name) {
     ccord_text_style ps = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_secondary));
     float pnw = ccord_text_draw_ellipsis(r, parent_ch->name, strlen(parent_ch->name), tx, ty, h->w * 0.25f, &ps);
@@ -291,28 +309,30 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
       }
     }
   } else if (group_dm) {
-    const char *elbl = "Edit Group";
+    const char *elbl = ui->mobile_layout ? "Edit" : "Edit Group";
     ccord_text_style ebs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_secondary));
     ccord_vec2 ebt = ccord_text_measure(r, elbl, strlen(elbl), &ebs, 0.0f);
-    float ebw = ebt.x + 16.0f;
+    float epad = ui->mobile_layout ? 10.0f : 16.0f;
+    float ebw = ebt.x + epad;
     ccord_rect er = {hdr_btn_left - ebw, cy - 12.0f, ebw, 24.0f};
-    if (er.x > tx + nw + 12.0f) {
+    if (er.x > tx + nw + 6.0f) {
       ui->gdm_edit_btn_rect = er;
       bool ehv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, er);
       ccord_draw_rrect(r, er, 4.0f, ehv ? COL(bg_item_hover) : COL(bg_tertiary));
-      ccord_text_draw(r, elbl, strlen(elbl), er.x + 8.0f, er.y + (er.h - ebt.y) * 0.5f, &ebs, 0.0f);
-      hdr_btn_left = er.x - 6.0f;
+      ccord_text_draw(r, elbl, strlen(elbl), er.x + epad * 0.5f, er.y + (er.h - ebt.y) * 0.5f, &ebs, 0.0f);
+      hdr_btn_left = er.x - 4.0f;
     }
-    const char *albl = "Add Member";
+    const char *albl = ui->mobile_layout ? "+ Add" : "Add Member";
     ccord_text_style abs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_on_brand));
     ccord_vec2 abt = ccord_text_measure(r, albl, strlen(albl), &abs, 0.0f);
-    float abw = abt.x + 16.0f;
+    float apad = ui->mobile_layout ? 10.0f : 16.0f;
+    float abw = abt.x + apad;
     ccord_rect ar = {hdr_btn_left - abw, cy - 12.0f, abw, 24.0f};
-    if (ar.x > tx + nw + 12.0f) {
+    if (ar.x > tx + nw + 6.0f) {
       ui->gdm_add_btn_rect = ar;
       ccord_draw_rrect(r, ar, 4.0f, COL(brand));
-      ccord_text_draw(r, albl, strlen(albl), ar.x + 8.0f, ar.y + (ar.h - abt.y) * 0.5f, &abs, 0.0f);
-      hdr_btn_left = ar.x - 6.0f;
+      ccord_text_draw(r, albl, strlen(albl), ar.x + apad * 0.5f, ar.y + (ar.h - abt.y) * 0.5f, &abs, 0.0f);
+      hdr_btn_left = ar.x - 4.0f;
     }
   }
   if (ui_stage_mobile_chat_active(ui)) {
@@ -354,7 +374,7 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
     snprintf(gdm_topic, sizeof gdm_topic, "%zu Members", ui_dm_member_count(ch));
     topic = gdm_topic;
   }
-  if (topic && topic[0]) {
+  if (!ui->mobile_layout && topic && topic[0]) {
     float dx = tx + nw + 12.0f;
     float right = hdr_btn_left < (mb.w > 0.0f ? mb.x - 8.0f : h->x + h->w - 16.0f)
                     ? hdr_btn_left
