@@ -102,6 +102,7 @@ static size_t g_voice_action_head = 0;
 static size_t g_voice_action_count = 0;
 
 static bool g_network_changed_pending = false;
+static int g_network_avail_pending = 0;   // 0 = none, 1 = offline, 2 = online
 
 // Standard UTF-8 -> Java UTF-16 jstring (safe for astral code points / emojis unlike NewStringUTF).
 static jstring jni_new_string_utf8(JNIEnv *env, const char *utf8)
@@ -599,6 +600,7 @@ void ccord_android_drain_events(ccord_platform *p)
   int vactions[ANDROID_VOICE_ACTION_Q_CAP];
   size_t nvactions = 0;
   bool net_changed = false;
+  int net_avail = 0;
 
   ccord_spin_lock_acquire(&g_jni_lock);
   while (g_file_count > 0 && nfiles < ANDROID_FILE_Q_CAP) {
@@ -614,6 +616,8 @@ void ccord_android_drain_events(ccord_platform *p)
   }
   net_changed = g_network_changed_pending;
   g_network_changed_pending = false;
+  net_avail = g_network_avail_pending;
+  g_network_avail_pending = 0;
   ccord_spin_lock_release(&g_jni_lock);
 
   for (size_t i = 0; i < nfiles; i++) {
@@ -623,7 +627,11 @@ void ccord_android_drain_events(ccord_platform *p)
   for (size_t i = 0; i < nvactions; i++) {
     ccord_platform_inject_tray_action(p, (ccord_tray_action)vactions[i]);
   }
-  if (net_changed) {
+  if (net_avail == 1) {
+    ccord_platform_inject_link_event(p, CCORD_LINK_OFFLINE);
+  } else if (net_avail == 2) {
+    ccord_platform_inject_link_event(p, CCORD_LINK_ONLINE);
+  } else if (net_changed) {
     ccord_platform_inject_link_event(p, CCORD_LINK_CHANGED);
   }
 }
@@ -776,6 +784,18 @@ Java_org_ccord_android_CCordBridge_nativeOnNetworkChanged(JNIEnv *env, jclass cl
   (void)cls;
   ccord_spin_lock_acquire(&g_jni_lock);
   g_network_changed_pending = true;
+  wake_locked();
+  ccord_spin_lock_release(&g_jni_lock);
+}
+
+JNIEXPORT void JNICALL
+Java_org_ccord_android_CCordBridge_nativeOnNetworkAvailable(JNIEnv *env, jclass cls, jboolean available)
+{
+  (void)env;
+  (void)cls;
+  ccord_spin_lock_acquire(&g_jni_lock);
+  g_network_avail_pending = (available == JNI_TRUE) ? 2 : 1;
+  if (available != JNI_TRUE) g_network_changed_pending = false;
   wake_locked();
   ccord_spin_lock_release(&g_jni_lock);
 }

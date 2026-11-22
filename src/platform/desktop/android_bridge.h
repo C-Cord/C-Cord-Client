@@ -77,6 +77,8 @@ JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnVoiceAction(
     JNIEnv *env, jclass cls, jint action);
 JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnNetworkChanged(
     JNIEnv *env, jclass cls);
+JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnNetworkAvailable(
+    JNIEnv *env, jclass cls, jboolean available);
 JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnCaptureFrame(
     JNIEnv *env, jclass cls, jobject buf, jint width, jint height, jint stride);
 JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnCaptureStopped(

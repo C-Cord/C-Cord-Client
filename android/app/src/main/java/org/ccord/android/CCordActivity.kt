@@ -199,7 +199,7 @@ class CCordActivity : SDLActivity() {
         stopScreenCaptureInternal()
         unregisterNetworkCallback()
         if (!mBrokenLibraries && CCordBridge.nativeReady) {
-            CCordBridge.nativeSetActivityActive(true)
+            CCordBridge.nativeSetActivityActive(false)
         }
         CCordBridge.detach(this)
         super.onDestroy()
@@ -702,17 +702,42 @@ class CCordActivity : SDLActivity() {
             val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
             connectivityManager = cm
             var seenInitial = false
+            var wasOffline = cm.activeNetwork == null
+            if (wasOffline && CCordBridge.nativeReady) {
+                CCordBridge.nativeOnNetworkAvailable(false)
+            }
             val cb = object : ConnectivityManager.NetworkCallback() {
                 override fun onAvailable(network: Network) {
+                    val cameBackOnline = wasOffline
+                    wasOffline = false
                     if (!seenInitial) {
                         seenInitial = true
+                        if (cameBackOnline && CCordBridge.nativeReady) {
+                            CCordBridge.nativeOnNetworkAvailable(true)
+                        }
                         return
                     }
-                    if (CCordBridge.nativeReady) CCordBridge.nativeOnNetworkChanged()
+                    if (CCordBridge.nativeReady) {
+                        if (cameBackOnline) {
+                            CCordBridge.nativeOnNetworkAvailable(true)
+                        } else {
+                            CCordBridge.nativeOnNetworkChanged()
+                        }
+                    }
                 }
 
                 override fun onLost(network: Network) {
-                    if (CCordBridge.nativeReady) CCordBridge.nativeOnNetworkChanged()
+                    // Only declare offline when no active default network remains; Wi-Fi <-> Cellular
+                    // handoffs deliver onAvailable() for the replacement network right away.
+                    val hasActive = try {
+                        cm.activeNetwork != null
+                    } catch (_: Throwable) {
+                        false
+                    }
+                    if (!hasActive) {
+                        wasOffline = true
+                        if (CCordBridge.nativeReady) CCordBridge.nativeOnNetworkAvailable(false)
+                    }
                 }
             }
             networkCallback = cb

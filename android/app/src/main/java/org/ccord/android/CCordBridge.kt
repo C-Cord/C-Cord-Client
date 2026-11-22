@@ -121,6 +121,9 @@ object CCordBridge {
     external fun nativeOnNetworkChanged()
 
     @JvmStatic
+    external fun nativeOnNetworkAvailable(available: Boolean)
+
+    @JvmStatic
     external fun nativeOnCaptureFrame(buf: ByteBuffer, width: Int, height: Int, stride: Int)
 
     @JvmStatic

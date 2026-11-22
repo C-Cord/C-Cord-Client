@@ -15,6 +15,11 @@
 #include <unistd.h>
 #endif
 
+#if defined(__linux__)
+#include <sys/timerfd.h>
+#include <time.h>
+#endif
+
 #if defined(__ANDROID__)
 #include <SDL3/SDL_system.h>
 #include "desktop/android_bridge.h"
@@ -146,6 +151,9 @@ static void platform_notify_action_cb(void *ud, const ccord_notify_target *targe
 
 static void apply_title_badge(ccord_platform *p)
 {
+#if defined(__ANDROID__)
+  (void)p;
+#else
   if (!p->window) return;
   char buf[BASE_TITLE_MAX + 32u];
   if (p->badge_tray > 0) {
@@ -154,6 +162,7 @@ static void apply_title_badge(ccord_platform *p)
     snprintf(buf, sizeof buf, "%s", p->base_title);
   }
   SDL_SetWindowTitle(p->window, buf);
+#endif
 }
 
 #if !defined(__ANDROID__)
@@ -207,6 +216,10 @@ void platform_wake(ccord_platform *p)
 {
 #if !defined(_WIN32)
   if (!p) return;
+  if (SDL_GetCurrentThreadID() == p->main_thread_id &&
+      atomic_load_explicit(&p->suppress_main_wake, memory_order_relaxed)) {
+    return;
+  }
   int fd = atomic_load_explicit(&p->wake_wr_fd, memory_order_acquire);
   if (fd < 0) return;
   uint8_t b = 1;
@@ -335,7 +348,10 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
   p->window_visible = !c.start_minimized;
   p->wake_pipe[0] = -1;
   p->wake_pipe[1] = -1;
+  p->wake_timer_fd = -1;
+  p->main_thread_id = SDL_GetCurrentThreadID();
   atomic_init(&p->wake_wr_fd, -1);
+  atomic_init(&p->suppress_main_wake, false);
   p->drop_mutex = SDL_CreateMutex();
   SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
 #if !defined(__ANDROID__)
@@ -370,6 +386,9 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
     p->wake_pipe[0] = -1;
     p->wake_pipe[1] = -1;
   }
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+  p->wake_timer_fd = timerfd_create(CLOCK_BOOTTIME, TFD_NONBLOCK | TFD_CLOEXEC);
+#endif
 #endif
 #if defined(__ANDROID__)
   // Re-assert edge-to-edge window styling after SDL_CreateWindow's async COMMAND_CHANGE_WINDOW_STYLE.
@@ -436,8 +455,10 @@ void ccord_platform_destroy(ccord_platform *p)
   atomic_store_explicit(&p->wake_wr_fd, -1, memory_order_release);
   if (p->wake_pipe[0] >= 0) close(p->wake_pipe[0]);
   if (p->wake_pipe[1] >= 0) close(p->wake_pipe[1]);
+  if (p->wake_timer_fd >= 0) close(p->wake_timer_fd);
   p->wake_pipe[0] = -1;
   p->wake_pipe[1] = -1;
+  p->wake_timer_fd = -1;
 #endif
   if (p->text_input_on) SDL_StopTextInput(p->window);
   platform_pending_text_clear(p);

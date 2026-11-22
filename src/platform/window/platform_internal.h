@@ -84,6 +84,9 @@ struct ccord_platform {
   atomic_bool pending_quit_ev;
   int wake_pipe[2];               // POSIX/Android self-pipe to wake background poll() immediately
   _Atomic int wake_wr_fd;         // mirror of wake_pipe[1] for thread-safe wakeups (-1 when closed)
+  int wake_timer_fd;              // Linux/Android CLOCK_BOOTTIME timerfd so poll() never oversleeps across SoC naps
+  SDL_ThreadID main_thread_id;    // thread owning ccord_platform_wait_idle()
+  atomic_bool suppress_main_wake; // suppresses main-thread self-wakes during wait_idle poll-prep drain
   bool pending_safe_area_ev;
   bool pending_keyboard_ev;
   bool pending_focus_ev;          // deferred CCORD_IN_FOCUS synthesized when SDL focus flag recovers without an event

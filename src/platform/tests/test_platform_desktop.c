@@ -1800,6 +1800,19 @@ static void test_background_wait_idle_poll(void)
   ccord_sock_close(sv[0]);
   ccord_sock_close(sv[1]);
 
+  // 1b. Idle sleep with no events or readable fds must honor the requested timeout (timerfd + no main-thread self-wake).
+  {
+    // Push an unrelated SDL event on the main thread before entering wait_idle to ensure poll-prep draining
+    // does not re-trigger wake_pipe[1] and abort the upcoming poll() with 0 ms sleep.
+    SDL_Event dummy = {.type = SDL_EVENT_USER};
+    (void)SDL_PushEvent(&dummy);
+    t0 = SDL_GetTicks();
+    got = ccord_platform_wait_idle(p, &ev, nullptr, 0, 120);
+    elapsed = SDL_GetTicks() - t0;
+    CT_CHECK(!got);
+    CT_CHECK(elapsed >= 90u && elapsed < 1000u);
+  }
+
   // 2. Foreground transition from another thread must wake wake_pipe immediately and deliver CCORD_IN_APP_FOREGROUND.
   uint32_t fg_delay = 30;
   ccord_thread *th2 = ccord_thread_create(wake_fg_thread, &fg_delay);

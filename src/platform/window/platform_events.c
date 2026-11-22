@@ -13,6 +13,11 @@
 #include <unistd.h>
 #endif
 
+#if defined(__linux__)
+#include <sys/timerfd.h>
+#include <time.h>
+#endif
+
 #if defined(__ANDROID__)
 #include "desktop/android_bridge.h"
 #endif
@@ -559,7 +564,10 @@ bool ccord_platform_wait_idle(ccord_platform *p, ccord_input_event *out, const c
     while (read(p->wake_pipe[0], drain, sizeof drain) > 0) {}
 
     p->bg_pumped_once = false;
-    if (ccord_platform_next_event(p, out, 0)) return true;
+    atomic_store_explicit(&p->suppress_main_wake, true, memory_order_relaxed);
+    bool prep_ev = ccord_platform_next_event(p, out, 0);
+    atomic_store_explicit(&p->suppress_main_wake, false, memory_order_relaxed);
+    if (prep_ev) return true;
 
 #if defined(__ANDROID__)
     if (!atomic_load(&p->in_background) || ccord_android_is_activity_active()) {
@@ -573,19 +581,49 @@ bool ccord_platform_wait_idle(ccord_platform *p, ccord_input_event *out, const c
     }
 #endif
 
-    struct pollfd pfds[1 + 24];
+    struct pollfd pfds[2 + 24];
     nfds_t nfds = 0;
     pfds[nfds++] = (struct pollfd){.fd = p->wake_pipe[0], .events = POLLIN};
+    int timer_idx = -1;
+    int wait_ms = timeout_ms == UINT32_MAX ? -1 : (timeout_ms > (uint32_t)INT_MAX ? INT_MAX : (int)timeout_ms);
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+    if (p->wake_timer_fd >= 0) {
+      struct itimerspec its = {0};
+      if (timeout_ms != UINT32_MAX) {
+        its.it_value.tv_sec = (time_t)(timeout_ms / 1000u);
+        its.it_value.tv_nsec = (long)((timeout_ms % 1000u) * 1000000u);
+        if (its.it_value.tv_sec == 0 && its.it_value.tv_nsec == 0) its.it_value.tv_nsec = 1;
+        if (timerfd_settime(p->wake_timer_fd, 0, &its, nullptr) == 0) {
+          timer_idx = (int)nfds;
+          pfds[nfds++] = (struct pollfd){.fd = p->wake_timer_fd, .events = POLLIN};
+          wait_ms = -1;   // CLOCK_BOOTTIME timerfd controls expiry across SoC naps
+        }
+      } else {
+        (void)timerfd_settime(p->wake_timer_fd, 0, &its, nullptr);
+      }
+    }
+#endif
     for (size_t i = 0; i < extra_fd_count && nfds < (nfds_t)(sizeof pfds / sizeof pfds[0]); i++) {
       if (extra_fds && extra_fds[i] >= 0) {
         pfds[nfds++] = (struct pollfd){.fd = extra_fds[i], .events = POLLIN};
       }
     }
-    int wait_ms = timeout_ms > (uint32_t)INT_MAX ? INT_MAX : (int)timeout_ms;
     int rc = poll(pfds, nfds, wait_ms);
     if (rc > 0 && (pfds[0].revents & POLLIN) != 0) {
       while (read(p->wake_pipe[0], drain, sizeof drain) > 0) {}
     }
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+    if (timer_idx >= 0) {
+      if (rc > 0 && (pfds[timer_idx].revents & POLLIN) != 0) {
+        uint64_t exp = 0;
+        while (read(p->wake_timer_fd, &exp, sizeof exp) > 0) {}
+      }
+      struct itimerspec disarm = {0};
+      (void)timerfd_settime(p->wake_timer_fd, 0, &disarm, nullptr);
+    }
+#else
+    (void)timer_idx;
+#endif
     p->bg_pumped_once = false;
     return ccord_platform_next_event(p, out, 0);
   }

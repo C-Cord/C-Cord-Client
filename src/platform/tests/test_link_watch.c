@@ -152,6 +152,14 @@ static void test_priority(void)
   CT_CHECK(ccord_linkwatch_take(w) == CCORD_LINK_NONE);
   ccord_linkwatch_inject(w, CCORD_LINK_CHANGED);
   CT_CHECK(ccord_linkwatch_take(w) == CCORD_LINK_CHANGED);
+  ccord_linkwatch_inject(w, CCORD_LINK_PROBE);
+  CT_CHECK(ccord_linkwatch_take(w) == CCORD_LINK_PROBE);
+  ccord_linkwatch_inject(w, CCORD_LINK_CHANGED);
+  ccord_linkwatch_inject(w, CCORD_LINK_OFFLINE);
+  CT_CHECK(ccord_linkwatch_take(w) == CCORD_LINK_OFFLINE);
+  CT_CHECK(ccord_linkwatch_take(w) == CCORD_LINK_NONE);
+  ccord_linkwatch_inject(w, CCORD_LINK_ONLINE);
+  CT_CHECK(ccord_linkwatch_take(w) == CCORD_LINK_ONLINE);
   ccord_linkwatch_inject(w, CCORD_LINK_NONE);
   CT_CHECK(ccord_linkwatch_take(w) == CCORD_LINK_NONE);
   ccord_linkwatch_destroy(w);

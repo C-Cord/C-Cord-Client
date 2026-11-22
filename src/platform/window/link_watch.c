@@ -49,6 +49,8 @@ struct ccord_linkwatch {
   int64_t last_skew;
   bool pending_resumed;
   bool pending_changed;
+  uint8_t pending_avail;   // 0 = none, 1 = offline, 2 = online
+  bool pending_probe;
   int fd;
   bool seeding;
   route_key routes[ROUTE_SET_MAX];
@@ -163,16 +165,34 @@ void ccord_linkwatch_inject(ccord_linkwatch *w, ccord_link_event ev)
   if (!w) return;
   if (ev == CCORD_LINK_RESUMED) w->pending_resumed = true;
   else if (ev == CCORD_LINK_CHANGED) w->pending_changed = true;
+  else if (ev == CCORD_LINK_OFFLINE) {
+    w->pending_avail = 1u;
+    w->pending_changed = false;
+  } else if (ev == CCORD_LINK_ONLINE) {
+    w->pending_avail = 2u;
+  } else if (ev == CCORD_LINK_PROBE) {
+    w->pending_probe = true;
+  }
 }
 
 ccord_link_event ccord_linkwatch_take(ccord_linkwatch *w)
 {
   if (!w) return CCORD_LINK_NONE;
+  if (w->pending_avail != 0u) {
+    ccord_link_event ev = (w->pending_avail == 1u) ? CCORD_LINK_OFFLINE : CCORD_LINK_ONLINE;
+    w->pending_avail = 0u;
+    w->pending_resumed = false;
+    w->pending_changed = false;
+    w->pending_probe = false;
+    return ev;
+  }
   ccord_link_event ev = w->pending_resumed ? CCORD_LINK_RESUMED
                         : w->pending_changed ? CCORD_LINK_CHANGED
-                                             : CCORD_LINK_NONE;
+                        : w->pending_probe ? CCORD_LINK_PROBE
+                                           : CCORD_LINK_NONE;
   w->pending_resumed = false;
   w->pending_changed = false;
+  w->pending_probe = false;
   return ev;
 }
 
