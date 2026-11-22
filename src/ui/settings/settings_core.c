@@ -1185,6 +1185,9 @@ bool ui_settings_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
   if (ui->settings_page == SP_PRIVACY || ui->settings_page == SP_DEVICES || ui->settings_page == SP_CONNECTIONS) {
     return ui_settings_m6_wheel(ui, ui->settings_page - SP_PRIVACY, g.content, ev->wheel, ui_wheel_direct(ui, ev));
   }
+  if (ui->settings_page == SP_PLUGINS && (!ui->mobile_layout || ui->mobile_settings_detail)) {
+    if (st_plugins_handle_wheel(ui, &g, ev)) return true;
+  }
   {
     float max_p = st_page_max_scroll(ui, &g);
     if (max_p > 0.0f) {

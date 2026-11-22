@@ -103,6 +103,8 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
     if (ui->settings_open) {
       if (ui->account_mfa_required) {
         ui_settings_dismiss_mfa(ui);
+      } else if (ui_settings_plugins_dismiss_overlay(ui)) {
+        // Dismissed active Plugins modal, popover, bottom sheet, or sub-view.
       } else if (!ui_is_login_screen(ui)) {
         ui_open_settings(ui, false);
       }

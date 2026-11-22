@@ -79,17 +79,6 @@ typedef struct sgeom {
   float step;                  // one sidebar scroll step: one row pitch
   ccord_rect page[SP_COUNT];
 } sgeom;
-typedef struct plugin_card_rects {
-  ccord_rect card;
-  ccord_rect btn_toggle;
-  ccord_rect btn_log;
-  ccord_rect btn_reload;
-  ccord_rect btn_configure;
-  ccord_rect btn_export;
-  ccord_rect btn_update;
-  ccord_rect btn_auto;
-  ccord_rect btn_uninstall;
-} plugin_card_rects;
 
 #if defined(_WIN32)
 #define STREAM_ENC_COUNT 5
@@ -244,22 +233,12 @@ void st_label_value(ccord_ui *ui, ccord_renderer *r, float x, float *y, float w,
 bool st_settings_pressed(const ccord_ui *ui, ccord_rect rc);
 const char * st_state_name(ccord_plugin_state s);
 void st_draw_plugins(ccord_ui *ui, ccord_renderer *r, const sgeom *g);
+void st_draw_plugins_overlays(ccord_ui *ui, ccord_renderer *r, const sgeom *g);
 float st_plugin_body_y(const sgeom *g);
-float st_plugin_card_layout(const ccord_ui *ui, const sgeom *g, size_t idx, const ccord_plugin_info *p, float y, plugin_card_rects *out);
-void st_plugin_subtab_rects(const sgeom *g, ccord_rect *tab_inst, ccord_rect *tab_disc, ccord_rect *tab_upd, ccord_rect *btn_sync);
-float st_plugin_discover_layout(const sgeom *g, float y0, ccord_rect *r_q, ccord_rect *r_go, ccord_rect *r_sort,
-                                ccord_rect tier_rects[4], ccord_rect *r_class1);
-float st_plugin_updates_tier_layout(float bx, float bw, float ty0, ccord_rect tier_rects[3], float *out_box_h);
-extern bool st_s_plugin_class1_only;
-extern float st_s_plugin_consent_box_h;
-extern char st_s_plugin_consent_id[65];
-extern uint64_t st_s_plugin_consent_perms;
-extern char st_s_plugin_detail_id[65];
-extern char st_s_plugin_log_id[65];
-extern char st_s_plugin_search[96];
-extern bool st_s_plugin_search_focused;
-extern int st_s_plugin_sort_idx;
-extern char st_s_plugin_status_msg[192];
-extern int st_s_plugin_subtab;
-extern int st_s_plugin_tier_filter;
-void st_trigger_plugin_discover_query(ccord_ui *ui, bool append_next_page);
+bool st_plugins_has_overlay(void);
+bool st_plugins_handle_back(ccord_ui *ui);
+bool st_plugins_handle_click(ccord_ui *ui, const sgeom *g, float x, float y);
+bool st_plugins_handle_wheel(ccord_ui *ui, const sgeom *g, const ccord_input_event *ev);
+bool st_plugins_handle_key(ccord_ui *ui, const ccord_input_event *ev);
+int64_t st_plugins_hover_key(const ccord_ui *ui, const sgeom *g, float x, float y);
+bool st_plugins_debug_find_rect(const char *key, ccord_rect *out);

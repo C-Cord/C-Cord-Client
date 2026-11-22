@@ -281,322 +281,8 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
     case SP_CONNECTIONS:
       // M6 account pages: bodies, scrolling and confirmations live in settings_m6_devices.c.
       return ui_settings_m6_click(ui, ui->settings_page - SP_PRIVACY, g->content, g->panel, x, y);
-    case SP_PLUGINS: {
-      if (ui_in_rect(x, y, st_extensions_toggle_rect(g))) {
-        st_set_extensions(ui, !ui->extensions_on);
-        return true;
-      }
-      ccord_rect r_inst, r_disc, r_upd, r_sync;
-      st_plugin_subtab_rects(g, &r_inst, &r_disc, &r_upd, &r_sync);
-      if (ui_in_rect(x, y, r_inst)) {
-        st_s_plugin_subtab = 0; st_s_plugin_search_focused = false; st_s_page_scroll = 0.0f;
-        st_s_plugin_log_id[0] = '\0'; st_s_plugin_consent_id[0] = '\0'; st_s_plugin_consent_perms = 0; st_s_plugin_consent_box_h = 224.0f; st_s_plugin_detail_id[0] = '\0';
-        return true;
-      }
-      if (ui_in_rect(x, y, r_disc)) {
-        st_s_plugin_subtab = 1; st_s_plugin_search_focused = false; st_s_page_scroll = 0.0f;
-        st_s_plugin_log_id[0] = '\0'; st_s_plugin_consent_id[0] = '\0'; st_s_plugin_consent_perms = 0; st_s_plugin_consent_box_h = 224.0f; st_s_plugin_detail_id[0] = '\0';
-        const ccord_catalog_status *cst = ccord_contrib_catalog_status(ui->d.contrib);
-        if (cst && !cst->has_loaded && !cst->syncing) st_trigger_plugin_discover_query(ui, false);
-        return true;
-      }
-      if (ui_in_rect(x, y, r_upd)) {
-        st_s_plugin_subtab = 2; st_s_plugin_search_focused = false; st_s_page_scroll = 0.0f;
-        st_s_plugin_log_id[0] = '\0'; st_s_plugin_consent_id[0] = '\0'; st_s_plugin_consent_perms = 0; st_s_plugin_consent_box_h = 224.0f; st_s_plugin_detail_id[0] = '\0';
-        ccord_contrib_catalog_check_updates(ui->d.contrib);
-        return true;
-      }
-      if (ui_in_rect(x, y, r_sync)) {
-        ccord_contrib_catalog_refresh(ui->d.contrib);
-        return true;
-      }
-
-      float px = g->content.x, body_top = st_plugin_body_y(g), pw = g->content.w;
-      ccord_rect body_clip = {px, body_top - 4.0f, pw, fmaxf(g->content.y + g->content.h - body_top + 6.0f, 40.0f)};
-      if (!ui_in_rect(x, y, body_clip)) return false;
-      float py = body_top - st_s_page_scroll;
-      if (st_s_plugin_log_id[0]) {
-        float ly0 = body_top;
-        ccord_rect b_rel = pw < 430.0f ? (ccord_rect){px, ly0 + 24.0f, 74.0f, UIS_H_BTN_SM}
-                                       : (ccord_rect){px + pw - 246.0f, ly0 - 4.0f, 74.0f, UIS_H_BTN_SM};
-        ccord_rect b_clr = pw < 430.0f ? (ccord_rect){px + 82.0f, ly0 + 24.0f, 74.0f, UIS_H_BTN_SM}
-                                       : (ccord_rect){px + pw - 164.0f, ly0 - 4.0f, 74.0f, UIS_H_BTN_SM};
-        ccord_rect b_bck = pw < 430.0f ? (ccord_rect){px + 164.0f, ly0 + 24.0f, 82.0f, UIS_H_BTN_SM}
-                                       : (ccord_rect){px + pw - 82.0f, ly0 - 4.0f, 82.0f, UIS_H_BTN_SM};
-        if (ui_in_rect(x, y, b_rel)) {
-          ccord_contrib_plugin_reload(ui->d.contrib, st_s_plugin_log_id);
-          return true;
-        }
-        if (ui_in_rect(x, y, b_clr)) {
-          ccord_contrib_clear_plugin_log(ui->d.contrib, st_s_plugin_log_id);
-          return true;
-        }
-        if (ui_in_rect(x, y, b_bck)) {
-          st_s_plugin_log_id[0] = '\0';
-          return true;
-        }
-        return false;
-      }
-      if (st_s_plugin_consent_id[0]) {
-        ccord_rect box = {px, py, pw, st_s_plugin_consent_box_h};
-        float text_w = fmaxf(80.0f, pw - 32.0f);
-        float app_w = fminf(184.0f, fmaxf(text_w - 104.0f, 110.0f));
-        float can_w = fminf(96.0f, fmaxf(text_w - app_w - 8.0f, 70.0f));
-        if (ui_in_rect(x, y, (ccord_rect){box.x + 16.0f, box.y + box.h - 46.0f, app_w, UIS_H_BTN})) {
-          ccord_contrib_plugin_consent_accept_for(ui->d.contrib, st_s_plugin_consent_id, st_s_plugin_consent_perms);
-          st_s_plugin_consent_id[0] = '\0';
-          st_s_plugin_consent_perms = 0;
-          st_s_plugin_consent_box_h = 224.0f;
-          st_s_page_scroll = 0.0f;
-          return true;
-        }
-        if (ui_in_rect(x, y, (ccord_rect){box.x + 16.0f + app_w + 8.0f, box.y + box.h - 46.0f, can_w, UIS_H_BTN})) {
-          st_s_plugin_consent_id[0] = '\0';
-          st_s_plugin_consent_perms = 0;
-          st_s_plugin_consent_box_h = 224.0f;
-          st_s_page_scroll = 0.0f;
-          return true;
-        }
-        return false;
-      }
-      if (st_s_plugin_detail_id[0]) {
-        const ccord_catalog_entry *e = ccord_contrib_catalog_detail(ui->d.contrib);
-        if (!e || strcmp(e->id, st_s_plugin_detail_id) != 0) {
-          const ccord_catalog_entry *fb = ccord_contrib_catalog_find(ui->d.contrib, st_s_plugin_detail_id);
-          e = (fb && fb->has_detail) ? fb : nullptr;
-        }
-        if (ui_in_rect(x, y, (ccord_rect){px, py, 86.0f, UIS_H_BTN_SM})) {
-          st_s_plugin_detail_id[0] = '\0';
-          st_s_page_scroll = 0.0f;
-          return true;
-        }
-        if (!e) {
-          ccord_rect box = {px, py + 34.0f, pw, 128.0f};
-          if (ui_in_rect(x, y, (ccord_rect){box.x + 16.0f, box.y + box.h - 44.0f, 120.0f, UIS_H_BTN})) {
-            ccord_contrib_catalog_fetch_detail(ui->d.contrib, st_s_plugin_detail_id);
-            return true;
-          }
-          return false;
-        }
-        float det_off = pw < 480.0f ? 20.0f : 0.0f;
-        ccord_rect box = {px, py + 34.0f, pw, 286.0f + det_off};
-        if (!e->bundled && !e->installing && (!e->installed || e->update_available)) {
-          if (ui_in_rect(x, y, (ccord_rect){box.x + 16.0f, box.y + box.h - 44.0f, 152.0f, UIS_H_BTN})) {
-            ccord_contrib_catalog_install(ui->d.contrib, e->id);
-            return true;
-          }
-        }
-        if (e->installed && !e->bundled) {
-          float ux = box.x + ((!e->installed || e->update_available) ? 180.0f : 16.0f);
-          if (ui_in_rect(x, y, (ccord_rect){ux, box.y + box.h - 44.0f, 96.0f, UIS_H_BTN})) {
-            char id_copy[65], name_copy[96], eb[128] = "";
-            snprintf(id_copy, sizeof id_copy, "%s", e->id);
-            snprintf(name_copy, sizeof name_copy, "%s", e->name);
-            if (ccord_contrib_plugin_uninstall(ui->d.contrib, id_copy, eb, sizeof eb)) {
-              snprintf(st_s_plugin_status_msg, sizeof st_s_plugin_status_msg, "Uninstalled %s", name_copy);
-              st_s_plugin_detail_id[0] = '\0';
-            } else {
-              snprintf(st_s_plugin_status_msg, sizeof st_s_plugin_status_msg, "Uninstall failed: %.150s", eb);
-            }
-            return true;
-          }
-        }
-        return false;
-      }
-
-      if (st_s_plugin_subtab == 1) {
-        ccord_rect r_q, r_go, r_sort, tier_rects[4], r_class1;
-        py = st_plugin_discover_layout(g, py, &r_q, &r_go, &r_sort, tier_rects, &r_class1);
-        if (ui_in_rect(x, y, r_q)) {
-          st_s_plugin_search_focused = true;
-          if (ui->touch_mode) ui->touch_text_focused = true;
-          return true;
-        }
-        st_s_plugin_search_focused = false;
-        if (ui->touch_mode) ui->touch_text_focused = false;
-        if (ui_in_rect(x, y, r_go)) {
-          st_trigger_plugin_discover_query(ui, false);
-          return true;
-        }
-        if (ui_in_rect(x, y, r_sort)) {
-          st_s_plugin_sort_idx = (st_s_plugin_sort_idx + 1) % 5;
-          st_trigger_plugin_discover_query(ui, false);
-          return true;
-        }
-        for (int t = 0; t < 4; t++) {
-          if (ui_in_rect(x, y, tier_rects[t])) {
-            st_s_plugin_tier_filter = t;
-            st_trigger_plugin_discover_query(ui, false);
-            return true;
-          }
-        }
-        if (ui_in_rect(x, y, r_class1)) {
-          st_s_plugin_class1_only = !st_s_plugin_class1_only;
-          st_trigger_plugin_discover_query(ui, false);
-          return true;
-        }
-
-        const ccord_catalog_status *cst = ccord_contrib_catalog_status(ui->d.contrib);
-        size_t cn = ui->d.contrib ? ccord_contrib_catalog_count(ui->d.contrib) : 0;
-        bool narrow_card = pw < 480.0f;
-        for (size_t i = 0; i < cn; i++) {
-          const ccord_catalog_entry *e = ccord_contrib_catalog_at(ui->d.contrib, i);
-          if (!e) continue;
-          bool has_w = e->warning_sev != CCORD_WARN_NONE && e->warning_title && e->warning_title[0];
-          float ch = (narrow_card ? 136.0f : 98.0f) + (has_w ? 20.0f : 0.0f);
-          ccord_rect btn_det = narrow_card ? (ccord_rect){px + 14.0f, py + ch - 34.0f, 84.0f, UIS_H_BTN_SM}
-                                           : (ccord_rect){px + pw - 200.0f, py + ch - 34.0f, 76.0f, UIS_H_BTN_SM};
-          ccord_rect btn_act = narrow_card ? (ccord_rect){px + 106.0f, py + ch - 34.0f, 108.0f, UIS_H_BTN_SM}
-                                           : (ccord_rect){px + pw - 116.0f, py + ch - 34.0f, 102.0f, UIS_H_BTN_SM};
-          if (ui_in_rect(x, y, btn_det)) {
-            snprintf(st_s_plugin_detail_id, sizeof st_s_plugin_detail_id, "%s", e->id);
-            st_s_page_scroll = 0.0f;
-            ccord_contrib_catalog_fetch_detail(ui->d.contrib, e->id);
-            return true;
-          }
-          if (ui_in_rect(x, y, btn_act) && !e->installing && !e->bundled) {
-            if (!e->installed || e->update_available) {
-              ccord_contrib_catalog_install(ui->d.contrib, e->id);
-              return true;
-            }
-          }
-          py += ch + 10.0f;
-        }
-        if (cst && cst->has_more && !cst->loading_more) {
-          ccord_rect r_more = {px, py + 4.0f, 148.0f, UIS_H_BTN_SM};
-          if (ui_in_rect(x, y, r_more)) {
-            st_trigger_plugin_discover_query(ui, true);
-            return true;
-          }
-        }
-        return false;
-      }
-
-      if (st_s_plugin_subtab == 2) {
-        // Updates & Settings tab clicks
-        const ccord_catalog_prefs *pr_cur = ccord_contrib_catalog_prefs(ui->d.contrib);
-        ccord_catalog_prefs pr = pr_cur ? *pr_cur : (ccord_catalog_prefs){.auto_update_enabled = false, .auto_update_min_tier = 2};
-        ccord_rect tier_rects[3];
-        float box_h = 142.0f;
-        (void)st_plugin_updates_tier_layout(px, pw, py + 68.0f, tier_rects, &box_h);
-        ccord_rect box = {px, py, pw, box_h};
-        ccord_rect sw_row = {box.x + 14.0f, box.y + 12.0f, box.w - 28.0f, 36.0f};
-        ccord_rect sw_hit = {sw_row.x + sw_row.w - 48.0f, sw_row.y + 4.0f, 44.0f, 26.0f};
-        if (ui_in_rect(x, y, sw_hit)) {
-          pr.auto_update_enabled = !pr.auto_update_enabled;
-          ccord_contrib_catalog_set_prefs(ui->d.contrib, &pr);
-          return true;
-        }
-        for (int k = 0; k < 3; k++) {
-          if (ui_in_rect(x, y, tier_rects[k])) {
-            pr.auto_update_min_tier = (uint8_t)(k + 1);
-            ccord_contrib_catalog_set_prefs(ui->d.contrib, &pr);
-            return true;
-          }
-        }
-        ccord_rect r_run = pw < 410.0f
-                             ? (ccord_rect){box.x + 14.0f, box.y + box.h - 36.0f, fminf(184.0f, pw - 28.0f), UIS_H_BTN_SM}
-                             : (ccord_rect){box.x + box.w - 178.0f, box.y + box.h - 36.0f, 164.0f, UIS_H_BTN_SM};
-        if (ui_in_rect(x, y, r_run)) {
-          ccord_contrib_catalog_run_auto_updates(ui->d.contrib);
-          return true;
-        }
-        py += box.h + 32.0f;
-        size_t un = ui->d.contrib ? ccord_contrib_catalog_update_count(ui->d.contrib) : 0;
-        bool narrow_upd = pw < 440.0f;
-        for (size_t i = 0; i < un; i++) {
-          const ccord_catalog_entry *e = ccord_contrib_catalog_update_at(ui->d.contrib, i);
-          if (!e || !e->update_available) continue;
-          float ch = narrow_upd ? 98.0f : 72.0f;
-          ccord_rect btn_u = narrow_upd ? (ccord_rect){px + 14.0f, py + ch - 34.0f, 132.0f, UIS_H_BTN_SM}
-                                        : (ccord_rect){px + pw - 134.0f, py + 20.0f, 120.0f, UIS_H_BTN_SM};
-          if (ui_in_rect(x, y, btn_u) && !e->installing) {
-            if (e->update_needs_review) {
-              snprintf(st_s_plugin_detail_id, sizeof st_s_plugin_detail_id, "%s", e->id);
-              st_s_page_scroll = 0.0f;
-              ccord_contrib_catalog_fetch_detail(ui->d.contrib, e->id);
-            } else {
-              ccord_contrib_catalog_install(ui->d.contrib, e->id);
-            }
-            return true;
-          }
-          py += ch + 8.0f;
-        }
-        return false;
-      }
-
-      // Tab 0: Installed
-      py += 24.0f;
-      size_t n = ui->d.contrib ? ccord_contrib_plugin_count(ui->d.contrib) : 0;
-      for (size_t i = 0; i < n; i++) {
-        const ccord_plugin_info *p = ccord_contrib_plugin_at(ui->d.contrib, i);
-        if (!p) continue;
-        plugin_card_rects rc;
-        float h = st_plugin_card_layout(ui, g, i, p, py, &rc);
-        if (ui_in_rect(x, y, rc.btn_toggle)) {
-          if (p->state == CCORD_PLUGIN_NEEDS_CONSENT) {
-            snprintf(st_s_plugin_consent_id, sizeof st_s_plugin_consent_id, "%s", p->id);
-            st_s_plugin_consent_perms = p->perms_mask;
-            st_s_plugin_consent_box_h = 224.0f;
-            st_s_page_scroll = 0.0f;
-          } else {
-            bool on = !(p->state == CCORD_PLUGIN_READY || p->state == CCORD_PLUGIN_STARTING);
-            ccord_contrib_plugin_set_enabled(ui->d.contrib, p->id, on);
-          }
-          return true;
-        }
-        if (ui_in_rect(x, y, rc.btn_log)) {
-          snprintf(st_s_plugin_log_id, sizeof st_s_plugin_log_id, "%s", p->id);
-          return true;
-        }
-        if (ui_in_rect(x, y, rc.btn_reload)) {
-          ccord_contrib_plugin_reload(ui->d.contrib, p->id);
-          return true;
-        }
-        if (rc.btn_configure.w > 0.0f && ui_in_rect(x, y, rc.btn_configure)) {
-          ui_plugin_settings_open(ui, p->id);
-          return true;
-        }
-        if (ui_in_rect(x, y, rc.btn_export)) {
-          const char *home = getenv("HOME");
-          char dest[512], ebuf[128] = "";
-          snprintf(dest, sizeof dest, "%s/%s-%s.cce", home && home[0] ? home : ".", p->id, p->version);
-          if (ccord_contrib_plugin_export_cce(ui->d.contrib, p->id, dest, ebuf, sizeof ebuf)) {
-            snprintf(st_s_plugin_status_msg, sizeof st_s_plugin_status_msg, "Exported: %.175s", dest);
-          } else {
-            snprintf(st_s_plugin_status_msg, sizeof st_s_plugin_status_msg, "Export failed: %.170s", ebuf);
-          }
-          return true;
-        }
-        if (rc.btn_update.w > 0.0f && ui_in_rect(x, y, rc.btn_update)) {
-          if (p->update_needs_review) {
-            snprintf(st_s_plugin_detail_id, sizeof st_s_plugin_detail_id, "%s", p->id);
-            st_s_page_scroll = 0.0f;
-            ccord_contrib_catalog_fetch_detail(ui->d.contrib, p->id);
-          } else {
-            ccord_contrib_catalog_install(ui->d.contrib, p->id);
-          }
-          return true;
-        }
-        if (rc.btn_auto.w > 0.0f && ui_in_rect(x, y, rc.btn_auto)) {
-          ccord_contrib_catalog_set_plugin_auto_update(ui->d.contrib, p->id, !p->auto_update);
-          return true;
-        }
-        if (rc.btn_uninstall.w > 0.0f && ui_in_rect(x, y, rc.btn_uninstall)) {
-          char id_copy[65], name_copy[96], ebuf[128] = "";
-          snprintf(id_copy, sizeof id_copy, "%s", p->id);
-          snprintf(name_copy, sizeof name_copy, "%s", p->name);
-          if (ccord_contrib_plugin_uninstall(ui->d.contrib, id_copy, ebuf, sizeof ebuf)) {
-            snprintf(st_s_plugin_status_msg, sizeof st_s_plugin_status_msg, "Uninstalled %s", name_copy);
-          } else {
-            snprintf(st_s_plugin_status_msg, sizeof st_s_plugin_status_msg, "Uninstall failed: %.150s", ebuf);
-          }
-          return true;
-        }
-        py += h + 10.0f;
-      }
-      break;
-    }
+    case SP_PLUGINS:
+      return st_plugins_handle_click(ui, g, x, y);
     default:
       break;
   }
@@ -719,21 +405,8 @@ static int64_t settings_hover_key(const ccord_ui *ui, const sgeom *g, float x, f
       }
       return 0;
     }
-    case SP_PLUGINS: {
-      if (ui_in_rect(x, y, st_extensions_toggle_rect(g))) return 600;
-      ccord_rect r_inst, r_disc, r_upd, r_sync;
-      st_plugin_subtab_rects(g, &r_inst, &r_disc, &r_upd, &r_sync);
-      if (ui_in_rect(x, y, r_inst)) return 601;
-      if (ui_in_rect(x, y, r_disc)) return 602;
-      if (ui_in_rect(x, y, r_upd)) return 603;
-      if (ui_in_rect(x, y, r_sync)) return 604;
-      if (ui_in_rect(x, y, g->content) && y >= g->content.y + 116.0f) {
-        int row_cell = (int)((y - (g->content.y + 116.0f)) / 24.0f);
-        int col_cell = (int)((x - g->content.x) / 64.0f);
-        return 650 + (int64_t)row_cell * 32 + (int64_t)col_cell;
-      }
-      return 0;
-    }
+    case SP_PLUGINS:
+      return st_plugins_hover_key(ui, g, x, y);
     default: {
       // External M6 preference / device / profile pages: quantize hover cells inside content so
       // 1px pointer jitter in the same control or whitespace does not trigger redraws.
@@ -990,6 +663,12 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     st_s_press_y = ev->y;
     st_s_press_until_ms = ui->now_ms + SETTINGS_PRESS_MS;
     ui->dirty = true;
+    if (ui->settings_page == SP_PLUGINS && (!ui->mobile_layout || ui->mobile_settings_detail) &&
+        st_plugins_has_overlay()) {
+      (void)st_plugins_handle_click(ui, &g, ev->x, ev->y);
+      st_s_hover_key = -1;
+      return true;
+    }
     if (ui_in_rect(ev->x, ev->y, g.close) || !ui_in_rect(ev->x, ev->y, g.panel)) {
       st_settings_save_flush(ui);
       ui_open_settings(ui, false);
@@ -1001,22 +680,8 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
         ui->dirty = true;
         return true;
       }
-      if (ui->settings_page == SP_PLUGINS) {
-        if (st_s_plugin_log_id[0]) { st_s_plugin_log_id[0] = '\0'; ui->dirty = true; return true; }
-        if (st_s_plugin_consent_id[0]) {
-          st_s_plugin_consent_id[0] = '\0';
-          st_s_plugin_consent_perms = 0;
-          st_s_plugin_consent_box_h = 224.0f;
-          st_s_page_scroll = 0.0f;
-          ui->dirty = true;
-          return true;
-        }
-        if (st_s_plugin_detail_id[0]) {
-          st_s_plugin_detail_id[0] = '\0';
-          st_s_page_scroll = 0.0f;
-          ui->dirty = true;
-          return true;
-        }
+      if (ui->settings_page == SP_PLUGINS && st_plugins_handle_back(ui)) {
+        return true;
       }
       ui->mobile_settings_detail = false;
       ui->account_focus_field = 0;
@@ -1212,36 +877,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (ui->settings_page == SP_PROFILE_EDIT && ui_settings_profile_key(ui, ev)) return true;
-  if (ui->settings_page == SP_PLUGINS && st_s_plugin_subtab == 1 && !st_s_plugin_detail_id[0] && st_s_plugin_search_focused) {
-    if (ev->type == CCORD_IN_TEXT && ev->text[0]) {
-      size_t cur = strlen(st_s_plugin_search);
-      size_t add = strlen(ev->text);
-      if (cur + add < sizeof st_s_plugin_search) {
-        memcpy(st_s_plugin_search + cur, ev->text, add + 1);
-        ui->dirty = true;
-      }
-      return true;
-    }
-    if (ev->type == CCORD_IN_KEY_DOWN) {
-      if (ev->key == CCORD_KEY_BACKSPACE) {
-        size_t cur = strlen(st_s_plugin_search);
-        while (cur > 0 && ((unsigned char)st_s_plugin_search[cur - 1] & 0xC0u) == 0x80u) cur--;
-        if (cur > 0) st_s_plugin_search[cur - 1] = '\0';
-        ui->dirty = true;
-        return true;
-      }
-      if (ev->key == CCORD_KEY_RETURN) {
-        st_trigger_plugin_discover_query(ui, false);
-        ui->dirty = true;
-        return true;
-      }
-      if (ev->key == CCORD_KEY_ESCAPE) {
-        st_s_plugin_search_focused = false;
-        ui->dirty = true;
-        return true;
-      }
-    }
-  }
+  if (ui->settings_page == SP_PLUGINS && st_plugins_handle_key(ui, ev)) return true;
   if (ui->settings_page == SP_APPEARANCE && ui->account_focus_field == 6) {
     // QuickCSS snippet editor: every edit applies live through the host and persists.
     ccord_text_edit *active = &ui->quickcss_edit;

@@ -324,12 +324,40 @@ static void draw_keybinds(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 
 static void draw_extensions_row(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 {
-  draw_row_label(ui, r, g, 0, "EXTENSIONS");
+  uis_tokens tk = uis_tokens_of(ui);
   float x = g->content.x, w = g->content.w;
-  ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_muted));
-  const char *note = ui->extensions_on ? "Turning off stops every extension and removes its menu items."
-                                       : "Turning on starts the extensions again.";
-  ccord_text_draw_ellipsis(r, note, strlen(note), x, st_row_y(g, 0) + 20.0f, w - 60.0f, &ns);
+  float ry = st_row_y(g, 0);
+  ccord_text_style os = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));
+  const char *lbl = "EXTENSIONS";
+  ccord_text_draw(r, lbl, strlen(lbl), x, ry, &os, 0.0f);
+  float lw = ccord_text_measure(r, lbl, strlen(lbl), &os, 0.0f).x;
+
+  // Compact live active/paused status pill next to EXTENSIONS label
+  size_t active_n = 0;
+  size_t total_n = ui->d.contrib ? ccord_contrib_plugin_count(ui->d.contrib) : 0;
+  for (size_t i = 0; i < total_n; i++) {
+    const ccord_plugin_info *p = ccord_contrib_plugin_at(ui->d.contrib, i);
+    if (p && p->state == CCORD_PLUGIN_READY) active_n++;
+  }
+  char ptxt[32];
+  if (!ui->extensions_on) snprintf(ptxt, sizeof ptxt, "Paused");
+  else if (active_n > 0) snprintf(ptxt, sizeof ptxt, "%zu active", active_n);
+  else snprintf(ptxt, sizeof ptxt, "Ready");
+  ccord_color pfg = !ui->extensions_on ? COL(status_idle) : (active_n > 0 ? COL(status_online) : COL(text_muted));
+  ccord_color pbg = {pfg.r, pfg.g, pfg.b, 34};
+  ccord_text_style ps = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, pfg);
+  float pw = ccord_text_measure(r, ptxt, strlen(ptxt), &ps, 0.0f).x + 12.0f;
+  float px = x + lw + 8.0f;
+  if (px + pw < x + w - 58.0f) {
+    ccord_rect pill = {px, ry - 2.0f, pw, 16.0f};
+    uis_plate(ui, r, pill, pill.h * 0.5f, pbg);
+    ccord_text_draw(r, ptxt, strlen(ptxt), pill.x + 6.0f, pill.y + 2.0f, &ps, 0.0f);
+  }
+
+  ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_control, COL(text_muted));
+  const char *note = ui->extensions_on ? "Manage installed plugins, discover new ones, and review updates."
+                                       : "All extensions are paused. Turn on to re-enable your plugins.";
+  ccord_text_draw_ellipsis(r, note, strlen(note), x, ry + 20.0f, fmaxf(w - 58.0f, 60.0f), &ns);
   ccord_rect t = st_extensions_toggle_rect(g);
   uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, t)};
   uis_toggle(ui, r, st_row_rect(g, 0), ui->extensions_on, st, "swext", 0);
@@ -479,6 +507,9 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
   ui_icon_close(r, g.close.x + g.close.w * 0.5f, g.close.y + g.close.h * 0.5f, UIS_ICON_GLYPH, cc);
   if (ui->settings_page == SP_ACCOUNT && ui->account_mfa_required) {
     st_draw_mfa_popup(ui, r);
+  }
+  if (ui->settings_page == SP_PLUGINS && (!ui->mobile_layout || ui->mobile_settings_detail)) {
+    st_draw_plugins_overlays(ui, r, &g);
   }
 }
 

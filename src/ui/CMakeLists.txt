@@ -126,7 +126,7 @@ add_library(ccord::ui ALIAS ccord_ui)
 target_include_directories(ccord_ui PUBLIC include)
 target_link_libraries(ccord_ui
   PUBLIC ccord_ui_logic ccord_render ccord_session ccord_model ccord_contrib ccord_store ccord_emoji ccord_theme ccord_platform ccord_core ${CCORD_MATH_LIB}
-  PRIVATE ccord_ui_internal_inc SDL3::SDL3)
+  PRIVATE ccord_ui_internal_inc ccord_ipc SDL3::SDL3)
 ccord_strict_warnings(ccord_ui)
 
 if(CCORD_BUILD_TESTS)
