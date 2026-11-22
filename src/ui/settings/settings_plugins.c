@@ -2515,7 +2515,7 @@ static void draw_protected_security_modal(ccord_ui *ui, ccord_renderer *r)
   ccord_text_draw_ellipsis(r, title_l, strlen(title_l), box.x + 72.0f, iy + 1.0f, box.w - 92.0f, &ns);
   float px = box.x + 72.0f;
   px += draw_pill(ui, r, px, iy + 22.0f, tier_label(s_sec_tier, false), tier_color(ui, s_sec_tier, false)) + 8.0f;
-  char sub_id[128];
+  char sub_id[160];
   if (s_sec_author[0]) snprintf(sub_id, sizeof sub_id, "by @%s · %s", s_sec_author, s_sec_id);
   else snprintf(sub_id, sizeof sub_id, "%s", s_sec_id);
   ccord_text_draw_ellipsis(r, sub_id, strlen(sub_id), px, iy + 24.0f, fmaxf(box.x + box.w - 20.0f - px, 40.0f), &cs);

@@ -639,9 +639,8 @@ ccord_rect st_vol_plus_rect(const sgeom *g, int row)
 static bool stream_wraps_row(const sgeom *g, int row)
 {
   if (g->content.w >= 420.0f) return false;
-  if (row == 0 && STREAM_ENC_COUNT > 3) return true;
-  if (row == 1 && STREAM_FW_COUNT > 3) return true;
-  return false;
+  int count = (row == 0) ? STREAM_ENC_COUNT : (row == 1) ? STREAM_FW_COUNT : 0;
+  return count > 3;
 }
 
 float st_stream_row_y(const sgeom *g, int row)

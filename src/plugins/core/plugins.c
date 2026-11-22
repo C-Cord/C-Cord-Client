@@ -130,9 +130,11 @@ bool pl_valid_plain_text(const char *s, size_t n, size_t max)
 
 void pl_publish_state(ccord_plugins *m, plugin *p)
 {
-  _Static_assert((uint32_t)CCORD_CONTRIB_PLAT_ALL == (uint32_t)CCORD_PLAT_ALL &&
-                     (uint32_t)CCORD_CONTRIB_PLAT_ANDROID == (uint32_t)CCORD_PLAT_ANDROID &&
-                     (uint32_t)CCORD_CONTRIB_PLAT_DESKTOP == (uint32_t)CCORD_PLAT_DESKTOP,
+  _Static_assert((uint32_t)CCORD_CONTRIB_PLAT_ALL == (uint32_t)CCORD_PLAT_ALL,
+                 "contrib platform bitmask must match manifest.h");
+  _Static_assert((uint32_t)CCORD_CONTRIB_PLAT_ANDROID == (uint32_t)CCORD_PLAT_ANDROID,
+                 "contrib platform bitmask must match manifest.h");
+  _Static_assert((uint32_t)CCORD_CONTRIB_PLAT_DESKTOP == (uint32_t)CCORD_PLAT_DESKTOP,
                  "contrib platform bitmask must match manifest.h");
   ccord_catalog_local_overlay ov = {0};
   bool has_ov = m->catalog && ccord_catalog_query_overlay(m->catalog, p->m.id, p->m.version, p->consented_perms, &ov);
