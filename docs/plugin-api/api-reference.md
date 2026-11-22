@@ -18,6 +18,7 @@ Unknown top-level keys and duplicate permissions are strictly rejected. Manifest
 | `"version"` | `string` | required | Strict numeric `MAJOR.MINOR.PATCH` string (no `-prerelease`, `+build`, or `v` prefix). |
 | `"api"` | `integer` | required | Target API version (`1`). |
 | `"main"` | `string` | `"main.lua"` | Optional relative `.lua` entry file (`^[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*\.lua$`, <= 128 bytes). |
+| `"icon"` | `string` | `""` | Optional relative path inside the `.cce` archive to a bundled `.png`, `.jpg`, `.jpeg`, or `.webp` icon (<= 128 bytes, no `".."` or leading `"/"`; max **512×512 px**, max **256 KiB**). Loaded directly from disk for installed plugins and extracted to a 128×128 thumbnail by `plugins.c-cord.org`. |
 | `"description"` | `string` | `""` | Optional short printable UTF-8 summary (<= 200 bytes). |
 | `"license"` | `string` | `""` | Optional SPDX license identifier (<= 32 bytes). |
 | `"platforms"` | `string[]` | `["all"]` | Allowed targets: `"linux"`, `"macos"`, `"darwin"` (alias for macOS), `"windows"`, `"android"`, `"desktop"`, `"mobile"`, `"all"`. Empty array `[]` equals `["all"]`. |

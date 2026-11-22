@@ -25,6 +25,7 @@ C-Cord extensions are Lua 5.5.1 plugins that run in an isolated sandboxed host â
      "version": "1.0.0",
      "api": 1,
      "main": "main.lua",
+     "icon": "assets/icon.png",
      "description": "A cross-platform C-Cord extension.",
      "license": "MIT",
      "platforms": ["desktop", "android"],
@@ -36,6 +37,7 @@ C-Cord extensions are Lua 5.5.1 plugins that run in an isolated sandboxed host â
    - `api`: `1` (required; Plugin API version).
    - `version`: strict numeric `MAJOR.MINOR.PATCH` (no `-prerelease` or `v` prefix).
    - `main` *(optional)*: relative `.lua` entry path, defaults to `"main.lua"`.
+   - `icon` *(optional)*: relative path inside the `.cce` archive to a bundled `.png`, `.jpg`, `.jpeg`, or `.webp` plugin icon (max **512Ã—512 px**, max **256 KiB**). Displayed in Settings and extracted to a 128Ã—128 thumbnail by the catalog.
    - `platforms` *(optional)*: Array of `"linux"`, `"macos"`, `"darwin"`, `"windows"`, `"android"`, `"desktop"`, `"mobile"`, or `"all"`. Omit or pass `[]` to run everywhere.
    - `requires_capabilities` *(optional)*: Array of capability names (e.g., `"haptics"`, `"share"`, `"tray"`, `"global_shortcuts"`). If the host lacks a required capability, the plugin is marked unavailable instead of crashing mid-execution.
    - `allowed_hosts` *(optional)*: Optional domain allow-list (max 32 entries) for `network.http` and `network.ws` (exact domains like `"api.github.com"` or subdomain wildcards like `"*.example.com"`). Shown transparently on the consent prompt.
