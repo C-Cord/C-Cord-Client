@@ -109,7 +109,8 @@ void ccord_ui_set_extensions_enabled(ccord_ui *ui, bool on);
 // Copies the Account view model shown on the third Settings page. The app owns the live state.
 void ccord_ui_set_account_view(ccord_ui *ui, const ccord_account_view *view);
 
-// Native in-app updater status (used for AppImage, Windows, and macOS; system packages stay quiet).
+// Native in-app updater status (all platforms check and notify; only self-updatable installs
+// with a verified release asset expose the in-app Update / Update Now install action).
 typedef enum ccord_ui_update_state {
   CCORD_UI_UPDATE_IDLE = 0,
   CCORD_UI_UPDATE_CHECKING,
@@ -122,6 +123,7 @@ typedef enum ccord_ui_update_state {
 typedef struct ccord_ui_update_info {
   ccord_ui_update_state state;
   bool self_updatable;
+  bool can_install;
   char install_kind[32];
   char latest_version[64];
   char release_url[256];

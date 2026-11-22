@@ -120,10 +120,84 @@ static void test_sha256_file(void)
   remove(tmp);
 }
 
+static void test_apply_check_result(void)
+{
+  static const char k_json[] =
+      "{"
+      "  \"release\": {"
+      "    \"tag\": \"v0.3.0\","
+      "    \"html_url\": \"https://github.com/C-Cord/C-Cord-Client/releases/tag/v0.3.0\","
+      "    \"assets\": ["
+      "      {\"name\":\"C-Cord-0.3.0-linux-x86_64.AppImage\",\"os\":\"linux\",\"arch\":\"x86_64\",\"format\":\"appimage\",\"size_bytes\":123456,\"sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}"
+      "    ]"
+      "  }"
+      "}";
+
+  // System package: notifies of new version without allowing in-app install.
+  ccord_update_parsed p = {0};
+  CHECK(ccord_updater_parse_latest(k_json, sizeof k_json - 1, "linux", "x86_64", CCORD_INSTALL_SYSTEM_PKG,
+                                   "https://c-cord.org", &p));
+  CHECK(!p.found);
+  ccord_ui_update_info ui = {0};
+  CHECK(!ccord_updater_apply_check_result("0.1.0", CCORD_INSTALL_SYSTEM_PKG, &p, true, &ui));
+  CHECK(ui.state == CCORD_UI_UPDATE_AVAILABLE);
+  CHECK(!ui.self_updatable);
+  CHECK(!ui.can_install);
+  CHECK(strcmp(ui.latest_version, "v0.3.0") == 0);
+  CHECK(strcmp(ui.release_url, "https://github.com/C-Cord/C-Cord-Client/releases/tag/v0.3.0") == 0);
+  CHECK(strstr(ui.status_text, "package manager") != nullptr);
+
+  // Android: notifies of new version without allowing in-app install.
+  ccord_ui_update_info aui = {0};
+  CHECK(!ccord_updater_apply_check_result("0.1.0", CCORD_INSTALL_ANDROID, &p, true, &aui));
+  CHECK(aui.state == CCORD_UI_UPDATE_AVAILABLE);
+  CHECK(!aui.self_updatable);
+  CHECK(!aui.can_install);
+  CHECK(strstr(aui.status_text, "F-Droid") != nullptr);
+
+  // System package already up to date.
+  ccord_ui_update_info utd = {0};
+  CHECK(!ccord_updater_apply_check_result("0.3.0", CCORD_INSTALL_SYSTEM_PKG, &p, true, &utd));
+  CHECK(utd.state == CCORD_UI_UPDATE_UP_TO_DATE);
+  CHECK(!utd.can_install);
+
+  // AppImage with verified asset: notifies AND enables in-app install.
+  ccord_update_parsed pa = {0};
+  CHECK(ccord_updater_parse_latest(k_json, sizeof k_json - 1, "linux", "x86_64", CCORD_INSTALL_APPIMAGE,
+                                   "https://c-cord.org", &pa));
+  CHECK(pa.found);
+  ccord_ui_update_info aiu = {0};
+  CHECK(ccord_updater_apply_check_result("0.1.0", CCORD_INSTALL_APPIMAGE, &pa, true, &aiu));
+  CHECK(aiu.state == CCORD_UI_UPDATE_AVAILABLE);
+  CHECK(aiu.self_updatable);
+  CHECK(aiu.can_install);
+
+  // Self-updatable install without a verified matching asset: notifies, but refuses in-app install.
+  ccord_update_parsed p_unverified = pa;
+  p_unverified.found = false;
+  ccord_ui_update_info nou = {0};
+  CHECK(!ccord_updater_apply_check_result("0.1.0", CCORD_INSTALL_APPIMAGE, &p_unverified, true, &nou));
+  CHECK(nou.state == CCORD_UI_UPDATE_AVAILABLE);
+  CHECK(nou.self_updatable);
+  CHECK(!nou.can_install);
+
+  // Traversal tag must not trigger an update notification or bogus release URL.
+  static const char k_bad_tag[] = "{\"release\":{\"tag\":\"../v0.3.0\",\"assets\":[]}}";
+  ccord_update_parsed pb = {0};
+  CHECK(ccord_updater_parse_latest(k_bad_tag, sizeof k_bad_tag - 1, "linux", "x86_64", CCORD_INSTALL_SYSTEM_PKG,
+                                   "https://c-cord.org", &pb));
+  CHECK(pb.release_url[0] == '\0');
+  ccord_ui_update_info bui = {0};
+  CHECK(!ccord_updater_apply_check_result("0.1.0", CCORD_INSTALL_SYSTEM_PKG, &pb, true, &bui));
+  CHECK(bui.state == CCORD_UI_UPDATE_UP_TO_DATE);
+  CHECK(!bui.can_install);
+}
+
 int main(void)
 {
   test_semver();
   test_parse_assets();
+  test_apply_check_result();
   test_http_allowlist();
   test_sha256_file();
   return failures == 0 ? 0 : 1;

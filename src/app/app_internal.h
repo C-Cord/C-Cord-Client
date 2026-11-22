@@ -117,7 +117,7 @@ typedef struct app {
   ccord_theme *theme;                       // app-owned theme (non-owning mirror of main()'s theme; for --verify-slice m6)
   bool last_streamer_mode;                  // tracks streamer mode transitions for plugin dispatch
   ccord_warm *warm;                         // warm-start disk cache of the account (null-safe everywhere)
-  ccord_updater *updater;                   // native in-app updater (AppImage, Windows, macOS)
+  ccord_updater *updater;                   // native in-app updater (checks all platforms; self-updates AppImage, Windows, macOS)
   uint64_t start_ms;                        // now_ms() when the session was started (READY latency log)
   bool warm_was_stale;                      // the previous loop iteration saw the session stale
   bool saved_accounts_pushed;               // the saved-account roster was pushed to the UI at least once

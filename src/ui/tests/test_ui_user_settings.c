@@ -83,7 +83,9 @@ typedef struct fixture {
   uint64_t now;
   uint32_t caps;
   int theme_calls, zoom_calls;
+  int update_check_calls, update_install_calls, open_url_calls;
   char last_theme[32];
+  char last_url[256];
   float last_zoom;
 } fixture;
 
@@ -112,6 +114,23 @@ static uint32_t host_caps(void *ud)
 {
   (void)ud;
   return F.caps;
+}
+static void host_update_check(void *ud)
+{
+  (void)ud;
+  F.update_check_calls++;
+}
+static void host_update_install(void *ud)
+{
+  (void)ud;
+  F.update_install_calls++;
+}
+static bool host_open_url(void *ud, const char *url)
+{
+  (void)ud;
+  F.open_url_calls++;
+  snprintf(F.last_url, sizeof F.last_url, "%s", url ? url : "");
+  return true;
 }
 
 static void frame(int n)
@@ -209,11 +228,17 @@ static bool setup(const char *argv0, bool wipe)
   F.caps = CAP_ALL;
   F.theme_calls = 0;
   F.zoom_calls = 0;
+  F.update_check_calls = 0;
+  F.update_install_calls = 0;
+  F.open_url_calls = 0;
   F.last_theme[0] = '\0';
+  F.last_url[0] = '\0';
   F.last_zoom = 0.0f;
   ccord_ui_deps d = {.bus = F.bus, .store = F.store, .session = F.session, .contrib = F.contrib, .theme = &F.theme,
                      .host = {.clipboard_set = host_clip_set, .apply_theme = host_apply_theme,
-                              .set_zoom = host_set_zoom, .desktop_capabilities = host_caps},
+                              .set_zoom = host_set_zoom, .desktop_capabilities = host_caps,
+                              .open_url = host_open_url, .update_check = host_update_check,
+                              .update_install = host_update_install},
                      .fixed_now_unix_ms = 1793534400000LL};
   F.ui = ccord_ui_create(&d, &err);
   if (!F.ui) return false;
@@ -805,6 +830,93 @@ static void test_overlay_stubs(void)
   }
 }
 
+// Update banner & Settings > C-Cord: banner triggers on all platforms (including System Package),
+// omitting the Update button whenever the install is not self-updatable or has no verified asset.
+static void test_update_banner_and_settings(void)
+{
+  // Close Settings if open so the chat-area update banner renders.
+  if (sdbg().open) {
+    send((ccord_input_event){.type = CCORD_IN_KEY_DOWN, .key = CCORD_KEY_ESCAPE});
+    frame(2);
+  }
+  CT_CHECK(!sdbg().open);
+  F.update_check_calls = 0;
+  F.update_install_calls = 0;
+  F.open_url_calls = 0;
+  F.last_url[0] = '\0';
+
+  // 1. System package: banner appears with Notes + dismiss, but NO Update button.
+  ccord_ui_update_info pkg = {
+    .state = CCORD_UI_UPDATE_AVAILABLE,
+    .self_updatable = false,
+    .can_install = false,
+    .install_kind = "System Package",
+    .latest_version = "v0.3.0",
+    .release_url = "https://github.com/C-Cord/C-Cord-Client/releases/tag/v0.3.0",
+    .status_text = "C-Cord v0.3.0 is available — update via your package manager.",
+  };
+  ccord_ui_set_update_info(F.ui, &pkg);
+  frame(2);
+  CT_CHECK(F.ui->update_banner_dismiss_rect.w > 0.0f);
+  CT_CHECK(F.ui->update_banner_notes_rect.w > 0.0f);
+  CT_CHECK(F.ui->update_banner_install_rect.w == 0.0f);
+
+  click_rect(F.ui->update_banner_notes_rect);
+  CT_CHECK(F.open_url_calls == 1);
+  CT_CHECK(strcmp(F.last_url, pkg.release_url) == 0);
+  CT_CHECK(F.update_install_calls == 0);
+
+  click_rect(F.ui->update_banner_dismiss_rect);
+  CT_CHECK(F.ui->update_banner_dismissed);
+  CT_CHECK(F.ui->update_banner_dismiss_rect.w == 0.0f);
+
+  // Settings > C-Cord on System Package: primary button checks for updates (never installs); Release Notes works.
+  goto_prefs(CCORD_M6_PREFS_CCORD);
+  CT_CHECK(pdbg().update_primary.w > 0.0f);
+  CT_CHECK(pdbg().update_notes.w > 0.0f);
+  click_rect(pdbg().update_primary);
+  CT_CHECK(F.update_check_calls == 1);
+  CT_CHECK(F.update_install_calls == 0);
+  click_rect(pdbg().update_notes);
+  CT_CHECK(F.open_url_calls == 2);
+
+  // 2. Self-updatable install WITH verified asset: banner shows Update button and Settings installs.
+  send((ccord_input_event){.type = CCORD_IN_KEY_DOWN, .key = CCORD_KEY_ESCAPE});
+  frame(2);
+  ccord_ui_update_info appimg = {
+    .state = CCORD_UI_UPDATE_AVAILABLE,
+    .self_updatable = true,
+    .can_install = true,
+    .install_kind = "AppImage",
+    .latest_version = "v0.4.0",
+    .release_url = "https://github.com/C-Cord/C-Cord-Client/releases/tag/v0.4.0",
+    .status_text = "C-Cord v0.4.0 is available.",
+  };
+  ccord_ui_set_update_info(F.ui, &appimg);
+  frame(2);
+  CT_CHECK(!F.ui->update_banner_dismissed);   // newer version un-dismisses banner
+  CT_CHECK(F.ui->update_banner_install_rect.w > 0.0f);
+  CT_CHECK(F.ui->update_banner_notes_rect.w > 0.0f);
+  CT_CHECK(F.ui->update_banner_dismiss_rect.w > 0.0f);
+  click_rect(F.ui->update_banner_install_rect);
+  CT_CHECK(F.update_install_calls == 1);
+
+  goto_prefs(CCORD_M6_PREFS_CCORD);
+  click_rect(pdbg().update_primary);
+  CT_CHECK(F.update_install_calls == 2);
+
+  // 3. Self-updatable install WITHOUT verified asset: banner still appears, Update button omitted.
+  send((ccord_input_event){.type = CCORD_IN_KEY_DOWN, .key = CCORD_KEY_ESCAPE});
+  frame(2);
+  ccord_ui_update_info no_asset = appimg;
+  no_asset.can_install = false;
+  snprintf(no_asset.latest_version, sizeof no_asset.latest_version, "v0.5.0");
+  ccord_ui_set_update_info(F.ui, &no_asset);
+  frame(2);
+  CT_CHECK(F.ui->update_banner_dismiss_rect.w > 0.0f);
+  CT_CHECK(F.ui->update_banner_install_rect.w == 0.0f);
+}
+
 int main(int argc, char **argv)
 {
   (void)argc;
@@ -823,6 +935,7 @@ int main(int argc, char **argv)
   test_client_prefs();
   test_close_to_background();
   test_overlay_stubs();
+  test_update_banner_and_settings();
   teardown();
   return CT_RESULT("test_ui_user_settings");
 }

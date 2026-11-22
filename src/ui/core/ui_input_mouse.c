@@ -286,7 +286,8 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (ui->update_banner_install_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->update_banner_install_rect)) {
-    if (ui->update_info.state == CCORD_UI_UPDATE_AVAILABLE && ui->d.host.update_install) {
+    if (ui->update_info.self_updatable && ui->update_info.can_install &&
+        ui->update_info.state == CCORD_UI_UPDATE_AVAILABLE && ui->d.host.update_install) {
       ui->d.host.update_install(ui->d.host.ud);
     }
     ui->dirty = true;

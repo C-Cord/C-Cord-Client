@@ -127,7 +127,7 @@ static void ui_draw_stale_bar(ccord_ui *ui, ccord_renderer *r)
 
 static void ui_draw_update_bar(ccord_ui *ui, ccord_renderer *r)
 {
-  if (!ui || !ui->update_info.self_updatable || ui->update_banner_dismissed) return;
+  if (!ui || ui->update_banner_dismissed) return;
   if (ui_is_loading_screen(ui) || ui_is_login_screen(ui)) return;
   ccord_ui_update_state st = ui->update_info.state;
   if (st != CCORD_UI_UPDATE_AVAILABLE && st != CCORD_UI_UPDATE_DOWNLOADING && st != CCORD_UI_UPDATE_READY) return;
@@ -147,7 +147,8 @@ static void ui_draw_update_bar(ccord_ui *ui, ccord_renderer *r)
                (uis_state){.hover = ui_in_rect(ui->mx, ui->my, notes_r)}, "updn", 0);
     right_x = notes_r.x - 6.0f;
   }
-  if (st == CCORD_UI_UPDATE_AVAILABLE || st == CCORD_UI_UPDATE_DOWNLOADING) {
+  if (ui->update_info.self_updatable && ui->update_info.can_install &&
+      (st == CCORD_UI_UPDATE_AVAILABLE || st == CCORD_UI_UPDATE_DOWNLOADING)) {
     const char *blbl = (st == CCORD_UI_UPDATE_DOWNLOADING) ? "Downloading..." : "Update";
     float bw = (st == CCORD_UI_UPDATE_DOWNLOADING) ? 106.0f : 72.0f;
     ccord_rect inst_r = {right_x - bw, bar.y + 4.0f, bw, 26.0f};
@@ -157,6 +158,8 @@ static void ui_draw_update_bar(ccord_ui *ui, ccord_renderer *r)
                            .disabled = st == CCORD_UI_UPDATE_DOWNLOADING},
                "updi", 0);
     right_x = inst_r.x - 10.0f;
+  } else {
+    right_x -= 4.0f;
   }
   uis_button(ui, r, dismiss_r, "x", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
              (uis_state){.hover = ui_in_rect(ui->mx, ui->my, dismiss_r)}, "updx", 0);

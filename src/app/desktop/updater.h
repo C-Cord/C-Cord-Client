@@ -39,6 +39,12 @@ int ccord_updater_semver_compare(const char *a, const char *b);
 bool ccord_updater_parse_latest(const char *json, size_t json_len, const char *os_name, const char *arch,
                                 ccord_install_kind kind, const char *base_url, ccord_update_parsed *out);
 
+// Evaluates a parsed latest release against (current_version, kind) and populates out_ui.
+// Returns true when an in-app installable asset was selected (out_ui->can_install == true).
+bool ccord_updater_apply_check_result(const char *current_version, ccord_install_kind kind,
+                                      const ccord_update_parsed *parsed, bool parsed_ok,
+                                      ccord_ui_update_info *out_ui);
+
 // Computes lowercase hex SHA-256 digest of a file on disk.
 bool ccord_updater_sha256_file(const char *path, char out_hex[65]);
 

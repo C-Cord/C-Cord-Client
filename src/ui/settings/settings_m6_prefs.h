@@ -83,6 +83,7 @@ typedef struct ccord_settings_m6_prefs_debug {
   ccord_rect tts_toggle;
   // C-Cord page (CCORD_M6_PREFS_CCORD)
   ccord_rect jump_minus, jump_track, jump_plus, game_toggle, notify_badge, notify_focus, close_background;
+  ccord_rect update_primary, update_notes;
   int jump_value;
   bool game_detection_on, close_background_on;
   bool notify_badge_on, notify_focus_suppress;

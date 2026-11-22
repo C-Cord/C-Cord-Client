@@ -1033,16 +1033,22 @@ static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
     snprintf(ver_line, sizeof ver_line, "C-Cord v%s", CCORD_VERSION_STRING);
   }
   p_note(ui, r, c.x, p_row_y(c, 5) + 4.0f, c.w, ver_line);
-  if (ui->update_info.self_updatable) {
-    const char *status = ui->update_info.status_text[0] ? ui->update_info.status_text : "Automatic updates enabled via c-cord.org";
+  if (ui->update_info.self_updatable || ui->update_info.install_kind[0]) {
+    const char *fallback_status = ui->update_info.self_updatable
+                                    ? "Automatic updates enabled via c-cord.org"
+                                    : (strcmp(ui->update_info.install_kind, "Android") == 0
+                                         ? "Updates are managed via F-Droid or Releases."
+                                         : "Updates are managed by your system package manager.");
+    const char *status = ui->update_info.status_text[0] ? ui->update_info.status_text : fallback_status;
     p_note(ui, r, c.x, p_row_y(c, 5) + 22.0f, c.w, status);
     ccord_rect btn = p_update_primary_btn(c);
+    bool can_inst = ui->update_info.self_updatable && ui->update_info.can_install;
     bool busy = ui->update_info.state == CCORD_UI_UPDATE_CHECKING || ui->update_info.state == CCORD_UI_UPDATE_DOWNLOADING;
     const char *lbl = "Check for Updates";
     uis_btn_kind kind = UIS_BTN_SECONDARY;
     if (ui->update_info.state == CCORD_UI_UPDATE_CHECKING) lbl = "Checking...";
     else if (ui->update_info.state == CCORD_UI_UPDATE_DOWNLOADING) lbl = "Downloading...";
-    else if (ui->update_info.state == CCORD_UI_UPDATE_AVAILABLE) {
+    else if (can_inst && ui->update_info.state == CCORD_UI_UPDATE_AVAILABLE) {
       lbl = "Update Now";
       kind = UIS_BTN_PRIMARY;
     }
@@ -1053,8 +1059,6 @@ static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
       uis_button(ui, r, nb, "Release Notes", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
                  (uis_state){.hover = ui_in_rect(ui->mx, ui->my, nb)}, "m6un", 0);
     }
-  } else if (ui->update_info.install_kind[0]) {
-    p_note(ui, r, c.x, p_row_y(c, 5) + 22.0f, c.w, "Updates are managed by your system package manager.");
   }
 }
 
@@ -1091,8 +1095,10 @@ static bool p_click_ccord(ccord_ui *ui, ccord_rect c, float x, float y)
     if (ui->d.host.set_close_to_tray) ui->d.host.set_close_to_tray(ui->d.host.ud, s_prefs.close_background);
     ui_settings_save(ui);
     return true;
-  } else if (ui->update_info.self_updatable && ui_in_rect(x, y, p_update_primary_btn(c))) {
-    if (ui->update_info.state == CCORD_UI_UPDATE_AVAILABLE) {
+  } else if ((ui->update_info.self_updatable || ui->update_info.install_kind[0]) &&
+             ui_in_rect(x, y, p_update_primary_btn(c))) {
+    bool can_inst = ui->update_info.self_updatable && ui->update_info.can_install;
+    if (can_inst && ui->update_info.state == CCORD_UI_UPDATE_AVAILABLE) {
       if (ui->d.host.update_install) ui->d.host.update_install(ui->d.host.ud);
     } else if (ui->update_info.state != CCORD_UI_UPDATE_CHECKING &&
                ui->update_info.state != CCORD_UI_UPDATE_DOWNLOADING) {
@@ -1100,7 +1106,8 @@ static bool p_click_ccord(ccord_ui *ui, ccord_rect c, float x, float y)
     }
     ui->dirty = true;
     return true;
-  } else if (ui->update_info.self_updatable && ui->update_info.release_url[0] &&
+  } else if ((ui->update_info.self_updatable || ui->update_info.install_kind[0]) &&
+             ui->update_info.release_url[0] &&
              ui_in_rect(x, y, p_update_notes_btn(c))) {
     if (ui->d.host.open_url) (void)ui->d.host.open_url(ui->d.host.ud, ui->update_info.release_url);
     return true;
@@ -1189,6 +1196,10 @@ void ui_settings_m6_prefs_get_debug(const ccord_ui *ui, ccord_settings_m6_prefs_
     out->notify_badge = p_toggle(c, 2);
     out->notify_focus = p_toggle(c, 3);
     out->close_background = p_toggle(c, 4);
+    if (ui && (ui->update_info.self_updatable || ui->update_info.install_kind[0])) {
+      out->update_primary = p_update_primary_btn(c);
+      if (ui->update_info.release_url[0]) out->update_notes = p_update_notes_btn(c);
+    }
     out->close_background_on = s_prefs.close_background;
     out->jump_value = s_prefs.jump_present_messages;
     out->game_detection_on = s_prefs.game_detection;

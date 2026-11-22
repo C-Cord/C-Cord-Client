@@ -254,7 +254,7 @@ bool ccord_updater_parse_latest(const char *json, size_t json_len, const char *o
   snprintf(out->tag, sizeof out->tag, "%s", tag);
   if (html_url && strncmp(html_url, "https://", 8) == 0) {
     snprintf(out->release_url, sizeof out->release_url, "%s", html_url);
-  } else {
+  } else if (safe_url_segment(tag)) {
     snprintf(out->release_url, sizeof out->release_url, "https://github.com/C-Cord/C-Cord-Client/releases/tag/%s", tag);
   }
 
@@ -484,6 +484,49 @@ struct ccord_updater {
   _Atomic bool has_update;
 };
 
+bool ccord_updater_apply_check_result(const char *current_version, ccord_install_kind kind,
+                                      const ccord_update_parsed *parsed, bool parsed_ok,
+                                      ccord_ui_update_info *out_ui)
+{
+  if (!out_ui) return false;
+  const char *cur = (current_version && current_version[0]) ? current_version : "0.0.0";
+  bool self_upd = ccord_updater_is_self_updatable(kind);
+  out_ui->self_updatable = self_upd;
+  out_ui->can_install = false;
+  snprintf(out_ui->install_kind, sizeof out_ui->install_kind, "%s", ccord_updater_install_kind_label(kind));
+
+  if (!parsed_ok || !parsed || !safe_url_segment(parsed->tag)) {
+    out_ui->state = CCORD_UI_UPDATE_UP_TO_DATE;
+    snprintf(out_ui->status_text, sizeof out_ui->status_text, "You are on the latest available release.");
+    return false;
+  }
+
+  snprintf(out_ui->latest_version, sizeof out_ui->latest_version, "%s", parsed->tag);
+  snprintf(out_ui->release_url, sizeof out_ui->release_url, "%s", parsed->release_url);
+
+  if (ccord_updater_semver_compare(cur, parsed->tag) < 0) {
+    bool can_inst = self_upd && parsed->found;
+    out_ui->state = CCORD_UI_UPDATE_AVAILABLE;
+    out_ui->can_install = can_inst;
+    if (can_inst) {
+      snprintf(out_ui->status_text, sizeof out_ui->status_text, "C-Cord %s is available.", parsed->tag);
+    } else if (kind == CCORD_INSTALL_SYSTEM_PKG) {
+      snprintf(out_ui->status_text, sizeof out_ui->status_text,
+               "C-Cord %s is available — update via your package manager.", parsed->tag);
+    } else if (kind == CCORD_INSTALL_ANDROID) {
+      snprintf(out_ui->status_text, sizeof out_ui->status_text,
+               "C-Cord %s is available — update via F-Droid or Releases.", parsed->tag);
+    } else {
+      snprintf(out_ui->status_text, sizeof out_ui->status_text, "C-Cord %s is available.", parsed->tag);
+    }
+    return can_inst;
+  }
+
+  out_ui->state = CCORD_UI_UPDATE_UP_TO_DATE;
+  snprintf(out_ui->status_text, sizeof out_ui->status_text, "C-Cord is up to date (v%s).", cur);
+  return false;
+}
+
 static void updater_do_check(ccord_updater *u)
 {
   char url[320];
@@ -500,23 +543,14 @@ static void updater_do_check(ccord_updater *u)
 
   ccord_mutex_lock(u->mtx);
   if (!ok) {
+    u->latest = (ccord_update_parsed){0};
     u->ui.state = CCORD_UI_UPDATE_ERROR;
+    u->ui.can_install = false;
     snprintf(u->ui.status_text, sizeof u->ui.status_text, "Update check failed: %.120s",
              res.error[0] ? res.error : "could not reach c-cord.org");
-  } else if (!parsed_ok) {
-    u->ui.state = CCORD_UI_UPDATE_UP_TO_DATE;
-    snprintf(u->ui.status_text, sizeof u->ui.status_text, "You are on the latest available release.");
-  } else if (ccord_updater_semver_compare(u->current_version, parsed.tag) < 0 && parsed.found) {
-    u->latest = parsed;
-    u->ui.state = CCORD_UI_UPDATE_AVAILABLE;
-    snprintf(u->ui.latest_version, sizeof u->ui.latest_version, "%s", parsed.tag);
-    snprintf(u->ui.release_url, sizeof u->ui.release_url, "%s", parsed.release_url);
-    snprintf(u->ui.status_text, sizeof u->ui.status_text, "C-Cord %s is available.", parsed.tag);
   } else {
-    u->ui.state = CCORD_UI_UPDATE_UP_TO_DATE;
-    snprintf(u->ui.latest_version, sizeof u->ui.latest_version, "%s", parsed.tag);
-    snprintf(u->ui.release_url, sizeof u->ui.release_url, "%s", parsed.release_url);
-    snprintf(u->ui.status_text, sizeof u->ui.status_text, "C-Cord is up to date (v%s).", u->current_version);
+    bool can_inst = ccord_updater_apply_check_result(u->current_version, u->kind, &parsed, parsed_ok, &u->ui);
+    u->latest = can_inst ? parsed : (ccord_update_parsed){0};
   }
   u->dirty = true;
   atomic_store_explicit(&u->has_update, true, memory_order_release);
@@ -642,11 +676,12 @@ static void updater_schedule(ccord_updater *u, updater_job job)
       return;
     }
     u->ui.state = CCORD_UI_UPDATE_CHECKING;
+    u->ui.can_install = false;
     snprintf(u->ui.status_text, sizeof u->ui.status_text, "Checking for updates...");
     u->dirty = true;
     atomic_store_explicit(&u->has_update, true, memory_order_release);
   } else if (job == JOB_INSTALL) {
-    if (u->ui.state != CCORD_UI_UPDATE_AVAILABLE) {
+    if (u->ui.state != CCORD_UI_UPDATE_AVAILABLE || !u->ui.self_updatable || !u->ui.can_install) {
       ccord_mutex_unlock(u->mtx);
       return;
     }
@@ -706,11 +741,9 @@ ccord_updater *ccord_updater_create(const char *current_version, const char *dat
     ccord_updater_destroy(u);
     return nullptr;
   }
-  if (u->ui.self_updatable) {
-    const char *no_auto = getenv("CCORD_NO_UPDATE_CHECK");
-    if (auto_check && (!no_auto || strcmp(no_auto, "1") != 0)) {
-      ccord_updater_check_now(u);
-    }
+  const char *no_auto = getenv("CCORD_NO_UPDATE_CHECK");
+  if (auto_check && (!no_auto || strcmp(no_auto, "1") != 0)) {
+    ccord_updater_check_now(u);
   }
   return u;
 }
@@ -733,7 +766,7 @@ void ccord_updater_destroy(ccord_updater *u)
 
 void ccord_updater_check_now(ccord_updater *u)
 {
-  if (!u || !u->ui.self_updatable) return;
+  if (!u) return;
   updater_schedule(u, JOB_CHECK);
 }
 
