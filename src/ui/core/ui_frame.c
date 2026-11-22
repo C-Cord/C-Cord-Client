@@ -310,11 +310,17 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
     if (ui->discovery_open) {
       ui_draw_discovery(ui, r);
     } else if (ui_panels_has_active_full_view(ui)) {
-      float fv_x = ui->layout.chat_header.x;
-      float fv_y = ui_panels_slot_height(ui, CCORD_PANEL_TOP);
-      float fv_h = ui->win_h - fv_y - ui_panels_slot_height(ui, CCORD_PANEL_BOTTOM);
+      float safe_l = ui->safe_insets.left;
+      float safe_r = ui->safe_insets.right;
+      float safe_t = ui->safe_insets.top;
+      float bot_in = fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
+      float fv_x = ui->mobile_layout ? safe_l : ui->layout.chat_header.x;
+      float fv_y = safe_t + ui_panels_slot_height(ui, CCORD_PANEL_TOP);
+      float fv_w = ui->win_w - fv_x - safe_r;
+      float fv_h = ui->win_h - fv_y - bot_in - ui_panels_slot_height(ui, CCORD_PANEL_BOTTOM);
+      if (fv_w < 0.0f) fv_w = 0.0f;
       if (fv_h < 0.0f) fv_h = 0.0f;
-      ui_panels_draw_full_view(ui, r, (ccord_rect){fv_x, fv_y, ui->win_w - fv_x, fv_h});
+      ui_panels_draw_full_view(ui, r, (ccord_rect){fv_x, fv_y, fv_w, fv_h});
     } else if (ui->stage_channel != CCORD_ID_NONE) {
       if (ui_stage_mobile_chat_active(ui)) {
         ui_draw_messages(ui, r);

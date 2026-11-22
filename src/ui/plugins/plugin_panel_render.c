@@ -150,7 +150,7 @@ static ccord_vec2 measure_node(ccord_ui *ui, ccord_renderer *r, const pnode *nd,
 
 static bool panels_can_hover(const ccord_ui *ui)
 {
-  return ui->mouse_in && !ui->menu.open && !ui->settings_open && !ui->go_live_open &&
+  return !ui->touch_mode && ui->mouse_in && !ui->menu.open && !ui->settings_open && !ui->go_live_open &&
          !ui->quick_switcher_open && !ui->shortcuts_open && !ui_server_settings_is_open(ui) &&
          !ui_channel_settings_is_open(ui) && !ui_plugin_dialog_is_open(ui) && !ui_plugin_settings_is_open(ui);
 }
@@ -826,6 +826,7 @@ void ui_panels_draw(ccord_ui *ui, ccord_renderer *r)
   }
   ui_panel_mgr *m = pp_ensure_mgr(ui);
   if (!m) return;
+  if (!ui_panels_has_active_full_view(ui)) m->full_view_back_rect = (ccord_rect){0};
   m->nhits = 0;
   m->nboxes = 0;
   pp_prune_stale_compiled(m, ui->d.contrib);
@@ -834,18 +835,23 @@ void ui_panels_draw(ccord_ui *ui, ccord_renderer *r)
   float col_w = ui->layout.chat_header.w;
   if (col_w <= 0.0f) return;
 
-  float top_y = 0.0f;
+  float safe_t = ui->safe_insets.top;
+  float safe_r = ui->safe_insets.right;
+  float bot_in = pp_p_maxf(ui->safe_insets.bottom, ui->keyboard_inset);
+  float top_y = safe_t;
   float sub_y = ui->layout.chat_header.y + ui->layout.chat_header.h;
   float bot_total = ui_panels_slot_height(ui, CCORD_PANEL_BOTTOM);
-  float bot_y = ui->win_h - bot_total;
+  float bot_y = ui->win_h - bot_in - bot_total;
   float comp_top_y = ui->layout.message_area.y + ui->layout.message_area.h;
   float left_x = ui->layout.channel_list.x + ui->layout.channel_list.w;
-  float right_x = ui->win_w - ui_panels_slot_width(ui, CCORD_PANEL_RIGHT_SIDEBAR);
+  float right_total = ui_panels_slot_width(ui, CCORD_PANEL_RIGHT_SIDEBAR);
+  if (ui->mobile_layout) right_total = pp_p_minf(right_total, col_w * 0.65f);
+  float right_x = ui->win_w - safe_r - right_total;
   float chan_top_y = ui->layout.channel_list.y;
   float chan_bot_y = ui->layout.channel_list.y + ui->layout.channel_list.h - ui_panels_slot_height(ui, CCORD_PANEL_CHANNEL_BOTTOM);
   float rail_top_y = ui->layout.server_list.y;
   float rail_bot_y = ui->layout.server_list.y + ui->layout.server_list.h - ui_panels_slot_height(ui, CCORD_PANEL_RAIL_BOTTOM);
-  float hdr_right_x = ui->layout.chat_header.x + ui->layout.chat_header.w - 180.0f;
+  float hdr_right_x = ui->layout.chat_header.x + ui->layout.chat_header.w - (ui->mobile_layout ? 110.0f : 180.0f);
 
   for (size_t i = 0; i < np; i++) {
     const ccord_panel_contribution *pc = ccord_contrib_panel_at(ui->d.contrib, i);
@@ -873,22 +879,29 @@ void ui_panels_draw(ccord_ui *ui, ccord_renderer *r)
         def_bg = false; break;
       }
       case CCORD_PANEL_LEFT_SIDEBAR: {
+        if (ui->mobile_layout && !ui->layout.left_drawer_visible) continue;
         float pw = pp_p_clampf(pc->width > 0.0f ? pc->width : 200.0f, 48.0f, 480.0f);
-        prc = (ccord_rect){left_x, 0.0f, pw, ui->win_h}; left_x += pw; break;
+        if (left_x + pw <= 0.0f) continue;
+        prc = (ccord_rect){left_x, safe_t, pw, pp_p_maxf(ui->win_h - safe_t - bot_in, 0.0f)}; left_x += pw; break;
       }
       case CCORD_PANEL_RIGHT_SIDEBAR: {
         float pw = pp_p_clampf(pc->width > 0.0f ? pc->width : 240.0f, 48.0f, 480.0f);
-        prc = (ccord_rect){right_x, ui->layout.chat_header.y + ui->layout.chat_header.h, pw,
-                           ui->win_h - (ui->layout.chat_header.y + ui->layout.chat_header.h)};
+        if (ui->mobile_layout) pw = pp_p_minf(pw, col_w * 0.65f);
+        float ry = ui->layout.chat_header.y + ui->layout.chat_header.h;
+        prc = (ccord_rect){right_x, ry, pw, pp_p_maxf(ui->win_h - bot_in - ry, 0.0f)};
         right_x += pw; break;
       }
       case CCORD_PANEL_CHANNEL_TOP:
+        if (ui->mobile_layout && !ui->layout.left_drawer_visible) continue;
         prc = (ccord_rect){ui->layout.channel_list.x, chan_top_y, ui->layout.channel_list.w, ph}; chan_top_y += ph; break;
       case CCORD_PANEL_CHANNEL_BOTTOM:
+        if (ui->mobile_layout && !ui->layout.left_drawer_visible) continue;
         prc = (ccord_rect){ui->layout.channel_list.x, chan_bot_y, ui->layout.channel_list.w, ph}; chan_bot_y += ph; break;
       case CCORD_PANEL_RAIL_TOP:
+        if (ui->mobile_layout && !ui->layout.left_drawer_visible) continue;
         prc = (ccord_rect){ui->layout.server_list.x, rail_top_y, ui->layout.server_list.w, ph}; rail_top_y += ph; break;
       case CCORD_PANEL_RAIL_BOTTOM:
+        if (ui->mobile_layout && !ui->layout.left_drawer_visible) continue;
         prc = (ccord_rect){ui->layout.server_list.x, rail_bot_y, ui->layout.server_list.w, ph}; rail_bot_y += ph; break;
       case CCORD_PANEL_HEADER_RIGHT: {
         float pw = pc->width > 0.0f ? pc->width : 96.0f;
@@ -897,6 +910,7 @@ void ui_panels_draw(ccord_ui *ui, ccord_renderer *r)
         def_bg = false; break;
       }
       case CCORD_PANEL_VOICE_BAR: {
+        if (ui->mobile_layout && !ui->layout.left_drawer_visible) continue;
         ccord_rect vb = ui_voice_bar_rect(ui);
         if (vb.h <= 0.0f) continue;
         prc = (ccord_rect){vb.x, vb.y - ph, vb.w, ph}; break;
@@ -921,6 +935,25 @@ void ui_panels_draw_full_view(ccord_ui *ui, ccord_renderer *r, ccord_rect area)
   ui_panel_mgr *m = ui->panel_mgr;
   const ccord_panel_contribution *pc = ccord_contrib_find_panel(ui->d.contrib, m->full_view_owner, m->full_view_id);
   if (!pc) return;
+  m->full_view_back_rect = (ccord_rect){0};
+  if (ui->mobile_layout && area.h > 44.0f) {
+    float bar_h = 44.0f;
+    ccord_rect bar = {area.x, area.y, area.w, bar_h};
+    ccord_draw_rect(r, bar, ui->theme->c.bg_secondary);
+    uis_divider(ui, r, bar.x, bar.y + bar_h - 1.0f, bar.w);
+    ccord_rect back = {bar.x + 8.0f, bar.y + 6.0f, 76.0f, 32.0f};
+    m->full_view_back_rect = back;
+    uis_button(ui, r, back, "< Back", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+               (uis_state){.hover = panels_can_hover(ui) && ui_in_rect(ui->mx, ui->my, back)}, "pfv_back", 1);
+    const char *title = (pc->title && pc->title[0]) ? pc->title : pc->panel_id;
+    ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, ui->theme->m.font_size_base, ui->theme->c.text_header);
+    float tx = back.x + back.w + 8.0f;
+    float tw = pp_p_maxf(bar.x + bar.w - tx - 12.0f, 24.0f);
+    ccord_vec2 tm = ccord_text_measure(r, title, strlen(title), &ts, 0.0f);
+    ccord_text_draw_ellipsis(r, title, strlen(title), tx, bar.y + (bar_h - tm.y) * 0.5f, tw, &ts);
+    area.y += bar_h;
+    area.h -= bar_h;
+  }
   draw_one_panel(ui, r, m, pc, area, false, true);
 }
 
@@ -931,29 +964,39 @@ void ui_panels_draw_overlays(ccord_ui *ui, ccord_renderer *r)
   if (ui_plugin_security_surface_active(ui)) return;
   ui_panel_mgr *m = pp_ensure_mgr(ui);
   if (!m) return;
+  float safe_l = ui->safe_insets.left;
+  float safe_r = ui->safe_insets.right;
+  float safe_t = ui->safe_insets.top;
+  float bot_in = pp_p_maxf(ui->safe_insets.bottom, ui->keyboard_inset);
+  float avail_w = pp_p_maxf(ui->win_w - safe_l - safe_r - 16.0f, 120.0f);
+  float avail_h = pp_p_maxf(ui->win_h - safe_t - bot_in - 16.0f, 60.0f);
   size_t np = ccord_contrib_panel_count(ui->d.contrib);
   for (size_t i = 0; i < np; i++) {
     const ccord_panel_contribution *pc = ccord_contrib_panel_at(ui->d.contrib, i);
     if (!pc || !pc->visible) continue;
     if (pc->slot == CCORD_PANEL_MODAL) {
       float mw = pc->width > 0.0f ? pc->width : UIS_MODAL_W_MD;
-      float mh = pp_p_clampf(pc->height, 80.0f, ui->win_h - 64.0f);
+      float mh = pp_p_clampf(pc->height, 80.0f, pp_p_maxf(avail_h - 32.0f, 80.0f));
       ccord_rect box = uis_modal_box(ui, mw, mh);
       uis_modal_frame(ui, r, box);
       draw_one_panel(ui, r, m, pc, box, true, false);
     } else if (pc->slot == CCORD_PANEL_POPOVER) {
-      float pw = pc->width > 0.0f ? pc->width : 280.0f;
-      float ph = pp_p_clampf(pc->height, 40.0f, ui->win_h - 32.0f);
-      float px = pp_p_clampf(pc->x > 0.0f ? pc->x : (ui->win_w - pw) * 0.5f, 8.0f, pp_p_maxf(8.0f, ui->win_w - pw - 8.0f));
-      float py = pp_p_clampf(pc->y > 0.0f ? pc->y : 56.0f, 8.0f, pp_p_maxf(8.0f, ui->win_h - ph - 8.0f));
+      float pw = pp_p_minf(pc->width > 0.0f ? pc->width : 280.0f, avail_w);
+      float ph = pp_p_clampf(pc->height, 40.0f, avail_h);
+      float min_x = safe_l + 8.0f, max_x = pp_p_maxf(min_x, ui->win_w - safe_r - pw - 8.0f);
+      float min_y = safe_t + 8.0f, max_y = pp_p_maxf(min_y, ui->win_h - bot_in - ph - 8.0f);
+      float px = pp_p_clampf(pc->x > 0.0f ? pc->x : (safe_l + (ui->win_w - safe_l - safe_r - pw) * 0.5f), min_x, max_x);
+      float py = pp_p_clampf(pc->y > 0.0f ? pc->y : safe_t + 56.0f, min_y, max_y);
       ccord_rect box = {px, py, pw, ph};
       uis_popover_frame(ui, r, box);
       draw_one_panel(ui, r, m, pc, box, true, false);
     } else if (pc->slot == CCORD_PANEL_FLOATING) {
-      float fw = pc->width > 0.0f ? pc->width : 300.0f;
-      float fh = pp_p_clampf(pc->height, 40.0f, ui->win_h - 32.0f);
-      float fx = pp_p_clampf(pc->x > 0.0f ? pc->x : ui->win_w - fw - 24.0f, 8.0f, pp_p_maxf(8.0f, ui->win_w - fw - 8.0f));
-      float fy = pp_p_clampf(pc->y > 0.0f ? pc->y : 64.0f, 8.0f, pp_p_maxf(8.0f, ui->win_h - fh - 8.0f));
+      float fw = pp_p_minf(pc->width > 0.0f ? pc->width : 300.0f, avail_w);
+      float fh = pp_p_clampf(pc->height, 40.0f, avail_h);
+      float min_x = safe_l + 8.0f, max_x = pp_p_maxf(min_x, ui->win_w - safe_r - fw - 8.0f);
+      float min_y = safe_t + 8.0f, max_y = pp_p_maxf(min_y, ui->win_h - bot_in - fh - 8.0f);
+      float fx = pp_p_clampf(pc->x > 0.0f ? pc->x : ui->win_w - safe_r - fw - 24.0f, min_x, max_x);
+      float fy = pp_p_clampf(pc->y > 0.0f ? pc->y : safe_t + 64.0f, min_y, max_y);
       ccord_rect box = {fx, fy, fw, fh};
       uis_tokens tk = uis_tokens_of(ui);
       uis_frame(ui, r, box, tk.r_surface, ui->theme->c.bg_floating, UIS_ELEV_POPOVER);
@@ -1018,11 +1061,32 @@ bool ui_panels_has_focused_input(const ccord_ui *ui)
   return ui && ui->panel_mgr && ui->panel_mgr->focused_input_key != 0;
 }
 
+bool ui_panels_handle_back(ccord_ui *ui)
+{
+  if (!ui || !ui->panel_mgr || !ui->d.contrib) return false;
+  ui_panel_mgr *m = ui->panel_mgr;
+  for (size_t i = m->nboxes; i > 0; i--) {
+    ccord_panel_slot sl = m->boxes[i - 1u].slot;
+    if (sl == CCORD_PANEL_MODAL || sl == CCORD_PANEL_POPOVER) {
+      ccord_panel_event pev = {.kind = CCORD_PANEL_EV_CLOSE, .node_id = ""};
+      dispatch_ev(ui, m->boxes[i - 1u].owner, m->boxes[i - 1u].panel_id, &pev);
+      ui->dirty = true;
+      return true;
+    }
+  }
+  if (ui_panels_has_active_full_view(ui)) {
+    ui_panels_set_active_full_view(ui, nullptr, nullptr);
+    ui->dirty = true;
+    return true;
+  }
+  return false;
+}
+
 bool ui_panels_handle_input(ccord_ui *ui, const ccord_input_event *ev)
 {
   if (!ui || !ev || !ui->panel_mgr || !ui->d.contrib || ui->discovery_open) return false;
   ui_panel_mgr *m = ui->panel_mgr;
-  if (m->nboxes == 0 && m->focused_input_key == 0) return false;
+  if (m->nboxes == 0 && m->focused_input_key == 0 && m->full_view_back_rect.w <= 0.0f) return false;
 
   // Check if a modal plugin panel is open (blocks clicks outside and closes on Escape/scrim).
   const panel_box *top_modal = nullptr;
@@ -1161,11 +1225,16 @@ bool ui_panels_handle_input(ccord_ui *ui, const ccord_input_event *ev)
   }
 
   if (ev->type == CCORD_IN_MOUSE_DOWN) {
+    if (ev->button == 1 && m->full_view_back_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, m->full_view_back_rect)) {
+      ui_panels_set_active_full_view(ui, nullptr, nullptr);
+      return true;
+    }
     if (!point_in_any_panel(m, ev->x, ev->y)) {
       if (m->focused_input_key != 0) {
         ccord_panel_event pev = {.kind = CCORD_PANEL_EV_BLUR, .node_id = m->focused_node};
         dispatch_ev(ui, m->focused_owner, m->focused_panel, &pev);
         m->focused_input_key = 0;
+        if (ui->touch_mode) ui->touch_text_focused = false;
       }
       if (top_modal) {
         ccord_panel_event pev = {.kind = CCORD_PANEL_EV_CLOSE, .node_id = ""};
@@ -1186,6 +1255,7 @@ bool ui_panels_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       ccord_panel_event bev = {.kind = CCORD_PANEL_EV_BLUR, .node_id = m->focused_node};
       dispatch_ev(ui, m->focused_owner, m->focused_panel, &bev);
       m->focused_input_key = 0;
+      if (ui->touch_mode) ui->touch_text_focused = false;
     }
     if (h && (ev->button >= 1 && ev->button <= 3)) {
       if (ev->button == 1 && h->wkind == PHIT_INPUT) {
@@ -1194,6 +1264,7 @@ bool ui_panels_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         snprintf(m->focused_owner, sizeof m->focused_owner, "%s", h->owner);
         snprintf(m->focused_panel, sizeof m->focused_panel, "%s", h->panel_id);
         snprintf(m->focused_node, sizeof m->focused_node, "%s", h->node_id);
+        if (ui->touch_mode) ui->touch_text_focused = true;
         ccord_panel_event fev = {.kind = CCORD_PANEL_EV_FOCUS, .node_id = h->node_id};
         dispatch_ev(ui, h->owner, h->panel_id, &fev);
         return true;

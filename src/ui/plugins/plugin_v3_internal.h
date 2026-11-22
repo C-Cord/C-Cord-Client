@@ -95,7 +95,10 @@ typedef struct v3_dialog_state {
   size_t nfields;
   int focused_idx;
   int drag_slider_idx;
+  float scroll_y;
+  float content_h;
   ccord_rect box_rect;
+  ccord_rect body_rect;
   ccord_rect confirm_rect;
   ccord_rect cancel_rect;
 } v3_dialog_state;

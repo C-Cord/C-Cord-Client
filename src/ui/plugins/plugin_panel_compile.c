@@ -966,6 +966,7 @@ void ui_panels_set_active_full_view(ccord_ui *ui, const char *owner, const char 
   if (!owner || !owner[0] || !panel_id || !panel_id[0]) {
     m->full_view_owner[0] = '\0';
     m->full_view_id[0] = '\0';
+    m->full_view_back_rect = (ccord_rect){0};
   } else {
     snprintf(m->full_view_owner, sizeof m->full_view_owner, "%s", owner);
     snprintf(m->full_view_id, sizeof m->full_view_id, "%s", panel_id);

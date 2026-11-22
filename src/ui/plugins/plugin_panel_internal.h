@@ -223,6 +223,7 @@ struct ui_panel_mgr {
   // Active full-view plugin tab
   char full_view_owner[65];
   char full_view_id[40];
+  ccord_rect full_view_back_rect;
   // Compiled cache for inline decorator widget trees
   decor_cache_entry decor_cache[32];
   size_t decor_cursor;

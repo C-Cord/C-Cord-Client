@@ -311,6 +311,9 @@ static void v3_dialog_sync(ccord_ui *ui, const ccord_plugin_dialog *dlg)
   v->dlg.kind = dlg->kind;
   v->dlg.focused_idx = -1;
   v->dlg.drag_slider_idx = -1;
+  v->dlg.scroll_y = 0.0f;
+  v->dlg.content_h = 0.0f;
+  v->dlg.body_rect = (ccord_rect){0};
 
   if (dlg->kind == CCORD_DIALOG_PROMPT) {
     v3_field *f = &v->dlg.fields[0];
@@ -339,6 +342,7 @@ static void v3_dialog_submit(ccord_ui *ui, const ccord_plugin_dialog *dlg, bool 
   if (!accepted) {
     ccord_contrib_resolve_dialog(ui->d.contrib, dlg->req_id, false, nullptr);
     v->dlg.active_req_id = 0;
+    if (ui->touch_mode) ui->touch_text_focused = false;
     ui->dirty = true;
     return;
   }
@@ -372,6 +376,7 @@ static void v3_dialog_submit(ccord_ui *ui, const ccord_plugin_dialog *dlg, bool 
   ccord_contrib_resolve_dialog(ui->d.contrib, dlg->req_id, true, (b.data && ccord_jw_ok(&w)) ? (const char *)b.data : "true");
   ccord_buf_free(&b);
   v->dlg.active_req_id = 0;
+  if (ui->touch_mode) ui->touch_text_focused = false;
   ui->dirty = true;
 }
 
@@ -379,6 +384,15 @@ bool ui_plugin_dialog_is_open(const ccord_ui *ui)
 {
   if (!ui || !ui->d.contrib) return false;
   return ccord_contrib_active_dialog(ui->d.contrib) != nullptr;
+}
+
+bool ui_plugin_dialog_wants_text(const ccord_ui *ui)
+{
+  if (!ui_plugin_dialog_is_open(ui) || !ui->plugin_v3) return false;
+  const v3_dialog_state *d = &ui->plugin_v3->dlg;
+  if (d->focused_idx < 0 || (size_t)d->focused_idx >= d->nfields) return false;
+  v3_field_kind k = d->fields[d->focused_idx].kind;
+  return k == V3F_TEXT || k == V3F_SECRET || k == V3F_COLOR;
 }
 
 void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r)
@@ -392,7 +406,8 @@ void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r)
 
   uis_tokens tk = uis_tokens_of(ui);
   float mw = (dlg->kind == CCORD_DIALOG_FORM) ? UIS_MODAL_W_MD : UIS_MODAL_W_SM;
-  float inner_w = mw - UIS_SP_5 * 2.0f;
+  ccord_rect probe = uis_modal_box(ui, mw, 220.0f);
+  float inner_w = fmaxf(probe.w - UIS_SP_5 * 2.0f, 120.0f);
 
   ccord_text_style mst = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_control, ui->theme->c.text_normal);
   float msg_h = 0.0f;
@@ -403,10 +418,11 @@ void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r)
   float fields_h = 0.0f;
   for (size_t i = 0; i < v->dlg.nfields; i++) fields_h += v3_field_height(&v->dlg.fields[i]) + UIS_SP_2;
 
-  float mh = 76.0f + UIS_H_CHIP + UIS_SP_2 + msg_h + fields_h + UIS_H_BTN + UIS_SP_5;
+  float mh = 76.0f + UIS_H_CHIP + UIS_SP_3 + msg_h + fields_h + UIS_H_BTN + UIS_SP_5;
   if (mh < 180.0f) mh = 180.0f;
   ccord_rect box = uis_modal_box(ui, mw, mh);
   v->dlg.box_rect = box;
+  inner_w = fmaxf(box.w - UIS_SP_5 * 2.0f, 120.0f);
 
   uis_modal_frame(ui, r, box);
   const char *title = (dlg->title && dlg->title[0]) ? dlg->title : "Plugin Dialog";
@@ -415,19 +431,30 @@ void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r)
   // Explicit attribution badge so plugins cannot spoof native dialogs.
   char badge[128];
   snprintf(badge, sizeof badge, "Plugin: %s", (dlg->plugin_name && dlg->plugin_name[0]) ? dlg->plugin_name : dlg->owner);
-  float bw = uis_label_width(ui, r, badge);
+  float bw = fminf(uis_label_width(ui, r, badge), inner_w);
   uis_chip(ui, r, (ccord_rect){box.x + UIS_SP_5, y, bw, UIS_H_CHIP}, badge, (uis_state){.selected = true}, "pdlg_owner", dlg->req_id);
   y += UIS_H_CHIP + UIS_SP_3;
 
+  float footer_top = box.y + box.h - UIS_SP_5 - UIS_H_BTN - UIS_SP_3;
+  float body_h = fmaxf(footer_top - y, 36.0f);
+  v->dlg.content_h = msg_h + fields_h;
+  v->dlg.body_rect = (ccord_rect){box.x + UIS_SP_5, y, inner_w, body_h};
+  float max_scroll = v->dlg.content_h > body_h ? (v->dlg.content_h - body_h) : 0.0f;
+  if (v->dlg.scroll_y < 0.0f) v->dlg.scroll_y = 0.0f;
+  if (v->dlg.scroll_y > max_scroll) v->dlg.scroll_y = max_scroll;
+
+  ccord_push_clip(r, v->dlg.body_rect);
+  float cy = y - v->dlg.scroll_y;
   if (dlg->message && dlg->message[0]) {
-    ccord_text_draw(r, dlg->message, strlen(dlg->message), box.x + UIS_SP_5, y, &mst, inner_w);
-    y += msg_h;
+    ccord_text_draw(r, dlg->message, strlen(dlg->message), box.x + UIS_SP_5, cy, &mst, inner_w);
+    cy += msg_h;
   }
 
   for (size_t i = 0; i < v->dlg.nfields; i++) {
-    v3_draw_field(ui, r, &v->dlg.fields[i], i, box.x + UIS_SP_5, y, inner_w, v->dlg.focused_idx == (int)i, "pdlg_f");
-    y += v3_field_height(&v->dlg.fields[i]) + UIS_SP_2;
+    v3_draw_field(ui, r, &v->dlg.fields[i], i, box.x + UIS_SP_5, cy, inner_w, v->dlg.focused_idx == (int)i, "pdlg_f");
+    cy += v3_field_height(&v->dlg.fields[i]) + UIS_SP_2;
   }
+  ccord_pop_clip(r);
 
   const char *ok_lbl = (dlg->confirm_label && dlg->confirm_label[0]) ? dlg->confirm_label : "Confirm";
   const char *cancel_lbl = (dlg->cancel_label && dlg->cancel_label[0]) ? dlg->cancel_label : "Cancel";
@@ -435,6 +462,12 @@ void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r)
   float cancel_w = uis_label_width(ui, r, cancel_lbl);
   if (ok_w < 84.0f) ok_w = 84.0f;
   if (cancel_w < 84.0f) cancel_w = 84.0f;
+  if (ok_w + cancel_w + UIS_SP_2 > inner_w) {
+    float half = floorf((inner_w - UIS_SP_2) * 0.5f);
+    if (half < 56.0f) half = 56.0f;
+    ok_w = fminf(ok_w, half);
+    cancel_w = fminf(cancel_w, half);
+  }
 
   v->dlg.confirm_rect = uis_modal_footer_button(box, 0, ok_w);
   v->dlg.cancel_rect = (ccord_rect){v->dlg.confirm_rect.x - UIS_SP_2 - cancel_w, v->dlg.confirm_rect.y, cancel_w, UIS_H_BTN};
@@ -454,6 +487,14 @@ bool ui_plugin_dialog_handle_input(ccord_ui *ui, const ccord_input_event *ev)
   ui_plugin_v3 *v = ui->plugin_v3;
   if (!v) return true;
 
+  if (ev->type == CCORD_IN_WHEEL) {
+    float max_scroll = v->dlg.content_h > v->dlg.body_rect.h ? (v->dlg.content_h - v->dlg.body_rect.h) : 0.0f;
+    v->dlg.scroll_y -= ev->wheel * 32.0f;
+    if (v->dlg.scroll_y < 0.0f) v->dlg.scroll_y = 0.0f;
+    if (v->dlg.scroll_y > max_scroll) v->dlg.scroll_y = max_scroll;
+    ui->dirty = true;
+    return true;
+  }
   if (ev->type == CCORD_IN_MOUSE_MOVE) {
     if (v->dlg.drag_slider_idx >= 0 && (size_t)v->dlg.drag_slider_idx < v->dlg.nfields) {
       v3_field *f = &v->dlg.fields[v->dlg.drag_slider_idx];
@@ -476,21 +517,25 @@ bool ui_plugin_dialog_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
     v->dlg.focused_idx = -1;
-    for (size_t i = 0; i < v->dlg.nfields; i++) {
-      v3_field *f = &v->dlg.fields[i];
-      if (!ui_in_rect(ev->x, ev->y, f->hit_rect)) continue;
-      if (f->kind == V3F_TOGGLE) {
-        f->bool_val = !f->bool_val;
-      } else if (f->kind == V3F_SLIDER) {
-        f->num_val = v3_slider_from_x(f, ev->x);
-        v->dlg.drag_slider_idx = (int)i;
-      } else if (f->kind == V3F_SELECT && f->nopts > 0) {
-        f->sel_idx = (f->sel_idx + 1u) % f->nopts;
-      } else if (f->kind == V3F_TEXT || f->kind == V3F_SECRET || f->kind == V3F_COLOR) {
-        v->dlg.focused_idx = (int)i;
+    if (ui->touch_mode) ui->touch_text_focused = false;
+    if (ui_in_rect(ev->x, ev->y, v->dlg.body_rect)) {
+      for (size_t i = 0; i < v->dlg.nfields; i++) {
+        v3_field *f = &v->dlg.fields[i];
+        if (!ui_in_rect(ev->x, ev->y, f->hit_rect)) continue;
+        if (f->kind == V3F_TOGGLE) {
+          f->bool_val = !f->bool_val;
+        } else if (f->kind == V3F_SLIDER) {
+          f->num_val = v3_slider_from_x(f, ev->x);
+          v->dlg.drag_slider_idx = (int)i;
+        } else if (f->kind == V3F_SELECT && f->nopts > 0) {
+          f->sel_idx = (f->sel_idx + 1u) % f->nopts;
+        } else if (f->kind == V3F_TEXT || f->kind == V3F_SECRET || f->kind == V3F_COLOR) {
+          v->dlg.focused_idx = (int)i;
+          if (ui->touch_mode) ui->touch_text_focused = true;
+        }
+        ui->dirty = true;
+        return true;
       }
-      ui->dirty = true;
-      return true;
     }
     return true;
   }
@@ -596,6 +641,15 @@ bool ui_plugin_settings_is_open(const ccord_ui *ui)
   return ui && ui->plugin_v3 && ui->plugin_v3->set.open;
 }
 
+bool ui_plugin_settings_wants_text(const ccord_ui *ui)
+{
+  if (!ui_plugin_settings_is_open(ui)) return false;
+  const v3_settings_state *s = &ui->plugin_v3->set;
+  if (s->focused_idx < 0 || (size_t)s->focused_idx >= s->nfields) return false;
+  v3_field_kind k = s->fields[s->focused_idx].kind;
+  return k == V3F_TEXT || k == V3F_SECRET || k == V3F_COLOR;
+}
+
 void ui_plugin_settings_draw(ccord_ui *ui, ccord_renderer *r)
 {
   if (!ui_plugin_settings_is_open(ui) || !r) return;
@@ -607,11 +661,8 @@ void ui_plugin_settings_draw(ccord_ui *ui, ccord_renderer *r)
   for (size_t i = 0; i < s->nfields; i++) content_h += v3_field_height(&s->fields[i]) + UIS_SP_2;
   s->content_h = content_h;
 
-  float max_body = ui->win_h - 220.0f;
-  if (max_body < 160.0f) max_body = 160.0f;
-  float body_h = content_h < max_body ? content_h : max_body;
-  if (body_h < 80.0f) body_h = 80.0f;
-  float mh = 76.0f + UIS_H_CHIP + UIS_SP_3 + body_h + UIS_H_BTN + UIS_SP_5;
+  float desired_body = content_h < 80.0f ? 80.0f : content_h;
+  float mh = 76.0f + UIS_H_CHIP + UIS_SP_3 + desired_body + UIS_H_BTN + UIS_SP_5;
   ccord_rect box = uis_modal_box(ui, UIS_MODAL_W_MD, mh);
   s->box_rect = box;
 
@@ -620,11 +671,13 @@ void ui_plugin_settings_draw(ccord_ui *ui, ccord_renderer *r)
   snprintf(title, sizeof title, "%s Settings", s->plugin_name);
   float y = uis_modal_title(ui, r, box, title);
 
-  float bw = uis_label_width(ui, r, s->owner);
+  float inner_w = fmaxf(box.w - UIS_SP_5 * 2.0f, 120.0f);
+  float bw = fminf(uis_label_width(ui, r, s->owner), inner_w);
   uis_chip(ui, r, (ccord_rect){box.x + UIS_SP_5, y, bw, UIS_H_CHIP}, s->owner, (uis_state){0}, "pset_id", ui_name_id(s->owner));
   y += UIS_H_CHIP + UIS_SP_3;
 
-  float inner_w = box.w - UIS_SP_5 * 2.0f;
+  float footer_top = box.y + box.h - UIS_SP_5 - UIS_H_BTN - UIS_SP_3;
+  float body_h = fmaxf(footer_top - y, 36.0f);
   ccord_rect body = {box.x + UIS_SP_5, y, inner_w, body_h};
   s->body_rect = body;
 
@@ -679,11 +732,13 @@ bool ui_plugin_settings_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         v3_settings_emit(ui, s->owner, &s->fields[s->focused_idx]);
       }
       s->open = false;
+      if (ui->touch_mode) ui->touch_text_focused = false;
       ui->dirty = true;
       return true;
     }
     int prev_focus = s->focused_idx;
     s->focused_idx = -1;
+    if (ui->touch_mode) ui->touch_text_focused = false;
     if (ui_in_rect(ev->x, ev->y, s->body_rect)) {
       for (size_t i = 0; i < s->nfields; i++) {
         v3_field *f = &s->fields[i];
@@ -700,6 +755,7 @@ bool ui_plugin_settings_handle_input(ccord_ui *ui, const ccord_input_event *ev)
           v3_settings_emit(ui, s->owner, f);
         } else if (f->kind == V3F_TEXT || f->kind == V3F_SECRET || f->kind == V3F_COLOR) {
           s->focused_idx = (int)i;
+          if (ui->touch_mode) ui->touch_text_focused = true;
         }
         break;
       }

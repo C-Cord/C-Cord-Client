@@ -783,7 +783,13 @@ static void sync_text_input(ccord_ui *ui)
 {
   bool want = false;
   int kind = 0;   // 0=text, 1=email, 2=password, 3=otp, 4=single_line
-  if (ui_profile_roles_picker_open(ui)) {
+  if (ui_plugin_dialog_is_open(ui)) {
+    want = ui_plugin_dialog_wants_text(ui) && (!ui->touch_mode || ui->touch_text_focused);
+    kind = 4;
+  } else if (ui_plugin_settings_is_open(ui)) {
+    want = ui_plugin_settings_wants_text(ui) && (!ui->touch_mode || ui->touch_text_focused);
+    kind = 4;
+  } else if (ui_profile_roles_picker_open(ui)) {
     want = !ui->touch_mode || ui->touch_text_focused;
     kind = 4;
   } else if (ui->report_open || ui->schedule_open || ui->poll_open || ui->sc.open) {
@@ -830,6 +836,9 @@ static void sync_text_input(ccord_ui *ui)
     } else {
       want = true;
     }
+    kind = 4;
+  } else if (ui_panels_has_focused_input(ui)) {
+    want = !ui->touch_mode || ui->touch_text_focused;
     kind = 4;
   } else if (!ui->lightbox_open && !ui->select_open && !ui->menu.open && !ui->go_live_open &&
              !ui->pins_open && !ui->reactions_open && !ui->inbox_open && !ui->shortcuts_open) {

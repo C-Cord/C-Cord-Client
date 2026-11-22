@@ -15,6 +15,7 @@ bool ui_panels_has_active_full_view(const ccord_ui *ui);
 bool ui_panels_is_active_full_view(const ccord_ui *ui, const char *owner, const char *panel_id);
 void ui_panels_set_active_full_view(ccord_ui *ui, const char *owner, const char *panel_id);
 bool ui_panels_handle_input(ccord_ui *ui, const ccord_input_event *ev);
+bool ui_panels_handle_back(ccord_ui *ui);
 bool ui_panels_has_focused_input(const ccord_ui *ui);
 bool ui_panels_cursor(const ccord_ui *ui, float x, float y, ccord_cursor_kind *out_cursor);
 bool ui_panels_find_hit_rect(const ccord_ui *ui, const char *owner, const char *panel_id, const char *node_id, ccord_rect *out);
@@ -52,11 +53,13 @@ void ui_local_messages_draw(ccord_ui *ui, ccord_renderer *r, ccord_id channel_id
 bool ui_local_messages_handle_click(ccord_ui *ui, const ccord_input_event *ev);
 // User-initiated plugin dialogs (confirm/prompt/form)
 bool ui_plugin_dialog_is_open(const ccord_ui *ui);
+bool ui_plugin_dialog_wants_text(const ccord_ui *ui);
 void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r);
 bool ui_plugin_dialog_handle_input(ccord_ui *ui, const ccord_input_event *ev);
 // Schema-driven plugin settings modal
 void ui_plugin_settings_open(ccord_ui *ui, const char *owner);
 bool ui_plugin_settings_is_open(const ccord_ui *ui);
+bool ui_plugin_settings_wants_text(const ccord_ui *ui);
 void ui_plugin_settings_draw(ccord_ui *ui, ccord_renderer *r);
 bool ui_plugin_settings_handle_input(ccord_ui *ui, const ccord_input_event *ev);
 // Local plugin keybinds

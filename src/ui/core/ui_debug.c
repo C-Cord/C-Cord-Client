@@ -847,7 +847,9 @@ bool ccord_ui_handle_back(ccord_ui *ui)
     return true;
   }
 
-  // 2. Topmost composer & profile popovers/modals.
+  // 2. Topmost plugin dialogs/settings, composer & profile popovers/modals.
+  if (ui_plugin_dialog_is_open(ui)) { (void)ui_plugin_dialog_handle_input(ui, &esc); ui->dirty = true; return true; }
+  if (ui_plugin_settings_is_open(ui)) { (void)ui_plugin_settings_handle_input(ui, &esc); ui->dirty = true; return true; }
   if (ui->report_open) { ui_report_flow_close(ui); ui->dirty = true; return true; }
   if (ui->schedule_open) { ui_schedule_dialog_close(ui); ui->dirty = true; return true; }
   if (ui->poll_open) { ui_poll_composer_close(ui); ui->dirty = true; return true; }
@@ -904,6 +906,7 @@ bool ccord_ui_handle_back(ccord_ui *ui)
     return true;
   }
   if (ui->go_live_open) { ui->go_live_open = false; ui->dirty = true; return true; }
+  if (ui_panels_handle_back(ui)) return true;
 
   // 6. Full-screen settings (mobile 2-level stack unwinds detail -> categories -> close).
   if (ui_channel_settings_is_open(ui)) {

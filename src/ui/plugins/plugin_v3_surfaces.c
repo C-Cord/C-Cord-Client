@@ -446,7 +446,7 @@ float ui_actbtns_draw_slot(ccord_ui *ui, ccord_renderer *r, ccord_action_btn_slo
     }
     used += w + UIS_SP_1;
 
-    bool hov = ui->mouse_in && v3_actbtn_slot_interactive(ui, slot, ui->mx) && ui_in_rect(ui->mx, ui->my, rc);
+    bool hov = !ui->touch_mode && ui->mouse_in && v3_actbtn_slot_interactive(ui, slot, ui->mx) && ui_in_rect(ui->mx, ui->my, rc);
     uint64_t aid = ui_name_id(b->owner) ^ ui_name_id(b->btn_id);
     uis_state st = {.hover = hov};
     ccord_color fg = uis_icon_button(ui, r, rc, st, "actbtn", aid);
@@ -720,7 +720,7 @@ void ui_plugin_full_views_draw_rail(ccord_ui *ui, ccord_renderer *r, float rail_
     }
     ccord_rect rc = {x, *io_y, sz, sz};
     bool active = ui_panels_is_active_full_view(ui, p->owner, p->panel_id);
-    bool hov = ui_in_rect(ui->mx, ui->my, rc);
+    bool hov = !ui->touch_mode && ui->mouse_in && ui_in_rect(ui->mx, ui->my, rc);
     ccord_color bg = (active || hov) ? ui->theme->c.brand : ui->theme->c.bg_primary;
     ccord_color fg = (active || hov) ? ui->theme->c.text_on_brand : ui->theme->c.text_header;
     float rad = (active || hov) ? 16.0f : (sz * 0.5f);

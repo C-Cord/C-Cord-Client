@@ -14,6 +14,8 @@
 #include <ccord/ui/ui.h>
 
 #include "../ui_internal.h"
+#include "plugin_panel_internal.h"
+#include "plugin_v3_internal.h"
 #include "status_card.h"
 #include "ccord_test.h"
 
@@ -1320,6 +1322,70 @@ static void test_mobile_voice_stage_and_go_live(void)
   step_frames(4, 25);
 }
 
+static void test_mobile_plugin_v3_dialog_and_full_view(void)
+{
+  ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+
+  // Wave 5A: Plugin v3 Form Dialog clamps inner_w and footer buttons inside 360dp above keyboard.
+  ccord_error err;
+  ccord_plugin_dialog dlg = {
+    .owner = "test.mob",
+    .plugin_name = "Mobile Plugin Test",
+    .req_id = 42,
+    .kind = CCORD_DIALOG_FORM,
+    .title = "Configure Extension",
+    .message = "Adjust your mobile plugin preferences below.",
+    .confirm_label = "Save Settings",
+    .cancel_label = "Cancel",
+    .fields_json = "[{\"type\":\"text\",\"key\":\"host\",\"label\":\"Server URL\",\"placeholder\":\"https://...\"},"
+                   "{\"type\":\"toggle\",\"key\":\"sync\",\"label\":\"Auto Sync\",\"default\":true}]",
+  };
+  CT_CHECK(ccord_contrib_open_dialog(F.contrib, &dlg, &err) == CCORD_OK);
+  ccord_ui_set_keyboard_inset(F.ui, 240.0f);
+  step_frames(4, 25);
+  CT_CHECK(ui_plugin_dialog_is_open(F.ui));
+  CT_CHECK(F.ui->plugin_v3 != nullptr);
+  if (F.ui->plugin_v3) {
+    ccord_rect box = F.ui->plugin_v3->dlg.box_rect;
+    ccord_rect ok = F.ui->plugin_v3->dlg.confirm_rect;
+    ccord_rect can = F.ui->plugin_v3->dlg.cancel_rect;
+    CT_CHECK(rect_in_bounds(box, 0.0f, 44.0f, 360.0f, 780.0f - 240.0f));
+    CT_CHECK(rect_in_bounds(ok, box.x, box.y, box.x + box.w, box.y + box.h));
+    CT_CHECK(rect_in_bounds(can, box.x, box.y, box.x + box.w, box.y + box.h));
+    CT_CHECK(rects_disjoint(can, ok));
+    for (size_t i = 0; i < F.ui->plugin_v3->dlg.nfields; i++) {
+      ccord_rect fh = F.ui->plugin_v3->dlg.fields[i].hit_rect;
+      if (fh.w > 0.0f) CT_CHECK(fh.x >= box.x && fh.x + fh.w <= box.x + box.w + 0.5f);
+    }
+  }
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+  CT_CHECK(!ui_plugin_dialog_is_open(F.ui));
+
+  // Wave 5A: Plugin Full View renders a safe-area mobile < Back bar and exits when tapped.
+  const char *pjson = "{\"type\":\"box\",\"dir\":\"col\",\"pad\":12,\"children\":[{\"type\":\"text\",\"text\":\"Mobile Full View\"}]}";
+  CT_CHECK(ccord_contrib_set_panel(F.contrib, "test.mob", "dash", CCORD_PANEL_FULL_VIEW, 0.0f, pjson, &err) == CCORD_OK);
+  ui_panels_set_active_full_view(F.ui, "test.mob", "dash");
+  step_frames(4, 25);
+  CT_CHECK(ui_panels_has_active_full_view(F.ui));
+  CT_CHECK(F.ui->panel_mgr != nullptr);
+  if (F.ui->panel_mgr) {
+    ccord_rect fb = F.ui->panel_mgr->full_view_back_rect;
+    CT_CHECK(rect_in_bounds(fb, 0.0f, 44.0f, 360.0f, 120.0f));
+    touch_tap(fb.x + fb.w * 0.5f, fb.y + fb.h * 0.5f);
+    step_frames(2, 25);
+    CT_CHECK(!ui_panels_has_active_full_view(F.ui));
+  }
+  (void)ccord_contrib_remove_panel(F.contrib, "test.mob", "dash");
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -1338,6 +1404,7 @@ int main(void)
   test_mobile_header_search_friends_dm();
   test_mobile_overlays_and_popovers();
   test_mobile_voice_stage_and_go_live();
+  test_mobile_plugin_v3_dialog_and_full_view();
   test_mobile_anim_pacing();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");
