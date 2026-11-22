@@ -298,6 +298,11 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
     SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "dummy");
     SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
   }
+  // Prevent SDL3 from automatically synthesizing SDL_EVENT_QUIT when the sole window requests close:
+  // C-Cord manages its own native tray (D-Bus SNI / Win32 / NSStatusBar) instead of SDL_CreateTray,
+  // and translate() maps SDL_EVENT_WINDOW_CLOSE_REQUESTED to CCORD_IN_QUIT when close-to-tray is off.
+  // Genuine quit requests (SIGINT/SIGTERM, macOS Cmd+Q / Dock Quit) still emit SDL_EVENT_QUIT.
+  SDL_SetHint(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, "0");
 #if defined(__ANDROID__)
   // Keep SDL_main running while backgrounded so the Discord Gateway stays connected and OS notifications fire.
   SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");

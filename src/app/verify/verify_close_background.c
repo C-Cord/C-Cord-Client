@@ -4,6 +4,8 @@
 // Drives a private headless platform (dummy video driver), since the tray and window state are platform-level.
 #include <stdio.h>
 
+#include <SDL3/SDL_hints.h>
+
 #include <ccord/platform/platform.h>
 
 #include "app_desktop.h"
@@ -38,6 +40,7 @@ int ccord_verify_close_background_slice(const ccord_verify_ui_parity_ctx *ctx)
     return 1;
   }
   ccord_platform_set_tray_callback(p, on_tray, nullptr);
+  CHECK(!SDL_GetHintBoolean(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, true), "sdl-no-quit-on-last-close");
 
   ccord_app_startup st;
   ccord_app_desktop_startup_defaults(&st);

@@ -91,6 +91,8 @@ static void test_window_lifecycle(void)
   ccord_platform *p = ccord_platform_create(&cfg, &err);
   CT_CHECK(p != nullptr);
   if (!p) return;
+  // SDL3 must not synthesize SDL_EVENT_QUIT when the last window requests close, or close-to-tray exits immediately.
+  CT_CHECK(!SDL_GetHintBoolean(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, true));
   drain(p);
   CT_CHECK(!ccord_platform_window_visible(p));
   CT_CHECK(!ccord_platform_window_focused(p));
