@@ -496,7 +496,8 @@ static void test_api_v3_integration(void)
   CT_CHECK(strcmp(nt, "V3:Ping") == 0);
   CT_CHECK(!ccord_contrib_run_notification_hook(contrib, 100, 200, 300, 400, "mute-me", true, false, nt, sizeof nt, nb, sizeof nb, &silent));
 
-  // Raw gateway event dispatch.
+  // Raw gateway event dispatch: subscriber query must report active subscription before shutdown and false after.
+  CT_CHECK(ccord_plugins_has_raw_gateway_subscribers(pm));
   ccord_plugins_dispatch_raw_gateway(pm, "TEST_V3_EVENT", "{\"val\":42}");
   CT_CHECK(v3_pump_clip(pm, bus, &cl, "c2_gw:42"));
 
@@ -524,6 +525,7 @@ static void test_api_v3_integration(void)
   close(srv.listen_fd);
 
   ccord_plugins_shutdown(pm);
+  CT_CHECK(!ccord_plugins_has_raw_gateway_subscribers(pm));
   ccord_plugins_destroy(pm);
   ccord_contrib_destroy(contrib);
   ccord_store_destroy(store);
@@ -887,6 +889,7 @@ int main(void)
   }
 
   ccord_plugins_shutdown(pm);
+  CT_CHECK(!ccord_plugins_has_raw_gateway_subscribers(pm));
   ccord_plugins_destroy(pm);
   ccord_contrib_destroy(contrib);
   ccord_store_destroy(store);

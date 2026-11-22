@@ -87,6 +87,7 @@ typedef struct app {
   ccord_account *account;         // token-session state for the Account page; owns no socket or listener
 #if CCORD_WITH_PLUGINS
   ccord_plugins *plugins;        // nullptr while extensions are off
+  bool plugin_raw_gw_active;     // mirrors whether any READY plugin subscribes to gateway.raw
 #endif
   const options *opt;            // command-line options (plugin dirs, --no-plugins, --no-warm-cache)
   bool quit;
@@ -199,6 +200,7 @@ void app_host_account_action(void *ud, ccord_account_action action);
 #if CCORD_WITH_PLUGINS
 void app_plugins_start(app *a);
 void app_plugins_stop(app *a);
+void app_plugins_sync_raw_gateway(app *a);
 void app_host_set_extensions(void *ud, bool on);
 void app_plugins_push_platform_state(app *a);
 #endif

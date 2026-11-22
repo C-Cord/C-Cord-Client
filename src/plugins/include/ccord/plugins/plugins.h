@@ -138,6 +138,7 @@ void ccord_plugins_update_platform_state(ccord_plugins *p, const ccord_plugin_pl
 // Dispatches Class 1 `app.lifecycle` ("foreground"|"background"|"low_memory") to subscribed plugins.
 void ccord_plugins_dispatch_lifecycle(ccord_plugins *p, const char *state);
 // API v3 client -> plugin dispatchers
+bool ccord_plugins_has_raw_gateway_subscribers(const ccord_plugins *p);
 void ccord_plugins_dispatch_raw_gateway(ccord_plugins *p, const char *event_name, const char *payload_json);
 void ccord_plugins_dispatch_theme_change(ccord_plugins *p, const char *theme_id);
 void ccord_plugins_dispatch_window_focus(ccord_plugins *p, bool focused);

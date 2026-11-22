@@ -597,8 +597,18 @@ void app_plugins_start(app *a)
     CCORD_LOG_W("extensions disabled: %s", err.message);
     return;
   }
-  if (a->session) ccord_session_set_raw_gateway_cb(a->session, plugin_raw_gateway_cb, a);
+  a->plugin_raw_gw_active = false;
   (void)ccord_plugins_load_all(a->plugins);
+  app_plugins_sync_raw_gateway(a);
+}
+
+void app_plugins_sync_raw_gateway(app *a)
+{
+  if (!a || !a->session) return;
+  bool need = a->plugins && ccord_plugins_has_raw_gateway_subscribers(a->plugins);
+  if (need == a->plugin_raw_gw_active) return;
+  a->plugin_raw_gw_active = need;
+  ccord_session_set_raw_gateway_cb(a->session, need ? plugin_raw_gateway_cb : nullptr, need ? a : nullptr);
 }
 
 // Stops every host (they send nothing more) and drops their menu items; Settings keeps the plugin list as Stopped.
@@ -606,6 +616,7 @@ void app_plugins_stop(app *a)
 {
   if (!a->plugins) return;
   if (a->session) ccord_session_set_raw_gateway_cb(a->session, nullptr, nullptr);
+  a->plugin_raw_gw_active = false;
   ccord_plugins_destroy(a->plugins);
   a->plugins = nullptr;
   ccord_contrib_set_handlers(a->contrib, &(ccord_contrib_handlers){0});   // no callbacks into the freed manager

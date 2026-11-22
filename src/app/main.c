@@ -84,6 +84,7 @@ void app_pump(app *a)
 #if CCORD_WITH_PLUGINS
   if (a->plugins) {
     ccord_plugins_pump(a->plugins, app_now_ms(a));
+    app_plugins_sync_raw_gateway(a);
     if (a->desktop && ccord_app_desktop_sync_plugin_theme(a->desktop) && a->theme) {
       ccord_plugins_dispatch_theme_change(a->plugins, a->theme->id);
     }

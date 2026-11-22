@@ -911,6 +911,17 @@ bool ext_handle_presence_voice_social_window(ccord_plugins *m, plugin *p, uint32
 
 // ---------------------------------------------------------------- Public API v3 client -> plugin dispatchers
 
+bool ccord_plugins_has_raw_gateway_subscribers(const ccord_plugins *m)
+{
+  if (!m) return false;
+  for (size_t i = 0; i < m->nplugins; i++) {
+    const plugin *p = m->plugins[i];
+    if (!p->used || p->state != CCORD_PLUGIN_READY || !pl_has_perm(p, CCORD_PERM_GATEWAY_RAW)) continue;
+    if (p->gw_raw_any || p->ngw_raw_events > 0) return true;
+  }
+  return false;
+}
+
 void ccord_plugins_dispatch_raw_gateway(ccord_plugins *m, const char *event_name, const char *payload_json)
 {
   if (!m || !event_name || !event_name[0]) return;
