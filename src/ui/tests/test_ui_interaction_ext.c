@@ -2898,6 +2898,81 @@ static void test_nameplate_visibility_and_animation(void)
   F.ui->anim.reduced_motion = saved_rm_anim;
 }
 
+// Refocusing while already viewing a DM clears its unread/mention counts, opening the newest message
+// via ccord_ui_open_message preserves stick_bottom so auto-ack stays active, and popovers never swallow CCORD_IN_FOCUS.
+static void test_same_dm_refocus_and_open_latest_message(void)
+{
+  ccord_error err;
+  ccord_id prev_guild = ccord_store_selected_guild(F.store);
+  ccord_id prev_chan = ccord_store_selected_channel(F.store);
+
+  ui_send((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = true});
+  CT_CHECK(ccord_session_open_dm(F.session, 1002u, &err) == CCORD_OK);
+  frame(8);
+  ccord_id dm_ch = CCORD_ID_NONE;
+  for (size_t i = 0; i < ccord_store_channel_count(F.store, CCORD_DM_GUILD_ID); i++) {
+    const ccord_channel *c = ccord_store_channel_at(F.store, CCORD_DM_GUILD_ID, i);
+    if (c && c->user_id == 1002u) { dm_ch = c->id; break; }
+  }
+  CT_CHECK(dm_ch != CCORD_ID_NONE);
+  if (dm_ch == CCORD_ID_NONE) return;
+  CT_CHECK(ccord_session_select_guild(F.session, CCORD_DM_GUILD_ID, &err) == CCORD_OK);
+  CT_CHECK(ccord_session_select_channel(F.session, dm_ch, &err) == CCORD_OK);
+  frame(20);
+  CT_CHECK(ccord_store_selected_guild(F.store) == CCORD_DM_GUILD_ID && ccord_store_selected_channel(F.store) == dm_ch);
+  const ccord_channel *dc = ccord_store_channel(F.store, dm_ch);
+  CT_CHECK(dc && dc->unread_count == 0 && dc->mention_count == 0 && dbg().stick_bottom);
+
+  // 1. Unfocus while viewing this DM, receive a message, then refocus: unread & mention counts clear.
+  ui_send((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = false});
+  ccord_id msg1 = CCORD_ID_NONE;
+  CT_CHECK(ccord_mock_post_rich_message(F.transport, dm_ch, 1002u, "hello in same DM", nullptr, &msg1, &err) == CCORD_OK);
+  frame(4);
+  dc = ccord_store_channel(F.store, dm_ch);
+  CT_CHECK(dc && dc->unread_count == 1 && dc->mention_count == 1);
+  // Popovers (e.g. account status card) must never swallow CCORD_IN_FOCUS.
+  F.ui->sc.open = true;
+  ui_send((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = true});
+  F.ui->sc.open = false;
+  CT_CHECK(F.ui->window_focused && ui_is_reading(F.ui));
+  frame(25);
+  dc = ccord_store_channel(F.store, dm_ch);
+  CT_CHECK(dc && dc->unread_count == 0 && dc->mention_count == 0 && dc->last_read_id >= msg1);
+
+  // 2. Clicking a notification for the newest message via ccord_ui_open_message keeps stick_bottom=true so auto-ack clears it.
+  ui_send((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = false});
+  ccord_id msg2 = CCORD_ID_NONE;
+  CT_CHECK(ccord_mock_post_rich_message(F.transport, dm_ch, 1002u, "newest dm message", nullptr, &msg2, &err) == CCORD_OK);
+  frame(4);
+  dc = ccord_store_channel(F.store, dm_ch);
+  CT_CHECK(dc && dc->unread_count == 1 && dc->mention_count == 1);
+  ccord_ui_open_message(F.ui, CCORD_DM_GUILD_ID, dm_ch, msg2);
+  CT_CHECK(dbg().stick_bottom);
+  ui_send((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = true});
+  CT_CHECK(ui_is_reading(F.ui));
+  frame(25);
+  dc = ccord_store_channel(F.store, dm_ch);
+  CT_CHECK(dc && dc->unread_count == 0 && dc->mention_count == 0 && dc->last_read_id >= msg2 && dbg().stick_bottom);
+
+  // 3. Stale unread/mention counts when last_read_id is already > latest local message still clear without rolling back.
+  ccord_id msg3 = CCORD_ID_NONE;
+  CT_CHECK(ccord_mock_post_rich_message(F.transport, dm_ch, 1002u, "later dm message", nullptr, &msg3, &err) == CCORD_OK);
+  frame(4);
+  CT_CHECK(ccord_store_apply_read(F.store, dm_ch, msg3, 0, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_delete_message(F.store, dm_ch, msg3, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_set_channel_counts(F.store, dm_ch, 1u, 1u, &err) == CCORD_OK);
+  F.ui->ack_channel = CCORD_ID_NONE;
+  F.ui->acked_message = CCORD_ID_NONE;
+  F.ui->ack_next_ms = 0;
+  frame(4);
+  dc = ccord_store_channel(F.store, dm_ch);
+  CT_CHECK(dc && dc->unread_count == 0 && dc->mention_count == 0 && dc->last_read_id == msg3);
+
+  if (prev_guild != CCORD_ID_NONE) (void)ccord_session_select_guild(F.session, prev_guild, &err);
+  if (prev_chan != CCORD_ID_NONE) (void)ccord_session_select_channel(F.session, prev_chan, &err);
+  frame(4);
+}
+
 
 int main(int argc, char **argv)
 {
@@ -2930,6 +3005,7 @@ int main(int argc, char **argv)
   test_dm_and_substring_mention_autocomplete();
   test_plugin_api_v3_ui();
   test_nameplate_visibility_and_animation();
+  test_same_dm_refocus_and_open_latest_message();
   ui_test_teardown();
   ct_failures += ui_test_harness_failures();
   return CT_RESULT("test_ui_interaction_ext");

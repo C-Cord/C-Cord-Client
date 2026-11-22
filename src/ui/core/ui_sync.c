@@ -789,7 +789,10 @@ void uc_auto_ack(ccord_ui *ui)
   }
   if (target_id == CCORD_ID_NONE) return;
   if (!hist_loaded && c->last_message_id > target_id) return;
-  if (c->last_read_id != CCORD_ID_NONE && target_id < c->last_read_id) return;
+  if (c->last_read_id != CCORD_ID_NONE && target_id < c->last_read_id) {
+    if (c->unread_count == 0 && c->mention_count == 0) return;
+    target_id = c->last_read_id;   // clear stale unread/mention counts without rolling last_read_id backward
+  }
   if (c->unread_count == 0 && c->mention_count == 0 &&
       (c->last_read_id == CCORD_ID_NONE || target_id <= c->last_read_id)) {
     ui->ack_channel = ch;
@@ -803,6 +806,7 @@ void uc_auto_ack(ccord_ui *ui)
     ui->acked_message = target_id;
     ui->ack_channel = ch;
     ui->ack_next_ms = ui->now_ms + UI_ACK_MIN_GAP_MS;
+    ui->dirty = true;
   } else {
     ui->ack_next_ms = ui->now_ms + UI_ACK_RETRY_MS;
   }

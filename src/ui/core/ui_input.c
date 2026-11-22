@@ -698,7 +698,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     if (ui_plugin_dialog_is_open(ui) && ui_plugin_dialog_handle_input(ui, ev)) return true;
     if (ui_plugin_settings_is_open(ui) && ui_plugin_settings_handle_input(ui, ev)) return true;
   }
-  if (ev->type != CCORD_IN_RESIZE) {   // composer overlays sit above the views; topmost modal first
+  if (ev->type != CCORD_IN_RESIZE && ev->type != CCORD_IN_FOCUS && ev->type != CCORD_IN_QUIT) {   // composer overlays sit above the views; topmost modal first
     if (ui->report_open && ui_report_flow_input(ui, ev)) return true;
     if (ui->schedule_open && ui_schedule_dialog_input(ui, ev)) return true;
     if (ui->poll_open && ui_poll_composer_input(ui, ev)) return true;
@@ -706,7 +706,8 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     if (ui->clan_pop && ui_clan_popover_input(ui, ev)) return true;
     if (ui->prof_roles && ui_profile_roles_input(ui, ev)) return true;
   }
-  if (ui->sc.open && ev->type != CCORD_IN_RESIZE && ui_status_card_handle(ui, ev)) return true;   // account card
+  if (ui->sc.open && ev->type != CCORD_IN_RESIZE && ev->type != CCORD_IN_FOCUS && ev->type != CCORD_IN_QUIT &&
+      ui_status_card_handle(ui, ev)) return true;   // account card
   switch (ev->type) {
     case CCORD_IN_RESIZE:
       ccord_ui_set_viewport(ui, ev->x, ev->y);

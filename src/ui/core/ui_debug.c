@@ -473,6 +473,19 @@ void ccord_ui_open_message(ccord_ui *ui, ccord_id guild_id, ccord_id channel_id,
   ui_select_guild_and_channel(ui, gid, channel_id);
   if (channel_id != ccord_store_selected_channel(ui->d.store)) return;   // the channel could not be opened
   if (message_id != CCORD_ID_NONE && ccord_store_find_message(ui->d.store, channel_id, message_id)) {
+    const ccord_message *latest = uc_latest_non_ephemeral_message(ui->d.store, channel_id);
+    if (latest && latest->id == message_id &&
+        (latest->author_id == CCORD_ID_NONE ||
+         ccord_store_relationship(ui->d.store, latest->author_id) != CCORD_REL_BLOCKED)) {
+      // Target is already the newest message: stay pinned to the bottom so reading/auto-ack stays active
+      // even for tall media/embed messages, while still flashing the jump highlight on it.
+      ui->msg_scroll_vel = 0.0f;
+      ccord_vlist_reset_bottom(&ui->vlist);
+      ui->jump_highlight_msg_id = message_id;
+      ui->jump_highlight_until_ms = ui->now_ms + UI_JUMP_FLASH_MS;
+      ui->dirty = true;
+      return;
+    }
     (void)ui_jump_to_message(ui, message_id);
     return;
   }
