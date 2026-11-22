@@ -100,6 +100,7 @@ typedef struct plugin {
   ccord_manifest m;                    // m.id is the owner key used everywhere
   char *perm_str;
   char *allowed_hosts_str;
+  char *icon_path;
   char *dir;
   char *source;
   size_t source_len;
@@ -273,9 +274,12 @@ void pl_stop_host(ccord_plugins *m, plugin *p);
 void pl_start_plugin_host(ccord_plugins *m, plugin *p);
 bool pl_reload_plugin_source(plugin *p, char *why, size_t why_cap);
 void pl_on_plugin_reload(void *ud, const char *id);
+void pl_on_plugin_consent_accept_for(void *ud, const char *id, uint64_t expected_perms);
+char *pl_resolve_icon_path(const char *real_dir, const char *rel_icon);
 bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
                                 const char *expected_id, const char *expected_version,
                                 uint64_t expected_perms, bool from_catalog,
+                                bool preapprove_consent,
                                 char *err_buf, size_t err_cap);
 const char *pl_channel_kind_str(const ccord_store *st, const ccord_channel *c);
 void pl_channel_display_name(const ccord_store *st, const ccord_channel *c, char *out, size_t cap);

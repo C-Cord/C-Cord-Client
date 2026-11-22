@@ -314,20 +314,38 @@ typedef enum ccord_catalog_warn_sev : uint8_t {
   CCORD_WARN_DANGER  = 3,
 } ccord_catalog_warn_sev;
 
+enum {
+  CCORD_CONTRIB_PLAT_LINUX   = 1u << 0,
+  CCORD_CONTRIB_PLAT_MACOS   = 1u << 1,
+  CCORD_CONTRIB_PLAT_WINDOWS = 1u << 2,
+  CCORD_CONTRIB_PLAT_ANDROID = 1u << 3,
+  CCORD_CONTRIB_PLAT_DESKTOP = CCORD_CONTRIB_PLAT_LINUX | CCORD_CONTRIB_PLAT_MACOS | CCORD_CONTRIB_PLAT_WINDOWS,
+  CCORD_CONTRIB_PLAT_MOBILE  = CCORD_CONTRIB_PLAT_ANDROID,
+  CCORD_CONTRIB_PLAT_ALL     = CCORD_CONTRIB_PLAT_DESKTOP | CCORD_CONTRIB_PLAT_MOBILE,
+};
+
 typedef struct ccord_plugin_info {
   const char *id, *name, *version;
   const char *description;        // optional summary
+  const char *icon_path;          // local disk path to bundled or cached icon ("" if none)
   const char *permissions;        // comma separated, display only
   const char *allowed_hosts;      // comma separated, display only (empty = unrestricted)
   uint64_t perms_mask;            // declared permission bitmask (for TOCTOU-free consent approval)
+  uint64_t consented_perms;       // previously consented permission bitmask (for update diff UI)
+  uint32_t platforms;             // CCORD_PLAT_* bitmask (0 = all)
   uint8_t risk_class;             // 0=API Class 1, 1=API Class 2, 2=API Class 3
   ccord_plugin_tier tier;         // 0=unknown/local, 1=official, 2=verified, 3=unverified
   bool is_bundled;
+  bool revoked;
   bool auto_update;
   bool enabled;
   bool consent_granted;
   bool update_needs_review;
   const char *update_version;     // "" unless catalog has newer version
+  uint64_t update_perms_mask;     // declared permissions of pending catalog update
+  const char *update_permissions; // comma separated permissions of pending update
+  const char *update_allowed_hosts; // comma separated allowed_hosts of pending update
+  const char *update_changelog;   // release notes snippet of pending update
   ccord_catalog_warn_sev warning_sev;
   const char *warning_title;      // "" unless moderator warning present
   const char *warning_message;    // "" unless moderator warning present
@@ -347,7 +365,12 @@ typedef struct ccord_catalog_entry {
   const char *download_url;
   const char *sha256;
   const char *permissions;        // comma separated
+  const char *allowed_hosts;      // comma separated (empty = unrestricted)
   const char *changelog;
+  const char *icon_url;           // catalog thumbnail URL ("" if none)
+  const char *icon_path;          // locally cached icon file path ("" until cached)
+  uint64_t perms_mask;            // declared permission bitmask
+  uint32_t platforms;             // CCORD_PLAT_* bitmask (0 = all)
   uint64_t size_bytes;
   uint64_t downloads;
   uint8_t api_class;              // 1, 2, or 3
@@ -424,9 +447,12 @@ typedef struct ccord_contrib_handlers {
   bool (*plugin_uninstall)(void *ud, const char *id, char *err_buf, size_t err_cap);
   void (*catalog_refresh)(void *ud);
   void (*catalog_query)(void *ud, const char *q, int tier, int api_class, const char *sort, bool append_next_page);
+  void (*catalog_query_ex)(void *ud, const char *q, int tier, int api_class, const char *platform, const char *sort,
+                           bool append_next_page);
   void (*catalog_fetch_detail)(void *ud, const char *id);
   void (*catalog_check_updates)(void *ud);
   void (*catalog_install)(void *ud, const char *id);
+  void (*catalog_install_approved)(void *ud, const char *id, uint64_t approved_perms);
   void (*catalog_set_prefs)(void *ud, const ccord_catalog_prefs *prefs);
   void (*catalog_set_plugin_auto_update)(void *ud, const char *id, bool enabled);
   void (*catalog_run_auto_updates)(void *ud);
@@ -601,9 +627,12 @@ bool ccord_contrib_plugin_uninstall(ccord_contrib *c, const char *id, char *err_
 void ccord_contrib_catalog_refresh(ccord_contrib *c);
 void ccord_contrib_catalog_query(ccord_contrib *c, const char *q, int tier, int api_class, const char *sort,
                                  bool append_next_page);
+void ccord_contrib_catalog_query_ex(ccord_contrib *c, const char *q, int tier, int api_class, const char *platform,
+                                    const char *sort, bool append_next_page);
 void ccord_contrib_catalog_fetch_detail(ccord_contrib *c, const char *id);
 void ccord_contrib_catalog_check_updates(ccord_contrib *c);
 void ccord_contrib_catalog_install(ccord_contrib *c, const char *id);
+void ccord_contrib_catalog_install_approved(ccord_contrib *c, const char *id, uint64_t approved_perms);
 void ccord_contrib_catalog_set_prefs(ccord_contrib *c, const ccord_catalog_prefs *prefs);
 void ccord_contrib_catalog_set_plugin_auto_update(ccord_contrib *c, const char *id, bool enabled);
 void ccord_contrib_catalog_run_auto_updates(ccord_contrib *c);

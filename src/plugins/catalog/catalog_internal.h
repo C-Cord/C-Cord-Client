@@ -12,6 +12,7 @@
 #include <ccord/core/os.h>
 #include <ccord/core/sha256.h>
 #include <ccord/ipc/perm.h>
+#include <ccord/plugins/manifest.h>
 
 #include <ctype.h>
 #include <errno.h>
@@ -28,10 +29,11 @@
 #define CATALOG_MAX_CCE_BYTES (25u * 1024u * 1024u)
 #define CATALOG_REFRESH_INTERVAL_MS (6ULL * 60ULL * 60ULL * 1000ULL)
 #define CATALOG_STARTUP_DELAY_MS 1500ULL
-#define CATALOG_QUEUE_CAP 32
+#define CATALOG_QUEUE_CAP 64
 #define CATALOG_PAGE_LIMIT 24
 #define CATALOG_MAX_BATCH_IDS 64
 #define CATALOG_MAX_INFLIGHT_INSTALLS 8
+#define CATALOG_MAX_INFLIGHT_ICONS 24
 
 typedef struct cat_item {
   char id[65];
@@ -45,10 +47,13 @@ typedef struct cat_item {
   char download_url[512];
   char sha256[65];
   char permissions[512];
+  char allowed_hosts[512];
   char changelog[512];
+  char icon_url[256];
   uint64_t size_bytes;
   uint64_t downloads;
   uint64_t perms_mask;
+  uint32_t platforms;
   uint8_t api_class;
   ccord_plugin_tier tier;
   ccord_catalog_warn_sev warning_sev;
@@ -78,6 +83,7 @@ typedef enum job_kind : uint8_t {
   JOB_CHECK_UPDATES = 3,
   JOB_FETCH_REVOCATIONS = 4,
   JOB_INSTALL = 5,
+  JOB_FETCH_ICON = 6,
 } job_kind;
 
 typedef struct worker_job {
@@ -86,15 +92,17 @@ typedef struct worker_job {
   bool append_page;
   bool install_after_detail;
   bool is_auto_update;
+  bool preapprove_consent;
   char id[65];
   char url[1024];
   char expected_sha256[65];
   char version[33];
   char etag[128];
-  char *dest_path; // owned by job (JOB_INSTALL only), transferred to worker_result
+  char *dest_path; // owned by job (JOB_INSTALL / JOB_FETCH_ICON), transferred to worker_result
   char *post_body; // owned by job until worker frees it
   size_t post_len;
   uint64_t expected_perms;
+  uint64_t approved_perms;
   ccord_plugin_tier tier;
 } worker_job;
 
@@ -106,12 +114,14 @@ typedef struct worker_result {
   bool append_page;
   bool install_after_detail;
   bool is_auto_update;
+  bool preapprove_consent;
   char id[65];
   char version[33];
   char sha256[65];
   char etag[128];
   char *dest_path; // owned until pump frees after handle_result
   uint64_t expected_perms;
+  uint64_t approved_perms;
   ccord_plugin_tier tier;
   char *body;
   size_t body_len;
@@ -135,6 +145,7 @@ struct ccord_catalog {
   char cur_query[96];
   int cur_tier;
   int cur_api_class;
+  char cur_platform[16];
   char cur_sort[16];
   uint64_t discover_req_seq;
 
@@ -162,6 +173,10 @@ struct ccord_catalog {
   // Active download/install IDs (lazily allocated on first install)
   char (*installing_ids)[65];
   size_t ninstalling;
+
+  // In-flight icon download filenames (deduplicates concurrent requests for same icon hash)
+  char icon_inflight[CATALOG_MAX_INFLIGHT_ICONS][32];
+  size_t nicon_inflight;
 
   bool initial_check_queued;
   uint64_t created_ms;
@@ -215,3 +230,6 @@ const cat_item *cat_find_update_item(const ccord_catalog *cat, const char *id);
 const cat_item *cat_find_best_item(const ccord_catalog *cat, const char *id);
 void cat_publish_catalog(ccord_catalog *cat);
 void cat_enforce_revocations(ccord_catalog *cat);
+bool cat_extract_icon_filename(const char *icon_url, char out[32]);
+bool cat_resolve_cached_icon_path(const ccord_catalog *cat, const char *icon_url, char *out, size_t cap);
+void cat_maybe_queue_icon(ccord_catalog *cat, const char *icon_url);

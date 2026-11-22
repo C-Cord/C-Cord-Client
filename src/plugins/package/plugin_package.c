@@ -149,6 +149,22 @@ bool pl_path_strictly_under(const char *real_path, const char *real_dir)
   return real_path[dl] == '/' || real_path[dl] == '\\';
 }
 
+char *pl_resolve_icon_path(const char *real_dir, const char *rel_icon)
+{
+  if (!real_dir || !real_dir[0] || !rel_icon || !rel_icon[0]) return nullptr;
+  char icon_full[PBUF + 160], real_icon[CCORD_PATH_MAX];
+  int n = snprintf(icon_full, sizeof icon_full, "%s/%s", real_dir, rel_icon);
+  if (n < 0 || (size_t)n >= sizeof icon_full) return nullptr;
+  if (!pl_resolve_real_path(icon_full, real_icon, sizeof real_icon)) return nullptr;
+  if (!pl_path_strictly_under(real_icon, real_dir)) return nullptr;
+  uint64_t fsz = 0;
+  if (!ccord_path_is_file(real_icon) || !ccord_file_size(real_icon, &fsz) ||
+      fsz == 0 || fsz > CCORD_MANIFEST_MAX_ICON_BYTES) {
+    return nullptr;
+  }
+  return ccord_strdup(real_icon);
+}
+
 static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir_name,
                          const ccord_json *consent_root, size_t *started)
 {
@@ -219,6 +235,7 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
   char hbuf[1024] = "";
   plugins_ext_format_allowed_hosts(&man, hbuf, sizeof hbuf);
   p->allowed_hosts_str = ccord_strdup(hbuf);
+  p->icon_path = pl_resolve_icon_path(real_dir, man.icon);
   p->dir = ccord_strdup(real_dir);
   if (!p->dir || !p->perm_str) {
     p->state = CCORD_PLUGIN_FAILED;
@@ -351,9 +368,10 @@ bool ccord_plugins_export_cce(ccord_plugins *m, const char *id, const char *dest
 }
 
 bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
-                                    const char *expected_id, const char *expected_version,
-                                    uint64_t expected_perms, bool from_catalog,
-                                    char *err_buf, size_t err_cap)
+                                const char *expected_id, const char *expected_version,
+                                uint64_t expected_perms, bool from_catalog,
+                                bool preapprove_consent,
+                                char *err_buf, size_t err_cap)
 {
   if (!m || !pkg_path || !m->has_data_dir) {
     if (err_buf && err_cap) snprintf(err_buf, err_cap, "plugin data directory unavailable");
@@ -438,6 +456,10 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
       // Manual .cce overwrite must never silently inherit prior Class 2/3 consent.
       existing->consent_granted = false;
       existing->consented_perms = 0;
+    } else if (preapprove_consent && (man.perms & ~expected_perms) == 0) {
+      existing->consent_granted = true;
+      existing->consented_perms = man.perms;
+      existing->enabled = true;
     }
     pl_on_plugin_reload(m, man.id);
     return true;
@@ -447,12 +469,18 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
   const ccord_json *consent_root = from_catalog ? pl_consent_parse_file(m, &consent_ar) : nullptr;
   consider_dir(m, final_dir, man.id, consent_root, &started);
   if (consent_ar.head) ccord_arena_free(&consent_ar);
+  if (from_catalog && preapprove_consent) {
+    plugin *np = pl_find_owner(m, man.id);
+    if (np && !np->revoked && np->state == CCORD_PLUGIN_NEEDS_CONSENT && (np->m.perms & ~expected_perms) == 0) {
+      pl_on_plugin_consent_accept_for(m, np->m.id, np->m.perms);
+    }
+  }
   return true;
 }
 
 bool ccord_plugins_import_package(ccord_plugins *m, const char *pkg_path, char *err_buf, size_t err_cap)
 {
-  return pl_import_package_internal(m, pkg_path, nullptr, nullptr, 0, false, err_buf, err_cap);
+  return pl_import_package_internal(m, pkg_path, nullptr, nullptr, 0, false, false, err_buf, err_cap);
 }
 
 bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, size_t err_cap)
@@ -488,6 +516,7 @@ bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, si
   ccord_free(p->storage_dir);
   ccord_free(p->perm_str);
   ccord_free(p->allowed_hosts_str);
+  ccord_free(p->icon_path);
   plugins_ext_reset_plugin(p);
   p->used = false;
   p->m.id[0] = '\0';
@@ -502,6 +531,7 @@ bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, si
   p->storage_dir = nullptr;
   p->perm_str = nullptr;
   p->allowed_hosts_str = nullptr;
+  p->icon_path = nullptr;
   pl_consent_save(m);
   if (m->catalog) ccord_catalog_on_uninstalled(m->catalog, id_copy);
   return true;

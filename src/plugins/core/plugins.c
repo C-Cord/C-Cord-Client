@@ -130,23 +130,35 @@ bool pl_valid_plain_text(const char *s, size_t n, size_t max)
 
 void pl_publish_state(ccord_plugins *m, plugin *p)
 {
+  _Static_assert((uint32_t)CCORD_CONTRIB_PLAT_ALL == (uint32_t)CCORD_PLAT_ALL &&
+                     (uint32_t)CCORD_CONTRIB_PLAT_ANDROID == (uint32_t)CCORD_PLAT_ANDROID &&
+                     (uint32_t)CCORD_CONTRIB_PLAT_DESKTOP == (uint32_t)CCORD_PLAT_DESKTOP,
+                 "contrib platform bitmask must match manifest.h");
   ccord_catalog_local_overlay ov = {0};
   bool has_ov = m->catalog && ccord_catalog_query_overlay(m->catalog, p->m.id, p->m.version, p->consented_perms, &ov);
   ccord_plugin_tier tier = p->is_bundled ? CCORD_TIER_OFFICIAL : (has_ov ? ov.tier : CCORD_TIER_UNKNOWN);
   ccord_plugin_info info = {
     .id = p->m.id, .name = p->m.name, .version = p->m.version,
     .description = p->m.description,
+    .icon_path = (p->icon_path && p->icon_path[0]) ? p->icon_path : (has_ov ? ov.icon_path : ""),
     .permissions = p->perm_str ? p->perm_str : "",
     .allowed_hosts = p->allowed_hosts_str ? p->allowed_hosts_str : "",
     .perms_mask = p->m.perms,
+    .consented_perms = p->consented_perms,
+    .platforms = p->m.platforms ? p->m.platforms : CCORD_PLAT_ALL,
     .risk_class = (uint8_t)ccord_perm_max_class(p->m.perms),
     .tier = tier,
     .is_bundled = p->is_bundled,
+    .revoked = p->revoked,
     .auto_update = has_ov ? ov.auto_update : true,
     .enabled = p->enabled,
     .consent_granted = p->consent_granted,
     .update_needs_review = has_ov ? ov.update_needs_review : false,
     .update_version = has_ov ? ov.update_version : "",
+    .update_perms_mask = has_ov ? ov.update_perms_mask : 0,
+    .update_permissions = has_ov ? ov.update_permissions : "",
+    .update_allowed_hosts = has_ov ? ov.update_allowed_hosts : "",
+    .update_changelog = has_ov ? ov.update_changelog : "",
     .warning_sev = has_ov ? ov.warning_sev : CCORD_WARN_NONE,
     .warning_title = has_ov ? ov.warning_title : "",
     .warning_message = has_ov ? ov.warning_message : "",
@@ -547,6 +559,7 @@ void ccord_plugins_destroy(ccord_plugins *m)
     ccord_free(p->storage_dir);
     ccord_free(p->perm_str);
     ccord_free(p->allowed_hosts_str);
+    ccord_free(p->icon_path);
     ccord_free(p);
   }
   ccord_free(m->plugins);
@@ -595,7 +608,7 @@ static void on_plugin_set_enabled(void *ud, const char *id, bool enabled)
   pl_start_plugin_host(m, p);
 }
 
-static void on_plugin_consent_accept_for(void *ud, const char *id, uint64_t expected_perms)
+void pl_on_plugin_consent_accept_for(void *ud, const char *id, uint64_t expected_perms)
 {
   ccord_plugins *m = ud;
   plugin *p = pl_find_owner(m, id);
@@ -626,7 +639,7 @@ static void on_plugin_consent_accept_for(void *ud, const char *id, uint64_t expe
 
 static void on_plugin_consent_accept(void *ud, const char *id)
 {
-  on_plugin_consent_accept_for(ud, id, UINT64_MAX);
+  pl_on_plugin_consent_accept_for(ud, id, UINT64_MAX);
 }
 
 void pl_on_plugin_reload(void *ud, const char *id)
@@ -690,6 +703,8 @@ void pl_on_plugin_reload(void *ud, const char *id)
     ccord_free(p->allowed_hosts_str);
     p->allowed_hosts_str = hs;
   }
+  ccord_free(p->icon_path);
+  p->icon_path = pl_resolve_icon_path(real_dir, man.icon);
 
   char rev_reason[256] = "";
   if (m->catalog && ccord_catalog_is_revoked(m->catalog, man.id, rev_reason, sizeof rev_reason)) {
@@ -746,7 +761,15 @@ static bool cb_import_verified_cce(void *ud, const char *pkg, const char *expect
                                    const char *expected_version, uint64_t expected_perms,
                                    char *eb, size_t ec)
 {
-  return pl_import_package_internal(ud, pkg, expected_id, expected_version, expected_perms, true, eb, ec);
+  return pl_import_package_internal(ud, pkg, expected_id, expected_version, expected_perms, true, false, eb, ec);
+}
+
+static bool cb_import_verified_cce_approved(void *ud, const char *pkg, const char *expected_id,
+                                            const char *expected_version, uint64_t expected_perms,
+                                            bool preapprove_consent, char *eb, size_t ec)
+{
+  return pl_import_package_internal(ud, pkg, expected_id, expected_version, expected_perms, true,
+                                    preapprove_consent, eb, ec);
 }
 
 static bool cb_uninstall(void *ud, const char *id, char *eb, size_t ec)
@@ -760,6 +783,12 @@ static void cb_cat_query(void *ud, const char *q, int tier, int api_class, const
   ccord_plugins *m = ud;
   if (m->catalog) ccord_catalog_query(m->catalog, q, tier, api_class, sort, append_next_page);
 }
+static void cb_cat_query_ex(void *ud, const char *q, int tier, int api_class, const char *platform, const char *sort,
+                            bool append_next_page)
+{
+  ccord_plugins *m = ud;
+  if (m->catalog) ccord_catalog_query_ex(m->catalog, q, tier, api_class, platform, sort, append_next_page);
+}
 static void cb_cat_fetch_detail(void *ud, const char *id)
 {
   ccord_plugins *m = ud;
@@ -767,6 +796,11 @@ static void cb_cat_fetch_detail(void *ud, const char *id)
 }
 static void cb_cat_check_updates(void *ud) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_check_updates(m->catalog); }
 static void cb_cat_install(void *ud, const char *id) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_install(m->catalog, id); }
+static void cb_cat_install_approved(void *ud, const char *id, uint64_t approved_perms)
+{
+  ccord_plugins *m = ud;
+  if (m->catalog) ccord_catalog_install_approved(m->catalog, id, approved_perms);
+}
 static void cb_cat_set_prefs(void *ud, const ccord_catalog_prefs *pr) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_set_prefs(m->catalog, pr); }
 static void cb_cat_set_auto(void *ud, const char *id, bool on) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_set_plugin_auto_update(m->catalog, id, on); }
 static void cb_cat_run_auto(void *ud) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_run_auto_updates(m->catalog); }
@@ -946,16 +980,18 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     .link_open_hook = plugins_ext_on_link_open_hook,
     .plugin_set_enabled = on_plugin_set_enabled,
     .plugin_consent_accept = on_plugin_consent_accept,
-    .plugin_consent_accept_for = on_plugin_consent_accept_for,
+    .plugin_consent_accept_for = pl_on_plugin_consent_accept_for,
     .plugin_reload = pl_on_plugin_reload,
     .plugin_export_cce = cb_export_cce,
     .plugin_import_package = cb_import_pkg,
     .plugin_uninstall = cb_uninstall,
     .catalog_refresh = cb_cat_refresh,
     .catalog_query = cb_cat_query,
+    .catalog_query_ex = cb_cat_query_ex,
     .catalog_fetch_detail = cb_cat_fetch_detail,
     .catalog_check_updates = cb_cat_check_updates,
     .catalog_install = cb_cat_install,
+    .catalog_install_approved = cb_cat_install_approved,
     .catalog_set_prefs = cb_cat_set_prefs,
     .catalog_set_plugin_auto_update = cb_cat_set_auto,
     .catalog_run_auto_updates = cb_cat_run_auto,
@@ -966,6 +1002,7 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     .get_local_plugin = cat_get_local_plugin,
     .list_local_plugins = cat_list_local_plugins,
     .import_verified_cce = cb_import_verified_cce,
+    .import_verified_cce_approved = cb_import_verified_cce_approved,
     .revoke_plugin = cat_revoke_plugin,
     .sync_installed_info = cat_sync_installed_info,
     .toast = cat_toast,

@@ -84,6 +84,49 @@ static bool valid_main(const char *s, size_t n)
   return true;
 }
 
+static bool ends_with_ci(const char *s, size_t n, const char *suf)
+{
+  size_t sn = strlen(suf);
+  if (n < sn) return false;
+  for (size_t i = 0; i < sn; i++) {
+    char a = s[n - sn + i];
+    char b = suf[i];
+    if (a >= 'A' && a <= 'Z') a = (char)(a - 'A' + 'a');
+    if (b >= 'A' && b <= 'Z') b = (char)(b - 'A' + 'a');
+    if (a != b) return false;
+  }
+  return true;
+}
+
+// Relative path inside plugin dir ending in .png/.jpg/.jpeg/.webp, <= 128 bytes, no ".." or "//".
+static bool valid_icon(const char *s, size_t n)
+{
+  if (n < 5 || n > 128 || s[0] == '/' || s[n - 1] == '/') return false;
+  if (!(ends_with_ci(s, n, ".png") || ends_with_ci(s, n, ".jpg") ||
+        ends_with_ci(s, n, ".jpeg") || ends_with_ci(s, n, ".webp"))) {
+    return false;
+  }
+  size_t seg_start = 0;
+  for (size_t i = 0; i <= n; i++) {
+    if (i == n || s[i] == '/') {
+      size_t slen = i - seg_start;
+      if (slen == 0) return false;
+      if ((slen == 1 && s[seg_start] == '.') ||
+          (slen == 2 && s[seg_start] == '.' && s[seg_start + 1] == '.')) {
+        return false;
+      }
+      seg_start = i + 1;
+      continue;
+    }
+    char c = s[i];
+    if (c == '.' && i + 1 < n && s[i + 1] == '.') return false;
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+              c == '_' || c == '-' || c == '.';
+    if (!ok) return false;
+  }
+  return true;
+}
+
 static ccord_status get_string(const ccord_json *obj, const char *key, const char *max_key, char *dst, size_t dst_cap,
                                size_t max_len, bool required, size_t *out_len, ccord_error *err)
 {
@@ -367,7 +410,7 @@ ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *
   if (!json || len == 0 || len > MANIFEST_MAX_BYTES) return bad(err, CCORD_ERR_RANGE, "plugin.json: size must be 1..16 KiB");
 
   static const char *const top_keys[] = {
-    "schema", "id", "name", "version", "api", "main", "description", "license",
+    "schema", "id", "name", "version", "api", "main", "icon", "description", "license",
     "permissions", "limits", "platforms", "requires_capabilities", "allowed_hosts",
   };
   ccord_arena arena;
@@ -431,6 +474,12 @@ ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *
   slen = sizeof("main.lua") - 1u;
   if ((st = get_string(root, "main", "128 bytes", out->main, sizeof out->main, 128, false, &slen, err)) != CCORD_OK) goto done;
   if (!valid_main(out->main, slen)) { st = bad(err, CCORD_ERR_INVALID, "plugin.json: invalid 'main'"); goto done; }
+  slen = 0;
+  if ((st = get_string(root, "icon", "128 bytes", out->icon, sizeof out->icon, 128, false, &slen, err)) != CCORD_OK) goto done;
+  if (slen > 0 && !valid_icon(out->icon, slen)) {
+    st = bad(err, CCORD_ERR_INVALID, "plugin.json: 'icon' must be a relative .png/.jpg/.jpeg/.webp path");
+    goto done;
+  }
 
   const ccord_json *perms = ccord_json_get(root, "permissions");
   if (perms) {

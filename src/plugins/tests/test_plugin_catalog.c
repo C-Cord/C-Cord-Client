@@ -7,6 +7,7 @@
 #include <ccord/core/error.h>
 #include <ccord/ipc/perm.h>
 #include <ccord/model/contrib.h>
+#include <ccord/plugins/manifest.h>
 
 #include "ccord_test.h"
 
@@ -98,6 +99,9 @@ typedef struct fake_host {
   char installed_ver[33];
   uint64_t consented_perms;
   int import_calls;
+  int import_approved_calls;
+  bool last_preapproved;
+  uint64_t last_expected_perms;
   int revoke_calls;
   char revoked_id[65];
 } fake_host;
@@ -125,9 +129,25 @@ static bool host_import(void *ud, const char *pkg_path, const char *expected_id,
                         const char *expected_version, uint64_t expected_perms,
                         char *err_buf, size_t err_cap)
 {
-  (void)pkg_path; (void)expected_id; (void)expected_perms; (void)err_buf; (void)err_cap;
+  (void)pkg_path; (void)expected_id; (void)err_buf; (void)err_cap;
   fake_host *h = ud;
   h->import_calls++;
+  h->last_preapproved = false;
+  h->last_expected_perms = expected_perms;
+  snprintf(h->installed_ver, sizeof h->installed_ver, "%s",
+           (expected_version && expected_version[0]) ? expected_version : "1.2.0");
+  return true;
+}
+
+static bool host_import_approved(void *ud, const char *pkg_path, const char *expected_id,
+                                 const char *expected_version, uint64_t expected_perms,
+                                 bool preapprove_consent, char *err_buf, size_t err_cap)
+{
+  (void)pkg_path; (void)expected_id; (void)err_buf; (void)err_cap;
+  fake_host *h = ud;
+  h->import_approved_calls++;
+  h->last_preapproved = preapprove_consent;
+  h->last_expected_perms = expected_perms;
   snprintf(h->installed_ver, sizeof h->installed_ver, "%s",
            (expected_version && expected_version[0]) ? expected_version : "1.2.0");
   return true;
@@ -386,10 +406,128 @@ static void test_v2_discover_updates_sha_and_revocations(void)
   ccord_contrib_destroy(contrib);
 }
 
+static bool pred_icon_cached(void *ud)
+{
+  const ccord_contrib *c = ud;
+  const ccord_catalog_entry *e = ccord_contrib_catalog_at(c, 0);
+  return e && e->icon_path && e->icon_path[0] != '\0';
+}
+
+static void test_manifest_icon_and_catalog_v2_fields(void)
+{
+  // 1. Manifest "icon" validation: valid PNG/JPEG/WebP paths accepted; traversal & unsupported extensions rejected.
+  ccord_manifest m = {0};
+  ccord_error err = {0};
+  const char *good_png = "{\"schema\":1,\"id\":\"io.test.icon\",\"name\":\"Icon\",\"version\":\"1.0.0\",\"api\":1,\"icon\":\"assets/icon.png\"}";
+  CT_CHECK(ccord_manifest_parse(good_png, strlen(good_png), &m, &err) == CCORD_OK);
+  CT_CHECK(strcmp(m.icon, "assets/icon.png") == 0);
+
+  const char *good_webp = "{\"schema\":1,\"id\":\"io.test.icon\",\"name\":\"Icon\",\"version\":\"1.0.0\",\"api\":1,\"icon\":\"logo.WEBP\"}";
+  CT_CHECK(ccord_manifest_parse(good_webp, strlen(good_webp), &m, &err) == CCORD_OK);
+  CT_CHECK(strcmp(m.icon, "logo.WEBP") == 0);
+
+  const char *bad_icons[] = {
+    "{\"schema\":1,\"id\":\"io.test.icon\",\"name\":\"Icon\",\"version\":\"1.0.0\",\"api\":1,\"icon\":\"../escape.png\"}",
+    "{\"schema\":1,\"id\":\"io.test.icon\",\"name\":\"Icon\",\"version\":\"1.0.0\",\"api\":1,\"icon\":\"/abs.png\"}",
+    "{\"schema\":1,\"id\":\"io.test.icon\",\"name\":\"Icon\",\"version\":\"1.0.0\",\"api\":1,\"icon\":\"icon.svg\"}",
+    "{\"schema\":1,\"id\":\"io.test.icon\",\"name\":\"Icon\",\"version\":\"1.0.0\",\"api\":1,\"icon\":\"a//b.png\"}",
+  };
+  for (size_t i = 0; i < sizeof bad_icons / sizeof bad_icons[0]; i++) {
+    CT_CHECK(ccord_manifest_parse(bad_icons[i], strlen(bad_icons[i]), &m, &err) != CCORD_OK);
+  }
+
+  // 2. Catalog API v2 icon_url + platforms + allowed_hosts + disk icon cache + preapproved install!
+  char tmpl[] = "/tmp/ccord_cat_icon_XXXXXX";
+  char *dir = mkdtemp(tmpl);
+  CT_CHECK(dir != nullptr);
+  if (!dir) return;
+  const char payload[] = "AUTHENTIC-CCE-BYTES-V2";
+  char tmp_cce[512];
+  snprintf(tmp_cce, sizeof tmp_cce, "%s/ref.cce", dir);
+  FILE *fp = fopen(tmp_cce, "wb");
+  CT_CHECK(fp != nullptr);
+  if (fp) { fwrite(payload, 1, sizeof payload - 1, fp); fclose(fp); }
+  char good_sha[65] = "";
+  CT_CHECK(ccord_catalog_sha256_file_hex(tmp_cce, good_sha));
+
+  const char *disc =
+      "{\"schema\":2,\"total\":1,\"has_more\":false,\"next_cursor\":\"\",\"plugins\":[{"
+      "\"id\":\"org.ccord.demo\",\"name\":\"Demo Icon\",\"description\":\"Cross-platform plugin\","
+      "\"version\":\"2.0.0\",\"tier\":1,\"api_class\":3,\"size_bytes\":22,\"downloads\":99,"
+      "\"author_login\":\"C-Cord\",\"icon_url\":\"https://plugins.c-cord.org/icons/0123456789abcdef.png\","
+      "\"platforms\":[\"desktop\",\"android\"]}]}";
+  char det_json[1024];
+  snprintf(det_json, sizeof det_json,
+           "{\"schema\":1,\"id\":\"org.ccord.demo\",\"name\":\"Demo Icon\",\"description\":\"Cross-platform plugin\","
+           "\"license\":\"MIT\",\"tier\":1,\"downloads\":99,"
+           "\"icon_url\":\"https://plugins.c-cord.org/icons/0123456789abcdef.png\","
+           "\"author\":{\"login\":\"C-Cord\",\"repo\":\"C-Cord/demo\",\"repo_url\":\"https://github.com/C-Cord/demo\"},"
+           "\"latest\":{\"version\":\"2.0.0\",\"download_url\":\"https://github.com/C-Cord/demo/releases/download/v2.0.0/d.cce\","
+           "\"sha256\":\"%s\",\"size_bytes\":22,\"permissions\":[\"network.http\"],\"allowed_hosts\":[\"api.example.com\"],"
+           "\"platforms\":[\"desktop\",\"android\"],\"api_class\":3,\"changelog\":\"Icon support\"}}",
+           good_sha);
+
+  ccord_contrib *contrib = ccord_contrib_create(&err);
+  CT_CHECK(contrib != nullptr);
+  fake_http_state http_st = {
+    .discover_p1_json = disc,
+    .detail_json = det_json,
+    .download_bytes = payload,
+    .download_len = sizeof payload - 1,
+  };
+  ccord_catalog_http http = {.ud = &http_st, .get = fake_get, .post_json = fake_post, .download_file = fake_dl};
+  fake_host host = {0};
+  ccord_catalog_host_cbs cbs = {
+    .ud = &host, .get_local_plugin = host_get_local, .list_local_plugins = host_list_local,
+    .import_verified_cce = host_import, .import_verified_cce_approved = host_import_approved,
+    .revoke_plugin = host_revoke,
+  };
+  ccord_catalog *cat = ccord_catalog_create(dir, contrib, &http, &cbs);
+  CT_CHECK(cat != nullptr);
+
+  // Query with platform=android -> verifies query param AND triggers 1-time icon cache download
+  ccord_catalog_query_ex(cat, "", 0, 0, "android", "popular", false);
+  pump_until(cat, 2000, pred_icon_cached, contrib);
+  CT_CHECK(strstr(http_st.last_get_url, "platform=android") != nullptr);
+  CT_CHECK(http_st.dl_calls == 1);
+  const ccord_catalog_entry *e0 = ccord_contrib_catalog_at(contrib, 0);
+  CT_CHECK(e0 != nullptr);
+  if (e0) {
+    CT_CHECK(e0->platforms == CCORD_CONTRIB_PLAT_ALL);
+    CT_CHECK(strstr(e0->icon_path, "0123456789abcdef.png") != nullptr);
+  }
+
+  // Second query MUST NOT re-download the cached icon (0 extra dl_calls)!
+  int dls_after_first = http_st.dl_calls;
+  ccord_catalog_query_ex(cat, "", 0, 0, "desktop", "popular", false);
+  pump_until(cat, 2000, pred_discover_loaded, contrib);
+  CT_CHECK(http_st.dl_calls == dls_after_first);
+
+  // Fetch detail -> verify allowed_hosts and perms_mask
+  ccord_catalog_fetch_detail(cat, "org.ccord.demo");
+  pump_until(cat, 2000, pred_detail_ready, contrib);
+  const ccord_catalog_entry *det = ccord_contrib_catalog_detail(contrib);
+  CT_CHECK(det != nullptr && det->has_detail);
+  if (det) {
+    CT_CHECK(strcmp(det->allowed_hosts, "api.example.com") == 0);
+    CT_CHECK(det->perms_mask == (uint64_t)CCORD_PERM_NETWORK_HTTP);
+  }
+
+  // Atomic pre-approved install -> invokes import_verified_cce_approved with preapprove_consent == true
+  ccord_catalog_install_approved(cat, "org.ccord.demo", (uint64_t)CCORD_PERM_NETWORK_HTTP);
+  pump_until(cat, 2000, pred_not_installing, contrib);
+  CT_CHECK(host.import_approved_calls == 1 && host.last_preapproved);
+  CT_CHECK(host.last_expected_perms == (uint64_t)CCORD_PERM_NETWORK_HTTP);
+
+  ccord_catalog_destroy(cat);
+  ccord_contrib_destroy(contrib);
+}
+
 int main(void)
 {
   test_semver();
   test_zero_installed_makes_zero_startup_calls();
   test_v2_discover_updates_sha_and_revocations();
+  test_manifest_icon_and_catalog_v2_fields();
   return CT_RESULT("test_plugin_catalog");
 }

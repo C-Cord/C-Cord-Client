@@ -22,6 +22,11 @@ typedef struct ccord_catalog_host_cbs {
   bool (*import_verified_cce)(void *ud, const char *pkg_path, const char *expected_id,
                               const char *expected_version, uint64_t expected_perms,
                               char *err_buf, size_t err_cap);
+  // Optional: same as import_verified_cce, additionally granting consent atomically when man.perms matches approved_perms.
+  bool (*import_verified_cce_approved)(void *ud, const char *pkg_path, const char *expected_id,
+                                       const char *expected_version, uint64_t expected_perms,
+                                       bool preapprove_consent,
+                                       char *err_buf, size_t err_cap);
   // Stop & disable a plugin whose installed SHA-256 was revoked for malware.
   void (*revoke_plugin)(void *ud, const char *id, const char *reason);
   // Re-publish installed plugin metadata (tier, warnings, update_version, auto_update) into contrib.
@@ -42,9 +47,12 @@ void ccord_catalog_pump(ccord_catalog *cat, uint64_t now_ms);
 void ccord_catalog_refresh(ccord_catalog *cat);
 void ccord_catalog_query(ccord_catalog *cat, const char *q, int tier, int api_class, const char *sort,
                          bool append_next_page);
+void ccord_catalog_query_ex(ccord_catalog *cat, const char *q, int tier, int api_class, const char *platform,
+                            const char *sort, bool append_next_page);
 void ccord_catalog_fetch_detail(ccord_catalog *cat, const char *id);
 void ccord_catalog_check_updates(ccord_catalog *cat);
 void ccord_catalog_install(ccord_catalog *cat, const char *id);
+void ccord_catalog_install_approved(ccord_catalog *cat, const char *id, uint64_t approved_perms);
 void ccord_catalog_set_prefs(ccord_catalog *cat, const ccord_catalog_prefs *prefs);
 void ccord_catalog_set_plugin_auto_update(ccord_catalog *cat, const char *id, bool enabled);
 void ccord_catalog_run_auto_updates(ccord_catalog *cat);
@@ -60,6 +68,11 @@ typedef struct ccord_catalog_local_overlay {
   bool auto_update;
   bool update_needs_review;
   char update_version[33];
+  uint64_t update_perms_mask;
+  char update_permissions[512];
+  char update_allowed_hosts[512];
+  char update_changelog[512];
+  char icon_path[CCORD_PATH_MAX];
   ccord_catalog_warn_sev warning_sev;
   char warning_title[128];
   char warning_message[512];

@@ -198,7 +198,9 @@ static void worker_main(void *arg)
     res.append_page = job.append_page;
     res.install_after_detail = job.install_after_detail;
     res.is_auto_update = job.is_auto_update;
+    res.preapprove_consent = job.preapprove_consent;
     res.expected_perms = job.expected_perms;
+    res.approved_perms = job.approved_perms;
     res.tier = job.tier;
     cat_copy_str(res.id, sizeof res.id, job.id);
     cat_copy_str(res.version, sizeof res.version, job.version);
@@ -241,9 +243,84 @@ static void worker_main(void *arg)
           res.ok = true;
         }
       }
+    } else if (job.kind == JOB_FETCH_ICON) {
+      if (cat->http.download_file && res.dest_path) {
+        char tmp_path[CCORD_PATH_MAX + 80];
+        int tn = snprintf(tmp_path, sizeof tmp_path, "%s.tmp", res.dest_path);
+        if (tn > 0 && (size_t)tn < sizeof tmp_path) {
+          if (cat->http.download_file(cat->http.ud, job.url, tmp_path, CCORD_MANIFEST_MAX_ICON_BYTES,
+                                      res.error, sizeof res.error)) {
+            uint64_t fsz = 0;
+            if (ccord_file_size(tmp_path, &fsz) && fsz > 0 && fsz <= CCORD_MANIFEST_MAX_ICON_BYTES &&
+                rename(tmp_path, res.dest_path) == 0) {
+              res.ok = true;
+            } else {
+              ccord_file_unlink(tmp_path);
+            }
+          } else {
+            ccord_file_unlink(tmp_path);
+          }
+        }
+      }
     }
     ccord_free(job.post_body);
     push_result(cat, &res);
+  }
+}
+
+// ---------------------------------------------------------------- icon disk cache
+
+static bool icon_is_inflight(const ccord_catalog *cat, const char *fname)
+{
+  for (size_t i = 0; i < cat->nicon_inflight; i++) {
+    if (strcmp(cat->icon_inflight[i], fname) == 0) return true;
+  }
+  return false;
+}
+
+static void icon_set_inflight(ccord_catalog *cat, const char *fname, bool on)
+{
+  for (size_t i = 0; i < cat->nicon_inflight; i++) {
+    if (strcmp(cat->icon_inflight[i], fname) == 0) {
+      if (!on) {
+        memmove(&cat->icon_inflight[i], &cat->icon_inflight[i + 1],
+                (cat->nicon_inflight - i - 1) * sizeof cat->icon_inflight[0]);
+        cat->nicon_inflight--;
+      }
+      return;
+    }
+  }
+  if (on && cat->nicon_inflight < CATALOG_MAX_INFLIGHT_ICONS) {
+    cat_copy_str(cat->icon_inflight[cat->nicon_inflight++], sizeof cat->icon_inflight[0], fname);
+  }
+}
+
+void cat_maybe_queue_icon(ccord_catalog *cat, const char *icon_url)
+{
+  if (!cat || !cat->has_data_dir || !cat->http.download_file || !icon_url || !icon_url[0]) return;
+  char fname[32];
+  if (!cat_extract_icon_filename(icon_url, fname)) return;
+  char existing[CCORD_PATH_MAX];
+  if (cat_resolve_cached_icon_path(cat, icon_url, existing, sizeof existing)) return; // already cached on disk
+  if (icon_is_inflight(cat, fname)) return;
+
+  char pdir[CCORD_PATH_MAX + 32], cdir[CCORD_PATH_MAX + 48], dpath[CCORD_PATH_MAX + 96];
+  snprintf(pdir, sizeof pdir, "%s/plugins", cat->data_dir);
+  snprintf(cdir, sizeof cdir, "%s/plugins/icon_cache", cat->data_dir);
+  cat_mkdir_ok(cat->data_dir);
+  cat_mkdir_ok(pdir);
+  cat_mkdir_ok(cdir);
+  int dn = snprintf(dpath, sizeof dpath, "%s/%s", cdir, fname);
+  if (dn < 0 || (size_t)dn >= sizeof dpath) return;
+
+  worker_job job = {.kind = JOB_FETCH_ICON};
+  cat_copy_str(job.id, sizeof job.id, fname);
+  cat_copy_str(job.url, sizeof job.url, icon_url);
+  job.dest_path = ccord_malloc((size_t)dn + 1u);
+  if (!job.dest_path) return;
+  memcpy(job.dest_path, dpath, (size_t)dn + 1u);
+  if (enqueue_job(cat, &job)) {
+    icon_set_inflight(cat, fname, true);
   }
 }
 
@@ -258,7 +335,8 @@ static void enqueue_revocations_fetch(ccord_catalog *cat)
   (void)enqueue_job(cat, &job);
 }
 
-static void queue_install_item(ccord_catalog *cat, const cat_item *it, bool is_auto)
+static void queue_install_item_ex(ccord_catalog *cat, const cat_item *it, bool is_auto,
+                                  bool preapprove_consent, uint64_t approved_perms)
 {
   if (!cat || !it || !cat->has_data_dir || !cat_valid_catalog_id(it->id) || !cat_valid_catalog_version(it->version) ||
       !it->download_url[0] || strlen(it->sha256) != 64) return;
@@ -269,11 +347,14 @@ static void queue_install_item(ccord_catalog *cat, const cat_item *it, bool is_a
   cat_mkdir_ok(pdir);
   cat_mkdir_ok(tmp_dir);
 
+  bool allow_preapprove = preapprove_consent && ((it->perms_mask & ~approved_perms) == 0);
   worker_job job = {
     .kind = JOB_INSTALL,
     .tier = it->tier,
     .is_auto_update = is_auto,
-    .expected_perms = it->perms_mask,
+    .preapprove_consent = allow_preapprove,
+    .expected_perms = allow_preapprove ? approved_perms : it->perms_mask,
+    .approved_perms = approved_perms,
   };
   cat_copy_str(job.id, sizeof job.id, it->id);
   cat_copy_str(job.url, sizeof job.url, it->download_url);
@@ -290,6 +371,11 @@ static void queue_install_item(ccord_catalog *cat, const cat_item *it, bool is_a
     snprintf(cat->status.status_msg, sizeof cat->status.status_msg, "Downloading %s v%s...", it->name, it->version);
     cat_publish_catalog(cat);
   }
+}
+
+static void queue_install_item(ccord_catalog *cat, const cat_item *it, bool is_auto)
+{
+  queue_install_item_ex(cat, it, is_auto, false, 0);
 }
 
 void ccord_catalog_check_updates(ccord_catalog *cat)
@@ -360,8 +446,8 @@ void ccord_catalog_check_updates(ccord_catalog *cat)
   (void)enqueue_job(cat, &job);
 }
 
-void ccord_catalog_query(ccord_catalog *cat, const char *q, int tier, int api_class, const char *sort,
-                         bool append_next_page)
+void ccord_catalog_query_ex(ccord_catalog *cat, const char *q, int tier, int api_class, const char *platform,
+                            const char *sort, bool append_next_page)
 {
   if (!cat) return;
   if (!cat->http.get) {
@@ -377,14 +463,16 @@ void ccord_catalog_query(ccord_catalog *cat, const char *q, int tier, int api_cl
     cat_copy_str(cat->cur_query, sizeof cat->cur_query, q ? q : "");
     cat->cur_tier = (tier >= 1 && tier <= 3) ? tier : 0;
     cat->cur_api_class = (api_class >= 1 && api_class <= 3) ? api_class : 0;
+    cat_copy_str(cat->cur_platform, sizeof cat->cur_platform, platform ? platform : "");
     cat_copy_str(cat->cur_sort, sizeof cat->cur_sort, (sort && sort[0]) ? sort : "popular");
     cat->next_cursor[0] = '\0';
     cat->status.has_more = false;
   }
 
-  char enc_q[288], enc_cur[512];
+  char enc_q[288], enc_cur[512], enc_plat[48];
   url_encode_component(cat->cur_query, enc_q, sizeof enc_q);
   url_encode_component(append_next_page ? cat->next_cursor : "", enc_cur, sizeof enc_cur);
+  url_encode_component(cat->cur_platform, enc_plat, sizeof enc_plat);
 
   worker_job job = {
     .kind = JOB_DISCOVER_QUERY,
@@ -402,6 +490,9 @@ void ccord_catalog_query(ccord_catalog *cat, const char *q, int tier, int api_cl
   if (n > 0 && (size_t)n < sizeof job.url && cat->cur_api_class >= 1 && cat->cur_api_class <= 3) {
     n += snprintf(job.url + n, sizeof job.url - (size_t)n, "&api_class=%d", cat->cur_api_class);
   }
+  if (n > 0 && (size_t)n < sizeof job.url && enc_plat[0]) {
+    n += snprintf(job.url + n, sizeof job.url - (size_t)n, "&platform=%s", enc_plat);
+  }
   if (n > 0 && (size_t)n < sizeof job.url && append_next_page && enc_cur[0]) {
     (void)snprintf(job.url + n, sizeof job.url - (size_t)n, "&cursor=%s", enc_cur);
   }
@@ -417,7 +508,14 @@ void ccord_catalog_query(ccord_catalog *cat, const char *q, int tier, int api_cl
   }
 }
 
-static void enqueue_detail_fetch(ccord_catalog *cat, const char *id, bool install_after)
+void ccord_catalog_query(ccord_catalog *cat, const char *q, int tier, int api_class, const char *sort,
+                         bool append_next_page)
+{
+  ccord_catalog_query_ex(cat, q, tier, api_class, "", sort, append_next_page);
+}
+
+static void enqueue_detail_fetch(ccord_catalog *cat, const char *id, bool install_after,
+                                 bool preapprove_consent, uint64_t approved_perms)
 {
   if (!cat || !id || !id[0]) return;
   if (!cat->http.get) {
@@ -432,6 +530,8 @@ static void enqueue_detail_fetch(ccord_catalog *cat, const char *id, bool instal
     .kind = JOB_FETCH_DETAIL,
     .seq = ++cat->detail_req_seq,
     .install_after_detail = install_after,
+    .preapprove_consent = preapprove_consent,
+    .approved_perms = approved_perms,
   };
   cat_copy_str(job.id, sizeof job.id, id);
   snprintf(job.url, sizeof job.url, "%s/api/v2/plugins/%s", cat->base_url, enc_id);
@@ -452,15 +552,15 @@ static void enqueue_detail_fetch(ccord_catalog *cat, const char *id, bool instal
 
 void ccord_catalog_fetch_detail(ccord_catalog *cat, const char *id)
 {
-  enqueue_detail_fetch(cat, id, false);
+  enqueue_detail_fetch(cat, id, false, false, 0);
 }
 
 void ccord_catalog_refresh(ccord_catalog *cat)
 {
   if (!cat) return;
   ccord_catalog_check_updates(cat);
-  ccord_catalog_query(cat, cat->cur_query, cat->cur_tier, cat->cur_api_class,
-                      cat->cur_sort[0] ? cat->cur_sort : "popular", false);
+  ccord_catalog_query_ex(cat, cat->cur_query, cat->cur_tier, cat->cur_api_class, cat->cur_platform,
+                         cat->cur_sort[0] ? cat->cur_sort : "popular", false);
 }
 
 void ccord_catalog_install(ccord_catalog *cat, const char *id)
@@ -473,7 +573,18 @@ void ccord_catalog_install(ccord_catalog *cat, const char *id)
     return;
   }
   // Otherwise (slim Discover card), fetch /api/v2/plugins/{id} first and auto-chain into install!
-  enqueue_detail_fetch(cat, id, true);
+  enqueue_detail_fetch(cat, id, true, false, 0);
+}
+
+void ccord_catalog_install_approved(ccord_catalog *cat, const char *id, uint64_t approved_perms)
+{
+  if (!cat || !id || !id[0] || cat_is_installing(cat, id)) return;
+  const cat_item *best = cat_find_best_item(cat, id);
+  if (best && best->has_detail && best->download_url[0] && strlen(best->sha256) == 64) {
+    queue_install_item_ex(cat, best, false, true, approved_perms);
+    return;
+  }
+  enqueue_detail_fetch(cat, id, true, true, approved_perms);
 }
 
 void ccord_catalog_run_auto_updates(ccord_catalog *cat)
@@ -678,8 +789,9 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
     } else if (res->not_modified && cat->has_detail && cat->detail && strcmp(cat->detail->id, res->id) == 0) {
       cat->status.offline = false;
       cat->status.detail_error[0] = '\0';
+      if (cat->detail->icon_url[0]) cat_maybe_queue_icon(cat, cat->detail->icon_url);
       if (res->install_after_detail) {
-        queue_install_item(cat, cat->detail, false);
+        queue_install_item_ex(cat, cat->detail, false, res->preapprove_consent, res->approved_perms);
       }
     } else if (res->body) {
       cat_item parsed = {0};
@@ -690,9 +802,10 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
           cat->status.detail_error[0] = '\0';
           *cat->detail = parsed;
           cat->has_detail = true;
+          if (cat->detail->icon_url[0]) cat_maybe_queue_icon(cat, cat->detail->icon_url);
           if (res->etag[0]) cat_copy_str(cat->detail_etag, sizeof cat->detail_etag, res->etag);
           if (res->install_after_detail) {
-            queue_install_item(cat, cat->detail, false);
+            queue_install_item_ex(cat, cat->detail, false, res->preapprove_consent, res->approved_perms);
           }
         } else {
           if (res->install_after_detail) set_installing(cat, res->id, false);
@@ -754,9 +867,16 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
       return;
     }
     char err_buf[256] = "";
-    bool imported = res->dest_path && cat->cbs.import_verified_cce &&
-                    cat->cbs.import_verified_cce(cat->cbs.ud, res->dest_path, res->id, res->version,
-                                                 res->expected_perms, err_buf, sizeof err_buf);
+    bool imported = false;
+    if (res->dest_path) {
+      if (res->preapprove_consent && cat->cbs.import_verified_cce_approved) {
+        imported = cat->cbs.import_verified_cce_approved(cat->cbs.ud, res->dest_path, res->id, res->version,
+                                                         res->expected_perms, true, err_buf, sizeof err_buf);
+      } else if (cat->cbs.import_verified_cce) {
+        imported = cat->cbs.import_verified_cce(cat->cbs.ud, res->dest_path, res->id, res->version,
+                                                res->expected_perms, err_buf, sizeof err_buf);
+      }
+    }
     if (res->dest_path) ccord_file_unlink(res->dest_path);
     if (!imported) {
       snprintf(cat->status.status_msg, sizeof cat->status.status_msg,
@@ -776,6 +896,14 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
       if (cat->cbs.toast) cat->cbs.toast(cat->cbs.ud, cat->status.status_msg, 0);
     }
     cat_publish_catalog(cat);
+    return;
+  }
+
+  if (res->kind == JOB_FETCH_ICON) {
+    icon_set_inflight(cat, res->id, false);
+    if (res->ok) {
+      cat_publish_catalog(cat);
+    }
   }
 }
 

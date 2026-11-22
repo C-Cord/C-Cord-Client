@@ -33,11 +33,13 @@ enum {
   CCORD_CAP_PANELS              = 1ull << 13,
 };
 
-#define CCORD_MANIFEST_MAX_HOSTS 32u
-#define CCORD_MANIFEST_HOST_CAP  128u
+#define CCORD_MANIFEST_MAX_HOSTS      32u
+#define CCORD_MANIFEST_HOST_CAP       128u
+#define CCORD_MANIFEST_MAX_ICON_BYTES (256u * 1024u)
+#define CCORD_MANIFEST_MAX_ICON_DIM   512
 
 typedef struct ccord_manifest {
-  char id[65], name[65], version[33], description[201], license[33], main[129];
+  char id[65], name[65], version[33], description[201], license[33], main[129], icon[129];
   uint32_t schema_version;
   uint32_t api_version;
   ccord_perm_set perms;        // Class 2 (Unsafe) + Class 3 (System) declarations; Class 1 (Safe) is always granted

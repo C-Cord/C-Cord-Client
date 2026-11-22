@@ -104,6 +104,90 @@ static void parse_permissions_array(const ccord_json *perms, cat_item *it)
   }
 }
 
+static uint32_t parse_platforms_array(const ccord_json *arr)
+{
+  if (!arr || ccord_json_type_of(arr) != CCORD_JSON_ARRAY) return CCORD_PLAT_ALL;
+  size_t n = ccord_json_array_len(arr);
+  if (n == 0) return CCORD_PLAT_ALL;
+  uint32_t mask = 0;
+  for (size_t i = 0; i < n; i++) {
+    size_t sl = 0;
+    const char *s = ccord_json_string(ccord_json_array_at(arr, i), &sl);
+    if (!s || sl == 0) continue;
+    if (strcmp(s, "linux") == 0) mask |= CCORD_PLAT_LINUX;
+    else if (strcmp(s, "macos") == 0 || strcmp(s, "darwin") == 0) mask |= CCORD_PLAT_MACOS;
+    else if (strcmp(s, "windows") == 0) mask |= CCORD_PLAT_WINDOWS;
+    else if (strcmp(s, "android") == 0) mask |= CCORD_PLAT_ANDROID;
+    else if (strcmp(s, "desktop") == 0) mask |= CCORD_PLAT_DESKTOP;
+    else if (strcmp(s, "mobile") == 0) mask |= CCORD_PLAT_MOBILE;
+    else if (strcmp(s, "all") == 0) mask |= CCORD_PLAT_ALL;
+  }
+  return mask ? mask : CCORD_PLAT_ALL;
+}
+
+static void parse_hosts_array(const ccord_json *arr, char *out, size_t cap)
+{
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  if (!arr || ccord_json_type_of(arr) != CCORD_JSON_ARRAY) return;
+  size_t n = ccord_json_array_len(arr);
+  size_t off = 0;
+  for (size_t i = 0; i < n; i++) {
+    size_t sl = 0;
+    const char *s = ccord_json_string(ccord_json_array_at(arr, i), &sl);
+    if (!s || sl == 0) continue;
+    if (off > 0 && off + 2 < cap) {
+      out[off++] = ',';
+      out[off++] = ' ';
+    }
+    if (off + sl < cap) {
+      memcpy(out + off, s, sl);
+      off += sl;
+      out[off] = '\0';
+    }
+  }
+}
+
+bool cat_extract_icon_filename(const char *icon_url, char out[32])
+{
+  if (!out) return false;
+  out[0] = '\0';
+  if (!icon_url || !icon_url[0]) return false;
+  if (strncmp(icon_url, "https://", 8) != 0 && strncmp(icon_url, "http://", 7) != 0) return false;
+  const char *slash = strrchr(icon_url, '/');
+  if (!slash || !slash[1]) return false;
+  const char *name = slash + 1;
+  size_t n = strlen(name);
+  if (n != 20 && n != 21) return false;
+  for (size_t i = 0; i < 16; i++) {
+    char c = name[i];
+    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+  }
+  if (n == 20 && strcmp(name + 16, ".png") != 0) return false;
+  if (n == 21 && strcmp(name + 16, ".webp") != 0) return false;
+  memcpy(out, name, n + 1);
+  return true;
+}
+
+bool cat_resolve_cached_icon_path(const ccord_catalog *cat, const char *icon_url, char *out, size_t cap)
+{
+  if (out && cap > 0) out[0] = '\0';
+  if (!cat || !cat->has_data_dir || !icon_url || !icon_url[0] || !out || cap == 0) return false;
+  char fname[32];
+  if (!cat_extract_icon_filename(icon_url, fname)) return false;
+  int n = snprintf(out, cap, "%s/plugins/icon_cache/%s", cat->data_dir, fname);
+  if (n < 0 || (size_t)n >= cap) {
+    out[0] = '\0';
+    return false;
+  }
+  uint64_t fsz = 0;
+  if (ccord_path_is_file(out) && ccord_file_size(out, &fsz) && fsz > 0 && fsz <= CCORD_MANIFEST_MAX_ICON_BYTES) {
+    return true;
+  }
+  out[0] = '\0';
+  return false;
+}
+
 static void parse_warnings_array(const ccord_json *warns, cat_item *it)
 {
   it->warning_sev = CCORD_WARN_NONE;
@@ -209,6 +293,8 @@ bool cat_parse_discover_page_json(ccord_catalog *cat, const char *json, size_t l
     cat_json_str_copy(o, "author_repo_url", it.repo_url, sizeof it.repo_url);
     cat_json_str_copy(o, "version", it.version, sizeof it.version);
     cat_json_str_copy(o, "warning_title", it.warning_title, sizeof it.warning_title);
+    cat_json_str_copy(o, "icon_url", it.icon_url, sizeof it.icon_url);
+    it.platforms = parse_platforms_array(ccord_json_get(o, "platforms"));
     if (!cat_valid_catalog_id(it.id) || !it.name[0] || !cat_valid_catalog_version(it.version)) continue;
 
     int64_t tv = 3;
@@ -239,6 +325,7 @@ bool cat_parse_discover_page_json(ccord_catalog *cat, const char *json, size_t l
       }
     }
     if (!dup) cat->discover[cat->ndiscover++] = it;
+    if (it.icon_url[0]) cat_maybe_queue_icon(cat, it.icon_url);
   }
 
   cat->status.total_count = total > 0 ? (size_t)total : cat->ndiscover;
@@ -274,6 +361,7 @@ bool cat_parse_detail_json(const char *json, size_t len, cat_item *out)
   cat_json_str_copy(o, "name", out->name, sizeof out->name);
   cat_json_str_copy(o, "description", out->description, sizeof out->description);
   cat_json_str_copy(o, "license", out->license, sizeof out->license);
+  cat_json_str_copy(o, "icon_url", out->icon_url, sizeof out->icon_url);
   if (author && ccord_json_type_of(author) == CCORD_JSON_OBJECT) {
     cat_json_str_copy(author, "login", out->author, sizeof out->author);
     cat_json_str_copy(author, "repo", out->repo, sizeof out->repo);
@@ -283,6 +371,8 @@ bool cat_parse_detail_json(const char *json, size_t len, cat_item *out)
   cat_json_str_copy(latest, "download_url", out->download_url, sizeof out->download_url);
   cat_json_str_copy(latest, "sha256", out->sha256, sizeof out->sha256);
   cat_json_str_copy(latest, "changelog", out->changelog, sizeof out->changelog);
+  out->platforms = parse_platforms_array(ccord_json_get(latest, "platforms"));
+  parse_hosts_array(ccord_json_get(latest, "allowed_hosts"), out->allowed_hosts, sizeof out->allowed_hosts);
   if (!cat_valid_catalog_id(out->id) || !out->name[0] || !cat_valid_catalog_version(out->version) ||
       !out->download_url[0] || strlen(out->sha256) != 64) {
     ccord_arena_free(&arena);
@@ -355,6 +445,9 @@ bool cat_parse_updates_check_json(ccord_catalog *cat, const char *json, size_t l
           cat_json_str_copy(o, "download_url", it->download_url, sizeof it->download_url);
           cat_json_str_copy(o, "sha256", it->sha256, sizeof it->sha256);
           cat_json_str_copy(o, "changelog", it->changelog, sizeof it->changelog);
+          cat_json_str_copy(o, "icon_url", it->icon_url, sizeof it->icon_url);
+          it->platforms = parse_platforms_array(ccord_json_get(o, "platforms"));
+          parse_hosts_array(ccord_json_get(o, "allowed_hosts"), it->allowed_hosts, sizeof it->allowed_hosts);
           if (!cat_valid_catalog_id(it->id) || !it->name[0] || !cat_valid_catalog_version(it->version) ||
               !it->download_url[0] || strlen(it->sha256) != 64) {
             continue;
@@ -370,6 +463,7 @@ bool cat_parse_updates_check_json(ccord_catalog *cat, const char *json, size_t l
           else it->api_class = (uint8_t)(ccord_perm_max_class(it->perms_mask) + 1);
           parse_warnings_array(ccord_json_get(o, "warnings"), it);
           it->has_detail = true;
+          if (it->icon_url[0]) cat_maybe_queue_icon(cat, it->icon_url);
           new_n++;
         }
       }
@@ -444,21 +538,29 @@ bool ccord_catalog_query_overlay(const ccord_catalog *cat, const char *id,
   out->warning_sev = it->warning_sev;
   cat_copy_str(out->warning_title, sizeof out->warning_title, it->warning_title);
   cat_copy_str(out->warning_message, sizeof out->warning_message, it->warning_message);
+  if (it->icon_url[0]) {
+    (void)cat_resolve_cached_icon_path(cat, it->icon_url, out->icon_path, sizeof out->icon_path);
+  }
   bool avail = false, review = false;
   if (cat_compute_update_info(it, installed_ver, consented_perms, &avail, &review) && avail) {
     cat_copy_str(out->update_version, sizeof out->update_version, it->version);
     out->update_needs_review = review;
+    out->update_perms_mask = it->perms_mask;
+    cat_copy_str(out->update_permissions, sizeof out->update_permissions, it->permissions);
+    cat_copy_str(out->update_allowed_hosts, sizeof out->update_allowed_hosts, it->allowed_hosts);
+    cat_copy_str(out->update_changelog, sizeof out->update_changelog, it->changelog);
   }
   return true;
 }
 
 static void build_contrib_entry(const ccord_catalog *cat, const cat_item *it,
-                                char local_ver_buf[33], ccord_catalog_entry *out,
-                                bool *out_pending_upd)
+                                char local_ver_buf[33], char icon_path_buf[CCORD_PATH_MAX],
+                                ccord_catalog_entry *out, bool *out_pending_upd)
 {
   bool installed = false, bundled = false;
   uint64_t consented = 0;
   local_ver_buf[0] = '\0';
+  icon_path_buf[0] = '\0';
   if (cat->cbs.get_local_plugin) {
     installed = cat->cbs.get_local_plugin(cat->cbs.ud, it->id, local_ver_buf, 33, &consented, &bundled);
   }
@@ -469,6 +571,9 @@ static void build_contrib_entry(const ccord_catalog *cat, const cat_item *it,
     cat_compute_update_info(upd_src ? upd_src : it, local_ver_buf, consented, &avail, &review);
   }
   if (out_pending_upd) *out_pending_upd = avail;
+  if (it->icon_url[0]) {
+    (void)cat_resolve_cached_icon_path(cat, it->icon_url, icon_path_buf, CCORD_PATH_MAX);
+  }
 
   *out = (ccord_catalog_entry){
     .id = it->id,
@@ -482,7 +587,12 @@ static void build_contrib_entry(const ccord_catalog *cat, const cat_item *it,
     .download_url = it->download_url,
     .sha256 = it->sha256,
     .permissions = it->permissions,
+    .allowed_hosts = it->allowed_hosts,
     .changelog = it->changelog,
+    .icon_url = it->icon_url,
+    .icon_path = icon_path_buf,
+    .perms_mask = it->perms_mask,
+    .platforms = it->platforms ? it->platforms : CCORD_PLAT_ALL,
     .size_bytes = it->size_bytes,
     .downloads = it->downloads,
     .api_class = it->api_class,
@@ -509,10 +619,11 @@ void cat_publish_catalog(ccord_catalog *cat)
   size_t pending = 0;
   ccord_catalog_entry *upd_entries = cat->nupdates ? ccord_calloc(cat->nupdates, sizeof *upd_entries) : nullptr;
   char (*upd_vers)[33] = cat->nupdates ? ccord_calloc(cat->nupdates, sizeof *upd_vers) : nullptr;
+  char (*upd_icons)[CCORD_PATH_MAX] = cat->nupdates ? ccord_calloc(cat->nupdates, sizeof *upd_icons) : nullptr;
   size_t upd_out_n = 0;
-  for (size_t i = 0; i < cat->nupdates && upd_entries && upd_vers; i++) {
+  for (size_t i = 0; i < cat->nupdates && upd_entries && upd_vers && upd_icons; i++) {
     bool is_upd = false;
-    build_contrib_entry(cat, &cat->updates[i], upd_vers[upd_out_n], &upd_entries[upd_out_n], &is_upd);
+    build_contrib_entry(cat, &cat->updates[i], upd_vers[upd_out_n], upd_icons[upd_out_n], &upd_entries[upd_out_n], &is_upd);
     if (is_upd) {
       pending++;
       upd_out_n++;
@@ -522,12 +633,14 @@ void cat_publish_catalog(ccord_catalog *cat)
   ccord_contrib_set_catalog_updates(cat->contrib, upd_entries, upd_out_n);
   ccord_free(upd_entries);
   ccord_free(upd_vers);
+  ccord_free(upd_icons);
 
   // 2. Publish on-demand detail entry
   if (cat->has_detail && cat->detail) {
     char det_ver[33];
+    char det_icon[CCORD_PATH_MAX];
     ccord_catalog_entry det_e = {0};
-    build_contrib_entry(cat, cat->detail, det_ver, &det_e, nullptr);
+    build_contrib_entry(cat, cat->detail, det_ver, det_icon, &det_e, nullptr);
     ccord_contrib_set_catalog_detail(cat->contrib, &det_e);
   } else {
     ccord_contrib_set_catalog_detail(cat->contrib, nullptr);
@@ -536,12 +649,15 @@ void cat_publish_catalog(ccord_catalog *cat)
   // 3. Publish current Discover page + status + prefs
   ccord_catalog_entry *disc_entries = cat->ndiscover ? ccord_calloc(cat->ndiscover, sizeof *disc_entries) : nullptr;
   char (*disc_vers)[33] = cat->ndiscover ? ccord_calloc(cat->ndiscover, sizeof *disc_vers) : nullptr;
-  for (size_t i = 0; i < cat->ndiscover && disc_entries && disc_vers; i++) {
-    build_contrib_entry(cat, &cat->discover[i], disc_vers[i], &disc_entries[i], nullptr);
+  char (*disc_icons)[CCORD_PATH_MAX] = cat->ndiscover ? ccord_calloc(cat->ndiscover, sizeof *disc_icons) : nullptr;
+  for (size_t i = 0; i < cat->ndiscover && disc_entries && disc_vers && disc_icons; i++) {
+    build_contrib_entry(cat, &cat->discover[i], disc_vers[i], disc_icons[i], &disc_entries[i], nullptr);
   }
-  ccord_contrib_set_catalog(cat->contrib, disc_entries, disc_entries ? cat->ndiscover : 0, &cat->status, &cat->prefs);
+  ccord_contrib_set_catalog(cat->contrib, disc_entries, (disc_entries && disc_vers && disc_icons) ? cat->ndiscover : 0,
+                            &cat->status, &cat->prefs);
   ccord_free(disc_entries);
   ccord_free(disc_vers);
+  ccord_free(disc_icons);
 
   if (cat->cbs.sync_installed_info) cat->cbs.sync_installed_info(cat->cbs.ud);
 }

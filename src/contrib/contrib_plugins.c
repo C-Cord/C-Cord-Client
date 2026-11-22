@@ -17,9 +17,13 @@ static void free_plugin_info(ccord_plugin_info *info)
   contrib_free_str(info->name);
   contrib_free_str(info->version);
   contrib_free_str(info->description);
+  contrib_free_str(info->icon_path);
   contrib_free_str(info->permissions);
   contrib_free_str(info->allowed_hosts);
   contrib_free_str(info->update_version);
+  contrib_free_str(info->update_permissions);
+  contrib_free_str(info->update_allowed_hosts);
+  contrib_free_str(info->update_changelog);
   contrib_free_str(info->warning_title);
   contrib_free_str(info->warning_message);
   contrib_free_str(info->error);
@@ -38,7 +42,10 @@ void contrib_free_catalog_entry(ccord_catalog_entry *e)
   contrib_free_str(e->download_url);
   contrib_free_str(e->sha256);
   contrib_free_str(e->permissions);
+  contrib_free_str(e->allowed_hosts);
   contrib_free_str(e->changelog);
+  contrib_free_str(e->icon_url);
+  contrib_free_str(e->icon_path);
   contrib_free_str(e->warning_title);
   contrib_free_str(e->warning_message);
   contrib_free_str(e->installed_version);
@@ -79,24 +86,34 @@ ccord_status ccord_contrib_set_plugin(ccord_contrib *c, const ccord_plugin_info 
     .id = ccord_strdup(info->id), .name = ccord_strdup(info->name),
     .version = ccord_strdup(info->version ? info->version : ""),
     .description = ccord_strdup(info->description ? info->description : ""),
+    .icon_path = ccord_strdup(info->icon_path ? info->icon_path : ""),
     .permissions = ccord_strdup(info->permissions ? info->permissions : ""),
     .allowed_hosts = ccord_strdup(info->allowed_hosts ? info->allowed_hosts : ""),
     .perms_mask = info->perms_mask,
+    .consented_perms = info->consented_perms,
+    .platforms = info->platforms,
     .risk_class = info->risk_class,
     .tier = info->tier,
     .is_bundled = info->is_bundled,
+    .revoked = info->revoked,
     .auto_update = info->auto_update,
     .enabled = info->enabled,
     .consent_granted = info->consent_granted,
     .update_needs_review = info->update_needs_review,
     .update_version = ccord_strdup(info->update_version ? info->update_version : ""),
+    .update_perms_mask = info->update_perms_mask,
+    .update_permissions = ccord_strdup(info->update_permissions ? info->update_permissions : ""),
+    .update_allowed_hosts = ccord_strdup(info->update_allowed_hosts ? info->update_allowed_hosts : ""),
+    .update_changelog = ccord_strdup(info->update_changelog ? info->update_changelog : ""),
     .warning_sev = info->warning_sev,
     .warning_title = ccord_strdup(info->warning_title ? info->warning_title : ""),
     .warning_message = ccord_strdup(info->warning_message ? info->warning_message : ""),
     .state = info->state, .error = ccord_strdup(info->error ? info->error : ""),
   };
-  if (!fresh.id || !fresh.name || !fresh.version || !fresh.description || !fresh.permissions ||
-      !fresh.allowed_hosts || !fresh.update_version || !fresh.warning_title || !fresh.warning_message || !fresh.error) {
+  if (!fresh.id || !fresh.name || !fresh.version || !fresh.description || !fresh.icon_path ||
+      !fresh.permissions || !fresh.allowed_hosts || !fresh.update_version ||
+      !fresh.update_permissions || !fresh.update_allowed_hosts || !fresh.update_changelog ||
+      !fresh.warning_title || !fresh.warning_message || !fresh.error) {
     free_plugin_info(&fresh);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "contrib: out of memory");
   }
@@ -153,7 +170,12 @@ static bool clone_catalog_entry(const ccord_catalog_entry *s, ccord_catalog_entr
     .download_url = ccord_strdup(s->download_url ? s->download_url : ""),
     .sha256 = ccord_strdup(s->sha256 ? s->sha256 : ""),
     .permissions = ccord_strdup(s->permissions ? s->permissions : ""),
+    .allowed_hosts = ccord_strdup(s->allowed_hosts ? s->allowed_hosts : ""),
     .changelog = ccord_strdup(s->changelog ? s->changelog : ""),
+    .icon_url = ccord_strdup(s->icon_url ? s->icon_url : ""),
+    .icon_path = ccord_strdup(s->icon_path ? s->icon_path : ""),
+    .perms_mask = s->perms_mask,
+    .platforms = s->platforms,
     .size_bytes = s->size_bytes,
     .downloads = s->downloads,
     .api_class = s->api_class ? s->api_class : 1,
@@ -172,7 +194,8 @@ static bool clone_catalog_entry(const ccord_catalog_entry *s, ccord_catalog_entr
   };
   if (!d.id || !d.name || !d.description || !d.license || !d.author || !d.repo ||
       !d.repo_url || !d.version || !d.download_url || !d.sha256 || !d.permissions ||
-      !d.changelog || !d.warning_title || !d.warning_message || !d.installed_version) {
+      !d.allowed_hosts || !d.changelog || !d.icon_url || !d.icon_path ||
+      !d.warning_title || !d.warning_message || !d.installed_version) {
     contrib_free_catalog_entry(&d);
     return false;
   }
@@ -448,6 +471,18 @@ void ccord_contrib_catalog_query(ccord_contrib *c, const char *q, int tier, int 
   }
 }
 
+void ccord_contrib_catalog_query_ex(ccord_contrib *c, const char *q, int tier, int api_class, const char *platform,
+                                    const char *sort, bool append_next_page)
+{
+  if (!c) return;
+  if (c->handlers.catalog_query_ex) {
+    c->handlers.catalog_query_ex(c->handlers.ud, q ? q : "", tier, api_class,
+                                 platform ? platform : "", sort ? sort : "popular", append_next_page);
+  } else if (c->handlers.catalog_query) {
+    c->handlers.catalog_query(c->handlers.ud, q ? q : "", tier, api_class, sort ? sort : "popular", append_next_page);
+  }
+}
+
 void ccord_contrib_catalog_fetch_detail(ccord_contrib *c, const char *id)
 {
   if (c && id && c->handlers.catalog_fetch_detail) c->handlers.catalog_fetch_detail(c->handlers.ud, id);
@@ -461,6 +496,16 @@ void ccord_contrib_catalog_check_updates(ccord_contrib *c)
 void ccord_contrib_catalog_install(ccord_contrib *c, const char *id)
 {
   if (c && id && c->handlers.catalog_install) c->handlers.catalog_install(c->handlers.ud, id);
+}
+
+void ccord_contrib_catalog_install_approved(ccord_contrib *c, const char *id, uint64_t approved_perms)
+{
+  if (!c || !id) return;
+  if (c->handlers.catalog_install_approved) {
+    c->handlers.catalog_install_approved(c->handlers.ud, id, approved_perms);
+  } else if (c->handlers.catalog_install) {
+    c->handlers.catalog_install(c->handlers.ud, id);
+  }
 }
 
 void ccord_contrib_catalog_set_prefs(ccord_contrib *c, const ccord_catalog_prefs *prefs)
