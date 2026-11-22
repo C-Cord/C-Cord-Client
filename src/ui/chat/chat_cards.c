@@ -3,25 +3,134 @@
 #define _POSIX_C_SOURCE 200809L
 #include "chat_internal.h"
 
-// One compact line above a reply's header: vertical quote bar, the replied-to author's avatar, their name in their role
-// colour, then a one-line snippet of the original in muted text (brighter on hover). Whole line is the click target; a
-// deleted original is not clickable.
+static void draw_reply_avatar_circle(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float cx, float cy, float size)
+{
+  float rad = size * 0.5f;
+  ccord_rect dst = {cx - rad, cy - rad, size, size};
+  char url[256];
+  if (u && ui_user_avatar_url(u, url, sizeof url) && ui_ensure_media(ui, r, url)) {
+    ccord_draw_texture_rounded(r, url, dst, rad, 255);
+    ui->dbg_avatar_textures_drawn++;
+    return;
+  }
+  ccord_color bg = ui_user_color(ui, u ? u->avatar_palette : 0u);
+  ccord_draw_circle(r, cx, cy, rad, bg);
+  char init[8] = "?";
+  if (u && u->name && u->name[0]) {
+    size_t l = ccord_utf8_next(u->name, strlen(u->name), 0);
+    if (l > 4u) l = 4u;
+    memcpy(init, u->name, l);
+    init[l] = '\0';
+    if (l == 1u && init[0] >= 'a' && init[0] <= 'z') init[0] = (char)(init[0] - 'a' + 'A');
+  }
+  ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, size * 0.50f, COL(text_on_brand));
+  ccord_vec2 m = ccord_text_measure(r, init, strlen(init), &st, 0.0f);
+  ccord_text_draw(r, init, strlen(init), dst.x + (dst.w - m.x) * 0.5f, dst.y + (dst.h - m.y) * 0.5f, &st, 0.0f);
+}
+
+static void draw_reply_spine(ccord_renderer *r, float sx, float y_bot, float x_end, float cy, ccord_color col)
+{
+  const float th = UI_REPLY_SPINE_W;
+  float dx = x_end - sx;
+  float dy = y_bot - cy;
+  if (dx < 6.0f || dy < 4.0f) {
+    ccord_draw_line(r, (ccord_vec2){x_end - 8.0f, cy}, (ccord_vec2){x_end, cy}, th, col);
+    return;
+  }
+  float rad = UI_REPLY_SPINE_R;
+  if (rad > dx - 4.0f) rad = dx - 4.0f;
+  if (rad > dy - 1.0f) rad = dy - 1.0f;
+  if (rad < 2.0f) rad = 2.0f;
+  // Curved L-connector rising from the replier's avatar (or grouped body line) into the reply pill with a directional tip.
+  ccord_draw_circle(r, sx, y_bot, th * 0.5f, col);
+  ccord_draw_line(r, (ccord_vec2){sx, y_bot}, (ccord_vec2){sx, cy + rad}, th, col);
+  const float cx = sx + rad;
+  const float ay = cy + rad;
+  const int segs = 6;
+  const float k_pi = 3.14159265358979323846f;
+  ccord_vec2 prev = {sx, ay};
+  for (int i = 1; i <= segs; i++) {
+    float a = k_pi + (k_pi * 0.5f) * ((float)i / (float)segs);
+    ccord_vec2 cur = {cx + cosf(a) * rad, ay + sinf(a) * rad};
+    ccord_draw_line(r, prev, cur, th, col);
+    prev = cur;
+  }
+  ccord_draw_line(r, (ccord_vec2){cx, cy}, (ccord_vec2){x_end, cy}, th, col);
+  ccord_draw_line(r, (ccord_vec2){x_end - 3.5f, cy - 3.0f}, (ccord_vec2){x_end, cy}, 1.5f, col);
+  ccord_draw_line(r, (ccord_vec2){x_end - 3.5f, cy + 3.0f}, (ccord_vec2){x_end, cy}, 1.5f, col);
+}
+
+// One compact reply pill above the message header, connected by a curved spine from the replier's avatar:
+// circular 16 px avatar, replied-to author (caption weight/size so it recedes behind the main message) with a
+// colon separator, and a one-line snippet of the original. Whole pill is the click target; deleted originals are static.
 void dc_draw_reply_line(ccord_ui *ui, ccord_renderer *r, const decor_info *d, ccord_id guild, float sx, float y1,
                             float x, float y, float w)
 {
-  (void)sx;
-  (void)y1;
-  float h = UI_REPLY_LINE_H;
-  ccord_rect line = {x, y, w, h};
-  float cy = y + h * 0.5f;
+  const float h = UI_REPLY_LINE_H;
+  const float cy = y + h * 0.5f;
+  const float pad_l = 3.0f;   // concentric with the 16 px circular avatar inside the 22 px capsule pill
+  const float pad_r = 9.0f;
+  const float av_gap = 5.0f;
+  const float colon_gap = 5.0f;
+  const float fs = M(font_size_small) - 2.0f;
+  ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, fs, COL(text_secondary));
+  ccord_text_style ts = ui_style(ui, CCORD_FONT_REGULAR, fs, COL(text_muted));
+  const float text_h = fminf(ccord_text_measure(r, "Ag", 2, &ts, 0.0f).y, h - 2.0f);
+  const float ty = y + (h - text_h) * 0.5f;
+  const float inner_x = x + pad_l;
+  const float tx = inner_x + UI_REPLY_AVATAR + av_gap;
+  const float max_right = x + w - pad_r;
   bool clickable = d->reply_target_id != CCORD_ID_NONE && !d->reply_deleted;
+  bool has_user = !d->reply_deleted && d->reply_author_id != CCORD_ID_NONE;
+
+  // Measure content first so the pill wraps tightly around the quoted message instead of stretching empty across the chat.
+  char rtext[sizeof d->reply_text] = "";
+  size_t rtl = 0u;
+  const char *nm = d->reply_name[0] ? d->reply_name : "a message";
+  float name_max = fminf(maxf(max_right - tx, 0.0f), maxf(w * 0.35f, 60.0f));
+  float meas_nw = 0.0f, colon_w = 0.0f, content_right = tx;
+  bool show_snip = false;
+  if (d->reply_deleted) {
+    float tw = ccord_text_measure(r, d->reply_text, strlen(d->reply_text), &ts, 0.0f).x;
+    content_right = tx + fminf(tw, maxf(max_right - tx, 0.0f));
+  } else {
+    meas_nw = fminf(ccord_text_measure(r, nm, strlen(nm), &ns, 0.0f).x, name_max);
+    colon_w = ccord_text_measure(r, ":", 1, &ts, 0.0f).x;
+    memcpy(rtext, d->reply_text, sizeof rtext);
+    rtl = ui_streamer_mask_inplace(ui, rtext, strlen(rtext), true);
+    float sx2 = tx + meas_nw + colon_w + colon_gap;
+    if (rtl > 0u && max_right - sx2 > 24.0f) {
+      show_snip = true;
+      float icon_w = d->reply_attach_only ? 15.0f : 0.0f;
+      float sw = ccord_text_measure(r, rtext, rtl, &ts, 0.0f).x;
+      content_right = sx2 + icon_w + fminf(sw, maxf(max_right - sx2 - icon_w, 0.0f));
+    } else {
+      content_right = tx + meas_nw;
+    }
+  }
+  float pill_w = fminf(w, maxf(content_right - x + pad_r, UI_REPLY_AVATAR + pad_l + pad_r));
+  ccord_rect line = {x, y, pill_w, h};
+
   bool hovered = clickable && ui->mouse_in && !ui->menu.open && !ui->settings_open && ui_in_rect(ui->mx, ui->my, line);
   float hv = ui_fade(ui, "replyln", d->msg_id, hovered);
-  ccord_color bar_col = hv > 0.01f ? ui_mix(COL(divider), COL(brand), hv) : COL(divider);
-  ccord_draw_rrect(r, (ccord_rect){x - 8.5f, y + 2.5f, 2.5f, h - 5.0f}, 1.25f, bar_col);
+
+  // Curved spine: rises from above the replier's avatar on full rows, or from beside the first body line on grouped/dense rows.
+  ccord_color spine_rest = d->reply_deleted ? ui_alpha(COL(text_muted), 0.45f)
+                                            : ui_mix(COL(text_muted), COL(divider), 0.30f);
+  ccord_color spine_col = hv > 0.01f ? ui_mix(spine_rest, COL(brand), hv) : spine_rest;
+  bool has_avatar_below = y1 > y + h + 1.0f;
+  float spine_x = has_avatar_below ? sx : fmaxf(sx, x - 16.0f);
+  float spine_y_bot = has_avatar_below ? (y1 - 3.0f) : (y + h + UI_REPLY_LINE_GAP + ui_line_h(ui, M(font_size_base)) * 0.45f);
+  draw_reply_spine(r, spine_x, spine_y_bot, x - 4.0f, cy, spine_col);
+
+  // Tinted capsule pill with a crisp 1 px border and subtle brand wash on hover so it stands out over hovered rows.
+  ccord_color border_col = hv > 0.01f ? ui_mix(COL(border_subtle), COL(brand), hv * 0.80f) : COL(border_subtle);
+  ccord_color fill_col = hv > 0.01f ? ui_mix(COL(bg_secondary), COL(brand), hv * 0.14f) : COL(bg_secondary);
+  ccord_rect border_rc = {line.x - 1.0f, line.y - 1.0f, line.w + 2.0f, line.h + 2.0f};
+  ccord_draw_rrect(r, border_rc, border_rc.h * 0.5f, border_col);
+  ccord_draw_rrect(r, line, line.h * 0.5f, fill_col);
 
   ccord_rect av = {0, 0, 0, 0};
-  bool has_user = !d->reply_deleted && d->reply_author_id != CCORD_ID_NONE;
   if (has_user) {
     const ccord_user *u = ccord_store_user(ui->d.store, d->reply_author_id);
     const ccord_user_profile *prof = ccord_store_user_profile(ui->d.store, d->reply_author_id);
@@ -30,52 +139,57 @@ void dc_draw_reply_line(ccord_ui *ui, ccord_renderer *r, const decor_info *d, cc
       .name = d->reply_name,
       .handle = (u && u->handle && u->handle[0]) ? u->handle : "",
       .status_text = "",
-      .avatar_url = (u && u->avatar_url && u->avatar_url[0]) ? u->avatar_url
-                    : ((prof && prof->avatar_url) ? prof->avatar_url : ""),
+      .avatar_url = (prof && prof->guild_id == guild && prof->guild_avatar_url && prof->guild_avatar_url[0])
+                      ? prof->guild_avatar_url
+                      : ((u && u->avatar_url && u->avatar_url[0]) ? u->avatar_url
+                         : ((prof && prof->avatar_url) ? prof->avatar_url : "")),
       .presence = CCORD_PRESENCE_OFFLINE,
       .is_bot = u ? u->is_bot : false,
       .avatar_palette = u ? u->avatar_palette : (uint8_t)(d->reply_author_id % 6u),
     };
-    av = (ccord_rect){x, cy - UI_REPLY_AVATAR * 0.5f, UI_REPLY_AVATAR, UI_REPLY_AVATAR};
-    ui_draw_avatar(ui, r, &ru, av.x + av.w * 0.5f, av.y + av.h * 0.5f, UI_REPLY_AVATAR, (ccord_color){0, 0, 0, 0}, false);
+    av = (ccord_rect){inner_x, cy - UI_REPLY_AVATAR * 0.5f, UI_REPLY_AVATAR, UI_REPLY_AVATAR};
+    draw_reply_avatar_circle(ui, r, &ru, av.x + av.w * 0.5f, av.y + av.h * 0.5f, UI_REPLY_AVATAR);
   } else {
-    ui_icon_reply(r, x + UI_REPLY_AVATAR * 0.5f, cy, 12.0f, COL(text_muted));
+    float icx = inner_x + UI_REPLY_AVATAR * 0.5f;
+    ccord_draw_circle(r, icx, cy, UI_REPLY_AVATAR * 0.5f, COL(bg_tertiary));
+    if (d->reply_deleted) {
+      ui_icon_close(r, icx, cy, 9.0f, COL(text_muted));
+    } else {
+      ui_icon_reply(r, icx, cy, 10.0f, COL(text_muted));
+    }
   }
-  float tx = x + UI_REPLY_AVATAR + 6.0f;
-  float right = x + w;
-  ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
-  ccord_text_style ts = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small),
-                                 ui_mix(COL(text_muted), COL(text_header), hv * 0.85f));
-  float ty = y + (h - ui_line_h(ui, ts.size)) * 0.5f;
+
+  float pill_inner_right = line.x + line.w - pad_r;
   ccord_rect snip = {0, 0, 0, 0};
   ccord_rect rname_rect = {0, 0, 0, 0};
   if (d->reply_deleted) {
-    // Italic is the markdown convention here (a mixed-in secondary tone); there is no italic face.
-    ts.color = ui_mix(COL(text_muted), COL(text_secondary), 0.35f);
-    float tw = ccord_text_draw_ellipsis(r, d->reply_text, strlen(d->reply_text), tx, ty, maxf(right - tx, 0.0f), &ts);
-    snip = (ccord_rect){tx, ty, tw, ui_line_h(ui, ts.size)};
+    ts.color = ui_mix(COL(text_muted), COL(text_secondary), 0.25f);
+    float tw = ccord_text_draw_ellipsis(r, d->reply_text, strlen(d->reply_text), tx, ty,
+                                        maxf(pill_inner_right - tx, 0.0f), &ts);
+    snip = (ccord_rect){tx, ty, tw, text_h};
   } else {
     bool has_role = false;
     ccord_color rc = ui_role_color(ui, guild, d->reply_author_id, &has_role);
-    if (has_role) ns.color = rc;
-    const char *nm = d->reply_name[0] ? d->reply_name : "a message";
-    float name_max = fminf(maxf(right - tx, 0.0f), maxf(w * 0.4f, 60.0f));
+    ns.color = has_role ? ui_mix(rc, COL(text_secondary), 0.12f * (1.0f - hv))
+                        : ui_mix(COL(text_secondary), COL(text_header), hv);
+    ts.color = ui_mix(COL(text_muted), COL(text_normal), hv * 0.90f);
     float nw = ccord_text_draw_ellipsis(r, nm, strlen(nm), tx, ty, name_max, &ns);
-    if (has_user) rname_rect = (ccord_rect){tx, ty, maxf(nw, 4.0f), ui_line_h(ui, ns.size)};
-    float sx2 = tx + nw + 6.0f;
-    if (right - sx2 > 24.0f) {
-      char rtext[sizeof d->reply_text];   // Streamer Mode: the replied-to text may carry an invite
-      memcpy(rtext, d->reply_text, sizeof rtext);
-      size_t rtl = ui_streamer_mask_inplace(ui, rtext, strlen(rtext), true);
-      float avail = right - sx2;
-      if (d->reply_attach_only) {
-        ui_icon_file(r, sx2 + 6.0f, cy, 13.0f, ts.color);
-        sx2 += 16.0f;
-        avail -= 16.0f;
-        ts.color = ui_mix(ts.color, COL(text_secondary), 0.35f);
+    if (has_user) rname_rect = (ccord_rect){tx, ty, maxf(nw, 4.0f), text_h};
+    if (show_snip) {
+      ccord_text_style cs = ui_style(ui, CCORD_FONT_REGULAR, fs, ui_mix(COL(text_muted), COL(text_secondary), hv));
+      ccord_text_draw(r, ":", 1, tx + nw, ty, &cs, 0.0f);
+      float sx2 = tx + nw + colon_w + colon_gap;
+      float avail = maxf(pill_inner_right - sx2, 0.0f);
+      if (d->reply_attach_only && avail > 16.0f) {
+        ui_icon_file(r, sx2 + 5.5f, cy, 12.0f, ts.color);
+        sx2 += 15.0f;
+        avail = maxf(pill_inner_right - sx2, 0.0f);
+        ts.color = ui_mix(ts.color, COL(text_secondary), 0.30f);
       }
-      float sw = ccord_text_draw_ellipsis(r, rtext, rtl, sx2, ty, maxf(avail, 0.0f), &ts);
-      snip = (ccord_rect){sx2, ty, sw, ui_line_h(ui, ts.size)};
+      if (avail > 4.0f) {
+        float sw = ccord_text_draw_ellipsis(r, rtext, rtl, sx2, ty, avail, &ts);
+        snip = (ccord_rect){sx2, ty, sw, text_h};
+      }
     }
   }
   ui->dbg_reply_cards++;

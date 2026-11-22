@@ -100,7 +100,7 @@ typedef enum decor_kind : uint8_t {
 
 // Reply reference (one compact line above the message header) and composer reply bar metrics, in logical px.
 #define UI_REPLY_LINE_H 22.0f      // the whole reference line; a card would be taller than this
-#define UI_REPLY_LINE_GAP 2.0f     // space between the line and the message header
+#define UI_REPLY_LINE_GAP 4.0f     // space between the reply pill and the message header
 #define UI_REPLY_AVATAR 16.0f      // replied-to author's round avatar
 #define UI_REPLY_SPINE_W 2.0f      // connector thickness
 #define UI_REPLY_SPINE_R 6.0f      // radius of the connector's turn
