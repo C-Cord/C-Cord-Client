@@ -145,10 +145,15 @@ bool st_handle_mfa_popup(ccord_ui *ui, const ccord_input_event *ev)
 
 void st_account_buttons(const ccord_ui *ui, const sgeom *g, ccord_rect *primary, ccord_rect *secondary)
 {
-  (void)ui;
-  float by = g->content.y + g->content.h - 42.0f;
-  *primary = (ccord_rect){g->content.x, by, 156.0f, UIS_H_BTN};
-  *secondary = (ccord_rect){g->content.x + 168.0f, by, 132.0f, UIS_H_BTN};
+  float wy = st_account_web_y(ui, g);
+  float extra_web = g->content.w < 380.0f ? (UIS_H_BTN + 6.0f) : 0.0f;
+  float min_by = wy + UIS_H_BTN + extra_web + 6.0f;
+  float bot_by = g->content.y + g->content.h - 42.0f;
+  float by = bot_by > min_by ? bot_by : min_by;
+  float pw = fminf(156.0f, fmaxf((g->content.w - 12.0f) * 0.54f, 96.0f));
+  float sw = fminf(132.0f, fmaxf(g->content.w - pw - 12.0f, 84.0f));
+  *primary = (ccord_rect){g->content.x, by, pw, UIS_H_BTN};
+  *secondary = (ccord_rect){g->content.x + pw + 12.0f, by, sw, UIS_H_BTN};
 }
 
 void st_draw_button(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char *label, bool primary)
@@ -302,9 +307,10 @@ void st_draw_account(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 
   ccord_text_style wls = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_overline, COL(text_muted));
   const char *web_head = "BILLING, NITRO, SHOP & ACCOUNT (OPEN IN WEB BROWSER)";
-  ccord_text_draw(r, web_head, strlen(web_head), x, g->content.y + g->content.h - 98.0f, &wls, 0.0f);
+  float web_y = st_account_web_y(ui, g);
+  ccord_text_draw_ellipsis(r, web_head, strlen(web_head), x, web_y - 18.0f, w, &wls);
   for (int i = 0; i < 5; i++) {
-    st_draw_button(ui, r, st_account_web_btn_rect(g, i), st_k_web_labels[i], false);
+    st_draw_button(ui, r, st_account_web_btn_rect(ui, g, i), st_k_web_labels[i], false);
   }
 
   ccord_rect primary = {0, 0, 0, 0}, secondary = {0, 0, 0, 0};
@@ -326,20 +332,21 @@ void st_draw_mfa_popup(ccord_ui *ui, ccord_renderer *r)
   uis_card(ui, r, pop);
   ccord_push_clip(r, pop);
 
+  float msc = st_mfa_scroll_offset(ui, &pop);
   ccord_draw_rect(r, (ccord_rect){pop.x, pop.y, pop.w, 4.0f}, COL(brand));
 
   const char *title = "Two-Factor Authentication";
   ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_title, COL(text_header));
   ccord_vec2 tt = ccord_text_measure(r, title, strlen(title), &ts, 0.0f);
-  ccord_text_draw(r, title, strlen(title), pop.x + (pop.w - tt.x) * 0.5f, pop.y + 22.0f, &ts, 0.0f);
+  ccord_text_draw(r, title, strlen(title), pop.x + (pop.w - tt.x) * 0.5f, pop.y + 22.0f - msc, &ts, 0.0f);
 
   const char *sub = "Enter the 6-digit code from your authenticator app.";
   ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_secondary));
   ccord_vec2 st = ccord_text_measure(r, sub, strlen(sub), &ss, 0.0f);
   float sub_x = st.x < pop.w - 32.0f ? pop.x + (pop.w - st.x) * 0.5f : pop.x + 16.0f;
-  ccord_text_draw_ellipsis(r, sub, strlen(sub), sub_x, pop.y + 50.0f, pop.w - 32.0f, &ss);
+  ccord_text_draw_ellipsis(r, sub, strlen(sub), sub_x, pop.y + 50.0f - msc, pop.w - 32.0f, &ss);
 
-  ccord_rect banner = {pop.x + 28.0f, pop.y + 80.0f, pop.w - 56.0f, 34.0f};
+  ccord_rect banner = {pop.x + 28.0f, pop.y + 80.0f - msc, pop.w - 56.0f, 34.0f};
   if (ui->account_login_status[0] != '\0') {
     uis_card(ui, r, banner);
     ccord_color accent = ui->account_login_is_error ? COL(danger) : COL(brand);
@@ -372,9 +379,10 @@ void st_draw_login_screen(ccord_ui *ui, ccord_renderer *r)
   uis_card(ui, r, card);
   ccord_push_clip(r, card);
 
+  float lsc = st_login_scroll_offset(ui, &card);
   // Top Discord brand accent bar + badge
   ccord_draw_rrect(r, (ccord_rect){card.x, card.y, card.w, 8.0f}, 4.0f, COL(brand));
-  ccord_rect badge = {card.x + (card.w - 96.0f) * 0.5f, card.y + 14.0f, 96.0f, 22.0f};
+  ccord_rect badge = {card.x + (card.w - 96.0f) * 0.5f, card.y + 14.0f - lsc, 96.0f, 22.0f};
   ccord_draw_rrect(r, badge, 11.0f, COL(brand));
   ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_caption, COL(text_on_brand));
   ccord_vec2 bt = ccord_text_measure(r, "DISCORD", 7, &bs, 0.0f);
@@ -384,12 +392,12 @@ void st_draw_login_screen(ccord_ui *ui, ccord_renderer *r)
   const char *title = "Welcome back!";
   ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_title, COL(text_header));
   ccord_vec2 tt = ccord_text_measure(r, title, strlen(title), &ts, 0.0f);
-  ccord_text_draw(r, title, strlen(title), card.x + (card.w - tt.x) * 0.5f, card.y + 42.0f, &ts, 0.0f);
+  ccord_text_draw(r, title, strlen(title), card.x + (card.w - tt.x) * 0.5f, card.y + 42.0f - lsc, &ts, 0.0f);
 
   const char *sub = "We're so excited to see you again!";
   ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_secondary));
   ccord_vec2 st = ccord_text_measure(r, sub, strlen(sub), &ss, 0.0f);
-  ccord_text_draw(r, sub, strlen(sub), card.x + (card.w - st.x) * 0.5f, card.y + 68.0f, &ss, 0.0f);
+  ccord_text_draw(r, sub, strlen(sub), card.x + (card.w - st.x) * 0.5f, card.y + 68.0f - lsc, &ss, 0.0f);
 
   // Two-tab bar: Tab 0 = Token Sign-In, Tab 1 = Email & Password
   static const char *const k_tab_labels[2] = {"Token Sign-In", "Email & Password"};
@@ -402,7 +410,7 @@ void st_draw_login_screen(ccord_ui *ui, ccord_renderer *r)
 
   // Connecting state / Auth error banner / Info banner
   float cx = card.x + 32.0f, cw = card.w - 64.0f;
-  ccord_rect banner = {cx, card.y + 136.0f, cw, 32.0f};
+  ccord_rect banner = {cx, card.y + 136.0f - lsc, cw, 32.0f};
   bool connecting = (ui->d.session && ccord_session_state(ui->d.session) == CCORD_CONN_CONNECTING) ||
                     (ui->account_view.busy && !ui->account_view.signed_in);
   if (connecting) {
@@ -452,8 +460,8 @@ void st_draw_login_screen(ccord_ui *ui, ccord_renderer *r)
     const char *h1 = "Token is saved locally with 0600 permissions at:";
     const char *h2 = "$XDG_CONFIG_HOME/ccord/token";
 #endif
-    ccord_text_draw_ellipsis(r, h1, strlen(h1), cx, card.y + 344.0f, cw, &hs);
-    ccord_text_draw_ellipsis(r, h2, strlen(h2), cx, card.y + 362.0f, cw, &ls);
+    ccord_text_draw_ellipsis(r, h1, strlen(h1), cx, card.y + 344.0f - lsc, cw, &hs);
+    ccord_text_draw_ellipsis(r, h2, strlen(h2), cx, card.y + 362.0f - lsc, cw, &ls);
   } else {
     ccord_rect em_box = st_login_email_box_rect(&card);
     ccord_rect pw_box = st_login_password_box_rect(&card);
@@ -465,7 +473,7 @@ void st_draw_login_screen(ccord_ui *ui, ccord_renderer *r)
     st_draw_button(ui, r, lbtn, connecting ? "Connecting to Discord Gateway..." : "Connect to Discord", true);
     const char *h3 = ui->mobile_layout ? "CAPTCHA required? Switch to Token Sign-In."
                                        : "If Discord requires a browser CAPTCHA, switch to Token Sign-In.";
-    ccord_text_draw_ellipsis(r, h3, strlen(h3), cx, card.y + 372.0f, cw, &hs);
+    ccord_text_draw_ellipsis(r, h3, strlen(h3), cx, card.y + 372.0f - lsc, cw, &hs);
   }
 
   ccord_pop_clip(r);

@@ -96,6 +96,9 @@ float st_s_press_y;
 uint64_t st_s_press_until_ms;
 float st_s_voice_scroll;    // Voice & Video page scroll offset in px
 ccord_scroller st_s_voice_glide;   // wheel glide of st_s_voice_scroll (scroll.h)
+float st_s_page_scroll;     // vertical scroll offset for tall Settings pages on mobile / short viewports
+float st_s_plugins_content_h;
+float st_s_login_scroll;    // vertical scroll offset for Login/MFA card when keyboard shrinks viewport
 bool st_s_save_pending;
 ccord_ui *st_s_save_ui;
 uint64_t st_s_save_due_ms;
@@ -506,7 +509,7 @@ void ui_settings_m6_host_rects(const ccord_ui *ui, ccord_rect out_tabs[CCORD_M6_
     out_tabs[CCORD_M6_PAGE_DEVICES] = g.page[SP_DEVICES];
     out_tabs[CCORD_M6_PAGE_CONNECTIONS] = g.page[SP_CONNECTIONS];
   }
-  if (out_account_web_btn) *out_account_web_btn = st_account_web_btn_rect(&g, 4);
+  if (out_account_web_btn) *out_account_web_btn = st_account_web_btn_rect(ui, &g, 4);
 }
 
 // M6 preference-page sidebar wiring (settings_m6_prefs.h): tab rects of the five preference pages.
@@ -621,12 +624,60 @@ ccord_rect st_vol_minus_rect(const sgeom *g, int row)
 
 ccord_rect st_vol_track_rect(const sgeom *g, int row)
 {
-  return (ccord_rect){g->content.x + 36.0f, st_row_y(g, row) + 28.0f, 200.0f, UIS_SLIDER_H};
+  float tw = g->content.w < 330.0f ? fmaxf(g->content.w - 130.0f, 80.0f) : 200.0f;
+  return (ccord_rect){g->content.x + 36.0f, st_row_y(g, row) + 28.0f, tw, UIS_SLIDER_H};
 }
 
 ccord_rect st_vol_plus_rect(const sgeom *g, int row)
 {
-  return (ccord_rect){g->content.x + 244.0f, st_row_y(g, row) + 18.0f, UIS_H_BTN_SM, UIS_H_BTN_SM};
+  ccord_rect tr = st_vol_track_rect(g, row);
+  return (ccord_rect){tr.x + tr.w + 8.0f, st_row_y(g, row) + 18.0f, UIS_H_BTN_SM, UIS_H_BTN_SM};
+}
+
+// Streaming rows: on narrow viewports (< 420dp), 5-chip rows wrap into 3 + 2 so encoder/framework
+// labels remain readable instead of crushing to ~55dp; desktop layout stays pixel-identical.
+static bool stream_wraps_row(const sgeom *g, int row)
+{
+  if (g->content.w >= 420.0f) return false;
+  if (row == 0 && STREAM_ENC_COUNT > 3) return true;
+  if (row == 1 && STREAM_FW_COUNT > 3) return true;
+  return false;
+}
+
+float st_stream_row_y(const sgeom *g, int row)
+{
+  float extra = 0.0f;
+  for (int r = 0; r < row; r++) {
+    if (stream_wraps_row(g, r)) extra += UIS_H_CHIP + 6.0f;
+  }
+  return st_row_y(g, row) + extra;
+}
+
+ccord_rect st_stream_auto_pill_rect(const sgeom *g, int row)
+{
+  return (ccord_rect){g->content.x + g->content.w - 92.0f, st_stream_row_y(g, row) - 4.0f, 92.0f, UIS_H_CHIP};
+}
+
+ccord_rect st_stream_chip_rect(const sgeom *g, int row, int opt, int count)
+{
+  if (count < 1) return (ccord_rect){0, 0, 0, 0};
+  float ry = st_stream_row_y(g, row);
+  if (stream_wraps_row(g, row)) {
+    int per_row = 3;
+    int sub_row = opt / per_row;
+    int col = opt % per_row;
+    float gap = 6.0f;
+    float cw = (g->content.w - gap * (float)(per_row - 1)) / (float)per_row;
+    if (cw > 132.0f) cw = 132.0f;
+    if (cw < 44.0f) cw = 44.0f;
+    return (ccord_rect){g->content.x + (float)col * (cw + gap),
+                        ry + 20.0f + (float)sub_row * (UIS_H_CHIP + 6.0f), cw, UIS_H_CHIP};
+  }
+  float gap = g->content.w < 380.0f ? 6.0f : 8.0f;
+  float cw = (g->content.w - gap * (float)(count - 1)) / (float)count;
+  if (cw > 132.0f) cw = 132.0f;
+  if (cw < 44.0f) cw = 44.0f;
+  return (ccord_rect){g->content.x + (float)opt * (cw + gap), ry + 20.0f, cw, UIS_H_CHIP};
 }
 
 // Keybind box (click it, then press the chord) and the "Automatic" pill at the end of a streaming chip row.
@@ -645,12 +696,30 @@ ccord_rect st_extensions_toggle_rect(const sgeom *g)
   return st_toggle_rect(g, 0);
 }
 
-ccord_rect st_account_web_btn_rect(const sgeom *g, int idx)
+float st_account_web_y(const ccord_ui *ui, const sgeom *g)
 {
+  size_t shown = ui ? (ui->saved_account_count < SAVED_ACCOUNT_ROWS ? ui->saved_account_count : SAVED_ACCOUNT_ROWS) : 0;
+  float min_y = g->content.y + 372.0f + (float)(shown > 0 ? shown : 1u) * 40.0f + 32.0f;
+  if (ui && ui->saved_account_count > SAVED_ACCOUNT_ROWS) min_y += 22.0f;
+  float bottom_y = g->content.y + g->content.h - (g->content.w < 380.0f ? 122.0f : 80.0f);
+  return bottom_y > min_y ? bottom_y : min_y;
+}
+
+ccord_rect st_account_web_btn_rect(const ccord_ui *ui, const sgeom *g, int idx)
+{
+  float by = st_account_web_y(ui, g);
+  if (g->content.w < 380.0f) {
+    float gap = 6.0f;
+    int row = idx < 3 ? 0 : 1;
+    int col = idx < 3 ? idx : (idx - 3);
+    int cols = row == 0 ? 3 : 2;
+    float bw = floorf((g->content.w - (float)(cols - 1) * gap) / (float)cols);
+    if (bw < 60.0f) bw = 60.0f;
+    return (ccord_rect){g->content.x + (float)col * (bw + gap), by + (float)row * (UIS_H_BTN + 6.0f), bw, UIS_H_BTN};
+  }
   float gap = 8.0f;
   float bw = (g->content.w - 4.0f * gap) / 5.0f;
   if (bw < 60.0f) bw = 60.0f;
-  float by = g->content.y + g->content.h - 80.0f;
   return (ccord_rect){g->content.x + (float)idx * (bw + gap), by, bw, UIS_H_BTN};
 }
 
@@ -680,17 +749,24 @@ ccord_rect st_account_token_box_rect(const sgeom *g)
 
 ccord_rect st_account_token_paste_rect(const sgeom *g)
 {
-  return (ccord_rect){g->content.x, g->content.y + 284.0f, 68.0f, UIS_H_BTN};
+  float pw = g->content.w < 320.0f ? floorf((g->content.w - 12.0f) * 0.22f) : 68.0f;
+  return (ccord_rect){g->content.x, g->content.y + 284.0f, pw, UIS_H_BTN};
 }
 
 ccord_rect st_account_token_save_rect(const sgeom *g)
 {
-  return (ccord_rect){g->content.x + 76.0f, g->content.y + 284.0f, 136.0f, UIS_H_BTN};
+  ccord_rect p = st_account_token_paste_rect(g);
+  float gap = g->content.w < 320.0f ? 6.0f : 8.0f;
+  float sw = g->content.w < 320.0f ? floorf((g->content.w - 12.0f) * 0.46f) : 136.0f;
+  return (ccord_rect){p.x + p.w + gap, g->content.y + 284.0f, sw, UIS_H_BTN};
 }
 
 ccord_rect st_account_token_clear_rect(const sgeom *g)
 {
-  return (ccord_rect){g->content.x + 220.0f, g->content.y + 284.0f, 96.0f, UIS_H_BTN};
+  ccord_rect s = st_account_token_save_rect(g);
+  float gap = g->content.w < 320.0f ? 6.0f : 8.0f;
+  float cw = g->content.w < 320.0f ? fmaxf(g->content.x + g->content.w - (s.x + s.w + gap), 60.0f) : 96.0f;
+  return (ccord_rect){s.x + s.w + gap, g->content.y + 284.0f, cw, UIS_H_BTN};
 }
 
 // QuickCSS snippet editor (Appearance, row 6).
@@ -748,40 +824,47 @@ ccord_rect st_login_card_rect(const ccord_ui *ui)
 
 ccord_rect st_login_tab_rect(const ccord_rect *card, int tab)
 {
+  float sc = st_login_scroll_offset(nullptr, card);
   float cx = card->x + 32.0f;
   float cw = card->w - 64.0f;
   float tw = (cw - 8.0f) * 0.5f;
-  return (ccord_rect){cx + (float)tab * (tw + 8.0f), card->y + 96.0f, tw, UIS_H_BTN};
+  return (ccord_rect){cx + (float)tab * (tw + 8.0f), card->y + 96.0f - sc, tw, UIS_H_BTN};
 }
 
 ccord_rect st_login_token_box_rect(const ccord_rect *card)
 {
-  return (ccord_rect){card->x + 32.0f, card->y + 198.0f, card->w - 64.0f, UIS_H_INPUT};
+  float sc = st_login_scroll_offset(nullptr, card);
+  return (ccord_rect){card->x + 32.0f, card->y + 198.0f - sc, card->w - 64.0f, UIS_H_INPUT};
 }
 
 ccord_rect st_login_token_paste_rect(const ccord_rect *card)
 {
-  return (ccord_rect){card->x + 32.0f, card->y + 246.0f, card->w - 64.0f, UIS_H_BTN};
+  float sc = st_login_scroll_offset(nullptr, card);
+  return (ccord_rect){card->x + 32.0f, card->y + 246.0f - sc, card->w - 64.0f, UIS_H_BTN};
 }
 
 ccord_rect st_login_token_save_rect(const ccord_rect *card)
 {
-  return (ccord_rect){card->x + 32.0f, card->y + 290.0f, card->w - 64.0f, UIS_H_BTN_LG};
+  float sc = st_login_scroll_offset(nullptr, card);
+  return (ccord_rect){card->x + 32.0f, card->y + 290.0f - sc, card->w - 64.0f, UIS_H_BTN_LG};
 }
 
 ccord_rect st_login_email_box_rect(const ccord_rect *card)
 {
-  return (ccord_rect){card->x + 32.0f, card->y + 196.0f, card->w - 64.0f, UIS_H_INPUT};
+  float sc = st_login_scroll_offset(nullptr, card);
+  return (ccord_rect){card->x + 32.0f, card->y + 196.0f - sc, card->w - 64.0f, UIS_H_INPUT};
 }
 
 ccord_rect st_login_password_box_rect(const ccord_rect *card)
 {
-  return (ccord_rect){card->x + 32.0f, card->y + 262.0f, card->w - 64.0f, UIS_H_INPUT};
+  float sc = st_login_scroll_offset(nullptr, card);
+  return (ccord_rect){card->x + 32.0f, card->y + 262.0f - sc, card->w - 64.0f, UIS_H_INPUT};
 }
 
 ccord_rect st_login_credentials_btn_rect(const ccord_rect *card)
 {
-  return (ccord_rect){card->x + 32.0f, card->y + 320.0f, card->w - 64.0f, UIS_H_BTN_LG};
+  float sc = st_login_scroll_offset(nullptr, card);
+  return (ccord_rect){card->x + 32.0f, card->y + 320.0f - sc, card->w - 64.0f, UIS_H_BTN_LG};
 }
 
 // Secondary 2FA / TOTP popup modal (only shown after Discord requests 2FA for the account).
@@ -802,19 +885,42 @@ ccord_rect st_mfa_popup_rect(const ccord_ui *ui)
   return (ccord_rect){roundf(sl + (uw - cw) * 0.5f), roundf(st + (uh - ch) * 0.5f), cw, ch};
 }
 
+float st_login_scroll_offset(const ccord_ui *ui, const ccord_rect *card)
+{
+  (void)ui;
+  float need = 404.0f;
+  float max_s = need > card->h ? (need - card->h) : 0.0f;
+  if (st_s_login_scroll < 0.0f) st_s_login_scroll = 0.0f;
+  if (st_s_login_scroll > max_s) st_s_login_scroll = max_s;
+  return st_s_login_scroll;
+}
+
+float st_mfa_scroll_offset(const ccord_ui *ui, const ccord_rect *pop)
+{
+  (void)ui;
+  float need = 290.0f;
+  float max_s = need > pop->h ? (need - pop->h) : 0.0f;
+  if (st_s_login_scroll < 0.0f) st_s_login_scroll = 0.0f;
+  if (st_s_login_scroll > max_s) st_s_login_scroll = max_s;
+  return st_s_login_scroll;
+}
+
 ccord_rect st_mfa_popup_input_rect(const ccord_rect *pop)
 {
-  return (ccord_rect){pop->x + 28.0f, pop->y + 148.0f, pop->w - 56.0f, UIS_H_INPUT};
+  float sc = st_mfa_scroll_offset(nullptr, pop);
+  return (ccord_rect){pop->x + 28.0f, pop->y + 148.0f - sc, pop->w - 56.0f, UIS_H_INPUT};
 }
 
 ccord_rect st_mfa_popup_verify_rect(const ccord_rect *pop)
 {
-  return (ccord_rect){pop->x + 28.0f, pop->y + 196.0f, pop->w - 56.0f, UIS_H_BTN_LG};
+  float sc = st_mfa_scroll_offset(nullptr, pop);
+  return (ccord_rect){pop->x + 28.0f, pop->y + 196.0f - sc, pop->w - 56.0f, UIS_H_BTN_LG};
 }
 
 ccord_rect st_mfa_popup_back_rect(const ccord_rect *pop)
 {
-  return (ccord_rect){pop->x + 28.0f, pop->y + 244.0f, pop->w - 56.0f, UIS_H_BTN};
+  float sc = st_mfa_scroll_offset(nullptr, pop);
+  return (ccord_rect){pop->x + 28.0f, pop->y + 244.0f - sc, pop->w - 56.0f, UIS_H_BTN};
 }
 
 void ui_settings_auth_autofill_rects(const ccord_ui *ui, ccord_rect *email_r, ccord_rect *pw_r, ccord_rect *otp_r)
@@ -955,7 +1061,46 @@ float st_voice_max_scroll(const sgeom *g)
 
 ccord_rect st_voice_scroll_track(const sgeom *g)
 {
-  return (ccord_rect){g->content.x + g->content.w + 12.0f, g->content.y + 44.0f, 8.0f, g->content.h - 44.0f};
+  float tx = g->content.x + g->content.w + 12.0f;
+  float max_tx = g->panel.x + g->panel.w - 12.0f;
+  if (tx > max_tx) tx = max_tx;
+  return (ccord_rect){tx, g->content.y + 44.0f, 8.0f, g->content.h - 44.0f};
+}
+
+float st_page_max_scroll(const ccord_ui *ui, const sgeom *g)
+{
+  if (!ui || !g) return 0.0f;
+  float total = 0.0f;
+  switch (ui->settings_page) {
+    case SP_ACCOUNT: {
+      float web_y = st_account_web_y(ui, g);
+      float extra_web = g->content.w < 380.0f ? (UIS_H_BTN + 6.0f) : 0.0f;
+      total = (web_y - g->content.y) + UIS_H_BTN + extra_web + 52.0f;
+      break;
+    }
+    case SP_APPEARANCE:
+      total = 44.0f + 8.0f * 54.0f + 16.0f;
+      break;
+    case SP_STREAMING:
+      total = (st_stream_row_y(g, 5) - g->content.y) + 40.0f;
+      break;
+    case SP_KEYBINDS: {
+      size_t npk = ui->d.contrib ? ccord_contrib_keybind_count(ui->d.contrib) : 0;
+      if (npk > 8u) npk = 8u;
+      total = 44.0f + (float)(6u + npk) * 54.0f + 16.0f;
+      break;
+    }
+    case SP_PLUGINS: {
+      float body_top = st_plugin_body_y(g);
+      float view_h = fmaxf((g->content.y + g->content.h) - body_top, 40.0f);
+      float m = st_s_plugins_content_h - view_h;
+      return m > 0.0f ? m : 0.0f;
+    }
+    default:
+      return 0.0f;
+  }
+  float m = total - g->content.h;
+  return m > 0.0f ? m : 0.0f;
 }
 
 ccord_rect st_voice_scroll_up_rect(const sgeom *g)
@@ -1006,6 +1151,17 @@ bool st_voice_scroll_click(ccord_ui *ui, const sgeom *g, float x, float y)
 // event (108 px, the scrollbar step). Returns true when the page moved.
 bool ui_settings_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
 {
+  if (ui_is_login_screen(ui) || (ui->settings_page == SP_ACCOUNT && ui->account_mfa_required)) {
+    ccord_rect box = ui->account_mfa_required ? st_mfa_popup_rect(ui) : st_login_card_rect(ui);
+    float need = ui->account_mfa_required ? 290.0f : 404.0f;
+    float max_s = need > box.h ? (need - box.h) : 0.0f;
+    if (max_s <= 0.0f) return false;
+    st_s_login_scroll -= ev->wheel * 48.0f;
+    if (st_s_login_scroll < 0.0f) st_s_login_scroll = 0.0f;
+    if (st_s_login_scroll > max_s) st_s_login_scroll = max_s;
+    ui->dirty = true;
+    return true;
+  }
   sgeom g = st_geometry(ui);
   if (!ui_in_rect(ev->x, ev->y, g.panel)) return false;
   if (g.list.w > 0.0f && ui_in_rect(ev->x, ev->y, g.list)) {
@@ -1023,8 +1179,21 @@ bool ui_settings_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (ui->settings_page == SP_PROFILE_EDIT) return ui_settings_profile_wheel(ui, ev->wheel);
+  if (ui->settings_page == SP_NOTIFICATIONS && ui->settings_sounds_open) {
+    return ui_settings_m6_prefs_wheel(ui, CCORD_M6_PREFS_NOTIFICATIONS, g.content, ev->wheel);
+  }
   if (ui->settings_page == SP_PRIVACY || ui->settings_page == SP_DEVICES || ui->settings_page == SP_CONNECTIONS) {
     return ui_settings_m6_wheel(ui, ui->settings_page - SP_PRIVACY, g.content, ev->wheel, ui_wheel_direct(ui, ev));
+  }
+  {
+    float max_p = st_page_max_scroll(ui, &g);
+    if (max_p > 0.0f) {
+      st_s_page_scroll -= ev->wheel * 56.0f;
+      if (st_s_page_scroll < 0.0f) st_s_page_scroll = 0.0f;
+      if (st_s_page_scroll > max_p) st_s_page_scroll = max_p;
+      ui->dirty = true;
+      return true;
+    }
   }
   return false;
 }

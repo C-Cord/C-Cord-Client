@@ -808,7 +808,7 @@ static void sync_text_input(ccord_ui *ui)
     } else if (ui->settings_page == 2 && ui->account_focus_field == 6) {
       field = true;
       kind = 0;
-    } else if (ui_settings_profile_wants_text(ui)) {
+    } else if (ui_settings_profile_wants_text(ui) || ui_settings_plugins_wants_text(ui)) {
       field = true;
       kind = 4;
     }
@@ -877,7 +877,7 @@ static bool ui_caret_wants_blink(const ccord_ui *ui)
     if (ui->account_mfa_required) return ui->account_focus_field == 4;
     if (ui_is_login_screen(ui) || ui->settings_page == 0) return ui->account_focus_field != 0;
     if (ui->settings_page == 2 && ui->account_focus_field == 6) return true;
-    return ui_settings_profile_wants_text(ui);
+    return ui_settings_profile_wants_text(ui) || ui_settings_plugins_wants_text(ui);
   }
   if (ui_server_settings_is_open(ui)) return ui_server_settings_wants_caret(ui);
   if (ui_channel_settings_is_open(ui)) return ui_channel_settings_wants_caret(ui);

@@ -61,12 +61,14 @@ static ccord_rect p_minus(ccord_rect c, int row)
 
 static ccord_rect p_track(ccord_rect c, int row)
 {
-  return (ccord_rect){c.x + 36.0f, p_row_y(c, row) + 28.0f, 200.0f, UIS_SLIDER_H};
+  float tw = c.w < 430.0f ? fmaxf(c.w - 208.0f, 64.0f) : 200.0f;
+  return (ccord_rect){c.x + 36.0f, p_row_y(c, row) + 28.0f, tw, UIS_SLIDER_H};
 }
 
 static ccord_rect p_plus(ccord_rect c, int row)
 {
-  return (ccord_rect){c.x + 244.0f, p_row_y(c, row) + 18.0f, UIS_H_BTN_SM, UIS_H_BTN_SM};
+  ccord_rect tr = p_track(c, row);
+  return (ccord_rect){tr.x + tr.w + 8.0f, p_row_y(c, row) + 18.0f, UIS_H_BTN_SM, UIS_H_BTN_SM};
 }
 
 static ccord_rect p_device(ccord_rect c, int row)
@@ -78,7 +80,16 @@ static ccord_rect p_device(ccord_rect c, int row)
 
 static ccord_rect p_zoom_reset(ccord_rect c)
 {
+  if (c.w < 430.0f) {
+    float rw = 70.0f;
+    return (ccord_rect){c.x + c.w - rw, p_row_y(c, 2) + 18.0f, rw, UIS_H_BTN_SM};
+  }
   return (ccord_rect){c.x + 330.0f, p_row_y(c, 2) + 18.0f, 90.0f, UIS_H_BTN_SM};
+}
+
+ccord_rect ui_settings_m6_zoom_reset_rect(ccord_rect content)
+{
+  return p_zoom_reset(content);
 }
 
 // ---- transient module state (one settings modal at a time; reset from ui_settings_init) ----
@@ -97,6 +108,7 @@ static struct {
   int jump_present_messages;
   bool game_detection;
   bool close_background;      // settings.ini key close_to_tray (default on): window close keeps C-Cord in the tray
+  float sounds_scroll;        // vertical scroll offset for 1-col Customize Sounds list on narrow viewports
 } s_prefs = {.drawn_page = -1, .notify_badge = true,
              .streamer_hide_personal = true, .streamer_hide_invites = true,
              .streamer_disable_sounds = true, .streamer_disable_notifications = true,
@@ -122,6 +134,7 @@ void ui_settings_m6_prefs_reset(void)
   s_prefs.jump_present_messages = P_JUMP_PRESENT_DEFAULT;
   s_prefs.game_detection = true;
   s_prefs.close_background = true;
+  s_prefs.sounds_scroll = 0.0f;
 }
 
 // ---- capabilities -----------------------------------------------------------------------------
@@ -322,20 +335,24 @@ void ui_settings_m6_appearance_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect 
     {"brand", COL(brand)}, {"online", COL(status_online)}, {"idle", COL(status_idle)}, {"dnd", COL(status_dnd)},
   };
   ccord_text_style cs = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_overline, COL(text_muted));
-  float cell = 40.0f;
+  float cell = w < 400.0f ? 32.0f : 40.0f;
+  float sgap = w < 400.0f ? 6.0f : 8.0f;
   uis_tokens tk = uis_tokens_of(ui);
-  size_t per_row = (size_t)(w / (cell + 8.0f));
+  size_t per_row = (size_t)((w + sgap) / (cell + sgap));
   if (per_row == 0) per_row = 1;
   if (per_row > 8) per_row = 8;
-  for (size_t i = 0; i < sizeof sw / sizeof sw[0]; i++) {
-    float cx = x + (float)(i % per_row) * (cell + 8.0f);
-    float cy = y + (float)(i / per_row) * (cell + 16.0f);
+  size_t nsw = sizeof sw / sizeof sw[0];
+  size_t swatch_rows = (nsw + per_row - 1u) / per_row;
+  float row_pitch = cell + 16.0f;
+  for (size_t i = 0; i < nsw; i++) {
+    float cx = x + (float)(i % per_row) * (cell + sgap);
+    float cy = y + (float)(i / per_row) * row_pitch;
     ccord_draw_rrect(r, (ccord_rect){cx - 1.0f, cy - 1.0f, cell + 2.0f, 28.0f}, tk.r_control + 1.0f, COL(border_subtle));
     ccord_draw_rrect(r, (ccord_rect){cx, cy, cell, 26.0f}, tk.r_control, sw[i].c);
-    ccord_text_draw_ellipsis(r, sw[i].name, strlen(sw[i].name), cx, cy + 28.0f, cell + 6.0f, &cs);
+    ccord_text_draw_ellipsis(r, sw[i].name, strlen(sw[i].name), cx, cy + 28.0f, cell + sgap - 2.0f, &cs);
   }
   if (ui->d.contrib && ccord_contrib_theme_preset_count(ui->d.contrib) > 0) {
-    float py = y + 54.0f;
+    float py = y + (swatch_rows <= 1u ? 54.0f : (float)swatch_rows * row_pitch);
     ccord_text_style ph = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));
     ccord_text_draw(r, "PLUGIN THEMES", 13, x, py, &ph, 0.0f);
     py += ui_line_h(ui, ph.size) + UIS_SP_1;
@@ -369,7 +386,14 @@ bool ui_settings_m6_appearance_click(ccord_ui *ui, ccord_rect content, float x, 
   }
   if (ui->d.contrib && ccord_contrib_theme_preset_count(ui->d.contrib) > 0 && ui->last_renderer) {
     uis_tokens tk = uis_tokens_of(ui);
-    float base_y = p_row_y(content, 3) + 8.0f + ui_line_h(ui, tk.fs_control) + 8.0f + 54.0f +
+    float cell = content.w < 400.0f ? 32.0f : 40.0f;
+    float sgap = content.w < 400.0f ? 6.0f : 8.0f;
+    size_t per_row = (size_t)((content.w + sgap) / (cell + sgap));
+    if (per_row == 0) per_row = 1;
+    if (per_row > 8) per_row = 8;
+    size_t swatch_rows = (8u + per_row - 1u) / per_row;
+    float sw_off = swatch_rows <= 1u ? 54.0f : (float)swatch_rows * (cell + 16.0f);
+    float base_y = p_row_y(content, 3) + 8.0f + ui_line_h(ui, tk.fs_control) + 8.0f + sw_off +
                    ui_line_h(ui, tk.fs_overline) + UIS_SP_1;
     float px = content.x;
     float py = base_y;
@@ -624,12 +648,34 @@ const ui_sound_kind ui_sound_kinds[UI_SOUND_KIND_COUNT] = {
 #define P_SOUND_ROWS 10   // two columns of ten, filled column by column
 #define P_SOUND_ROW_H 36.0f
 
+static bool p_sounds_single_col(ccord_rect c)
+{
+  return c.w < 440.0f;
+}
+
+static float p_sounds_max_scroll(ccord_rect c)
+{
+  float list_y = c.y + P_TITLE_H + 24.0f;
+  float view_h = fmaxf(c.y + c.h - list_y, 40.0f);
+  float total_h = p_sounds_single_col(c) ? ((float)UI_SOUND_KIND_COUNT * P_SOUND_ROW_H + 8.0f)
+                                         : ((float)P_SOUND_ROWS * P_SOUND_ROW_H + 8.0f);
+  float m = total_h - view_h;
+  return m > 0.0f ? m : 0.0f;
+}
+
 static ccord_rect p_sound_row(ccord_rect c, int kind)
 {
+  float max_s = p_sounds_max_scroll(c);
+  float scroll = s_prefs.sounds_scroll;
+  if (scroll < 0.0f) scroll = 0.0f;
+  if (scroll > max_s) scroll = max_s;
+  if (p_sounds_single_col(c)) {
+    return (ccord_rect){c.x, c.y + P_TITLE_H + 24.0f + (float)kind * P_SOUND_ROW_H - scroll, c.w, UIS_H_BTN_SM};
+  }
   float colw = (c.w - 24.0f) * 0.5f;
   int col = kind / P_SOUND_ROWS, row = kind % P_SOUND_ROWS;
   float x = c.x + (float)col * (colw + 24.0f);
-  return (ccord_rect){x, c.y + P_TITLE_H + 24.0f + (float)row * P_SOUND_ROW_H, colw, UIS_H_BTN_SM};
+  return (ccord_rect){x, c.y + P_TITLE_H + 24.0f + (float)row * P_SOUND_ROW_H - scroll, colw, UIS_H_BTN_SM};
 }
 
 static ccord_rect p_sound_toggle(ccord_rect c, int kind)
@@ -675,26 +721,40 @@ static void p_draw_sounds(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
   p_button(ui, r, p_sounds_back(c), "Back", false, false);
   p_note(ui, r, c.x, c.y + P_TITLE_H, c.w,
          master ? "Choose which sounds play." : "Sounds are off: turn SOUNDS on to change these.");
-  float colw = (c.w - 24.0f) * 0.5f;
+  float max_s = p_sounds_max_scroll(c);
+  if (s_prefs.sounds_scroll < 0.0f) s_prefs.sounds_scroll = 0.0f;
+  if (s_prefs.sounds_scroll > max_s) s_prefs.sounds_scroll = max_s;
+  float list_y = c.y + P_TITLE_H + 22.0f;
+  ccord_rect clip = {c.x - 4.0f, list_y, c.w + 8.0f, fmaxf(c.y + c.h - list_y, 20.0f)};
+  bool single = p_sounds_single_col(c);
+  float colw = single ? c.w : (c.w - 24.0f) * 0.5f;
+  ccord_push_clip(r, clip);
   for (int k = 0; k < UI_SOUND_KIND_COUNT; k++) {
-    ccord_rect t = p_sound_toggle(c, k);
+    ccord_rect row = p_sound_row(c, k);
+    if (row.y + row.h < clip.y || row.y > clip.y + clip.h) continue;
+    ccord_rect t = uis_toggle_rect(row);
     ccord_text_style ls = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, master ? COL(text_header) : COL(text_muted));
     ccord_vec2 lm = ccord_text_measure(r, ui_sound_kinds[k].label, strlen(ui_sound_kinds[k].label), &ls, 0.0f);
-    ccord_text_draw_ellipsis(r, ui_sound_kinds[k].label, strlen(ui_sound_kinds[k].label), t.x - (colw - 44.0f),
+    ccord_text_draw_ellipsis(r, ui_sound_kinds[k].label, strlen(ui_sound_kinds[k].label), row.x,
                              t.y + (t.h - lm.y) * 0.5f, colw - 44.0f - 10.0f, &ls);
     uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, t), .disabled = !master};
-    uis_toggle(ui, r, p_sound_row(c, k), ui_sound_kind_enabled(ui, (unsigned)k) && master, st, "m6ps", (uint64_t)k);
+    uis_toggle(ui, r, row, ui_sound_kind_enabled(ui, (unsigned)k) && master, st, "m6ps", (uint64_t)k);
   }
+  ccord_pop_clip(r);
 }
 
 static bool p_click_sounds(ccord_ui *ui, ccord_rect c, float x, float y)
 {
   if (ui_in_rect(x, y, p_sounds_back(c))) {
     ui->settings_sounds_open = false;
+    s_prefs.sounds_scroll = 0.0f;
     ui->dirty = true;
     return true;
   }
   if (!ui->settings_notify_sounds) return false;
+  float list_y = c.y + P_TITLE_H + 22.0f;
+  ccord_rect clip = {c.x, list_y, c.w, fmaxf(c.y + c.h - list_y, 20.0f)};
+  if (!ui_in_rect(x, y, clip)) return false;
   for (int k = 0; k < UI_SOUND_KIND_COUNT; k++) {
     if (ui_in_rect(x, y, p_sound_toggle(c, k))) {
       ui->settings_sounds_off ^= 1u << k;
@@ -703,6 +763,18 @@ static bool p_click_sounds(ccord_ui *ui, ccord_rect c, float x, float y)
     }
   }
   return false;
+}
+
+bool ui_settings_m6_prefs_wheel(ccord_ui *ui, int page, ccord_rect content, float wheel)
+{
+  if (!ui || page != CCORD_M6_PREFS_NOTIFICATIONS || !ui->settings_sounds_open) return false;
+  float max_s = p_sounds_max_scroll(content);
+  if (max_s <= 0.0f) return false;
+  s_prefs.sounds_scroll -= wheel * 48.0f;
+  if (s_prefs.sounds_scroll < 0.0f) s_prefs.sounds_scroll = 0.0f;
+  if (s_prefs.sounds_scroll > max_s) s_prefs.sounds_scroll = max_s;
+  ui->dirty = true;
+  return true;
 }
 
 // ---- Notifications page -----------------------------------------------------------------------
@@ -1024,7 +1096,9 @@ static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
   p_toggle_row(ui, r, c, 3, k_ccord_controls[3].label,
                "Don't show desktop notifications while this window is focused.",
                s_prefs.notify_focus_suppress, false, "m6pc", 3);
-  p_toggle_row(ui, r, c, 4, k_ccord_controls[4].label, "Keep C-Cord running in the background when the window is closed",
+  p_toggle_row(ui, r, c, 4, k_ccord_controls[4].label,
+               ui->force_mobile_mode ? "Keep connected in the background for live notifications (uses more battery)"
+                                     : "Keep C-Cord running in the background when the window is closed",
                s_prefs.close_background, false, "m6pc", 4);
   char ver_line[160];
   if (ui->update_info.install_kind[0]) {

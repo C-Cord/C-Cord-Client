@@ -218,32 +218,49 @@ static void draw_voice(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 // The "Automatic" pill at the end of a streaming chip row: a chip, selected while the choice is Automatic.
 static void draw_auto_pill(ccord_ui *ui, ccord_renderer *r, const sgeom *g, int row, bool sel)
 {
-  ccord_rect ar = st_auto_pill_rect(g, row);
+  ccord_rect ar = st_stream_auto_pill_rect(g, row);
   uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, ar), .selected = sel};
   uis_chip(ui, r, ar, "Automatic", st, "sauto", (uint64_t)row);
 }
 
+static void draw_stream_chip_row(ccord_ui *ui, ccord_renderer *r, const sgeom *g, int row, int count,
+                                 const char *const *labels, int selected)
+{
+  for (int i = 0; i < count; i++) {
+    ccord_rect o = st_stream_chip_rect(g, row, i, count);
+    uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, o), .selected = i == selected};
+    uint64_t cid = (uint64_t)ui->settings_page * 4096u + (uint64_t)row * 64u + (uint64_t)i;
+    uis_chip(ui, r, o, labels[i], st, "chip", cid);
+  }
+}
+
+static void draw_stream_label(ccord_ui *ui, ccord_renderer *r, const sgeom *g, int row, const char *label)
+{
+  ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_overline, COL(text_muted));
+  ccord_text_draw(r, label, strlen(label), g->content.x, st_stream_row_y(g, row), &ls, 0.0f);
+}
+
 static void draw_streaming(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 {
-  draw_row_label(ui, r, g, 0, "GPU / DISCORD ENCODER");
+  draw_stream_label(ui, r, g, 0, "GPU / DISCORD ENCODER");
   draw_auto_pill(ui, r, g, 0, ui->settings_encoder == (int)CCORD_STREAM_ENCODER_AUTO);
-  draw_chip_row(ui, r, g, 0, STREAM_ENC_COUNT, st_k_encoders, st_find_val_index(st_k_encoder_vals, STREAM_ENC_COUNT, ui->settings_encoder));
-  draw_row_label(ui, r, g, 1, "CAPTURE FRAMEWORK");
+  draw_stream_chip_row(ui, r, g, 0, STREAM_ENC_COUNT, st_k_encoders, st_find_val_index(st_k_encoder_vals, STREAM_ENC_COUNT, ui->settings_encoder));
+  draw_stream_label(ui, r, g, 1, "CAPTURE FRAMEWORK");
   draw_auto_pill(ui, r, g, 1, ui->settings_framework == (int)CCORD_STREAM_FRAMEWORK_AUTO);
-  draw_chip_row(ui, r, g, 1, STREAM_FW_COUNT, st_k_frameworks, st_find_val_index(st_k_framework_vals, STREAM_FW_COUNT, ui->settings_framework));
-  draw_row_label(ui, r, g, 2, "RESOLUTION");
-  draw_chip_row(ui, r, g, 2, 4, st_k_resolutions, ui->settings_resolution);
-  draw_row_label(ui, r, g, 3, "FRAMERATE");
-  draw_chip_row(ui, r, g, 3, 3, st_k_fps, ui->settings_fps);
-  draw_row_label(ui, r, g, 4, "CODEC");
-  draw_chip_row(ui, r, g, 4, 2, st_k_codecs, ui->settings_codec);
+  draw_stream_chip_row(ui, r, g, 1, STREAM_FW_COUNT, st_k_frameworks, st_find_val_index(st_k_framework_vals, STREAM_FW_COUNT, ui->settings_framework));
+  draw_stream_label(ui, r, g, 2, "RESOLUTION");
+  draw_stream_chip_row(ui, r, g, 2, 4, st_k_resolutions, ui->settings_resolution);
+  draw_stream_label(ui, r, g, 3, "FRAMERATE");
+  draw_stream_chip_row(ui, r, g, 3, 3, st_k_fps, ui->settings_fps);
+  draw_stream_label(ui, r, g, 4, "CODEC");
+  draw_stream_chip_row(ui, r, g, 4, 2, st_k_codecs, ui->settings_codec);
   const ccord_stream_state *st = ccord_store_stream(ui->d.store);
   ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_muted));
   char note[192];
   snprintf(note, sizeof note, "%s",
            st && st->active ? "A stream is live; changes apply to the next Go Live session."
                             : "Encoder and capture backend default to Automatic and are configured here.");
-  ccord_text_draw_ellipsis(r, note, strlen(note), g->content.x, st_row_y(g, 5) + 4.0f, g->content.w, &ns);
+  ccord_text_draw_ellipsis(r, note, strlen(note), g->content.x, st_stream_row_y(g, 5) + 4.0f, g->content.w, &ns);
 }
 
 static void draw_text_images(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
@@ -387,17 +404,31 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
     uis_button(ui, r, g.back, "< Back", UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){0}, "sback", 0);
   }
   if (g.content.w > 0.0f) {
+    if (st_s_last_drawn_page != ui->settings_page) st_s_page_scroll = 0.0f;
     ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_title, COL(text_header));
     const char *title = st_k_pages[ui->settings_page].label;
     ccord_text_draw(r, title, strlen(title), g.content.x, g.content.y, &ts, 0.0f);
-    ccord_push_clip(r, g.panel);
+    bool page_scrolls = ui->settings_page == SP_ACCOUNT || ui->settings_page == SP_APPEARANCE ||
+                        ui->settings_page == SP_STREAMING || ui->settings_page == SP_KEYBINDS;
+    sgeom gs = g;
+    ccord_rect body_clip = g.panel;
+    if (page_scrolls) {
+      float max_p = st_page_max_scroll(ui, &g);
+      if (st_s_page_scroll < 0.0f) st_s_page_scroll = 0.0f;
+      if (st_s_page_scroll > max_p) st_s_page_scroll = max_p;
+      if (max_p > 0.0f) {
+        gs.content.y -= st_s_page_scroll;
+        body_clip = (ccord_rect){g.content.x - 4.0f, g.content.y + 34.0f, g.content.w + 8.0f, fmaxf(g.content.h - 34.0f, 20.0f)};
+      }
+    }
+    ccord_push_clip(r, body_clip);
     ccord_push_alpha(r, ui_enter(ui, "spagebody", (uint64_t)ui->settings_page, 160));   // a page eases in when chosen
     switch (ui->settings_page) {
-      case SP_ACCOUNT: st_draw_account(ui, r, &g); break;
+      case SP_ACCOUNT: st_draw_account(ui, r, &gs); break;
       case SP_PROFILE_EDIT: ui_settings_profile_draw(ui, r, g.content, g.panel); break;
-      case SP_APPEARANCE: draw_appearance(ui, r, &g); break;
+      case SP_APPEARANCE: draw_appearance(ui, r, &gs); break;
       case SP_VOICE: draw_voice(ui, r, &g); break;
-      case SP_STREAMING: draw_streaming(ui, r, &g); break;
+      case SP_STREAMING: draw_streaming(ui, r, &gs); break;
       case SP_TEXT_IMAGES: draw_text_images(ui, r, &g); break;
       case SP_NOTIFICATIONS:
         ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_NOTIFICATIONS, g.content, g.panel);
@@ -417,7 +448,7 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
       case SP_CCORD:
         ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_CCORD, g.content, g.panel);
         break;
-      case SP_KEYBINDS: draw_keybinds(ui, r, &g); break;
+      case SP_KEYBINDS: draw_keybinds(ui, r, &gs); break;
       case SP_PRIVACY:
       case SP_DEVICES:
       case SP_CONNECTIONS:
@@ -479,20 +510,20 @@ void ccord_ui_get_settings_debug(const ccord_ui *ui, ccord_ui_settings_debug *ou
   out->output_volume = st_vol_track_rect(&gv, 3);
   for (int i = 0; i < 2; i++) out->voice_mode[i] = st_chips_rect(&gv, 4, i, 2);
   for (int i = 0; i < 5; i++) {
-    out->encoder[i] = st_chips_rect(&g, 0, i, 5);
-    out->framework[i] = st_chips_rect(&g, 1, i, 5);
+    out->encoder[i] = st_stream_chip_rect(&g, 0, i, 5);
+    out->framework[i] = st_stream_chip_rect(&g, 1, i, 5);
   }
-  for (int i = 0; i < 2; i++) out->codec[i] = st_chips_rect(&g, 4, i, 2);
-  for (int i = 0; i < 3; i++) out->fps[i] = st_chips_rect(&g, 3, i, 3);
-  for (int i = 0; i < 4; i++) out->resolution[i] = st_chips_rect(&g, 2, i, 4);
+  for (int i = 0; i < 2; i++) out->codec[i] = st_stream_chip_rect(&g, 4, i, 2);
+  for (int i = 0; i < 3; i++) out->fps[i] = st_stream_chip_rect(&g, 3, i, 3);
+  for (int i = 0; i < 4; i++) out->resolution[i] = st_stream_chip_rect(&g, 2, i, 4);
   out->embed_toggle = st_toggle_rect(&g, 0);
   out->attachment_toggle = st_toggle_rect(&g, 1);
   out->hardware_toggle = st_toggle_rect(&gv, 8);
   out->plugins_switch = ui_settings_rect(ui, false);
-  out->billing_btn = st_account_web_btn_rect(&g, 0);
-  out->nitro_btn = st_account_web_btn_rect(&g, 1);
-  out->shop_btn = st_account_web_btn_rect(&g, 2);
-  out->boost_btn = st_account_web_btn_rect(&g, 3);
+  out->billing_btn = st_account_web_btn_rect(ui, &g, 0);
+  out->nitro_btn = st_account_web_btn_rect(ui, &g, 1);
+  out->shop_btn = st_account_web_btn_rect(ui, &g, 2);
+  out->boost_btn = st_account_web_btn_rect(ui, &g, 3);
   out->quickcss_toggle = st_toggle_rect(&g, 5);
   out->reduced_motion_toggle = st_toggle_rect(&g, 7);
   out->notify_desktop_toggle = st_toggle_rect(&g, 3);

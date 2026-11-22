@@ -55,6 +55,7 @@ bool ui_forward_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced);
 // Settings wheel (settings.c): the Voice & Video page and the list pages of settings_m6_devices.c. True when the
 // wheel moved one of them.
 bool ui_settings_handle_wheel(ccord_ui *ui, const ccord_input_event *ev);
+bool ui_settings_plugins_wants_text(const ccord_ui *ui);
 static inline bool ui_sound_kind_enabled(const ccord_ui *ui, unsigned kind)
 {
   return kind < UI_SOUND_KIND_COUNT && (!ui || (ui->settings_sounds_off & (1u << kind)) == 0u);

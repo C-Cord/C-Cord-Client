@@ -121,7 +121,9 @@ static ccord_rect m6_conn_toggle_rect(ccord_rect card, int idx)
 
 static ccord_rect m6_scroll_track(ccord_rect content)
 {
-  return (ccord_rect){content.x + content.w + 12.0f, content.y + M6_TITLE_H, 8.0f, content.h - M6_TITLE_H};
+  // Keep scrollbar inside viewport on narrow mobile screens where content fills to within 16dp of right edge.
+  float tx = content.w < 460.0f ? (content.x + content.w - 6.0f) : (content.x + content.w + 12.0f);
+  return (ccord_rect){tx, content.y + M6_TITLE_H, 8.0f, content.h - M6_TITLE_H};
 }
 
 static ccord_rect m6_scroll_up(ccord_rect content)
@@ -631,18 +633,25 @@ static void m6_draw_conn_card(ccord_ui *ui, ccord_renderer *r, ccord_rect card, 
   char title[160];
   snprintf(title, sizeof title, "%s — %s", c->type, conn_name);
   ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_body, COL(text_header));
-  float tw = ccord_text_draw_ellipsis(r, title, strlen(title), card.x + 12.0f, card.y + 10.0f, card.w - 250.0f, &hs);
-  float bx = card.x + 12.0f + tw + 10.0f;
   ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_control, COL(status_online));
-  if (c->verified) {
+  ccord_text_style rs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_control, COL(danger));
+  ccord_rect disc = m6_conn_disconnect_rect(card);
+  float badge_w = 0.0f;
+  float ver_w = 0.0f, rev_w = 0.0f;
+  if (c->verified) { ver_w = ccord_text_measure(r, "Verified", 8, &bs, 0.0f).x; badge_w += ver_w + 10.0f; }
+  if (c->revoked) { rev_w = ccord_text_measure(r, "Revoked", 7, &rs, 0.0f).x; badge_w += rev_w + 10.0f; }
+  float avail_t = disc.x - (card.x + 12.0f) - 10.0f - badge_w;
+  if (avail_t < 60.0f) avail_t = fmaxf(disc.x - (card.x + 12.0f) - 10.0f, 40.0f);
+  float tw = ccord_text_draw_ellipsis(r, title, strlen(title), card.x + 12.0f, card.y + 10.0f, avail_t, &hs);
+  float bx = card.x + 12.0f + tw + 10.0f;
+  if (c->verified && bx + ver_w <= disc.x - 4.0f) {
     ccord_text_draw(r, "Verified", 8, bx, card.y + 13.0f, &bs, 0.0f);
-    bx += ccord_text_measure(r, "Verified", 8, &bs, 0.0f).x + 10.0f;
+    bx += ver_w + 10.0f;
   }
-  if (c->revoked) {
-    ccord_text_style rs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_control, COL(danger));
+  if (c->revoked && bx + rev_w <= disc.x - 4.0f) {
     ccord_text_draw(r, "Revoked", 7, bx, card.y + 13.0f, &rs, 0.0f);
   }
-  m6_button(ui, r, m6_conn_disconnect_rect(card), armed ? "Confirm" : "Disconnect", false, false);
+  m6_button(ui, r, disc, armed ? "Confirm" : "Disconnect", false, false);
   static const char *const k_labels[3] = {"Display on profile", "Display on status", "Sync friends"};
   const bool on[3] = {c->visibility != 0, c->show_activity, c->friend_sync};
   ccord_text_style ls = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_secondary));

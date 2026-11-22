@@ -30,6 +30,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       if (ui_in_rect(x, y, st_quickcss_box_rect(g))) {
         ui->account_focus_field = 6;   // sentinel: routes key/text events to the snippet editor
         ccord_text_edit_set_caret(&ui->quickcss_edit, ui->quickcss_edit.len, false);
+        if (ui->touch_mode) ui->touch_text_focused = true;
         ui->dirty = true;
         return false;   // focusing the box does not modify any persisted setting
       }
@@ -194,8 +195,8 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       break;
     }
     case SP_STREAMING: {
-      ccord_rect auto_enc = st_auto_pill_rect(g, 0);
-      ccord_rect auto_fw = st_auto_pill_rect(g, 1);
+      ccord_rect auto_enc = st_stream_auto_pill_rect(g, 0);
+      ccord_rect auto_fw = st_stream_auto_pill_rect(g, 1);
       if (ui_in_rect(x, y, auto_enc)) {
         ui->settings_encoder = (int)CCORD_STREAM_ENCODER_AUTO;
         ui->gl_encoder = (int)CCORD_STREAM_ENCODER_AUTO;
@@ -209,7 +210,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         return true;
       }
       for (int i = 0; i < STREAM_ENC_COUNT; i++) {
-        if (ui_in_rect(x, y, st_chips_rect(g, 0, i, STREAM_ENC_COUNT))) {
+        if (ui_in_rect(x, y, st_stream_chip_rect(g, 0, i, STREAM_ENC_COUNT))) {
           ui->settings_encoder = st_k_encoder_vals[i];
           ui->gl_encoder = st_k_encoder_vals[i];   // Go Live starts from these defaults
           ui->dirty = true;
@@ -217,7 +218,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         }
       }
       for (int i = 0; i < STREAM_FW_COUNT; i++) {
-        if (ui_in_rect(x, y, st_chips_rect(g, 1, i, STREAM_FW_COUNT))) {
+        if (ui_in_rect(x, y, st_stream_chip_rect(g, 1, i, STREAM_FW_COUNT))) {
           ui->settings_framework = st_k_framework_vals[i];
           ui->gl_framework = st_k_framework_vals[i];
           ui->dirty = true;
@@ -225,7 +226,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         }
       }
       for (int i = 0; i < 4; i++) {
-        if (ui_in_rect(x, y, st_chips_rect(g, 2, i, 4))) {
+        if (ui_in_rect(x, y, st_stream_chip_rect(g, 2, i, 4))) {
           ui->settings_resolution = i;
           ui->gl_resolution = i;
           ui->dirty = true;
@@ -233,7 +234,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         }
       }
       for (int i = 0; i < 3; i++) {
-        if (ui_in_rect(x, y, st_chips_rect(g, 3, i, 3))) {
+        if (ui_in_rect(x, y, st_stream_chip_rect(g, 3, i, 3))) {
           ui->settings_fps = i;
           ui->gl_fps = i;
           ui->dirty = true;
@@ -241,7 +242,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         }
       }
       for (int i = 0; i < 2; i++) {
-        if (ui_in_rect(x, y, st_chips_rect(g, 4, i, 2))) {
+        if (ui_in_rect(x, y, st_stream_chip_rect(g, 4, i, 2))) {
           ui->settings_codec = i;
           ui->gl_codec = i;
           ui->dirty = true;
@@ -288,19 +289,19 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       ccord_rect r_inst, r_disc, r_upd, r_sync;
       st_plugin_subtab_rects(g, &r_inst, &r_disc, &r_upd, &r_sync);
       if (ui_in_rect(x, y, r_inst)) {
-        st_s_plugin_subtab = 0; st_s_plugin_search_focused = false;
+        st_s_plugin_subtab = 0; st_s_plugin_search_focused = false; st_s_page_scroll = 0.0f;
         st_s_plugin_log_id[0] = '\0'; st_s_plugin_consent_id[0] = '\0'; st_s_plugin_consent_perms = 0; st_s_plugin_consent_box_h = 224.0f; st_s_plugin_detail_id[0] = '\0';
         return true;
       }
       if (ui_in_rect(x, y, r_disc)) {
-        st_s_plugin_subtab = 1; st_s_plugin_search_focused = false;
+        st_s_plugin_subtab = 1; st_s_plugin_search_focused = false; st_s_page_scroll = 0.0f;
         st_s_plugin_log_id[0] = '\0'; st_s_plugin_consent_id[0] = '\0'; st_s_plugin_consent_perms = 0; st_s_plugin_consent_box_h = 224.0f; st_s_plugin_detail_id[0] = '\0';
         const ccord_catalog_status *cst = ccord_contrib_catalog_status(ui->d.contrib);
         if (cst && !cst->has_loaded && !cst->syncing) st_trigger_plugin_discover_query(ui, false);
         return true;
       }
       if (ui_in_rect(x, y, r_upd)) {
-        st_s_plugin_subtab = 2; st_s_plugin_search_focused = false;
+        st_s_plugin_subtab = 2; st_s_plugin_search_focused = false; st_s_page_scroll = 0.0f;
         st_s_plugin_log_id[0] = '\0'; st_s_plugin_consent_id[0] = '\0'; st_s_plugin_consent_perms = 0; st_s_plugin_consent_box_h = 224.0f; st_s_plugin_detail_id[0] = '\0';
         ccord_contrib_catalog_check_updates(ui->d.contrib);
         return true;
@@ -310,17 +311,27 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         return true;
       }
 
-      float px = g->content.x, py = g->content.y + 120.0f, pw = g->content.w;
+      float px = g->content.x, body_top = st_plugin_body_y(g), pw = g->content.w;
+      ccord_rect body_clip = {px, body_top - 4.0f, pw, fmaxf(g->content.y + g->content.h - body_top + 6.0f, 40.0f)};
+      if (!ui_in_rect(x, y, body_clip)) return false;
+      float py = body_top - st_s_page_scroll;
       if (st_s_plugin_log_id[0]) {
-        if (ui_in_rect(x, y, (ccord_rect){px + pw - 246.0f, py - 4.0f, 74.0f, UIS_H_BTN_SM})) {
+        float ly0 = body_top;
+        ccord_rect b_rel = pw < 430.0f ? (ccord_rect){px, ly0 + 24.0f, 74.0f, UIS_H_BTN_SM}
+                                       : (ccord_rect){px + pw - 246.0f, ly0 - 4.0f, 74.0f, UIS_H_BTN_SM};
+        ccord_rect b_clr = pw < 430.0f ? (ccord_rect){px + 82.0f, ly0 + 24.0f, 74.0f, UIS_H_BTN_SM}
+                                       : (ccord_rect){px + pw - 164.0f, ly0 - 4.0f, 74.0f, UIS_H_BTN_SM};
+        ccord_rect b_bck = pw < 430.0f ? (ccord_rect){px + 164.0f, ly0 + 24.0f, 82.0f, UIS_H_BTN_SM}
+                                       : (ccord_rect){px + pw - 82.0f, ly0 - 4.0f, 82.0f, UIS_H_BTN_SM};
+        if (ui_in_rect(x, y, b_rel)) {
           ccord_contrib_plugin_reload(ui->d.contrib, st_s_plugin_log_id);
           return true;
         }
-        if (ui_in_rect(x, y, (ccord_rect){px + pw - 164.0f, py - 4.0f, 74.0f, UIS_H_BTN_SM})) {
+        if (ui_in_rect(x, y, b_clr)) {
           ccord_contrib_clear_plugin_log(ui->d.contrib, st_s_plugin_log_id);
           return true;
         }
-        if (ui_in_rect(x, y, (ccord_rect){px + pw - 82.0f, py - 4.0f, 82.0f, UIS_H_BTN_SM})) {
+        if (ui_in_rect(x, y, b_bck)) {
           st_s_plugin_log_id[0] = '\0';
           return true;
         }
@@ -328,17 +339,22 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       }
       if (st_s_plugin_consent_id[0]) {
         ccord_rect box = {px, py, pw, st_s_plugin_consent_box_h};
-        if (ui_in_rect(x, y, (ccord_rect){box.x + 16.0f, box.y + box.h - 46.0f, 184.0f, UIS_H_BTN})) {
+        float text_w = fmaxf(80.0f, pw - 32.0f);
+        float app_w = fminf(184.0f, fmaxf(text_w - 104.0f, 110.0f));
+        float can_w = fminf(96.0f, fmaxf(text_w - app_w - 8.0f, 70.0f));
+        if (ui_in_rect(x, y, (ccord_rect){box.x + 16.0f, box.y + box.h - 46.0f, app_w, UIS_H_BTN})) {
           ccord_contrib_plugin_consent_accept_for(ui->d.contrib, st_s_plugin_consent_id, st_s_plugin_consent_perms);
           st_s_plugin_consent_id[0] = '\0';
           st_s_plugin_consent_perms = 0;
           st_s_plugin_consent_box_h = 224.0f;
+          st_s_page_scroll = 0.0f;
           return true;
         }
-        if (ui_in_rect(x, y, (ccord_rect){box.x + 212.0f, box.y + box.h - 46.0f, 96.0f, UIS_H_BTN})) {
+        if (ui_in_rect(x, y, (ccord_rect){box.x + 16.0f + app_w + 8.0f, box.y + box.h - 46.0f, can_w, UIS_H_BTN})) {
           st_s_plugin_consent_id[0] = '\0';
           st_s_plugin_consent_perms = 0;
           st_s_plugin_consent_box_h = 224.0f;
+          st_s_page_scroll = 0.0f;
           return true;
         }
         return false;
@@ -351,6 +367,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         }
         if (ui_in_rect(x, y, (ccord_rect){px, py, 86.0f, UIS_H_BTN_SM})) {
           st_s_plugin_detail_id[0] = '\0';
+          st_s_page_scroll = 0.0f;
           return true;
         }
         if (!e) {
@@ -361,7 +378,8 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
           }
           return false;
         }
-        ccord_rect box = {px, py + 34.0f, pw, 286.0f};
+        float det_off = pw < 480.0f ? 20.0f : 0.0f;
+        ccord_rect box = {px, py + 34.0f, pw, 286.0f + det_off};
         if (!e->bundled && !e->installing && (!e->installed || e->update_available)) {
           if (ui_in_rect(x, y, (ccord_rect){box.x + 16.0f, box.y + box.h - 44.0f, 152.0f, UIS_H_BTN})) {
             ccord_contrib_catalog_install(ui->d.contrib, e->id);
@@ -387,15 +405,15 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       }
 
       if (st_s_plugin_subtab == 1) {
-        // Row 1: Search input + Search button + Sort toggle
-        ccord_rect r_q = {px, py, pw - 196.0f, UIS_H_BTN_SM};
-        ccord_rect r_go = {px + pw - 188.0f, py, 74.0f, UIS_H_BTN_SM};
-        ccord_rect r_sort = {px + pw - 106.0f, py, 106.0f, UIS_H_BTN_SM};
+        ccord_rect r_q, r_go, r_sort, tier_rects[4], r_class1;
+        py = st_plugin_discover_layout(g, py, &r_q, &r_go, &r_sort, tier_rects, &r_class1);
         if (ui_in_rect(x, y, r_q)) {
           st_s_plugin_search_focused = true;
+          if (ui->touch_mode) ui->touch_text_focused = true;
           return true;
         }
         st_s_plugin_search_focused = false;
+        if (ui->touch_mode) ui->touch_text_focused = false;
         if (ui_in_rect(x, y, r_go)) {
           st_trigger_plugin_discover_query(ui, false);
           return true;
@@ -405,39 +423,34 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
           st_trigger_plugin_discover_query(ui, false);
           return true;
         }
-        py += 34.0f;
-
-        // Row 2: Tier filters + API Class 1 toggle (server-side query)
-        float fx = px;
-        static const float k_fw[4] = {54.0f, 76.0f, 76.0f, 88.0f};
         for (int t = 0; t < 4; t++) {
-          if (ui_in_rect(x, y, (ccord_rect){fx, py, k_fw[t], UIS_H_BTN_SM})) {
+          if (ui_in_rect(x, y, tier_rects[t])) {
             st_s_plugin_tier_filter = t;
             st_trigger_plugin_discover_query(ui, false);
             return true;
           }
-          fx += k_fw[t] + 6.0f;
         }
-        if (ui_in_rect(x, y, (ccord_rect){fx + 4.0f, py, 126.0f, UIS_H_BTN_SM})) {
+        if (ui_in_rect(x, y, r_class1)) {
           st_s_plugin_class1_only = !st_s_plugin_class1_only;
           st_trigger_plugin_discover_query(ui, false);
           return true;
         }
-        py += 36.0f;
 
         const ccord_catalog_status *cst = ccord_contrib_catalog_status(ui->d.contrib);
-        float bottom_lim = g->panel.y + g->panel.h - (cst && cst->has_more ? 52.0f : 16.0f);
         size_t cn = ui->d.contrib ? ccord_contrib_catalog_count(ui->d.contrib) : 0;
+        bool narrow_card = pw < 480.0f;
         for (size_t i = 0; i < cn; i++) {
           const ccord_catalog_entry *e = ccord_contrib_catalog_at(ui->d.contrib, i);
           if (!e) continue;
           bool has_w = e->warning_sev != CCORD_WARN_NONE && e->warning_title && e->warning_title[0];
-          float ch = 98.0f + (has_w ? 20.0f : 0.0f);
-          if (py + ch > bottom_lim) break;
-          ccord_rect btn_det = {px + pw - 200.0f, py + ch - 34.0f, 76.0f, UIS_H_BTN_SM};
-          ccord_rect btn_act = {px + pw - 116.0f, py + ch - 34.0f, 102.0f, UIS_H_BTN_SM};
+          float ch = (narrow_card ? 136.0f : 98.0f) + (has_w ? 20.0f : 0.0f);
+          ccord_rect btn_det = narrow_card ? (ccord_rect){px + 14.0f, py + ch - 34.0f, 84.0f, UIS_H_BTN_SM}
+                                           : (ccord_rect){px + pw - 200.0f, py + ch - 34.0f, 76.0f, UIS_H_BTN_SM};
+          ccord_rect btn_act = narrow_card ? (ccord_rect){px + 106.0f, py + ch - 34.0f, 108.0f, UIS_H_BTN_SM}
+                                           : (ccord_rect){px + pw - 116.0f, py + ch - 34.0f, 102.0f, UIS_H_BTN_SM};
           if (ui_in_rect(x, y, btn_det)) {
             snprintf(st_s_plugin_detail_id, sizeof st_s_plugin_detail_id, "%s", e->id);
+            st_s_page_scroll = 0.0f;
             ccord_contrib_catalog_fetch_detail(ui->d.contrib, e->id);
             return true;
           }
@@ -450,7 +463,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
           py += ch + 10.0f;
         }
         if (cst && cst->has_more && !cst->loading_more) {
-          ccord_rect r_more = {px, g->panel.y + g->panel.h - 44.0f, 148.0f, UIS_H_BTN_SM};
+          ccord_rect r_more = {px, py + 4.0f, 148.0f, UIS_H_BTN_SM};
           if (ui_in_rect(x, y, r_more)) {
             st_trigger_plugin_discover_query(ui, true);
             return true;
@@ -463,7 +476,10 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         // Updates & Settings tab clicks
         const ccord_catalog_prefs *pr_cur = ccord_contrib_catalog_prefs(ui->d.contrib);
         ccord_catalog_prefs pr = pr_cur ? *pr_cur : (ccord_catalog_prefs){.auto_update_enabled = false, .auto_update_min_tier = 2};
-        ccord_rect box = {px, py, pw, 142.0f};
+        ccord_rect tier_rects[3];
+        float box_h = 142.0f;
+        (void)st_plugin_updates_tier_layout(px, pw, py + 68.0f, tier_rects, &box_h);
+        ccord_rect box = {px, py, pw, box_h};
         ccord_rect sw_row = {box.x + 14.0f, box.y + 12.0f, box.w - 28.0f, 36.0f};
         ccord_rect sw_hit = {sw_row.x + sw_row.w - 48.0f, sw_row.y + 4.0f, 44.0f, 26.0f};
         if (ui_in_rect(x, y, sw_hit)) {
@@ -471,31 +487,33 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
           ccord_contrib_catalog_set_prefs(ui->d.contrib, &pr);
           return true;
         }
-        float tx = box.x + 14.0f, ty = box.y + 68.0f;
-        static const float k_tw[3] = {104.0f, 134.0f, 118.0f};
         for (int k = 0; k < 3; k++) {
-          if (ui_in_rect(x, y, (ccord_rect){tx, ty, k_tw[k], UIS_H_BTN_SM})) {
+          if (ui_in_rect(x, y, tier_rects[k])) {
             pr.auto_update_min_tier = (uint8_t)(k + 1);
             ccord_contrib_catalog_set_prefs(ui->d.contrib, &pr);
             return true;
           }
-          tx += k_tw[k] + 8.0f;
         }
-        if (ui_in_rect(x, y, (ccord_rect){box.x + box.w - 178.0f, box.y + box.h - 36.0f, 164.0f, UIS_H_BTN_SM})) {
+        ccord_rect r_run = pw < 410.0f
+                             ? (ccord_rect){box.x + 14.0f, box.y + box.h - 36.0f, fminf(184.0f, pw - 28.0f), UIS_H_BTN_SM}
+                             : (ccord_rect){box.x + box.w - 178.0f, box.y + box.h - 36.0f, 164.0f, UIS_H_BTN_SM};
+        if (ui_in_rect(x, y, r_run)) {
           ccord_contrib_catalog_run_auto_updates(ui->d.contrib);
           return true;
         }
-        py += box.h + 28.0f;
+        py += box.h + 32.0f;
         size_t un = ui->d.contrib ? ccord_contrib_catalog_update_count(ui->d.contrib) : 0;
+        bool narrow_upd = pw < 440.0f;
         for (size_t i = 0; i < un; i++) {
           const ccord_catalog_entry *e = ccord_contrib_catalog_update_at(ui->d.contrib, i);
           if (!e || !e->update_available) continue;
-          float ch = 72.0f;
-          if (py + ch > g->panel.y + g->panel.h - 16.0f) break;
-          ccord_rect btn_u = {px + pw - 134.0f, py + 20.0f, 120.0f, UIS_H_BTN_SM};
+          float ch = narrow_upd ? 98.0f : 72.0f;
+          ccord_rect btn_u = narrow_upd ? (ccord_rect){px + 14.0f, py + ch - 34.0f, 132.0f, UIS_H_BTN_SM}
+                                        : (ccord_rect){px + pw - 134.0f, py + 20.0f, 120.0f, UIS_H_BTN_SM};
           if (ui_in_rect(x, y, btn_u) && !e->installing) {
             if (e->update_needs_review) {
               snprintf(st_s_plugin_detail_id, sizeof st_s_plugin_detail_id, "%s", e->id);
+              st_s_page_scroll = 0.0f;
               ccord_contrib_catalog_fetch_detail(ui->d.contrib, e->id);
             } else {
               ccord_contrib_catalog_install(ui->d.contrib, e->id);
@@ -515,12 +533,12 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         if (!p) continue;
         plugin_card_rects rc;
         float h = st_plugin_card_layout(ui, g, i, p, py, &rc);
-        if (py + h > g->panel.y + g->panel.h - 16.0f) break;
         if (ui_in_rect(x, y, rc.btn_toggle)) {
           if (p->state == CCORD_PLUGIN_NEEDS_CONSENT) {
             snprintf(st_s_plugin_consent_id, sizeof st_s_plugin_consent_id, "%s", p->id);
             st_s_plugin_consent_perms = p->perms_mask;
             st_s_plugin_consent_box_h = 224.0f;
+            st_s_page_scroll = 0.0f;
           } else {
             bool on = !(p->state == CCORD_PLUGIN_READY || p->state == CCORD_PLUGIN_STARTING);
             ccord_contrib_plugin_set_enabled(ui->d.contrib, p->id, on);
@@ -553,6 +571,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         if (rc.btn_update.w > 0.0f && ui_in_rect(x, y, rc.btn_update)) {
           if (p->update_needs_review) {
             snprintf(st_s_plugin_detail_id, sizeof st_s_plugin_detail_id, "%s", p->id);
+            st_s_page_scroll = 0.0f;
             ccord_contrib_catalog_fetch_detail(ui->d.contrib, p->id);
           } else {
             ccord_contrib_catalog_install(ui->d.contrib, p->id);
@@ -596,44 +615,47 @@ static int64_t settings_hover_key(const ccord_ui *ui, const sgeom *g, float x, f
 
   switch (ui->settings_page) {
     case SP_ACCOUNT: {
+      sgeom ga = *g;
+      if (st_page_max_scroll(ui, g) > 0.0f) ga.content.y -= st_s_page_scroll;
       for (int i = 0; i < 5; i++) {
-        if (ui_in_rect(x, y, st_account_web_btn_rect(g, i))) return 100 + i;
+        if (ui_in_rect(x, y, st_account_web_btn_rect(ui, &ga, i))) return 100 + i;
       }
       if (!ui->account_view.signed_in) {
-        if (ui_in_rect(x, y, st_account_email_box_rect(g))) return 110;
-        if (ui_in_rect(x, y, st_account_password_box_rect(g))) return 111;
-        if (ui_in_rect(x, y, st_account_login_btn_rect(g))) return 112;
+        if (ui_in_rect(x, y, st_account_email_box_rect(&ga))) return 110;
+        if (ui_in_rect(x, y, st_account_password_box_rect(&ga))) return 111;
+        if (ui_in_rect(x, y, st_account_login_btn_rect(&ga))) return 112;
       }
-      if (ui_in_rect(x, y, st_account_token_box_rect(g))) return 113;
-      if (ui_in_rect(x, y, st_account_token_paste_rect(g))) return 114;
-      if (ui_in_rect(x, y, st_account_token_save_rect(g))) return 115;
-      if (ui_in_rect(x, y, st_account_token_clear_rect(g))) return 116;
-      if (ui_in_rect(x, y, st_account_add_btn_rect(g))) return 117;
+      if (ui_in_rect(x, y, st_account_token_box_rect(&ga))) return 113;
+      if (ui_in_rect(x, y, st_account_token_paste_rect(&ga))) return 114;
+      if (ui_in_rect(x, y, st_account_token_save_rect(&ga))) return 115;
+      if (ui_in_rect(x, y, st_account_token_clear_rect(&ga))) return 116;
+      if (ui_in_rect(x, y, st_account_add_btn_rect(&ga))) return 117;
       for (size_t i = 0; i < ui->saved_account_count && i < SAVED_ACCOUNT_ROWS; i++) {
-        if (ui_in_rect(x, y, st_saved_account_switch_rect(g, (int)i))) return 120 + (int64_t)i * 2;
-        if (ui_in_rect(x, y, st_saved_account_remove_rect(g, (int)i))) return 120 + (int64_t)i * 2 + 1;
+        if (ui_in_rect(x, y, st_saved_account_switch_rect(&ga, (int)i))) return 120 + (int64_t)i * 2;
+        if (ui_in_rect(x, y, st_saved_account_remove_rect(&ga, (int)i))) return 120 + (int64_t)i * 2 + 1;
       }
       ccord_rect primary, secondary;
-      st_account_buttons(ui, g, &primary, &secondary);
+      st_account_buttons(ui, &ga, &primary, &secondary);
       if (ui_in_rect(x, y, primary)) return 140;
       if (ui_in_rect(x, y, secondary)) return 141;
       return 0;
     }
     case SP_APPEARANCE: {
+      sgeom ga = *g;
+      if (st_page_max_scroll(ui, g) > 0.0f) ga.content.y -= st_s_page_scroll;
       for (int i = 0; i < 2; i++) {
-        if (ui_in_rect(x, y, st_chips_rect(g, 0, i, 2))) return 200 + i;
+        if (ui_in_rect(x, y, st_chips_rect(&ga, 0, i, 2))) return 200 + i;
       }
       for (int i = 0; i < 3; i++) {
-        if (ui_in_rect(x, y, st_chips_rect(g, 1, i, 3))) return 210 + i;
+        if (ui_in_rect(x, y, st_chips_rect(&ga, 1, i, 3))) return 210 + i;
       }
-      if (ui_in_rect(x, y, st_vol_minus_rect(g, 2))) return 220;
-      if (ui_in_rect(x, y, st_vol_plus_rect(g, 2))) return 221;
-      if (ui_in_rect(x, y, st_vol_track_rect(g, 2))) return 222;
-      ccord_rect reset_r = {g->content.x + 324.0f, st_row_y(g, 2) + 18.0f, 64.0f, UIS_H_BTN_SM};
-      if (ui_in_rect(x, y, reset_r)) return 223;
-      if (ui_in_rect(x, y, st_toggle_rect(g, 5))) return 225;
-      if (ui_in_rect(x, y, st_quickcss_box_rect(g))) return 226;
-      if (ui_in_rect(x, y, st_toggle_rect(g, 7))) return 227;
+      if (ui_in_rect(x, y, st_vol_minus_rect(&ga, 2))) return 220;
+      if (ui_in_rect(x, y, st_vol_plus_rect(&ga, 2))) return 221;
+      if (ui_in_rect(x, y, st_vol_track_rect(&ga, 2))) return 222;
+      if (ui_in_rect(x, y, ui_settings_m6_zoom_reset_rect(ga.content))) return 223;
+      if (ui_in_rect(x, y, st_toggle_rect(&ga, 5))) return 225;
+      if (ui_in_rect(x, y, st_quickcss_box_rect(&ga))) return 226;
+      if (ui_in_rect(x, y, st_toggle_rect(&ga, 7))) return 227;
       return 0;
     }
     case SP_VOICE: {
@@ -974,8 +996,32 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
     if (g.back.w > 0.0f && ui_in_rect(ev->x, ev->y, g.back)) {
+      if (ui->settings_page == SP_NOTIFICATIONS && ui->settings_sounds_open) {
+        ui->settings_sounds_open = false;
+        ui->dirty = true;
+        return true;
+      }
+      if (ui->settings_page == SP_PLUGINS) {
+        if (st_s_plugin_log_id[0]) { st_s_plugin_log_id[0] = '\0'; ui->dirty = true; return true; }
+        if (st_s_plugin_consent_id[0]) {
+          st_s_plugin_consent_id[0] = '\0';
+          st_s_plugin_consent_perms = 0;
+          st_s_plugin_consent_box_h = 224.0f;
+          st_s_page_scroll = 0.0f;
+          ui->dirty = true;
+          return true;
+        }
+        if (st_s_plugin_detail_id[0]) {
+          st_s_plugin_detail_id[0] = '\0';
+          st_s_page_scroll = 0.0f;
+          ui->dirty = true;
+          return true;
+        }
+      }
       ui->mobile_settings_detail = false;
       ui->account_focus_field = 0;
+      if (ui->touch_mode) ui->touch_text_focused = false;
+      st_s_page_scroll = 0.0f;
       ui->dirty = true;
       return true;
     }
@@ -1014,16 +1060,22 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       return true;   // Level 1 categories screen: page content is not visible
     }
     if (ui->settings_page == SP_ACCOUNT) {
+      sgeom ga = g;
+      float max_a = st_page_max_scroll(ui, &g);
+      if (max_a > 0.0f) {
+        if (st_s_page_scroll > max_a) st_s_page_scroll = max_a;
+        ga.content.y -= st_s_page_scroll;
+      }
       for (int i = 0; i < 5; i++) {
-        if (ui_in_rect(ev->x, ev->y, st_account_web_btn_rect(&g, i))) {
+        if (ui_in_rect(ev->x, ev->y, st_account_web_btn_rect(ui, &ga, i))) {
           ui_open_url(ui, st_k_web_urls[i], st_k_web_labels[i]);
           ui->dirty = true;
           return true;
         }
       }
       if (!ui->account_view.signed_in) {
-        ccord_rect em_box = st_account_email_box_rect(&g);
-        ccord_rect pw_box = st_account_password_box_rect(&g);
+        ccord_rect em_box = st_account_email_box_rect(&ga);
+        ccord_rect pw_box = st_account_password_box_rect(&ga);
         if (ui_in_rect(ev->x, ev->y, em_box)) {
           ui->account_focus_field = 2;
           ui->touch_text_focused = true;
@@ -1038,7 +1090,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
           ui->dirty = true;
           return true;
         }
-        if (ui_in_rect(ev->x, ev->y, st_account_login_btn_rect(&g))) {
+        if (ui_in_rect(ev->x, ev->y, st_account_login_btn_rect(&ga))) {
           ui->account_focus_field = 0;
           ui->touch_text_focused = false;
           if (ui->d.host.account_action) {
@@ -1049,7 +1101,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
         }
       }
       {
-        ccord_rect tbox = st_account_token_box_rect(&g);
+        ccord_rect tbox = st_account_token_box_rect(&ga);
         if (ui_in_rect(ev->x, ev->y, tbox)) {
           ui->account_focus_field = 1;
           ui->touch_text_focused = true;
@@ -1060,7 +1112,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       }
       ui->account_focus_field = 0;
       ui->touch_text_focused = false;
-      if (ui_in_rect(ev->x, ev->y, st_account_token_paste_rect(&g))) {
+      if (ui_in_rect(ev->x, ev->y, st_account_token_paste_rect(&ga))) {
         if (ui->d.host.clipboard_get) {
           char *clip = ui->d.host.clipboard_get(ui->d.host.ud);
           if (clip) {
@@ -1073,14 +1125,14 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
         ui->dirty = true;
         return true;
       }
-      if (ui_in_rect(ev->x, ev->y, st_account_token_save_rect(&g))) {
+      if (ui_in_rect(ev->x, ev->y, st_account_token_save_rect(&ga))) {
         if (ui->d.host.account_action) {
           ui->d.host.account_action(ui->d.host.ud, CCORD_ACCOUNT_ACTION_TOKEN_SIGN_IN);
         }
         ui->dirty = true;
         return true;
       }
-      if (ui_in_rect(ev->x, ev->y, st_account_token_clear_rect(&g))) {
+      if (ui_in_rect(ev->x, ev->y, st_account_token_clear_rect(&ga))) {
         ccord_text_edit_clear(&ui->account_token_edit);
         if (ui->d.host.account_action) {
           ui->d.host.account_action(ui->d.host.ud, CCORD_ACCOUNT_ACTION_TOKEN_SIGN_OUT);
@@ -1090,26 +1142,27 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       }
       // Multi-account switcher: Add focuses the token box for a new sign-in; Switch/Remove go to
       // the app (keyring + session/store), which pushes the updated roster back.
-      if (ui_in_rect(ev->x, ev->y, st_account_add_btn_rect(&g))) {
+      if (ui_in_rect(ev->x, ev->y, st_account_add_btn_rect(&ga))) {
         ccord_text_edit_clear(&ui->account_token_edit);
         ui->account_focus_field = 1;
+        if (ui->touch_mode) ui->touch_text_focused = true;
         ui->dirty = true;
         return true;
       }
       for (size_t i = 0; i < ui->saved_account_count && i < SAVED_ACCOUNT_ROWS; i++) {
-        if (!ui->saved_accounts[i].active && ui_in_rect(ev->x, ev->y, st_saved_account_switch_rect(&g, (int)i))) {
+        if (!ui->saved_accounts[i].active && ui_in_rect(ev->x, ev->y, st_saved_account_switch_rect(&ga, (int)i))) {
           if (ui->d.host.account_switch) ui->d.host.account_switch(ui->d.host.ud, ui->saved_accounts[i].user_id);
           ui->dirty = true;
           return true;
         }
-        if (ui_in_rect(ev->x, ev->y, st_saved_account_remove_rect(&g, (int)i))) {
+        if (ui_in_rect(ev->x, ev->y, st_saved_account_remove_rect(&ga, (int)i))) {
           if (ui->d.host.account_remove) ui->d.host.account_remove(ui->d.host.ud, ui->saved_accounts[i].user_id);
           ui->dirty = true;
           return true;
         }
       }
       ccord_rect primary, secondary;
-      st_account_buttons(ui, &g, &primary, &secondary);
+      st_account_buttons(ui, &ga, &primary, &secondary);
       const ccord_account_view *v = &ui->account_view;
       ccord_account_action action;
       bool have = false;
@@ -1135,6 +1188,15 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       sgeom gv = g;
       gv.content.y -= st_s_voice_scroll;   // rows scroll; hit-testing matches the drawn positions
       handled = handle_page_controls(ui, &gv, ev->x, ev->y);
+    } else if (ui->settings_page == SP_APPEARANCE || ui->settings_page == SP_STREAMING ||
+               ui->settings_page == SP_KEYBINDS) {
+      sgeom gs = g;
+      float max_p = st_page_max_scroll(ui, &g);
+      if (max_p > 0.0f) {
+        if (st_s_page_scroll > max_p) st_s_page_scroll = max_p;
+        gs.content.y -= st_s_page_scroll;
+      }
+      handled = handle_page_controls(ui, &gs, ev->x, ev->y);
     } else {
       handled = handle_page_controls(ui, &g, ev->x, ev->y);
     }

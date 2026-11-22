@@ -933,6 +933,11 @@ bool ccord_ui_handle_back(ccord_ui *ui)
       return true;
     }
     if (ui_is_login_screen(ui)) return false;
+    if (ui->settings_sounds_open) {
+      ui->settings_sounds_open = false;
+      ui->dirty = true;
+      return true;
+    }
     if (ui->mobile_layout && ui->mobile_settings_detail) {
       ui->mobile_settings_detail = false;
       ui->dirty = true;

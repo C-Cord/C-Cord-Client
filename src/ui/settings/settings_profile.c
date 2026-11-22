@@ -575,6 +575,7 @@ static void focus_field(ccord_ui *ui, int f)
     ccord_text_edit_move(&S->ed[f], 2, false);
     ui->caret_on = true;
     ui->caret_epoch_ms = ui->now_ms;
+    if (ui->touch_mode) ui->touch_text_focused = true;
   }
   ui->dirty = true;
 }
@@ -1113,9 +1114,11 @@ void ui_settings_profile_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect conten
   memset(S->err_rect, 0, sizeof S->err_rect);
   uint32_t changed = changed_mask();
   float top = content.y + 52.0f;
+  float bottom = content.y + content.h;
+  if (bottom > panel.y + panel.h - UIS_SP_4) bottom = panel.y + panel.h - UIS_SP_4;
   S->bar_visible = changed != 0 || S->pending || S->saved_until_ms != 0 || S->general[0] != '\0';
-  S->bar = (ccord_rect){content.x, panel.y + panel.h - UIS_SP_4 - BAR_H, content.w, BAR_H};
-  S->view = (ccord_rect){content.x - UIS_SP_2, top, content.w + 2.0f * UIS_SP_2, panel.y + panel.h - top};
+  S->bar = (ccord_rect){content.x, bottom - BAR_H, content.w, BAR_H};
+  S->view = (ccord_rect){content.x - UIS_SP_2, top, content.w + 2.0f * UIS_SP_2, fmaxf(bottom - top, 40.0f)};
   S->view_h = S->view.h;
   float max_scroll = S->content_h - S->view_h;
   if (max_scroll < 0.0f) max_scroll = 0.0f;

@@ -33,6 +33,10 @@ void ui_settings_m6_prefs_reset(void);
 void ui_settings_m6_prefs_draw(ccord_ui *ui, ccord_renderer *r, int page, ccord_rect content, ccord_rect panel);
 // Hit-tests a left click; true when the page consumed it.
 bool ui_settings_m6_prefs_click(ccord_ui *ui, int page, ccord_rect content, ccord_rect panel, float x, float y);
+// Wheel scrolling for M6 preference sub-views (e.g. narrow Customize Sounds list).
+bool ui_settings_m6_prefs_wheel(ccord_ui *ui, int page, ccord_rect content, float wheel);
+// Appearance zoom reset button rect (shared with settings_input.c hover key).
+ccord_rect ui_settings_m6_zoom_reset_rect(ccord_rect content);
 
 // Appearance theme/zoom block (rows 1-3 of the Appearance page; settings.c keeps the rest of the
 // page). Theme chips call host.apply_theme, the zoom slider/reset call host.set_zoom; both persist
