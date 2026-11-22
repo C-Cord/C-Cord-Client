@@ -861,13 +861,31 @@ static void test_m3c_group_dms_requests_profiles_and_custom_status(void)
   frame(4);
   CT_CHECK(strcmp(ccord_store_user_note(F.store, 1002), "GPU debugger wizard") == 0);
 
-  // Switch to Mutual Servers (tab 1) and Mutual Friends (tab 2), then close modal:
+  // Switch to Mutual Servers (tab 1) and verify guild icons render in the list (not just initials placeholders),
+  // then Mutual Friends (tab 2), then close modal:
+  size_t gi_t0 = dbg().guild_icon_textures_drawn;
+  frame(1);
+  size_t rail_gi_per_frame = dbg().guild_icon_textures_drawn - gi_t0;
   click_rect(dbg().profile_modal_tab_rects[1]);
   frame(2);
   CT_CHECK(dbg().profile_modal_tab == 1 && dbg().profile_modal_mutual_count >= 1);
+  const ccord_user_profile *ada_prof = ccord_store_user_profile(F.store, 1002);
+  CT_CHECK(ada_prof != nullptr);
+  size_t want_mutual_icons = 0;
+  for (size_t i = 0; i < ada_prof->mutual_guild_count; i++) {
+    const ccord_guild *mg = ccord_store_guild(F.store, ada_prof->mutual_guild_ids[i]);
+    if (mg && mg->icon_url && mg->icon_url[0] != '\0') want_mutual_icons++;
+  }
+  CT_CHECK(want_mutual_icons >= 1);
+  size_t gi_t1 = dbg().guild_icon_textures_drawn;
+  frame(1);
+  CT_CHECK(dbg().guild_icon_textures_drawn - gi_t1 == rail_gi_per_frame + want_mutual_icons);
   click_rect(dbg().profile_modal_tab_rects[2]);
   frame(2);
   CT_CHECK(dbg().profile_modal_tab == 2 && dbg().profile_modal_mutual_count >= 1);
+  size_t gi_t2 = dbg().guild_icon_textures_drawn;
+  frame(1);
+  CT_CHECK(dbg().guild_icon_textures_drawn - gi_t2 == rail_gi_per_frame);
   click_rect(dbg().profile_modal_close_btn);
   frame(2);
   CT_CHECK(!dbg().profile_modal_open);

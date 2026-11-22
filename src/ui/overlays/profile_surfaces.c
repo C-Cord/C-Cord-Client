@@ -267,30 +267,39 @@ void dc_draw_user_profile_modal(ccord_ui *ui, ccord_renderer *r)
       ccord_text_style rts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
       for (size_t i = 0; i < prof->mutual_guild_count; i++) {
         ccord_id mgid = prof->mutual_guild_ids[i];
-        const ccord_guild *gd = ccord_store_guild(ui->d.store, mgid);
-        char gname_buf[64];
-        const char *gname = (gd && gd->name && gd->name[0]) ? gd->name : nullptr;
-        if (!gname) {
-          snprintf(gname_buf, sizeof gname_buf, "Server %llu", (unsigned long long)mgid);
-          gname = gname_buf;
-        }
         ccord_rect rr = {ix, cy, iw, 40.0f};
-        bool rhv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, rr);
-        uis_plate(ui, r, rr, ptk.r_control, COL(bg_secondary));
-        uis_list_row_fill(ui, r, rr, (uis_state){.hover = rhv}, "pmmg", (uint64_t)mgid);
-        ccord_rect gic = {rr.x + 8.0f, rr.y + 6.0f, 28.0f, 28.0f};
-        ccord_draw_rrect(r, gic, 8.0f, COL(brand));
-        char init[8];
-        ui_initials(gname, init);
-        ccord_text_style ist = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(text_on_brand));
-        ccord_vec2 it = ccord_text_measure(r, init, strlen(init), &ist, 0.0f);
-        ccord_text_draw(r, init, strlen(init), gic.x + (gic.w - it.x) * 0.5f, gic.y + (gic.h - it.y) * 0.5f, &ist, 0.0f);
-        ccord_text_draw_ellipsis(r, gname, strlen(gname), rr.x + 46.0f, rr.y + 10.0f, rr.w - 56.0f, &rts);
-        if (ui->nprofile_modal_mutual_hits < 32u && rr.y + rr.h > body_y0 && rr.y < body_y1) {
-          float ry0 = maxf(rr.y, body_y0), ry1 = fminf(rr.y + rr.h, body_y1);
-          ui->profile_modal_mutual_hits[ui->nprofile_modal_mutual_hits].rect = (ccord_rect){rr.x, ry0, rr.w, ry1 - ry0};
-          ui->profile_modal_mutual_hits[ui->nprofile_modal_mutual_hits].id = mgid;
-          ui->nprofile_modal_mutual_hits++;
+        bool visible = rr.y + rr.h > body_y0 && rr.y < body_y1;
+        if (visible) {
+          const ccord_guild *gd = ccord_store_guild(ui->d.store, mgid);
+          char gname_buf[64];
+          const char *gname = (gd && gd->name && gd->name[0]) ? gd->name : nullptr;
+          if (!gname) {
+            snprintf(gname_buf, sizeof gname_buf, "Server %llu", (unsigned long long)mgid);
+            gname = gname_buf;
+          }
+          bool rhv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, body_area) && ui_in_rect(ui->mx, ui->my, rr);
+          uis_plate(ui, r, rr, ptk.r_control, COL(bg_secondary));
+          uis_list_row_fill(ui, r, rr, (uis_state){.hover = rhv}, "pmmg", (uint64_t)mgid);
+          ccord_rect gic = {rr.x + 8.0f, rr.y + 6.0f, 28.0f, 28.0f};
+          char icon_url[256];
+          if (gd && ui_guild_icon_url(gd, icon_url, sizeof icon_url) && ui_ensure_media(ui, r, icon_url)) {
+            ccord_draw_texture_rounded_anim(r, icon_url, gic, 8.0f, 255, rhv);
+            ui->dbg_guild_icon_textures_drawn++;
+          } else {
+            ccord_draw_rrect(r, gic, 8.0f, COL(brand));
+            char init[8];
+            ui_initials(gname, init);
+            ccord_text_style ist = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(text_on_brand));
+            ccord_vec2 it = ccord_text_measure(r, init, strlen(init), &ist, 0.0f);
+            ccord_text_draw(r, init, strlen(init), gic.x + (gic.w - it.x) * 0.5f, gic.y + (gic.h - it.y) * 0.5f, &ist, 0.0f);
+          }
+          ccord_text_draw_ellipsis(r, gname, strlen(gname), rr.x + 46.0f, rr.y + 10.0f, rr.w - 56.0f, &rts);
+          if (ui->nprofile_modal_mutual_hits < 32u) {
+            float ry0 = maxf(rr.y, body_y0), ry1 = fminf(rr.y + rr.h, body_y1);
+            ui->profile_modal_mutual_hits[ui->nprofile_modal_mutual_hits].rect = (ccord_rect){rr.x, ry0, rr.w, ry1 - ry0};
+            ui->profile_modal_mutual_hits[ui->nprofile_modal_mutual_hits].id = mgid;
+            ui->nprofile_modal_mutual_hits++;
+          }
         }
         cy += 44.0f;
       }
