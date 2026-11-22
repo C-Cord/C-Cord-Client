@@ -77,6 +77,7 @@ struct ccord_ui {
   ui_track trk_chan, trk_member, trk_rail;   // row motion snapshots (src/ui/motion.c)
   // Values the draw pass last used, read by the motion verify slice. Written by draw_nav.c / draw_members.c only.
   float dbg_rail_radius[UI_RAIL_SLOTS_MAX], dbg_rail_pill_h[UI_RAIL_SLOTS_MAX], dbg_rail_alpha[UI_RAIL_SLOTS_MAX];
+  size_t dbg_rail_tip_voice_shown, dbg_rail_tip_voice_total;   // voice avatars / total users in hovered server tooltip
   float dbg_crow_y[UI_TRACK_MAX];          // content y each channel row was drawn at
   float dbg_chan_sel_fade;                 // selection fade (0..1) of the selected channel row
   ccord_cursor_kind cursor;

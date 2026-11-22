@@ -53,6 +53,7 @@ static void ccord_test_cleanup_dir(void) {
 #include <ccord/core/alloc.h>
 #include <ccord/core/paths.h>
 #include <ccord/net/mock_transport.h>
+#include <ccord/store/roles.h>
 #include <ccord/store/store.h>
 #include <ccord/platform/platform.h>
 #include <ccord/ui/ui.h>
@@ -342,20 +343,122 @@ static void test_rail_tooltip(void)
 {
   ui_rail_slot slots[UI_RAIL_SLOTS_MAX];
   size_t n = ui_rail_build_slots(F.ui, slots, UI_RAIL_SLOTS_MAX, nullptr);
-  bool found = false;
-  for (size_t i = 0; i < n && !found; i++) {
-    if (slots[i].kind != UI_RAIL_GUILD || slots[i].rect.w <= 0.0f) continue;
-    found = true;
-    hover_at(slots[i].rect);
+  int dm_idx = -1, guild_idx = -1;
+  for (size_t i = 0; i < n; i++) {
+    if (slots[i].rect.w <= 0.0f) continue;
+    if (dm_idx < 0 && slots[i].kind == UI_RAIL_DM) dm_idx = (int)i;
+    if (guild_idx < 0 && slots[i].kind == UI_RAIL_GUILD) guild_idx = (int)i;
   }
-  CT_CHECK(found);
+  CT_CHECK(dm_idx >= 0 && guild_idx >= 0);
+  if (guild_idx < 0) return;
+
+  const ccord_guild *g = ccord_store_guild_at(F.store, slots[guild_idx].guild_index);
+  CT_CHECK(g != nullptr);
+  if (!g) return;
+  ccord_id gid = g->id;
+  ccord_id vch = CCORD_ID_NONE;
+  size_t nch = ccord_store_channel_count(F.store, gid);
+  for (size_t i = 0; i < nch; i++) {
+    const ccord_channel *ch = ccord_store_channel_at(F.store, gid, i);
+    if (ch && ch->kind == CCORD_CHANNEL_VOICE) {
+      vch = ch->id;
+      break;
+    }
+  }
+  CT_CHECK(vch != CCORD_ID_NONE);
+  if (vch == CCORD_ID_NONE) return;
+
+  // 1. Clear any seeded voice states in this guild: hovering shows the plain single-line tooltip.
+  ccord_error err;
+  ccord_id seeded[16];
+  size_t nseeded = 0u;
+  size_t nv = 0u;
+  const ccord_voice_state *vs = ccord_store_voice_states(F.store, &nv);
+  for (size_t i = 0; i < nv && nseeded < 16u; i++) {
+    if (vs[i].guild_id == gid) seeded[nseeded++] = vs[i].user_id;
+  }
+  for (size_t i = 0; i < nseeded; i++) {
+    CT_CHECK(ccord_store_set_voice_state(F.store, &(ccord_voice_state){.guild_id = gid, .channel_id = CCORD_ID_NONE,
+                                                                       .user_id = seeded[i]}, &err) == CCORD_OK);
+  }
+  hover_at(slots[guild_idx].rect);
   uint32_t c[UIS_K_COUNT];
-  audit_frame("rail tooltip", c);
+  audit_frame("rail tooltip empty vc", c);
   CT_CHECK(c[UIS_K_TOOLTIP] == 1);
   CT_CHECK(c[UIS_K_BUTTON] == 0);
+  CT_CHECK(F.ui->dbg_rail_tip_voice_total == 0u && F.ui->dbg_rail_tip_voice_shown == 0u);
+  float plain_h = uis_audit_get()->kind[UIS_K_TOOLTIP].rect.h;
+
+  // 2. Add 3 users to voice: tooltip expands vertically with a speaker + 3 avatars, staying on the style grid.
+  const char *names[9] = {"Alice", "Bob", "Carol", "Dave", "Eve", "Frank", "Grace", "Heidi", "Ivan"};
+  for (size_t i = 0; i < 9u; i++) {
+    ccord_user u = {.id = 91000u + i, .name = names[i], .status_text = "", .presence = CCORD_PRESENCE_ONLINE,
+                    .avatar_palette = (uint8_t)(i % 6u)};
+    CT_CHECK(ccord_store_upsert_user(F.store, &u, &err) == CCORD_OK);
+  }
+  for (size_t i = 0; i < 3u; i++) {
+    CT_CHECK(ccord_store_set_voice_state(F.store, &(ccord_voice_state){.guild_id = gid, .channel_id = vch,
+                                                                       .user_id = 91000u + i}, &err) == CCORD_OK);
+  }
+  audit_frame("rail tooltip 3 vc", c);
+  CT_CHECK(c[UIS_K_TOOLTIP] == 1 && c[UIS_K_BUTTON] == 0);
+  CT_CHECK(F.ui->dbg_rail_tip_voice_total == 3u && F.ui->dbg_rail_tip_voice_shown == 3u);
+  float vc3_h = uis_audit_get()->kind[UIS_K_TOOLTIP].rect.h;
+  float vc3_w = uis_audit_get()->kind[UIS_K_TOOLTIP].rect.w;
+  CT_CHECK(vc3_h > plain_h + 20.0f);
+
+  // 3. Up to 6 users: all 6 avatars are shown with no overflow pill.
+  for (size_t i = 3u; i < 6u; i++) {
+    CT_CHECK(ccord_store_set_voice_state(F.store, &(ccord_voice_state){.guild_id = gid, .channel_id = vch,
+                                                                       .user_id = 91000u + i}, &err) == CCORD_OK);
+  }
+  audit_frame("rail tooltip 6 vc", c);
+  CT_CHECK(c[UIS_K_TOOLTIP] == 1 && c[UIS_K_BUTTON] == 0);
+  CT_CHECK(F.ui->dbg_rail_tip_voice_total == 6u && F.ui->dbg_rail_tip_voice_shown == 6u);
+  CT_CHECK(near(uis_audit_get()->kind[UIS_K_TOOLTIP].rect.h, vc3_h));
+  CT_CHECK(uis_audit_get()->kind[UIS_K_TOOLTIP].rect.w > vc3_w);
+
+  // 4. More than 6 users (9): 5 avatars + "+4" overflow pill.
+  for (size_t i = 6u; i < 9u; i++) {
+    CT_CHECK(ccord_store_set_voice_state(F.store, &(ccord_voice_state){.guild_id = gid, .channel_id = vch,
+                                                                       .user_id = 91000u + i}, &err) == CCORD_OK);
+  }
+  audit_frame("rail tooltip 9 vc overflow", c);
+  CT_CHECK(c[UIS_K_TOOLTIP] == 1 && c[UIS_K_BUTTON] == 0);
+  CT_CHECK(F.ui->dbg_rail_tip_voice_total == 9u && F.ui->dbg_rail_tip_voice_shown == 5u);
+  CT_CHECK(near(uis_audit_get()->kind[UIS_K_TOOLTIP].rect.h, vc3_h));
+
+  // 5. Hidden voice channel (denied VIEW_CHANNEL under role preview) is excluded from the tooltip.
+  for (size_t i = 0; i < 9u; i++) {
+    CT_CHECK(ccord_store_set_voice_state(F.store, &(ccord_voice_state){.guild_id = gid, .channel_id = CCORD_ID_NONE,
+                                                                       .user_id = 91000u + i}, &err) == CCORD_OK);
+  }
+  ccord_channel hidden_vc = {.id = 998877u, .guild_id = gid, .kind = CCORD_CHANNEL_VOICE,
+                             .name = "Secret VC", .topic = ""};
+  CT_CHECK(ccord_store_upsert_channel(F.store, &hidden_vc, &err) == CCORD_OK);
+  ccord_overwrite deny = {.id = gid, .kind = CCORD_OVERWRITE_ROLE, .allow = 0, .deny = CCORD_PERM_VIEW_CHANNEL};
+  CT_CHECK(ccord_store_set_channel_overwrites(F.store, hidden_vc.id, gid, &deny, 1u, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_set_voice_state(F.store, &(ccord_voice_state){.guild_id = gid, .channel_id = hidden_vc.id,
+                                                                     .user_id = 91000u}, &err) == CCORD_OK);
+  ui_start_role_preview(F.ui, gid, gid);
+  CT_CHECK(!ui_channel_visible(F.ui, gid, ccord_store_channel(F.store, hidden_vc.id)));
+  audit_frame("rail tooltip hidden vc", c);
+  CT_CHECK(c[UIS_K_TOOLTIP] == 1);
+  CT_CHECK(F.ui->dbg_rail_tip_voice_total == 0u && F.ui->dbg_rail_tip_voice_shown == 0u);
+  CT_CHECK(near(uis_audit_get()->kind[UIS_K_TOOLTIP].rect.h, plain_h));
+  ui_stop_role_preview(F.ui);
+  CT_CHECK(ccord_store_delete_channel(F.store, hidden_vc.id, &err) == CCORD_OK);
+
+  // 6. DM rail slot never draws a guild voice row.
+  hover_at(slots[dm_idx].rect);
+  audit_frame("rail dm tooltip", c);
+  CT_CHECK(c[UIS_K_TOOLTIP] == 1);
+  CT_CHECK(F.ui->dbg_rail_tip_voice_total == 0u && F.ui->dbg_rail_tip_voice_shown == 0u);
+
   away();
   audit_frame("rail rest", c);
   CT_CHECK(c[UIS_K_TOOLTIP] == 0);
+  CT_CHECK(F.ui->dbg_rail_tip_voice_total == 0u && F.ui->dbg_rail_tip_voice_shown == 0u);
 }
 
 static void test_member_popover(void)

@@ -978,6 +978,12 @@ const ccord_voice_state *ccord_store_voice_at(const ccord_store *s, ccord_id cha
   return nullptr;
 }
 
+const ccord_voice_state *ccord_store_voice_states(const ccord_store *s, size_t *out_count)
+{
+  if (out_count) *out_count = s ? s->d.nvoices : 0u;
+  return (s && s->d.nvoices > 0u) ? s->d.voices : nullptr;
+}
+
 const ccord_voice_state *ccord_store_voice_user(const ccord_store *s, ccord_id guild_id, ccord_id user_id)
 {
   long i = s ? find_voice(&s->d, guild_id, user_id) : -1;

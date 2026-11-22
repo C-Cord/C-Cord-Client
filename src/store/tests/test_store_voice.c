@@ -592,6 +592,48 @@ static void test_lifecycle(void)
   ccord_bus_destroy(bus);
 }
 
+static void test_voice_states_slice(void)
+{
+  ccord_error err;
+  size_t n = 99u;
+  CT_CHECK(ccord_store_voice_states(nullptr, &n) == nullptr && n == 0u);
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *s = make_store(bus, &err);
+  CT_CHECK(s && bus);
+  if (!s || !bus) return;
+
+  n = 99u;
+  CT_CHECK(ccord_store_voice_states(s, &n) == nullptr && n == 0u);
+  CT_CHECK(ccord_store_voice_states(s, nullptr) == nullptr);
+
+  ccord_channel g11_vc = {.id = 31, .guild_id = 11, .kind = CCORD_CHANNEL_VOICE, .name = "Lounge VC", .topic = ""};
+  CT_CHECK(ccord_store_upsert_channel(s, &g11_vc, &err) == CCORD_OK);
+
+  CT_CHECK(ccord_store_set_voice_state(s, &(ccord_voice_state){.guild_id = 10, .channel_id = 21, .user_id = 1}, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_set_voice_state(s, &(ccord_voice_state){.guild_id = 10, .channel_id = 21, .user_id = 2}, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_set_voice_state(s, &(ccord_voice_state){.guild_id = 11, .channel_id = 31, .user_id = 3}, &err) == CCORD_OK);
+
+  const ccord_voice_state *vs = ccord_store_voice_states(s, &n);
+  CT_CHECK(vs != nullptr && n == 3u);
+  size_t g10_n = 0u, g11_n = 0u;
+  for (size_t i = 0; i < n; i++) {
+    if (vs[i].guild_id == 10 && vs[i].channel_id == 21) g10_n++;
+    if (vs[i].guild_id == 11 && vs[i].channel_id == 31 && vs[i].user_id == 3) g11_n++;
+  }
+  CT_CHECK(g10_n == 2u && g11_n == 1u);
+
+  CT_CHECK(ccord_store_set_voice_state(s, &(ccord_voice_state){.guild_id = 10, .channel_id = CCORD_ID_NONE, .user_id = 2}, &err) == CCORD_OK);
+  vs = ccord_store_voice_states(s, &n);
+  CT_CHECK(vs != nullptr && n == 2u);
+
+  CT_CHECK(ccord_store_delete_guild(s, 10, &err) == CCORD_OK);
+  vs = ccord_store_voice_states(s, &n);
+  CT_CHECK(vs != nullptr && n == 1u && vs[0].guild_id == 11 && vs[0].user_id == 3);
+
+  ccord_store_destroy(s);
+  ccord_bus_destroy(bus);
+}
+
 int main(void)
 {
   test_call_state();
@@ -601,5 +643,6 @@ int main(void)
   test_user_audio();
   test_dave_and_rtc();
   test_lifecycle();
+  test_voice_states_slice();
   return CT_RESULT("test_store_voice");
 }

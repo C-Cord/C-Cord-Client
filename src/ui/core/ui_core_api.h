@@ -341,6 +341,7 @@ void ui_discovery_request(ccord_ui *ui, bool force);
 
 // ---- draw_nav.c ----
 void ui_draw_server_list(ccord_ui *ui, ccord_renderer *r);
+void ui_draw_server_rail_tooltip(ccord_ui *ui, ccord_renderer *r);
 void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r);
 void ui_draw_user_panel(ccord_ui *ui, ccord_renderer *r);
 

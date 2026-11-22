@@ -268,13 +268,11 @@ void uis_list_row_fill(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, uis_state
 
 // ---------------------------------------------------------------- tooltip
 
-ccord_rect uis_tooltip(ccord_ui *ui, ccord_renderer *r, ccord_rect anchor, const char *text, uis_tip_side side,
-                       uint64_t id)
+ccord_rect uis_tooltip_begin(ccord_ui *ui, ccord_renderer *r, ccord_rect anchor, float content_w, float content_h,
+                             uis_tip_side side, uint64_t id)
 {
   float fs = TH(font_size_small);
-  ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, fs, CO(text_header));
-  ccord_vec2 t = ccord_text_measure(r, text, strlen(text), &st, 0.0f);
-  ccord_rect tip = {0.0f, 0.0f, t.x + 2.0f * UIS_SP_3, t.y + 2.0f * UIS_SP_2};
+  ccord_rect tip = {0.0f, 0.0f, content_w + 2.0f * UIS_SP_3, content_h + 2.0f * UIS_SP_2};
   const float gap = 6.0f, margin = 8.0f;
   switch (side) {
     case UIS_TIP_BELOW:
@@ -298,9 +296,24 @@ ccord_rect uis_tooltip(ccord_ui *ui, ccord_renderer *r, ccord_rect anchor, const
   float rad = TH(context_menu_radius);
   ui_popup_begin(ui, r, "uistip", id, UIS_MS_TIP, 0.0f);
   uis_frame(ui, r, tip, rad, CO(bg_floating), UIS_ELEV_POPOVER);
-  ccord_text_draw(r, text, strlen(text), tip.x + UIS_SP_3, tip.y + UIS_SP_2, &st, 0.0f);
-  ui_popup_end(r);
   audit(UIS_K_TOOLTIP, tip, rad, fs, CO(bg_floating));
+  return tip;
+}
+
+void uis_tooltip_end(ccord_renderer *r)
+{
+  ui_popup_end(r);
+}
+
+ccord_rect uis_tooltip(ccord_ui *ui, ccord_renderer *r, ccord_rect anchor, const char *text, uis_tip_side side,
+                       uint64_t id)
+{
+  float fs = TH(font_size_small);
+  ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, fs, CO(text_header));
+  ccord_vec2 t = ccord_text_measure(r, text, strlen(text), &st, 0.0f);
+  ccord_rect tip = uis_tooltip_begin(ui, r, anchor, t.x, t.y, side, id);
+  ccord_text_draw(r, text, strlen(text), tip.x + UIS_SP_3, tip.y + UIS_SP_2, &st, 0.0f);
+  uis_tooltip_end(r);
   return tip;
 }
 

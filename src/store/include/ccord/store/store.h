@@ -170,6 +170,7 @@ ccord_id ccord_store_typing_user_at(const ccord_store *s, ccord_id channel_id, s
 int64_t ccord_store_typing_expires_at(const ccord_store *s, ccord_id channel_id, size_t i);
 size_t ccord_store_voice_count(const ccord_store *s, ccord_id channel_id);
 const ccord_voice_state *ccord_store_voice_at(const ccord_store *s, ccord_id channel_id, size_t i);
+const ccord_voice_state *ccord_store_voice_states(const ccord_store *s, size_t *out_count);   // all active voice states, borrowed
 const ccord_voice_state *ccord_store_voice_user(const ccord_store *s, ccord_id guild_id, ccord_id user_id);
 ccord_id ccord_store_active_voice_channel(const ccord_store *s);           // self's channel, 0 = not connected
 const ccord_voice_server *ccord_store_voice_server(const ccord_store *s, ccord_id guild_id);

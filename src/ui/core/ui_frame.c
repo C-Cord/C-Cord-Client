@@ -250,6 +250,8 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui->dbg_clan_badges = 0;
   ui->dbg_activity_cards = 0;
   ui->dbg_role_pills = 0;
+  ui->dbg_rail_tip_voice_shown = 0;
+  ui->dbg_rail_tip_voice_total = 0;
   ui_profile_roles_begin_frame(ui);
   ui->dbg_tts_badges = 0;
   ui->ngdm_member_hits = 0;
@@ -389,6 +391,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
         ui_draw_server_list(ui, r);
         ui_draw_voice_bar(ui, r);
         ui_draw_user_panel(ui, r);
+        ui_draw_server_rail_tooltip(ui, r);
       }
       ui_panels_draw(ui, r);
       ui_draw_stream_pip(ui, r);
@@ -398,6 +401,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
       ui_panels_draw(ui, r);
       ui_draw_voice_bar(ui, r);
       ui_draw_user_panel(ui, r);
+      ui_draw_server_rail_tooltip(ui, r);
       ui_draw_stream_pip(ui, r);
     }
     ui_draw_notice(ui, r);

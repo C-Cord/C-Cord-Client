@@ -494,31 +494,174 @@ void ui_draw_server_list(ccord_ui *ui, ccord_renderer *r)
     ui_plugin_full_views_draw_rail(ui, r, l->x, l->w, &fv_y);
   }
   ccord_pop_clip(r);
+}
 
-  // Tooltip for the hovered rail item (drawn above everything in this column).
-  if (!ui->touch_mode && ui->hover_rail_slot >= 0 && (size_t)ui->hover_rail_slot < nslots && !ui->menu.open && !ui->settings_open &&
-      !(ui->drag == DRAG_SERVER && ui->drag_active)) {
-    const ui_rail_slot *sl = &slots[ui->hover_rail_slot];
-    const char *name = nullptr;
-    switch (sl->kind) {
-      case UI_RAIL_DM: name = CCORD_DM_GUILD_NAME; break;
-      case UI_RAIL_GUILD: {
-        const ccord_guild *g = ccord_store_guild_at(ui->d.store, sl->guild_index);
-        name = g ? g->name : nullptr;
-        break;
-      }
-      case UI_RAIL_FOLDER_COLLAPSED:
-      case UI_RAIL_FOLDER_HEADER:
-        name = sl->folder_name[0] ? sl->folder_name : "Server Folder";
-        break;
-      case UI_RAIL_ADD_SERVER: name = "Add a Server"; break;
-      case UI_RAIL_DISCOVERY: name = "Explore Discoverable Servers"; break;
+#define UI_RAIL_VOICE_MAX_AVATARS 6u
+
+static size_t collect_guild_voice_users(const ccord_ui *ui, ccord_id guild_id, ccord_id *out_users, size_t cap)
+{
+  if (!ui || !ui->d.store || guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) return 0u;
+  size_t nvoices = 0u;
+  const ccord_voice_state *voices = ccord_store_voice_states(ui->d.store, &nvoices);
+  if (!voices || nvoices == 0u) return 0u;
+  size_t total = 0u;
+  ccord_id last_ch_id = CCORD_ID_NONE;
+  bool last_ch_vis = false;
+  for (size_t i = 0; i < nvoices; i++) {
+    const ccord_voice_state *vs = &voices[i];
+    if (vs->guild_id != guild_id || vs->channel_id == CCORD_ID_NONE || vs->user_id == CCORD_ID_NONE) continue;
+    bool vis = false;
+    if (vs->channel_id == last_ch_id) {
+      vis = last_ch_vis;
+    } else {
+      const ccord_channel *ch = ccord_store_channel(ui->d.store, vs->channel_id);
+      vis = ch && (ch->kind == CCORD_CHANNEL_VOICE || ch->kind == CCORD_CHANNEL_STAGE) &&
+            ui_channel_visible(ui, guild_id, ch);
+      last_ch_id = vs->channel_id;
+      last_ch_vis = vis;
     }
-    if (name) {
-      ccord_rect ic = sl->rect;
-      // Anchor: the rail column at the icon's height, so the tip sits 6 px right of the rail.
-      uis_tooltip(ui, r, (ccord_rect){l->x, ic.y, l->w, ic.h}, name, UIS_TIP_RIGHT, (uint64_t)ui->hover_rail_slot);
-    }
+    if (!vis) continue;
+    if (total < cap) out_users[total] = vs->user_id;
+    total++;
+  }
+  return total;
+}
+
+static void draw_guild_voice_avatar(ccord_ui *ui, ccord_renderer *r, ccord_id guild_id, ccord_id user_id,
+                                    float cx, float cy, float size)
+{
+  const ccord_user *u = ccord_store_user(ui->d.store, user_id);
+  const ccord_user_profile *prof = ccord_store_user_profile(ui->d.store, user_id);
+  ccord_user resolved = {0};
+  if (u) resolved = *u;
+  resolved.id = user_id;
+  if (prof && prof->guild_id == guild_id && prof->guild_avatar_url && prof->guild_avatar_url[0]) {
+    resolved.avatar_url = prof->guild_avatar_url;
+  } else if ((!resolved.avatar_url || !resolved.avatar_url[0]) && prof && prof->avatar_url && prof->avatar_url[0]) {
+    resolved.avatar_url = prof->avatar_url;
+  }
+  float rad = size * 0.5f;
+  ccord_rect dst = {cx - rad, cy - rad, size, size};
+  char url[256];
+  if (ui_user_avatar_url(&resolved, url, sizeof url) && ui_ensure_media(ui, r, url)) {
+    ccord_draw_texture_rounded(r, url, dst, rad, 255);
+    ui->dbg_avatar_textures_drawn++;
+    return;
+  }
+  ccord_color bg = ui_user_color(ui, u ? u->avatar_palette : (uint8_t)(user_id % 6u));
+  ccord_draw_circle(r, cx, cy, rad, bg);
+  char init[8] = "?";
+  if (u && u->name && u->name[0]) {
+    size_t l = ccord_utf8_next(u->name, strlen(u->name), 0);
+    if (l > 4) l = 4;
+    memcpy(init, u->name, l);
+    init[l] = '\0';
+    if (l == 1 && init[0] >= 'a' && init[0] <= 'z') init[0] = (char)(init[0] - 'a' + 'A');
+  }
+  ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, size * 0.44f, avatar_text_color(ui, bg));
+  text_centered(r, init, dst, &st);
+}
+
+static void draw_guild_voice_tooltip(ccord_ui *ui, ccord_renderer *r, ccord_rect anchor, const ccord_guild *g,
+                                     uint64_t tip_id)
+{
+  const char *name = (g && g->name) ? g->name : nullptr;
+  if (!name) return;
+  ccord_id voice_users[UI_RAIL_VOICE_MAX_AVATARS];
+  size_t voice_total = collect_guild_voice_users(ui, g->id, voice_users, UI_RAIL_VOICE_MAX_AVATARS);
+  if (voice_total == 0u) {
+    uis_tooltip(ui, r, anchor, name, UIS_TIP_RIGHT, tip_id);
+    return;
+  }
+  size_t shown = voice_total <= UI_RAIL_VOICE_MAX_AVATARS ? voice_total : (UI_RAIL_VOICE_MAX_AVATARS - 1u);
+  size_t overflow = voice_total > UI_RAIL_VOICE_MAX_AVATARS ? (voice_total - shown) : 0u;
+  ui->dbg_rail_tip_voice_shown = shown;
+  ui->dbg_rail_tip_voice_total = voice_total;
+
+  uis_tokens tok = uis_tokens_of(ui);
+  ccord_text_style title_st = ui_style(ui, CCORD_FONT_BOLD, tok.fs_control, COL(text_header));
+  ccord_vec2 title_sz = ccord_text_measure(r, name, strlen(name), &title_st, 0.0f);
+
+  // Snap avatar diameter to the spacing grid (24 px on default themes) so the tooltip height stays grid-aligned.
+  float av_sz = roundf(fminf(fmaxf(M(avatar_size_small), 20.0f), 28.0f) / UIS_SP_1) * UIS_SP_1;
+  float step = roundf(av_sz * 0.84f);
+  const float halo_pad = 1.5f;
+  const float icon_sz = 16.0f;
+  const float icon_gap = UIS_SP_2;
+  const float row_gap = UIS_SP_2;
+
+  char more_lbl[24] = "";
+  ccord_text_style more_st = ui_style(ui, CCORD_FONT_BOLD, tok.fs_caption, COL(text_secondary));
+  float more_w = 0.0f;
+  if (overflow > 0u) {
+    snprintf(more_lbl, sizeof more_lbl, "+%zu", overflow);
+    ccord_vec2 mt = ccord_text_measure(r, more_lbl, strlen(more_lbl), &more_st, 0.0f);
+    more_w = maxf(av_sz, mt.x + 2.0f * UIS_SP_1 + 2.0f);
+  }
+  float avatars_w = overflow > 0u ? ((float)shown * step + more_w) : ((float)(shown - 1u) * step + av_sz);
+  float voice_w = icon_sz + icon_gap + avatars_w;
+  float content_w = maxf(title_sz.x, voice_w);
+  float max_w = ui->win_w - 16.0f - 2.0f * UIS_SP_3;
+  if (max_w > voice_w && content_w > max_w) content_w = max_w;
+  float content_h = title_sz.y + row_gap + av_sz;
+
+  ccord_rect tip = uis_tooltip_begin(ui, r, anchor, content_w, content_h, UIS_TIP_RIGHT, tip_id);
+  float ix = tip.x + UIS_SP_3;
+  float iy = tip.y + UIS_SP_2;
+  ccord_text_draw_ellipsis(r, name, strlen(name), ix, iy, tip.w - 2.0f * UIS_SP_3, &title_st);
+
+  float row_cy = iy + title_sz.y + row_gap + av_sz * 0.5f;
+  ui_icon_speaker(r, ix + icon_sz * 0.5f, row_cy, icon_sz, COL(text_secondary));
+  float ax0 = ix + icon_sz + icon_gap;
+  for (size_t i = 0; i < shown; i++) {
+    float cx = ax0 + av_sz * 0.5f + (float)i * step;
+    if (i > 0u) ccord_draw_circle(r, cx, row_cy, av_sz * 0.5f + halo_pad, COL(bg_floating));
+    draw_guild_voice_avatar(ui, r, g->id, voice_users[i], cx, row_cy, av_sz);
+  }
+  if (overflow > 0u) {
+    ccord_rect pill = {ax0 + (float)shown * step, row_cy - av_sz * 0.5f, more_w, av_sz};
+    ccord_rect halo = {pill.x - halo_pad, pill.y - halo_pad, pill.w + 2.0f * halo_pad, pill.h + 2.0f * halo_pad};
+    ccord_draw_rrect(r, halo, halo.h * 0.5f, COL(bg_floating));
+    ccord_draw_rrect(r, pill, pill.h * 0.5f, COL(bg_tertiary));
+    text_centered(r, more_lbl, pill, &more_st);
+  }
+  uis_tooltip_end(r);
+}
+
+// Tooltip for the hovered rail item (drawn after the left-column panels so it never clips behind the user panel).
+void ui_draw_server_rail_tooltip(ccord_ui *ui, ccord_renderer *r)
+{
+  if (ui->touch_mode || ui->hover_rail_slot < 0 || ui->menu.open || ui->settings_open ||
+      (ui->drag == DRAG_SERVER && ui->drag_active)) {
+    return;
+  }
+  size_t nslots = 0;
+  const ui_rail_slot *slots = ui_rail_slots_cached(ui, &nslots, nullptr);
+  if (!slots || (size_t)ui->hover_rail_slot >= nslots) return;
+  const ccord_layout_rect *l = &ui->layout.server_list;
+  const ui_rail_slot *sl = &slots[ui->hover_rail_slot];
+  ccord_rect ic = sl->rect;
+  // Anchor: the rail column at the icon's height, so the tip sits 6 px right of the rail.
+  ccord_rect anchor = {l->x, ic.y, l->w, ic.h};
+  uint64_t tip_id = (uint64_t)ui->hover_rail_slot;
+  if (sl->kind == UI_RAIL_GUILD) {
+    const ccord_guild *g = ccord_store_guild_at(ui->d.store, sl->guild_index);
+    draw_guild_voice_tooltip(ui, r, anchor, g, tip_id);
+    return;
+  }
+  const char *name = nullptr;
+  switch (sl->kind) {
+    case UI_RAIL_DM: name = CCORD_DM_GUILD_NAME; break;
+    case UI_RAIL_FOLDER_COLLAPSED:
+    case UI_RAIL_FOLDER_HEADER:
+      name = sl->folder_name[0] ? sl->folder_name : "Server Folder";
+      break;
+    case UI_RAIL_ADD_SERVER: name = "Add a Server"; break;
+    case UI_RAIL_DISCOVERY: name = "Explore Discoverable Servers"; break;
+    case UI_RAIL_GUILD: break;
+  }
+  if (name) {
+    uis_tooltip(ui, r, anchor, name, UIS_TIP_RIGHT, tip_id);
   }
 }
 

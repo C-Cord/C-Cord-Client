@@ -136,6 +136,12 @@ void uis_list_row_fill(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, uis_state
 
 // ---- tooltip ----
 typedef enum uis_tip_side : uint8_t { UIS_TIP_BELOW, UIS_TIP_ABOVE, UIS_TIP_RIGHT } uis_tip_side;
+// Multi-element tooltip container: places a tooltip sized to `content_w` x `content_h` plus standard UIS_SP_3 x UIS_SP_2
+// padding, opens the UIS_MS_TIP popup fade, draws the popover frame and records one UIS_K_TOOLTIP audit entry.
+// Returns the drawn outer box; caller draws content inside (box.x + UIS_SP_3, box.y + UIS_SP_2) and calls uis_tooltip_end.
+ccord_rect uis_tooltip_begin(ccord_ui *ui, ccord_renderer *r, ccord_rect anchor, float content_w, float content_h,
+                             uis_tip_side side, uint64_t id);
+void uis_tooltip_end(ccord_renderer *r);
 // Fades in over UIS_MS_TIP (instant under reduced motion), UIS_SP_3 x UIS_SP_2 padding, 6 px from the anchor, kept
 // inside the window with an 8 px margin. Call only while the anchor is hovered; do not wrap it in another popup fade.
 // Returns the drawn rect.
