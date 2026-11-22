@@ -1144,3 +1144,8 @@ uint32_t ccord_ui_next_wait_ms(const ccord_ui *ui, uint64_t now_ms)
   return wait;
 }
 
+bool ccord_ui_notify_desktop_enabled(const ccord_ui *ui)
+{
+  return !ui || ui->settings_notify_desktop;
+}
+

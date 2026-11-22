@@ -534,3 +534,5 @@ bool ccord_ui_sound_kind_enabled(const ccord_ui *ui, unsigned kind);
 bool ccord_ui_is_reading(const ccord_ui *ui);
 ccord_id ccord_ui_stage_channel(const ccord_ui *ui);
 bool ccord_ui_pref_game_detection(void);
+bool ccord_ui_pref_close_to_background(void);
+bool ccord_ui_notify_desktop_enabled(const ccord_ui *ui);

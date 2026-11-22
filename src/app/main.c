@@ -166,12 +166,14 @@ void app_run_frames(app *a, int n)
 
 // ---------------------------------------------------------------- interactive loop
 
+#if !CCORD_OS_ANDROID
 // The "Detect games" client pref, read by the game-detection scheduler on every poll.
 static bool game_detect_pref_enabled(void *ud)
 {
   (void)ud;
   return ccord_ui_pref_game_detection();
 }
+#endif
 
 static void run_interactive(app *a)
 {
@@ -217,8 +219,8 @@ static void run_interactive(app *a)
     if (!should_draw && !media_fast) {
       ccord_socket_t wait_fds[24];
       size_t nfds = 0;
-      uint32_t bg_timeout = ccord_platform_is_mobile(a->platform) ? 60000u : 250u;
-      if (a->resume_needs_draw || a->resume_link_wake) {
+      uint32_t bg_timeout = ccord_platform_is_mobile(a->platform) ? UINT32_MAX : 250u;
+      if (a->resume_needs_draw || a->resume_link_wake || a->resume_link_probe) {
         bg_timeout = 0u;
       } else {
         if (a->session) {
@@ -320,9 +322,17 @@ static void run_interactive(app *a)
           a->bg_since_ms = app_boottime_ms(a);
           a->resume_needs_draw = false;
           a->resume_link_wake = false;
+          a->resume_link_probe = false;
+          if (a->session) {
+            ccord_session_set_background(a->session, true);
+            if (ccord_platform_is_mobile(a->platform) && !a->keep_alive_active && !vstate.active && !video_active) {
+              ccord_session_set_suspended(a->session, true);
+            }
+          }
           if (a->warm && a->session && !ccord_session_is_stale(a->session)) {
             ccord_error werr;
             (void)ccord_warm_save(a->warm, a->store, true, &werr);
+            was_visible = false;   // avoid duplicate synced warm_save in the visible->!visible check below
           }
 #if CCORD_WITH_PLUGINS
           if (a->plugins) {
@@ -337,6 +347,10 @@ static void run_interactive(app *a)
           uint64_t now_fg = app_boottime_ms(a);
           uint64_t bg_dur = (a->bg_since_ms > 0 && now_fg >= a->bg_since_ms) ? (now_fg - a->bg_since_ms) : 0u;
           a->bg_since_ms = 0;
+          if (a->session) {
+            ccord_session_set_background(a->session, false);
+            ccord_session_set_suspended(a->session, false);
+          }
           if (a->deferred_lowmem_evict) {
             a->deferred_lowmem_evict = false;
             ccord_render_evict_caches(a->renderer);
@@ -358,11 +372,15 @@ static void run_interactive(app *a)
             .left = raw_safe.left / zoom,
           };
           ccord_ui_set_safe_insets(a->ui, a->last_safe.top, a->last_safe.right, a->last_safe.bottom, a->last_safe.left);
-          // Only wake/reconnect the gateway if it dropped or we were backgrounded long enough for Doze
-          // to stall sockets; defer the wake until after the resumed UI frame is painted so resume never flashes black.
-          bool need_wake = a->session &&
-                           (ccord_session_state(a->session) != CCORD_CONN_CONNECTED || bg_dur >= 45000u);
-          if (need_wake) a->resume_link_wake = true;
+          // Reconnect immediately if dropped, or probe live sockets with OP 1 after >= 45 s backgrounded instead
+          // of tearing down healthy TLS connections; defer until after the resumed UI frame presents.
+          if (a->session) {
+            if (ccord_session_state(a->session) != CCORD_CONN_CONNECTED) {
+              a->resume_link_wake = true;
+            } else if (bg_dur >= 45000u) {
+              a->resume_link_probe = true;
+            }
+          }
 #if CCORD_WITH_PLUGINS
           app_plugins_push_platform_state(a);
           if (a->plugins) {
@@ -514,16 +532,19 @@ static void run_interactive(app *a)
       ccord_platform_notify_first_frame(a->platform);
       redraw = false;
     }
-    if (a->resume_link_wake) {
+    if (a->resume_link_wake || a->resume_link_probe) {
+      ccord_link_event lev = a->resume_link_wake ? CCORD_LINK_RESUMED : CCORD_LINK_PROBE;
       a->resume_link_wake = false;
+      a->resume_link_probe = false;
       if (a->session) {
         ccord_error lerr;
-        (void)ccord_session_link_event(a->session, CCORD_LINK_RESUMED, &lerr);
+        (void)ccord_session_link_event(a->session, lev, &lerr);
       }
     }
-    // Sync Android background keep-alive foreground service while signed in so messages & notifications arrive when tabbed out.
+    // Sync Android background keep-alive foreground service while signed in and background notifications are enabled.
     {
-      bool want_keep_alive = a->live && a->session && a->store &&
+      bool bg_pref = ccord_ui_pref_close_to_background() && ccord_ui_notify_desktop_enabled(a->ui);
+      bool want_keep_alive = bg_pref && a->live && a->session && a->store &&
                              ccord_store_self_id(a->store) != CCORD_ID_NONE &&
                              ccord_session_state(a->session) != CCORD_CONN_FAILED;
       if (want_keep_alive != a->keep_alive_active) {
@@ -1037,7 +1058,9 @@ int main(int argc, char **argv)
     if (opt.channel || opt.type_text || opt.has_hover || opt.has_right_click || opt.has_click || opt.print_clipboard || opt.scroll || opt.open_settings || opt.settings_plugins || opt.settings_account || opt.toggle_extensions) {
       fputs("ccord: note: --channel/--type/--hover/--right-click/--scroll/--open-settings only apply with --screenshot\n", stderr);
     }
-    // Rich Presence: local Discord RPC server (discord-ipc-N). Optional: failure only disables it.
+#if !CCORD_OS_ANDROID
+    // Rich Presence: local Discord RPC server (discord-ipc-N) and desktop /proc game detection.
+    // Disabled on Android where SELinux hides /proc and local desktop IPC does not apply.
     if (!opt.no_rpc) {
       ccord_error ierr;
       // Game detection: the detectable list is cached in the data dir; --mock serves the fixture and never touches it.
@@ -1055,6 +1078,7 @@ int main(int argc, char **argv)
         ccord_error_clear(&ierr);
       }
     }
+#endif
     run_interactive(&a);
     result = 0;
   }

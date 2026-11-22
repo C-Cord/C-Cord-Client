@@ -632,11 +632,9 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     ui->ime_active = false;
     ui->window_focused = false;
     if (ui->media_playing) ui->media_playing = false;
-    if (ui->media_audio) {
-      ccord_audio_destroy(ui->media_audio);
-      ui->media_audio = nullptr;
-      ui->media_audio_resync = true;
-    }
+    uc_media_player_close(ui);
+    ui->media_url[0] = '\0';
+    ui->media_att_id = CCORD_ID_NONE;
     if (ui->vm.recording) ui_vm_cancel(ui);
     if (ui->settings_save_dirty) {
       ui->settings_save_dirty = false;

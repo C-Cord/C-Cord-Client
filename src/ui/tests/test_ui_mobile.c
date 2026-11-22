@@ -622,6 +622,7 @@ static void test_mobile_safe_area_rail_and_background_focus(void)
   (void)ccord_ui_handle_input(F.ui, &focus_ev);
   CT_CHECK(F.ui->window_focused);
   F.ui->media_playing = true;
+  snprintf(F.ui->media_url, sizeof F.ui->media_url, "https://cdn.discordapp.com/attachments/1/2/clip.mp4");
   {
     ccord_error aerr = {0};
     ccord_audio_config acfg = {.sample_rate = 48000, .channels = 2, .frame_samples = 960, .capture = false};
@@ -637,6 +638,9 @@ static void test_mobile_safe_area_rail_and_background_focus(void)
   CT_CHECK(!ui_is_reading(F.ui));
   CT_CHECK(!F.ui->media_playing);
   CT_CHECK(F.ui->media_audio == nullptr);
+  CT_CHECK(F.ui->media_stream == nullptr);
+  CT_CHECK(F.ui->media_net == nullptr);
+  CT_CHECK(F.ui->media_url[0] == '\0');
   CT_CHECK(!F.ui->vm.recording);
   CT_CHECK(!F.ui->settings_save_dirty);
 

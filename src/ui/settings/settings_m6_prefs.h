@@ -59,7 +59,6 @@ void ccord_ui_pref_set_game_detection(bool on);
 // Close-to-background (settings.ini key close_to_tray, default ON): the window close button hides to the
 // tray instead of quitting. Same pref as the Advanced "CLOSE TO TRAY" row; the app is told through
 // host.set_close_to_tray.
-bool ccord_ui_pref_close_to_background(void);
 void ccord_ui_pref_set_close_to_background(bool on);
 
 // Streamer-mode masking for sensitive account/invite strings: returns `text` unchanged when

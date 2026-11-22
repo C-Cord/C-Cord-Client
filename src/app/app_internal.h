@@ -135,6 +135,7 @@ typedef struct app {
   bool deferred_lowmem_evict;               // defer GPU cache eviction while EGL surface is paused in background
   bool resume_needs_draw;                   // paint resumed UI frame before any blocking network pump
   bool resume_link_wake;                    // trigger CCORD_LINK_RESUMED after the resumed frame presents
+  bool resume_link_probe;                   // send OP 1 heartbeat probe after the resumed frame presents
   ccord_text_input_kind ime_kind;           // active field hint passed from UI to SDL_StartTextInputWithProperties
   bool file_dialog_pending;                 // true while a chat "Upload a File" dialog's drop results are arriving
 #if CCORD_LIVE_ACCOUNT

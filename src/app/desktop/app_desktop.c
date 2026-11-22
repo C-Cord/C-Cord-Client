@@ -634,6 +634,7 @@ static void badge_totals(const ccord_store *s, int64_t now_unix_ms, uint32_t *ou
 void ccord_app_desktop_sync_badge(ccord_app_desktop *d)
 {
   if (!d || !d->store || !d->platform) return;
+  if (ccord_platform_is_mobile(d->platform)) return;   // mobile has no desktop title bar or SNI tray badge
   uint64_t revision = ccord_store_revision(d->store);
   if (d->badge_valid && revision == d->badge_revision) return;
   d->badge_revision = revision;
@@ -999,7 +1000,12 @@ static void app_link_cb(void *ud, ccord_link_event ev)
   ccord_error err;
   ccord_status st = ccord_session_link_event(s, ev, &err);
   if (st != CCORD_OK && st != CCORD_ERR_UNSUPPORTED) {
-    CCORD_LOG_D("link: %s event not applied: %s", ev == CCORD_LINK_RESUMED ? "resume" : "network-change", err.message);
+    const char *ename = ev == CCORD_LINK_RESUMED ? "resume"
+                        : ev == CCORD_LINK_OFFLINE ? "offline"
+                        : ev == CCORD_LINK_ONLINE ? "online"
+                        : ev == CCORD_LINK_PROBE ? "probe"
+                                                 : "network-change";
+    CCORD_LOG_D("link: %s event not applied: %s", ename, err.message);
   }
 }
 
