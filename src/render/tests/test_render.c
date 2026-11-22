@@ -809,6 +809,119 @@ static void test_v3_primitives(ccord_renderer *r)
   CT_CHECK(ccord_render_set_custom_fonts(r, "", ""));
 }
 
+static void test_anti_aliasing_and_mips(ccord_renderer *r)
+{
+  ccord_error err;
+  // 1. Color emoji over pure white: yellow face (R=255) must not suffer double-premultiplied dark fringe (R=191).
+  ccord_color white = {255, 255, 255, 255};
+  ccord_text_style em_st = {CCORD_FONT_EMOJI, 48.0f, {255, 255, 255, 255}};
+  ccord_render_begin(r, white);
+  ccord_text_draw(r, "\xF0\x9F\x98\x80", 4, 20.0f, 20.0f, &em_st, 0.0f);
+  // Mixed text + color emoji on the same line (uses both TTF_DrawRendererText and premul color-glyph draw).
+  ccord_text_style mix_st = {CCORD_FONT_REGULAR, 20.0f, {20, 20, 20, 255}};
+  ccord_text_draw(r, "\xF0\x9F\x94\xA5 42", 7, 100.0f, 30.0f, &mix_st, 0.0f);
+  const char *path = "test_render_aa_shot.png";
+  CT_CHECK(ccord_render_screenshot(r, path, &err) == CCORD_OK);
+  ccord_render_end(r);
+  SDL_Surface *s = SDL_LoadPNG(path);
+  CT_CHECK(s != nullptr);
+  if (s) {
+    uint8_t min_r = 255;
+    int yellow_rim = 0;
+    // Top rim of the 48 px yellow face (above eyes) has only yellow (255,204,77) over white (255,255,255): R stays 255.
+    for (int y = 20; y < 34; y++) {
+      for (int x = 20; x < 72; x++) {
+        uint8_t pr, pg, pb, pa;
+        SDL_ReadSurfacePixel(s, x, y, &pr, &pg, &pb, &pa);
+        if (pr < min_r) min_r = pr;
+        if (pr > 240 && pb < 180) yellow_rim++;
+      }
+    }
+    CT_CHECK(yellow_rim > 30);
+    CT_CHECK(min_r >= 253);
+    // Mixed text: warm fire pixels and dark '42' text pixels both appear.
+    int fire_px = 0, digit_px = 0;
+    for (int y = 25; y < 60; y++) {
+      for (int x = 100; x < 165; x++) {
+        uint8_t pr, pg, pb, pa;
+        SDL_ReadSurfacePixel(s, x, y, &pr, &pg, &pb, &pa);
+        if (pr > 200 && pg > 80 && pb < 90) fire_px++;
+        if (pr < 60 && pg < 60 && pb < 60) digit_px++;
+      }
+    }
+    CT_CHECK(fire_px > 20 && digit_px > 10);
+    SDL_DestroySurface(s);
+  }
+  remove(path);
+
+  // 2. Rounded texture anti-aliasing + mipmap box-filtered downscaling + faded color emoji alpha.
+  uint8_t checker[128 * 128 * 4];
+  for (int y = 0; y < 128; y++) {
+    for (int x = 0; x < 128; x++) {
+      uint8_t v = ((x ^ y) & 1) ? 255u : 0u;
+      size_t off = ((size_t)y * 128u + (size_t)x) * 4u;
+      checker[off + 0] = v;
+      checker[off + 1] = v;
+      checker[off + 2] = v;
+      checker[off + 3] = 255u;
+    }
+  }
+  CT_CHECK(ccord_render_upload_rgba(r, "aa:checker", checker, 128, 128, &err) == CCORD_OK);
+
+  uint8_t solid_blue[64 * 64 * 4];
+  for (int i = 0; i < 64 * 64; i++) {
+    solid_blue[i * 4 + 0] = 88u;
+    solid_blue[i * 4 + 1] = 101u;
+    solid_blue[i * 4 + 2] = 242u;
+    solid_blue[i * 4 + 3] = 255u;
+  }
+  CT_CHECK(ccord_render_upload_rgba(r, "aa:blue", solid_blue, 64, 64, &err) == CCORD_OK);
+
+  ccord_color dark = {20, 20, 23, 255};
+  ccord_render_begin(r, dark);
+  // Downscale 128x128 1px checkerboard 8x -> 16x16: mipmaps average alternating 0/255 cleanly to ~128.
+  ccord_draw_texture(r, "aa:checker", (ccord_rect){20.0f, 20.0f, 16.0f, 16.0f}, 255);
+  // Rounded texture: curved corner must contain intermediate anti-aliased edge pixels, not binary stair-steps.
+  ccord_draw_texture_rounded(r, "aa:blue", (ccord_rect){80.0f, 20.0f, 60.0f, 60.0f}, 16.0f, 255);
+  // Faded color emoji under ccord_push_alpha(0.5): peak brightness must be roughly halved.
+  ccord_push_alpha(r, 0.5f);
+  ccord_text_draw(r, "\xF0\x9F\x98\x80", 4, 180.0f, 20.0f, &em_st, 0.0f);
+  ccord_pop_alpha(r);
+  CT_CHECK(ccord_render_screenshot(r, path, &err) == CCORD_OK);
+  ccord_render_end(r);
+
+  s = SDL_LoadPNG(path);
+  CT_CHECK(s != nullptr);
+  if (s) {
+    CT_CHECK(pixel_is(s, 28, 28, (ccord_color){128, 128, 128, 255}, 12));
+    CT_CHECK(pixel_is(s, 110, 50, (ccord_color){88, 101, 242, 255}, 2));
+    CT_CHECK(pixel_is(s, 81, 21, dark, 2));
+    int aa_edge_px = 0;
+    for (int y = 20; y < 38; y++) {
+      for (int x = 80; x < 98; x++) {
+        uint8_t pr, pg, pb, pa;
+        SDL_ReadSurfacePixel(s, x, y, &pr, &pg, &pb, &pa);
+        if (pb > dark.b + 15 && pb < 242 - 15) aa_edge_px++;
+      }
+    }
+    CT_CHECK(aa_edge_px >= 6);
+    uint8_t max_r = 0;
+    for (int y = 20; y < 72; y++) {
+      for (int x = 180; x < 232; x++) {
+        uint8_t pr, pg, pb, pa;
+        SDL_ReadSurfacePixel(s, x, y, &pr, &pg, &pb, &pa);
+        if (pr > max_r) max_r = pr;
+      }
+    }
+    // 50% of 255 over 20 = ~137 (must not stay un-faded at 255, nor disappear to 20).
+    CT_CHECK(max_r >= 120 && max_r <= 155);
+    SDL_DestroySurface(s);
+  }
+  remove(path);
+  ccord_render_evict_texture(r, "aa:checker");
+  ccord_render_evict_texture(r, "aa:blue");
+}
+
 int main(int argc, char **argv)
 {
   ccord_error err;
@@ -844,6 +957,7 @@ int main(int argc, char **argv)
   test_zoom(r);
   test_platform_apis(p, r);
   test_v3_primitives(r);
+  test_anti_aliasing_and_mips(r);
   ccord_render_destroy(r);
   ccord_platform_destroy(p);
   return CT_RESULT("test_render");

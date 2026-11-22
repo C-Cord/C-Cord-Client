@@ -65,8 +65,10 @@ ccord_renderer *ccord_render_create(ccord_platform *p, const ccord_theme *theme,
     ccord_render_destroy(r);
     return nullptr;
   }
+  const char *rname = SDL_GetRendererName(r->sdl);
+  r->software = rname && strcmp(rname, "software") == 0;
   if (!headless) SDL_SetRenderVSync(r->sdl, 1);   // headless dummy/offscreen skips simulated 60 Hz sleeps
-  CCORD_LOG_I("render: SDL renderer '%s', video driver '%s'", SDL_GetRendererName(r->sdl), video ? video : "?");
+  CCORD_LOG_I("render: SDL renderer '%s', video driver '%s'", rname ? rname : "?", video ? video : "?");
   SDL_SetRenderDrawBlendMode(r->sdl, SDL_BLENDMODE_BLEND);
   if (!headless) {
     // Paint the theme backdrop immediately so Android/GLES surfaces never sit solid black while startup finishes.

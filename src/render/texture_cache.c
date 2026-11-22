@@ -197,6 +197,17 @@ static int tex_alloc_slot(ccord_renderer *r)
   return -1;
 }
 
+static void tex_destroy_mips(tex_entry *e)
+{
+  for (int m = 0; m < e->nmips; m++) {
+    if (e->mips[m]) SDL_DestroyTexture(e->mips[m]);
+    e->mips[m] = nullptr;
+    e->mip_w[m] = 0;
+    e->mip_h[m] = 0;
+  }
+  e->nmips = 0;
+}
+
 void tex_free_slot(ccord_renderer *r, int slot)
 {
   tex_entry *e = &r->texs[slot];
@@ -204,6 +215,7 @@ void tex_free_slot(ccord_renderer *r, int slot)
   tex_hash_remove(r, slot, e->key_hash);
   tex_lru_unlink(r, slot);
   tex_drop_anim(r, e);
+  tex_destroy_mips(e);
   if (e->tex) SDL_DestroyTexture(e->tex);
   r->tex_bytes_total -= e->tex_bytes <= r->tex_bytes_total ? e->tex_bytes : r->tex_bytes_total;
   ccord_free(e->key);
@@ -226,26 +238,268 @@ static void tex_enforce_vram_budget(ccord_renderer *r, int protect_slot)
   }
 }
 
-static bool tex_update_pixels(SDL_Texture *tex, bool streaming, const uint8_t *rgba, int width, int height)
+static bool rgba_has_transparency(const uint8_t *rgba, size_t npixels)
+{
+  for (size_t i = 0; i < npixels; i++) {
+    if (rgba[i * 4u + 3u] != 255u) return true;
+  }
+  return false;
+}
+
+static void rgba_premultiply_row(uint8_t *dst, const uint8_t *src, int width)
+{
+  for (int x = 0; x < width; x++) {
+    size_t off = (size_t)x * 4u;
+    uint32_t a = src[off + 3u];
+    if (a == 255u) {
+      dst[off + 0u] = src[off + 0u];
+      dst[off + 1u] = src[off + 1u];
+      dst[off + 2u] = src[off + 2u];
+      dst[off + 3u] = 255u;
+    } else if (a == 0u) {
+      dst[off + 0u] = 0u;
+      dst[off + 1u] = 0u;
+      dst[off + 2u] = 0u;
+      dst[off + 3u] = 0u;
+    } else {
+      dst[off + 0u] = (uint8_t)((src[off + 0u] * a + 127u) / 255u);
+      dst[off + 1u] = (uint8_t)((src[off + 1u] * a + 127u) / 255u);
+      dst[off + 2u] = (uint8_t)((src[off + 2u] * a + 127u) / 255u);
+      dst[off + 3u] = (uint8_t)a;
+    }
+  }
+}
+
+static bool tex_update_pixels(SDL_Texture *tex, bool streaming, bool premul_on_copy, const uint8_t *rgba, int width,
+                              int height)
 {
   const int row_bytes = width * 4;
   if (streaming) {
     void *pixels = nullptr;
     int pitch = 0;
     if (SDL_LockTexture(tex, nullptr, &pixels, &pitch)) {
-      if (pitch == row_bytes) {
-        memcpy(pixels, rgba, (size_t)row_bytes * (size_t)height);
+      uint8_t *dst = (uint8_t *)pixels;
+      if (!premul_on_copy) {
+        if (pitch == row_bytes) {
+          memcpy(dst, rgba, (size_t)row_bytes * (size_t)height);
+        } else {
+          for (int y = 0; y < height; y++) {
+            memcpy(dst + (size_t)y * (size_t)pitch, rgba + (size_t)y * (size_t)row_bytes, (size_t)row_bytes);
+          }
+        }
       } else {
-        uint8_t *dst = (uint8_t *)pixels;
         for (int y = 0; y < height; y++) {
-          memcpy(dst + (size_t)y * (size_t)pitch, rgba + (size_t)y * (size_t)row_bytes, (size_t)row_bytes);
+          rgba_premultiply_row(dst + (size_t)y * (size_t)pitch, rgba + (size_t)y * (size_t)row_bytes, width);
         }
       }
       SDL_UnlockTexture(tex);
       return true;
     }
   }
+  if (premul_on_copy && rgba_has_transparency(rgba, (size_t)width * (size_t)height)) {
+    uint8_t *tmp = ccord_malloc((size_t)row_bytes * (size_t)height);
+    if (tmp) {
+      for (int y = 0; y < height; y++) {
+        rgba_premultiply_row(tmp + (size_t)y * (size_t)row_bytes, rgba + (size_t)y * (size_t)row_bytes, width);
+      }
+      bool ok = SDL_UpdateTexture(tex, nullptr, tmp, row_bytes);
+      ccord_free(tmp);
+      return ok;
+    }
+  }
   return SDL_UpdateTexture(tex, nullptr, rgba, row_bytes);
+}
+
+// Box-filters src (sw x sh) into dst (dw x dh), where dw = max(1, sw / 2), dh = max(1, sh / 2).
+// When premul is true, both src and dst are premultiplied RGBA32; otherwise straight RGBA32 (alpha-weighted
+// so transparent neighbors never bleed dark halos into edges).
+static void tex_mip_downscale(const uint8_t *src, int sw, int sh, uint8_t *dst, int dw, int dh, bool premul)
+{
+  if (sw == dw * 2 && sh == dh * 2) {
+    const size_t srow = (size_t)sw * 4u;
+    for (int y = 0; y < dh; y++) {
+      const uint8_t *r0 = src + (size_t)(y * 2) * srow;
+      const uint8_t *r1 = r0 + srow;
+      uint8_t *out = dst + (size_t)y * (size_t)dw * 4u;
+      for (int x = 0; x < dw; x++) {
+        const uint8_t *p00 = r0 + (size_t)(x * 2) * 4u;
+        const uint8_t *p10 = p00 + 4u;
+        const uint8_t *p01 = r1 + (size_t)(x * 2) * 4u;
+        const uint8_t *p11 = p01 + 4u;
+        if (premul) {
+          for (int k = 0; k < 4; k++) {
+            out[x * 4 + k] = (uint8_t)(((uint32_t)p00[k] + p10[k] + p01[k] + p11[k] + 2u) >> 2);
+          }
+        } else {
+          uint32_t a00 = p00[3], a10 = p10[3], a01 = p01[3], a11 = p11[3];
+          uint32_t asum = a00 + a10 + a01 + a11;
+          if (asum == 0u) {
+            out[x * 4 + 0] = out[x * 4 + 1] = out[x * 4 + 2] = out[x * 4 + 3] = 0u;
+          } else {
+            for (int k = 0; k < 3; k++) {
+              uint32_t c = p00[k] * a00 + p10[k] * a10 + p01[k] * a01 + p11[k] * a11;
+              out[x * 4 + k] = (uint8_t)((c + asum / 2u) / asum);
+            }
+            out[x * 4 + 3] = (uint8_t)((asum + 2u) >> 2);
+          }
+        }
+      }
+    }
+    return;
+  }
+  const float rx = (float)sw / (float)dw;
+  const float ry = (float)sh / (float)dh;
+  for (int y = 0; y < dh; y++) {
+    float y0 = (float)y * ry;
+    float y1 = y0 + ry;
+    int sy0 = (int)y0;
+    for (int x = 0; x < dw; x++) {
+      float x0 = (float)x * rx;
+      float x1 = x0 + rx;
+      int sx0 = (int)x0;
+      float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      float wsum = 0.0f;
+      for (int sy = sy0; (float)sy < y1 && sy < sh; sy++) {
+        float wy = fminf(y1, (float)(sy + 1)) - fmaxf(y0, (float)sy);
+        for (int sx = sx0; (float)sx < x1 && sx < sw; sx++) {
+          float w = wy * (fminf(x1, (float)(sx + 1)) - fmaxf(x0, (float)sx));
+          const uint8_t *p = src + ((size_t)sy * (size_t)sw + (size_t)sx) * 4u;
+          if (premul) {
+            acc[0] += w * (float)p[0];
+            acc[1] += w * (float)p[1];
+            acc[2] += w * (float)p[2];
+            acc[3] += w * (float)p[3];
+          } else {
+            float wa = w * ((float)p[3] / 255.0f);
+            acc[0] += wa * (float)p[0];
+            acc[1] += wa * (float)p[1];
+            acc[2] += wa * (float)p[2];
+            acc[3] += wa;
+          }
+          wsum += w;
+        }
+      }
+      uint8_t *out = dst + ((size_t)y * (size_t)dw + (size_t)x) * 4u;
+      if (wsum <= 0.0f) {
+        out[0] = out[1] = out[2] = out[3] = 0u;
+      } else if (premul) {
+        for (int k = 0; k < 4; k++) {
+          long v = lroundf(acc[k] / wsum);
+          out[k] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+      } else if (acc[3] <= 0.0f) {
+        out[0] = out[1] = out[2] = out[3] = 0u;
+      } else {
+        for (int k = 0; k < 3; k++) {
+          long v = lroundf(acc[k] / acc[3]);
+          out[k] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+        }
+        long a = lroundf(acc[3] / wsum * 255.0f);
+        out[3] = (uint8_t)(a < 0 ? 0 : (a > 255 ? 255 : a));
+      }
+    }
+  }
+}
+
+static bool tex_should_build_mips(int width, int height, bool streaming)
+{
+  if (width < 32 && height < 32) return false;
+  if (streaming && (width > 256 || height > 256)) return false;   // skip per-frame mip updates on large videos/GIFs
+  return true;
+}
+
+// Builds up to CCORD_TEX_MAX_MIPS half-resolution mip textures from base pixels `src` (already in the target
+// premul/straight representation) and returns total mip VRAM bytes.
+static size_t tex_build_mips(ccord_renderer *r, const uint8_t *src, int width, int height, bool streaming, bool premul,
+                             SDL_Texture *out_mips[CCORD_TEX_MAX_MIPS], int out_w[CCORD_TEX_MAX_MIPS],
+                             int out_h[CCORD_TEX_MAX_MIPS], int *out_nmips)
+{
+  *out_nmips = 0;
+  if (!tex_should_build_mips(width, height, streaming)) return 0u;
+  const SDL_TextureAccess access = streaming ? SDL_TEXTUREACCESS_STREAMING : SDL_TEXTUREACCESS_STATIC;
+  const SDL_BlendMode bmode = premul ? SDL_BLENDMODE_BLEND_PREMULTIPLIED : SDL_BLENDMODE_BLEND;
+  int cw = width, ch = height;
+  const uint8_t *cur = src;
+  uint8_t *buf_a = nullptr, *buf_b = nullptr;
+  size_t total_bytes = 0u;
+
+  for (int m = 0; m < CCORD_TEX_MAX_MIPS && (cw >= 32 || ch >= 32); m++) {
+    int dw = cw > 1 ? cw / 2 : 1;
+    int dh = ch > 1 ? ch / 2 : 1;
+    if (dw == cw && dh == ch) break;
+    uint8_t *dst_buf = (m & 1) == 0 ? buf_a : buf_b;
+    if (!dst_buf) {
+      dst_buf = ccord_malloc((size_t)dw * (size_t)dh * 4u);
+      if (!dst_buf) break;
+      if ((m & 1) == 0) buf_a = dst_buf;
+      else buf_b = dst_buf;
+    }
+    tex_mip_downscale(cur, cw, ch, dst_buf, dw, dh, premul);
+    SDL_Texture *mtex = SDL_CreateTexture(r->sdl, SDL_PIXELFORMAT_RGBA32, access, dw, dh);
+    if (!mtex) break;
+    if (!tex_update_pixels(mtex, streaming, false, dst_buf, dw, dh)) {
+      SDL_DestroyTexture(mtex);
+      break;
+    }
+    SDL_SetTextureBlendMode(mtex, bmode);
+    SDL_SetTextureScaleMode(mtex, SDL_SCALEMODE_LINEAR);
+    out_mips[m] = mtex;
+    out_w[m] = dw;
+    out_h[m] = dh;
+    (*out_nmips)++;
+    total_bytes += (size_t)dw * (size_t)dh * 4u;
+    cur = dst_buf;
+    cw = dw;
+    ch = dh;
+  }
+  ccord_free(buf_a);
+  ccord_free(buf_b);
+  return total_bytes;
+}
+
+// Updates an existing entry's base texture and (for small animated emojis/icons) its mip chain.
+static bool tex_update_entry_pixels(tex_entry *e, const uint8_t *rgba, bool already_premul)
+{
+  const bool need_premul = e->premul && !already_premul;
+  if (e->nmips == 0) {
+    return tex_update_pixels(e->tex, e->tex_streaming, need_premul, rgba, e->w, e->h);
+  }
+  const uint8_t *base = rgba;
+  uint8_t *premul_buf = nullptr;
+  if (need_premul && rgba_has_transparency(rgba, (size_t)e->w * (size_t)e->h)) {
+    premul_buf = ccord_malloc((size_t)e->w * (size_t)e->h * 4u);
+    if (premul_buf) {
+      for (int y = 0; y < e->h; y++) {
+        rgba_premultiply_row(premul_buf + (size_t)y * (size_t)e->w * 4u, rgba + (size_t)y * (size_t)e->w * 4u, e->w);
+      }
+      base = premul_buf;
+    }
+  }
+  bool ok = tex_update_pixels(e->tex, e->tex_streaming, need_premul && !premul_buf, base, e->w, e->h);
+  if (ok) {
+    int cw = e->w, ch = e->h;
+    const uint8_t *cur = base;
+    uint8_t *buf_a = nullptr, *buf_b = nullptr;
+    for (int m = 0; m < e->nmips && e->mips[m]; m++) {
+      int dw = e->mip_w[m], dh = e->mip_h[m];
+      uint8_t *dst_buf = (m & 1) == 0 ? buf_a : buf_b;
+      if (!dst_buf) {
+        dst_buf = ccord_malloc((size_t)dw * (size_t)dh * 4u);
+        if (!dst_buf) break;
+        if ((m & 1) == 0) buf_a = dst_buf;
+        else buf_b = dst_buf;
+      }
+      tex_mip_downscale(cur, cw, ch, dst_buf, dw, dh, e->premul);
+      (void)tex_update_pixels(e->mips[m], e->tex_streaming, false, dst_buf, dw, dh);
+      cur = dst_buf;
+      cw = dw;
+      ch = dh;
+    }
+    ccord_free(buf_a);
+    ccord_free(buf_b);
+  }
+  ccord_free(premul_buf);
+  return ok;
 }
 
 static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const uint8_t *rgba, int width, int height,
@@ -255,6 +509,10 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
   if (!r || !key || !key[0] || !rgba || width <= 0 || height <= 0 || width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "upload rgba: invalid argument");
   }
+  // GPU backends blend premultiplied textures cleanly across both SDL_RenderTexture and SDL_RenderGeometry;
+  // SDL3's CPU software renderer ignores BLEND_PREMULTIPLIED in SW_RenderGeometry, so software keeps straight alpha.
+  const bool premul = !r->software;
+  const SDL_BlendMode bmode = premul ? SDL_BLENDMODE_BLEND_PREMULTIPLIED : SDL_BLENDMODE_BLEND;
   uint32_t kh = 0;
   int existing_slot = tex_lookup_slot(r, key, &kh);
   tex_entry *existing = nullptr;
@@ -269,14 +527,21 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
     if (!existing->tex_streaming) {
       SDL_Texture *stex = SDL_CreateTexture(r->sdl, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STREAMING, width, height);
       if (stex) {
-        SDL_SetTextureBlendMode(stex, SDL_BLENDMODE_BLEND);
+        SDL_SetTextureBlendMode(stex, bmode);
         SDL_SetTextureScaleMode(stex, SDL_SCALEMODE_LINEAR);
         SDL_DestroyTexture(existing->tex);
         existing->tex = stex;
         existing->tex_streaming = true;
+        existing->premul = premul;
+        if (existing->nmips > 0) {
+          r->tex_bytes_total -= existing->tex_bytes <= r->tex_bytes_total ? existing->tex_bytes : r->tex_bytes_total;
+          tex_destroy_mips(existing);
+          existing->tex_bytes = (size_t)width * (size_t)height * 4u;
+          r->tex_bytes_total += existing->tex_bytes;
+        }
       }
     }
-    if (!tex_update_pixels(existing->tex, existing->tex_streaming, rgba, width, height)) {
+    if (!tex_update_entry_pixels(existing, rgba, false)) {
       return ccord_error_set(err, CCORD_ERR_IO, "upload rgba: texture update failed: %s", SDL_GetError());
     }
     return CCORD_OK;
@@ -287,22 +552,49 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
   if (!tex) {
     return ccord_error_set(err, CCORD_ERR_IO, "upload rgba: SDL_CreateTexture failed: %s", SDL_GetError());
   }
-  if (!tex_update_pixels(tex, want_streaming, rgba, width, height)) {
+  uint8_t *premul_buf = nullptr;
+  const uint8_t *upload_src = rgba;
+  if (premul && rgba_has_transparency(rgba, (size_t)width * (size_t)height)) {
+    premul_buf = ccord_malloc((size_t)width * (size_t)height * 4u);
+    if (premul_buf) {
+      for (int y = 0; y < height; y++) {
+        rgba_premultiply_row(premul_buf + (size_t)y * (size_t)width * 4u, rgba + (size_t)y * (size_t)width * 4u, width);
+      }
+      upload_src = premul_buf;
+    }
+  }
+  if (!tex_update_pixels(tex, want_streaming, premul && !premul_buf, upload_src, width, height)) {
+    ccord_free(premul_buf);
     SDL_DestroyTexture(tex);
     return ccord_error_set(err, CCORD_ERR_IO, "upload rgba: texture update failed: %s", SDL_GetError());
   }
-  SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND);
+  SDL_SetTextureBlendMode(tex, bmode);
   SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
-  const size_t new_bytes = (size_t)width * (size_t)height * 4u;
+
+  SDL_Texture *mips[CCORD_TEX_MAX_MIPS] = {0};
+  int mip_w[CCORD_TEX_MAX_MIPS] = {0};
+  int mip_h[CCORD_TEX_MAX_MIPS] = {0};
+  int nmips = 0;
+  size_t mip_bytes = tex_build_mips(r, upload_src, width, height, want_streaming, premul, mips, mip_w, mip_h, &nmips);
+  ccord_free(premul_buf);
+  const size_t new_bytes = (size_t)width * (size_t)height * 4u + mip_bytes;
 
   if (existing) {
     tex_drop_anim(r, existing);
+    tex_destroy_mips(existing);
     if (existing->tex) SDL_DestroyTexture(existing->tex);
     r->tex_bytes_total -= existing->tex_bytes <= r->tex_bytes_total ? existing->tex_bytes : r->tex_bytes_total;
     existing->tex = tex;
     existing->tex_streaming = want_streaming;
+    existing->premul = premul;
     existing->w = width;
     existing->h = height;
+    for (int m = 0; m < nmips; m++) {
+      existing->mips[m] = mips[m];
+      existing->mip_w[m] = mip_w[m];
+      existing->mip_h[m] = mip_h[m];
+    }
+    existing->nmips = nmips;
     existing->tex_bytes = new_bytes;
     r->tex_bytes_total += new_bytes;
     tex_enforce_vram_budget(r, existing_slot);
@@ -311,6 +603,7 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
 
   char *kcopy = ccord_strndup(key, strlen(key));
   if (!kcopy) {
+    for (int m = 0; m < nmips; m++) SDL_DestroyTexture(mips[m]);
     SDL_DestroyTexture(tex);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "upload rgba: out of memory");
   }
@@ -321,6 +614,7 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
   }
   int slot = tex_alloc_slot(r);
   if (slot < 0) {
+    for (int m = 0; m < nmips; m++) SDL_DestroyTexture(mips[m]);
     SDL_DestroyTexture(tex);
     ccord_free(kcopy);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "upload rgba: texture cache full");
@@ -331,12 +625,19 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
     .tex = tex,
     .w = width,
     .h = height,
+    .nmips = nmips,
     .tex_bytes = new_bytes,
     .tick = ++r->tex_tick,
     .lru_prev = -1,
     .lru_next = -1,
     .tex_streaming = want_streaming,
+    .premul = premul,
   };
+  for (int m = 0; m < nmips; m++) {
+    r->texs[slot].mips[m] = mips[m];
+    r->texs[slot].mip_w[m] = mip_w[m];
+    r->texs[slot].mip_h[m] = mip_h[m];
+  }
   tex_hash_insert(r, slot, kh);
   tex_lru_push_front(r, slot);
   r->ntexs++;
@@ -402,7 +703,13 @@ static bool tex_anim_append(ccord_renderer *r, tex_entry *e, const uint8_t *rgba
   }
   uint8_t *px = ccord_malloc(fbytes);
   if (!px) return false;
-  memcpy(px, rgba, fbytes);
+  if (e->premul) {
+    for (int y = 0; y < e->h; y++) {
+      rgba_premultiply_row(px + (size_t)y * (size_t)e->w * 4u, rgba + (size_t)y * (size_t)e->w * 4u, e->w);
+    }
+  } else {
+    memcpy(px, rgba, fbytes);
+  }
   e->anim.frames[e->anim.frame_count] = px;
   e->anim.delay_ms[e->anim.frame_count] = delay_ms;
   e->anim.frame_count++;
@@ -449,7 +756,7 @@ static void tex_decode_more(ccord_renderer *r, tex_entry *e, uint64_t budget_ms)
       tex_drop_anim(r, e);
       e->dec_video = was_video;
       tex_set_dec(r, e, dec, true);
-      tex_update_pixels(e->tex, e->tex_streaming, px, e->w, e->h);
+      tex_update_entry_pixels(e, px, false);
       e->stream_due_ms = tex_clock_ms(r) + delay;
       return;
     }
@@ -665,7 +972,7 @@ static void tex_advance_anim(ccord_renderer *r, tex_entry *e, bool animate)
         return;
       }
     }
-    tex_update_pixels(e->tex, e->tex_streaming, px, e->w, e->h);
+    tex_update_entry_pixels(e, px, false);
     // Pace from the schedule, not from "now", so a late frame does not slow the clip; resync after a long gap.
     uint64_t base = now - e->stream_due_ms > 250u ? now : e->stream_due_ms;
     e->stream_due_ms = base + tex_frame_delay(e, dur);
@@ -679,7 +986,7 @@ static void tex_advance_anim(ccord_renderer *r, tex_entry *e, bool animate)
   if (!animate) {
     e->anim_start_ms = now;
     if (e->anim_cur_frame != 0 && e->anim.frames[0]) {
-      tex_update_pixels(e->tex, e->tex_streaming, e->anim.frames[0], e->w, e->h);
+      tex_update_entry_pixels(e, e->anim.frames[0], e->premul);
       e->anim_cur_frame = 0;
     }
     return;
@@ -690,7 +997,7 @@ static void tex_advance_anim(ccord_renderer *r, tex_entry *e, bool animate)
   size_t idx = (e->dec && elapsed >= e->anim.total_ms) ? e->anim.frame_count - 1u
                                                        : ccord_anim_frame_at(&e->anim, elapsed);
   if (idx < e->anim.frame_count && idx != e->anim_cur_frame && e->anim.frames[idx]) {
-    tex_update_pixels(e->tex, e->tex_streaming, e->anim.frames[idx], e->w, e->h);
+    tex_update_entry_pixels(e, e->anim.frames[idx], e->premul);
     e->anim_cur_frame = idx;
   }
 }
@@ -701,57 +1008,102 @@ static void tex_draw(ccord_renderer *r, tex_entry *e, ccord_rect dst, float radi
   SDL_FRect fr = render_snap(r, dst);
   if (fr.w <= 0.0f || fr.h <= 0.0f) return;
   float du = uv[2] - uv[0], dv = uv[3] - uv[1];
+
+  // Pick the smallest mip whose sampled region is still >= the physical destination rect, keeping GPU bilinear
+  // downscale ratios in [1.0, 2.0] so texels are never skipped.
+  SDL_Texture *draw_tex = e->tex;
+  int draw_w = e->w, draw_h = e->h;
+  for (int m = 0; m < e->nmips; m++) {
+    if (!e->mips[m]) break;
+    if (du * (float)e->mip_w[m] >= fr.w && dv * (float)e->mip_h[m] >= fr.h) {
+      draw_tex = e->mips[m];
+      draw_w = e->mip_w[m];
+      draw_h = e->mip_h[m];
+    } else {
+      break;
+    }
+  }
+
   float maxr = floorf((fr.w < fr.h ? fr.w : fr.h) * 0.5f);
   float rr = roundf(radius * r->scale);
   if (rr > maxr) rr = maxr;
   if (rr <= 0.5f) {
-    SDL_FRect src = {uv[0] * (float)e->w, uv[1] * (float)e->h, du * (float)e->w, dv * (float)e->h};
-    SDL_SetTextureColorMod(e->tex, 255, 255, 255);
-    SDL_SetTextureAlphaMod(e->tex, ccord_fx_alpha(r, alpha));
-    SDL_RenderTexture(r->sdl, e->tex, &src, &fr);
+    SDL_FRect src = {uv[0] * (float)draw_w, uv[1] * (float)draw_h, du * (float)draw_w, dv * (float)draw_h};
+    uint8_t eff_a = ccord_fx_alpha(r, alpha);
+    if (e->premul) SDL_SetTextureColorMod(draw_tex, eff_a, eff_a, eff_a);
+    else SDL_SetTextureColorMod(draw_tex, 255, 255, 255);
+    SDL_SetTextureAlphaMod(draw_tex, eff_a);
+    SDL_RenderTexture(r->sdl, draw_tex, &src, &fr);
     return;
   }
 
-  enum { CORNER_SEGS = 12, PERIM_VERTS = 4 * (CORNER_SEGS + 1), TOTAL_VERTS = 1 + PERIM_VERTS };
-  // Precomputed unit-circle (cos, sin) for 4 corners x (CORNER_SEGS + 1 = 13) angles = 52 entries (7.5 deg step).
+  // Anti-aliased rounded rect: opaque core triangle fan inset by 0.5 px + 1 px alpha-feathered perimeter ring
+  // whose outer vertices fade to 0. Matches disc_texture() analytic corner coverage while keeping straight edges crisp.
+  enum {
+    CORNER_SEGS = 16,
+    PERIM_VERTS = 4 * (CORNER_SEGS + 1),
+    TOTAL_VERTS = 1 + 2 * PERIM_VERTS,
+    TOTAL_INDICES = PERIM_VERTS * 9,
+  };
   static const float k_corner_lut[PERIM_VERTS][2] = {
     // corner 0: -90..0 deg
-    {0.00000000f, -1.00000000f}, {0.13052619f, -0.99144486f}, {0.25881905f, -0.96592583f}, {0.38268343f, -0.92387953f},
-    {0.50000000f, -0.86602540f}, {0.60876143f, -0.79335334f}, {0.70710678f, -0.70710678f}, {0.79335334f, -0.60876143f},
-    {0.86602540f, -0.50000000f}, {0.92387953f, -0.38268343f}, {0.96592583f, -0.25881905f}, {0.99144486f, -0.13052619f},
+    {0.00000000f, -1.00000000f}, {0.09801714f, -0.99518473f}, {0.19509032f, -0.98078528f}, {0.29028468f, -0.95694034f},
+    {0.38268343f, -0.92387953f}, {0.47139674f, -0.88192126f}, {0.55557023f, -0.83146961f}, {0.63439328f, -0.77301045f},
+    {0.70710678f, -0.70710678f}, {0.77301045f, -0.63439328f}, {0.83146961f, -0.55557023f}, {0.88192126f, -0.47139674f},
+    {0.92387953f, -0.38268343f}, {0.95694034f, -0.29028468f}, {0.98078528f, -0.19509032f}, {0.99518473f, -0.09801714f},
     {1.00000000f, 0.00000000f},
     // corner 1: 0..90 deg
-    {1.00000000f, 0.00000000f}, {0.99144486f, 0.13052619f}, {0.96592583f, 0.25881905f}, {0.92387953f, 0.38268343f},
-    {0.86602540f, 0.50000000f}, {0.79335334f, 0.60876143f}, {0.70710678f, 0.70710678f}, {0.60876143f, 0.79335334f},
-    {0.50000000f, 0.86602540f}, {0.38268343f, 0.92387953f}, {0.25881905f, 0.96592583f}, {0.13052619f, 0.99144486f},
+    {1.00000000f, 0.00000000f}, {0.99518473f, 0.09801714f}, {0.98078528f, 0.19509032f}, {0.95694034f, 0.29028468f},
+    {0.92387953f, 0.38268343f}, {0.88192126f, 0.47139674f}, {0.83146961f, 0.55557023f}, {0.77301045f, 0.63439328f},
+    {0.70710678f, 0.70710678f}, {0.63439328f, 0.77301045f}, {0.55557023f, 0.83146961f}, {0.47139674f, 0.88192126f},
+    {0.38268343f, 0.92387953f}, {0.29028468f, 0.95694034f}, {0.19509032f, 0.98078528f}, {0.09801714f, 0.99518473f},
     {0.00000000f, 1.00000000f},
     // corner 2: 90..180 deg
-    {0.00000000f, 1.00000000f}, {-0.13052619f, 0.99144486f}, {-0.25881905f, 0.96592583f}, {-0.38268343f, 0.92387953f},
-    {-0.50000000f, 0.86602540f}, {-0.60876143f, 0.79335334f}, {-0.70710678f, 0.70710678f}, {-0.79335334f, 0.60876143f},
-    {-0.86602540f, 0.50000000f}, {-0.92387953f, 0.38268343f}, {-0.96592583f, 0.25881905f}, {-0.99144486f, 0.13052619f},
+    {0.00000000f, 1.00000000f}, {-0.09801714f, 0.99518473f}, {-0.19509032f, 0.98078528f}, {-0.29028468f, 0.95694034f},
+    {-0.38268343f, 0.92387953f}, {-0.47139674f, 0.88192126f}, {-0.55557023f, 0.83146961f}, {-0.63439328f, 0.77301045f},
+    {-0.70710678f, 0.70710678f}, {-0.77301045f, 0.63439328f}, {-0.83146961f, 0.55557023f}, {-0.88192126f, 0.47139674f},
+    {-0.92387953f, 0.38268343f}, {-0.95694034f, 0.29028468f}, {-0.98078528f, 0.19509032f}, {-0.99518473f, 0.09801714f},
     {-1.00000000f, 0.00000000f},
     // corner 3: 180..270 deg
-    {-1.00000000f, 0.00000000f}, {-0.99144486f, -0.13052619f}, {-0.96592583f, -0.25881905f}, {-0.92387953f, -0.38268343f},
-    {-0.86602540f, -0.50000000f}, {-0.79335334f, -0.60876143f}, {-0.70710678f, -0.70710678f}, {-0.60876143f, -0.79335334f},
-    {-0.50000000f, -0.86602540f}, {-0.38268343f, -0.92387953f}, {-0.25881905f, -0.96592583f}, {-0.13052619f, -0.99144486f},
+    {-1.00000000f, 0.00000000f}, {-0.99518473f, -0.09801714f}, {-0.98078528f, -0.19509032f}, {-0.95694034f, -0.29028468f},
+    {-0.92387953f, -0.38268343f}, {-0.88192126f, -0.47139674f}, {-0.83146961f, -0.55557023f}, {-0.77301045f, -0.63439328f},
+    {-0.70710678f, -0.70710678f}, {-0.63439328f, -0.77301045f}, {-0.55557023f, -0.83146961f}, {-0.47139674f, -0.88192126f},
+    {-0.38268343f, -0.92387953f}, {-0.29028468f, -0.95694034f}, {-0.19509032f, -0.98078528f}, {-0.09801714f, -0.99518473f},
     {0.00000000f, -1.00000000f},
   };
-  static const int k_rrect_indices[PERIM_VERTS * 3] = {
-    0,  1,  2,  0,  2,  3,  0,  3,  4,  0,  4,  5,  0,  5,  6,  0,  6,  7,  0,  7,  8,  0,  8,  9,  0,  9, 10,
-    0, 10, 11,  0, 11, 12,  0, 12, 13,  0, 13, 14,  0, 14, 15,  0, 15, 16,  0, 16, 17,  0, 17, 18,  0, 18, 19,
-    0, 19, 20,  0, 20, 21,  0, 21, 22,  0, 22, 23,  0, 23, 24,  0, 24, 25,  0, 25, 26,  0, 26, 27,  0, 27, 28,
-    0, 28, 29,  0, 29, 30,  0, 30, 31,  0, 31, 32,  0, 32, 33,  0, 33, 34,  0, 34, 35,  0, 35, 36,  0, 36, 37,
-    0, 37, 38,  0, 38, 39,  0, 39, 40,  0, 40, 41,  0, 41, 42,  0, 42, 43,  0, 43, 44,  0, 44, 45,  0, 45, 46,
-    0, 46, 47,  0, 47, 48,  0, 48, 49,  0, 49, 50,  0, 50, 51,  0, 51, 52,  0, 52,  1,
-  };
+  static int k_indices[TOTAL_INDICES];
+  static bool k_indices_ready = false;
+  if (!k_indices_ready) {
+    int n = 0;
+    for (int i = 0; i < PERIM_VERTS; i++) {
+      int ni = (i + 1) % PERIM_VERTS;
+      int in0 = 1 + i, in1 = 1 + ni;
+      int out0 = 1 + PERIM_VERTS + i, out1 = 1 + PERIM_VERTS + ni;
+      k_indices[n++] = 0;
+      k_indices[n++] = in0;
+      k_indices[n++] = in1;
+      k_indices[n++] = in0;
+      k_indices[n++] = out0;
+      k_indices[n++] = out1;
+      k_indices[n++] = in0;
+      k_indices[n++] = out1;
+      k_indices[n++] = in1;
+    }
+    k_indices_ready = true;
+  }
 
   SDL_Vertex verts[TOTAL_VERTS];
-  SDL_FColor col = {1.0f, 1.0f, 1.0f, (float)alpha / 255.0f * r->alpha};
+  float fa = (float)alpha / 255.0f * r->alpha;
+  SDL_FColor col_in = e->premul ? (SDL_FColor){fa, fa, fa, fa} : (SDL_FColor){1.0f, 1.0f, 1.0f, fa};
+  SDL_FColor col_out = e->premul ? (SDL_FColor){0.0f, 0.0f, 0.0f, 0.0f} : (SDL_FColor){1.0f, 1.0f, 1.0f, 0.0f};
 
   float cx = fr.x + fr.w * 0.5f;
   float cy = fr.y + fr.h * 0.5f;
-  verts[0] = (SDL_Vertex){.position = {cx, cy}, .color = col, .tex_coord = {uv[0] + du * 0.5f, uv[1] + dv * 0.5f}};
+  verts[0] = (SDL_Vertex){.position = {cx, cy}, .color = col_in, .tex_coord = {uv[0] + du * 0.5f, uv[1] + dv * 0.5f}};
 
+  const float feather = fminf(0.5f, fminf(fr.w, fr.h) * 0.25f);
+  const float r_in = fmaxf(0.0f, rr - feather);
+  const float r_out = rr + feather;
   const float corner_cx[4] = {fr.x + fr.w - rr, fr.x + fr.w - rr, fr.x + rr, fr.x + rr};
   const float corner_cy[4] = {fr.y + rr, fr.y + fr.h - rr, fr.y + fr.h - rr, fr.y + rr};
   const float inv_w = 1.0f / fr.w;
@@ -762,21 +1114,35 @@ static void tex_draw(ccord_renderer *r, tex_entry *e, ccord_rect dst, float radi
     const float ccx = corner_cx[c];
     const float ccy = corner_cy[c];
     for (int sgi = 0; sgi <= CORNER_SEGS; sgi++, li++) {
-      float px = ccx + k_corner_lut[li][0] * rr;
-      float py = ccy + k_corner_lut[li][1] * rr;
-      float u = (px - fr.x) * inv_w;
-      float v = (py - fr.y) * inv_h;
-      if (u < 0.0f) u = 0.0f;
-      if (u > 1.0f) u = 1.0f;
-      if (v < 0.0f) v = 0.0f;
-      if (v > 1.0f) v = 1.0f;
-      verts[1 + li] = (SDL_Vertex){.position = {px, py}, .color = col, .tex_coord = {uv[0] + u * du, uv[1] + v * dv}};
+      const float nx = k_corner_lut[li][0];
+      const float ny = k_corner_lut[li][1];
+      float px_in = ccx + nx * r_in;
+      float py_in = ccy + ny * r_in;
+      float u_in = (px_in - fr.x) * inv_w;
+      float v_in = (py_in - fr.y) * inv_h;
+      if (u_in < 0.0f) u_in = 0.0f;
+      if (u_in > 1.0f) u_in = 1.0f;
+      if (v_in < 0.0f) v_in = 0.0f;
+      if (v_in > 1.0f) v_in = 1.0f;
+      verts[1 + li] = (SDL_Vertex){
+        .position = {px_in, py_in}, .color = col_in, .tex_coord = {uv[0] + u_in * du, uv[1] + v_in * dv}};
+
+      float px_out = ccx + nx * r_out;
+      float py_out = ccy + ny * r_out;
+      float u_out = (px_out - fr.x) * inv_w;
+      float v_out = (py_out - fr.y) * inv_h;
+      if (u_out < 0.0f) u_out = 0.0f;
+      if (u_out > 1.0f) u_out = 1.0f;
+      if (v_out < 0.0f) v_out = 0.0f;
+      if (v_out > 1.0f) v_out = 1.0f;
+      verts[1 + PERIM_VERTS + li] = (SDL_Vertex){
+        .position = {px_out, py_out}, .color = col_out, .tex_coord = {uv[0] + u_out * du, uv[1] + v_out * dv}};
     }
   }
 
-  SDL_SetTextureColorMod(e->tex, 255, 255, 255);
-  SDL_SetTextureAlphaMod(e->tex, 255);
-  SDL_RenderGeometry(r->sdl, e->tex, verts, TOTAL_VERTS, k_rrect_indices, PERIM_VERTS * 3);
+  SDL_SetTextureColorMod(draw_tex, 255, 255, 255);
+  SDL_SetTextureAlphaMod(draw_tex, 255);
+  SDL_RenderGeometry(r->sdl, draw_tex, verts, TOTAL_VERTS, k_indices, TOTAL_INDICES);
 }
 
 void ccord_draw_texture(ccord_renderer *r, const char *key, ccord_rect dst, uint8_t alpha)

@@ -15,8 +15,10 @@
 #define CCORD_ELLIPSIS_SETS 256
 #define CCORD_ELLIPSIS_WAYS 2
 #define CCORD_FONT_CACHE_SIZE 48
+#define CCORD_COLOR_GLYPH_CACHE_SIZE 256
 #define CCORD_DISC_CACHE_SIZE 48
 #define CCORD_TEX_CACHE_SIZE 1024
+#define CCORD_TEX_MAX_MIPS 4
 #define MAX_IMAGE_DIM 4096
 #define CCORD_TEX_HASH_SIZE 2048
 #define CCORD_TEX_HASH_MASK (CCORD_TEX_HASH_SIZE - 1u)
@@ -41,11 +43,16 @@ typedef struct tex_entry {
   uint32_t key_hash;
   SDL_Texture *tex;
   int w, h;
+  SDL_Texture *mips[CCORD_TEX_MAX_MIPS];
+  int mip_w[CCORD_TEX_MAX_MIPS];
+  int mip_h[CCORD_TEX_MAX_MIPS];
+  int nmips;
   size_t tex_bytes;
   uint64_t tick;
   int16_t lru_prev;         // intrusive LRU doubly-linked list (-1 = head / unlinked)
   int16_t lru_next;         // intrusive LRU doubly-linked list (-1 = tail), or free-list next when key == nullptr
   bool tex_streaming;       // created with SDL_TEXTUREACCESS_STREAMING
+  bool premul;              // pixels premultiplied + SDL_BLENDMODE_BLEND_PREMULTIPLIED
   ccord_anim anim;
   bool has_anim;
   size_t anim_cur_frame;
@@ -62,6 +69,22 @@ typedef struct tex_entry {
   uint64_t stream_due_ms;   // streaming: when the next frame replaces the shown one
 } tex_entry;
 
+typedef struct text_color_op {
+  TTF_Font *font;
+  uint32_t glyph_index;
+  SDL_Rect src;
+  SDL_Rect dst;
+} text_color_op;
+
+typedef struct color_glyph_entry {
+  TTF_Font *font;
+  uint32_t glyph_index;
+  SDL_Rect src;
+  int w, h;                 // target physical pixel size
+  SDL_Texture *tex;         // premultiplied RGBA32, SDL_BLENDMODE_BLEND_PREMULTIPLIED
+  uint64_t tick;
+} color_glyph_entry;
+
 typedef struct text_entry {
   TTF_Text *text;
   TTF_Font *font;
@@ -73,6 +96,9 @@ typedef struct text_entry {
   size_t slen;
   uint32_t *o2s;      // len + 1 entries, original offset -> shaped offset
   uint32_t *s2o;      // slen + 1 entries, shaped offset -> original offset
+  text_color_op *color_ops;
+  int ncolor_ops;
+  bool has_non_color_ops;
   int wrap_px;
   uint32_t hash;
   int next;           // next entry in the same hash bucket, -1 = end
@@ -120,6 +146,7 @@ struct ccord_renderer {
   float off_stack[CCORD_FX_DEPTH][2];
   int noff;
   bool ttf_inited;
+  bool software;        // true when SDL renderer is the CPU "software" backend
 
   TTF_Font *base[2];    // one open font per style; sized copies come from font_cache
   TTF_Font *bundled_base[CCORD_BUNDLED_COUNT];   // 0 = Emoji, 1 = CJK; opened lazily & independently
@@ -132,6 +159,9 @@ struct ccord_renderer {
   int nmiss, miss_next;
   font_entry fonts[CCORD_FONT_CACHE_SIZE];
   int nfonts;
+  color_glyph_entry color_glyphs[CCORD_COLOR_GLYPH_CACHE_SIZE];
+  int ncolor_glyphs;
+  uint64_t color_glyph_tick;
 
   text_entry texts[CCORD_TEXT_CACHE_SIZE];
   int buckets[CCORD_TEXT_CACHE_SIZE];

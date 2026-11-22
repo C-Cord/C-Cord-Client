@@ -566,6 +566,15 @@ void text_cache_init(ccord_renderer *r)
   r->text_lru_tail = -1;
 }
 
+static void color_glyph_cache_flush(ccord_renderer *r)
+{
+  for (int i = 0; i < r->ncolor_glyphs; i++) {
+    if (r->color_glyphs[i].tex) SDL_DestroyTexture(r->color_glyphs[i].tex);
+    r->color_glyphs[i] = (color_glyph_entry){0};
+  }
+  r->ncolor_glyphs = 0;
+}
+
 static void entry_free(text_entry *e)
 {
   if (e->text) TTF_DestroyText(e->text);
@@ -573,6 +582,7 @@ static void entry_free(text_entry *e)
   ccord_free(e->shaped);
   ccord_free(e->o2s);
   ccord_free(e->s2o);
+  ccord_free(e->color_ops);
   memset(e, 0, sizeof *e);
 }
 
@@ -590,6 +600,7 @@ static void text_entries_flush(ccord_renderer *r)
 void text_cache_flush(ccord_renderer *r)
 {
   text_entries_flush(r);
+  color_glyph_cache_flush(r);
   for (int i = 0; i < r->nfonts; i++) {
     if (r->fonts[i].font) {
       TTF_ClearFallbackFonts(r->fonts[i].font);
@@ -736,6 +747,256 @@ static void normalize_bitmap_glyphs(TTF_Text *t, TTF_Font *font, int wrap_px, in
   *io_h = d->h;
 }
 
+// ---- premultiplied color-glyph cache (fixes SDL3_ttf double-premultiplication on FreeType FT_PIXEL_MODE_BGRA) ----
+
+// Area-weighted resample of premultiplied RGBA32 pixels from (sw x sh) into (dw x dh).
+static void resample_premul_rgba(const uint8_t *src, int sw, int sh, uint8_t *dst, int dw, int dh)
+{
+  const float rx = (float)sw / (float)dw;
+  const float ry = (float)sh / (float)dh;
+  for (int y = 0; y < dh; y++) {
+    float y0 = (float)y * ry;
+    float y1 = y0 + ry;
+    if (ry < 1.0f) {
+      y0 = fminf(y0 + ry * 0.5f, (float)sh - 0.001f);
+      y1 = y0 + 0.001f;
+    }
+    int sy0 = (int)y0;
+    if (sy0 < 0) sy0 = 0;
+    for (int x = 0; x < dw; x++) {
+      float x0 = (float)x * rx;
+      float x1 = x0 + rx;
+      if (rx < 1.0f) {
+        x0 = fminf(x0 + rx * 0.5f, (float)sw - 0.001f);
+        x1 = x0 + 0.001f;
+      }
+      int sx0 = (int)x0;
+      if (sx0 < 0) sx0 = 0;
+      float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+      float wsum = 0.0f;
+      for (int sy = sy0; (float)sy < y1 && sy < sh; sy++) {
+        float wy = fminf(y1, (float)(sy + 1)) - fmaxf(y0, (float)sy);
+        for (int sx = sx0; (float)sx < x1 && sx < sw; sx++) {
+          float w = wy * (fminf(x1, (float)(sx + 1)) - fmaxf(x0, (float)sx));
+          const uint8_t *p = src + ((size_t)sy * (size_t)sw + (size_t)sx) * 4u;
+          acc[0] += w * (float)p[0];
+          acc[1] += w * (float)p[1];
+          acc[2] += w * (float)p[2];
+          acc[3] += w * (float)p[3];
+          wsum += w;
+        }
+      }
+      uint8_t *d = dst + ((size_t)y * (size_t)dw + (size_t)x) * 4u;
+      if (wsum <= 0.0f) {
+        d[0] = d[1] = d[2] = d[3] = 0u;
+        continue;
+      }
+      for (int k = 0; k < 4; k++) {
+        long v = lroundf(acc[k] / wsum);
+        d[k] = (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+      }
+    }
+  }
+}
+
+static SDL_Texture *color_glyph_get(ccord_renderer *r, TTF_Font *font, uint32_t glyph_index, SDL_Rect src, int dst_w,
+                                    int dst_h)
+{
+  if (!r || !font || src.w <= 0 || src.h <= 0 || dst_w <= 0 || dst_h <= 0) return nullptr;
+  for (int i = 0; i < r->ncolor_glyphs; i++) {
+    color_glyph_entry *ce = &r->color_glyphs[i];
+    if (ce->font == font && ce->glyph_index == glyph_index && ce->w == dst_w && ce->h == dst_h &&
+        ce->src.x == src.x && ce->src.y == src.y && ce->src.w == src.w && ce->src.h == src.h) {
+      ce->tick = ++r->color_glyph_tick;
+      return ce->tex;
+    }
+  }
+  TTF_ImageType img_type = TTF_IMAGE_INVALID;
+  SDL_Surface *surf = TTF_GetGlyphImageForIndex(font, glyph_index, &img_type);
+  if (!surf) return nullptr;
+  if (img_type != TTF_IMAGE_COLOR) {
+    SDL_DestroySurface(surf);
+    return nullptr;
+  }
+  if (surf->format != SDL_PIXELFORMAT_RGBA32) {
+    SDL_Surface *conv = SDL_ConvertSurface(surf, SDL_PIXELFORMAT_RGBA32);
+    SDL_DestroySurface(surf);
+    surf = conv;
+    if (!surf) return nullptr;
+  }
+  int sx = src.x < 0 ? 0 : src.x;
+  int sy = src.y < 0 ? 0 : src.y;
+  int sw = src.w;
+  int sh = src.h;
+  if (sx >= surf->w || sy >= surf->h) {
+    SDL_DestroySurface(surf);
+    return nullptr;
+  }
+  if (sx + sw > surf->w) sw = surf->w - sx;
+  if (sy + sh > surf->h) sh = surf->h - sy;
+  if (sw <= 0 || sh <= 0) {
+    SDL_DestroySurface(surf);
+    return nullptr;
+  }
+  size_t s_px = (size_t)sw * (size_t)sh;
+  uint8_t *rgba = ccord_malloc(s_px * 4u);
+  if (!rgba) {
+    SDL_DestroySurface(surf);
+    return nullptr;
+  }
+  const uint8_t *sp = (const uint8_t *)surf->pixels;
+  for (int y = 0; y < sh; y++) {
+    memcpy(rgba + (size_t)y * (size_t)sw * 4u,
+           sp + (size_t)(sy + y) * (size_t)surf->pitch + (size_t)sx * 4u, (size_t)sw * 4u);
+  }
+  SDL_DestroySurface(surf);
+
+  // FreeType FT_PIXEL_MODE_BGRA (COLRv0/CBDT/sbix) outputs premultiplied RGB (r,g,b <= a). If a future SDL3_ttf
+  // un-premultiplies before returning the surface, detect straight alpha (any channel > a) and premultiply here.
+  bool straight = false;
+  for (size_t i = 0; i < s_px; i++) {
+    uint8_t a = rgba[i * 4u + 3u];
+    if (rgba[i * 4u + 0u] > a || rgba[i * 4u + 1u] > a || rgba[i * 4u + 2u] > a) {
+      straight = true;
+      break;
+    }
+  }
+  if (straight) {
+    for (size_t i = 0; i < s_px; i++) {
+      uint32_t a = rgba[i * 4u + 3u];
+      rgba[i * 4u + 0u] = (uint8_t)((rgba[i * 4u + 0u] * a + 127u) / 255u);
+      rgba[i * 4u + 1u] = (uint8_t)((rgba[i * 4u + 1u] * a + 127u) / 255u);
+      rgba[i * 4u + 2u] = (uint8_t)((rgba[i * 4u + 2u] * a + 127u) / 255u);
+    }
+  }
+
+  uint8_t *upload = rgba;
+  uint8_t *scaled = nullptr;
+  int tw = sw, th = sh;
+  if (dst_w != sw || dst_h != sh) {
+    scaled = ccord_malloc((size_t)dst_w * (size_t)dst_h * 4u);
+    if (scaled) {
+      resample_premul_rgba(rgba, sw, sh, scaled, dst_w, dst_h);
+      upload = scaled;
+      tw = dst_w;
+      th = dst_h;
+    }
+  }
+  SDL_Texture *tex = SDL_CreateTexture(r->sdl, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_STATIC, tw, th);
+  if (tex) {
+    if (SDL_UpdateTexture(tex, nullptr, upload, tw * 4)) {
+      SDL_SetTextureBlendMode(tex, SDL_BLENDMODE_BLEND_PREMULTIPLIED);
+      SDL_SetTextureScaleMode(tex, SDL_SCALEMODE_LINEAR);
+    } else {
+      SDL_DestroyTexture(tex);
+      tex = nullptr;
+    }
+  }
+  ccord_free(scaled);
+  ccord_free(rgba);
+  if (!tex) return nullptr;
+
+  int slot;
+  if (r->ncolor_glyphs < CCORD_COLOR_GLYPH_CACHE_SIZE) {
+    slot = r->ncolor_glyphs++;
+  } else {
+    slot = 0;
+    uint64_t best_tick = r->color_glyphs[0].tick;
+    for (int i = 1; i < r->ncolor_glyphs; i++) {
+      if (r->color_glyphs[i].tick < best_tick) {
+        best_tick = r->color_glyphs[i].tick;
+        slot = i;
+      }
+    }
+    if (r->color_glyphs[slot].tex) SDL_DestroyTexture(r->color_glyphs[slot].tex);
+  }
+  r->color_glyphs[slot] = (color_glyph_entry){
+    .font = font,
+    .glyph_index = glyph_index,
+    .src = src,
+    .w = dst_w,
+    .h = dst_h,
+    .tex = tex,
+    .tick = ++r->color_glyph_tick,
+  };
+  return tex;
+}
+
+// Separates color-emoji draw ops (Twemoji COLRv0, system color emoji fonts) from SDL3_ttf's straight-alpha text
+// engine so they composite with SDL_BLENDMODE_BLEND_PREMULTIPLIED instead of being double-premultiplied.
+static void extract_color_glyphs(ccord_renderer *r, const font_entry *fe, text_entry *e)
+{
+  e->has_non_color_ops = true;
+  if (!r || !fe || !e || !e->text || !e->text->internal) return;
+  TTF_TextData *d = e->text->internal;
+  if (d->num_ops <= 0) {
+    e->has_non_color_ops = false;
+    return;
+  }
+  bool any_candidate = false;
+  for (int i = 0; i < d->num_ops; i++) {
+    const TTF_DrawOperation *op = &d->ops[i];
+    if (op->cmd != TTF_DRAW_COMMAND_COPY) continue;
+    if (fe->style == CCORD_FONT_EMOJI ||
+        (op->copy.glyph_font != fe->font && op->copy.glyph_font != fe->bundled_fb[CCORD_BUNDLED_CJK])) {
+      any_candidate = true;
+      break;
+    }
+  }
+  if (!any_candidate) return;
+
+  text_color_op *cops = nullptr;
+  int ncolor = 0, cap = 0;
+  int kept = 0;
+  for (int i = 0; i < d->num_ops; i++) {
+    TTF_DrawOperation *op = &d->ops[i];
+    if (op->cmd == TTF_DRAW_COMMAND_NOOP) continue;
+    bool extracted = false;
+    if (op->cmd == TTF_DRAW_COMMAND_COPY) {
+      bool maybe_color = (fe->style == CCORD_FONT_EMOJI) ||
+                         (op->copy.glyph_font != fe->font && op->copy.glyph_font != fe->bundled_fb[CCORD_BUNDLED_CJK]);
+      if (maybe_color &&
+          color_glyph_get(r, op->copy.glyph_font, op->copy.glyph_index, op->copy.src, op->copy.dst.w, op->copy.dst.h)) {
+        if (ncolor == cap) {
+          int ncap = cap ? cap * 2 : 4;
+          text_color_op *grown = ccord_realloc_array(cops, (size_t)ncap, sizeof *cops);
+          if (grown) {
+            cops = grown;
+            cap = ncap;
+          }
+        }
+        if (ncolor < cap) {
+          cops[ncolor++] = (text_color_op){
+            .font = op->copy.glyph_font,
+            .glyph_index = op->copy.glyph_index,
+            .src = op->copy.src,
+            .dst = op->copy.dst,
+          };
+          extracted = true;
+        }
+      }
+    }
+    if (!extracted) {
+      if (kept != i) d->ops[kept] = *op;
+      kept++;
+    }
+  }
+  if (ncolor == 0) {
+    ccord_free(cops);
+    e->has_non_color_ops = kept > 0;
+    return;
+  }
+  d->num_ops = kept;
+  if (d->engine && d->engine_text && d->engine->DestroyText) {
+    d->engine->DestroyText(d->engine->userdata, e->text);
+    d->engine_text = nullptr;
+  }
+  d->needs_engine_update = true;
+  e->color_ops = cops;
+  e->ncolor_ops = ncolor;
+  e->has_non_color_ops = kept > 0;
+}
+
 static text_entry *text_get(ccord_renderer *r, const char *s, size_t len, const ccord_text_style *st, float wrap_width)
 {
   if (!s) {
@@ -793,6 +1054,7 @@ static text_entry *text_get(ccord_renderer *r, const char *s, size_t len, const 
                     .wrap_px = wrap_px, .hash = h, .lru_prev = -1, .lru_next = -1};
   TTF_GetTextSize(t, &e->w, &e->h);
   normalize_bitmap_glyphs(t, font, wrap_px, &e->w, &e->h);
+  extract_color_glyphs(r, fe, e);
   int fh = TTF_GetFontHeight(font);
   if (slen == 0) {
     e->h = fh;
@@ -855,7 +1117,7 @@ int ccord_render_system_font_count(const ccord_renderer *r)
 
 static int text_draw_ops(const text_entry *e)
 {
-  return (e && e->text && e->text->internal) ? e->text->internal->num_ops : 0;
+  return (e && e->text && e->text->internal) ? (e->text->internal->num_ops + e->ncolor_ops) : 0;
 }
 
 ccord_glyph_kind ccord_text_glyph_kind(ccord_renderer *r, const ccord_text_style *st, uint32_t cp)
@@ -882,8 +1144,21 @@ static void text_draw_entry(ccord_renderer *r, text_entry *e, float x, float y, 
   if (!e || st->color.a == 0) return;
   uint8_t a = ccord_fx_alpha(r, st->color.a);
   if (a == 0) return;
-  TTF_SetTextColor(e->text, st->color.r, st->color.g, st->color.b, a);
-  TTF_DrawRendererText(e->text, roundf((x + r->ox) * r->scale), roundf((y + r->oy) * r->scale));
+  float bx = roundf((x + r->ox) * r->scale);
+  float by = roundf((y + r->oy) * r->scale);
+  if (e->has_non_color_ops) {
+    TTF_SetTextColor(e->text, st->color.r, st->color.g, st->color.b, a);
+    TTF_DrawRendererText(e->text, bx, by);
+  }
+  for (int i = 0; i < e->ncolor_ops; i++) {
+    const text_color_op *co = &e->color_ops[i];
+    SDL_Texture *tex = color_glyph_get(r, co->font, co->glyph_index, co->src, co->dst.w, co->dst.h);
+    if (!tex) continue;
+    SDL_SetTextureColorMod(tex, a, a, a);
+    SDL_SetTextureAlphaMod(tex, a);
+    SDL_FRect dst = {bx + (float)co->dst.x, by + (float)co->dst.y, (float)co->dst.w, (float)co->dst.h};
+    SDL_RenderTexture(r->sdl, tex, nullptr, &dst);
+  }
 }
 
 ccord_vec2 ccord_text_measure(ccord_renderer *r, const char *utf8, size_t len, const ccord_text_style *st, float wrap_width)

@@ -876,8 +876,9 @@ static bool avs_convert(ccord_av_stream *s, uint8_t **dst)
       }
     }
   } else {
+    int sws_flags = (s->sw < f->width || s->sh < f->height) ? SWS_AREA : SWS_BILINEAR;
     s->sws = sws_getCachedContext(s->sws, f->width, f->height, (enum AVPixelFormat)f->format, s->sw, s->sh,
-                                  AV_PIX_FMT_RGBA, SWS_BILINEAR, nullptr, nullptr, nullptr);
+                                  AV_PIX_FMT_RGBA, sws_flags, nullptr, nullptr, nullptr);
     if (!s->sws) return false;
     uint8_t *planes[4] = {target, nullptr, nullptr, nullptr};
     int strides[4] = {s->sw * 4, 0, 0, 0};
