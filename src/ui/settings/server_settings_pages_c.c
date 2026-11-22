@@ -145,6 +145,10 @@ static void draw_automod_editor(ss_cx *c, float x, float w, float *py)
     for (size_t i = 0; i < 7u; i++) {
       char mlbl[16], nm[SS_NAME_LEN];
       (void)snprintf(mlbl, sizeof mlbl, "%u", (unsigned)k_mlims[i]);
+      if (cx > x && cx + 48.0f > x + w) {
+        cx = x;
+        y += 32.0f;
+      }
       ss_chip(c, (ccord_rect){cx, y, 48.0f, 26.0f}, mlbl, ss->am_mention_limit == k_mlims[i],
               A_AM_MENTION_LIM, k_mlims[i], NAME(nm, "automod-mention-limit:%u", (unsigned)k_mlims[i]));
       cx += 56.0f;
@@ -286,13 +290,22 @@ void ss_draw_automod(ss_cx *c, const ss_geom *g)
 {
   ccord_ui *ui = c->ui;
   struct ui_server_settings *ss = c->ss;
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "AutoMod", y);
-  ss_button(c, (ccord_rect){x + w - 224.0f, y - 2.0f, 114.0f, 32.0f}, "Create Rule", BTN_PRIMARY, nullptr,
-            A_AM_NEW, CCORD_AUTOMOD_TRIGGER_KEYWORD, "automod-new");
-  ss_button(c, (ccord_rect){x + w - 100.0f, y - 2.0f, 100.0f, 32.0f}, "Refresh", BTN_SECONDARY, nullptr,
-            A_REFRESH, 0, "refresh");
-  y += 52.0f;
+  if (w < 380.0f) {
+    y += 34.0f;
+    ss_button(c, (ccord_rect){x, y, 114.0f, 32.0f}, "Create Rule", BTN_PRIMARY, nullptr,
+              A_AM_NEW, CCORD_AUTOMOD_TRIGGER_KEYWORD, "automod-new");
+    ss_button(c, (ccord_rect){x + 122.0f, y, 100.0f, 32.0f}, "Refresh", BTN_SECONDARY, nullptr,
+              A_REFRESH, 0, "refresh");
+    y += 44.0f;
+  } else {
+    ss_button(c, (ccord_rect){x + w - 224.0f, y - 2.0f, 114.0f, 32.0f}, "Create Rule", BTN_PRIMARY, nullptr,
+              A_AM_NEW, CCORD_AUTOMOD_TRIGGER_KEYWORD, "automod-new");
+    ss_button(c, (ccord_rect){x + w - 100.0f, y - 2.0f, 100.0f, 32.0f}, "Refresh", BTN_SECONDARY, nullptr,
+              A_REFRESH, 0, "refresh");
+    y += 52.0f;
+  }
 
   if (ss->am_editing) {
     draw_automod_editor(c, x, w, &y);
@@ -511,7 +524,7 @@ void ss_draw_integrations(ss_cx *c, const ss_geom *g)
   ccord_ui *ui = c->ui;
   struct ui_server_settings *ss = c->ss;
   const ccord_store *st = ui->d.store;
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "Integrations", y);
   ss_button(c, (ccord_rect){x + w - 100.0f, y - 2.0f, 100.0f, 32.0f}, "Refresh", BTN_SECONDARY, nullptr,
             A_REFRESH, 0, "refresh");
@@ -551,16 +564,29 @@ void ss_draw_integrations(ss_cx *c, const ss_geom *g)
     const ccord_channel *new_ch = new_ch_id != CCORD_ID_NONE ? ccord_store_channel(st, new_ch_id) : nullptr;
     char ch_lbl[CCORD_NAME_MAX_BYTES + 24];
     (void)snprintf(ch_lbl, sizeof ch_lbl, "Channel: #%s", new_ch && new_ch->name ? new_ch->name : "none");
-    float ch_w = fminf(220.0f, w * 0.34f);
-    float btn_w = 122.0f;
-    float name_w = fmaxf(120.0f, w - ch_w - btn_w - 16.0f);
-    ss_button(c, (ccord_rect){x, y, ch_w, 34.0f}, ch_lbl, BTN_SECONDARY,
-              new_ch ? nullptr : "No text channels in this server.", A_WH_NEW_CHAN, 0, "webhook-new-channel");
-    ss_field_box(c, (ccord_rect){x + ch_w + 8.0f, y, name_w, 34.0f}, &ss->wh_new_name, SSF_WH_NEW_NAME,
-                 "Webhook name (default: Captain Hook)", nullptr, "webhook-new-name");
-    ss_button(c, (ccord_rect){x + ch_w + name_w + 16.0f, y, btn_w, 34.0f}, "New Webhook", BTN_PRIMARY,
-              new_ch ? nullptr : "Create a text channel before adding a webhook.", A_WH_CREATE, 0, "webhook-create");
-    y += 46.0f;
+    if (w < 480.0f) {
+      float ch_w = floorf((w - 8.0f) * 0.44f);
+      float name_w = fmaxf(w - ch_w - 8.0f, 80.0f);
+      ss_button(c, (ccord_rect){x, y, ch_w, 34.0f}, ch_lbl, BTN_SECONDARY,
+                new_ch ? nullptr : "No text channels in this server.", A_WH_NEW_CHAN, 0, "webhook-new-channel");
+      ss_field_box(c, (ccord_rect){x + ch_w + 8.0f, y, name_w, 34.0f}, &ss->wh_new_name, SSF_WH_NEW_NAME,
+                   "Webhook name", nullptr, "webhook-new-name");
+      y += 40.0f;
+      ss_button(c, (ccord_rect){x, y, 132.0f, 34.0f}, "New Webhook", BTN_PRIMARY,
+                new_ch ? nullptr : "Create a text channel before adding a webhook.", A_WH_CREATE, 0, "webhook-create");
+      y += 44.0f;
+    } else {
+      float ch_w = fminf(220.0f, w * 0.34f);
+      float btn_w = 122.0f;
+      float name_w = fmaxf(120.0f, w - ch_w - btn_w - 16.0f);
+      ss_button(c, (ccord_rect){x, y, ch_w, 34.0f}, ch_lbl, BTN_SECONDARY,
+                new_ch ? nullptr : "No text channels in this server.", A_WH_NEW_CHAN, 0, "webhook-new-channel");
+      ss_field_box(c, (ccord_rect){x + ch_w + 8.0f, y, name_w, 34.0f}, &ss->wh_new_name, SSF_WH_NEW_NAME,
+                   "Webhook name (default: Captain Hook)", nullptr, "webhook-new-name");
+      ss_button(c, (ccord_rect){x + ch_w + name_w + 16.0f, y, btn_w, 34.0f}, "New Webhook", BTN_PRIMARY,
+                new_ch ? nullptr : "Create a text channel before adding a webhook.", A_WH_CREATE, 0, "webhook-create");
+      y += 46.0f;
+    }
 
     bool wh_loaded = ccord_store_webhooks_loaded(st, ss->guild_id);
     if (!ss_draw_list_state(c, SS_INTEGRATIONS, wh_loaded, x, &y, w)) {
@@ -571,41 +597,61 @@ void ss_draw_integrations(ss_cx *c, const ss_geom *g)
         ss_message(c, "No webhooks configured yet. Create one above to post automated updates into a channel.", x, y, w);
         y += 38.0f;
       } else {
+        bool narrow_wh = w < 480.0f;
         for (size_t i = 0; i < nwh; i++) {
           const ccord_webhook *wh = &whs[i];
           bool editing = (ss->wh_edit_id == wh->id);
           bool confirming = (ss->wh_del_confirm_id == wh->id);
-          float row_h = editing ? 84.0f : 62.0f;
+          float row_h = editing ? (narrow_wh ? 118.0f : 84.0f) : (narrow_wh ? 92.0f : 62.0f);
           ccord_rect row = {x, y, w, row_h};
           y += row_h;
           if (!ss_visible(c, row)) continue;
 
           if (editing) {
             uis_surface(ui, c->r, (ccord_rect){row.x, row.y + 2.0f, row.w, row.h - 4.0f}, COL(bg_secondary));
-            float ew = fmaxf(140.0f, w - 210.0f);
-            ss_field_box(c, (ccord_rect){row.x + 10.0f, row.y + 8.0f, ew, 32.0f}, &ss->wh_edit_name, SSF_WH_EDIT_NAME,
-                         "Webhook name", nullptr, "webhook-edit-name");
-            ss_button(c, (ccord_rect){row.x + w - 186.0f, row.y + 9.0f, 84.0f, 30.0f}, "Save", BTN_PRIMARY, nullptr,
-                      A_WH_EDIT_SAVE, wh->id, "webhook-edit-save");
-            ss_button(c, (ccord_rect){row.x + w - 94.0f, row.y + 9.0f, 84.0f, 30.0f}, "Cancel", BTN_SECONDARY, nullptr,
-                      A_WH_EDIT_CANCEL, wh->id, "webhook-edit-cancel");
+            if (narrow_wh) {
+              ss_field_box(c, (ccord_rect){row.x + 10.0f, row.y + 8.0f, w - 20.0f, 32.0f}, &ss->wh_edit_name, SSF_WH_EDIT_NAME,
+                           "Webhook name", nullptr, "webhook-edit-name");
+              ccord_id ech_id = ss_resolve_guild_text_chan(st, ss->guild_id, ss->wh_edit_chan, 0);
+              const ccord_channel *ech = ech_id != CCORD_ID_NONE ? ccord_store_channel(st, ech_id) : nullptr;
+              char eclbl[CCORD_NAME_MAX_BYTES + 28];
+              (void)snprintf(eclbl, sizeof eclbl, "Post to: #%s", ech && ech->name ? ech->name : "none");
+              const char *ec_why = wh->type == CCORD_WEBHOOK_INCOMING || wh->type == CCORD_WEBHOOK_CHANNEL_FOLLOWER
+                                     ? nullptr
+                                     : "Application webhooks manage their own channel.";
+              ss_button(c, (ccord_rect){row.x + 10.0f, row.y + 46.0f, w - 20.0f, 28.0f}, eclbl,
+                        BTN_SECONDARY, ec_why, A_WH_EDIT_CHAN, wh->id, "webhook-edit-channel");
+              ss_button(c, (ccord_rect){row.x + 10.0f, row.y + 80.0f, 84.0f, 30.0f}, "Save", BTN_PRIMARY, nullptr,
+                        A_WH_EDIT_SAVE, wh->id, "webhook-edit-save");
+              ss_button(c, (ccord_rect){row.x + 102.0f, row.y + 80.0f, 84.0f, 30.0f}, "Cancel", BTN_SECONDARY, nullptr,
+                        A_WH_EDIT_CANCEL, wh->id, "webhook-edit-cancel");
+            } else {
+              float ew = fmaxf(140.0f, w - 210.0f);
+              ss_field_box(c, (ccord_rect){row.x + 10.0f, row.y + 8.0f, ew, 32.0f}, &ss->wh_edit_name, SSF_WH_EDIT_NAME,
+                           "Webhook name", nullptr, "webhook-edit-name");
+              ss_button(c, (ccord_rect){row.x + w - 186.0f, row.y + 9.0f, 84.0f, 30.0f}, "Save", BTN_PRIMARY, nullptr,
+                        A_WH_EDIT_SAVE, wh->id, "webhook-edit-save");
+              ss_button(c, (ccord_rect){row.x + w - 94.0f, row.y + 9.0f, 84.0f, 30.0f}, "Cancel", BTN_SECONDARY, nullptr,
+                        A_WH_EDIT_CANCEL, wh->id, "webhook-edit-cancel");
 
-            ccord_id ech_id = ss_resolve_guild_text_chan(st, ss->guild_id, ss->wh_edit_chan, 0);
-            const ccord_channel *ech = ech_id != CCORD_ID_NONE ? ccord_store_channel(st, ech_id) : nullptr;
-            char eclbl[CCORD_NAME_MAX_BYTES + 28];
-            (void)snprintf(eclbl, sizeof eclbl, "Post to: #%s (click to change)",
-                           ech && ech->name ? ech->name : "none");
-            const char *ec_why = wh->type == CCORD_WEBHOOK_INCOMING || wh->type == CCORD_WEBHOOK_CHANNEL_FOLLOWER
-                                   ? nullptr
-                                   : "Application webhooks manage their own channel.";
-            ss_button(c, (ccord_rect){row.x + 10.0f, row.y + 46.0f, fminf(320.0f, w - 24.0f), 28.0f}, eclbl,
-                      BTN_SECONDARY, ec_why, A_WH_EDIT_CHAN, wh->id, "webhook-edit-channel");
+              ccord_id ech_id = ss_resolve_guild_text_chan(st, ss->guild_id, ss->wh_edit_chan, 0);
+              const ccord_channel *ech = ech_id != CCORD_ID_NONE ? ccord_store_channel(st, ech_id) : nullptr;
+              char eclbl[CCORD_NAME_MAX_BYTES + 28];
+              (void)snprintf(eclbl, sizeof eclbl, "Post to: #%s (click to change)",
+                             ech && ech->name ? ech->name : "none");
+              const char *ec_why = wh->type == CCORD_WEBHOOK_INCOMING || wh->type == CCORD_WEBHOOK_CHANNEL_FOLLOWER
+                                     ? nullptr
+                                     : "Application webhooks manage their own channel.";
+              ss_button(c, (ccord_rect){row.x + 10.0f, row.y + 46.0f, fminf(320.0f, w - 24.0f), 28.0f}, eclbl,
+                        BTN_SECONDARY, ec_why, A_WH_EDIT_CHAN, wh->id, "webhook-edit-channel");
+            }
           } else {
             const ccord_channel *wch = wh->channel_id != CCORD_ID_NONE ? ccord_store_channel(st, wh->channel_id) : nullptr;
             char title_buf[180];
             (void)snprintf(title_buf, sizeof title_buf, "%s  [%s]",
                            wh->name && wh->name[0] ? wh->name : "Unnamed Webhook", ss_webhook_type_label(wh->type));
-            (void)ss_text(c, title_buf, row.x + 6.0f, row.y + 8.0f, M(font_size_base), true, COL(text_header), w - 260.0f);
+            float tw = narrow_wh ? (w - 12.0f) : fmaxf(w - 260.0f, 60.0f);
+            (void)ss_text(c, title_buf, row.x + 6.0f, row.y + 8.0f, M(font_size_base), true, COL(text_header), tw);
 
             char sub_buf[220];
             if (wh->type == CCORD_WEBHOOK_CHANNEL_FOLLOWER && wh->source_guild_name && wh->source_guild_name[0]) {
@@ -618,11 +664,32 @@ void ss_draw_integrations(ss_cx *c, const ss_geom *g)
             } else {
               (void)snprintf(sub_buf, sizeof sub_buf, "#%s", wch && wch->name ? wch->name : "unknown");
             }
-            (void)ss_text(c, sub_buf, row.x + 6.0f, row.y + 31.0f, SS_CAP(c), false, COL(text_muted),
-                          w - 260.0f);
+            (void)ss_text(c, sub_buf, row.x + 6.0f, row.y + 31.0f, SS_CAP(c), false, COL(text_muted), tw);
 
             char nm1[SS_NAME_LEN], nm2[SS_NAME_LEN], nm3[SS_NAME_LEN];
-            if (confirming) {
+            if (narrow_wh) {
+              float bx = row.x + 6.0f, by = row.y + 54.0f;
+              if (confirming) {
+                ss_button(c, (ccord_rect){bx, by, 84.0f, 28.0f}, "Confirm", BTN_DANGER, nullptr,
+                          A_WH_DELETE_CONFIRM, wh->id,
+                          NAME(nm1, "webhook-delete-confirm:%llu", (unsigned long long)wh->id));
+                ss_button(c, (ccord_rect){bx + 92.0f, by, 78.0f, 28.0f}, "Cancel", BTN_SECONDARY, nullptr,
+                          A_WH_DELETE_CANCEL, wh->id,
+                          NAME(nm2, "webhook-delete-cancel:%llu", (unsigned long long)wh->id));
+              } else {
+                if (wh->type == CCORD_WEBHOOK_INCOMING && wh->token && wh->token[0]) {
+                  ss_button(c, (ccord_rect){bx, by, 84.0f, 28.0f}, "Copy URL", BTN_SECONDARY,
+                            nullptr, A_WH_COPY_URL, wh->id,
+                            NAME(nm1, "webhook-copy-url:%llu", (unsigned long long)wh->id));
+                  bx += 92.0f;
+                }
+                ss_button(c, (ccord_rect){bx, by, 72.0f, 28.0f}, "Edit", BTN_SECONDARY, nullptr,
+                          A_WH_EDIT, wh->id, NAME(nm2, "webhook-edit:%llu", (unsigned long long)wh->id));
+                bx += 80.0f;
+                ss_button(c, (ccord_rect){bx, by, 76.0f, 28.0f}, "Delete", BTN_DANGER, nullptr,
+                          A_WH_DELETE, wh->id, NAME(nm3, "webhook-delete:%llu", (unsigned long long)wh->id));
+              }
+            } else if (confirming) {
               ss_button(c, (ccord_rect){row.x + w - 168.0f, row.y + 16.0f, 84.0f, 30.0f}, "Confirm", BTN_DANGER, nullptr,
                         A_WH_DELETE_CONFIRM, wh->id,
                         NAME(nm1, "webhook-delete-confirm:%llu", (unsigned long long)wh->id));
@@ -673,15 +740,27 @@ void ss_draw_integrations(ss_cx *c, const ss_geom *g)
                       : !src_ch ? "No announcement channels are visible to follow."
                       : !dst_ch ? "No destination text channel in this server."
                                 : nullptr;
-  float btn_fw = 132.0f;
-  float half_w = fmaxf(110.0f, (w - btn_fw - 16.0f) * 0.5f);
-  ss_button(c, (ccord_rect){x, y, half_w, 34.0f}, src_lbl, BTN_SECONDARY,
-            src_ch ? nullptr : "No announcement channels available.", A_FOLLOW_SRC_CHAN, 0, "follow-source-channel");
-  ss_button(c, (ccord_rect){x + half_w + 8.0f, y, half_w, 34.0f}, dst_lbl, BTN_SECONDARY,
-            dst_ch ? nullptr : "No text channels in this server.", A_FOLLOW_DST_CHAN, 0, "follow-target-channel");
-  ss_button(c, (ccord_rect){x + half_w * 2.0f + 16.0f, y, btn_fw, 34.0f}, "Follow Channel", BTN_PRIMARY, fol_why,
-            A_FOLLOW_SUBMIT, 0, "follow-submit");
-  y += 44.0f;
+  if (w < 480.0f) {
+    float half_w = floorf((w - 8.0f) * 0.5f);
+    ss_button(c, (ccord_rect){x, y, half_w, 34.0f}, src_lbl, BTN_SECONDARY,
+              src_ch ? nullptr : "No announcement channels available.", A_FOLLOW_SRC_CHAN, 0, "follow-source-channel");
+    ss_button(c, (ccord_rect){x + half_w + 8.0f, y, fmaxf(w - half_w - 8.0f, 80.0f), 34.0f}, dst_lbl, BTN_SECONDARY,
+              dst_ch ? nullptr : "No text channels in this server.", A_FOLLOW_DST_CHAN, 0, "follow-target-channel");
+    y += 40.0f;
+    ss_button(c, (ccord_rect){x, y, 138.0f, 34.0f}, "Follow Channel", BTN_PRIMARY, fol_why,
+              A_FOLLOW_SUBMIT, 0, "follow-submit");
+    y += 42.0f;
+  } else {
+    float btn_fw = 132.0f;
+    float half_w = fmaxf(110.0f, (w - btn_fw - 16.0f) * 0.5f);
+    ss_button(c, (ccord_rect){x, y, half_w, 34.0f}, src_lbl, BTN_SECONDARY,
+              src_ch ? nullptr : "No announcement channels available.", A_FOLLOW_SRC_CHAN, 0, "follow-source-channel");
+    ss_button(c, (ccord_rect){x + half_w + 8.0f, y, half_w, 34.0f}, dst_lbl, BTN_SECONDARY,
+              dst_ch ? nullptr : "No text channels in this server.", A_FOLLOW_DST_CHAN, 0, "follow-target-channel");
+    ss_button(c, (ccord_rect){x + half_w * 2.0f + 16.0f, y, btn_fw, 34.0f}, "Follow Channel", BTN_PRIMARY, fol_why,
+              A_FOLLOW_SUBMIT, 0, "follow-submit");
+    y += 44.0f;
+  }
 
   size_t nfc = 0;
   const ccord_followed_channel *fcs = ccord_store_followed_channels(st, ss->guild_id, &nfc);
@@ -797,23 +876,26 @@ static void draw_community_prompt_editor(ss_cx *c, float x, float w, float *py)
                "Question prompt (e.g. What topics interest you?)", nullptr, "onboarding-prompt-title");
   y += 46.0f;
 
-  // Type + flags row
+  // Type + flags row (wraps cleanly across narrow viewports)
   float cx = x;
   ss_chip(c, (ccord_rect){cx, y, 122.0f, 26.0f}, "Multiple Choice",
           ss->ob_work_prompt.type == CCORD_ONBOARDING_MULTIPLE_CHOICE, A_OB_PROMPT_TYPE,
           CCORD_ONBOARDING_MULTIPLE_CHOICE, "onboarding-prompt-type:0");
   cx += 130.0f;
+  if (cx > x && cx + 96.0f > x + w) { cx = x; y += 32.0f; }
   ss_chip(c, (ccord_rect){cx, y, 96.0f, 26.0f}, "Dropdown",
           ss->ob_work_prompt.type == CCORD_ONBOARDING_DROPDOWN, A_OB_PROMPT_TYPE,
           CCORD_ONBOARDING_DROPDOWN, "onboarding-prompt-type:1");
-  cx += 108.0f;
+  cx += 104.0f;
+  if (cx > x && cx + 86.0f > x + w) { cx = x; y += 32.0f; }
   ss_chip(c, (ccord_rect){cx, y, 86.0f, 26.0f}, "Required", ss->ob_work_prompt.required,
           A_OB_PROMPT_REQ, 0, "onboarding-prompt-req");
   cx += 94.0f;
+  if (cx > x && cx + 108.0f > x + w) { cx = x; y += 32.0f; }
   ss_chip(c, (ccord_rect){cx, y, 108.0f, 26.0f}, "Single-Select", ss->ob_work_prompt.single_select,
           A_OB_PROMPT_SINGLE, 0, "onboarding-prompt-single");
   cx += 116.0f;
-  if (cx + 118.0f > x + w) { cx = x; y += 32.0f; }
+  if (cx > x && cx + 118.0f > x + w) { cx = x; y += 32.0f; }
   ss_chip(c, (ccord_rect){cx, y, 118.0f, 26.0f}, "In Onboarding", ss->ob_work_prompt.in_onboarding,
           A_OB_PROMPT_INOB, 0, "onboarding-prompt-inob");
   y += 38.0f;
@@ -915,7 +997,7 @@ void ss_draw_community(ss_cx *c, const ss_geom *g)
   const ccord_guild *gd = ccord_store_guild(st, ss->guild_id);
   if (!gd) return;
 
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "Community", y);
   if (gd->feature_community) {
     ss_button(c, (ccord_rect){x + w - 100.0f, y - 2.0f, 100.0f, 32.0f}, "Refresh", BTN_SECONDARY, nullptr,
@@ -982,10 +1064,16 @@ void ss_draw_community(ss_cx *c, const ss_geom *g)
   ss_button(c, (ccord_rect){x + half_c + 10.0f, y, half_c, 34.0f}, cu_lbl, BTN_SECONDARY, nullptr,
             A_COMM_UPDATES_CHAN, 0, "community-updates-channel");
   y += 42.0f;
-  ss_button(c, (ccord_rect){x, y, 186.0f, 32.0f}, "Save Community Channels", BTN_PRIMARY, nullptr,
+  ss_button(c, (ccord_rect){x, y, fminf(186.0f, w), 32.0f}, "Save Community Channels", BTN_PRIMARY, nullptr,
             A_COMM_CHAN_SAVE, 0, "community-channels-save");
-  ss_button(c, (ccord_rect){x + 196.0f, y, 150.0f, 32.0f}, "Disable Community", BTN_DANGER, nullptr,
-            A_COMM_DISABLE, 0, "community-disable");
+  if (w < 352.0f) {
+    y += 38.0f;
+    ss_button(c, (ccord_rect){x, y, fminf(150.0f, w), 32.0f}, "Disable Community", BTN_DANGER, nullptr,
+              A_COMM_DISABLE, 0, "community-disable");
+  } else {
+    ss_button(c, (ccord_rect){x + 196.0f, y, 150.0f, 32.0f}, "Disable Community", BTN_DANGER, nullptr,
+              A_COMM_DISABLE, 0, "community-disable");
+  }
   y += 48.0f;
   uis_divider(ui, c->r, x, y, w);
   y += 22.0f;
@@ -1036,19 +1124,36 @@ void ss_draw_community(ss_cx *c, const ss_geom *g)
     const ccord_channel *wadd_ch = wadd_id != CCORD_ID_NONE ? ccord_store_channel(st, wadd_id) : nullptr;
     char walbl[CCORD_NAME_MAX_BYTES + 16];
     (void)snprintf(walbl, sizeof walbl, "#%s", wadd_ch && wadd_ch->name ? wadd_ch->name : "none");
-    float ch_w = fminf(160.0f, w * 0.25f);
-    float em_w = 96.0f;
-    float add_w = 108.0f;
-    float d_w = fmaxf(110.0f, w - ch_w - em_w - add_w - 24.0f);
-    ss_button(c, (ccord_rect){x, y, ch_w, 34.0f}, walbl, BTN_SECONDARY,
-              wadd_ch ? nullptr : "No text channels.", A_WS_ADD_CHAN, 0, "welcome-add-channel");
-    ss_field_box(c, (ccord_rect){x + ch_w + 8.0f, y, d_w, 34.0f}, &ss->ws_add_desc, SSF_WS_ADD_DESC,
-                 "What happens here?", nullptr, "welcome-add-desc");
-    ss_field_box(c, (ccord_rect){x + ch_w + d_w + 16.0f, y, em_w, 34.0f}, &ss->ws_add_emoji, SSF_WS_ADD_EMOJI,
-                 "Emoji", nullptr, "welcome-add-emoji");
-    ss_button(c, (ccord_rect){x + ch_w + d_w + em_w + 24.0f, y, add_w, 34.0f}, "Add Channel", BTN_SECONDARY,
-              wadd_ch ? nullptr : "No text channels.", A_WS_CHAN_ADD, 0, "welcome-chan-add");
-    y += 44.0f;
+    if (w < 500.0f) {
+      float em_w = 88.0f;
+      float ch_w = fmaxf(w - em_w - 8.0f, 80.0f);
+      ss_button(c, (ccord_rect){x, y, ch_w, 34.0f}, walbl, BTN_SECONDARY,
+                wadd_ch ? nullptr : "No text channels.", A_WS_ADD_CHAN, 0, "welcome-add-channel");
+      ss_field_box(c, (ccord_rect){x + ch_w + 8.0f, y, em_w, 34.0f}, &ss->ws_add_emoji, SSF_WS_ADD_EMOJI,
+                   "Emoji", nullptr, "welcome-add-emoji");
+      y += 40.0f;
+      float add_w = 108.0f;
+      float d_w = fmaxf(w - add_w - 8.0f, 80.0f);
+      ss_field_box(c, (ccord_rect){x, y, d_w, 34.0f}, &ss->ws_add_desc, SSF_WS_ADD_DESC,
+                   "What happens here?", nullptr, "welcome-add-desc");
+      ss_button(c, (ccord_rect){x + d_w + 8.0f, y, add_w, 34.0f}, "Add Channel", BTN_SECONDARY,
+                wadd_ch ? nullptr : "No text channels.", A_WS_CHAN_ADD, 0, "welcome-chan-add");
+      y += 44.0f;
+    } else {
+      float ch_w = fminf(160.0f, w * 0.25f);
+      float em_w = 96.0f;
+      float add_w = 108.0f;
+      float d_w = fmaxf(110.0f, w - ch_w - em_w - add_w - 24.0f);
+      ss_button(c, (ccord_rect){x, y, ch_w, 34.0f}, walbl, BTN_SECONDARY,
+                wadd_ch ? nullptr : "No text channels.", A_WS_ADD_CHAN, 0, "welcome-add-channel");
+      ss_field_box(c, (ccord_rect){x + ch_w + 8.0f, y, d_w, 34.0f}, &ss->ws_add_desc, SSF_WS_ADD_DESC,
+                   "What happens here?", nullptr, "welcome-add-desc");
+      ss_field_box(c, (ccord_rect){x + ch_w + d_w + 16.0f, y, em_w, 34.0f}, &ss->ws_add_emoji, SSF_WS_ADD_EMOJI,
+                   "Emoji", nullptr, "welcome-add-emoji");
+      ss_button(c, (ccord_rect){x + ch_w + d_w + em_w + 24.0f, y, add_w, 34.0f}, "Add Channel", BTN_SECONDARY,
+                wadd_ch ? nullptr : "No text channels.", A_WS_CHAN_ADD, 0, "welcome-chan-add");
+      y += 44.0f;
+    }
   }
 
   ss_button(c, (ccord_rect){x, y, 168.0f, 34.0f}, "Save Welcome Screen", BTN_PRIMARY, nullptr,
@@ -1078,10 +1183,16 @@ void ss_draw_community(ss_cx *c, const ss_geom *g)
 
   ss_label(c, "ONBOARDING MODE", x, y);
   y += 22.0f;
-  ss_chip(c, (ccord_rect){x, y, 164.0f, 26.0f}, "Default (Channels)",
+  ss_chip(c, (ccord_rect){x, y, fminf(164.0f, w), 26.0f}, "Default (Channels)",
           ss->ob_work.mode == CCORD_ONBOARDING_DEFAULT, A_OB_MODE, CCORD_ONBOARDING_DEFAULT, "onboarding-mode:0");
-  ss_chip(c, (ccord_rect){x + 172.0f, y, 206.0f, 26.0f}, "Advanced (Channels + Prompts)",
-          ss->ob_work.mode == CCORD_ONBOARDING_ADVANCED, A_OB_MODE, CCORD_ONBOARDING_ADVANCED, "onboarding-mode:1");
+  if (w < 385.0f) {
+    y += 32.0f;
+    ss_chip(c, (ccord_rect){x, y, fminf(220.0f, w), 26.0f}, "Advanced (Channels + Prompts)",
+            ss->ob_work.mode == CCORD_ONBOARDING_ADVANCED, A_OB_MODE, CCORD_ONBOARDING_ADVANCED, "onboarding-mode:1");
+  } else {
+    ss_chip(c, (ccord_rect){x + 172.0f, y, 206.0f, 26.0f}, "Advanced (Channels + Prompts)",
+            ss->ob_work.mode == CCORD_ONBOARDING_ADVANCED, A_OB_MODE, CCORD_ONBOARDING_ADVANCED, "onboarding-mode:1");
+  }
   y += 38.0f;
 
   ss_label(c, "DEFAULT CHANNELS", x, y);

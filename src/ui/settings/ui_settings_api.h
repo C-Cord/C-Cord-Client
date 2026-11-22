@@ -119,6 +119,7 @@ bool ui_server_settings_modview_available(const ccord_ui *ui, ccord_id guild_id)
 void ui_server_settings_open(ccord_ui *ui, ccord_id guild_id);
 void ui_server_settings_open_modview(ccord_ui *ui, ccord_id guild_id, ccord_id user_id);
 void ui_server_settings_close(ccord_ui *ui);
+bool ui_server_settings_handle_back(ccord_ui *ui);
 void ui_server_settings_draw(ccord_ui *ui, ccord_renderer *r);
 bool ui_server_settings_handle(ccord_ui *ui, const ccord_input_event *ev);
 ccord_cursor_kind ui_server_settings_cursor(const ccord_ui *ui);

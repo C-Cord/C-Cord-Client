@@ -57,7 +57,7 @@ void ss_draw_emoji(ss_cx *c, const ss_geom *g)
   struct ui_server_settings *ss = c->ss;
   const ccord_guild *gd = ccord_store_guild(ui->d.store, ss->guild_id);
   if (!gd) return;
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "Emoji", y);
   ss_button(c, (ccord_rect){x + w - 100.0f, y - 2.0f, 100.0f, 32.0f}, "Refresh", BTN_SECONDARY, nullptr, A_REFRESH, 0,
             "refresh");
@@ -170,7 +170,7 @@ void ss_draw_stickers(ss_cx *c, const ss_geom *g)
   struct ui_server_settings *ss = c->ss;
   const ccord_guild *gd = ccord_store_guild(ui->d.store, ss->guild_id);
   if (!gd) return;
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "Stickers", y);
   ss_button(c, (ccord_rect){x + w - 100.0f, y - 2.0f, 100.0f, 32.0f}, "Refresh", BTN_SECONDARY, nullptr, A_REFRESH, 0,
             "refresh");
@@ -295,7 +295,7 @@ void ss_draw_soundboard(ss_cx *c, const ss_geom *g)
   struct ui_server_settings *ss = c->ss;
   const ccord_guild *gd = ccord_store_guild(ui->d.store, ss->guild_id);
   if (!gd) return;
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "Soundboard", y);
   ss_button(c, (ccord_rect){x + w - 100.0f, y - 2.0f, 100.0f, 32.0f}, "Refresh", BTN_SECONDARY, nullptr, A_REFRESH, 0,
             "refresh");
@@ -318,10 +318,10 @@ void ss_draw_soundboard(ss_cx *c, const ss_geom *g)
   (void)ss_text(c, file_info, x + 144.0f, y + 8.0f, M(font_size_small), false, COL(text_secondary), w - 144.0f);
   y += 34.0f + 12.0f;
 
-  float half_w = fmaxf(140.0f, (w - 12.0f) * 0.5f);
+  float half_w = fmaxf(100.0f, (w - 12.0f) * 0.5f);
   ss_field_box(c, (ccord_rect){x, y, half_w, 36.0f}, &ss->sound_new_name, SSF_SOUND_NEW_NAME,
                "Sound name (2-32 chars)", nullptr, "sound-new-name");
-  ss_field_box(c, (ccord_rect){x + half_w + 12.0f, y, half_w, 36.0f}, &ss->sound_new_emoji, SSF_SOUND_NEW_EMOJI,
+  ss_field_box(c, (ccord_rect){x + half_w + 12.0f, y, fmaxf(w - half_w - 12.0f, 80.0f), 36.0f}, &ss->sound_new_emoji, SSF_SOUND_NEW_EMOJI,
                "Emoji (optional)", nullptr, "sound-new-emoji");
   y += 36.0f + 12.0f;
 
@@ -330,15 +330,25 @@ void ss_draw_soundboard(ss_cx *c, const ss_geom *g)
   for (size_t vi = 0; vi < 4u; vi++) {
     char vlbl[16], vnm[SS_NAME_LEN];
     (void)snprintf(vlbl, sizeof vlbl, "%u%%", (unsigned)k_sound_vols[vi]);
+    if (cx > x + 64.0f && cx + 56.0f > x + w) {
+      cx = x;
+      y += 34.0f;
+    }
     ss_chip(c, (ccord_rect){cx, y + 2.0f, 56.0f, 28.0f}, vlbl, ss->sound_new_vol_pct == k_sound_vols[vi],
             A_SOUND_NEW_VOL, k_sound_vols[vi], NAME(vnm, "sound-new-vol:%u", (unsigned)k_sound_vols[vi]));
-    cx += 64.0f;
+    cx += 62.0f;
   }
   const char *up_why = nullptr;
   if (!ss->sound_upload_uri) up_why = "Choose an MP3 or OGG audio file first.";
   else if ((uint32_t)n >= limit) up_why = "This server has reached its soundboard slot limit.";
-  ss_button(c, (ccord_rect){x + w - 138.0f, y - 1.0f, 138.0f, 34.0f}, "Upload Sound", BTN_PRIMARY, up_why,
-            A_SOUND_CREATE, 0, "sound-upload");
+  if (w < 460.0f) {
+    y += 36.0f;
+    ss_button(c, (ccord_rect){x, y, 138.0f, 34.0f}, "Upload Sound", BTN_PRIMARY, up_why,
+              A_SOUND_CREATE, 0, "sound-upload");
+  } else {
+    ss_button(c, (ccord_rect){x + w - 138.0f, y - 1.0f, 138.0f, 34.0f}, "Upload Sound", BTN_PRIMARY, up_why,
+              A_SOUND_CREATE, 0, "sound-upload");
+  }
   y += 34.0f + 28.0f;
 
   uis_divider(ui, c->r, x, y, w);
@@ -366,14 +376,15 @@ void ss_draw_soundboard(ss_cx *c, const ss_geom *g)
     if (!ss_contains_ci(sname, needle) && !ss_contains_ci(semoji, needle) && !ss_contains_ci(up_name, needle)) continue;
     shown++;
     bool editing = (ss->edit_expr_page == SS_SOUNDBOARD && ss->edit_expr_id == sb->id);
-    ccord_rect row = {x, y, w, editing ? 104.0f : SS_ROW_H + 8.0f};
+    bool narrow_edit = editing && w < 460.0f;
+    ccord_rect row = {x, y, w, editing ? (narrow_edit ? 136.0f : 104.0f) : SS_ROW_H + 8.0f};
     y += row.h;
     if (!ss_visible(c, row)) continue;
     if (editing) {
-      float ew = fmaxf(120.0f, (w - 12.0f) * 0.5f);
+      float ew = fmaxf(100.0f, (w - 12.0f) * 0.5f);
       ss_field_box(c, (ccord_rect){row.x, row.y + 8.0f, ew, 36.0f}, &ss->expr_edit_name, SSF_EXPR_EDIT_NAME,
                    "Sound name", nullptr, "sound-edit-name");
-      ss_field_box(c, (ccord_rect){row.x + ew + 12.0f, row.y + 8.0f, ew, 36.0f}, &ss->expr_edit_emoji,
+      ss_field_box(c, (ccord_rect){row.x + ew + 12.0f, row.y + 8.0f, fmaxf(w - ew - 12.0f, 80.0f), 36.0f}, &ss->expr_edit_emoji,
                    SSF_EXPR_EDIT_EMOJI, "Emoji", nullptr, "sound-edit-emoji");
       float vx = row.x;
       for (size_t vi = 0; vi < 4u; vi++) {
@@ -383,10 +394,17 @@ void ss_draw_soundboard(ss_cx *c, const ss_geom *g)
                 A_EXPR_EDIT_VOL, k_sound_vols[vi], NAME(vnm, "sound-edit-vol:%u", (unsigned)k_sound_vols[vi]));
         vx += 60.0f;
       }
-      ss_button(c, (ccord_rect){row.x + w - 162.0f, row.y + 53.0f, 74.0f, 34.0f}, "Save", BTN_PRIMARY, nullptr,
-                A_EXPR_EDIT_SAVE, sb->id, "sound-edit-save");
-      ss_button(c, (ccord_rect){row.x + w - 80.0f, row.y + 53.0f, 80.0f, 34.0f}, "Cancel", BTN_SECONDARY, nullptr,
-                A_EXPR_EDIT_CANCEL, sb->id, "sound-edit-cancel");
+      if (narrow_edit) {
+        ss_button(c, (ccord_rect){row.x, row.y + 92.0f, 74.0f, 34.0f}, "Save", BTN_PRIMARY, nullptr,
+                  A_EXPR_EDIT_SAVE, sb->id, "sound-edit-save");
+        ss_button(c, (ccord_rect){row.x + 82.0f, row.y + 92.0f, 80.0f, 34.0f}, "Cancel", BTN_SECONDARY, nullptr,
+                  A_EXPR_EDIT_CANCEL, sb->id, "sound-edit-cancel");
+      } else {
+        ss_button(c, (ccord_rect){row.x + w - 162.0f, row.y + 53.0f, 74.0f, 34.0f}, "Save", BTN_PRIMARY, nullptr,
+                  A_EXPR_EDIT_SAVE, sb->id, "sound-edit-save");
+        ss_button(c, (ccord_rect){row.x + w - 80.0f, row.y + 53.0f, 80.0f, 34.0f}, "Cancel", BTN_SECONDARY, nullptr,
+                  A_EXPR_EDIT_CANCEL, sb->id, "sound-edit-cancel");
+      }
     } else {
       char disp[CCORD_NAME_MAX_BYTES + CCORD_EMOJI_MAX_BYTES + 16];
       if (semoji[0]) (void)snprintf(disp, sizeof disp, "%s  %s", semoji, sname);
@@ -854,7 +872,8 @@ static void draw_member_row(ss_cx *c, const ccord_guild *gd, const ccord_member 
                  m->user_id == gd->owner_id ? " [Owner]" : "",
                  (u && u->is_bot) ? " [BOT]" : "",
                  timed_out ? " [Timed Out]" : "");
-  float act_bar_w = is_owner && m->user_id != self_id ? 298.0f : 236.0f;
+  bool narrow_row = w < 520.0f;
+  float act_bar_w = narrow_row ? 0.0f : (is_owner && m->user_id != self_id ? 298.0f : 236.0f);
   (void)ss_text(c, title_line, row.x + 42.0f, row.y + 6.0f, M(font_size_base), true,
                 timed_out ? COL(danger) : COL(text_header), fmaxf(60.0f, w - 46.0f - act_bar_w));
 
@@ -868,34 +887,72 @@ static void draw_member_row(ss_cx *c, const ccord_guild *gd, const ccord_member 
   (void)ss_text(c, meta_line, row.x + 42.0f, row.y + 25.0f, SS_CAP(c), false, COL(text_muted),
                 fmaxf(60.0f, w - 46.0f - act_bar_w));
 
-  // Action buttons on right side of row
-  float bx = row.x + w;
+  // Action buttons: right side on desktop, clean wrapping row(s) below avatar/name on narrow mobile.
   char nm[SS_NAME_LEN];
-  if (is_owner && m->user_id != self_id) {
-    bx -= 58.0f;
-    const char *xf_why = (u && u->is_bot) ? "Bots cannot own a server." : nullptr;
-    ss_button(c, (ccord_rect){bx, row.y + 8.0f, 58.0f, 26.0f}, "Owner", BTN_SECONDARY, xf_why, A_MEM_TRANSFER,
-              m->user_id, NAME(nm, "member-transfer:%llu", (unsigned long long)m->user_id));
-    bx -= 4.0f;
+  float role_y_off = narrow_row ? 76.0f : 44.0f;
+  if (narrow_row) {
+    float bx = row.x + 4.0f, by = row.y + 44.0f;
+    float right = row.x + w - 4.0f;
+    float max_bw = fmaxf(w - 8.0f, 64.0f);
+    struct {
+      const char *lbl;
+      ss_btn_style st;
+      const char *why;
+      ss_act act;
+      const char *pfx;
+      bool show;
+    } acts[5] = {
+      {"Mod View", BTN_SECONDARY, nullptr, A_MEM_MODVIEW, "member-modview", true},
+      {timed_out ? "Unmute" : "Timeout", BTN_SECONDARY,
+       ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_TIMEOUT), A_MEM_TIMEOUT, "member-timeout", true},
+      {"Kick", BTN_SECONDARY,
+       ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_KICK), A_MEM_KICK, "member-kick", true},
+      {"Ban", BTN_DANGER,
+       ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_BAN), A_MEM_BAN, "member-ban", true},
+      {"Owner", BTN_SECONDARY, (u && u->is_bot) ? "Bots cannot own a server." : nullptr,
+       A_MEM_TRANSFER, "member-transfer", is_owner && m->user_id != self_id},
+    };
+    for (int ai = 0; ai < 5; ai++) {
+      if (!acts[ai].show) continue;
+      float bw = fminf(fmaxf(uis_label_width(ui, c->r, acts[ai].lbl), 48.0f), max_bw);
+      if (bx > row.x + 4.0f && bx + bw > right) {
+        bx = row.x + 4.0f;
+        by += 32.0f;
+      }
+      ss_button(c, (ccord_rect){bx, by, bw, 26.0f}, acts[ai].lbl, acts[ai].st, acts[ai].why, acts[ai].act,
+                m->user_id, NAME(nm, "%s:%llu", acts[ai].pfx, (unsigned long long)m->user_id));
+      bx += bw + 6.0f;
+    }
+    if (by > row.y + 44.0f && role_y_off < 108.0f) role_y_off = 108.0f;
+  } else {
+    float bx = row.x + w;
+    if (is_owner && m->user_id != self_id) {
+      bx -= 58.0f;
+      const char *xf_why = (u && u->is_bot) ? "Bots cannot own a server." : nullptr;
+      ss_button(c, (ccord_rect){bx, row.y + 8.0f, 58.0f, 26.0f}, "Owner", BTN_SECONDARY, xf_why, A_MEM_TRANSFER,
+                m->user_id, NAME(nm, "member-transfer:%llu", (unsigned long long)m->user_id));
+      bx -= 4.0f;
+    }
+    bx -= 48.0f;
+    ss_button(c, (ccord_rect){bx, row.y + 8.0f, 48.0f, 26.0f}, "Ban", BTN_DANGER,
+              ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_BAN), A_MEM_BAN, m->user_id,
+              NAME(nm, "member-ban:%llu", (unsigned long long)m->user_id));
+    bx -= 52.0f;
+    ss_button(c, (ccord_rect){bx, row.y + 8.0f, 48.0f, 26.0f}, "Kick", BTN_SECONDARY,
+              ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_KICK), A_MEM_KICK, m->user_id,
+              NAME(nm, "member-kick:%llu", (unsigned long long)m->user_id));
+    bx -= 68.0f;
+    ss_button(c, (ccord_rect){bx, row.y + 8.0f, 64.0f, 26.0f}, timed_out ? "Unmute" : "Timeout", BTN_SECONDARY,
+              ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_TIMEOUT), A_MEM_TIMEOUT, m->user_id,
+              NAME(nm, "member-timeout:%llu", (unsigned long long)m->user_id));
+    bx -= 68.0f;
+    ss_button(c, (ccord_rect){bx, row.y + 8.0f, 64.0f, 26.0f}, "Mod View", BTN_SECONDARY, nullptr, A_MEM_MODVIEW,
+              m->user_id, NAME(nm, "member-modview:%llu", (unsigned long long)m->user_id));
   }
-  bx -= 48.0f;
-  ss_button(c, (ccord_rect){bx, row.y + 8.0f, 48.0f, 26.0f}, "Ban", BTN_DANGER,
-            ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_BAN), A_MEM_BAN, m->user_id,
-            NAME(nm, "member-ban:%llu", (unsigned long long)m->user_id));
-  bx -= 52.0f;
-  ss_button(c, (ccord_rect){bx, row.y + 8.0f, 48.0f, 26.0f}, "Kick", BTN_SECONDARY,
-            ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_KICK), A_MEM_KICK, m->user_id,
-            NAME(nm, "member-kick:%llu", (unsigned long long)m->user_id));
-  bx -= 68.0f;
-  ss_button(c, (ccord_rect){bx, row.y + 8.0f, 64.0f, 26.0f}, timed_out ? "Unmute" : "Timeout", BTN_SECONDARY,
-            ss_member_act_why(ui, ss->guild_id, m->user_id, CCORD_PERM_ACT_TIMEOUT), A_MEM_TIMEOUT, m->user_id,
-            NAME(nm, "member-timeout:%llu", (unsigned long long)m->user_id));
-  bx -= 68.0f;
-  ss_button(c, (ccord_rect){bx, row.y + 8.0f, 64.0f, 26.0f}, "Mod View", BTN_SECONDARY, nullptr, A_MEM_MODVIEW,
-            m->user_id, NAME(nm, "member-modview:%llu", (unsigned long long)m->user_id));
 
   // Inline role chips (+/-)
-  float rx = row.x + 42.0f, ry = row.y + 44.0f;
+  float rx = row.x + (narrow_row ? 4.0f : 42.0f), ry = row.y + role_y_off;
+  float add_btn_w = narrow_row ? fmaxf(uis_label_width(ui, c->r, picker_open ? "- Role" : "+ Role"), 64.0f) : 52.0f;
   if (roles_known) {
     for (size_t mi = 0; mi < nmroles; mi++) {
       const ccord_role *ro = ccord_store_role(ui->d.store, ss->guild_id, mroles[mi]);
@@ -906,7 +963,7 @@ static void draw_member_row(ss_cx *c, const ccord_guild *gd, const ccord_member 
       (void)snprintf(clbl, sizeof clbl, "%s%s", ro->name ? ro->name : "role", rwhy == nullptr ? " x" : "");
       // The pill is a uis_chip; its inset holds the role colour dot on the left edge.
       float cw = fminf(150.0f, ss_text_width(c, clbl, SS_CAP(c), false) + 16.0f) + 12.0f;
-      if (rx + cw > row.x + w - 58.0f) break;
+      if (rx + cw > row.x + w - (add_btn_w + 6.0f)) break;
       ccord_rect pill = {rx, ry, cw, 21.0f};
       bool phov = ss_hit_add(c, pill, A_MEM_ROLE_DEL, m->user_id, rwhy,
                              NAME(nm, "member-role-del:%llu:%llu", (unsigned long long)m->user_id,
@@ -917,7 +974,7 @@ static void draw_member_row(ss_cx *c, const ccord_guild *gd, const ccord_member 
       rx += cw + 5.0f;
     }
     if (can_manage_roles && roles && nroles > 1u) {
-      ccord_rect add_rc = {rx, ry, 52.0f, 21.0f};
+      ccord_rect add_rc = {rx, ry, add_btn_w, 21.0f};
       ss_button(c, add_rc, picker_open ? "- Role" : "+ Role", BTN_SECONDARY, nullptr, A_MEM_ROLE_PICK, m->user_id,
                 NAME(nm, "member-role-pick:%llu", (unsigned long long)m->user_id));
     }
@@ -926,7 +983,7 @@ static void draw_member_row(ss_cx *c, const ccord_guild *gd, const ccord_member 
   }
 
   if (picker_open) {
-    float px = row.x + 42.0f, py_pick = row.y + 72.0f;
+    float px = row.x + (narrow_row ? 4.0f : 42.0f), py_pick = row.y + role_y_off + 28.0f;
     size_t offered = 0;
     for (size_t ri = 0; ri < nroles; ri++) {
       const ccord_role *ro = &roles[ri];
@@ -959,11 +1016,18 @@ void ss_draw_members(ss_cx *c, const ss_geom *g)
   if (!gd) return;
 
   bool has_drawer = ss->modview_uid != CCORD_ID_NONE && ccord_store_find_member(ui->d.store, ss->guild_id, ss->modview_uid);
-  float avail_w = ui->win_w - g->col_x - 24.0f;
+  float avail_w = ui->win_w - g->col_x - (ui->mobile_layout ? ui->safe_insets.right + UIS_SP_4 : 24.0f);
+  bool full_modview = has_drawer && avail_w < 580.0f;
+  if (full_modview) {
+    ccord_rect dbox = {g->col_x, c->clip.y + 4.0f, g->col_w, fmaxf(180.0f, c->clip.h - 12.0f)};
+    draw_modview_drawer(c, dbox);
+    ss->rows = ccord_store_member_count(ui->d.store, ss->guild_id);
+    return;
+  }
   float drawer_w = has_drawer ? fminf(340.0f, fmaxf(250.0f, avail_w * 0.36f)) : 0.0f;
   float x = g->col_x;
   float w = has_drawer ? fmaxf(280.0f, avail_w - drawer_w - 20.0f) : g->col_w;
-  float y = 56.0f - ss->scroll;
+  float y = g->top_y - ss->scroll;
 
   uint64_t self_perms = ss_self_perms(ui, ss->guild_id);
   ccord_id self_id = ccord_store_self_id(ui->d.store);
@@ -1043,19 +1107,22 @@ void ss_draw_members(ss_cx *c, const ss_geom *g)
   bool is_owner = ss_is_owner(ui, ss->guild_id);
   bool can_manage_roles = ccord_perm_has(self_perms, CCORD_PERM_MANAGE_ROLES);
 
+  bool two_act_rows = w < 420.0f && is_owner;
+  float base_row_h = w < 520.0f ? (two_act_rows ? 136.0f : 104.0f) : 72.0f;
+  float pick_row_h = w < 520.0f ? (two_act_rows ? 170.0f : 138.0f) : 108.0f;
   if (ss->member_role_picker_uid == CCORD_ID_NONE) {
-    // Fixed 72px rows: O(1) jump to the first visible row so off-screen members do zero store/chip work.
+    // Fixed-height rows: O(1) jump to the first visible row so off-screen members do zero store/chip work.
     float list_y0 = y;
     size_t first_k = 0;
     if (list_y0 < c->clip.y) {
-      float skip = floorf((c->clip.y - list_y0) / 72.0f);
+      float skip = floorf((c->clip.y - list_y0) / base_row_h);
       if (skip > 0.0f) first_k = (size_t)skip;
     }
     if (first_k > shown) first_k = shown;
     for (size_t k = first_k; k < shown; k++) {
-      float row_y = list_y0 + (float)k * 72.0f;
+      float row_y = list_y0 + (float)k * base_row_h;
       if (row_y >= c->clip.y + c->clip.h) break;
-      ccord_rect row = {x, row_y, w, 72.0f};
+      ccord_rect row = {x, row_y, w, base_row_h};
       if (!ss_visible(c, row)) continue;
       const ccord_member *m = ccord_store_member_at(ui->d.store, ss->guild_id, ss->mem_cache_idx[k]);
       if (!m) continue;
@@ -1065,7 +1132,7 @@ void ss_draw_members(ss_cx *c, const ss_geom *g)
       draw_member_row(c, gd, m, roles, nroles, roles_known, mroles, nmroles, false, is_owner, can_manage_roles,
                       self_id, row);
     }
-    y = list_y0 + (float)shown * 72.0f;
+    y = list_y0 + (float)shown * base_row_h;
   } else {
     for (size_t k = 0; k < shown; k++) {
       const ccord_member *m = ccord_store_member_at(ui->d.store, ss->guild_id, ss->mem_cache_idx[k]);
@@ -1078,7 +1145,7 @@ void ss_draw_members(ss_cx *c, const ss_geom *g)
         roles_known = ccord_store_member_roles(ui->d.store, ss->guild_id, m->user_id, &mroles, &nmroles);
         picker_open = roles_known;
       }
-      float row_h = picker_open ? 108.0f : 72.0f;
+      float row_h = picker_open ? pick_row_h : base_row_h;
       ccord_rect row = {x, y, w, row_h};
       y += row_h;
       if (!ss_visible(c, row)) continue;

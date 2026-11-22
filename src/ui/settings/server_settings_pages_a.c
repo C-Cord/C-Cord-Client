@@ -29,7 +29,7 @@ void ss_draw_overview(ss_cx *c, const ss_geom *g)
   struct ui_server_settings *ss = c->ss;
   const ccord_guild *gd = ccord_store_guild(ui->d.store, ss->guild_id);
   if (!gd) return;
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "Server Overview", y);
   y += 58.0f;
   ss_label(c, "SERVER NAME", x, y);
@@ -460,15 +460,30 @@ void ss_draw_roles(ss_cx *c, const ss_geom *g)
 {
   ccord_ui *ui = c->ui;
   struct ui_server_settings *ss = c->ss;
-  float top = 40.0f;
-  ccord_rect all = {g->col_x, top, g->col_w, ui->win_h - top - 20.0f};
-  float list_w = fminf(240.0f, all.w * 0.38f);
-  ccord_rect list = {all.x, all.y, list_w, all.h};
-  draw_role_list(c, g, list);
-
-  float ex = list.x + list_w + 24.0f, ew = all.w - list_w - 24.0f;
+  float top = ui->mobile_layout ? g->top_y : 40.0f;
+  float bot_in = ui->mobile_layout ? fmaxf(ui->safe_insets.bottom, ui->keyboard_inset) : 0.0f;
+  ccord_rect all = {g->col_x, top, g->col_w, fmaxf(ui->win_h - bot_in - top - 20.0f, 120.0f)};
+  bool narrow = all.w < 460.0f;
+  float ex, ew;
+  if (narrow) {
+    if (!ss->mobile_role_editing) {
+      draw_role_list(c, g, all);
+      ss->editor_view = (ccord_rect){0};
+      ss->view = all;
+      return;
+    }
+    ss->list_view = (ccord_rect){0};
+    ex = all.x;
+    ew = all.w;
+  } else {
+    float list_w = fminf(240.0f, all.w * 0.38f);
+    ccord_rect list = {all.x, all.y, list_w, all.h};
+    draw_role_list(c, g, list);
+    ex = list.x + list_w + 24.0f;
+    ew = all.w - list_w - 24.0f;
+  }
   if (ew < 100.0f) return;
-  ccord_rect view = {ex - 4.0f, top, ew + 8.0f, ui->win_h - top};
+  ccord_rect view = {ex - 4.0f, top, ew + 8.0f, fmaxf(ui->win_h - bot_in - top, 120.0f)};
   ss->editor_view = view;
   ss->view = view;
   const ccord_role *role = ccord_store_role(ui->d.store, ss->guild_id, ss->role_sel);
@@ -478,17 +493,25 @@ void ss_draw_roles(ss_cx *c, const ss_geom *g)
   ccord_perm_verdict v = ss_role_verdict(ui, ss->guild_id, role->id, false);
   const char *lock_why = v == CCORD_PERM_ALLOWED ? nullptr : ccord_perm_verdict_text(v, CCORD_PERM_ACT_EDIT_ROLES);
 
-  float y = top + 16.0f - ss->scroll;
+  float y = top + (narrow ? 4.0f : 16.0f) - ss->scroll;
   char head[SS_TITLE_MAX + 24];
   (void)snprintf(head, sizeof head, "Edit Role - %s", role->id == ss->guild_id ? "@everyone" : (ss->base.name));
   float preview_w = 128.0f;
-  (void)ss_text(c, head, ex, y, SS_TITLE(c), true, COL(text_header), fmaxf(40.0f, ew - preview_w - 12.0f));
   ss_cx ec = *c;
-  ec.clip = (ccord_rect){view.x, top, view.w, view.h - 0.0f};
+  ec.clip = (ccord_rect){view.x, top, view.w, view.h};
   ccord_push_clip(c->r, ec.clip);
-  ss_button(&ec, (ccord_rect){ex + ew - preview_w, y - 3.0f, preview_w, 30.0f}, "View as Role", BTN_SECONDARY, nullptr,
-            A_ROLE_PREVIEW, 0, "role-preview");
-  y += 38.0f;
+  if (ew < 340.0f) {
+    (void)ss_text(&ec, head, ex, y, SS_TITLE(c), true, COL(text_header), ew);
+    y += 30.0f;
+    ss_button(&ec, (ccord_rect){ex, y, preview_w, 30.0f}, "View as Role", BTN_SECONDARY, nullptr,
+              A_ROLE_PREVIEW, 0, "role-preview");
+    y += 38.0f;
+  } else {
+    (void)ss_text(&ec, head, ex, y, SS_TITLE(c), true, COL(text_header), fmaxf(40.0f, ew - preview_w - 12.0f));
+    ss_button(&ec, (ccord_rect){ex + ew - preview_w, y - 3.0f, preview_w, 30.0f}, "View as Role", BTN_SECONDARY, nullptr,
+              A_ROLE_PREVIEW, 0, "role-preview");
+    y += 38.0f;
+  }
   if (lock_why) {
     ccord_rect note = {ex, y, ew, 34.0f};
     uis_surface(ui, c->r, note, ui_alpha(COL(danger), 0.18f));
@@ -498,7 +521,12 @@ void ss_draw_roles(ss_cx *c, const ss_geom *g)
   }
   float tx = ex;
   for (int t = 0; t < TAB_COUNT; t++) {
-    ccord_rect tr = {tx, y, uis_label_width(ui, c->r, ss_k_tab_labels[t]), UIS_H_BTN_SM};
+    float tw = uis_label_width(ui, c->r, ss_k_tab_labels[t]);
+    if (tx > ex && tx + tw > ex + ew) {
+      tx = ex;
+      y += UIS_H_BTN_SM + 4.0f;
+    }
+    ccord_rect tr = {tx, y, tw, UIS_H_BTN_SM};
     char nm[SS_NAME_LEN];
     bool hov = ss_hit_add(&ec, tr, A_TAB, (uint64_t)t, nullptr, NAME(nm, "tab:%s", ss_k_tab_names[t]));
     bool sel = ss->tab == (ss_tab)t;
@@ -546,7 +574,7 @@ void ss_draw_safety(ss_cx *c, const ss_geom *g)
   struct ui_server_settings *ss = c->ss;
   const ccord_guild *gd = ccord_store_guild(ui->d.store, ss->guild_id);
   if (!gd) return;
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "Safety Setup", y);
   y += 56.0f;
 
@@ -694,15 +722,25 @@ static void draw_invites_extras(ss_cx *c, float x, float w, float *py)
   y += 24.0f;
   bool can_vanity = gd->feature_vanity_url || gd->premium_tier >= 3u;
   const char *v_why = can_vanity ? nullptr : "Vanity URL requires Server Boost Level 3.";
-  float box_w = fminf(fmaxf(140.0f, w - 210.0f), 320.0f);
-  ss_field_box(c, (ccord_rect){x, y, box_w, 36.0f}, &ss->vanity_edit, SSF_VANITY, "discord.gg/custom-slug", v_why,
-               "vanity-code");
-  ss_button(c, (ccord_rect){x + box_w + 10.0f, y + 1.0f, 92.0f, 34.0f}, "Save URL", BTN_PRIMARY, v_why,
-            A_VANITY_SAVE, 0, "vanity-save");
   const char *clr_why = v_why ? v_why : (gd->vanity_url_code[0] == '\0' ? "No vanity URL is set." : nullptr);
-  ss_button(c, (ccord_rect){x + box_w + 110.0f, y + 1.0f, 84.0f, 34.0f}, "Clear", BTN_SECONDARY, clr_why,
-            A_VANITY_CLEAR, 0, "vanity-clear");
-  y += 42.0f;
+  if (w < 440.0f) {
+    ss_field_box(c, (ccord_rect){x, y, w, 36.0f}, &ss->vanity_edit, SSF_VANITY, "discord.gg/custom-slug", v_why,
+                 "vanity-code");
+    y += 42.0f;
+    ss_button(c, (ccord_rect){x, y, 92.0f, 34.0f}, "Save URL", BTN_PRIMARY, v_why, A_VANITY_SAVE, 0, "vanity-save");
+    ss_button(c, (ccord_rect){x + 100.0f, y, 84.0f, 34.0f}, "Clear", BTN_SECONDARY, clr_why, A_VANITY_CLEAR, 0,
+              "vanity-clear");
+    y += 42.0f;
+  } else {
+    float box_w = fminf(fmaxf(140.0f, w - 210.0f), 320.0f);
+    ss_field_box(c, (ccord_rect){x, y, box_w, 36.0f}, &ss->vanity_edit, SSF_VANITY, "discord.gg/custom-slug", v_why,
+                 "vanity-code");
+    ss_button(c, (ccord_rect){x + box_w + 10.0f, y + 1.0f, 92.0f, 34.0f}, "Save URL", BTN_PRIMARY, v_why,
+              A_VANITY_SAVE, 0, "vanity-save");
+    ss_button(c, (ccord_rect){x + box_w + 110.0f, y + 1.0f, 84.0f, 34.0f}, "Clear", BTN_SECONDARY, clr_why,
+              A_VANITY_CLEAR, 0, "vanity-clear");
+    y += 42.0f;
+  }
   *py = y;
 }
 
@@ -710,7 +748,7 @@ void ss_draw_invites(ss_cx *c, const ss_geom *g)
 {
   ccord_ui *ui = c->ui;
   struct ui_server_settings *ss = c->ss;
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "Invites", y);
   y += 56.0f;
 
@@ -773,11 +811,12 @@ void ss_draw_invites(ss_cx *c, const ss_geom *g)
     ss_message(c, "No invites yet. Generate one above.", x, y, w);
     y += 40.0f;
   }
-  // Columns: code / inviter / uses / expires, then the actions.
+  // Columns: code / inviter / uses / expires, then the actions (2-row compact cards on narrow widths).
+  bool narrow_inv = w < 500.0f;
   float act_w = 170.0f;
   float cw_code = fmaxf(90.0f, (w - act_w) * 0.36f), cw_inv = fmaxf(70.0f, (w - act_w) * 0.28f);
   float cw_uses = 70.0f;
-  if (n > 0) {
+  if (n > 0 && !narrow_inv) {
     float hx = x;
     ss_label(c, "INVITE CODE", hx, y);
     ss_label(c, "INVITER", hx + cw_code, y);
@@ -786,30 +825,41 @@ void ss_draw_invites(ss_cx *c, const ss_geom *g)
     y += 24.0f;
   }
   for (size_t i = 0; i < n; i++) {
-    ccord_rect row = {x, y, w, SS_ROW_H};
-    y += SS_ROW_H;
+    float rh = narrow_inv ? 74.0f : SS_ROW_H;
+    ccord_rect row = {x, y, w, rh};
+    y += rh;
     if (!ss_visible(c, row)) continue;
-    float ty = row.y + (row.h - ui_line_h(ui, M(font_size_base))) * 0.5f;
-    // Streamer Mode: mask the bare invite code while Hide Instant Invite Links is on.
     char code_mask[128];
     const char *shown_code = ui_streamer_mask_code(ui, inv[i].code, code_mask, sizeof code_mask, true);
-    (void)ss_text(c, shown_code, row.x, ty, M(font_size_base), true, COL(text_header), cw_code - 10.0f);
-    (void)ss_text(c, inv[i].inviter_name && inv[i].inviter_name[0] ? inv[i].inviter_name : "-", row.x + cw_code, ty,
-                  M(font_size_base), false, COL(text_normal), cw_inv - 10.0f);
     char uses[32];
     if (inv[i].max_uses) (void)snprintf(uses, sizeof uses, "%u / %u", inv[i].uses, inv[i].max_uses);
     else (void)snprintf(uses, sizeof uses, "%u", inv[i].uses);
-    (void)ss_text(c, uses, row.x + cw_code + cw_inv, ty, M(font_size_base), false, COL(text_normal), cw_uses - 6.0f);
     char exp[32];
     if (inv[i].expires_ms == 0) (void)snprintf(exp, sizeof exp, "Never");
     else ss_format_remaining(inv[i].expires_ms - ui->now_unix_ms, exp, sizeof exp);
-    (void)ss_text(c, exp, row.x + cw_code + cw_inv + cw_uses, ty, M(font_size_base), false, COL(text_normal), 90.0f);
-    char nm[SS_NAME_LEN];
-    ss_button(c, (ccord_rect){row.x + w - 160.0f, row.y + 8.0f, 74.0f, 30.0f}, "Copy", BTN_SECONDARY, nullptr, A_INV_COPY, i,
-              NAME(nm, "invite-copy:%s", inv[i].code));
-    char nm2[SS_NAME_LEN];
-    ss_button(c, (ccord_rect){row.x + w - 80.0f, row.y + 8.0f, 80.0f, 30.0f}, "Revoke", BTN_DANGER, nullptr, A_INV_REVOKE, i,
-              NAME(nm2, "invite-revoke:%s", inv[i].code));
+    char nm[SS_NAME_LEN], nm2[SS_NAME_LEN];
+    if (narrow_inv) {
+      char meta[192];
+      (void)snprintf(meta, sizeof meta, "%s  ·  %s uses  ·  %s",
+                     inv[i].inviter_name && inv[i].inviter_name[0] ? inv[i].inviter_name : "-", uses, exp);
+      (void)ss_text(c, shown_code, row.x, row.y + 6.0f, M(font_size_base), true, COL(text_header), w);
+      (void)ss_text(c, meta, row.x, row.y + 24.0f, SS_CAP(c), false, COL(text_muted), w);
+      ss_button(c, (ccord_rect){row.x, row.y + 42.0f, 72.0f, 26.0f}, "Copy", BTN_SECONDARY, nullptr, A_INV_COPY, i,
+                NAME(nm, "invite-copy:%s", inv[i].code));
+      ss_button(c, (ccord_rect){row.x + 80.0f, row.y + 42.0f, 76.0f, 26.0f}, "Revoke", BTN_DANGER, nullptr, A_INV_REVOKE, i,
+                NAME(nm2, "invite-revoke:%s", inv[i].code));
+    } else {
+      float ty = row.y + (row.h - ui_line_h(ui, M(font_size_base))) * 0.5f;
+      (void)ss_text(c, shown_code, row.x, ty, M(font_size_base), true, COL(text_header), cw_code - 10.0f);
+      (void)ss_text(c, inv[i].inviter_name && inv[i].inviter_name[0] ? inv[i].inviter_name : "-", row.x + cw_code, ty,
+                    M(font_size_base), false, COL(text_normal), cw_inv - 10.0f);
+      (void)ss_text(c, uses, row.x + cw_code + cw_inv, ty, M(font_size_base), false, COL(text_normal), cw_uses - 6.0f);
+      (void)ss_text(c, exp, row.x + cw_code + cw_inv + cw_uses, ty, M(font_size_base), false, COL(text_normal), 90.0f);
+      ss_button(c, (ccord_rect){row.x + w - 160.0f, row.y + 8.0f, 74.0f, 30.0f}, "Copy", BTN_SECONDARY, nullptr, A_INV_COPY, i,
+                NAME(nm, "invite-copy:%s", inv[i].code));
+      ss_button(c, (ccord_rect){row.x + w - 80.0f, row.y + 8.0f, 80.0f, 30.0f}, "Revoke", BTN_DANGER, nullptr, A_INV_REVOKE, i,
+                NAME(nm2, "invite-revoke:%s", inv[i].code));
+    }
     uis_divider(ui, c->r, row.x, row.y + row.h - 1.0f, row.w);
   }
   draw_invites_extras(c, x, w, &y);
@@ -820,7 +870,7 @@ void ss_draw_bans(ss_cx *c, const ss_geom *g)
 {
   ccord_ui *ui = c->ui;
   struct ui_server_settings *ss = c->ss;
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "Bans", y);
   y += 56.0f;
   size_t n = 0;
@@ -937,7 +987,7 @@ void ss_draw_audit(ss_cx *c, const ss_geom *g)
   ccord_ui *ui = c->ui;
   struct ui_server_settings *ss = c->ss;
   ss_populate_audit_actors(ui);
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "Audit Log", y);
   y += 56.0f;
   float cx = x;
@@ -1089,7 +1139,7 @@ void ss_draw_danger(ss_cx *c, const ss_geom *g)
   struct ui_server_settings *ss = c->ss;
   const ccord_guild *gd = ccord_store_guild(ui->d.store, ss->guild_id);
   if (!gd) return;
-  float x = g->col_x, w = g->col_w, y = 56.0f - ss->scroll;
+  float x = g->col_x, w = g->col_w, y = g->top_y - ss->scroll;
   ss_title(c, g, "Danger Zone", y);
   y += 58.0f;
 

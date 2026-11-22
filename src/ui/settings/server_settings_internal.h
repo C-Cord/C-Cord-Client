@@ -237,7 +237,9 @@ struct ui_server_settings {
   ss_page page;
   ss_field focus;
   float scroll, content_h, view_h;          // the page's scrolling column
+  float sb_scroll, sb_content_h, sb_view_h; // mobile full-screen category list scroll
   float list_scroll, list_content_h;        // the role list
+  bool mobile_role_editing;                 // mobile Roles 2-step view: false=list, true=editor
   ccord_scroller scroll_glide, list_glide, modview_glide;   // wheel glides of the three columns (scroll.h)
   ccord_rect view, list_view, editor_view;  // last frame
   ccord_text_edit name_edit, role_name_edit, color_edit, ban_search, vanity_edit;
@@ -384,6 +386,7 @@ typedef struct ss_geom {
   float sb_w;          // sidebar width
   float x0;            // where the content area starts
   float col_x, col_w;  // the page's column
+  float top_y;         // page content starting y (below mobile Back/Close bar or 56dp desktop)
 } ss_geom;
 
 #include <ccord/core/base64.h>

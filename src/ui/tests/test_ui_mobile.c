@@ -16,6 +16,7 @@
 #include "../ui_internal.h"
 #include "plugin_panel_internal.h"
 #include "plugin_v3_internal.h"
+#include "settings_m6_prefs.h"
 #include "status_card.h"
 #include "ccord_test.h"
 
@@ -1322,6 +1323,165 @@ static void test_mobile_voice_stage_and_go_live(void)
   step_frames(4, 25);
 }
 
+static void test_mobile_settings_inner_pages(void)
+{
+  ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+
+  // Wave 5B: User Settings -> Appearance (Zoom Reset button stays strictly inside 360dp and disjoint from slider).
+  ui_open_settings(F.ui, true);
+  F.ui->settings_page = 2;   // SP_APPEARANCE
+  F.ui->mobile_settings_detail = true;
+  step_frames(8, 25);
+  save_mobile_screenshot("mobile_settings_appearance_360.png");
+  ccord_settings_m6_prefs_debug m6d = {0};
+  ui_settings_m6_prefs_get_debug(F.ui, &m6d);
+  CT_CHECK(rect_in_bounds(m6d.zoom_reset, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+  CT_CHECK(rects_disjoint(m6d.zoom_plus, m6d.zoom_reset));
+
+  // Wave 5B: User Settings -> Notifications -> Customize Sounds (1-col scrollable, Back unwinds grid first).
+  F.ui->settings_page = 6;   // SP_NOTIFICATIONS
+  F.ui->settings_sounds_open = true;
+  step_frames(6, 25);
+  ccord_rect s0 = ui_settings_sound_toggle_rect(F.ui, 0);
+  ccord_rect s1 = ui_settings_sound_toggle_rect(F.ui, 1);
+  CT_CHECK(rect_in_bounds(s0, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+  CT_CHECK(s1.y > s0.y);
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+  CT_CHECK(!F.ui->settings_sounds_open && F.ui->settings_open && F.ui->mobile_settings_detail);
+
+  // Wave 5B: User Settings -> My Account with keyboard open (web buttons fit inside 360dp, no collision with Token).
+  F.ui->settings_page = 0;   // SP_ACCOUNT
+  ccord_ui_set_keyboard_inset(F.ui, 260.0f);
+  step_frames(6, 25);
+  ccord_ui_settings_debug sd = {0};
+  ccord_ui_get_settings_debug(F.ui, &sd);
+  CT_CHECK(sd.billing_btn.x >= 0.0f && sd.billing_btn.x + sd.billing_btn.w <= 360.5f);
+  CT_CHECK(sd.nitro_btn.x >= 0.0f && sd.nitro_btn.x + sd.nitro_btn.w <= 360.5f);
+  CT_CHECK(sd.shop_btn.x >= 0.0f && sd.shop_btn.x + sd.shop_btn.w <= 360.5f);
+  CT_CHECK(sd.boost_btn.x >= 0.0f && sd.boost_btn.x + sd.boost_btn.w <= 360.5f);
+  CT_CHECK(sd.billing_btn.y > sd.account_token_save_btn.y + sd.account_token_save_btn.h);
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+
+  // Wave 5B: User Settings -> Plugins screenshot & non-overflow check.
+  F.ui->settings_page = 8;   // SP_PLUGINS
+  step_frames(6, 25);
+  save_mobile_screenshot("mobile_settings_plugins_360.png");
+  ui_open_settings(F.ui, false);
+  step_frames(4, 25);
+
+  // Wave 5B: Channel Settings -> Invites ("Create Invite" fits inside 360dp, no longer off-screen!).
+  const ccord_guild *g0 = ccord_store_guild_at(F.store, 0);
+  CT_CHECK(g0 != nullptr);
+  if (!g0) return;
+  ccord_id self_id = ccord_store_self_id(F.store);
+  ccord_error err;
+  // Make self owner so every Channel & Server Settings page is accessible.
+  ccord_guild gcopy = *g0;
+  gcopy.owner_id = self_id;
+  gcopy.self_permissions = UINT64_MAX;
+  CT_CHECK(ccord_store_upsert_guild(F.store, &gcopy, nullptr, 0, nullptr, 0, nullptr, 0, &err) == CCORD_OK);
+
+  ccord_id text_ch = CCORD_ID_NONE;
+  size_t nc = ccord_store_channel_count(F.store, g0->id);
+  for (size_t i = 0; i < nc; i++) {
+    const ccord_channel *c = ccord_store_channel_at(F.store, g0->id, i);
+    if (c && c->kind == CCORD_CHANNEL_TEXT) { text_ch = c->id; break; }
+  }
+  CT_CHECK(text_ch != CCORD_ID_NONE);
+  if (text_ch != CCORD_ID_NONE) {
+    CT_CHECK(ui_channel_settings_open(F.ui, text_ch));
+    F.ui->mobile_channel_settings_detail = false;
+    step_frames(6, 25);
+    ccord_rect inv_tab = {0};
+    CT_CHECK(ccord_ui_channel_settings_find(F.ui, "page:invites", &inv_tab));
+    touch_tap(inv_tab.x + inv_tab.w * 0.5f, inv_tab.y + inv_tab.h * 0.5f);
+    step_frames(6, 25);
+    ccord_rect inv_create = {0};
+    CT_CHECK(ccord_ui_channel_settings_find(F.ui, "inv_create", &inv_create));
+    CT_CHECK(rect_in_bounds(inv_create, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+    ui_channel_settings_close(F.ui);
+    step_frames(4, 25);
+  }
+
+  // Wave 5B: Server Settings -> Roles (2-step mobile flow) & Members -> Mod View (full-width inside 360dp).
+  ui_server_settings_open(F.ui, g0->id);
+  F.ui->mobile_server_settings_detail = false;
+  step_frames(6, 25);
+  ccord_rect roles_row = {0};
+  CT_CHECK(ccord_ui_server_settings_find(F.ui, "page:roles", &roles_row));
+  CT_CHECK(roles_row.y >= 44.0f + 40.0f && roles_row.h >= 38.0f);
+  touch_tap(roles_row.x + roles_row.w * 0.5f, roles_row.y + roles_row.h * 0.5f);
+  step_frames(6, 25);
+  CT_CHECK(F.ui->mobile_server_settings_detail);
+  // Step 1 on Roles: full-width role list (tabs not shown yet).
+  ccord_rect tab_disp = {0};
+  CT_CHECK(!ccord_ui_server_settings_find(F.ui, "tab:display", &tab_disp));
+  ccord_rect new_role_btn = {0};
+  CT_CHECK(ccord_ui_server_settings_find(F.ui, "role-create", &new_role_btn));
+  // Tap @everyone (or first role row) to enter full-width role editor.
+  char ev_role_nm[64];
+  snprintf(ev_role_nm, sizeof ev_role_nm, "role:%llu", (unsigned long long)g0->id);
+  ccord_rect rrow = {0};
+  CT_CHECK(ccord_ui_server_settings_find(F.ui, ev_role_nm, &rrow));
+  touch_tap(rrow.x + rrow.w * 0.5f, rrow.y + rrow.h * 0.5f);
+  step_frames(6, 25);
+  save_mobile_screenshot("mobile_server_settings_roles_360.png");
+  CT_CHECK(ccord_ui_server_settings_find(F.ui, "tab:display", &tab_disp));
+  ccord_rect tab_perms = {0}, tab_mem = {0};
+  CT_CHECK(ccord_ui_server_settings_find(F.ui, "tab:perms", &tab_perms));
+  CT_CHECK(ccord_ui_server_settings_find(F.ui, "tab:members", &tab_mem));
+  CT_CHECK(rect_in_bounds(tab_disp, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+  CT_CHECK(rect_in_bounds(tab_perms, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+  CT_CHECK(rect_in_bounds(tab_mem, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+  // Back unwinds role editor -> role list -> sidebar!
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(4, 25);
+  CT_CHECK(!ccord_ui_server_settings_find(F.ui, "tab:display", &tab_disp));
+  CT_CHECK(F.ui->mobile_server_settings_detail);
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(4, 25);
+  CT_CHECK(!F.ui->mobile_server_settings_detail);
+
+  // Scroll sidebar to reach Members, open Members & Mod View.
+  ccord_input_event sb_wh = {.type = CCORD_IN_WHEEL, .x = 180.0f, .y = 400.0f, .wheel = -5.0f};
+  (void)ccord_ui_handle_input(F.ui, &sb_wh);
+  step_frames(4, 25);
+  ccord_rect mem_row = {0};
+  CT_CHECK(ccord_ui_server_settings_find(F.ui, "page:members", &mem_row));
+  touch_tap(mem_row.x + mem_row.w * 0.5f, mem_row.y + mem_row.h * 0.5f);
+  step_frames(6, 25);
+  save_mobile_screenshot("mobile_server_settings_members_360.png");
+  if (ccord_store_member_count(F.store, g0->id) > 0) {
+    const ccord_member *m0 = ccord_store_member_at(F.store, g0->id, 0);
+    if (m0) {
+      char mv_nm[64];
+      snprintf(mv_nm, sizeof mv_nm, "member-modview:%llu", (unsigned long long)m0->user_id);
+      ccord_rect mv_btn = {0};
+      CT_CHECK(ccord_ui_server_settings_find(F.ui, mv_nm, &mv_btn));
+      CT_CHECK(rect_in_bounds(mv_btn, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+      touch_tap(mv_btn.x + mv_btn.w * 0.5f, mv_btn.y + mv_btn.h * 0.5f);
+      step_frames(6, 25);
+      ccord_rect mv_close = {0};
+      CT_CHECK(ccord_ui_server_settings_find(F.ui, "modview-close", &mv_close));
+      CT_CHECK(rect_in_bounds(mv_close, 0.0f, 44.0f, 360.0f, 780.0f - 34.0f));
+      // Back closes Mod View first while keeping Members open.
+      CT_CHECK(ccord_ui_handle_back(F.ui));
+      step_frames(4, 25);
+      CT_CHECK(!ccord_ui_server_settings_find(F.ui, "modview-close", &mv_close));
+      CT_CHECK(F.ui->mobile_server_settings_detail);
+    }
+  }
+  ui_server_settings_close(F.ui);
+  step_frames(4, 25);
+}
+
 static void test_mobile_plugin_v3_dialog_and_full_view(void)
 {
   ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
@@ -1404,6 +1564,7 @@ int main(void)
   test_mobile_header_search_friends_dm();
   test_mobile_overlays_and_popovers();
   test_mobile_voice_stage_and_go_live();
+  test_mobile_settings_inner_pages();
   test_mobile_plugin_v3_dialog_and_full_view();
   test_mobile_anim_pacing();
   fixture_destroy();

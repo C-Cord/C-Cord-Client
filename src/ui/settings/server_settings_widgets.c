@@ -158,6 +158,7 @@ static ss_geom ss_layout(const ccord_ui *ui)
   if (ui->mobile_layout) {
     float sl = ui->safe_insets.left;
     float sr = ui->safe_insets.right;
+    g.top_y = ui->safe_insets.top + UIS_SP_3 + UIS_ICON_BTN + UIS_SP_3;
     if (!ui->mobile_server_settings_detail) {
       g.sb_w = ui->win_w;
       g.x0 = ui->win_w;
@@ -178,6 +179,7 @@ static ss_geom ss_layout(const ccord_ui *ui)
   g.col_x = g.x0 + pad;
   g.col_w = fminf(avail - pad * 2.0f, 860.0f);
   if (g.col_w < 120.0f) g.col_w = 120.0f;
+  g.top_y = 56.0f;
   return g;
 }
 
@@ -219,9 +221,30 @@ static void draw_sidebar(ss_cx *c, const ss_geom *g)
   struct ui_server_settings *ss = c->ss;
   ccord_draw_rect(c->r, (ccord_rect){0.0f, 0.0f, g->sb_w, ui->win_h}, COL(bg_secondary));
   const ccord_guild *gd = ccord_store_guild(ui->d.store, ss->guild_id);
-  float x = 14.0f, w = g->sb_w - 28.0f, y = 36.0f;
-  (void)ss_text(c, gd && gd->name ? gd->name : "Server", x + 6.0f, y, M(font_size_small), true, COL(text_header), w - 12.0f);
-  y += 24.0f;
+  float sl = ui->mobile_layout ? ui->safe_insets.left : 0.0f;
+  float sr = ui->mobile_layout ? ui->safe_insets.right : 0.0f;
+  float st = ui->mobile_layout ? ui->safe_insets.top : 0.0f;
+  float sb_bot = ui->mobile_layout ? ui->safe_insets.bottom : 0.0f;
+  float x = ui->mobile_layout ? (sl + UIS_SP_4) : 14.0f;
+  float w = ui->mobile_layout ? fmaxf(g->sb_w - sl - sr - 2.0f * UIS_SP_4, 140.0f) : (g->sb_w - 28.0f);
+  float hdr_y = ui->mobile_layout ? (st + UIS_SP_3 + 6.0f) : 36.0f;
+  (void)ss_text(c, gd && gd->name ? gd->name : "Server", x + 6.0f, hdr_y,
+                ui->mobile_layout ? SS_TITLE(c) : M(font_size_small), true, COL(text_header),
+                fmaxf(w - (ui->mobile_layout ? (UIS_ICON_BTN + 16.0f) : 12.0f), 60.0f));
+  float list_top = ui->mobile_layout ? (st + UIS_SP_3 + UIS_ICON_BTN + UIS_SP_2) : (hdr_y + 24.0f);
+  float view_h = fmaxf(ui->win_h - sb_bot - list_top - (ui->mobile_layout ? UIS_SP_2 : 0.0f), 60.0f);
+  ss->sb_view_h = view_h;
+  float max_sb = fmaxf(0.0f, ss->sb_content_h - view_h);
+  if (ss->sb_scroll < 0.0f) ss->sb_scroll = 0.0f;
+  if (ss->sb_scroll > max_sb) ss->sb_scroll = max_sb;
+  ss_cx sc = *c;
+  if (ui->mobile_layout) {
+    sc.clip = (ccord_rect){sl, list_top, fmaxf(g->sb_w - sl - sr, 120.0f), view_h};
+    ccord_push_clip(c->r, sc.clip);
+  }
+  float y = list_top - (ui->mobile_layout ? ss->sb_scroll : 0.0f);
+  float row_h = ui->mobile_layout ? 40.0f : 28.0f;
+  float row_pitch = row_h + 2.0f;
   static const struct {
     const char *heading;
     ss_page pages[4];
@@ -239,27 +262,38 @@ static void draw_sidebar(ss_cx *c, const ss_geom *g)
     if (!any) continue;
     if (groups[gi].heading) {
       y += 10.0f;
-      ss_label(c, groups[gi].heading, x + 6.0f, y);
+      if (!ui->mobile_layout || (y + 20.0f >= sc.clip.y && y <= sc.clip.y + sc.clip.h)) {
+        ss_label(&sc, groups[gi].heading, x + 6.0f, y);
+      }
       y += 20.0f;
     }
     for (size_t k = 0; k < groups[gi].count; k++) {
       ss_page p = groups[gi].pages[k];
       if (!ss_page_allowed(ui, ss->guild_id, p)) continue;
-      ccord_rect item = {x, y, w, 28.0f};
+      ccord_rect item = {x, y, w, row_h};
+      y += row_pitch;
+      if (ui->mobile_layout && (item.y + item.h < sc.clip.y || item.y > sc.clip.y + sc.clip.h)) continue;
       char nm[SS_NAME_LEN];
-      bool hov = ss_hit_add(c, item, A_PAGE, (uint64_t)p, nullptr, NAME(nm, "page:%s", ss_k_page_names[p]));
-      bool sel = ss->page == p;
+      bool hov = ss_hit_add(&sc, item, A_PAGE, (uint64_t)p, nullptr, NAME(nm, "page:%s", ss_k_page_names[p]));
+      bool sel = !ui->mobile_layout && ss->page == p;
       ui_row_state prs = ui_row_state_of(ui, "sspage", (uint64_t)p, hov, sel, COL(bg_secondary));
       uis_list_row_fill(ui, c->r, item, (uis_state){.hover = hov, .selected = sel}, "sspage", (uint64_t)p);
-      ccord_color idle_col = p == SS_DANGER ? COL(danger) : COL(text_muted);
-      (void)ss_text(c, ss_k_page_labels[p], item.x + 10.0f, item.y + (item.h - ui_line_h(ui, M(font_size_base))) * 0.5f,
+      ccord_color idle_col = p == SS_DANGER ? COL(danger) : (ui->mobile_layout ? COL(text_normal) : COL(text_muted));
+      (void)ss_text(&sc, ss_k_page_labels[p], item.x + 10.0f, item.y + (item.h - ui_line_h(ui, M(font_size_base))) * 0.5f,
                     M(font_size_base), sel,
                     ui_row_state_text(&prs, idle_col, COL(text_interactive_hover), COL(text_interactive_active)),
-                    item.w - 16.0f);
-      y += 30.0f;
+                    item.w - (ui->mobile_layout ? 32.0f : 16.0f));
+      if (ui->mobile_layout) {
+        ui_icon_chevron(c->r, item.x + item.w - UIS_SP_4, item.y + item.h * 0.5f, UIS_SP_3, ICON_RIGHT, COL(text_muted));
+      }
     }
   }
-  uis_vdivider(ui, c->r, g->sb_w - 1.0f, 0.0f, ui->win_h);
+  ss->sb_content_h = (y + (ui->mobile_layout ? ss->sb_scroll : 0.0f)) - list_top + 16.0f;
+  if (ui->mobile_layout) {
+    ccord_pop_clip(c->r);
+  } else {
+    uis_vdivider(ui, c->r, g->sb_w - 1.0f, 0.0f, ui->win_h);
+  }
 }
 
 ccord_rect ss_mobile_back_rect(const ccord_ui *ui)
@@ -294,21 +328,28 @@ static void draw_unsaved_bar(ss_cx *c, const ss_geom *g)
   struct ui_server_settings *ss = c->ss;
   if (!ss_dirty(ss)) return;
   ui_popup_begin(ui, c->r, "ssbar", 0, 160, 16.0f);   // rises into place the moment something is edited
+  float bot_in = ui->mobile_layout ? fmaxf(ui->safe_insets.bottom, ui->keyboard_inset) : 0.0f;
+  float sr = ui->mobile_layout ? ui->safe_insets.right : 0.0f;
   float bw = fminf(g->col_w, 640.0f), bh = 52.0f;
-  ccord_rect bar = {g->x0 + (ui->win_w - g->x0 - bw) * 0.5f, ui->win_h - bh - 22.0f, bw, bh};
+  ccord_rect bar = {g->x0 + (ui->win_w - sr - g->x0 - bw) * 0.5f, ui->win_h - bot_in - bh - 16.0f, bw, bh};
   bool flash = ui->now_ms < ss->flash_until_ms;
   uis_popover_frame(ui, c->r, bar);
   if (flash) uis_surface(ui, c->r, bar, ui_alpha(COL(danger), 0.18f));
-  (void)ss_text(c, "Careful - you have unsaved changes!", bar.x + 16.0f, bar.y + (bar.h - ui_line_h(ui, M(font_size_base))) * 0.5f,
-                 M(font_size_base), true, flash ? COL(danger) : COL(text_header), bar.w - 250.0f);
+  bool compact_bar = bar.w < 400.0f;
+  float reset_w = compact_bar ? 62.0f : 80.0f;
+  float save_w = compact_bar ? 76.0f : 112.0f;
+  float btns_w = reset_w + save_w + 22.0f;
+  (void)ss_text(c, compact_bar ? "Unsaved changes" : "Careful - you have unsaved changes!", bar.x + 12.0f,
+                bar.y + (bar.h - ui_line_h(ui, M(font_size_base))) * 0.5f,
+                M(font_size_base), true, flash ? COL(danger) : COL(text_header), fmaxf(bar.w - btns_w - 16.0f, 56.0f));
   const char *why = nullptr;
   if (ss->page == SS_ROLES) {
     ccord_perm_verdict v = ss_role_verdict(ui, ss->guild_id, ss->role_sel, false);
     if (v != CCORD_PERM_ALLOWED) why = ccord_perm_verdict_text(v, CCORD_PERM_ACT_EDIT_ROLES);
   }
-  ss_button(c, (ccord_rect){bar.x + bar.w - 218.0f, bar.y + 10.0f, 80.0f, 32.0f}, "Reset", BTN_LINK, nullptr, A_RESET, 0, "reset");
-  ss_button(c, (ccord_rect){bar.x + bar.w - 126.0f, bar.y + 10.0f, 112.0f, 32.0f}, "Save Changes", BTN_PRIMARY, why, A_SAVE, 0,
-            "save");
+  ss_button(c, (ccord_rect){bar.x + bar.w - btns_w, bar.y + 10.0f, reset_w, 32.0f}, "Reset", BTN_LINK, nullptr, A_RESET, 0, "reset");
+  ss_button(c, (ccord_rect){bar.x + bar.w - save_w - 12.0f, bar.y + 10.0f, save_w, 32.0f},
+            compact_bar ? "Save" : "Save Changes", BTN_PRIMARY, why, A_SAVE, 0, "save");
   ui_popup_end(c->r);
 }
 
@@ -316,10 +357,13 @@ static void draw_toast(ss_cx *c, const ss_geom *g)
 {
   ccord_ui *ui = c->ui;
   if (!ui->notice[0] || ui->now_ms >= ui->notice_until_ms) return;
+  float bot_in = ui->mobile_layout ? fmaxf(ui->safe_insets.bottom, ui->keyboard_inset) : 0.0f;
+  float sr = ui->mobile_layout ? ui->safe_insets.right : 0.0f;
   float tw = fminf(g->col_w, 560.0f);
   ccord_text_style st = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(text_normal));
   ccord_vec2 t = ccord_text_measure(c->r, ui->notice, strlen(ui->notice), &st, tw - 28.0f);
-  ccord_rect box = {g->x0 + (ui->win_w - g->x0 - tw) * 0.5f, ui->win_h - 52.0f - 22.0f - t.y - 34.0f, tw, t.y + 20.0f};
+  ccord_rect box = {g->x0 + (ui->win_w - sr - g->x0 - tw) * 0.5f,
+                    ui->win_h - bot_in - 52.0f - 22.0f - t.y - 34.0f, tw, t.y + 20.0f};
   float ta, tslide;
   ui_toast_look(ui, &ta, &tslide);
   ccord_push_alpha(c->r, ta);
@@ -365,7 +409,10 @@ void ui_server_settings_draw(ccord_ui *ui, ccord_renderer *r)
   ss->rows = 0;
   ss->hover = -1;
   ss_geom g = ss_layout(ui);
-  ss_cx c = {ui, r, ss, (ccord_rect){g.x0, 0.0f, ui->win_w - g.x0, ui->win_h}};
+  float top_clip = ui->mobile_layout ? (ui->safe_insets.top + UIS_SP_3 + UIS_ICON_BTN + UIS_SP_2) : 0.0f;
+  float bot_in = ui->mobile_layout ? fmaxf(ui->safe_insets.bottom, ui->keyboard_inset) : 0.0f;
+  float sr_in = ui->mobile_layout ? ui->safe_insets.right : 0.0f;
+  ss_cx c = {ui, r, ss, (ccord_rect){g.x0, top_clip, fmaxf(ui->win_w - g.x0 - sr_in, 80.0f), fmaxf(ui->win_h - bot_in - top_clip, 80.0f)}};
   ss->view = c.clip;
   ccord_draw_rect(r, (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h}, COL(bg_primary));
 
@@ -394,7 +441,7 @@ void ui_server_settings_draw(ccord_ui *ui, ccord_renderer *r)
   }
 
   // Keep the scroll positions inside what was measured.
-  float view_h = ss->page == SS_ROLES ? ss->editor_view.h : ui->win_h;
+  float view_h = (ss->page == SS_ROLES && ss->editor_view.h > 0.0f) ? ss->editor_view.h : c.clip.h;
   float max_scroll = fmaxf(0.0f, ss->content_h - view_h);
   if (ss->scroll > max_scroll) ss->scroll = max_scroll;
   if (ss->scroll < 0.0f) ss->scroll = 0.0f;

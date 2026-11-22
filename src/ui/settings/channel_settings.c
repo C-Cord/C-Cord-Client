@@ -649,13 +649,19 @@ void ui_channel_settings_draw(ccord_ui *ui, ccord_renderer *r)
   // Unsaved Changes bar: a floating strip (popover frame, token radius), red while it flashes
   if (dirty) {
     bool flash = cs->flash_until_ms > ui->now_ms;
-    ccord_rect bar = {content_x, wh - 62.0f, content_w, 48.0f};
+    float bot_in = ui->mobile_layout ? fmaxf(ui->safe_insets.bottom, ui->keyboard_inset) : 0.0f;
+    ccord_rect bar = {content_x, wh - bot_in - 62.0f, content_w, 48.0f};
     uis_frame(ui, r, bar, uis_tokens_of(ui).r_surface, flash ? COL(danger) : COL(bg_floating), UIS_ELEV_POPOVER);
-    (void)cs_text(&top_cx, "Careful — you have unsaved changes!", bar.x + 16.0f, bar.y + 14.0f, uis_tokens_of(ui).fs_body,
-                  false, flash ? COL(text_on_brand) : COL(text_header), bar.w - 220.0f);
-    cs_button(&top_cx, (ccord_rect){bar.x + bar.w - 204.0f, bar.y + 9.0f, 72.0f, 30.0f}, "Reset", UIS_BTN_SECONDARY, nullptr, CA_RESET, 0, "reset");
-    cs_button(&top_cx, (ccord_rect){bar.x + bar.w - 124.0f, bar.y + 9.0f, 112.0f, 30.0f}, "Save Changes",
-              UIS_BTN_SUCCESS, nullptr, CA_SAVE, 0, "save");
+    bool compact_bar = bar.w < 400.0f;
+    float save_w = compact_bar ? 76.0f : 112.0f;
+    float reset_w = compact_bar ? 64.0f : 72.0f;
+    float btns_w = save_w + reset_w + 20.0f;
+    (void)cs_text(&top_cx, compact_bar ? "Unsaved changes" : "Careful — you have unsaved changes!",
+                  bar.x + 12.0f, bar.y + 14.0f, uis_tokens_of(ui).fs_body,
+                  false, flash ? COL(text_on_brand) : COL(text_header), fmaxf(bar.w - btns_w - 16.0f, 60.0f));
+    cs_button(&top_cx, (ccord_rect){bar.x + bar.w - btns_w, bar.y + 9.0f, reset_w, 30.0f}, "Reset", UIS_BTN_SECONDARY, nullptr, CA_RESET, 0, "reset");
+    cs_button(&top_cx, (ccord_rect){bar.x + bar.w - save_w - 12.0f, bar.y + 9.0f, save_w, 30.0f},
+              compact_bar ? "Save" : "Save Changes", UIS_BTN_SUCCESS, nullptr, CA_SAVE, 0, "save");
   }
 }
 
@@ -801,6 +807,7 @@ static void cs_activate(ccord_ui *ui, const cs_hit *h)
       cs->focus = (cs_field)h->arg;
       ccord_text_edit *ed = cs_edit_for(cs, cs->focus);
       if (ed) ccord_text_edit_set_caret(ed, ed->len, false);
+      if (ui->touch_mode) ui->touch_text_focused = true;
       break;
     }
     case CA_SAVE: cs_save(ui); break;

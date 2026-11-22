@@ -919,13 +919,7 @@ bool ccord_ui_handle_back(ccord_ui *ui)
     return true;
   }
   if (ui_server_settings_is_open(ui)) {
-    if (ui->mobile_layout && ui->mobile_server_settings_detail) {
-      ui->mobile_server_settings_detail = false;
-      ui->dirty = true;
-      return true;
-    }
-    ui_server_settings_close(ui);
-    return true;
+    return ui_server_settings_handle_back(ui);
   }
   if (ui->settings_open) {
     if (ui->account_mfa_required) {

@@ -175,9 +175,13 @@ void cs_draw_cs_overview(cs_cx *c, const ccord_channel *ch, float x, float w, fl
               nullptr, CA_USER_LIMIT, cs_k_user_limits[i], NAME(nm, "user_limit:%u", (unsigned)cs_k_user_limits[i]));
       cx += cw + 6.0f;
     }
-    cs_button(c, (ccord_rect){cx + 6.0f, y, 28.0f, 28.0f}, "-", UIS_BTN_SECONDARY,
+    if (cx + 66.0f > x + w) {
+      cx = x;
+      y += 34.0f;
+    }
+    cs_button(c, (ccord_rect){cx + (cx > x ? 6.0f : 0.0f), y, 28.0f, 28.0f}, "-", UIS_BTN_SECONDARY,
               cs->ov_work.user_limit == 0 ? "Already unlimited." : nullptr, CA_USER_LIMIT_STEP, 0, "user_limit:dec");
-    cs_button(c, (ccord_rect){cx + 38.0f, y, 28.0f, 28.0f}, "+", UIS_BTN_SECONDARY,
+    cs_button(c, (ccord_rect){cx + (cx > x ? 38.0f : 32.0f), y, 28.0f, 28.0f}, "+", UIS_BTN_SECONDARY,
               cs->ov_work.user_limit >= CCORD_ADMIN_USER_LIMIT_MAX ? "Maximum user limit reached." : nullptr,
               CA_USER_LIMIT_STEP, 1, "user_limit:inc");
     y += 44.0f;
@@ -189,6 +193,10 @@ void cs_draw_cs_overview(cs_cx *c, const ccord_channel *ch, float x, float w, fl
     float cx = x;
     for (size_t i = 0; i < ARCHIVE_COUNT; i++) {
       float cw = 88.0f;
+      if (cx > x && cx + cw > x + w) {
+        cx = x;
+        y += 34.0f;
+      }
       char nm[CS_NAME_LEN];
       cs_chip(c, (ccord_rect){cx, y, cw, 28.0f}, cs_k_archive_labels[i], cs->ov_work.archive_min == cs_k_archives[i],
               nullptr, CA_ARCHIVE, cs_k_archives[i], NAME(nm, "archive:%u", (unsigned)cs_k_archives[i]));
@@ -220,14 +228,28 @@ void cs_draw_cs_overview(cs_cx *c, const ccord_channel *ch, float x, float w, fl
       y += 44.0f;
     }
     if (cs->ov_work.tag_count < CCORD_FORUM_MAX_TAGS) {
-      cs_field_box(c, (ccord_rect){x, y, w * 0.45f, 34.0f}, CSF_TAG_NAME, "New tag name", nullptr, "field:tag_name");
-      cs_field_box(c, (ccord_rect){x + w * 0.47f, y, w * 0.20f, 34.0f}, CSF_TAG_EMOJI, "Emoji", nullptr,
-                   "field:tag_emoji");
-      cs_chip(c, (ccord_rect){x + w * 0.69f, y + 3.0f, 92.0f, 28.0f}, "Moderated", cs->tag_new_mod, nullptr,
-              CA_TAG_NEW_MOD, 0, "tag_new_mod");
-      cs_button(c, (ccord_rect){x + w - 84.0f, y + 3.0f, 84.0f, 28.0f}, "Add Tag", UIS_BTN_PRIMARY,
-                nullptr, CA_TAG_ADD, 0, "tag_add");
-      y += 46.0f;
+      if (w < 480.0f) {
+        float ew = fminf(92.0f, w * 0.30f);
+        float nw = fmaxf(w - ew - 8.0f, 80.0f);
+        cs_field_box(c, (ccord_rect){x, y, nw, 34.0f}, CSF_TAG_NAME, "New tag name", nullptr, "field:tag_name");
+        cs_field_box(c, (ccord_rect){x + nw + 8.0f, y, ew, 34.0f}, CSF_TAG_EMOJI, "Emoji", nullptr,
+                     "field:tag_emoji");
+        y += 40.0f;
+        cs_chip(c, (ccord_rect){x, y, 100.0f, 28.0f}, "Moderated", cs->tag_new_mod, nullptr,
+                CA_TAG_NEW_MOD, 0, "tag_new_mod");
+        cs_button(c, (ccord_rect){x + 108.0f, y, 92.0f, 28.0f}, "Add Tag", UIS_BTN_PRIMARY,
+                  nullptr, CA_TAG_ADD, 0, "tag_add");
+        y += 40.0f;
+      } else {
+        cs_field_box(c, (ccord_rect){x, y, w * 0.45f, 34.0f}, CSF_TAG_NAME, "New tag name", nullptr, "field:tag_name");
+        cs_field_box(c, (ccord_rect){x + w * 0.47f, y, w * 0.20f, 34.0f}, CSF_TAG_EMOJI, "Emoji", nullptr,
+                     "field:tag_emoji");
+        cs_chip(c, (ccord_rect){x + w * 0.69f, y + 3.0f, 92.0f, 28.0f}, "Moderated", cs->tag_new_mod, nullptr,
+                CA_TAG_NEW_MOD, 0, "tag_new_mod");
+        cs_button(c, (ccord_rect){x + w - 84.0f, y + 3.0f, 84.0f, 28.0f}, "Add Tag", UIS_BTN_PRIMARY,
+                  nullptr, CA_TAG_ADD, 0, "tag_add");
+        y += 46.0f;
+      }
     }
   }
 
@@ -537,11 +559,21 @@ void cs_draw_cs_invites(cs_cx *c, float x, float w, float *py)
     char age_lbl[64], use_lbl[64];
     (void)snprintf(age_lbl, sizeof age_lbl, "Expire: %s", cs_k_cs_inv_age_labels[cs->inv_age_idx]);
     (void)snprintf(use_lbl, sizeof use_lbl, "Max: %s", cs_k_cs_inv_use_labels[cs->inv_uses_idx]);
-    cs_chip(c, (ccord_rect){x, y, 160.0f, 30.0f}, age_lbl, false, nullptr, CA_INV_AGE, 0, "inv_age");
-    cs_chip(c, (ccord_rect){x + 168.0f, y, 150.0f, 30.0f}, use_lbl, false, nullptr, CA_INV_USES, 0, "inv_uses");
-    cs_button(c, (ccord_rect){x + 326.0f, y, 128.0f, 30.0f}, "Create Invite", UIS_BTN_PRIMARY,
-              nullptr, CA_INV_CREATE, 0, "inv_create");
-    y += 46.0f;
+    if (w < 460.0f) {
+      float half = floorf((w - 8.0f) * 0.5f);
+      cs_chip(c, (ccord_rect){x, y, half, 30.0f}, age_lbl, false, nullptr, CA_INV_AGE, 0, "inv_age");
+      cs_chip(c, (ccord_rect){x + half + 8.0f, y, w - half - 8.0f, 30.0f}, use_lbl, false, nullptr, CA_INV_USES, 0, "inv_uses");
+      y += 38.0f;
+      cs_button(c, (ccord_rect){x, y, fminf(148.0f, w), 30.0f}, "Create Invite", UIS_BTN_PRIMARY,
+                nullptr, CA_INV_CREATE, 0, "inv_create");
+      y += 42.0f;
+    } else {
+      cs_chip(c, (ccord_rect){x, y, 160.0f, 30.0f}, age_lbl, false, nullptr, CA_INV_AGE, 0, "inv_age");
+      cs_chip(c, (ccord_rect){x + 168.0f, y, 150.0f, 30.0f}, use_lbl, false, nullptr, CA_INV_USES, 0, "inv_uses");
+      cs_button(c, (ccord_rect){x + 326.0f, y, 128.0f, 30.0f}, "Create Invite", UIS_BTN_PRIMARY,
+                nullptr, CA_INV_CREATE, 0, "inv_create");
+      y += 46.0f;
+    }
   }
 
   size_t count = 0;

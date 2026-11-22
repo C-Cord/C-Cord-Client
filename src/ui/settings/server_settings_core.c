@@ -1077,7 +1077,13 @@ static void ss_wheel_by(ccord_ui *ui, const ccord_input_event *ev, float dy)
 {
   struct ui_server_settings *ss = ui->ss;
   bool direct = ui_wheel_direct(ui, ev);
-  if (ss->page == SS_ROLES && ev->x < ss->list_view.x + ss->list_view.w + 12.0f) {
+  if (ui->mobile_layout && !ui->mobile_server_settings_detail) {
+    float max_sb = fmaxf(0.0f, ss->sb_content_h - ss->sb_view_h);
+    ss->sb_scroll = fminf(fmaxf(ss->sb_scroll + dy, 0.0f), max_sb);
+    ui->dirty = true;
+    return;
+  }
+  if (ss->page == SS_ROLES && ss->list_view.w > 0.0f && ev->x < ss->list_view.x + ss->list_view.w + 12.0f) {
     ccord_scroller_scroll(&ss->list_glide, &ss->list_scroll, dy, fmaxf(0.0f, ss->list_content_h - ss->list_view.h), direct);
   } else if (ss->page == SS_MEMBERS && ss->modview_uid != CCORD_ID_NONE &&
              ss->modview_rect.w > 0.0f && ev->x >= ss->modview_rect.x) {
@@ -1094,7 +1100,13 @@ static void ss_wheel_by(ccord_ui *ui, const ccord_input_event *ev, float dy)
 static void ss_scroll_by(ccord_ui *ui, float x, float dy)
 {
   struct ui_server_settings *ss = ui->ss;
-  if (ss->page == SS_ROLES && x < ss->list_view.x + ss->list_view.w + 12.0f) {
+  if (ui->mobile_layout && !ui->mobile_server_settings_detail) {
+    float max_sb = fmaxf(0.0f, ss->sb_content_h - ss->sb_view_h);
+    ss->sb_scroll = fminf(fmaxf(ss->sb_scroll + dy, 0.0f), max_sb);
+    ui->dirty = true;
+    return;
+  }
+  if (ss->page == SS_ROLES && ss->list_view.w > 0.0f && x < ss->list_view.x + ss->list_view.w + 12.0f) {
     ccord_scroller_cancel(&ss->list_glide);
     float max = fmaxf(0.0f, ss->list_content_h - ss->list_view.h);
     ss->list_scroll = fminf(fmaxf(ss->list_scroll + dy, 0.0f), max);
@@ -1187,6 +1199,54 @@ static bool ss_handle_field_key(ccord_ui *ui, const ccord_input_event *ev)
   return true;
 }
 
+bool ui_server_settings_handle_back(ccord_ui *ui)
+{
+  if (!ui_server_settings_is_open(ui)) return false;
+  struct ui_server_settings *ss = ui->ss;
+  if (ui->touch_mode) ui->touch_text_focused = false;
+  if (ss->page == SS_MEMBERS && ss->modview_uid != CCORD_ID_NONE) {
+    ss->modview_uid = CCORD_ID_NONE;
+    ss->modview_scroll = 0.0f;
+    ui->dirty = true;
+    return true;
+  }
+  if (ss->page == SS_ROLES && ss->mobile_role_editing) {
+    if (ss_dirty(ss)) {
+      ss->flash_until_ms = ui->now_ms + SS_FLASH_MS;
+    } else {
+      ss->mobile_role_editing = false;
+      ss->focus = SSF_NONE;
+    }
+    ui->dirty = true;
+    return true;
+  }
+  if (ss->page == SS_AUTOMOD && ss->am_editing) {
+    ss->am_editing = false;
+    ss->focus = SSF_NONE;
+    ui->dirty = true;
+    return true;
+  }
+  if (ss->page == SS_COMMUNITY && ss->ob_editing_prompt) {
+    ss->ob_editing_prompt = false;
+    ss->focus = SSF_NONE;
+    ui->dirty = true;
+    return true;
+  }
+  if (ui->mobile_layout && ui->mobile_server_settings_detail) {
+    if (ss_dirty(ss)) {
+      ss->flash_until_ms = ui->now_ms + SS_FLASH_MS;
+    } else {
+      ui->mobile_server_settings_detail = false;
+      ss->focus = SSF_NONE;
+    }
+    ui->dirty = true;
+    return true;
+  }
+  ss_try_close(ui);
+  ui->dirty = true;
+  return true;
+}
+
 bool ui_server_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
 {
   if (!ui_server_settings_is_open(ui) || !ev) return false;
@@ -1202,17 +1262,13 @@ bool ui_server_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       if (ev->button != 1) return true;
       ccord_rect br = ss_mobile_back_rect(ui);
       if (br.w > 0.0f && ui_in_rect(ev->x, ev->y, br)) {
-        if (ss_dirty(ss)) {
-          ss->flash_until_ms = ui->now_ms + 700u;
-        } else {
-          ui->mobile_server_settings_detail = false;
-          ss->focus = SSF_NONE;
-        }
-        ui->dirty = true;
-        return true;
+        return ui_server_settings_handle_back(ui);
       }
       int h = ss_hit_at(ss, ev->x, ev->y);
-      if (h < 0 || ss->hits[h].act != A_FIELD) ss->focus = SSF_NONE;   // a click anywhere else leaves the field
+      if (h < 0 || ss->hits[h].act != A_FIELD) {
+        ss->focus = SSF_NONE;   // a click anywhere else leaves the field
+        if (ui->touch_mode) ui->touch_text_focused = false;
+      }
       if (h >= 0) {
         ss_hit hit = ss->hits[h];   // activating may rebuild the page
         ss_activate(ui, &hit);

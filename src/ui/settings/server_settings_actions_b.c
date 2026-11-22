@@ -746,12 +746,14 @@ void ss_activate(ccord_ui *ui, const ss_hit *h)
     case A_CLOSE: ss_try_close(ui); break;
     case A_PAGE:
       ss_go_page(ui, (ss_page)h->arg);
+      ss->mobile_role_editing = false;
       if (ui->mobile_layout) ui->mobile_server_settings_detail = true;
       break;
     case A_FIELD: {
       ss->focus = (ss_field)h->arg;
       ccord_text_edit *ed = ss_edit_for(ss, ss->focus);
       if (ed) ccord_text_edit_move(ed, 2, false);
+      if (ui->touch_mode) ui->touch_text_focused = true;
       ui->caret_on = true;
       ui->caret_epoch_ms = ui->now_ms;
       break;
@@ -772,7 +774,10 @@ void ss_activate(ccord_ui *ui, const ss_hit *h)
     case A_AFK_CHANNEL: ss_cycle_overview_channel(ui, true); break;
     case A_AFK_TIMEOUT: ss->ov_work_cfg.afk_timeout = ss_norm_afk_timeout((uint32_t)h->arg); break;
     case A_ROLE_SELECT:
-      if (h->arg == ss->role_sel) break;
+      if (h->arg == ss->role_sel) {
+        if (ui->mobile_layout) ss->mobile_role_editing = true;
+        break;
+      }
       if (ss_role_dirty(ss)) {
         ss_flash(ui, "You have unsaved changes. Save or reset them first.");
         break;
@@ -781,10 +786,14 @@ void ss_activate(ccord_ui *ui, const ss_hit *h)
       ss->scroll = 0.0f;
       ccord_scroller_cancel(&ss->scroll_glide);
       ss->focus = SSF_NONE;
+      if (ui->mobile_layout) ss->mobile_role_editing = true;
       break;
     case A_ROLE_CREATE:
       if (ss_role_dirty(ss)) ss_flash(ui, "You have unsaved changes. Save or reset them first.");
-      else ss_create_role(ui);
+      else {
+        ss_create_role(ui);
+        if (ui->mobile_layout) ss->mobile_role_editing = true;
+      }
       break;
     case A_ROLE_UP: ss_move_role(ui, true); break;
     case A_ROLE_DOWN: ss_move_role(ui, false); break;
