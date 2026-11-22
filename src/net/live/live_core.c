@@ -930,6 +930,20 @@ static ccord_status live_network_event(ccord_transport *t, ccord_link_event kind
 {
   live *l = (live *)t;
   ccord_error_clear(err);
+  if (kind == CCORD_LINK_OFFLINE) {
+    if (l->gw) ccord_gateway_set_network_online(l->gw, false);
+    return CCORD_OK;
+  }
+  if (kind == CCORD_LINK_ONLINE) {
+    if (l->gw) ccord_gateway_set_network_online(l->gw, true);
+    live_voice_link_event(l, CCORD_LINK_CHANGED);
+    return CCORD_OK;
+  }
+  if (kind == CCORD_LINK_PROBE) {
+    ccord_gwpace_wake_verdict verdict = l->gw ? ccord_gateway_probe(l->gw) : CCORD_GWPACE_WAKE_IGNORED;
+    if (verdict == CCORD_GWPACE_WAKE_ACCEPTED) live_voice_link_event(l, CCORD_LINK_RESUMED);
+    return CCORD_OK;
+  }
   if (kind != CCORD_LINK_RESUMED && kind != CCORD_LINK_CHANGED) return CCORD_OK;
   ccord_gwpace_wake_verdict verdict = live_gateway_wake(l, kind);
   static const char *const names[] = {"ignored", "fresh", "coalesced", "accepted"};
@@ -937,6 +951,18 @@ static ccord_status live_network_event(ccord_transport *t, ccord_link_event kind
               (unsigned)verdict < 4 ? names[verdict] : "?");
   if (verdict != CCORD_GWPACE_WAKE_IGNORED) live_voice_link_event(l, kind);
   return CCORD_OK;
+}
+
+static void live_set_background(ccord_transport *t, bool background)
+{
+  live *l = (live *)t;
+  if (l && l->gw) ccord_gateway_set_background(l->gw, background);
+}
+
+static void live_set_suspended(ccord_transport *t, bool suspended)
+{
+  live *l = (live *)t;
+  if (l && l->gw) ccord_gateway_set_suspended(l->gw, suspended);
 }
 
 static void live_drain_voice_speaking(live *l)
@@ -1278,6 +1304,8 @@ static const ccord_transport_vtable k_live_vt = {
   .active_uploads = live_active_uploads,
   .resolve_video = live_resolve_video,
   .wait_info = live_wait_info,
+  .set_background = live_set_background,
+  .set_suspended = live_set_suspended,
 };
 
 ccord_gov *ccord_live_transport_governor(ccord_transport *t)

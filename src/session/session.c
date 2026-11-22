@@ -136,6 +136,20 @@ ccord_status ccord_session_link_event(ccord_session *s, ccord_link_event kind, c
   return ccord_transport_network_event(s->transport, kind, err);
 }
 
+void ccord_session_set_background(ccord_session *s, bool background)
+{
+  if (!s) return;
+  s->in_background = background;
+  ccord_transport_set_background(s->transport, background);
+}
+
+void ccord_session_set_suspended(ccord_session *s, bool suspended)
+{
+  if (!s) return;
+  s->suspended = suspended;
+  ccord_transport_set_suspended(s->transport, suspended);
+}
+
 bool ccord_session_is_stale(const ccord_session *s)
 {
   return s && s->stale;
@@ -153,6 +167,8 @@ ccord_status ccord_session_set_transport(ccord_session *s, ccord_transport *tran
   s->transport = transport;
   ccord_mutex_unlock(s->audio_mtx);
   ccord_stream_hub_set_transport(s->streams, transport);
+  ccord_transport_set_background(transport, s->in_background);
+  s->rich_op3_retry_ms = 0;
   s->nrequested = 0;
   s->nchan_hist = 0;
   s->nprofile_req = 0;
@@ -476,13 +492,17 @@ size_t ccord_session_pump(ccord_session *s)
     sess_apply_event(s, &ev);
     n++;
   }
-  ccord_stream_hub_pump(s->streams, ccord_clock_ms());
-  ccord_profile_rest_pump(s->profile_rest, ccord_clock_ms());
+  uint64_t now_ms = ccord_clock_ms();
+  ccord_stream_hub_pump(s->streams, now_ms);
+  ccord_profile_rest_pump(s->profile_rest, now_ms);
   if (s->rich_op3_dirty && s->state == CCORD_CONN_CONNECTED && !s->stale &&
-      ccord_store_self_id(s->store) != CCORD_ID_NONE) {
+      ccord_store_self_id(s->store) != CCORD_ID_NONE && now_ms >= s->rich_op3_retry_ms) {
     ccord_error gw_err;
     if (session_send_presence_with_custom(s, session_current_presence(s), &gw_err) == CCORD_OK) {
       s->rich_op3_dirty = false;
+      s->rich_op3_retry_ms = 0;
+    } else {
+      s->rich_op3_retry_ms = now_ms + 1000u;
     }
   }
   return n;
@@ -494,17 +514,28 @@ bool ccord_session_wait_info(const ccord_session *s, ccord_wait_info *out)
   *out = (ccord_wait_info){.timeout_ms = UINT32_MAX};
   if (!s || !s->transport) return false;
   bool supported = ccord_transport_wait_info(s->transport, out);
-  if (s->notif_count > 0 || (s->rich_op3_dirty && s->state == CCORD_CONN_CONNECTED && !s->stale &&
-                             ccord_store_self_id(s->store) != CCORD_ID_NONE)) {
+  if (s->notif_count > 0) {
     out->immediate = true;
     out->timeout_ms = 0;
     return supported;
+  }
+  uint64_t now_ms = ccord_clock_ms();
+  if (s->rich_op3_dirty && s->state == CCORD_CONN_CONNECTED && !s->stale &&
+      ccord_store_self_id(s->store) != CCORD_ID_NONE) {
+    if (now_ms >= s->rich_op3_retry_ms) {
+      out->immediate = true;
+      out->timeout_ms = 0;
+      return supported;
+    }
+    uint64_t rem = s->rich_op3_retry_ms - now_ms;
+    uint32_t w = rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
+    if (w < out->timeout_ms) out->timeout_ms = w;
   }
   if (s->profile_rest && ccord_profile_rest_pending(s->profile_rest)) {
     if (out->timeout_ms > 50u) out->timeout_ms = 50u;
   }
   if (s->streams) {
-    uint32_t sm_wait = ccord_stream_hub_next_wait_ms(s->streams, ccord_clock_ms());
+    uint32_t sm_wait = ccord_stream_hub_next_wait_ms(s->streams, now_ms);
     if (sm_wait == 0) {
       out->immediate = true;
       out->timeout_ms = 0;

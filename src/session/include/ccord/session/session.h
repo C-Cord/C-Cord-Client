@@ -26,6 +26,10 @@ void ccord_session_set_stale(ccord_session *s, bool stale);
 // heartbeat. No stale guard (a warm start may be sitting in backoff); it sends no request. Returns
 // CCORD_ERR_UNSUPPORTED when the transport has no hook. Main thread, never blocks.
 [[nodiscard]] ccord_status ccord_session_link_event(ccord_session *s, ccord_link_event kind, ccord_error *err);
+// Tells the transport whether the app is backgrounded (suppresses OP 14 guild subscriptions & slows reconnect backoff)
+// or suspended for power saving (closes socket while preserving session_id/seq for fast RESUME on foreground).
+void ccord_session_set_background(ccord_session *s, bool background);
+void ccord_session_set_suspended(ccord_session *s, bool suspended);
 bool ccord_session_is_stale(const ccord_session *s);
 // Applies up to 64 transport events to the store; posts connection.state. Call once per frame. Returns events applied.
 size_t ccord_session_pump(ccord_session *s);

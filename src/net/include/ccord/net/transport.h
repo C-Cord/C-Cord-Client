@@ -723,6 +723,10 @@ typedef struct ccord_transport_vtable {
   // Optional. Reports readable sockets and the next timer deadline so an idle/background main loop can sleep in
   // kernel poll() instead of waking at a fixed interval. Main thread, non-blocking.
   bool (*wait_info)(const ccord_transport *t, ccord_wait_info *out);
+  // Optional. Toggles background efficiency mode (unsubscribes OP 14 typing/presence/member-list streams, raises
+  // reconnect backoff cap) and background power-saving suspend (closes socket while preserving session for RESUME).
+  void (*set_background)(ccord_transport *t, bool background);
+  void (*set_suspended)(ccord_transport *t, bool suspended);
 } ccord_transport_vtable;
 struct ccord_transport { const ccord_transport_vtable *vt; };           // implementations embed this as first member
 [[nodiscard]] static inline ccord_status ccord_transport_connect(ccord_transport *t, ccord_error *e) { return t->vt->connect(t, e); }
@@ -1201,6 +1205,12 @@ static inline bool ccord_transport_wait_info(const ccord_transport *t, ccord_wai
   *out = (ccord_wait_info){.timeout_ms = UINT32_MAX};
   if (!CCORD_TRANSPORT_OPTIONAL(t, wait_info)) return false;
   return t->vt->wait_info(t, out);
+}
+static inline void ccord_transport_set_background(ccord_transport *t, bool background) {
+  if (CCORD_TRANSPORT_OPTIONAL(t, set_background)) t->vt->set_background(t, background);
+}
+static inline void ccord_transport_set_suspended(ccord_transport *t, bool suspended) {
+  if (CCORD_TRANSPORT_OPTIONAL(t, set_suspended)) t->vt->set_suspended(t, suspended);
 }
 [[nodiscard]] static inline ccord_status ccord_transport_create_poll(ccord_transport *t, ccord_id c,
                                                                      const ccord_poll_create *poll, ccord_error *e) {

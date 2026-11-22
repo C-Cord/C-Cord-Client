@@ -26,6 +26,16 @@ void ccord_gateway_stop(ccord_gateway *g);
 // The machine woke from sleep or the network changed: drops the socket and reconnects at once (RESUME when a session
 // exists), unless the pace says it is too soon. IGNORED unless the gateway is connected or connecting. Never blocks.
 ccord_gwpace_wake_verdict ccord_gateway_wake(ccord_gateway *g, ccord_link_event kind);
+// Probes a live connected socket with an immediate OP 1 heartbeat (short 5 s ACK timeout) instead of tearing down
+// healthy TLS sockets on foreground resume; falls back to ccord_gateway_wake(g, CCORD_LINK_RESUMED) when not connected.
+ccord_gwpace_wake_verdict ccord_gateway_probe(ccord_gateway *g);
+// Toggles background efficiency mode: unsubscribes OP 14 guild typing/presence/member-list streams on entering
+// background, skips re-subscribing while backgrounded, and re-subscribes automatically on foreground.
+void ccord_gateway_set_background(ccord_gateway *g, bool background);
+// Tracks OS network availability: while offline, closes dead sockets and pauses reconnect loops until back online.
+void ccord_gateway_set_network_online(ccord_gateway *g, bool online);
+// Suspends or resumes the gateway connection while preserving session_id/resume_url/seq for fast RESUME.
+void ccord_gateway_set_suspended(ccord_gateway *g, bool suspended);
 // Frees the previous returned event, drains the socket without blocking, and
 // returns the next queued event. Pointers are valid until the next call.
 bool ccord_gateway_poll(ccord_gateway *g, ccord_net_event *out);
@@ -44,6 +54,7 @@ const char *ccord_gateway_voice_session_id(const ccord_gateway *g);
 [[nodiscard]] ccord_status ccord_gateway_build_resume(const char *token, const char *session_id, int64_t seq,
                                                       ccord_buf *out, ccord_error *err);
 [[nodiscard]] ccord_status ccord_gateway_build_lazy_request(ccord_id guild_id, ccord_buf *out, ccord_error *err);
+[[nodiscard]] ccord_status ccord_gateway_build_lazy_unsubscribe(ccord_id guild_id, ccord_buf *out, ccord_error *err);
 // Opcode 4 VOICE_STATE_UPDATE. channel_id 0 means "disconnect from voice";
 // guild_id CCORD_DM_GUILD_ID sends guild_id:null (join/leave a DM / group call).
 [[nodiscard]] ccord_status ccord_gateway_build_voice_state(ccord_id guild_id, ccord_id channel_id, bool self_mute,

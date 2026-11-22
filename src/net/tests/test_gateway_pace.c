@@ -380,6 +380,38 @@ static void test_wake_streak_resets_when_stable_or_restarted(void)
   CT_CHECK(!ccord_gwpace_plan_wake(nullptr, 0, true, true));   // IGNORED
 }
 
+static void test_probe_deadline_and_background_backoff(void)
+{
+  // Probe tightens ACK deadline to 5 s; receiving OP 11 restores the full heartbeat interval.
+  ccord_gwpace p;
+  ccord_gwpace_init(&p, 41);
+  ccord_gwpace_hello(&p, 1000, INTERVAL);
+  ccord_gwpace_heartbeat_sent(&p, 2000);
+  CT_CHECK(p.hb_next_ms == 2000 + INTERVAL);
+  ccord_gwpace_probe_deadline(&p, 2000, 5000);
+  CT_CHECK(p.hb_next_ms == 7000);
+  CT_CHECK(ccord_gwpace_heartbeat_due(&p, 6999) == CCORD_GWPACE_BEAT_NONE);
+  CT_CHECK(ccord_gwpace_heartbeat_due(&p, 7000) == CCORD_GWPACE_BEAT_ZOMBIE);
+  // If ACK lands at 2080, full interval (2000 + INTERVAL) is restored.
+  CT_CHECK(ccord_gwpace_heartbeat_ack(&p, 2080) == 80);
+  CT_CHECK(p.hb_next_ms == 2000 + INTERVAL);
+  CT_CHECK(ccord_gwpace_heartbeat_due(&p, 7000) == CCORD_GWPACE_BEAT_NONE);
+  CT_CHECK(ccord_gwpace_heartbeat_due(&p, 2000 + INTERVAL) == CCORD_GWPACE_BEAT_SEND);
+
+  // Background mode raises reconnect backoff ceiling to 5 min (CCORD_GWPACE_BG_BACKOFF_MAX_MS).
+  ccord_gwpace q;
+  ccord_gwpace_init(&q, 42);
+  ccord_gwpace_set_background(&q, true);
+  uint32_t max_seen = 0;
+  for (int i = 0; i < 12; i++) {
+    uint32_t d = ccord_gwpace_plan_reconnect(&q, (uint64_t)i * 1000u, CCORD_GWPACE_NETWORK, true);
+    if (d > max_seen) max_seen = d;
+    CT_CHECK(d <= CCORD_GWPACE_BG_BACKOFF_MAX_MS);
+  }
+  CT_CHECK(max_seen > CCORD_GWPACE_BACKOFF_MAX_MS);
+  CT_CHECK(max_seen >= CCORD_GWPACE_BG_BACKOFF_MAX_MS / 2u);
+}
+
 int main(void)
 {
   test_first_heartbeat_is_jittered();
@@ -399,5 +431,6 @@ int main(void)
   test_wake_during_the_first_handshake_is_accepted();
   test_wake_without_a_session_keeps_the_identify_spacing();
   test_wake_streak_resets_when_stable_or_restarted();
+  test_probe_deadline_and_background_backoff();
   return CT_RESULT("test_gateway_pace");
 }

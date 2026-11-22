@@ -29,6 +29,7 @@
 #define CCORD_GWPACE_IDENTIFY_PER_HOUR 6u
 #define CCORD_GWPACE_BACKOFF_BASE_MS 1000u
 #define CCORD_GWPACE_BACKOFF_MAX_MS 60000u
+#define CCORD_GWPACE_BG_BACKOFF_MAX_MS 300000u  // gentler 5 min reconnect ceiling while backgrounded
 #define CCORD_GWPACE_STABLE_MS 30000u           // connected this long: the failure streak resets
 #define CCORD_GWPACE_WAKE_GAP_MS 5000u          // minimum gap between accepted wakes; doubles per accepted CHANGED wake
 #define CCORD_GWPACE_WAKE_GAP_MAX_SHIFT 4u      // 5, 10, 20, 40, 80 s
@@ -66,6 +67,7 @@ typedef struct ccord_gwpace {
   uint32_t hb_latency_ms;      // last measured round trip (0 until the first ack)
   // reconnect
   uint32_t fail_streak;
+  bool background;               // raises reconnect backoff ceiling to CCORD_GWPACE_BG_BACKOFF_MAX_MS
   bool reconnect_pending;
   bool reconnect_resume;
   uint64_t reconnect_at_ms;
@@ -94,6 +96,11 @@ void ccord_gwpace_hello(ccord_gwpace *p, uint64_t now_ms, uint32_t interval_ms);
 void ccord_gwpace_heartbeat_sent(ccord_gwpace *p, uint64_t now_ms);
 // op 11. Returns the round-trip time in ms (0 when no heartbeat was outstanding).
 uint32_t ccord_gwpace_heartbeat_ack(ccord_gwpace *p, uint64_t now_ms);
+// Tightens the ACK deadline on an in-flight heartbeat probe (e.g. foreground resume after idle) so a dead socket
+// triggers zombie recovery within `ack_timeout_ms` while a live socket restores the full interval upon ACK.
+void ccord_gwpace_probe_deadline(ccord_gwpace *p, uint64_t now_ms, uint32_t ack_timeout_ms);
+// Switches between foreground (60 s) and background (5 min) reconnect backoff caps.
+void ccord_gwpace_set_background(ccord_gwpace *p, bool background);
 
 // ---- reconnect ----
 // Decides when to reconnect and whether to try RESUME. `resumable`: a session exists that Discord may still accept.

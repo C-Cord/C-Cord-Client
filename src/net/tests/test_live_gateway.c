@@ -625,6 +625,144 @@ static void test_wake_with_the_network_down_retries_with_backoff(void)
   CT_CHECK(fg_connections(ev, n) == 3);
 }
 
+// ---- 14. background mode unsubscribes OP 14 and re-subscribes on foreground ----------------------------------------
+
+static void test_background_lazy_unsubscribe_and_resubscribe(void)
+{
+  // Wire format sanity check for ccord_gateway_build_lazy_unsubscribe.
+  ccord_buf ub;
+  ccord_buf_init(&ub, 128);
+  ccord_error err;
+  CT_CHECK(ccord_gateway_build_lazy_unsubscribe(777, &ub, &err) == CCORD_OK);
+  CT_CHECK(strstr(ccord_buf_cstr(&ub), "\"op\":14") != nullptr);
+  CT_CHECK(strstr(ccord_buf_cstr(&ub), "\"guild_id\":\"777\"") != nullptr);
+  CT_CHECK(strstr(ccord_buf_cstr(&ub), "\"typing\":false") != nullptr);
+  CT_CHECK(strstr(ccord_buf_cstr(&ub), "\"threads\":false") != nullptr);
+  CT_CHECK(strstr(ccord_buf_cstr(&ub), "\"activities\":false") != nullptr);
+  CT_CHECK(strstr(ccord_buf_cstr(&ub), "\"channels\":{}") != nullptr);
+  ccord_buf_free(&ub);
+  CT_CHECK(ccord_gateway_build_lazy_unsubscribe(CCORD_DM_GUILD_ID, &ub, &err) == CCORD_ERR_INVALID);
+
+  fg_server srv;
+  CT_CHECK(fg_start(&srv, script_limit, nullptr));
+  client c;
+  CT_CHECK(client_start(&c, srv.url));
+  CT_CHECK(wait_connected(&c, 1, 4000));
+  CT_CHECK(ccord_gateway_select_channel(c.g, 777, 888, &err) == CCORD_OK);
+  pump(&c, 100);
+  // Entering background immediately sends OP 14 unsubscribe (channels:{}) and suppresses new lazy requests.
+  ccord_gateway_set_background(c.g, true);
+  CT_CHECK(ccord_gateway_select_channel(c.g, 777, 999, &err) == CCORD_OK);
+  pump(&c, 150);
+  // Returning to foreground automatically re-subscribes the latest selected channel (999).
+  ccord_gateway_set_background(c.g, false);
+  pump(&c, 150);
+  finish(&c);
+  fg_event ev[FG_MAX_EVENTS];
+  size_t n = fg_stop(&srv, ev, FG_MAX_EVENTS);
+  CT_CHECK(fg_count(ev, n, 0, "LAZY {\"888\":[[0,99]]}") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "LAZY {}") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "LAZY {\"999\":[[0,99]]}") == 1);
+}
+
+// ---- 15. offline and background suspend pause reconnect loops; returning online/foreground resumes -----------------
+
+static void script_multi_resume(void *ud, fg_conn *c)
+{
+  (void)ud;
+  if (!fg_open_session(c, 60000)) return;
+  fg_serve_session(c, true, fg_now_ms() + 6000, 0);
+}
+
+static void test_offline_and_suspend_pause_reconnects(void)
+{
+  fg_server srv;
+  CT_CHECK(fg_start(&srv, script_multi_resume, nullptr));
+  client c;
+  CT_CHECK(client_start(&c, srv.url));
+  CT_CHECK(wait_connected(&c, 1, 4000));
+  advance(&c, 4000, 100);
+
+  // Going offline closes the socket and pauses reconnects indefinitely (wait_info timeout == UINT32_MAX).
+  ccord_gateway_set_network_online(c.g, false);
+  pump(&c, 100);
+  uint32_t to = 0;
+  bool pend = true;
+  CT_CHECK(ccord_gateway_wait_info(c.g, &to, &pend) == CCORD_INVALID_SOCKET);
+  CT_CHECK(to == UINT32_MAX && !pend);
+  advance(&c, 120000, 150);
+  CT_CHECK(c.connected == 1);   // zero reconnect attempts while offline
+
+  // Returning online resumes cleanly using the saved session.
+  ccord_gateway_set_network_online(c.g, true);
+  CT_CHECK(wait_connected(&c, 2, 4000));
+  CT_CHECK(ccord_gateway_session_id(c.g) != nullptr);
+
+  // Background suspend also closes the socket, preserves session_id, and sleeps indefinitely until foreground.
+  ccord_gateway_set_suspended(c.g, true);
+  pump(&c, 100);
+  CT_CHECK(ccord_gateway_session_id(c.g) != nullptr);
+  CT_CHECK(ccord_gateway_wait_info(c.g, &to, &pend) == CCORD_INVALID_SOCKET);
+  CT_CHECK(to == UINT32_MAX && !pend);
+  advance(&c, 120000, 150);
+  CT_CHECK(c.connected == 2);
+
+  ccord_gateway_set_suspended(c.g, false);
+  CT_CHECK(wait_connected(&c, 3, 4000));
+  finish(&c);
+  fg_event ev[FG_MAX_EVENTS];
+  size_t n = fg_stop(&srv, ev, FG_MAX_EVENTS);
+  CT_CHECK(fg_connections(ev, n) == 3);
+  CT_CHECK(fg_count(ev, n, 1, "RESUME seq=1 session=sess-1") == 1);
+  CT_CHECK(fg_count(ev, n, 2, "RESUME seq=2 session=sess-1") == 1);
+}
+
+// ---- 16. foreground resume probe sends OP 1 without tearing down a healthy socket, and catches zombies in 5 s ------
+
+static void script_probe_healthy_then_zombie(void *ud, fg_conn *c)
+{
+  (void)ud;
+  if (c->idx == 0) {
+    if (!fg_open_session(c, 60000)) return;
+    // Acknowledge only the first OP 1 heartbeat, then go silent to simulate a NAT-blackholed socket.
+    fg_serve_session(c, true, fg_now_ms() + 6000, 1);
+    fg_serve_session(c, false, fg_now_ms() + 6000, 0);
+    return;
+  }
+  if (!fg_open_session(c, 60000)) return;
+  fg_serve_session(c, true, fg_now_ms() + 6000, 0);
+}
+
+static void test_probe_keeps_healthy_socket_and_catches_zombie(void)
+{
+  fg_server srv;
+  CT_CHECK(fg_start(&srv, script_probe_healthy_then_zombie, nullptr));
+  client c;
+  CT_CHECK(client_start(&c, srv.url));
+  CT_CHECK(wait_connected(&c, 1, 4000));
+  advance(&c, 4000, 100);
+
+  // First probe: server replies with OP 11 -> connection stays open (still conn 0) and full interval resumes.
+  CT_CHECK(ccord_gateway_probe(c.g) == CCORD_GWPACE_WAKE_FRESH);
+  pump(&c, 200);
+  advance(&c, 10000, 100);   // 10 s later (> 5 s probe timeout): ACK arrived so no zombie teardown!
+  CT_CHECK(c.connected == 1);
+
+  // Second probe: server drops ACK -> zombie recovery triggers after 5 s and RESUMES on conn 1.
+  CT_CHECK(ccord_gateway_probe(c.g) == CCORD_GWPACE_WAKE_FRESH);
+  pump(&c, 100);
+  advance(&c, 4900, 100);
+  CT_CHECK(c.connected == 1);
+  advance(&c, 200, 100);
+  CT_CHECK(wait_connected(&c, 2, 4000));
+  finish(&c);
+  fg_event ev[FG_MAX_EVENTS];
+  size_t n = fg_stop(&srv, ev, FG_MAX_EVENTS);
+  CT_CHECK(fg_connections(ev, n) == 2);
+  CT_CHECK(fg_count(ev, n, 0, "HEARTBEAT d=1") >= 2);
+  CT_CHECK(fg_count(ev, n, 1, "RESUME seq=1 session=sess-1") == 1);
+}
+
 int main(void)
 {
   test_heartbeats_follow_the_interval();
@@ -642,5 +780,8 @@ int main(void)
   test_wake_without_a_session_identifies();
   test_wake_is_ignored_when_stopped_or_failed();
   test_wake_with_the_network_down_retries_with_backoff();
+  test_background_lazy_unsubscribe_and_resubscribe();
+  test_offline_and_suspend_pause_reconnects();
+  test_probe_keeps_healthy_socket_and_catches_zombie();
   return CT_RESULT("test_live_gateway");
 }

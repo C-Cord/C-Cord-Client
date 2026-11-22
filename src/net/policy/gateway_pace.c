@@ -64,23 +64,42 @@ uint32_t ccord_gwpace_heartbeat_ack(ccord_gwpace *p, uint64_t now_ms)
 {
   if (!p || !p->hb_awaiting_ack) return 0;
   p->hb_awaiting_ack = false;
+  // If a foreground resume probe tightened hb_next_ms to a short ACK deadline, restore the full interval now.
+  uint64_t full_next = p->hb_sent_ms + p->hb_interval_ms;
+  if (p->hb_active && p->hb_next_ms < full_next) p->hb_next_ms = full_next;
   uint64_t rtt = now_ms >= p->hb_sent_ms ? now_ms - p->hb_sent_ms : 0;
   if (rtt > UINT32_MAX) rtt = UINT32_MAX;
   p->hb_latency_ms = rtt ? (uint32_t)rtt : 1u;   // 0 is reserved for "no heartbeat was outstanding"
   return p->hb_latency_ms;
 }
 
+void ccord_gwpace_probe_deadline(ccord_gwpace *p, uint64_t now_ms, uint32_t ack_timeout_ms)
+{
+  if (!p || !p->hb_active || !p->hb_awaiting_ack) return;
+  if (ack_timeout_ms == 0) ack_timeout_ms = 5000u;
+  uint64_t cap = now_ms + ack_timeout_ms;
+  if (p->hb_next_ms > cap) p->hb_next_ms = cap;
+}
+
+void ccord_gwpace_set_background(ccord_gwpace *p, bool background)
+{
+  if (p) p->background = background;
+}
+
 // ---- reconnect ----
 
 // Delay before the next attempt for a given number of consecutive failures: none for the first (one reconnect after
-// a transient drop is normal), then 1 s, 2 s, 4 s ... up to a minute, each reduced by up to half at random.
+// a transient drop is normal), then 1 s, 2 s, 4 s ... up to a minute (5 minutes while backgrounded), each reduced by
+// up to half at random.
 static uint64_t pace_backoff(ccord_gwpace *p)
 {
   if (p->fail_streak == 0) return 0;
+  uint32_t max_shift = p->background ? 9u : 6u;
+  uint64_t cap = p->background ? CCORD_GWPACE_BG_BACKOFF_MAX_MS : CCORD_GWPACE_BACKOFF_MAX_MS;
   uint32_t shift = p->fail_streak - 1u;
-  if (shift > 6u) shift = 6u;
+  if (shift > max_shift) shift = max_shift;
   uint64_t full = (uint64_t)CCORD_GWPACE_BACKOFF_BASE_MS << shift;
-  if (full > CCORD_GWPACE_BACKOFF_MAX_MS) full = CCORD_GWPACE_BACKOFF_MAX_MS;
+  if (full > cap) full = cap;
   return full / 2u + pace_rand_upto(p, full / 2u);
 }
 
