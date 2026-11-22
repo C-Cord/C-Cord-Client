@@ -50,7 +50,8 @@ typedef struct ui_events_state {
   ccord_text_edit name, location, start, end, desc;
   bool edits_init;
   char form_error[192];
-  ccord_rect f_name, f_location, f_start, f_end, f_desc, f_type, f_channel, f_save, f_cancel;
+  ccord_rect f_view, f_name, f_location, f_start, f_end, f_desc, f_type, f_channel, f_save, f_cancel;
+  float form_scroll, form_max, form_content_h;
   // Stage prompts.
   ccord_id stage_guild, stage_channel;
   ccord_text_edit stage_topic;
@@ -332,6 +333,27 @@ bool ui_scheduled_events_active(const ccord_ui *ui)
   return st && st->open;
 }
 
+bool ui_scheduled_events_wants_text(const ccord_ui *ui)
+{
+  if (!ui_scheduled_events_active(ui)) return false;
+  ui_events_state *st = events_state(ui, false);
+  return st && (st->view == UI_EVENTS_FORM || st->view == UI_EVENTS_STAGE_START);
+}
+
+bool ui_scheduled_events_handle_back(ccord_ui *ui)
+{
+  if (!ui_scheduled_events_active(ui)) return false;
+  ui_events_state *st = events_state(ui, false);
+  if (st && st->view == UI_EVENTS_FORM) {
+    st->view = UI_EVENTS_LIST;
+    ui->dirty = true;
+    return true;
+  }
+  ccord_input_event esc = {.type = CCORD_IN_KEY_DOWN, .key = CCORD_KEY_ESCAPE};
+  (void)ui_scheduled_events_handle(ui, &esc);
+  return true;
+}
+
 static void form_open(ccord_ui *ui, ccord_id event_id)
 {
   ui_events_state *st = events_state(ui, false);
@@ -470,28 +492,39 @@ static void events_draw_list(ccord_ui *ui, ccord_renderer *r)
   if (!st) return;
   ccord_rect box;
   size_t total = ccord_store_scheduled_event_count(ui->d.store, st->guild_id);
+  bool compact = ui->mobile_layout || ui->win_w < 460.0f;
+  float row_h = compact ? 112.0f : EV_ROW_H;
   // Height follows the row count up to a cap; beyond it the list scrolls inside the modal.
-  float want_h = clampf(76.0f + (float)total * EV_ROW_H, 240.0f, 560.0f);
+  float want_h = clampf((compact ? 112.0f : 76.0f) + (float)total * row_h, 240.0f, 560.0f);
   ev_modal_begin(ui, r, &box, 600.0f, want_h, "Scheduled Events");
   st->box = box;
+  compact = compact || box.w < 440.0f;
+  row_h = compact ? 112.0f : EV_ROW_H;
   const ccord_guild *gd = ccord_store_guild(ui->d.store, st->guild_id);
   ccord_text_style gs = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(text_muted));
   const char *gname = gd && gd->name[0] ? gd->name : "Server";
-  ccord_text_draw_ellipsis(r, gname, strlen(gname), box.x + 20.0f, box.y + 40.0f, box.w - 220.0f, &gs);
+  ccord_text_draw_ellipsis(r, gname, strlen(gname), box.x + 20.0f, box.y + 40.0f,
+                           compact ? (box.w - 40.0f) : (box.w - 220.0f), &gs);
 
   st->close_btn = (ccord_rect){box.x + box.w - UIS_ICON_BTN - UIS_SP_3, box.y + 12.0f, UIS_ICON_BTN, UIS_ICON_BTN};
   bool chov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, st->close_btn);
   ccord_color cglyph = uis_icon_button(ui, r, st->close_btn, (uis_state){.hover = chov}, "evclose", 0);
   ui_icon_close(r, st->close_btn.x + st->close_btn.w * 0.5f, st->close_btn.y + st->close_btn.h * 0.5f, 12.0f, cglyph);
   st->create_btn = (ccord_rect){0, 0, 0, 0};
+  float list_top = box.y + 60.0f;
   if (events_create(ui, st->guild_id)) {
-    st->create_btn = (ccord_rect){box.x + box.w - 180.0f, box.y + 14.0f, 118.0f, UIS_H_BTN_SM};
+    if (compact) {
+      st->create_btn = (ccord_rect){box.x + 16.0f, box.y + 60.0f, box.w - 32.0f, UIS_H_BTN_SM};
+      list_top = box.y + 96.0f;
+    } else {
+      st->create_btn = (ccord_rect){box.x + box.w - 180.0f, box.y + 14.0f, 118.0f, UIS_H_BTN_SM};
+    }
     ev_button(ui, r, st->create_btn, "Create Event", UIS_BTN_PRIMARY);
   }
 
-  st->list_view = (ccord_rect){box.x + 16.0f, box.y + 60.0f, box.w - 32.0f, box.h - 76.0f};
+  st->list_view = (ccord_rect){box.x + 16.0f, list_top, box.w - 32.0f, fmaxf(box.y + box.h - 16.0f - list_top, 40.0f)};
   ccord_rect view = st->list_view;
-  st->list_content_h = (float)total * EV_ROW_H;
+  st->list_content_h = (float)total * row_h;
   float max_scroll = st->list_content_h > view.h ? st->list_content_h - view.h : 0.0f;
   st->scroll = clampf(st->scroll, 0.0f, max_scroll);
   st->row_count = 0;
@@ -517,16 +550,16 @@ static void events_draw_list(ccord_ui *ui, ccord_renderer *r)
   for (size_t i = 0; i < total && st->row_count < UI_EVENTS_ROW_MAX; i++) {
     const ccord_scheduled_event *ev = ccord_store_scheduled_event_at(ui->d.store, st->guild_id, i);
     if (!ev) continue;
-    float ry = view.y + (float)i * EV_ROW_H - st->scroll;
-    if (ry + EV_ROW_H < view.y || ry > view.y + view.h) continue;   // cull
-    bool fully_visible = ry >= view.y && ry + EV_ROW_H <= view.y + view.h;
-    ccord_rect row = {view.x, ry, view.w, EV_ROW_H - 6.0f};
+    float ry = view.y + (float)i * row_h - st->scroll;
+    if (ry + row_h < view.y || ry > view.y + view.h) continue;   // cull
+    bool fully_visible = ry >= view.y && ry + row_h <= view.y + view.h;
+    ccord_rect row = {view.x, ry, view.w, row_h - 6.0f};
     bool hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, row);
     uis_plate(ui, r, row, uis_tokens_of(ui).r_control, COL(bg_tertiary));
     uis_list_row_fill(ui, r, row, (uis_state){.hover = hov}, "evrow", (uint64_t)i);
 
     float tx = row.x + 12.0f;
-    float tw = row.w - 200.0f;
+    float tw = compact ? fmaxf(row.w - 24.0f, 40.0f) : fmaxf(row.w - 200.0f, 40.0f);
     ccord_text_draw_ellipsis(r, ev->name, strlen(ev->name), tx, row.y + 8.0f, tw, &ns);
     // Status · kind · where.
     char line[224];
@@ -548,7 +581,7 @@ static void events_draw_list(ccord_ui *ui, ccord_renderer *r)
     ccord_text_draw(r, status_word, strlen(status_word), tx, row.y + 28.0f, &sts, tw);
     ccord_vec2 sw = ccord_text_measure(r, status_word, strlen(status_word), &sts, 0.0f);
     const char *rest = line + strlen(status_word);
-    ccord_text_draw_ellipsis(r, rest, strlen(rest), tx + sw.x, row.y + 28.0f, tw - sw.x, &ss);
+    ccord_text_draw_ellipsis(r, rest, strlen(rest), tx + sw.x, row.y + 28.0f, fmaxf(tw - sw.x, 16.0f), &ss);
     // Start time · interested count.
     char when[128];
     if (ev->scheduled_start_ms > 0) {
@@ -565,22 +598,38 @@ static void events_draw_list(ccord_ui *ui, ccord_renderer *r)
     }
     ccord_text_draw_ellipsis(r, when, strlen(when), tx, row.y + 48.0f, tw, &ms);
 
-    // Right column: Interested toggle, then Edit / Delete for managers.
+    // Action buttons: right column on desktop, stacked bottom row on compact/mobile cards.
     if (fully_visible && st->row_count < UI_EVENTS_ROW_MAX) {
       size_t ri = st->row_count;
       st->rows[ri].event_id = ev->id;
       st->rows[ri].row = row;
-      st->rows[ri].rsvp = (ccord_rect){row.x + row.w - 170.0f, row.y + 9.0f, 158.0f, UIS_H_BTN_SM};
       st->rows[ri].rsvp_on = ev->me_rsvped;
       st->rows[ri].delete_armed = st->delete_armed == ev->id;
       st->rows[ri].edit = (ccord_rect){0, 0, 0, 0};
       st->rows[ri].del = (ccord_rect){0, 0, 0, 0};
+      bool can_mgr = event_can_manage(ui, st->guild_id, ev);
+      if (compact) {
+        float by = row.y + row.h - UIS_H_BTN_SM - 8.0f;
+        float inner_w = row.w - 24.0f;
+        if (can_mgr) {
+          float bw = floorf((inner_w - 12.0f) / 3.0f);
+          st->rows[ri].rsvp = (ccord_rect){row.x + 12.0f, by, bw, UIS_H_BTN_SM};
+          st->rows[ri].edit = (ccord_rect){row.x + 12.0f + bw + 6.0f, by, bw, UIS_H_BTN_SM};
+          st->rows[ri].del = (ccord_rect){row.x + 12.0f + 2.0f * (bw + 6.0f), by, inner_w - 2.0f * (bw + 6.0f), UIS_H_BTN_SM};
+        } else {
+          st->rows[ri].rsvp = (ccord_rect){row.x + 12.0f, by, inner_w, UIS_H_BTN_SM};
+        }
+      } else {
+        st->rows[ri].rsvp = (ccord_rect){row.x + row.w - 170.0f, row.y + 9.0f, 158.0f, UIS_H_BTN_SM};
+        if (can_mgr) {
+          st->rows[ri].edit = (ccord_rect){row.x + row.w - 170.0f, row.y + 44.0f, 76.0f, UIS_H_BTN_SM};
+          st->rows[ri].del = (ccord_rect){row.x + row.w - 86.0f, row.y + 44.0f, 74.0f, UIS_H_BTN_SM};
+        }
+      }
       ev_button(ui, r, st->rows[ri].rsvp, ev->me_rsvped ? "Interested ✓" : "Interested",
                 ev->me_rsvped ? UIS_BTN_PRIMARY : UIS_BTN_SECONDARY);
-      if (event_can_manage(ui, st->guild_id, ev)) {
+      if (can_mgr) {
         bool armed = st->delete_armed == ev->id;
-        st->rows[ri].edit = (ccord_rect){row.x + row.w - 170.0f, row.y + 44.0f, 76.0f, UIS_H_BTN_SM};
-        st->rows[ri].del = (ccord_rect){row.x + row.w - 86.0f, row.y + 44.0f, 74.0f, UIS_H_BTN_SM};
         ev_button(ui, r, st->rows[ri].edit, armed ? "Keep" : "Edit", UIS_BTN_SECONDARY);
         ev_button(ui, r, st->rows[ri].del, armed ? "Confirm" : "Delete", UIS_BTN_DANGER);
       }
@@ -602,9 +651,15 @@ static void events_draw_form(ccord_ui *ui, ccord_renderer *r)
   ev_modal_begin(ui, r, &box, 560.0f, 480.0f, st->edit_id != CCORD_ID_NONE ? "Edit Event" : "Create Event");
   st->box = box;
   float x = box.x + 20.0f, w = box.w - 40.0f;
-  float fy = box.y + 52.0f;
+  st->f_cancel = (ccord_rect){box.x + box.w - 196.0f, box.y + box.h - 48.0f, 84.0f, UIS_H_BTN};
+  st->f_save = (ccord_rect){box.x + box.w - 104.0f, box.y + box.h - 48.0f, 84.0f, UIS_H_BTN};
+  float body_top = box.y + 52.0f;
+  st->f_view = (ccord_rect){box.x + 12.0f, body_top, box.w - 24.0f, fmaxf(st->f_cancel.y - 10.0f - body_top, 40.0f)};
+  st->form_scroll = clampf(st->form_scroll, 0.0f, st->form_max);
+  float fy = body_top - st->form_scroll;
   bool external = st->entity_type == CCORD_SCHEDULED_EVENT_EXTERNAL;
 
+  ccord_push_clip(r, st->f_view);
   ev_field_label(ui, r, x, fy, w, "NAME");
   st->f_name = (ccord_rect){x, fy + 16.0f, w, UIS_H_INPUT};
   ev_input(ui, r, st->f_name, &st->name, st->focus == 0, "Movie night");
@@ -614,7 +669,9 @@ static void events_draw_form(ccord_ui *ui, ccord_renderer *r)
   const char *type_lbl = external ? "Type: External"
                        : st->entity_type == CCORD_SCHEDULED_EVENT_VOICE ? "Type: Voice"
                                                                         : "Type: Stage";
-  st->f_type = (ccord_rect){x, fy, 150.0f, UIS_H_BTN_SM};
+  bool stack_tc = (!external && w < 330.0f);
+  float type_w = stack_tc ? w : fminf(150.0f, w);
+  st->f_type = (ccord_rect){x, fy, type_w, UIS_H_BTN_SM};
   ev_button(ui, r, st->f_type, type_lbl, UIS_BTN_SECONDARY);
   st->f_channel = (ccord_rect){0, 0, 0, 0};
   if (!external) {
@@ -629,7 +686,12 @@ static void events_draw_form(ccord_ui *ui, ccord_renderer *r)
       const ccord_channel *ch = ccord_store_channel(ui->d.store, sel);
       snprintf(ch_lbl, sizeof ch_lbl, "Channel: #%s", ch && ch->name[0] ? ch->name : "unknown");
     }
-    st->f_channel = (ccord_rect){x + 158.0f, fy, w - 158.0f, UIS_H_BTN_SM};
+    if (stack_tc) {
+      fy += UIS_H_BTN_SM + 6.0f;
+      st->f_channel = (ccord_rect){x, fy, w, UIS_H_BTN_SM};
+    } else {
+      st->f_channel = (ccord_rect){x + type_w + 8.0f, fy, fmaxf(w - type_w - 8.0f, 60.0f), UIS_H_BTN_SM};
+    }
     ev_button(ui, r, st->f_channel, ch_lbl, UIS_BTN_SECONDARY);
   }
   fy += 36.0f;
@@ -655,15 +717,20 @@ static void events_draw_form(ccord_ui *ui, ccord_renderer *r)
   ev_field_label(ui, r, x, fy, w, "DESCRIPTION");
   st->f_desc = (ccord_rect){x, fy + 16.0f, w, UIS_H_INPUT};
   ev_input(ui, r, st->f_desc, &st->desc, st->focus == 4, "What's happening (optional)");
-  fy += 46.0f;
+  fy += 56.0f;
 
   if (st->form_error[0]) {
     ccord_text_style es = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(danger));
     ccord_text_draw_ellipsis(r, st->form_error, strlen(st->form_error), x, fy, w, &es);
+    fy += 22.0f;
+  }
+  st->form_content_h = fmaxf((fy + st->form_scroll) - body_top + 6.0f, 0.0f);
+  st->form_max = st->form_content_h > st->f_view.h ? (st->form_content_h - st->f_view.h) : 0.0f;
+  ccord_pop_clip(r);
+  if (st->form_max > 0.0f) {
+    (void)ui_draw_list_scrollbar(ui, r, st->f_view, st->form_content_h, st->form_scroll, "evformscroll", 0);
   }
 
-  st->f_cancel = (ccord_rect){box.x + box.w - 196.0f, box.y + box.h - 48.0f, 84.0f, UIS_H_BTN};
-  st->f_save = (ccord_rect){box.x + box.w - 104.0f, box.y + box.h - 48.0f, 84.0f, UIS_H_BTN};
   ev_button(ui, r, st->f_cancel, "Cancel", UIS_BTN_SECONDARY);
   ev_button(ui, r, st->f_save, "Save", UIS_BTN_PRIMARY);
   ui_popup_end(r);
@@ -1042,6 +1109,13 @@ static bool events_handle_form(ccord_ui *ui, const ccord_input_event *ev)
     ui->dirty = true;
     return true;
   }
+  if (ev->type == CCORD_IN_WHEEL) {
+    if (st->form_max > 0.0f) {
+      st->form_scroll = clampf(st->form_scroll - ev->wheel * 36.0f, 0.0f, st->form_max);
+      ui->dirty = true;
+    }
+    return true;
+  }
   if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 1) {
     if (st->f_save.w > 0.0f && ui_in_rect(ev->x, ev->y, st->f_save)) {
       form_submit(ui);
@@ -1051,6 +1125,11 @@ static bool events_handle_form(ccord_ui *ui, const ccord_input_event *ev)
       form_back_to_list(ui);
       return true;
     }
+    if (st->box.w > 0.0f && !ui_in_rect(ev->x, ev->y, st->box)) {
+      events_close(ui);
+      return true;
+    }
+    if (st->f_view.h > 0.0f && !ui_in_rect(ev->x, ev->y, st->f_view)) return true;
     if (st->f_type.w > 0.0f && ui_in_rect(ev->x, ev->y, st->f_type)) {
       st->entity_type = st->entity_type % 3 + 1;   // Stage -> Voice -> External -> Stage
       st->channel_sel = 0;

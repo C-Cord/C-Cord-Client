@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "ui_style.h"
 #include "ui_voice_surfaces.h"
 
 #define M(name) (ui->theme->m.name)
@@ -142,9 +143,8 @@ void ui_dave_modal_draw(ccord_ui *ui, ccord_renderer *r)
   bool is_dave = st->modal == 1;
   ui_popup_begin(ui, r, "davemodal", 0, UI_MODAL_MS, 10.0f);
   ccord_draw_rect(r, (ccord_rect){0, 0, ui->win_w, ui->win_h}, COL(overlay));
-  float mw = fminf(fmaxf(ui->win_w - 64.0f, 300.0f), 440.0f);
   float mh = is_dave ? 250.0f : 280.0f;
-  ccord_rect m = {(ui->win_w - mw) * 0.5f, (ui->win_h - mh) * 0.4f, mw, mh};
+  ccord_rect m = uis_modal_box(ui, 440.0f, mh);
   st->box = m;
   ccord_draw_rrect(r, (ccord_rect){m.x - 1.0f, m.y - 1.0f, m.w + 2.0f, m.h + 2.0f}, 9.0f, COL(border_subtle));
   ccord_draw_rrect(r, m, 8.0f, COL(bg_secondary));

@@ -162,11 +162,14 @@ void ui_draw_stream_fullscreen(ccord_ui *ui, ccord_renderer *r)
     ccord_text_draw(r, placeholder, strlen(placeholder), (screen.w - pht.x) * 0.5f, (screen.h - pht.y) * 0.5f, &phs, 0.0f);
   }
 
-  ui->stream_fs_top_bar = (ccord_rect){0.0f, 0.0f, screen.w, 54.0f};
+  float fs_l = ui->safe_insets.left, fs_r = ui->safe_insets.right;
+  float fs_t = ui->safe_insets.top, fs_b = ui->safe_insets.bottom;
+  float fs_aw = maxf(screen.w - fs_l - fs_r, 120.0f);
+  ui->stream_fs_top_bar = (ccord_rect){0.0f, 0.0f, screen.w, fs_t + 54.0f};
   float bot_h = 50.0f;
-  float bot_w = fminf(screen.w - 32.0f, self_streaming ? 404.0f : 294.0f);
-  if (bot_w < 240.0f) bot_w = fminf(screen.w, 240.0f);
-  ui->stream_fs_bot_bar = (ccord_rect){(screen.w - bot_w) * 0.5f, screen.h - bot_h - 18.0f, bot_w, bot_h};
+  float bot_w = fminf(fs_aw - 24.0f, self_streaming ? 404.0f : 294.0f);
+  if (bot_w < 240.0f) bot_w = fminf(fs_aw, 240.0f);
+  ui->stream_fs_bot_bar = (ccord_rect){fs_l + (fs_aw - bot_w) * 0.5f, screen.h - fs_b - bot_h - 14.0f, bot_w, bot_h};
 
   float hud_a = stream_fs_hud_alpha(ui, paused || !frame_present || hidden_preview);
   if (hud_a <= 0.02f) return;
@@ -180,7 +183,7 @@ void ui_draw_stream_fullscreen(ccord_ui *ui, ccord_renderer *r)
 
   ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 3.0f, badge_fg);
   ccord_vec2 lt = ccord_text_measure(r, badge, strlen(badge), &ls, 0.0f);
-  ccord_rect lb = {16.0f, 17.0f, lt.x + 16.0f, 20.0f};
+  ccord_rect lb = {fs_l + 16.0f, fs_t + 17.0f, lt.x + 16.0f, 20.0f};
   ccord_draw_rrect(r, lb, 4.0f, badge_bg);
   ccord_text_draw(r, badge, strlen(badge), lb.x + (lb.w - lt.x) * 0.5f, lb.y + (lb.h - lt.y) * 0.5f, &ls, 0.0f);
 
@@ -200,13 +203,15 @@ void ui_draw_stream_fullscreen(ccord_ui *ui, ccord_renderer *r)
     }
   }
 
-  ccord_rect exit_btn = {screen.w - 16.0f - 132.0f, 12.0f, 132.0f, 30.0f};
+  bool fs_compact = fs_aw < 420.0f;
+  const char *ex_lbl = fs_compact ? "Exit" : "Exit Fullscreen";
+  float exit_w = fs_compact ? 68.0f : 132.0f;
+  ccord_rect exit_btn = {screen.w - fs_r - 16.0f - exit_w, fs_t + 12.0f, exit_w, 30.0f};
   ui->stream_fs_exit_rect = exit_btn;
   bool exit_hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, exit_btn);
   ccord_draw_rrect(r, exit_btn, 5.0f, exit_hov ? COL(bg_item_hover) : COL(bg_tertiary));
   ui_icon_fullscreen(r, exit_btn.x + 16.0f, exit_btn.y + exit_btn.h * 0.5f, 13.0f, COL(text_header), true);
   ccord_text_style exs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_header));
-  const char *ex_lbl = "Exit Fullscreen";
   ccord_vec2 ext = ccord_text_measure(r, ex_lbl, strlen(ex_lbl), &exs, 0.0f);
   ccord_text_draw(r, ex_lbl, strlen(ex_lbl), exit_btn.x + 28.0f, exit_btn.y + (exit_btn.h - ext.y) * 0.5f, &exs, 0.0f);
 
@@ -214,16 +219,16 @@ void ui_draw_stream_fullscreen(ccord_ui *ui, ccord_renderer *r)
   ccord_text_style hs = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 2.0f, COL(text_muted));
   ccord_vec2 ht = ccord_text_measure(r, hint, strlen(hint), &hs, 0.0f);
   float title_right = exit_btn.x - 14.0f;
-  if (screen.w >= 540.0f) {
+  if (fs_aw >= 540.0f) {
     float hx = exit_btn.x - 14.0f - ht.x;
-    ccord_text_draw(r, hint, strlen(hint), hx, (ui->stream_fs_top_bar.h - ht.y) * 0.5f, &hs, 0.0f);
+    ccord_text_draw(r, hint, strlen(hint), hx, fs_t + (54.0f - ht.y) * 0.5f, &hs, 0.0f);
     title_right = hx - 16.0f;
   }
   float title_x = lb.x + lb.w + 12.0f;
   float title_w = title_right - title_x;
   if (title_w > 32.0f) {
     ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
-    ccord_text_draw_ellipsis(r, title, strlen(title), title_x, (ui->stream_fs_top_bar.h - ui_line_h(ui, ts.size)) * 0.5f,
+    ccord_text_draw_ellipsis(r, title, strlen(title), title_x, fs_t + (54.0f - ui_line_h(ui, ts.size)) * 0.5f,
                              title_w, &ts);
   }
 
@@ -233,18 +238,22 @@ void ui_draw_stream_fullscreen(ccord_ui *ui, ccord_renderer *r)
                    ui_alpha(COL(border_subtle), 0.7f));
   ccord_draw_rrect(r, bar, 10.0f, (ccord_color){0x14, 0x16, 0x1B, 232});
 
+  bool bot_compact = bar.w < 390.0f;
   ccord_text_style b1s = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_header));
   ccord_text_style b2s = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_on_brand));
-  const char *b1_lbl = self_streaming ? (ui->stream_hide_preview ? "Show Preview" : "Hide Preview")
-                                      : (ws->paused ? "Resume" : "Pause");
-  const char *b2_lbl = self_streaming ? "Stop Streaming" : "Stop Watching";
+  const char *b1_lbl = self_streaming
+                         ? (bot_compact ? (ui->stream_hide_preview ? "Show" : "Hide")
+                                        : (ui->stream_hide_preview ? "Show Preview" : "Hide Preview"))
+                         : (ws->paused ? "Resume" : "Pause");
+  const char *b2_lbl = bot_compact ? "Stop" : (self_streaming ? "Stop Streaming" : "Stop Watching");
   float by = bar.y + (bar.h - 30.0f) * 0.5f;
-  float bx = bar.x + 12.0f;
-  float gap = 8.0f;
+  float bx = bar.x + (bot_compact ? 8.0f : 12.0f);
+  float gap = bot_compact ? 6.0f : 8.0f;
 
   if (self_streaming) {
     const char *plbl = st->paused ? "Resume" : "Pause";
-    ccord_rect pb = {bx, by, 82.0f, 30.0f};
+    float pw = bot_compact ? floorf((bar.w - 16.0f - 2.0f * gap) * 0.32f) : 82.0f;
+    ccord_rect pb = {bx, by, pw, 30.0f};
     ui->stream_fs_pause_rect = pb;
     bool hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, pb);
     ccord_draw_rrect(r, pb, 5.0f, hov ? COL(bg_item_hover) : COL(bg_tertiary));
@@ -253,7 +262,9 @@ void ui_draw_stream_fullscreen(ccord_ui *ui, ccord_renderer *r)
     bx += pb.w + gap;
   }
 
-  float b1_w = self_streaming ? 116.0f : 96.0f;
+  float b1_w = bot_compact
+                 ? floorf((bar.w - 16.0f - (self_streaming ? 2.0f : 1.0f) * gap) * (self_streaming ? 0.34f : 0.48f))
+                 : (self_streaming ? 116.0f : 96.0f);
   ccord_rect b1 = {bx, by, b1_w, 30.0f};
   ui->stream_fs_btn1_rect = b1;
   bool b1_hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, b1);
@@ -262,7 +273,7 @@ void ui_draw_stream_fullscreen(ccord_ui *ui, ccord_renderer *r)
   ccord_text_draw(r, b1_lbl, strlen(b1_lbl), b1.x + (b1.w - b1t.x) * 0.5f, b1.y + (b1.h - b1t.y) * 0.5f, &b1s, 0.0f);
   bx += b1.w + gap;
 
-  float b2_w = 124.0f;
+  float b2_w = bot_compact ? maxf(bar.x + bar.w - 8.0f - bx, 54.0f) : 124.0f;
   ccord_rect b2 = {bx, by, b2_w, 30.0f};
   ui->stream_fs_btn2_rect = b2;
   bool b2_hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, b2);
@@ -403,6 +414,17 @@ ccord_cursor_kind ui_stream_pip_cursor(const ccord_ui *ui, float x, float y)
 
 static void pip_bounds(const ccord_ui *ui, float aspect, float *out_min_w, float *out_max_w)
 {
+  float avail_w = maxf(ui->win_w - ui->safe_insets.left - ui->safe_insets.right - 16.0f, 140.0f);
+  float avail_h = maxf(ui->win_h - ui->safe_insets.top - fmaxf(ui->safe_insets.bottom, ui->keyboard_inset) - 16.0f, 96.0f);
+  if (ui->mobile_layout) {
+    float max_w = fminf(avail_w * 0.52f, 220.0f);
+    float max_h = avail_h * 0.45f;
+    if (max_w / aspect > max_h) max_w = maxf(max_h * aspect, 130.0f);
+    if (max_w > avail_w) max_w = avail_w;
+    *out_min_w = fminf(140.0f, max_w);
+    *out_max_w = max_w;
+    return;
+  }
   float max_w = clampf(ui->win_w * 0.72f, 200.0f, 960.0f);
   float max_h = clampf(ui->win_h * 0.72f, 120.0f, 640.0f);
   if (max_w / aspect > max_h) max_w = maxf(max_h * aspect, 200.0f);
@@ -435,19 +457,23 @@ void ui_draw_stream_pip(ccord_ui *ui, ccord_renderer *r)
 
   float min_w = 200.0f, max_w = 640.0f;
   pip_bounds(ui, aspect, &min_w, &max_w);
-  float w = clampf(ui->stream_pip_w > 1.0f ? ui->stream_pip_w : 320.0f, min_w, max_w);
+  float def_w = ui->mobile_layout ? fminf(180.0f, max_w) : 320.0f;
+  float w = clampf(ui->stream_pip_w > 1.0f ? ui->stream_pip_w : def_w, min_w, max_w);
   float h = w / aspect;
+  float sl = 8.0f + ui->safe_insets.left, sr = 8.0f + ui->safe_insets.right;
+  float st_in = 8.0f + ui->safe_insets.top;
+  float sb_in = 8.0f + fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
   float px, py;
   if (!ui->stream_pip_positioned) {
     ccord_rect ma = ui_rect(ui->layout.message_area);
-    px = (ma.w >= w + 24.0f) ? (ma.x + ma.w - w - 16.0f) : (ui->win_w - w - 16.0f);
-    py = (ma.h >= h + 24.0f) ? (ma.y + ma.h - h - 16.0f) : (ui->win_h - h - 16.0f);
+    px = (ma.w >= w + 24.0f) ? (ma.x + ma.w - w - 16.0f) : (ui->win_w - w - sr - 8.0f);
+    py = (ma.h >= h + 24.0f) ? (ma.y + ma.h - h - 16.0f) : (ui->win_h - h - sb_in - 8.0f);
   } else {
     px = ui->stream_pip_x;
     py = ui->stream_pip_y;
   }
-  px = clampf(px, 8.0f, maxf(8.0f, ui->win_w - w - 8.0f));
-  py = clampf(py, 8.0f, maxf(8.0f, ui->win_h - h - 8.0f));
+  px = clampf(px, sl, maxf(sl, ui->win_w - w - sr));
+  py = clampf(py, st_in, maxf(st_in, ui->win_h - h - sb_in));
 
   ccord_rect pip = {px, py, w, h};
   ui->stream_pip_rect = pip;
@@ -668,17 +694,23 @@ void ui_stream_pip_drag_end(ccord_ui *ui)
 
 static ccord_rect go_live_tab_rect(const ccord_rect *m, int tab)
 {
-  return (ccord_rect){m->x + 24.0f + (float)tab * 136.0f, m->y + 62.0f, 128.0f, 28.0f};
+  bool compact = m->w < 440.0f;
+  float pad = compact ? 16.0f : 24.0f;
+  float tw = compact ? fminf(128.0f, floorf((m->w - 2.0f * pad - 8.0f) * 0.5f)) : 128.0f;
+  return (ccord_rect){m->x + pad + (float)tab * (tw + 8.0f), m->y + 62.0f, tw, 28.0f};
 }
 
 static ccord_rect go_live_source_card_rect(const ccord_rect *m, size_t idx)
 {
-  float grid_x = m->x + 24.0f, grid_y = m->y + 98.0f;
-  float grid_w = m->w - 48.0f;
-  float gap = 12.0f;
-  float card_w = (grid_w - gap * 2.0f) / 3.0f;
-  float card_h = 102.0f;
-  size_t col = idx % 3u, row = idx / 3u;
+  bool compact = m->w < 440.0f;
+  float pad = compact ? 16.0f : 24.0f;
+  float grid_x = m->x + pad, grid_y = m->y + 98.0f;
+  float grid_w = m->w - 2.0f * pad;
+  size_t cols = compact ? 2u : 3u;
+  float gap = compact ? 8.0f : 12.0f;
+  float card_w = (grid_w - gap * (float)(cols - 1u)) / (float)cols;
+  float card_h = compact ? 64.0f : 102.0f;
+  size_t col = idx % cols, row = idx / cols;
   return (ccord_rect){grid_x + (float)col * (card_w + gap), grid_y + (float)row * (card_h + gap), card_w, card_h};
 }
 
@@ -747,6 +779,8 @@ void ui_draw_go_live(ccord_ui *ui, ccord_renderer *r)
   }
 
   // Grid of live source cards with thumbnails
+  bool gl_compact = m.w < 440.0f;
+  float gl_pad = gl_compact ? 16.0f : 24.0f;
   for (size_t i = 0; i < ui->go_live_source_count && i < 6; i++) {
     ccord_rect card = go_live_source_card_rect(&m, i);
     bool sel = (i == ui->go_live_selected_source);
@@ -756,7 +790,8 @@ void ui_draw_go_live(ccord_ui *ui, ccord_renderer *r)
     uis_plate(ui, r, card, gtk.r_control, COL(bg_tertiary));
     uis_list_row_fill(ui, r, card, (uis_state){.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, card), .selected = sel},
                       "glsrc", (uint64_t)i);
-    ccord_rect thumb = {card.x + 6.0f, card.y + 6.0f, card.w - 12.0f, 68.0f};
+    float thumb_h = maxf(card.h - 28.0f, 24.0f);
+    ccord_rect thumb = {card.x + 6.0f, card.y + 5.0f, card.w - 12.0f, thumb_h};
     char key[48];
     snprintf(key, sizeof key, "__cap_thumb_%zu__", i);
     if (ccord_render_has_texture(r, key, nullptr, nullptr)) {
@@ -767,15 +802,22 @@ void ui_draw_go_live(ccord_ui *ui, ccord_renderer *r)
     const char *title = ui->go_live_sources[i].title[0] ? ui->go_live_sources[i].title : "Window";
     ccord_text_style cts = ui_style(ui, sel ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR, M(font_size_small) - 2.0f,
                                     sel ? COL(text_header) : COL(text_secondary));
-    ccord_text_draw_ellipsis(r, title, strlen(title), card.x + 8.0f, card.y + 78.0f, card.w - 16.0f, &cts);
+    ccord_text_draw_ellipsis(r, title, strlen(title), card.x + 8.0f, thumb.y + thumb.h + 4.0f, card.w - 16.0f, &cts);
   }
 
   // Stream Quality Box (Resolution & Frame Rate ONLY — encoder/codec/framework are in Settings)
-  ccord_rect qbox = {m.x + 24.0f, m.y + 320.0f, m.w - 48.0f, 86.0f};
+  ccord_rect qbox = gl_compact
+                      ? (ccord_rect){m.x + gl_pad, m.y + 306.0f, m.w - 2.0f * gl_pad, 104.0f}
+                      : (ccord_rect){m.x + 24.0f, m.y + 320.0f, m.w - 48.0f, 86.0f};
   uis_plate(ui, r, qbox, gtk.r_control, COL(bg_primary));
   ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 3.0f, COL(text_muted));
-  ccord_text_draw(r, "RESOLUTION", 10, m.x + 36.0f, m.y + 338.0f, &ls, 0.0f);
-  ccord_text_draw(r, "FRAME RATE", 10, m.x + 36.0f, m.y + 376.0f, &ls, 0.0f);
+  if (gl_compact) {
+    ccord_text_draw(r, "RESOLUTION", 10, m.x + 24.0f, qbox.y + 7.0f, &ls, 0.0f);
+    ccord_text_draw(r, "FRAME RATE", 10, m.x + 24.0f, qbox.y + 55.0f, &ls, 0.0f);
+  } else {
+    ccord_text_draw(r, "RESOLUTION", 10, m.x + 36.0f, m.y + 338.0f, &ls, 0.0f);
+    ccord_text_draw(r, "FRAME RATE", 10, m.x + 36.0f, m.y + 376.0f, &ls, 0.0f);
+  }
 
   for (int cat = 3; cat <= 4; cat++) {
     int count = ui_go_live_option_count(cat);

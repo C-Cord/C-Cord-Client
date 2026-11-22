@@ -316,11 +316,17 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
       if (fv_h < 0.0f) fv_h = 0.0f;
       ui_panels_draw_full_view(ui, r, (ccord_rect){fv_x, fv_y, ui->win_w - fv_x, fv_h});
     } else if (ui->stage_channel != CCORD_ID_NONE) {
-      ui_draw_voice_stage(ui, r);
-      if (ui_stage_split_active(ui)) ui_draw_messages(ui, r);   // side-by-side Text Chat pane
-      ui_draw_chat_header(ui, r);
-      ui_draw_composer(ui, r);
-      if (ui_stage_split_active(ui)) ui_draw_stage_split_divider(ui, r);
+      if (ui_stage_mobile_chat_active(ui)) {
+        ui_draw_messages(ui, r);
+        ui_draw_chat_header(ui, r);
+        ui_draw_composer(ui, r);
+      } else {
+        ui_draw_voice_stage(ui, r);
+        if (ui_stage_split_active(ui)) ui_draw_messages(ui, r);   // side-by-side Text Chat pane
+        ui_draw_chat_header(ui, r);
+        if (!ui->mobile_layout || ui_stage_split_active(ui)) ui_draw_composer(ui, r);
+        if (ui_stage_split_active(ui)) ui_draw_stage_split_divider(ui, r);
+      }
     } else if (ui_forum_is_active(ui)) {
       ui_draw_forum(ui, r);
       ui_draw_chat_header(ui, r);

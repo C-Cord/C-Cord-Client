@@ -530,7 +530,7 @@ bool uc_handle_right_click(ccord_ui *ui, const ccord_input_event *ev)
       }
       uc_open_menu_at(ui, ev, (ccord_menu_context){CCORD_MENU_CHANNEL, CCORD_DM_GUILD_ID, cch->id, 0, 0, nullptr, nullptr});
     }
-  } else if (!ui->discovery_open && ui->stage_channel != CCORD_ID_NONE && ui_in_rect(ev->x, ev->y, ui_stage_area(ui))) {
+  } else if (!ui->discovery_open && ui->stage_channel != CCORD_ID_NONE && !ui_stage_mobile_chat_active(ui) && ui_in_rect(ev->x, ev->y, ui_stage_area(ui))) {
     ccord_id vuid = ui_voice_stage_user_at(ui, ev->x, ev->y);
     if (vuid == CCORD_ID_NONE) return false;
     const ccord_channel *sc = ccord_store_channel(ui->d.store, ui->stage_channel);

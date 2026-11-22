@@ -733,7 +733,7 @@ bool ui_is_reading(const ccord_ui *ui)
       (ui->mobile_layout && (ui->left_drawer_open || ui->right_drawer_open))) {
     return false;
   }
-  if (ui->stage_channel != CCORD_ID_NONE && !ui_stage_split_active(ui)) return false;
+  if (ui->stage_channel != CCORD_ID_NONE && !ui_stage_chat_active(ui)) return false;
   const ccord_channel *c = ui_selected_channel(ui);
   if (c && c->is_message_request) return false;
   return true;

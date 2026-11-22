@@ -43,6 +43,8 @@ typedef struct ui_events_debug {
 } ui_events_debug;
 void ui_scheduled_events_open(ccord_ui *ui, ccord_id guild_id);
 bool ui_scheduled_events_active(const ccord_ui *ui);
+bool ui_scheduled_events_wants_text(const ccord_ui *ui);
+bool ui_scheduled_events_handle_back(ccord_ui *ui);
 void ui_scheduled_events_draw(ccord_ui *ui, ccord_renderer *r);
 bool ui_scheduled_events_handle(ccord_ui *ui, const ccord_input_event *ev);   // consumes every event while active
 ccord_cursor_kind ui_scheduled_events_cursor(const ccord_ui *ui);

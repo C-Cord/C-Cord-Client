@@ -80,6 +80,7 @@ typedef struct ui_stage_state {
   } cam_tile[UI_CAM_TILE_MAX];
   ccord_rect stream_player, stage_view;
   ccord_rect stream_resize_handle, stream_fs_btn, stream_vport;
+  ccord_rect mob_mute, mob_deaf, mob_cam, mob_stream, mob_leave;
 } ui_stage_state;
 
 static ui_stage_state g_stage;
@@ -333,7 +334,9 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
   ui_icon_speaker(r, ma.x + 24.0f, ma.y + 28.0f, 22.0f, COL(status_online));
   ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large), COL(text_header));
   ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(text_muted));
-  ccord_text_draw_ellipsis(r, ch->name, strlen(ch->name), ma.x + 44.0f, ma.y + 12.0f, ma.w - 220.0f, &ts);
+  ccord_rect back = ui_stage_chat_btn(ui);
+  float hdr_text_w = maxf(back.x - (ma.x + 44.0f) - 10.0f, 60.0f);
+  ccord_text_draw_ellipsis(r, ch->name, strlen(ch->name), ma.x + 44.0f, ma.y + 12.0f, hdr_text_w, &ts);
   const ccord_stream_state *st = ccord_store_stream(ui->d.store);
   const ccord_watched_stream *ws = ui->d.session ? ccord_session_watched_stream(ui->d.session) : nullptr;
   bool self_streaming = st && st->active;
@@ -348,8 +351,7 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
   } else {
     snprintf(sub, sizeof sub, "Voice / Stream Stage  ·  %zu connected", ccord_store_voice_count(ui->d.store, ch->id));
   }
-  ccord_text_draw_ellipsis(r, sub, strlen(sub), ma.x + 44.0f, ma.y + 31.0f, ma.w - 220.0f, &ss);
-  ccord_rect back = ui_stage_chat_btn(ui);
+  ccord_text_draw_ellipsis(r, sub, strlen(sub), ma.x + 44.0f, ma.y + 31.0f, hdr_text_w, &ss);
   bool bh = ui->hover_voice_back;
   float bhf = ui_fade(ui, "stageback", 0, bh);
   ccord_draw_rrect(r, back, 4.0f, ui_mix(COL(bg_tertiary), COL(bg_item_hover), bhf));
@@ -374,8 +376,8 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
   ast->banner_visible = false;
   ast->instance_count = 0;
 
-  float area_x = ma.x + 20.0f, area_y = ma.y + 70.0f;
-  float area_w = ma.w - 40.0f;
+  float area_x = ma.x + (ui->mobile_layout ? 12.0f : 20.0f), area_y = ma.y + 70.0f;
+  float area_w = maxf(ma.w - (ui->mobile_layout ? 24.0f : 40.0f), 80.0f);
 
   // M5 control row: voice status, stage topic, request-to-speak. Edits open the shared text prompt;
   // the buttons only appear when the session would accept the action (permission / stage membership).
@@ -383,18 +385,22 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
   ccord_id self_id = ccord_store_self_id(ui->d.store);
   bool self_here = v && v->channel_id == ch->id;
   float ctl_cy = ma.y + 66.0f, cx = area_x;
+  float row_right = area_x + area_w;
+  ccord_text_style chip_ms = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_secondary));
   bool can_status = ccord_store_has_permission(ui->d.store, ch->guild_id, ch->id, self_id,
                                                CCORD_PERM_SET_VOICE_CHANNEL_STATUS);
   const char *status = ccord_store_voice_status(ui->d.store, ch->id);
   if (can_status) {
     char sl[160];
     snprintf(sl, sizeof sl, "Status: %s", (status && status[0]) ? status : "set voice status");
-    sst->status_edit = dc_stage_chip(ui, r, cx, ctl_cy, sl, COL(bg_tertiary), COL(text_secondary), 260.0f);
+    float max_sw = fminf(260.0f, area_w);
+    sst->status_edit = dc_stage_chip(ui, r, cx, ctl_cy, sl, COL(bg_tertiary), COL(text_secondary), max_sw);
     cx = sst->status_edit.x + sst->status_edit.w + 8.0f;
   } else if (status && status[0]) {
     ccord_text_style sts = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(text_muted));
-    ccord_text_draw_ellipsis(r, status, strlen(status), cx, ctl_cy - 7.0f, 260.0f, &sts);
-    cx += 268.0f;
+    float stw = fminf(260.0f, area_w);
+    ccord_text_draw_ellipsis(r, status, strlen(status), cx, ctl_cy - 7.0f, stw, &sts);
+    cx += stw + 8.0f;
   }
   bool can_mod = is_stage && ccord_store_has_permission(ui->d.store, ch->guild_id, ch->id, self_id,
                                                         CCORD_PERM_MUTE_MEMBERS);
@@ -405,12 +411,19 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
       // An instance is live: its topic can be edited and the stage can be ended.
       char tl[160];
       snprintf(tl, sizeof tl, "Topic: %s", si->topic[0] ? si->topic : "set topic");
-      sst->topic_edit = dc_stage_chip(ui, r, cx, ctl_cy, tl, COL(bg_tertiary), COL(text_secondary), 260.0f);
+      float max_tw = fminf(260.0f, area_w);
+      float est_tw = fminf(ccord_text_measure(r, tl, strlen(tl), &chip_ms, max_tw - 18.0f).x + 18.0f, max_tw);
+      if (cx > area_x && cx + est_tw > row_right) { cx = area_x; ctl_cy += 30.0f; }
+      sst->topic_edit = dc_stage_chip(ui, r, cx, ctl_cy, tl, COL(bg_tertiary), COL(text_secondary), max_tw);
       cx = sst->topic_edit.x + sst->topic_edit.w + 8.0f;
+      float est_ew = fminf(ccord_text_measure(r, "End Stage", 9, &chip_ms, 102.0f).x + 18.0f, 120.0f);
+      if (cx > area_x && cx + est_ew > row_right) { cx = area_x; ctl_cy += 30.0f; }
       sst->stage_end = dc_stage_chip(ui, r, cx, ctl_cy, "End Stage", COL(danger), COL(text_on_brand), 120.0f);
       cx = sst->stage_end.x + sst->stage_end.w + 8.0f;
     } else {
       // No instance yet: Start Stage opens the topic prompt and creates it through the session.
+      float est_sw = fminf(ccord_text_measure(r, "Start Stage", 11, &chip_ms, 112.0f).x + 18.0f, 130.0f);
+      if (cx > area_x && cx + est_sw > row_right) { cx = area_x; ctl_cy += 30.0f; }
       sst->stage_start = dc_stage_chip(ui, r, cx, ctl_cy, "Start Stage", COL(brand), COL(text_on_brand), 130.0f);
       cx = sst->stage_start.x + sst->stage_start.w + 8.0f;
     }
@@ -419,6 +432,8 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
   // (launching also joins) and only with the Use Activities permission.
   if (ch->kind == CCORD_CHANNEL_VOICE && self_here && ui->d.session && ch->guild_id != CCORD_DM_GUILD_ID &&
       ccord_store_has_permission(ui->d.store, ch->guild_id, ch->id, self_id, CCORD_PERM_USE_EMBEDDED_ACTIVITIES)) {
+    float est_aw = fminf(ccord_text_measure(r, "Activities", 10, &chip_ms, 102.0f).x + 18.0f, 120.0f);
+    if (cx > area_x && cx + est_aw > row_right) { cx = area_x; ctl_cy += 30.0f; }
     ast->chip = dc_stage_chip(ui, r, cx, ctl_cy, "Activities", COL(brand), COL(text_on_brand), 120.0f);
     cx = ast->chip.x + ast->chip.w + 8.0f;
   }
@@ -428,19 +443,25 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
                                                          CCORD_PERM_REQUEST_TO_SPEAK);
     if (can_ask) {
       const char *rl = pending ? "Cancel Request" : "Request to Speak";
-      float rw = 150.0f;
-      float rx = ma.x + ma.w - 20.0f - rw;
-      if (rx > cx) {
-        sst->request_speak = dc_stage_chip(ui, r, rx, ctl_cy, rl, pending ? COL(bg_tertiary) : COL(brand),
-                                      pending ? COL(text_secondary) : COL(text_on_brand), rw);
-        sst->request_speak_cancel = pending;
+      float rw = fminf(150.0f, area_w);
+      float rx = row_right - rw;
+      if (rx < cx && cx > area_x) {
+        ctl_cy += 30.0f;
+        rx = area_x;
+      } else if (rx < area_x) {
+        rx = area_x;
       }
+      sst->request_speak = dc_stage_chip(ui, r, rx, ctl_cy, rl, pending ? COL(bg_tertiary) : COL(brand),
+                                    pending ? COL(text_secondary) : COL(text_on_brand), rw);
+      sst->request_speak_cancel = pending;
     }
   }
-  area_y = ma.y + 96.0f;
+  area_y = (ctl_cy > ma.y + 66.0f) ? (ctl_cy + 26.0f) : (ma.y + 96.0f);
+  float mob_bar_h = (ui->mobile_layout && self_here) ? 60.0f : 0.0f;
+  float stage_bottom = ma.y + ma.h - mob_bar_h;
 
   if (self_streaming || watching_remote) {
-    float avail_h = maxf(ma.y + ma.h - area_y, 0.0f);
+    float avail_h = maxf(stage_bottom - area_y, 0.0f);
     float min_h = fminf(160.0f, avail_h);
     float max_h = maxf(avail_h - 14.0f, min_h);
     float stage_h;
@@ -519,19 +540,28 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
     sst->stream_frame_h = frame_present ? frame_h : 0;
 
     // Right-aligned stream controls: [Pause (self)] [Hide Preview / Pause] [Stop] [Fullscreen]
+    bool compact_hdr = player.w < 440.0f;
     ccord_text_style b1s = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 3.0f, COL(text_header));
     ccord_text_style b2s = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 3.0f, COL(text_on_brand));
-    const char *b1_lbl = self_streaming ? (ui->stream_hide_preview ? "Show Preview" : "Hide Preview")
-                                        : (ws->paused ? "Resume" : "Pause");
-    const char *b2_lbl = self_streaming ? "Stop Streaming" : "Stop Watching";
+    const char *b1_lbl = self_streaming
+                           ? (compact_hdr ? (ui->stream_hide_preview ? "Show" : "Hide")
+                                          : (ui->stream_hide_preview ? "Show Preview" : "Hide Preview"))
+                           : (ws->paused ? "Resume" : "Pause");
+    const char *b2_lbl = compact_hdr ? "Stop" : (self_streaming ? "Stop Streaming" : "Stop Watching");
     ccord_vec2 b1t = ccord_text_measure(r, b1_lbl, strlen(b1_lbl), &b1s, 0.0f);
     ccord_vec2 b2t = ccord_text_measure(r, b2_lbl, strlen(b2_lbl), &b2s, 0.0f);
-    float b2_w = player.w < 440.0f ? maxf(b2t.x + 14.0f, 76.0f) : 114.0f;
-    float b1_w = player.w < 440.0f ? maxf(b1t.x + 14.0f, 64.0f) : 104.0f;
+    float b2_w = compact_hdr ? maxf(b2t.x + 14.0f, 48.0f) : 114.0f;
+    float b1_w = compact_hdr ? maxf(b1t.x + 14.0f, 48.0f) : 104.0f;
+    const char *plbl = (self_streaming && st->paused) ? "Resume" : "Pause";
+    ccord_vec2 pt = ccord_text_measure(r, plbl, strlen(plbl), &b1s, 0.0f);
+    float pb_w = compact_hdr ? maxf(pt.x + 14.0f, 48.0f) : 78.0f;
+    float btns_total_w = 28.0f + 6.0f + b2_w + 6.0f + b1_w + (self_streaming ? (6.0f + pb_w) : 0.0f);
+    bool two_row_hdr = (player.x + player.w - 12.0f - btns_total_w < lb.x + lb.w + 8.0f);
+    float btn_y = two_row_hdr ? (player.y + 34.0f) : (player.y + 7.0f);
 
-    ccord_rect fsb = {player.x + player.w - 12.0f - 28.0f, player.y + 7.0f, 28.0f, 24.0f};
-    ccord_rect b2 = {fsb.x - 6.0f - b2_w, player.y + 7.0f, b2_w, 24.0f};
-    ccord_rect b1 = {b2.x - 6.0f - b1_w, player.y + 7.0f, b1_w, 24.0f};
+    ccord_rect fsb = {player.x + player.w - 12.0f - 28.0f, btn_y, 28.0f, 24.0f};
+    ccord_rect b2 = {fsb.x - 6.0f - b2_w, btn_y, b2_w, 24.0f};
+    ccord_rect b1 = {b2.x - 6.0f - b1_w, btn_y, b1_w, 24.0f};
     ui->stream_stage_fs_rect = fsb;
     sst->stream_fs_btn = fsb;
     ui->stream_stage_btn1_rect = b1;
@@ -548,10 +578,7 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
     ccord_text_draw(r, b2_lbl, strlen(b2_lbl), b2.x + (b2.w - b2t.x) * 0.5f, b2.y + (b2.h - b2t.y) * 0.5f, &b2s, 0.0f);
     float left_btn_x = b1.x;
     if (self_streaming) {
-      const char *plbl = st->paused ? "Resume" : "Pause";
-      ccord_vec2 pt = ccord_text_measure(r, plbl, strlen(plbl), &b1s, 0.0f);
-      float pb_w = player.w < 440.0f ? maxf(pt.x + 14.0f, 54.0f) : 78.0f;
-      ccord_rect pb = {b1.x - 6.0f - pb_w, player.y + 7.0f, pb_w, 24.0f};
+      ccord_rect pb = {b1.x - 6.0f - pb_w, btn_y, pb_w, 24.0f};
       ui->stream_stage_pause_rect = pb;
       bool pb_hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, pb);
       ccord_draw_rrect(r, pb, 4.0f, pb_hov ? COL(bg_item_hover) : COL(bg_tertiary));
@@ -561,13 +588,15 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
 
     ccord_text_style pts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
     float title_x = lb.x + lb.w + 10.0f;
-    float title_max_w = left_btn_x - title_x - 10.0f;
+    float title_max_w = (two_row_hdr ? (player.x + player.w - 12.0f) : left_btn_x) - title_x - 10.0f;
     if (title_max_w > 24.0f) {
       ccord_text_draw_ellipsis(r, st_title, strlen(st_title), title_x, player.y + 11.0f, title_max_w, &pts);
     }
 
     // Video frame viewport inside the stream player
-    ccord_rect vport = {player.x + 12.0f, player.y + 36.0f, maxf(player.w - 24.0f, 0.0f), maxf(player.h - 46.0f, 0.0f)};
+    float vport_top = two_row_hdr ? (player.y + 64.0f) : (player.y + 36.0f);
+    ccord_rect vport = {player.x + 12.0f, vport_top, maxf(player.w - 24.0f, 0.0f),
+                        maxf(player.y + player.h - vport_top - 10.0f, 0.0f)};
     ui->stream_stage_vport_rect = vport;
     sst->stream_vport = vport;
     if (self_streaming && ui->stream_hide_preview) {
@@ -625,8 +654,16 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
   // stay reachable via the wheel instead of being dropped at the bottom edge.
   size_t n = ccord_store_voice_count(ui->d.store, ch->id);
   float tile_w = 176.0f, tile_h = 150.0f, gap = 12.0f;
-  int cols = (int)((area_w + gap) / (tile_w + gap));
-  if (cols < 1) cols = 1;
+  int cols;
+  if (area_w >= 260.0f && area_w < 380.0f) {
+    cols = 2;
+    gap = 10.0f;
+    tile_w = floorf((area_w - gap) * 0.5f);
+  } else {
+    cols = (int)((area_w + gap) / (tile_w + gap));
+    if (cols < 1) cols = 1;
+    if (tile_w > area_w) tile_w = area_w;
+  }
   int passes = is_stage ? 2 : 1;
   size_t pass_match[2] = {0, 0};
   // Camera participants (self_video; self first) get the 16:9 tile grid on a plain voice channel.
@@ -684,24 +721,21 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
   sst->cam_cols = cam_l.cols;
   const ccord_activity_instance *act_inst = nullptr;
   size_t act_n = dc_activity_instance_total(ui, ch, &act_inst);
-  content_h += dc_activity_block_h(act_n);
+  float act_blk_h = dc_activity_block_h_w(act_n, area_w);
+  content_h += act_blk_h;
   if (ncards > 0) content_h += 18.0f + (float)((ncards + (size_t)card_cols - 1u) / (size_t)card_cols) * 62.0f;
 
-  ccord_rect sview = {ma.x, area_y, ma.w, ma.y + ma.h - area_y};
+  ccord_rect sview = {ma.x, area_y, ma.w, stage_bottom - area_y};
   if (sview.h < 0.0f) sview.h = 0.0f;
   ui->stage_view_h = sview.h;
   ui->stage_content_h = content_h;
   ui->stage_scroll = clampf(ui->stage_scroll, 0.0f, maxf(content_h - sview.h, 0.0f));
   sst->stage_view = sview;
-  if (sview.h <= 1.0f) {
-    ui->stage_thumb = (ccord_rect){0, 0, 0, 0};
-    return;
-  }
-
-  ccord_push_clip(r, sview);
-  float section_y = area_y - ui->stage_scroll;
-  dc_activity_draw_block(ui, r, ch, act_inst, act_n, area_x, section_y, area_w, sview);
-  section_y += dc_activity_block_h(act_n);
+  if (sview.h > 1.0f) {
+    ccord_push_clip(r, sview);
+    float section_y = area_y - ui->stage_scroll;
+    dc_activity_draw_block(ui, r, ch, act_inst, act_n, area_x, section_y, area_w, sview);
+    section_y += act_blk_h;
   for (size_t i = 0; i < ncam; i++) {
     const ccord_voice_state *vs = camlist[i];
     ccord_rect tile = ui_cam_layout_tile(&cam_l, area_x, area_w, section_y, ncam, i);
@@ -764,12 +798,13 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
   }
   if (n == 0) {
     ccord_text_style es = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_base), COL(text_muted));
-    float empty_y = area_y - ui->stage_scroll + dc_activity_block_h(act_n);
+    float empty_y = area_y - ui->stage_scroll + act_blk_h;
     ccord_text_draw(r, "No one is connected yet.", 25, area_x, empty_y, &es, 0.0f);
     section_y = empty_y + 30.0f;
   }
 
   // Go Live broadcast cards: the server-reported broadcasts in this channel, with viewer counts.
+  float card_w = fminf(220.0f, area_w);
   float card_x = area_x, card_y = section_y + 2.0f;
   bool card_hdr = false;
   for (size_t i = 0; i < nsc && sst->stream_cards < UI_STREAM_CARD_MAX; i++) {
@@ -781,9 +816,9 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
       card_y += 18.0f;
       card_hdr = true;
     }
-    ccord_rect card = {card_x, card_y, 220.0f, 50.0f};
-    card_x += 232.0f;
-    if (card_x + 220.0f > ma.x + ma.w - 20.0f) {
+    ccord_rect card = {card_x, card_y, card_w, 50.0f};
+    card_x += card_w + 12.0f;
+    if (card_x + card_w > area_x + area_w + 1.0f) {
       card_x = area_x;
       card_y += 62.0f;
     }
@@ -822,8 +857,60 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
       sst->stream_cards++;
     }
   }
-  ccord_pop_clip(r);
-  ui->stage_thumb = ui_draw_list_scrollbar(ui, r, sview, content_h, ui->stage_scroll, "stagescroll", 0);
+    ccord_pop_clip(r);
+    ui->stage_thumb = ui_draw_list_scrollbar(ui, r, sview, content_h, ui->stage_scroll, "stagescroll", 0);
+  } else {
+    ui->stage_thumb = (ccord_rect){0, 0, 0, 0};
+  }
+
+  // Inline mobile voice control bar (Mute, Deafen, Camera, Screen, Disconnect) so users do not need
+  // to open the left drawer to reach voice controls on phones.
+  if (mob_bar_h > 0.0f) {
+    ccord_rect bar = {ma.x, stage_bottom, ma.w, mob_bar_h};
+    ccord_draw_rect(r, bar, COL(bg_secondary));
+    ccord_draw_rect(r, (ccord_rect){bar.x, bar.y, bar.w, 1.0f}, COL(border_subtle));
+    float bpad = 10.0f, bgap = 8.0f;
+    float bw = floorf((bar.w - 2.0f * bpad - 4.0f * bgap) / 5.0f);
+    if (bw < 36.0f) bw = 36.0f;
+    float btn_h = 40.0f, by = bar.y + (bar.h - btn_h) * 0.5f;
+    float bx = bar.x + (bar.w - (5.0f * bw + 4.0f * bgap)) * 0.5f;
+    sst->mob_mute = (ccord_rect){bx, by, bw, btn_h}; bx += bw + bgap;
+    sst->mob_deaf = (ccord_rect){bx, by, bw, btn_h}; bx += bw + bgap;
+    sst->mob_cam = (ccord_rect){bx, by, bw, btn_h}; bx += bw + bgap;
+    sst->mob_stream = (ccord_rect){bx, by, bw, btn_h}; bx += bw + bgap;
+    sst->mob_leave = (ccord_rect){bx, by, bw, btn_h};
+
+    bool deaf = v ? v->self_deaf : (ui->d.session && ccord_session_voice_deafened(ui->d.session));
+    bool muted = (v ? v->self_mute : (ui->d.session && ccord_session_voice_muted(ui->d.session))) || deaf;
+    bool cam = ui->camera_on;
+    bool streaming = self_streaming;
+    const ccord_rect btns[5] = {sst->mob_mute, sst->mob_deaf, sst->mob_cam, sst->mob_stream, sst->mob_leave};
+    const char *lbls[5] = {muted ? "Unmute" : "Mute", deaf ? "Undeaf" : "Deafen",
+                           cam ? "Cam On" : "Cam", streaming ? "Live" : "Share", "Leave"};
+    const ccord_color bgs[5] = {
+      muted ? COL(danger) : COL(bg_tertiary),
+      deaf ? COL(danger) : COL(bg_tertiary),
+      cam ? COL(status_online) : COL(bg_tertiary),
+      streaming ? COL(brand) : COL(bg_tertiary),
+      COL(danger),
+    };
+    const ccord_color fgs[5] = {
+      muted ? COL(text_on_brand) : COL(text_header),
+      deaf ? COL(text_on_brand) : COL(text_header),
+      cam ? COL(text_on_brand) : COL(text_header),
+      streaming ? COL(text_on_brand) : COL(text_header),
+      COL(text_on_brand),
+    };
+    for (int bi = 0; bi < 5; bi++) {
+      bool bhv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, btns[bi]);
+      ccord_draw_rrect(r, btns[bi], 8.0f, bhv ? ui_mix(bgs[bi], COL(bg_item_hover), 0.25f) : bgs[bi]);
+      ccord_text_style mbs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 3.0f, fgs[bi]);
+      ccord_vec2 mbt = ccord_text_measure(r, lbls[bi], strlen(lbls[bi]), &mbs, 0.0f);
+      ccord_text_draw_ellipsis(r, lbls[bi], strlen(lbls[bi]),
+                               btns[bi].x + maxf((btns[bi].w - mbt.x) * 0.5f, 3.0f),
+                               btns[bi].y + (btns[bi].h - mbt.y) * 0.5f, maxf(btns[bi].w - 6.0f, 16.0f), &mbs);
+    }
+  }
 }
 
 // Activity chip / instance-card clicks inside the stage view. Join launches (and joins) through the
@@ -908,6 +995,36 @@ bool ui_voice_stage_handle(ccord_ui *ui, const ccord_input_event *ev)
 
   // M5 control row: status / topic open the shared prompt; request-to-speak is a governed PATCH.
   ui_stage_state *sst = stage_state(ui);
+  if (sst->mob_mute.w > 0.0f && ui_in_rect(ev->x, ev->y, sst->mob_mute)) {
+    uc_toggle_voice_mute(ui);
+    return true;
+  }
+  if (sst->mob_deaf.w > 0.0f && ui_in_rect(ev->x, ev->y, sst->mob_deaf)) {
+    uc_toggle_voice_deafen(ui);
+    return true;
+  }
+  if (sst->mob_cam.w > 0.0f && ui_in_rect(ev->x, ev->y, sst->mob_cam)) {
+    bool next = !ui->camera_on;
+    if (ui->d.session) {
+      ccord_error err;
+      if (ccord_session_set_voice_camera(ui->d.session, next, &err) != CCORD_OK) {
+        ui_notice(ui, "Cannot toggle camera: %s", err.message);
+        return true;
+      }
+    }
+    ui->camera_on = next;
+    ui_notice(ui, ui->camera_on ? "Camera on" : "Camera off");
+    ui->dirty = true;
+    return true;
+  }
+  if (sst->mob_stream.w > 0.0f && ui_in_rect(ev->x, ev->y, sst->mob_stream)) {
+    uc_open_go_live(ui);
+    return true;
+  }
+  if (sst->mob_leave.w > 0.0f && ui_in_rect(ev->x, ev->y, sst->mob_leave)) {
+    uc_leave_voice(ui);
+    return true;
+  }
   bool is_stage = ch->kind == CCORD_CHANNEL_STAGE;
   ccord_id self_id = ccord_store_self_id(ui->d.store);
   bool can_mod = is_stage && ccord_store_has_permission(ui->d.store, ch->guild_id, ch->id, self_id,

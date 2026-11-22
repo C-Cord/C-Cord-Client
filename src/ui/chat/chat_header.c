@@ -196,7 +196,7 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
   ui_forum_set_breadcrumb_rect(ui, (ccord_rect){0}, CCORD_ID_NONE);
   const ccord_channel *ch = ui_selected_channel(ui);
   bool voice_stage = false;
-  if (ui->stage_channel != CCORD_ID_NONE && !ui_stage_split_active(ui)) {
+  if (ui->stage_channel != CCORD_ID_NONE && !ui_stage_chat_active(ui)) {
     const ccord_channel *sc = ccord_store_channel(ui->d.store, ui->stage_channel);
     if (sc) {
       ch = sc;
@@ -313,6 +313,19 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
       ccord_draw_rrect(r, ar, 4.0f, COL(brand));
       ccord_text_draw(r, albl, strlen(albl), ar.x + 8.0f, ar.y + (ar.h - abt.y) * 0.5f, &abs, 0.0f);
       hdr_btn_left = ar.x - 6.0f;
+    }
+  }
+  if (ui_stage_mobile_chat_active(ui)) {
+    ccord_rect vbtn = ui_stage_chat_btn(ui);
+    if (vbtn.w > 0.0f && vbtn.x > tx + nw + 4.0f) {
+      bool vhv = ui->hover_voice_back;
+      ccord_draw_rrect(r, vbtn, 4.0f, vhv ? COL(bg_item_hover) : COL(brand));
+      ccord_text_style vbs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_on_brand));
+      const char *vlbl = "< Voice";
+      ccord_vec2 vbt = ccord_text_measure(r, vlbl, strlen(vlbl), &vbs, 0.0f);
+      ccord_text_draw(r, vlbl, strlen(vlbl), vbtn.x + (vbtn.w - vbt.x) * 0.5f,
+                      vbtn.y + (vbtn.h - vbt.y) * 0.5f, &vbs, 0.0f);
+      hdr_btn_left = vbtn.x - 6.0f;
     }
   }
   if (is_dm && dm_u) {

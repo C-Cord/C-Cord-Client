@@ -863,6 +863,9 @@ bool ccord_ui_handle_back(ccord_ui *ui)
     return true;
   }
   if (ui->shortcuts_open) { ui->shortcuts_open = false; ui->dirty = true; return true; }
+  if (ui_scheduled_events_active(ui)) {
+    return ui_scheduled_events_handle_back(ui);
+  }
   if (ui->lightbox_open || ui->quick_switcher_open || ui->select_open || ui->modal_kind != UI_MODAL_NONE) {
     (void)ui_overlays_handle(ui, &esc);
     ui->dirty = true;
@@ -939,6 +942,17 @@ bool ccord_ui_handle_back(ccord_ui *ui)
   if (ui->discovery_open) {
     ui->discovery_open = false;
     ui_compute_layout(ui);
+    ui->dirty = true;
+    return true;
+  }
+  if (ui->stage_channel != CCORD_ID_NONE) {
+    if (ui->stage_chat_open) {
+      ui->stage_chat_open = false;
+      ui_compute_layout(ui);
+      ui->dirty = true;
+      return true;
+    }
+    ui_clear_voice_stage(ui);
     ui->dirty = true;
     return true;
   }

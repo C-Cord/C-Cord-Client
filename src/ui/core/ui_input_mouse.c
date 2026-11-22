@@ -375,7 +375,7 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
   if (ui_forum_is_active(ui) && ui_forum_handle_event(ui, ev)) {
     return true;
   }
-  if (ui->stage_channel != CCORD_ID_NONE && ui_in_rect(ev->x, ev->y, ui_stage_area(ui))) {
+  if (ui->stage_channel != CCORD_ID_NONE && !ui_stage_mobile_chat_active(ui) && ui_in_rect(ev->x, ev->y, ui_stage_area(ui))) {
     if (ui_voice_stage_handle(ui, ev)) return true;
   }
   if (ui_vm_handle_click(ui, ev->x, ev->y)) {   // mic button, and the recording / review bar
@@ -1106,7 +1106,7 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     uc_reset_caret_blink(ui);
     return true;
   }
-  if ((ui->stage_channel == CCORD_ID_NONE || ui_stage_split_active(ui)) && !ui_is_dm_friends_view(ui) &&
+  if ((ui->stage_channel == CCORD_ID_NONE || ui_stage_chat_active(ui)) && !ui_is_dm_friends_view(ui) &&
       !ui_is_dm_requests_view(ui) && ui_in_rect(ev->x, ev->y, ui_rect(l->message_area))) {
     if (ui->touch_mode) {
       if (ui->touch_text_focused) {

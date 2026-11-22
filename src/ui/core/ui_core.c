@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _POSIX_C_SOURCE 200809L
 #include "ui_core_internal.h"
+#include "ui_voice_surfaces.h"
 
 // ---------------------------------------------------------------- bus
 
@@ -713,7 +714,7 @@ bool uc_composer_accepts_text(const ccord_ui *ui)
 {
   if (!ui) return false;
   if (ui_is_dm_friends_view(ui) || ui_is_dm_requests_view(ui)) return false;
-  if (ui->stage_channel != CCORD_ID_NONE && !ui_stage_split_active(ui)) return false;
+  if (ui->stage_channel != CCORD_ID_NONE && !ui_stage_chat_active(ui)) return false;
   if (ui_vm_is_active(ui)) return false;
   if (ui_selected_channel(ui) == nullptr) return false;
   return true;
@@ -802,7 +803,18 @@ static void sync_text_input(ccord_ui *ui)
     want = ui->touch_mode ? ui_channel_settings_wants_caret(ui) : true;
     kind = 4;
   } else if (ui->quick_switcher_open || ui->modal_kind != UI_MODAL_NONE) {
-    want = true;
+    if (ui->quick_switcher_open) {
+      want = true;
+    } else if (ui_call_prompt_active(ui)) {
+      want = true;
+    } else if (ui_dave_modal_active(ui) || ui_activity_shelf_active(ui) ||
+               ui->modal_kind == UI_MODAL_MEMBER_VERIFICATION) {
+      want = false;
+    } else if (ui_scheduled_events_active(ui)) {
+      want = ui_scheduled_events_wants_text(ui);
+    } else {
+      want = true;
+    }
     kind = 4;
   } else if (!ui->lightbox_open && !ui->select_open && !ui->menu.open && !ui->go_live_open &&
              !ui->pins_open && !ui->reactions_open && !ui->inbox_open && !ui->shortcuts_open) {

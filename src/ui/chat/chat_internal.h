@@ -327,6 +327,7 @@ void dc_populate_quick_switcher(ccord_ui *ui);
 bool dc_substr_ci(const char *hay, const char *needle, size_t nlen);
 void dc_draw_user_profile_modal(ccord_ui *ui, ccord_renderer *r);
 float dc_activity_block_h(size_t n);
+float dc_activity_block_h_w(size_t n, float w);
 void dc_activity_draw_block(ccord_ui *ui, ccord_renderer *r, const ccord_channel *ch, const ccord_activity_instance *inst, size_t n, float x, float y, float w, ccord_rect clip);
 size_t dc_activity_instance_total(const ccord_ui *ui, const ccord_channel *ch, const ccord_activity_instance **out);
 bool dc_activity_stage_click(ccord_ui *ui, const ccord_channel *ch, float x, float y);

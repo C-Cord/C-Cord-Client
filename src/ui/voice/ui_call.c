@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "ui_internal.h"
+#include "ui_style.h"
 #include "ui_voice_surfaces.h"
 
 #include <ccord/net/admin.h>
@@ -126,22 +127,26 @@ void ui_call_draw(ccord_ui *ui, ccord_renderer *r)
   if (ring) {
     const ccord_channel *ch = ccord_store_channel(ui->d.store, ring->channel_id);
     const char *who = ch ? ui_dm_display_name(ui, ch) : "Unknown";
-    float bw = 380.0f, bh = 64.0f;
-    if (bw > ui->win_w - 16.0f) bw = fmaxf(ui->win_w - 16.0f, 240.0f);
-    ccord_rect box = {(ui->win_w - bw) * 0.5f, 10.0f, bw, bh};
+    float sl = 8.0f + ui->safe_insets.left, sr = 8.0f + ui->safe_insets.right;
+    float avail_w = fmaxf(ui->win_w - sl - sr, 240.0f);
+    float bw = fminf(380.0f, avail_w), bh = 64.0f;
+    ccord_rect box = {sl + (avail_w - bw) * 0.5f, ui->safe_insets.top + 10.0f, bw, bh};
     ui_popup_begin(ui, r, "callring", 0, UI_POPUP_MS, 6.0f);
     ccord_draw_rrect(r, (ccord_rect){box.x - 1.0f, box.y - 1.0f, box.w + 2.0f, box.h + 2.0f}, 9.0f, COL(border_subtle));
     ccord_draw_rrect(r, box, 8.0f, COL(bg_floating));
     ui_icon_speaker(r, box.x + 22.0f, box.y + bh * 0.5f, 20.0f, COL(status_online));
+    float dec_w = bw < 350.0f ? 68.0f : 82.0f;
+    float acc_w = bw < 350.0f ? 66.0f : 78.0f;
+    st->ring_accept = (ccord_rect){box.x + box.w - 10.0f - acc_w, box.y + (bh - 30.0f) * 0.5f, acc_w, 30.0f};
+    st->ring_decline = (ccord_rect){st->ring_accept.x - 6.0f - dec_w, st->ring_accept.y, dec_w, 30.0f};
     char line[160];
     snprintf(line, sizeof line, "Incoming call — %s", who);
     ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
-    ccord_text_draw_ellipsis(r, line, strlen(line), box.x + 40.0f, box.y + 10.0f, box.w - 210.0f, &ts);
+    ccord_text_draw_ellipsis(r, line, strlen(line), box.x + 40.0f, box.y + 10.0f,
+                             fmaxf(st->ring_decline.x - (box.x + 48.0f), 40.0f), &ts);
     ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(text_muted));
     const char *sub = "Ringing…";
     ccord_text_draw(r, sub, strlen(sub), box.x + 40.0f, box.y + 34.0f, &ss, 0.0f);
-    st->ring_decline = (ccord_rect){box.x + box.w - 176.0f, box.y + (bh - 30.0f) * 0.5f, 82.0f, 30.0f};
-    st->ring_accept = (ccord_rect){box.x + box.w - 88.0f, box.y + (bh - 30.0f) * 0.5f, 78.0f, 30.0f};
     ccord_draw_rrect(r, st->ring_decline, 5.0f, COL(danger));
     ccord_draw_rrect(r, st->ring_accept, 5.0f, COL(status_online));
     ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_on_brand));
@@ -246,11 +251,14 @@ void ui_call_draw_header_button(ccord_ui *ui, ccord_renderer *r, float *hdr_btn_
   if (!in_call && ui_dm_channel_is_bot(ui, ch)) return;   // Discord does not expose DM calling for bot accounts
   const ccord_call_state *ring = ui->d.session ? ccord_session_incoming_call(ui->d.session) : nullptr;
   bool ringing_here = ring && ring->channel_id == ch->id;
-  const char *lbl = in_call ? "Leave Call" : (ringing_here ? "Join Call" : "Start Call");
+  const char *lbl = ui->mobile_layout
+                      ? (in_call ? "Leave" : (ringing_here ? "Join" : "Call"))
+                      : (in_call ? "Leave Call" : (ringing_here ? "Join Call" : "Start Call"));
   ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f,
                                   in_call ? COL(text_secondary) : COL(text_on_brand));
   ccord_vec2 bt = ccord_text_measure(r, lbl, strlen(lbl), &bs, 0.0f);
-  float bw = bt.x + 18.0f;
+  float pad = ui->mobile_layout ? 12.0f : 18.0f;
+  float bw = bt.x + pad;
   ccord_rect br = {*hdr_btn_left - bw, cy - 12.0f, bw, 24.0f};
   if (br.x <= min_x) return;
   st->header_btn = br;
@@ -260,7 +268,7 @@ void ui_call_draw_header_button(ccord_ui *ui, ccord_renderer *r, float *hdr_btn_
   ccord_color bg = in_call ? (hov ? COL(bg_item_hover) : COL(bg_tertiary))
                            : (ringing_here ? COL(status_online) : COL(brand));
   ccord_draw_rrect(r, br, 4.0f, bg);
-  ccord_text_draw(r, lbl, strlen(lbl), br.x + 9.0f, br.y + (br.h - bt.y) * 0.5f, &bs, 0.0f);
+  ccord_text_draw(r, lbl, strlen(lbl), br.x + pad * 0.5f, br.y + (br.h - bt.y) * 0.5f, &bs, 0.0f);
   *hdr_btn_left = br.x - 6.0f;
 }
 
@@ -332,9 +340,7 @@ void ui_call_prompt_draw(ccord_ui *ui, ccord_renderer *r)
   bool is_status = st->prompt_kind == UI_VOICE_PROMPT_STATUS;
   ui_popup_begin(ui, r, "voiceprompt", 0, UI_MODAL_MS, 10.0f);
   ccord_draw_rect(r, (ccord_rect){0, 0, ui->win_w, ui->win_h}, COL(overlay));
-  float mw = fminf(fmaxf(ui->win_w - 64.0f, 300.0f), 480.0f);
-  float mh = 190.0f;
-  ccord_rect m = {(ui->win_w - mw) * 0.5f, (ui->win_h - mh) * 0.4f, mw, mh};
+  ccord_rect m = uis_modal_box(ui, 480.0f, 190.0f);
   st->prompt_box = m;
   ccord_draw_rrect(r, (ccord_rect){m.x - 1.0f, m.y - 1.0f, m.w + 2.0f, m.h + 2.0f}, 9.0f, COL(border_subtle));
   ccord_draw_rrect(r, m, 8.0f, COL(bg_secondary));

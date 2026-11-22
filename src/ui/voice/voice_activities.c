@@ -171,10 +171,7 @@ void ui_activity_shelf_draw(ccord_ui *ui, ccord_renderer *r)
   if (st->sel >= n) st->sel = n > 0 ? n - 1u : 0u;
 
   ccord_draw_rect(r, (ccord_rect){0, 0, ui->win_w, ui->win_h}, COL(overlay));
-  float w = 460.0f, h = 480.0f;
-  if (w > ui->win_w - 32.0f && ui->win_w > 64.0f) w = ui->win_w - 32.0f;
-  if (h > ui->win_h - 32.0f && ui->win_h > 64.0f) h = ui->win_h - 32.0f;
-  ccord_rect box = {(ui->win_w - w) * 0.5f, (ui->win_h - h) * 0.5f, w, h};
+  ccord_rect box = uis_modal_box(ui, 460.0f, 480.0f);
   st->box = box;
 
   ui_popup_begin(ui, r, "actshelf", 0, UI_MODAL_MS, 8.0f);
@@ -352,6 +349,12 @@ float dc_activity_block_h(size_t n)
   return n == 0 ? 0.0f : 18.0f + ACT_BANNER_H + (float)n * (ACT_CARD_H + ACT_CARD_GAP) + 6.0f;
 }
 
+float dc_activity_block_h_w(size_t n, float w)
+{
+  float ch = w < 400.0f ? (ACT_CARD_H + 34.0f) : ACT_CARD_H;
+  return n == 0 ? 0.0f : 18.0f + ACT_BANNER_H + (float)n * (ch + ACT_CARD_GAP) + 6.0f;
+}
+
 // https://discord.com/channels/<guild>/<channel>: where the activity runs ("@me" for a DM call).
 static void activity_channel_url(const ccord_channel *ch, char *out, size_t cap)
 {
@@ -407,9 +410,11 @@ void dc_activity_draw_block(ccord_ui *ui, ccord_renderer *r, const ccord_channel
   ccord_text_draw_ellipsis(r, banner, strlen(banner), x, y + 2.0f, w, &bns);
   y += ACT_BANNER_H;
 
+  bool compact_act = w < 400.0f;
+  float card_h = compact_act ? (ACT_CARD_H + 34.0f) : ACT_CARD_H;
   ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
   ccord_text_style ps = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 3.0f, COL(text_muted));
-  for (size_t i = 0; i < n; i++, y += ACT_CARD_H + ACT_CARD_GAP) {
+  for (size_t i = 0; i < n; i++, y += card_h + ACT_CARD_GAP) {
     const ccord_activity_instance *in = &inst[i];
     size_t pc = in->participant_count < CCORD_ACTIVITY_MAX_PARTICIPANTS ? in->participant_count
                                                                         : CCORD_ACTIVITY_MAX_PARTICIPANTS;
@@ -420,7 +425,7 @@ void dc_activity_draw_block(ccord_ui *ui, ccord_renderer *r, const ccord_channel
     st->inst[i].self_in = self_in;
     st->inst[i].participant_count = in->participant_count;
     st->inst[i].card = st->inst[i].join = st->inst[i].leave = st->inst[i].open_browser = (ccord_rect){0, 0, 0, 0};
-    ccord_rect card = {x, y, w, ACT_CARD_H};
+    ccord_rect card = {x, y, w, card_h};
     if (card.y + card.h < clip.y || card.y > clip.y + clip.h) continue;
     ccord_draw_rrect(r, card, 6.0f, COL(bg_secondary));
     st->inst[i].card = activity_clip_rect(card, clip);
@@ -436,23 +441,31 @@ void dc_activity_draw_block(ccord_ui *ui, ccord_renderer *r, const ccord_channel
     }
     const char *name = app && app->name[0] ? app->name : "Activity";
 
-    // Buttons, right-aligned: [Open in browser][Leave] for the user's own instance, [Join] otherwise.
-    float right = card.x + card.w - 12.0f, bcy = card.y + card.h * 0.5f, btn_left = right;
+    // Buttons: right-aligned on desktop, stacked bottom row on compact/mobile widths.
+    float right = card.x + card.w - 12.0f, bcy = compact_act ? (card.y + card.h - 20.0f) : (card.y + card.h * 0.5f);
+    float btn_left = right;
     ccord_rect join = {0, 0, 0, 0}, leave = {0, 0, 0, 0}, open = {0, 0, 0, 0};
     if (self_in) {
-      leave = activity_button(ui, r, right, bcy, 70.0f, "Leave", COL(danger), COL(text_on_brand));
-      open = activity_button(ui, r, leave.x - 8.0f, bcy, 130.0f, "Open in browser", COL(brand), COL(text_on_brand));
+      if (compact_act) {
+        float bw_open = maxf((card.w - 32.0f) * 0.62f, 110.0f);
+        float bw_leave = maxf(card.w - 32.0f - bw_open, 60.0f);
+        leave = activity_button(ui, r, right, bcy, bw_leave, "Leave", COL(danger), COL(text_on_brand));
+        open = activity_button(ui, r, leave.x - 8.0f, bcy, bw_open, "Open in browser", COL(brand), COL(text_on_brand));
+      } else {
+        leave = activity_button(ui, r, right, bcy, 70.0f, "Leave", COL(danger), COL(text_on_brand));
+        open = activity_button(ui, r, leave.x - 8.0f, bcy, 130.0f, "Open in browser", COL(brand), COL(text_on_brand));
+      }
       btn_left = open.x;
     } else {
-      join = activity_button(ui, r, right, bcy, 70.0f, "Join", COL(brand), COL(text_on_brand));
+      float jw = compact_act ? maxf(card.w - 24.0f, 70.0f) : 70.0f;
+      join = activity_button(ui, r, right, bcy, jw, "Join", COL(brand), COL(text_on_brand));
       btn_left = join.x;
     }
     st->inst[i].join = activity_clip_rect(join, clip);
     st->inst[i].leave = activity_clip_rect(leave, clip);
     st->inst[i].open_browser = activity_clip_rect(open, clip);
 
-    float text_w = btn_left - 12.0f - (card.x + 12.0f);
-    if (text_w < 40.0f) text_w = 40.0f;
+    float text_w = compact_act ? maxf(card.w - 24.0f, 40.0f) : maxf(btn_left - 12.0f - (card.x + 12.0f), 40.0f);
     ccord_text_draw_ellipsis(r, name, strlen(name), card.x + 12.0f, card.y + 7.0f, text_w, &ns);
     // Participants: a row of small avatars, then the first names and the overflow count.
     float ax = card.x + 12.0f + 10.0f, ay = card.y + 40.0f;

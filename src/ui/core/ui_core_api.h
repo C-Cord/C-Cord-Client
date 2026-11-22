@@ -276,6 +276,14 @@ ccord_rect ui_voice_btn_rect(const ccord_ui *ui, int slot);  // 0 = camera, 1 = 
 ccord_rect ui_stage_chat_btn(const ccord_ui *ui);
 // Side-by-side stage + chat: true when the user opened Text Chat and the split layout fits.
 bool ui_stage_split_active(const ccord_ui *ui);
+// Mobile full-screen Text Chat toggled from inside a voice/stage channel.
+bool ui_stage_mobile_chat_active(const ccord_ui *ui);
+// Either desktop split Text Chat or mobile full-screen voice Text Chat is visible.
+bool ui_stage_chat_active(const ccord_ui *ui);
+void uc_leave_voice(ccord_ui *ui);
+void uc_open_go_live(ccord_ui *ui);
+void uc_toggle_voice_deafen(ccord_ui *ui);
+void uc_toggle_voice_mute(ccord_ui *ui);
 // The stage's draw/hit area: the split stage pane, or the whole message area when not split.
 ccord_rect ui_stage_area(const ccord_ui *ui);
 // Vertical splitter between the stage pane and text chat pane (zero size when not split).

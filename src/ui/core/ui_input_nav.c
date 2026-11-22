@@ -332,7 +332,7 @@ void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
     ui->dirty = true;
     return;
   }
-  if (ui->stage_channel != CCORD_ID_NONE && ui_in_rect(ev->x, ev->y, ui_stage_area(ui))) {
+  if (ui->stage_channel != CCORD_ID_NONE && !ui_stage_mobile_chat_active(ui) && ui_in_rect(ev->x, ev->y, ui_stage_area(ui))) {
     float max = ui->stage_content_h - ui->stage_view_h;
     ccord_scroller_scroll(&ui->stage_glide, &ui->stage_scroll, dy, max, direct);
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;

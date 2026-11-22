@@ -686,13 +686,36 @@ bool ui_stage_split_active(const ccord_ui *ui)
   return ui && ui->stage_channel != CCORD_ID_NONE && ui->stage_chat_open && ui->layout.stage_split;
 }
 
+bool ui_stage_mobile_chat_active(const ccord_ui *ui)
+{
+  return ui && ui->mobile_layout && ui->stage_channel != CCORD_ID_NONE && ui->stage_chat_open;
+}
+
+bool ui_stage_chat_active(const ccord_ui *ui)
+{
+  return ui_stage_split_active(ui) || ui_stage_mobile_chat_active(ui);
+}
+
 ccord_rect ui_stage_area(const ccord_ui *ui)
 {
-  return ui_stage_split_active(ui) ? ui_rect(ui->layout.stage_pane) : ui_rect(ui->layout.message_area);
+  if (ui_stage_split_active(ui)) return ui_rect(ui->layout.stage_pane);
+  ccord_rect ma = ui_rect(ui->layout.message_area);
+  if (ui && ui->mobile_layout && ui->stage_channel != CCORD_ID_NONE && !ui->stage_chat_open) {
+    float bottom = ui->layout.composer.y + ui->layout.composer.h;
+    if (bottom > ma.y + ma.h) ma.h = bottom - ma.y;
+  }
+  return ma;
 }
 
 ccord_rect ui_stage_chat_btn(const ccord_ui *ui)
 {
+  if (ui_stage_mobile_chat_active(ui)) {
+    const ccord_layout_rect *h = &ui->layout.chat_header;
+    ccord_rect lm = ui_saved_messages_rect(ui);
+    if (lm.w <= 0.0f) lm = ui_pin_rect(ui);
+    float right = lm.w > 0.0f ? (lm.x - 6.0f) : (h->x + h->w - 8.0f);
+    return (ccord_rect){right - 68.0f, h->y + (h->h - 26.0f) * 0.5f, 68.0f, 26.0f};
+  }
   ccord_rect ma = ui_stage_area(ui);
   return (ccord_rect){ma.x + ma.w - 8.0f - 110.0f, ma.y + 10.0f, 110.0f, 28.0f};
 }
@@ -799,12 +822,7 @@ ccord_rect ui_pins_item_rect(const ccord_ui *ui, size_t index)
 
 ccord_rect ui_go_live_rect(const ccord_ui *ui)
 {
-  float w = 560.0f, h = 520.0f;
-  if (w > ui->win_w - 60.0f) w = ui->win_w - 60.0f;
-  if (h > ui->win_h - 60.0f) h = ui->win_h - 60.0f;
-  if (w < 200.0f) w = ui->win_w;
-  if (h < 200.0f) h = ui->win_h;
-  return uis_modal_box(ui, w, h);
+  return uis_modal_box(ui, 560.0f, 520.0f);
 }
 
 int ui_go_live_option_count(int category)
@@ -827,20 +845,28 @@ ccord_rect ui_go_live_option_rect(const ccord_ui *ui, int category, int option)
   }
   int count = ui_go_live_option_count(category);
   if (count <= 0) count = 1;
-  float x0 = m.x + 136.0f;
-  float w = m.w - 136.0f - 36.0f;
+  bool compact = m.w < 440.0f;
+  float x0 = compact ? (m.x + 24.0f) : (m.x + 136.0f);
+  float w = compact ? (m.w - 48.0f) : (m.w - 136.0f - 36.0f);
   if (w < 80.0f) w = 80.0f;
-  float gap = 8.0f;
+  float gap = compact ? 6.0f : 8.0f;
   float cw = (w - gap * (float)(count - 1)) / (float)count;
   if (cw < 20.0f) cw = 20.0f;
-  float ry = (category == 3) ? (m.y + 331.0f) : (m.y + 369.0f);
+  float ry;
+  if (compact) {
+    float qy = m.y + 306.0f;
+    ry = (category == 3) ? (qy + 22.0f) : (qy + 70.0f);
+  } else {
+    ry = (category == 3) ? (m.y + 331.0f) : (m.y + 369.0f);
+  }
   return (ccord_rect){x0 + (float)option * (cw + gap), ry, cw, UIS_H_BTN_SM};
 }
 
 ccord_rect ui_go_live_start_rect(const ccord_ui *ui)
 {
   ccord_rect m = ui_go_live_rect(ui);
-  return (ccord_rect){m.x + m.w - 24.0f - 132.0f, m.y + m.h - 55.0f, 132.0f, UIS_H_BTN};
+  float pad = m.w < 440.0f ? 16.0f : 24.0f;
+  return (ccord_rect){m.x + m.w - pad - 132.0f, m.y + m.h - 52.0f, 132.0f, UIS_H_BTN};
 }
 
 ccord_rect ui_go_live_close_rect(const ccord_ui *ui)
@@ -852,6 +878,9 @@ ccord_rect ui_go_live_close_rect(const ccord_ui *ui)
 ccord_rect ui_go_live_audio_rect(const ccord_ui *ui)
 {
   ccord_rect m = ui_go_live_rect(ui);
+  if (m.w < 440.0f) {
+    return (ccord_rect){m.x + 16.0f, m.y + 418.0f, m.w - 32.0f, 28.0f};
+  }
   return (ccord_rect){m.x + 24.0f, m.y + 416.0f, m.w - 48.0f, 30.0f};
 }
 

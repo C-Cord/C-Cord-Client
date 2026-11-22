@@ -173,7 +173,7 @@ hover_state uc_compute_hover(ccord_ui *ui)
     h.msg_req_ctrl = true;
   } else if (ui->mv.composer_btn.w > 0.0f && ui_in_rect(x, y, ui->mv.composer_btn)) {
     h.msg_req_ctrl = true;   // the "Complete the rules" button gets the same pointer cursor
-  } else if ((ui->stage_channel == CCORD_ID_NONE || ui_stage_split_active(ui)) && ui_is_dm_requests_view(ui) &&
+  } else if ((ui->stage_channel == CCORD_ID_NONE || ui_stage_chat_active(ui)) && ui_is_dm_requests_view(ui) &&
              ui_in_rect(x, y, ui_rect(l->message_area))) {
     for (size_t i = 0; i < ui->ndm_request_hits; i++) {
       if (ui_in_rect(x, y, ui->dm_request_hits[i].card_rect)) {
@@ -182,7 +182,7 @@ hover_state uc_compute_hover(ccord_ui *ui)
       }
     }
     return h;
-  } else if ((ui->stage_channel == CCORD_ID_NONE || ui_stage_split_active(ui)) && ui_in_rect(x, y, ui_rect(l->message_area))) {
+  } else if ((ui->stage_channel == CCORD_ID_NONE || ui_stage_chat_active(ui)) && ui_in_rect(x, y, ui_rect(l->message_area))) {
     if (ui->new_bar_rect.w > 0.0f && ui_in_rect(x, y, ui->new_bar_rect)) {
       h.new_bar = true;
       return h;
@@ -487,7 +487,7 @@ bool uc_update_hover(ccord_ui *ui)
       } else if (!ui->discovery_open && !ui->msg_req_banner_visible && !ui_is_dm_requests_view(ui) &&
                  ui_in_rect(ui->mx, ui->my, box)) {
         k = CCORD_CURSOR_TEXT;
-      } else if (!ui->discovery_open && (ui->stage_channel == CCORD_ID_NONE || ui_stage_split_active(ui)) &&
+      } else if (!ui->discovery_open && (ui->stage_channel == CCORD_ID_NONE || ui_stage_chat_active(ui)) &&
                  !ui_is_dm_friends_view(ui) && !ui_is_dm_requests_view(ui) &&
                  !(call_bar.w > 0.0f && ui_in_rect(ui->mx, ui->my, call_bar)) &&
                  ui_in_rect(ui->mx, ui->my, ui_rect(ui->layout.message_area))) {
