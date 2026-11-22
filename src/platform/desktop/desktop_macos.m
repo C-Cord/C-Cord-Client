@@ -437,6 +437,30 @@ bool ccord_desktop_take_activation_token(ccord_desktop *d, char *out, size_t cap
   return false;
 }
 
+size_t ccord_desktop_close_channel_notifications(ccord_desktop *d, uint64_t channel_id, uint64_t upto_message_id)
+{
+  if (!d || channel_id == 0) return 0;
+  size_t closed = 0;
+  uint32_t ids[DESKTOP_NOTIFY_MAP_MAX];
+  for (size_t i = 0; i < DESKTOP_NOTIFY_MAP_MAX; i++) {
+    desktop_notify_entry *e = &d->notify_map[i];
+    if (e->id == 0 || e->target.channel_id != channel_id) continue;
+    if (upto_message_id != 0 && e->target.message_id != 0 && e->target.message_id > upto_message_id) continue;
+    ids[closed++] = e->id;
+    memset(e, 0, sizeof *e);
+  }
+  if (closed > 0 && !d->offline && d->notify_ok && d->has_bundle) {
+    @autoreleasepool {
+      NSMutableArray<NSString *> *idents = [NSMutableArray arrayWithCapacity:closed];
+      for (size_t i = 0; i < closed; i++) {
+        [idents addObject:[NSString stringWithFormat:@"%u", (unsigned)ids[i]]];
+      }
+      [[UNUserNotificationCenter currentNotificationCenter] removeDeliveredNotificationsWithIdentifiers:idents];
+    }
+  }
+  return closed;
+}
+
 bool ccord_desktop_tray_available(const ccord_desktop *d) { return d && !d->offline && d->tray_ok; }
 
 void ccord_desktop_set_badge(ccord_desktop *d, uint32_t unread, uint32_t mentions, uint32_t count)

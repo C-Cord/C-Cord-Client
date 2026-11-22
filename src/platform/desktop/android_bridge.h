@@ -34,6 +34,7 @@ bool ccord_android_set_orientation(int mode);
 bool ccord_android_keep_screen_on(bool on);
 bool ccord_android_notify_message(uint32_t id, const char *title, const char *body,
                                   uint64_t guild_id, uint64_t channel_id, uint64_t message_id);
+void ccord_android_cancel_notification(uint32_t id);
 void ccord_android_set_voice_service(bool active, const char *channel_name, bool muted, bool deafened);
 void ccord_android_set_keep_alive(bool active);
 void ccord_android_on_fullscreen_changed(bool fullscreen);

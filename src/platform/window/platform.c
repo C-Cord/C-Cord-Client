@@ -1129,6 +1129,11 @@ void ccord_platform_inject_notify_activation_token(ccord_platform *p, uint32_t n
   if (p) ccord_desktop_inject_activation_token(p->desktop, notification_id, token);
 }
 
+size_t ccord_platform_close_channel_notifications(ccord_platform *p, uint64_t channel_id, uint64_t upto_message_id)
+{
+  return p ? ccord_desktop_close_channel_notifications(p->desktop, channel_id, upto_message_id) : 0;
+}
+
 uint32_t ccord_platform_notify_count(const ccord_platform *p)
 {
   return p ? p->notify_count : 0;

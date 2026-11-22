@@ -236,6 +236,47 @@ void ccord_desktop_inject_notify_closed(ccord_desktop *d, uint32_t id)
 }
 
 #if CCORD_HAVE_PORTAL
+static void close_notify_done(GObject *source, GAsyncResult *res, gpointer user_data)
+{
+  ccord_desktop *d = user_data;
+  GError *gerr = nullptr;
+  GVariant *ret = g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), res, &gerr);
+  if (gerr) {
+    if (!d->dead) CCORD_LOG_D("desktop: CloseNotification failed: %s", gerr->message);
+    g_error_free(gerr);
+  }
+  if (ret) g_variant_unref(ret);
+  dbus_desktop_unref(d);
+}
+#endif
+
+size_t ccord_desktop_close_channel_notifications(ccord_desktop *d, uint64_t channel_id, uint64_t upto_message_id)
+{
+  if (!d || channel_id == 0) return 0;
+  size_t closed = 0;
+  for (size_t i = 0; i < DESKTOP_NOTIFY_MAP_MAX; i++) {
+    desktop_notify_entry *e = &d->notify_map[i];
+    if (e->id == 0 || e->target.channel_id != channel_id) continue;
+    if (upto_message_id != 0 && e->target.message_id != 0 && e->target.message_id > upto_message_id) continue;
+    uint32_t nid = e->id;
+    memset(e, 0, sizeof *e);
+    if (d->pending_activation_id == nid) {
+      d->pending_activation_id = 0;
+      d->pending_activation_token[0] = '\0';
+    }
+#if CCORD_HAVE_PORTAL
+    if (d->bus && d->notifications_available) {
+      g_dbus_connection_call(d->bus, NOTIFY_NAME, NOTIFY_PATH, NOTIFY_NAME, "CloseNotification",
+                             g_variant_new("(u)", (guint32)nid), nullptr, G_DBUS_CALL_FLAGS_NONE, 1500,
+                             d->cancellable, close_notify_done, dbus_desktop_ref(d));
+    }
+#endif
+    closed++;
+  }
+  return closed;
+}
+
+#if CCORD_HAVE_PORTAL
 typedef struct notify_call {
   ccord_desktop *d;                // holds a ref
   bool has_target;

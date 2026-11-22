@@ -420,6 +420,20 @@ bool ccord_android_notify_message(uint32_t id, const char *title, const char *bo
   return ok;
 }
 
+void ccord_android_cancel_notification(uint32_t id)
+{
+  if (id == 0) return;
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls, "cancelNotification", "(I)V");
+    if (mid) (*env)->CallStaticVoidMethod(env, cls, mid, (jint)id);
+    clear_exception(env);
+  }
+  android_env_release(attached);
+}
+
 void ccord_android_set_voice_service(bool active, const char *channel_name, bool muted, bool deafened)
 {
   bool attached = false;
@@ -987,6 +1001,23 @@ bool ccord_desktop_take_activation_token(ccord_desktop *d, char *out, size_t cap
   (void)out;
   (void)cap;
   return false;
+}
+
+size_t ccord_desktop_close_channel_notifications(ccord_desktop *d, uint64_t channel_id, uint64_t upto_message_id)
+{
+  if (!d || channel_id == 0) return 0;
+  size_t closed = 0;
+  for (size_t i = 0; i < ANDROID_NOTIFY_MAP_CAP; i++) {
+    notify_entry *e = &d->map[i];
+    if (!e->used || e->target.channel_id != channel_id) continue;
+    if (upto_message_id != 0 && e->target.message_id != 0 && e->target.message_id > upto_message_id) continue;
+    uint32_t nid = e->id;
+    e->used = false;
+    e->id = 0;
+    if (!d->offline && nid != 0) ccord_android_cancel_notification(nid);
+    closed++;
+  }
+  return closed;
 }
 
 bool ccord_desktop_tray_available(const ccord_desktop *d) { (void)d; return false; }

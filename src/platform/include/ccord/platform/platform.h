@@ -114,6 +114,9 @@ size_t ccord_platform_notify_map_count(const ccord_platform *p);
 void ccord_platform_inject_notify_action(ccord_platform *p, uint32_t notification_id, const char *action_key);
 void ccord_platform_inject_notify_closed(ccord_platform *p, uint32_t notification_id);
 void ccord_platform_inject_notify_activation_token(ccord_platform *p, uint32_t notification_id, const char *token);
+// Dismisses active OS notifications targeting `channel_id` (and message_id <= upto_message_id when non-zero)
+// and drops their click-routing entries. Returns how many notifications were dismissed.
+size_t ccord_platform_close_channel_notifications(ccord_platform *p, uint64_t channel_id, uint64_t upto_message_id);
 
 // Desktop services: DBus notifications, SNI tray/unread badge, GlobalShortcuts portal ----
 // Honest capability queries: false when no session bus / service is reachable (e.g. headless).

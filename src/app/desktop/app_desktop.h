@@ -127,6 +127,9 @@ void ccord_app_desktop_pump(ccord_app_desktop *d, bool virtual_clock, int64_t no
 uint32_t ccord_app_desktop_next_wait_ms(const ccord_app_desktop *d, int64_t now_unix_ms);
 // Recomputes and pushes total unread/mention counts to the SNI tray only when the store revision moved.
 void ccord_app_desktop_sync_badge(ccord_app_desktop *d);
+// Dismisses active OS notifications for channels the user is actively reading (focused window) or whose
+// read position has advanced (e.g. Mark as Read or read on another device).
+void ccord_app_desktop_sync_notifications(ccord_app_desktop *d);
 // Applies a CCORD_EV_HOTKEY id to the session voice state; false when not in voice / unknown id.
 bool ccord_app_desktop_handle_hotkey(ccord_app_desktop *d, const char *shortcut_id, ccord_error *err);
 // Theme/zoom changes need one forced redraw; true once per change (the caller clears it).
@@ -168,5 +171,6 @@ typedef struct ccord_app_desktop_debug {
   uint64_t voice_state_pushes;       // tray voice-state syncs (only when mute/deafen changed)
   bool last_voice_muted, last_voice_deafened;   // last state pushed to the tray
   uint64_t quick_css_applies;        // ccord_theme_apply_quick_css calls (including base re-applies)
+  uint64_t notifications_closed;     // active OS notifications dismissed because their channel was read
 } ccord_app_desktop_debug;
 void ccord_app_desktop_get_debug(const ccord_app_desktop *d, ccord_app_desktop_debug *out);

@@ -47,6 +47,9 @@ void ccord_desktop_inject_activation_token(ccord_desktop *d, uint32_t id, const 
 // Consumes the most recent ActivationToken delivered before ActionInvoked (Wayland xdg-activation token
 // or X11 "_TIME<ts>"). Returns true and writes a NUL-terminated string into `out` when one was pending.
 bool ccord_desktop_take_activation_token(ccord_desktop *d, char *out, size_t cap);
+// Dismisses active OS notifications targeting `channel_id` (and message_id <= upto_message_id when non-zero),
+// removes them from the click-routing table, and requests the daemon to close them. Returns count dismissed.
+size_t ccord_desktop_close_channel_notifications(ccord_desktop *d, uint64_t channel_id, uint64_t upto_message_id);
 
 bool ccord_desktop_tray_available(const ccord_desktop *d);
 // unread/mentions are the store totals; count is the number shown on the tray icon (mentions + unread DMs).

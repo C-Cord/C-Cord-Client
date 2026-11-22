@@ -533,6 +533,34 @@ bool ccord_desktop_take_activation_token(ccord_desktop *d, char *out, size_t cap
   return false;
 }
 
+size_t ccord_desktop_close_channel_notifications(ccord_desktop *d, uint64_t channel_id, uint64_t upto_message_id)
+{
+  if (!d || channel_id == 0) return 0;
+  size_t closed = 0;
+  bool clear_balloon = false;
+  for (size_t i = 0; i < DESKTOP_NOTIFY_MAP_MAX; i++) {
+    desktop_notify_entry *e = &d->notify_map[i];
+    if (e->id == 0 || e->target.channel_id != channel_id) continue;
+    if (upto_message_id != 0 && e->target.message_id != 0 && e->target.message_id > upto_message_id) continue;
+    if (e->id == d->active_balloon_id) clear_balloon = true;
+    memset(e, 0, sizeof *e);
+    closed++;
+  }
+  if (clear_balloon) {
+    d->active_balloon_id = 0;
+    if (!d->offline && d->tray_added && d->hwnd) {
+      NOTIFYICONDATAW nid;
+      memset(&nid, 0, sizeof nid);
+      nid.cbSize = sizeof nid;
+      nid.hWnd = d->hwnd;
+      nid.uID = TRAY_ICON_UID;
+      nid.uFlags = NIF_INFO;
+      (void)Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+  }
+  return closed;
+}
+
 bool ccord_desktop_tray_available(const ccord_desktop *d) { return d && !d->offline && d->tray_added; }
 
 void ccord_desktop_set_badge(ccord_desktop *d, uint32_t unread, uint32_t mentions, uint32_t count)

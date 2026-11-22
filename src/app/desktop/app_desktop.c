@@ -193,6 +193,15 @@ void ccord_app_desktop_prepare_renderer(const ccord_app_startup *startup)
 
 // ---------------------------------------------------------------- object
 
+#define APP_TRACKED_NOTIFY_MAX 32u
+
+typedef struct app_tracked_notify {
+  ccord_id channel_id;
+  ccord_id message_id;
+  ccord_id initial_last_read_id;   // channel's last_read_id when the notification was delivered
+  uint64_t seq;
+} app_tracked_notify;
+
 struct ccord_app_desktop {
   ccord_store *store;
   ccord_session *session;
@@ -226,6 +235,11 @@ struct ccord_app_desktop {
   bool badge_pushed;
   bool voice_sync_valid;          // tray voice state: push only when mute/deafen actually changed
   bool redraw;
+  app_tracked_notify tracked_notifs[APP_TRACKED_NOTIFY_MAX];
+  size_t tracked_notif_count;
+  uint64_t tracked_notif_seq;
+  uint64_t notif_sync_rev;
+  bool notif_sync_valid;
   ccord_app_desktop_debug dbg;
 };
 
@@ -741,6 +755,79 @@ void ccord_app_desktop_set_sound_hook(ccord_app_desktop *d, ccord_app_desktop_so
   if (d) d->sound_hook = fn;
 }
 
+static void desktop_track_notification(ccord_app_desktop *d, ccord_id channel_id, ccord_id message_id)
+{
+  if (!d || channel_id == CCORD_ID_NONE) return;
+  const ccord_channel *ch = d->store ? ccord_store_channel(d->store, channel_id) : nullptr;
+  app_tracked_notify entry = {
+    .channel_id = channel_id,
+    .message_id = message_id,
+    .initial_last_read_id = ch ? ch->last_read_id : CCORD_ID_NONE,
+    .seq = ++d->tracked_notif_seq,
+  };
+  if (d->tracked_notif_count < APP_TRACKED_NOTIFY_MAX) {
+    d->tracked_notifs[d->tracked_notif_count++] = entry;
+  } else {
+    size_t oldest = 0;
+    for (size_t i = 1; i < APP_TRACKED_NOTIFY_MAX; i++) {
+      if (d->tracked_notifs[i].seq < d->tracked_notifs[oldest].seq) oldest = i;
+    }
+    d->tracked_notifs[oldest] = entry;
+  }
+  d->notif_sync_valid = false;
+}
+
+void ccord_app_desktop_sync_notifications(ccord_app_desktop *d)
+{
+  if (!d || !d->platform || !d->store) return;
+  if (d->tracked_notif_count == 0 && ccord_platform_notify_map_count(d->platform) == 0) return;
+
+  // Rule 1: while the window is focused and actively reading the selected channel, dismiss all
+  // active OS notifications belonging to that channel (e.g. restored from minimized/unfocused).
+  bool focused = ccord_platform_window_focused(d->platform);
+  bool reading = focused && (!d->ui || ccord_ui_is_reading(d->ui));
+  if (reading) {
+    ccord_id sel = ccord_store_selected_channel(d->store);
+    if (sel != CCORD_ID_NONE) {
+      size_t closed = ccord_platform_close_channel_notifications(d->platform, sel, 0);
+      if (closed > 0) d->dbg.notifications_closed += closed;
+      size_t w = 0;
+      for (size_t i = 0; i < d->tracked_notif_count; i++) {
+        if (d->tracked_notifs[i].channel_id != sel) d->tracked_notifs[w++] = d->tracked_notifs[i];
+      }
+      d->tracked_notif_count = w;
+    }
+  }
+
+  // Rule 2: if a tracked channel's read position advanced past the notified message (Mark as Read
+  // or read on another client) or the channel disappeared, dismiss those notifications even while unfocused.
+  if (d->tracked_notif_count > 0) {
+    uint64_t rev = ccord_store_revision(d->store);
+    if (!d->notif_sync_valid || rev != d->notif_sync_rev) {
+      d->notif_sync_rev = rev;
+      d->notif_sync_valid = true;
+      size_t w = 0;
+      for (size_t i = 0; i < d->tracked_notif_count; i++) {
+        app_tracked_notify e = d->tracked_notifs[i];
+        const ccord_channel *ch = ccord_store_channel(d->store, e.channel_id);
+        if (!ch) {
+          size_t closed = ccord_platform_close_channel_notifications(d->platform, e.channel_id, 0);
+          if (closed > 0) d->dbg.notifications_closed += closed;
+          continue;
+        }
+        if (ch->last_read_id != CCORD_ID_NONE && ch->last_read_id > e.initial_last_read_id &&
+            (e.message_id == CCORD_ID_NONE || ch->last_read_id >= e.message_id)) {
+          size_t closed = ccord_platform_close_channel_notifications(d->platform, e.channel_id, ch->last_read_id);
+          if (closed > 0) d->dbg.notifications_closed += closed;
+          continue;
+        }
+        d->tracked_notifs[w++] = e;
+      }
+      d->tracked_notif_count = w;
+    }
+  }
+}
+
 bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n, int64_t now_unix_ms)
 {
   if (!d || !n) return false;
@@ -774,6 +861,7 @@ bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n
     d->dbg.notifications_suppressed++;
     return false;
   }
+  desktop_track_notification(d, n->channel_id, n->message_id);
   d->dbg.notifications_delivered++;
   // On mobile while backgrounded, the OS notification channel plays the native alert sound/vibration
   // and respects system DND/vibrate mode without opening an SDL audio playback stream.
@@ -834,6 +922,7 @@ void ccord_app_desktop_pump(ccord_app_desktop *d, bool virtual_clock, int64_t no
     }
   }
   ccord_app_desktop_sync_badge(d);
+  ccord_app_desktop_sync_notifications(d);
   desktop_sync_voice_state(d);
 }
 

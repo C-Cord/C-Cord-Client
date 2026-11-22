@@ -501,6 +501,8 @@ static void run_interactive(app *a)
     if (a->resume_needs_draw && ccord_app_desktop_should_draw(a->platform)) {
       a->resume_needs_draw = false;
       (void)ccord_ui_update(a->ui, app_now_ms(a));
+      ccord_app_desktop_sync_badge(a->desktop);
+      ccord_app_desktop_sync_notifications(a->desktop);
       app_draw_frame(a);
       ccord_platform_notify_first_frame(a->platform);
       redraw = false;
@@ -557,6 +559,8 @@ static void run_interactive(app *a)
       fast_draws = 0;
     } else {
       bool upd = ccord_ui_update(a->ui, app_now_ms(a));
+      ccord_app_desktop_sync_badge(a->desktop);
+      ccord_app_desktop_sync_notifications(a->desktop);
       if (upd || redraw) {
         uint64_t dt0 = app_now_ms(a);
         app_draw_frame(a);

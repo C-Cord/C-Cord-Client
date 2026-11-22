@@ -342,6 +342,18 @@ object CCordBridge {
     }
 
     @JvmStatic
+    fun cancelNotification(id: Int) {
+        if (id <= 0) return
+        val ctx = activityRef?.get() ?: appContext ?: return
+        try {
+            val nm = ctx.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager ?: return
+            nm.cancel(id)
+        } catch (t: Throwable) {
+            Log.w(TAG, "cancelNotification failed", t)
+        }
+    }
+
+    @JvmStatic
     fun setKeepAliveService(active: Boolean) {
         val ctx = activityRef?.get() ?: appContext ?: return
         CCordVoiceService.updateKeepAliveState(ctx, active)

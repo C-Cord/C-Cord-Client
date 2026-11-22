@@ -597,6 +597,93 @@ static void test_notify_delivery(void)
   CT_CHECK(dbg().notifications_delivered == before.notifications_delivered + 1);
 }
 
+// Active OS notifications for the open DM channel clear automatically when the user pops the client
+// back up and focuses it, and notifications for any channel clear when its read state advances elsewhere.
+static void test_notify_auto_clear_on_focus_and_read(void)
+{
+  ccord_error err;
+  ccord_id prev_guild = ccord_store_selected_guild(F.store);
+  ccord_id prev_chan = ccord_store_selected_channel(F.store);
+  // Clear any leftover entries from earlier notification delivery tests.
+  const ccord_channel *prev_ch = ccord_store_channel_at(F.store, HQ, 1);
+  if (prev_ch) (void)ccord_platform_close_channel_notifications(F.platform, prev_ch->id, 0);
+
+  // Open a DM with Ada, select it, and actively view it at the bottom.
+  CT_CHECK(ccord_session_open_dm(F.session, ADA, &err) == CCORD_OK);
+  frame(6);
+  ccord_id dm_ch = CCORD_ID_NONE;
+  for (size_t i = 0; i < ccord_store_channel_count(F.store, CCORD_DM_GUILD_ID); i++) {
+    const ccord_channel *c = ccord_store_channel_at(F.store, CCORD_DM_GUILD_ID, i);
+    if (c && c->user_id == ADA) { dm_ch = c->id; break; }
+  }
+  CT_CHECK(dm_ch != CCORD_ID_NONE);
+  if (dm_ch == CCORD_ID_NONE) return;
+  CT_CHECK(ccord_session_select_guild(F.session, CCORD_DM_GUILD_ID, &err) == CCORD_OK);
+  CT_CHECK(ccord_session_select_channel(F.session, dm_ch, &err) == CCORD_OK);
+  ccord_platform_set_window_focused(F.platform, true);
+  send_ev((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = true});
+  frame(10);
+  CT_CHECK(ccord_store_selected_guild(F.store) == CCORD_DM_GUILD_ID && ccord_store_selected_channel(F.store) == dm_ch);
+
+  // Unfocus / minimize while viewing that DM, then receive a new DM message and deliver its OS notification.
+  send_ev((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = false});
+  ccord_platform_set_window_focused(F.platform, false);
+  ccord_id dm_msg = CCORD_ID_NONE;
+  CT_CHECK(ccord_mock_post_rich_message(F.transport, dm_ch, ADA, "ping while minimized", nullptr, &dm_msg, &err) ==
+           CCORD_OK);
+  frame(4);
+  const ccord_channel *dc = ccord_store_channel(F.store, dm_ch);
+  CT_CHECK(dc && dc->unread_count >= 1 && dc->mention_count >= 1);
+  ccord_app_desktop_pump(F.desktop, false, 1793534400000LL);
+  uint32_t dm_nid = ccord_platform_last_notify_id(F.platform);
+  ccord_notify_target got = {0};
+  CT_CHECK(dm_nid != 0 && ccord_platform_notify_target_for(F.platform, dm_nid, &got) && got.channel_id == dm_ch);
+  // Still unfocused: notification must remain active.
+  ccord_app_desktop_sync_notifications(F.desktop);
+  CT_CHECK(ccord_platform_notify_target_for(F.platform, dm_nid, &got));
+
+  // Pop the client back up / focus while still viewing that same DM: auto-ack + notification clear.
+  ccord_app_desktop_debug before = dbg();
+  ccord_platform_set_window_focused(F.platform, true);
+  send_ev((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = true});
+  frame(20);
+  ccord_app_desktop_sync_badge(F.desktop);
+  ccord_app_desktop_sync_notifications(F.desktop);
+  dc = ccord_store_channel(F.store, dm_ch);
+  CT_CHECK(dc && dc->unread_count == 0 && dc->mention_count == 0);
+  CT_CHECK(!ccord_platform_notify_target_for(F.platform, dm_nid, &got));
+  CT_CHECK(dbg().notifications_closed >= before.notifications_closed + 1);
+
+  // Rule 2: notification in a non-selected channel clears even while unfocused once last_read_id advances.
+  const ccord_channel *other = ccord_store_channel_at(F.store, HQ, 1);
+  CT_CHECK(other != nullptr);
+  if (other) {
+    ccord_id other_id = other->id;
+    ccord_id next_msg = other->last_read_id + 100u;
+    send_ev((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = false});
+    ccord_platform_set_window_focused(F.platform, false);
+    ccord_notification on = {.guild_id = HQ, .channel_id = other_id, .message_id = next_msg, .author_id = ADA,
+                             .is_dm = false, .is_mention = true};
+    CT_CHECK(ccord_app_desktop_deliver(F.desktop, &on, 1793534401000LL));
+    uint32_t onid = ccord_platform_last_notify_id(F.platform);
+    CT_CHECK(ccord_platform_notify_target_for(F.platform, onid, &got) && got.channel_id == other_id);
+    // Unread hasn't advanced yet: stays active.
+    ccord_app_desktop_sync_notifications(F.desktop);
+    CT_CHECK(ccord_platform_notify_target_for(F.platform, onid, &got));
+    // Read on another device (or Mark as Read): last_read_id moves past next_msg -> notification dismissed.
+    CT_CHECK(ccord_store_apply_read(F.store, other_id, next_msg, 0, &err) == CCORD_OK);
+    ccord_app_desktop_sync_notifications(F.desktop);
+    CT_CHECK(!ccord_platform_notify_target_for(F.platform, onid, &got));
+  }
+
+  // Restore focus and prior channel selection for subsequent tests.
+  ccord_platform_set_window_focused(F.platform, true);
+  send_ev((ccord_input_event){.type = CCORD_IN_FOCUS, .focused = true});
+  if (prev_guild != CCORD_ID_NONE) (void)ccord_session_select_guild(F.session, prev_guild, &err);
+  if (prev_chan != CCORD_ID_NONE) (void)ccord_session_select_channel(F.session, prev_chan, &err);
+  frame(4);
+}
+
 static int g_hook_calls;
 static bool g_hook_mention;
 static bool g_hook_handles = true;
@@ -1268,6 +1355,7 @@ int main(int argc, char **argv)
   test_badge_sync();
   test_notify_truth_table();
   test_notify_delivery();
+  test_notify_auto_clear_on_focus_and_read();
   test_notify_sound_hook();
   test_hotkeys();
   test_voice_state_sync();

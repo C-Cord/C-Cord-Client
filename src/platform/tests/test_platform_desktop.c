@@ -225,6 +225,33 @@ static void test_notify_click_offline(ccord_platform *p)
   CT_CHECK(ccord_platform_notify_map_count(p) == 32);
   CT_CHECK(!ccord_platform_notify_target_for(p, first, &got));
   CT_CHECK(ccord_platform_notify_target_for(p, last, &got) && got.message_id == 199);
+
+  // Close-by-channel dismisses matching entries (all or up to message_id) and leaves other channels intact.
+  CT_CHECK(ccord_platform_close_channel_notifications(p, 22, 0) == 32);
+  CT_CHECK(ccord_platform_notify_map_count(p) == 0);
+  ccord_notify_target ta = {.guild_id = 11, .channel_id = 22, .message_id = 30};
+  ccord_notify_target tb = {.guild_id = 11, .channel_id = 22, .message_id = 50};
+  ccord_notify_target tc = {.guild_id = 11, .channel_id = 99, .message_id = 40};
+  CT_CHECK(ccord_platform_notify_message(p, "a", "m1", &ta));
+  uint32_t ida = ccord_platform_last_notify_id(p);
+  CT_CHECK(ccord_platform_notify_message(p, "b", "m2", &tb));
+  uint32_t idb = ccord_platform_last_notify_id(p);
+  CT_CHECK(ccord_platform_notify_message(p, "c", "m3", &tc));
+  uint32_t idc = ccord_platform_last_notify_id(p);
+  CT_CHECK(ccord_platform_notify_map_count(p) == 3);
+  CT_CHECK(ccord_platform_close_channel_notifications(p, 22, 40) == 1);
+  CT_CHECK(!ccord_platform_notify_target_for(p, ida, &got));
+  CT_CHECK(ccord_platform_notify_target_for(p, idb, &got) && got.message_id == 50);
+  CT_CHECK(ccord_platform_notify_target_for(p, idc, &got) && got.channel_id == 99);
+  CT_CHECK(ccord_platform_close_channel_notifications(p, 22, 0) == 1);
+  CT_CHECK(!ccord_platform_notify_target_for(p, idb, &got));
+  CT_CHECK(ccord_platform_notify_map_count(p) == 1);
+  // Activation token injection before ActionInvoked keeps click routing working and is safe to consume on show.
+  ccord_platform_inject_notify_activation_token(p, idc, "plasma_offline_TIME12345");
+  ccord_platform_inject_notify_action(p, idc, "default");
+  CT_CHECK(g_clicks == 2 && g_click_target.channel_id == 99 && g_click_target.message_id == 40);
+  CT_CHECK(ccord_platform_close_channel_notifications(p, 99, 0) == 1);
+  CT_CHECK(ccord_platform_notify_map_count(p) == 0);
   ccord_platform_set_notify_click_callback(p, nullptr, nullptr);
 }
 
@@ -470,12 +497,15 @@ typedef struct {
   GDBusConnection *conn;
   guint names_acquired;
   guint notify_count;
+  guint32 notify_next_id;    // 0 = fixed id 42 (legacy assertions); >0 = incrementing ids
   char notify_app[64];
   char notify_icon[64];
   char notify_desktop_entry[64];
   char notify_summary[256];
   char notify_body[256];
   char notify_actions[64];   // the action list of the last Notify: keys and labels joined by ','
+  guint close_calls;
+  guint32 closed_ids[16];
   guint tray_registrations;
   char tray_service[128];
   guint new_status_signals;
@@ -506,6 +536,9 @@ static const char k_mock_notify_xml[] =
     "    <arg type='s' name='body' direction='in'/><arg type='as' name='actions' direction='in'/>"
     "    <arg type='a{sv}' name='hints' direction='in'/><arg type='i' name='timeout' direction='in'/>"
     "    <arg type='u' name='id' direction='out'/>"
+    "  </method>"
+    "  <method name='CloseNotification'>"
+    "    <arg type='u' name='id' direction='in'/>"
     "  </method>"
     "</interface></node>";
 
@@ -637,6 +670,16 @@ static void mock_notify_call(GDBusConnection *connection, const gchar *sender, c
   (void)object_path;
   (void)interface_name;
   mock_state *m = user_data;
+  if (strcmp(method_name, "CloseNotification") == 0) {
+    guint32 nid = 0;
+    g_variant_get(parameters, "(u)", &nid);
+    if (m->close_calls < (guint)(sizeof m->closed_ids / sizeof m->closed_ids[0])) {
+      m->closed_ids[m->close_calls] = nid;
+    }
+    m->close_calls++;
+    g_dbus_method_invocation_return_value(invocation, nullptr);
+    return;
+  }
   if (strcmp(method_name, "Notify") != 0) {
     g_dbus_method_invocation_return_error(invocation, G_DBUS_ERROR, G_DBUS_ERROR_UNKNOWN_METHOD, "no %s", method_name);
     return;
@@ -672,7 +715,8 @@ static void mock_notify_call(GDBusConnection *connection, const gchar *sender, c
     }
     g_variant_unref(hints);
   }
-  g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", (guint32)42));
+  guint32 out_id = m->notify_next_id ? m->notify_next_id++ : (guint32)42;
+  g_dbus_method_invocation_return_value(invocation, g_variant_new("(u)", out_id));
 }
 
 static void mock_watcher_call(GDBusConnection *connection, const gchar *sender, const gchar *object_path,
@@ -1321,6 +1365,9 @@ static void test_empty_bus(void)
 }
 
 static bool cond_notify_unavailable(void) { return g_live_p && !ccord_platform_notifications_available(g_live_p); }
+static bool cond_map3(void) { return g_live_p && ccord_platform_notify_map_count(g_live_p) == 3; }
+static bool cond_close2(void) { return g_mock.close_calls >= 2; }
+static bool cond_close3(void) { return g_mock.close_calls >= 3; }
 
 static void test_late_notify_daemon(void)
 {
@@ -1443,6 +1490,30 @@ static void test_live(void)
       mock_emit_notify_signal("ActionInvoked", g_variant_new("(us)", (guint32)42, "default"));   // closed already
       CT_CHECK(!wait_for(p, cond_never, 300));   // give the signal time to arrive: it must do nothing
       CT_CHECK(g_clicks == 1);
+
+      // Dismissing channel notifications invokes CloseNotification over D-Bus for matching ids only.
+      g_mock.notify_next_id = 100;
+      g_mock.close_calls = 0;
+      ccord_notify_target c500_a = {.guild_id = 5, .channel_id = 500, .message_id = 10};
+      ccord_notify_target c500_b = {.guild_id = 5, .channel_id = 500, .message_id = 20};
+      ccord_notify_target c600_a = {.guild_id = 5, .channel_id = 600, .message_id = 30};
+      CT_CHECK(ccord_platform_notify_message(p, "DM", "one", &c500_a));
+      CT_CHECK(ccord_platform_notify_message(p, "DM", "two", &c500_b));
+      CT_CHECK(ccord_platform_notify_message(p, "Other", "three", &c600_a));
+      CT_CHECK(wait_for(p, cond_map3, 5000));
+      CT_CHECK(ccord_platform_close_channel_notifications(p, 500, 0) == 2);
+      CT_CHECK(wait_for(p, cond_close2, 5000));
+      CT_CHECK(g_mock.close_calls == 2);
+      CT_CHECK((g_mock.closed_ids[0] == 100 && g_mock.closed_ids[1] == 101) ||
+               (g_mock.closed_ids[0] == 101 && g_mock.closed_ids[1] == 100));
+      CT_CHECK(ccord_platform_notify_map_count(p) == 1);
+      CT_CHECK(ccord_platform_notify_target_for(p, 102, &got) && got.channel_id == 600);
+      CT_CHECK(ccord_platform_close_channel_notifications(p, 600, 0) == 1);
+      CT_CHECK(wait_for(p, cond_close3, 5000));
+      CT_CHECK(g_mock.close_calls == 3 && g_mock.closed_ids[2] == 102);
+      CT_CHECK(ccord_platform_notify_map_count(p) == 0);
+      g_mock.notify_next_id = 0;
+
       ccord_platform_set_notify_click_callback(p, nullptr, nullptr);
       ccord_platform_set_window_focused(p, true);
 
