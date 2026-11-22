@@ -98,7 +98,7 @@ static const page_expect k_expect[] = {
   {"Text & Images", TP_TEXT_IMAGES, 0, 0, 2, 0, 0, 0},
   {"Notifications", TP_NOTIFICATIONS, 1, 0, 5, 4, 0, 0},
   {"Keybinds", TP_KEYBINDS, 5, 0, 0, 0, 0, 0},   // one key-cap button per keybind row: five rows
-  {"Plugins", TP_PLUGINS, 4, 0, 1, 0, 0, 0},   // sub-tab buttons: Installed, Discover, Updates, Sync Catalog
+  {"Plugins", TP_PLUGINS, 1, 0, 1, 0, 0, 0},   // Sync button (sub-tabs & filter chips use uis_tab) + Extensions toggle
   {"Privacy", TP_PRIVACY, 0, 0, 5, 3, 0, 0},
   // Seeded by the mock on sign-in: two sessions (one is this device, so it has no Log Out), so the footer and one
   // Log Out button; the list is fetched before the audited draw (test_page).

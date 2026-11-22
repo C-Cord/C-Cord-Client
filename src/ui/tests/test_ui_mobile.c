@@ -16,6 +16,7 @@
 #include "../ui_internal.h"
 #include "plugin_panel_internal.h"
 #include "plugin_v3_internal.h"
+#include "settings_internal.h"
 #include "settings_m6_prefs.h"
 #include "status_card.h"
 #include "ccord_test.h"
@@ -1546,6 +1547,108 @@ static void test_mobile_plugin_v3_dialog_and_full_view(void)
   (void)ccord_contrib_remove_panel(F.contrib, "test.mob", "dash");
 }
 
+static void test_plugins_revamp_mobile(void)
+{
+  ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_error err = {0};
+  char icon_path[CCORD_PATH_MAX] = "";
+  (void)ccord_paths_join(icon_path, sizeof icon_path, ccord_paths_asset_dir(), "icons/ccord-128.png", &err);
+
+  ccord_plugin_info p1 = {
+    .id = "org.ccord.spotify-rpc", .name = "Spotify Now Playing", .version = "2.0.0",
+    .description = "Displays your current track in C-Cord status with custom album art badges.",
+    .icon_path = icon_path,
+    .permissions = "presence.write, ui.panel", .allowed_hosts = "api.spotify.com",
+    .perms_mask = (1ull << 13) | (1ull << 16), .consented_perms = (1ull << 13) | (1ull << 16),
+    .platforms = CCORD_CONTRIB_PLAT_ALL, .risk_class = 1, .tier = CCORD_TIER_OFFICIAL,
+    .enabled = true, .consent_granted = true, .auto_update = true,
+    .update_needs_review = true, .update_version = "2.1.0",
+    .update_perms_mask = (1ull << 13) | (1ull << 16) | (1ull << 27),
+    .update_permissions = "presence.write, ui.panel, network.http",
+    .update_allowed_hosts = "api.spotify.com, i.scdn.co",
+    .update_changelog = "Added high-res album artwork fetching directly from Spotify CDN.",
+    .state = CCORD_PLUGIN_READY,
+  };
+  ccord_plugin_info p2 = {
+    .id = "io.community.quick-notes", .name = "Quick Notes", .version = "1.4.2",
+    .description = "Save timestamped channel notes locally via /qnote with zero elevated permissions.",
+    .platforms = CCORD_CONTRIB_PLAT_ALL, .risk_class = 0, .tier = CCORD_TIER_VERIFIED,
+    .enabled = true, .consent_granted = true, .auto_update = true, .state = CCORD_PLUGIN_READY,
+  };
+  CT_CHECK(ccord_contrib_set_plugin(F.contrib, &p1, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_set_plugin(F.contrib, &p2, &err) == CCORD_OK);
+
+  ccord_catalog_entry cat_items[2] = {
+    {
+      .id = "dev.kyle.obs-deck", .name = "OBS Stream Deck", .version = "1.0.3",
+      .description = "Control OBS scenes and mute state from a desktop sidebar dock.",
+      .author = "kyle", .license = "Apache-2.0", .permissions = "ui.panel, network.local",
+      .perms_mask = (1ull << 16) | (1ull << 41), .platforms = CCORD_CONTRIB_PLAT_DESKTOP,
+      .downloads = 2310, .api_class = 3, .tier = CCORD_TIER_UNVERIFIED, .has_detail = true,
+    },
+    {
+      .id = "org.ccord.spotify-rpc", .name = "Spotify Now Playing", .version = "2.1.0",
+      .description = "Displays your current track in C-Cord status with custom album art badges.",
+      .author = "C-Cord", .license = "MIT", .icon_path = icon_path,
+      .permissions = "presence.write, ui.panel, network.http", .allowed_hosts = "api.spotify.com, i.scdn.co",
+      .perms_mask = (1ull << 13) | (1ull << 16) | (1ull << 27), .platforms = CCORD_CONTRIB_PLAT_ALL,
+      .downloads = 18420, .api_class = 3, .tier = CCORD_TIER_OFFICIAL, .has_detail = true,
+      .installed = true, .update_available = true, .update_needs_review = true, .installed_version = "2.0.0",
+    },
+  };
+  ccord_catalog_status cst = {.has_loaded = true, .total_count = 2, .pending_updates = 1};
+  ccord_catalog_prefs pr = {.auto_update_enabled = true, .auto_update_min_tier = 2};
+  ccord_contrib_set_catalog(F.contrib, cat_items, 2, &cst, &pr);
+  ccord_contrib_set_catalog_updates(F.contrib, &cat_items[1], 1);
+
+  ui_open_settings(F.ui, true);
+  F.ui->mobile_settings_detail = true;
+  F.ui->settings_page = SP_PLUGINS;
+  F.ui->dirty = true;
+  step_frames(10, 25);
+
+  // Verify every tab fits inside 360dp width without horizontal clipping!
+  ccord_rect t0 = {0}, t1 = {0}, t2 = {0}, ov = {0};
+  CT_CHECK(st_plugins_debug_find_rect("tab:0", &t0) && t0.x >= 0.0f && t0.x + t0.w <= 360.5f);
+  CT_CHECK(st_plugins_debug_find_rect("tab:1", &t1) && t1.x >= 0.0f && t1.x + t1.w <= 360.5f);
+  CT_CHECK(st_plugins_debug_find_rect("tab:2", &t2) && t2.x >= 0.0f && t2.x + t2.w <= 360.5f);
+  save_mobile_screenshot("mobile_plugins_installed_360.png");
+
+  // Tap '...' overflow -> opens Mobile Slide-Up Bottom Sheet!
+  CT_CHECK(st_plugins_debug_find_rect("overflow:org.ccord.spotify-rpc", &ov));
+  CT_CHECK(ov.x >= 0.0f && ov.x + ov.w <= 360.5f);
+  touch_tap(ov.x + ov.w * 0.5f, ov.y + ov.h * 0.5f);
+  step_frames(4, 25);
+  CT_CHECK(st_plugins_has_overlay());
+  save_mobile_screenshot("mobile_plugins_bottom_sheet_360.png");
+  CT_CHECK(ui_settings_plugins_dismiss_overlay(F.ui));
+  step_frames(3, 25);
+
+  // Tap Discover tab -> verify 1-col mobile Discover + Desktop Only guard!
+  touch_tap(t1.x + t1.w * 0.5f, t1.y + t1.h * 0.5f);
+  step_frames(4, 25);
+  save_mobile_screenshot("mobile_plugins_discover_360.png");
+
+  // Tap Updates tab -> tap Review & Update -> Protected Security Diff Modal on 360dp!
+  touch_tap(t2.x + t2.w * 0.5f, t2.y + t2.h * 0.5f);
+  step_frames(4, 25);
+  save_mobile_screenshot("mobile_plugins_updates_360.png");
+  ccord_rect r_rev = {0};
+  CT_CHECK(st_plugins_debug_find_rect("cat_install:org.ccord.spotify-rpc", &r_rev));
+  touch_tap(r_rev.x + r_rev.w * 0.5f, r_rev.y + r_rev.h * 0.5f);
+  step_frames(4, 25);
+  CT_CHECK(ui_settings_security_modal_open(F.ui));
+  save_mobile_screenshot("mobile_plugins_security_360.png");
+  CT_CHECK(ui_settings_plugins_dismiss_overlay(F.ui));
+  step_frames(2, 25);
+
+  ui_open_settings(F.ui, false);
+  step_frames(2, 25);
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -1566,6 +1669,7 @@ int main(void)
   test_mobile_voice_stage_and_go_live();
   test_mobile_settings_inner_pages();
   test_mobile_plugin_v3_dialog_and_full_view();
+  test_plugins_revamp_mobile();
   test_mobile_anim_pacing();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");

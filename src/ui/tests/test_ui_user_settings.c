@@ -64,6 +64,7 @@ static void ccord_test_cleanup_dir(void) {
 
 #include "../ui_internal.h"
 
+#include "settings_internal.h"
 #include "settings_m6_prefs.h"
 
 #include "ccord_test.h"
@@ -917,6 +918,161 @@ static void test_update_banner_and_settings(void)
   CT_CHECK(F.ui->update_banner_install_rect.w == 0.0f);
 }
 
+static void save_desktop_shot(const char *name)
+{
+  const char *dir = getenv("CCORD_MOBILE_SCREENSHOT_DIR");
+  if (!dir || !dir[0]) return;
+  char path[512];
+  snprintf(path, sizeof path, "%s/%s", dir, name);
+  ccord_error err = {0};
+  ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+  ccord_ui_draw(F.ui, F.renderer);
+  (void)ccord_render_screenshot(F.renderer, path, &err);
+  ccord_render_end(F.renderer);
+}
+
+static void test_plugins_revamp_desktop(void)
+{
+  ccord_error err = {0};
+  char icon_path[CCORD_PATH_MAX] = "";
+  (void)ccord_paths_join(icon_path, sizeof icon_path, ccord_paths_asset_dir(), "icons/ccord-128.png", &err);
+
+  // Seed realistic installed plugins (real PNG icon + monogram fallback + needs consent + update review + revoked)
+  ccord_plugin_info p1 = {
+    .id = "org.ccord.spotify-rpc", .name = "Spotify Now Playing", .version = "2.0.0",
+    .description = "Displays your current track in C-Cord status with custom album art badges.",
+    .icon_path = icon_path,
+    .permissions = "presence.write, ui.panel",
+    .allowed_hosts = "api.spotify.com",
+    .perms_mask = (1ull << 13) | (1ull << 16),
+    .consented_perms = (1ull << 13) | (1ull << 16),
+    .platforms = CCORD_CONTRIB_PLAT_ALL,
+    .risk_class = 1, .tier = CCORD_TIER_OFFICIAL, .enabled = true, .consent_granted = true, .auto_update = true,
+    .update_needs_review = true, .update_version = "2.1.0",
+    .update_perms_mask = (1ull << 13) | (1ull << 16) | (1ull << 27),
+    .update_permissions = "presence.write, ui.panel, network.http",
+    .update_allowed_hosts = "api.spotify.com, i.scdn.co",
+    .update_changelog = "Added high-res album artwork fetching directly from Spotify CDN.",
+    .state = CCORD_PLUGIN_READY,
+  };
+  ccord_plugin_info p2 = {
+    .id = "io.community.quick-notes", .name = "Quick Notes", .version = "1.4.2",
+    .description = "Save timestamped channel notes locally via /qnote with zero elevated permissions.",
+    .platforms = CCORD_CONTRIB_PLAT_ALL,
+    .risk_class = 0, .tier = CCORD_TIER_VERIFIED, .enabled = true, .consent_granted = true, .auto_update = true,
+    .state = CCORD_PLUGIN_READY,
+  };
+  ccord_plugin_info p3 = {
+    .id = "dev.alice.theme-studio", .name = "Theme Studio", .version = "0.9.0",
+    .description = "Live visual token editor and custom wallpaper manager for C-Cord.",
+    .permissions = "theme.write, ui.panel",
+    .perms_mask = (1ull << 21) | (1ull << 16),
+    .platforms = CCORD_CONTRIB_PLAT_DESKTOP,
+    .risk_class = 1, .tier = CCORD_TIER_UNVERIFIED, .enabled = false, .consent_granted = false,
+    .state = CCORD_PLUGIN_NEEDS_CONSENT,
+  };
+  CT_CHECK(ccord_contrib_set_plugin(F.contrib, &p1, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_set_plugin(F.contrib, &p2, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_set_plugin(F.contrib, &p3, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_set_settings_schema(F.contrib, "io.community.quick-notes",
+                                             "[{\"key\":\"prefix\",\"type\":\"text\",\"label\":\"Prefix\"}]", "{}", &err) == CCORD_OK);
+
+  ccord_catalog_entry cat_items[4] = {
+    {
+      .id = "org.ccord.spotify-rpc", .name = "Spotify Now Playing", .version = "2.1.0",
+      .description = "Displays your current track in C-Cord status with custom album art badges.",
+      .author = "C-Cord", .license = "MIT", .icon_path = icon_path,
+      .permissions = "presence.write, ui.panel, network.http", .allowed_hosts = "api.spotify.com, i.scdn.co",
+      .changelog = "Added high-res album artwork fetching directly from Spotify CDN.",
+      .perms_mask = (1ull << 13) | (1ull << 16) | (1ull << 27), .platforms = CCORD_CONTRIB_PLAT_ALL,
+      .downloads = 18420, .api_class = 3, .tier = CCORD_TIER_OFFICIAL, .has_detail = true,
+      .installed = true, .update_available = true, .update_needs_review = true, .installed_version = "2.0.0",
+    },
+    {
+      .id = "io.community.emoji-stats", .name = "Emoji Stats", .version = "1.2.0",
+      .description = "Tracks your most-used custom emojis with clean native bar charts.",
+      .author = "mira", .license = "MIT", .platforms = CCORD_CONTRIB_PLAT_ALL,
+      .downloads = 5420, .api_class = 1, .tier = CCORD_TIER_VERIFIED, .has_detail = true,
+    },
+    {
+      .id = "dev.kyle.obs-deck", .name = "OBS Stream Deck", .version = "1.0.3",
+      .description = "Control OBS scenes and mute state from a desktop sidebar dock.",
+      .author = "kyle", .license = "Apache-2.0", .permissions = "ui.panel, network.local",
+      .perms_mask = (1ull << 16) | (1ull << 41), .platforms = CCORD_CONTRIB_PLAT_DESKTOP,
+      .downloads = 2310, .api_class = 3, .tier = CCORD_TIER_UNVERIFIED, .has_detail = true,
+    },
+    {
+      .id = "org.ccord.voice-meter", .name = "Voice Level Meter", .version = "1.1.0",
+      .description = "Real-time input/output dB visualizer in the voice bar.",
+      .author = "C-Cord", .license = "MIT", .permissions = "voice.levels, ui.panel",
+      .perms_mask = (1ull << 34) | (1ull << 16), .platforms = CCORD_CONTRIB_PLAT_ALL,
+      .downloads = 9105, .api_class = 2, .tier = CCORD_TIER_OFFICIAL, .has_detail = true,
+    },
+  };
+  ccord_catalog_status cst = {.has_loaded = true, .total_count = 4, .pending_updates = 1};
+  ccord_catalog_prefs pr = {.auto_update_enabled = true, .auto_update_min_tier = 2};
+  ccord_contrib_set_catalog(F.contrib, cat_items, 4, &cst, &pr);
+  ccord_contrib_set_catalog_updates(F.contrib, &cat_items[0], 1);
+
+  ui_open_settings(F.ui, true);
+  F.ui->settings_page = SP_PLUGINS;
+  F.ui->dirty = true;
+  frame(4);
+  save_desktop_shot("desktop_plugins_installed.png");
+
+  // 1. Open overflow popover on Quick Notes
+  ccord_rect r_ov = {0};
+  CT_CHECK(st_plugins_debug_find_rect("overflow:io.community.quick-notes", &r_ov));
+  click_rect(r_ov);
+  frame(2);
+  save_desktop_shot("desktop_plugins_overflow.png");
+  // Dismiss overflow with ESC -> stays in Settings!
+  send((ccord_input_event){.type = CCORD_IN_KEY_DOWN, .key = CCORD_KEY_ESCAPE});
+  frame(2);
+  CT_CHECK(F.ui->settings_open && !st_plugins_has_overlay());
+
+  // 2. Click Review & Update on Spotify -> opens Protected Security Diff Modal!
+  ccord_rect r_upd = {0};
+  CT_CHECK(st_plugins_debug_find_rect("update_review:org.ccord.spotify-rpc", &r_upd));
+  click_rect(r_upd);
+  frame(2);
+  CT_CHECK(ui_settings_security_modal_open(F.ui));
+  save_desktop_shot("desktop_plugins_security_diff.png");
+  ccord_rect r_can = {0};
+  CT_CHECK(st_plugins_debug_find_rect("sec_cancel", &r_can));
+  click_rect(r_can);
+  frame(2);
+  CT_CHECK(!ui_settings_security_modal_open(F.ui));
+
+  // 3. Switch to Discover (2-col grid) + open Sort dropdown
+  ccord_rect r_tab1 = {0};
+  CT_CHECK(st_plugins_debug_find_rect("tab:1", &r_tab1));
+  click_rect(r_tab1);
+  frame(3);
+  save_desktop_shot("desktop_plugins_discover.png");
+  ccord_rect r_sort = {0};
+  CT_CHECK(st_plugins_debug_find_rect("sort", &r_sort));
+  click_rect(r_sort);
+  frame(2);
+  save_desktop_shot("desktop_plugins_sort.png");
+  send((ccord_input_event){.type = CCORD_IN_KEY_DOWN, .key = CCORD_KEY_ESCAPE});
+  frame(2);
+
+  // 4. Switch to Updates tab & expand Auto-Update Policy
+  ccord_rect r_tab2 = {0};
+  CT_CHECK(st_plugins_debug_find_rect("tab:2", &r_tab2));
+  click_rect(r_tab2);
+  frame(3);
+  ccord_rect r_pol = {0};
+  CT_CHECK(st_plugins_debug_find_rect("policy_expand", &r_pol));
+  click_rect(r_pol);
+  frame(2);
+  save_desktop_shot("desktop_plugins_updates.png");
+
+  ui_open_settings(F.ui, false);
+  frame(2);
+}
+
 int main(int argc, char **argv)
 {
   (void)argc;
@@ -936,6 +1092,7 @@ int main(int argc, char **argv)
   test_close_to_background();
   test_overlay_stubs();
   test_update_banner_and_settings();
+  test_plugins_revamp_desktop();
   teardown();
   return CT_RESULT("test_ui_user_settings");
 }
