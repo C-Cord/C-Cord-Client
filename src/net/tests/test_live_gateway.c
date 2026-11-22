@@ -724,8 +724,9 @@ static void script_probe_healthy_then_zombie(void *ud, fg_conn *c)
   (void)ud;
   if (c->idx == 0) {
     if (!fg_open_session(c, 60000)) return;
-    // Acknowledge only the first OP 1 heartbeat, then go silent to simulate a NAT-blackholed socket.
-    fg_serve_session(c, true, fg_now_ms() + 6000, 1);
+    // Acknowledge the initial jittered heartbeat and the first OP 1 probe, then go silent to simulate a
+    // NAT-blackholed socket.
+    fg_serve_session(c, true, fg_now_ms() + 6000, 2);
     fg_serve_session(c, false, fg_now_ms() + 6000, 0);
     return;
   }
@@ -740,11 +741,21 @@ static void test_probe_keeps_healthy_socket_and_catches_zombie(void)
   client c;
   CT_CHECK(client_start(&c, srv.url));
   CT_CHECK(wait_connected(&c, 1, 4000));
-  advance(&c, 4000, 100);
+  // Drain the initial jittered heartbeat (uniform in [0, 60 s)) so the next scheduled beat is a full 60 s away
+  // and cannot race with the two probes below.
+  pump(&c, 100);
+  uint32_t to = 0;
+  bool pend = false;
+  (void)ccord_gateway_wait_info(c.g, &to, &pend);
+  if (to < 60000) advance(&c, to, 200);
 
   // First probe: server replies with OP 11 -> connection stays open (still conn 0) and full interval resumes.
   CT_CHECK(ccord_gateway_probe(c.g) == CCORD_GWPACE_WAKE_FRESH);
-  pump(&c, 200);
+  for (uint64_t end = ccord_clock_ms() + 2000; ccord_clock_ms() < end;) {
+    pump(&c, 10);
+    (void)ccord_gateway_wait_info(c.g, &to, &pend);
+    if (to >= 55000) break;   // OP 11 ACK restored the full 60 s interval
+  }
   advance(&c, 10000, 100);   // 10 s later (> 5 s probe timeout): ACK arrived so no zombie teardown!
   CT_CHECK(c.connected == 1);
 
