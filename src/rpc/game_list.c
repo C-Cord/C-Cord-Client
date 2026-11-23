@@ -41,26 +41,29 @@ static char *dup_name(ccord_arena *a, const char *s, size_t n)
   return ccord_arena_strndup(a, s, n);
 }
 
-static void add_entry(ccord_game_list *l, const char *name, size_t n, bool win, uint32_t app_idx)
+static bool add_entry_buf(ccord_arena *arena, entry **entries, size_t *nentries, size_t *capentries,
+                          const char *name, size_t n, bool win, uint32_t app_idx)
 {
   if (n > 0 && name[0] == '>') { name++; n--; }       // Discord marks some names with a leading '>'; the name follows
   while (n > 0 && name[0] == '/') { name++; n--; }
-  if (n == 0 || n > KEY_MAX) return;
-  char *key = ccord_arena_alloc(&l->arena, n + 1, 1);
-  if (!key) return;
+  if (n == 0 || n > KEY_MAX) return true;
+  if (*nentries == *capentries) {
+    size_t ncap = *capentries ? *capentries * 2u : 128u;
+    entry *g = ccord_realloc_array(*entries, ncap, sizeof *g);
+    if (!g) return false;
+    *entries = g;
+    *capentries = ncap;
+  }
+  char *key = ccord_arena_alloc(arena, n + 1, 1);
+  if (!key) return false;
   for (size_t i = 0; i < n; i++) {
     char c = lower_ascii(name[i]);
     key[i] = c == '\\' ? '/' : c;
   }
   key[n] = '\0';
-  entry *e = &l->entries[l->nentries];
-  e->key = key;
-  e->klen = (uint32_t)n;
-  e->app = app_idx;
-  e->win = win;
-  uint32_t b = gd_hash_bytes(key, n) & (uint32_t)(l->nbuckets - 1);
-  e->next = l->buckets[b];
-  l->buckets[b] = (uint32_t)l->nentries++;
+  (*entries)[*nentries] = (entry){.key = key, .klen = (uint32_t)n, .app = app_idx, .next = UINT32_MAX, .win = win};
+  (*nentries)++;
+  return true;
 }
 
 static bool usable_exe(const ccord_json *x, const char **name_out, size_t *len_out, bool *win_out)
@@ -93,41 +96,108 @@ static bool usable_exe(const ccord_json *x, const char **name_out, size_t *len_o
   return true;
 }
 
-static void add_app(ccord_game_list *l, const ccord_json *obj, size_t exe_cap_left)
+static bool add_app_buf(ccord_arena *arena, app **apps, size_t *napps, size_t *capapps,
+                        entry **entries, size_t *nentries, size_t *capentries, const ccord_json *obj)
 {
   size_t idlen = 0, namelen = 0;
   const char *id = json_str(obj, "id", &idlen), *name = json_str(obj, "name", &namelen);
   const ccord_json *exes = ccord_json_get(obj, "executables");
-  if (!id || !name || namelen == 0 || !valid_snowflake(id, idlen)) return;
-  if (!exes || ccord_json_type_of(exes) != CCORD_JSON_ARRAY) return;
+  if (!id || !name || namelen == 0 || !valid_snowflake(id, idlen)) return true;
+  if (!exes || ccord_json_type_of(exes) != CCORD_JSON_ARRAY) return true;
   size_t n = ccord_json_array_len(exes);
   bool has_usable = false;
-  for (size_t i = 0; i < n && exe_cap_left > 0; i++) {
-    const char *xname = nullptr;
-    size_t xlen = 0;
-    bool win = false;
-    if (usable_exe(ccord_json_array_at(exes, i), &xname, &xlen, &win)) {
+  for (size_t i = 0; i < n; i++) {
+    if (usable_exe(ccord_json_array_at(exes, i), nullptr, nullptr, nullptr)) {
       has_usable = true;
       break;
     }
   }
-  if (!has_usable) return;
-  char *id_copy = ccord_arena_strndup(&l->arena, id, idlen);
-  char *name_copy = dup_name(&l->arena, name, namelen);
-  if (!id_copy || !name_copy) return;
-  uint32_t idx = (uint32_t)l->napps;
-  size_t before = l->nentries;
-  for (size_t i = 0; i < n && l->nentries - before < exe_cap_left; i++) {
+  if (!has_usable) return true;
+  if (*napps == *capapps) {
+    size_t ncap = *capapps ? *capapps * 2u : 64u;
+    app *g = ccord_realloc_array(*apps, ncap, sizeof *g);
+    if (!g) return false;
+    *apps = g;
+    *capapps = ncap;
+  }
+  char *id_copy = ccord_arena_strndup(arena, id, idlen);
+  char *name_copy = dup_name(arena, name, namelen);
+  if (!id_copy || !name_copy) return false;
+  uint32_t idx = (uint32_t)*napps;
+  size_t before = *nentries;
+  for (size_t i = 0; i < n; i++) {
     const char *xname = nullptr;
     size_t xlen = 0;
     bool win = false;
     if (!usable_exe(ccord_json_array_at(exes, i), &xname, &xlen, &win)) continue;
-    add_entry(l, xname, xlen, win, idx);
+    if (!add_entry_buf(arena, entries, nentries, capentries, xname, xlen, win, idx)) return false;
   }
-  if (l->nentries == before) return;                  // no usable executable: the app can never match
-  l->apps[l->napps].id = id_copy;
-  l->apps[l->napps].name = name_copy;
-  l->napps++;
+  if (*nentries == before) return true;               // no usable executable: the app can never match
+  (*apps)[(*napps)++] = (app){.id = id_copy, .name = name_copy};
+  return true;
+}
+
+static size_t skip_ws(const char *s, size_t len, size_t pos)
+{
+  while (pos < len) {
+    char c = s[pos];
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n') pos++;
+    else break;
+  }
+  return pos;
+}
+
+// Finds the extent [start, *end_out) of one serialized JSON value starting at `start`.
+static bool scan_json_value(const char *s, size_t len, size_t start, size_t *end_out)
+{
+  if (start >= len) return false;
+  char c0 = s[start];
+  if (c0 == '{' || c0 == '[') {
+    size_t depth = 1;
+    bool in_str = false;
+    bool esc = false;
+    size_t p = start + 1;
+    while (p < len && depth > 0) {
+      char c = s[p++];
+      if (in_str) {
+        if (esc) esc = false;
+        else if (c == '\\') esc = true;
+        else if (c == '"') in_str = false;
+      } else if (c == '"') {
+        in_str = true;
+      } else if (c == '{' || c == '[') {
+        depth++;
+      } else if (c == '}' || c == ']') {
+        depth--;
+      }
+    }
+    if (depth != 0 || in_str) return false;
+    *end_out = p;
+    return true;
+  }
+  if (c0 == '"') {
+    bool esc = false;
+    size_t p = start + 1;
+    while (p < len) {
+      char c = s[p++];
+      if (esc) esc = false;
+      else if (c == '\\') esc = true;
+      else if (c == '"') {
+        *end_out = p;
+        return true;
+      }
+    }
+    return false;
+  }
+  size_t p = start;
+  while (p < len) {
+    char c = s[p];
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == ',' || c == ']') break;
+    p++;
+  }
+  if (p == start) return false;
+  *end_out = p;
+  return true;
 }
 
 ccord_game_list *ccord_game_list_load(const char *json, size_t len, ccord_error *err)
@@ -141,75 +211,140 @@ ccord_game_list *ccord_game_list_load(const char *json, size_t len, ccord_error 
     ccord_error_set(err, CCORD_ERR_RANGE, "game list: input larger than %u bytes", CCORD_GAME_LIST_MAX_BYTES);
     return nullptr;
   }
-  ccord_arena tmp;
-  size_t tmp_chunk = len < (64u << 10) ? (16u << 10) : (len < (1u << 20) ? (256u << 10) : (1u << 20));
-  ccord_arena_init(&tmp, tmp_chunk);
-  // A JSON node needs at least one input byte, so the node limit never has to exceed the input length.
-  ccord_json_limits lim = {.max_depth = JSON_MAX_DEPTH, .max_nodes = len < JSON_MAX_NODES ? len + 16u : JSON_MAX_NODES,
-                           .max_string = JSON_MAX_STRING};
-  const ccord_json *root = ccord_json_parse(&tmp, json ? json : "", len, &lim, err);
-  if (!root) {
-    ccord_arena_free(&tmp);
+  const char *buf = json ? json : "";
+  size_t pos = skip_ws(buf, len, 0);
+  if (pos >= len || buf[pos] != '[') {
+    ccord_arena non_arr;
+    ccord_arena_init(&non_arr, 4096u);
+    ccord_json_limits lim = {.max_depth = JSON_MAX_DEPTH, .max_nodes = 4096u, .max_string = JSON_MAX_STRING};
+    const ccord_json *root = ccord_json_parse(&non_arr, buf, len, &lim, err);
+    if (root) ccord_error_set(err, CCORD_ERR_INVALID, "game list: top level must be an array");
+    else if (err && err->code == CCORD_OK) ccord_error_set(err, CCORD_ERR_PARSE, "game list: invalid JSON");
+    ccord_arena_free(&non_arr);
     return nullptr;
   }
-  if (ccord_json_type_of(root) != CCORD_JSON_ARRAY) {
-    ccord_error_set(err, CCORD_ERR_INVALID, "game list: top level must be an array");
-    ccord_arena_free(&tmp);
-    return nullptr;
-  }
-  // Filter non-current-OS and launcher executables BEFORE sizing apps, entries, and hash buckets.
-  size_t n = ccord_json_array_len(root), app_total = 0, exe_total = 0;
-  for (size_t i = 0; i < n; i++) {
-    const ccord_json *app_obj = ccord_json_array_at(root, i);
-    if (!app_obj || ccord_json_type_of(app_obj) != CCORD_JSON_OBJECT) continue;
-    size_t idlen = 0, namelen = 0;
-    const char *id = json_str(app_obj, "id", &idlen), *name = json_str(app_obj, "name", &namelen);
-    const ccord_json *exes = ccord_json_get(app_obj, "executables");
-    if (!id || !name || namelen == 0 || !valid_snowflake(id, idlen)) continue;
-    if (!exes || ccord_json_type_of(exes) != CCORD_JSON_ARRAY) continue;
-    size_t en = ccord_json_array_len(exes), usable = 0;
-    for (size_t j = 0; j < en; j++) {
-      if (usable_exe(ccord_json_array_at(exes, j), nullptr, nullptr, nullptr)) usable++;
-    }
-    if (usable > 0) {
-      app_total++;
-      exe_total += usable;
-    }
-  }
+
   ccord_game_list *l = ccord_calloc(1, sizeof *l);
   if (!l) {
     ccord_error_set(err, CCORD_ERR_NOMEM, "game list: out of memory");
-    ccord_arena_free(&tmp);
     return nullptr;
   }
-  size_t list_chunk = exe_total < 256u ? (16u << 10) : (64u << 10);
-  ccord_arena_init(&l->arena, list_chunk);
+  ccord_arena_init(&l->arena, 16u << 10);
+  ccord_arena elem_arena;
+  ccord_arena_init(&elem_arena, 8192u);
+
+  app *apps = nullptr;
+  entry *entries = nullptr;
+  size_t napps = 0, cap_apps = 0;
+  size_t nentries = 0, cap_entries = 0;
+
+  pos = skip_ws(buf, len, pos + 1u);
+  bool need_elem = false;
+  bool ok = true;
+  if (pos < len && buf[pos] == ']') {
+    pos = skip_ws(buf, len, pos + 1u);
+    if (pos != len) {
+      ccord_error_set(err, CCORD_ERR_PARSE, "game list: trailing data");
+      ok = false;
+    }
+  } else {
+    while (pos < len) {
+      if (buf[pos] == ']') {
+        if (need_elem) {
+          ccord_error_set(err, CCORD_ERR_PARSE, "game list: trailing comma");
+          ok = false;
+          break;
+        }
+        pos = skip_ws(buf, len, pos + 1u);
+        if (pos != len) {
+          ccord_error_set(err, CCORD_ERR_PARSE, "game list: trailing data");
+          ok = false;
+        }
+        break;
+      }
+      size_t elem_end = 0;
+      if (!scan_json_value(buf, len, pos, &elem_end)) {
+        ccord_error_set(err, CCORD_ERR_PARSE, "game list: malformed element");
+        ok = false;
+        break;
+      }
+      size_t elen = elem_end - pos;
+      ccord_json_limits elim = {.max_depth = JSON_MAX_DEPTH > 1u ? JSON_MAX_DEPTH - 1u : 1u,
+                                .max_nodes = elen < JSON_MAX_NODES ? elen + 16u : JSON_MAX_NODES,
+                                .max_string = JSON_MAX_STRING};
+      ccord_arena_reset(&elem_arena);
+      const ccord_json *elem = ccord_json_parse(&elem_arena, buf + pos, elen, &elim, err);
+      if (!elem) {
+        ok = false;
+        break;
+      }
+      if (ccord_json_type_of(elem) == CCORD_JSON_OBJECT) {
+        if (!add_app_buf(&l->arena, &apps, &napps, &cap_apps, &entries, &nentries, &cap_entries, elem)) {
+          ccord_error_set(err, CCORD_ERR_NOMEM, "game list: out of memory");
+          ok = false;
+          break;
+        }
+      }
+      pos = skip_ws(buf, len, elem_end);
+      if (pos < len && buf[pos] == ',') {
+        pos = skip_ws(buf, len, pos + 1u);
+        need_elem = true;
+      } else if (pos < len && buf[pos] == ']') {
+        need_elem = false;
+      } else {
+        ccord_error_set(err, CCORD_ERR_PARSE, "game list: expected ',' or ']'");
+        ok = false;
+        break;
+      }
+    }
+    if (ok && need_elem) {
+      ccord_error_set(err, CCORD_ERR_PARSE, "game list: unterminated array");
+      ok = false;
+    }
+  }
+  ccord_arena_free(&elem_arena);
+
+  if (!ok) {
+    ccord_free(apps);
+    ccord_free(entries);
+    ccord_game_list_free(l);
+    return nullptr;
+  }
+
   l->nbuckets = 16;
-  while (l->nbuckets < exe_total * 2 && l->nbuckets < (1u << 30)) l->nbuckets <<= 1;
-  l->apps = ccord_arena_alloc(&l->arena, (app_total + 1) * sizeof *l->apps, alignof(app));
-  l->entries = ccord_arena_alloc(&l->arena, (exe_total + 1) * sizeof *l->entries, alignof(entry));
+  while (l->nbuckets < nentries * 2 && l->nbuckets < (1u << 30)) l->nbuckets <<= 1;
+  l->apps = ccord_arena_alloc(&l->arena, (napps + 1) * sizeof *l->apps, alignof(app));
+  l->entries = ccord_arena_alloc(&l->arena, (nentries + 1) * sizeof *l->entries, alignof(entry));
   l->buckets = ccord_arena_alloc(&l->arena, l->nbuckets * sizeof *l->buckets, alignof(uint32_t));
 #if !CCORD_OS_WINDOWS && !CCORD_OS_MACOS
   l->cache = gd_scan_cache_new();
   if (!l->cache) {
+    ccord_free(apps);
+    ccord_free(entries);
     ccord_error_set(err, CCORD_ERR_NOMEM, "game list: out of memory");
     ccord_game_list_free(l);
-    ccord_arena_free(&tmp);
     return nullptr;
   }
 #endif
   if (!l->apps || !l->entries || !l->buckets) {
+    ccord_free(apps);
+    ccord_free(entries);
     ccord_error_set(err, CCORD_ERR_NOMEM, "game list: out of memory");
     ccord_game_list_free(l);
-    ccord_arena_free(&tmp);
     return nullptr;
   }
+  if (napps > 0) memcpy(l->apps, apps, napps * sizeof *apps);
+  if (nentries > 0) memcpy(l->entries, entries, nentries * sizeof *entries);
+  l->napps = napps;
+  l->nentries = nentries;
+  ccord_free(apps);
+  ccord_free(entries);
   memset(l->buckets, 0xff, l->nbuckets * sizeof *l->buckets);   // UINT32_MAX = empty chain
-  for (size_t i = 0; i < n; i++) {
-    const ccord_json *app_obj = ccord_json_array_at(root, i);
-    if (app_obj && ccord_json_type_of(app_obj) == CCORD_JSON_OBJECT) add_app(l, app_obj, exe_total - l->nentries);
+  for (size_t i = 0; i < l->nentries; i++) {
+    uint32_t b = gd_hash_bytes(l->entries[i].key, l->entries[i].klen) & (uint32_t)(l->nbuckets - 1);
+    l->entries[i].next = l->buckets[b];
+    l->buckets[b] = (uint32_t)i;
   }
-  ccord_arena_free(&tmp);
   return l;
 }
 

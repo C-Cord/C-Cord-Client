@@ -234,4 +234,7 @@ void ccord_live_event_free(ccord_live_event *ev);
                                                              const char *session_id, const char *nonce,
                                                              ccord_buf *out, ccord_error *err);
 
+// Releases cached per-guild role name/color tables across disconnects so role tables do not stay pinned in RAM.
+void ccord_live_role_cache_clear(void);
+
 // Gateway connection (internal to live_transport.c, exposed for that unit) ----

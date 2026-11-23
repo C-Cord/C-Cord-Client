@@ -62,7 +62,8 @@ struct ccord_video_resolver {
   ccord_mutex *mx;
   ccord_cond *cv;
   ccord_thread *thr;
-  bool thr_started;
+  bool thr_running;
+  bool thr_joinable;
   bool stop;
   _Atomic uint64_t gen;
 
@@ -513,8 +514,15 @@ static void vr_worker_fn(void *arg)
   ccord_video_resolver *r = arg;
   for (;;) {
     ccord_mutex_lock(r->mx);
-    while (!r->stop && !r->has_job) ccord_cond_wait(r->cv, r->mx);
+    while (!r->stop && !r->has_job) {
+      if (!ccord_cond_wait_timeout(r->cv, r->mx, 60000u) && !r->stop && !r->has_job) {
+        r->thr_running = false;
+        ccord_mutex_unlock(r->mx);
+        return;
+      }
+    }
     if (r->stop) {
+      r->thr_running = false;
       ccord_mutex_unlock(r->mx);
       return;
     }
@@ -573,9 +581,13 @@ void ccord_video_resolver_destroy(ccord_video_resolver *r)
   atomic_fetch_add_explicit(&r->gen, 1u, memory_order_acq_rel);
   ccord_mutex_lock(r->mx);
   r->stop = true;
+  ccord_thread *thr = r->thr_joinable ? r->thr : nullptr;
+  r->thr = nullptr;
+  r->thr_joinable = false;
+  r->thr_running = false;
   ccord_cond_broadcast(r->cv);
   ccord_mutex_unlock(r->mx);
-  if (r->thr_started && r->thr) ccord_thread_join(r->thr);
+  if (thr) ccord_thread_join(thr);
   ccord_cond_destroy(r->cv);
   ccord_mutex_destroy(r->mx);
   ccord_free(r);
@@ -610,13 +622,24 @@ ccord_status ccord_video_resolver_submit(ccord_video_resolver *r, uint64_t req_i
       return CCORD_OK;
     }
   }
-  if (!r->thr_started) {
-    r->thr = ccord_thread_create(vr_worker_fn, r);
-    if (!r->thr) {
+  if (!r->thr_running) {
+    if (r->thr_joinable) {
+      ccord_thread *old = r->thr;
+      r->thr = nullptr;
+      r->thr_joinable = false;
       ccord_mutex_unlock(r->mx);
-      return ccord_error_set(err, CCORD_ERR_INTERNAL, "video_resolve: cannot start worker thread");
+      if (old) ccord_thread_join(old);
+      ccord_mutex_lock(r->mx);
     }
-    r->thr_started = true;
+    if (!r->thr_running) {
+      r->thr = ccord_thread_create(vr_worker_fn, r);
+      if (!r->thr) {
+        ccord_mutex_unlock(r->mx);
+        return ccord_error_set(err, CCORD_ERR_INTERNAL, "video_resolve: cannot start worker thread");
+      }
+      r->thr_running = true;
+      r->thr_joinable = true;
+    }
   }
   r->has_job = true;
   r->job_req_id = req_id;

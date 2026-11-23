@@ -9,6 +9,8 @@
 #include <string.h>
 #include <time.h>
 
+#include <ccord/core/os.h>
+
 bool live_push_media_event_owned(live *l, const char *url, const char *path, char *owned_data, size_t len)
 {
   ccord_live_event ev;
@@ -916,9 +918,11 @@ void live_rest_done(void *ud, ccord_status status, long http_status, const char 
       ccord_status pst = live_queue_add_raw(l, CCORD_REST_PUT, u->upload_urls[0],
                                             "application/octet-stream", u->file_datas[0], u->file_sizes[0],
                                             op, &err);
+      bool trim0 = u->file_sizes[0] >= (1024u * 1024u);
       ccord_free(u->file_datas[0]);
       u->file_datas[0] = nullptr;
       u->file_sizes[0] = 0;
+      if (trim0) ccord_os_trim_memory();
       if (pst == CCORD_OK) return; // op stays alive for next step
       CCORD_LOG_W("live: upload put enqueue failed: %s", err.message);
       push_action_failed(l, op, pst, 0, nullptr, 0);
@@ -940,9 +944,11 @@ void live_rest_done(void *ud, ccord_status status, long http_status, const char 
         ccord_status pst = live_queue_add_raw(l, CCORD_REST_PUT, u->upload_urls[idx],
                                               "application/octet-stream", u->file_datas[idx], u->file_sizes[idx],
                                               op, &err);
+        bool trimi = u->file_sizes[idx] >= (1024u * 1024u);
         ccord_free(u->file_datas[idx]);
         u->file_datas[idx] = nullptr;
         u->file_sizes[idx] = 0;
+        if (trimi) ccord_os_trim_memory();
         if (pst == CCORD_OK) return;
         CCORD_LOG_W("live: upload put [%zu] enqueue failed: %s", idx, err.message);
         push_action_failed(l, op, pst, 0, nullptr, 0);

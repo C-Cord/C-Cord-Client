@@ -109,7 +109,7 @@ static void vg_close_ws(ccord_voice_gateway *g)
   g->heartbeat_pending = false;
   g->heartbeat_nonce = 0;
   g->frame_is_binary = false;
-  ccord_buf_clear(&g->frame);
+  ccord_buf_shrink(&g->frame, 16384u);
 }
 
 
@@ -447,7 +447,7 @@ static void vg_stop_unlocked(ccord_voice_gateway *g, bool destroying)
   sodium_memzero(g->secret, sizeof g->secret);
   atomic_store(&g->keyframe_requested, false);
   g->state = CCORD_VOICE_IDLE;
-  ccord_buf_clear(&g->frame);
+  ccord_buf_shrink(&g->frame, 16384u);
   if (!destroying) {
     ccord_vc_init(&g->rc, ccord_clock_ms() ^ (uint64_t)(uintptr_t)g);
   }
@@ -1182,18 +1182,18 @@ static bool vg_drain(ccord_voice_gateway *g, ccord_voice_event *out)
       ccord_error err;
       if (g->frame_is_binary) {
         (void)vg_handle_binary_unlocked(g, (const uint8_t *)g->frame.data, g->frame.len, &err);
-        ccord_buf_clear(&g->frame);
+        ccord_buf_shrink(&g->frame, 16384u);
         g->frame_is_binary = false;
       } else {
         ccord_voice_event ev;
         if (vg_handle_unlocked(g, g->frame.data, g->frame.len, &ev, &err) == CCORD_OK) {
           if (ev.op != CCORD_VOICE_OP_HEARTBEAT_ACK) {
             *out = ev;
-            ccord_buf_clear(&g->frame);
+            ccord_buf_shrink(&g->frame, 16384u);
             return true;
           }
         }
-        ccord_buf_clear(&g->frame);
+        ccord_buf_shrink(&g->frame, 16384u);
       }
     }
   }

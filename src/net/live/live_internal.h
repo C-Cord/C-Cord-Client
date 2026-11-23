@@ -4,6 +4,7 @@
 #pragma once
 
 #include <ccord/net/live_transport.h>
+#include <ccord/net/discord_json.h>
 #include <ccord/net/discord_proto.h>
 #include <ccord/net/gateway_pace.h>
 #include <ccord/net/video_resolve.h>
@@ -36,6 +37,7 @@
 #include "common/tls_internal.h"
 #include "discord/rest_internal.h"
 
+#define LIVE_QUEUE_INIT_CAP 8u
 #define LIVE_QUEUE_SIZE 64u
 #define LIVE_API_MAX 512u
 #define LIVE_BODY_MAX (CCORD_SEND_MAX_BYTES * 6u + 64u)
@@ -144,9 +146,9 @@ typedef struct live {
   bool vlink_rewatch;           // a REJOIN ended the voice session: re-send the stream watch once ESTABLISHED
   ccord_rest_config rest;
   ccord_rest_queue *restq;
-  ccord_live_event pending[LIVE_QUEUE_SIZE];
-  char *pending_media[LIVE_QUEUE_SIZE];  // optional heap-owned media payload per pending slot (zero-copy)
-  size_t head, tail, count;
+  ccord_live_event *pending;
+  char **pending_media;                  // optional heap-owned media payload per pending slot (zero-copy)
+  size_t head, tail, count, pending_cap;
   ccord_live_event current;
   char *current_media;                   // optional heap-owned media payload for `current`
   bool have_current;

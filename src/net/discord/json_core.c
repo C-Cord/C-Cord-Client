@@ -9,7 +9,7 @@
 void ccord_live_event_init(ccord_live_event *ev)
 {
   memset(ev, 0, sizeof *ev);
-  ccord_arena_init(&ev->arena, 0);
+  ccord_arena_init(&ev->arena, 1024u);
   ev->ev.type = CCORD_NET_NONE;
   ev->seq = -1;
 }

@@ -2,6 +2,8 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include "warm_cache_internal.h"
 
+#include <ccord/core/os.h>
+
 // ------------------------------------------------------------------------------------------------ small helpers
 
 int64_t warm_now(const ccord_warm *w)
@@ -378,6 +380,7 @@ ccord_status ccord_warm_save(ccord_warm *w, const ccord_store *store, bool sync,
   w->saved_rev = ccord_store_revision(store);
   w->saved_once = true;
   CCORD_LOG_I("warm: saved %zu bytes in %u ms%s", flen, (unsigned)(ccord_clock_ms() - t0), sync ? " (synced)" : "");
+  ccord_os_trim_memory();
   return CCORD_OK;
 }
 

@@ -1327,6 +1327,18 @@ const role_table *dj_cache_guild_roles(ccord_id gid, const ccord_json *roles)
   return g_role_cache[slot_idx].table.count > 0 ? &g_role_cache[slot_idx].table : nullptr;
 }
 
+void ccord_live_role_cache_clear(void)
+{
+  for (size_t i = 0; i < g_role_cache_count; i++) {
+    dj_role_table_free(&g_role_cache[i].table);
+  }
+  ccord_free(g_role_cache);
+  g_role_cache = nullptr;
+  g_role_cache_count = 0;
+  g_role_cache_cap = 0;
+  ccord_idmap_free(&g_role_cache_idx);
+}
+
 void dj_resolve_member_role(ccord_arena *a, ccord_id gid, const role_table *rt, const ccord_json *mj,
                                 const char **out_name, uint32_t *out_color, uint8_t *out_rank)
 {

@@ -17,6 +17,18 @@ uint64_t live_now(const live *l)
 
 static void live_chan_guild_from_event(live *l, const ccord_net_event *ev);
 
+static void live_fix_self_ptrs(ccord_live_event *slot)
+{
+  if (slot->ev.type == CCORD_NET_SNAPSHOT) {
+    slot->ev.snapshot = &slot->snapshot;
+  } else if (slot->ev.type == CCORD_NET_USER_SETTINGS) {
+    // The model travels by value with the queued event; repoint at the copy so the answer cannot dangle.
+    slot->ev.user_settings = &slot->user_settings;
+  } else if (slot->ev.type == CCORD_NET_ACCOUNT_PRIVATE) {
+    slot->ev.account_private = &slot->account_private;
+  }
+}
+
 bool live_push_with_media(live *l, ccord_live_event *ev, char *owned_media)
 {
   if (l->count == LIVE_QUEUE_SIZE) {
@@ -25,21 +37,43 @@ bool live_push_with_media(live *l, ccord_live_event *ev, char *owned_media)
     ccord_free(owned_media);
     return false;
   }
+  if (l->count >= l->pending_cap) {
+    size_t ncap = l->pending_cap ? l->pending_cap * 2u : LIVE_QUEUE_INIT_CAP;
+    if (ncap > LIVE_QUEUE_SIZE) ncap = LIVE_QUEUE_SIZE;
+    ccord_live_event *np = ccord_calloc(ncap, sizeof *np);
+    char **nm = np ? ccord_calloc(ncap, sizeof *nm) : nullptr;
+    if (!np || !nm) {
+      ccord_free(nm);
+      ccord_free(np);
+      ccord_live_event_free(ev);
+      ccord_free(owned_media);
+      return false;
+    }
+    for (size_t i = 0; i < l->count; i++) {
+      size_t src = (l->head + i) % l->pending_cap;
+      np[i] = l->pending[src];
+      nm[i] = l->pending_media[src];
+      live_fix_self_ptrs(&np[i]);
+      if (l->pending[src].has_account_private) {
+        ccord_live_wipe(&l->pending[src].account_private, sizeof l->pending[src].account_private);
+      }
+    }
+    ccord_free(l->pending);
+    ccord_free(l->pending_media);
+    l->pending = np;
+    l->pending_media = nm;
+    l->pending_cap = ncap;
+    l->head = 0;
+    l->tail = l->count;
+  }
   l->pending[l->tail] = *ev;
   l->pending_media[l->tail] = owned_media;
-  if (l->pending[l->tail].ev.type == CCORD_NET_SNAPSHOT) {
-    l->pending[l->tail].ev.snapshot = &l->pending[l->tail].snapshot;
-  } else if (l->pending[l->tail].ev.type == CCORD_NET_USER_SETTINGS) {
-    // The model travels by value with the queued event; repoint at the copy so the answer cannot dangle.
-    l->pending[l->tail].ev.user_settings = &l->pending[l->tail].user_settings;
-  } else if (l->pending[l->tail].ev.type == CCORD_NET_ACCOUNT_PRIVATE) {
-    l->pending[l->tail].ev.account_private = &l->pending[l->tail].account_private;
-  }
+  live_fix_self_ptrs(&l->pending[l->tail]);
   live_chan_guild_from_event(l, &l->pending[l->tail].ev);
   if (ev->has_account_private) ccord_live_wipe(&ev->account_private, sizeof ev->account_private);
   memset(ev, 0, sizeof *ev);
   ev->seq = -1;
-  l->tail = (l->tail + 1u) % LIVE_QUEUE_SIZE;
+  l->tail = (l->tail + 1u) % l->pending_cap;
   l->count++;
   return true;
 }
@@ -58,12 +92,16 @@ static void live_clear_events(live *l)
     l->have_current = false;
   }
   for (size_t i = 0; i < l->count; i++) {
-    size_t idx = (l->head + i) % LIVE_QUEUE_SIZE;
+    size_t idx = (l->head + i) % l->pending_cap;
     ccord_live_event_free(&l->pending[idx]);
     ccord_free(l->pending_media[idx]);
     l->pending_media[idx] = nullptr;
   }
-  l->head = l->tail = l->count = 0;
+  ccord_free(l->pending);
+  l->pending = nullptr;
+  ccord_free(l->pending_media);
+  l->pending_media = nullptr;
+  l->head = l->tail = l->count = l->pending_cap = 0;
 }
 
 // Drop every queued viewer access unit and PCM sample and release the lazily allocated buffers and decoder.
@@ -963,6 +1001,22 @@ static void live_disconnect(ccord_transport *t)
   l->voice_cache_count = 0;
   live_chan_guild_clear_all(l);
   if (l->gw) ccord_gateway_stop(l->gw);
+  if (l->vresolve) {
+    ccord_video_resolver_destroy(l->vresolve);
+    l->vresolve = nullptr;
+  }
+  ccord_free(l->effect_configs);
+  l->effect_configs = nullptr;
+  l->effect_config_count = 0;
+  l->effect_config_cap = 0;
+  l->effect_catalog_loaded = false;
+  l->effect_catalog_inflight = false;
+  ccord_free(l->frame_configs);
+  l->frame_configs = nullptr;
+  l->frame_config_count = 0;
+  l->frame_config_cap = 0;
+  l->product_queried_count = 0;
+  ccord_live_role_cache_clear();
   live_clear_events(l);
   live_clear_pending_decor_profiles(l);
   l->state = CCORD_CONN_DISCONNECTED;
@@ -1206,8 +1260,24 @@ bool live_poll(ccord_transport *t, ccord_net_event *out)
   }
   memset(&l->pending[l->head], 0, sizeof l->pending[l->head]);
   l->pending[l->head].seq = -1;
-  l->head = (l->head + 1u) % LIVE_QUEUE_SIZE;
+  l->head = (l->head + 1u) % l->pending_cap;
   l->count--;
+  if (l->count == 0 && l->pending_cap > 16u) {
+    ccord_live_event *sp = ccord_calloc(LIVE_QUEUE_INIT_CAP, sizeof *sp);
+    char **sm = sp ? ccord_calloc(LIVE_QUEUE_INIT_CAP, sizeof *sm) : nullptr;
+    if (sp && sm) {
+      ccord_free(l->pending);
+      ccord_free(l->pending_media);
+      l->pending = sp;
+      l->pending_media = sm;
+      l->pending_cap = LIVE_QUEUE_INIT_CAP;
+      l->head = 0;
+      l->tail = 0;
+    } else {
+      ccord_free(sm);
+      ccord_free(sp);
+    }
+  }
   l->have_current = true;
   *out = l->current.ev;
   return true;
@@ -1279,6 +1349,7 @@ static void live_destroy(ccord_transport *t)
   ccord_free(l->frame_configs);
   live_chan_guild_clear_all(l);
   ccord_idmap_free(&l->chan_guild_idx);
+  ccord_live_role_cache_clear();
   ccord_free(l->chan_guilds);
   ccord_free(l->rich_json);
   ccord_free(l->status_base);

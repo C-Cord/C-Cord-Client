@@ -164,7 +164,6 @@ typedef struct pid_cache_entry {
 
 struct scan_cache {
   ccord_mutex *mu;
-  scratch *sc;
   char *proc_root;
   dev_t root_dev;
   ino_t root_ino;
@@ -190,7 +189,6 @@ scan_cache *gd_scan_cache_new(void)
 void gd_scan_cache_free(scan_cache *c)
 {
   if (!c) return;
-  ccord_free(c->sc);
   ccord_free(c->proc_root);
   ccord_free(c->slots);
   ccord_mutex_destroy(c->mu);
@@ -291,7 +289,7 @@ static void cache_prune(scan_cache *c, uint32_t gen)
       c->count--;
     }
   }
-  if (c->cap > 1024u && c->count * 8u < c->cap) {
+  if (c->cap > 256u && c->count * 4u < c->cap) {
     size_t target = 256u;
     while (target < c->count * 2u) target <<= 1;
     if (target < c->cap) (void)cache_rehash(c, target);
@@ -385,16 +383,13 @@ ccord_status ccord_game_scan(const ccord_game_list *l, const char *proc_root, cc
     close(rootfd);
     return ccord_error_set(err, CCORD_ERR_IO, "game scan: cannot read proc root");
   }
+  scratch *sc = ccord_malloc(sizeof *sc);
+  if (!sc) {
+    closedir(dir);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "game scan: out of memory");
+  }
   scan_cache *c = l->cache;
   ccord_mutex_lock(c->mu);
-  if (!c->sc) {
-    c->sc = ccord_malloc(sizeof *c->sc);
-    if (!c->sc) {
-      ccord_mutex_unlock(c->mu);
-      closedir(dir);
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "game scan: out of memory");
-    }
-  }
   if (!c->root_valid || !have_root_st || !c->proc_root || strcmp(c->proc_root, root) != 0 ||
       c->root_dev != root_st.st_dev || c->root_ino != root_st.st_ino) {
     cache_clear(c);
@@ -409,7 +404,6 @@ ccord_status ccord_game_scan(const ccord_game_list *l, const char *proc_root, cc
     c->gen = 1;
   }
   uint32_t gen = c->gen;
-  scratch *sc = c->sc;
   int dfd = dirfd(dir);
   bool have = false;
   uint32_t best_app = NO_APP;
@@ -450,6 +444,7 @@ ccord_status ccord_game_scan(const ccord_game_list *l, const char *proc_root, cc
   cache_prune(c, gen);
   ccord_mutex_unlock(c->mu);
   closedir(dir);
+  ccord_free(sc);
   if (!have) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "game scan: no detectable game running");
   const app *ap = &l->apps[best_app];
   snprintf(out->app_id, sizeof out->app_id, "%s", ap->id);

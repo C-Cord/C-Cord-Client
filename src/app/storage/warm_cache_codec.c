@@ -2,6 +2,8 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include "warm_cache_internal.h"
 
+#include <ccord/core/os.h>
+
 // ------------------------------------------------------------------------------------------------ writer
 
 static void wk_u64(ccord_jw *w, const char *k, uint64_t v)
@@ -947,6 +949,7 @@ ccord_status ccord_warm_load_ex(ccord_warm *w, ccord_store *store, ccord_session
   }
   if (why) {
     ccord_arena_free(&parse_a);
+    ccord_os_trim_memory();
     drop_file(path, why);
     return CCORD_OK;
   }
@@ -976,6 +979,7 @@ ccord_status ccord_warm_load_ex(ccord_warm *w, ccord_store *store, ccord_session
   if (why) {
     ccord_arena_free(&snap_a);
     ccord_arena_free(&parse_a);
+    ccord_os_trim_memory();
     drop_file(path, why);
     return CCORD_OK;
   }
@@ -998,6 +1002,7 @@ ccord_status ccord_warm_load_ex(ccord_warm *w, ccord_store *store, ccord_session
   ccord_arena_free(&snap_a);
   if (snap_st != CCORD_OK) {
     ccord_arena_free(&parse_a);
+    ccord_os_trim_memory();
     drop_file(path, serr.message);
     return CCORD_OK;
   }
@@ -1009,6 +1014,7 @@ ccord_status ccord_warm_load_ex(ccord_warm *w, ccord_store *store, ccord_session
   res.saved_ms = r_i64(root, "saved_ms");
   res.self_id = snap.self_id;
   ccord_arena_free(&parse_a);
+  ccord_os_trim_memory();
 
   ccord_id active_ch = ccord_store_selected_channel(store);
   res.history_channels = load_history(w, store, active_ch, initial_only);

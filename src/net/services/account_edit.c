@@ -196,6 +196,8 @@ struct ccord_account_rest {
   acct_mock_state *mock;
 #ifdef CCORD_PROFILE_LIVE
   ccord_rest_queue *queue;
+  char *base_url;
+  char *token;
 #endif
   ccord_account_token_cb token_cb;
   void *token_ud;
@@ -237,13 +239,30 @@ ccord_account_rest *ccord_account_rest_create_live(const char *base_url, const c
     ccord_error_set(err, CCORD_ERR_NOMEM, "account: out of memory");
     return nullptr;
   }
-  ccord_rest_config cfg = {.base_url = base_url, .token = token, .timeout_ms = 20000u};
-  r->queue = ccord_rest_queue_create(&cfg, err);
-  if (!r->queue) {
+  r->base_url = (base_url && base_url[0]) ? ccord_strdup(base_url) : nullptr;
+  r->token = ccord_strdup(token);
+  if (!r->token || (base_url && base_url[0] && !r->base_url)) {
+    if (r->token) acct_wipe_str(r->token);
+    ccord_free(r->token);
+    ccord_free(r->base_url);
     ccord_free(r);
+    ccord_error_set(err, CCORD_ERR_NOMEM, "account: out of memory");
     return nullptr;
   }
   return r;
+}
+
+static ccord_status acct_ensure_queue(ccord_account_rest *r, ccord_error *err)
+{
+  if (r->queue) return CCORD_OK;
+  ccord_rest_config cfg = {.base_url = r->base_url, .token = r->token, .timeout_ms = 20000u};
+  ccord_error tmp = {0};
+  r->queue = ccord_rest_queue_create(&cfg, err ? err : &tmp);
+  if (!r->queue) {
+    ccord_status code = err ? err->code : tmp.code;
+    return code != CCORD_OK ? code : CCORD_ERR_NOMEM;
+  }
+  return CCORD_OK;
 }
 #else
 ccord_account_rest *ccord_account_rest_create_live(const char *base_url, const char *token, ccord_error *err)
@@ -297,6 +316,14 @@ void ccord_account_rest_set_token(ccord_account_rest *r, const char *token)
 {
   if (!r || r->is_mock) return;
 #ifdef CCORD_PROFILE_LIVE
+  char *nt = token ? ccord_strdup(token) : nullptr;
+  if (!token || nt) {
+    if (r->token) {
+      acct_wipe_str(r->token);
+      ccord_free(r->token);
+    }
+    r->token = nt;
+  }
   if (r->queue) ccord_rest_queue_set_token(r->queue, token);
 #else
   (void)token;
@@ -784,6 +811,8 @@ static ccord_status acct_http_send(ccord_account_rest *r, acct_http_method metho
 {
   if (!r->is_mock) {
 #ifdef CCORD_PROFILE_LIVE
+    ccord_status qst = acct_ensure_queue(r, err);
+    if (qst != CCORD_OK) return qst;
     ccord_rest_method rm = CCORD_REST_GET;
     if (method == ACCT_POST) rm = CCORD_REST_POST;
     else if (method == ACCT_PATCH) rm = CCORD_REST_PATCH;
@@ -885,6 +914,11 @@ void ccord_account_rest_destroy(ccord_account_rest *r)
   }
 #ifdef CCORD_PROFILE_LIVE
   if (r->queue) ccord_rest_queue_destroy(r->queue);
+  if (r->token) {
+    acct_wipe_str(r->token);
+    ccord_free(r->token);
+  }
+  ccord_free(r->base_url);
 #endif
   ccord_free(r);
 }

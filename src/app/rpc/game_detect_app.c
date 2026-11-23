@@ -180,6 +180,9 @@ static void run_job(ccord_game_detect_app *g, job_kind kind, char *body, size_t 
     res->ok = true;
   }
   ccord_free(body);
+  if (kind == JOB_LOAD_CACHE || kind == JOB_LOAD_BODY || kind == JOB_FREE_LIST) {
+    ccord_os_trim_memory();
+  }
 }
 
 static void worker_main(void *arg)

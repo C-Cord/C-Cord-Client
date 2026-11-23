@@ -24,11 +24,12 @@
 #include <ccord/core/utf8.h>
 #include <ccord/net/gateway_pace.h>
 
+#define GW_QUEUE_INIT_CAP 16u
 #define GW_QUEUE_SIZE 512u
 #define GW_DRAIN_BUDGET_MS 8u
 #define GW_SEND_AGAIN_MAX 500
-#define GW_BUF_SHRINK_THRESHOLD 262144u
-#define GW_BUF_SHRINK_KEEP 65536u
+#define GW_BUF_SHRINK_THRESHOLD 65536u
+#define GW_BUF_SHRINK_KEEP 32768u
 
 struct ccord_gateway {
   char token[CCORD_LIVE_TOKEN_MAX + 1];
@@ -73,8 +74,8 @@ struct ccord_gateway {
   ccord_buf z_out;        // inflated JSON (may hold several concatenated messages)
   ccord_live_event current;
   bool have_current;
-  ccord_live_event queue[GW_QUEUE_SIZE];
-  size_t head, tail, count;
+  ccord_live_event *queue;
+  size_t head, tail, count, qcap;
   char *rich_json;          // Rich Presence activities (RPC SET_ACTIVITY): validated array spliced into every op 3
   size_t rich_len;
 };
@@ -90,28 +91,57 @@ static uint64_t gw_now(const ccord_gateway *g)
 #endif
 }
 
-static void gw_push(ccord_gateway *g, ccord_live_event *ev)
+static void gw_fix_self_ptrs(ccord_live_event *slot)
+{
+  if (slot->ev.type == CCORD_NET_SNAPSHOT) {
+    slot->ev.snapshot = &slot->snapshot;
+  } else if (slot->ev.type == CCORD_NET_USER_SETTINGS) {
+    // The settings model travels by value in the queued event; point the public field at that copy.
+    slot->ev.user_settings = &slot->user_settings;
+  } else if (slot->ev.type == CCORD_NET_ACCOUNT_PRIVATE) {
+    slot->ev.account_private = &slot->account_private;
+  }
+}
+
+static bool gw_push(ccord_gateway *g, ccord_live_event *ev)
 {
   if (g->count == GW_QUEUE_SIZE) {
     g->dropped_events++;
     CCORD_LOG_W("gateway: event queue full, dropped %llu event(s) so far", (unsigned long long)g->dropped_events);
     ccord_live_event_free(ev);
-    return;
+    return false;
+  }
+  if (g->count >= g->qcap) {
+    size_t ncap = g->qcap ? g->qcap * 2u : GW_QUEUE_INIT_CAP;
+    if (ncap > GW_QUEUE_SIZE) ncap = GW_QUEUE_SIZE;
+    ccord_live_event *nq = ccord_calloc(ncap, sizeof *nq);
+    if (!nq) {
+      g->dropped_events++;
+      ccord_live_event_free(ev);
+      return false;
+    }
+    for (size_t i = 0; i < g->count; i++) {
+      size_t src = (g->head + i) % g->qcap;
+      nq[i] = g->queue[src];
+      gw_fix_self_ptrs(&nq[i]);
+      if (g->queue[src].has_account_private) {
+        ccord_live_wipe(&g->queue[src].account_private, sizeof g->queue[src].account_private);
+      }
+    }
+    ccord_free(g->queue);
+    g->queue = nq;
+    g->qcap = ncap;
+    g->head = 0;
+    g->tail = g->count;
   }
   g->queue[g->tail] = *ev;
-  if (g->queue[g->tail].ev.type == CCORD_NET_SNAPSHOT) {
-    g->queue[g->tail].ev.snapshot = &g->queue[g->tail].snapshot;
-  } else if (g->queue[g->tail].ev.type == CCORD_NET_USER_SETTINGS) {
-    // The settings model travels by value in the queued event; point the public field at that copy.
-    g->queue[g->tail].ev.user_settings = &g->queue[g->tail].user_settings;
-  } else if (g->queue[g->tail].ev.type == CCORD_NET_ACCOUNT_PRIVATE) {
-    g->queue[g->tail].ev.account_private = &g->queue[g->tail].account_private;
-  }
+  gw_fix_self_ptrs(&g->queue[g->tail]);
   if (ev->has_account_private) ccord_live_wipe(&ev->account_private, sizeof ev->account_private);
   memset(ev, 0, sizeof *ev);
   ev->seq = -1;
-  g->tail = (g->tail + 1u) % GW_QUEUE_SIZE;
+  g->tail = (g->tail + 1u) % g->qcap;
   g->count++;
+  return true;
 }
 
 static void gw_push_state(ccord_gateway *g, ccord_connection_state state)
@@ -120,7 +150,7 @@ static void gw_push_state(ccord_gateway *g, ccord_connection_state state)
   ccord_live_event_init(&ev);
   ev.ev.type = CCORD_NET_STATE;
   ev.ev.state = state;
-  gw_push(g, &ev);
+  (void)gw_push(g, &ev);
 }
 
 static void gw_push_error(ccord_gateway *g, ccord_status status, const char *text)
@@ -134,12 +164,12 @@ static void gw_push_error(ccord_gateway *g, ccord_status status, const char *tex
     ev.ev.text = ccord_arena_strndup(&ev.arena, text, strlen(text));
   }
   if (!ev.ev.text) ev.ev.text = "gateway error";
-  gw_push(g, &ev);
+  (void)gw_push(g, &ev);
 }
 
 static void gw_buf_release(ccord_buf *b)
 {
-  if (b->cap > GW_BUF_SHRINK_THRESHOLD) {
+  if (b->cap >= GW_BUF_SHRINK_THRESHOLD) {
     ccord_buf_shrink(b, GW_BUF_SHRINK_KEEP);
   } else {
     ccord_buf_clear(b);
@@ -166,6 +196,13 @@ static void gw_close_socket(ccord_gateway *g)
   gw_buf_release(&g->z_out);
   g->frame_active = false;
   g->frame_is_binary = false;
+  if (g->count == 0) {
+    ccord_free(g->queue);
+    g->queue = nullptr;
+    g->qcap = 0;
+    g->head = 0;
+    g->tail = 0;
+  }
 }
 
 static void gw_fail(ccord_gateway *g, ccord_status status, const char *text)
@@ -592,8 +629,7 @@ static bool gw_finish_decoded(ccord_gateway *g, ccord_live_event *ev, size_t pay
     bool is_call_create = ev->ev.type == CCORD_NET_CALL_CREATE;
     const ccord_voice_state *parts = is_call_create ? ev->voice_states : nullptr;
     size_t nparts = is_call_create ? ev->voice_state_count : 0;
-    bool dropped = g->count == GW_QUEUE_SIZE;   // gw_push would free the event (and its arena) instead of queueing it
-    gw_push(g, ev);
+    bool dropped = !gw_push(g, ev);
     for (size_t i = 0; !dropped && i < nparts; i++) {
       ccord_live_event ve;
       ccord_live_event_init(&ve);
@@ -1055,9 +1091,12 @@ void ccord_gateway_destroy(ccord_gateway *g)
     g->have_current = false;
   }
   for (size_t i = 0; i < g->count; i++) {
-    size_t idx = (g->head + i) % GW_QUEUE_SIZE;
+    size_t idx = (g->head + i) % g->qcap;
     ccord_live_event_free(&g->queue[idx]);
   }
+  ccord_free(g->queue);
+  g->queue = nullptr;
+  g->qcap = 0;
   ccord_buf_free(&g->frame);
   ccord_buf_free(&g->z_buf);
   ccord_buf_free(&g->z_out);
@@ -1387,8 +1426,18 @@ bool ccord_gateway_poll(ccord_gateway *g, ccord_net_event *out)
   }
   memset(&g->queue[g->head], 0, sizeof g->queue[g->head]);
   g->queue[g->head].seq = -1;
-  g->head = (g->head + 1u) % GW_QUEUE_SIZE;
+  g->head = (g->head + 1u) % g->qcap;
   g->count--;
+  if (g->count == 0 && g->qcap > 32u) {
+    ccord_live_event *sq = ccord_calloc(GW_QUEUE_INIT_CAP, sizeof *sq);
+    if (sq) {
+      ccord_free(g->queue);
+      g->queue = sq;
+      g->qcap = GW_QUEUE_INIT_CAP;
+      g->head = 0;
+      g->tail = 0;
+    }
+  }
   g->have_current = true;
   *out = g->current.ev;
   return true;

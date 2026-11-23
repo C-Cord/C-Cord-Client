@@ -715,10 +715,24 @@ struct ccord_profile_rest {
   mock_state *mock;
 #ifdef CCORD_PROFILE_LIVE
   ccord_rest_queue *queue;
+  char *base_url;
+  char *token;
 #endif
 };
 
 #ifdef CCORD_PROFILE_LIVE
+static void prof_wipe(void *p, size_t n)
+{
+  if (!p || n == 0) return;
+  volatile unsigned char *v = (volatile unsigned char *)p;
+  while (n--) *v++ = 0;
+}
+
+static void prof_wipe_str(char *s)
+{
+  if (s) prof_wipe(s, strlen(s));
+}
+
 ccord_profile_rest *ccord_profile_rest_create_live(const char *base_url, const char *token, ccord_error *err)
 {
   ccord_error_clear(err);
@@ -731,14 +745,31 @@ ccord_profile_rest *ccord_profile_rest_create_live(const char *base_url, const c
     ccord_error_set(err, CCORD_ERR_NOMEM, "profile: out of memory");
     return nullptr;
   }
-  // A 10 MiB image upload needs more than the 15 s API default on a slow uplink.
-  ccord_rest_config cfg = {.base_url = base_url, .token = token, .timeout_ms = 90000u};
-  r->queue = ccord_rest_queue_create(&cfg, err);
-  if (!r->queue) {
+  r->base_url = (base_url && base_url[0]) ? ccord_strdup(base_url) : nullptr;
+  r->token = ccord_strdup(token);
+  if (!r->token || (base_url && base_url[0] && !r->base_url)) {
+    prof_wipe_str(r->token);
+    ccord_free(r->token);
+    ccord_free(r->base_url);
     ccord_free(r);
+    ccord_error_set(err, CCORD_ERR_NOMEM, "profile: out of memory");
     return nullptr;
   }
   return r;
+}
+
+static ccord_status profile_ensure_queue(ccord_profile_rest *r, ccord_error *err)
+{
+  if (r->queue) return CCORD_OK;
+  // A 10 MiB image upload needs more than the 15 s API default on a slow uplink.
+  ccord_rest_config cfg = {.base_url = r->base_url, .token = r->token, .timeout_ms = 90000u};
+  ccord_error tmp = {0};
+  r->queue = ccord_rest_queue_create(&cfg, err ? err : &tmp);
+  if (!r->queue) {
+    ccord_status code = err ? err->code : tmp.code;
+    return code != CCORD_OK ? code : CCORD_ERR_NOMEM;
+  }
+  return CCORD_OK;
 }
 #else
 ccord_profile_rest *ccord_profile_rest_create_live(const char *base_url, const char *token, ccord_error *err)
@@ -943,6 +974,8 @@ static ccord_status rest_send(ccord_profile_rest *r, bool use_put, const char *p
 {
   if (!r->is_mock) {
 #ifdef CCORD_PROFILE_LIVE
+    ccord_status qst = profile_ensure_queue(r, err);
+    if (qst != CCORD_OK) return qst;
     ccord_rest_request req =
       ccord_rest_request_make(use_put ? CCORD_REST_PUT : CCORD_REST_PATCH, path, CCORD_GOV_USER);
     req.body = body;
@@ -1035,6 +1068,9 @@ void ccord_profile_rest_destroy(ccord_profile_rest *r)
   }
 #ifdef CCORD_PROFILE_LIVE
   if (r->queue) ccord_rest_queue_destroy(r->queue);   // answers every queued request with CCORD_ERR_IO
+  prof_wipe_str(r->token);
+  ccord_free(r->token);
+  ccord_free(r->base_url);
 #endif
   ccord_free(r);
 }
@@ -1281,6 +1317,8 @@ static ccord_status rest_send_get(ccord_profile_rest *r, const char *path, http_
 {
   if (!r->is_mock) {
 #ifdef CCORD_PROFILE_LIVE
+    ccord_status qst = profile_ensure_queue(r, err);
+    if (qst != CCORD_OK) return qst;
     ccord_rest_request req = ccord_rest_request_make(CCORD_REST_GET, path, CCORD_GOV_USER);
     req.cb = cb;
     req.ud = ud;

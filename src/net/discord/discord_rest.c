@@ -26,6 +26,7 @@
 #include <ccord/core/log.h>
 #include <ccord/core/alloc.h>
 #include <ccord/core/json.h>
+#include <ccord/core/os.h>
 
 static bool ascii_eq_ci(const char *a, const char *b, size_t n)
 {
@@ -292,7 +293,7 @@ ccord_status ccord_live_rest_request(const ccord_rest_config *cfg, ccord_rest_me
 #define CCORD_REST_BULK_MIN_BYTES_PER_S 2048u   // a media download slower than this ...
 #define CCORD_REST_BULK_STALL_S 20u             // ... for this long has stalled
 #define CCORD_REST_BULK_TIMEOUT_MS 300000u      // hard ceiling for one media download
-#define CCORD_REST_HANDLE_POOL_MAX 8u           // reusable CURL easy handles kept warm per queue
+#define CCORD_REST_HANDLE_POOL_MAX 4u           // reusable CURL easy handles kept warm per queue
 
 typedef enum rest_job_state : uint8_t { JOB_PENDING = 0, JOB_RUNNING } rest_job_state;
 
@@ -414,8 +415,10 @@ static void rest_job_free(ccord_rest_job *job)
     if (job->body.data && job->body.len > 0) ccord_live_wipe(job->body.data, job->body.len);
     if (job->resp.data && job->resp.len > 0) ccord_live_wipe(job->resp.data, job->resp.len);
   }
+  bool large_bulk_body = job->bulk && job->body.cap >= (1024u * 1024u);
   ccord_buf_free(&job->body);
   ccord_buf_free(&job->resp);
+  if (large_bulk_body) ccord_os_trim_memory();
   wipe_cstr(job->auth);
   ccord_free(job->route_path);
   ccord_free(job->content_type);
@@ -565,6 +568,9 @@ ccord_rest_queue *ccord_rest_queue_create(const ccord_rest_config *cfg, ccord_er
     return nullptr;
   }
   q->multi = curl_multi_init();
+  if (q->multi) {
+    (void)curl_multi_setopt(q->multi, CURLMOPT_MAXCONNECTS, 6L);
+  }
   q->gov = ccord_gov_create(cfg ? cfg->governor : nullptr);
   if (!q->multi || !q->gov) {
     ccord_rest_queue_destroy(q);
@@ -1112,7 +1118,10 @@ static void rest_finish(ccord_rest_queue *q, ccord_rest_job *job, ccord_status s
 
 static bool rest_start(ccord_rest_queue *q, ccord_rest_job *job)
 {
-  ccord_buf_clear(&job->resp);
+  if (job->sensitive && job->resp.data && job->resp.len > 0) {
+    ccord_live_wipe(job->resp.data, job->resp.len);
+  }
+  ccord_buf_shrink(&job->resp, 16384u);
   ccord_gov_response_init(&job->hdrs, 0);
   if (job->stream) rest_stream_reset_response(job);
   if (!rest_job_attach(q, job)) return false;
