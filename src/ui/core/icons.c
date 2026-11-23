@@ -340,3 +340,74 @@ void ui_icon_stage_return(ccord_renderer *r, float cx, float cy, float size, cco
   ccord_draw_line(r, (ccord_vec2){cx - o * 0.75f, cy - o * 0.75f}, (ccord_vec2){cx + o * 0.15f, cy - o * 0.75f}, t, c);
   ccord_draw_line(r, (ccord_vec2){cx - o * 0.75f, cy - o * 0.75f}, (ccord_vec2){cx - o * 0.75f, cy + o * 0.15f}, t, c);
 }
+
+// File upload drop tray with upward arrow.
+void ui_icon_upload_drop(ccord_renderer *r, float cx, float cy, float size, ccord_color c)
+{
+  float s = size * 0.5f;
+  float t = fmaxf(size * 0.105f, 1.5f);
+  // Upward arrow shaft + chevron head
+  ccord_draw_line(r, (ccord_vec2){cx, cy + s * 0.30f}, (ccord_vec2){cx, cy - s * 0.78f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx - s * 0.42f, cy - s * 0.34f}, (ccord_vec2){cx, cy - s * 0.78f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx + s * 0.42f, cy - s * 0.34f}, (ccord_vec2){cx, cy - s * 0.78f}, t, c);
+  // Open U-shaped tray at the bottom
+  float lx = cx - s * 0.78f, rx = cx + s * 0.78f;
+  float ty = cy + s * 0.24f, by = cy + s * 0.76f;
+  ccord_draw_line(r, (ccord_vec2){lx, ty}, (ccord_vec2){lx, by}, t, c);
+  ccord_draw_line(r, (ccord_vec2){rx, ty}, (ccord_vec2){rx, by}, t, c);
+  ccord_draw_line(r, (ccord_vec2){lx, by}, (ccord_vec2){rx, by}, t, c);
+}
+
+// Slashed eye outline for spoiler drop mode.
+void ui_icon_spoiler_eye(ccord_renderer *r, float cx, float cy, float size, ccord_color c)
+{
+  float s = size * 0.5f;
+  float t = fmaxf(size * 0.10f, 1.5f);
+  // Diamond-almond eye outline using two smooth quadratic-like V-arcs
+  ccord_draw_line(r, (ccord_vec2){cx - s * 0.88f, cy}, (ccord_vec2){cx - s * 0.36f, cy - s * 0.44f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx - s * 0.36f, cy - s * 0.44f}, (ccord_vec2){cx + s * 0.36f, cy - s * 0.44f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx + s * 0.36f, cy - s * 0.44f}, (ccord_vec2){cx + s * 0.88f, cy}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx - s * 0.88f, cy}, (ccord_vec2){cx - s * 0.36f, cy + s * 0.44f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx - s * 0.36f, cy + s * 0.44f}, (ccord_vec2){cx + s * 0.36f, cy + s * 0.44f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx + s * 0.36f, cy + s * 0.44f}, (ccord_vec2){cx + s * 0.88f, cy}, t, c);
+  // Pupil + diagonal spoiler slash
+  ccord_draw_circle_stroke(r, cx, cy, s * 0.24f, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx - s * 0.72f, cy + s * 0.72f}, (ccord_vec2){cx + s * 0.72f, cy - s * 0.72f}, t, c);
+}
+
+// Package archive box with a centered plus for .cce plugin drops.
+void ui_icon_plugin_pkg(ccord_renderer *r, float cx, float cy, float size, ccord_color c)
+{
+  float s = size * 0.5f;
+  float t = fmaxf(size * 0.10f, 1.5f);
+  ccord_draw_rrect_stroke(r, (ccord_rect){cx - s * 0.78f, cy - s * 0.44f, s * 1.56f, s * 1.24f}, size * 0.12f, t, c);
+  // Top handle/cap
+  ccord_draw_line(r, (ccord_vec2){cx - s * 0.32f, cy - s * 0.44f}, (ccord_vec2){cx - s * 0.32f, cy - s * 0.76f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx + s * 0.32f, cy - s * 0.44f}, (ccord_vec2){cx + s * 0.32f, cy - s * 0.76f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx - s * 0.32f, cy - s * 0.76f}, (ccord_vec2){cx + s * 0.32f, cy - s * 0.76f}, t, c);
+  // Centered '+' inside the package body
+  float py = cy + s * 0.18f;
+  ccord_draw_line(r, (ccord_vec2){cx - s * 0.32f, py}, (ccord_vec2){cx + s * 0.32f, py}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx, py - s * 0.32f}, (ccord_vec2){cx, py + s * 0.32f}, t, c);
+}
+
+// Prohibited circle with diagonal slash for blocked drop states.
+void ui_icon_blocked(ccord_renderer *r, float cx, float cy, float size, ccord_color c)
+{
+  float s = size * 0.5f;
+  float t = fmaxf(size * 0.105f, 1.5f);
+  float rad = s * 0.80f;
+  ccord_draw_circle_stroke(r, cx, cy, rad, t, c);
+  float d = rad * 0.68f;
+  ccord_draw_line(r, (ccord_vec2){cx - d, cy + d}, (ccord_vec2){cx + d, cy - d}, t, c);
+}
+
+// Exclamation inside a circle for upload size errors.
+void ui_icon_alert_circle(ccord_renderer *r, float cx, float cy, float size, ccord_color c)
+{
+  float s = size * 0.5f;
+  float t = fmaxf(size * 0.105f, 1.5f);
+  ccord_draw_circle_stroke(r, cx, cy, s * 0.82f, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx, cy - s * 0.40f}, (ccord_vec2){cx, cy + s * 0.10f}, t, c);
+  ccord_draw_circle(r, cx, cy + s * 0.40f, t * 0.62f, c);
+}

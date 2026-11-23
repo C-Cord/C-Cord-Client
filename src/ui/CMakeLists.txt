@@ -94,6 +94,7 @@ add_library(ccord_ui STATIC
   overlays/profile_roles.c
   overlays/clan_popover.c
   overlays/report_flow.c
+  overlays/drop_overlay.c
   # Expressions
   expressions/expr_picker.c
   expressions/expr_tabs.c
@@ -172,7 +173,8 @@ if(CCORD_BUILD_TESTS)
     test_ui_ime
     test_ui_settings_devices
     test_ui_user_settings
-    test_ui_account_profile)
+    test_ui_account_profile
+    test_ui_drop_overlay)
     ccord_add_test(NAME ${ui_test} SOURCES tests/${ui_test}.c
                    LIBS ccord_ui ccord_ui_internal_inc ccord_platform ccord_net_mock SDL3::SDL3 LABELS ui)
   endforeach()

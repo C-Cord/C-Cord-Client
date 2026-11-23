@@ -46,7 +46,7 @@ static const lint_package k_packages[] = {
           "settings/server_settings_actions_b.c",
           "settings/channel_settings.c", "settings/channel_settings_pages.c"}},
   {"X", {"expressions/expr_picker.c", "expressions/expr_tabs.c",
-         "overlays/ui_saved_messages.c", "chat/ui_voice_message.c"}},
+         "overlays/ui_saved_messages.c", "overlays/drop_overlay.c", "chat/ui_voice_message.c"}},
   // N: draw_nav.c, draw_members.c, context_menu.c (add when package N lands)
   // C: draw_forum.c (and draw_chat.c's chat part) (add when package C lands)
   // O: ui_scheduled_events.c, ui_call.c, ui_dave.c (and draw_chat.c's overlay part) (add when package O lands)

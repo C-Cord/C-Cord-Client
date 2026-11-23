@@ -63,6 +63,7 @@ enum settings_page {
   SP_COUNT,
 };
 _Static_assert(SP_PROFILE_EDIT == UI_SETTINGS_PAGE_PROFILE, "settings_profile.h names this page index");
+_Static_assert(SP_PLUGINS == UI_SETTINGS_PAGE_PLUGINS, "ui_overlays_api.h names this page index");
 
 // Numeric order is the sidebar order: USER SETTINGS, APP SETTINGS, C-CORD, EXTENSIONS.
 enum settings_category { CAT_USER = 0, CAT_APP, CAT_CCORD, CAT_EXT, CAT_COUNT };

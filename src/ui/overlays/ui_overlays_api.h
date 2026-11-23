@@ -233,3 +233,52 @@ typedef struct ui_report_flow_debug {
 } ui_report_flow_debug;
 void ui_report_flow_debug_get(const ccord_ui *ui, ui_report_flow_debug *out);
 
+// ---- drop_overlay.c: file drag-and-drop hover overlay & oversized-file error modal ----
+// State is lazily heap-allocated on ui->drop_ovl and freed once both surfaces finish closing (0 bytes when idle).
+#define UI_SETTINGS_PAGE_PLUGINS 8
+typedef enum ui_drop_mode : uint8_t {
+  UI_DROP_MODE_NONE = 0,
+  UI_DROP_MODE_UPLOAD,       // active text channel / DM ready to attach
+  UI_DROP_MODE_SPOILER,      // Shift held while hovering in an uploadable channel
+  UI_DROP_MODE_PLUGINS,      // Settings > Plugins (.cce package import)
+  UI_DROP_MODE_LOCKED,       // no send permission, pending screening, DM request, or non-chat view
+  UI_DROP_MODE_LIMIT_FULL,   // CCORD_RICH_MAX_ATTACHMENTS (10) already staged
+} ui_drop_mode;
+
+// Effective per-file upload limit for the currently selected channel (account Nitro tier + guild boost tier).
+uint64_t ui_current_upload_limit(const ccord_ui *ui, ccord_upload_limit_source *out_source);
+void ui_drop_overlay_begin(ccord_ui *ui, uint8_t mods);
+void ui_drop_overlay_move(ccord_ui *ui, float x, float y, uint8_t mods);
+void ui_drop_overlay_end(ccord_ui *ui);
+bool ui_drop_overlay_active(const ccord_ui *ui);
+bool ui_drop_overlay_shift_held(const ccord_ui *ui);
+void ui_upload_error_open(ccord_ui *ui, const char *filename, uint64_t file_size, uint64_t limit_bytes,
+                          ccord_upload_limit_source limit_src);
+bool ui_upload_error_is_open(const ccord_ui *ui);
+void ui_upload_error_close(ccord_ui *ui);
+bool ui_upload_error_handle(ccord_ui *ui, const ccord_input_event *ev);
+ccord_cursor_kind ui_upload_error_cursor(const ccord_ui *ui);
+void ui_drop_overlay_draw(ccord_ui *ui, ccord_renderer *r);
+void ui_drop_overlay_trim_memory(ccord_ui *ui);
+void ui_drop_overlay_destroy(ccord_ui *ui);
+
+typedef struct ui_drop_overlay_debug {
+  uint64_t limit_bytes;
+  ccord_rect card_rect;
+  ccord_rect error_box;
+  ccord_rect error_ok_btn;
+  ui_drop_mode mode;
+  ccord_upload_limit_source limit_source;
+  bool hover_open;
+  bool error_open;
+  bool alloc_live;
+  bool pointer_over_card;
+  bool shift_held;
+  char title[128];
+  char subtitle[192];
+  char limit_pill[96];
+  char error_title[64];
+  char error_body[384];
+} ui_drop_overlay_debug;
+void ui_drop_overlay_debug_get(const ccord_ui *ui, ui_drop_overlay_debug *out);
+

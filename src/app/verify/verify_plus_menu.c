@@ -19,7 +19,6 @@
 #include "ui_internal.h"
 
 #define PM_MAX_PICK 4
-#define PM_CAP_BYTES (25u * 1024u * 1024u)
 
 typedef struct pm {
   const ccord_verify_ui_parity_ctx *c;
@@ -126,10 +125,8 @@ static void pm_run(pm *s)
   for (int i = 0; i < 3; i++) snprintf(paths[i], sizeof paths[i], "%s/%s", dir, names[i]);
   bool made = true;
   for (int i = 0; i < 3; i++) made = made && pm_make_file(paths[i], 0, "plus menu upload");
-  made = made && pm_make_file(big, (off_t)PM_CAP_BYTES + 1, nullptr);
   if (!pm_check(s, made, "temp upload files created")) {
     for (int i = 0; i < 3; i++) remove(paths[i]);
-    remove(big);
     return;
   }
   g_platform = s->c->platform;
@@ -229,7 +226,12 @@ static void pm_run(pm *s)
     for (size_t i = 0; i < 3; i++) order = order && strcmp(ui->staged_files[i].filename, names[i]) == 0;
     if (!pm_check(s, order, "the picked files are staged in pick order, none duplicated")) break;
 
-    // A pick with one file over the 25 MB cap: that file is refused with the size notice, the others still attach.
+    // A pick with one file over the active channel upload cap: that file is refused with the size notice + modal,
+    // while the other valid files still attach in pick order.
+    uint64_t active_cap = ui_current_upload_limit(ui, nullptr);
+    char lim_s[32];
+    ccord_format_upload_limit(active_cap, lim_s, sizeof lim_s);
+    if (!pm_check(s, pm_make_file(big, (off_t)active_cap + 1, nullptr), "oversized sparse temp file created")) break;
     ccord_ui_clear_attachment(ui);
     ui->notice[0] = '\0';
     g_pick[0] = paths[0];
@@ -240,7 +242,10 @@ static void pm_run(pm *s)
     pm_click_rect(s, ui_plus_menu_row_rect(ui, 0));
     pm_deliver_drops(s);
     if (!pm_check(s, ccord_ui_staged_attachment_count(ui) == 2, "the other files of a pick with an oversized one still attach")) break;
-    if (!pm_check(s, strstr(ui->notice, "25 MB") != nullptr, "the oversized file shows the existing size notice")) break;
+    if (!pm_check(s, strstr(ui->notice, lim_s) != nullptr && ui_upload_error_is_open(ui),
+                  "the oversized file shows the active size notice and error modal"))
+      break;
+    ui_upload_error_close(ui);
     if (!pm_check(s, strcmp(ui->staged_files[0].filename, names[0]) == 0 && strcmp(ui->staged_files[1].filename, names[1]) == 0,
                   "the attached files keep their pick order around the refused one"))
       break;

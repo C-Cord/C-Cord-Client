@@ -545,6 +545,7 @@ struct ccord_ui {
   ccord_rect staged_spoiler_rects[CCORD_RICH_MAX_ATTACHMENTS];
   ccord_rect staged_remove_rects[CCORD_RICH_MAX_ATTACHMENTS];
   bool had_active_uploads;
+  struct ui_drop_overlay *drop_ovl;   // lazily heap-allocated only while file drag hover or upload-error modal is active
   ui_upload_debug dbg_uploads;
 
   // ephemeral message dismiss hit rects

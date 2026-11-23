@@ -404,3 +404,8 @@ void ui_icon_plus(ccord_renderer *r, float cx, float cy, float size, ccord_color
 void ui_icon_compass(ccord_renderer *r, float cx, float cy, float size, ccord_color c, ccord_color bg);
 void ui_icon_fullscreen(ccord_renderer *r, float cx, float cy, float size, ccord_color c, bool exit_mode);
 void ui_icon_stage_return(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
+void ui_icon_upload_drop(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
+void ui_icon_spoiler_eye(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
+void ui_icon_plugin_pkg(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
+void ui_icon_blocked(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
+void ui_icon_alert_circle(ccord_renderer *r, float cx, float cy, float size, ccord_color c);

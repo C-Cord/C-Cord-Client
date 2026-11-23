@@ -661,6 +661,7 @@ void ccord_ui_destroy(ccord_ui *ui)
   ui_poll_composer_destroy(ui);
   ui_profile_roles_destroy(ui);
   ui_report_flow_destroy(ui);
+  ui_drop_overlay_destroy(ui);
   ui_menu_release(ui);
   ccord_vlist_free(&ui->vlist);
   ccord_text_edit_free(&ui->edit);

@@ -620,6 +620,18 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     ui_ime_preedit_set(ui, ev->text, ev->ime_start, ev->ime_length);
     return true;
   }
+  if (ev->type == CCORD_EV_DROP_BEGIN) {
+    ui_drop_overlay_begin(ui, ev->mods);
+    return true;
+  }
+  if (ev->type == CCORD_EV_DROP_POSITION) {
+    ui_drop_overlay_move(ui, ev->x, ev->y, ev->mods);
+    return true;
+  }
+  if (ev->type == CCORD_EV_DROP_COMPLETE) {
+    ui_drop_overlay_end(ui);
+    return true;
+  }
   if (ev->type == CCORD_IN_TOUCH_DOWN || ev->type == CCORD_IN_TOUCH_MOVE ||
       ev->type == CCORD_IN_TOUCH_UP || ev->type == CCORD_IN_TOUCH_CANCEL) {
     float prev_lt = ui->left_drawer_t, prev_rt = ui->right_drawer_t;
@@ -639,6 +651,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
   }
   if (ev->type == CCORD_IN_APP_BACKGROUND) {
     ui_menu_close(ui);
+    ui_drop_overlay_end(ui);
     ui->touch_text_focused = false;
     ui->ime_active = false;
     ui->window_focused = false;
@@ -686,6 +699,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     ui_composer_format_free();
     ui_plugin_v3_trim_memory(ui);
     ui_settings_plugins_free_scratch();
+    ui_drop_overlay_trim_memory(ui);
     ui_vlist_shrink_tight(&ui->vlist);
     ccord_arena_free(&ui->hit_arena);
     ccord_arena_init(&ui->hit_arena, 4096u);
@@ -702,10 +716,18 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     return ccord_ui_handle_back(ui);
   }
   if (ev->type != CCORD_IN_RESIZE && ev->type != CCORD_IN_FOCUS && ev->type != CCORD_IN_QUIT) {
+    // Defensive clear: normal pointer/keyboard activity only resumes after an OS drag ends or is cancelled,
+    // so clearing here ensures a missed compositor DROP_COMPLETE can never leave the drop overlay stuck.
+    if (ui_drop_overlay_active(ui) &&
+        (ev->type == CCORD_IN_MOUSE_MOVE || ev->type == CCORD_IN_MOUSE_DOWN || ev->type == CCORD_IN_KEY_DOWN)) {
+      ui_drop_overlay_end(ui);
+      if (ev->type == CCORD_IN_KEY_DOWN && ev->key == CCORD_KEY_ESCAPE) return true;
+    }
     if (ev->type == CCORD_IN_MOUSE_MOVE || ev->type == CCORD_IN_MOUSE_DOWN || ev->type == CCORD_IN_MOUSE_UP || ev->type == CCORD_IN_WHEEL) {
       ui->mx = ev->x;
       ui->my = ev->y;
     }
+    if (ui_upload_error_is_open(ui) && ui_upload_error_handle(ui, ev)) return true;
     if (ui_plugin_dialog_is_open(ui) && ui_plugin_dialog_handle_input(ui, ev)) return true;
     if (ui_plugin_settings_is_open(ui) && ui_plugin_settings_handle_input(ui, ev)) return true;
   }

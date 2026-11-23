@@ -509,32 +509,76 @@ bool ccord_ui_get_saved_window_size(const ccord_ui *ui, int *out_w, int *out_h)
   return true;
 }
 
-bool ccord_ui_attach_bytes(ccord_ui *ui, const char *filename, const void *data, size_t size)
+static const char *attach_basename(const char *path)
 {
-  if (!ui || !filename || !filename[0] || !data || size == 0 || size > (25u * 1024u * 1024u)) return false;
-  if (ui_settings_profile_take_image(ui, filename, data, size)) return true;   // Settings > Profile asked for an image
+  if (!path) return "";
+  const char *base = strrchr(path, '/');
+#if CCORD_OS_WINDOWS
+  const char *bs = strrchr(path, '\\');
+  if (bs && (!base || bs > base)) base = bs;
+#endif
+  return base ? base + 1 : path;
+}
+
+// Takes ownership of `owned_data` on every path (frees it on rejection or if Settings > Profile consumes it).
+static bool ui_attach_owned_bytes(ccord_ui *ui, const char *filename, uint8_t *owned_data, size_t size)
+{
+  if (!ui || !filename || !filename[0] || !owned_data || size == 0) {
+    ccord_free(owned_data);
+    return false;
+  }
+  if (ui_settings_profile_take_image(ui, filename, owned_data, size)) {
+    ccord_free(owned_data);
+    return true;   // Settings > Profile asked for an image
+  }
   if (ui->staged_file_count >= CCORD_RICH_MAX_ATTACHMENTS) {
+    ccord_free(owned_data);
     ui_notice(ui, "Maximum of %u attachments per message", (unsigned)CCORD_RICH_MAX_ATTACHMENTS);
     return false;
   }
-  const char *base = strrchr(filename, '/');
-  base = base ? base + 1 : filename;
-  if (!base[0]) return false;
+  const char *base = attach_basename(filename);
+  if (!base[0]) {
+    ccord_free(owned_data);
+    return false;
+  }
   bool sp = false;
   if (strncmp(base, "SPOILER_", 8) == 0 && base[8] != '\0') {
     sp = true;
     base += 8;
   }
-  uint8_t *copy = ccord_malloc(size);
-  if (!copy) return false;
-  memcpy(copy, data, size);
   size_t idx = ui->staged_file_count++;
-  ui->staged_files[idx].data = copy;
+  ui->staged_files[idx].data = owned_data;
   ui->staged_files[idx].size = size;
   ui->staged_files[idx].spoiler = sp;
   snprintf(ui->staged_files[idx].filename, sizeof ui->staged_files[idx].filename, "%.127s", base);
   ui->dirty = true;
   return true;
+}
+
+bool ccord_ui_attach_bytes(ccord_ui *ui, const char *filename, const void *data, size_t size)
+{
+  if (!ui || !filename || !filename[0] || !data) return false;
+  ccord_upload_limit_source src = CCORD_UPLOAD_SRC_FREE;
+  uint64_t limit = ui_current_upload_limit(ui, &src);
+  if (size == 0 || (uint64_t)size > limit) {
+    char lim_s[32];
+    ccord_format_upload_limit(limit, lim_s, sizeof lim_s);
+    ui_notice(ui, "File must be between 1 B and %s", lim_s);
+    ui_upload_error_open(ui, filename, (uint64_t)size, limit, src);
+    return false;
+  }
+  if (ui_settings_profile_take_image(ui, filename, data, size)) return true;   // Settings > Profile asked for an image
+  if (ui->staged_file_count >= CCORD_RICH_MAX_ATTACHMENTS) {
+    ui_notice(ui, "Maximum of %u attachments per message", (unsigned)CCORD_RICH_MAX_ATTACHMENTS);
+    return false;
+  }
+  uint8_t *copy = ccord_malloc(size);
+  if (!copy) {
+    ui_notice(ui, "Not enough memory to attach %s", attach_basename(filename));
+    return false;
+  }
+  memcpy(copy, data, size);
+  return ui_attach_owned_bytes(ui, filename, copy, size);
 }
 
 size_t ccord_ui_staged_attachment_count(const ccord_ui *ui)
@@ -553,12 +597,14 @@ bool ccord_ui_toggle_attachment_spoiler(ccord_ui *ui, size_t index)
 bool ccord_ui_remove_staged_attachment(ccord_ui *ui, size_t index)
 {
   if (!ui || index >= ui->staged_file_count) return false;
+  bool large = ui->staged_files[index].size >= (1024u * 1024u);
   ccord_free(ui->staged_files[index].data);
   for (size_t i = index; i + 1u < ui->staged_file_count; i++) {
     ui->staged_files[i] = ui->staged_files[i + 1u];
   }
   ui->staged_file_count--;
   memset(&ui->staged_files[ui->staged_file_count], 0, sizeof ui->staged_files[0]);
+  if (large) ccord_os_trim_memory();
   ui->dirty = true;
   return true;
 }
@@ -566,35 +612,41 @@ bool ccord_ui_remove_staged_attachment(ccord_ui *ui, size_t index)
 bool ccord_ui_attach_file(ccord_ui *ui, const char *path)
 {
   if (!ui || !path || !path[0]) return false;
+  uint64_t sz = 0;
+  if (!ccord_file_size(path, &sz)) {
+    ui_notice(ui, "Cannot open file: %s", path);
+    return false;
+  }
+  ccord_upload_limit_source src = CCORD_UPLOAD_SRC_FREE;
+  uint64_t limit = ui_current_upload_limit(ui, &src);
+  if (sz == 0 || sz > limit) {
+    char lim_s[32];
+    ccord_format_upload_limit(limit, lim_s, sizeof lim_s);
+    ui_notice(ui, "File must be between 1 B and %s", lim_s);
+    ui_upload_error_open(ui, path, sz, limit, src);
+    return false;
+  }
   FILE *f = fopen(path, "rb");
   if (!f) {
     ui_notice(ui, "Cannot open file: %s", path);
     return false;
   }
-  if (fseek(f, 0, SEEK_END) != 0) {
-    fclose(f);
-    return false;
-  }
-  long sz = ftell(f);
-  if (sz <= 0 || sz > (long)(25u * 1024u * 1024u) || fseek(f, 0, SEEK_SET) != 0) {
-    fclose(f);
-    ui_notice(ui, "File must be between 1 B and 25 MB");
-    return false;
-  }
+  // Single-buffer read: transfers ownership directly to staged_files without a second malloc/memcpy peak.
   uint8_t *buf = ccord_malloc((size_t)sz);
   if (!buf) {
     fclose(f);
+    ui_notice(ui, "Not enough memory to attach %s", attach_basename(path));
     return false;
   }
   size_t got = fread(buf, 1, (size_t)sz, f);
   fclose(f);
   if (got != (size_t)sz) {
     ccord_free(buf);
+    ui_notice(ui, "Cannot read file: %s", attach_basename(path));
     return false;
   }
   size_t before = ui->staged_file_count;
-  bool ok = ccord_ui_attach_bytes(ui, path, buf, got);
-  ccord_free(buf);
+  bool ok = ui_attach_owned_bytes(ui, path, buf, got);
   if (ok && ui->staged_file_count == before + 1u) {
     char *dst = ui->staged_files[before].path;
     size_t cap = sizeof ui->staged_files[before].path;
@@ -611,11 +663,14 @@ bool ccord_ui_attach_file(ccord_ui *ui, const char *path)
 void ccord_ui_clear_attachment(ccord_ui *ui)
 {
   if (!ui) return;
+  bool had_large = false;
   for (size_t i = 0; i < ui->staged_file_count; i++) {
+    if (ui->staged_files[i].size >= (1024u * 1024u)) had_large = true;
     ccord_free(ui->staged_files[i].data);
   }
   memset(ui->staged_files, 0, sizeof ui->staged_files);
   ui->staged_file_count = 0;
+  if (had_large) ccord_os_trim_memory();
   ui->dirty = true;
 }
 
@@ -848,6 +903,7 @@ bool ccord_ui_handle_back(ccord_ui *ui)
   }
 
   // 2. Topmost plugin dialogs/settings, composer & profile popovers/modals.
+  if (ui_upload_error_is_open(ui)) { ui_upload_error_close(ui); return true; }
   if (ui_plugin_dialog_is_open(ui)) { (void)ui_plugin_dialog_handle_input(ui, &esc); ui->dirty = true; return true; }
   if (ui_plugin_settings_is_open(ui)) { (void)ui_plugin_settings_handle_input(ui, &esc); ui->dirty = true; return true; }
   if (ui->report_open) { ui_report_flow_close(ui); ui->dirty = true; return true; }

@@ -485,6 +485,8 @@ typedef enum ui_overlay {
   UI_OVL_MEMBER_POPOVER,
   UI_OVL_REACTIONS,
   UI_OVL_SHORTCUTS,
+  UI_OVL_DROP_OVERLAY,
+  UI_OVL_UPLOAD_ERROR,
   UI_OVL_COUNT
 } ui_overlay;
 

@@ -581,7 +581,8 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui_plugin_settings_draw(ui, r);
   ui_plugin_dialog_draw(ui, r);
   ui_profile_roles_draw(ui, r);   // above the popout / profile that anchors it
-  ui_menu_draw(ui, r);            // topmost: context menus & mobile Copy/Paste bottom sheets cover settings/modals
+  ui_menu_draw(ui, r);            // context menus & mobile Copy/Paste bottom sheets cover settings/modals
+  ui_drop_overlay_draw(ui, r);    // topmost: drag-and-drop target & oversized-file error modal
   uc_update_hover(ui);   // rows moved under a stationary pointer
   if (ui->typing_next_ms != 0) {
     ui->typing_anim_only = !ui->anim.pending;

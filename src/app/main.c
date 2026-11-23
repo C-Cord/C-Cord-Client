@@ -308,7 +308,20 @@ static void run_interactive(app *a)
               (void)ebuf;
 #endif
             } else {
-              (void)ccord_ui_attach_file(a->ui, dpath);
+              size_t before = ccord_ui_staged_attachment_count(a->ui);
+              bool ok = ccord_ui_attach_file(a->ui, dpath);
+              if (ok && !from_picker && (ev.mods & CCORD_MOD_SHIFT) != 0 &&
+                  ccord_ui_staged_attachment_count(a->ui) == before + 1u) {
+                const char *base = strrchr(dpath, '/');
+#if CCORD_OS_WINDOWS
+                const char *bs = strrchr(dpath, '\\');
+                if (bs && (!base || bs > base)) base = bs;
+#endif
+                base = base ? base + 1 : dpath;
+                if (strncmp(base, "SPOILER_", 8) != 0 || base[8] == '\0') {
+                  (void)ccord_ui_toggle_attachment_spoiler(a->ui, before);
+                }
+              }
             }
             redraw = true;
           }
@@ -455,6 +468,11 @@ static void run_interactive(app *a)
           app_plugins_push_platform_state(a);
           if (a->plugins) ccord_plugins_dispatch_window_resize(a->plugins, ev.x, ev.y);
 #endif
+        } else if (ev.type == CCORD_EV_DROP_POSITION) {
+          float zoom = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f;
+          if (zoom <= 0.0f) zoom = 1.0f;
+          ev.x /= zoom;
+          ev.y /= zoom;
         } else if (ev.type == CCORD_IN_FOCUS) {
 #if CCORD_WITH_PLUGINS
           if (a->plugins) ccord_plugins_dispatch_window_focus(a->plugins, ev.focused);

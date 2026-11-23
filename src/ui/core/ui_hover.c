@@ -307,7 +307,9 @@ bool uc_update_hover(ccord_ui *ui)
 
   // cursor
   ccord_cursor_kind k = CCORD_CURSOR_DEFAULT;
-  if (ui->drag == DRAG_STREAM_STAGE_H) {
+  if (ui_upload_error_is_open(ui)) {
+    k = ui_upload_error_cursor(ui);
+  } else if (ui->drag == DRAG_STREAM_STAGE_H) {
     k = CCORD_CURSOR_NS_RESIZE;
   } else if (ui->drag == DRAG_STAGE_SPLIT) {
     k = CCORD_CURSOR_EW_RESIZE;
