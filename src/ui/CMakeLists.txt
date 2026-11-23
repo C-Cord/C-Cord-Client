@@ -171,7 +171,8 @@ if(CCORD_BUILD_TESTS)
     test_ui_voice_surfaces
     test_ui_ime
     test_ui_settings_devices
-    test_ui_user_settings)
+    test_ui_user_settings
+    test_ui_account_profile)
     ccord_add_test(NAME ${ui_test} SOURCES tests/${ui_test}.c
                    LIBS ccord_ui ccord_ui_internal_inc ccord_platform ccord_net_mock SDL3::SDL3 LABELS ui)
   endforeach()
