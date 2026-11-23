@@ -981,6 +981,7 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
   ui_sync_messages(ui);
   uc_auto_ack(ui);
   uc_search_tick(ui);
+  ui_reminders_tick(ui);
   if (ui->discovery_due_ms != 0) {
     if (!ui->discovery_open) {
       ui->discovery_due_ms = 0;

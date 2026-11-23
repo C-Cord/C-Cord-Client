@@ -748,6 +748,15 @@ void ui_menu_open(ccord_ui *ui, float x, float y, const ccord_menu_context *ctx)
         builtin = add_item(ui, saved ? "Unsave Message" : "Save Message", MENU_BUILTIN_SAVE_MESSAGE, nullptr, nullptr, false);
         if (builtin) ui->menu.items[ui->menu.count - 1].arg = saved ? 0 : 1;
       }
+      if (builtin && confirmed) {
+        int rp = add_parent(ui, "Create Reminder", false);
+        if (rp >= 0) {
+          (void)add_child(ui, rp, "In 15 minutes", MENU_BUILTIN_REMIND_ME, 15LL * 60 * 1000, false, false);
+          (void)add_child(ui, rp, "In 1 hour", MENU_BUILTIN_REMIND_ME, 60LL * 60 * 1000, false, false);
+          (void)add_child(ui, rp, "In 3 hours", MENU_BUILTIN_REMIND_ME, 3LL * 60 * 60 * 1000, false, false);
+          (void)add_child(ui, rp, "Tomorrow (24 hours)", MENU_BUILTIN_REMIND_ME, 24LL * 60 * 60 * 1000, false, false);
+        }
+      }
       if (builtin && can_crosspost) {
         builtin = add_item(ui, "Publish Message", MENU_BUILTIN_CROSSPOST, nullptr, nullptr, false);
       }

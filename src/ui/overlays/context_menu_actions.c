@@ -265,6 +265,10 @@ static void activate(ccord_ui *ui, size_t idx)
     else ui_saved_messages_unsave(ui, ctx.channel_id, ctx.message_id);
     return;
   }
+  if (it.builtin == MENU_BUILTIN_REMIND_ME) {
+    ui_reminder_add(ui, ctx.channel_id, ctx.message_id, it.arg);
+    return;
+  }
   if (it.builtin == MENU_BUILTIN_APP_COMMAND) {
     if (!ui->d.session) {
       ui_notice(ui, "Not connected");

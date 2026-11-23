@@ -147,11 +147,11 @@ int main(void)
 
   // Extensions on (default): right-click a message, click the bundled "Copy Message ID" item (last item,
   // after Copy Text, React, Delete (the mock makes you an administrator), Reply (sep), Forward, Copy Message
-  // Link, Pin, Mark Unread (sep), Save, Create Thread and Report Message (sep); the menu is built before the async
-  // app-command index lands, so no QuoteMessage row; y = 300 + pad 6 + 11 * item 32 + 4 * separator 9 + half item 16 = 710).
+  // Link, Pin, Mark Unread (sep), Save, Create Reminder, Create Thread and Report Message (sep); the menu is built before the async
+  // app-command index lands, so no QuoteMessage row; y = 300 + pad 6 + 12 * item 32 + 4 * separator 9 + half item 16 = 742).
   // The action runs in the plugin host, which writes the clipboard; the headless run then prints it.
   const char *const copy_id[] = {CCORD_BIN, "--headless", "--screenshot", shot, "--size", "1280x800",
-                                 "--right-click", "700,300", "--click", "750,710", "--print-clipboard", nullptr};
+                                 "--right-click", "700,300", "--click", "750,742", "--print-clipboard", nullptr};
   CT_CHECK(run_capture(copy_id, out, sizeof out) == 0);
   const char *clip = strstr(out, "clipboard: ");
   CT_CHECK(clip != nullptr);

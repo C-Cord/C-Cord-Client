@@ -689,13 +689,16 @@ struct ccord_ui {
   float inbox_scroll, inbox_content_h;
   ccord_rect inbox_thumb;   // drawn inbox-list thumb (zero when it fits / is hidden)
   ccord_rect inbox_popover_rect, inbox_mark_all_rect;
-  ccord_rect inbox_tab_rects[2];
+  ccord_rect inbox_tab_rects[UI_INBOX_TAB_COUNT];
   ui_inbox_hit inbox_hits[UI_INBOX_HIT_MAX];
   size_t ninbox_hits;
 
-  // Saved Messages / bookmarks popover (Result 1) + header button.
+  // Saved Messages / bookmarks popover (Result 1) + header button + Reminders.
   ui_saved_msg *saved_msgs;
   size_t nsaved_msgs, cap_saved_msgs;
+  ui_reminder *reminders;
+  size_t nreminders, cap_reminders;
+  uint64_t reminder_last_check_ms;
   bool saved_popover_open;
   float saved_scroll, saved_content_h;
   ccord_rect saved_thumb;   // drawn saved-list thumb (zero when it fits / is hidden)

@@ -40,6 +40,12 @@ bool ui_saved_messages_handle(ccord_ui *ui, const ccord_input_event *ev);   // t
 void ui_saved_messages_load_ini(ccord_ui *ui, const char *key, const char *value);
 void ui_saved_messages_apply_loaded(ccord_ui *ui);
 void ui_saved_messages_save_ini(const ccord_ui *ui, FILE *f);
+// Message reminders (ui_saved_messages.c): persisted in [reminders] and surfaced in Inbox -> Reminders.
+void ui_reminder_add(ccord_ui *ui, ccord_id channel_id, ccord_id message_id, int64_t delay_ms);
+void ui_reminder_remove(ccord_ui *ui, size_t index);
+void ui_reminders_tick(ccord_ui *ui);
+void ui_reminders_save_ini(const ccord_ui *ui, FILE *f);
+void ui_reminders_load_ini(ccord_ui *ui, const char *key, const char *value);
 // Forward picker.
 void ui_forward_picker_open(ccord_ui *ui, ccord_id source_channel_id, ccord_id message_id);
 bool ui_forward_picker_active(const ccord_ui *ui);

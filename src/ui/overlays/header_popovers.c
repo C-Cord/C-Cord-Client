@@ -343,16 +343,92 @@ typedef struct inbox_entry {
   ccord_id guild_id;
   ccord_id channel_id;
   ccord_id message_id;
+  uint64_t aux_id;
   uint32_t unread_count;
   uint32_t mention_count;
-  char title[140];
+  uint8_t kind;   // 0 = unread/mention, 1 = saved, 2 = reminder, 3 = scheduled
+  char title[144];
   char subtitle[200];
+  const char *action_lbl;
 } inbox_entry;
 
 static size_t collect_inbox_entries(const ccord_ui *ui, int tab, inbox_entry *out, size_t cap)
 {
   if (!ui || !out || cap == 0) return 0;
   size_t count = 0;
+  if (tab == 2) {   // Saved / Bookmarks
+    for (size_t i = 0; i < ui->nsaved_msgs && count < cap; i++) {
+      const ui_saved_msg *sm = &ui->saved_msgs[i];
+      inbox_entry *e = &out[count++];
+      *e = (inbox_entry){
+        .guild_id = sm->guild_id,
+        .channel_id = sm->channel_id,
+        .message_id = sm->message_id,
+        .kind = 1u,
+        .action_lbl = "Remove",
+      };
+      const ccord_channel *c = ccord_store_channel(ui->d.store, sm->channel_id);
+      if (c && c->guild_id != CCORD_DM_GUILD_ID && c->name && c->name[0]) {
+        snprintf(e->title, sizeof e->title, "%.70s  #%.60s", sm->label[0] ? sm->label : "Saved", c->name);
+      } else {
+        snprintf(e->title, sizeof e->title, "%.128s", sm->label[0] ? sm->label : "Saved Message");
+      }
+      snprintf(e->subtitle, sizeof e->subtitle, "%.180s", sm->preview[0] ? sm->preview : "Jump to message");
+    }
+    return count;
+  }
+  if (tab == 3) {   // Reminders
+    int64_t now_unix = ui->now_unix_ms > 0 ? ui->now_unix_ms : (int64_t)ui->now_ms;
+    for (size_t i = 0; i < ui->nreminders && count < cap; i++) {
+      const ui_reminder *rm = &ui->reminders[i];
+      inbox_entry *e = &out[count++];
+      *e = (inbox_entry){
+        .guild_id = rm->guild_id,
+        .channel_id = rm->channel_id,
+        .message_id = rm->message_id,
+        .aux_id = (uint64_t)i,
+        .kind = 2u,
+        .action_lbl = "Dismiss",
+      };
+      int64_t rem_s = (rm->due_unix_ms - now_unix) / 1000LL;
+      char due_buf[32];
+      if (rm->fired || rem_s <= 0) snprintf(due_buf, sizeof due_buf, "Due now");
+      else if (rem_s < 3600) snprintf(due_buf, sizeof due_buf, "in %lldm", (long long)((rem_s + 59) / 60));
+      else if (rem_s < 86400) snprintf(due_buf, sizeof due_buf, "in %lldh", (long long)(rem_s / 3600));
+      else snprintf(due_buf, sizeof due_buf, "in %lldd", (long long)(rem_s / 86400));
+      snprintf(e->title, sizeof e->title, "%.90s  \xC2\xB7  %s", rm->label[0] ? rm->label : "Reminder", due_buf);
+      snprintf(e->subtitle, sizeof e->subtitle, "%.180s", rm->preview[0] ? rm->preview : "Jump to message");
+    }
+    return count;
+  }
+  if (tab == 4) {   // Scheduled Messages
+    ccord_ui_scheduled_item sitems[UI_INBOX_HIT_MAX];
+    size_t ns = ui->d.host.scheduled_list
+                    ? ui->d.host.scheduled_list(ui->d.host.ud, sitems, cap < UI_INBOX_HIT_MAX ? cap : UI_INBOX_HIT_MAX)
+                    : 0u;
+    int64_t now_unix = ui->now_unix_ms > 0 ? ui->now_unix_ms : (int64_t)ui->now_ms;
+    for (size_t i = 0; i < ns && count < cap; i++) {
+      const ccord_ui_scheduled_item *si = &sitems[i];
+      const ccord_channel *c = ccord_store_channel(ui->d.store, si->channel_id);
+      inbox_entry *e = &out[count++];
+      *e = (inbox_entry){
+        .guild_id = c ? c->guild_id : CCORD_ID_NONE,
+        .channel_id = si->channel_id,
+        .aux_id = si->id,
+        .kind = 3u,
+        .action_lbl = "Cancel",
+      };
+      int64_t rem_s = (si->due_unix_ms - now_unix) / 1000LL;
+      char due_buf[32];
+      if (rem_s <= 0) snprintf(due_buf, sizeof due_buf, "Sending...");
+      else if (rem_s < 3600) snprintf(due_buf, sizeof due_buf, "in %lldm", (long long)((rem_s + 59) / 60));
+      else if (rem_s < 86400) snprintf(due_buf, sizeof due_buf, "in %lldh", (long long)(rem_s / 3600));
+      else snprintf(due_buf, sizeof due_buf, "in %lldd", (long long)(rem_s / 86400));
+      snprintf(e->title, sizeof e->title, "#%.80s  \xC2\xB7  %s", (c && c->name && c->name[0]) ? c->name : "channel", due_buf);
+      snprintf(e->subtitle, sizeof e->subtitle, "%.180s", si->preview[0] ? si->preview : "(attachment)");
+    }
+    return count;
+  }
   size_t ng = ccord_store_guild_count(ui->d.store);
   for (size_t pass = 0; pass <= ng && count < cap; pass++) {
     ccord_id gid = (pass == 0) ? CCORD_DM_GUILD_ID : ccord_store_guild_at(ui->d.store, pass - 1)->id;
@@ -463,8 +539,7 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
   ui->ninbox_hits = 0;
   ui->inbox_popover_rect = (ccord_rect){0};
   ui->inbox_mark_all_rect = (ccord_rect){0};
-  ui->inbox_tab_rects[0] = (ccord_rect){0};
-  ui->inbox_tab_rects[1] = (ccord_rect){0};
+  for (int t = 0; t < UI_INBOX_TAB_COUNT; t++) ui->inbox_tab_rects[t] = (ccord_rect){0};
   ui->inbox_content_h = 0.0f;
   ui->inbox_thumb = (ccord_rect){0, 0, 0, 0};
   if (!ui->inbox_open) return;
@@ -475,7 +550,7 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
   float safe_r = 8.0f + ui->safe_insets.right;
   float safe_b = 8.0f + fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
   float top_y = h->y + h->h + 6.0f;
-  float w = 420.0f, hgt = 420.0f;
+  float w = 460.0f, hgt = 448.0f;
   if (w > ui->win_w - safe_l - safe_r && ui->win_w > 32.0f) w = maxf(ui->win_w - safe_l - safe_r, 200.0f);
   float max_hgt = ui->win_h - top_y - safe_b;
   if (hgt > max_hgt && ui->win_h > 120.0f) hgt = maxf(max_hgt, 160.0f);
@@ -492,39 +567,52 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
   ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
   ccord_text_draw(r, "Inbox", 5, box.x + 14.0f, box.y + 12.0f, &hs, 0.0f);
 
-  bool compact_hdr = box.w < 390.0f;
   float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
   uis_btn_size bsz = ui->mobile_layout ? UIS_BTN_S_MD : UIS_BTN_S_SM;
-  static const char *const k_tabs[2] = {"Unreads", "Mentions"};
-  float tx = compact_hdr ? (box.x + 12.0f) : (box.x + 76.0f);
-  float ty = compact_hdr ? (box.y + bh + 12.0f) : (box.y + 8.0f);
-  for (int t = 0; t < 2; t++) {
-    ccord_rect tr = {tx, ty, uis_label_width(ui, r, k_tabs[t]), bh};
+  if (ui->inbox_tab < 0 || ui->inbox_tab >= UI_INBOX_TAB_COUNT) ui->inbox_tab = 0;
+
+  inbox_entry entries[UI_INBOX_HIT_MAX];
+  size_t nentries = collect_inbox_entries(ui, ui->inbox_tab, entries, UI_INBOX_HIT_MAX);
+
+  bool has_ackable = false;
+  if (ui->inbox_tab <= 1) {
+    for (size_t i = 0; i < nentries; i++) {
+      if (entries[i].unread_count > 0 || entries[i].mention_count > 0) {
+        has_ackable = true;
+        break;
+      }
+    }
+  }
+  const char *malbl = (ui->inbox_tab == 4) ? "+ Schedule" : "Mark All Read";
+  float maw = uis_label_width(ui, r, malbl);
+  ccord_rect mar = {box.x + box.w - maw - 12.0f, box.y + 8.0f, maw, bh};
+  if (ui->inbox_tab <= 1 || ui->inbox_tab == 4) {
+    ui->inbox_mark_all_rect = mar;
+    bool enabled = (ui->inbox_tab == 4) ? true : has_ackable;
+    bool mahv = enabled && ui->mouse_in && ui_in_rect(ui->mx, ui->my, mar);
+    uis_button(ui, r, mar, malbl, ui->inbox_tab == 4 ? UIS_BTN_PRIMARY : UIS_BTN_SECONDARY, bsz,
+               (uis_state){.hover = mahv, .disabled = !enabled}, "inboxall", 0);
+  }
+
+  // Row 2: 5 tabs (Unreads, Mentions, Saved, Reminders, Scheduled), auto-wrapping on narrow/mobile popovers.
+  static const char *const k_tabs[UI_INBOX_TAB_COUNT] = {"Unreads", "Mentions", "Saved", "Reminders", "Scheduled"};
+  float tx = box.x + 10.0f;
+  float ty = box.y + bh + 12.0f;
+  float tab_max_x = box.x + box.w - 10.0f;
+  for (int t = 0; t < UI_INBOX_TAB_COUNT; t++) {
+    float tw = uis_label_width(ui, r, k_tabs[t]);
+    if (tx + tw > tab_max_x && tx > box.x + 10.0f) {
+      tx = box.x + 10.0f;
+      ty += bh + UIS_SP_1;
+    }
+    ccord_rect tr = {tx, ty, tw, bh};
     ui->inbox_tab_rects[t] = tr;
     bool thv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, tr);
     uis_tab(ui, r, tr, k_tabs[t], (uis_state){.hover = thv, .selected = ui->inbox_tab == t}, "inboxtab", (uint64_t)t);
     tx += tr.w + UIS_SP_1;
   }
 
-  inbox_entry entries[UI_INBOX_HIT_MAX];
-  size_t nentries = collect_inbox_entries(ui, ui->inbox_tab, entries, UI_INBOX_HIT_MAX);
-
-  bool has_ackable = false;
-  for (size_t i = 0; i < nentries; i++) {
-    if (entries[i].unread_count > 0 || entries[i].mention_count > 0) {
-      has_ackable = true;
-      break;
-    }
-  }
-  const char *malbl = "Mark All Read";
-  float maw = uis_label_width(ui, r, malbl);
-  ccord_rect mar = {box.x + box.w - maw - 12.0f, box.y + 8.0f, maw, bh};
-  ui->inbox_mark_all_rect = mar;
-  bool mahv = has_ackable && ui->mouse_in && ui_in_rect(ui->mx, ui->my, mar);
-  uis_button(ui, r, mar, malbl, UIS_BTN_SECONDARY, bsz, (uis_state){.hover = mahv, .disabled = !has_ackable},
-             "inboxall", 0);
-
-  float div_y = compact_hdr ? (ty + bh + 6.0f) : (box.y + bh + 16.0f);
+  float div_y = ty + bh + 6.0f;
   uis_divider(ui, r, box.x, div_y, box.w);
 
   float list_x = box.x + 10.0f;
@@ -540,11 +628,18 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
 
   ccord_push_clip(r, (ccord_rect){list_x, list_y, list_w, list_h});
   if (nentries == 0) {
-    const char *empty = (ui->inbox_tab == 0) ? "You're all caught up! No unread channels."
-                                             : "No recent mentions.";
+    static const char *const k_empty[UI_INBOX_TAB_COUNT] = {
+      "You're all caught up! No unread channels.",
+      "No recent mentions.",
+      "No saved messages yet.",
+      "No active reminders. Right-click a message to set one.",
+      "No scheduled messages.",
+    };
+    const char *empty = k_empty[ui->inbox_tab];
     ccord_text_style es = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(text_muted));
-    ccord_vec2 et = ccord_text_measure(r, empty, strlen(empty), &es, 0.0f);
-    ccord_text_draw(r, empty, strlen(empty), list_x + (list_w - et.x) * 0.5f, list_y + (list_h - et.y) * 0.45f, &es, 0.0f);
+    ccord_vec2 et = ccord_text_measure(r, empty, strlen(empty), &es, list_w - 16.0f);
+    float ex = et.x < list_w ? list_x + (list_w - et.x) * 0.5f : list_x + 8.0f;
+    ccord_text_draw(r, empty, strlen(empty), ex, list_y + (list_h - et.y) * 0.45f, &es, list_w - 16.0f);
   } else {
     ccord_text_style cts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
     ccord_text_style css = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(text_secondary));
@@ -553,9 +648,12 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
       if (cy + card_h < list_y || cy > list_y + list_h) continue;
       ccord_rect card = {list_x, cy, list_w, card_h};
       ccord_rect ack_r = {0};
-      bool can_ack = entries[i].unread_count > 0 || entries[i].mention_count > 0;
+      const char *act_lbl = entries[i].action_lbl ? entries[i].action_lbl
+                          : ((entries[i].unread_count > 0 || entries[i].mention_count > 0) ? "Mark Read" : nullptr);
+      bool can_ack = act_lbl != nullptr;
       if (can_ack) {
-        ack_r = (ccord_rect){card.x + card.w - 84.0f, card.y + 4.0f, 76.0f, bh};
+        float aw = fmaxf(72.0f, uis_label_width(ui, r, act_lbl));
+        ack_r = (ccord_rect){card.x + card.w - aw - 8.0f, card.y + 4.0f, aw, bh};
       }
       // Only fully visible cards are clickable; clipped ones must be scrolled into view first.
       if (cy >= list_y && cy + card_h <= list_y + list_h && ui->ninbox_hits < UI_INBOX_HIT_MAX) {
@@ -565,6 +663,8 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
           .guild_id = entries[i].guild_id,
           .channel_id = entries[i].channel_id,
           .message_id = entries[i].message_id,
+          .aux_id = entries[i].aux_id,
+          .kind = entries[i].kind,
         };
       }
       bool chv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, card);
@@ -602,7 +702,8 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
                                card.x + 10.0f, card.y + (ui->mobile_layout ? 44.0f : 34.0f), card.w - 20.0f, &css);
 
       if (can_ack) {
-        uis_button(ui, r, ack_r, "Mark Read", UIS_BTN_SECONDARY, bsz, (uis_state){.hover = ahv}, "inboxack", (uint64_t)i);
+        uis_button(ui, r, ack_r, act_lbl, entries[i].kind >= 1u ? UIS_BTN_DANGER_SOFT : UIS_BTN_SECONDARY, bsz,
+                   (uis_state){.hover = ahv}, "inboxack", (uint64_t)i);
       }
     }
   }

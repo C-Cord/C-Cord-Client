@@ -427,10 +427,13 @@ bool uc_update_hover(ccord_ui *ui)
   } else if (ui->inbox_open) {
     if (ui->mouse_in) {
       if (h.inbox || h.search || h.pin ||
-          ui_in_rect(ui->mx, ui->my, ui->inbox_tab_rects[0]) ||
-          ui_in_rect(ui->mx, ui->my, ui->inbox_tab_rects[1]) ||
           (ui->inbox_mark_all_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->inbox_mark_all_rect))) {
         k = CCORD_CURSOR_POINTER;
+      }
+      for (int t = 0; k == CCORD_CURSOR_DEFAULT && t < UI_INBOX_TAB_COUNT; t++) {
+        if (ui->inbox_tab_rects[t].w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->inbox_tab_rects[t])) {
+          k = CCORD_CURSOR_POINTER;
+        }
       }
       for (size_t i = 0; k == CCORD_CURSOR_DEFAULT && i < ui->ninbox_hits; i++) {
         if (ui_in_rect(ui->mx, ui->my, ui->inbox_hits[i].card_rect)) k = CCORD_CURSOR_POINTER;

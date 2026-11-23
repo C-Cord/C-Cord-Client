@@ -1021,7 +1021,7 @@ bool ui_inbox_handle(ccord_ui *ui, const ccord_input_event *ev)
       ui->dirty = true;
       return true;
     }
-    for (int t = 0; t < 2; t++) {
+    for (int t = 0; t < UI_INBOX_TAB_COUNT; t++) {
       if (ui->inbox_tab_rects[t].w > 0.0f && ui_in_rect(ev->x, ev->y, ui->inbox_tab_rects[t])) {
         ui->inbox_tab = t;
         ui->inbox_scroll = 0.0f;
@@ -1030,6 +1030,12 @@ bool ui_inbox_handle(ccord_ui *ui, const ccord_input_event *ev)
       }
     }
     if (ui->inbox_mark_all_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->inbox_mark_all_rect)) {
+      if (ui->inbox_tab == 4) {
+        ui->inbox_open = false;
+        ui_schedule_dialog_open(ui);
+        ui->dirty = true;
+        return true;
+      }
       size_t acked = 0;
       size_t ng = ccord_store_guild_count(ui->d.store);
       for (size_t pass = 0; pass <= ng && acked < CCORD_MARK_READ_MAX; pass++) {
@@ -1051,8 +1057,18 @@ bool ui_inbox_handle(ccord_ui *ui, const ccord_input_event *ev)
     for (size_t i = 0; i < ui->ninbox_hits; i++) {
       const ui_inbox_hit *hit = &ui->inbox_hits[i];
       if (hit->ack_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, hit->ack_rect)) {
-        const ccord_channel *c = ccord_store_channel(ui->d.store, hit->channel_id);
-        if (c) (void)ui_ack_channel_now(ui, hit->guild_id, c);
+        if (hit->kind == 1u) {
+          ui_saved_messages_unsave(ui, hit->channel_id, hit->message_id);
+        } else if (hit->kind == 2u) {
+          ui_reminder_remove(ui, (size_t)hit->aux_id);
+        } else if (hit->kind == 3u) {
+          if (ui->d.host.scheduled_cancel && ui->d.host.scheduled_cancel(ui->d.host.ud, hit->aux_id)) {
+            ui_notice(ui, "Scheduled message cancelled");
+          }
+        } else {
+          const ccord_channel *c = ccord_store_channel(ui->d.store, hit->channel_id);
+          if (c) (void)ui_ack_channel_now(ui, hit->guild_id, c);
+        }
         ui->dirty = true;
         return true;
       }

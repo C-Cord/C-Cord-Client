@@ -81,6 +81,10 @@ static bool settings_visit(const char *section, const char *key, const char *val
     ui_saved_messages_load_ini(ui, key, value);
     return true;
   }
+  if (strcmp(section, "reminders") == 0) {
+    ui_reminders_load_ini(ui, key, value);
+    return true;
+  }
   if (strcmp(section, "pinned_dms") == 0 || strcmp(section, "favorite_dms") == 0 ||
       strcmp(section, "friend_nicknames") == 0 || strcmp(section, "ignored_users") == 0) {
     ui_dm_prefs_load_ini(ui, section, key, value);
@@ -235,6 +239,7 @@ static void settings_load(ccord_ui *ui)
   fclose(f);
   text[n] = '\0';
   ui->nsaved_msgs = 0;   // rebuild the bookmark list from this file
+  ui->nreminders = 0;    // rebuild the reminder list from this file
   ccord_error err;
   if (ccord_ini_parse(text, n, settings_visit, ui, &err) != CCORD_OK) ccord_error_clear(&err);
   ccord_free(text);
@@ -332,6 +337,7 @@ static void settings_write_ini(ccord_ui *ui, FILE *f)
   if (s_warm_cache_value[0]) fprintf(f, "warm_cache = %s\n", s_warm_cache_value);
   ui_settings_m6_prefs_ini_save(ui, f);   // M6 theme/zoom/streamer/notify keys
   ui_saved_messages_save_ini(ui, f);      // [saved_messages] bookmarks
+  ui_reminders_save_ini(ui, f);           // [reminders] message reminders
   ui_dm_prefs_save_ini(ui, f);            // [pinned_dms], [favorite_dms], [friend_nicknames], [ignored_users]
 }
 

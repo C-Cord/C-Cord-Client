@@ -519,7 +519,7 @@ static void test_context_menu(void)
   mouse(CCORD_IN_MOUSE_DOWN, 3, x, y);
   frame(2);
   ccord_ui_debug d = dbg();
-  CT_CHECK(d.context_menu_open && d.context_menu_items == 12u + own_react_item + msg_app_cmds);   // Copy, React, Edit, Delete, Reply, Forward, Copy Link, Pin, Mark Unread, Save, Create Thread (+ View Reactions) (+ MESSAGE app commands) + plugin item
+  CT_CHECK(d.context_menu_open && d.context_menu_items == 13u + own_react_item + msg_app_cmds);   // Copy, React, Edit, Delete, Reply, Forward, Copy Link, Pin, Mark Unread, Save, Create Reminder, Create Thread (+ View Reactions) (+ MESSAGE app commands) + plugin item
   // Esc closes
   key(CCORD_KEY_ESCAPE, 0);
   CT_CHECK(!dbg().context_menu_open);
@@ -560,7 +560,7 @@ static void test_context_menu(void)
     size_t oth_react_item = (om && om->reaction_kind_count > 0) ? 1u : 0u;
     mouse(CCORD_IN_MOUSE_DOWN, 3, x, oy);
     frame(1);
-    CT_CHECK(dbg().context_menu_open && dbg().context_menu_items == 12u + oth_react_item + msg_app_cmds);
+    CT_CHECK(dbg().context_menu_open && dbg().context_menu_items == 13u + oth_react_item + msg_app_cmds);
     key(CCORD_KEY_ESCAPE, 0);
   }
 

@@ -497,8 +497,7 @@ static uint64_t ui_overlay_hover_sig(const ccord_ui *ui)
     HBIT(ui_in_rect(x, y, ui->shortcuts_modal_rect), 2);
   } else if (ui->inbox_open) {
     HBIT(ui_in_rect(x, y, ui->inbox_mark_all_rect), 10);
-    HBIT(ui_in_rect(x, y, ui->inbox_tab_rects[0]), 11);
-    HBIT(ui_in_rect(x, y, ui->inbox_tab_rects[1]), 12);
+    for (int t = 0; t < UI_INBOX_TAB_COUNT; t++) HBIT(ui_in_rect(x, y, ui->inbox_tab_rects[t]), 11 + t);
     for (size_t i = 0; i < ui->ninbox_hits; i++) {
       if (ui_in_rect(x, y, ui->inbox_hits[i].card_rect)) sig = uc_sig_mix_u64(sig, 100u + i);
       if (ui_in_rect(x, y, ui->inbox_hits[i].ack_rect)) sig = uc_sig_mix_u64(sig, 200u + i);

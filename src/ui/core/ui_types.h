@@ -381,6 +381,7 @@ typedef enum menu_builtin : uint8_t {
   MENU_BUILTIN_COPY_LINK,          // copy the message's discord.com/channels/... link
   MENU_BUILTIN_MARK_UNREAD,        // mark the channel unread from this message onward
   MENU_BUILTIN_SAVE_MESSAGE,       // arg = 1 save / 0 unsave (Saved Messages bookmark)
+  MENU_BUILTIN_REMIND_ME,          // arg = delay_ms (create message reminder)
   MENU_BUILTIN_TEXT_PASTE,
   MENU_BUILTIN_TEXT_COPY,
   MENU_BUILTIN_TEXT_CUT,
@@ -567,13 +568,26 @@ typedef struct ui_nav_loc {
 } ui_nav_loc;
 
 #define UI_INBOX_HIT_MAX 32u
+#define UI_INBOX_TAB_COUNT 5
 typedef struct ui_inbox_hit {
   ccord_rect card_rect;
   ccord_rect ack_rect;
   ccord_id guild_id;
   ccord_id channel_id;
   ccord_id message_id;
+  uint64_t aux_id;     // reminder index (Reminders tab) or scheduled message id (Scheduled tab)
+  uint8_t kind;        // 0 = unread/mention, 1 = saved, 2 = reminder, 3 = scheduled
 } ui_inbox_hit;
+
+// Local message reminders (persisted in [reminders] of settings.ini, surfaced in Inbox -> Reminders).
+#define UI_REMINDER_MAX 64u
+typedef struct ui_reminder {
+  ccord_id channel_id, message_id, guild_id;
+  int64_t due_unix_ms;
+  bool fired;
+  char label[96];
+  char preview[160];
+} ui_reminder;
 
 // Saved Messages (bookmarks). The UI list is the display + persistence source of truth; the store is
 // rehydrated from it so the session/store bookmark APIs agree. label/preview are captured at save time

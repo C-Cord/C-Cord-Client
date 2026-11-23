@@ -204,6 +204,149 @@ void ui_saved_messages_save_ini(const ccord_ui *ui, FILE *f)
   }
 }
 
+// ---------------------------------------------------------------- Message Reminders
+
+static bool reminders_ensure_cap(ccord_ui *ui, size_t need)
+{
+  if (need <= ui->cap_reminders) return true;
+  if (need > UI_REMINDER_MAX) return false;
+  size_t ncap = ui->cap_reminders ? ui->cap_reminders * 2u : 8u;
+  if (ncap < need) ncap = need;
+  if (ncap > UI_REMINDER_MAX) ncap = UI_REMINDER_MAX;
+  ui_reminder *buf = ccord_realloc(ui->reminders, ncap * sizeof *buf);
+  if (!buf) return false;
+  ui->reminders = buf;
+  ui->cap_reminders = ncap;
+  return true;
+}
+
+void ui_reminder_add(ccord_ui *ui, ccord_id channel_id, ccord_id message_id, int64_t delay_ms)
+{
+  if (!ui || !ui->d.store || channel_id == CCORD_ID_NONE || message_id == CCORD_ID_NONE || delay_ms <= 0) return;
+  const ccord_message *m = ccord_store_find_message(ui->d.store, channel_id, message_id);
+  const ccord_channel *ch = ccord_store_channel(ui->d.store, channel_id);
+  int64_t now_unix = ui->now_unix_ms > 0 ? ui->now_unix_ms : (int64_t)ui->now_ms;
+  ui_reminder entry = {
+    .channel_id = channel_id,
+    .message_id = message_id,
+    .guild_id = ch ? ch->guild_id : CCORD_ID_NONE,
+    .due_unix_ms = now_unix + delay_ms,
+    .fired = false,
+  };
+  if (m) {
+    const ccord_user *u = ccord_store_user(ui->d.store, m->author_id);
+    const char *nm = (u && u->display_name && u->display_name[0]) ? u->display_name
+                   : ((u && u->name && u->name[0]) ? u->name : "User");
+    sanitize_line(nm, entry.label, sizeof entry.label);
+    char prev[160];
+    (void)ccord_message_preview(m, prev, sizeof prev);
+    sanitize_line(prev, entry.preview, sizeof entry.preview);
+  } else {
+    snprintf(entry.label, sizeof entry.label, "Message");
+    snprintf(entry.preview, sizeof entry.preview, "Jump to message");
+  }
+  // Replace existing reminder on the same message, or append sorted by due_unix_ms.
+  for (size_t i = 0; i < ui->nreminders; i++) {
+    if (ui->reminders[i].channel_id == channel_id && ui->reminders[i].message_id == message_id) {
+      ui->reminders[i] = entry;
+      ui_settings_save(ui);
+      ui_notice(ui, "Reminder updated");
+      ui->dirty = true;
+      return;
+    }
+  }
+  if (ui->nreminders >= UI_REMINDER_MAX) {
+    ui_notice(ui, "Reminder limit reached (%u)", (unsigned)UI_REMINDER_MAX);
+    return;
+  }
+  if (!reminders_ensure_cap(ui, ui->nreminders + 1u)) return;
+  size_t pos = ui->nreminders;
+  while (pos > 0 && ui->reminders[pos - 1u].due_unix_ms > entry.due_unix_ms) pos--;
+  if (pos < ui->nreminders) {
+    memmove(&ui->reminders[pos + 1u], &ui->reminders[pos], (ui->nreminders - pos) * sizeof(ui->reminders[0]));
+  }
+  ui->reminders[pos] = entry;
+  ui->nreminders++;
+  ui_settings_save(ui);
+  ui_notice(ui, "Reminder set");
+  ui->dirty = true;
+}
+
+void ui_reminder_remove(ccord_ui *ui, size_t index)
+{
+  if (!ui || index >= ui->nreminders) return;
+  if (index + 1u < ui->nreminders) {
+    memmove(&ui->reminders[index], &ui->reminders[index + 1u],
+            (ui->nreminders - index - 1u) * sizeof(ui->reminders[0]));
+  }
+  ui->nreminders--;
+  ui_settings_save(ui);
+  ui->dirty = true;
+}
+
+void ui_reminders_tick(ccord_ui *ui)
+{
+  if (!ui || ui->nreminders == 0 || ui->now_unix_ms <= 0) return;
+  if (ui->now_ms < ui->reminder_last_check_ms + 1000u) return;
+  ui->reminder_last_check_ms = ui->now_ms;
+  bool any_fired = false;
+  for (size_t i = 0; i < ui->nreminders; i++) {
+    ui_reminder *r = &ui->reminders[i];
+    if (r->fired || r->due_unix_ms > ui->now_unix_ms) continue;
+    r->fired = true;
+    any_fired = true;
+    ui_notice(ui, "Reminder: %s — %.80s", r->label[0] ? r->label : "Message", r->preview);
+  }
+  if (any_fired) {
+    ui_settings_save(ui);
+    ui->dirty = true;
+  }
+}
+
+void ui_reminders_save_ini(const ccord_ui *ui, FILE *f)
+{
+  if (!ui || !f || ui->nreminders == 0) return;
+  fprintf(f, "[reminders]\n");
+  for (size_t i = 0; i < ui->nreminders; i++) {
+    const ui_reminder *e = &ui->reminders[i];
+    fprintf(f, "rem_%zu = %llu,%llu,%llu,%lld,%d|%s|%s\n", i,
+            (unsigned long long)e->channel_id, (unsigned long long)e->message_id,
+            (unsigned long long)e->guild_id, (long long)e->due_unix_ms, e->fired ? 1 : 0,
+            e->label, e->preview);
+  }
+}
+
+void ui_reminders_load_ini(ccord_ui *ui, const char *key, const char *value)
+{
+  if (!ui || !key || !value || strncmp(key, "rem_", 4) != 0) return;
+  if (ui->nreminders >= UI_REMINDER_MAX) return;
+  unsigned long long cid = 0, mid = 0, gid = 0;
+  long long due = 0;
+  int fired = 0;
+  int n = 0;
+  if (sscanf(value, "%llu,%llu,%llu,%lld,%d%n", &cid, &mid, &gid, &due, &fired, &n) != 5 || n <= 0) return;
+  if (cid == 0 || mid == 0) return;
+  const char *p = value + n;
+  if (*p != '|') return;
+  p++;
+  const char *sep = strchr(p, '|');
+  if (!sep) return;
+  if (!reminders_ensure_cap(ui, ui->nreminders + 1u)) return;
+  ui_reminder e = {
+    .channel_id = (ccord_id)cid,
+    .message_id = (ccord_id)mid,
+    .guild_id = (ccord_id)gid,
+    .due_unix_ms = (int64_t)due,
+    .fired = fired != 0,
+  };
+  size_t ll = (size_t)(sep - p);
+  if (ll >= sizeof e.label) ll = sizeof e.label - 1u;
+  memcpy(e.label, p, ll);
+  e.label[ll] = '\0';
+  sanitize_line(sep + 1, e.preview, sizeof e.preview);
+  ui->reminders[ui->nreminders++] = e;
+}
+
 // Visit one [saved_messages] key: msg_N = ch,msg,guild,ts,author|label|preview. Appends in file order
 // (index 0 = newest); apply_loaded pushes them into the store afterwards.
 void ui_saved_messages_load_ini(ccord_ui *ui, const char *key, const char *value)
@@ -481,6 +624,10 @@ void ui_saved_messages_free(ccord_ui *ui)
   ui->saved_msgs = nullptr;
   ui->nsaved_msgs = 0;
   ui->cap_saved_msgs = 0;
+  ccord_free(ui->reminders);
+  ui->reminders = nullptr;
+  ui->nreminders = 0;
+  ui->cap_reminders = 0;
 }
 
 // Owner-tracked lazy heap state (the M5 pattern): heals when the ui address is reused or the modal kind taken over.
