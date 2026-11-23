@@ -27,15 +27,22 @@ bool pw_fs_watch_add(plugin_workers *w, const char *owner, uint64_t watch_id, co
 {
   if (!w || !owner || !path || !path[0]) return false;
   for (size_t i = 0; i < PW_MAX_WATCHES; i++) {
-    if (!w->watches[i].active) {
-      pw_watch *slot = &w->watches[i];
-      memset(slot, 0, sizeof *slot);
+    if (!w->watches[i] || !w->watches[i]->active) {
+      pw_watch *slot = w->watches[i];
+      if (!slot) {
+        slot = ccord_calloc(1, sizeof *slot);
+        if (!slot) return false;
+        w->watches[i] = slot;
+      } else {
+        memset(slot, 0, sizeof *slot);
+      }
       slot->active = true;
       slot->watch_id = watch_id;
       snprintf(slot->owner, sizeof slot->owner, "%s", owner);
       snprintf(slot->path, sizeof slot->path, "%s", path);
       stat_snapshot(path, &slot->existed, &slot->last_mtime_ns, &slot->last_size);
 #if defined(__linux__) && !CCORD_OS_WINDOWS
+      if (w->inotify_fd < 0) w->inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
       slot->wd = w->inotify_fd >= 0
                    ? inotify_add_watch(w->inotify_fd, path,
                                        IN_MODIFY | IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE_SELF)
@@ -51,11 +58,13 @@ void pw_fs_watch_remove(plugin_workers *w, const char *owner, uint64_t watch_id)
 {
   if (!w || !owner) return;
   for (size_t i = 0; i < PW_MAX_WATCHES; i++) {
-    if (w->watches[i].active && w->watches[i].watch_id == watch_id && strcmp(w->watches[i].owner, owner) == 0) {
+    pw_watch *wt = w->watches[i];
+    if (wt && wt->active && wt->watch_id == watch_id && strcmp(wt->owner, owner) == 0) {
 #if defined(__linux__) && !CCORD_OS_WINDOWS
-      pw_inotify_rm_watch(w->inotify_fd, w->watches[i].wd);
+      pw_inotify_rm_watch(w->inotify_fd, wt->wd);
 #endif
-      w->watches[i].active = false;
+      ccord_free(wt);
+      w->watches[i] = nullptr;
       return;
     }
   }
@@ -63,6 +72,14 @@ void pw_fs_watch_remove(plugin_workers *w, const char *owner, uint64_t watch_id)
 
 void pw_poll_watches(plugin_workers *w)
 {
+  bool any_watch = false;
+  for (size_t i = 0; i < PW_MAX_WATCHES; i++) {
+    if (w->watches[i] && w->watches[i]->active) {
+      any_watch = true;
+      break;
+    }
+  }
+  if (!any_watch) return;
 #if defined(__linux__) && !CCORD_OS_WINDOWS
   if (w->inotify_fd >= 0) {
     alignas(struct inotify_event) char buf[4096];
@@ -75,24 +92,25 @@ void pw_poll_watches(plugin_workers *w)
         memcpy(&ie, buf + off, sizeof ie);
         const char *ename = (ie.len > 0 && off + (ssize_t)(sizeof ie + ie.len) <= n) ? (buf + off + sizeof ie) : nullptr;
         for (size_t i = 0; i < PW_MAX_WATCHES; i++) {
-          if (!w->watches[i].active || w->watches[i].wd != ie.wd) continue;
+          pw_watch *wt = w->watches[i];
+          if (!wt || !wt->active || wt->wd != ie.wd) continue;
           const char *kind = (ie.mask & (IN_CREATE | IN_MOVED_TO)) ? "create"
                            : (ie.mask & (IN_DELETE | IN_DELETE_SELF | IN_MOVED_FROM)) ? "delete"
                            : "modify";
           ccord_buf jb; ccord_buf_init(&jb, 0); ccord_jw jw; ccord_jw_init(&jw, &jb);
           ccord_jw_begin_object(&jw);
           ccord_jw_key(&jw, "kind"); ccord_jw_cstr(&jw, kind);
-          ccord_jw_key(&jw, "path"); ccord_jw_cstr(&jw, w->watches[i].path);
+          ccord_jw_key(&jw, "path"); ccord_jw_cstr(&jw, wt->path);
           if (ename && ename[0]) { ccord_jw_key(&jw, "name"); ccord_jw_cstr(&jw, ename); }
           ccord_jw_end_object(&jw);
           if (ccord_jw_ok(&jw)) {
-            pw_event ev = {.kind = PW_EV_FS_WATCH, .id = w->watches[i].watch_id, .ok = true,
+            pw_event ev = {.kind = PW_EV_FS_WATCH, .id = wt->watch_id, .ok = true,
                            .json = ccord_strndup(ccord_buf_cstr(&jb), jb.len)};
-            snprintf(ev.owner, sizeof ev.owner, "%s", w->watches[i].owner);
+            snprintf(ev.owner, sizeof ev.owner, "%s", wt->owner);
             pw_push_ev(w, &ev);
           }
           ccord_buf_free(&jb);
-          stat_snapshot(w->watches[i].path, &w->watches[i].existed, &w->watches[i].last_mtime_ns, &w->watches[i].last_size);
+          stat_snapshot(wt->path, &wt->existed, &wt->last_mtime_ns, &wt->last_size);
         }
         off += (ssize_t)(sizeof(struct inotify_event) + ie.len);
       }
@@ -103,8 +121,8 @@ void pw_poll_watches(plugin_workers *w)
   if (now - w->last_watch_poll_ms < 250u) return;
   w->last_watch_poll_ms = now;
   for (size_t i = 0; i < PW_MAX_WATCHES; i++) {
-    pw_watch *wt = &w->watches[i];
-    if (!wt->active) continue;
+    pw_watch *wt = w->watches[i];
+    if (!wt || !wt->active) continue;
 #if defined(__linux__) && !CCORD_OS_WINDOWS
     if (wt->wd >= 0) continue;   // handled by inotify
 #endif

@@ -686,6 +686,7 @@ static int resume_coro_guarded(ccord_sandbox *sb, lua_State *co, int nargs)
   if (sb->insn_per_call > 0) sb->budget = (int64_t)sb->insn_per_call;
   int nres = 0;
   int st = lua_resume(co, sb->L, nargs, &nres);
+  if (st == LUA_ERRMEM && sb->limit == CCORD_SB_LIMIT_NONE) sb->limit = CCORD_SB_LIMIT_MEMORY;
   if (st != LUA_OK && st != LUA_YIELD) {
     const char *msg = lua_tostring(co, -1);
     sb_log(sb, CCORD_LOG_WARN, "async", msg ? msg : "coroutine error");

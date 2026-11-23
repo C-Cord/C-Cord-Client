@@ -97,7 +97,7 @@ struct plugin_workers {
 #if defined(__linux__) && !CCORD_OS_WINDOWS
   int inotify_fd;
 #endif
-  pw_watch watches[PW_MAX_WATCHES];
+  pw_watch *watches[PW_MAX_WATCHES];
   uint64_t last_watch_poll_ms;
   // ws & spawned procs
   pthread_mutex_t slot_mu;

@@ -56,6 +56,8 @@ typedef struct host {
   deferred_msg deferred[MAX_DEFERRED];
   size_t deferred_head;
   size_t deferred_count;
+  bool gc_pending;
+  uint64_t gc_due_ms;
 } host;
 
 static void host_free_deferred(host *h)
@@ -285,8 +287,21 @@ static void handle_init(host *h, const ccord_ipc_msg *msg)
   if (h->isolate_process) ccord_host_os_sandbox(dir);
   ccord_sandbox_config cfg = {
     .plugin_id = id, .plugin_name = name, .plugin_version = version, .plugin_dir = dir,
-    .perms = perms, .memory_bytes = h->cancel ? (32u << 20) : (64u << 20), .instructions = 0,
+    .perms = perms, .memory_bytes = h->cancel ? (16u << 20) : (32u << 20), .instructions = 0,
   };
+  const ccord_json *lim = p ? ccord_json_get(p, "limits") : nullptr;
+  if (lim && ccord_json_type_of(lim) == CCORD_JSON_OBJECT) {
+    int64_t mb = 0, ins = 0;
+    const ccord_json *mj = ccord_json_get(lim, "memory_bytes");
+    if (mj && ccord_json_int64(mj, &mb) && mb > 0) {
+      uint64_t u = (uint64_t)mb;
+      if (u < (1u << 20)) u = (1u << 20);
+      if (u > (128u << 20)) u = (128u << 20);
+      cfg.memory_bytes = u;
+    }
+    const ccord_json *ij = ccord_json_get(lim, "instructions");
+    if (ij && ccord_json_int64(ij, &ins) && ins > 0) cfg.instructions = (uint64_t)ins;
+  }
   const ccord_json *plat = p ? ccord_json_get(p, "platform") : nullptr;
   if (plat && ccord_json_type_of(plat) == CCORD_JSON_OBJECT) {
     cfg.has_platform = true;
@@ -323,6 +338,8 @@ static void handle_init(host *h, const ccord_ipc_msg *msg)
   ccord_status st = ccord_sandbox_load(h->sb, src, sl, &err);
   if (limit_stop(h)) return;
   if (st != CCORD_OK) { reply_error(h, msg->id, "invalid_argument", err.message); return; }
+  ccord_sandbox_gc(h->sb);
+  h->gc_pending = false;
   reply_ok(h, msg->id, nullptr);
 }
 
@@ -507,26 +524,36 @@ static void handle_v3_ntf(host *h, const ccord_ipc_msg *msg)
   (void)limit_stop(h);
 }
 
+static void schedule_idle_gc(host *h)
+{
+  if (h->sb && !h->stop) {
+    h->gc_pending = true;
+    h->gc_due_ms = ccord_clock_ms() + 5000u;
+  }
+}
+
 static void dispatch(host *h, const ccord_ipc_msg *msg)
 {
   switch (msg->kind) {
     case CCORD_IPC_REQ:
-      if (strcmp(msg->method, "init") == 0) handle_init(h, msg);
-      else if (strcmp(msg->method, "command.run") == 0) handle_command(h, msg);
+      if (strcmp(msg->method, "init") == 0) { handle_init(h, msg); return; }
+      if (strcmp(msg->method, "ping") == 0) { reply_ok(h, msg->id, nullptr); return; }
+      if (strcmp(msg->method, "command.run") == 0) handle_command(h, msg);
       else if (strcmp(msg->method, "command.complete") == 0) handle_command_complete(h, msg);
       else if (strcmp(msg->method, "hook.call") == 0) handle_hook_call(h, msg);
       else if (strcmp(msg->method, "composer.autocomplete") == 0) handle_autocomplete(h, msg);
       else if (strcmp(msg->method, "plugin.rpc.call") == 0) handle_rpc_call(h, msg);
-      else if (strcmp(msg->method, "ping") == 0) reply_ok(h, msg->id, nullptr);
       else reply_error(h, msg->id, "unsupported", "unknown method");
+      schedule_idle_gc(h);
       return;
     case CCORD_IPC_NTF:
+      if (strcmp(msg->method, "shutdown") == 0) { h->stop = true; return; }
+      if (strcmp(msg->method, "platform.state") == 0) { handle_platform_state(h, msg); return; }
       if (strcmp(msg->method, "event") == 0) handle_event(h, msg);
       else if (strcmp(msg->method, "menu.invoke") == 0) handle_menu(h, msg);
       else if (strcmp(msg->method, "panel.event") == 0) handle_panel_event(h, msg);
-      else if (strcmp(msg->method, "platform.state") == 0) handle_platform_state(h, msg);
-      else if (strcmp(msg->method, "shutdown") == 0) h->stop = true;
       else handle_v3_ntf(h, msg);
+      schedule_idle_gc(h);
       return;
     case CCORD_IPC_RES:
       if (!msg->ok) svc_log(h, CCORD_LOG_WARN, msg->err_message ? msg->err_message : "main rejected a request");
@@ -570,7 +597,14 @@ static int run_loop(host *h)
     // Block until IPC activity or the next sandbox timer; shutting down or killing an in-process
     // plugin closes the peer socketpair end, waking poll() immediately without periodic 1 s ticks.
     int poll_ms = h->sb ? ccord_sandbox_next_timer_ms(h->sb) : -1;
-    if (h->deferred_count > 0) poll_ms = 0;
+    if (h->deferred_count > 0) {
+      poll_ms = 0;
+    } else if (h->gc_pending) {
+      uint64_t now = ccord_clock_ms();
+      int gc_rem = now >= h->gc_due_ms ? 0
+                 : (h->gc_due_ms - now > (uint64_t)INT_MAX ? INT_MAX : (int)(h->gc_due_ms - now));
+      if (poll_ms < 0 || gc_rem < poll_ms) poll_ms = gc_rem;
+    }
     if (ccord_sock_poll1(ccord_ipc_fd(h->ipc), events, poll_ms) < 0) fatal(h, EXIT_INTERNAL);
     for (;;) {
       ccord_ipc_msg msg;
@@ -595,6 +629,11 @@ static int run_loop(host *h)
         ccord_error terr = {0};
         (void)ccord_sandbox_tick(h->sb, ccord_clock_ms(), &terr);
         (void)limit_stop(h);
+        schedule_idle_gc(h);
+      }
+      if (!h->stop && h->gc_pending && h->sb && ccord_clock_ms() >= h->gc_due_ms) {
+        ccord_sandbox_gc(h->sb);
+        h->gc_pending = false;
       }
       ccord_error err = {0};
       if (ccord_ipc_flush(h->ipc, h->stop ? 100 : 0, &err) != CCORD_OK && !h->stop) fatal(h, EXIT_PROTOCOL);

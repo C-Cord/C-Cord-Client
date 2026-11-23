@@ -63,6 +63,7 @@ typedef struct ccord_sandbox_config {
 
 ccord_sandbox *ccord_sandbox_create(const ccord_sandbox_config *cfg, const ccord_sandbox_services *svc, ccord_error *err);
 void ccord_sandbox_destroy(ccord_sandbox *sb);
+void ccord_sandbox_gc(ccord_sandbox *sb);
 
 // Updates live platform metrics (safe area, viewport, keyboard, orientation) visible to `platform.*()`.
 void ccord_sandbox_set_platform_state(ccord_sandbox *sb, const ccord_sandbox_platform_state *st);

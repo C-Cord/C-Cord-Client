@@ -177,9 +177,13 @@ static bool key_in(const char *k, const char *const *list, size_t n)
 static ccord_status parse_limits(const ccord_json *lim, ccord_manifest *out, ccord_error *err)
 {
   if (ccord_json_type_of(lim) != CCORD_JSON_OBJECT) return bad(err, CCORD_ERR_PARSE, "plugin.json: 'limits' must be an object");
-  // Limits are no longer enforced; kept for schema v1 compatibility.
   out->memory_bytes = 0;
   out->instructions = 0;
+  int64_t iv = 0;
+  const ccord_json *mb = ccord_json_get(lim, "memory_bytes");
+  if (mb && ccord_json_int64(mb, &iv) && iv > 0) out->memory_bytes = (uint64_t)iv;
+  const ccord_json *ins = ccord_json_get(lim, "instructions");
+  if (ins && ccord_json_int64(ins, &iv) && iv > 0) out->instructions = (uint64_t)iv;
   return CCORD_OK;
 }
 
@@ -504,8 +508,6 @@ ccord_status ccord_manifest_parse(const char *json, size_t len, ccord_manifest *
   if (hosts) {
     if ((st = parse_allowed_hosts(hosts, out, err)) != CCORD_OK) goto done;
   }
-  out->memory_bytes = 0;
-  out->instructions = 0;
 
 done:
   ccord_arena_free(&arena);

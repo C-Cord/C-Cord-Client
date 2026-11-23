@@ -1303,6 +1303,13 @@ static void handle_hello(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg)
   ccord_jw_end_array(&w);
   ccord_jw_key(&w, "source"); ccord_jw_string(&w, p->source ? p->source : "", p->source ? p->source_len : 0);
   ccord_jw_key(&w, "api"); ccord_jw_int(&w, CCORD_PLUGIN_API_VERSION);
+  if (p->m.memory_bytes > 0 || p->m.instructions > 0) {
+    ccord_jw_key(&w, "limits");
+    ccord_jw_begin_object(&w);
+    if (p->m.memory_bytes > 0) { ccord_jw_key(&w, "memory_bytes"); ccord_jw_int(&w, (int64_t)p->m.memory_bytes); }
+    if (p->m.instructions > 0) { ccord_jw_key(&w, "instructions"); ccord_jw_int(&w, (int64_t)p->m.instructions); }
+    ccord_jw_end_object(&w);
+  }
   ccord_jw_key(&w, "platform");
   ccord_jw_begin_object(&w);
   ccord_jw_key(&w, "os"); ccord_jw_cstr(&w, m->plat_os);

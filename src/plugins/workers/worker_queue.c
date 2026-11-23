@@ -88,7 +88,7 @@ plugin_workers *pw_create(const ccord_plugin_platform_ops *ops)
   pthread_mutex_init(&w->ev_mu, nullptr);
   pthread_mutex_init(&w->slot_mu, nullptr);
 #if defined(__linux__) && !CCORD_OS_WINDOWS
-  w->inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+  w->inotify_fd = -1;
 #endif
   return w;
 }
@@ -97,11 +97,13 @@ void pw_remove_owner(plugin_workers *w, const char *owner)
 {
   if (!w || !owner) return;
   for (size_t i = 0; i < PW_MAX_WATCHES; i++) {
-    if (w->watches[i].active && strcmp(w->watches[i].owner, owner) == 0) {
+    pw_watch *wt = w->watches[i];
+    if (wt && wt->active && strcmp(wt->owner, owner) == 0) {
 #if defined(__linux__) && !CCORD_OS_WINDOWS
-      pw_inotify_rm_watch(w->inotify_fd, w->watches[i].wd);
+      pw_inotify_rm_watch(w->inotify_fd, wt->wd);
 #endif
-      w->watches[i].active = false;
+      ccord_free(wt);
+      w->watches[i] = nullptr;
     }
   }
   pthread_mutex_lock(&w->slot_mu);
@@ -182,6 +184,10 @@ void pw_destroy(plugin_workers *w)
 #if defined(__linux__) && !CCORD_OS_WINDOWS
   if (w->inotify_fd >= 0) close(w->inotify_fd);
 #endif
+  for (size_t i = 0; i < PW_MAX_WATCHES; i++) {
+    ccord_free(w->watches[i]);
+    w->watches[i] = nullptr;
+  }
   pthread_mutex_lock(&w->ev_mu);
   for (size_t i = 0; i < w->nevents; i++) ccord_free(w->events[i].json);
   ccord_free(w->events);

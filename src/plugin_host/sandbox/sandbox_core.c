@@ -46,7 +46,6 @@ static void *sb_alloc(void *ud, void *ptr, size_t osize, size_t nsize)
   }
   size_t base = sb->mem_used - freed;
   if (sb->mem_limit > 0 && nsize > sb->mem_limit - base) {
-    if (sb->limit == CCORD_SB_LIMIT_NONE) sb->limit = CCORD_SB_LIMIT_MEMORY;
     return nullptr;
   }
   void *np = realloc(ptr, nsize);
@@ -376,7 +375,9 @@ ccord_status sb_call_guarded(ccord_sandbox *sb, int nargs, int nres, ccord_error
 {
   lua_State *L = sb->L;
   if (sb->insn_per_call > 0) sb->budget = (int64_t)sb->insn_per_call;
-  if (lua_pcall(L, nargs, nres, 0) == LUA_OK) return CCORD_OK;
+  int rc = lua_pcall(L, nargs, nres, 0);
+  if (rc == LUA_OK) return CCORD_OK;
+  if (rc == LUA_ERRMEM && sb->limit == CCORD_SB_LIMIT_NONE) sb->limit = CCORD_SB_LIMIT_MEMORY;
   const char *msg = lua_tostring(L, -1);
   ccord_error_set(err, CCORD_ERR_INVALID, "%s", msg ? msg : "lua error");
   lua_pop(L, 1);
@@ -536,12 +537,18 @@ static int api_require(lua_State *L)
   snprintf(chunkname, sizeof chunkname, "=%s", rel);
   int lrc = luaL_loadbufferx(L, buf, rd, chunkname, "t");
   ccord_free(buf);
-  if (lrc != LUA_OK) return lua_error(L);
+  if (lrc != LUA_OK) {
+    if (lrc == LUA_ERRMEM && sb->limit == CCORD_SB_LIMIT_NONE) sb->limit = CCORD_SB_LIMIT_MEMORY;
+    return lua_error(L);
+  }
 
   sb->require_depth++;
   int crc = lua_pcall(L, 0, 1, 0);
   sb->require_depth--;
-  if (crc != LUA_OK) return lua_error(L);
+  if (crc != LUA_OK) {
+    if (crc == LUA_ERRMEM && sb->limit == CCORD_SB_LIMIT_NONE) sb->limit = CCORD_SB_LIMIT_MEMORY;
+    return lua_error(L);
+  }
 
   if (lua_isnil(L, -1)) {
     lua_pop(L, 1);
@@ -744,6 +751,9 @@ ccord_sandbox *ccord_sandbox_create(const ccord_sandbox_config *cfg, const ccord
     return nullptr;
   }
   memcpy(lua_getextraspace(sb->L), &sb, sizeof sb);
+  lua_gc(sb->L, LUA_GCINC);
+  lua_gc(sb->L, LUA_GCPARAM, LUA_GCPPAUSE, 120);
+  lua_gc(sb->L, LUA_GCPARAM, LUA_GCPSTEPMUL, 250);
   lua_sethook(sb->L, count_hook, LUA_MASKCOUNT, sb->insn_per_call > 0 ? SB_HOOK_STEP : SB_IDLE_HOOK_STEP);
   lua_pushcfunction(sb->L, open_all);
   if (lua_pcall(sb->L, 0, 0, 0) != LUA_OK) {
@@ -761,6 +771,13 @@ void ccord_sandbox_destroy(ccord_sandbox *sb)
   if (sb->L) lua_close(sb->L);
   ccord_free(sb->timers);
   ccord_free(sb);
+}
+
+void ccord_sandbox_gc(ccord_sandbox *sb)
+{
+  if (!sb || !sb->L) return;
+  lua_gc(sb->L, LUA_GCCOLLECT);
+  ccord_os_trim_memory();
 }
 
 ccord_status ccord_sandbox_seed_storage(ccord_sandbox *sb, const ccord_json *obj, ccord_error *err)
@@ -793,7 +810,9 @@ ccord_status ccord_sandbox_load(ccord_sandbox *sb, const char *src, size_t len, 
 {
   lua_State *L = sb->L;
   int top = lua_gettop(L);
-  if (luaL_loadbufferx(L, src, len, "=main.lua", "t") != LUA_OK) {
+  int lrc = luaL_loadbufferx(L, src, len, "=main.lua", "t");
+  if (lrc != LUA_OK) {
+    if (lrc == LUA_ERRMEM && sb->limit == CCORD_SB_LIMIT_NONE) sb->limit = CCORD_SB_LIMIT_MEMORY;
     const char *msg = lua_tostring(L, -1);
     ccord_error_set(err, CCORD_ERR_PARSE, "%s", msg ? msg : "syntax error");
     lua_settop(L, top);
