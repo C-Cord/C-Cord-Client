@@ -75,6 +75,155 @@ bool cat_hex_equal_ci(const char *a, const char *b)
   return true;
 }
 
+static bool host_csv_contains_ci(const char *csv, const char *tok, size_t tok_len)
+{
+  if (!csv || !tok || tok_len == 0) return false;
+  const char *p = csv;
+  while (*p) {
+    while (*p && (*p == ',' || isspace((unsigned char)*p))) p++;
+    const char *s = p;
+    while (*p && *p != ',') p++;
+    const char *e = p;
+    while (e > s && isspace((unsigned char)e[-1])) e--;
+    size_t len = (size_t)(e - s);
+    if (len == tok_len) {
+      bool eq = true;
+      for (size_t i = 0; i < len; i++) {
+        if (tolower((unsigned char)s[i]) != tolower((unsigned char)tok[i])) {
+          eq = false;
+          break;
+        }
+      }
+      if (eq) return true;
+    }
+  }
+  return false;
+}
+
+static size_t host_csv_count(const char *csv)
+{
+  if (!csv) return 0;
+  size_t n = 0;
+  const char *p = csv;
+  while (*p) {
+    while (*p && (*p == ',' || isspace((unsigned char)*p))) p++;
+    const char *s = p;
+    while (*p && *p != ',') p++;
+    const char *e = p;
+    while (e > s && isspace((unsigned char)e[-1])) e--;
+    if (e > s) n++;
+  }
+  return n;
+}
+
+bool ccord_hosts_expanded(const char *consented_csv, bool had_consented, const char *new_csv, uint64_t new_perms)
+{
+  const uint64_t net_mask = (uint64_t)CCORD_PERM_NETWORK_HTTP | (uint64_t)CCORD_PERM_NETWORK_WS;
+  if ((new_perms & net_mask) == 0) return false;
+  if (!had_consented) return false;
+  if (host_csv_count(consented_csv) == 0) return false; // previously unrestricted
+  if (host_csv_count(new_csv) == 0) return true;        // became unrestricted!
+
+  const char *p = new_csv;
+  while (*p) {
+    while (*p && (*p == ',' || isspace((unsigned char)*p))) p++;
+    const char *s = p;
+    while (*p && *p != ',') p++;
+    const char *e = p;
+    while (e > s && isspace((unsigned char)e[-1])) e--;
+    if (e > s && !host_csv_contains_ci(consented_csv, s, (size_t)(e - s))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool json_bool_or_int(const ccord_json *v)
+{
+  if (!v) return false;
+  if (ccord_json_type_of(v) == CCORD_JSON_BOOL) return ccord_json_bool(v, false);
+  int64_t n = 0;
+  if (ccord_json_int64(v, &n)) return n != 0;
+  return false;
+}
+
+static void parse_signature_obj(const ccord_json *obj, cat_item *out)
+{
+  if (!obj || !out) return;
+  const ccord_json *sig = ccord_json_get(obj, "signature");
+  if (!sig || ccord_json_type_of(sig) != CCORD_JSON_OBJECT) return;
+  cat_json_str_copy(sig, "alg", out->sig_alg, sizeof out->sig_alg);
+  cat_json_str_copy(sig, "key_id", out->sig_key_id, sizeof out->sig_key_id);
+  cat_json_str_copy(sig, "sig", out->sig_hex, sizeof out->sig_hex);
+  out->has_signature = (out->sig_alg[0] != '\0' && out->sig_hex[0] != '\0');
+}
+
+static int cmp_cstr_ptr(const void *a, const void *b)
+{
+  const char *const *sa = a;
+  const char *const *sb = b;
+  return strcmp(*sa, *sb);
+}
+
+static bool append_sorted_unique_json_csv(ccord_buf *buf, const ccord_json *arr)
+{
+  if (!arr || ccord_json_type_of(arr) != CCORD_JSON_ARRAY) return true;
+  size_t n = ccord_json_array_len(arr);
+  if (n == 0) return true;
+  const char **items = ccord_alloc_array(n, sizeof *items);
+  if (!items) return false;
+  size_t cnt = 0;
+  for (size_t i = 0; i < n; i++) {
+    size_t sl = 0;
+    const char *s = ccord_json_string(ccord_json_array_at(arr, i), &sl);
+    if (!s || sl == 0) continue;
+    items[cnt++] = s;
+  }
+  if (cnt > 1) qsort(items, cnt, sizeof *items, cmp_cstr_ptr);
+  bool ok = true;
+  bool first = true;
+  for (size_t i = 0; i < cnt && ok; i++) {
+    if (i > 0 && strcmp(items[i], items[i - 1]) == 0) continue;
+    if (!first) ok = ccord_buf_append(buf, ",", 1) == CCORD_OK;
+    if (ok) ok = ccord_buf_append_str(buf, items[i]) == CCORD_OK;
+    first = false;
+  }
+  ccord_free(items);
+  return ok;
+}
+
+static bool verify_plugin_item_signature(const ccord_catalog *cat, const cat_item *it,
+                                         const ccord_json *perms_arr, const ccord_json *hosts_arr)
+{
+  if (!cat || cat->npubkeys == 0) return true;
+  if (!it || !it->has_signature || strlen(it->sha256) != 64) return false;
+  char sha_lo[65];
+  for (size_t i = 0; i < 64; i++) {
+    sha_lo[i] = (char)tolower((unsigned char)it->sha256[i]);
+  }
+  sha_lo[64] = '\0';
+
+  ccord_buf b;
+  ccord_buf_init(&b, CATALOG_MAX_API_BYTES);
+  bool ok = ccord_buf_appendf(&b, "ccord-plugin-v2\n%s\n%d\n%s\n%s\n%s\n",
+                              it->id, (int)it->tier, it->version, sha_lo, it->download_url) == CCORD_OK;
+  if (ok) ok = append_sorted_unique_json_csv(&b, perms_arr);
+  if (ok) ok = ccord_buf_append(&b, "\n", 1) == CCORD_OK;
+  if (ok) ok = append_sorted_unique_json_csv(&b, hosts_arr);
+  if (ok) {
+    ok = ccord_buf_appendf(&b, "\n%d\n%d\n%" PRId64 "\n%" PRId64 "\n",
+                           (int)it->warning_sev, it->needs_tier_review ? 1 : 0,
+                           it->author_github_id, it->repo_id) == CCORD_OK;
+  }
+  bool verified = false;
+  if (ok) {
+    verified = cat_verify_ed25519(cat, it->sig_alg, it->sig_key_id, it->sig_hex,
+                                  (const uint8_t *)b.data, b.len);
+  }
+  ccord_buf_free(&b);
+  return verified;
+}
+
 // ---------------------------------------------------------------- API v2 JSON parsers
 
 static void parse_permissions_array(const ccord_json *perms, cat_item *it)
@@ -313,6 +462,7 @@ bool cat_parse_discover_page_json(ccord_catalog *cat, const char *json, size_t l
     if (ccord_json_int64(ccord_json_get(o, "warning_sev"), &ws) && ws >= 0 && ws <= 3) {
       it.warning_sev = (ccord_catalog_warn_sev)ws;
     }
+    it.needs_tier_review = json_bool_or_int(ccord_json_get(o, "needs_tier_review"));
     it.has_detail = false;
 
     // Avoid duplicates when appending cursor pages
@@ -337,8 +487,10 @@ bool cat_parse_discover_page_json(ccord_catalog *cat, const char *json, size_t l
 }
 
 // Parse GET /api/v2/plugins/{id} full detail response
-bool cat_parse_detail_json(const char *json, size_t len, cat_item *out)
+bool cat_parse_detail_json(const ccord_catalog *cat, const char *json, size_t len, cat_item *out,
+                           bool *out_sig_failed)
 {
+  if (out_sig_failed) *out_sig_failed = false;
   if (!json || len == 0 || !out) return false;
   memset(out, 0, sizeof *out);
   ccord_arena arena;
@@ -366,13 +518,24 @@ bool cat_parse_detail_json(const char *json, size_t len, cat_item *out)
     cat_json_str_copy(author, "login", out->author, sizeof out->author);
     cat_json_str_copy(author, "repo", out->repo, sizeof out->repo);
     cat_json_str_copy(author, "repo_url", out->repo_url, sizeof out->repo_url);
+    (void)ccord_json_int64(ccord_json_get(author, "github_user_id"), &out->author_github_id);
+    (void)ccord_json_int64(ccord_json_get(author, "repo_id"), &out->repo_id);
   }
+  if (out->author_github_id == 0) {
+    (void)ccord_json_int64(ccord_json_get(o, "author_github_id"), &out->author_github_id);
+  }
+  if (out->repo_id == 0) {
+    (void)ccord_json_int64(ccord_json_get(o, "repo_id"), &out->repo_id);
+  }
+  out->needs_tier_review = json_bool_or_int(ccord_json_get(o, "needs_tier_review"));
   cat_json_str_copy(latest, "version", out->version, sizeof out->version);
   cat_json_str_copy(latest, "download_url", out->download_url, sizeof out->download_url);
   cat_json_str_copy(latest, "sha256", out->sha256, sizeof out->sha256);
   cat_json_str_copy(latest, "changelog", out->changelog, sizeof out->changelog);
   out->platforms = parse_platforms_array(ccord_json_get(latest, "platforms"));
-  parse_hosts_array(ccord_json_get(latest, "allowed_hosts"), out->allowed_hosts, sizeof out->allowed_hosts);
+  const ccord_json *perms_arr = ccord_json_get(latest, "permissions");
+  const ccord_json *hosts_arr = ccord_json_get(latest, "allowed_hosts");
+  parse_hosts_array(hosts_arr, out->allowed_hosts, sizeof out->allowed_hosts);
   if (!cat_valid_catalog_id(out->id) || !out->name[0] || !cat_valid_catalog_version(out->version) ||
       !out->download_url[0] || strlen(out->sha256) != 64) {
     ccord_arena_free(&arena);
@@ -386,11 +549,27 @@ bool cat_parse_detail_json(const char *json, size_t len, cat_item *out)
   int64_t dls = 0;
   if (ccord_json_int64(ccord_json_get(o, "downloads"), &dls) && dls > 0) out->downloads = (uint64_t)dls;
 
-  parse_permissions_array(ccord_json_get(latest, "permissions"), out);
+  parse_permissions_array(perms_arr, out);
   int64_t ac = 0;
   if (ccord_json_int64(ccord_json_get(latest, "api_class"), &ac) && ac >= 1 && ac <= 3) out->api_class = (uint8_t)ac;
   else out->api_class = (uint8_t)(ccord_perm_max_class(out->perms_mask) + 1);
   parse_warnings_array(ccord_json_get(o, "warnings"), out);
+  if (out->warning_sev == CCORD_WARN_NONE) {
+    int64_t ws = 0;
+    if (ccord_json_int64(ccord_json_get(o, "warning_sev"), &ws) && ws >= 0 && ws <= 3) {
+      out->warning_sev = (ccord_catalog_warn_sev)ws;
+    }
+  }
+  parse_signature_obj(o, out);
+  if (!out->has_signature) parse_signature_obj(latest, out);
+  if (!verify_plugin_item_signature(cat, out, perms_arr, hosts_arr)) {
+    if (out_sig_failed) *out_sig_failed = true;
+    CCORD_LOG_W("catalog: rejected plugin detail for %s v%s (invalid or missing Ed25519 signature)",
+                out->id, out->version);
+    ccord_arena_free(&arena);
+    memset(out, 0, sizeof *out);
+    return false;
+  }
   out->has_detail = true;
 
   ccord_arena_free(&arena);
@@ -434,6 +613,7 @@ bool cat_parse_updates_check_json(ccord_catalog *cat, const char *json, size_t l
           const ccord_json *o = ccord_json_array_at(arr, i);
           if (!o || ccord_json_type_of(o) != CCORD_JSON_OBJECT) continue;
           cat_item *it = &new_upd[new_n];
+          memset(it, 0, sizeof *it);
           cat_json_str_copy(o, "id", it->id, sizeof it->id);
           cat_json_str_copy(o, "name", it->name, sizeof it->name);
           cat_json_str_copy(o, "description", it->description, sizeof it->description);
@@ -441,15 +621,30 @@ bool cat_parse_updates_check_json(ccord_catalog *cat, const char *json, size_t l
           cat_json_str_copy(o, "author_login", it->author, sizeof it->author);
           cat_json_str_copy(o, "author_repo", it->repo, sizeof it->repo);
           cat_json_str_copy(o, "author_repo_url", it->repo_url, sizeof it->repo_url);
+          (void)ccord_json_int64(ccord_json_get(o, "author_github_id"), &it->author_github_id);
+          (void)ccord_json_int64(ccord_json_get(o, "repo_id"), &it->repo_id);
+          const ccord_json *author = ccord_json_get(o, "author");
+          if (author && ccord_json_type_of(author) == CCORD_JSON_OBJECT) {
+            if (it->author_github_id == 0) {
+              (void)ccord_json_int64(ccord_json_get(author, "github_user_id"), &it->author_github_id);
+            }
+            if (it->repo_id == 0) {
+              (void)ccord_json_int64(ccord_json_get(author, "repo_id"), &it->repo_id);
+            }
+          }
+          it->needs_tier_review = json_bool_or_int(ccord_json_get(o, "needs_tier_review"));
           cat_json_str_copy(o, "version", it->version, sizeof it->version);
           cat_json_str_copy(o, "download_url", it->download_url, sizeof it->download_url);
           cat_json_str_copy(o, "sha256", it->sha256, sizeof it->sha256);
           cat_json_str_copy(o, "changelog", it->changelog, sizeof it->changelog);
           cat_json_str_copy(o, "icon_url", it->icon_url, sizeof it->icon_url);
           it->platforms = parse_platforms_array(ccord_json_get(o, "platforms"));
-          parse_hosts_array(ccord_json_get(o, "allowed_hosts"), it->allowed_hosts, sizeof it->allowed_hosts);
+          const ccord_json *perms_arr = ccord_json_get(o, "permissions");
+          const ccord_json *hosts_arr = ccord_json_get(o, "allowed_hosts");
+          parse_hosts_array(hosts_arr, it->allowed_hosts, sizeof it->allowed_hosts);
           if (!cat_valid_catalog_id(it->id) || !it->name[0] || !cat_valid_catalog_version(it->version) ||
               !it->download_url[0] || strlen(it->sha256) != 64) {
+            memset(it, 0, sizeof *it);
             continue;
           }
           int64_t tv = 3;
@@ -457,11 +652,24 @@ bool cat_parse_updates_check_json(ccord_catalog *cat, const char *json, size_t l
           else it->tier = CCORD_TIER_UNVERIFIED;
           int64_t sz = 0;
           if (ccord_json_int64(ccord_json_get(o, "size_bytes"), &sz) && sz > 0) it->size_bytes = (uint64_t)sz;
-          parse_permissions_array(ccord_json_get(o, "permissions"), it);
+          parse_permissions_array(perms_arr, it);
           int64_t ac = 0;
           if (ccord_json_int64(ccord_json_get(o, "api_class"), &ac) && ac >= 1 && ac <= 3) it->api_class = (uint8_t)ac;
           else it->api_class = (uint8_t)(ccord_perm_max_class(it->perms_mask) + 1);
           parse_warnings_array(ccord_json_get(o, "warnings"), it);
+          if (it->warning_sev == CCORD_WARN_NONE) {
+            int64_t ws = 0;
+            if (ccord_json_int64(ccord_json_get(o, "warning_sev"), &ws) && ws >= 0 && ws <= 3) {
+              it->warning_sev = (ccord_catalog_warn_sev)ws;
+            }
+          }
+          parse_signature_obj(o, it);
+          if (!verify_plugin_item_signature(cat, it, perms_arr, hosts_arr)) {
+            CCORD_LOG_W("catalog: skipping update for %s v%s (invalid or missing Ed25519 signature)",
+                        it->id, it->version);
+            memset(it, 0, sizeof *it);
+            continue;
+          }
           it->has_detail = true;
           if (it->icon_url[0]) cat_maybe_queue_icon(cat, it->icon_url);
           new_n++;
@@ -501,7 +709,8 @@ const cat_item *cat_find_best_item(const ccord_catalog *cat, const char *id)
 }
 
 bool cat_compute_update_info(const cat_item *it, const char *local_ver, uint64_t consented_perms,
-                                bool *out_avail, bool *out_needs_review)
+                             const char *consented_hosts_csv, bool had_consented_hosts,
+                             bool *out_avail, bool *out_needs_review)
 {
   *out_avail = false;
   *out_needs_review = false;
@@ -513,7 +722,10 @@ bool cat_compute_update_info(const cat_item *it, const char *local_ver, uint64_t
     if (added != 0 && ccord_perm_max_class(added) > CCORD_PERM_CLASS_SAFE) {
       new_restricted_perms = true;
     }
-    if (new_restricted_perms || it->warning_sev >= CCORD_WARN_DANGER) {
+    bool hosts_expanded = ccord_hosts_expanded(consented_hosts_csv, had_consented_hosts,
+                                               it->allowed_hosts, it->perms_mask);
+    if (new_restricted_perms || hosts_expanded || it->needs_tier_review ||
+        it->warning_sev >= CCORD_WARN_DANGER) {
       *out_needs_review = true;
     }
     return true;
@@ -541,8 +753,15 @@ bool ccord_catalog_query_overlay(const ccord_catalog *cat, const char *id,
   if (it->icon_url[0]) {
     (void)cat_resolve_cached_icon_path(cat, it->icon_url, out->icon_path, sizeof out->icon_path);
   }
+  char consented_hosts[1024] = "";
+  bool had_consented_hosts = false;
+  if (cat->cbs.get_local_allowed_hosts) {
+    (void)cat->cbs.get_local_allowed_hosts(cat->cbs.ud, id, consented_hosts,
+                                           sizeof consented_hosts, &had_consented_hosts);
+  }
   bool avail = false, review = false;
-  if (cat_compute_update_info(it, installed_ver, consented_perms, &avail, &review) && avail) {
+  if (cat_compute_update_info(it, installed_ver, consented_perms, consented_hosts, had_consented_hosts,
+                              &avail, &review) && avail) {
     cat_copy_str(out->update_version, sizeof out->update_version, it->version);
     out->update_needs_review = review;
     out->update_perms_mask = it->perms_mask;
@@ -567,8 +786,15 @@ static void build_contrib_entry(const ccord_catalog *cat, const cat_item *it,
   const installed_meta *m = cat_find_meta_const(cat, it->id);
   bool avail = false, review = false;
   if (installed && !bundled) {
+    char consented_hosts[1024] = "";
+    bool had_consented_hosts = false;
+    if (cat->cbs.get_local_allowed_hosts) {
+      (void)cat->cbs.get_local_allowed_hosts(cat->cbs.ud, it->id, consented_hosts,
+                                             sizeof consented_hosts, &had_consented_hosts);
+    }
     const cat_item *upd_src = it->has_detail ? it : cat_find_update_item(cat, it->id);
-    cat_compute_update_info(upd_src ? upd_src : it, local_ver_buf, consented, &avail, &review);
+    cat_compute_update_info(upd_src ? upd_src : it, local_ver_buf, consented,
+                            consented_hosts, had_consented_hosts, &avail, &review);
   }
   if (out_pending_upd) *out_pending_upd = avail;
   if (it->icon_url[0]) {
@@ -693,16 +919,18 @@ void ccord_catalog_enforce_revocations(ccord_catalog *cat)
   cat_enforce_revocations(cat);
 }
 
-bool ccord_catalog_is_revoked(const ccord_catalog *cat, const char *id, char *reason_out, size_t reason_cap)
+bool ccord_catalog_is_hash_or_id_revoked(const ccord_catalog *cat, const char *id, const char *sha256_hex,
+                                         char *reason_out, size_t reason_cap)
 {
-  if (!cat || !id || !id[0] || cat->nrevoked == 0) return false;
-  const installed_meta *m = cat_find_meta_const(cat, id);
+  if (!cat || cat->nrevoked == 0) return false;
+  bool has_sha = sha256_hex && strlen(sha256_hex) == 64;
+  bool has_id = id && id[0] != '\0';
   for (size_t r = 0; r < cat->nrevoked; r++) {
     bool hit = false;
-    if (m && strlen(m->sha256) == 64 && strlen(cat->revoked[r].sha256) == 64 &&
-        cat_hex_equal_ci(m->sha256, cat->revoked[r].sha256)) {
+    if (has_sha && strlen(cat->revoked[r].sha256) == 64 &&
+        cat_hex_equal_ci(sha256_hex, cat->revoked[r].sha256)) {
       hit = true;
-    } else if (cat->revoked[r].sha256[0] == '\0' && cat->revoked[r].plugin_id[0] != '\0' &&
+    } else if (has_id && cat->revoked[r].sha256[0] == '\0' && cat->revoked[r].plugin_id[0] != '\0' &&
                strcmp(cat->revoked[r].plugin_id, id) == 0) {
       hit = true;
     }
@@ -715,5 +943,12 @@ bool ccord_catalog_is_revoked(const ccord_catalog *cat, const char *id, char *re
     }
   }
   return false;
+}
+
+bool ccord_catalog_is_revoked(const ccord_catalog *cat, const char *id, char *reason_out, size_t reason_cap)
+{
+  if (!cat || !id || !id[0] || cat->nrevoked == 0) return false;
+  const installed_meta *m = cat_find_meta_const(cat, id);
+  return ccord_catalog_is_hash_or_id_revoked(cat, id, m ? m->sha256 : nullptr, reason_out, reason_cap);
 }
 

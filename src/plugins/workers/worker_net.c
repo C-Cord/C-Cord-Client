@@ -5,12 +5,54 @@
 
 // ---------------------------------------------------------------- Built-in loopback TCP HTTP/1.1
 
+static bool valid_http_method(const char *m)
+{
+  if (!m || !m[0]) return false;
+  size_t n = 0;
+  for (const char *p = m; *p; p++) {
+    if (*p < 'A' || *p > 'Z') return false;
+    if (++n > 15u) return false;
+  }
+  return n >= 1u;
+}
+
 #if !CCORD_OS_WINDOWS
 #ifdef MSG_NOSIGNAL
 #define PW_SEND_FLAGS MSG_NOSIGNAL
 #else
 #define PW_SEND_FLAGS 0
 #endif
+
+static bool valid_http_path(const char *path)
+{
+  if (!path || path[0] != '/') return false;
+  for (const unsigned char *p = (const unsigned char *)path; *p; p++) {
+    if (*p <= 0x20u || *p >= 0x7fu) return false;
+  }
+  return true;
+}
+
+static bool valid_hdr_name(const char *k)
+{
+  if (!k || !k[0]) return false;
+  for (const unsigned char *p = (const unsigned char *)k; *p; p++) {
+    if (*p <= 0x20u || *p >= 0x7fu || *p == ':') return false;
+  }
+  if (ccord_strcasecmp(k, "host") == 0 || ccord_strcasecmp(k, "content-length") == 0 ||
+      ccord_strcasecmp(k, "transfer-encoding") == 0 || ccord_strcasecmp(k, "connection") == 0) {
+    return false;
+  }
+  return true;
+}
+
+static bool valid_hdr_val(const char *v, size_t vl)
+{
+  for (size_t i = 0; i < vl; i++) {
+    unsigned char c = (unsigned char)v[i];
+    if ((c < 0x20u && c != '\t') || c == 0x7fu) return false;
+  }
+  return true;
+}
 
 static int tcp_connect_timeout(const char *host, int port, uint32_t timeout_ms)
 {
@@ -52,6 +94,15 @@ static bool loopback_http_do(const char *host, int port, const char *path, const
                              const char *headers_json, const uint8_t *body, size_t body_len,
                              uint32_t timeout_ms, ccord_plugin_http_resp *resp)
 {
+  const char *eff_method = (method && method[0]) ? method : "GET";
+  if (!valid_http_method(eff_method)) {
+    snprintf(resp->error, sizeof resp->error, "invalid HTTP method");
+    return false;
+  }
+  if (!valid_http_path(path)) {
+    snprintf(resp->error, sizeof resp->error, "invalid HTTP request path");
+    return false;
+  }
   int fd = tcp_connect_timeout(host, port, timeout_ms ? timeout_ms : 5000u);
   if (fd < 0) { snprintf(resp->error, sizeof resp->error, "connect failed"); return false; }
   struct timeval tv = {.tv_sec = (time_t)((timeout_ms ? timeout_ms : 5000u) / 1000u),
@@ -59,11 +110,23 @@ static bool loopback_http_do(const char *host, int port, const char *path, const
   (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
   (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 
-  ccord_buf req; ccord_buf_init(&req, 0);
-  char head[1024];
-  int hn = snprintf(head, sizeof head, "%s %s HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\nContent-Length: %zu\r\n",
-                    method && method[0] ? method : "GET", path, host, port, body_len);
-  (void)ccord_buf_append(&req, head, (size_t)hn);
+  ccord_buf req; ccord_buf_init(&req, 256u);
+  char port_s[16], clen_s[32];
+  snprintf(port_s, sizeof port_s, "%d", port);
+  snprintf(clen_s, sizeof clen_s, "%zu", body_len);
+  bool is_v6 = strchr(host, ':') != nullptr;
+  (void)ccord_buf_append_str(&req, eff_method);
+  (void)ccord_buf_append(&req, " ", 1);
+  (void)ccord_buf_append_str(&req, path);
+  (void)ccord_buf_append_str(&req, " HTTP/1.1\r\nHost: ");
+  if (is_v6) (void)ccord_buf_append(&req, "[", 1);
+  (void)ccord_buf_append_str(&req, host);
+  if (is_v6) (void)ccord_buf_append(&req, "]", 1);
+  (void)ccord_buf_append(&req, ":", 1);
+  (void)ccord_buf_append_str(&req, port_s);
+  (void)ccord_buf_append_str(&req, "\r\nConnection: close\r\nContent-Length: ");
+  (void)ccord_buf_append_str(&req, clen_s);
+  (void)ccord_buf_append(&req, "\r\n", 2);
   if (headers_json && headers_json[0]) {
     ccord_arena ar; ccord_arena_init(&ar, 1024u);
     ccord_error pe = {0};
@@ -75,7 +138,7 @@ static bool loopback_http_do(const char *host, int port, const char *path, const
         const char *k = ccord_json_object_key(hj, i, &v);
         size_t vl = 0;
         const char *vs = v ? ccord_json_string(v, &vl) : nullptr;
-        if (k && vs && !strchr(k, '\r') && !strchr(k, '\n') && !memchr(vs, '\r', vl) && !memchr(vs, '\n', vl)) {
+        if (k && vs && valid_hdr_name(k) && valid_hdr_val(vs, vl)) {
           (void)ccord_buf_append_str(&req, k);
           (void)ccord_buf_append(&req, ": ", 2);
           (void)ccord_buf_append(&req, vs, vl);
@@ -87,6 +150,12 @@ static bool loopback_http_do(const char *host, int port, const char *path, const
   }
   (void)ccord_buf_append(&req, "\r\n", 2);
   if (body && body_len > 0) (void)ccord_buf_append(&req, (const char *)body, body_len);
+  if (req.failed) {
+    ccord_buf_free(&req);
+    close(fd);
+    snprintf(resp->error, sizeof resp->error, "out of memory");
+    return false;
+  }
 
   size_t sent = 0;
   while (sent < req.len) {
@@ -164,6 +233,7 @@ typedef struct http_job {
   size_t body_len;
   uint32_t timeout_ms;
   bool local_only;
+  bool allow_local;
 } http_job;
 
 static void *http_worker_fn(void *arg)
@@ -176,23 +246,28 @@ static void *http_worker_fn(void *arg)
   bool ok = false;
   if (!pw_extract_url_host_port(j->url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path)) {
     snprintf(resp.error, sizeof resp.error, "invalid URL");
-  } else if (pw_is_localhost_host(host) && strcmp(scheme, "http") == 0) {
-#if !CCORD_OS_WINDOWS
-    ok = loopback_http_do(host, port, path, j->method, j->headers_json, j->body, j->body_len, j->timeout_ms, &resp);
-#else
-    snprintf(resp.error, sizeof resp.error, "loopback HTTP unsupported on this build");
-#endif
-  } else if (w->ops.http_request) {
-    ccord_plugin_http_req req = {
-      .url = j->url, .method = j->method, .headers_json = j->headers_json,
-      .body = j->body, .body_len = j->body_len,
-      .timeout_ms = j->timeout_ms ? j->timeout_ms : 15000u,
-      .max_bytes = PW_MAX_HTTP_BODY,
-      .allow_localhost_http = pw_is_localhost_host(host),
-    };
-    ok = w->ops.http_request(w->ops.ud, &req, &resp);
   } else {
-    snprintf(resp.error, sizeof resp.error, "HTTP client unavailable in offline build");
+    bool is_loc = pw_is_localhost_host(host);
+    if (is_loc && !j->allow_local) {
+      snprintf(resp.error, sizeof resp.error, "localhost access requires network.local permission");
+    } else if (is_loc && strcmp(scheme, "http") == 0) {
+#if !CCORD_OS_WINDOWS
+      ok = loopback_http_do(host, port, path, j->method, j->headers_json, j->body, j->body_len, j->timeout_ms, &resp);
+#else
+      snprintf(resp.error, sizeof resp.error, "loopback HTTP unsupported on this build");
+#endif
+    } else if (w->ops.http_request) {
+      ccord_plugin_http_req req = {
+        .url = j->url, .method = j->method, .headers_json = j->headers_json,
+        .body = j->body, .body_len = j->body_len,
+        .timeout_ms = j->timeout_ms ? j->timeout_ms : 15000u,
+        .max_bytes = PW_MAX_HTTP_BODY,
+        .allow_localhost_http = (j->allow_local && is_loc),
+      };
+      ok = w->ops.http_request(w->ops.ud, &req, &resp);
+    } else {
+      snprintf(resp.error, sizeof resp.error, "HTTP client unavailable in offline build");
+    }
   }
 
   if (!atomic_load(&w->shutting_down)) {
@@ -227,27 +302,44 @@ static void *http_worker_fn(void *arg)
 
 bool pw_start_http(plugin_workers *w, const char *owner, uint64_t req_id, const ccord_manifest *manifest,
                    const char *url, const char *method, const char *headers_json,
-                   const uint8_t *body, size_t body_len, uint32_t timeout_ms, bool local_only)
+                   const uint8_t *body, size_t body_len, uint32_t timeout_ms, bool local_only, bool allow_local)
 {
   if (!w || !owner || !url) return false;
+  if (strlen(url) >= 2048u) return false;
+  const char *eff_method = (method && method[0]) ? method : "GET";
+  if (!valid_http_method(eff_method)) {
+    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
+    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
+    snprintf(ev.error, sizeof ev.error, "invalid HTTP method");
+    pw_push_ev(w, &ev);
+    return true;
+  }
   char scheme[16] = "", host[256] = "", path[1024] = "";
   int port = 80;
   if (!pw_extract_url_host_port(url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path)) return false;
-  if (strcmp(scheme, "https") != 0 && !(strcmp(scheme, "http") == 0 && pw_is_localhost_host(host))) {
+  bool is_loc = pw_is_localhost_host(host);
+  if (is_loc && !allow_local) {
+    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
+    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
+    snprintf(ev.error, sizeof ev.error, "localhost access requires network.local permission");
+    pw_push_ev(w, &ev);
+    return true;
+  }
+  if (strcmp(scheme, "https") != 0 && !(strcmp(scheme, "http") == 0 && is_loc)) {
     pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
     snprintf(ev.owner, sizeof ev.owner, "%s", owner);
     snprintf(ev.error, sizeof ev.error, "only https:// (or localhost http://) is allowed");
     pw_push_ev(w, &ev);
     return true;
   }
-  if (local_only && !pw_is_localhost_host(host)) {
+  if (local_only && !is_loc) {
     pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
     snprintf(ev.owner, sizeof ev.owner, "%s", owner);
     snprintf(ev.error, sizeof ev.error, "network.local only allows localhost/127.0.0.1");
     pw_push_ev(w, &ev);
     return true;
   }
-  if (!pw_is_localhost_host(host) && manifest && !ccord_manifest_host_allowed(manifest, host)) {
+  if (!is_loc && manifest && !ccord_manifest_host_allowed(manifest, host)) {
     pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
     snprintf(ev.owner, sizeof ev.owner, "%s", owner);
     snprintf(ev.error, sizeof ev.error, "host '%.180s' not permitted by plugin.json allowed_hosts", host);
@@ -260,7 +352,7 @@ bool pw_start_http(plugin_workers *w, const char *owner, uint64_t req_id, const 
   snprintf(j->owner, sizeof j->owner, "%s", owner);
   j->req_id = req_id;
   snprintf(j->url, sizeof j->url, "%s", url);
-  snprintf(j->method, sizeof j->method, "%s", method && method[0] ? method : "GET");
+  snprintf(j->method, sizeof j->method, "%s", eff_method);
   if (headers_json && headers_json[0]) j->headers_json = ccord_strdup(headers_json);
   if (body && body_len > 0) {
     j->body = ccord_malloc(body_len);
@@ -268,6 +360,7 @@ bool pw_start_http(plugin_workers *w, const char *owner, uint64_t req_id, const 
   }
   j->timeout_ms = timeout_ms;
   j->local_only = local_only;
+  j->allow_local = allow_local;
   atomic_fetch_add(&w->active_jobs, 1);
   pthread_t t;
   if (pthread_create(&t, nullptr, http_worker_fn, j) != 0) {
@@ -280,6 +373,100 @@ bool pw_start_http(plugin_workers *w, const char *owner, uint64_t req_id, const 
 }
 
 // ---------------------------------------------------------------- Async Unix socket send
+
+static bool strstr_ci(const char *hay, const char *needle)
+{
+  if (!hay || !needle || !needle[0]) return false;
+  size_t nlen = strlen(needle);
+  for (const char *h = hay; *h; h++) {
+    size_t i = 0;
+    while (i < nlen && h[i] && tolower((unsigned char)h[i]) == tolower((unsigned char)needle[i])) i++;
+    if (i == nlen) return true;
+  }
+  return false;
+}
+
+static bool unix_path_matches_blocklist(const char *p)
+{
+  if (!p || !p[0]) return true;
+  static const char *const k_blocked[] = {
+    "docker.sock",
+    "podman.sock",
+    "containerd.sock",
+    "dbus",
+    "systemd",
+    "ssh-agent",
+    "agent.",
+    "gpg-agent",
+    "s.gpg-agent",
+    "discord-ipc-",
+    "ccord-",
+  };
+  for (size_t i = 0; i < sizeof k_blocked / sizeof k_blocked[0]; i++) {
+    if (strstr_ci(p, k_blocked[i])) return true;
+  }
+  return false;
+}
+
+static bool unix_path_eq_resolved(const char *a, const char *a_real, const char *b)
+{
+  if (!b || !b[0]) return false;
+  if (strcmp(a, b) == 0 || (a_real && a_real[0] && strcmp(a_real, b) == 0)) return true;
+#if !CCORD_OS_WINDOWS
+  char b_real[CCORD_PATH_MAX];
+  if (realpath(b, b_real)) {
+    if (strcmp(a, b_real) == 0 || (a_real && a_real[0] && strcmp(a_real, b_real) == 0)) return true;
+  }
+#endif
+  return false;
+}
+
+bool pw_unix_socket_path_is_blocked(const char *sock_path)
+{
+  if (!sock_path || !sock_path[0] || sock_path[0] == '@') return true;
+  for (const unsigned char *q = (const unsigned char *)sock_path; *q; q++) {
+    if (*q < 0x20u || *q == 0x7fu) return true;
+  }
+  // Reject ".." path traversal segments.
+  for (const char *seg = sock_path; *seg;) {
+    const char *end = seg;
+    while (*end && *end != '/' && *end != '\\') end++;
+    if ((size_t)(end - seg) == 2u && seg[0] == '.' && seg[1] == '.') return true;
+    seg = *end ? end + 1 : end;
+  }
+  if (unix_path_matches_blocklist(sock_path)) return true;
+
+  const char *resolved = nullptr;
+#if !CCORD_OS_WINDOWS
+  char rbuf[CCORD_PATH_MAX];
+  if (realpath(sock_path, rbuf)) {
+    resolved = rbuf;
+    if (unix_path_matches_blocklist(resolved)) return true;
+  }
+#endif
+
+  const char *ssh_sock = getenv("SSH_AUTH_SOCK");
+  if (ssh_sock && ssh_sock[0] && unix_path_eq_resolved(sock_path, resolved, ssh_sock)) return true;
+
+  const char *dbus_addr = getenv("DBUS_SESSION_BUS_ADDRESS");
+  if (dbus_addr && dbus_addr[0]) {
+    const char *p = dbus_addr;
+    while ((p = strstr(p, "path=")) != nullptr) {
+      p += 5;
+      const char *end = p;
+      while (*end && *end != ',' && *end != ';') end++;
+      size_t plen = (size_t)(end - p);
+      if (plen > 0 && plen < CCORD_PATH_MAX) {
+        char dpath[CCORD_PATH_MAX];
+        memcpy(dpath, p, plen);
+        dpath[plen] = '\0';
+        if (unix_path_eq_resolved(sock_path, resolved, dpath)) return true;
+      }
+      p = end;
+    }
+  }
+  return false;
+}
 
 typedef struct unix_job {
   plugin_workers *w;
@@ -298,50 +485,53 @@ static void *unix_worker_fn(void *arg)
   char ebuf[128] = "unix socket unsupported";
   ccord_buf resp; ccord_buf_init(&resp, 0);
 #if !CCORD_OS_WINDOWS
-  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
-  if (fd >= 0) {
+  struct stat ust;
+  if (pw_unix_socket_path_is_blocked(j->path)) {
+    snprintf(ebuf, sizeof ebuf, "unix socket path is blocked");
+  } else if (lstat(j->path, &ust) == 0 && S_ISLNK(ust.st_mode)) {
+    snprintf(ebuf, sizeof ebuf, "symbolic link unix socket paths are not allowed");
+  } else {
     struct sockaddr_un sa = {.sun_family = AF_UNIX};
     size_t plen = strlen(j->path);
     if (plen >= sizeof sa.sun_path) {
       snprintf(ebuf, sizeof ebuf, "unix socket path too long");
-      close(fd);
-      fd = -1;
     } else {
-      memcpy(sa.sun_path, j->path, plen + 1u);
-    }
-  }
-  if (fd >= 0) {
-    ccord_sock_set_nosigpipe(fd);
-    struct sockaddr_un sa = {.sun_family = AF_UNIX};
-    memcpy(sa.sun_path, j->path, strlen(j->path) + 1u);
-    struct timeval tv = {.tv_sec = 3, .tv_usec = 0};
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
-    if (connect(fd, (struct sockaddr *)&sa, sizeof sa) == 0) {
-      size_t off = 0;
-      bool wr_ok = true;
-      while (off < j->len) {
-        ssize_t n = send(fd, j->data + off, j->len - off, PW_SEND_FLAGS);
-        if (n <= 0) { wr_ok = false; break; }
-        off += (size_t)n;
-      }
-      if (wr_ok) {
-        (void)shutdown(fd, SHUT_WR);
-        char tmp[4096];
-        for (;;) {
-          ssize_t n = recv(fd, tmp, sizeof tmp, 0);
-          if (n <= 0) break;
-          if (resp.len + (size_t)n > 256u * 1024u) break;
-          (void)ccord_buf_append(&resp, tmp, (size_t)n);
-        }
-        ok = true;
+      int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+      if (fd < 0) {
+        snprintf(ebuf, sizeof ebuf, "unix socket creation failed");
       } else {
-        snprintf(ebuf, sizeof ebuf, "unix send failed");
+        ccord_sock_set_nosigpipe(fd);
+        memcpy(sa.sun_path, j->path, plen + 1u);
+        struct timeval tv = {.tv_sec = 3, .tv_usec = 0};
+        (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+        if (connect(fd, (struct sockaddr *)&sa, sizeof sa) == 0) {
+          size_t off = 0;
+          bool wr_ok = true;
+          while (off < j->len) {
+            ssize_t n = send(fd, j->data + off, j->len - off, PW_SEND_FLAGS);
+            if (n <= 0) { wr_ok = false; break; }
+            off += (size_t)n;
+          }
+          if (wr_ok) {
+            (void)shutdown(fd, SHUT_WR);
+            char tmp[4096];
+            for (;;) {
+              ssize_t n = recv(fd, tmp, sizeof tmp, 0);
+              if (n <= 0) break;
+              if (resp.len + (size_t)n > 256u * 1024u) break;
+              (void)ccord_buf_append(&resp, tmp, (size_t)n);
+            }
+            ok = true;
+          } else {
+            snprintf(ebuf, sizeof ebuf, "unix send failed");
+          }
+        } else {
+          snprintf(ebuf, sizeof ebuf, "unix connect failed");
+        }
+        close(fd);
       }
-    } else {
-      snprintf(ebuf, sizeof ebuf, "unix connect failed");
     }
-    close(fd);
   }
 #endif
   if (!atomic_load(&w->shutting_down)) {
@@ -370,6 +560,14 @@ bool pw_start_unix_send(plugin_workers *w, const char *owner, uint64_t req_id, c
                         const uint8_t *data, size_t len)
 {
   if (!w || !owner || !sock_path) return false;
+  if (pw_unix_socket_path_is_blocked(sock_path)) {
+    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
+    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
+    snprintf(ev.error, sizeof ev.error, "unix socket path is blocked");
+    pw_push_ev(w, &ev);
+    return true;
+  }
+  if (strlen(sock_path) >= 256u) return false;
   unix_job *j = ccord_calloc(1, sizeof *j);
   if (!j) return false;
   j->w = w; snprintf(j->owner, sizeof j->owner, "%s", owner); j->req_id = req_id;
@@ -457,6 +655,12 @@ static void *ws_worker_fn(void *arg)
     ws_emit(w, s->owner, s->ws_id, "close", "{\"code\":1006,\"reason\":\"invalid URL\"}");
     return nullptr;
   }
+  bool is_loc = pw_is_localhost_host(host);
+  if (is_loc && !s->allow_local) {
+    ws_emit(w, s->owner, s->ws_id, "error", "{\"message\":\"localhost access requires network.local permission\"}");
+    ws_emit(w, s->owner, s->ws_id, "close", "{\"code\":1008,\"reason\":\"localhost access requires network.local permission\"}");
+    return nullptr;
+  }
   if (strcmp(scheme, "wss") == 0 && w->ops.ws_open) {
     char ebuf[256] = "";
     void *h = w->ops.ws_open(w->ops.ud, s->url, s->headers_json, ebuf, sizeof ebuf);
@@ -502,7 +706,12 @@ static void *ws_worker_fn(void *arg)
   }
 
 #if !CCORD_OS_WINDOWS
-  if (strcmp(scheme, "ws") == 0 && pw_is_localhost_host(host)) {
+  if (strcmp(scheme, "ws") == 0 && is_loc && s->allow_local) {
+    if (!valid_http_path(path)) {
+      ws_emit(w, s->owner, s->ws_id, "error", "{\"message\":\"invalid WebSocket request path\"}");
+      ws_emit(w, s->owner, s->ws_id, "close", "{\"code\":1008,\"reason\":\"invalid path\"}");
+      return nullptr;
+    }
     int fd = tcp_connect_timeout(host, port, 5000u);
     if (fd < 0) {
       ws_emit(w, s->owner, s->ws_id, "error", "{\"message\":\"connect failed\"}");
@@ -513,13 +722,31 @@ static void *ws_worker_fn(void *arg)
     (void)ccord_random_bytes(nonce, sizeof nonce);
     ccord_buf key_b64; ccord_buf_init(&key_b64, 32u);
     pw_b64_encode(nonce, sizeof nonce, &key_b64);
-    char hs[1024];
-    int hsn = snprintf(hs, sizeof hs,
-                       "GET %s HTTP/1.1\r\nHost: %s:%d\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-                       "Sec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n\r\n",
-                       path, host, port, ccord_buf_cstr(&key_b64));
+    ccord_buf hs_buf; ccord_buf_init(&hs_buf, 256u);
+    char port_s[16];
+    snprintf(port_s, sizeof port_s, "%d", port);
+    bool is_v6 = strchr(host, ':') != nullptr;
+    (void)ccord_buf_append_str(&hs_buf, "GET ");
+    (void)ccord_buf_append_str(&hs_buf, path);
+    (void)ccord_buf_append_str(&hs_buf, " HTTP/1.1\r\nHost: ");
+    if (is_v6) (void)ccord_buf_append(&hs_buf, "[", 1);
+    (void)ccord_buf_append_str(&hs_buf, host);
+    if (is_v6) (void)ccord_buf_append(&hs_buf, "]", 1);
+    (void)ccord_buf_append(&hs_buf, ":", 1);
+    (void)ccord_buf_append_str(&hs_buf, port_s);
+    (void)ccord_buf_append_str(&hs_buf, "\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: ");
+    (void)ccord_buf_append_str(&hs_buf, ccord_buf_cstr(&key_b64));
+    (void)ccord_buf_append_str(&hs_buf, "\r\nSec-WebSocket-Version: 13\r\n\r\n");
     ccord_buf_free(&key_b64);
-    if (send(fd, hs, (size_t)hsn, PW_SEND_FLAGS) != hsn) {
+    bool hs_sent = !hs_buf.failed;
+    size_t hs_off = 0;
+    while (hs_sent && hs_off < hs_buf.len) {
+      ssize_t wn = send(fd, hs_buf.data + hs_off, hs_buf.len - hs_off, PW_SEND_FLAGS);
+      if (wn <= 0) { hs_sent = false; break; }
+      hs_off += (size_t)wn;
+    }
+    ccord_buf_free(&hs_buf);
+    if (!hs_sent) {
       close(fd);
       ws_emit(w, s->owner, s->ws_id, "error", "{\"message\":\"handshake write failed\"}");
       ws_emit(w, s->owner, s->ws_id, "close", "{\"code\":1006,\"reason\":\"handshake failed\"}");
@@ -616,13 +843,25 @@ static void *ws_worker_fn(void *arg)
 }
 
 bool pw_ws_connect(plugin_workers *w, const char *owner, uint64_t ws_id, const ccord_manifest *manifest,
-                   const char *url, const char *headers_json)
+                   const char *url, const char *headers_json, bool allow_local)
 {
   if (!w || !owner || !url) return false;
+  if (strlen(url) >= 1024u) return false;
   char scheme[16] = "", host[256] = "", path[1024] = "";
   int port = 80;
   if (!pw_extract_url_host_port(url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path)) return false;
-  if (!pw_is_localhost_host(host) && manifest && !ccord_manifest_host_allowed(manifest, host)) {
+  bool is_loc = pw_is_localhost_host(host);
+  if (is_loc && !allow_local) {
+    ws_emit(w, owner, ws_id, "error", "{\"message\":\"localhost access requires network.local permission\"}");
+    ws_emit(w, owner, ws_id, "close", "{\"code\":1008,\"reason\":\"localhost access requires network.local permission\"}");
+    return true;
+  }
+  if (strcmp(scheme, "wss") != 0 && !(strcmp(scheme, "ws") == 0 && is_loc)) {
+    ws_emit(w, owner, ws_id, "error", "{\"message\":\"only wss:// (or localhost ws://) is allowed\"}");
+    ws_emit(w, owner, ws_id, "close", "{\"code\":1008,\"reason\":\"invalid scheme\"}");
+    return true;
+  }
+  if (!is_loc && manifest && !ccord_manifest_host_allowed(manifest, host)) {
     ws_emit(w, owner, ws_id, "error", "{\"message\":\"host blocked by allowed_hosts\"}");
     ws_emit(w, owner, ws_id, "close", "{\"code\":1008,\"reason\":\"host blocked\"}");
     return true;
@@ -632,6 +871,7 @@ bool pw_ws_connect(plugin_workers *w, const char *owner, uint64_t ws_id, const c
   s->active = true;
   s->tcp_fd = -1;
   s->ws_id = ws_id;
+  s->allow_local = allow_local;
   s->parent = w;
   snprintf(s->owner, sizeof s->owner, "%s", owner);
   snprintf(s->url, sizeof s->url, "%s", url);

@@ -34,6 +34,7 @@
 #define CATALOG_MAX_BATCH_IDS 64
 #define CATALOG_MAX_INFLIGHT_INSTALLS 8
 #define CATALOG_MAX_INFLIGHT_ICONS 24
+#define CATALOG_MAX_PUBKEYS 4u
 
 typedef struct cat_item {
   char id[65];
@@ -60,6 +61,13 @@ typedef struct cat_item {
   char warning_title[128];
   char warning_message[512];
   bool has_detail;
+  bool needs_tier_review;
+  int64_t author_github_id;
+  int64_t repo_id;
+  bool has_signature;
+  char sig_alg[16];
+  char sig_key_id[32];
+  char sig_hex[132];
 } cat_item;
 
 typedef struct revoked_item {
@@ -103,6 +111,7 @@ typedef struct worker_job {
   size_t post_len;
   uint64_t expected_perms;
   uint64_t approved_perms;
+  char expected_allowed_hosts[512];
   ccord_plugin_tier tier;
 } worker_job;
 
@@ -122,6 +131,7 @@ typedef struct worker_result {
   char *dest_path; // owned until pump frees after handle_result
   uint64_t expected_perms;
   uint64_t approved_perms;
+  char expected_allowed_hosts[512];
   ccord_plugin_tier tier;
   char *body;
   size_t body_len;
@@ -137,6 +147,11 @@ struct ccord_catalog {
   ccord_catalog_host_cbs cbs;
   ccord_catalog_prefs prefs;
   ccord_catalog_status status;
+
+  // Pinned Ed25519 public keys for verifying catalog metadata and revocations
+  uint8_t pubkeys[CATALOG_MAX_PUBKEYS][32];
+  char pubkey_ids[CATALOG_MAX_PUBKEYS][17];
+  size_t npubkeys;
 
   // Bounded O(1) discover page state (only currently browsed page(s))
   cat_item *discover;
@@ -203,6 +218,9 @@ void cat_mkdir_ok(const char *p);
 char *cat_read_entire_file(const char *path, size_t max_bytes, size_t *out_len);
 void cat_json_str_copy(const ccord_json *obj, const char *key, char *dst, size_t cap);
 bool cat_hex_equal_ci(const char *a, const char *b);
+bool cat_hex_decode(const char *hex, uint8_t *out, size_t out_bytes);
+bool cat_verify_ed25519(const ccord_catalog *cat, const char *alg, const char *key_id,
+                        const char *sig_hex, const uint8_t *msg, size_t msg_len);
 bool cat_is_installing(const ccord_catalog *cat, const char *id);
 installed_meta *cat_find_meta(ccord_catalog *cat, const char *id);
 const installed_meta *cat_find_meta_const(const ccord_catalog *cat, const char *id);
@@ -221,9 +239,11 @@ void cat_load_revocations_cache(ccord_catalog *cat);
 bool cat_valid_catalog_id(const char *s);
 bool cat_valid_catalog_version(const char *s);
 bool cat_compute_update_info(const cat_item *it, const char *local_ver, uint64_t consented_perms,
+                             const char *consented_hosts_csv, bool had_consented_hosts,
                              bool *out_avail, bool *out_needs_review);
 bool cat_parse_discover_page_json(ccord_catalog *cat, const char *json, size_t len, bool append);
-bool cat_parse_detail_json(const char *json, size_t len, cat_item *out);
+bool cat_parse_detail_json(const ccord_catalog *cat, const char *json, size_t len, cat_item *out,
+                           bool *out_sig_failed);
 bool cat_parse_updates_check_json(ccord_catalog *cat, const char *json, size_t len,
                                   bool *out_rev_stale, int64_t *out_rev_seq);
 const cat_item *cat_find_update_item(const ccord_catalog *cat, const char *id);

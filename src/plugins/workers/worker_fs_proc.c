@@ -2,6 +2,12 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _GNU_SOURCE
 #include "workers_internal.h"
+#if defined(__linux__) && !CCORD_OS_WINDOWS
+#include <sys/syscall.h>
+#endif
+#if !CCORD_OS_WINDOWS && !defined(__GLIBC__)
+extern char **environ;
+#endif
 
 // ---------------------------------------------------------------- Filesystem watcher (fs.watch)
 
@@ -149,6 +155,71 @@ void pw_poll_watches(plugin_workers *w)
 
 // ---------------------------------------------------------------- system.exec & system.spawn
 
+#if !CCORD_OS_WINDOWS
+static bool child_env_is_sensitive(const char *entry)
+{
+  if (!entry) return false;
+  const char *eq = strchr(entry, '=');
+  size_t n = eq ? (size_t)(eq - entry) : strlen(entry);
+  if (n == 0) return false;
+  char up[256];
+  if (n >= sizeof up) n = sizeof up - 1u;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)entry[i];
+    up[i] = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : (char)c;
+  }
+  up[n] = '\0';
+  static const char *const k_patterns[] = {
+    "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PRIVATE_KEY", "API_KEY",
+    "AWS_SECRET", "AWS_SESSION", "COOKIE", "CREDENTIAL", "AUTH", "CCORD_",
+  };
+  for (size_t i = 0; i < sizeof k_patterns / sizeof k_patterns[0]; i++) {
+    if (strstr(up, k_patterns[i]) != nullptr) return true;
+  }
+  return false;
+}
+
+static void child_scrub_env(void)
+{
+  if (!environ) return;
+  size_t i = 0;
+  while (environ[i]) {
+    if (child_env_is_sensitive(environ[i])) {
+      const char *before = environ[i];
+      const char *eq = strchr(before, '=');
+      size_t n = eq ? (size_t)(eq - before) : strlen(before);
+      if (n > 0 && n < 256u) {
+        char name[256];
+        memcpy(name, before, n);
+        name[n] = '\0';
+        (void)unsetenv(name);
+        if (environ[i] == before) i++;
+      } else {
+        size_t j = i;
+        while (environ[j]) {
+          environ[j] = environ[j + 1];
+          j++;
+        }
+      }
+      continue;
+    }
+    i++;
+  }
+}
+
+static void child_close_extra_fds(void)
+{
+#if defined(__linux__) && defined(SYS_close_range)
+  if (syscall(SYS_close_range, 3u, ~0u, 0u) == 0) return;
+#endif
+  long max_fd = sysconf(_SC_OPEN_MAX);
+  if (max_fd < 0 || max_fd > 4096) max_fd = 4096;
+  for (int fd = 3; fd < (int)max_fd; fd++) {
+    (void)close(fd);
+  }
+}
+#endif
+
 typedef struct exec_job {
   plugin_workers *w;
   char owner[65];
@@ -183,6 +254,8 @@ static void *exec_worker_fn(void *arg)
       close(in_p[0]); close(in_p[1]);
       close(out_p[0]); close(out_p[1]);
       close(err_p[0]); close(err_p[1]);
+      child_close_extra_fds();
+      child_scrub_env();
       if (j->cwd[0] && chdir(j->cwd) != 0) _exit(127);
       execvp(j->argv[0], j->argv);
       _exit(127);
@@ -380,6 +453,8 @@ bool pw_start_spawn(plugin_workers *w, const char *owner, uint64_t proc_id, cons
     (void)dup2(out_p[1], STDOUT_FILENO);
     (void)dup2(err_p[1], STDERR_FILENO);
     close(in_p[0]); close(in_p[1]); close(out_p[0]); close(out_p[1]); close(err_p[0]); close(err_p[1]);
+    child_close_extra_fds();
+    child_scrub_env();
     if (cwd && cwd[0] && chdir(cwd) != 0) _exit(127);
     execvp(argv[0], argv);
     _exit(127);

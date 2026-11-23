@@ -797,31 +797,66 @@ bool pl_fs_path_is_protected(const ccord_plugins *m, const char *raw_path)
   if (!resolve_canonical_target(raw_path, target, sizeof target)) return true;
 
   char rdir[CCORD_PATH_MAX];
-  if (m->has_data_dir && m->data_dir && resolve_canonical_target(m->data_dir, rdir, sizeof rdir)) {
+  if (m && m->has_data_dir && m->data_dir && resolve_canonical_target(m->data_dir, rdir, sizeof rdir)) {
     if (path_same_or_under(target, rdir)) return true;
   }
   const char *gdata = ccord_paths_data_dir();
   if (gdata && gdata[0] && resolve_canonical_target(gdata, rdir, sizeof rdir)) {
     if (path_same_or_under(target, rdir)) return true;
   }
-  for (size_t i = 0; i < m->nsearch; i++) {
-    if (m->search[i] && resolve_canonical_target(m->search[i], rdir, sizeof rdir)) {
-      if (path_same_or_under(target, rdir)) return true;
+  const char *exe = ccord_paths_exe_path();
+  if (exe && exe[0]) {
+    if (path_same_or_under(target, exe)) return true;
+    if (resolve_canonical_target(exe, rdir, sizeof rdir) && path_same_or_under(target, rdir)) return true;
+  }
+#if defined(__linux__) && !CCORD_OS_WINDOWS
+  if (pl_resolve_real_path("/proc/self/exe", rdir, sizeof rdir) && path_same_or_under(target, rdir)) {
+    return true;
+  }
+#endif
+  if (m) {
+    for (size_t i = 0; i < m->nsearch; i++) {
+      if (m->search[i] && resolve_canonical_target(m->search[i], rdir, sizeof rdir)) {
+        if (path_same_or_under(target, rdir)) return true;
+      }
     }
   }
-  // Protect C-Cord configuration / token directories across OS conventions.
-  char cfg_cand[4][CCORD_PATH_MAX];
+  // Protect C-Cord configuration / token directories, credential stores, and shell/autostart persistence targets.
+  char cfg_cand[16][CCORD_PATH_MAX];
   size_t nc = 0;
   const char *xdg = getenv("XDG_CONFIG_HOME");
-  if (xdg && xdg[0] && snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/ccord", xdg) < (int)sizeof cfg_cand[0]) nc++;
+  if (xdg && xdg[0]) {
+    int n = snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/ccord", xdg);
+    if (n > 0 && (size_t)n < sizeof cfg_cand[0]) nc++;
+    if (nc < 16u) {
+      n = snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/autostart", xdg);
+      if (n > 0 && (size_t)n < sizeof cfg_cand[0]) nc++;
+    }
+  }
   const char *home = getenv("HOME");
   if (home && home[0]) {
-    if (nc < 4 && snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/.config/ccord", home) < (int)sizeof cfg_cand[0]) nc++;
-    if (nc < 4 && snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/Library/Application Support/ccord", home) < (int)sizeof cfg_cand[0]) nc++;
+    static const char *const k_home_protected[] = {
+      ".config/ccord",
+      "Library/Application Support/ccord",
+      ".local/bin/C-Cord.AppImage",
+      ".config/autostart",
+      ".bashrc",
+      ".profile",
+      ".zshrc",
+      ".bash_profile",
+      ".ssh",
+      ".gnupg",
+    };
+    for (size_t i = 0; i < sizeof k_home_protected / sizeof k_home_protected[0] && nc < 16u; i++) {
+      int n = snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/%s", home, k_home_protected[i]);
+      if (n > 0 && (size_t)n < sizeof cfg_cand[0]) nc++;
+    }
   }
   const char *appdata = getenv("APPDATA");
-  if (appdata && appdata[0] && nc < 4 &&
-      snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/ccord", appdata) < (int)sizeof cfg_cand[0]) nc++;
+  if (appdata && appdata[0] && nc < 16u) {
+    int n = snprintf(cfg_cand[nc], sizeof cfg_cand[0], "%s/ccord", appdata);
+    if (n > 0 && (size_t)n < sizeof cfg_cand[0]) nc++;
+  }
   for (size_t i = 0; i < nc; i++) {
     if (resolve_canonical_target(cfg_cand[i], rdir, sizeof rdir) && path_same_or_under(target, rdir)) return true;
   }
@@ -879,8 +914,23 @@ static void req_fs(ccord_plugins *m, plugin *p, uint32_t id, const char *method,
     return;
   }
   if (strcmp(method, "fs.remove") == 0) {
+#if CCORD_OS_WINDOWS
     if (remove(path) != 0) pl_reply_err(m, p, id, "io", strerror(errno));
     else pl_reply_ok(m, p, id, nullptr);
+#else
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+      pl_reply_err(m, p, id, "io", strerror(errno));
+      return;
+    }
+    if (S_ISLNK(st.st_mode)) {
+      pl_reply_err(m, p, id, "permission_denied", "refusing to remove symbolic link");
+      return;
+    }
+    int rrc = S_ISDIR(st.st_mode) ? rmdir(path) : unlink(path);
+    if (rrc != 0) pl_reply_err(m, p, id, "io", strerror(errno));
+    else pl_reply_ok(m, p, id, nullptr);
+#endif
     return;
   }
   if (strcmp(method, "fs.write") == 0) {
@@ -898,6 +948,7 @@ static void req_fs(ccord_plugins *m, plugin *p, uint32_t id, const char *method,
       pl_reply_err(m, p, id, "invalid_argument", "fs.write: invalid base64");
       return;
     }
+#if CCORD_OS_WINDOWS
     FILE *f = fopen(path, append ? "ab" : "wb");
     if (!f) {
       ccord_free(raw);
@@ -906,6 +957,41 @@ static void req_fs(ccord_plugins *m, plugin *p, uint32_t id, const char *method,
     }
     size_t wr = raw_len ? fwrite(raw, 1, raw_len, f) : 0;
     fclose(f);
+#else
+    int flags = O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK | (append ? O_APPEND : 0);
+    int fd = open(path, flags, 0644);
+    if (fd < 0) {
+      ccord_free(raw);
+      pl_reply_err(m, p, id, "io", strerror(errno));
+      return;
+    }
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+      close(fd);
+      ccord_free(raw);
+      pl_reply_err(m, p, id, "io", "not a regular file");
+      return;
+    }
+    if (!append && ftruncate(fd, 0) != 0) {
+      int e = errno;
+      close(fd);
+      ccord_free(raw);
+      pl_reply_err(m, p, id, "io", strerror(e));
+      return;
+    }
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+    size_t wr = 0;
+    while (wr < raw_len) {
+      ssize_t wn = write(fd, raw + wr, raw_len - wr);
+      if (wn < 0) {
+        if (errno == EINTR) continue;
+        break;
+      }
+      wr += (size_t)wn;
+    }
+    close(fd);
+#endif
     ccord_free(raw);
     if (wr != raw_len) pl_reply_err(m, p, id, "io", "short write");
     else pl_reply_ok(m, p, id, nullptr);
@@ -936,7 +1022,7 @@ static void req_fs(ccord_plugins *m, plugin *p, uint32_t id, const char *method,
     }
     fsz = (uint64_t)st.st_size;
 #else
-    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (fd < 0) { pl_reply_err(m, p, id, "io", strerror(errno)); return; }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {

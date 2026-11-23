@@ -197,6 +197,60 @@ void cat_save_revocations_cache(const ccord_catalog *cat)
   ccord_buf_free(&b);
 }
 
+static bool verify_revocations_signature(const ccord_catalog *cat, const ccord_json *root,
+                                         int64_t seq, bool full, const ccord_json *arr)
+{
+  if (!cat || cat->npubkeys == 0) return true;
+  const ccord_json *sig = ccord_json_get(root, "signature");
+  if (!sig || ccord_json_type_of(sig) != CCORD_JSON_OBJECT) return false;
+  char sig_alg[16], sig_key_id[32], sig_hex[132];
+  cat_json_str_copy(sig, "alg", sig_alg, sizeof sig_alg);
+  cat_json_str_copy(sig, "key_id", sig_key_id, sizeof sig_key_id);
+  cat_json_str_copy(sig, "sig", sig_hex, sizeof sig_hex);
+
+  ccord_buf b;
+  ccord_buf_init(&b, CATALOG_MAX_API_BYTES);
+  bool ok = ccord_buf_appendf(&b, "ccord-revocations-v2\n%" PRId64 "\n%d\n", seq, full ? 1 : 0) == CCORD_OK;
+  if (ok && arr && ccord_json_type_of(arr) == CCORD_JSON_ARRAY) {
+    size_t rn = ccord_json_array_len(arr);
+    for (size_t i = 0; i < rn && ok; i++) {
+      const ccord_json *o = ccord_json_array_at(arr, i);
+      if (!o || ccord_json_type_of(o) != CCORD_JSON_OBJECT) continue;
+      int64_t iseq = 0;
+      (void)ccord_json_int64(ccord_json_get(o, "seq"), &iseq);
+      size_t sha_l = 0, pid_l = 0, rsn_l = 0;
+      const char *sha_s = ccord_json_string(ccord_json_get(o, "sha256"), &sha_l);
+      const char *pid_s = ccord_json_string(ccord_json_get(o, "plugin_id"), &pid_l);
+      const char *rsn_s = ccord_json_string(ccord_json_get(o, "reason"), &rsn_l);
+      ok = ccord_buf_appendf(&b, "%" PRId64 "|", iseq) == CCORD_OK;
+      if (sha_s) {
+        for (size_t k = 0; k < sha_l && ok; k++) {
+          char c = (char)tolower((unsigned char)sha_s[k]);
+          ok = ccord_buf_append(&b, &c, 1) == CCORD_OK;
+        }
+      }
+      if (ok) ok = ccord_buf_append(&b, "|", 1) == CCORD_OK;
+      if (ok && pid_s && pid_l > 0) ok = ccord_buf_append(&b, pid_s, pid_l) == CCORD_OK;
+      if (ok) ok = ccord_buf_append(&b, "|", 1) == CCORD_OK;
+      if (rsn_s) {
+        for (size_t k = 0; k < rsn_l && ok; k++) {
+          char c = rsn_s[k];
+          if (c == '\r' || c == '\n' || c == '|') c = ' ';
+          ok = ccord_buf_append(&b, &c, 1) == CCORD_OK;
+        }
+      }
+      if (ok) ok = ccord_buf_append(&b, "\n", 1) == CCORD_OK;
+    }
+  }
+  bool verified = false;
+  if (ok) {
+    verified = cat_verify_ed25519(cat, sig_alg, sig_key_id, sig_hex,
+                                  (const uint8_t *)b.data, b.len);
+  }
+  ccord_buf_free(&b);
+  return verified;
+}
+
 bool cat_merge_revocations_json(ccord_catalog *cat, const char *json, size_t len, bool is_cache_file)
 {
   if (!cat || !json || len == 0) return false;
@@ -214,11 +268,18 @@ bool cat_merge_revocations_json(ccord_catalog *cat, const char *json, size_t len
   bool full = is_cache_file;
   const ccord_json *full_j = ccord_json_get(root, "full");
   if (full_j) full = ccord_json_bool(full_j, false);
+  const ccord_json *arr = ccord_json_get(root, "revoked");
+
+  if (!is_cache_file && !verify_revocations_signature(cat, root, seq, full, arr)) {
+    CCORD_LOG_W("catalog: rejected revocations payload (invalid or missing Ed25519 signature)");
+    ccord_arena_free(&arena);
+    return false;
+  }
+
   if (is_cache_file) {
     cat_json_str_copy(root, "etag", cat->rev_etag, sizeof cat->rev_etag);
   }
 
-  const ccord_json *arr = ccord_json_get(root, "revoked");
   if (arr && ccord_json_type_of(arr) == CCORD_JSON_ARRAY) {
     size_t rn = ccord_json_array_len(arr);
     if (full) {
@@ -238,10 +299,23 @@ bool cat_merge_revocations_json(ccord_catalog *cat, const char *json, size_t len
           cat_json_str_copy(o, "sha256", item.sha256, sizeof item.sha256);
           cat_json_str_copy(o, "plugin_id", item.plugin_id, sizeof item.plugin_id);
           cat_json_str_copy(o, "reason", item.reason, sizeof item.reason);
-          if (strlen(item.sha256) != 64) continue;
+          size_t slen = strlen(item.sha256);
+          bool valid_hash = (slen == 64);
+          if (valid_hash) {
+            for (size_t j = 0; j < 64; j++) {
+              if (!isxdigit((unsigned char)item.sha256[j])) { valid_hash = false; break; }
+              item.sha256[j] = (char)tolower((unsigned char)item.sha256[j]);
+            }
+          }
+          bool valid_id_only = (slen == 0 && item.plugin_id[0] != '\0');
+          if (!valid_hash && !valid_id_only) continue;
           bool dup = false;
           for (size_t k = 0; k < cat->nrevoked; k++) {
-            if (cat_hex_equal_ci(cat->revoked[k].sha256, item.sha256)) { dup = true; break; }
+            bool sha_same = (valid_hash && strlen(cat->revoked[k].sha256) == 64 &&
+                             cat_hex_equal_ci(cat->revoked[k].sha256, item.sha256)) ||
+                            (!valid_hash && cat->revoked[k].sha256[0] == '\0');
+            bool id_same = strcmp(cat->revoked[k].plugin_id, item.plugin_id) == 0;
+            if (sha_same && id_same) { dup = true; break; }
           }
           if (!dup) cat->revoked[cat->nrevoked++] = item;
         }

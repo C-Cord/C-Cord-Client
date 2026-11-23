@@ -135,6 +135,8 @@ typedef struct plugin {
   uint64_t last_save_ms;
   char *storage_dir;
   ccord_perm_set consented_perms;
+  bool has_consented_hosts;
+  char consented_hosts_csv[1024];
   bool is_bundled;
   bool revoked;
   // API v3 state
@@ -270,9 +272,12 @@ void pl_storage_load(plugin *p);
 void pl_mkdir_ok(const char *path);
 void pl_storage_save(ccord_plugins *m, plugin *p, uint64_t now);
 void pl_storage_setup(ccord_plugins *m, plugin *p);
+void pl_format_hosts_csv(const ccord_manifest *man, char *out, size_t cap);
 const ccord_json *pl_consent_parse_file(const ccord_plugins *m, ccord_arena *ar);
-bool pl_consent_apply(const ccord_json *root, const char *id, uint64_t perms, bool *out_enabled,
-                      bool *out_consent, ccord_perm_set *out_consented_perms);
+bool pl_consent_apply(const ccord_json *root, const char *id, const ccord_manifest *man,
+                      bool *out_enabled, bool *out_consent, ccord_perm_set *out_consented_perms,
+                      bool *out_has_consented_hosts, char *out_consented_hosts, size_t hosts_cap,
+                      bool *out_migrated);
 void pl_consent_save(const ccord_plugins *m);
 ccord_status pl_spawn_host(ccord_plugins *m, plugin *p, ccord_error *err);
 void pl_stop_host(ccord_plugins *m, plugin *p);
@@ -283,8 +288,8 @@ void pl_on_plugin_consent_accept_for(void *ud, const char *id, uint64_t expected
 char *pl_resolve_icon_path(const char *real_dir, const char *rel_icon);
 bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
                                 const char *expected_id, const char *expected_version,
-                                uint64_t expected_perms, bool from_catalog,
-                                bool preapprove_consent,
+                                uint64_t expected_perms, const char *expected_allowed_hosts,
+                                bool from_catalog, bool preapprove_consent,
                                 char *err_buf, size_t err_cap);
 const char *pl_channel_kind_str(const ccord_store *st, const ccord_channel *c);
 void pl_channel_display_name(const ccord_store *st, const ccord_channel *c, char *out, size_t cap);

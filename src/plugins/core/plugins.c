@@ -597,6 +597,8 @@ static void on_plugin_set_enabled(void *ud, const char *id, bool enabled)
     p->enabled = false;
     p->consent_granted = false;
     p->consented_perms = 0;
+    p->has_consented_hosts = false;
+    p->consented_hosts_csv[0] = '\0';
     pl_set_plugin_failed(m, p, rev_reason[0] ? rev_reason : "Revoked by C-Cord moderators", true);
     return;
   }
@@ -621,6 +623,8 @@ void pl_on_plugin_consent_accept_for(void *ud, const char *id, uint64_t expected
     p->enabled = false;
     p->consent_granted = false;
     p->consented_perms = 0;
+    p->has_consented_hosts = false;
+    p->consented_hosts_csv[0] = '\0';
     pl_set_plugin_failed(m, p, rev_reason[0] ? rev_reason : "Revoked by C-Cord moderators", true);
     return;
   }
@@ -634,6 +638,8 @@ void pl_on_plugin_consent_accept_for(void *ud, const char *id, uint64_t expected
   }
   p->consent_granted = true;
   p->consented_perms = p->m.perms;
+  p->has_consented_hosts = true;
+  pl_format_hosts_csv(&p->m, p->consented_hosts_csv, sizeof p->consented_hosts_csv);
   p->enabled = true;
   pl_consent_save(m);
   pl_start_plugin_host(m, p);
@@ -714,17 +720,23 @@ void pl_on_plugin_reload(void *ud, const char *id)
     p->enabled = false;
     p->consent_granted = false;
     p->consented_perms = 0;
+    p->has_consented_hosts = false;
+    p->consented_hosts_csv[0] = '\0';
     pl_set_plugin_failed(m, p, rev_reason[0] ? rev_reason : "Revoked by C-Cord moderators", true);
     pl_consent_save(m);
     return;
   }
   p->revoked = false;
 
+  char new_hosts[1024] = "";
+  pl_format_hosts_csv(&man, new_hosts, sizeof new_hosts);
+  bool hosts_expanded = ccord_hosts_expanded(p->consented_hosts_csv, p->has_consented_hosts,
+                                             new_hosts, man.perms);
   bool safe_class = ccord_perm_max_class(man.perms) == CCORD_PERM_CLASS_SAFE;
   if (safe_class) {
     p->consent_granted = true;
     p->consented_perms = man.perms;
-  } else if (!p->consent_granted || (man.perms & ~p->consented_perms) != 0) {
+  } else if (!p->consent_granted || (man.perms & ~p->consented_perms) != 0 || hosts_expanded) {
     ccord_free(p->source);
     p->source = nullptr;
     p->source_len = 0;
@@ -763,15 +775,25 @@ static bool cb_import_verified_cce(void *ud, const char *pkg, const char *expect
                                    const char *expected_version, uint64_t expected_perms,
                                    char *eb, size_t ec)
 {
-  return pl_import_package_internal(ud, pkg, expected_id, expected_version, expected_perms, true, false, eb, ec);
+  return pl_import_package_internal(ud, pkg, expected_id, expected_version, expected_perms, nullptr,
+                                    true, false, eb, ec);
 }
 
 static bool cb_import_verified_cce_approved(void *ud, const char *pkg, const char *expected_id,
                                             const char *expected_version, uint64_t expected_perms,
                                             bool preapprove_consent, char *eb, size_t ec)
 {
-  return pl_import_package_internal(ud, pkg, expected_id, expected_version, expected_perms, true,
-                                    preapprove_consent, eb, ec);
+  return pl_import_package_internal(ud, pkg, expected_id, expected_version, expected_perms, nullptr,
+                                    true, preapprove_consent, eb, ec);
+}
+
+static bool cb_import_verified_cce_ex(void *ud, const char *pkg, const char *expected_id,
+                                      const char *expected_version, uint64_t expected_perms,
+                                      const char *expected_allowed_hosts, bool preapprove_consent,
+                                      char *eb, size_t ec)
+{
+  return pl_import_package_internal(ud, pkg, expected_id, expected_version, expected_perms,
+                                    expected_allowed_hosts, true, preapprove_consent, eb, ec);
 }
 
 static bool cb_uninstall(void *ud, const char *id, char *eb, size_t ec)
@@ -806,6 +828,29 @@ static void cb_cat_install_approved(void *ud, const char *id, uint64_t approved_
 static void cb_cat_set_prefs(void *ud, const ccord_catalog_prefs *pr) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_set_prefs(m->catalog, pr); }
 static void cb_cat_set_auto(void *ud, const char *id, bool on) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_set_plugin_auto_update(m->catalog, id, on); }
 static void cb_cat_run_auto(void *ud) { ccord_plugins *m = ud; if (m->catalog) ccord_catalog_run_auto_updates(m->catalog); }
+
+bool ccord_plugins_get_consented_hosts(const ccord_plugins *m, const char *id,
+                                       char *hosts_out, size_t hosts_cap, bool *had_consented_out)
+{
+  if (hosts_out && hosts_cap) hosts_out[0] = '\0';
+  if (had_consented_out) *had_consented_out = false;
+  if (!m || !id || !id[0]) return false;
+  for (size_t i = 0; i < m->nplugins; i++) {
+    const plugin *p = m->plugins[i];
+    if (p->used && strcmp(p->m.id, id) == 0) {
+      if (hosts_out && hosts_cap) pl_set_text(hosts_out, hosts_cap, p->consented_hosts_csv);
+      if (had_consented_out) *had_consented_out = p->has_consented_hosts;
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool cat_get_local_allowed_hosts(void *ud, const char *id, char *hosts_out, size_t hosts_cap,
+                                        bool *had_consented_out)
+{
+  return ccord_plugins_get_consented_hosts(ud, id, hosts_out, hosts_cap, had_consented_out);
+}
 
 static bool cat_get_local_plugin(void *ud, const char *id, char *ver_out, size_t ver_cap,
                                  uint64_t *consented_perms_out, bool *is_bundled_out)
@@ -842,6 +887,8 @@ static void cat_revoke_plugin(void *ud, const char *id, const char *reason)
   p->enabled = false;
   p->consent_granted = false;
   p->consented_perms = 0;
+  p->has_consented_hosts = false;
+  p->consented_hosts_csv[0] = '\0';
   p->state = CCORD_PLUGIN_FAILED;
   pl_set_text(p->error, sizeof p->error, reason ? reason : "Revoked by C-Cord moderators");
   pl_consent_save(m);
@@ -1003,9 +1050,11 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
   ccord_catalog_host_cbs ccbs = {
     .ud = m,
     .get_local_plugin = cat_get_local_plugin,
+    .get_local_allowed_hosts = cat_get_local_allowed_hosts,
     .list_local_plugins = cat_list_local_plugins,
     .import_verified_cce = cb_import_verified_cce,
     .import_verified_cce_approved = cb_import_verified_cce_approved,
+    .import_verified_cce_ex = cb_import_verified_cce_ex,
     .revoke_plugin = cat_revoke_plugin,
     .sync_installed_info = cat_sync_installed_info,
     .toast = cat_toast,

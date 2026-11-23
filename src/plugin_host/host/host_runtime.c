@@ -285,9 +285,15 @@ static void handle_init(host *h, const ccord_ipc_msg *msg)
   const char *dir = str_of(pl, "dir", &dl);
   (void)dl;
   if (h->isolate_process) ccord_host_os_sandbox(dir);
+#if CCORD_OS_ANDROID
+  const uint64_t mem_cap = 32u << 20;
+#else
+  const uint64_t mem_cap = h->cancel ? (32u << 20) : (64u << 20);
+#endif
   ccord_sandbox_config cfg = {
     .plugin_id = id, .plugin_name = name, .plugin_version = version, .plugin_dir = dir,
-    .perms = perms, .memory_bytes = h->cancel ? (16u << 20) : (32u << 20), .instructions = 0,
+    .perms = perms, .memory_bytes = h->cancel ? (16u << 20) : (32u << 20),
+    .instructions = 50000000u,
   };
   const ccord_json *lim = p ? ccord_json_get(p, "limits") : nullptr;
   if (lim && ccord_json_type_of(lim) == CCORD_JSON_OBJECT) {
@@ -296,11 +302,15 @@ static void handle_init(host *h, const ccord_ipc_msg *msg)
     if (mj && ccord_json_int64(mj, &mb) && mb > 0) {
       uint64_t u = (uint64_t)mb;
       if (u < (1u << 20)) u = (1u << 20);
-      if (u > (128u << 20)) u = (128u << 20);
+      if (u > mem_cap) u = mem_cap;
       cfg.memory_bytes = u;
     }
     const ccord_json *ij = ccord_json_get(lim, "instructions");
-    if (ij && ccord_json_int64(ij, &ins) && ins > 0) cfg.instructions = (uint64_t)ins;
+    if (ij && ccord_json_int64(ij, &ins) && ins > 0) {
+      uint64_t u = (uint64_t)ins;
+      if (u > 100000000u) u = 100000000u;
+      cfg.instructions = u;
+    }
   }
   const ccord_json *plat = p ? ccord_json_get(p, "platform") : nullptr;
   if (plat && ccord_json_type_of(plat) == CCORD_JSON_OBJECT) {

@@ -16,6 +16,9 @@ typedef struct ccord_catalog_host_cbs {
   // Query locally installed plugin state (main thread only).
   bool (*get_local_plugin)(void *ud, const char *id, char *ver_out, size_t ver_cap,
                            uint64_t *consented_perms_out, bool *is_bundled_out);
+  // Optional: query previously consented allowed_hosts CSV for a locally installed plugin (main thread only).
+  bool (*get_local_allowed_hosts)(void *ud, const char *id, char *hosts_out, size_t hosts_cap,
+                                  bool *had_consented_out);
   // Enumerate locally installed non-bundled plugin IDs for targeted update/revocation checks.
   size_t (*list_local_plugins)(void *ud, char (*ids_out)[65], size_t cap);
   // Install a SHA-256-verified .cce file on the main thread, enforcing expected catalog id/version/perms.
@@ -27,6 +30,11 @@ typedef struct ccord_catalog_host_cbs {
                                        const char *expected_version, uint64_t expected_perms,
                                        bool preapprove_consent,
                                        char *err_buf, size_t err_cap);
+  // Optional: full verified import enforcing expected_allowed_hosts and optional atomic consent pre-approval.
+  bool (*import_verified_cce_ex)(void *ud, const char *pkg_path, const char *expected_id,
+                                 const char *expected_version, uint64_t expected_perms,
+                                 const char *expected_allowed_hosts, bool preapprove_consent,
+                                 char *err_buf, size_t err_cap);
   // Stop & disable a plugin whose installed SHA-256 was revoked for malware.
   void (*revoke_plugin)(void *ud, const char *id, const char *reason);
   // Re-publish installed plugin metadata (tier, warnings, update_version, auto_update) into contrib.
@@ -57,10 +65,19 @@ void ccord_catalog_set_prefs(ccord_catalog *cat, const ccord_catalog_prefs *pref
 void ccord_catalog_set_plugin_auto_update(ccord_catalog *cat, const char *id, bool enabled);
 void ccord_catalog_run_auto_updates(ccord_catalog *cat);
 void ccord_catalog_on_uninstalled(ccord_catalog *cat, const char *id);
+// Configure pinned Ed25519 public key(s) (comma-separated 64-hex keys, up to 4; empty/null disables pinning).
+bool ccord_catalog_set_pubkeys(ccord_catalog *cat, const char *hex_csv);
+// Record SHA-256 of a locally imported / sideloaded .cce package in installed-meta.json and enforce revocations.
+void ccord_catalog_record_local_install(ccord_catalog *cat, const char *id, const char *sha256_hex);
 // Re-run cached revocation checks against currently loaded plugins (must be called after load_all).
 void ccord_catalog_enforce_revocations(ccord_catalog *cat);
 // True if the installed SHA-256 recorded for `id` matches a moderator revocation entry.
 bool ccord_catalog_is_revoked(const ccord_catalog *cat, const char *id, char *reason_out, size_t reason_cap);
+// True if `sha256_hex` (when 64 hex chars) or ID-only revocation for `id` matches a moderator revocation entry.
+bool ccord_catalog_is_hash_or_id_revoked(const ccord_catalog *cat, const char *id, const char *sha256_hex,
+                                         char *reason_out, size_t reason_cap);
+// True if `new_csv` expands network.http/network.ws allowed_hosts beyond previously consented `consented_csv`.
+bool ccord_hosts_expanded(const char *consented_csv, bool had_consented, const char *new_csv, uint64_t new_perms);
 
 // Metadata enrichment for installed plugin cards in ccord_plugins.
 typedef struct ccord_catalog_local_overlay {

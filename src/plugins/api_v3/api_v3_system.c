@@ -10,16 +10,16 @@ const ccord_json_limits k_ext_limits = {16, 8192, (size_t)2u << 20};
 bool ext_is_localhost_url(const char *url)
 {
   if (!url) return false;
-  const char *p = nullptr;
-  if (strncmp(url, "http://", 7) == 0) p = url + 7;
-  else if (strncmp(url, "https://", 8) == 0) p = url + 8;
-  else if (strncmp(url, "ws://", 5) == 0) p = url + 5;
-  else if (strncmp(url, "wss://", 6) == 0) p = url + 6;
-  else return false;
-  if (strncmp(p, "127.0.0.1", 9) == 0 && (p[9] == ':' || p[9] == '/' || p[9] == '\0')) return true;
-  if (strncmp(p, "localhost", 9) == 0 && (p[9] == ':' || p[9] == '/' || p[9] == '\0')) return true;
-  if (strncmp(p, "[::1]", 5) == 0 && (p[5] == ':' || p[5] == '/' || p[5] == '\0')) return true;
-  return false;
+  char scheme[16] = "", host[256] = "", path[1024] = "";
+  int port = 80;
+  if (!pw_extract_url_host_port(url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path)) {
+    return false;
+  }
+  if (strcmp(scheme, "http") != 0 && strcmp(scheme, "https") != 0 &&
+      strcmp(scheme, "ws") != 0 && strcmp(scheme, "wss") != 0) {
+    return false;
+  }
+  return pw_is_localhost_host(host);
 }
 
 uint32_t ext_parse_hex_rgba(const char *s)
@@ -61,7 +61,7 @@ void ext_encode_json_str(const ccord_json *j, ccord_buf *out)
 void ext_send_async_reply(ccord_plugins *m, plugin *p, uint64_t req_id, bool ok,
                              const char *result_json, const char *err_msg)
 {
-  if (!p || !p->ipc || p->state != CCORD_PLUGIN_READY) return;
+  if (!p || !p->ipc || (p->state != CCORD_PLUGIN_READY && p->state != CCORD_PLUGIN_STARTING)) return;
   ccord_buf b;
   ccord_buf_init(&b, 0);
   ccord_jw w;
@@ -165,7 +165,7 @@ void plugins_ext_on_worker_event(void *ud, const pw_event *ev)
   ccord_plugins *m = ud;
   if (!m || !ev) return;
   plugin *p = pl_find_owner(m, ev->owner);
-  if (!p || p->state != CCORD_PLUGIN_READY || !p->ipc) return;
+  if (!p || !p->ipc || (p->state != CCORD_PLUGIN_READY && p->state != CCORD_PLUGIN_STARTING)) return;
 
   if (ev->kind == PW_EV_ASYNC_REPLY) {
     ext_send_async_reply(m, p, ev->id, ev->ok, ev->json, ev->error);
@@ -269,10 +269,23 @@ bool ext_handle_class3_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *
     if (opts && ccord_json_get(opts, "timeout_ms")) (void)ccord_json_int64(ccord_json_get(opts, "timeout_ms"), &tmo);
 
     bool is_loc = ext_is_localhost_url(url);
+    bool allow_local = pl_has_perm(p, CCORD_PERM_NETWORK_LOCAL);
     if (local_only) {
-      if (!pl_has_perm(p, CCORD_PERM_NETWORK_LOCAL)) { pl_fail_plugin(m, p, "undeclared restricted API called: network.local"); return true; }
-    } else if (!(is_loc && pl_has_perm(p, CCORD_PERM_NETWORK_LOCAL))) {
-      if (!pl_has_perm(p, CCORD_PERM_NETWORK_HTTP)) { pl_fail_plugin(m, p, "undeclared restricted API called: network.http"); return true; }
+      if (!allow_local) { pl_fail_plugin(m, p, "undeclared restricted API called: network.local"); return true; }
+    } else if (is_loc) {
+      if (!allow_local) {
+        if (!pl_has_perm(p, CCORD_PERM_NETWORK_HTTP)) {
+          pl_fail_plugin(m, p, "undeclared restricted API called: network.local");
+          return true;
+        }
+        pl_reply_ok(m, p, id, nullptr);
+        ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr,
+                             "localhost access requires network.local permission");
+        return true;
+      }
+    } else if (!pl_has_perm(p, CCORD_PERM_NETWORK_HTTP)) {
+      pl_fail_plugin(m, p, "undeclared restricted API called: network.http");
+      return true;
     }
     ccord_buf hb; ccord_buf_init(&hb, 0);
     if (opts && ccord_json_get(opts, "headers")) ext_encode_json_str(ccord_json_get(opts, "headers"), &hb);
@@ -280,7 +293,7 @@ bool ext_handle_class3_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *
     if (!m->workers || !url ||
         !pw_start_http(m->workers, p->m.id, (uint64_t)req_id, &p->m, url, hmeth ? hmeth : "GET",
                        hb.len ? ccord_buf_cstr(&hb) : nullptr, (const uint8_t *)body, bl,
-                       (uint32_t)(tmo > 0 ? tmo : 15000), local_only)) {
+                       (uint32_t)(tmo > 0 ? tmo : 15000), local_only, allow_local)) {
       ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "http worker unavailable");
     }
     ccord_buf_free(&hb);
@@ -292,12 +305,18 @@ bool ext_handle_class3_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *
     size_t pl_l = 0, bl = 0;
     const char *spath = pl_str_param(params, "path", &pl_l);
     const char *b64 = pl_str_param(params, "b64", &bl);
+    if (!spath || !spath[0] || pl_fs_path_is_protected(m, spath) || pw_unix_socket_path_is_blocked(spath)) {
+      pl_reply_ok(m, p, id, nullptr);
+      ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr,
+                           "permission denied: unix socket path is protected");
+      return true;
+    }
     size_t cap = (bl / 4u) * 3u + 4u;
     uint8_t *raw = bl ? ccord_malloc(cap) : nullptr;
     size_t rlen = 0;
     bool dec_ok = !bl || (raw && pl_fs_b64_decode((const unsigned char *)b64, bl, raw, &rlen));
     pl_reply_ok(m, p, id, nullptr);
-    if (!m->workers || !spath || !dec_ok || !pw_start_unix_send(m->workers, p->m.id, (uint64_t)req_id, spath, raw, rlen)) {
+    if (!m->workers || !dec_ok || !pw_start_unix_send(m->workers, p->m.id, (uint64_t)req_id, spath, raw, rlen)) {
       ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "unix socket send failed");
     }
     ccord_free(raw);
@@ -307,14 +326,27 @@ bool ext_handle_class3_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *
     int64_t wid = 0; (void)ccord_json_int64(ccord_json_get(params, "ws_id"), &wid);
     size_t ul = 0; const char *url = pl_str_param(params, "url", &ul);
     bool is_loc = ext_is_localhost_url(url);
-    if (!(is_loc && pl_has_perm(p, CCORD_PERM_NETWORK_LOCAL)) && !pl_has_perm(p, CCORD_PERM_NETWORK_WS)) {
+    bool allow_local = pl_has_perm(p, CCORD_PERM_NETWORK_LOCAL);
+    if (is_loc) {
+      if (!allow_local) {
+        if (!pl_has_perm(p, CCORD_PERM_NETWORK_WS)) {
+          pl_fail_plugin(m, p, "undeclared restricted API called: network.local");
+          return true;
+        }
+        if (m->workers && url) {
+          (void)pw_ws_connect(m->workers, p->m.id, (uint64_t)wid, &p->m, url, nullptr, false);
+        }
+        pl_reply_ok(m, p, id, nullptr);
+        return true;
+      }
+    } else if (!pl_has_perm(p, CCORD_PERM_NETWORK_WS)) {
       pl_fail_plugin(m, p, "undeclared restricted API called: network.ws");
       return true;
     }
     ccord_buf hb; ccord_buf_init(&hb, 0);
     if (ccord_json_get(params, "headers")) ext_encode_json_str(ccord_json_get(params, "headers"), &hb);
     if (m->workers && url) {
-      (void)pw_ws_connect(m->workers, p->m.id, (uint64_t)wid, &p->m, url, hb.len ? ccord_buf_cstr(&hb) : nullptr);
+      (void)pw_ws_connect(m->workers, p->m.id, (uint64_t)wid, &p->m, url, hb.len ? ccord_buf_cstr(&hb) : nullptr, allow_local);
     }
     ccord_buf_free(&hb);
     pl_reply_ok(m, p, id, nullptr);
@@ -380,7 +412,12 @@ bool ext_handle_class3_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *
       return true;
     }
     struct stat st;
+#if !CCORD_OS_WINDOWS
+    if (lstat(path, &st) != 0) { pl_reply_err(m, p, id, "io", strerror(errno)); return true; }
+    if (S_ISLNK(st.st_mode)) { pl_reply_err(m, p, id, "permission_denied", "symbolic links are not allowed"); return true; }
+#else
     if (stat(path, &st) != 0) { pl_reply_err(m, p, id, "io", strerror(errno)); return true; }
+#endif
     char buf[160];
     snprintf(buf, sizeof buf, "{\"size\":%lld,\"mtime\":%lld,\"is_dir\":%s,\"is_file\":%s}",
              (long long)st.st_size, (long long)st.st_mtime,

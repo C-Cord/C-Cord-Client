@@ -181,9 +181,22 @@ static ccord_status parse_limits(const ccord_json *lim, ccord_manifest *out, cco
   out->instructions = 0;
   int64_t iv = 0;
   const ccord_json *mb = ccord_json_get(lim, "memory_bytes");
-  if (mb && ccord_json_int64(mb, &iv) && iv > 0) out->memory_bytes = (uint64_t)iv;
+  if (mb && ccord_json_int64(mb, &iv) && iv > 0) {
+#if CCORD_OS_ANDROID
+    const uint64_t mem_cap = 32u << 20;
+#else
+    const uint64_t mem_cap = 64u << 20;
+#endif
+    uint64_t u = (uint64_t)iv;
+    if (u > mem_cap) u = mem_cap;
+    out->memory_bytes = u;
+  }
   const ccord_json *ins = ccord_json_get(lim, "instructions");
-  if (ins && ccord_json_int64(ins, &iv) && iv > 0) out->instructions = (uint64_t)iv;
+  if (ins && ccord_json_int64(ins, &iv) && iv > 0) {
+    uint64_t u = (uint64_t)iv;
+    if (u > 100000000u) u = 100000000u;
+    out->instructions = u;
+  }
   return CCORD_OK;
 }
 
@@ -391,8 +404,15 @@ static bool host_ieq(const char *a, const char *b)
 bool ccord_manifest_host_allowed(const ccord_manifest *m, const char *host)
 {
   if (!m || !host || !host[0]) return false;
+  size_t hlen = 0;
+  for (const char *p = host; *p; p++) {
+    char c = *p;
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '-';
+    if (!ok) return false;
+    hlen++;
+  }
   if (m->allowed_host_count == 0) return true;
-  size_t hlen = strlen(host);
   for (size_t i = 0; i < m->allowed_host_count; i++) {
     const char *pat = m->allowed_hosts[i];
     if (pat[0] == '*' && pat[1] == '.') {

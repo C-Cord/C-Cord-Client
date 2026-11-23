@@ -147,6 +147,12 @@ void ccord_plugins_dispatch_streamer_mode(ccord_plugins *p, bool enabled);
 void ccord_plugins_dispatch_composer_change(ccord_plugins *p, ccord_id channel_id, const char *text);
 void ccord_plugins_dispatch_voice_pcm(ccord_plugins *p, const int16_t *pcm, size_t samples);
 void ccord_plugins_dispatch_voice_levels(ccord_plugins *p, const char *levels_json);
+bool ccord_plugins_get_consented_hosts(const ccord_plugins *p, const char *id,
+                                       char *hosts_out, size_t hosts_cap, bool *had_consented_out);
 bool ccord_plugins_import_package(ccord_plugins *p, const char *pkg_path, char *err_buf, size_t err_cap);
+bool ccord_plugins_import_package_from_catalog(ccord_plugins *p, const char *pkg_path,
+                                               const char *expected_id, const char *expected_version,
+                                               uint64_t expected_perms, const char *expected_allowed_hosts,
+                                               bool preapprove_consent, char *err_buf, size_t err_cap);
 bool ccord_plugins_export_cce(ccord_plugins *p, const char *id, const char *dest_path, char *err_buf, size_t err_cap);
 bool ccord_plugins_uninstall(ccord_plugins *p, const char *id, char *err_buf, size_t err_cap);

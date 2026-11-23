@@ -13,7 +13,9 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #if defined(__linux__) && !defined(__ANDROID__)
 #include <fcntl.h>
 #include <linux/audit.h>
@@ -27,6 +29,11 @@
 #elif defined(__linux__)
 #include <signal.h>
 #include <sys/prctl.h>
+#elif defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
 #endif
 #if defined(__APPLE__)
 #include <sandbox.h>
@@ -54,52 +61,70 @@ void ccord_host_os_harden(void)
 void ccord_host_os_sandbox(const char *plugin_dir)
 {
 #if defined(__linux__) && !defined(__ANDROID__)
-  (void)prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+  if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+    fprintf(stderr, "ccord-plugin-host: PR_SET_NO_NEW_PRIVS failed: %s\n", strerror(errno));
+    _exit(126);
+  }
 
   // 1. Landlock filesystem sandbox (ABI v1+): read-only access limited strictly to plugin_dir.
 #ifdef SYS_landlock_create_ruleset
   {
-    struct landlock_ruleset_attr attr = {0};
-    attr.handled_access_fs =
-      LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_FILE |
-      LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
-      LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG |
-      LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
-      LANDLOCK_ACCESS_FS_MAKE_SYM;
-    long rfd = syscall(SYS_landlock_create_ruleset, &attr, sizeof attr, (uint32_t)0);
-    if (rfd >= 0) {
-      if (plugin_dir && plugin_dir[0]) {
-        int dfd = open(plugin_dir, O_PATH | O_CLOEXEC);
-        if (dfd >= 0) {
-          struct landlock_path_beneath_attr rule = {
-            .allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
-            .parent_fd = dfd,
-          };
-          (void)syscall(SYS_landlock_add_rule, (int)rfd, LANDLOCK_RULE_PATH_BENEATH, &rule, (uint32_t)0);
-          close(dfd);
-        }
-      }
-#ifdef CCORD_SANITIZED
-      // ASan/LSan reads /proc/self at process exit for leak reporting.
-      {
-        int pfd = open("/proc/self", O_PATH | O_CLOEXEC);
-        if (pfd >= 0) {
-          struct landlock_path_beneath_attr prule = {
-            .allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
-            .parent_fd = pfd,
-          };
-          (void)syscall(SYS_landlock_add_rule, (int)rfd, LANDLOCK_RULE_PATH_BENEATH, &prule, (uint32_t)0);
-          close(pfd);
-        }
-      }
+    long abi = syscall(SYS_landlock_create_ruleset, nullptr, (size_t)0, (uint32_t)LANDLOCK_CREATE_RULESET_VERSION);
+    if (abi < 0) {
+      fprintf(stderr, "ccord-plugin-host: warning: Landlock unavailable (%s)\n", strerror(errno));
+    } else {
+      struct landlock_ruleset_attr attr = {0};
+      attr.handled_access_fs =
+        LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_FILE |
+        LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE |
+        LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG |
+        LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK |
+        LANDLOCK_ACCESS_FS_MAKE_SYM;
+#ifdef LANDLOCK_ACCESS_FS_REFER
+      if (abi >= 2) attr.handled_access_fs |= LANDLOCK_ACCESS_FS_REFER;
 #endif
-      (void)syscall(SYS_landlock_restrict_self, (int)rfd, (uint32_t)0);
-      close((int)rfd);
+#ifdef LANDLOCK_ACCESS_FS_TRUNCATE
+      if (abi >= 3) attr.handled_access_fs |= LANDLOCK_ACCESS_FS_TRUNCATE;
+#endif
+      long rfd = syscall(SYS_landlock_create_ruleset, &attr, sizeof attr, (uint32_t)0);
+      if (rfd < 0) {
+        fprintf(stderr, "ccord-plugin-host: warning: landlock_create_ruleset failed (%s)\n", strerror(errno));
+      } else {
+        if (plugin_dir && plugin_dir[0]) {
+          int dfd = open(plugin_dir, O_PATH | O_CLOEXEC);
+          if (dfd >= 0) {
+            struct landlock_path_beneath_attr rule = {
+              .allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
+              .parent_fd = dfd,
+            };
+            (void)syscall(SYS_landlock_add_rule, (int)rfd, LANDLOCK_RULE_PATH_BENEATH, &rule, (uint32_t)0);
+            close(dfd);
+          }
+        }
+#ifdef CCORD_SANITIZED
+        // ASan/LSan reads /proc/self at process exit for leak reporting.
+        {
+          int pfd = open("/proc/self", O_PATH | O_CLOEXEC);
+          if (pfd >= 0) {
+            struct landlock_path_beneath_attr prule = {
+              .allowed_access = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR,
+              .parent_fd = pfd,
+            };
+            (void)syscall(SYS_landlock_add_rule, (int)rfd, LANDLOCK_RULE_PATH_BENEATH, &prule, (uint32_t)0);
+            close(pfd);
+          }
+        }
+#endif
+        if (syscall(SYS_landlock_restrict_self, (int)rfd, (uint32_t)0) != 0) {
+          fprintf(stderr, "ccord-plugin-host: warning: landlock_restrict_self failed (%s)\n", strerror(errno));
+        }
+        close((int)rfd);
+      }
     }
   }
 #endif
 
-  // 2. Seccomp-BPF denylist: block network sockets, process exec/spawn, ptrace, and fs mutation syscalls.
+  // 2. Seccomp-BPF denylist: block network sockets, process exec/spawn, ptrace, namespaces, io_uring, and fs mutation syscalls.
 #if defined(__x86_64__)
 #define CCORD_AUDIT_ARCH AUDIT_ARCH_X86_64
 #elif defined(__aarch64__)
@@ -116,6 +141,9 @@ void ccord_host_os_sandbox(const char *plugin_dir)
     static const uint32_t k_deny_nr[] = {
 #ifdef __NR_socket
       __NR_socket,
+#endif
+#ifdef __NR_socketpair
+      __NR_socketpair,
 #endif
 #ifdef __NR_connect
       __NR_connect,
@@ -155,6 +183,30 @@ void ccord_host_os_sandbox(const char *plugin_dir)
 #ifdef __NR_vfork
       __NR_vfork,
 #endif
+#ifdef __NR_clone3
+      __NR_clone3,
+#endif
+#ifdef __NR_io_uring_setup
+      __NR_io_uring_setup,
+#endif
+#ifdef __NR_io_uring_enter
+      __NR_io_uring_enter,
+#endif
+#ifdef __NR_io_uring_register
+      __NR_io_uring_register,
+#endif
+#ifdef __NR_memfd_create
+      __NR_memfd_create,
+#endif
+#ifdef __NR_userfaultfd
+      __NR_userfaultfd,
+#endif
+#ifdef __NR_unshare
+      __NR_unshare,
+#endif
+#ifdef __NR_setns
+      __NR_setns,
+#endif
 #ifdef __NR_mount
       __NR_mount,
 #endif
@@ -166,6 +218,42 @@ void ccord_host_os_sandbox(const char *plugin_dir)
 #endif
 #ifdef __NR_pivot_root
       __NR_pivot_root,
+#endif
+#ifdef __NR_keyctl
+      __NR_keyctl,
+#endif
+#ifdef __NR_add_key
+      __NR_add_key,
+#endif
+#ifdef __NR_request_key
+      __NR_request_key,
+#endif
+#ifdef __NR_bpf
+      __NR_bpf,
+#endif
+#ifdef __NR_perf_event_open
+      __NR_perf_event_open,
+#endif
+#ifdef __NR_kexec_load
+      __NR_kexec_load,
+#endif
+#ifdef __NR_init_module
+      __NR_init_module,
+#endif
+#ifdef __NR_finit_module
+      __NR_finit_module,
+#endif
+#ifdef __NR_open_by_handle_at
+      __NR_open_by_handle_at,
+#endif
+#ifdef __NR_name_to_handle_at
+      __NR_name_to_handle_at,
+#endif
+#ifdef __NR_mknod
+      __NR_mknod,
+#endif
+#ifdef __NR_mknodat
+      __NR_mknodat,
 #endif
 #ifdef __NR_unlink
       __NR_unlink,
@@ -232,7 +320,9 @@ void ccord_host_os_sandbox(const char *plugin_dir)
 #endif
     };
     const size_t ndeny = sizeof k_deny_nr / sizeof k_deny_nr[0];
+    static_assert((sizeof k_deny_nr / sizeof k_deny_nr[0]) < 250u, "seccomp denylist exceeds uint8_t BPF jump range");
     struct sock_filter insns[6 + (sizeof k_deny_nr / sizeof k_deny_nr[0])];
+    const size_t cap = sizeof insns / sizeof insns[0];
     size_t pc = 0;
     // Load arch and kill on mismatch.
     insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)offsetof(struct seccomp_data, arch));
@@ -240,14 +330,22 @@ void ccord_host_os_sandbox(const char *plugin_dir)
     insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
     // Load syscall number.
     insns[pc++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS, (uint32_t)offsetof(struct seccomp_data, nr));
-    for (size_t i = 0; i < ndeny; i++) {
+    for (size_t i = 0; i < ndeny && pc + 2u < cap; i++) {
       uint8_t jt = (uint8_t)(ndeny - i);   // jump to RET_ERRNO (after RET_ALLOW)
       insns[pc++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, k_deny_nr[i], jt, 0);
+    }
+    if (pc + 2u > cap) {
+      fprintf(stderr, "ccord-plugin-host: seccomp program buffer overflow\n");
+      _exit(126);
     }
     insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
     insns[pc++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
     struct sock_fprog prog = {.len = (unsigned short)pc, .filter = insns};
-    (void)prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog);
+    if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+      int e = errno;
+      fprintf(stderr, "ccord-plugin-host: PR_SET_SECCOMP failed: %s\n", strerror(e));
+      if (e != ENOSYS) _exit(126);
+    }
   }
 #endif
 #elif defined(__APPLE__)
@@ -292,6 +390,34 @@ void ccord_host_os_sandbox(const char *plugin_dir)
 #pragma clang diagnostic pop
     }
     ccord_buf_free(&prof);
+  }
+#elif defined(_WIN32)
+  (void)plugin_dir;
+  // 1. Apply Job Object restrictions (single process, full UI isolation) if not already restricted.
+  {
+    HANDLE job = CreateJobObjectW(nullptr, nullptr);
+    if (job) {
+      JOBOBJECT_BASIC_LIMIT_INFORMATION bli = {0};
+      bli.LimitFlags = JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+      bli.ActiveProcessLimit = 1;
+      (void)SetInformationJobObject(job, JobObjectBasicLimitInformation, &bli, sizeof bli);
+
+      JOBOBJECT_BASIC_UI_RESTRICTIONS uir = {0};
+      uir.UIRestrictionsClass = JOB_OBJECT_UILIMIT_ALL;
+      (void)SetInformationJobObject(job, JobObjectBasicUIRestrictions, &uir, sizeof uir);
+
+      if (!AssignProcessToJobObject(job, GetCurrentProcess())) {
+        CloseHandle(job);
+      }
+    }
+  }
+  // 2. Disable all token privileges on self.
+  {
+    HANDLE tok = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &tok)) {
+      (void)AdjustTokenPrivileges(tok, TRUE, nullptr, 0, nullptr, nullptr);
+      CloseHandle(tok);
+    }
   }
 #else
   (void)plugin_dir;

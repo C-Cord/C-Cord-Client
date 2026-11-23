@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
+#include <arpa/inet.h>
 #include <poll.h>
 #include <strings.h>
 #endif
@@ -147,17 +148,78 @@ void ccord_http_response_free(ccord_http_response *r)
 
 #if defined(CCORD_HTTP_FETCH_LIVE)
 
-static bool url_is_loopback_host(const char *host)
+static bool is_all_ipv4_chars(const char *s)
 {
-  if (!host) return false;
-  return strcasecmp(host, "localhost") == 0 || strcmp(host, "127.0.0.1") == 0 ||
-         strcmp(host, "::1") == 0 || strcmp(host, "[::1]") == 0;
+  if (!s || !s[0]) return false;
+  for (const char *p = s; *p; p++) {
+    if (!((*p >= '0' && *p <= '9') || *p == '.')) return false;
+  }
+  return true;
 }
 
-static bool parse_general_url(const char *url, bool allow_plain_loopback, bool ws_mode, bool *out_plain)
+static bool url_is_loopback_host(const char *host)
+{
+  if (!host || !host[0]) return false;
+  size_t raw_len = strlen(host);
+  if (raw_len >= 256u) return false;
+  size_t start = 0;
+  size_t end = raw_len;
+  if (raw_len >= 2u && host[0] == '[' && host[raw_len - 1u] == ']') {
+    start = 1u;
+    end = raw_len - 1u;
+  }
+  size_t len = end - start;
+  if (len == 0) return false;
+  char h[256];
+  for (size_t i = 0; i < len; i++) {
+    h[i] = (char)tolower((unsigned char)host[start + i]);
+  }
+  if (len > 1u && h[len - 1u] == '.') len--;
+  h[len] = '\0';
+
+  if (strcmp(h, "localhost") == 0) return true;
+  if (len > 10u && strcmp(h + len - 10u, ".localhost") == 0) return true;
+  if (strcmp(h, "::1") == 0 || strcmp(h, "::") == 0) return true;
+  if (strcmp(h, "0.0.0.0") == 0 || strcmp(h, "0") == 0) return true;
+  if (strncmp(h, "127.", 4) == 0 && is_all_ipv4_chars(h)) return true;
+  if (strncmp(h, "0.", 2) == 0 && is_all_ipv4_chars(h)) return true;
+  if (strncmp(h, "::ffff:127.", 11) == 0 || strncmp(h, "::ffff:0.", 9) == 0) return true;
+
+#if !defined(_WIN32)
+  struct in_addr a4;
+  if (inet_pton(AF_INET, h, &a4) == 1) {
+    uint32_t ip = ntohl(a4.s_addr);
+    if ((ip & 0xFF000000u) == 0x7F000000u || (ip & 0xFF000000u) == 0x00000000u) return true;
+  }
+  struct in6_addr a6;
+  if (inet_pton(AF_INET6, h, &a6) == 1) {
+    const uint8_t *b = a6.s6_addr;
+    bool z12 = true;
+    for (int i = 0; i < 12; i++) {
+      if (b[i] != 0) { z12 = false; break; }
+    }
+    if (z12 && b[12] == 0 && b[13] == 0 && b[14] == 0 && (b[15] == 0 || b[15] == 1)) return true;
+    bool v4m = true;
+    for (int i = 0; i < 10; i++) {
+      if (b[i] != 0) { v4m = false; break; }
+    }
+    if (v4m && b[10] == 0xff && b[11] == 0xff) {
+      if (b[12] == 127 || b[12] == 0) return true;
+    }
+  }
+#endif
+  return false;
+}
+
+static bool parse_general_url(const char *url, bool allow_plain_loopback, bool ws_mode,
+                              bool *out_plain, bool *out_is_loopback)
 {
   if (out_plain) *out_plain = false;
+  if (out_is_loopback) *out_is_loopback = false;
   if (!url || !url[0]) return false;
+  for (const unsigned char *q = (const unsigned char *)url; *q; q++) {
+    if (*q < 0x20u || *q == 0x7fu) return false;
+  }
   bool plain = false;
   const char *auth = nullptr;
   if (ws_mode) {
@@ -189,8 +251,10 @@ static bool parse_general_url(const char *url, bool allow_plain_loopback, bool w
   char host[256];
   memcpy(host, auth, hlen);
   host[hlen] = '\0';
-  if (plain && !url_is_loopback_host(host)) return false;
+  bool is_lb = url_is_loopback_host(host);
+  if (plain && !is_lb) return false;
   if (out_plain) *out_plain = plain;
+  if (out_is_loopback) *out_is_loopback = is_lb;
   return true;
 }
 
@@ -582,9 +646,20 @@ bool ccord_http_request(const ccord_http_request_opts *req, ccord_http_response 
     return false;
   }
   bool plain = false;
-  if (!parse_general_url(req->url, req->allow_localhost_http, false, &plain)) {
+  bool is_loopback = false;
+  if (!parse_general_url(req->url, req->allow_localhost_http, false, &plain, &is_loopback)) {
     set_err(out->error, sizeof out->error, "URL must use HTTPS (plain HTTP allowed only for localhost)");
     return false;
+  }
+  const char *meth = (req->method && req->method[0]) ? req->method : "GET";
+  {
+    size_t mlen = 0;
+    for (const char *mp = meth; *mp; mp++) {
+      if (!((*mp >= 'A' && *mp <= 'Z') || (*mp >= 'a' && *mp <= 'z')) || ++mlen > 15u) {
+        set_err(out->error, sizeof out->error, "invalid HTTP method");
+        return false;
+      }
+    }
   }
   ccord_curl_global_init_once();
   CURL *curl = curl_easy_init();
@@ -610,11 +685,13 @@ bool ccord_http_request(const ccord_http_request_opts *req, ccord_http_response 
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
     curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+    if (!req->allow_localhost_http || !is_loopback) {
+      ccord_curl_apply_public_opensocket(curl);
+    }
   } else {
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http");
   }
 
-  const char *meth = (req->method && req->method[0]) ? req->method : "GET";
   if (strcasecmp(meth, "HEAD") == 0) {
     curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
   } else if (strcasecmp(meth, "GET") != 0) {
@@ -667,7 +744,8 @@ ccord_ws_client *ccord_ws_client_open(const char *url, const char *headers_json,
 {
 #if defined(CURLWS_TEXT)
   bool plain = false;
-  if (!parse_general_url(url, true, true, &plain)) {
+  bool is_loopback = false;
+  if (!parse_general_url(url, true, true, &plain, &is_loopback)) {
     set_err(err_buf, err_cap, "WebSocket URL must use wss:// (ws:// allowed only for localhost)");
     return nullptr;
   }
@@ -686,6 +764,9 @@ ccord_ws_client *ccord_ws_client_open(const char *url, const char *headers_json,
     ccord_curl_apply_tls(curl);
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "wss");
+    if (!is_loopback) {
+      ccord_curl_apply_public_opensocket(curl);
+    }
   } else {
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "ws");
   }

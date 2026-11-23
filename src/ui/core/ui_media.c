@@ -662,6 +662,75 @@ static bool ui_open_ccord_plugin_url(ccord_ui *ui, const char *url)
   return ui_open_plugin_install_prompt(ui, id);
 }
 
+static bool ui_extract_http_host(const char *url, char *host_out, size_t host_cap)
+{
+  if (!url || !host_out || host_cap == 0) return false;
+  for (const unsigned char *q = (const unsigned char *)url; *q; q++) {
+    if (*q < 0x20u || *q == 0x7fu) return false;
+  }
+  const char *auth = nullptr;
+  if (strncmp(url, "https://", 8) == 0) auth = url + 8;
+  else if (strncmp(url, "http://", 7) == 0) auth = url + 7;
+  else return false;
+  const char *p = auth;
+  while (*p && *p != '/' && *p != '?' && *p != '#') {
+    unsigned char c = (unsigned char)*p;
+    if (c == '@' || c == '\\' || c <= 0x20u || c >= 0x7fu) return false;
+    p++;
+  }
+  const char *hs = auth;
+  const char *he = p;
+  bool is_v6 = false;
+  const char *port_s = nullptr;
+  if (hs < p && *hs == '[') {
+    const char *rb = memchr(hs, ']', (size_t)(p - hs));
+    if (!rb) return false;
+    is_v6 = true;
+    hs++;
+    he = rb;
+    if (rb + 1 < p) {
+      if (rb[1] != ':') return false;
+      port_s = rb + 2;
+    }
+  } else {
+    const char *col = memchr(hs, ':', (size_t)(p - hs));
+    if (col) {
+      if (memchr(col + 1, ':', (size_t)(p - (col + 1))) != nullptr) return false;
+      he = col;
+      port_s = col + 1;
+    }
+  }
+  if (port_s) {
+    if (port_s >= p) return false;
+    unsigned long pv = 0;
+    for (const char *q = port_s; q < p; q++) {
+      if (*q < '0' || *q > '9') return false;
+      pv = pv * 10ul + (unsigned long)(*q - '0');
+      if (pv > 65535ul) return false;
+    }
+    if (pv == 0ul) return false;
+  }
+  size_t hl = (size_t)(he - hs);
+  if (hl == 0 || hl >= host_cap) return false;
+  for (size_t i = 0; i < hl; i++) {
+    unsigned char c = (unsigned char)hs[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '-' || (is_v6 && c == ':');
+    if (!ok) return false;
+    host_out[i] = (char)tolower(c);
+  }
+  host_out[hl] = '\0';
+  return true;
+}
+
+static bool ui_link_rewrite_allowed(const char *orig_url, const char *new_url)
+{
+  char oh[256], nh[256];
+  if (!ui_extract_http_host(orig_url, oh, sizeof oh)) return false;
+  if (!ui_extract_http_host(new_url, nh, sizeof nh)) return false;
+  return strcmp(oh, nh) == 0;
+}
+
 bool ui_open_url(ccord_ui *ui, const char *url, const char *label)
 {
   if (!ui || !url || !url[0]) return false;
@@ -699,7 +768,9 @@ bool ui_open_url(ccord_ui *ui, const char *url, const char *label)
       ui->dirty = true;
       return false;
     }
-    if (rewritten_url[0]) target = rewritten_url;
+    if (rewritten_url[0] && ui_link_rewrite_allowed(target, rewritten_url)) {
+      target = rewritten_url;
+    }
   }
   ui_url_copy(ui->last_opened_url, sizeof ui->last_opened_url, target);
   ui->dbg_urls_opened++;

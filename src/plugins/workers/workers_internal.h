@@ -66,6 +66,7 @@ typedef struct pw_ws_slot {
   void *ext_handle;      // non-null when using ops.ws_*
   char url[1024];
   char *headers_json;
+  bool allow_local;
   plugin_workers *parent;
 } pw_ws_slot;
 
@@ -110,9 +111,6 @@ struct plugin_workers {
 
 void pw_push_ev(plugin_workers *w, const pw_event *ev);
 void pw_b64_encode(const uint8_t *in, size_t n, ccord_buf *out);
-bool pw_extract_url_host_port(const char *url, char *scheme_out, size_t scap, char *host_out, size_t hcap,
-                              int *port_out, char *path_out, size_t pcap);
-bool pw_is_localhost_host(const char *host);
 #if !CCORD_OS_WINDOWS
 bool pw_ws_send_tcp_frame(int fd, uint8_t opcode, const uint8_t *data, size_t len);
 #endif

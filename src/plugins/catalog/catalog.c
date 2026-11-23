@@ -2,6 +2,137 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include "catalog_internal.h"
 
+#if defined(CCORD_HAVE_SODIUM) && CCORD_HAVE_SODIUM
+#include <sodium.h>
+#endif
+
+static int hex_nibble(char c)
+{
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+bool cat_hex_decode(const char *hex, uint8_t *out, size_t out_bytes)
+{
+  if (!hex || !out) return false;
+  if (strlen(hex) != out_bytes * 2u) return false;
+  for (size_t i = 0; i < out_bytes; i++) {
+    int hi = hex_nibble(hex[i * 2u]);
+    int lo = hex_nibble(hex[i * 2u + 1u]);
+    if (hi < 0 || lo < 0) return false;
+    out[i] = (uint8_t)((hi << 4) | lo);
+  }
+  return true;
+}
+
+static void compute_pubkey_id(const uint8_t pk[32], char id_out[17])
+{
+  unsigned char digest[32];
+  ccord_sha256(pk, 32, digest);
+  static const char k_hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < 8; i++) {
+    id_out[i * 2u] = k_hex[(size_t)(digest[i] >> 4)];
+    id_out[i * 2u + 1u] = k_hex[(size_t)(digest[i] & 0x0fu)];
+  }
+  id_out[16] = '\0';
+}
+
+static bool parse_pubkeys_csv(const char *hex_csv, uint8_t pks[CATALOG_MAX_PUBKEYS][32],
+                              char ids[CATALOG_MAX_PUBKEYS][17], size_t *io_count)
+{
+  if (!hex_csv || !io_count) return false;
+  const char *p = hex_csv;
+  while (*p) {
+    while (*p && (*p == ',' || isspace((unsigned char)*p))) p++;
+    if (!*p) break;
+    const char *s = p;
+    while (*p && *p != ',') p++;
+    const char *e = p;
+    while (e > s && isspace((unsigned char)e[-1])) e--;
+    size_t tlen = (size_t)(e - s);
+    if (tlen != 64) return false;
+    char tmp[65];
+    memcpy(tmp, s, 64);
+    tmp[64] = '\0';
+    uint8_t pk[32];
+    if (!cat_hex_decode(tmp, pk, sizeof pk)) return false;
+    bool dup = false;
+    for (size_t k = 0; k < *io_count; k++) {
+      if (memcmp(pks[k], pk, 32) == 0) { dup = true; break; }
+    }
+    if (!dup) {
+      if (*io_count >= CATALOG_MAX_PUBKEYS) return false;
+      memcpy(pks[*io_count], pk, 32);
+      compute_pubkey_id(pk, ids[*io_count]);
+      (*io_count)++;
+    }
+  }
+  return true;
+}
+
+bool ccord_catalog_set_pubkeys(ccord_catalog *cat, const char *hex_csv)
+{
+  if (!cat) return false;
+  if (!hex_csv || !hex_csv[0]) {
+    cat->npubkeys = 0;
+    cat->has_detail = false;
+    cat->detail_etag[0] = '\0';
+    cat->rev_etag[0] = '\0';
+    return true;
+  }
+  uint8_t tmp_pks[CATALOG_MAX_PUBKEYS][32];
+  char tmp_ids[CATALOG_MAX_PUBKEYS][17];
+  size_t cnt = 0;
+  if (!parse_pubkeys_csv(hex_csv, tmp_pks, tmp_ids, &cnt) || cnt == 0) return false;
+  memcpy(cat->pubkeys, tmp_pks, sizeof tmp_pks);
+  memcpy(cat->pubkey_ids, tmp_ids, sizeof tmp_ids);
+  cat->npubkeys = cnt;
+  cat->has_detail = false;
+  cat->detail_etag[0] = '\0';
+  cat->rev_etag[0] = '\0';
+  return true;
+}
+
+#if defined(CCORD_HAVE_SODIUM) && CCORD_HAVE_SODIUM
+static bool key_id_equal_ci(const char *a, const char *b)
+{
+  if (!a || !b) return false;
+  if (strlen(a) != 16 || strlen(b) != 16) return false;
+  for (size_t i = 0; i < 16; i++) {
+    if (tolower((unsigned char)a[i]) != tolower((unsigned char)b[i])) return false;
+  }
+  return true;
+}
+#endif
+
+bool cat_verify_ed25519(const ccord_catalog *cat, const char *alg, const char *key_id,
+                        const char *sig_hex, const uint8_t *msg, size_t msg_len)
+{
+  if (!cat || cat->npubkeys == 0) return true;
+  if (!alg || strcmp(alg, "ed25519") != 0) return false;
+  uint8_t sig_bytes[64];
+  if (!sig_hex || !cat_hex_decode(sig_hex, sig_bytes, sizeof sig_bytes)) return false;
+#if defined(CCORD_HAVE_SODIUM) && CCORD_HAVE_SODIUM
+  if (sodium_init() < 0) return false;
+  for (int pass = 0; pass < 2; pass++) {
+    for (size_t k = 0; k < cat->npubkeys; k++) {
+      bool id_match = key_id && key_id[0] && key_id_equal_ci(cat->pubkey_ids[k], key_id);
+      if ((pass == 0 && !id_match) || (pass == 1 && id_match)) continue;
+      if (crypto_sign_verify_detached(sig_bytes, msg, (unsigned long long)msg_len, cat->pubkeys[k]) == 0) {
+        return true;
+      }
+    }
+  }
+  return false;
+#else
+  (void)key_id; (void)msg; (void)msg_len; (void)sig_bytes;
+  CCORD_LOG_E("catalog: Ed25519 public key configured but C-Cord was built without libsodium; rejecting payload");
+  return false;
+#endif
+}
+
 void cat_copy_str(char *dst, size_t cap, const char *src)
 {
   if (!dst || cap == 0) return;
@@ -201,6 +332,7 @@ static void worker_main(void *arg)
     res.preapprove_consent = job.preapprove_consent;
     res.expected_perms = job.expected_perms;
     res.approved_perms = job.approved_perms;
+    cat_copy_str(res.expected_allowed_hosts, sizeof res.expected_allowed_hosts, job.expected_allowed_hosts);
     res.tier = job.tier;
     cat_copy_str(res.id, sizeof res.id, job.id);
     cat_copy_str(res.version, sizeof res.version, job.version);
@@ -340,6 +472,14 @@ static void queue_install_item_ex(ccord_catalog *cat, const cat_item *it, bool i
 {
   if (!cat || !it || !cat->has_data_dir || !cat_valid_catalog_id(it->id) || !cat_valid_catalog_version(it->version) ||
       !it->download_url[0] || strlen(it->sha256) != 64) return;
+  char rev_reason[256] = "";
+  if (ccord_catalog_is_hash_or_id_revoked(cat, it->id, it->sha256, rev_reason, sizeof rev_reason)) {
+    cat_copy_str(cat->status.status_msg, sizeof cat->status.status_msg,
+                 rev_reason[0] ? rev_reason : "Refused to install revoked plugin");
+    if (cat->cbs.toast) cat->cbs.toast(cat->cbs.ud, cat->status.status_msg, 2);
+    cat_publish_catalog(cat);
+    return;
+  }
   char tmp_dir[CCORD_PATH_MAX + 32], pdir[CCORD_PATH_MAX + 32];
   snprintf(pdir, sizeof pdir, "%s/plugins", cat->data_dir);
   snprintf(tmp_dir, sizeof tmp_dir, "%s/plugins/.download_tmp", cat->data_dir);
@@ -360,6 +500,7 @@ static void queue_install_item_ex(ccord_catalog *cat, const cat_item *it, bool i
   cat_copy_str(job.url, sizeof job.url, it->download_url);
   cat_copy_str(job.expected_sha256, sizeof job.expected_sha256, it->sha256);
   cat_copy_str(job.version, sizeof job.version, it->version);
+  cat_copy_str(job.expected_allowed_hosts, sizeof job.expected_allowed_hosts, it->allowed_hosts);
   char dpath[CCORD_PATH_MAX + 160];
   int dn = snprintf(dpath, sizeof dpath, "%s/%s-%s.cce", tmp_dir, it->id, it->version);
   if (dn < 0 || (size_t)dn >= sizeof dpath) return;
@@ -606,8 +747,16 @@ void ccord_catalog_run_auto_updates(ccord_catalog *cat)
     if (m && !m->auto_update) continue;
     if ((uint8_t)it->tier > cat->prefs.auto_update_min_tier) continue;
 
+    char consented_hosts[1024] = "";
+    bool had_consented_hosts = false;
+    if (cat->cbs.get_local_allowed_hosts) {
+      (void)cat->cbs.get_local_allowed_hosts(cat->cbs.ud, it->id, consented_hosts,
+                                             sizeof consented_hosts, &had_consented_hosts);
+    }
+
     bool avail = false, review = false;
-    if (cat_compute_update_info(it, local_ver, consented, &avail, &review) && avail && !review) {
+    if (cat_compute_update_info(it, local_ver, consented, consented_hosts, had_consented_hosts,
+                                &avail, &review) && avail && !review) {
       queue_install_item(cat, it, true);
       queued++;
     }
@@ -649,6 +798,20 @@ ccord_catalog *ccord_catalog_create(const char *data_dir, ccord_contrib *contrib
     return nullptr;
   }
   cat_copy_str(cat->status.catalog_url, sizeof cat->status.catalog_url, cat->base_url);
+
+#ifdef CCORD_CATALOG_PUBKEY
+  if (CCORD_CATALOG_PUBKEY[0] != '\0') {
+    if (!parse_pubkeys_csv(CCORD_CATALOG_PUBKEY, cat->pubkeys, cat->pubkey_ids, &cat->npubkeys)) {
+      CCORD_LOG_W("catalog: invalid compile-time CCORD_CATALOG_PUBKEY");
+    }
+  }
+#endif
+  const char *env_pk = getenv("CCORD_CATALOG_PUBKEY");
+  if (env_pk && env_pk[0] != '\0') {
+    if (!parse_pubkeys_csv(env_pk, cat->pubkeys, cat->pubkey_ids, &cat->npubkeys)) {
+      CCORD_LOG_W("catalog: invalid CCORD_CATALOG_PUBKEY environment variable");
+    }
+  }
 
   cat_load_prefs(cat);
   cat_load_installed_meta(cat);
@@ -746,6 +909,29 @@ void ccord_catalog_on_uninstalled(ccord_catalog *cat, const char *id)
   cat_publish_catalog(cat);
 }
 
+void ccord_catalog_record_local_install(ccord_catalog *cat, const char *id, const char *sha256_hex)
+{
+  if (!cat || !id || !id[0] || !sha256_hex || strlen(sha256_hex) != 64) return;
+  for (size_t i = 0; i < 64; i++) {
+    if (hex_nibble(sha256_hex[i]) < 0) return;
+  }
+  installed_meta *m = cat_upsert_meta(cat, id);
+  if (!m) return;
+  for (size_t i = 0; i < 64; i++) {
+    m->sha256[i] = (char)tolower((unsigned char)sha256_hex[i]);
+  }
+  m->sha256[64] = '\0';
+  if (cat->cbs.get_local_plugin) {
+    char ver[33] = "";
+    if (cat->cbs.get_local_plugin(cat->cbs.ud, id, ver, sizeof ver, nullptr, nullptr) && ver[0]) {
+      cat_copy_str(m->version, sizeof m->version, ver);
+    }
+  }
+  cat_save_installed_meta(cat);
+  cat_enforce_revocations(cat);
+  cat_publish_catalog(cat);
+}
+
 static void handle_result(ccord_catalog *cat, worker_result *res)
 {
   if (res->kind == JOB_DISCOVER_QUERY) {
@@ -795,7 +981,8 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
       }
     } else if (res->body) {
       cat_item parsed = {0};
-      if (cat_parse_detail_json(res->body, res->body_len, &parsed)) {
+      bool sig_failed = false;
+      if (cat_parse_detail_json(cat, res->body, res->body_len, &parsed, &sig_failed)) {
         if (!cat->detail) cat->detail = ccord_calloc(1, sizeof *cat->detail);
         if (cat->detail) {
           cat->status.offline = false;
@@ -813,7 +1000,19 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
         }
       } else {
         if (res->install_after_detail) set_installing(cat, res->id, false);
-        cat_copy_str(cat->status.detail_error, sizeof cat->status.detail_error, "Invalid plugin detail payload");
+        const char *emsg = sig_failed
+                             ? "Catalog signature verification failed (missing or invalid Ed25519 signature)"
+                             : "Invalid plugin detail payload";
+        cat_copy_str(cat->status.detail_error, sizeof cat->status.detail_error, emsg);
+        if (sig_failed) {
+          cat_copy_str(cat->status.status_msg, sizeof cat->status.status_msg, emsg);
+          if (cat->has_detail && cat->detail && strcmp(cat->detail->id, res->id) == 0) {
+            cat->has_detail = false;
+          }
+        }
+        if (res->install_after_detail && cat->cbs.toast) {
+          cat->cbs.toast(cat->cbs.ud, cat->status.detail_error, 2);
+        }
       }
     }
     ccord_free(res->body);
@@ -847,8 +1046,14 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
     if (res->ok && !res->not_modified && res->body) {
       if (cat_merge_revocations_json(cat, res->body, res->body_len, false)) {
         if (res->etag[0]) cat_copy_str(cat->rev_etag, sizeof cat->rev_etag, res->etag);
+        if (strstr(cat->status.status_msg, "Rejected revocations") != nullptr) {
+          cat->status.status_msg[0] = '\0';
+        }
         cat_save_revocations_cache(cat);
         cat_enforce_revocations(cat);
+      } else if (cat->npubkeys > 0) {
+        cat_copy_str(cat->status.status_msg, sizeof cat->status.status_msg,
+                     "Rejected revocations update (invalid or missing Ed25519 signature)");
       }
     }
     ccord_free(res->body);
@@ -869,7 +1074,11 @@ static void handle_result(ccord_catalog *cat, worker_result *res)
     char err_buf[256] = "";
     bool imported = false;
     if (res->dest_path) {
-      if (res->preapprove_consent && cat->cbs.import_verified_cce_approved) {
+      if (cat->cbs.import_verified_cce_ex) {
+        imported = cat->cbs.import_verified_cce_ex(cat->cbs.ud, res->dest_path, res->id, res->version,
+                                                   res->expected_perms, res->expected_allowed_hosts,
+                                                   res->preapprove_consent, err_buf, sizeof err_buf);
+      } else if (res->preapprove_consent && cat->cbs.import_verified_cce_approved) {
         imported = cat->cbs.import_verified_cce_approved(cat->cbs.ud, res->dest_path, res->id, res->version,
                                                          res->expected_perms, true, err_buf, sizeof err_buf);
       } else if (cat->cbs.import_verified_cce) {

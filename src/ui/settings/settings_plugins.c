@@ -139,6 +139,8 @@ static char s_sec_ver_old[33];
 static char s_sec_ver_new[33];
 static char s_sec_icon_path[CCORD_PATH_MAX];
 static char s_sec_allowed_hosts[512];
+static char s_sec_old_allowed_hosts[512];
+static bool s_sec_has_old_hosts;
 static char s_sec_changelog[512];
 static char s_sec_warn_title[128];
 static char s_sec_warn_msg[512];
@@ -675,6 +677,8 @@ static void close_security_modal(void)
 {
   s_sec_mode = SEC_NONE;
   s_sec_id[0] = '\0';
+  s_sec_old_allowed_hosts[0] = '\0';
+  s_sec_has_old_hosts = false;
   s_sec_perms = 0;
   s_sec_old_perms = 0;
   s_sec_scroll = 0.0f;
@@ -724,6 +728,11 @@ static void open_sec_modal_for_catalog(const ccord_ui *ui, const ccord_catalog_e
   s_sec_perms = e->perms_mask;
   const ccord_plugin_info *inst = find_plugin_info(ui ? ui->d.contrib : nullptr, e->id);
   s_sec_old_perms = (mode == SEC_UPDATE && inst) ? inst->consented_perms : 0;
+  if (mode == SEC_UPDATE && inst) {
+    copy_str(s_sec_old_allowed_hosts, sizeof s_sec_old_allowed_hosts, inst->allowed_hosts);
+    s_sec_has_old_hosts =
+      (inst->consented_perms & ((uint64_t)CCORD_PERM_NETWORK_HTTP | (uint64_t)CCORD_PERM_NETWORK_WS)) != 0;
+  }
   if (!s_sec_icon_path[0] && inst && inst->icon_path) {
     copy_str(s_sec_icon_path, sizeof s_sec_icon_path, inst->icon_path);
   }
@@ -746,6 +755,9 @@ static void open_sec_modal_for_installed_update(const ccord_ui *ui, const ccord_
   copy_str(s_sec_ver_new, sizeof s_sec_ver_new, p->update_version);
   copy_str(s_sec_icon_path, sizeof s_sec_icon_path, p->icon_path);
   copy_str(s_sec_allowed_hosts, sizeof s_sec_allowed_hosts, p->update_allowed_hosts);
+  copy_str(s_sec_old_allowed_hosts, sizeof s_sec_old_allowed_hosts, p->allowed_hosts);
+  s_sec_has_old_hosts =
+    (p->consented_perms & ((uint64_t)CCORD_PERM_NETWORK_HTTP | (uint64_t)CCORD_PERM_NETWORK_WS)) != 0;
   copy_str(s_sec_changelog, sizeof s_sec_changelog, p->update_changelog);
   s_sec_warn_sev = p->warning_sev;
   copy_str(s_sec_warn_title, sizeof s_sec_warn_title, p->warning_title);
@@ -841,9 +853,93 @@ static float draw_perm_card_row(ccord_ui *ui, ccord_renderer *r, float x, float 
   return rh + 6.0f;
 }
 
+static bool ui_host_in_csv(const char *csv, const char *tok, size_t tok_len)
+{
+  if (!csv || !tok || tok_len == 0) return false;
+  const char *p = csv;
+  while (*p) {
+    while (*p && (*p == ',' || isspace((unsigned char)*p))) p++;
+    const char *s = p;
+    while (*p && *p != ',') p++;
+    const char *e = p;
+    while (e > s && isspace((unsigned char)e[-1])) e--;
+    size_t len = (size_t)(e - s);
+    if (len == tok_len) {
+      bool eq = true;
+      for (size_t i = 0; i < len; i++) {
+        if (tolower((unsigned char)s[i]) != tolower((unsigned char)tok[i])) {
+          eq = false;
+          break;
+        }
+      }
+      if (eq) return true;
+    }
+  }
+  return false;
+}
+
+static size_t ui_count_csv_tokens(const char *csv)
+{
+  if (!csv) return 0;
+  size_t n = 0;
+  const char *p = csv;
+  while (*p) {
+    while (*p && (*p == ',' || isspace((unsigned char)*p))) p++;
+    const char *s = p;
+    while (*p && *p != ',') p++;
+    const char *e = p;
+    while (e > s && isspace((unsigned char)e[-1])) e--;
+    if (e > s) n++;
+  }
+  return n;
+}
+
+static bool ui_hosts_changed_or_expanded(const char *old_hosts, bool had_old_hosts, const char *new_hosts,
+                                         bool *out_became_unrestricted, bool *out_expanded)
+{
+  if (out_became_unrestricted) *out_became_unrestricted = false;
+  if (out_expanded) *out_expanded = false;
+  if (!had_old_hosts) return false;
+  size_t old_n = ui_count_csv_tokens(old_hosts);
+  size_t new_n = ui_count_csv_tokens(new_hosts);
+  if (old_n > 0 && new_n == 0) {
+    if (out_became_unrestricted) *out_became_unrestricted = true;
+    if (out_expanded) *out_expanded = true;
+    return true;
+  }
+  if (old_n > 0 && new_n > 0) {
+    const char *p = new_hosts;
+    while (*p) {
+      while (*p && (*p == ',' || isspace((unsigned char)*p))) p++;
+      const char *s = p;
+      while (*p && *p != ',') p++;
+      const char *e = p;
+      while (e > s && isspace((unsigned char)e[-1])) e--;
+      if (e > s && !ui_host_in_csv(old_hosts, s, (size_t)(e - s))) {
+        if (out_expanded) *out_expanded = true;
+        return true;
+      }
+    }
+  }
+  if (old_n != new_n) return true;
+  if (old_n > 0) {
+    const char *p = old_hosts;
+    while (*p) {
+      while (*p && (*p == ',' || isspace((unsigned char)*p))) p++;
+      const char *s = p;
+      while (*p && *p != ',') p++;
+      const char *e = p;
+      while (e > s && isspace((unsigned char)e[-1])) e--;
+      if (e > s && !ui_host_in_csv(new_hosts, s, (size_t)(e - s))) return true;
+    }
+  }
+  return false;
+}
+
 static float draw_permissions_section(ccord_ui *ui, ccord_renderer *r, float x, float y, float w,
                                       uint64_t perms_mask, uint64_t old_mask, bool diff_mode,
-                                      const char *allowed_hosts, bool paint)
+                                      const char *allowed_hosts, const char *old_allowed_hosts,
+                                      bool had_old_hosts, bool paint)
 {
   uis_tokens tk = uis_tokens_of(ui);
   ccord_text_style hdr_s = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));
@@ -939,22 +1035,78 @@ static float draw_permissions_section(ccord_ui *ui, ccord_renderer *r, float x, 
   bool uses_net = (perms_mask & ((uint64_t)CCORD_PERM_NETWORK_HTTP | (uint64_t)CCORD_PERM_NETWORK_WS)) != 0;
   if (uses_net) {
     bool restricted = allowed_hosts && allowed_hosts[0] != '\0';
-    char scope_txt[640];
-    if (restricted) {
-      snprintf(scope_txt, sizeof scope_txt, "Network scope pinned to allowed hosts: %s", allowed_hosts);
+    bool became_unrestricted = false;
+    bool hosts_expanded = false;
+    bool hosts_changed = diff_mode &&
+                         ui_hosts_changed_or_expanded(old_allowed_hosts, had_old_hosts, allowed_hosts,
+                                                      &became_unrestricted, &hosts_expanded);
+    char scope_txt[1280];
+    ccord_color sc = restricted ? COL(brand) : COL(danger);
+    uint8_t bg_alpha = 26;
+    if (hosts_changed && became_unrestricted) {
+      snprintf(scope_txt, sizeof scope_txt,
+               "UPDATED NETWORK SCOPE (EXPANDED TO UNRESTRICTED): Previously restricted to [%.240s]. "
+               "This update removes allowed_hosts and can contact ANY external host.",
+               (old_allowed_hosts && old_allowed_hosts[0]) ? old_allowed_hosts : "specific hosts");
+      sc = COL(danger);
+      bg_alpha = 38;
+    } else if (hosts_changed && hosts_expanded) {
+      snprintf(scope_txt, sizeof scope_txt,
+               "UPDATED NETWORK SCOPE (EXPANDED): Allowed hosts expanded from [%.240s] to [%.240s]. "
+               "Review the newly added external domains carefully.",
+               (old_allowed_hosts && old_allowed_hosts[0]) ? old_allowed_hosts : "unrestricted",
+               restricted ? allowed_hosts : "unrestricted");
+      sc = COL(danger);
+      bg_alpha = 34;
+    } else if (hosts_changed) {
+      snprintf(scope_txt, sizeof scope_txt,
+               "UPDATED NETWORK SCOPE: Allowed hosts changed from [%.240s] to [%.240s].",
+               (old_allowed_hosts && old_allowed_hosts[0]) ? old_allowed_hosts : "unrestricted (any host)",
+               restricted ? allowed_hosts : "unrestricted (any host)");
+      sc = restricted ? COL(brand) : COL(danger);
+      bg_alpha = 28;
+    } else if (restricted) {
+      snprintf(scope_txt, sizeof scope_txt, "Network scope pinned to allowed hosts: %.512s", allowed_hosts);
     } else {
       snprintf(scope_txt, sizeof scope_txt,
                "Unrestricted network access: no allowed_hosts allow-list declared; this plugin may contact any external host.");
     }
-    ccord_color sc = restricted ? COL(brand) : COL(danger);
     ccord_text_style ss = ui_style(ui, CCORD_FONT_BOLD, tk.fs_caption, sc);
     float tw = fmaxf(w - 24.0f, 60.0f);
     float sh = fmaxf(16.0f, ccord_text_measure(r, scope_txt, strlen(scope_txt), &ss, tw).y);
     float bh = sh + 16.0f;
     if (paint) {
-      uis_plate(ui, r, (ccord_rect){x, cy, w, bh}, tk.r_control, with_alpha(sc, 26));
+      uis_plate(ui, r, (ccord_rect){x, cy, w, bh}, tk.r_control, with_alpha(sc, bg_alpha));
       ccord_draw_rect(r, (ccord_rect){x, cy, 3.0f, bh}, sc);
       ccord_text_draw(r, scope_txt, strlen(scope_txt), x + 12.0f, cy + 8.0f, &ss, tw);
+    }
+    cy += bh + 8.0f;
+  }
+
+  // Class 3 Broad Host-User Access warning for system.exec, fs.write, or network.local
+  bool has_sys_exec = (perms_mask & (uint64_t)CCORD_PERM_SYSTEM_EXEC) != 0;
+  bool has_fs_write = (perms_mask & (uint64_t)CCORD_PERM_FS_WRITE) != 0;
+  bool has_net_local = (perms_mask & (uint64_t)CCORD_PERM_NETWORK_LOCAL) != 0;
+  if (has_sys_exec || has_fs_write || has_net_local) {
+    char host_txt[640];
+    snprintf(host_txt, sizeof host_txt,
+             "HIGH RISK · BROAD HOST ACCESS: Requests%s%s%s. "
+             "These Class 3 permissions grant broad host-user access (external processes, file modification, "
+             "or local sockets) and can reach files or credentials outside C-Cord's sandbox. "
+             "Only approve plugins from authors you fully trust.",
+             has_sys_exec ? " system.exec (run external processes)" : "",
+             has_fs_write ? (has_sys_exec ? ", fs.write (modify local files)" : " fs.write (modify local files)") : "",
+             has_net_local ? ((has_sys_exec || has_fs_write) ? ", network.local (connect to local sockets/services)"
+                                                             : " network.local (connect to local sockets/services)") : "");
+    ccord_color sc = COL(danger);
+    ccord_text_style ss = ui_style(ui, CCORD_FONT_BOLD, tk.fs_caption, sc);
+    float tw = fmaxf(w - 24.0f, 60.0f);
+    float sh = fmaxf(16.0f, ccord_text_measure(r, host_txt, strlen(host_txt), &ss, tw).y);
+    float bh = sh + 16.0f;
+    if (paint) {
+      uis_plate(ui, r, (ccord_rect){x, cy, w, bh}, tk.r_control, with_alpha(sc, 38));
+      ccord_draw_rect(r, (ccord_rect){x, cy, 3.0f, bh}, sc);
+      ccord_text_draw(r, host_txt, strlen(host_txt), x + 12.0f, cy + 8.0f, &ss, tw);
     }
     cy += bh + 8.0f;
   }
@@ -1317,7 +1469,8 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
     cur_h += warn_h + 10.0f;
   }
 
-  float perms_h = draw_permissions_section(ui, r, x + 16.0f, 0.0f, inner_w, d_perms, 0, false, d_hosts, false);
+  float perms_h = draw_permissions_section(ui, r, x + 16.0f, 0.0f, inner_w, d_perms, 0, false,
+                                           d_hosts, nullptr, false, false);
   cur_h += 20.0f + perms_h + 8.0f;
 
   float cl_h = 0.0f;
@@ -1375,7 +1528,8 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
 
   ccord_text_draw(r, "PERMISSIONS & CAPABILITIES", 26, box.x + 16.0f, cy, &ovs, 0.0f);
   cy += 20.0f;
-  cy += draw_permissions_section(ui, r, box.x + 16.0f, cy, inner_w, d_perms, 0, false, d_hosts, true);
+  cy += draw_permissions_section(ui, r, box.x + 16.0f, cy, inner_w, d_perms, 0, false,
+                                 d_hosts, nullptr, false, true);
   cy += 8.0f;
 
   if (cl_h > 0.0f) {
@@ -2050,8 +2204,14 @@ static float draw_update_card(ccord_ui *ui, ccord_renderer *r, const ccord_catal
     char msg[192];
     if (e->update_needs_review) {
       size_t nnew = count_new_perms(e->perms_mask, inst ? inst->consented_perms : 0);
+      bool had_net = inst && ((inst->consented_perms & ((uint64_t)CCORD_PERM_NETWORK_HTTP | (uint64_t)CCORD_PERM_NETWORK_WS)) != 0);
+      bool host_exp = false;
+      (void)ui_hosts_changed_or_expanded(inst ? inst->allowed_hosts : nullptr, had_net,
+                                         e->allowed_hosts, nullptr, &host_exp);
       if (nnew > 0) snprintf(msg, sizeof msg, "+%zu new permission%s — review required", nnew, nnew == 1 ? "" : "s");
-      else snprintf(msg, sizeof msg, "Moderator warning attached — review required");
+      else if (host_exp) snprintf(msg, sizeof msg, "Network allowed_hosts expanded — review required");
+      else if (e->warning_sev >= CCORD_WARN_DANGER) snprintf(msg, sizeof msg, "Moderator warning attached — review required");
+      else snprintf(msg, sizeof msg, "Trust or scope review required before updating");
     } else {
       snprintf(msg, sizeof msg, "Same API permissions · SHA-256 verified");
     }
@@ -2528,7 +2688,8 @@ static void draw_protected_security_modal(ccord_ui *ui, ccord_renderer *r)
       body_content += warn_h + 10.0f;
     }
     body_content += draw_permissions_section(ui, r, 0.0f, 0.0f, inner_w, s_sec_perms, s_sec_old_perms,
-                                             s_sec_mode == SEC_UPDATE, s_sec_allowed_hosts, false);
+                                             s_sec_mode == SEC_UPDATE, s_sec_allowed_hosts,
+                                             s_sec_old_allowed_hosts, s_sec_has_old_hosts, false);
     cl_h = 0.0f;
     if (s_sec_mode == SEC_UPDATE && s_sec_changelog[0]) {
       cl_h = fmaxf(18.0f, ccord_text_measure(r, s_sec_changelog, strlen(s_sec_changelog), &ms, inner_w).y);
@@ -2610,7 +2771,8 @@ static void draw_protected_security_modal(ccord_ui *ui, ccord_renderer *r)
   }
 
   cy += draw_permissions_section(ui, r, box.x + 20.0f, cy, inner_w, s_sec_perms, s_sec_old_perms,
-                                 s_sec_mode == SEC_UPDATE, s_sec_allowed_hosts, true);
+                                 s_sec_mode == SEC_UPDATE, s_sec_allowed_hosts,
+                                 s_sec_old_allowed_hosts, s_sec_has_old_hosts, true);
 
   if (cl_h > 0.0f) {
     ccord_text_style ovs = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));

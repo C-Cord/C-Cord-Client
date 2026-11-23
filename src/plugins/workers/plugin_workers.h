@@ -32,16 +32,22 @@ void pw_remove_owner(plugin_workers *w, const char *owner);
 // Drains completed worker events into caller callback on main thread.
 void pw_pump(plugin_workers *w, void (*on_event)(void *ud, const pw_event *ev), void *ud);
 
+// URL & local target validation helpers
+bool pw_extract_url_host_port(const char *url, char *scheme_out, size_t scap, char *host_out, size_t hcap,
+                              int *port_out, char *path_out, size_t pcap);
+bool pw_is_localhost_host(const char *host);
+bool pw_unix_socket_path_is_blocked(const char *sock_path);
+
 // Async HTTP / localhost HTTP
 bool pw_start_http(plugin_workers *w, const char *owner, uint64_t req_id, const ccord_manifest *manifest,
                    const char *url, const char *method, const char *headers_json,
-                   const uint8_t *body, size_t body_len, uint32_t timeout_ms, bool local_only);
+                   const uint8_t *body, size_t body_len, uint32_t timeout_ms, bool local_only, bool allow_local);
 // Async local Unix socket send/recv
 bool pw_start_unix_send(plugin_workers *w, const char *owner, uint64_t req_id, const char *sock_path,
                         const uint8_t *data, size_t len);
 // WebSockets (loopback ws:// native RFC 6455; external wss:// via platform_ops.ws_*)
 bool pw_ws_connect(plugin_workers *w, const char *owner, uint64_t ws_id, const ccord_manifest *manifest,
-                   const char *url, const char *headers_json);
+                   const char *url, const char *headers_json, bool allow_local);
 bool pw_ws_send(plugin_workers *w, const char *owner, uint64_t ws_id, const uint8_t *data, size_t len, bool binary);
 void pw_ws_close(plugin_workers *w, const char *owner, uint64_t ws_id, uint16_t code, const char *reason);
 // Filesystem watcher

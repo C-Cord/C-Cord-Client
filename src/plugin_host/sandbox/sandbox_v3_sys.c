@@ -22,9 +22,39 @@ static bool url_is_localhost(const char *url)
   else if (strncmp(url, "ws://", 5) == 0) p = url + 5;
   else if (strncmp(url, "wss://", 6) == 0) p = url + 6;
   else return false;
-  if (strncmp(p, "127.0.0.1", 9) == 0 && (p[9] == ':' || p[9] == '/' || p[9] == '\0')) return true;
-  if (strncmp(p, "localhost", 9) == 0 && (p[9] == ':' || p[9] == '/' || p[9] == '\0')) return true;
-  if (strncmp(p, "[::1]", 5) == 0 && (p[5] == ':' || p[5] == '/' || p[5] == '\0')) return true;
+  const char *end = p;
+  while (*end && *end != '/' && *end != '?' && *end != '#') {
+    unsigned char c = (unsigned char)*end;
+    if (c == '@' || c == '\\' || c <= 0x20u || c >= 0x7fu) return false;
+    end++;
+  }
+  const char *hs = p, *he = end;
+  if (hs < end && *hs == '[') {
+    const char *rb = memchr(hs, ']', (size_t)(end - hs));
+    if (!rb) return false;
+    hs++;
+    he = rb;
+  } else {
+    const char *col = memchr(hs, ':', (size_t)(end - hs));
+    if (col) he = col;
+  }
+  size_t hl = (size_t)(he - hs);
+  if (hl == 0 || hl >= 256u) return false;
+  char h[256];
+  for (size_t i = 0; i < hl; i++) h[i] = (char)tolower((unsigned char)hs[i]);
+  if (hl > 1u && h[hl - 1u] == '.') hl--;
+  h[hl] = '\0';
+  if (strcmp(h, "localhost") == 0) return true;
+  if (hl > 10u && strcmp(h + hl - 10u, ".localhost") == 0) return true;
+  if (strcmp(h, "::1") == 0 || strcmp(h, "::") == 0 || strcmp(h, "0.0.0.0") == 0 || strcmp(h, "0") == 0) return true;
+  if (strncmp(h, "127.", 4) == 0 || strncmp(h, "0.", 2) == 0) {
+    bool ok = true;
+    for (size_t i = 0; i < hl; i++) {
+      if (!((h[i] >= '0' && h[i] <= '9') || h[i] == '.')) { ok = false; break; }
+    }
+    if (ok) return true;
+  }
+  if (strncmp(h, "::ffff:127.", 11) == 0 || strncmp(h, "::ffff:0.", 9) == 0) return true;
   return false;
 }
 

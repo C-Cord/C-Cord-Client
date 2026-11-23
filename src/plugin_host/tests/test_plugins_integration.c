@@ -13,9 +13,13 @@
 #include <ccord/net/account_edit.h>
 #include <ccord/net/mock_transport.h>
 #include <ccord/net/profile_edit.h>
+#include <ccord/plugins/manifest.h>
 #include <ccord/plugins/plugins.h>
 #include <ccord/session/session.h>
 #include <ccord/store/store.h>
+#include "../../plugins/workers/plugin_workers.h"
+
+extern bool pl_fs_path_is_protected(const ccord_plugins *m, const char *raw_path);
 
 #include <signal.h>
 #include <stdatomic.h>
@@ -365,7 +369,9 @@ static void test_api_v3_integration(void)
              "  if d.content == 'hello' then return {content='HELLO_V3!'} end\n"
              "end)\n"
              "hooks.on_link_open(function(d)\n"
-             "  if d.url == 'https://x.com/test' then return {url='https://fxtwitter.com/test'} end\n"
+             "  if d.url == 'https://x.com/test?utm_source=tracker' then return {url='https://x.com/test'} end\n"
+             "  if d.url == 'https://x.com/phish' then return {url='https://evil.example/steal'} end\n"
+             "  if d.url == 'https://x.com/file' then return {url='file:///etc/passwd'} end\n"
              "end)\n"
              "hooks.on_notification(function(d)\n"
              "  if d.content == 'mute-me' then return {suppress=true} end\n"
@@ -492,8 +498,12 @@ static void test_api_v3_integration(void)
   CT_CHECK(!ccord_contrib_run_before_send(contrib, 200, 0, "cancelme", out_txt, sizeof out_txt, reason, sizeof reason));
   CT_CHECK(strcmp(reason, "blocked_v3") == 0);
   char out_url[256] = "";
-  CT_CHECK(ccord_contrib_run_link_open_hook(contrib, "https://x.com/test", out_url, sizeof out_url));
-  CT_CHECK(strcmp(out_url, "https://fxtwitter.com/test") == 0);
+  CT_CHECK(ccord_contrib_run_link_open_hook(contrib, "https://x.com/test?utm_source=tracker", out_url, sizeof out_url));
+  CT_CHECK(strcmp(out_url, "https://x.com/test") == 0);
+  CT_CHECK(ccord_contrib_run_link_open_hook(contrib, "https://x.com/phish", out_url, sizeof out_url));
+  CT_CHECK(strcmp(out_url, "https://x.com/phish") == 0);
+  CT_CHECK(ccord_contrib_run_link_open_hook(contrib, "https://x.com/file", out_url, sizeof out_url));
+  CT_CHECK(strcmp(out_url, "https://x.com/file") == 0);
   char nt[128] = "Ping", nb[128] = "hi";
   bool silent = false;
   CT_CHECK(ccord_contrib_run_notification_hook(contrib, 100, 200, 300, 400, "hello", true, false, nt, sizeof nt, nb, sizeof nb, &silent));
@@ -732,6 +742,317 @@ static void test_account_class3_plugins(void)
   snprintf(fp, sizeof fp, "%s/plugins/dev.test.c3acct", data_dir); (void)rmdir(fp);
   snprintf(fp, sizeof fp, "%s/plugins", data_dir); (void)rmdir(fp);
   (void)rmdir(data_dir); (void)rmdir(root);
+}
+
+typedef struct sec_local_srv {
+  int listen_fd;
+  uint16_t port;
+  _Atomic bool stop;
+  _Atomic int hits;
+} sec_local_srv;
+
+static void *sec_srv_thread(void *arg)
+{
+  sec_local_srv *ctx = arg;
+  struct timeval tv = {.tv_sec = 0, .tv_usec = 100000};
+  (void)setsockopt(ctx->listen_fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  while (!atomic_load(&ctx->stop)) {
+    int cfd = accept(ctx->listen_fd, nullptr, nullptr);
+    if (cfd < 0) continue;
+    atomic_fetch_add(&ctx->hits, 1);
+    const char *resp = "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: close\r\n\r\nLEAK";
+    (void)send(cfd, resp, strlen(resp), 0);
+    close(cfd);
+  }
+  return nullptr;
+}
+
+static void test_security_regressions(void)
+{
+  // 1. URL parsing & '#' fragment bypass / userinfo / backslash / control-char / port validation.
+  {
+    char scheme[16], host[256], path[1024];
+    int port = 0;
+
+    // Fragment bypass: host must be "evil.com", never "evil.com#.trusted.com".
+    CT_CHECK(pw_extract_url_host_port("https://evil.com#.trusted.com", scheme, sizeof scheme,
+                                      host, sizeof host, &port, path, sizeof path));
+    CT_CHECK(strcmp(scheme, "https") == 0 && strcmp(host, "evil.com") == 0 && port == 443 && strcmp(path, "/") == 0);
+
+    ccord_manifest m = {0};
+    m.allowed_host_count = 1;
+    snprintf(m.allowed_hosts[0], sizeof m.allowed_hosts[0], "*.trusted.com");
+    CT_CHECK(!ccord_manifest_host_allowed(&m, host));
+    CT_CHECK(ccord_manifest_host_allowed(&m, "api.trusted.com"));
+
+    // Defense-in-depth in ccord_manifest_host_allowed: reject non-hostname chars even with unrestricted manifest.
+    ccord_manifest open_m = {0};
+    CT_CHECK(!ccord_manifest_host_allowed(&m, "evil.com#.trusted.com"));
+    CT_CHECK(!ccord_manifest_host_allowed(&m, "user@api.trusted.com"));
+    CT_CHECK(!ccord_manifest_host_allowed(&m, "api.trusted.com/x"));
+    CT_CHECK(!ccord_manifest_host_allowed(&m, "api.trusted.com\\x"));
+    CT_CHECK(!ccord_manifest_host_allowed(&m, "api.trusted.com "));
+    CT_CHECK(!ccord_manifest_host_allowed(&open_m, "evil.com#.trusted.com"));
+    CT_CHECK(!ccord_manifest_host_allowed(&open_m, "user@example.com"));
+
+    // Authority smuggling / control chars / invalid ports must be rejected.
+    CT_CHECK(!pw_extract_url_host_port("https://user@trusted.com/", scheme, sizeof scheme,
+                                       host, sizeof host, &port, path, sizeof path));
+    CT_CHECK(!pw_extract_url_host_port("https://evil.com\\@trusted.com/", scheme, sizeof scheme,
+                                       host, sizeof host, &port, path, sizeof path));
+    CT_CHECK(!pw_extract_url_host_port("https://trusted.com\r\n/", scheme, sizeof scheme,
+                                       host, sizeof host, &port, path, sizeof path));
+    CT_CHECK(!pw_extract_url_host_port("https://trusted.com/a\nb", scheme, sizeof scheme,
+                                       host, sizeof host, &port, path, sizeof path));
+    CT_CHECK(!pw_extract_url_host_port("https://trusted.com:80abc/", scheme, sizeof scheme,
+                                       host, sizeof host, &port, path, sizeof path));
+    CT_CHECK(!pw_extract_url_host_port("https://trusted.com:0/", scheme, sizeof scheme,
+                                       host, sizeof host, &port, path, sizeof path));
+    CT_CHECK(!pw_extract_url_host_port("https://trusted.com:70000/", scheme, sizeof scheme,
+                                       host, sizeof host, &port, path, sizeof path));
+    CT_CHECK(!pw_extract_url_host_port("https://trusted.com:/", scheme, sizeof scheme,
+                                       host, sizeof host, &port, path, sizeof path));
+    CT_CHECK(!pw_extract_url_host_port("http://[::1]junk/", scheme, sizeof scheme,
+                                       host, sizeof host, &port, path, sizeof path));
+    CT_CHECK(pw_extract_url_host_port("http://[::1]:8080/ping#frag", scheme, sizeof scheme,
+                                      host, sizeof host, &port, path, sizeof path));
+    CT_CHECK(strcmp(host, "::1") == 0 && port == 8080 && strcmp(path, "/ping") == 0);
+
+    // Loopback / local host detection.
+    CT_CHECK(pw_is_localhost_host("localhost"));
+    CT_CHECK(pw_is_localhost_host("LOCALHOST"));
+    CT_CHECK(pw_is_localhost_host("localhost."));
+    CT_CHECK(pw_is_localhost_host("sub.localhost"));
+    CT_CHECK(pw_is_localhost_host("sub.LOCALHOST."));
+    CT_CHECK(pw_is_localhost_host("127.0.0.1"));
+    CT_CHECK(pw_is_localhost_host("127.0.0.2"));
+    CT_CHECK(pw_is_localhost_host("127.255.255.254"));
+    CT_CHECK(pw_is_localhost_host("0.0.0.0"));
+    CT_CHECK(pw_is_localhost_host("::1"));
+    CT_CHECK(pw_is_localhost_host("[::1]"));
+    CT_CHECK(pw_is_localhost_host("::"));
+    CT_CHECK(pw_is_localhost_host("[::]"));
+    CT_CHECK(pw_is_localhost_host("::ffff:127.0.0.1"));
+    CT_CHECK(pw_is_localhost_host("[::ffff:127.0.0.2]"));
+    CT_CHECK(!pw_is_localhost_host("example.com"));
+    CT_CHECK(!pw_is_localhost_host("localhost.evil.com"));
+    CT_CHECK(!pw_is_localhost_host("127.example.com"));
+    CT_CHECK(!pw_is_localhost_host("8.8.8.8"));
+
+    // Manifest memory & instruction limit caps (desktop 64 MiB / 100M insns).
+    const char *big_lim =
+      "{\"schema\":1,\"id\":\"dev.test.lim\",\"name\":\"Lim\",\"version\":\"1.0.0\",\"api\":1,"
+      "\"main\":\"main.lua\",\"limits\":{\"memory_bytes\":536870912,\"instructions\":999999999}}";
+    ccord_manifest lm = {0};
+    ccord_error lerr = {0};
+    CT_CHECK(ccord_manifest_parse(big_lim, strlen(big_lim), &lm, &lerr) == CCORD_OK);
+    CT_CHECK(lm.memory_bytes == (64u << 20));
+    CT_CHECK(lm.instructions == 100000000u);
+  }
+
+  // 2. High-risk Unix socket blocklist & protected filesystem path checks.
+  {
+    CT_CHECK(pw_unix_socket_path_is_blocked("/var/run/docker.sock"));
+    CT_CHECK(pw_unix_socket_path_is_blocked("/run/podman/podman.sock"));
+    CT_CHECK(pw_unix_socket_path_is_blocked("/run/containerd/containerd.sock"));
+    CT_CHECK(pw_unix_socket_path_is_blocked("/tmp/ssh-agent.sock"));
+    CT_CHECK(pw_unix_socket_path_is_blocked("/run/user/1000/gnupg/S.gpg-agent"));
+    CT_CHECK(pw_unix_socket_path_is_blocked("/run/user/1000/discord-ipc-0"));
+    CT_CHECK(pw_unix_socket_path_is_blocked("/tmp/ccord-main.sock"));
+    CT_CHECK(pw_unix_socket_path_is_blocked("@abstract-sock"));
+    CT_CHECK(pw_unix_socket_path_is_blocked("/tmp/../var/run/foo.sock"));
+    CT_CHECK(!pw_unix_socket_path_is_blocked("/tmp/my-benign-plugin.sock"));
+    setenv("SSH_AUTH_SOCK", "/tmp/custom-ssh-sock-test", 1);
+    setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/custom-bus-test,guid=1234", 1);
+    CT_CHECK(pw_unix_socket_path_is_blocked("/tmp/custom-ssh-sock-test"));
+    CT_CHECK(pw_unix_socket_path_is_blocked("/tmp/custom-bus-test"));
+
+    const char *home = getenv("HOME");
+    if (home && home[0]) {
+      char pbuf[1024];
+      snprintf(pbuf, sizeof pbuf, "%s/.ssh/id_rsa", home);
+      CT_CHECK(pl_fs_path_is_protected(nullptr, pbuf));
+      snprintf(pbuf, sizeof pbuf, "%s/.gnupg/secring.gpg", home);
+      CT_CHECK(pl_fs_path_is_protected(nullptr, pbuf));
+      snprintf(pbuf, sizeof pbuf, "%s/.bashrc", home);
+      CT_CHECK(pl_fs_path_is_protected(nullptr, pbuf));
+      snprintf(pbuf, sizeof pbuf, "%s/.config/autostart/pwn.desktop", home);
+      CT_CHECK(pl_fs_path_is_protected(nullptr, pbuf));
+      snprintf(pbuf, sizeof pbuf, "%s/.local/bin/C-Cord.AppImage", home);
+      CT_CHECK(pl_fs_path_is_protected(nullptr, pbuf));
+    }
+    CT_CHECK(pl_fs_path_is_protected(nullptr, "/proc/self/exe"));
+    CT_CHECK(!pl_fs_path_is_protected(nullptr, "/tmp/ccord-sec-test-allowed.txt"));
+  }
+
+  // 3. End-to-end regressions:
+  //    - network.http / network.ws without network.local blocked from localhost/127.0.0.1/127.0.0.2;
+  //    - gateway.raw redacts token/session_id/email/phone/mfa_enabled/analytics_token/resume_gateway_url in READY;
+  //    - plugin.call blocks same-class privilege escalation (system.info -> system.exec without allow_lower_class);
+  //    - system.exec scrubs sensitive env vars (TOKEN, SECRET, API_KEY, CCORD_).
+  char root[] = "/tmp/ccord-sec-reg-XXXXXX";
+  CT_CHECK(mkdtemp(root) != nullptr);
+  char plugins_dir[1100], data_dir[1100];
+  char d_http[1200], d_info[1200], d_exec[1200], d_gw[1200];
+  snprintf(plugins_dir, sizeof plugins_dir, "%s/plugins", root);
+  snprintf(data_dir, sizeof data_dir, "%s/data", root);
+  snprintf(d_http, sizeof d_http, "%s/sec_http", plugins_dir);
+  snprintf(d_info, sizeof d_info, "%s/sec_info", plugins_dir);
+  snprintf(d_exec, sizeof d_exec, "%s/sec_exec", plugins_dir);
+  snprintf(d_gw, sizeof d_gw, "%s/sec_gw", plugins_dir);
+  CT_CHECK(mkdir(plugins_dir, 0700) == 0);
+  CT_CHECK(mkdir(d_http, 0700) == 0);
+  CT_CHECK(mkdir(d_info, 0700) == 0);
+  CT_CHECK(mkdir(d_exec, 0700) == 0);
+  CT_CHECK(mkdir(d_gw, 0700) == 0);
+
+  sec_local_srv srv = {.listen_fd = -1};
+  srv.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  CT_CHECK(srv.listen_fd >= 0);
+  int one = 1;
+  (void)setsockopt(srv.listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = 0};
+  CT_CHECK(bind(srv.listen_fd, (struct sockaddr *)&addr, sizeof addr) == 0);
+  socklen_t alen = sizeof addr;
+  CT_CHECK(getsockname(srv.listen_fd, (struct sockaddr *)&addr, &alen) == 0);
+  srv.port = ntohs(addr.sin_port);
+  CT_CHECK(listen(srv.listen_fd, 8) == 0);
+  pthread_t srv_tid;
+  CT_CHECK(pthread_create(&srv_tid, nullptr, sec_srv_thread, &srv) == 0);
+
+  setenv("DISCORD_TOKEN", "REDACTED_TEST_ENV_TOK", 1);
+  setenv("CCORD_TEST_SECRET", "REDACTED_TEST_ENV_SEC", 1);
+  setenv("TEST_API_KEY", "REDACTED_TEST_ENV_KEY", 1);
+
+  write_file(d_http, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.sec_http\",\"name\":\"SecHttp\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"network.http\",\"network.ws\",\"clipboard.write\"]}");
+  char http_lua[2048];
+  snprintf(http_lua, sizeof http_lua,
+           "net.http.request({url='http://127.0.0.1:%u/a', method='GET'}, function(r, e)\n"
+           "  clipboard.write('sec_http_127:' .. tostring(r == nil) .. ':' .. tostring(e))\n"
+           "end)\n"
+           "net.http.request({url='http://localhost:%u/b', method='GET'}, function(r, e)\n"
+           "  clipboard.write('sec_http_loc:' .. tostring(r == nil) .. ':' .. tostring(e))\n"
+           "end)\n"
+           "net.http.request({url='http://127.0.0.2:%u/c', method='GET'}, function(r, e)\n"
+           "  clipboard.write('sec_http_1272:' .. tostring(r == nil) .. ':' .. tostring(e))\n"
+           "end)\n"
+           "net.ws.connect('ws://127.0.0.1:%u/ws', {\n"
+           "  on_error=function(e) clipboard.write('sec_ws_loc:' .. tostring(e and e.message)) end,\n"
+           "})\n",
+           (unsigned)srv.port, (unsigned)srv.port, (unsigned)srv.port, (unsigned)srv.port);
+  write_file(d_http, "main.lua", http_lua);
+
+  write_file(d_info, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.sec_info\",\"name\":\"SecInfo\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"system.info\",\"commands\",\"clipboard.write\"]}");
+  write_file(d_info, "main.lua",
+             "commands.register('samecls', 'Try same-class escalation', function()\n"
+             "  plugin.call('dev.test.sec_exec', 'run_priv', function(res, err)\n"
+             "    clipboard.write(res ~= nil and 'sec_samecls:LEAKED' or ('sec_samecls:DENIED:' .. tostring(err)))\n"
+             "  end)\n"
+             "end)\n");
+
+  write_file(d_exec, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.sec_exec\",\"name\":\"SecExec\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"system.exec\",\"clipboard.write\"]}");
+  write_file(d_exec, "main.lua",
+             "plugin.expose('run_priv', function() return 'PRIV_LEAK' end)\n"
+             "system.exec({cmd='/bin/sh', args={'-c', 'printf \"%s|%s|%s\" \"${DISCORD_TOKEN:-NONE}\" \"${CCORD_TEST_SECRET:-NONE}\" \"${TEST_API_KEY:-NONE}\"'}}, function(r, e)\n"
+             "  clipboard.write('sec_exec_env:' .. tostring(r and r.code) .. ':' .. tostring(r and r.stdout))\n"
+             "end)\n");
+
+  write_file(d_gw, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.sec_gw\",\"name\":\"SecGw\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"gateway.raw\",\"clipboard.write\"]}");
+  write_file(d_gw, "main.lua",
+             "gateway.on_raw('READY', function(d)\n"
+             "  local leaked = (d.token ~= nil) or (d.analytics_token ~= nil) or (d.session_id ~= nil) or\n"
+             "                 (d.resume_gateway_url ~= nil) or (d.auth_session_id_hash ~= nil) or\n"
+             "                 (d.user and (d.user.email ~= nil or d.user.phone ~= nil or d.user.mfa_enabled ~= nil))\n"
+             "  clipboard.write('sec_gw_ready:' .. tostring(leaked) .. ':' .. tostring(d.v) .. ':' .. tostring(d.user and d.user.username))\n"
+             "end)\n");
+
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  ccord_contrib *contrib = ccord_contrib_create(&err);
+  CT_CHECK(bus && store && contrib);
+
+  v3_clip_log cl = {0};
+  const char *dirs[] = {plugins_dir};
+  ccord_plugins_config cfg = {
+    .store = store, .contrib = contrib, .bus = bus,
+    .search_dirs = dirs, .search_dir_count = 1,
+    .data_dir = data_dir, .host_exe = CCORD_PLUGIN_HOST_BIN,
+    .clipboard_write = v3_on_clip, .clipboard_ud = &cl,
+  };
+  ccord_plugins *pm = ccord_plugins_create(&cfg, &err);
+  CT_CHECK(pm != nullptr);
+  (void)ccord_plugins_load_all(pm);
+
+  const char *ids[] = {"dev.test.sec_http", "dev.test.sec_info", "dev.test.sec_exec", "dev.test.sec_gw"};
+  for (size_t i = 0; i < sizeof ids / sizeof ids[0]; i++) {
+    CT_CHECK(pump_until(pm, bus, contrib, ids[i], CCORD_PLUGIN_NEEDS_CONSENT));
+    const ccord_plugin_info *pi = find_info(contrib, ids[i]);
+    CT_CHECK(pi != nullptr);
+    if (pi) ccord_contrib_plugin_consent_accept_for(contrib, ids[i], pi->perms_mask);
+  }
+  for (size_t i = 0; i < sizeof ids / sizeof ids[0]; i++) {
+    CT_CHECK(pump_until(pm, bus, contrib, ids[i], CCORD_PLUGIN_READY));
+  }
+
+  // Verify localhost HTTP & WS blocked for network.http/network.ws without network.local.
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "sec_http_127:true:localhost access requires network.local"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "sec_http_loc:true:localhost access requires network.local"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "sec_http_1272:true:localhost access requires network.local"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "sec_ws_loc:localhost access requires network.local"));
+  CT_CHECK(atomic_load(&srv.hits) == 0);
+
+  // Verify system.exec scrubbed sensitive env vars.
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "sec_exec_env:0:NONE|NONE|NONE"));
+
+  // Verify same-class plugin.call escalation blocked (system.info -> system.exec).
+  CT_CHECK(ccord_contrib_run_command(contrib, "samecls", "", 100, 200, &err) == CCORD_OK);
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "sec_samecls:DENIED:"));
+  CT_CHECK(!v3_has_clip(&cl, "sec_samecls:LEAKED"));
+
+  // Verify gateway.raw redacts sensitive fields in READY payloads.
+  ccord_plugins_dispatch_raw_gateway(
+    pm, "READY",
+    "{\"v\":9,\"token\":\"REDACTED_TEST_TOK\",\"analytics_token\":\"REDACTED_TEST_AN\","
+    "\"session_id\":\"REDACTED_TEST_SID\",\"resume_gateway_url\":\"wss://resume.example\","
+    "\"auth_session_id_hash\":\"REDACTED_TEST_HASH\","
+    "\"user\":{\"username\":\"alice\",\"email\":\"a@b.test\",\"phone\":\"+15550100\",\"mfa_enabled\":true}}");
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "sec_gw_ready:false:9:alice"));
+
+  atomic_store(&srv.stop, true);
+  (void)pthread_join(srv_tid, nullptr);
+  close(srv.listen_fd);
+
+  ccord_plugins_shutdown(pm);
+  ccord_plugins_destroy(pm);
+  ccord_contrib_destroy(contrib);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+
+  char rm[1400];
+  const char *fdel[] = {
+    "sec_http/plugin.json", "sec_http/main.lua",
+    "sec_info/plugin.json", "sec_info/main.lua",
+    "sec_exec/plugin.json", "sec_exec/main.lua",
+    "sec_gw/plugin.json", "sec_gw/main.lua",
+  };
+  for (size_t i = 0; i < sizeof fdel / sizeof fdel[0]; i++) {
+    snprintf(rm, sizeof rm, "%s/%s", plugins_dir, fdel[i]);
+    (void)unlink(rm);
+  }
+  (void)rmdir(d_http); (void)rmdir(d_info); (void)rmdir(d_exec); (void)rmdir(d_gw);
+  (void)rmdir(plugins_dir);
+  snprintf(rm, sizeof rm, "%s/plugins.json", data_dir); (void)unlink(rm);
+  (void)rmdir(data_dir);
+  (void)rmdir(root);
 }
 
 int main(void)
@@ -1114,5 +1435,6 @@ int main(void)
 
   test_api_v3_integration();
   test_account_class3_plugins();
+  test_security_regressions();
   return CT_RESULT("test_plugins_integration");
 }

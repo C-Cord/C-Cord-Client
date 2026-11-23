@@ -147,6 +147,19 @@ void plugins_ext_handle_command_result(ccord_plugins *m, plugin *p, ccord_id cha
   }
 }
 
+static ccord_perm_set restricted_perms_only(ccord_perm_set s)
+{
+  ccord_perm_set out = 0;
+  size_t n = ccord_perm_count();
+  for (size_t i = 0; i < n; i++) {
+    ccord_perm pm = ccord_perm_at(i);
+    if ((s & (ccord_perm_set)pm) && ccord_perm_class_of(pm) != CCORD_PERM_CLASS_SAFE) {
+      out |= (ccord_perm_set)pm;
+    }
+  }
+  return out;
+}
+
 bool ext_handle_audio_hooks_gw_rpc(ccord_plugins *m, plugin *p, uint32_t id, const char *method,
                                       const ccord_json *params)
 {
@@ -311,9 +324,11 @@ bool ext_handle_audio_hooks_gw_rpc(ccord_plugins *m, plugin *p, uint32_t id, con
       ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "exposed function not found");
       return true;
     }
-    if (caller_cls < target_cls && !allow_low) {
+    ccord_perm_set caller_r = restricted_perms_only(p->m.perms);
+    ccord_perm_set target_r = restricted_perms_only(tp->m.perms);
+    if (!allow_low && (caller_cls < target_cls || (target_r & ~caller_r) != 0)) {
       ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr,
-                       "permission denied: lower-class plugin cannot call higher-class exposed function");
+                       "permission denied: caller lacks target plugin's restricted permissions");
       return true;
     }
     ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
@@ -923,6 +938,84 @@ bool ccord_plugins_has_raw_gateway_subscribers(const ccord_plugins *m)
   return false;
 }
 
+static bool gw_event_needs_redaction(const char *ev)
+{
+  if (!ev) return false;
+  return strcmp(ev, "READY") == 0 ||
+         strcmp(ev, "READY_SUPPLEMENTAL") == 0 ||
+         strcmp(ev, "SESSIONS_REPLACE") == 0 ||
+         strcmp(ev, "AUTH_SESSION_CHANGE") == 0;
+}
+
+static bool gw_key_is_sensitive(const char *k)
+{
+  if (!k) return false;
+  static const char *const k_redact[] = {
+    "token",
+    "analytics_token",
+    "session_id",
+    "resume_gateway_url",
+    "auth_session_id_hash",
+    "mfa_enabled",
+    "email",
+    "phone",
+  };
+  for (size_t i = 0; i < sizeof k_redact / sizeof k_redact[0]; i++) {
+    if (strcmp(k, k_redact[i]) == 0) return true;
+  }
+  return false;
+}
+
+static void pl_jw_copy_json_redacted(ccord_jw *w, const ccord_json *j, int depth)
+{
+  if (!j || depth > 32) {
+    ccord_jw_null(w);
+    return;
+  }
+  switch (ccord_json_type_of(j)) {
+    case CCORD_JSON_NULL:
+      ccord_jw_null(w);
+      break;
+    case CCORD_JSON_BOOL:
+      ccord_jw_bool(w, ccord_json_bool(j, false));
+      break;
+    case CCORD_JSON_NUMBER: {
+      int64_t iv = 0;
+      if (ccord_json_int64(j, &iv)) ccord_jw_int(w, iv);
+      else ccord_jw_double(w, ccord_json_number(j, 0.0));
+      break;
+    }
+    case CCORD_JSON_STRING: {
+      size_t n = 0;
+      const char *s = ccord_json_string(j, &n);
+      ccord_jw_string(w, s ? s : "", n);
+      break;
+    }
+    case CCORD_JSON_ARRAY: {
+      ccord_jw_begin_array(w);
+      size_t n = ccord_json_array_len(j);
+      for (size_t i = 0; i < n; i++) {
+        pl_jw_copy_json_redacted(w, ccord_json_array_at(j, i), depth + 1);
+      }
+      ccord_jw_end_array(w);
+      break;
+    }
+    case CCORD_JSON_OBJECT: {
+      ccord_jw_begin_object(w);
+      size_t n = ccord_json_object_len(j);
+      for (size_t i = 0; i < n; i++) {
+        const ccord_json *v = nullptr;
+        const char *k = ccord_json_object_key(j, i, &v);
+        if (!k || gw_key_is_sensitive(k)) continue;
+        ccord_jw_key(w, k);
+        pl_jw_copy_json_redacted(w, v, depth + 1);
+      }
+      ccord_jw_end_object(w);
+      break;
+    }
+  }
+}
+
 void ccord_plugins_dispatch_raw_gateway(ccord_plugins *m, const char *event_name, const char *payload_json)
 {
   if (!m || !event_name || !event_name[0]) return;
@@ -948,7 +1041,12 @@ void ccord_plugins_dispatch_raw_gateway(ccord_plugins *m, const char *event_name
   ccord_jw_begin_object(&w);
   ccord_jw_key(&w, "event"); ccord_jw_cstr(&w, event_name);
   ccord_jw_key(&w, "payload");
-  if (pj) pl_jw_copy_json(&w, pj); else ccord_jw_null(&w);
+  if (pj) {
+    if (gw_event_needs_redaction(event_name)) pl_jw_copy_json_redacted(&w, pj, 0);
+    else pl_jw_copy_json(&w, pj);
+  } else {
+    ccord_jw_null(&w);
+  }
   ccord_jw_end_object(&w);
   ccord_arena_free(&ar);
   if (ccord_jw_ok(&w)) {

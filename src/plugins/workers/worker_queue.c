@@ -36,46 +36,166 @@ void pw_push_ev(plugin_workers *w, const pw_event *ev)
 }
 
 bool pw_extract_url_host_port(const char *url, char *scheme_out, size_t scap, char *host_out, size_t hcap,
-                                  int *port_out, char *path_out, size_t pcap)
+                              int *port_out, char *path_out, size_t pcap)
 {
-  if (!url) return false;
+  if (!url || !scheme_out || scap == 0 || !host_out || hcap == 0 || !port_out || !path_out || pcap == 0) {
+    return false;
+  }
+  for (const unsigned char *q = (const unsigned char *)url; *q; q++) {
+    if (*q < 0x20u || *q == 0x7fu) return false;
+  }
   const char *sep = strstr(url, "://");
   if (!sep) return false;
   size_t sl = (size_t)(sep - url);
   if (sl == 0 || sl >= scap) return false;
-  for (size_t i = 0; i < sl; i++) scheme_out[i] = (char)tolower((unsigned char)url[i]);
+  for (size_t i = 0; i < sl; i++) {
+    unsigned char c = (unsigned char)url[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (i > 0 && ((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.'));
+    if (!ok) return false;
+    scheme_out[i] = (char)tolower(c);
+  }
   scheme_out[sl] = '\0';
+
   const char *auth = sep + 3;
   const char *p = auth;
-  while (*p && *p != '/' && *p != '?') p++;
-  const char *host_start = auth, *host_end = p;
+  while (*p && *p != '/' && *p != '?' && *p != '#') {
+    unsigned char c = (unsigned char)*p;
+    if (c == '@' || c == '\\' || c <= 0x20u || c >= 0x7fu) return false;
+    p++;
+  }
+
+  const char *host_start = auth;
+  const char *host_end = p;
+  const char *port_start = nullptr;
+  bool is_bracketed_v6 = false;
   int port = (strcmp(scheme_out, "https") == 0 || strcmp(scheme_out, "wss") == 0) ? 443 : 80;
-  if (host_start < host_end && *host_start == '[') {
-    const char *rb = memchr(host_start, ']', (size_t)(host_end - host_start));
+
+  if (host_start < p && *host_start == '[') {
+    const char *rb = memchr(host_start, ']', (size_t)(p - host_start));
     if (!rb) return false;
+    is_bracketed_v6 = true;
     host_start++;
-    if (rb + 1 < host_end && rb[1] == ':') port = atoi(rb + 2);
     host_end = rb;
+    if (rb + 1 < p) {
+      if (rb[1] != ':') return false;
+      port_start = rb + 2;
+    }
   } else {
-    const char *col = memchr(host_start, ':', (size_t)(host_end - host_start));
+    const char *col = memchr(host_start, ':', (size_t)(p - host_start));
     if (col) {
-      port = atoi(col + 1);
+      if (memchr(col + 1, ':', (size_t)(p - (col + 1))) != nullptr) return false;
       host_end = col;
+      port_start = col + 1;
     }
   }
+
+  if (port_start) {
+    if (port_start >= p) return false;
+    unsigned long pval = 0;
+    for (const char *q = port_start; q < p; q++) {
+      if (*q < '0' || *q > '9') return false;
+      pval = pval * 10ul + (unsigned long)(*q - '0');
+      if (pval > 65535ul) return false;
+    }
+    if (pval == 0ul) return false;
+    port = (int)pval;
+  }
+
   size_t hl = (size_t)(host_end - host_start);
-  if (hl == 0 || hl >= hcap || port <= 0 || port > 65535) return false;
+  if (hl == 0 || hl >= hcap) return false;
+  for (size_t i = 0; i < hl; i++) {
+    unsigned char c = (unsigned char)host_start[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '-' ||
+              (is_bracketed_v6 && c == ':');
+    if (!ok) return false;
+  }
   memcpy(host_out, host_start, hl);
   host_out[hl] = '\0';
   *port_out = port;
-  if (*p) snprintf(path_out, pcap, "%s", p);
-  else snprintf(path_out, pcap, "/");
+
+  const char *path_end = p;
+  while (*path_end && *path_end != '#') path_end++;
+  size_t raw_plen = (size_t)(path_end - p);
+  if (raw_plen == 0) {
+    if (pcap < 2u) return false;
+    path_out[0] = '/';
+    path_out[1] = '\0';
+  } else if (*p == '?') {
+    if (raw_plen + 2u > pcap) return false;
+    path_out[0] = '/';
+    memcpy(path_out + 1, p, raw_plen);
+    path_out[raw_plen + 1u] = '\0';
+  } else {
+    if (raw_plen >= pcap) return false;
+    memcpy(path_out, p, raw_plen);
+    path_out[raw_plen] = '\0';
+  }
+  return true;
+}
+
+static bool is_all_ipv4_chars(const char *s)
+{
+  if (!s || !s[0]) return false;
+  for (const char *p = s; *p; p++) {
+    if (!((*p >= '0' && *p <= '9') || *p == '.')) return false;
+  }
   return true;
 }
 
 bool pw_is_localhost_host(const char *host)
 {
-  return host && (strcmp(host, "127.0.0.1") == 0 || strcmp(host, "localhost") == 0 || strcmp(host, "::1") == 0);
+  if (!host || !host[0]) return false;
+  size_t raw_len = strlen(host);
+  if (raw_len >= 256u) return false;
+  char h[256];
+  size_t start = 0;
+  size_t end = raw_len;
+  if (raw_len >= 2u && host[0] == '[' && host[raw_len - 1u] == ']') {
+    start = 1u;
+    end = raw_len - 1u;
+  }
+  size_t len = end - start;
+  if (len == 0) return false;
+  for (size_t i = 0; i < len; i++) {
+    h[i] = (char)tolower((unsigned char)host[start + i]);
+  }
+  if (len > 1u && h[len - 1u] == '.') len--;
+  h[len] = '\0';
+
+  if (strcmp(h, "localhost") == 0) return true;
+  if (len > 10u && strcmp(h + len - 10u, ".localhost") == 0) return true;
+  if (strcmp(h, "::1") == 0 || strcmp(h, "::") == 0) return true;
+  if (strcmp(h, "0.0.0.0") == 0 || strcmp(h, "0") == 0) return true;
+  if (strncmp(h, "127.", 4) == 0 && is_all_ipv4_chars(h)) return true;
+  if (strncmp(h, "0.", 2) == 0 && is_all_ipv4_chars(h)) return true;
+  if (strncmp(h, "::ffff:127.", 11) == 0 || strncmp(h, "::ffff:0.", 9) == 0) return true;
+
+#if !CCORD_OS_WINDOWS
+  struct in_addr a4;
+  if (inet_pton(AF_INET, h, &a4) == 1) {
+    uint32_t ip = ntohl(a4.s_addr);
+    if ((ip & 0xFF000000u) == 0x7F000000u || (ip & 0xFF000000u) == 0x00000000u) return true;
+  }
+  struct in6_addr a6;
+  if (inet_pton(AF_INET6, h, &a6) == 1) {
+    const uint8_t *b = a6.s6_addr;
+    bool z12 = true;
+    for (int i = 0; i < 12; i++) {
+      if (b[i] != 0) { z12 = false; break; }
+    }
+    if (z12 && b[12] == 0 && b[13] == 0 && b[14] == 0 && (b[15] == 0 || b[15] == 1)) return true;
+    bool v4m = true;
+    for (int i = 0; i < 10; i++) {
+      if (b[i] != 0) { v4m = false; break; }
+    }
+    if (v4m && b[10] == 0xff && b[11] == 0xff) {
+      if (b[12] == 127 || b[12] == 0) return true;
+    }
+  }
+#endif
+  return false;
 }
 
 // ---------------------------------------------------------------- lifecycle

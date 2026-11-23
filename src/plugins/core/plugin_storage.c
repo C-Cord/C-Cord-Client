@@ -20,6 +20,7 @@
 #include <ccord/ipc/ipc.h>
 #include <ccord/store/notify.h>
 
+#include <ctype.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -256,12 +257,38 @@ const ccord_json *pl_consent_parse_file(const ccord_plugins *m, ccord_arena *ar)
   return root;
 }
 
-bool pl_consent_apply(const ccord_json *root, const char *id, uint64_t perms, bool *out_enabled,
-                          bool *out_consent, ccord_perm_set *out_consented_perms)
+void pl_format_hosts_csv(const ccord_manifest *man, char *out, size_t cap)
 {
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  if (!man || man->allowed_host_count == 0) return;
+  size_t off = 0;
+  for (size_t i = 0; i < man->allowed_host_count; i++) {
+    const char *h = man->allowed_hosts[i];
+    size_t hl = strlen(h);
+    if (hl == 0) continue;
+    if (off > 0 && off + 1 < cap) out[off++] = ',';
+    if (off + hl >= cap) break;
+    for (size_t k = 0; k < hl; k++) {
+      out[off++] = (char)tolower((unsigned char)h[k]);
+    }
+    out[off] = '\0';
+  }
+}
+
+bool pl_consent_apply(const ccord_json *root, const char *id, const ccord_manifest *man,
+                      bool *out_enabled, bool *out_consent, ccord_perm_set *out_consented_perms,
+                      bool *out_has_consented_hosts, char *out_consented_hosts, size_t hosts_cap,
+                      bool *out_migrated)
+{
+  uint64_t perms = man ? man->perms : 0;
   *out_enabled = strcmp(id, "dev.ccord.starter-example") != 0;
   *out_consent = ccord_perm_max_class(perms) == CCORD_PERM_CLASS_SAFE;
   *out_consented_perms = ccord_perm_max_class(perms) == CCORD_PERM_CLASS_SAFE ? perms : 0;
+  if (out_has_consented_hosts) *out_has_consented_hosts = false;
+  if (out_consented_hosts && hosts_cap > 0) out_consented_hosts[0] = '\0';
+  if (out_migrated) *out_migrated = false;
+
   const ccord_json *entry = root ? ccord_json_get(root, id) : nullptr;
   if (entry) {
     *out_enabled = ccord_json_bool(ccord_json_get(entry, "enabled"), true);
@@ -274,6 +301,50 @@ bool pl_consent_apply(const ccord_json *root, const char *id, uint64_t perms, bo
       if (consent_bool && ccord_json_bool(consent_bool, false)) {
         *out_consent = true;
         *out_consented_perms = perms;
+      }
+    }
+
+    const ccord_json *hosts_j = ccord_json_get(entry, "allowed_hosts");
+    const ccord_json *hc_j = ccord_json_get(entry, "allowed_hosts_consented");
+    bool has_hosts_field = (hosts_j && ccord_json_type_of(hosts_j) == CCORD_JSON_ARRAY) ||
+                           (hc_j && ccord_json_bool(hc_j, false));
+    bool had_consented_hosts = false;
+    if (has_hosts_field) {
+      had_consented_hosts = true;
+      if (hosts_j && ccord_json_type_of(hosts_j) == CCORD_JSON_ARRAY &&
+          out_consented_hosts && hosts_cap > 0) {
+        size_t hn = ccord_json_array_len(hosts_j);
+        size_t off = 0;
+        for (size_t i = 0; i < hn; i++) {
+          size_t sl = 0;
+          const char *hs = ccord_json_string(ccord_json_array_at(hosts_j, i), &sl);
+          if (!hs || sl == 0) continue;
+          if (off > 0 && off + 1 < hosts_cap) out_consented_hosts[off++] = ',';
+          if (off + sl >= hosts_cap) break;
+          for (size_t k = 0; k < sl; k++) {
+            out_consented_hosts[off++] = (char)tolower((unsigned char)hs[k]);
+          }
+          out_consented_hosts[off] = '\0';
+        }
+      }
+    } else if ((*out_consented_perms & ((uint64_t)CCORD_PERM_NETWORK_HTTP | (uint64_t)CCORD_PERM_NETWORK_WS)) != 0) {
+      // Backwards compatibility: existing consent.json predates allowed_hosts persistence.
+      // Snapshot the currently installed manifest's allowed_hosts so unchanged plugins work seamlessly
+      // while future updates that expand allowed_hosts require explicit user consent.
+      had_consented_hosts = true;
+      if (man && out_consented_hosts && hosts_cap > 0) {
+        pl_format_hosts_csv(man, out_consented_hosts, hosts_cap);
+      }
+      if (out_migrated) *out_migrated = true;
+    }
+
+    if (out_has_consented_hosts) *out_has_consented_hosts = had_consented_hosts;
+    if (*out_consent && man) {
+      char cur_hosts[1024] = "";
+      pl_format_hosts_csv(man, cur_hosts, sizeof cur_hosts);
+      if (ccord_hosts_expanded(out_consented_hosts ? out_consented_hosts : "",
+                               had_consented_hosts, cur_hosts, man->perms)) {
+        *out_consent = false;
       }
     }
   }
@@ -298,6 +369,21 @@ void pl_consent_save(const ccord_plugins *m)
     ccord_jw_begin_object(&w);
     ccord_jw_key(&w, "enabled"); ccord_jw_bool(&w, p->enabled);
     ccord_jw_key(&w, "perms"); ccord_jw_int(&w, (int64_t)p->consented_perms);
+    if (p->has_consented_hosts) {
+      ccord_jw_key(&w, "allowed_hosts_consented"); ccord_jw_bool(&w, true);
+      ccord_jw_key(&w, "allowed_hosts");
+      ccord_jw_begin_array(&w);
+      const char *hp = p->consented_hosts_csv;
+      while (*hp) {
+        while (*hp && (*hp == ',' || isspace((unsigned char)*hp))) hp++;
+        const char *hs = hp;
+        while (*hp && *hp != ',') hp++;
+        const char *he = hp;
+        while (he > hs && isspace((unsigned char)he[-1])) he--;
+        if (he > hs) ccord_jw_string(&w, hs, (size_t)(he - hs));
+      }
+      ccord_jw_end_array(&w);
+    }
     ccord_jw_end_object(&w);
   }
   ccord_jw_end_object(&w);

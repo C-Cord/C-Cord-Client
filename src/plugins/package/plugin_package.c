@@ -166,7 +166,7 @@ char *pl_resolve_icon_path(const char *real_dir, const char *rel_icon)
 }
 
 static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir_name,
-                         const ccord_json *consent_root, size_t *started)
+                         const ccord_json *consent_root, size_t *started, bool *out_migrated)
 {
   char manifest_path[PBUF + 64];
   int mp_len = snprintf(manifest_path, sizeof manifest_path, "%s/plugin.json", dir_path);
@@ -249,6 +249,8 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
     p->enabled = false;
     p->consent_granted = false;
     p->consented_perms = 0;
+    p->has_consented_hosts = false;
+    p->consented_hosts_csv[0] = '\0';
     p->state = CCORD_PLUGIN_FAILED;
     pl_set_text(p->error, sizeof p->error, rev_reason[0] ? rev_reason : "Revoked by C-Cord moderators");
     pl_publish_state(m, p);
@@ -264,7 +266,10 @@ static void consider_dir(ccord_plugins *m, const char *dir_path, const char *dir
   }
   pl_storage_setup(m, p);
   p->consented_perms = ccord_perm_max_class(man.perms) == CCORD_PERM_CLASS_SAFE ? man.perms : 0;
-  pl_consent_apply(consent_root, man.id, man.perms, &p->enabled, &p->consent_granted, &p->consented_perms);
+  bool migrated = false;
+  pl_consent_apply(consent_root, man.id, &man, &p->enabled, &p->consent_granted, &p->consented_perms,
+                   &p->has_consented_hosts, p->consented_hosts_csv, sizeof p->consented_hosts_csv, &migrated);
+  if (migrated && out_migrated) *out_migrated = true;
   if (ccord_perm_max_class(man.perms) == CCORD_PERM_CLASS_SAFE) {
     p->consent_granted = true;
     p->consented_perms = man.perms;
@@ -303,6 +308,7 @@ size_t ccord_plugins_load_all(ccord_plugins *m)
   ccord_arena consent_ar = {.chunk_size = 4096u};
   const ccord_json *consent_root = m->nsearch > 0 ? pl_consent_parse_file(m, &consent_ar) : nullptr;
   size_t started = 0;
+  bool migrated_hosts = false;
   for (size_t i = 0; i < m->nsearch; i++) {
     ccord_dir *d = ccord_dir_open(m->search[i]);
     if (!d) {
@@ -317,11 +323,12 @@ size_t ccord_plugins_load_all(ccord_plugins *m)
       int n = snprintf(path, sizeof path, "%s/%s", m->search[i], ename);
       if (n < 0 || (size_t)n >= sizeof path) continue;
       if (!is_dir && !ccord_path_is_dir(path)) continue;
-      consider_dir(m, path, ename, consent_root, &started);
+      consider_dir(m, path, ename, consent_root, &started, &migrated_hosts);
     }
     ccord_dir_close(d);
   }
   if (consent_ar.head) ccord_arena_free(&consent_ar);
+  if (migrated_hosts) pl_consent_save(m);
   if (m->catalog) ccord_catalog_enforce_revocations(m->catalog);
   return started;
 }
@@ -369,13 +376,28 @@ bool ccord_plugins_export_cce(ccord_plugins *m, const char *id, const char *dest
 
 bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
                                 const char *expected_id, const char *expected_version,
-                                uint64_t expected_perms, bool from_catalog,
-                                bool preapprove_consent,
+                                uint64_t expected_perms, const char *expected_allowed_hosts,
+                                bool from_catalog, bool preapprove_consent,
                                 char *err_buf, size_t err_cap)
 {
   if (!m || !pkg_path || !m->has_data_dir) {
     if (err_buf && err_cap) snprintf(err_buf, err_cap, "plugin data directory unavailable");
     return false;
+  }
+  // Compute SHA-256 of the .cce archive before extraction for revocation checks and sideload tracking.
+  char pkg_sha[65] = "";
+  if (!ccord_catalog_sha256_file_hex(pkg_path, pkg_sha)) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "cannot read or hash package file");
+    return false;
+  }
+  if (m->catalog) {
+    char rev_reason[256] = "";
+    if (ccord_catalog_is_hash_or_id_revoked(m->catalog, nullptr, pkg_sha, rev_reason, sizeof rev_reason)) {
+      if (err_buf && err_cap) {
+        snprintf(err_buf, err_cap, "%s", rev_reason[0] ? rev_reason : "package SHA-256 is revoked");
+      }
+      return false;
+    }
   }
   char base[PBUF], tmp_dir[PBUF + 32], inst_root[PBUF + 32];
   snprintf(base, sizeof base, "%s/plugins", m->data_dir);
@@ -411,6 +433,16 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
     if (err_buf && err_cap) snprintf(err_buf, err_cap, "cannot overwrite bundled extension");
     return false;
   }
+  if (m->catalog) {
+    char rev_reason[256] = "";
+    if (ccord_catalog_is_hash_or_id_revoked(m->catalog, man.id, pkg_sha, rev_reason, sizeof rev_reason)) {
+      pl_rm_dir_recursive(tmp_dir);
+      if (err_buf && err_cap) {
+        snprintf(err_buf, err_cap, "%s", rev_reason[0] ? rev_reason : "plugin is revoked by C-Cord moderators");
+      }
+      return false;
+    }
+  }
   if (from_catalog) {
     if (!expected_id || strcmp(man.id, expected_id) != 0) {
       pl_rm_dir_recursive(tmp_dir);
@@ -429,6 +461,18 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
       pl_rm_dir_recursive(tmp_dir);
       if (err_buf && err_cap) snprintf(err_buf, err_cap, "package declares permissions absent from catalog entry");
       return false;
+    }
+    // Reject packages whose allowed_hosts expands beyond the verified catalog listing.
+    if (expected_allowed_hosts) {
+      char pkg_hosts[1024] = "";
+      pl_format_hosts_csv(&man, pkg_hosts, sizeof pkg_hosts);
+      if (ccord_hosts_expanded(expected_allowed_hosts, true, pkg_hosts, man.perms)) {
+        pl_rm_dir_recursive(tmp_dir);
+        if (err_buf && err_cap) {
+          snprintf(err_buf, err_cap, "package allowed_hosts expands beyond catalog entry");
+        }
+        return false;
+      }
     }
   }
 
@@ -453,21 +497,28 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
     ccord_free(existing->dir);
     existing->dir = nd;
     if (!from_catalog) {
-      // Manual .cce overwrite must never silently inherit prior Class 2/3 consent.
+      // Manual .cce overwrite must never silently inherit prior Class 2/3 consent or allowed_hosts.
       existing->consent_granted = false;
       existing->consented_perms = 0;
+      existing->has_consented_hosts = false;
+      existing->consented_hosts_csv[0] = '\0';
     } else if (preapprove_consent && (man.perms & ~expected_perms) == 0) {
       existing->consent_granted = true;
       existing->consented_perms = man.perms;
+      existing->has_consented_hosts = true;
+      pl_format_hosts_csv(&man, existing->consented_hosts_csv, sizeof existing->consented_hosts_csv);
       existing->enabled = true;
     }
     pl_on_plugin_reload(m, man.id);
+    if (!from_catalog && m->catalog) {
+      ccord_catalog_record_local_install(m->catalog, man.id, pkg_sha);
+    }
     return true;
   }
   size_t started = 0;
   ccord_arena consent_ar = {.chunk_size = 4096u};
   const ccord_json *consent_root = from_catalog ? pl_consent_parse_file(m, &consent_ar) : nullptr;
-  consider_dir(m, final_dir, man.id, consent_root, &started);
+  consider_dir(m, final_dir, man.id, consent_root, &started, nullptr);
   if (consent_ar.head) ccord_arena_free(&consent_ar);
   if (from_catalog && preapprove_consent) {
     plugin *np = pl_find_owner(m, man.id);
@@ -475,12 +526,24 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
       pl_on_plugin_consent_accept_for(m, np->m.id, np->m.perms);
     }
   }
+  if (!from_catalog && m->catalog) {
+    ccord_catalog_record_local_install(m->catalog, man.id, pkg_sha);
+  }
   return true;
 }
 
 bool ccord_plugins_import_package(ccord_plugins *m, const char *pkg_path, char *err_buf, size_t err_cap)
 {
-  return pl_import_package_internal(m, pkg_path, nullptr, nullptr, 0, false, false, err_buf, err_cap);
+  return pl_import_package_internal(m, pkg_path, nullptr, nullptr, 0, nullptr, false, false, err_buf, err_cap);
+}
+
+bool ccord_plugins_import_package_from_catalog(ccord_plugins *m, const char *pkg_path,
+                                               const char *expected_id, const char *expected_version,
+                                               uint64_t expected_perms, const char *expected_allowed_hosts,
+                                               bool preapprove_consent, char *err_buf, size_t err_cap)
+{
+  return pl_import_package_internal(m, pkg_path, expected_id, expected_version, expected_perms,
+                                    expected_allowed_hosts, true, preapprove_consent, err_buf, err_cap);
 }
 
 bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, size_t err_cap)
@@ -521,6 +584,8 @@ bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, si
   p->used = false;
   p->m.id[0] = '\0';
   p->revoked = false;
+  p->has_consented_hosts = false;
+  p->consented_hosts_csv[0] = '\0';
   p->items = nullptr;
   p->nitems = 0;
   p->cap_items = 0;
