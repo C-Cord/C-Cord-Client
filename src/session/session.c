@@ -116,6 +116,7 @@ void ccord_session_destroy(ccord_session *s)
   sess_reset_verification_cache(s);
   ccord_free(s->verification_cache);
   ccord_free(s->video_resolved);
+  ccord_free(s->collectibles);
   ccord_free(s);
 }
 
@@ -178,6 +179,13 @@ ccord_status ccord_session_set_transport(ccord_session *s, ccord_transport *tran
   s->slash_choice_count = 0;
   s->npins_in_flight = 0;
   s->notif_head = 0;
+  ccord_free(s->collectibles);
+  s->collectibles = nullptr;
+  s->collectible_count = 0;
+  s->collectibles_state = CCORD_FETCH_IDLE;
+  s->collectibles_fetched_ms = 0;
+  s->collectibles_gen++;
+  s->collectibles_error[0] = '\0';
   s->notif_count = 0;
   s->video_resolved_head = 0;
   s->video_resolved_count = 0;

@@ -201,6 +201,12 @@ struct ccord_session {
   ccord_store *store;
   ccord_transport *transport;
   ccord_profile_rest *profile_rest;   // own-profile edits (profile_edit.c); null until attached
+  ccord_owned_collectible *collectibles;
+  size_t collectible_count;
+  ccord_fetch_state collectibles_state;
+  uint64_t collectibles_fetched_ms;
+  uint64_t collectibles_gen;
+  char collectibles_error[160];
   ccord_connection_state state;
   bool stale;               // store seeded from the on-disk cache, READY not yet applied (see ccord_session_set_stale)
   // Background requests that arrived while stale: replayed once when READY clears it.

@@ -288,3 +288,108 @@ ccord_status ccord_image_decode_rgba(const uint8_t *data, size_t len, uint8_t **
   return ccord_image_decode_rgba_max(data, len, MAX_IMAGE_DIM, out_rgba, out_w, out_h, err);
 }
 
+ccord_status ccord_image_crop_png(const uint8_t *src, size_t src_len, float zoom, float pan_x, float pan_y,
+                                  int out_w, int out_h, uint8_t **out_png, size_t *out_len, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (out_png) *out_png = nullptr;
+  if (out_len) *out_len = 0;
+  if (!src || src_len < 4 || !out_png || !out_len || out_w <= 0 || out_h <= 0 || out_w > 1024 || out_h > 1024) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "image crop: invalid argument");
+  }
+  if (zoom < 1.0f) zoom = 1.0f;
+  if (zoom > 4.0f) zoom = 4.0f;
+  if (pan_x < -1.0f) pan_x = -1.0f;
+  if (pan_x > 1.0f) pan_x = 1.0f;
+  if (pan_y < -1.0f) pan_y = -1.0f;
+  if (pan_y > 1.0f) pan_y = 1.0f;
+
+  uint8_t *rgba = nullptr;
+  int sw = 0, sh = 0;
+  ccord_status st = ccord_image_decode_rgba(src, src_len, &rgba, &sw, &sh, err);
+  if (st != CCORD_OK) return st;
+
+  // Compute aspect-fit cover crop window inside (sw x sh), zoomed by `zoom` and panned by (pan_x, pan_y).
+  double target_ar = (double)out_w / (double)out_h;
+  double src_ar = (double)sw / (double)sh;
+  double base_w = (double)sw, base_h = (double)sh;
+  if (src_ar > target_ar) base_w = (double)sh * target_ar;
+  else base_h = (double)sw / target_ar;
+  double crop_w = base_w / (double)zoom;
+  double crop_h = base_h / (double)zoom;
+  if (crop_w < 1.0) crop_w = 1.0;
+  if (crop_h < 1.0) crop_h = 1.0;
+  double max_ox = ((double)sw - crop_w) * 0.5;
+  double max_oy = ((double)sh - crop_h) * 0.5;
+  double x0 = max_ox + (double)pan_x * max_ox;
+  double y0 = max_oy + (double)pan_y * max_oy;
+
+  uint8_t *dst = ccord_malloc((size_t)out_w * (size_t)out_h * 4u);
+  if (!dst) {
+    ccord_free(rgba);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "image crop: out of memory");
+  }
+  for (int y = 0; y < out_h; y++) {
+    double sy = y0 + (((double)y + 0.5) / (double)out_h) * crop_h - 0.5;
+    if (sy < 0.0) sy = 0.0;
+    if (sy > (double)(sh - 1)) sy = (double)(sh - 1);
+    int iy0 = (int)sy;
+    int iy1 = iy0 + 1 < sh ? iy0 + 1 : iy0;
+    double fy = sy - (double)iy0;
+    for (int x = 0; x < out_w; x++) {
+      double sx = x0 + (((double)x + 0.5) / (double)out_w) * crop_w - 0.5;
+      if (sx < 0.0) sx = 0.0;
+      if (sx > (double)(sw - 1)) sx = (double)(sw - 1);
+      int ix0 = (int)sx;
+      int ix1 = ix0 + 1 < sw ? ix0 + 1 : ix0;
+      double fx = sx - (double)ix0;
+
+      const uint8_t *p00 = rgba + ((size_t)iy0 * (size_t)sw + (size_t)ix0) * 4u;
+      const uint8_t *p10 = rgba + ((size_t)iy0 * (size_t)sw + (size_t)ix1) * 4u;
+      const uint8_t *p01 = rgba + ((size_t)iy1 * (size_t)sw + (size_t)ix0) * 4u;
+      const uint8_t *p11 = rgba + ((size_t)iy1 * (size_t)sw + (size_t)ix1) * 4u;
+      uint8_t *op = dst + ((size_t)y * (size_t)out_w + (size_t)x) * 4u;
+      for (int c = 0; c < 4; c++) {
+        double top = (double)p00[c] * (1.0 - fx) + (double)p10[c] * fx;
+        double bot = (double)p01[c] * (1.0 - fx) + (double)p11[c] * fx;
+        int val = (int)(top * (1.0 - fy) + bot * fy + 0.5);
+        if (val < 0) val = 0;
+        if (val > 255) val = 255;
+        op[c] = (uint8_t)val;
+      }
+    }
+  }
+  ccord_free(rgba);
+
+  png_image pimg;
+  memset(&pimg, 0, sizeof pimg);
+  pimg.version = PNG_IMAGE_VERSION;
+  pimg.width = (png_uint_32)out_w;
+  pimg.height = (png_uint_32)out_h;
+  pimg.format = PNG_FORMAT_RGBA;
+
+  png_alloc_size_t png_sz = 0;
+  if (!png_image_write_to_memory(&pimg, nullptr, &png_sz, 0, dst, 0, nullptr) || png_sz == 0) {
+    ccord_free(dst);
+    png_image_free(&pimg);
+    return ccord_error_set(err, CCORD_ERR_IO, "image crop: png size query failed");
+  }
+  uint8_t *buf = ccord_malloc((size_t)png_sz);
+  if (!buf) {
+    ccord_free(dst);
+    png_image_free(&pimg);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "image crop: out of memory");
+  }
+  if (!png_image_write_to_memory(&pimg, buf, &png_sz, 0, dst, 0, nullptr) || PNG_IMAGE_FAILED(pimg)) {
+    ccord_free(buf);
+    ccord_free(dst);
+    png_image_free(&pimg);
+    return ccord_error_set(err, CCORD_ERR_IO, "image crop: png encode failed");
+  }
+  ccord_free(dst);
+  png_image_free(&pimg);
+  *out_png = buf;
+  *out_len = (size_t)png_sz;
+  return CCORD_OK;
+}
+

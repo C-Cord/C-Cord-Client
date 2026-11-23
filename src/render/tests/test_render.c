@@ -922,6 +922,74 @@ static void test_anti_aliasing_and_mips(ccord_renderer *r)
   ccord_render_evict_texture(r, "aa:blue");
 }
 
+static void test_image_crop_png(void)
+{
+  // Build a 64x64 4-quadrant PNG: TL=Red, TR=Green, BL=Blue, BR=Yellow
+  const int W = 64, H = 64;
+  uint8_t *rgba = ccord_malloc((size_t)W * (size_t)H * 4u);
+  CT_CHECK(rgba != nullptr);
+  if (!rgba) return;
+  for (int y = 0; y < H; y++) {
+    for (int x = 0; x < W; x++) {
+      uint8_t *p = rgba + ((size_t)y * (size_t)W + (size_t)x) * 4u;
+      if (y < H / 2 && x < W / 2) { p[0] = 240; p[1] = 20;  p[2] = 20;  p[3] = 255; }
+      else if (y < H / 2)         { p[0] = 20;  p[1] = 220; p[2] = 20;  p[3] = 255; }
+      else if (x < W / 2)         { p[0] = 20;  p[1] = 40;  p[2] = 240; p[3] = 255; }
+      else                        { p[0] = 240; p[1] = 220; p[2] = 20;  p[3] = 255; }
+    }
+  }
+  png_image img = {.version = PNG_IMAGE_VERSION, .width = (png_uint_32)W, .height = (png_uint_32)H, .format = PNG_FORMAT_RGBA};
+  png_alloc_size_t src_sz = 0;
+  (void)png_image_write_to_memory(&img, nullptr, &src_sz, 0, rgba, 0, nullptr);
+  uint8_t *src = src_sz > 0 ? ccord_malloc(src_sz) : nullptr;
+  CT_CHECK(src != nullptr && png_image_write_to_memory(&img, src, &src_sz, 0, rgba, 0, nullptr) != 0);
+  png_image_free(&img);
+  ccord_free(rgba);
+  if (!src) return;
+
+  ccord_error err = {0};
+  uint8_t *out_png = nullptr;
+  size_t out_len = 0;
+  static const uint8_t kSig[8] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
+
+  // Zoom 2x, pan top-left (-1, -1) -> crops strictly inside the Red TL quadrant, resized to 32x32
+  CT_CHECK(ccord_image_crop_png(src, (size_t)src_sz, 2.0f, -1.0f, -1.0f, 32, 32, &out_png, &out_len, &err) == CCORD_OK);
+  CT_CHECK(out_png != nullptr && out_len > 8 && memcmp(out_png, kSig, 8) == 0);
+  if (out_png) {
+    uint8_t *dec = nullptr;
+    int dw = 0, dh = 0;
+    CT_CHECK(ccord_image_decode_rgba(out_png, out_len, &dec, &dw, &dh, &err) == CCORD_OK);
+    CT_CHECK(dw == 32 && dh == 32 && dec != nullptr);
+    if (dec) {
+      const uint8_t *c = dec + ((size_t)16 * 32u + 16u) * 4u;
+      CT_CHECK(c[0] > 200 && c[1] < 50 && c[2] < 50 && c[3] == 255);
+      ccord_free(dec);
+    }
+    ccord_free(out_png);
+    out_png = nullptr;
+  }
+
+  // Zoom 2x, pan bottom-right (+1, +1), banner aspect 40x20 -> crops inside the Yellow BR quadrant
+  CT_CHECK(ccord_image_crop_png(src, (size_t)src_sz, 2.0f, 1.0f, 1.0f, 40, 20, &out_png, &out_len, &err) == CCORD_OK);
+  CT_CHECK(out_png != nullptr && out_len > 8 && memcmp(out_png, kSig, 8) == 0);
+  if (out_png) {
+    uint8_t *dec = nullptr;
+    int dw = 0, dh = 0;
+    CT_CHECK(ccord_image_decode_rgba(out_png, out_len, &dec, &dw, &dh, &err) == CCORD_OK);
+    CT_CHECK(dw == 40 && dh == 20 && dec != nullptr);
+    if (dec) {
+      const uint8_t *c = dec + ((size_t)10 * 40u + 20u) * 4u;
+      CT_CHECK(c[0] > 200 && c[1] > 180 && c[2] < 50 && c[3] == 255);
+      ccord_free(dec);
+    }
+    ccord_free(out_png);
+  }
+
+  // Invalid dimensions fail cleanly
+  CT_CHECK(ccord_image_crop_png(src, (size_t)src_sz, 2.0f, 0.0f, 0.0f, 0, 32, &out_png, &out_len, &err) != CCORD_OK);
+  ccord_free(src);
+}
+
 int main(int argc, char **argv)
 {
   ccord_error err;
@@ -958,6 +1026,7 @@ int main(int argc, char **argv)
   test_platform_apis(p, r);
   test_v3_primitives(r);
   test_anti_aliasing_and_mips(r);
+  test_image_crop_png();
   ccord_render_destroy(r);
   ccord_platform_destroy(p);
   return CT_RESULT("test_render");

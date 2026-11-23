@@ -1260,6 +1260,11 @@ size_t ccord_gateway_member_ranges(uint32_t chunks, uint32_t ranges[3][2]);
                                                                ccord_profile_effect_config *out_effect, bool *has_effect,
                                                                ccord_profile_frame_config *out_frame, bool *has_frame,
                                                                ccord_error *err);
+// Parses GET /users/@me/collectibles-purchases into the user's owned Avatar Decorations, Profile Effects and Nameplates.
+// Caller frees *out_items with ccord_free.
+[[nodiscard]] ccord_status ccord_live_json_collectibles_purchases(const char *json, size_t len,
+                                                                  ccord_owned_collectible **out_items,
+                                                                  size_t *out_count, ccord_error *err);
 // Resolves the deterministic disk cache path under $XDG_CACHE_HOME/ccord/media/ for a CDN URL.
 [[nodiscard]] ccord_status ccord_media_cache_path(const char *url, char *out_path, size_t cap, ccord_error *err);
 // Enables/disables emitting CCORD_NET_RAW_GATEWAY for op 0 dispatch frames (zero overhead while disabled).

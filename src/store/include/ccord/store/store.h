@@ -323,6 +323,31 @@ typedef struct ccord_self_profile_update {
   bool set_display_name, set_avatar, set_banner, set_bio, set_pronouns, set_accent;
   const char *display_name, *avatar_url, *banner_url, *bio, *pronouns;   // CDN URLs for avatar/banner
   uint32_t accent_color;                                                 // 0 = none
+  // Extended global / per-server profile fields (zero-init safe).
+  ccord_id guild_id;                                                     // CCORD_ID_NONE = global; non-zero = per-server
+  bool set_handle;
+  const char *handle;
+  bool set_theme_colors;
+  bool theme_colors_set;
+  uint32_t theme_primary;
+  uint32_t theme_accent;
+  bool set_avatar_decoration;
+  ccord_id avatar_decoration_sku_id;
+  const char *avatar_decoration_url;
+  bool set_profile_effect;
+  ccord_id profile_effect_id;
+  const ccord_profile_effect_config *profile_effect;   // optional resolved config (nullptr keeps/clears)
+  bool set_profile_frame;
+  ccord_id profile_frame_sku_id;
+  const ccord_profile_frame_config *profile_frame;     // optional resolved frame config (nullptr keeps/clears)
+  bool set_nameplate;
+  ccord_id nameplate_sku_id;
+  const char *nameplate_asset;
+  const char *nameplate_palette;
+  bool set_clan;
+  ccord_id clan_guild_id;
+  const char *clan_tag;
+  const char *clan_badge;
 } ccord_self_profile_update;
 [[nodiscard]] ccord_status ccord_store_set_self_profile(ccord_store *s, const ccord_self_profile_update *u,
                                                         ccord_error *err);

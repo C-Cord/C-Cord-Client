@@ -352,6 +352,7 @@ bool dj_map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_json
     if (strcmp(fs, "COMMUNITY") == 0) g.feature_community = true;
     else if (strcmp(fs, "VANITY_URL") == 0) g.feature_vanity_url = true;
     else if (strcmp(fs, "BANNER") == 0) g.feature_banner = true;
+    else if (strcmp(fs, "GUILD_TAGS") == 0 || strcmp(fs, "CLAN") == 0) g.feature_guild_tags = true;
   }
   const ccord_json *inc_raw = gj ? ccord_json_get(gj, "incidents_data") : nullptr;
   if (!inc_raw && props) inc_raw = ccord_json_get(props, "incidents_data");

@@ -83,6 +83,7 @@ typedef struct ccord_guild {
   bool feature_community;                      // COMMUNITY in guild.features
   bool feature_vanity_url;                     // VANITY_URL in guild.features
   bool feature_banner;                         // BANNER in guild.features
+  bool feature_guild_tags;                     // GUILD_TAGS or CLAN in guild.features
   bool has_guild_settings;                     // true when overview/safety fields were populated
   bool has_incidents_data;                     // true when incidents_data was populated
   int64_t invites_disabled_until_ms;           // unix ms (0 = not paused)

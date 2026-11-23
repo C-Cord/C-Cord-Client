@@ -102,6 +102,17 @@ static bool parse_profile_effect_item(const ccord_json *obj, ccord_id fallback_i
   out->id = id;
   out->sku_id = sku_id;
 
+  const char *title = dj_jstr(cfg, "title");
+  if (!title || title[0] == '\0') title = dj_jstr(obj, "title");
+  if (!title || title[0] == '\0') title = dj_jstr(cfg, "name");
+  if (!title || title[0] == '\0') title = dj_jstr(obj, "name");
+  if (title && title[0] != '\0') dj_copy_trunc_utf8(out->title, sizeof out->title, title);
+
+  const char *desc = dj_jstr(cfg, "description");
+  if (!desc || desc[0] == '\0') desc = dj_jstr(obj, "description");
+  if (!desc || desc[0] == '\0') desc = dj_jstr(cfg, "accessibilityLabel");
+  if (desc && desc[0] != '\0') dj_copy_trunc_utf8(out->description, sizeof out->description, desc);
+
   const char *thumb = dj_jstr(cfg, "thumbnailPreviewSrc");
   if (!thumb) thumb = dj_jstr(cfg, "thumbnail_preview_src");
   copy_decor_url(out->thumbnail_url, thumb);
@@ -291,9 +302,9 @@ static void extract_profile_frame_ref(const ccord_json *prof_obj, const ccord_js
 static void parse_profile_extras(ccord_arena *a, const ccord_json *root, const ccord_json *uj, const ccord_json *pj,
                                  ccord_id uid, ccord_user_profile *prof)
 {
-  // user.banner_color / user_profile.banner_color, then the user-level theme from user_profile.theme_colors.
-  if (dj_parse_hex_color(dj_jstr(uj, "banner_color"), &prof->banner_color) ||
-      (pj && dj_parse_hex_color(dj_jstr(pj, "banner_color"), &prof->banner_color))) {
+  // user_profile.banner_color takes priority over user.banner_color, then user_profile.theme_colors.
+  if ((pj && dj_parse_hex_color(dj_jstr(pj, "banner_color"), &prof->banner_color)) ||
+      dj_parse_hex_color(dj_jstr(uj, "banner_color"), &prof->banner_color)) {
     prof->has_banner_color = true;
   }
   if (theme_pair(pj, "theme_colors", &prof->theme_primary, &prof->theme_accent)) prof->has_theme = true;
@@ -303,11 +314,16 @@ static void parse_profile_extras(ccord_arena *a, const ccord_json *root, const c
   const ccord_json *gm = ccord_json_get(root, "guild_member");
   if (gm && ccord_json_type_of(gm) != CCORD_JSON_OBJECT) gm = nullptr;
 
-  // Per-server profile: its theme replaces the user-level theme when it is present and valid.
+  // Per-server profile: store guild theme separately AND also apply to active theme for profile_view.c.
   ccord_id gid = CCORD_ID_NONE;
   if (dj_json_id_key(gmp, "guild_id", &gid) && gid != CCORD_DM_GUILD_ID) prof->guild_id = gid;
   else gid = CCORD_ID_NONE;
-  if (theme_pair(gmp, "theme_colors", &prof->theme_primary, &prof->theme_accent)) prof->has_theme = true;
+  if (theme_pair(gmp, "theme_colors", &prof->guild_theme_primary, &prof->guild_theme_accent)) {
+    prof->guild_has_theme = true;
+    prof->has_theme = true;
+    prof->theme_primary = prof->guild_theme_primary;
+    prof->theme_accent = prof->guild_theme_accent;
+  }
   if (gmp) {
     if (dj_parse_hex_color(dj_jstr(gmp, "banner_color"), &prof->banner_color)) prof->has_banner_color = true;
     const ccord_json *gac = ccord_json_get(gmp, "accent_color");
@@ -344,11 +360,15 @@ static void parse_profile_extras(ccord_arena *a, const ccord_json *root, const c
 
   // Avatar decorations (user + per-server guild_member override).
   prof->avatar_decoration_url = dj_extract_avatar_deco_url(a, uj);
+  prof->avatar_decoration_sku_id = dj_extract_avatar_deco_sku(uj);
   prof->guild_avatar_decoration_url = dj_extract_avatar_deco_url(a, gm);
+  prof->guild_avatar_decoration_sku_id = dj_extract_avatar_deco_sku(gm);
 
   // Nameplates (user + per-server guild_member override).
   dj_extract_nameplate_info(uj, prof->nameplate_asset, prof->nameplate_palette);
+  prof->nameplate_sku_id = dj_extract_nameplate_sku(uj);
   dj_extract_nameplate_info(gm, prof->guild_nameplate_asset, prof->guild_nameplate_palette);
+  prof->guild_nameplate_sku_id = dj_extract_nameplate_sku(gm);
 
   // Profile effects & profile frames (user_profile + per-server guild_member_profile overrides).
   extract_profile_effect_ref(pj, &prof->profile_effect_id, &prof->profile_effect);
@@ -506,6 +526,7 @@ ccord_status ccord_live_json_user_profile(const char *json, size_t len, ccord_id
     .status_text = "",
     .avatar_url = avatar_url,
     .avatar_decoration_url = prof->avatar_decoration_url,
+    .avatar_decoration_sku_id = prof->avatar_decoration_sku_id,
     .banner_url = banner_url,
     .accent_color = (uint32_t)accent,
     .bio = bio,
@@ -514,6 +535,7 @@ ccord_status ccord_live_json_user_profile(const char *json, size_t len, ccord_id
     .is_bot = botj && ccord_json_bool(botj, false),
     .avatar_palette = (uint8_t)(uid % 6u),
     .clan_guild_id = prof->clan_guild_id,
+    .nameplate_sku_id = prof->nameplate_sku_id,
   };
   memcpy(u->clan_tag, prof->clan_tag, sizeof u->clan_tag);
   memcpy(u->clan_badge, prof->clan_badge, sizeof u->clan_badge);
@@ -637,6 +659,324 @@ ccord_status ccord_live_json_collectible_product(const char *json, size_t len, c
       if (parse_profile_frame_item(root, root_sku, out_frame)) *has_frame = true;
     }
   }
+done:
+  ccord_arena_free(&scratch);
+  return st;
+}
+
+typedef struct cp_list {
+  ccord_owned_collectible *items;
+  size_t count;
+  size_t cap;
+} cp_list;
+
+static void cp_push(cp_list *L, const ccord_owned_collectible *cand)
+{
+  if (!L || !cand || L->count >= CCORD_COLLECTIBLES_MAX) return;
+  if (cand->sku_id == CCORD_ID_NONE && cand->item_id == CCORD_ID_NONE) return;
+  for (size_t i = 0; i < L->count; i++) {
+    ccord_owned_collectible *e = &L->items[i];
+    if (e->kind != cand->kind) continue;
+    bool same = (cand->sku_id != CCORD_ID_NONE && e->sku_id == cand->sku_id) ||
+                (cand->kind == CCORD_COLLECTIBLE_PROFILE_EFFECT && cand->item_id != CCORD_ID_NONE && e->item_id == cand->item_id);
+    if (!same) continue;
+    if (e->name[0] == '\0' && cand->name[0] != '\0') memcpy(e->name, cand->name, sizeof e->name);
+    if (e->category[0] == '\0' && cand->category[0] != '\0') memcpy(e->category, cand->category, sizeof e->category);
+    if (e->asset[0] == '\0' && cand->asset[0] != '\0') memcpy(e->asset, cand->asset, sizeof e->asset);
+    if (e->palette[0] == '\0' && cand->palette[0] != '\0') memcpy(e->palette, cand->palette, sizeof e->palette);
+    if (e->cdn_url[0] == '\0' && cand->cdn_url[0] != '\0') memcpy(e->cdn_url, cand->cdn_url, sizeof e->cdn_url);
+    if (e->static_url[0] == '\0' && cand->static_url[0] != '\0') memcpy(e->static_url, cand->static_url, sizeof e->static_url);
+    if (!e->has_effect && cand->has_effect) {
+      e->has_effect = true;
+      e->effect = cand->effect;
+    }
+    if (!e->has_frame && cand->has_frame) {
+      e->has_frame = true;
+      e->frame = cand->frame;
+    }
+    return;
+  }
+  if (L->count == L->cap) {
+    size_t ncap = L->cap ? L->cap * 2u : 16u;
+    if (ncap > CCORD_COLLECTIBLES_MAX) ncap = CCORD_COLLECTIBLES_MAX;
+    ccord_owned_collectible *na = ccord_realloc_array(L->items, ncap, sizeof *na);
+    if (!na) return;
+    L->items = na;
+    L->cap = ncap;
+  }
+  L->items[L->count++] = *cand;
+}
+
+static void cp_titlecase_copy(char *dst, size_t cap, const char *src)
+{
+  if (!dst || cap == 0) return;
+  dst[0] = '\0';
+  if (!src || !src[0]) return;
+  dj_copy_trunc_utf8(dst, cap, src);
+  for (size_t i = 0; dst[i] != '\0'; i++) {
+    if (dst[i] == '_') dst[i] = ' ';
+    if ((i == 0 || dst[i - 1] == ' ') && dst[i] >= 'a' && dst[i] <= 'z') {
+      dst[i] = (char)(dst[i] - 'a' + 'A');
+    }
+  }
+}
+
+static void cp_parse_item(cp_list *L, const ccord_json *it, int64_t type_hint, ccord_id parent_sku,
+                          const char *parent_name, const char *parent_cat, int64_t expires_ms)
+{
+  if (!it || ccord_json_type_of(it) != CCORD_JSON_OBJECT) return;
+  int64_t itype = dj_json_i64(it, "type", type_hint);
+  if (itype < 0) {
+    if (ccord_json_get(it, "layers") != nullptr || ccord_json_get(it, "inner_width") != nullptr ||
+        ccord_json_get(it, "innerWidth") != nullptr) itype = 3;
+    else if (ccord_json_get(it, "palette") != nullptr) itype = 2;
+    else if (ccord_json_get(it, "effects") != nullptr || ccord_json_get(it, "thumbnailPreviewSrc") != nullptr ||
+             ccord_json_get(it, "config") != nullptr) itype = 1;
+    else if (ccord_json_get(it, "asset") != nullptr) itype = 0;
+  }
+  ccord_id isku = CCORD_ID_NONE;
+  (void)dj_json_id_key(it, "sku_id", &isku);
+  if (isku == CCORD_ID_NONE) isku = parent_sku;
+
+  int64_t exp = dj_json_ts_ms(it, "expires_at");
+  if (exp == 0) exp = iso_key_ms(it, "expires_at");
+  if (exp == 0) exp = expires_ms;
+
+  const char *iname = dj_jstr(it, "title");
+  if (!iname || !iname[0]) iname = dj_jstr(it, "name");
+  if (!iname || !iname[0]) iname = dj_jstr(it, "label");
+  if (!iname || !iname[0]) iname = parent_name;
+
+  if (itype == 0) {
+    const char *asset = dj_jstr(it, "asset");
+    if (!dj_cdn_name_ok(asset) || isku == CCORD_ID_NONE) return;
+    ccord_owned_collectible c = {
+      .kind = CCORD_COLLECTIBLE_AVATAR_DECORATION,
+      .sku_id = isku,
+      .item_id = isku,
+      .expires_at_ms = exp,
+    };
+    dj_copy_trunc_utf8(c.name, sizeof c.name, (iname && iname[0]) ? iname : "Avatar Decoration");
+    if (parent_cat && parent_cat[0]) dj_copy_trunc_utf8(c.category, sizeof c.category, parent_cat);
+    dj_copy_trunc_utf8(c.asset, sizeof c.asset, asset);
+    (void)snprintf(c.cdn_url, sizeof c.cdn_url,
+                   "https://cdn.discordapp.com/avatar-decoration-presets/%s.png?size=128&passthrough=true", asset);
+    (void)snprintf(c.static_url, sizeof c.static_url,
+                   "https://cdn.discordapp.com/avatar-decoration-presets/%s.png?size=128&passthrough=false", asset);
+    cp_push(L, &c);
+  } else if (itype == 1) {
+    ccord_id eff_id = CCORD_ID_NONE;
+    (void)dj_json_id_key(it, "id", &eff_id);
+    const ccord_json *cfg = ccord_json_get(it, "config");
+    if (eff_id == CCORD_ID_NONE && cfg && ccord_json_type_of(cfg) == CCORD_JSON_OBJECT) {
+      (void)dj_json_id_key(cfg, "id", &eff_id);
+    }
+    if (eff_id == CCORD_ID_NONE) eff_id = isku;
+    if (isku == CCORD_ID_NONE) isku = eff_id;
+    if (eff_id == CCORD_ID_NONE) return;
+    ccord_owned_collectible c = {
+      .kind = CCORD_COLLECTIBLE_PROFILE_EFFECT,
+      .sku_id = isku,
+      .item_id = eff_id,
+      .expires_at_ms = exp,
+    };
+    ccord_profile_effect_config pe = {0};
+    if (parse_profile_effect_item(it, eff_id, &pe)) {
+      c.has_effect = true;
+      c.effect = pe;
+      if (pe.id != CCORD_ID_NONE) c.item_id = pe.id;
+      if (pe.title[0] != '\0') iname = pe.title;
+      const char *thumb = pe.thumbnail_url[0] ? pe.thumbnail_url
+                                              : (pe.static_frame_url[0] ? pe.static_frame_url : pe.reduced_motion_url);
+      const char *sturl = pe.reduced_motion_url[0] ? pe.reduced_motion_url
+                                                   : (pe.static_frame_url[0] ? pe.static_frame_url : pe.thumbnail_url);
+      dj_copy_trunc_utf8(c.cdn_url, sizeof c.cdn_url, thumb);
+      dj_copy_trunc_utf8(c.static_url, sizeof c.static_url, sturl);
+    }
+    dj_copy_trunc_utf8(c.name, sizeof c.name, (iname && iname[0]) ? iname : "Profile Effect");
+    if (parent_cat && parent_cat[0]) dj_copy_trunc_utf8(c.category, sizeof c.category, parent_cat);
+    cp_push(L, &c);
+  } else if (itype == 2) {
+    const char *asset = dj_jstr(it, "asset");
+    if (!dj_nameplate_asset_ok(asset) || isku == CCORD_ID_NONE) return;
+    const char *pal = dj_jstr(it, "palette");
+    if (!dj_cdn_name_ok(pal)) pal = "cobalt";
+    ccord_owned_collectible c = {
+      .kind = CCORD_COLLECTIBLE_NAMEPLATE,
+      .sku_id = isku,
+      .item_id = isku,
+      .expires_at_ms = exp,
+    };
+    dj_copy_trunc_utf8(c.name, sizeof c.name, (iname && iname[0]) ? iname : "Nameplate");
+    dj_copy_trunc_utf8(c.asset, sizeof c.asset, asset);
+    dj_copy_trunc_utf8(c.palette, sizeof c.palette, pal);
+    if (parent_cat && parent_cat[0]) dj_copy_trunc_utf8(c.category, sizeof c.category, parent_cat);
+    else cp_titlecase_copy(c.category, sizeof c.category, pal);
+    cp_push(L, &c);
+  } else if (itype == 3) {
+    ccord_profile_frame_config pf = {0};
+    bool parsed = parse_profile_frame_item(it, isku, &pf);
+    ccord_id fsku = parsed ? pf.sku_id : isku;
+    if (fsku == CCORD_ID_NONE) (void)dj_json_id_key(it, "id", &fsku);
+    if (fsku == CCORD_ID_NONE) return;
+    ccord_owned_collectible c = {
+      .kind = CCORD_COLLECTIBLE_PROFILE_FRAME,
+      .sku_id = fsku,
+      .item_id = fsku,
+      .expires_at_ms = exp,
+      .has_frame = parsed,
+    };
+    if (parsed) {
+      c.frame = pf;
+      const char *anim = pf.animated_url[0]
+                           ? pf.animated_url
+                           : (pf.layer_count > 0 && pf.layers[0].url[0] ? pf.layers[0].url : pf.static_url);
+      const char *stat = pf.static_url[0]
+                           ? pf.static_url
+                           : (pf.layer_count > 0 && pf.layers[0].static_url[0] ? pf.layers[0].static_url : anim);
+      dj_copy_trunc_utf8(c.cdn_url, sizeof c.cdn_url, anim);
+      dj_copy_trunc_utf8(c.static_url, sizeof c.static_url, stat);
+    } else {
+      extract_item_assets(it, c.cdn_url, c.static_url);
+    }
+    dj_copy_trunc_utf8(c.name, sizeof c.name, (iname && iname[0]) ? iname : "Profile Frame");
+    if (parent_cat && parent_cat[0]) dj_copy_trunc_utf8(c.category, sizeof c.category, parent_cat);
+    cp_push(L, &c);
+  }
+}
+
+static void cp_parse_product(cp_list *L, const ccord_json *prod, int depth)
+{
+  if (!prod || ccord_json_type_of(prod) != CCORD_JSON_OBJECT || depth > 4) return;
+  ccord_id psku = CCORD_ID_NONE;
+  (void)dj_json_id_key(prod, "sku_id", &psku);
+  if (psku == CCORD_ID_NONE) (void)dj_json_id_key(prod, "id", &psku);
+  int64_t ptype = dj_json_i64(prod, "type", -1);
+  const char *pname = dj_jstr(prod, "name");
+  if (!pname || !pname[0]) pname = dj_jstr(prod, "title");
+  const char *pcat = dj_jstr(prod, "category");
+  if (!pcat || !pcat[0]) pcat = dj_jstr(prod, "category_title");
+  int64_t exp = dj_json_ts_ms(prod, "expires_at");
+  if (exp == 0) exp = iso_key_ms(prod, "expires_at");
+
+  bool parsed_children = false;
+  const ccord_json *items = ccord_json_get(prod, "items");
+  if (items && ccord_json_type_of(items) == CCORD_JSON_ARRAY && ccord_json_array_len(items) > 0u) {
+    size_t ni = ccord_json_array_len(items);
+    for (size_t i = 0; i < ni; i++) {
+      cp_parse_item(L, ccord_json_array_at(items, i), (ptype >= 0 && ptype <= 3) ? ptype : -1,
+                    psku, pname, pcat, exp);
+    }
+    parsed_children = true;
+  }
+  const ccord_json *bundled = ccord_json_get(prod, "bundled_products");
+  if (bundled && ccord_json_type_of(bundled) == CCORD_JSON_ARRAY) {
+    size_t nb = ccord_json_array_len(bundled);
+    for (size_t i = 0; i < nb; i++) cp_parse_product(L, ccord_json_array_at(bundled, i), depth + 1);
+    parsed_children = true;
+  }
+  const ccord_json *variants = ccord_json_get(prod, "variants");
+  if (variants && ccord_json_type_of(variants) == CCORD_JSON_ARRAY) {
+    size_t nv = ccord_json_array_len(variants);
+    for (size_t i = 0; i < nv; i++) cp_parse_product(L, ccord_json_array_at(variants, i), depth + 1);
+    parsed_children = true;
+  }
+  const ccord_json *ad = ccord_json_get(prod, "avatar_decoration");
+  if (ad && ccord_json_type_of(ad) == CCORD_JSON_OBJECT) {
+    cp_parse_item(L, ad, 0, psku, pname, pcat, exp);
+    parsed_children = true;
+  }
+  const ccord_json *pe = ccord_json_get(prod, "profile_effect");
+  if (pe && ccord_json_type_of(pe) == CCORD_JSON_OBJECT) {
+    cp_parse_item(L, pe, 1, psku, pname, pcat, exp);
+    parsed_children = true;
+  }
+  const ccord_json *np = ccord_json_get(prod, "nameplate");
+  if (np && ccord_json_type_of(np) == CCORD_JSON_OBJECT) {
+    cp_parse_item(L, np, 2, psku, pname, pcat, exp);
+    parsed_children = true;
+  }
+  const ccord_json *pf = ccord_json_get(prod, "profile_frame");
+  if (pf && ccord_json_type_of(pf) == CCORD_JSON_OBJECT) {
+    cp_parse_item(L, pf, 3, psku, pname, pcat, exp);
+    parsed_children = true;
+  }
+  if (!parsed_children) {
+    cp_parse_item(L, prod, ptype, psku, pname, pcat, exp);
+  }
+  // Inherit parent product-level frame assets when a child frame item omitted them.
+  char top_anim[256] = "", top_static[256] = "";
+  extract_item_assets(prod, top_anim, top_static);
+  if (top_anim[0] != '\0' || top_static[0] != '\0') {
+    for (size_t i = 0; i < L->count; i++) {
+      ccord_owned_collectible *e = &L->items[i];
+      if (e->kind != CCORD_COLLECTIBLE_PROFILE_FRAME) continue;
+      if (psku != CCORD_ID_NONE && e->sku_id != psku) continue;
+      if (e->cdn_url[0] == '\0' && top_anim[0] != '\0') dj_copy_trunc_utf8(e->cdn_url, sizeof e->cdn_url, top_anim);
+      if (e->static_url[0] == '\0' && top_static[0] != '\0') {
+        dj_copy_trunc_utf8(e->static_url, sizeof e->static_url, top_static);
+      }
+      if (e->has_frame) {
+        if (e->frame.animated_url[0] == '\0' && top_anim[0] != '\0') {
+          dj_copy_trunc_utf8(e->frame.animated_url, sizeof e->frame.animated_url, top_anim);
+        }
+        if (e->frame.static_url[0] == '\0' && top_static[0] != '\0') {
+          dj_copy_trunc_utf8(e->frame.static_url, sizeof e->frame.static_url, top_static);
+        }
+      }
+    }
+  }
+}
+
+ccord_status ccord_live_json_collectibles_purchases(const char *json, size_t len,
+                                                    ccord_owned_collectible **out_items,
+                                                    size_t *out_count, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (out_items) *out_items = nullptr;
+  if (out_count) *out_count = 0;
+  if (!json || !out_items || !out_count) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "rest: null collectibles purchases args");
+  }
+  ccord_arena scratch;
+  ccord_arena_init(&scratch, dj_scratch_chunk_size(len));
+  ccord_status st = CCORD_OK;
+  const ccord_json *root = dj_parse_json(&scratch, json, len, err);
+  if (!root) {
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad collectibles purchases json");
+    goto done;
+  }
+  cp_list L = {0};
+  if (ccord_json_type_of(root) == CCORD_JSON_ARRAY) {
+    size_t n = ccord_json_array_len(root);
+    for (size_t i = 0; i < n; i++) cp_parse_product(&L, ccord_json_array_at(root, i), 0);
+  } else if (ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
+    const ccord_json *arr = ccord_json_get(root, "purchases");
+    if (!arr) arr = ccord_json_get(root, "collectibles-purchases");
+    if (!arr) arr = ccord_json_get(root, "products");
+    if (!arr) arr = ccord_json_get(root, "items");
+    if (arr && ccord_json_type_of(arr) == CCORD_JSON_ARRAY) {
+      size_t n = ccord_json_array_len(arr);
+      for (size_t i = 0; i < n; i++) cp_parse_product(&L, ccord_json_array_at(arr, i), 0);
+    }
+    const ccord_json *cats = ccord_json_get(root, "categories");
+    if (cats && ccord_json_type_of(cats) == CCORD_JSON_ARRAY) {
+      size_t nc = ccord_json_array_len(cats);
+      for (size_t ci = 0; ci < nc; ci++) {
+        const ccord_json *cat = ccord_json_array_at(cats, ci);
+        if (!cat || ccord_json_type_of(cat) != CCORD_JSON_OBJECT) continue;
+        const ccord_json *prods = ccord_json_get(cat, "products");
+        if (!prods || ccord_json_type_of(prods) != CCORD_JSON_ARRAY) continue;
+        size_t np = ccord_json_array_len(prods);
+        for (size_t pi = 0; pi < np; pi++) cp_parse_product(&L, ccord_json_array_at(prods, pi), 0);
+      }
+    }
+  } else {
+    st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: unexpected collectibles purchases root");
+    goto done;
+  }
+  *out_items = L.items;
+  *out_count = L.count;
 done:
   ccord_arena_free(&scratch);
   return st;

@@ -824,6 +824,7 @@ bool dj_parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *err)
     .status_text = "",
     .avatar_url = dj_build_cdn_url(&ev->arena, "avatars", self, dj_jstr(me, "avatar")),
     .avatar_decoration_url = dj_extract_avatar_deco_url(&ev->arena, me),
+    .avatar_decoration_sku_id = dj_extract_avatar_deco_sku(me),
     .banner_url = dj_build_cdn_url(&ev->arena, "banners", self, self_banner),
     .accent_color = (uint32_t)self_accent,
     .has_accent_color = has_self_accent,
@@ -835,6 +836,7 @@ bool dj_parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *err)
   };
   dj_extract_clan_info(me, self_user.clan_tag, &self_user.clan_guild_id, self_user.clan_badge);
   dj_extract_nameplate_info(me, self_user.nameplate_asset, self_user.nameplate_palette);
+  self_user.nameplate_sku_id = dj_extract_nameplate_sku(me);
   {
     const ccord_json *cs_init = uset ? ccord_json_get(uset, "custom_status") : nullptr;
     if (cs_init && ccord_json_type_of(cs_init) == CCORD_JSON_OBJECT) {

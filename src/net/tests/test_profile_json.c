@@ -439,6 +439,72 @@ static void test_gateway_decor_parsing(void)
                   "https://cdn.discordapp.com/media/v1/collectibles-shop/1411111111111111111/2222222222222222222/animated") == 0);
 }
 
+static void test_collectibles_purchases_parsing(void)
+{
+  static const char kPurchases[] =
+    "{\"purchases\":["
+    "{\"sku_id\":\"121000000000000001\",\"name\":\"Sakura Petals\",\"category\":\"Spring\","
+    "\"items\":[{\"type\":0,\"sku_id\":\"121000000000000001\",\"asset\":\"a_sakura_petals\"}]},"
+    "{\"sku_id\":\"121000000000000001\",\"name\":\"Duplicate Deco\","
+    "\"items\":[{\"type\":0,\"sku_id\":\"121000000000000001\",\"asset\":\"a_sakura_petals\"}]},"
+    "{\"sku_id\":\"122000000000000002\",\"name\":\"Twilight Bundle\",\"type\":1000,"
+    "\"bundled_products\":["
+    "{\"sku_id\":\"122000000000000003\",\"name\":\"Solar Flare\",\"items\":["
+    "{\"type\":1,\"id\":\"1139323093991575696\",\"sku_id\":\"122000000000000003\","
+    "\"title\":\"Solar Flare\",\"thumbnailPreviewSrc\":\"https://cdn.discordapp.com/assets/profile_effects/sf.png\"}]},"
+    "{\"sku_id\":\"123000000000000004\",\"name\":\"Twilight Wave\",\"items\":["
+    "{\"type\":2,\"sku_id\":\"123000000000000004\",\"asset\":\"nameplates/nameplates/twilight/\",\"palette\":\"cobalt\"}]}"
+    "]},"
+    "{\"sku_id\":\"123000000000000005\",\"name\":\"Hostile Traversal\",\"items\":["
+    "{\"type\":2,\"sku_id\":\"123000000000000005\",\"asset\":\"../etc/passwd\",\"palette\":\"../bad\"}]},"
+    "{\"sku_id\":\"124000000000000006\",\"type\":3,\"name\":\"Neon Frame\",\"category\":\"Cyber\",\"items\":["
+    "{\"type\":3,\"sku_id\":\"124000000000000006\",\"inner_width\":300,\"overflow_top\":20,"
+    "\"layers\":[{\"id\":\"124000000000000007\",\"order\":0,\"anchor\":0,"
+    "\"assets\":{\"animated_image_url\":\"https://cdn.discordapp.com/assets/profile_frames/neon.png\"}}]}]}"
+    "]}";
+  ccord_owned_collectible *items = nullptr;
+  size_t count = 0;
+  ccord_error err = {0};
+  CT_CHECK(ccord_live_json_collectibles_purchases(kPurchases, strlen(kPurchases), &items, &count, &err) == CCORD_OK);
+  CT_CHECK(items != nullptr && count == 4);
+  if (items && count == 4) {
+    CT_CHECK(items[0].kind == CCORD_COLLECTIBLE_AVATAR_DECORATION && items[0].sku_id == 121000000000000001ULL);
+    CT_CHECK(strcmp(items[0].name, "Sakura Petals") == 0 && strcmp(items[0].asset, "a_sakura_petals") == 0);
+    CT_CHECK(strstr(items[0].cdn_url, "avatar-decoration-presets/a_sakura_petals.png") != nullptr);
+    CT_CHECK(items[1].kind == CCORD_COLLECTIBLE_PROFILE_EFFECT && items[1].item_id == 1139323093991575696ULL);
+    CT_CHECK(strcmp(items[1].name, "Solar Flare") == 0);
+    CT_CHECK(strstr(items[1].cdn_url, "cdn.discordapp.com/assets/profile_effects/sf.png") != nullptr);
+    CT_CHECK(items[2].kind == CCORD_COLLECTIBLE_NAMEPLATE && items[2].sku_id == 123000000000000004ULL);
+    CT_CHECK(strcmp(items[2].asset, "nameplates/nameplates/twilight/") == 0 && strcmp(items[2].palette, "cobalt") == 0);
+    CT_CHECK(items[3].kind == CCORD_COLLECTIBLE_PROFILE_FRAME && items[3].sku_id == 124000000000000006ULL);
+    CT_CHECK(strcmp(items[3].name, "Neon Frame") == 0 && items[3].has_frame && items[3].frame.layer_count == 1);
+    CT_CHECK(strstr(items[3].cdn_url, "cdn.discordapp.com/assets/profile_frames/neon.png") != nullptr);
+  }
+  ccord_free(items);
+
+  // Verify user_profile.banner_color takes priority over user.banner_color when both are present.
+  static const char kBannerPrio[] =
+    "{\"user\":{\"id\":\"609\",\"username\":\"prio\",\"banner_color\":\"#111111\"},"
+    "\"user_profile\":{\"banner_color\":\"#ff005b\"}}";
+  ccord_live_event pev;
+  CT_CHECK(ccord_live_json_user_profile(kBannerPrio, strlen(kBannerPrio), 609, &pev, &err) == CCORD_OK);
+  CT_CHECK(pev.ev.user_profile && pev.ev.user_profile->has_banner_color && pev.ev.user_profile->banner_color == 0xFF005Bu);
+  ccord_live_event_free(&pev);
+
+  // Also verify title & description extraction on GET /user-profile-effects
+  static const char kEffTitle[] =
+    "{\"profile_effect_configs\":[{\"id\":\"1139323093991575696\",\"sku_id\":\"122000000000000003\","
+    "\"title\":\"Solar Flare\",\"description\":\"Radiant corona\","
+    "\"staticFrameSrc\":\"https://cdn.discordapp.com/assets/profile_effects/sf_static.png\","
+    "\"effects\":[{\"src\":\"https://cdn.discordapp.com/assets/profile_effects/sf.png\",\"loop\":true,\"zIndex\":10}]}]}";
+  ccord_profile_effect_config *ef = nullptr;
+  size_t ecount = 0;
+  CT_CHECK(ccord_live_json_profile_effects(kEffTitle, strlen(kEffTitle), &ef, &ecount, &err) == CCORD_OK);
+  CT_CHECK(ef != nullptr && ecount == 1 && strcmp(ef[0].title, "Solar Flare") == 0 &&
+           strcmp(ef[0].description, "Radiant corona") == 0);
+  ccord_free(ef);
+}
+
 int main(void)
 {
   test_full_profile();
@@ -448,5 +514,6 @@ int main(void)
   test_store_owns_profile_extras();
   test_profile_decor_parsing();
   test_gateway_decor_parsing();
+  test_collectibles_purchases_parsing();
   return CT_RESULT("test_profile_json");
 }

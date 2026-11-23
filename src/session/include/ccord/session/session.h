@@ -388,6 +388,14 @@ const ccord_discover_guild *ccord_session_discovery_results(const ccord_session 
 // CCORD_ERR_INVALID/RANGE (validation), CCORD_ERR_UNSUPPORTED (no backend attached), CCORD_ERR_NOT_FOUND (no self).
 [[nodiscard]] ccord_status ccord_session_edit_profile(ccord_session *s, const ccord_profile_edit *edit,
                                                       ccord_profile_edit_cb cb, void *ud, ccord_error *err);
+// Owned Discord Collectibles inventory (GET /users/@me/collectibles-purchases + /user-profile-effects).
+// TTL-guarded (120 s) unless `force` is true; deduplicates in-flight fetches.
+[[nodiscard]] ccord_status ccord_session_fetch_collectibles(ccord_session *s, bool force, ccord_error *err);
+ccord_fetch_state ccord_session_collectibles_state(const ccord_session *s);
+const ccord_owned_collectible *ccord_session_collectibles(const ccord_session *s, size_t *out_count);
+const char *ccord_session_collectibles_error(const ccord_session *s);
+const ccord_profile_effect_config *ccord_session_find_owned_effect(const ccord_session *s, ccord_id effect_id);
+const ccord_profile_frame_config *ccord_session_find_owned_frame(const ccord_session *s, ccord_id sku_id);
 
 // ---- M5 voice & video intents (implemented by m5-session-mock / m5-live-transport) -----------------------------
 // DM calls: OP 4 VOICE_STATE_UPDATE {guild_id:null, channel_id} joins/leaves; ringing is passive (CALL_CREATE).

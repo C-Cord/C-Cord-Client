@@ -300,6 +300,14 @@ ccord_status ccord_store_upsert_user(ccord_store *s, const ccord_user *user, cco
     if (copy.nameplate_palette[0] == '\0' && old->nameplate_palette[0] != '\0') {
       memcpy(copy.nameplate_palette, old->nameplate_palette, sizeof copy.nameplate_palette);
     }
+    if (copy.avatar_decoration_sku_id == CCORD_ID_NONE && old->avatar_decoration_sku_id != CCORD_ID_NONE &&
+        copy.avatar_decoration_url && copy.avatar_decoration_url[0] != '\0') {
+      copy.avatar_decoration_sku_id = old->avatar_decoration_sku_id;
+    }
+    if (copy.nameplate_sku_id == CCORD_ID_NONE && old->nameplate_sku_id != CCORD_ID_NONE &&
+        copy.nameplate_asset[0] != '\0') {
+      copy.nameplate_sku_id = old->nameplate_sku_id;
+    }
     if (!user->has_presence) {
       copy.has_presence = old->has_presence;
       if (copy.custom_status_emoji[0] == '\0' && copy.custom_status_text[0] == '\0' &&
@@ -856,49 +864,183 @@ ccord_status ccord_store_set_self_profile(ccord_store *s, const ccord_self_profi
   long ui = store_find_user(&s->d, s->d.self_id);
   if (ui < 0) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: self user not in store");
   const char *name = u->display_name ? u->display_name : "";
+  const char *handle = u->handle ? u->handle : "";
   const char *avatar = u->avatar_url ? u->avatar_url : "";
   const char *banner = u->banner_url ? u->banner_url : "";
   const char *bio = u->bio ? u->bio : "";
   const char *pronouns = u->pronouns ? u->pronouns : "";
-  if (!store_text_ok(name, CCORD_NAME_MAX_BYTES) || !store_text_ok(avatar, CCORD_STORE_URL_MAX_BYTES) ||
-      !store_text_ok(banner, CCORD_STORE_URL_MAX_BYTES) || !store_text_ok(bio, CCORD_USER_BIO_MAX_BYTES) ||
-      !store_text_ok(pronouns, CCORD_USER_PRONOUNS_MAX_BYTES)) {
+  const char *deco = u->avatar_decoration_url ? u->avatar_decoration_url : "";
+  if (!store_text_ok(name, CCORD_NAME_MAX_BYTES) || !store_text_ok(handle, CCORD_NAME_MAX_BYTES) ||
+      !store_text_ok(avatar, CCORD_STORE_URL_MAX_BYTES) || !store_text_ok(banner, CCORD_STORE_URL_MAX_BYTES) ||
+      !store_text_ok(bio, CCORD_USER_BIO_MAX_BYTES) || !store_text_ok(pronouns, CCORD_USER_PRONOUNS_MAX_BYTES) ||
+      !store_text_ok(deco, CCORD_STORE_URL_MAX_BYTES)) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: profile text");
   }
   ccord_user *usr = &s->d.users[ui];
   long pi = find_profile(&s->d, s->d.self_id);
   ccord_user_profile *prof = pi >= 0 ? &s->d.profiles[pi] : nullptr;
+  bool per_guild = u->guild_id != CCORD_ID_NONE && u->guild_id != CCORD_DM_GUILD_ID;
+  bool need_prof = prof == nullptr && (u->set_theme_colors || u->set_profile_effect || u->set_profile_frame || per_guild);
+  if (need_prof) {
+    ccord_user_profile initp = {
+      .user_id = s->d.self_id,
+      .display_name = usr->name ? usr->name : "",
+      .handle = usr->handle ? usr->handle : "",
+      .avatar_url = usr->avatar_url ? usr->avatar_url : "",
+      .banner_url = usr->banner_url ? usr->banner_url : "",
+      .accent_color = usr->accent_color,
+      .has_accent_color = usr->has_accent_color,
+      .bio = usr->bio ? usr->bio : "",
+      .pronouns = usr->pronouns ? usr->pronouns : "",
+      .avatar_decoration_url = usr->avatar_decoration_url ? usr->avatar_decoration_url : "",
+      .clan_guild_id = usr->clan_guild_id,
+    };
+    memcpy(initp.clan_tag, usr->clan_tag, sizeof initp.clan_tag);
+    memcpy(initp.clan_badge, usr->clan_badge, sizeof initp.clan_badge);
+    memcpy(initp.nameplate_asset, usr->nameplate_asset, sizeof initp.nameplate_asset);
+    memcpy(initp.nameplate_palette, usr->nameplate_palette, sizeof initp.nameplate_palette);
+    (void)ccord_store_upsert_user_profile(s, &initp, nullptr);
+    pi = find_profile(&s->d, s->d.self_id);
+    prof = pi >= 0 ? &s->d.profiles[pi] : nullptr;
+  }
   bool ok = true;
-  if (u->set_display_name) {
-    // Clearing the display name shows the username again.
-    const char *shown = name[0] != '\0' ? name : (usr->handle && usr->handle[0] != '\0' ? usr->handle : "User");
-    ok = ok && replace_cstr(&usr->name, shown);
-    if (prof) ok = ok && replace_cstr(&prof->display_name, shown);
-  }
-  if (u->set_avatar) {
-    ok = ok && replace_cstr(&usr->avatar_url, avatar);
-    if (prof) ok = ok && replace_cstr(&prof->avatar_url, avatar);
-  }
-  if (u->set_banner) {
-    ok = ok && replace_cstr(&usr->banner_url, banner);
-    if (prof) ok = ok && replace_cstr(&prof->banner_url, banner);
-  }
-  if (u->set_bio) {
-    ok = ok && replace_cstr(&usr->bio, bio);
-    if (prof) ok = ok && replace_cstr(&prof->bio, bio);
-  }
-  if (u->set_pronouns) {
-    ok = ok && replace_cstr(&usr->pronouns, pronouns);
-    if (prof) ok = ok && replace_cstr(&prof->pronouns, pronouns);
-  }
-  if (u->set_accent) {
-    usr->accent_color = u->accent_color;
-    usr->has_accent_color = true;
+  if (per_guild) {
+    // Update member nickname/decoration/nameplate in the guild member list too when present.
+    for (size_t k = 0; k < s->d.nmembers; k++) {
+      ccord_member *gm = &s->d.members[k];
+      if (gm->guild_id != u->guild_id || gm->user_id != s->d.self_id) continue;
+      if (u->set_display_name) (void)snprintf(gm->nick, sizeof gm->nick, "%s", name);
+      if (u->set_avatar_decoration) (void)snprintf(gm->avatar_decoration_url, sizeof gm->avatar_decoration_url, "%s", deco);
+      if (u->set_nameplate) {
+        (void)snprintf(gm->nameplate_asset, sizeof gm->nameplate_asset, "%s", u->nameplate_asset ? u->nameplate_asset : "");
+        (void)snprintf(gm->nameplate_palette, sizeof gm->nameplate_palette, "%s", u->nameplate_palette ? u->nameplate_palette : "");
+      }
+      break;
+    }
     if (prof) {
-      prof->accent_color = u->accent_color;
-      prof->has_accent_color = true;
-      prof->banner_color = u->accent_color;
-      prof->has_banner_color = (u->accent_color != 0 || usr->has_accent_color);
+      prof->guild_id = u->guild_id;
+      if (u->set_display_name) ok = ok && replace_cstr(&prof->guild_nick, name);
+      if (u->set_avatar) ok = ok && replace_cstr(&prof->guild_avatar_url, avatar);
+      if (u->set_banner) ok = ok && replace_cstr(&prof->guild_banner_url, banner);
+      if (u->set_bio) ok = ok && replace_cstr(&prof->guild_bio, bio);
+      if (u->set_pronouns) ok = ok && replace_cstr(&prof->guild_pronouns, pronouns);
+      if (u->set_avatar_decoration) {
+        prof->guild_avatar_decoration_sku_id = u->avatar_decoration_sku_id;
+        ok = ok && replace_cstr(&prof->guild_avatar_decoration_url, deco);
+      }
+      if (u->set_profile_effect) {
+        prof->guild_profile_effect_id = u->profile_effect_id;
+        if (u->profile_effect_id == CCORD_ID_NONE) prof->profile_effect = (ccord_profile_effect_config){0};
+        else if (u->profile_effect) prof->profile_effect = *u->profile_effect;
+      }
+      if (u->set_profile_frame) {
+        prof->guild_profile_frame_sku_id = u->profile_frame_sku_id;
+        if (u->profile_frame_sku_id == CCORD_ID_NONE) prof->profile_frame = (ccord_profile_frame_config){0};
+        else if (u->profile_frame) prof->profile_frame = *u->profile_frame;
+      }
+      if (u->set_accent) {
+        prof->accent_color = u->accent_color;
+        prof->has_accent_color = true;
+        prof->banner_color = u->accent_color;
+        prof->has_banner_color = true;
+      }
+      if (u->set_nameplate) {
+        prof->guild_nameplate_sku_id = u->nameplate_sku_id;
+        (void)snprintf(prof->guild_nameplate_asset, sizeof prof->guild_nameplate_asset, "%s",
+                       u->nameplate_asset ? u->nameplate_asset : "");
+        (void)snprintf(prof->guild_nameplate_palette, sizeof prof->guild_nameplate_palette, "%s",
+                       u->nameplate_palette ? u->nameplate_palette : "");
+      }
+      if (u->set_theme_colors) {
+        prof->guild_has_theme = u->theme_colors_set;
+        prof->guild_theme_primary = u->theme_colors_set ? u->theme_primary : 0u;
+        prof->guild_theme_accent = u->theme_colors_set ? u->theme_accent : 0u;
+        prof->has_theme = u->theme_colors_set;
+        prof->theme_primary = u->theme_colors_set ? u->theme_primary : 0u;
+        prof->theme_accent = u->theme_colors_set ? u->theme_accent : 0u;
+      }
+    }
+  } else {
+    if (u->set_handle && handle[0] != '\0') {
+      ok = ok && replace_cstr(&usr->handle, handle);
+      if (prof) ok = ok && replace_cstr(&prof->handle, handle);
+    }
+    if (u->set_display_name) {
+      // Clearing the display name shows the username again.
+      const char *shown = name[0] != '\0' ? name : (usr->handle && usr->handle[0] != '\0' ? usr->handle : "User");
+      ok = ok && replace_cstr(&usr->name, shown);
+      if (prof) ok = ok && replace_cstr(&prof->display_name, shown);
+    }
+    if (u->set_avatar) {
+      ok = ok && replace_cstr(&usr->avatar_url, avatar);
+      if (prof) ok = ok && replace_cstr(&prof->avatar_url, avatar);
+    }
+    if (u->set_banner) {
+      ok = ok && replace_cstr(&usr->banner_url, banner);
+      if (prof) ok = ok && replace_cstr(&prof->banner_url, banner);
+    }
+    if (u->set_bio) {
+      ok = ok && replace_cstr(&usr->bio, bio);
+      if (prof) ok = ok && replace_cstr(&prof->bio, bio);
+    }
+    if (u->set_pronouns) {
+      ok = ok && replace_cstr(&usr->pronouns, pronouns);
+      if (prof) ok = ok && replace_cstr(&prof->pronouns, pronouns);
+    }
+    if (u->set_accent) {
+      usr->accent_color = u->accent_color;
+      usr->has_accent_color = true;
+      if (prof) {
+        prof->accent_color = u->accent_color;
+        prof->has_accent_color = true;
+        prof->banner_color = u->accent_color;
+        prof->has_banner_color = (u->accent_color != 0 || usr->has_accent_color);
+      }
+    }
+    if (u->set_theme_colors && prof) {
+      prof->has_theme = u->theme_colors_set;
+      prof->theme_primary = u->theme_colors_set ? u->theme_primary : 0u;
+      prof->theme_accent = u->theme_colors_set ? u->theme_accent : 0u;
+    }
+    if (u->set_avatar_decoration) {
+      usr->avatar_decoration_sku_id = u->avatar_decoration_sku_id;
+      ok = ok && replace_cstr(&usr->avatar_decoration_url, deco);
+      if (prof) {
+        prof->avatar_decoration_sku_id = u->avatar_decoration_sku_id;
+        ok = ok && replace_cstr(&prof->avatar_decoration_url, deco);
+      }
+    }
+    if (u->set_profile_effect && prof) {
+      prof->profile_effect_id = u->profile_effect_id;
+      if (u->profile_effect_id == CCORD_ID_NONE) prof->profile_effect = (ccord_profile_effect_config){0};
+      else if (u->profile_effect) prof->profile_effect = *u->profile_effect;
+    }
+    if (u->set_profile_frame && prof) {
+      prof->profile_frame_sku_id = u->profile_frame_sku_id;
+      if (u->profile_frame_sku_id == CCORD_ID_NONE) prof->profile_frame = (ccord_profile_frame_config){0};
+      else if (u->profile_frame) prof->profile_frame = *u->profile_frame;
+    }
+    if (u->set_nameplate) {
+      usr->nameplate_sku_id = u->nameplate_sku_id;
+      (void)snprintf(usr->nameplate_asset, sizeof usr->nameplate_asset, "%s",
+                     u->nameplate_asset ? u->nameplate_asset : "");
+      (void)snprintf(usr->nameplate_palette, sizeof usr->nameplate_palette, "%s",
+                     u->nameplate_palette ? u->nameplate_palette : "");
+      if (prof) {
+        prof->nameplate_sku_id = u->nameplate_sku_id;
+        memcpy(prof->nameplate_asset, usr->nameplate_asset, sizeof prof->nameplate_asset);
+        memcpy(prof->nameplate_palette, usr->nameplate_palette, sizeof prof->nameplate_palette);
+      }
+    }
+    if (u->set_clan) {
+      usr->clan_guild_id = u->clan_guild_id;
+      (void)snprintf(usr->clan_tag, sizeof usr->clan_tag, "%s", u->clan_tag ? u->clan_tag : "");
+      (void)snprintf(usr->clan_badge, sizeof usr->clan_badge, "%s", u->clan_badge ? u->clan_badge : "");
+      if (prof) {
+        prof->clan_guild_id = usr->clan_guild_id;
+        memcpy(prof->clan_tag, usr->clan_tag, sizeof prof->clan_tag);
+        memcpy(prof->clan_badge, usr->clan_badge, sizeof prof->clan_badge);
+      }
     }
   }
   s->revision++;

@@ -604,6 +604,15 @@ const char *dj_extract_avatar_deco_url(ccord_arena *a, const ccord_json *obj)
   return dj_cdn_asset_url(a, "avatar-decoration-presets", dj_jstr(adj, "asset"), ".png?size=128&passthrough=true");
 }
 
+ccord_id dj_extract_avatar_deco_sku(const ccord_json *obj)
+{
+  const ccord_json *adj = obj ? ccord_json_get(obj, "avatar_decoration_data") : nullptr;
+  if (!adj || ccord_json_type_of(adj) != CCORD_JSON_OBJECT) return CCORD_ID_NONE;
+  ccord_id sku = CCORD_ID_NONE;
+  (void)dj_json_id_key(adj, "sku_id", &sku);
+  return sku;
+}
+
 void dj_extract_avatar_deco_buf(const ccord_json *obj, char out[256])
 {
   if (!out) return;
@@ -617,7 +626,7 @@ void dj_extract_avatar_deco_buf(const ccord_json *obj, char out[256])
 }
 
 // Safe relative asset path for collectibles.nameplate.asset (e.g. "nameplates/nameplates/american_flag/").
-static bool nameplate_asset_ok(const char *s)
+bool dj_nameplate_asset_ok(const char *s)
 {
   if (!s || s[0] == '\0' || s[0] == '/') return false;
   size_t n = strlen(s);
@@ -643,13 +652,25 @@ void dj_extract_nameplate_info(const ccord_json *obj, char out_asset[128], char 
   const ccord_json *np = ccord_json_get(col, "nameplate");
   if (!np || ccord_json_type_of(np) != CCORD_JSON_OBJECT) return;
   const char *asset = dj_jstr(np, "asset");
-  if (out_asset && nameplate_asset_ok(asset)) {
+  if (out_asset && dj_nameplate_asset_ok(asset)) {
     dj_copy_trunc_utf8(out_asset, 128u, asset);
   }
   const char *pal = dj_jstr(np, "palette");
   if (out_palette && dj_cdn_name_ok(pal)) {
     dj_copy_trunc_utf8(out_palette, 24u, pal);
   }
+}
+
+ccord_id dj_extract_nameplate_sku(const ccord_json *obj)
+{
+  if (!obj) return CCORD_ID_NONE;
+  const ccord_json *col = ccord_json_get(obj, "collectibles");
+  if (!col || ccord_json_type_of(col) != CCORD_JSON_OBJECT) return CCORD_ID_NONE;
+  const ccord_json *np = ccord_json_get(col, "nameplate");
+  if (!np || ccord_json_type_of(np) != CCORD_JSON_OBJECT) return CCORD_ID_NONE;
+  ccord_id sku = CCORD_ID_NONE;
+  (void)dj_json_id_key(np, "sku_id", &sku);
+  return sku;
 }
 
 int64_t dj_json_ts_ms(const ccord_json *obj, const char *key)
@@ -858,6 +879,7 @@ bool dj_map_user_obj(ccord_arena *a, const ccord_json *uj, ccord_presence pres, 
     .status_text = "",
     .avatar_url = dj_build_cdn_url(a, "avatars", uid, dj_jstr(uj, "avatar")),
     .avatar_decoration_url = dj_extract_avatar_deco_url(a, uj),
+    .avatar_decoration_sku_id = dj_extract_avatar_deco_sku(uj),
     .banner_url = dj_build_cdn_url(a, "banners", uid, dj_jstr(uj, "banner")),
     .accent_color = (uint32_t)accent,
     .has_accent_color = has_accent,
@@ -869,6 +891,7 @@ bool dj_map_user_obj(ccord_arena *a, const ccord_json *uj, ccord_presence pres, 
   };
   dj_extract_clan_info(uj, out->clan_tag, &out->clan_guild_id, out->clan_badge);
   dj_extract_nameplate_info(uj, out->nameplate_asset, out->nameplate_palette);
+  out->nameplate_sku_id = dj_extract_nameplate_sku(uj);
   return true;
 }
 

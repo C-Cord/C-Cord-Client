@@ -591,6 +591,7 @@ ccord_status mk_build_dataset(mock *m, ccord_error *err)
   m->guilds[0].public_updates_channel_id = 3113u;
   m->guilds[0].feature_vanity_url = true;
   m->guilds[0].feature_banner = true;
+  m->guilds[0].feature_guild_tags = true;
   (void)snprintf(m->guilds[0].vanity_url_code, sizeof m->guilds[0].vanity_url_code, "ccord");
   m->guilds[1].owner_id = m->users[1].id;   // "Lua Lounge" belongs to someone else (Ada); the others have no known owner
 

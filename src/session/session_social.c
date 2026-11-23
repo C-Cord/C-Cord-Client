@@ -425,9 +425,27 @@ ccord_status ccord_session_set_profile_rest(ccord_session *s, ccord_profile_rest
 {
   if (!s) return CCORD_ERR_INVALID;
   if (s->profile_rest == rest) return CCORD_OK;
+  s->collectibles_gen++;
   ccord_profile_rest_destroy(s->profile_rest);
   s->profile_rest = rest;
+  ccord_free(s->collectibles);
+  s->collectibles = nullptr;
+  s->collectible_count = 0;
+  s->collectibles_state = CCORD_FETCH_IDLE;
+  s->collectibles_fetched_ms = 0;
+  s->collectibles_error[0] = '\0';
   return CCORD_OK;
+}
+
+static void guild_member_cdn_url(ccord_id gid, ccord_id uid, const char *kind, const char *hash, char *out, size_t cap)
+{
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  if (!hash || !hash[0] || gid == CCORD_ID_NONE || uid == CCORD_ID_NONE) return;
+  bool anim = hash[0] == 'a' && hash[1] == '_';
+  const char *sz = (kind && strcmp(kind, "banners") == 0) ? "512" : "128";
+  (void)snprintf(out, cap, "https://cdn.discordapp.com/guilds/%llu/users/%llu/%s/%s.%s?size=%s",
+                 (unsigned long long)gid, (unsigned long long)uid, kind, hash, anim ? "gif" : "png", sz);
 }
 
 typedef struct session_profile_ctx {
@@ -441,19 +459,22 @@ static void session_apply_profile(ccord_session *s, const ccord_profile_applied 
 {
   ccord_id self = ccord_store_self_id(s->store);
   if (self == CCORD_ID_NONE || a->fields == 0) return;
-  ccord_self_profile_update u = {0};
+  bool per_guild = a->guild_id != CCORD_ID_NONE && a->guild_id != CCORD_DM_GUILD_ID;
+  ccord_self_profile_update u = {.guild_id = a->guild_id};
   char avatar[256] = "", banner[256] = "";
   if (a->fields & (1u << CCORD_PROFILE_FIELD_DISPLAY_NAME)) {
     u.set_display_name = true;
     u.display_name = a->display_name;
   }
   if (a->fields & (1u << CCORD_PROFILE_FIELD_AVATAR)) {
-    (void)ccord_profile_cdn_url("avatars", self, a->avatar_hash, avatar, sizeof avatar);
+    if (per_guild) guild_member_cdn_url(a->guild_id, self, "avatars", a->avatar_hash, avatar, sizeof avatar);
+    else (void)ccord_profile_cdn_url("avatars", self, a->avatar_hash, avatar, sizeof avatar);
     u.set_avatar = true;
     u.avatar_url = avatar;
   }
   if (a->fields & (1u << CCORD_PROFILE_FIELD_BANNER)) {
-    (void)ccord_profile_cdn_url("banners", self, a->banner_hash, banner, sizeof banner);
+    if (per_guild) guild_member_cdn_url(a->guild_id, self, "banners", a->banner_hash, banner, sizeof banner);
+    else (void)ccord_profile_cdn_url("banners", self, a->banner_hash, banner, sizeof banner);
     u.set_banner = true;
     u.banner_url = banner;
   }
@@ -468,6 +489,41 @@ static void session_apply_profile(ccord_session *s, const ccord_profile_applied 
   if (a->fields & (1u << CCORD_PROFILE_FIELD_ACCENT)) {
     u.set_accent = true;
     u.accent_color = a->accent_color >= 0 ? (uint32_t)a->accent_color : 0u;
+  }
+  if (a->fields & (1u << CCORD_PROFILE_FIELD_THEME_COLORS)) {
+    u.set_theme_colors = true;
+    u.theme_colors_set = a->theme_colors_set;
+    u.theme_primary = a->theme_primary;
+    u.theme_accent = a->theme_accent;
+  }
+  if (a->fields & (1u << CCORD_PROFILE_FIELD_AVATAR_DECORATION)) {
+    u.set_avatar_decoration = true;
+    u.avatar_decoration_sku_id = a->avatar_decoration_sku_id;
+    u.avatar_decoration_url = a->avatar_decoration_url;
+  }
+  if (a->fields & (1u << CCORD_PROFILE_FIELD_PROFILE_EFFECT)) {
+    u.set_profile_effect = true;
+    ccord_id peid = CCORD_ID_NONE;
+    if (a->profile_effect_id[0]) (void)ccord_id_parse(a->profile_effect_id, strlen(a->profile_effect_id), &peid);
+    u.profile_effect_id = peid;
+    u.profile_effect = ccord_session_find_owned_effect(s, peid);
+  }
+  if (a->fields & (1u << CCORD_PROFILE_FIELD_PROFILE_FRAME)) {
+    u.set_profile_frame = true;
+    u.profile_frame_sku_id = a->profile_frame_sku_id;
+    u.profile_frame = ccord_session_find_owned_frame(s, a->profile_frame_sku_id);
+  }
+  if (a->fields & (1u << CCORD_PROFILE_FIELD_NAMEPLATE)) {
+    u.set_nameplate = true;
+    u.nameplate_sku_id = a->nameplate_sku_id;
+    u.nameplate_asset = a->nameplate_asset;
+    u.nameplate_palette = a->nameplate_palette;
+  }
+  if (a->fields & (1u << CCORD_PROFILE_FIELD_CLAN_GUILD)) {
+    u.set_clan = true;
+    u.clan_guild_id = a->clan_guild_id;
+    u.clan_tag = a->clan_tag;
+    u.clan_badge = a->clan_badge;
   }
   ccord_error err;
   if (ccord_store_set_self_profile(s->store, &u, &err) != CCORD_OK) {
@@ -501,6 +557,117 @@ ccord_status ccord_session_edit_profile(ccord_session *s, const ccord_profile_ed
   ccord_status st = ccord_profile_edit_start(s->profile_rest, edit, session_profile_done, ctx, err);
   if (st != CCORD_OK) ccord_free(ctx);   // nothing was sent and the callback will not run
   return st;
+}
+
+typedef struct session_collectibles_ctx {
+  ccord_session *session;
+  uint64_t gen;
+} session_collectibles_ctx;
+
+static void session_collectibles_done(void *ud, ccord_status st, long http,
+                                      const ccord_owned_collectible *items, size_t count, const char *message)
+{
+  (void)http;
+  session_collectibles_ctx *ctx = ud;
+  ccord_session *s = ctx->session;
+  bool live = (s && ctx->gen == s->collectibles_gen);
+  ccord_free(ctx);
+  if (!live) return;
+  if (st != CCORD_OK) {
+    s->collectibles_state = CCORD_FETCH_FAILED;
+    (void)snprintf(s->collectibles_error, sizeof s->collectibles_error, "%s",
+                   (message && message[0]) ? message : "Couldn't load your collectibles");
+    return;
+  }
+  ccord_owned_collectible *copy = nullptr;
+  if (count > 0 && items) {
+    copy = ccord_calloc(count, sizeof *copy);
+    if (!copy) {
+      s->collectibles_state = CCORD_FETCH_FAILED;
+      (void)snprintf(s->collectibles_error, sizeof s->collectibles_error, "Out of memory");
+      return;
+    }
+    memcpy(copy, items, count * sizeof *copy);
+  }
+  ccord_free(s->collectibles);
+  s->collectibles = copy;
+  s->collectible_count = count;
+  s->collectibles_state = CCORD_FETCH_READY;
+  s->collectibles_fetched_ms = ccord_clock_ms();
+  s->collectibles_error[0] = '\0';
+}
+
+ccord_status ccord_session_fetch_collectibles(ccord_session *s, bool force, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "session: null session");
+  if (!s->profile_rest) {
+    s->collectibles_state = CCORD_FETCH_FAILED;
+    (void)snprintf(s->collectibles_error, sizeof s->collectibles_error, "Sign in to load your Discord collection");
+    return ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "session: profile REST not attached");
+  }
+  if (s->collectibles_state == CCORD_FETCH_LOADING) return CCORD_OK;
+  uint64_t now = ccord_clock_ms();
+  if (!force && s->collectibles_state == CCORD_FETCH_READY && s->collectibles_fetched_ms != 0 &&
+      now < s->collectibles_fetched_ms + 120000ull) {
+    return CCORD_OK;
+  }
+  session_collectibles_ctx *ctx = ccord_calloc(1, sizeof *ctx);
+  if (!ctx) return ccord_error_set(err, CCORD_ERR_NOMEM, "session: out of memory");
+  ctx->session = s;
+  ctx->gen = s->collectibles_gen;
+  s->collectibles_state = CCORD_FETCH_LOADING;
+  s->collectibles_error[0] = '\0';
+  ccord_status st = ccord_profile_rest_fetch_collectibles(s->profile_rest, session_collectibles_done, ctx, err);
+  if (st != CCORD_OK) {
+    s->collectibles_state = CCORD_FETCH_FAILED;
+    (void)snprintf(s->collectibles_error, sizeof s->collectibles_error, "%.159s",
+                   (err && err->message[0]) ? err->message : "Couldn't load your collection");
+    ccord_free(ctx);
+  }
+  return st;
+}
+
+ccord_fetch_state ccord_session_collectibles_state(const ccord_session *s)
+{
+  return s ? s->collectibles_state : CCORD_FETCH_IDLE;
+}
+
+const ccord_owned_collectible *ccord_session_collectibles(const ccord_session *s, size_t *out_count)
+{
+  if (out_count) *out_count = s ? s->collectible_count : 0;
+  return s ? s->collectibles : nullptr;
+}
+
+const char *ccord_session_collectibles_error(const ccord_session *s)
+{
+  return s ? s->collectibles_error : "";
+}
+
+const ccord_profile_effect_config *ccord_session_find_owned_effect(const ccord_session *s, ccord_id effect_id)
+{
+  if (!s || effect_id == CCORD_ID_NONE) return nullptr;
+  for (size_t i = 0; i < s->collectible_count; i++) {
+    const ccord_owned_collectible *c = &s->collectibles[i];
+    if (c->kind == CCORD_COLLECTIBLE_PROFILE_EFFECT && c->has_effect &&
+        (c->item_id == effect_id || c->sku_id == effect_id || c->effect.id == effect_id)) {
+      return &c->effect;
+    }
+  }
+  return nullptr;
+}
+
+const ccord_profile_frame_config *ccord_session_find_owned_frame(const ccord_session *s, ccord_id sku_id)
+{
+  if (!s || sku_id == CCORD_ID_NONE) return nullptr;
+  for (size_t i = 0; i < s->collectible_count; i++) {
+    const ccord_owned_collectible *c = &s->collectibles[i];
+    if (c->kind == CCORD_COLLECTIBLE_PROFILE_FRAME && c->has_frame &&
+        (c->sku_id == sku_id || c->item_id == sku_id || c->frame.sku_id == sku_id)) {
+      return &c->frame;
+    }
+  }
+  return nullptr;
 }
 
 

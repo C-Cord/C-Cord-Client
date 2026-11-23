@@ -28,6 +28,7 @@ typedef struct ccord_user {
   const char *status_text;                     // "" if none
   const char *avatar_url;                      // CDN URL or "" / nullptr if none
   const char *avatar_decoration_url;           // CDN URL or "" / nullptr if none
+  ccord_id avatar_decoration_sku_id;           // avatar_decoration_data.sku_id (0 when none/unknown)
   const char *banner_url;                      // CDN URL or "" / nullptr if none
   uint32_t accent_color;                       // 0xRRGGBB (0 if none)
   bool has_accent_color;
@@ -39,6 +40,7 @@ typedef struct ccord_user {
   char clan_tag[16];                           // server identity / clan tag badge (empty when none)
   ccord_id clan_guild_id;
   char clan_badge[64];
+  ccord_id nameplate_sku_id;                   // collectibles.nameplate.sku_id (0 when none/unknown)
   char nameplate_asset[128];                   // collectibles.nameplate asset path or CDN URL (empty when none)
   char nameplate_palette[24];                  // collectibles.nameplate palette slug (e.g. "cobalt", empty when none)
   // Custom status (activity type 4 / user_settings.custom_status) and primary rich-presence activity (types 0..3, 5).
@@ -85,12 +87,15 @@ typedef struct ccord_profile_effect_layer {
 typedef struct ccord_profile_effect_config {
   ccord_id id;
   ccord_id sku_id;
+  char title[96];                              // display title ("title" / "name")
+  char description[160];                       // accessibility / description text
   char thumbnail_url[256];                     // thumbnailPreviewSrc (APNG/PNG)
   char reduced_motion_url[256];                // reducedMotionSrc (APNG/PNG)
   char static_frame_url[256];                  // staticFrameSrc (PNG)
   size_t layer_count;
   ccord_profile_effect_layer layers[CCORD_PROFILE_EFFECT_MAX_LAYERS];
 } ccord_profile_effect_config;
+
 #define CCORD_PROFILE_FRAME_MAX_LAYERS 4u
 // One layer of a Discord profile frame (PROFILE_FRAME collectible item layers[]).
 typedef struct ccord_profile_frame_layer {
@@ -113,6 +118,32 @@ typedef struct ccord_profile_frame_config {
   size_t layer_count;
   ccord_profile_frame_layer layers[CCORD_PROFILE_FRAME_MAX_LAYERS];
 } ccord_profile_frame_config;
+
+// Owned Discord Collectible item (from GET /users/@me/collectibles-purchases + /user-profile-effects).
+#define CCORD_COLLECTIBLES_MAX 256u
+typedef enum ccord_collectible_kind : uint8_t {
+  CCORD_COLLECTIBLE_AVATAR_DECORATION = 0,     // Discord type 0
+  CCORD_COLLECTIBLE_PROFILE_EFFECT = 1,        // Discord type 1
+  CCORD_COLLECTIBLE_NAMEPLATE = 2,             // Discord type 2
+  CCORD_COLLECTIBLE_PROFILE_FRAME = 3,         // Discord type 3
+} ccord_collectible_kind;
+
+typedef struct ccord_owned_collectible {
+  ccord_collectible_kind kind;
+  ccord_id sku_id;                             // SKU ID sent in PATCH /users/@me (deco/nameplate) or /users/@me/profile
+  ccord_id item_id;                            // profile_effect_id (for PROFILE_EFFECT; equals sku_id when identical)
+  char name[96];                               // human-readable display name
+  char category[48];                           // optional category/bundle name or palette label
+  char asset[128];                             // deco asset hash or nameplate asset path (e.g. "nameplates/...")
+  char palette[24];                            // nameplate palette slug (e.g. "cobalt", "berry", "crimson")
+  char cdn_url[256];                           // animated / primary CDN URL (deco passthrough=true or effect/frame thumb)
+  char static_url[256];                        // static / reduced-motion CDN URL (deco passthrough=false or effect/frame static)
+  int64_t expires_at_ms;                       // unix ms when rental/quest reward expires (0 = permanent)
+  bool has_effect;                             // true when `effect` holds resolved profile effect layers/URLs
+  ccord_profile_effect_config effect;
+  bool has_frame;                              // true when `frame` holds resolved profile frame layers/overflow
+  ccord_profile_frame_config frame;
+} ccord_owned_collectible;
 typedef struct ccord_user_profile {
   union {
     ccord_id user_id;
@@ -154,12 +185,19 @@ typedef struct ccord_user_profile {
   const char *guild_banner_url;                // guild_member_profile "banner", CDN URL or "" / nullptr
   const char *guild_bio;                       // guild_member_profile "bio", "" / nullptr if none
   const char *guild_pronouns;                  // guild_member_profile "pronouns", "" / nullptr if none
+  bool guild_has_theme;                        // true when guild_member_profile has theme_colors
+  uint32_t guild_theme_primary;                // 0xRRGGBB, guild_member_profile "theme_colors"[0]
+  uint32_t guild_theme_accent;                 // 0xRRGGBB, guild_member_profile "theme_colors"[1]
   size_t badge_count;
   ccord_profile_badge badges[CCORD_PROFILE_MAX_BADGES];  // profile "badges", capped at 16
   const char *avatar_decoration_url;           // user "avatar_decoration_data" asset URL, "" / nullptr if none
+  ccord_id avatar_decoration_sku_id;           // user "avatar_decoration_data.sku_id" (0 = none/unknown)
   const char *guild_avatar_decoration_url;     // guild_member "avatar_decoration_data" asset URL, "" / nullptr if none
+  ccord_id guild_avatar_decoration_sku_id;     // guild_member "avatar_decoration_data.sku_id" (0 = none/unknown)
+  ccord_id nameplate_sku_id;                   // user collectibles.nameplate.sku_id
   char nameplate_asset[128];                   // user collectibles.nameplate asset path
   char nameplate_palette[24];                  // user collectibles.nameplate palette
+  ccord_id guild_nameplate_sku_id;             // guild_member collectibles.nameplate.sku_id
   char guild_nameplate_asset[128];             // guild_member collectibles.nameplate asset path
   char guild_nameplate_palette[24];            // guild_member collectibles.nameplate palette
   ccord_id profile_effect_id;                  // user_profile.profile_effect.id (0 = none)

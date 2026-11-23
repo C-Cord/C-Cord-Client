@@ -495,6 +495,131 @@ static void test_mock_backend(void)
   CT_CHECK(r4.calls == 1 && r4.res.status == CCORD_ERR_IO && r4.res.applied.fields == 0);
 }
 
+// Extended profile fields: 2-color theme, avatar decoration, profile effect, nameplate, clan tag, and per-server profile.
+static void test_extended_cosmetics_and_guild_profile(void)
+{
+  test_env e;
+  CT_CHECK(env_init(&e));
+  if (!e.s) return;
+  ccord_error err = {0};
+  ccord_profile_rest *rest = ccord_profile_rest_create_mock(e.self, &err);
+  CT_CHECK(rest != nullptr && ccord_session_set_profile_rest(e.s, rest) == CCORD_OK);
+  if (!rest) { env_done(&e); return; }
+
+  const ccord_guild *g0 = ccord_store_guild_at(e.store, 0);
+  ccord_id gid = g0 ? g0->id : 555001ull;
+
+  // 1. Global cosmetics + 2-color Nitro theme + Server Tag (PUT /users/@me/clan)
+  ccord_profile_edit ed = CCORD_PROFILE_EDIT_INIT;
+  ed.has_theme_colors = true;
+  ed.theme_primary = 0x1E3A8Au;
+  ed.theme_accent = 0x3B82F6u;
+  ed.has_avatar_decoration = true;
+  ed.avatar_decoration_sku_id = 121000000000000001ull;
+  ed.avatar_decoration_asset = "a_starlight_halo";
+  ed.has_profile_effect = true;
+  ed.profile_effect_id = "aurora_drift";
+  ed.has_nameplate = true;
+  ed.nameplate_sku_id = 123000000000000001ull;
+  ed.nameplate_asset = "nameplates/cobalt_wave/";
+  ed.nameplate_palette = "cobalt";
+  ed.has_clan_guild = true;
+  ed.clan_guild_id = gid;
+  ed.clan_tag = "CORD";
+  run r = {0};
+  CT_CHECK(ccord_session_edit_profile(e.s, &ed, on_done, &r, &err) == CCORD_OK);
+  CT_CHECK(wait_done(&e, &r));
+  CT_CHECK(r.res.status == CCORD_OK && r.res.requests_sent == 3);
+  CT_CHECK(strcmp(ccord_profile_rest_mock_last_path(rest), "/users/@me/clan") == 0);
+  const ccord_user *u = self_user(&e);
+  const ccord_user_profile *p = ccord_store_user_profile(e.store, e.self);
+  CT_CHECK(u && strcmp(u->nameplate_asset, "nameplates/cobalt_wave/") == 0 && strcmp(u->nameplate_palette, "cobalt") == 0);
+  CT_CHECK(u && u->clan_guild_id == gid && strcmp(u->clan_tag, "CORD") == 0);
+  CT_CHECK(p && p->has_theme && p->theme_primary == 0x1E3A8Au && p->theme_accent == 0x3B82F6u);
+
+  // 1b. Standalone nameplate PATCH uses Discord's real top-level "nameplate_sku_id" key on /users/@me
+  ccord_profile_edit nped = CCORD_PROFILE_EDIT_INIT;
+  nped.has_nameplate = true;
+  nped.nameplate_sku_id = 123000000000000001ull;
+  nped.nameplate_asset = "nameplates/nameplates/cobalt/";
+  nped.nameplate_palette = "cobalt";
+  run rnp = {0};
+  CT_CHECK(ccord_session_edit_profile(e.s, &nped, on_done, &rnp, &err) == CCORD_OK);
+  CT_CHECK(wait_done(&e, &rnp));
+  CT_CHECK(rnp.res.status == CCORD_OK);
+  CT_CHECK(strcmp(ccord_profile_rest_mock_last_path(rest), "/users/@me") == 0);
+  CT_CHECK(strstr(ccord_profile_rest_mock_last_body(rest), "\"nameplate_sku_id\":\"123000000000000001\"") != nullptr);
+
+  // 2. Per-server profile edit targets /guilds/{gid}/members/@me and /guilds/{gid}/profile/@me
+  //    (and per-server banner rides /guilds/{gid}/profile/@me, NOT /members/@me).
+  ccord_profile_edit ged = CCORD_PROFILE_EDIT_INIT;
+  ged.guild_id = gid;
+  ged.has_display_name = true;
+  ged.display_name = "ServerNick";
+  ged.has_banner = true;
+  ged.banner = PNG;
+  ged.banner_len = sizeof PNG;
+  ged.has_bio = true;
+  ged.bio = "Server-only bio";
+  run r2 = {0};
+  CT_CHECK(ccord_session_edit_profile(e.s, &ged, on_done, &r2, &err) == CCORD_OK);
+  CT_CHECK(wait_done(&e, &r2));
+  CT_CHECK(r2.res.status == CCORD_OK && r2.res.requests_sent == 2);
+  char expect_path[96];
+  snprintf(expect_path, sizeof expect_path, "/guilds/%llu/profile/@me", (unsigned long long)gid);
+  CT_CHECK(strcmp(ccord_profile_rest_mock_last_path(rest), expect_path) == 0);
+  CT_CHECK(strstr(ccord_profile_rest_mock_last_body(rest), "\"banner\":\"data:image/png;base64,") != nullptr);
+  const ccord_member *mem = ccord_store_find_member(e.store, gid, e.self);
+  if (mem) CT_CHECK(strcmp(mem->nick, "ServerNick") == 0);
+  const ccord_user_profile *gp = ccord_store_user_profile(e.store, e.self);
+  CT_CHECK(gp && gp->guild_banner_url && strstr(gp->guild_banner_url, "banners/mockbn") != nullptr);
+
+  // 3. Owned collectibles inventory fetch parses real JSON + enriches profile effects + includes Profile Frames.
+  CT_CHECK(ccord_session_fetch_collectibles(e.s, false, &err) == CCORD_OK);
+  for (int i = 0; i < 100 && ccord_session_collectibles_state(e.s) == CCORD_FETCH_LOADING; i++) {
+    (void)ccord_session_pump(e.s);
+    usleep(1000);
+  }
+  CT_CHECK(ccord_session_collectibles_state(e.s) == CCORD_FETCH_READY);
+  size_t ncol = 0;
+  const ccord_owned_collectible *cols = ccord_session_collectibles(e.s, &ncol);
+  CT_CHECK(cols != nullptr && ncol >= 4);
+  bool has_deco = false, has_eff = false, has_np = false, has_frm = false;
+  ccord_id eff_id = CCORD_ID_NONE, frm_sku = CCORD_ID_NONE;
+  for (size_t i = 0; i < ncol; i++) {
+    if (cols[i].kind == CCORD_COLLECTIBLE_AVATAR_DECORATION) has_deco = true;
+    if (cols[i].kind == CCORD_COLLECTIBLE_PROFILE_EFFECT) {
+      has_eff = true;
+      eff_id = cols[i].item_id;
+      CT_CHECK(cols[i].has_effect && cols[i].effect.layer_count > 0);
+    }
+    if (cols[i].kind == CCORD_COLLECTIBLE_NAMEPLATE) has_np = true;
+    if (cols[i].kind == CCORD_COLLECTIBLE_PROFILE_FRAME) {
+      has_frm = true;
+      frm_sku = cols[i].sku_id;
+      CT_CHECK(cols[i].has_frame && cols[i].frame.layer_count > 0);
+    }
+  }
+  CT_CHECK(has_deco && has_eff && has_np && has_frm);
+  CT_CHECK(ccord_session_find_owned_effect(e.s, eff_id) != nullptr);
+  CT_CHECK(ccord_session_find_owned_frame(e.s, frm_sku) != nullptr);
+
+  // 4. Standalone Profile Frame PATCH sends "profile_frame_sku_id" on /users/@me/profile and updates store.
+  ccord_profile_edit fed = CCORD_PROFILE_EDIT_INIT;
+  fed.has_profile_frame = true;
+  fed.profile_frame_sku_id = frm_sku;
+  run rf = {0};
+  CT_CHECK(ccord_session_edit_profile(e.s, &fed, on_done, &rf, &err) == CCORD_OK);
+  CT_CHECK(wait_done(&e, &rf));
+  CT_CHECK(rf.res.status == CCORD_OK);
+  CT_CHECK(strcmp(ccord_profile_rest_mock_last_path(rest), "/users/@me/profile") == 0);
+  CT_CHECK(strstr(ccord_profile_rest_mock_last_body(rest), "\"profile_frame_sku_id\":") != nullptr);
+  gp = ccord_store_user_profile(e.store, e.self);
+  CT_CHECK(gp && gp->profile_frame_sku_id == frm_sku && gp->profile_frame.sku_id == frm_sku);
+
+  env_done(&e);
+}
+
 int main(void)
 {
   test_bio_only();
@@ -504,5 +629,6 @@ int main(void)
   test_limits_and_forbidden_fields();
   test_invalid_edit_sends_nothing();
   test_mock_backend();
+  test_extended_cosmetics_and_guild_profile();
   return CT_RESULT("test_session_profile_edit");
 }

@@ -551,6 +551,7 @@ ccord_status ccord_store_upsert_guild(ccord_store *s, const ccord_guild *guild, 
       s->d.guilds[gi].feature_community = guild->feature_community;
       s->d.guilds[gi].feature_vanity_url = guild->feature_vanity_url;
       s->d.guilds[gi].feature_banner = guild->feature_banner;
+      s->d.guilds[gi].feature_guild_tags = guild->feature_guild_tags;
       s->d.guilds[gi].has_guild_settings = true;
     }
     if (guild->has_incidents_data) {
