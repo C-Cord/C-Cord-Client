@@ -189,7 +189,7 @@ int main(void)
   if (s) {
     CT_CHECK(pixel_is(s, 20, 20, 0x14, 0x14, 0x17));      // full-window #141417 backdrop (bg_tertiary)
     CT_CHECK(pixel_is(s, 412, 390, 0x1e, 0x1e, 0x23));    // centered 480x420 #1e1e23 login card (bg_secondary token)
-    CT_CHECK(pixel_is(s, 640, 193, 0x6e, 0x7b, 0xf2));    // #6e7bf2 top header accent bar (brand)
+    CT_CHECK(pixel_is(s, 640, 193, 0x3b, 0x82, 0xf6));    // #3b82f6 top header accent bar (brand)
     SDL_DestroySurface(s);
   }
   remove(shot);
