@@ -126,6 +126,23 @@ void ccord_idmap_clear(ccord_idmap *m)
   m->count = 0;
 }
 
+void ccord_idmap_shrink(ccord_idmap *m)
+{
+  if (!m || !m->entries) return;
+  if (m->count == 0) {
+    ccord_idmap_free(m);
+    return;
+  }
+  size_t ncap = 16u;
+  while (ncap / 2u <= m->count) {
+    if (ncap > SIZE_MAX / 4u) return;
+    ncap *= 2u;
+  }
+  if (ncap < m->cap) {
+    (void)regrow(m, ncap);
+  }
+}
+
 void ccord_idmap_free(ccord_idmap *m)
 {
   if (!m) return;

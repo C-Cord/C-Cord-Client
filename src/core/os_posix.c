@@ -24,6 +24,9 @@
 #include <sys/stat.h>
 #include <sys/utsname.h>
 #include <unistd.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #if CCORD_OS_ANDROID
 #include <android/api-level.h>
 #endif
@@ -356,6 +359,13 @@ void ccord_thread_join(ccord_thread *t)
   if (!t) return;
   pthread_join(t->t, nullptr);
   ccord_free(t);
+}
+
+void ccord_os_trim_memory(void)
+{
+#if defined(__GLIBC__)
+  (void)malloc_trim(0);
+#endif
 }
 
 void ccord_spin_lock_acquire(ccord_spin_lock *l)

@@ -121,8 +121,13 @@ void ccord_arena_reset(ccord_arena *a)
     ccord_free(c);
     c = n;
   }
-  head->next = nullptr;
-  head->used = 0;
+  if (head->cap > a->chunk_size) {
+    ccord_free(head);
+    a->head = nullptr;
+  } else {
+    head->next = nullptr;
+    head->used = 0;
+  }
   a->used_total = 0;
 }
 

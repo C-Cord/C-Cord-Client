@@ -8,6 +8,7 @@
 #include <ccord/core/alloc.h>
 #include <ccord/core/log.h>
 
+#define BUS_QUEUE_INIT_CAP 64u
 #define BUS_QUEUE_CAP 4096u
 #define BUS_DRAIN_LIMIT 1024u
 
@@ -25,8 +26,8 @@ struct ccord_bus {
   ccord_sub_id next_id;
   bool need_compact;
   int dispatching;
-  ccord_event *queue; // ring buffer of BUS_QUEUE_CAP entries
-  size_t head, count;
+  ccord_event *queue; // dynamically grown ring buffer up to BUS_QUEUE_CAP entries
+  size_t head, count, qcap;
   uint64_t seq, dropped;
 };
 
@@ -66,7 +67,8 @@ ccord_bus *ccord_bus_create(ccord_error *err)
     ccord_error_set(err, CCORD_ERR_NOMEM, "event bus: out of memory");
     return nullptr;
   }
-  bus->queue = ccord_alloc_array(BUS_QUEUE_CAP, sizeof *bus->queue);
+  bus->qcap = BUS_QUEUE_INIT_CAP;
+  bus->queue = ccord_alloc_array(bus->qcap, sizeof *bus->queue);
   if (!bus->queue) {
     ccord_free(bus);
     ccord_error_set(err, CCORD_ERR_NOMEM, "event bus: out of memory");
@@ -133,14 +135,33 @@ ccord_status ccord_bus_post(ccord_bus *bus, ccord_event ev)
   if (ev.type <= CCORD_EVT_NONE || ev.type >= CCORD_EVT__COUNT || ev.type == CCORD_EVT_ANY) {
     return CCORD_ERR_INVALID;
   }
-  if (bus->count >= BUS_QUEUE_CAP) {
-    bus->dropped++;
-    CCORD_LOG_W("event bus full, dropped %s (total dropped %llu)", event_names[ev.type],
-                (unsigned long long)bus->dropped);
-    return CCORD_ERR_RANGE;
+  if (bus->count >= bus->qcap) {
+    if (bus->qcap >= BUS_QUEUE_CAP) {
+      bus->dropped++;
+      CCORD_LOG_W("event bus full, dropped %s (total dropped %llu)", event_names[ev.type],
+                  (unsigned long long)bus->dropped);
+      return CCORD_ERR_RANGE;
+    }
+    size_t ncap = bus->qcap * 2u;
+    if (ncap > BUS_QUEUE_CAP) ncap = BUS_QUEUE_CAP;
+    ccord_event *nq = ccord_alloc_array(ncap, sizeof *nq);
+    if (!nq) {
+      bus->dropped++;
+      return CCORD_ERR_NOMEM;
+    }
+    size_t first = bus->qcap - bus->head;
+    if (first > bus->count) first = bus->count;
+    memcpy(nq, bus->queue + bus->head, first * sizeof *nq);
+    if (bus->count > first) {
+      memcpy(nq + first, bus->queue, (bus->count - first) * sizeof *nq);
+    }
+    ccord_free(bus->queue);
+    bus->queue = nq;
+    bus->head = 0;
+    bus->qcap = ncap;
   }
   ev.seq = ++bus->seq;
-  bus->queue[(bus->head + bus->count) % BUS_QUEUE_CAP] = ev;
+  bus->queue[(bus->head + bus->count) % bus->qcap] = ev;
   bus->count++;
   return CCORD_OK;
 }
@@ -152,7 +173,7 @@ size_t ccord_bus_drain(ccord_bus *bus)
   bus->dispatching++;
   while (bus->count > 0 && delivered < BUS_DRAIN_LIMIT) {
     ccord_event ev = bus->queue[bus->head];
-    bus->head = (bus->head + 1) % BUS_QUEUE_CAP;
+    bus->head = (bus->head + 1u) % bus->qcap;
     bus->count--;
     delivered++;
 
@@ -168,6 +189,15 @@ size_t ccord_bus_drain(ccord_bus *bus)
   bus->dispatching--;
   if (bus->dispatching == 0 && bus->need_compact) {
     compact(bus);
+  }
+  if (bus->dispatching == 0 && bus->count == 0 && bus->qcap > BUS_QUEUE_INIT_CAP) {
+    ccord_event *sq = ccord_alloc_array(BUS_QUEUE_INIT_CAP, sizeof *sq);
+    if (sq) {
+      ccord_free(bus->queue);
+      bus->queue = sq;
+      bus->qcap = BUS_QUEUE_INIT_CAP;
+      bus->head = 0;
+    }
   }
   return delivered;
 }

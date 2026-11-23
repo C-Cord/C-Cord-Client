@@ -171,6 +171,10 @@ char *ccord_buf_take(ccord_buf *b, size_t *len)
     return ccord_strdup("");
   }
   char *out = b->data;
+  if (b->cap > b->len + 64u) {
+    char *trimmed = ccord_realloc(b->data, b->len + 1u);
+    if (trimmed) out = trimmed;
+  }
   if (len) {
     *len = b->len;
   }

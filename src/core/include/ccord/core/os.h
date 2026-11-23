@@ -89,6 +89,8 @@ bool ccord_cond_wait_timeout(ccord_cond *c, ccord_mutex *m, uint32_t timeout_ms)
 
 ccord_thread *ccord_thread_create(ccord_thread_fn fn, void *arg);
 void ccord_thread_join(ccord_thread *t);
+// Best-effort hint to return freed heap pages to the OS after large transient allocations.
+void ccord_os_trim_memory(void);
 
 // Zero-init static lock (safe for file-scope globals without init functions)
 typedef struct ccord_spin_lock {

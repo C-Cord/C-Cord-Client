@@ -34,5 +34,7 @@ bool ccord_idmap_remove(ccord_idmap *m, uint64_t key);
 [[nodiscard]] bool ccord_idmap_reserve(ccord_idmap *m, size_t entries);
 // Forgets every entry and keeps the memory.
 void ccord_idmap_clear(ccord_idmap *m);
+// Shrinks the table capacity to match the current entry count (or frees if empty).
+void ccord_idmap_shrink(ccord_idmap *m);
 // Forgets every entry and releases the memory.
 void ccord_idmap_free(ccord_idmap *m);

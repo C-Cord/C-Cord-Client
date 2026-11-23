@@ -10,6 +10,7 @@
 #include <ccord/core/alloc.h>
 
 #include <ctype.h>
+#include <malloc.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -516,4 +517,11 @@ int ccord_sock_poll1(ccord_socket_t s, unsigned events, int timeout_ms)
   if (pfd.revents & (POLLERR | POLLNVAL)) out |= CCORD_POLL_ERR;
   if (pfd.revents & POLLHUP) out |= CCORD_POLL_HUP;
   return out;
+}
+
+void ccord_os_trim_memory(void)
+{
+#if defined(_MSC_VER)
+  (void)_heapmin();
+#endif
 }

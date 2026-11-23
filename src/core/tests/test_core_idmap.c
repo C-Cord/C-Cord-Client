@@ -75,6 +75,11 @@ static void test_clear_and_reserve(void)
   CT_CHECK(ccord_idmap_put(&m, 42, 4) && m.count == 1 && ccord_idmap_find(&m, 42, &v) && v == 4);
   CT_CHECK(!ccord_idmap_reserve(&m, SIZE_MAX / 2u));   // an absurd request fails instead of wrapping
   CT_CHECK(ccord_idmap_find(&m, 42, &v) && v == 4);    // and leaves the map as it was
+  ccord_idmap_shrink(&m);
+  CT_CHECK(m.cap == 16u && ccord_idmap_find(&m, 42, &v) && v == 4);
+  CT_CHECK(ccord_idmap_remove(&m, 42));
+  ccord_idmap_shrink(&m);
+  CT_CHECK(m.count == 0 && m.cap == 0 && m.entries == nullptr);
   ccord_idmap_free(&m);
 }
 
