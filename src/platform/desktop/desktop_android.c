@@ -350,6 +350,53 @@ bool ccord_android_share_text(const char *title, const char *text)
   return ok;
 }
 
+static bool android_call_image_bridge(const char *method_name, const char *filename,
+                                      const uint8_t *data, size_t len, const char *fallback_url)
+{
+  if ((!data || len == 0) && (!fallback_url || !fallback_url[0])) return false;
+  if (len > (size_t)INT32_MAX) return false;
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  bool ok = false;
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls, method_name, "(Ljava/lang/String;[BLjava/lang/String;)Z");
+    if (mid) {
+      jstring jname = jni_new_string_utf8(env, (filename && filename[0]) ? filename : "ccord_image.png");
+      jstring jurl = jni_new_string_utf8(env, fallback_url ? fallback_url : "");
+      jbyteArray jbytes = nullptr;
+      bool bytes_ok = true;
+      if (data && len > 0) {
+        jbytes = (*env)->NewByteArray(env, (jsize)len);
+        if (jbytes && !(*env)->ExceptionCheck(env)) {
+          (*env)->SetByteArrayRegion(env, jbytes, 0, (jsize)len, (const jbyte *)data);
+        } else {
+          bytes_ok = false;
+        }
+      }
+      if (jname && jurl && bytes_ok && !(*env)->ExceptionCheck(env)) {
+        ok = (*env)->CallStaticBooleanMethod(env, cls, mid, jname, jbytes, jurl) == JNI_TRUE;
+      }
+      if (jbytes) (*env)->DeleteLocalRef(env, jbytes);
+      if (jurl) (*env)->DeleteLocalRef(env, jurl);
+      if (jname) (*env)->DeleteLocalRef(env, jname);
+    }
+    clear_exception(env);
+  }
+  android_env_release(attached);
+  return ok;
+}
+
+bool ccord_android_save_image(const char *filename, const uint8_t *data, size_t len, const char *fallback_url)
+{
+  return android_call_image_bridge("saveImageToGallery", filename, data, len, fallback_url);
+}
+
+bool ccord_android_share_image(const char *filename, const uint8_t *data, size_t len, const char *fallback_url)
+{
+  return android_call_image_bridge("shareImage", filename, data, len, fallback_url);
+}
+
 bool ccord_android_open_file_picker(void)
 {
   bool attached = false;

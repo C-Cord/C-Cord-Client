@@ -243,6 +243,8 @@ const ccord_media_item *ccord_session_get_media(const ccord_session *s, const ch
 // True when the most recent attempt to load `url` failed (blocked host, HTTP error, too large, timed out). A failed
 // URL is no longer pending, so ccord_session_fetch_media asks the transport again: callers pace their retries.
 bool ccord_session_media_failed(const ccord_session *s, const char *url);
+// Reports live download byte progress for an in-flight fetch_media(url). Returns true when progress is active.
+bool ccord_session_media_progress(const ccord_session *s, const char *url, uint64_t *out_now, uint64_t *out_total);
 
 // Resolves a third-party video page URL (YouTube, X/Twitter, etc.) into direct HTTPS stream URL(s).
 // Non-blocking: assigns `*out_req_id` and queues work on the transport; results arrive via

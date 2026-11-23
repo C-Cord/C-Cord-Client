@@ -434,6 +434,22 @@ static bool host_share_text(void *ud, const char *title, const char *text)
   return a && a->platform && ccord_platform_share_text(a->platform, title, text);
 }
 
+#if defined(__ANDROID__)
+static bool host_save_image(void *ud, const char *filename, const uint8_t *data, size_t len,
+                            const char *fallback_url)
+{
+  app *a = ud;
+  return a && a->platform && ccord_platform_save_image(a->platform, filename, data, len, fallback_url);
+}
+
+static bool host_share_image(void *ud, const char *filename, const uint8_t *data, size_t len,
+                             const char *fallback_url)
+{
+  app *a = ud;
+  return a && a->platform && ccord_platform_share_image(a->platform, filename, data, len, fallback_url);
+}
+#endif
+
 static void host_dismiss_keyboard(void *ud)
 {
   app *a = ud;
@@ -476,6 +492,10 @@ void app_fill_ui_host(app *a, ccord_ui_host *out)
     .update_install = host_update_install,
     .haptic_impact = host_haptic_impact,
     .share_text = host_share_text,
+#if defined(__ANDROID__)
+    .save_image = host_save_image,
+    .share_image = host_share_image,
+#endif
     .dismiss_keyboard = host_dismiss_keyboard,
     .text_input_kind = host_text_input_kind,
     .auth_autofill = host_auth_autofill,

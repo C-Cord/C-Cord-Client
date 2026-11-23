@@ -6,21 +6,32 @@ import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.ClipData
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.media.AudioManager
+import android.media.MediaScannerConnection
 import android.os.Build
+import android.os.Environment
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.MediaStore
 import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.lang.ref.WeakReference
+import java.net.HttpURLConnection
+import java.net.URL
 import java.nio.ByteBuffer
+import java.util.Locale
 
 /**
  * Static JNI bridge invoked from src/platform/desktop_android.c and src/platform/capture_android.c.
@@ -239,6 +250,181 @@ object CCordBridge {
             true
         } catch (t: Throwable) {
             Log.w(TAG, "shareText failed", t)
+            false
+        }
+    }
+
+    private fun detectImageMimeAndExt(filename: String, bytes: ByteArray?): Pair<String, String> {
+        if (bytes != null && bytes.size >= 12) {
+            val b0 = bytes[0].toInt() and 0xFF
+            val b1 = bytes[1].toInt() and 0xFF
+            val b2 = bytes[2].toInt() and 0xFF
+            val b3 = bytes[3].toInt() and 0xFF
+            if (b0 == 0x89 && b1 == 0x50 && b2 == 0x4E && b3 == 0x47) return "image/png" to "png"
+            if (b0 == 0xFF && b1 == 0xD8 && b2 == 0xFF) return "image/jpeg" to "jpg"
+            if (b0 == 0x47 && b1 == 0x49 && b2 == 0x46 && b3 == 0x38) return "image/gif" to "gif"
+            if (b0 == 0x52 && b1 == 0x49 && b2 == 0x46 && b3 == 0x46 &&
+                bytes[8].toInt() == 0x57 && bytes[9].toInt() == 0x45 &&
+                bytes[10].toInt() == 0x42 && bytes[11].toInt() == 0x50
+            ) {
+                return "image/webp" to "webp"
+            }
+        }
+        val lower = filename.lowercase(Locale.ROOT)
+        return when {
+            lower.endsWith(".jpg") || lower.endsWith(".jpeg") -> "image/jpeg" to "jpg"
+            lower.endsWith(".webp") -> "image/webp" to "webp"
+            lower.endsWith(".gif") -> "image/gif" to "gif"
+            else -> "image/png" to "png"
+        }
+    }
+
+    private fun sanitizeImageFilename(raw: String, ext: String): String {
+        val base = raw.substringAfterLast('/').substringAfterLast('\\').substringBefore('?').trim()
+        val cleaned = buildString {
+            for (ch in base) {
+                if (ch.isLetterOrDigit() || ch == '.' || ch == '-' || ch == '_') append(ch)
+                else append('_')
+            }
+        }.trimStart('.').take(96)
+        if (cleaned.isEmpty()) return "ccord_${System.currentTimeMillis()}.$ext"
+        return if (cleaned.contains('.')) cleaned else "$cleaned.$ext"
+    }
+
+    private fun writeBytesToGallery(ctx: Context, filename: String, bytes: ByteArray): Boolean {
+        if (bytes.isEmpty()) return false
+        val (mime, ext) = detectImageMimeAndExt(filename, bytes)
+        val safeName = sanitizeImageFilename(filename, ext)
+        return try {
+            val resolver = ctx.contentResolver
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, safeName)
+                    put(MediaStore.Images.Media.MIME_TYPE, mime)
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/C-Cord")
+                    put(MediaStore.Images.Media.IS_PENDING, 1)
+                }
+                val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values) ?: return false
+                try {
+                    resolver.openOutputStream(uri)?.use { out ->
+                        out.write(bytes)
+                        out.flush()
+                    } ?: run {
+                        resolver.delete(uri, null, null)
+                        return false
+                    }
+                    val done = ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }
+                    resolver.update(uri, done, null, null)
+                    true
+                } catch (t: Throwable) {
+                    resolver.delete(uri, null, null)
+                    throw t
+                }
+            } else {
+                val values = ContentValues().apply {
+                    put(MediaStore.Images.Media.DISPLAY_NAME, safeName)
+                    put(MediaStore.Images.Media.MIME_TYPE, mime)
+                }
+                val uri = try {
+                    resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                } catch (_: SecurityException) {
+                    null
+                }
+                if (uri != null) {
+                    resolver.openOutputStream(uri)?.use { out ->
+                        out.write(bytes)
+                        out.flush()
+                    } ?: return false
+                    true
+                } else {
+                    val dir = File(ctx.getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: ctx.filesDir, "C-Cord")
+                    if (!dir.exists()) dir.mkdirs()
+                    val outFile = File(dir, safeName)
+                    outFile.writeBytes(bytes)
+                    MediaScannerConnection.scanFile(ctx, arrayOf(outFile.absolutePath), arrayOf(mime), null)
+                    true
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "writeBytesToGallery failed", t)
+            false
+        }
+    }
+
+    @JvmStatic
+    fun saveImageToGallery(filename: String, bytes: ByteArray?, fallbackUrl: String): Boolean {
+        val ctx = activityRef?.get()?.applicationContext ?: appContext ?: return false
+        if (bytes != null && bytes.isNotEmpty()) {
+            return writeBytesToGallery(ctx, filename, bytes)
+        }
+        val urlStr = fallbackUrl.trim()
+        if (!urlStr.startsWith("https://") && !urlStr.startsWith("http://")) return false
+        Thread({
+            var conn: HttpURLConnection? = null
+            try {
+                conn = (URL(urlStr).openConnection() as? HttpURLConnection) ?: return@Thread
+                conn.connectTimeout = 10_000
+                conn.readTimeout = 20_000
+                conn.instanceFollowRedirects = true
+                if (conn.responseCode in 200..299) {
+                    val maxBytes = 50 * 1024 * 1024
+                    val baos = ByteArrayOutputStream()
+                    val buf = ByteArray(16 * 1024)
+                    conn.inputStream.use { inp ->
+                        while (true) {
+                            val n = inp.read(buf)
+                            if (n <= 0) break
+                            if (baos.size() + n > maxBytes) return@Thread
+                            baos.write(buf, 0, n)
+                        }
+                    }
+                    writeBytesToGallery(ctx, filename, baos.toByteArray())
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "saveImageToGallery fallback fetch failed", t)
+            } finally {
+                conn?.disconnect()
+            }
+        }, "ccord-save-img").start()
+        return true
+    }
+
+    @JvmStatic
+    fun shareImage(filename: String, bytes: ByteArray?, fallbackUrl: String): Boolean {
+        val act = activityRef?.get() ?: return false
+        if (bytes == null || bytes.isEmpty()) {
+            return shareText(filename, fallbackUrl)
+        }
+        val (mime, ext) = detectImageMimeAndExt(filename, bytes)
+        val safeName = sanitizeImageFilename(filename, ext)
+        return try {
+            val shareDir = File(act.cacheDir, "shared")
+            if (!shareDir.exists()) shareDir.mkdirs()
+            // Prune stale temp files older than 1 hour so cache/shared stays tiny.
+            val cutoff = System.currentTimeMillis() - 3_600_000L
+            shareDir.listFiles()?.forEach { f ->
+                if (f.isFile && f.lastModified() < cutoff) f.delete()
+            }
+            val outFile = File(shareDir, safeName)
+            outFile.writeBytes(bytes)
+            val uri = FileProvider.getUriForFile(act, "${act.packageName}.fileprovider", outFile)
+            act.runOnUiThread {
+                try {
+                    val send = Intent(Intent.ACTION_SEND).apply {
+                        type = mime
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        clipData = ClipData.newRawUri(safeName, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    val chooser = Intent.createChooser(send, "Share image")
+                    act.startActivity(chooser)
+                } catch (t: Throwable) {
+                    Log.w(TAG, "shareImage chooser failed", t)
+                }
+            }
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "shareImage failed", t)
             false
         }
     }

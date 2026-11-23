@@ -72,6 +72,10 @@ typedef struct ccord_ui_host {      // everything the UI needs from the OS; test
   // Optional mobile / touch UX callbacks (nullable on desktop).
   bool (*haptic_impact)(void *ud, int style);                // 0=light, 1=medium, 2=heavy, 3=selection
   bool (*share_text)(void *ud, const char *title, const char *text);
+  // Saves image bytes (if non-null) or URL to the device gallery (e.g. Android MediaStore Pictures/C-Cord/).
+  bool (*save_image)(void *ud, const char *filename, const uint8_t *data, size_t len, const char *fallback_url);
+  // Shares image bytes via native OS share sheet (e.g. Android FileProvider ACTION_SEND).
+  bool (*share_image)(void *ud, const char *filename, const uint8_t *data, size_t len, const char *fallback_url);
   void (*dismiss_keyboard)(void *ud);
   // Optional hint for the active text field's input type (matches ccord_text_input_kind: 0=text, 1=email, 2=password, 3=otp, 4=single_line).
   void (*text_input_kind)(void *ud, int kind);

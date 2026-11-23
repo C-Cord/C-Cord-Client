@@ -509,4 +509,12 @@ bool ccord_session_media_failed(const ccord_session *s, const char *url)
   return false;
 }
 
+bool ccord_session_media_progress(const ccord_session *s, const char *url, uint64_t *out_now, uint64_t *out_total)
+{
+  if (out_now) *out_now = 0;
+  if (out_total) *out_total = 0;
+  if (!s || !s->transport || !url || url[0] == '\0') return false;
+  return ccord_transport_media_progress(s->transport, url, out_now, out_total);
+}
+
 

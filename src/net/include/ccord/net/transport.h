@@ -727,6 +727,8 @@ typedef struct ccord_transport_vtable {
   // reconnect backoff cap) and background power-saving suspend (closes socket while preserving session for RESUME).
   void (*set_background)(ccord_transport *t, bool background);
   void (*set_suspended)(ccord_transport *t, bool suspended);
+  // Optional. Live download byte progress for an in-flight fetch_media(url). Returns true while active.
+  bool (*media_progress)(const ccord_transport *t, const char *url, uint64_t *out_now, uint64_t *out_total);
 } ccord_transport_vtable;
 struct ccord_transport { const ccord_transport_vtable *vt; };           // implementations embed this as first member
 [[nodiscard]] static inline ccord_status ccord_transport_connect(ccord_transport *t, ccord_error *e) { return t->vt->connect(t, e); }
@@ -870,6 +872,13 @@ static inline size_t ccord_transport_poll_stream_pcm(ccord_transport *t, int16_t
   if (!CCORD_TRANSPORT_OPTIONAL(t, fetch_media_range))
     return ccord_error_set(e, CCORD_ERR_UNSUPPORTED, "transport: ranged media fetch not supported");
   return t->vt->fetch_media_range(t, req, e);
+}
+static inline bool ccord_transport_media_progress(const ccord_transport *t, const char *url,
+                                                  uint64_t *out_now, uint64_t *out_total) {
+  if (out_now) *out_now = 0;
+  if (out_total) *out_total = 0;
+  if (!url || !url[0] || !CCORD_TRANSPORT_OPTIONAL(t, media_progress)) return false;
+  return t->vt->media_progress(t, url, out_now, out_total);
 }
 [[nodiscard]] static inline ccord_status ccord_transport_network_event(ccord_transport *t, ccord_link_event kind,
                                                                      ccord_error *e) {

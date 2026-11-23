@@ -815,7 +815,8 @@ ccord_status ccord_render_upload_media(ccord_renderer *r, const char *key, const
   }
   uint8_t *rgba = nullptr;
   int w = 0, h = 0;
-  ccord_status st = ccord_image_decode_rgba(data, len, &rgba, &w, &h, err);
+  int static_max_dim = (opts && opts->max_dim > 0) ? opts->max_dim : (CCORD_OS_ANDROID ? 2048 : MAX_IMAGE_DIM);
+  ccord_status st = ccord_image_decode_rgba_max(data, len, static_max_dim, &rgba, &w, &h, err);
   if (st != CCORD_OK) return st;
   st = tex_upload_rgba(r, key, rgba, w, h, false, err);
   ccord_free(rgba);

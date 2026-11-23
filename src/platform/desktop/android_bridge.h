@@ -29,6 +29,8 @@ int ccord_android_get_form_factor(void);
 bool ccord_android_haptic_impact(int style);
 bool ccord_android_haptic_notify(int kind);
 bool ccord_android_share_text(const char *title, const char *text);
+bool ccord_android_save_image(const char *filename, const uint8_t *data, size_t len, const char *fallback_url);
+bool ccord_android_share_image(const char *filename, const uint8_t *data, size_t len, const char *fallback_url);
 bool ccord_android_open_file_picker(void);
 bool ccord_android_set_orientation(int mode);
 bool ccord_android_keep_screen_on(bool on);

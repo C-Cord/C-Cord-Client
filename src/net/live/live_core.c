@@ -347,9 +347,74 @@ static void live_chan_guild_from_event(live *l, const ccord_net_event *ev)
 
 
 
+static uint64_t live_media_prog_hash(const char *url)
+{
+  uint64_t h = 14695981039346656037ULL;
+  for (const unsigned char *p = (const unsigned char *)url; p && *p; p++) {
+    h ^= (uint64_t)*p;
+    h *= 1099511628211ULL;
+  }
+  return h ? h : 1ULL;
+}
+
+static void live_media_prog_clear(live *l, const char *url)
+{
+  if (!l || !url || !url[0]) return;
+  uint64_t h = live_media_prog_hash(url);
+  for (size_t i = 0; i < sizeof l->media_prog / sizeof l->media_prog[0]; i++) {
+    if (l->media_prog[i].active && l->media_prog[i].url_hash == h) {
+      l->media_prog[i].active = false;
+      l->media_prog[i].url_hash = 0;
+      l->media_prog[i].now = 0;
+      l->media_prog[i].total = 0;
+    }
+  }
+}
+
+static void live_media_progress_cb(void *ud, uint64_t dl_bytes, uint64_t total_bytes)
+{
+  live_rest_op *op = ud;
+  if (!op || !op->l || op->kind != LIVE_REST_MEDIA || !op->media_url || !op->media_url[0]) return;
+  live *l = op->l;
+  uint64_t h = live_media_prog_hash(op->media_url);
+  size_t free_slot = SIZE_MAX;
+  const size_t cap = sizeof l->media_prog / sizeof l->media_prog[0];
+  for (size_t i = 0; i < cap; i++) {
+    if (l->media_prog[i].active && l->media_prog[i].url_hash == h) {
+      l->media_prog[i].now = dl_bytes;
+      l->media_prog[i].total = total_bytes;
+      return;
+    }
+    if (!l->media_prog[i].active && free_slot == SIZE_MAX) free_slot = i;
+  }
+  size_t slot = free_slot != SIZE_MAX ? free_slot : (size_t)(h % cap);
+  l->media_prog[slot].url_hash = h;
+  l->media_prog[slot].now = dl_bytes;
+  l->media_prog[slot].total = total_bytes;
+  l->media_prog[slot].active = true;
+}
+
+static bool live_media_progress(const ccord_transport *t, const char *url, uint64_t *out_now, uint64_t *out_total)
+{
+  const live *l = (const live *)t;
+  if (!l || !url || !url[0]) return false;
+  uint64_t h = live_media_prog_hash(url);
+  for (size_t i = 0; i < sizeof l->media_prog / sizeof l->media_prog[0]; i++) {
+    if (l->media_prog[i].active && l->media_prog[i].url_hash == h) {
+      if (out_now) *out_now = l->media_prog[i].now;
+      if (out_total) *out_total = l->media_prog[i].total;
+      return true;
+    }
+  }
+  return false;
+}
+
 void live_rest_op_free(live_rest_op *op)
 {
   if (!op) return;
+  if (op->kind == LIVE_REST_MEDIA && op->l && op->media_url) {
+    live_media_prog_clear(op->l, op->media_url);
+  }
   if (op->upload) {
     live_upload_state *u = op->upload;
     if (u->upload_linked && op->l) {
@@ -519,6 +584,7 @@ ccord_status live_queue_add_raw(live *l, ccord_rest_method method, const char *u
   if (op->kind == LIVE_REST_MEDIA) {
     r.bulk = true;
     r.max_response = CCORD_LIVE_MAX_MEDIA;
+    r.progress_cb = live_media_progress_cb;
   } else if (op->kind == LIVE_REST_UPLOAD_PUT) {
     r.bulk = true;
     r.progress_cb = live_upload_progress_cb;
@@ -1254,6 +1320,7 @@ static const ccord_transport_vtable k_live_vt = {
   .fetch_media = live_fetch_media,
   .fetch_media_user = live_fetch_media_user,
   .fetch_media_range = live_fetch_media_range,
+  .media_progress = live_media_progress,
   .network_event = live_network_event,
   .search_messages = live_search_messages,
   .open_dm = live_open_dm,

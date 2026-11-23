@@ -232,6 +232,13 @@ typedef struct live {
     size_t len;
   } pending_decor_profiles[8];
   size_t pending_decor_count;
+  // Live byte-transfer progress for in-flight LIVE_REST_MEDIA downloads (keyed by FNV-1a hash of op->media_url).
+  struct {
+    uint64_t url_hash;
+    uint64_t now;
+    uint64_t total;
+    bool active;
+  } media_prog[16];
   uint64_t (*now_ms)(void *ud);
   void *clock_ud;
 } live;

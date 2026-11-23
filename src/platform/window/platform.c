@@ -1352,6 +1352,42 @@ bool ccord_platform_share_text(ccord_platform *p, const char *title, const char 
 #endif
 }
 
+bool ccord_platform_save_image(ccord_platform *p, const char *filename, const uint8_t *data, size_t len,
+                               const char *fallback_url)
+{
+  if (!p || p->headless) return false;
+  if ((!data || len == 0) && (!fallback_url || !fallback_url[0])) return false;
+  if (filename && !ccord_utf8_valid(filename, strlen(filename))) return false;
+  if (fallback_url && !ccord_utf8_valid(fallback_url, strlen(fallback_url))) return false;
+#if defined(__ANDROID__)
+  return ccord_android_save_image(filename, data, len, fallback_url);
+#else
+  (void)filename;
+  (void)data;
+  (void)len;
+  (void)fallback_url;
+  return false;
+#endif
+}
+
+bool ccord_platform_share_image(ccord_platform *p, const char *filename, const uint8_t *data, size_t len,
+                                const char *fallback_url)
+{
+  if (!p || p->headless) return false;
+  if ((!data || len == 0) && (!fallback_url || !fallback_url[0])) return false;
+  if (filename && !ccord_utf8_valid(filename, strlen(filename))) return false;
+  if (fallback_url && !ccord_utf8_valid(fallback_url, strlen(fallback_url))) return false;
+#if defined(__ANDROID__)
+  return ccord_android_share_image(filename, data, len, fallback_url);
+#else
+  (void)filename;
+  (void)data;
+  (void)len;
+  (void)fallback_url;
+  return false;
+#endif
+}
+
 bool ccord_platform_keep_screen_on(ccord_platform *p, bool on)
 {
   if (!p || p->headless) return false;

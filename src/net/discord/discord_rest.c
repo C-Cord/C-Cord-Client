@@ -503,12 +503,17 @@ static void rest_stream_reset_response(ccord_rest_job *job)
 
 static int rest_xferinfo_cb(void *ud, curl_off_t dltotal, curl_off_t dlnow, curl_off_t ultotal, curl_off_t ulnow)
 {
-  (void)dltotal;
-  (void)dlnow;
   ccord_rest_job *job = ud;
   if (!job || !job->progress_cb) return 0;
-  uint64_t total = ultotal > 0 ? (uint64_t)ultotal : (uint64_t)job->body.len;
-  uint64_t now = ulnow > 0 ? (uint64_t)ulnow : 0u;
+  uint64_t total = 0u;
+  uint64_t now = 0u;
+  if (job->method == CCORD_REST_GET) {
+    total = dltotal > 0 ? (uint64_t)dltotal : 0u;
+    now = dlnow > 0 ? (uint64_t)dlnow : (uint64_t)job->resp.len;
+  } else {
+    total = ultotal > 0 ? (uint64_t)ultotal : (uint64_t)job->body.len;
+    now = ulnow > 0 ? (uint64_t)ulnow : 0u;
+  }
   if (total > 0 && now > total) now = total;
   if (now != job->last_ulnow || total != job->last_ultotal || !job->progress_reported) {
     job->progress_reported = true;

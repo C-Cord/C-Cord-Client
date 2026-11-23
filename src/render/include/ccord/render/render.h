@@ -88,6 +88,9 @@ bool ccord_render_poll_font_index(ccord_renderer *r);
 // Decodes PNG (libpng), JPEG (libjpeg), or WebP (libwebp) bytes into a ccord_malloc'd RGBA32 buffer (4 bytes/px).
 [[nodiscard]] ccord_status ccord_image_decode_rgba(const uint8_t *data, size_t len, uint8_t **out_rgba,
                                                    int *out_w, int *out_h, ccord_error *err);
+// Like ccord_image_decode_rgba, capping either side to `max_dim` (0 = default MAX_IMAGE_DIM) while decoding.
+[[nodiscard]] ccord_status ccord_image_decode_rgba_max(const uint8_t *data, size_t len, int max_dim,
+                                                       uint8_t **out_rgba, int *out_w, int *out_h, ccord_error *err);
 // Decodes an image and uploads it into the renderer's LRU SDL_Texture cache under `key`.
 [[nodiscard]] ccord_status ccord_render_upload_image(ccord_renderer *r, const char *key, const uint8_t *data,
                                                      size_t len, int *out_w, int *out_h, ccord_error *err);

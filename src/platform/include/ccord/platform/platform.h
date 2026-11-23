@@ -379,6 +379,10 @@ float ccord_platform_keyboard_inset(const ccord_platform *p);
 bool ccord_platform_haptic_impact(ccord_platform *p, ccord_haptic_style style);
 bool ccord_platform_haptic_notify(ccord_platform *p, ccord_haptic_notify_kind kind);
 bool ccord_platform_share_text(ccord_platform *p, const char *title, const char *text);
+bool ccord_platform_save_image(ccord_platform *p, const char *filename, const uint8_t *data, size_t len,
+                               const char *fallback_url);
+bool ccord_platform_share_image(ccord_platform *p, const char *filename, const uint8_t *data, size_t len,
+                                const char *fallback_url);
 bool ccord_platform_keep_screen_on(ccord_platform *p, bool on);
 bool ccord_platform_set_orientation(ccord_platform *p, ccord_orientation_mode mode);
 void ccord_platform_dismiss_keyboard(ccord_platform *p);
