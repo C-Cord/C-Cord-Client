@@ -840,7 +840,8 @@ int main(void)
   };
   ccord_plugins *pm = ccord_plugins_create(&cfg, &err);
   CT_CHECK(pm != nullptr);
-  CT_CHECK(ccord_plugins_load_all(pm) == 5);
+  CT_CHECK(ccord_plugins_load_all(pm) == 4);
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.ccord.starter-example", CCORD_PLUGIN_STOPPED));
 
   // Undeclared API call: even inside pcall, host exits immediately and main marks plugin FAILED + logs it.
   CT_CHECK(pump_until(pm, bus, contrib, "dev.test.denied", CCORD_PLUGIN_FAILED));

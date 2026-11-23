@@ -259,7 +259,7 @@ const ccord_json *pl_consent_parse_file(const ccord_plugins *m, ccord_arena *ar)
 bool pl_consent_apply(const ccord_json *root, const char *id, uint64_t perms, bool *out_enabled,
                           bool *out_consent, ccord_perm_set *out_consented_perms)
 {
-  *out_enabled = true;
+  *out_enabled = strcmp(id, "dev.ccord.starter-example") != 0;
   *out_consent = ccord_perm_max_class(perms) == CCORD_PERM_CLASS_SAFE;
   *out_consented_perms = ccord_perm_max_class(perms) == CCORD_PERM_CLASS_SAFE ? perms : 0;
   const ccord_json *entry = root ? ccord_json_get(root, id) : nullptr;
