@@ -76,8 +76,8 @@ const char *const st_k_web_urls[5] = {
   "https://discord.com/nitro",
   "https://discord.com/shop",
   "https://discord.com/nitro",
-  // Account credential edits (email/password/username/avatar/2FA) are excluded from the client:
-  // they stay browser redirects to discord.com (design D6).
+  // Billing, Nitro, Shop, Server Boost, and full web account management remain browser redirects;
+  // in-client account edits (username/email/phone/password/2FA) use native MFA-verified dialogs.
   "https://discord.com/settings/account",
 };
 

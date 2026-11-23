@@ -14,7 +14,7 @@
 > **Third-Party Client Disclaimer:** C-Cord is an independent project and is **not** affiliated with, endorsed by, or supported by Discord Inc. Using a personal Discord user token with any third-party client violates Discord's Terms of Service and is done entirely at your own risk.
 
 > [!IMPORTANT]
-> **Account & Billing Safety:** C-Cord never collects or mimics payment or credential forms. Billing, Nitro, Shop, Server Boost checkout, OAuth account linking, and account credential edits (email, password, 2FA) always open `discord.com` in your web browser.
+> **Billing & OAuth Safety:** C-Cord never collects or mimics payment forms. Billing, Nitro, Shop, Server Boost checkout, and OAuth account linking always open `discord.com` in your web browser, while account profile and credential edits use C-Cord's native MFA-verified dialogs with immutable protected modal styling.
 
 ---
 
