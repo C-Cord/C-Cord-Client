@@ -141,6 +141,7 @@ static void wipe_cstr(char *s)
 
 static bool rest_is_sensitive(bool raw, bool pre_auth, ccord_rest_method method, const char *path)
 {
+  (void)method;
   if (pre_auth) return true;
   if (raw || !path) return false;
   if (strncmp(path, "/auth/", 6) == 0) return true;
@@ -148,9 +149,14 @@ static bool rest_is_sensitive(bool raw, bool pre_auth, ccord_rest_method method,
       strstr(path, "sessions/logout") != nullptr || strstr(path, "/webhooks") != nullptr) {
     return true;
   }
-  if (method != CCORD_REST_GET &&
-      (strcmp(path, "/users/@me") == 0 || strncmp(path, "/users/@me/delete", 17) == 0 ||
-       strncmp(path, "/users/@me/disable", 18) == 0)) {
+  if (strcmp(path, "/users/@me") == 0 ||
+      strncmp(path, "/users/@me/delete", 17) == 0 ||
+      strncmp(path, "/users/@me/disable", 18) == 0 ||
+      strncmp(path, "/users/@me/phone", 16) == 0 ||
+      strncmp(path, "/users/@me/email", 16) == 0 ||
+      strncmp(path, "/users/@me/harvest", 18) == 0 ||
+      strncmp(path, "/phone-verifications", 20) == 0 ||
+      strncmp(path, "/safety-hub/@me", 15) == 0) {
     return true;
   }
   return false;
@@ -319,6 +325,7 @@ typedef struct ccord_rest_job {
   char *route_path;      // API path handed to the governor (null for raw)
   char *content_type;
   char *audit_reason;
+  char *mfa_auth_token;  // X-Discord-MFA-Authorization JWT; volatile-wiped in rest_job_free
   ccord_gov_priority prio;
   ccord_gov_ticket ticket;
   ccord_gov_response hdrs;
@@ -413,6 +420,10 @@ static void rest_job_free(ccord_rest_job *job)
   ccord_free(job->route_path);
   ccord_free(job->content_type);
   ccord_free(job->audit_reason);
+  if (job->mfa_auth_token) {
+    ccord_live_wipe(job->mfa_auth_token, strlen(job->mfa_auth_token));
+    ccord_free(job->mfa_auth_token);
+  }
   for (rest_follower *f = job->followers; f;) {
     rest_follower *next = f->next;
     ccord_free(f);
@@ -765,6 +776,17 @@ static bool rest_job_attach(ccord_rest_queue *q, ccord_rest_job *job)
         }
         job->headers = curl_slist_append(job->headers, reason_hdr);
       }
+      if (job->mfa_auth_token && job->mfa_auth_token[0] != '\0') {
+        char mfa_hdr[2048];
+        int mn = snprintf(mfa_hdr, sizeof mfa_hdr, "X-Discord-MFA-Authorization: %s", job->mfa_auth_token);
+        if (mn < 0 || (size_t)mn >= sizeof mfa_hdr) {
+          ccord_live_wipe(mfa_hdr, sizeof mfa_hdr);
+          rest_job_detach_easy(q, job, true);
+          return false;
+        }
+        job->headers = curl_slist_append(job->headers, mfa_hdr);
+        ccord_live_wipe(mfa_hdr, sizeof mfa_hdr);
+      }
     }
   }
   if (!job->headers) {
@@ -907,6 +929,14 @@ ccord_status ccord_rest_queue_submit(ccord_rest_queue *q, const ccord_rest_reque
       return ccord_error_set(err, CCORD_ERR_RANGE, "rest: audit reason too long");
     }
   }
+  if (!raw && req->mfa_auth_token && req->mfa_auth_token[0] != '\0') {
+    size_t ml = strlen(req->mfa_auth_token);
+    if (ml + 30u >= 2048u) return ccord_error_set(err, CCORD_ERR_RANGE, "rest: MFA token too long");
+    for (size_t i = 0; i < ml; i++) {
+      unsigned char c = (unsigned char)req->mfa_auth_token[i];
+      if (c <= 0x20 || c == 0x7f) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad MFA token");
+    }
+  }
   if (q->njobs >= CCORD_REST_MAX_JOBS && req->priority != CCORD_GOV_USER) {
     return ccord_error_set(err, CCORD_ERR_RANGE, "rest: queue full");
   }
@@ -989,6 +1019,11 @@ ccord_status ccord_rest_queue_submit(ccord_rest_queue *q, const ccord_rest_reque
   if (st == CCORD_OK && !raw && req->audit_reason && req->audit_reason[0] != '\0') {
     job->audit_reason = ccord_strdup(req->audit_reason);
     if (!job->audit_reason) st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+  }
+  if (st == CCORD_OK && !raw && req->mfa_auth_token && req->mfa_auth_token[0] != '\0') {
+    job->mfa_auth_token = ccord_strdup(req->mfa_auth_token);
+    if (!job->mfa_auth_token) st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    else job->sensitive = true;
   }
   if (st != CCORD_OK) {
     rest_job_free(job);

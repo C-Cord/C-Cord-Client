@@ -207,6 +207,13 @@ struct ccord_session {
   uint64_t collectibles_fetched_ms;
   uint64_t collectibles_gen;
   char collectibles_error[160];
+  ccord_account_rest *account_rest;   // own-account edits (account_edit.c); null until attached
+  ccord_account_private account_private; // RAM-only private self-account metadata (never in store)
+  ccord_account_standing account_standing;
+  ccord_webauthn_cred webauthn_creds[CCORD_WEBAUTHN_MAX_CREDS];
+  size_t webauthn_cred_count;
+  bool webauthn_loaded;
+  uint64_t account_revision;
   ccord_connection_state state;
   bool stale;               // store seeded from the on-disk cache, READY not yet applied (see ccord_session_set_stale)
   // Background requests that arrived while stale: replayed once when READY clears it.
@@ -434,3 +441,5 @@ ccord_status session_send_presence_with_custom(ccord_session *s, ccord_presence 
 void session_apply_status_proto(ccord_session *s, const ccord_net_event *ev);
 void session_repush_rich_presence(ccord_session *s);
 void session_replay_stale(ccord_session *s);
+void sess_account_wipe_vault(ccord_session *s);
+void sess_account_apply_private(ccord_session *s, const ccord_account_private *priv);

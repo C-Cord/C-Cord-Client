@@ -142,7 +142,8 @@ typedef enum ccord_net_event_type : uint8_t {
   CCORD_NET_GUILD_PROFILE,            // guild_id + guild_profile (GET /guilds/{g}/profile answer)
   CCORD_NET_VOICE_STATES,             // guild_id (0 = multi-guild) + voice_states + voice_state_count + replace_voice_states (+ optional users)
   CCORD_NET_VIDEO_RESOLVED,           // resolve_id + media_url (page) + resolved_video_url + resolved_audio_url + resolved_duration_ms; status != OK = failed
-  CCORD_NET_RAW_GATEWAY               // expr_arg = gateway event name ("t"), expr_body/expr_body_len = raw "d" JSON (when raw tap enabled)
+  CCORD_NET_RAW_GATEWAY,              // expr_arg = gateway event name ("t"), expr_body/expr_body_len = raw "d" JSON (when raw tap enabled)
+  CCORD_NET_ACCOUNT_PRIVATE           // account_private (+ optional users[0] on USER_UPDATE): RAM-only private self-account metadata
 } ccord_net_event_type;
 
 // Voice connection health, as CCORD_NET_VOICE_LINK reports it.
@@ -502,6 +503,7 @@ typedef struct ccord_net_event {
   const ccord_voice_state *voice_states; // VOICE_STATES / GUILD_UPSERT: batch voice states
   size_t voice_state_count;              // VOICE_STATES / GUILD_UPSERT
   bool replace_voice_states;             // VOICE_STATES / GUILD_UPSERT: true = authoritative full list for guild_id
+  const ccord_account_private *account_private; // ACCOUNT_PRIVATE: RAM-only self-account metadata
 } ccord_net_event;                         // all pointers valid only until the next poll() on that transport
 
 typedef enum ccord_range_flags : uint32_t {

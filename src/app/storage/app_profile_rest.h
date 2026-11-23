@@ -25,6 +25,12 @@
 [[nodiscard]] bool ccord_app_profile_rest_attach_live(ccord_session *s, const char *token_file, const char *api_base,
                                                       ccord_error *err);
 
-// Destroys the session's profile backend (pending edits answer CCORD_ERR_IO). Null-safe. Use on sign-out and at
-// exit before ccord_session_destroy.
+// Destroys the session's profile (and account) backends (pending edits answer CCORD_ERR_IO).
 void ccord_app_profile_rest_detach(ccord_session *s);
+
+// Account-editing REST backend (username, email, phone, password, 2FA/TOTP, standing, etc.).
+[[nodiscard]] bool ccord_app_account_rest_attach_mock(ccord_session *s, ccord_id self_id, ccord_error *err);
+[[nodiscard]] bool ccord_app_account_rest_attach_live(ccord_session *s, const char *token_file, const char *api_base,
+                                                      ccord_account_token_cb token_cb, void *token_ud,
+                                                      ccord_error *err);
+void ccord_app_account_rest_detach(ccord_session *s);

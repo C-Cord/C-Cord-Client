@@ -10,6 +10,7 @@ add_library(ccord_session STATIC
   session_admin.c
   session_presence.c
   session_social.c
+  session_account.c
   session_features.c)
 add_library(ccord::session ALIAS ccord_session)
 target_include_directories(ccord_session PUBLIC include)

@@ -83,8 +83,10 @@ static void admin_m6_apply_settings_patch(ccord_user_settings *s, const ccord_us
   if (p->animate_emoji >= 0) s->animate_emoji = p->animate_emoji != 0;
   if (p->enable_tts_command >= 0) s->enable_tts_command = p->enable_tts_command != 0;
   if (p->stream_notifications_enabled >= 0) s->stream_notifications_enabled = p->stream_notifications_enabled != 0;
+  if (p->share_profile_updates >= 0) s->share_profile_updates = p->share_profile_updates != 0;
   if (p->explicit_content_filter >= 0) s->explicit_content_filter = (uint8_t)p->explicit_content_filter;
   if (p->animate_stickers >= 0) s->animate_stickers = (uint8_t)p->animate_stickers;
+  if (p->profile_privacy_scope >= 0) s->profile_privacy_scope = (uint8_t)p->profile_privacy_scope;
   if (p->locale[0] != '\0') (void)snprintf(s->locale, sizeof s->locale, "%s", p->locale);
 }
 

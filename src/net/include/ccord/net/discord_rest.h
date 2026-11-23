@@ -128,6 +128,7 @@ typedef struct ccord_rest_request {
   size_t range_len;                  // 1 .. CCORD_STREAM_RANGE_MAX_BYTES; also the response cap
   const char *if_range;
   ccord_rest_range_info *range_info; // out; filled before cb runs; must outlive the job until cb
+  const char *mfa_auth_token;        // optional X-Discord-MFA-Authorization header (wiped on job free); null/"" = none
 } ccord_rest_request;
 [[nodiscard]] ccord_rest_request ccord_rest_request_make(ccord_rest_method method, const char *path,
                                                          ccord_gov_priority priority);

@@ -626,6 +626,12 @@ void sess_apply_event_ext(ccord_session *s, const ccord_net_event *ev)
     case CCORD_NET_REPORT_SUBMITTED:
       sess_queue_report_event(s, ev);
       break;
+    case CCORD_NET_ACCOUNT_PRIVATE:
+      if (ev->account_private) sess_account_apply_private(s, ev->account_private);
+      if (ev->users && ev->user_count > 0) {
+        (void)ccord_store_upsert_user(s->store, &ev->users[0], &err);
+      }
+      break;
     case CCORD_NET_NONE:
       break;
     default: break;

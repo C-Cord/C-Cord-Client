@@ -56,6 +56,7 @@ void mk_item_release(mock_item *it)
   ccord_free(it->vserver_own);
   ccord_free(it->voice_status_own);
   ccord_free(it->settings_own);
+  ccord_free(it->account_private_own);
   ccord_free(it->auth_sessions_own);
   ccord_free(it->connections_own);
   ccord_free(it->events_own);
@@ -345,6 +346,24 @@ static ccord_status mock_queue_ready(mock *m, uint64_t due, ccord_error *err)
   // Running activity instances survive a reconnect: Discord re-sends them with the guild's state.
   for (size_t i = 0; i < m->nactivities; i++) {
     s = mk_queue_activity_instance(m, &m->activities[i], due, err);
+    if (s != CCORD_OK) return s;
+  }
+  // Private self-account metadata (synthetic mock values, RAM-only).
+  {
+    mock_item ait = mk_make_item(CCORD_NET_ACCOUNT_PRIVATE, due);
+    ait.account_private_own = ccord_calloc(1, sizeof *ait.account_private_own);
+    if (!ait.account_private_own) return ccord_error_set(err, CCORD_ERR_NOMEM, "mock: out of memory");
+    ait.account_private_own->valid = true;
+    (void)snprintf(ait.account_private_own->email, sizeof ait.account_private_own->email, "you@example.test");
+    (void)snprintf(ait.account_private_own->phone, sizeof ait.account_private_own->phone, "+15550100199");
+    ait.account_private_own->verified = true;
+    ait.account_private_own->mfa_enabled = true;
+    ait.account_private_own->sms_mfa_enabled = false;
+    ait.account_private_own->authenticator_types = CCORD_AUTH_TYPE_TOTP | CCORD_AUTH_TYPE_WEBAUTHN;
+    ait.account_private_own->nsfw_allowed = true;
+    ait.account_private_own->premium_type = 2u;
+    ait.ev.account_private = ait.account_private_own;
+    s = mk_push_item(m, &ait, err);
     if (s != CCORD_OK) return s;
   }
   return CCORD_OK;

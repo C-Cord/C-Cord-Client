@@ -63,6 +63,8 @@ typedef struct ccord_live_event {
   ccord_onboarding *onboarding;      // ONBOARDING
   bool has_user_settings;            // user_settings holds a decoded M6 account settings object
   ccord_user_settings user_settings; // READY.user_settings / USER_SETTINGS_UPDATE / REST /users/@me/settings
+  bool has_account_private;          // account_private holds RAM-only self-account PII from READY.user / USER_UPDATE
+  ccord_account_private account_private;
   ccord_auth_session *auth_sessions; // GET /auth/sessions answer
   size_t auth_session_count;
   ccord_connection *connections;     // GET /users/@me/connections list or a single PATCH answer (count 1)
@@ -79,6 +81,13 @@ void ccord_live_event_free(ccord_live_event *ev);
                                                      ccord_error *err);
 [[nodiscard]] ccord_status ccord_live_gateway_decode_ex(const char *json, size_t len, ccord_id self_id,
                                                         ccord_live_event *out, ccord_error *err);
+// Filters and redacts a raw op-0 gateway dispatch payload before it may be handed to extensions
+// subscribed to `gateway.raw`. Returns false when the dispatch MUST be dropped entirely (READY,
+// AUTH_SESSION_CHANGE, SESSIONS_REPLACE, AUTHENTICATOR_UPDATE, USER_SETTINGS_*, SAFETY_HUB_*, etc.).
+// For USER_UPDATE, strips private PII fields (email, phone, mfa_enabled, authenticator_types, etc.)
+// and writes the sanitized JSON into `out`.
+[[nodiscard]] bool ccord_live_gateway_redact_raw(const char *t_name, const char *d_json, size_t d_len,
+                                                 ccord_buf *out);
 // Maps a REST message object (or a history array) into an owned event.
 [[nodiscard]] ccord_status ccord_live_json_message(const char *json, size_t len, ccord_net_event_type type,
                                                    ccord_live_event *out, ccord_error *err);

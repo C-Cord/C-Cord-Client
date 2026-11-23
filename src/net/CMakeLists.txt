@@ -130,6 +130,7 @@ ccord_strict_warnings(ccord_net_voice)
 # 6. Dual-mode auxiliary services (profile_edit, http_fetch, video_resolve, detectable, app_lookup).
 add_library(ccord_net_services STATIC
   services/profile_edit.c
+  services/account_edit.c
   services/app_lookup.c
   services/detectable.c
   services/http_fetch.c
@@ -202,6 +203,7 @@ if(CCORD_BUILD_TESTS)
     ccord_add_test(NAME test_voice_crypto SOURCES tests/test_voice_crypto.c LIBS ccord_net_voice LABELS unit)
     ccord_add_test(NAME test_discord_json SOURCES tests/test_discord_json.c LIBS ccord_net_discord ccord_net_mock LABELS unit)
     ccord_add_test(NAME test_m6_json SOURCES tests/test_m6_json.c LIBS ccord_net_discord LABELS unit)
+    ccord_add_test(NAME test_account_edit SOURCES tests/test_account_edit.c LIBS ccord_net LABELS unit)
     ccord_add_test(NAME test_profile_json SOURCES tests/test_profile_json.c LIBS ccord_net_discord ccord_net_mock ccord_store LABELS unit)
 
     ccord_add_test(NAME test_live_auth_policy SOURCES tests/test_live_auth_policy.c LIBS ccord_net LABELS unit)

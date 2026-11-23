@@ -104,7 +104,10 @@ static void gw_push(ccord_gateway *g, ccord_live_event *ev)
   } else if (g->queue[g->tail].ev.type == CCORD_NET_USER_SETTINGS) {
     // The settings model travels by value in the queued event; point the public field at that copy.
     g->queue[g->tail].ev.user_settings = &g->queue[g->tail].user_settings;
+  } else if (g->queue[g->tail].ev.type == CCORD_NET_ACCOUNT_PRIVATE) {
+    g->queue[g->tail].ev.account_private = &g->queue[g->tail].account_private;
   }
+  if (ev->has_account_private) ccord_live_wipe(&ev->account_private, sizeof ev->account_private);
   memset(ev, 0, sizeof *ev);
   ev->seq = -1;
   g->tail = (g->tail + 1u) % GW_QUEUE_SIZE;
@@ -581,6 +584,8 @@ static bool gw_finish_decoded(ccord_gateway *g, ccord_live_event *ev, size_t pay
   // that event so the session applies the snapshot first and the account settings second.
   bool want_settings = ev->has_user_settings && ev->ev.type != CCORD_NET_USER_SETTINGS;
   ccord_user_settings settings = ev->user_settings;
+  bool want_acct = ev->has_account_private && ev->ev.type != CCORD_NET_ACCOUNT_PRIVATE;
+  ccord_account_private acct = ev->account_private;
   if (ev->ev.type != CCORD_NET_NONE || ev->guild_op != CCORD_LIVE_GUILD_NONE) {
     // CALL_CREATE carries its participants in the internal array: surface each as its own VOICE_STATE_UPDATE,
     // because the public event has a single voice_state slot and the store keeps one row per participant.
@@ -618,6 +623,15 @@ static bool gw_finish_decoded(ccord_gateway *g, ccord_live_event *ev, size_t pay
     sev.ev.type = CCORD_NET_USER_SETTINGS;
     gw_push(g, &sev);
   }
+  if (want_acct) {
+    ccord_live_event aev;
+    ccord_live_event_init(&aev);
+    aev.has_account_private = true;
+    aev.account_private = acct;
+    aev.ev.type = CCORD_NET_ACCOUNT_PRIVATE;
+    gw_push(g, &aev);
+  }
+  if (want_acct) ccord_live_wipe(&acct, sizeof acct);
   return heavy;
 }
 
@@ -683,12 +697,21 @@ static void gw_maybe_push_raw(ccord_gateway *g, const char *data, size_t len)
     }
   }
   if (op != 0 || !t_name[0] || !d_ptr || d_len == 0) return;
-  if (strcmp(t_name, "READY") == 0 || strcmp(t_name, "READY_SUPPLEMENTAL") == 0) return;
+
+  ccord_buf redacted;
+  ccord_buf_init(&redacted, d_len + 16u);
+  if (!ccord_live_gateway_redact_raw(t_name, d_ptr, d_len, &redacted)) {
+    if (redacted.data && redacted.len > 0) ccord_live_wipe(redacted.data, redacted.len);
+    ccord_buf_free(&redacted);
+    return;
+  }
 
   ccord_live_event rev;
   ccord_live_event_init(&rev);
   char *tc = ccord_arena_strndup(&rev.arena, t_name, strlen(t_name));
-  char *dc = ccord_arena_strndup(&rev.arena, d_ptr, d_len);
+  char *dc = ccord_arena_strndup(&rev.arena, redacted.data ? redacted.data : "", redacted.len);
+  size_t rlen = redacted.len;
+  ccord_buf_free(&redacted);
   if (!tc || !dc) {
     ccord_live_event_free(&rev);
     return;
@@ -696,7 +719,7 @@ static void gw_maybe_push_raw(ccord_gateway *g, const char *data, size_t len)
   rev.ev.type = CCORD_NET_RAW_GATEWAY;
   rev.ev.expr_arg = tc;
   rev.ev.expr_body = dc;
-  rev.ev.expr_body_len = d_len;
+  rev.ev.expr_body_len = rlen;
   gw_push(g, &rev);
 }
 
@@ -1358,6 +1381,10 @@ bool ccord_gateway_poll(ccord_gateway *g, ccord_net_event *out)
   g->current = g->queue[g->head];
   if (g->current.ev.type == CCORD_NET_SNAPSHOT) g->current.ev.snapshot = &g->current.snapshot;
   if (g->current.ev.type == CCORD_NET_USER_SETTINGS) g->current.ev.user_settings = &g->current.user_settings;
+  if (g->current.ev.type == CCORD_NET_ACCOUNT_PRIVATE) g->current.ev.account_private = &g->current.account_private;
+  if (g->queue[g->head].has_account_private) {
+    ccord_live_wipe(&g->queue[g->head].account_private, sizeof g->queue[g->head].account_private);
+  }
   memset(&g->queue[g->head], 0, sizeof g->queue[g->head]);
   g->queue[g->head].seq = -1;
   g->head = (g->head + 1u) % GW_QUEUE_SIZE;

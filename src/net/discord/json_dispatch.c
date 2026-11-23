@@ -1396,6 +1396,21 @@ static ccord_status decode_gateway_root(const ccord_json *root, ccord_id self_id
     if (!dj_map_user_note_update(out, d, CCORD_ID_NONE)) {
       return ccord_error_set(err, CCORD_ERR_PARSE, "gateway: bad user note");
     }
+  } else if (strcmp(type, "USER_UPDATE") == 0) {
+    dj_extract_account_private(d, &out->account_private);
+    out->has_account_private = out->account_private.valid;
+    if (out->has_account_private) {
+      out->ev.type = CCORD_NET_ACCOUNT_PRIVATE;
+      out->ev.account_private = &out->account_private;
+      ccord_user *u = ccord_arena_alloc(&out->arena, sizeof *u, _Alignof(ccord_user));
+      if (u && dj_map_user_obj(&out->arena, d, CCORD_PRESENCE_ONLINE, u)) {
+        out->users = u;
+        out->user_count = 1;
+        out->ev.users = u;
+        out->ev.user_count = 1;
+        out->ev.user_id = u->id;
+      }
+    }
   } else if (strcmp(type, "THREAD_LIST_SYNC") == 0) {
     if (!map_thread_list_sync(out, d)) return ccord_error_set(err, CCORD_ERR_PARSE, "gateway: bad thread list sync");
   } else if (strcmp(type, "THREAD_MEMBER_UPDATE") == 0) {

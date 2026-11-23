@@ -608,16 +608,19 @@ ccord_status ccord_admin_build_user_settings_patch(ccord_buf *out, const ccord_u
   if ((st = patch_flag("animate_emoji", patch->animate_emoji, err)) != CCORD_OK) return st;
   if ((st = patch_flag("enable_tts_command", patch->enable_tts_command, err)) != CCORD_OK) return st;
   if ((st = patch_flag("stream_notifications_enabled", patch->stream_notifications_enabled, err)) != CCORD_OK) return st;
+  if ((st = patch_flag("share_profile_updates", patch->share_profile_updates, err)) != CCORD_OK) return st;
   if ((st = patch_level("explicit_content_filter", patch->explicit_content_filter, err)) != CCORD_OK) return st;
   if ((st = patch_level("animate_stickers", patch->animate_stickers, err)) != CCORD_OK) return st;
+  if ((st = patch_level("profile_privacy_scope", patch->profile_privacy_scope, err)) != CCORD_OK) return st;
   size_t locale_len = 0;
   if ((st = check_patch_locale(patch, &locale_len, err)) != CCORD_OK) return st;
   bool changed = patch->default_guilds_restricted >= 0 || patch->friend_source_all >= 0 ||
                  patch->friend_source_mutual_friends >= 0 || patch->friend_source_mutual_guilds >= 0 ||
                  patch->allow_access_to_age_restricted_servers >= 0 || patch->developer_mode >= 0 ||
                  patch->gif_auto_play >= 0 || patch->animate_emoji >= 0 || patch->enable_tts_command >= 0 ||
-                 patch->stream_notifications_enabled >= 0 || patch->explicit_content_filter >= 0 ||
-                 patch->animate_stickers >= 0 || locale_len > 0;
+                 patch->stream_notifications_enabled >= 0 || patch->share_profile_updates >= 0 ||
+                 patch->explicit_content_filter >= 0 || patch->animate_stickers >= 0 ||
+                 patch->profile_privacy_scope >= 0 || locale_len > 0;
   if (!changed) return ccord_error_set(err, CCORD_ERR_INVALID, "nothing to change");
 
   ccord_jw w;
@@ -663,6 +666,10 @@ ccord_status ccord_admin_build_user_settings_patch(ccord_buf *out, const ccord_u
     ccord_jw_key(&w, "stream_notifications_enabled");
     ccord_jw_bool(&w, patch->stream_notifications_enabled != 0);
   }
+  if (patch->share_profile_updates >= 0) {
+    ccord_jw_key(&w, "share_profile_updates");
+    ccord_jw_bool(&w, patch->share_profile_updates != 0);
+  }
   if (patch->explicit_content_filter >= 0) {
     ccord_jw_key(&w, "explicit_content_filter");
     ccord_jw_int(&w, patch->explicit_content_filter);
@@ -670,6 +677,10 @@ ccord_status ccord_admin_build_user_settings_patch(ccord_buf *out, const ccord_u
   if (patch->animate_stickers >= 0) {
     ccord_jw_key(&w, "animate_stickers");
     ccord_jw_int(&w, patch->animate_stickers);
+  }
+  if (patch->profile_privacy_scope >= 0) {
+    ccord_jw_key(&w, "profile_privacy_scope");
+    ccord_jw_int(&w, patch->profile_privacy_scope);
   }
   if (locale_len > 0) {
     ccord_jw_key(&w, "locale");

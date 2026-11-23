@@ -55,6 +55,12 @@ void app_pump(app *a)
   }
 #endif
   (void)ccord_session_pump(a->session);
+#if CCORD_LIVE_ACCOUNT
+  if (a->pending_token_reconnect) {
+    a->pending_token_reconnect = false;
+    app_connect_live(a);
+  }
+#endif
   // M6: desktop notification gating (queue is always drained; delivery is skipped under a virtual clock)
   // and the SNI/title tray badge, recomputed only when the store revision moves.
   // Earcons pop the notification queue first (they deliver the desktop notification themselves); the desktop pump
@@ -930,11 +936,17 @@ int main(int argc, char **argv)
                 (unsigned long long)(ccord_clock_ms() - a.boot_t0_ms), warm_res.loaded ? 1 : 0, warm_res.guilds,
                 warm_res.history_channels);
   }
-  // Own-profile edits go through a REST backend the session owns: mock under --mock, else the live account's.
+  // Own-profile and account edits go through REST backends the session owns: mock under --mock, else live.
   if (use_mock) {
     if (!ccord_app_profile_rest_attach_mock(a.session, CCORD_ID_NONE, &err)) CCORD_LOG_W("profile editing unavailable: %s", err.message);
+    if (!ccord_app_account_rest_attach_mock(a.session, CCORD_ID_NONE, &err)) CCORD_LOG_W("account editing unavailable: %s", err.message);
   } else if (use_live) {
     if (!ccord_app_profile_rest_attach_live(a.session, opt.token_file, nullptr, &err)) CCORD_LOG_W("profile editing unavailable: %s", err.message);
+#if CCORD_LIVE_ACCOUNT
+    if (!ccord_app_account_rest_attach_live(a.session, opt.token_file, nullptr, app_on_account_token_rotated, &a, &err)) {
+      CCORD_LOG_W("account editing unavailable: %s", err.message);
+    }
+#endif
   }
 
   ccord_platform_config pc = {.title = "C-Cord", .width = opt.width, .height = opt.height,

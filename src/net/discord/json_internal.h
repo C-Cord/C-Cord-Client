@@ -253,3 +253,4 @@ void dj_copy_json_str(char *dst, size_t cap, const ccord_json *obj, const char *
 bool dj_map_stage_instance_obj(const ccord_json *d, ccord_id guild_hint, ccord_id channel_hint, ccord_stage_instance *out);
 bool dj_map_scheduled_event_obj(const ccord_json *d, ccord_id guild_hint, bool deleted, ccord_scheduled_event *out);
 bool dj_parse_hex_color(const char *s, uint32_t *out);
+void dj_extract_account_private(const ccord_json *u, ccord_account_private *out);

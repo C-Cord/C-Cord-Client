@@ -139,6 +139,7 @@ typedef struct mock_item {
   ccord_voice_server *vserver_own;     // owned; ev.voice_server points here (token/endpoint are static literals)
   char *voice_status_own;              // owned; ev.voice_status points here
   ccord_user_settings *settings_own;   // owned; ev.user_settings points here (M6)
+  ccord_account_private *account_private_own; // owned; ev.account_private points here
   ccord_auth_session *auth_sessions_own; // owned; ev.auth_sessions points here (M6)
   ccord_connection *connections_own;   // owned; ev.connections points here (M6)
   ccord_scheduled_event *events_own;   // owned; ev.scheduled_events points here

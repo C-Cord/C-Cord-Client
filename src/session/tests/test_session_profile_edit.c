@@ -9,6 +9,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include <ccord/net/account_edit.h>
 #include <ccord/net/mock_transport.h>
 #include <ccord/net/profile_edit.h>
 #include <ccord/session/session.h>
@@ -620,6 +621,72 @@ static void test_extended_cosmetics_and_guild_profile(void)
   env_done(&e);
 }
 
+typedef struct acct_run {
+  int calls;
+  ccord_account_result res;
+} acct_run;
+
+static void on_acct_done(void *ud, const ccord_account_result *res)
+{
+  acct_run *ar = ud;
+  ar->calls++;
+  ar->res = *res;
+}
+
+static bool wait_acct(test_env *e, acct_run *ar)
+{
+  for (int i = 0; i < 100 && ar->calls == 0; i++) {
+    (void)ccord_session_pump(e->s);
+    usleep(1000);
+  }
+  return ar->calls > 0;
+}
+
+// Session RAM-only account vault syncs updates from ccord_session_account_submit and wipes on destroy.
+static void test_session_account_vault(void)
+{
+  test_env e;
+  CT_CHECK(env_init(&e));
+  if (!e.s) return;
+  ccord_error err = {0};
+  ccord_account_rest *ar = ccord_account_rest_create_mock(e.self, &err);
+  CT_CHECK(ar != nullptr && ccord_session_set_account_rest(e.s, ar) == CCORD_OK);
+
+  const ccord_account_private *ap = ccord_session_account_private(e.s);
+  CT_CHECK(ap != nullptr && ap->valid && ap->email[0] != '\0');
+  uint64_t rev0 = ccord_session_account_revision(e.s);
+
+  // TOTP enable updates session vault mfa_enabled and bumps revision
+  char secret[33] = {0};
+  CT_CHECK(ccord_account_generate_totp_secret(secret, &err) == CCORD_OK);
+  acct_run run1 = {0};
+  ccord_account_req req = {.op = CCORD_ACCT_OP_MFA_TOTP_ENABLE, .value = secret, .code = "123456", .password = "pw123456"};
+  CT_CHECK(ccord_session_account_submit(e.s, &req, on_acct_done, &run1, &err) == CCORD_OK);
+  CT_CHECK(wait_acct(&e, &run1));
+  CT_CHECK(run1.res.status == CCORD_OK);
+  ap = ccord_session_account_private(e.s);
+  CT_CHECK(ap && ap->mfa_enabled && (ap->authenticator_types & CCORD_AUTH_TYPE_TOTP) != 0);
+  CT_CHECK(ccord_session_account_revision(e.s) > rev0);
+
+  // Standing fetch caches standing on session
+  acct_run run2 = {0};
+  CT_CHECK(ccord_session_account_fetch_standing(e.s, on_acct_done, &run2, &err) == CCORD_OK);
+  CT_CHECK(wait_acct(&e, &run2));
+  const ccord_account_standing *st = ccord_session_account_standing(e.s);
+  CT_CHECK(st && st->loaded && st->tier == CCORD_STANDING_ALL_GOOD);
+
+  // WebAuthn fetch caches credentials on session
+  acct_run run3 = {0};
+  CT_CHECK(ccord_session_account_fetch_webauthn(e.s, on_acct_done, &run3, &err) == CCORD_OK);
+  CT_CHECK(wait_acct(&e, &run3));
+  size_t nkeys = 0;
+  bool loaded = false;
+  const ccord_webauthn_cred *keys = ccord_session_account_webauthn(e.s, &nkeys, &loaded);
+  CT_CHECK(loaded && nkeys > 0 && keys != nullptr);
+
+  env_done(&e);
+}
+
 int main(void)
 {
   test_bio_only();
@@ -630,5 +697,6 @@ int main(void)
   test_invalid_edit_sends_nothing();
   test_mock_backend();
   test_extended_cosmetics_and_guild_profile();
+  test_session_account_vault();
   return CT_RESULT("test_session_profile_edit");
 }

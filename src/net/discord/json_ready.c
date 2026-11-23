@@ -436,6 +436,8 @@ static ccord_user_settings user_settings_defaults(void)
     .message_display_compact = false,
     .animate_stickers = 0,
     .locale = "en-US",
+    .profile_privacy_scope = 0,
+    .share_profile_updates = true,
   };
 }
 
@@ -466,6 +468,8 @@ static void map_user_settings_model(ccord_live_event *ev, const ccord_json *d)
     dj_json_bool_key(d, "stream_notifications_enabled", s.stream_notifications_enabled);
   s.message_display_compact = dj_json_bool_key(d, "message_display_compact", s.message_display_compact);
   s.animate_stickers = dj_json_u8_clamped(d, "animate_stickers", 2u, s.animate_stickers);
+  s.profile_privacy_scope = dj_json_u8_clamped(d, "profile_privacy_scope", 2u, s.profile_privacy_scope);
+  s.share_profile_updates = dj_json_bool_key(d, "share_profile_updates", s.share_profile_updates);
   dj_copy_trunc_utf8(s.locale, sizeof s.locale, dj_jstr(d, "locale"));
   if (s.locale[0] == '\0') memcpy(s.locale, "en-US", sizeof "en-US");
   ev->user_settings = s;
@@ -774,6 +778,9 @@ bool dj_parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *err)
   // M6 account settings ride READY; the snapshot event keeps ev.type == CCORD_NET_SNAPSHOT.
   const ccord_json *uset = ccord_json_get(d, "user_settings");
   map_user_settings_model(ev, uset);
+  // Private self-account metadata (RAM-only, delivered separately as CCORD_NET_ACCOUNT_PRIVATE).
+  dj_extract_account_private(me, &ev->account_private);
+  ev->has_account_private = ev->account_private.valid;
   {   // READY's type-1 proto is the base a later status write patches (the snapshot itself ignores it here)
     const char *p1 = dj_jstr(d, "user_settings_proto");
     size_t p1_len = 0;

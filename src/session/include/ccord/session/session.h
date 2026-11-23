@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #pragma once
 #include <ccord/core/event_bus.h>
+#include <ccord/net/account_edit.h>
 #include <ccord/net/profile_edit.h>
 #include <ccord/net/transport.h>
 #include <ccord/net/video_resolve.h>
@@ -396,6 +397,28 @@ const ccord_owned_collectible *ccord_session_collectibles(const ccord_session *s
 const char *ccord_session_collectibles_error(const ccord_session *s);
 const ccord_profile_effect_config *ccord_session_find_owned_effect(const ccord_session *s, ccord_id effect_id);
 const ccord_profile_frame_config *ccord_session_find_owned_frame(const ccord_session *s, ccord_id sku_id);
+
+// ---- private account vault & in-app account editing ----
+// Attaches the authenticated account-editing REST backend (ccord_account_rest_create_live / _mock).
+// The session takes ownership, pumps it, and destroys/wipes it on detach or session destroy.
+[[nodiscard]] ccord_status ccord_session_set_account_rest(ccord_session *s, ccord_account_rest *rest);
+[[nodiscard]] bool ccord_session_has_account_rest(const ccord_session *s);
+// RAM-only private account metadata (NEVER stored in ccord_store). Null when signed out / not yet received.
+const ccord_account_private *ccord_session_account_private(const ccord_session *s);
+const ccord_account_standing *ccord_session_account_standing(const ccord_session *s);
+const ccord_webauthn_cred *ccord_session_account_webauthn(const ccord_session *s, size_t *out_count, bool *out_loaded);
+uint64_t ccord_session_account_revision(const ccord_session *s);
+bool ccord_session_account_has_mfa_challenge(const ccord_session *s);
+[[nodiscard]] ccord_status ccord_session_account_submit(ccord_session *s, const ccord_account_req *req,
+                                                        ccord_account_cb cb, void *ud, ccord_error *err);
+[[nodiscard]] ccord_status ccord_session_account_finish_mfa(ccord_session *s, const char *mfa_type,
+                                                            const char *mfa_data, ccord_account_cb cb, void *ud,
+                                                            ccord_error *err);
+void ccord_session_account_cancel_mfa(ccord_session *s);
+[[nodiscard]] ccord_status ccord_session_account_fetch_standing(ccord_session *s, ccord_account_cb cb, void *ud,
+                                                                ccord_error *err);
+[[nodiscard]] ccord_status ccord_session_account_fetch_webauthn(ccord_session *s, ccord_account_cb cb, void *ud,
+                                                                ccord_error *err);
 
 // ---- M5 voice & video intents (implemented by m5-session-mock / m5-live-transport) -----------------------------
 // DM calls: OP 4 VOICE_STATE_UPDATE {guild_id:null, channel_id} joins/leaves; ringing is passive (CALL_CREATE).

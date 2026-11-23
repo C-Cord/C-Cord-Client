@@ -231,14 +231,41 @@ void app_connect_live(app *a)
   // pointer unconditionally so a->transport never dangles at the freed one (print_net_stats reads it at exit).
   a->transport = tr;
   a->live = true;
-  // The profile backend holds its own copy of the token: rebuild it for the account now connecting.
+  // The profile and account backends hold their own copy of the token: rebuild both for the account now connecting.
   ccord_error perr = {0};   // not err: that still carries set_transport's message for the status line below
   if (!ccord_app_profile_rest_attach_live(a->session, a->token_file, nullptr, &perr)) {
     CCORD_LOG_W("profile editing unavailable: %s", perr.message);
   }
+  ccord_error aerr = {0};
+  if (!ccord_app_account_rest_attach_live(a->session, a->token_file, nullptr, app_on_account_token_rotated, a, &aerr)) {
+    CCORD_LOG_W("account editing unavailable: %s", aerr.message);
+  }
   if (st != CCORD_OK) {
     ccord_ui_set_login_status(a->ui, err.message[0] ? err.message : "Failed to connect to Discord Gateway", false);
   }
+}
+
+void app_on_account_token_rotated(void *ud, const char *new_token)
+{
+  app *a = ud;
+  if (!a || !new_token || !new_token[0]) return;
+  ccord_error err = {0};
+  if (ccord_live_save_token(a->token_file, new_token, &err) != CCORD_OK) {
+    CCORD_LOG_E("account: failed to save rotated token: %s", err.message);
+    return;
+  }
+  ccord_id self_id = a->store ? ccord_store_self_id(a->store) : CCORD_ID_NONE;
+  const ccord_user *u = (a->store && self_id != CCORD_ID_NONE) ? ccord_store_user(a->store, self_id) : nullptr;
+  ccord_saved_account acct = {0};
+  acct.user_id = self_id;
+  if (u && u->handle && u->handle[0]) snprintf(acct.username, sizeof acct.username, "%s", u->handle);
+  if (u && u->name && u->name[0]) snprintf(acct.display_name, sizeof acct.display_name, "%s", u->name);
+  if (self_id != CCORD_ID_NONE) snprintf(acct.slot_id, sizeof acct.slot_id, "%llu", (unsigned long long)self_id);
+  else snprintf(acct.slot_id, sizeof acct.slot_id, "legacy");
+  acct.active = true;
+  (void)ccord_live_account_upsert(&acct, new_token, true, &err);
+  ccord_error_clear(&err);
+  a->pending_token_reconnect = true;
 }
 
 void app_disconnect_live(app *a)

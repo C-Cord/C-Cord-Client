@@ -17,6 +17,7 @@ void ccord_live_event_init(ccord_live_event *ev)
 void ccord_live_event_free(ccord_live_event *ev)
 {
   if (!ev) return;
+  if (ev->has_account_private) ccord_live_wipe(&ev->account_private, sizeof ev->account_private);
   ccord_arena_free(&ev->arena);
   memset(ev, 0, sizeof *ev);
   ev->seq = -1;
@@ -1047,6 +1048,159 @@ ccord_status ccord_live_json_auth_response(const char *json, size_t len, long ht
   ccord_error_set(err, CCORD_ERR_PERMISSION, "auth: %s", (msg && msg[0]) ? msg : "missing token in response");
   ccord_arena_free(&arena);
   return CCORD_ERR_PERMISSION;
+}
+
+void dj_extract_account_private(const ccord_json *u, ccord_account_private *out)
+{
+  if (!out) return;
+  memset(out, 0, sizeof *out);
+  if (!u || ccord_json_type_of(u) != CCORD_JSON_OBJECT) return;
+  bool any = ccord_json_get(u, "email") != nullptr ||
+             ccord_json_get(u, "phone") != nullptr ||
+             ccord_json_get(u, "verified") != nullptr ||
+             ccord_json_get(u, "mfa_enabled") != nullptr ||
+             ccord_json_get(u, "authenticator_types") != nullptr ||
+             ccord_json_get(u, "nsfw_allowed") != nullptr ||
+             ccord_json_get(u, "premium_type") != nullptr;
+  if (!any) return;
+  out->valid = true;
+  dj_copy_trunc_utf8(out->email, sizeof out->email, dj_jstr(u, "email"));
+  dj_copy_trunc_utf8(out->phone, sizeof out->phone, dj_jstr(u, "phone"));
+  out->verified = dj_json_bool_key(u, "verified", false);
+  out->mfa_enabled = dj_json_bool_key(u, "mfa_enabled", false);
+  out->nsfw_allowed = dj_json_bool_key(u, "nsfw_allowed", false);
+  out->premium_type = dj_json_u8_clamped(u, "premium_type", 3u, 0u);
+  const ccord_json *at = ccord_json_get(u, "authenticator_types");
+  size_t nat = at && ccord_json_type_of(at) == CCORD_JSON_ARRAY ? ccord_json_array_len(at) : 0;
+  for (size_t i = 0; i < nat; i++) {
+    int64_t v = 0;
+    if (!ccord_json_int64(ccord_json_array_at(at, i), &v)) continue;
+    if (v == 1) out->authenticator_types |= CCORD_AUTH_TYPE_WEBAUTHN;
+    else if (v == 2) out->authenticator_types |= CCORD_AUTH_TYPE_TOTP;
+    else if (v == 3) {
+      out->authenticator_types |= CCORD_AUTH_TYPE_SMS;
+      out->sms_mfa_enabled = true;
+    }
+  }
+  if (out->mfa_enabled && out->authenticator_types == 0) {
+    // Legacy payloads that omit authenticator_types while mfa_enabled=true default to TOTP.
+    out->authenticator_types = CCORD_AUTH_TYPE_TOTP;
+  }
+}
+
+static bool raw_key_is_private_pii(const char *k, size_t kl)
+{
+  static const char *const k_pii[] = {
+    "email", "phone", "mfa_enabled", "authenticator_types", "verified",
+    "purchased_flags", "premium_usage_flags", "token", "session_id", "nsfw_allowed",
+  };
+  for (size_t i = 0; i < sizeof k_pii / sizeof k_pii[0]; i++) {
+    size_t nl = strlen(k_pii[i]);
+    if (kl == nl && memcmp(k, k_pii[i], nl) == 0) return true;
+  }
+  return false;
+}
+
+static bool raw_skip_json_value(const char *s, size_t len, size_t *io)
+{
+  size_t i = *io;
+  while (i < len && (s[i] == ' ' || s[i] == '\t' || s[i] == '\r' || s[i] == '\n')) i++;
+  if (i >= len) return false;
+  if (s[i] == '{' || s[i] == '[') {
+    int depth = 1;
+    bool in_s = false, esc = false;
+    i++;
+    while (i < len && depth > 0) {
+      char c = s[i++];
+      if (in_s) {
+        if (esc) esc = false;
+        else if (c == '\\') esc = true;
+        else if (c == '"') in_s = false;
+      } else if (c == '"') {
+        in_s = true;
+      } else if (c == '{' || c == '[') {
+        depth++;
+      } else if (c == '}' || c == ']') {
+        depth--;
+      }
+    }
+    if (depth != 0) return false;
+  } else if (s[i] == '"') {
+    i++;
+    while (i < len && s[i] != '"') {
+      if (s[i] == '\\' && i + 1 < len) i++;
+      i++;
+    }
+    if (i >= len) return false;
+    i++;
+  } else {
+    size_t start = i;
+    while (i < len && s[i] != ',' && s[i] != '}' && s[i] != ']' &&
+           s[i] != ' ' && s[i] != '\t' && s[i] != '\r' && s[i] != '\n') {
+      i++;
+    }
+    if (i == start) return false;
+  }
+  *io = i;
+  return true;
+}
+
+bool ccord_live_gateway_redact_raw(const char *t_name, const char *d_json, size_t d_len, ccord_buf *out)
+{
+  if (!t_name || !t_name[0] || !d_json || d_len == 0 || !out) return false;
+  if (strcmp(t_name, "READY") == 0 ||
+      strcmp(t_name, "READY_SUPPLEMENTAL") == 0 ||
+      strcmp(t_name, "AUTH_SESSION_CHANGE") == 0 ||
+      strcmp(t_name, "SESSIONS_REPLACE") == 0 ||
+      strcmp(t_name, "AUTHENTICATOR_UPDATE") == 0 ||
+      strcmp(t_name, "USER_REQUIRED_ACTION_UPDATE") == 0 ||
+      strcmp(t_name, "USER_SETTINGS_UPDATE") == 0 ||
+      strcmp(t_name, "USER_SETTINGS_PROTO_UPDATE") == 0 ||
+      strncmp(t_name, "SAFETY_HUB_", 11) == 0) {
+    return false;
+  }
+  if (strcmp(t_name, "USER_UPDATE") != 0) {
+    return ccord_buf_append(out, d_json, d_len) == CCORD_OK;
+  }
+  // USER_UPDATE carries email, phone, mfa_enabled, authenticator_types, etc.
+  // Rebuild top-level JSON object omitting every sensitive field.
+  size_t i = 0;
+  while (i < d_len && (d_json[i] == ' ' || d_json[i] == '\t' || d_json[i] == '\r' || d_json[i] == '\n')) i++;
+  if (i >= d_len || d_json[i] != '{') return false;
+  i++;
+  if (ccord_buf_append_str(out, "{") != CCORD_OK) return false;
+  bool first = true;
+  while (i < d_len) {
+    while (i < d_len && (d_json[i] == ' ' || d_json[i] == '\t' || d_json[i] == '\r' || d_json[i] == '\n' || d_json[i] == ',')) i++;
+    if (i >= d_len || d_json[i] == '}') break;
+    if (d_json[i] != '"') return false;
+    size_t kq_start = i++;
+    size_t ks = i;
+    while (i < d_len && d_json[i] != '"') {
+      if (d_json[i] == '\\' && i + 1 < d_len) i++;
+      i++;
+    }
+    if (i >= d_len) return false;
+    size_t kl = i - ks;
+    i++; // closing '"'
+    size_t kq_end = i;
+    while (i < d_len && (d_json[i] == ' ' || d_json[i] == '\t' || d_json[i] == '\r' || d_json[i] == '\n')) i++;
+    if (i >= d_len || d_json[i] != ':') return false;
+    i++;
+    while (i < d_len && (d_json[i] == ' ' || d_json[i] == '\t' || d_json[i] == '\r' || d_json[i] == '\n')) i++;
+    size_t vs = i;
+    if (!raw_skip_json_value(d_json, d_len, &i)) return false;
+    size_t ve = i;
+    if (raw_key_is_private_pii(d_json + ks, kl)) continue;
+    if (!first && ccord_buf_append_str(out, ",") != CCORD_OK) return false;
+    first = false;
+    if (ccord_buf_append(out, d_json + kq_start, kq_end - kq_start) != CCORD_OK ||
+        ccord_buf_append_str(out, ":") != CCORD_OK ||
+        ccord_buf_append(out, d_json + vs, ve - vs) != CCORD_OK) {
+      return false;
+    }
+  }
+  return ccord_buf_append_str(out, "}") == CCORD_OK;
 }
 
 

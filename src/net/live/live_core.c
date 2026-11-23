@@ -32,8 +32,11 @@ bool live_push_with_media(live *l, ccord_live_event *ev, char *owned_media)
   } else if (l->pending[l->tail].ev.type == CCORD_NET_USER_SETTINGS) {
     // The model travels by value with the queued event; repoint at the copy so the answer cannot dangle.
     l->pending[l->tail].ev.user_settings = &l->pending[l->tail].user_settings;
+  } else if (l->pending[l->tail].ev.type == CCORD_NET_ACCOUNT_PRIVATE) {
+    l->pending[l->tail].ev.account_private = &l->pending[l->tail].account_private;
   }
   live_chan_guild_from_event(l, &l->pending[l->tail].ev);
+  if (ev->has_account_private) ccord_live_wipe(&ev->account_private, sizeof ev->account_private);
   memset(ev, 0, sizeof *ev);
   ev->seq = -1;
   l->tail = (l->tail + 1u) % LIVE_QUEUE_SIZE;
@@ -1197,6 +1200,10 @@ bool live_poll(ccord_transport *t, ccord_net_event *out)
   l->pending_media[l->head] = nullptr;
   if (l->current.ev.type == CCORD_NET_SNAPSHOT) l->current.ev.snapshot = &l->current.snapshot;
   if (l->current.ev.type == CCORD_NET_USER_SETTINGS) l->current.ev.user_settings = &l->current.user_settings;
+  if (l->current.ev.type == CCORD_NET_ACCOUNT_PRIVATE) l->current.ev.account_private = &l->current.account_private;
+  if (l->pending[l->head].has_account_private) {
+    ccord_live_wipe(&l->pending[l->head].account_private, sizeof l->pending[l->head].account_private);
+  }
   memset(&l->pending[l->head], 0, sizeof l->pending[l->head]);
   l->pending[l->head].seq = -1;
   l->head = (l->head + 1u) % LIVE_QUEUE_SIZE;

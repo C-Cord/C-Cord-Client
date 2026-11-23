@@ -150,6 +150,7 @@ typedef struct app {
   size_t last_synced_gcount;
   char last_synced_name[128];
   bool last_synced_connected;
+  bool pending_token_reconnect;             // deferred reconnect after password/2FA token rotation
 #endif
 } app;
 
@@ -192,6 +193,7 @@ ccord_transport *app_idle_transport_create(ccord_error *err);
 void app_push_saved_accounts(app *a);
 #if CCORD_LIVE_ACCOUNT
 void app_keyring_sync(app *a);
+void app_on_account_token_rotated(void *ud, const char *new_token);
 #endif
 void app_reopen_warm_cache(app *a, const char *token_file);
 void app_reset_account_sync_cache(app *a);

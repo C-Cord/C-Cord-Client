@@ -80,6 +80,8 @@ void ccord_session_destroy(ccord_session *s)
   ccord_mutex_unlock(s->audio_mtx);
   ccord_mutex_destroy(s->audio_mtx);
   ccord_profile_rest_destroy(s->profile_rest);   // pending edits answer CCORD_ERR_IO without touching the store
+  ccord_account_rest_destroy(s->account_rest);
+  sess_account_wipe_vault(s);
   for (size_t i = 0; i < s->nfav_pending; i++) ccord_free(s->fav_pending[i].url);
   ccord_free(s->requested);
   ccord_free(s->chan_hist);
@@ -179,6 +181,7 @@ ccord_status ccord_session_set_transport(ccord_session *s, ccord_transport *tran
   s->slash_choice_count = 0;
   s->npins_in_flight = 0;
   s->notif_head = 0;
+  sess_account_wipe_vault(s);
   ccord_free(s->collectibles);
   s->collectibles = nullptr;
   s->collectible_count = 0;
@@ -503,6 +506,7 @@ size_t ccord_session_pump(ccord_session *s)
   uint64_t now_ms = ccord_clock_ms();
   ccord_stream_hub_pump(s->streams, now_ms);
   ccord_profile_rest_pump(s->profile_rest, now_ms);
+  ccord_account_rest_pump(s->account_rest, now_ms);
   if (s->rich_op3_dirty && s->state == CCORD_CONN_CONNECTED && !s->stale &&
       ccord_store_self_id(s->store) != CCORD_ID_NONE && now_ms >= s->rich_op3_retry_ms) {
     ccord_error gw_err;
@@ -539,7 +543,8 @@ bool ccord_session_wait_info(const ccord_session *s, ccord_wait_info *out)
     uint32_t w = rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
     if (w < out->timeout_ms) out->timeout_ms = w;
   }
-  if (s->profile_rest && ccord_profile_rest_pending(s->profile_rest)) {
+  if ((s->profile_rest && ccord_profile_rest_pending(s->profile_rest)) ||
+      (s->account_rest && ccord_account_rest_pending(s->account_rest))) {
     if (out->timeout_ms > 50u) out->timeout_ms = 50u;
   }
   if (s->streams) {
