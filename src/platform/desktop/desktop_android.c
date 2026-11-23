@@ -535,6 +535,19 @@ void ccord_android_on_first_frame(void)
   android_env_release(attached);
 }
 
+void ccord_android_set_startup_theme(uint32_t argb, bool is_light)
+{
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls, "setStartupTheme", "(IZ)V");
+    if (mid) (*env)->CallStaticVoidMethod(env, cls, mid, (jint)argb, is_light ? JNI_TRUE : JNI_FALSE);
+    clear_exception(env);
+  }
+  android_env_release(attached);
+}
+
 void ccord_android_set_auth_autofill(int mode, int active_field, bool commit,
                                      int email_x, int email_y, int email_w, int email_h,
                                      int pw_x, int pw_y, int pw_w, int pw_h,

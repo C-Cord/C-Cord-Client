@@ -599,6 +599,7 @@ static void run_interactive(app *a)
         }
       }
     }
+    if (ccord_render_poll_font_index(a->renderer)) redraw = true;
     if (ccord_app_desktop_take_redraw(a->desktop)) redraw = true;
     if (a->media_redraw) {
       a->media_redraw = false;
@@ -714,7 +715,7 @@ static void android_init_env(void)
     (void)ccord_mkdir_p(pbuf, 0700, &err);
     (void)setenv("TMPDIR", pbuf, 1);
   }
-  if (snprintf(pbuf, sizeof pbuf, "%s/cacert.pem", internal) < (int)sizeof pbuf && ccord_path_is_file(pbuf)) {
+  if (snprintf(pbuf, sizeof pbuf, "%s/cacert.pem", internal) < (int)sizeof pbuf) {
     (void)setenv("SSL_CERT_FILE", pbuf, 1);
     (void)setenv("CCORD_CA_BUNDLE", pbuf, 1);
   }
@@ -944,6 +945,13 @@ int main(int argc, char **argv)
   if (!a.platform) {
     fprintf(stderr, "ccord: %s\n", err.message);
     goto done;
+  }
+  // Sync active theme background to Android startup prefs so next launch/resume matches exact theme surface.
+  {
+    ccord_color bg = theme->c.bg_primary;
+    uint32_t argb = 0xFF000000u | ((uint32_t)bg.r << 16) | ((uint32_t)bg.g << 8) | (uint32_t)bg.b;
+    uint32_t luma = ((uint32_t)bg.r * 299u + (uint32_t)bg.g * 587u + (uint32_t)bg.b * 114u) / 1000u;
+    ccord_platform_set_theme_bg(a.platform, argb, luma >= 140u);
   }
   CCORD_LOG_I("boot: +%llu ms platform_ready", (unsigned long long)(ccord_clock_ms() - a.boot_t0_ms));
   // Tray wiring before the first frame: Close-to-Tray startup pref + SNI menu/click actions.

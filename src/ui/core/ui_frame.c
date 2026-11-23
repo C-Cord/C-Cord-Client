@@ -8,6 +8,93 @@
 static void ui_draw_loading_screen(ccord_ui *ui, ccord_renderer *r)
 {
   const ccord_theme_colors *c = &ui->theme->c;
+  if (ui->mobile_layout) {
+    // Mobile cold-start skeleton: immediately renders chat chrome + subtle shimmer rows under a compact
+    // centered status card so the screen never looks blank while awaiting initial Gateway READY.
+    ccord_draw_rect(r, (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h}, c->bg_primary);
+    float safe_t = ui->safe_insets.top;
+    float safe_b = ui->safe_insets.bottom;
+    float safe_l = ui->safe_insets.left;
+    float safe_r = ui->safe_insets.right;
+    float cw = ui->win_w - safe_l - safe_r;
+    if (cw < 120.0f) cw = ui->win_w;
+
+    // Header skeleton
+    float hdr_h = 52.0f;
+    ccord_draw_rect(r, (ccord_rect){0.0f, 0.0f, ui->win_w, safe_t + hdr_h}, c->bg_secondary);
+    ccord_draw_rect(r, (ccord_rect){0.0f, safe_t + hdr_h - 1.0f, ui->win_w, 1.0f}, c->divider);
+    ccord_color skel = ui_mix(c->bg_primary, c->bg_item_hover, 0.55f);
+    ccord_color skel_hi = ui_mix(skel, c->text_muted, 0.16f);
+    float pulse = ui->anim.reduced_motion
+                    ? 0.35f
+                    : (0.5f + 0.5f * sinf((float)(ui->now_ms % 1400u) * (6.2831853f / 1400.0f)));
+    ccord_color shim = ui_mix(skel, skel_hi, pulse * 0.65f);
+    ccord_draw_rrect(r, (ccord_rect){safe_l + 14.0f, safe_t + 16.0f, 22.0f, 20.0f}, 6.0f, skel);
+    ccord_draw_rrect(r, (ccord_rect){safe_l + 48.0f, safe_t + 18.0f, fminf(130.0f, cw * 0.42f), 16.0f}, 8.0f, shim);
+    ccord_draw_circle(r, safe_l + cw - 26.0f, safe_t + hdr_h * 0.5f, 11.0f, skel);
+
+    // Animated shimmer message placeholders
+    float comp_h = 56.0f;
+    float msg_top = safe_t + hdr_h + 18.0f;
+    float msg_bot = ui->win_h - safe_b - comp_h - 12.0f;
+    static const float k_name_w[6] = {96.0f, 124.0f, 82.0f, 112.0f, 90.0f, 108.0f};
+    static const float k_l1_frac[6] = {0.72f, 0.86f, 0.58f, 0.80f, 0.68f, 0.75f};
+    static const float k_l2_frac[6] = {0.48f, 0.62f, 0.0f, 0.52f, 0.40f, 0.55f};
+    float y = msg_top;
+    for (int i = 0; i < 6 && y + 54.0f < msg_bot; i++) {
+      float row_p = ui->anim.reduced_motion
+                      ? 0.35f
+                      : (0.5f + 0.5f * sinf((float)((ui->now_ms + (uint64_t)i * 180u) % 1400u) * (6.2831853f / 1400.0f)));
+      ccord_color row_col = ui_mix(skel, skel_hi, row_p * 0.65f);
+      float av_x = safe_l + 16.0f;
+      ccord_draw_circle(r, av_x + 18.0f, y + 18.0f, 18.0f, row_col);
+      float tx = av_x + 48.0f;
+      float tw = fmaxf(80.0f, cw - 76.0f);
+      ccord_draw_rrect(r, (ccord_rect){tx, y + 3.0f, fminf(k_name_w[i], tw * 0.6f), 11.0f}, 5.5f, row_col);
+      ccord_draw_rrect(r, (ccord_rect){tx, y + 21.0f, tw * k_l1_frac[i], 10.0f}, 5.0f, skel);
+      float row_h = 52.0f;
+      if (k_l2_frac[i] > 0.0f) {
+        ccord_draw_rrect(r, (ccord_rect){tx, y + 37.0f, tw * k_l2_frac[i], 10.0f}, 5.0f, skel);
+        row_h = 68.0f;
+      }
+      y += row_h + 12.0f;
+    }
+
+    // Composer skeleton
+    ccord_draw_rect(r, (ccord_rect){0.0f, ui->win_h - safe_b - comp_h, ui->win_w, comp_h + safe_b}, c->bg_secondary);
+    ccord_draw_rrect(r, (ccord_rect){safe_l + 12.0f, ui->win_h - safe_b - comp_h + 10.0f, cw - 24.0f, 36.0f}, 18.0f, skel);
+
+    // Compact centered status card holding centered progress bar (keeps loading_bar_rect centered for tests)
+    float cx = ui->win_w * 0.5f;
+    float cy = ui->win_h * 0.5f;
+    float card_w = fminf(280.0f, fmaxf(180.0f, cw - 40.0f));
+    float card_h = 96.0f;
+    ccord_rect card = {cx - card_w * 0.5f, cy - card_h * 0.5f, card_w, card_h};
+    ccord_draw_rrect(r, card, 14.0f, ui_alpha(c->bg_tertiary, 0.92f));
+    ccord_draw_rrect_stroke(r, card, 14.0f, 1.0f, c->divider);
+
+    ccord_text_style title_st = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large), c->text_header);
+    const char *title = "C-Cord";
+    ccord_vec2 ts = ccord_text_measure(r, title, strlen(title), &title_st, 0.0f);
+    ccord_text_draw(r, title, strlen(title), cx - ts.x * 0.5f, card.y + 14.0f, &title_st, 0.0f);
+
+    float bar_w = fmaxf(120.0f, card_w - 40.0f);
+    float bar_h = 6.0f;
+    ccord_rect track = {cx - bar_w * 0.5f, card.y + 46.0f, bar_w, bar_h};
+    ui->loading_bar_rect = track;
+    ccord_draw_rrect(r, track, bar_h * 0.5f, c->bg_primary);
+    float prog = uc_clampf(ui->loading_progress > 0.0f ? ui->loading_progress : 0.15f, 0.05f, 1.0f);
+    ccord_draw_rrect(r, (ccord_rect){track.x, track.y, bar_w * prog, bar_h}, bar_h * 0.5f, c->brand);
+
+    const char *sub = (ui->d.session && ccord_session_state(ui->d.session) == CCORD_CONN_CONNECTED)
+                        ? "Loading servers & channels..."
+                        : "Connecting to Discord...";
+    ccord_text_style sub_st = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), c->text_muted);
+    ccord_vec2 ss = ccord_text_measure(r, sub, strlen(sub), &sub_st, 0.0f);
+    ccord_text_draw(r, sub, strlen(sub), cx - ss.x * 0.5f, card.y + 62.0f, &sub_st, 0.0f);
+    return;
+  }
+
   ccord_draw_rect(r, (ccord_rect){0.0f, 0.0f, ui->win_w, ui->win_h}, c->bg_tertiary);
   float cx = ui->win_w * 0.5f;
   float cy = ui->win_h * 0.5f;

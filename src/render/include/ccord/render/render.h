@@ -80,6 +80,9 @@ typedef enum ccord_glyph_kind { CCORD_GLYPH_NOTDEF, CCORD_GLYPH_REAL, CCORD_GLYP
 ccord_glyph_kind ccord_text_glyph_kind(ccord_renderer *r, const ccord_text_style *st, uint32_t cp);
 // Turns the run-time font lookup and the control-character cutting off (false) or on again; flushes the text cache.
 void ccord_render_set_glyph_fixes(ccord_renderer *r, bool enabled);
+// Returns true once when an asynchronous system-font fallback index finishes after at least one glyph was deferred
+// during Frame 1 (Android); flushes the text cache so the next frame resolves the deferred glyphs.
+bool ccord_render_poll_font_index(ccord_renderer *r);
 
 // Image decoding and keyed LRU SDL_Texture cache ------------------------------
 // Decodes PNG (libpng), JPEG (libjpeg), or WebP (libwebp) bytes into a ccord_malloc'd RGBA32 buffer (4 bytes/px).

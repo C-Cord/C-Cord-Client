@@ -23,10 +23,12 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import android.text.InputType
 import android.util.Log
 import android.util.SparseArray
+import android.view.Choreographer
 import android.view.MotionEvent
 import android.view.SurfaceView
 import android.view.View
@@ -38,6 +40,7 @@ import android.view.autofill.AutofillValue
 import android.widget.FrameLayout
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -57,6 +60,11 @@ import kotlin.math.max
 class CCordActivity : SDLActivity() {
     companion object {
         private const val TAG = "CCordActivity"
+        private const val STARTUP_TAG = "CCordStartup"
+        private const val PREFS_STARTUP = "ccord_startup_prefs"
+        private const val KEY_BG_ARGB = "bg_argb"
+        private const val KEY_IS_LIGHT = "is_light"
+        private const val DEFAULT_BG_ARGB = 0xFF141417.toInt() // Matte Graphite bg_primary
         private const val REQ_FILE_PICKER = 9101
         private const val REQ_MEDIA_PROJECTION = 9102
         private const val REQ_NOTIFICATIONS = 9103
@@ -65,10 +73,16 @@ class CCordActivity : SDLActivity() {
     private var connectivityManager: ConnectivityManager? = null
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
-    // Startup/resume backdrop overlay: hides SDL's uninitialized/recreating black SurfaceView hole until a frame presents.
+    // Cold-start OS SplashScreen hold + theme-matched resume backdrop synchronized with Choreographer.
+    @Volatile
+    private var keepSplashOnScreen = true
+    private var splashDismissScheduled = false
+    private var launchMonoMs: Long = 0L
+    private var startupBgArgb: Int = DEFAULT_BG_ARGB
+    private var startupIsLight: Boolean = false
     private var splashBackdrop: View? = null
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val splashTimeoutRunnable = Runnable { dismissSplashBackdrop() }
+    private val splashTimeoutRunnable = Runnable { releaseSplashNow("timeout") }
 
     // Window & lifecycle tracking for edge-to-edge restoration and smooth foreground resume.
     private var isFullscreenMode = false
@@ -95,14 +109,55 @@ class CCordActivity : SDLActivity() {
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        // Extract bundled Mozilla CA roots BEFORE super.onCreate() so SSL_CERT_FILE is ready
-        // before SDLThread starts SDL_main().
-        extractCaBundle()
+        launchMonoMs = SystemClock.elapsedRealtime()
+        loadStartupThemePrefs()
+        keepSplashOnScreen = true
+        splashDismissScheduled = false
+
+        // Keep Android's branded SplashScreen on screen until Frame 1 presents (with 1200ms failsafe)
+        // instead of showing an unbranded blank View slab over SurfaceView.
+        try {
+            val splash = installSplashScreen()
+            splash.setKeepOnScreenCondition { keepSplashOnScreen }
+            splash.setOnExitAnimationListener { provider ->
+                try {
+                    provider.view.animate()
+                        .alpha(0f)
+                        .setDuration(80L)
+                        .withEndAction {
+                            try {
+                                provider.remove()
+                            } catch (_: Throwable) {
+                            }
+                        }
+                        .start()
+                } catch (_: Throwable) {
+                    try {
+                        provider.remove()
+                    } catch (_: Throwable) {
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "installSplashScreen unavailable, falling back", t)
+            keepSplashOnScreen = false
+        }
+
+        // Fast-path no-op after first install; extracts Mozilla CA bundle asynchronously so onCreate never blocks.
+        extractCaBundleAsync()
+        mainHandler.postDelayed(splashTimeoutRunnable, 1200L)
 
         super.onCreate(savedInstanceState)
-        if (mBrokenLibraries) return
+        Log.i(STARTUP_TAG, "t=+${SystemClock.elapsedRealtime() - launchMonoMs}ms libs_loaded")
+        if (mBrokenLibraries) {
+            releaseSplashNow("broken_libs")
+            return
+        }
 
-        installSplashBackdrop(1500L)
+        try {
+            window.decorView.setBackgroundColor(startupBgArgb)
+        } catch (_: Throwable) {
+        }
         installAutofillOverlay()
         CCordBridge.attach(this)
         CCordBridge.nativeSetActivityActive(true)
@@ -141,8 +196,8 @@ class CCordActivity : SDLActivity() {
         if (CCordBridge.nativeReady) CCordBridge.nativeSetActivityActive(true)
         if (wasStopped) {
             wasStopped = false
-            // Cover the freshly recreating SurfaceView with our theme backdrop until the resumed frame presents.
-            installSplashBackdrop(450L)
+            // Cover the freshly recreating SurfaceView with our theme-matched backdrop until the resumed frame presents.
+            installSplashBackdrop(300L)
         }
         CCordVoiceService.retrySyncIfNeeded(this)
         configureEdgeToEdge(fullscreen = isFullscreenMode)
@@ -205,13 +260,47 @@ class CCordActivity : SDLActivity() {
         super.onDestroy()
     }
 
+    private fun loadStartupThemePrefs() {
+        try {
+            val prefs = getSharedPreferences(PREFS_STARTUP, Context.MODE_PRIVATE)
+            startupBgArgb = prefs.getInt(KEY_BG_ARGB, DEFAULT_BG_ARGB)
+            startupIsLight = prefs.getBoolean(KEY_IS_LIGHT, false)
+        } catch (_: Throwable) {
+            startupBgArgb = DEFAULT_BG_ARGB
+            startupIsLight = false
+        }
+    }
+
+    fun onStartupThemeChanged(argb: Int, isLight: Boolean) {
+        val opaque = argb or (0xFF shl 24)
+        if (startupBgArgb == opaque && startupIsLight == isLight) return
+        startupBgArgb = opaque
+        startupIsLight = isLight
+        try {
+            getSharedPreferences(PREFS_STARTUP, Context.MODE_PRIVATE)
+                .edit()
+                .putInt(KEY_BG_ARGB, opaque)
+                .putBoolean(KEY_IS_LIGHT, isLight)
+                .apply()
+            window.decorView.setBackgroundColor(opaque)
+            splashBackdrop?.setBackgroundColor(opaque)
+            val controller = WindowInsetsControllerCompat(window, window.decorView)
+            controller.isAppearanceLightStatusBars = isLight
+            controller.isAppearanceLightNavigationBars = isLight
+        } catch (t: Throwable) {
+            Log.w(TAG, "onStartupThemeChanged failed", t)
+        }
+    }
+
     private fun installSplashBackdrop(timeoutMs: Long) {
         try {
             mainHandler.removeCallbacks(splashTimeoutRunnable)
+            splashDismissScheduled = false
             if (splashBackdrop == null) {
                 val content = findViewById<ViewGroup>(android.R.id.content) ?: return
                 val backdrop = View(this).apply {
-                    setBackgroundColor(0xFF1E1F22.toInt())
+                    setBackgroundColor(startupBgArgb)
+                    alpha = 1f
                     isClickable = false
                     isFocusable = false
                     importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
@@ -224,6 +313,12 @@ class CCordActivity : SDLActivity() {
                     )
                 )
                 splashBackdrop = backdrop
+            } else {
+                splashBackdrop?.apply {
+                    animate().cancel()
+                    alpha = 1f
+                    setBackgroundColor(startupBgArgb)
+                }
             }
             mainHandler.postDelayed(splashTimeoutRunnable, timeoutMs)
         } catch (t: Throwable) {
@@ -232,12 +327,48 @@ class CCordActivity : SDLActivity() {
     }
 
     fun dismissSplashBackdrop() {
+        if (splashDismissScheduled && !keepSplashOnScreen && splashBackdrop == null) return
+        splashDismissScheduled = true
+        Log.i(STARTUP_TAG, "t=+${SystemClock.elapsedRealtime() - launchMonoMs}ms first_frame_jni")
+        // Wait one Choreographer vsync so SurfaceFlinger has latched SDL's newly swapped GLES frame.
+        try {
+            Choreographer.getInstance().postFrameCallback {
+                releaseSplashNow("first_frame")
+            }
+        } catch (_: Throwable) {
+            releaseSplashNow("first_frame_fallback")
+        }
+    }
+
+    private fun releaseSplashNow(reason: String) {
         mainHandler.removeCallbacks(splashTimeoutRunnable)
+        splashDismissScheduled = false
+        if (keepSplashOnScreen) {
+            keepSplashOnScreen = false
+            Log.i(STARTUP_TAG, "t=+${SystemClock.elapsedRealtime() - launchMonoMs}ms splash_released reason=$reason")
+        }
         val v = splashBackdrop ?: return
         splashBackdrop = null
         try {
-            (v.parent as? ViewGroup)?.removeView(v)
+            if (isFinishing || isDestroyed) {
+                (v.parent as? ViewGroup)?.removeView(v)
+            } else {
+                v.animate()
+                    .alpha(0f)
+                    .setDuration(80L)
+                    .withEndAction {
+                        try {
+                            (v.parent as? ViewGroup)?.removeView(v)
+                        } catch (_: Throwable) {
+                        }
+                    }
+                    .start()
+            }
         } catch (_: Throwable) {
+            try {
+                (v.parent as? ViewGroup)?.removeView(v)
+            } catch (_: Throwable) {
+            }
         }
     }
 
@@ -530,20 +661,30 @@ class CCordActivity : SDLActivity() {
         }
     }
 
-    private fun extractCaBundle() {
+    private fun extractCaBundleAsync() {
         val dst = File(filesDir, "cacert.pem")
         try {
             if (dst.exists() && dst.length() > 1024) return
-            assets.open("cacert.pem").use { input ->
-                val tmp = File(filesDir, "cacert.pem.tmp")
-                FileOutputStream(tmp).use { out -> input.copyTo(out) }
-                if (!tmp.renameTo(dst)) {
-                    tmp.copyTo(dst, overwrite = true)
-                    tmp.delete()
+        } catch (_: Throwable) {
+        }
+        val appCtx = applicationContext
+        Thread({
+            try {
+                if (dst.exists() && dst.length() > 1024) return@Thread
+                appCtx.assets.open("cacert.pem").use { input ->
+                    val tmp = File(appCtx.filesDir, "cacert.pem.tmp")
+                    FileOutputStream(tmp).use { out -> input.copyTo(out) }
+                    if (!tmp.renameTo(dst)) {
+                        tmp.copyTo(dst, overwrite = true)
+                        tmp.delete()
+                    }
                 }
+            } catch (t: Throwable) {
+                Log.w(TAG, "Could not extract cacert.pem from assets", t)
             }
-        } catch (t: Throwable) {
-            Log.w(TAG, "Could not extract cacert.pem from assets", t)
+        }, "CCordCaExtract").apply {
+            isDaemon = true
+            start()
         }
     }
 
@@ -601,8 +742,8 @@ class CCordActivity : SDLActivity() {
                 window.attributes = lp
             }
             val controller = WindowInsetsControllerCompat(window, window.decorView)
-            controller.isAppearanceLightStatusBars = false
-            controller.isAppearanceLightNavigationBars = false
+            controller.isAppearanceLightStatusBars = startupIsLight
+            controller.isAppearanceLightNavigationBars = startupIsLight
             if (fullscreen) {
                 controller.systemBarsBehavior =
                     WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE

@@ -46,6 +46,13 @@ ccord_fuzz_setup()
 if(ANDROID)
   # Android 15 (API 35+) requires 16 KB page-aligned ELF segments on arm64-v8a / x86_64.
   add_link_options(-Wl,-z,relro,-z,now -Wl,-z,noexecstack -Wl,-z,max-page-size=16384)
+  if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" AND NOT CCORD_SANITIZE)
+    add_compile_options(
+      "$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-ffunction-sections>"
+      "$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-fdata-sections>")
+    add_link_options(
+      "$<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>>:-Wl,--gc-sections>")
+  endif()
 elseif(UNIX AND NOT APPLE AND NOT CCORD_SANITIZE)
   add_link_options(-Wl,-z,relro,-z,now -Wl,-z,noexecstack)
   if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")

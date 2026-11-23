@@ -1,0 +1,12 @@
+/* SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception */
+/* Export only SDL_main and C-Cord JNI entrypoints from Android libmain.so so static
+ * third-party symbols stay local, shrinking .dynsym/.rela.dyn and speeding up dlopen(). */
+{
+  global:
+    SDL_main;
+    Java_org_ccord_android_*;
+    JNI_OnLoad;
+    JNI_OnUnload;
+  local:
+    *;
+};

@@ -38,6 +38,15 @@ static void tls_ca_resolve_impl(void)
 {
   const char *cafile = getenv("CCORD_CA_BUNDLE");
   if (!cafile || !cafile[0]) cafile = getenv("SSL_CERT_FILE");
+#if CCORD_OS_ANDROID
+  // On first install, CCordActivity extracts cacert.pem on a background thread while SDL boots.
+  // If extraction is still finishing right as the first TLS socket opens, wait briefly for rename().
+  if (cafile && cafile[0] && !ccord_path_is_file(cafile)) {
+    for (int i = 0; i < 40 && !ccord_path_is_file(cafile); i++) {
+      ccord_sleep_ms(5);
+    }
+  }
+#endif
   if (cafile && cafile[0] && ccord_path_is_file(cafile)) {
     size_t n = strlen(cafile);
     if (n < sizeof g_tls_ca_path) {

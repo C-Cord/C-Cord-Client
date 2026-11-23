@@ -155,6 +155,7 @@ struct ccord_renderer {
   int nsys_fallbacks;
   char fallback_path[CCORD_MAX_FALLBACKS][CCORD_FALLBACK_PATH_MAX];
   bool glyph_fixes_off;                          // test hook: no run-time font lookup, no control-character cutting
+  bool android_font_deferred;                    // true if a glyph lookup was deferred while Android font index built
   uint32_t miss_cp[CCORD_MISS_CACHE_SIZE];       // code points no installed font covers (not searched again)
   int nmiss, miss_next;
   font_entry fonts[CCORD_FONT_CACHE_SIZE];

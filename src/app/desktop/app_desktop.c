@@ -395,6 +395,12 @@ static void desktop_rebuild_theme_stack(ccord_app_desktop *d)
     snprintf(d->applied_font_reg, sizeof d->applied_font_reg, "%s", font_reg);
     snprintf(d->applied_font_bold, sizeof d->applied_font_bold, "%s", font_bold);
   }
+  if (d->platform && d->theme) {
+    ccord_color bg = d->theme->c.bg_primary;
+    uint32_t argb = 0xFF000000u | ((uint32_t)bg.r << 16) | ((uint32_t)bg.g << 8) | (uint32_t)bg.b;
+    uint32_t luma = ((uint32_t)bg.r * 299u + (uint32_t)bg.g * 587u + (uint32_t)bg.b * 114u) / 1000u;
+    ccord_platform_set_theme_bg(d->platform, argb, luma >= 140u);
+  }
   d->redraw = true;
 }
 

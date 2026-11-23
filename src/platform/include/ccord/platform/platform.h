@@ -415,5 +415,6 @@ typedef struct ccord_auth_autofill_state {
 } ccord_auth_autofill_state;
 
 void ccord_platform_notify_first_frame(ccord_platform *p);
+void ccord_platform_set_theme_bg(ccord_platform *p, uint32_t argb, bool is_light);
 void ccord_platform_set_auth_autofill(ccord_platform *p, const ccord_auth_autofill_state *st);
 bool ccord_platform_poll_autofill(ccord_platform *p, ccord_auth_autofill_field *out_field, char *out_text, size_t cap);

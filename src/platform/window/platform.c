@@ -1430,6 +1430,17 @@ void ccord_platform_notify_first_frame(ccord_platform *p)
 #endif
 }
 
+void ccord_platform_set_theme_bg(ccord_platform *p, uint32_t argb, bool is_light)
+{
+  if (!p || p->headless) return;
+#if defined(__ANDROID__)
+  ccord_android_set_startup_theme(argb, is_light);
+#else
+  (void)argb;
+  (void)is_light;
+#endif
+}
+
 void ccord_platform_set_auth_autofill(ccord_platform *p, const ccord_auth_autofill_state *st)
 {
   if (!p || !st || p->headless) return;

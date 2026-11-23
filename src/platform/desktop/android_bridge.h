@@ -42,6 +42,7 @@ void ccord_android_set_audio_comm_mode(bool in_call);
 bool ccord_android_request_screen_capture(void);
 void ccord_android_stop_screen_capture(void);
 void ccord_android_on_first_frame(void);
+void ccord_android_set_startup_theme(uint32_t argb, bool is_light);
 void ccord_android_set_auth_autofill(int mode, int active_field, bool commit,
                                      int email_x, int email_y, int email_w, int email_h,
                                      int pw_x, int pw_y, int pw_w, int pw_h,

@@ -37,6 +37,7 @@
             android:hardwareAccelerated="true"
             android:launchMode="singleTask"
             android:resizeableActivity="true"
+            android:theme="@style/CCordSplashTheme"
             android:windowSoftInputMode="adjustResize">
 
             <intent-filter>

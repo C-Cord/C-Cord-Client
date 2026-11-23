@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include <math.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -340,10 +341,6 @@ static bool lookup_system_font(ccord_renderer *r, font_entry *fe, uint32_t cp, F
 }
 #else
 // Without fontconfig: scan the standard font directories once and probe the files, plain Noto Sans-like ones first.
-static char **g_font_files;
-static int g_nfont_files;
-static bool g_font_scanned;
-
 static int font_file_rank(const char *path)
 {
   const char *base = strrchr(path, '/');
@@ -365,6 +362,11 @@ static int font_file_cmp(const void *a, const void *b)
   int ra = font_file_rank(pa), rb = font_file_rank(pb);
   return ra != rb ? ra - rb : strcmp(pa, pb);
 }
+
+#if !defined(__ANDROID__)
+static char **g_font_files;
+static int g_nfont_files;
+static bool g_font_scanned;
 
 static void scan_font_dir(const char *dir, int depth)
 {
@@ -389,7 +391,346 @@ static void scan_font_dir(const char *dir, int depth)
   }
   ccord_dir_close(d);
 }
+#endif
 
+#if defined(__ANDROID__) && !CCORD_HAVE_FONTCONFIG
+// Pure-C OpenType cmap indexer running asynchronously on a background thread so Android Frame 1
+// never stalls scanning /system/fonts or opening hundreds of TTF faces on the main thread.
+typedef struct android_cp_range {
+  uint32_t start;
+  uint32_t end;
+} android_cp_range;
+
+typedef struct android_font_entry {
+  char path[512];
+  int face_index;
+  android_cp_range *ranges;
+  size_t nranges;
+} android_font_entry;
+
+static _Atomic int g_android_font_state = 0;   // 0 = idle, 1 = indexing, 2 = ready
+static android_font_entry *g_android_fonts = nullptr;
+static size_t g_android_nfonts = 0;
+
+static uint16_t af_be16(const uint8_t *p) { return (uint16_t)(((uint16_t)p[0] << 8) | (uint16_t)p[1]); }
+static uint32_t af_be32(const uint8_t *p)
+{
+  return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+
+static bool af_range_push(android_cp_range **arr, size_t *n, size_t *cap, uint32_t lo, uint32_t hi)
+{
+  if (lo > hi) return true;
+  if (*n > 0) {
+    android_cp_range *last = &(*arr)[*n - 1u];
+    if (lo <= last->end + 1u && hi >= last->start) {
+      if (hi > last->end) last->end = hi;
+      if (lo < last->start) last->start = lo;
+      return true;
+    }
+  }
+  if (*n >= *cap) {
+    size_t ncap = *cap ? (*cap * 2u) : 64u;
+    if (ncap > 65536u) return false;
+    android_cp_range *grown = ccord_realloc(*arr, ncap * sizeof *grown);
+    if (!grown) return false;
+    *arr = grown;
+    *cap = ncap;
+  }
+  (*arr)[(*n)++] = (android_cp_range){.start = lo, .end = hi};
+  return true;
+}
+
+static int af_range_cmp(const void *a, const void *b)
+{
+  const android_cp_range *ra = a, *rb = b;
+  if (ra->start != rb->start) return ra->start < rb->start ? -1 : 1;
+  return ra->end < rb->end ? -1 : (ra->end > rb->end ? 1 : 0);
+}
+
+static void af_parse_cmap_subtable(const uint8_t *cmap, size_t cmap_len, uint32_t off,
+                                   android_cp_range **out, size_t *out_n)
+{
+  if (off + 4u > cmap_len) return;
+  uint16_t fmt = af_be16(cmap + off);
+  android_cp_range *arr = nullptr;
+  size_t n = 0, cap = 0;
+  if (fmt == 12u && off + 16u <= cmap_len) {
+    uint32_t ngroups = af_be32(cmap + off + 12u);
+    if (ngroups > 65536u) ngroups = 65536u;
+    if (off + 16u + (size_t)ngroups * 12u <= cmap_len) {
+      const uint8_t *g = cmap + off + 16u;
+      for (uint32_t i = 0; i < ngroups; i++, g += 12) {
+        uint32_t s = af_be32(g), e = af_be32(g + 4), gid = af_be32(g + 8);
+        if (gid == 0 && s == e) continue;
+        if (!af_range_push(&arr, &n, &cap, s, e)) break;
+      }
+    }
+  } else if (fmt == 4u && off + 14u <= cmap_len) {
+    uint16_t seg_x2 = af_be16(cmap + off + 6u);
+    size_t segs = seg_x2 / 2u;
+    size_t end_off = off + 14u;
+    size_t start_off = end_off + segs * 2u + 2u;
+    size_t delta_off = start_off + segs * 2u;
+    size_t roff_off = delta_off + segs * 2u;
+    if (segs > 0 && roff_off + segs * 2u <= cmap_len) {
+      for (size_t i = 0; i < segs; i++) {
+        uint16_t ec = af_be16(cmap + end_off + i * 2u);
+        uint16_t sc = af_be16(cmap + start_off + i * 2u);
+        if (sc == 0xFFFFu && ec == 0xFFFFu) break;
+        if (sc <= ec && !af_range_push(&arr, &n, &cap, sc, ec)) break;
+      }
+    }
+  }
+  if (n > 1) {
+    qsort(arr, n, sizeof *arr, af_range_cmp);
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++) {
+      if (w > 0 && arr[i].start <= arr[w - 1u].end + 1u) {
+        if (arr[i].end > arr[w - 1u].end) arr[w - 1u].end = arr[i].end;
+      } else {
+        arr[w++] = arr[i];
+      }
+    }
+    n = w;
+  }
+  *out = arr;
+  *out_n = n;
+}
+
+static void af_index_sfnt_face(FILE *fp, uint32_t sfnt_off, const char *path, int face_idx,
+                               android_font_entry **list, size_t *nlist, size_t *cap)
+{
+  uint8_t hdr[12];
+  if (fseek(fp, (long)sfnt_off, SEEK_SET) != 0 || fread(hdr, 1, sizeof hdr, fp) != sizeof hdr) return;
+  uint16_t ntables = af_be16(hdr + 4);
+  if (ntables == 0 || ntables > 128u) return;
+  uint32_t cmap_off = 0, cmap_len = 0;
+  for (uint16_t i = 0; i < ntables; i++) {
+    uint8_t rec[16];
+    if (fread(rec, 1, sizeof rec, fp) != sizeof rec) return;
+    if (rec[0] == 'c' && rec[1] == 'm' && rec[2] == 'a' && rec[3] == 'p') {
+      cmap_off = af_be32(rec + 8);
+      cmap_len = af_be32(rec + 12);
+      break;
+    }
+  }
+  if (cmap_off == 0 || cmap_len < 12u || cmap_len > (2u << 20)) return;
+  uint8_t *cmap = ccord_malloc(cmap_len);
+  if (!cmap) return;
+  if (fseek(fp, (long)cmap_off, SEEK_SET) != 0 || fread(cmap, 1, cmap_len, fp) != cmap_len) {
+    ccord_free(cmap);
+    return;
+  }
+  uint16_t nsub = af_be16(cmap + 2);
+  uint32_t best_off = 0;
+  int best_rank = 0;
+  for (uint16_t i = 0; i < nsub && (size_t)(4u + (i + 1u) * 8u) <= cmap_len; i++) {
+    const uint8_t *s = cmap + 4u + (size_t)i * 8u;
+    uint16_t plat = af_be16(s), enc = af_be16(s + 2);
+    uint32_t sub_off = af_be32(s + 4);
+    if (sub_off + 2u > cmap_len) continue;
+    uint16_t fmt = af_be16(cmap + sub_off);
+    int rank = 0;
+    if (fmt == 12u && ((plat == 3u && enc == 10u) || (plat == 0u && enc == 4u))) rank = 4;
+    else if (fmt == 12u) rank = 3;
+    else if (fmt == 4u && ((plat == 3u && enc == 1u) || (plat == 0u && enc == 3u))) rank = 2;
+    else if (fmt == 4u) rank = 1;
+    if (rank > best_rank) {
+      best_rank = rank;
+      best_off = sub_off;
+    }
+  }
+  android_cp_range *ranges = nullptr;
+  size_t nranges = 0;
+  if (best_rank > 0) af_parse_cmap_subtable(cmap, cmap_len, best_off, &ranges, &nranges);
+  ccord_free(cmap);
+  if (!ranges || nranges == 0) {
+    ccord_free(ranges);
+    return;
+  }
+  if (*nlist >= *cap) {
+    size_t ncap = *cap ? (*cap * 2u) : 128u;
+    android_font_entry *grown = ccord_realloc(*list, ncap * sizeof *grown);
+    if (!grown) {
+      ccord_free(ranges);
+      return;
+    }
+    *list = grown;
+    *cap = ncap;
+  }
+  android_font_entry *e = &(*list)[(*nlist)++];
+  snprintf(e->path, sizeof e->path, "%s", path);
+  e->face_index = face_idx;
+  e->ranges = ranges;
+  e->nranges = nranges;
+}
+
+static void af_index_file(const char *path, android_font_entry **list, size_t *nlist, size_t *cap)
+{
+  FILE *fp = fopen(path, "rb");
+  if (!fp) return;
+  uint8_t tag[12];
+  if (fread(tag, 1, sizeof tag, fp) != sizeof tag) {
+    fclose(fp);
+    return;
+  }
+  if (tag[0] == 't' && tag[1] == 't' && tag[2] == 'c' && tag[3] == 'f') {
+    uint32_t nfaces = af_be32(tag + 8);
+    if (nfaces > 8u) nfaces = 8u;
+    uint32_t offs[8];
+    for (uint32_t i = 0; i < nfaces; i++) {
+      uint8_t b[4];
+      if (fread(b, 1, 4, fp) != 4) {
+        nfaces = i;
+        break;
+      }
+      offs[i] = af_be32(b);
+    }
+    for (uint32_t i = 0; i < nfaces; i++) af_index_sfnt_face(fp, offs[i], path, (int)i, list, nlist, cap);
+  } else {
+    af_index_sfnt_face(fp, 0, path, 0, list, nlist, cap);
+  }
+  fclose(fp);
+}
+
+static bool af_path_seen(char **paths, size_t n, const char *p)
+{
+  for (size_t i = 0; i < n; i++) {
+    if (strcmp(paths[i], p) == 0) return true;
+  }
+  return false;
+}
+
+static void af_add_path(char ***paths, size_t *n, size_t *cap, const char *p)
+{
+  if (!p || !p[0] || af_path_seen(*paths, *n, p)) return;
+  if (*n >= *cap) {
+    size_t ncap = *cap ? (*cap * 2u) : 256u;
+    if (ncap > 2048u) return;
+    char **grown = ccord_realloc(*paths, ncap * sizeof *grown);
+    if (!grown) return;
+    *paths = grown;
+    *cap = ncap;
+  }
+  char *dup = ccord_strndup(p, strlen(p));
+  if (dup) (*paths)[(*n)++] = dup;
+}
+
+// Parse Android's /system/etc/fonts.xml to prioritize official normal-weight fallback order.
+static void af_parse_fonts_xml(char ***paths, size_t *n, size_t *cap)
+{
+  FILE *fp = fopen("/system/etc/fonts.xml", "rb");
+  if (!fp) return;
+  char line[512];
+  while (fgets(line, sizeof line, fp)) {
+    const char *tag = strstr(line, "<font");
+    if (!tag) continue;
+    if (strstr(tag, "italic") || strstr(tag, "weight=\"700\"") || strstr(tag, "weight=\"800\"") ||
+        strstr(tag, "weight=\"900\"")) {
+      continue;
+    }
+    const char *gt = strchr(tag, '>');
+    if (!gt) continue;
+    gt++;
+    while (*gt == ' ' || *gt == '\t') gt++;
+    const char *lt = strchr(gt, '<');
+    if (!lt || lt <= gt) continue;
+    size_t fn_len = (size_t)(lt - gt);
+    while (fn_len > 0 && (gt[fn_len - 1] == ' ' || gt[fn_len - 1] == '\t' || gt[fn_len - 1] == '\r' || gt[fn_len - 1] == '\n')) {
+      fn_len--;
+    }
+    if (fn_len == 0 || fn_len > 200u) continue;
+    char fn[256];
+    memcpy(fn, gt, fn_len);
+    fn[fn_len] = '\0';
+    if (!font_file_ext(fn)) continue;
+    char full[512];
+    if (snprintf(full, sizeof full, "/system/fonts/%s", fn) < (int)sizeof full && ccord_path_is_file(full)) {
+      af_add_path(paths, n, cap, full);
+    }
+  }
+  fclose(fp);
+}
+
+static int android_font_index_worker(void *ud)
+{
+  (void)ud;
+  char **paths = nullptr;
+  size_t npaths = 0, pcap = 0;
+  af_parse_fonts_xml(&paths, &npaths, &pcap);
+  size_t xml_count = npaths;
+  static const char *const k_dirs[] = {"/system/fonts", "/product/fonts", "/system_ext/fonts"};
+  for (size_t di = 0; di < sizeof k_dirs / sizeof k_dirs[0]; di++) {
+    ccord_dir *d = ccord_dir_open(k_dirs[di]);
+    if (!d) continue;
+    char name[512];
+    bool is_dir = false;
+    while (ccord_dir_next(d, name, sizeof name, &is_dir) && npaths < 2048u) {
+      if (is_dir || name[0] == '.' || !font_file_ext(name)) continue;
+      char full[512];
+      if (snprintf(full, sizeof full, "%s/%s", k_dirs[di], name) < (int)sizeof full) {
+        af_add_path(&paths, &npaths, &pcap, full);
+      }
+    }
+    ccord_dir_close(d);
+  }
+  if (npaths > xml_count + 1u) {
+    qsort(paths + xml_count, npaths - xml_count, sizeof *paths, font_file_cmp);
+  }
+  android_font_entry *entries = nullptr;
+  size_t nentries = 0, ecap = 0;
+  for (size_t i = 0; i < npaths; i++) {
+    af_index_file(paths[i], &entries, &nentries, &ecap);
+    ccord_free(paths[i]);
+  }
+  ccord_free(paths);
+  g_android_fonts = entries;
+  g_android_nfonts = nentries;
+  atomic_store_explicit(&g_android_font_state, 2, memory_order_release);
+  CCORD_LOG_I("android-fonts: indexed %zu font faces asynchronously", nentries);
+  return 0;
+}
+
+static bool af_has_cp(const android_font_entry *e, uint32_t cp)
+{
+  size_t lo = 0, hi = e->nranges;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    if (cp < e->ranges[mid].start) hi = mid;
+    else if (cp > e->ranges[mid].end) lo = mid + 1u;
+    else return true;
+  }
+  return false;
+}
+
+static bool lookup_system_font(ccord_renderer *r, font_entry *fe, uint32_t cp, bool *out_deferred)
+{
+  if (out_deferred) *out_deferred = false;
+  int st = atomic_load_explicit(&g_android_font_state, memory_order_acquire);
+  if (st == 0) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong_explicit(&g_android_font_state, &expected, 1,
+                                                memory_order_acq_rel, memory_order_acquire)) {
+      SDL_Thread *th = SDL_CreateThread(android_font_index_worker, "CCordFontIdx", nullptr);
+      if (th) SDL_DetachThread(th);
+      else atomic_store_explicit(&g_android_font_state, 2, memory_order_release);
+    }
+    if (out_deferred) *out_deferred = true;
+    return false;
+  }
+  if (st != 2) {
+    if (out_deferred) *out_deferred = true;
+    return false;
+  }
+  for (size_t i = 0; i < g_android_nfonts; i++) {
+    if (af_has_cp(&g_android_fonts[i], cp)) {
+      if (try_system_font(r, fe, g_android_fonts[i].path, g_android_fonts[i].face_index, cp)) return true;
+    }
+  }
+  return false;
+}
+#else
 static bool lookup_system_font(ccord_renderer *r, font_entry *fe, uint32_t cp)
 {
   if (!g_font_scanned) {
@@ -406,11 +747,6 @@ static bool lookup_system_font(ccord_renderer *r, font_entry *fe, uint32_t cp)
     scan_font_dir("/Library/Fonts", 0);
     const char *home = getenv("HOME");
     if (home && home[0] && snprintf(user, sizeof user, "%s/Library/Fonts", home) < (int)sizeof user) scan_font_dir(user, 0);
-#elif defined(__ANDROID__)
-    (void)user;
-    scan_font_dir("/system/fonts", 0);
-    scan_font_dir("/product/fonts", 0);
-    scan_font_dir("/system_ext/fonts", 0);
 #else
     scan_font_dir("/usr/share/fonts", 0);
     scan_font_dir("/usr/local/share/fonts", 0);
@@ -424,6 +760,7 @@ static bool lookup_system_font(ccord_renderer *r, font_entry *fe, uint32_t cp)
   }
   return false;
 }
+#endif
 #endif
 
 static bool miss_known(const ccord_renderer *r, uint32_t cp)
@@ -499,6 +836,16 @@ static void ensure_coverage(ccord_renderer *r, font_entry *fe, const char *s, si
     budget--;
 #if CCORD_HAVE_FONTCONFIG
     if (r->nsys_fallbacks >= CCORD_MAX_FALLBACKS || !lookup_system_font(r, fe, cp, &fc_cfg)) miss_add(r, cp);
+#elif defined(__ANDROID__)
+    if (r->nsys_fallbacks >= CCORD_MAX_FALLBACKS) {
+      miss_add(r, cp);
+    } else {
+      bool deferred = false;
+      if (!lookup_system_font(r, fe, cp, &deferred)) {
+        if (deferred) r->android_font_deferred = true;
+        else miss_add(r, cp);
+      }
+    }
 #else
     if (r->nsys_fallbacks >= CCORD_MAX_FALLBACKS || !lookup_system_font(r, fe, cp)) miss_add(r, cp);
 #endif
@@ -1390,4 +1737,18 @@ ccord_rect ccord_text_caret_rect(ccord_renderer *r, const char *utf8, size_t len
     return (ccord_rect){(float)x_px / r->scale, (float)sub.rect.y / r->scale, 1.0f, fh};
   }
   return (ccord_rect){(float)e->w / r->scale, 0.0f, 1.0f, fh};
+}
+
+bool ccord_render_poll_font_index(ccord_renderer *r)
+{
+#if defined(__ANDROID__) && !CCORD_HAVE_FONTCONFIG
+  if (!r || !r->android_font_deferred) return false;
+  if (atomic_load_explicit(&g_android_font_state, memory_order_acquire) != 2) return false;
+  r->android_font_deferred = false;
+  text_entries_flush(r);
+  return true;
+#else
+  (void)r;
+  return false;
+#endif
 }

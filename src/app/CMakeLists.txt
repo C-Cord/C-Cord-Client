@@ -32,7 +32,12 @@ if(ANDROID)
   add_library(main SHARED ${CCORD_APP_SOURCES})
   # Static FFmpeg AArch64 NEON assembly references internal FFmpeg tables with PC-relative relocations;
   # -Bsymbolic binds internal symbols locally inside libmain.so without disabling PIC or textrels.
-  target_link_options(main PRIVATE -Wl,-Bsymbolic)
+  # The version script hides static third-party symbols so dlopen() relocations stay minimal.
+  set(CCORD_ANDROID_LIBMAIN_MAP "${CMAKE_SOURCE_DIR}/android/app/libmain.map")
+  target_link_options(main PRIVATE
+    -Wl,-Bsymbolic
+    "-Wl,--version-script=${CCORD_ANDROID_LIBMAIN_MAP}")
+  set_target_properties(main PROPERTIES LINK_DEPENDS "${CCORD_ANDROID_LIBMAIN_MAP}")
 else()
   set(CCORD_APP_TARGET ccord)
   add_executable(ccord ${CCORD_APP_SOURCES})

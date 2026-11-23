@@ -410,6 +410,12 @@ object CCordBridge {
     }
 
     @JvmStatic
+    fun setStartupTheme(argb: Int, isLight: Boolean) {
+        val act = activityRef?.get() ?: return
+        act.runOnUiThread { act.onStartupThemeChanged(argb, isLight) }
+    }
+
+    @JvmStatic
     fun setAuthAutofill(
         mode: Int,
         activeField: Int,
