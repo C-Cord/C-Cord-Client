@@ -116,7 +116,7 @@ static void qr_encode_v6l(const char *utf8, qr_matrix *out)
     bit_pos++;
   }
   for (size_t i = 0; i < len; i++) {
-    uint8_t ch = (uint8_t)utf8[i];
+    uint32_t ch = (uint8_t)utf8[i];
     for (int b = 7; b >= 0; b--) {
       if ((ch >> b) & 1u) data_cw[bit_pos / 8u] |= (uint8_t)(1u << (7u - (bit_pos % 8u)));
       bit_pos++;
@@ -196,7 +196,7 @@ static void qr_encode_v6l(const char *utf8, qr_matrix *out)
         if (is_func[r][c]) continue;
         uint8_t bit = 0;
         if (bi < total_bits) {
-          bit = (uint8_t)((final_cw[bi / 8u] >> (7u - (bi % 8u))) & 1u);
+          bit = (uint8_t)((((uint32_t)final_cw[bi / 8u]) >> (7u - (bi % 8u))) & 1u);
           bi++;
         }
         if (((r + c) & 1) == 0) bit ^= 1u;   // Mask 0
@@ -253,7 +253,7 @@ static struct {
   ccord_account_backup_code backup_codes[CCORD_ACCOUNT_MAX_BACKUP_CODES];
   uint32_t mfa_methods;
   int mfa_method_idx;
-  char error[200];
+  char error[256];
   char info[200];
   uint64_t cb_gen;
   ccord_ui *owner;

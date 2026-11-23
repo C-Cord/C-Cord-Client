@@ -193,6 +193,8 @@ static void test_auth_sessions_full(void)
              strcmp(ev.auth_sessions[1].device, "phone") == 0 &&
              strcmp(ev.auth_sessions[1].location, "Oslo") == 0);
   }
+  ccord_live_event_free(&ev);
+
   // Real Discord GET /api/v9/auth/sessions returns an object wrapping {"user_sessions": [...]}.
   const char *wrapped =
     "{\"user_sessions\":[{\"id_hash\":\"wrap1\",\"approx_last_used_time\":\"2026-11-22T18:00:00.000000+00:00\","
