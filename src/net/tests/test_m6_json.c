@@ -193,6 +193,18 @@ static void test_auth_sessions_full(void)
              strcmp(ev.auth_sessions[1].device, "phone") == 0 &&
              strcmp(ev.auth_sessions[1].location, "Oslo") == 0);
   }
+  // Real Discord GET /api/v9/auth/sessions returns an object wrapping {"user_sessions": [...]}.
+  const char *wrapped =
+    "{\"user_sessions\":[{\"id_hash\":\"wrap1\",\"approx_last_used_time\":\"2026-11-22T18:00:00.000000+00:00\","
+    "\"client_info\":{\"os\":\"Linux\",\"platform\":\"Discord Client\",\"location\":\"Chicago, US\"}}]}";
+  CT_CHECK(ccord_live_json_auth_sessions(wrapped, strlen(wrapped), &ev, &err) == CCORD_OK);
+  CT_CHECK(ev.auth_session_count == 1 && ev.auth_sessions != nullptr);
+  if (ev.auth_session_count == 1) {
+    CT_CHECK(strcmp(ev.auth_sessions[0].id_hash, "wrap1") == 0);
+    CT_CHECK(strcmp(ev.auth_sessions[0].os, "Linux") == 0);
+    CT_CHECK(strcmp(ev.auth_sessions[0].device, "Discord Client") == 0);
+    CT_CHECK(strcmp(ev.auth_sessions[0].location, "Chicago, US") == 0);
+  }
   ccord_live_event_free(&ev);
 }
 

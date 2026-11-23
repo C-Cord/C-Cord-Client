@@ -604,6 +604,14 @@ void live_admin_done(live *l, const live_rest_op *op, const char *body, size_t l
         ev.ev.auth_sessions = ev.auth_sessions;
         ev.ev.auth_session_count = ev.auth_session_count;
         have = true;
+      } else {
+        ccord_live_event_free(&ev);
+        ccord_live_event_init(&ev);
+        ev.ev.type = CCORD_NET_ACTION_FAILED;
+        ev.ev.action = CCORD_ACTION_ADMIN;
+        ev.ev.admin_op = op->admin_op;
+        ev.ev.status = CCORD_ERR_PARSE;
+        have = true;
       }
       break;
     case CCORD_ADMIN_AUTH_SESSIONS_LOGOUT:
@@ -620,6 +628,14 @@ void live_admin_done(live *l, const live_rest_op *op, const char *body, size_t l
         ev.ev.type = CCORD_NET_CONNECTIONS;
         ev.ev.connections = ev.connections;
         ev.ev.connection_count = ev.connection_count;
+        have = true;
+      } else {
+        ccord_live_event_free(&ev);
+        ccord_live_event_init(&ev);
+        ev.ev.type = CCORD_NET_ACTION_FAILED;
+        ev.ev.action = CCORD_ACTION_ADMIN;
+        ev.ev.admin_op = op->admin_op;
+        ev.ev.status = CCORD_ERR_PARSE;
         have = true;
       }
       break;

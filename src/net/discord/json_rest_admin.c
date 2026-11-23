@@ -474,12 +474,21 @@ ccord_status ccord_live_json_auth_sessions(const char *json, size_t len, ccord_l
   ccord_arena_init(&scratch, dj_scratch_chunk_size(len));
   ccord_status st = CCORD_OK;
   const ccord_json *root = dj_parse_json(&scratch, json, len, err);
-  if (!root || ccord_json_type_of(root) != CCORD_JSON_ARRAY) {
+  const ccord_json *arr = nullptr;
+  if (root && ccord_json_type_of(root) == CCORD_JSON_ARRAY) {
+    arr = root;
+  } else if (root && ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
+    // Discord's real GET /api/v9/auth/sessions returns {"user_sessions": [...]}.
+    const ccord_json *us = ccord_json_get(root, "user_sessions");
+    if (!us) us = ccord_json_get(root, "sessions");
+    if (us && ccord_json_type_of(us) == CCORD_JSON_ARRAY) arr = us;
+  }
+  if (!arr) {
     ccord_live_event_free(out);
     st = ccord_error_set(err, CCORD_ERR_PARSE, "rest: bad auth sessions");
     goto done;
   }
-  size_t total = ccord_json_array_len(root);
+  size_t total = ccord_json_array_len(arr);
   size_t cap = total < CCORD_LIVE_MAX_AUTH_SESSIONS ? total : CCORD_LIVE_MAX_AUTH_SESSIONS;
   ccord_auth_session *items =
     cap > 0 ? ccord_arena_alloc(&out->arena, cap * sizeof *items, _Alignof(ccord_auth_session)) : nullptr;
@@ -490,7 +499,7 @@ ccord_status ccord_live_json_auth_sessions(const char *json, size_t len, ccord_l
   }
   size_t kept = 0;
   for (size_t i = 0; i < total && kept < cap; i++) {
-    const ccord_json *j = ccord_json_array_at(root, i);
+    const ccord_json *j = ccord_json_array_at(arr, i);
     if (!j || ccord_json_type_of(j) != CCORD_JSON_OBJECT) continue;
     map_auth_session_obj(j, &items[kept]);
     if (items[kept].id_hash[0] == '\0') continue;   // cannot address (or log out) a session without its hash
