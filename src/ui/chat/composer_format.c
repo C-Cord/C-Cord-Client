@@ -395,7 +395,7 @@ static void cf_ensure_metrics(const ccord_ui *ui, ccord_renderer *r, float size)
 {
   float zoom = ccord_render_get_zoom(r);
   ccord_vec2 rsz = ccord_render_size(r);
-  int fb = ccord_render_fallback_font_count(r);
+  int fb = ccord_render_loaded_fallback_font_count(r);
   int sys = ccord_render_system_font_count(r);
   if (g_cf_fm.valid && g_cf_fm.r == r && g_cf_fm.theme == ui->theme && g_cf_fm.size == size &&
       g_cf_fm.zoom == zoom && g_cf_fm.rw == rsz.x && g_cf_fm.rh == rsz.y &&

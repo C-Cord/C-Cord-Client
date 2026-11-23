@@ -31,6 +31,8 @@ void ccord_session_set_stale(ccord_session *s, bool stale);
 // or suspended for power saving (closes socket while preserving session_id/seq for fast RESUME on foreground).
 void ccord_session_set_background(ccord_session *s, bool background);
 void ccord_session_set_suspended(ccord_session *s, bool suspended);
+// Releases expendable cached buffers (e.g. search/reaction/discovery/invite/video-resolved caches) under memory pressure.
+void ccord_session_trim_memory(ccord_session *s);
 bool ccord_session_is_stale(const ccord_session *s);
 // Applies up to 64 transport events to the store; posts connection.state. Call once per frame. Returns events applied.
 size_t ccord_session_pump(ccord_session *s);
@@ -241,6 +243,8 @@ bool ccord_session_pop_media(ccord_session *s, ccord_media_item *out);
                                                     const char **url, const uint8_t **data, size_t *len);
 // The returned item is valid until the next ccord_session_pump (a newer download may evict it).
 const ccord_media_item *ccord_session_get_media(const ccord_session *s, const char *url);
+// Releases RAM body bytes of a disk-backed cached media entry while retaining its cache_path metadata.
+void ccord_session_release_media_bytes(ccord_session *s, const char *url);
 // True when the most recent attempt to load `url` failed (blocked host, HTTP error, too large, timed out). A failed
 // URL is no longer pending, so ccord_session_fetch_media asks the transport again: callers pace their retries.
 bool ccord_session_media_failed(const ccord_session *s, const char *url);

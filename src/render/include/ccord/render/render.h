@@ -70,6 +70,8 @@ ccord_rect ccord_text_caret_rect(ccord_renderer *r, const char *utf8, size_t len
 uint64_t ccord_text_cache_misses(const ccord_renderer *r);
 // Number of fallback fonts (bundled emoji/CJK, then system symbols) attached via TTF_AddFallbackFont.
 int ccord_render_fallback_font_count(const ccord_renderer *r);
+// Non-initializing count of currently loaded fallback fonts (avoids eager 7 MB fallback init before first non-ASCII glyph).
+int ccord_render_loaded_fallback_font_count(const ccord_renderer *r);
 // Family name of attached fallback font `index` (0 = first attached); nullptr when out of range. Test hook.
 const char *ccord_render_fallback_font_family(const ccord_renderer *r, int index);
 // Fonts attached after startup because a code point was not covered by the bundled ones (found on the host at run

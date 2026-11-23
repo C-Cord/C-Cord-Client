@@ -254,6 +254,7 @@ void dc_format_mmss(uint32_t ms, char *out, size_t cap);
 void dc_format_size(uint64_t bytes, char *out, size_t cap);
 float dc_gallery_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, float x, float y, float w, bool draw);
 const char * dc_media_pick(ccord_ui *ui, ccord_renderer *r, const char *primary, const char *fallback);
+const char * dc_media_pick_max(ccord_ui *ui, ccord_renderer *r, const char *primary, const char *fallback, int max_dim);
 bool dc_url_is_x_host(const char *u);
 float dc_components_row_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, float x, float y, float w, bool draw);
 float dc_cv2_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, float x, float y, float w, bool draw);

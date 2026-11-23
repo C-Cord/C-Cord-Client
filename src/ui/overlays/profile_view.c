@@ -442,7 +442,7 @@ void ui_draw_avatar_deco_url(ccord_ui *ui, ccord_renderer *r, const char *deco_u
   cdn_url(url, sizeof url, deco_url, "https://cdn.discordapp.com/avatar-decoration-presets/",
           ".png?size=128&passthrough=true");
   float s = avatar_size * 1.2f;
-  if (ui_ensure_media(ui, r, url)) {
+  if (ui_ensure_media_ex(ui, r, url, 256, false)) {
     int tw = 0, th = 0;
     if (ccord_render_has_texture(r, url, &tw, &th) && tw <= 2 && th <= 2) return;
     ccord_draw_texture(r, url, (ccord_rect){cx - s * 0.5f, cy - s * 0.5f, s, s}, alpha);
@@ -526,7 +526,8 @@ bool ui_draw_nameplate(ccord_ui *ui, ccord_renderer *r, const char *asset, const
   if (direct_http) {
     bool is_vid = url_is_video_asset(static_url);
     bool ready = allow_fetch
-                     ? (is_vid ? ui_ensure_media_ex(ui, r, static_url, 512, true) : ui_ensure_media(ui, r, static_url))
+                     ? (is_vid ? ui_ensure_media_ex(ui, r, static_url, 512, true)
+                               : ui_ensure_media_ex(ui, r, static_url, 512, false))
                      : true;
     if (ready && ccord_render_has_texture(r, static_url, &tw, &th) && tw > 2 && th > 2) {
       draw_url = static_url;
@@ -550,7 +551,7 @@ bool ui_draw_nameplate(ccord_ui *ui, ccord_renderer *r, const char *asset, const
           draw_url = static_url;
           draw_anim = false;
         }
-      } else if (ui_ensure_media(ui, r, static_url) &&
+      } else if (ui_ensure_media_ex(ui, r, static_url, 512, false) &&
                  ccord_render_has_texture(r, static_url, &tw, &th) && tw > 2 && th > 2) {
         draw_url = static_url;
         draw_anim = false;
@@ -631,7 +632,7 @@ void ui_profile_draw_effect(ccord_ui *ui, ccord_renderer *r, const ui_profile_lo
     const ccord_profile_effect_layer *L = &cfg->layers[i];
     if (!has_text(L->src)) continue;
     // Kick off download even before start_ms so intro->loop transitions seamlessly.
-    bool loaded = ui_ensure_media(ui, r, L->src);
+    bool loaded = ui_ensure_media_ex(ui, r, L->src, 512, false);
     if (L->start_ms > 0 && elapsed < (int64_t)L->start_ms) continue;
     if (!L->loop && L->duration_ms > 0 && elapsed >= (int64_t)L->start_ms + (int64_t)L->duration_ms) continue;
     if (L->loop && L->loop_delay_ms > 0 && L->duration_ms > 0) {
@@ -653,7 +654,7 @@ void ui_profile_draw_effect(ccord_ui *ui, ccord_renderer *r, const ui_profile_lo
     const char *fb = has_text(cfg->reduced_motion_url) ? cfg->reduced_motion_url
                      : (has_text(cfg->static_frame_url) ? cfg->static_frame_url
                         : (has_text(cfg->thumbnail_url) ? cfg->thumbnail_url : nullptr));
-    if (fb && ui_ensure_media(ui, r, fb)) {
+    if (fb && ui_ensure_media_ex(ui, r, fb, 512, false)) {
       int tw = 0, th = 0;
       if (ccord_render_has_texture(r, fb, &tw, &th) && tw > 2 && th > 2) {
         float dh = box.w * ((float)th / (float)tw);
@@ -692,7 +693,7 @@ void ui_profile_draw_frame(ccord_ui *ui, ccord_renderer *r, const ui_profile_loo
     const char *url = nullptr;
     if (has_text(L->url) && !ui_media_failed(ui, L->url)) url = L->url;
     else if (has_text(L->static_url) && !ui_media_failed(ui, L->static_url)) url = L->static_url;
-    if (!url || !ui_ensure_media(ui, r, url)) continue;
+    if (!url || !ui_ensure_media_ex(ui, r, url, 512, false)) continue;
     int tw = 0, th = 0;
     if (!ccord_render_has_texture(r, url, &tw, &th) || tw <= 2 || th <= 2) continue;
     float fh = fw * ((float)th / (float)tw);
@@ -711,7 +712,7 @@ void ui_profile_draw_frame(ccord_ui *ui, ccord_renderer *r, const ui_profile_loo
     const char *fb = nullptr;
     if (has_text(frm->animated_url) && !ui_media_failed(ui, frm->animated_url)) fb = frm->animated_url;
     else if (has_text(frm->static_url) && !ui_media_failed(ui, frm->static_url)) fb = frm->static_url;
-    if (fb && ui_ensure_media(ui, r, fb)) {
+    if (fb && ui_ensure_media_ex(ui, r, fb, 512, false)) {
       int tw = 0, th = 0;
       if (ccord_render_has_texture(r, fb, &tw, &th) && tw > 2 && th > 2) {
         ccord_rect dst = {box.x - ov_h, box.y - ov_t, fw, full_h};

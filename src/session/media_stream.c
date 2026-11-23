@@ -33,6 +33,7 @@ typedef enum slot_state : uint8_t { SLOT_EMPTY = 0, SLOT_FILLING, SLOT_READY } s
 typedef struct slot {
   uint8_t *data;      // allocated lazily, kept until close
   int64_t block;      // block index while READY
+  uint32_t cap;       // allocated capacity in bytes
   uint32_t valid;     // bytes in data (the last block of a file is short)
   uint64_t last_use;  // LRU tick
   slot_state state;
@@ -50,6 +51,7 @@ struct ccord_media_stream {
   ccord_cond *cv;
 
   // ---- shared with the reader thread (under mtx) ----
+  uint32_t max_blocks;     // effective slot count <= CCORD_STREAM_CACHE_BLOCKS
   slot slots[CCORD_STREAM_CACHE_BLOCKS];
   int64_t total;           // -1 unknown
   int64_t cursor;          // offset of the last read
@@ -108,9 +110,15 @@ static void latch_locked(ccord_media_stream *ms, ccord_status st, const char *te
   ccord_cond_broadcast(ms->cv);
 }
 
+static uint32_t stream_readahead_blocks(const ccord_media_stream *ms)
+{
+  uint32_t ra = ms->max_blocks > 4u ? ms->max_blocks - 4u : 1u;
+  return ra < CCORD_STREAM_READAHEAD_BLOCKS ? ra : CCORD_STREAM_READAHEAD_BLOCKS;
+}
+
 static slot *slot_find(ccord_media_stream *ms, int64_t blk)
 {
-  for (size_t i = 0; i < CCORD_STREAM_CACHE_BLOCKS; i++) {
+  for (size_t i = 0; i < ms->max_blocks; i++) {
     if (ms->slots[i].state == SLOT_READY && ms->slots[i].block == blk) return &ms->slots[i];
   }
   return nullptr;
@@ -119,7 +127,7 @@ static slot *slot_find(ccord_media_stream *ms, int64_t blk)
 static uint32_t resident_locked(const ccord_media_stream *ms)
 {
   uint32_t n = 0;
-  for (size_t i = 0; i < CCORD_STREAM_CACHE_BLOCKS; i++) n += ms->slots[i].state == SLOT_READY;
+  for (size_t i = 0; i < ms->max_blocks; i++) n += ms->slots[i].state == SLOT_READY;
   return n;
 }
 
@@ -130,12 +138,13 @@ static slot *slot_acquire(ccord_media_stream *ms, int64_t blk)
   slot *s = slot_find(ms, blk);
   if (s) return s;
   int64_t cb = ms->cursor / (int64_t)CCORD_STREAM_BLOCK_BYTES;
+  int64_t ra = (int64_t)stream_readahead_blocks(ms);
   slot *victim = nullptr;
-  for (size_t i = 0; i < CCORD_STREAM_CACHE_BLOCKS; i++) {
+  for (size_t i = 0; i < ms->max_blocks; i++) {
     slot *c = &ms->slots[i];
     if (c->state == SLOT_EMPTY) return c;
     if (c->state == SLOT_FILLING) continue;
-    if (c->block >= cb - 1 && c->block <= cb + (int64_t)CCORD_STREAM_READAHEAD_BLOCKS) continue;
+    if (c->block >= cb - 1 && c->block <= cb + ra) continue;
     if (!victim || c->last_use < victim->last_use) victim = c;
   }
   if (victim) {
@@ -162,7 +171,7 @@ static void stream_free(ccord_media_stream *ms)
   ccord_media_stream_cancel(ms);
   CCORD_LOG_I("stream: close host=%s fetched=%llu MiB requests=%u retries=%u", ms->host,
               (unsigned long long)(ms->st.bytes_fetched >> 20), ms->st.requests, ms->st.retries);
-  for (size_t i = 0; i < CCORD_STREAM_CACHE_BLOCKS; i++) ccord_free(ms->slots[i].data);
+  for (size_t i = 0; i < ms->max_blocks; i++) ccord_free(ms->slots[i].data);
   ccord_cond_destroy(ms->cv);
   ccord_mutex_destroy(ms->mtx);
   ccord_free(ms->url);
@@ -202,7 +211,8 @@ void ccord_stream_hub_set_transport(ccord_stream_hub *h, ccord_transport *t)
   }
 }
 
-ccord_media_stream *ccord_stream_hub_open(ccord_stream_hub *h, const char *url, ccord_error *err)
+ccord_media_stream *ccord_stream_hub_open_ex(ccord_stream_hub *h, const char *url, uint32_t max_blocks,
+                                             ccord_error *err)
 {
   ccord_error_clear(err);
   if (!h || !url || !*url || strlen(url) > STREAM_URL_MAX) {
@@ -235,6 +245,9 @@ ccord_media_stream *ccord_stream_hub_open(ccord_stream_hub *h, const char *url, 
     return nullptr;
   }
   ms->hub = h;
+  ms->max_blocks = max_blocks == 0u ? CCORD_STREAM_CACHE_BLOCKS
+                 : (max_blocks < 4u ? 4u
+                 : (max_blocks > CCORD_STREAM_CACHE_BLOCKS ? CCORD_STREAM_CACHE_BLOCKS : max_blocks));
   ms->total = -1;
   ms->demand = -1;
   ms->st.total = -1;
@@ -243,6 +256,11 @@ ccord_media_stream *ccord_stream_hub_open(ccord_stream_hub *h, const char *url, 
   h->head = ms;
   CCORD_LOG_I("stream: open host=%s total=unknown ranged=0", ms->host);
   return ms;
+}
+
+ccord_media_stream *ccord_stream_hub_open(ccord_stream_hub *h, const char *url, ccord_error *err)
+{
+  return ccord_stream_hub_open_ex(h, url, 0u, err);
 }
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -276,7 +294,8 @@ static bool choose_range(ccord_media_stream *ms, int64_t *start_blk, uint32_t *n
     ms->demand = -1;
   }
   int64_t cb = ms->cursor / B;
-  int64_t end = cb + (int64_t)CCORD_STREAM_READAHEAD_BLOCKS;
+  uint32_t ra = stream_readahead_blocks(ms);
+  int64_t end = cb + (int64_t)ra;
   if (end > total_blocks - 1) end = total_blocks - 1;
   int64_t b = cb;
   while (b <= end && !block_missing(ms, b)) b++;
@@ -284,7 +303,8 @@ static bool choose_range(ccord_media_stream *ms, int64_t *start_blk, uint32_t *n
   uint32_t n = 1;
   while (n < maxn && b + n <= end && block_missing(ms, b + n)) n++;
   // Small tails wait until the read position moves on, unless they reach the end of the file: fewer, bigger requests.
-  if (n < maxn && !(ms->total >= 0 && b + n == total_blocks)) return false;
+  uint32_t ra_maxn = ra < maxn ? ra : maxn;
+  if (n < ra_maxn && !(ms->total >= 0 && b + n == total_blocks)) return false;
   *start_blk = b;
   *nblk = n;
   return true;
@@ -426,6 +446,7 @@ typedef struct block_stage {
   size_t slot_idx;
   size_t off;
   size_t chunk;
+  size_t buf_cap;
   int64_t block;
   uint8_t *buf;
   bool already_ready;   // slot stayed SLOT_READY with existing data; swap under mtx and free old outside
@@ -470,7 +491,9 @@ static uint32_t store_body_locked(ccord_media_stream *ms, int64_t start, const u
       };
       if (!st.already_ready) {
         st.buf = s->data;
+        st.buf_cap = s->cap;
         s->data = nullptr;
+        s->cap = 0;
         s->state = SLOT_FILLING;
       }
       plan[nplan++] = st;
@@ -481,8 +504,17 @@ static uint32_t store_body_locked(ccord_media_stream *ms, int64_t start, const u
     // Phase 2 (unlocked): allocate missing block buffers and memcpy payload without stalling the demux thread.
     ccord_mutex_unlock(ms->mtx);
     for (size_t i = 0; i < nplan; i++) {
-      if (!plan[i].buf) plan[i].buf = ccord_malloc(B);
-      if (plan[i].buf) memcpy(plan[i].buf, data + plan[i].off, plan[i].chunk);
+      if (plan[i].buf && plan[i].buf_cap < plan[i].chunk) {
+        ccord_free(plan[i].buf);
+        plan[i].buf = nullptr;
+        plan[i].buf_cap = 0;
+      }
+      if (!plan[i].buf) {
+        size_t alloc_sz = plan[i].chunk > 0 ? plan[i].chunk : 1u;
+        plan[i].buf = ccord_malloc(alloc_sz);
+        plan[i].buf_cap = plan[i].buf ? alloc_sz : 0u;
+      }
+      if (plan[i].buf && plan[i].chunk > 0) memcpy(plan[i].buf, data + plan[i].off, plan[i].chunk);
     }
 
     // Phase 3 (under ms->mtx): commit ready slots, or roll back cleanly on cancel/OOM.
@@ -496,6 +528,7 @@ static uint32_t store_body_locked(ccord_media_stream *ms, int64_t start, const u
           if (plan[i].buf) to_free[nfree++] = plan[i].buf;
         } else {
           s->data = plan[i].buf;
+          s->cap = (uint32_t)plan[i].buf_cap;
           s->state = SLOT_EMPTY;
         }
         continue;
@@ -504,6 +537,7 @@ static uint32_t store_body_locked(ccord_media_stream *ms, int64_t start, const u
         to_free[nfree++] = s->data;
       }
       s->data = plan[i].buf;
+      s->cap = (uint32_t)plan[i].buf_cap;
       s->block = plan[i].block;
       s->valid = (uint32_t)plan[i].chunk;
       s->state = SLOT_READY;

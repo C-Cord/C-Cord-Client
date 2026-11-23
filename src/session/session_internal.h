@@ -39,9 +39,9 @@
 // Decoded textures live in the renderer; these are the compressed bodies kept so a texture evicted there can be
 // re-uploaded without a round trip. Bounded by bytes as well as by count now that one body can be a 32 MiB video.
 #if CCORD_OS_ANDROID
-#define SESSION_MEDIA_BYTE_BUDGET ((size_t)16u * 1024u * 1024u)
+#define SESSION_MEDIA_BYTE_BUDGET ((size_t)4u * 1024u * 1024u)
 #else
-#define SESSION_MEDIA_BYTE_BUDGET ((size_t)32u * 1024u * 1024u)
+#define SESSION_MEDIA_BYTE_BUDGET ((size_t)8u * 1024u * 1024u)
 #endif
 #define SESSION_MEDIA_FAILED_MAX 256u
 #define SESSION_PROFILE_CACHE_MAX 64u
@@ -404,6 +404,8 @@ void sess_post_state(ccord_session *s);
 bool sess_message_pings_own_role(const ccord_session *s, ccord_id guild_id, const ccord_message_rich *rich);
 void sess_queue_notification(ccord_session *s, ccord_notification n);
 void sess_store_media_loaded(ccord_session *s, const ccord_net_event *ev);
+void sess_trim_media_cache_bytes(ccord_session *s);
+void sess_clear_media_cache(ccord_session *s);
 void sess_clear_search_results(ccord_session *s);
 void sess_clear_reaction_users(ccord_session *s);
 void sess_store_reaction_users(ccord_session *s, const ccord_net_event *ev);

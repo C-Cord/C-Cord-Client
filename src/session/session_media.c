@@ -284,11 +284,12 @@ static void media_evict(ccord_session *s, size_t idx)
 }
 
 // Least recently used entry the UI is not about to pop (`keep` is never chosen); SIZE_MAX when there is none.
-static size_t media_lru(const ccord_session *s, size_t keep, bool allow_queued)
+static size_t media_lru(const ccord_session *s, size_t keep, bool allow_queued, bool need_bytes)
 {
   size_t best = SIZE_MAX;
   for (size_t i = 0; i < s->mc->media_count; i++) {
     if (i == keep || (!allow_queued && media_is_unread(&s->mc->media[i]))) continue;
+    if (need_bytes && s->mc->media[i].len == 0u) continue;
     if (best == SIZE_MAX || s->mc->media[i].access_tick < s->mc->media[best].access_tick) best = i;
   }
   return best;
@@ -298,7 +299,7 @@ static void media_trim_bytes(ccord_session *s, const char *keep_url, uint32_t ke
 {
   while (s->mc->media_bytes > SESSION_MEDIA_BYTE_BUDGET && s->mc->media_count > 1) {
     size_t keep = media_find_index(s, keep_url, keep_h32);
-    size_t victim = media_lru(s, keep, false);
+    size_t victim = media_lru(s, keep, false, true);
     if (victim == SIZE_MAX) return;
     media_evict(s, victim);
   }
@@ -340,8 +341,8 @@ void sess_store_media_loaded(ccord_session *s, const ccord_net_event *ev)
     return;
   }
   if (s->mc->media_count >= SESSION_MAX_MEDIA) {
-    size_t evict = media_lru(s, SIZE_MAX, false);
-    if (evict == SIZE_MAX) evict = media_lru(s, SIZE_MAX, true);
+    size_t evict = media_lru(s, SIZE_MAX, false, false);
+    if (evict == SIZE_MAX) evict = media_lru(s, SIZE_MAX, true, false);
     media_evict(s, evict);
   }
   size_t new_idx = s->mc->media_count;
@@ -384,7 +385,7 @@ static ccord_status session_fetch_media(ccord_session *s, const char *url, bool 
   if (!url || url[0] == '\0') return ccord_error_set(err, CCORD_ERR_INVALID, "session: empty media url");
   uint32_t h32 = media_hash_mix(media_url_hash(url));
   size_t midx = media_find_index(s, url, h32);
-  if (midx != SIZE_MAX) {
+  if (midx != SIZE_MAX && s->mc->media[midx].data != nullptr && s->mc->media[midx].len > 0u) {
     s->mc->media[midx].access_tick = ++s->mc->media_tick;
     media_unread_push(s, midx);
     return CCORD_OK;
@@ -411,13 +412,19 @@ static ccord_status session_fetch_media(ccord_session *s, const char *url, bool 
   return st;
 }
 
-ccord_media_stream *ccord_session_open_media_stream(ccord_session *s, const char *url, ccord_error *err)
+ccord_media_stream *ccord_session_open_media_stream_ex(ccord_session *s, const char *url, uint32_t max_blocks,
+                                                         ccord_error *err)
 {
   if (!s) {
     ccord_error_set(err, CCORD_ERR_INVALID, "session: null session");
     return nullptr;
   }
-  return ccord_stream_hub_open(s->streams, url, err);
+  return ccord_stream_hub_open_ex(s->streams, url, max_blocks, err);
+}
+
+ccord_media_stream *ccord_session_open_media_stream(ccord_session *s, const char *url, ccord_error *err)
+{
+  return ccord_session_open_media_stream_ex(s, url, 0u, err);
 }
 
 void ccord_session_close_media_stream(ccord_session *s, ccord_media_stream *ms)
@@ -497,6 +504,54 @@ const ccord_media_item *ccord_session_get_media(const ccord_session *s, const ch
   uint32_t h32 = media_hash_mix(media_url_hash(url));
   size_t idx = media_find_index(s, url, h32);
   return idx != SIZE_MAX ? &s->mc->media[idx].pub : nullptr;
+}
+
+static void media_drop_ram_body(ccord_session *s, size_t idx)
+{
+  session_media_entry *e = &s->mc->media[idx];
+  media_unread_remove(s, idx);
+  s->mc->media_bytes -= e->len <= s->mc->media_bytes ? e->len : s->mc->media_bytes;
+  ccord_free(e->data);
+  e->data = nullptr;
+  e->len = 0;
+  e->pub.data = nullptr;
+  e->pub.len = 0;
+}
+
+void ccord_session_release_media_bytes(ccord_session *s, const char *url)
+{
+  if (!s || !s->mc || !url || url[0] == '\0') return;
+  uint32_t h32 = media_hash_mix(media_url_hash(url));
+  size_t idx = media_find_index(s, url, h32);
+  if (idx == SIZE_MAX) return;
+  const session_media_entry *e = &s->mc->media[idx];
+  if (!e->data || !e->cache_path || e->cache_path[0] == '\0') return;
+  media_drop_ram_body(s, idx);
+}
+
+void sess_trim_media_cache_bytes(ccord_session *s)
+{
+  if (!s || !s->mc) return;
+  for (size_t i = 0; i < s->mc->media_count; i++) {
+    const session_media_entry *e = &s->mc->media[i];
+    if (e->data && e->cache_path && e->cache_path[0] != '\0' && !media_is_unread(e)) {
+      media_drop_ram_body(s, i);
+    }
+  }
+}
+
+void sess_clear_media_cache(ccord_session *s)
+{
+  if (!s || !s->mc) return;
+  for (size_t i = 0; i < s->mc->media_count; i++) {
+    ccord_free(s->mc->media[i].url);
+    ccord_free(s->mc->media[i].cache_path);
+    ccord_free(s->mc->media[i].data);
+  }
+  for (size_t i = 0; i < s->mc->media_req_count; i++) {
+    ccord_free(s->mc->media_requested[i]);
+  }
+  memset(s->mc, 0, sizeof *s->mc);
 }
 
 bool ccord_session_media_failed(const ccord_session *s, const char *url)

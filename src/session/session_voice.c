@@ -171,6 +171,10 @@ void session_apply_voice_state(ccord_session *s, const ccord_voice_state *raw_vs
   // told otherwise, so leave every instance there that still lists us (no ghost participant behind).
   if (prev_voice_ch != CCORD_ID_NONE && vs.channel_id != prev_voice_ch && vs.user_id == ccord_store_self_id(s->store)) {
     session_leave_channel_activities(s, prev_voice_ch);
+    if (vs.channel_id == CCORD_ID_NONE) {
+      ccord_free(s->cam_frame_buf);
+      s->cam_frame_buf = nullptr;
+    }
   }
   if (prev_voice_ch != CCORD_ID_NONE && (vs.channel_id != prev_voice_ch || (was_streaming && !vs.self_stream))) {
     (void)ccord_store_stream_remove(s->store, prev_voice_ch, vs.user_id, &err);
@@ -184,6 +188,8 @@ void session_apply_voice_state(ccord_session *s, const ccord_voice_state *raw_vs
       s->watched.active = false;
       atomic_store_explicit(&s->watched_active, false, memory_order_release);
       s->watched.paused = false;
+      ccord_free(s->stream_frame_buf);
+      s->stream_frame_buf = nullptr;
     }
   }
 }
@@ -325,9 +331,13 @@ ccord_status ccord_session_leave_voice(ccord_session *s, ccord_id guild_id, ccor
     return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "session: not connected to voice");
   }
   ccord_status st = ccord_transport_leave_voice(s->transport, guild_id, err);
-  if (st == CCORD_OK && pending) {
-    s->pending_voice_guild = CCORD_ID_NONE;
-    s->pending_voice_channel = CCORD_ID_NONE;
+  if (st == CCORD_OK) {
+    if (pending) {
+      s->pending_voice_guild = CCORD_ID_NONE;
+      s->pending_voice_channel = CCORD_ID_NONE;
+    }
+    ccord_free(s->cam_frame_buf);
+    s->cam_frame_buf = nullptr;
   }
   return st;
 }
@@ -498,6 +508,8 @@ ccord_status ccord_session_stop_watching(ccord_session *s, ccord_error *err)
   s->watched.active = false;
   atomic_store_explicit(&s->watched_active, false, memory_order_release);
   s->watched.paused = false;
+  ccord_free(s->stream_frame_buf);
+  s->stream_frame_buf = nullptr;
   return st;
 }
 
@@ -646,7 +658,12 @@ ccord_status ccord_session_call_leave(ccord_session *s, ccord_id channel_id, cco
   }
   if (!in_call && !ringing) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "session: not in this call");
   // Decline while ringing, or hang up while connected; the server decides whether the call ends.
-  return ccord_transport_call_action(s->transport, channel_id, CCORD_CALL_LEAVE, err);
+  ccord_status st = ccord_transport_call_action(s->transport, channel_id, CCORD_CALL_LEAVE, err);
+  if (st == CCORD_OK) {
+    ccord_free(s->cam_frame_buf);
+    s->cam_frame_buf = nullptr;
+  }
+  return st;
 }
 
 ccord_status ccord_session_play_soundboard(ccord_session *s, ccord_id guild_id, ccord_id sound_id,

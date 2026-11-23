@@ -7,6 +7,7 @@
 #define UI_PLAYER_MAX_DIM 960         // inline video is decoded no larger than this
 #define UI_PLAYER_SYNC_BUDGET_MS 12u  // decode time per frame of the app; behind that, the clock waits
 #define UI_PLAYER_AUDIO_LEAD_MS 80u   // audio queued ahead of the clock
+#define UI_MEDIA_RELEASE_THRESHOLD ((size_t)128u * 1024u)
 
 // The host of a media URL for the log: no scheme, userinfo, port, path or query string (signed CDN URLs carry
 // credentials-like tokens in the query).
@@ -103,11 +104,11 @@ static void media_player_fetch_whole(ccord_ui *ui, const char *url)
 }
 
 // Opens one ranged byte source + demux thread. False (nothing left open) when the transport cannot stream.
-static bool media_player_open_one_stream(ccord_ui *ui, const char *url, unsigned av_flags,
+static bool media_player_open_one_stream(ccord_ui *ui, const char *url, unsigned av_flags, uint32_t max_blocks,
                                          ccord_media_stream **net_out, ccord_av_stream **av_out)
 {
   ccord_error serr;
-  ccord_media_stream *net = ccord_session_open_media_stream(ui->d.session, url, &serr);
+  ccord_media_stream *net = ccord_session_open_media_stream_ex(ui->d.session, url, max_blocks, &serr);
   if (!net) {
     ccord_error_clear(&serr);
     return false;
@@ -145,9 +146,9 @@ static void media_player_start_urls(ccord_ui *ui, const char *video_url, const c
   if (!ui->d.session) return;
   bool dual = audio_url && audio_url[0] != '\0';
   if (dual) {
-    if (media_player_open_one_stream(ui, video_url, CCORD_AV_MEDIA | CCORD_AV_NO_AUDIO,
+    if (media_player_open_one_stream(ui, video_url, CCORD_AV_MEDIA | CCORD_AV_NO_AUDIO, 0u,
                                      &ui->media_net, &ui->media_stream) &&
-        media_player_open_one_stream(ui, audio_url, CCORD_AV_MEDIA,
+        media_player_open_one_stream(ui, audio_url, CCORD_AV_MEDIA, 8u,
                                      &ui->media_audio_net, &ui->media_audio_stream)) {
       return;
     }
@@ -155,8 +156,9 @@ static void media_player_start_urls(ccord_ui *ui, const char *video_url, const c
     uc_media_player_close(ui);
     if (ui->media_audio_url) ui->media_audio_url[0] = '\0';
   }
-  if (ccord_session_get_media(ui->d.session, video_url) == nullptr) {
-    if (!media_player_open_one_stream(ui, video_url, CCORD_AV_MEDIA, &ui->media_net, &ui->media_stream)) {
+  const ccord_media_item *vc = ccord_session_get_media(ui->d.session, video_url);
+  if (!vc || !vc->data || vc->len == 0u) {
+    if (!media_player_open_one_stream(ui, video_url, CCORD_AV_MEDIA, 0u, &ui->media_net, &ui->media_stream)) {
       media_player_fetch_whole(ui, video_url);
     }
   }
@@ -384,9 +386,11 @@ bool uc_media_player_tick(ccord_ui *ui, uint64_t dt)
     const char *play_url = media_player_active_play_url(ui);
     const ccord_media_item *it = ccord_session_get_media(ui->d.session, play_url);
     if (it && it->data && it->len > 0) {
+      size_t raw_len = it->len;
       ccord_error cerr;
-      ui->media_stream = ccord_av_stream_open(it->data, it->len, UI_PLAYER_MAX_DIM, CCORD_AV_MEDIA, &cerr);
+      ui->media_stream = ccord_av_stream_open(it->data, raw_len, UI_PLAYER_MAX_DIM, CCORD_AV_MEDIA, &cerr);
       if (ui->media_stream) {
+        if (raw_len >= UI_MEDIA_RELEASE_THRESHOLD) ccord_session_release_media_bytes(ui->d.session, play_url);
         media_player_opened(ui, true);
       } else {
         player_warn(play_url, "decode", "%zu bytes not playable: %s", it->len,
@@ -850,6 +854,20 @@ void ui_close_lightbox(ccord_ui *ui)
 {
   if (!ui) return;
   bool was_open = ui->lightbox_open;
+  if (ui->lightbox_items) {
+    size_t n = ui->lightbox_count < CCORD_RICH_MAX_ATTACHMENTS ? ui->lightbox_count : CCORD_RICH_MAX_ATTACHMENTS;
+    for (size_t i = 0; i < n; i++) {
+      const ui_lightbox_item *it = &ui->lightbox_items[i];
+      if (it->hd_url[0]) {
+        if (ui->last_renderer) ccord_render_evict_texture(ui->last_renderer, it->hd_url);
+        if (ui->d.session) ccord_session_release_media_bytes(ui->d.session, it->hd_url);
+      }
+      if (it->full_url[0] && strcmp(it->full_url, it->hd_url) != 0) {
+        if (ui->last_renderer) ccord_render_evict_texture(ui->last_renderer, it->full_url);
+        if (ui->d.session) ccord_session_release_media_bytes(ui->d.session, it->full_url);
+      }
+    }
+  }
   ui->lightbox_open = false;
   ui->lightbox_count = 0;
   ui->lightbox_index = 0;
@@ -1389,12 +1407,14 @@ void ui_pump_media(ccord_ui *ui, ccord_renderer *r)
     if (ui_should_async_decode(item.data, item.len, q)) {
       int mdim = (q && q->max_dim > 0) ? (int)q->max_dim : (CCORD_OS_ANDROID ? 2048 : 4096);
       if (bg_dec_submit(ui, item.url, item.data, item.len, mdim)) {
+        if (item.len >= UI_MEDIA_RELEASE_THRESHOLD) ccord_session_release_media_bytes(ui->d.session, item.url);
         ui->dirty = true;
         continue;
       }
     }
     if (q) q->pending = false;
     if (ui_upload_media_bytes(r, item.url, item.data, item.len, q)) {
+      if (item.len >= UI_MEDIA_RELEASE_THRESHOLD) ccord_session_release_media_bytes(ui->d.session, item.url);
       ui->dbg_media_textures++;
       uploaded++;
       ui_media_req_loaded(q);
@@ -1404,6 +1424,7 @@ void ui_pump_media(ccord_ui *ui, ccord_renderer *r)
       ui->dirty = true;
     } else {
       ui_media_warn(item.url, "decode failed (%zu bytes arrived that are not a picture or video we can show)", item.len);
+      if (item.len >= UI_MEDIA_RELEASE_THRESHOLD) ccord_session_release_media_bytes(ui->d.session, item.url);
       if (q) {
         q->bad = true;   // arrived but is not something we can show: asking again would not change that
         q->failed = true;
@@ -1432,22 +1453,26 @@ bool ui_ensure_media_ex(ccord_ui *ui, ccord_renderer *r, const char *url, int ma
   if (ui_media_is_decoding(ui, url)) return false;
   const ccord_media_item *cached = ccord_session_get_media(ui->d.session, url);
   if (cached && cached->data && cached->len > 0) {
-    if (ui_should_async_decode(cached->data, cached->len, q)) {
+    size_t raw_len = cached->len;
+    if (ui_should_async_decode(cached->data, raw_len, q)) {
       int mdim = (q->max_dim > 0) ? (int)q->max_dim : (CCORD_OS_ANDROID ? 2048 : 4096);
-      if (bg_dec_submit(ui, url, cached->data, cached->len, mdim)) {
+      if (bg_dec_submit(ui, url, cached->data, raw_len, mdim)) {
+        if (raw_len >= UI_MEDIA_RELEASE_THRESHOLD) ccord_session_release_media_bytes(ui->d.session, url);
         ui->dirty = true;
         return false;
       }
     }
     q->pending = false;
     if (!r) return false;
-    if (ui_upload_media_bytes(r, url, cached->data, cached->len, q)) {
+    if (ui_upload_media_bytes(r, url, cached->data, raw_len, q)) {
+      if (raw_len >= UI_MEDIA_RELEASE_THRESHOLD) ccord_session_release_media_bytes(ui->d.session, url);
       ui_media_req_loaded(q);
       ui->dbg_media_textures++;
       ui->dirty = true;
       return true;
     }
-    ui_media_warn(url, "decode failed (%zu cached bytes are not a picture or video we can show)", cached->len);
+    ui_media_warn(url, "decode failed (%zu cached bytes are not a picture or video we can show)", raw_len);
+    if (raw_len >= UI_MEDIA_RELEASE_THRESHOLD) ccord_session_release_media_bytes(ui->d.session, url);
     q->bad = true;
     q->failed = true;
     return false;
@@ -1471,7 +1496,8 @@ bool ui_ensure_media_ex(ccord_ui *ui, ccord_renderer *r, const char *url, int ma
     q->pending = true;
     q->retry_at_ms = ui->now_ms + UI_MEDIA_PENDING_MS;
     ui->dbg_media_requests++;
-    if (ccord_session_get_media(ui->d.session, url) != nullptr) {
+    const ccord_media_item *mc = ccord_session_get_media(ui->d.session, url);
+    if (mc && mc->data && mc->len > 0u) {
       ui->dirty = true;
     }
   } else {

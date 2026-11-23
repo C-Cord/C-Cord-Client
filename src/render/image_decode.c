@@ -223,17 +223,43 @@ static ccord_status decode_webp_rgba(const uint8_t *data, size_t len, int max_di
       (uint64_t)w * (uint64_t)h > MAX_SOURCE_PIXELS) {
     return ccord_error_set(err, CCORD_ERR_PARSE, "webp: invalid header or dimensions");
   }
+  if (max_dim <= 0 || max_dim > MAX_IMAGE_DIM) max_dim = MAX_IMAGE_DIM;
+  if (w > max_dim || h > max_dim) {
+    int big = w > h ? w : h;
+    int dw = (int)(((int64_t)w * max_dim + big / 2) / big);
+    int dh = (int)(((int64_t)h * max_dim + big / 2) / big);
+    if (dw < 1) dw = 1;
+    if (dh < 1) dh = 1;
+    WebPDecoderConfig cfg;
+    if (!WebPInitDecoderConfig(&cfg)) return ccord_error_set(err, CCORD_ERR_INTERNAL, "webp: config init failed");
+    size_t sz = (size_t)dw * (size_t)dh * 4u;
+    uint8_t *rgba = ccord_malloc(sz);
+    if (!rgba) return ccord_error_set(err, CCORD_ERR_NOMEM, "webp: out of memory");
+    cfg.options.use_scaling = 1;
+    cfg.options.scaled_width = dw;
+    cfg.options.scaled_height = dh;
+    cfg.output.colorspace = MODE_RGBA;
+    cfg.output.is_external_memory = 1;
+    cfg.output.u.RGBA.rgba = rgba;
+    cfg.output.u.RGBA.stride = dw * 4;
+    cfg.output.u.RGBA.size = sz;
+    VP8StatusCode st = WebPDecode(data, len, &cfg);
+    WebPFreeDecBuffer(&cfg.output);
+    if (st != VP8_STATUS_OK) {
+      ccord_free(rgba);
+      return ccord_error_set(err, CCORD_ERR_PARSE, "webp: decode failed");
+    }
+    *out_w = dw;
+    *out_h = dh;
+    *out_rgba = rgba;
+    return CCORD_OK;
+  }
   size_t sz = (size_t)w * (size_t)h * 4u;
   uint8_t *rgba = ccord_malloc(sz);
   if (!rgba) return ccord_error_set(err, CCORD_ERR_NOMEM, "webp: out of memory");
   if (!WebPDecodeRGBAInto(data, len, rgba, sz, w * 4)) {
     ccord_free(rgba);
     return ccord_error_set(err, CCORD_ERR_PARSE, "webp: decode failed");
-  }
-  ccord_status sst = shrink_rgba_to_fit(&rgba, &w, &h, max_dim, err);
-  if (sst != CCORD_OK) {
-    ccord_free(rgba);
-    return sst;
   }
   *out_w = w;
   *out_h = h;

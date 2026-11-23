@@ -66,9 +66,14 @@ static bool attach_fallback_to_font(ccord_renderer *r, font_entry *fe, TTF_Font 
 
 static void adopt_sys_fallback(ccord_renderer *r, font_entry *fe, TTF_Font *fb, const char *path)
 {
+  char *dup = ccord_strdup(path);
+  if (!dup) {
+    TTF_CloseFont(fb);
+    return;
+  }
   int idx = r->nsys_fallbacks++;
   r->fallback_base[idx] = fb;
-  snprintf(r->fallback_path[idx], sizeof r->fallback_path[idx], "%s", path);
+  r->fallback_path[idx] = dup;
   if (fe) (void)attach_fallback_to_font(r, fe, fb, &fe->fallbacks[idx]);
 }
 
@@ -237,7 +242,7 @@ static bool font_file_ext(const char *name)
 static bool already_adopted(const ccord_renderer *r, const char *path)
 {
   for (int i = 0; i < r->nsys_fallbacks; i++) {
-    if (strcmp(r->fallback_path[i], path) == 0) return true;
+    if (r->fallback_path[i] && strcmp(r->fallback_path[i], path) == 0) return true;
   }
   return false;
 }
@@ -1420,16 +1425,22 @@ uint64_t ccord_text_cache_misses(const ccord_renderer *r)
   return r ? r->cache_misses : 0;
 }
 
-int ccord_render_fallback_font_count(const ccord_renderer *r)
+int ccord_render_loaded_fallback_font_count(const ccord_renderer *r)
 {
   if (!r) return 0;
-  union { const ccord_renderer *c; ccord_renderer *v; } u = {.c = r};
-  fallback_fonts_init(u.v);
   int count = r->nsys_fallbacks;
   for (int k = 0; k < CCORD_BUNDLED_COUNT; k++) {
     if (r->bundled_base[k]) count++;
   }
   return count;
+}
+
+int ccord_render_fallback_font_count(const ccord_renderer *r)
+{
+  if (!r) return 0;
+  union { const ccord_renderer *c; ccord_renderer *v; } u = {.c = r};
+  fallback_fonts_init(u.v);
+  return ccord_render_loaded_fallback_font_count(r);
 }
 
 const char *ccord_render_fallback_font_family(const ccord_renderer *r, int index)

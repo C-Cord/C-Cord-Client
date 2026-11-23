@@ -98,14 +98,7 @@ void ccord_session_destroy(ccord_session *s)
   ccord_free(s->cam_frame_buf);
   ccord_free(s->rich_json);
   ccord_free(s->stale_rich);
-  for (size_t i = 0; i < s->mc->media_count; i++) {
-    ccord_free(s->mc->media[i].url);
-    ccord_free(s->mc->media[i].cache_path);
-    ccord_free(s->mc->media[i].data);
-  }
-  for (size_t i = 0; i < s->mc->media_req_count; i++) {
-    ccord_free(s->mc->media_requested[i]);
-  }
+  sess_clear_media_cache(s);
   ccord_free(s->mc);
   for (size_t i = 0; i < s->fail_count; i++) {
     ccord_free(s->failures[(s->fail_head + i) % SESSION_MAX_FAILURES].draft);
@@ -156,6 +149,24 @@ void ccord_session_set_suspended(ccord_session *s, bool suspended)
 bool ccord_session_is_stale(const ccord_session *s)
 {
   return s && s->stale;
+}
+
+void ccord_session_trim_memory(ccord_session *s)
+{
+  if (!s) return;
+  sess_clear_search_results(s);
+  sess_clear_reaction_users(s);
+  sess_reset_invite_cache(s);
+  ccord_free(s->invite_cache);
+  s->invite_cache = nullptr;
+  ccord_free(s->discovery_cache);
+  s->discovery_cache = nullptr;
+  s->discovery_cache_rr = 0;
+  ccord_free(s->video_resolved);
+  s->video_resolved = nullptr;
+  s->video_resolved_head = 0;
+  s->video_resolved_count = 0;
+  sess_trim_media_cache_bytes(s);
 }
 
 ccord_status ccord_session_set_transport(ccord_session *s, ccord_transport *transport, ccord_error *err)
@@ -210,8 +221,16 @@ ccord_status ccord_session_set_transport(ccord_session *s, ccord_transport *tran
   ccord_mutex_lock(s->audio_mtx);
   atomic_store_explicit(&s->has_voice_cfg, false, memory_order_release);
   ccord_mutex_unlock(s->audio_mtx);
+  s->watched.active = false;
+  atomic_store_explicit(&s->watched_active, false, memory_order_release);
+  s->watched.paused = false;
+  ccord_free(s->stream_frame_buf);
+  s->stream_frame_buf = nullptr;
+  ccord_free(s->cam_frame_buf);
+  s->cam_frame_buf = nullptr;
   s->ptt_held = false;
   sess_reset_account_lists(s);
+  sess_clear_media_cache(s);
   s->state = CCORD_CONN_DISCONNECTED;
   return ccord_transport_connect(s->transport, err);
 }

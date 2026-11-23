@@ -13,19 +13,21 @@
 #include <ccord/render/anim.h>
 
 #if CCORD_OS_ANDROID
-#define RENDER_TEX_VRAM_BUDGET ((size_t)48u * 1024u * 1024u)
+#define RENDER_TEX_VRAM_BUDGET ((size_t)32u * 1024u * 1024u)
 #define RENDER_ANIM_DEFAULT_DIM 512                                  // tighter mobile decode cap to avoid lmkd OOM
-#define RENDER_ANIM_DEFAULT_BUDGET ((size_t)8u * 1024u * 1024u)
-#define RENDER_ANIM_TOTAL_BUDGET ((size_t)32u * 1024u * 1024u)
-#define RENDER_STREAM_IDLE_MS 10000u                                 // close off-screen streaming decoders after 10 s idle
-#define RENDER_STREAM_MAX_OPEN 4
+#define RENDER_ANIM_DEFAULT_BUDGET ((size_t)6u * 1024u * 1024u)
+#define RENDER_ANIM_TOTAL_BUDGET ((size_t)20u * 1024u * 1024u)
+#define RENDER_STREAM_IDLE_MS 5000u                                  // close off-screen streaming decoders after 5 s idle
+#define RENDER_STREAM_MAX_OPEN 3
+#define RENDER_ANIM_IDLE_DROP_MS 5000u
 #else
-#define RENDER_TEX_VRAM_BUDGET ((size_t)128u * 1024u * 1024u)
-#define RENDER_ANIM_DEFAULT_DIM 800                                  // animated images are decoded no larger than this
-#define RENDER_ANIM_DEFAULT_BUDGET ((size_t)16u * 1024u * 1024u)     // decoded bytes kept per animation
-#define RENDER_ANIM_TOTAL_BUDGET ((size_t)96u * 1024u * 1024u)       // ... and across the whole cache
-#define RENDER_STREAM_IDLE_MS 15000u                                 // close off-screen streaming decoders after 15 s idle
-#define RENDER_STREAM_MAX_OPEN 12
+#define RENDER_TEX_VRAM_BUDGET ((size_t)96u * 1024u * 1024u)
+#define RENDER_ANIM_DEFAULT_DIM 640                                  // animated images are decoded no larger than this
+#define RENDER_ANIM_DEFAULT_BUDGET ((size_t)8u * 1024u * 1024u)      // decoded bytes kept per animation
+#define RENDER_ANIM_TOTAL_BUDGET ((size_t)48u * 1024u * 1024u)       // ... and across the whole cache
+#define RENDER_STREAM_IDLE_MS 8000u                                  // close off-screen streaming decoders after 8 s idle
+#define RENDER_STREAM_MAX_OPEN 6
+#define RENDER_ANIM_IDLE_DROP_MS 10000u
 #endif
 #define RENDER_ANIM_INLINE_MS 6u                                     // decode time spent inside the upload call
 
@@ -140,6 +142,7 @@ static tex_entry *tex_find(ccord_renderer *r, const char *key)
   int slot = tex_lookup_slot(r, key, nullptr);
   if (slot < 0) return nullptr;
   r->texs[slot].tick = ++r->tex_tick;
+  r->texs[slot].last_used_ms = ccord_clock_ms();
   tex_lru_touch(r, slot);
   return &r->texs[slot];
 }
@@ -403,8 +406,7 @@ static void tex_mip_downscale(const uint8_t *src, int sw, int sh, uint8_t *dst, 
 
 static bool tex_should_build_mips(int width, int height, bool streaming)
 {
-  if (width < 32 && height < 32) return false;
-  if (streaming && (width > 256 || height > 256)) return false;   // skip per-frame mip updates on large videos/GIFs
+  if (streaming || (width < 128 && height < 128)) return false;
   return true;
 }
 
@@ -519,6 +521,7 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
   if (existing_slot >= 0) {
     existing = &r->texs[existing_slot];
     existing->tick = ++r->tex_tick;
+    existing->last_used_ms = ccord_clock_ms();
     tex_lru_touch(r, existing_slot);
   }
   if (existing && existing->w == width && existing->h == height && existing->tex) {
@@ -632,6 +635,7 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
     .lru_next = -1,
     .tex_streaming = want_streaming,
     .premul = premul,
+    .last_used_ms = ccord_clock_ms(),
   };
   for (int m = 0; m < nmips; m++) {
     r->texs[slot].mips[m] = mips[m];
@@ -681,6 +685,22 @@ static void tex_evict_offscreen_anims(ccord_renderer *r, size_t max_bytes, int p
     const tex_entry *e = &r->texs[slot];
     if (e->tick > r->prev_frame_tick) break;
     if (slot != protect_slot && e->anim_bytes > 0) {
+      tex_free_slot(r, slot);
+      r->tex_evictions++;
+    }
+    slot = prev;
+  }
+}
+
+void tex_cache_evict_idle(ccord_renderer *r)
+{
+  if (!r) return;
+  uint64_t now_ms = ccord_clock_ms();
+  for (int slot = r->tex_lru_tail; slot != -1;) {
+    int prev = r->texs[slot].lru_prev;
+    const tex_entry *e = &r->texs[slot];
+    if (now_ms < e->last_used_ms || (now_ms - e->last_used_ms) < RENDER_ANIM_IDLE_DROP_MS) break;
+    if (e->anim_bytes > 0 || (e->streaming && e->dec)) {
       tex_free_slot(r, slot);
       r->tex_evictions++;
     }

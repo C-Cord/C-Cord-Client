@@ -17,8 +17,8 @@ typedef struct ccord_media_stream ccord_media_stream;
 // Constants. CCORD_STREAM_RANGE_MAX_BYTES (1 MiB) lives in net/transport.h.
 #define CCORD_STREAM_BLOCK_BYTES        (256u * 1024u)
 #define CCORD_STREAM_RANGE_BLOCKS       4u                                   // one request = up to 4 blocks = 1 MiB
-#define CCORD_STREAM_CACHE_BLOCKS       64u
-#define CCORD_STREAM_RAM_MAX            (CCORD_STREAM_CACHE_BLOCKS * CCORD_STREAM_BLOCK_BYTES)   // 16 MiB
+#define CCORD_STREAM_CACHE_BLOCKS       24u
+#define CCORD_STREAM_RAM_MAX            (CCORD_STREAM_CACHE_BLOCKS * CCORD_STREAM_BLOCK_BYTES)   // 6 MiB
 #define CCORD_STREAM_READAHEAD_BLOCKS   8u                                   // fetch up to 8 blocks past the read block
 #define CCORD_STREAM_MAX_ATTEMPTS       3u                                   // per range (backoff 250 ms, 1 s)
 #define CCORD_STREAM_READ_TIMEOUT_MS    30000u                               // a blocked read_at fails with -CCORD_ERR_TIMEOUT
@@ -44,6 +44,8 @@ typedef struct ccord_media_stream_stats {
 // fetch_media_range refuses a blocked URL with CCORD_ERR_PERMISSION when the next ccord_session_pump issues the first
 // range (bytes 0..1 MiB-1); the stream then latches that error (stats.error == CCORD_ERR_PERMISSION).
 [[nodiscard]] ccord_media_stream *ccord_session_open_media_stream(ccord_session *s, const char *url, ccord_error *err);
+[[nodiscard]] ccord_media_stream *ccord_session_open_media_stream_ex(ccord_session *s, const char *url,
+                                                                     uint32_t max_blocks, ccord_error *err);
 // UI thread. Cancels (wakes a blocked read_at) and frees. Safe on nullptr. ccord_session_destroy closes what is left.
 // Must be called after ccord_av_stream_close for the stream that reads from it.
 void ccord_session_close_media_stream(ccord_session *s, ccord_media_stream *ms);

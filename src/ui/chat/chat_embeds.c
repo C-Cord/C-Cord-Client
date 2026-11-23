@@ -490,7 +490,7 @@ float dc_embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, f
                              dc_url_is_anim_image(thumb_url), sbuf, sizeof sbuf)) {
         small = sbuf;
       }
-      const char *shown = dc_media_pick(ui, r, small, thumb_url);
+      const char *shown = dc_media_pick_max(ui, r, small, thumb_url, 256);
       if (shown) {
         ccord_draw_texture_cover(r, shown, tr, 4.0f, 255, ui_media_animate(ui, tr));
         ui->dbg_attachment_textures_drawn++;
@@ -530,7 +530,7 @@ float dc_embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, f
       if (has_icon) {
         ccord_rect ir = {ax, cy + (row_h - 18.0f) * 0.5f, 18.0f, 18.0f};
         ccord_draw_rrect(r, ir, 9.0f, COL(bg_tertiary));
-        if (ui_ensure_media(ui, r, e->author_icon)) {
+        if (ui_ensure_media_ex(ui, r, e->author_icon, 64, false)) {
           ccord_draw_texture_rounded(r, e->author_icon, ir, 9.0f, 255);
           ui->dbg_attachment_textures_drawn++;
         }
@@ -708,7 +708,7 @@ float dc_embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, f
       if (has_ficon) {
         ccord_rect fir = {fx, cy + (row_h - 16.0f) * 0.5f, 16.0f, 16.0f};
         ccord_draw_rrect(r, fir, 8.0f, COL(bg_tertiary));
-        if (ui_ensure_media(ui, r, e->footer_icon)) {
+        if (ui_ensure_media_ex(ui, r, e->footer_icon, 64, false)) {
           ccord_draw_texture_rounded(r, e->footer_icon, fir, 8.0f, 255);
           ui->dbg_attachment_textures_drawn++;
         }

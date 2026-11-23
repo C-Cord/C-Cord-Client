@@ -347,6 +347,7 @@ static void run_interactive(app *a)
           }
 #endif
           (void)ccord_ui_handle_input(a->ui, &ev);
+          ccord_os_trim_memory();
           continue;
         }
         if (ev.type == CCORD_IN_APP_FOREGROUND) {
@@ -405,9 +406,13 @@ static void run_interactive(app *a)
           } else {
             ccord_render_evict_caches(a->renderer);
           }
+          if (a->ui) (void)ccord_ui_handle_input(a->ui, &ev);
+          if (a->session) ccord_session_trim_memory(a->session);
+          if (a->store) ccord_store_trim_memory(a->store);
 #if CCORD_WITH_PLUGINS
           if (a->plugins) ccord_plugins_dispatch_lifecycle(a->plugins, "low_memory");
 #endif
+          ccord_os_trim_memory();
           continue;
         }
         if (ev.type == CCORD_IN_RENDER_RESET) {

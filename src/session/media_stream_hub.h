@@ -17,5 +17,7 @@ uint32_t ccord_stream_hub_next_wait_ms(const ccord_stream_hub *h, uint64_t now_m
 // Used by ccord_session_open_media_stream / _close_media_stream / ccord_session_set_transport (session.c).
 #include <ccord/session/media_stream.h>
 ccord_media_stream *ccord_stream_hub_open(ccord_stream_hub *h, const char *url, ccord_error *err);
+ccord_media_stream *ccord_stream_hub_open_ex(ccord_stream_hub *h, const char *url, uint32_t max_blocks,
+                                             ccord_error *err);
 void ccord_stream_hub_close(ccord_stream_hub *h, ccord_media_stream *ms);                 // nullptr-safe
 void ccord_stream_hub_set_transport(ccord_stream_hub *h, ccord_transport *t);             // in-flight ranges are re-issued

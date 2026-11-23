@@ -711,6 +711,9 @@ void app_media_pump_receive(ccord_app_media *m, uint64_t now)
       CCORD_LOG_W("media: decoder open failed (retry in %u ms): %s", MEDIA_OPEN_RETRY_MS, err.message);
       return;
     }
+    if (m->ops->decoder_set_max_dim) {
+      m->ops->decoder_set_max_dim(m->ud, m->decoder, 1920, 1080);
+    }
     m->decoder_retry_ms = 0;
     m->recv_need_idr = true;
   }

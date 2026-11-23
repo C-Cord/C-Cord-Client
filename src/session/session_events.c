@@ -2,6 +2,8 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include "session_internal.h"
 
+#include <ccord/core/os.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -335,6 +337,7 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
             (void)ccord_session_request_profile(s, self_id, &ignored);
           }
         }
+        ccord_os_trim_memory();
         }
       }
       break;
@@ -1082,6 +1085,8 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
             s->watched.active = false;
             atomic_store_explicit(&s->watched_active, false, memory_order_release);
             s->watched.paused = false;
+            ccord_free(s->stream_frame_buf);
+            s->stream_frame_buf = nullptr;
           } else if (!sig->server_update) {
             s->watched.paused = sig->paused;
           }

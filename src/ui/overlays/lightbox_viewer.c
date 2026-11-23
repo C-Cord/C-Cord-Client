@@ -6,6 +6,9 @@
 #define _POSIX_C_SOURCE 200809L
 #include "chat_internal.h"
 
+#include <ccord/core/alloc.h>
+#include <ccord/core/atomic_file.h>
+#include <ccord/core/os.h>
 #include <ccord/ui/timefmt.h>
 #include <math.h>
 #include <stdio.h>
@@ -285,23 +288,50 @@ static void lb_icon_browser(ccord_renderer *r, float cx, float cy, float sz, cco
 
 // ---- Actions: Save, Share, Copy, Browser, Retry ----
 
-static const ccord_media_item *lb_best_cached_bytes(const ccord_ui *ui, size_t idx)
+static const ccord_media_item *lb_best_cached_item(const ccord_ui *ui, size_t idx)
 {
   if (!ui || !ui->d.session) return nullptr;
   const char *full = lb_full_url(ui, idx);
   const char *hd = lb_hd_url(ui, idx);
   const char *prev = lb_preview_url(ui, idx);
   const ccord_media_item *it = (full[0] ? ccord_session_get_media(ui->d.session, full) : nullptr);
-  if (it && it->data && it->len > 0) return it;
+  if (it && ((it->data && it->len > 0) || (it->cache_path && it->cache_path[0]))) return it;
   if (hd[0] && strcmp(hd, full) != 0) {
     it = ccord_session_get_media(ui->d.session, hd);
-    if (it && it->data && it->len > 0) return it;
+    if (it && ((it->data && it->len > 0) || (it->cache_path && it->cache_path[0]))) return it;
   }
   if (prev[0]) {
     it = ccord_session_get_media(ui->d.session, prev);
-    if (it && it->data && it->len > 0) return it;
+    if (it && ((it->data && it->len > 0) || (it->cache_path && it->cache_path[0]))) return it;
   }
   return nullptr;
+}
+
+static bool lb_load_cached_bytes(const ccord_media_item *it, const uint8_t **out_data, size_t *out_len,
+                                 char **out_owned)
+{
+  *out_data = nullptr;
+  *out_len = 0;
+  *out_owned = nullptr;
+  if (!it) return false;
+  if (it->data && it->len > 0) {
+    *out_data = it->data;
+    *out_len = it->len;
+    return true;
+  }
+  if (it->cache_path && it->cache_path[0]) {
+    ccord_error err = {0};
+    size_t flen = 0;
+    char *buf = ccord_file_read_max(it->cache_path, 32u * 1024u * 1024u, &flen, &err);
+    if (buf && flen > 0) {
+      *out_owned = buf;
+      *out_data = (const uint8_t *)buf;
+      *out_len = flen;
+      return true;
+    }
+    ccord_free(buf);
+  }
+  return false;
 }
 
 static void lb_action_save(ccord_ui *ui)
@@ -310,10 +340,14 @@ static void lb_action_save(ccord_ui *ui)
   if (!full[0]) return;
   const ui_lightbox_item *meta = lb_item_at(ui, ui->lightbox_index);
   const char *fname = (meta && meta->filename[0]) ? meta->filename : "ccord_image.png";
-  const ccord_media_item *cached = lb_best_cached_bytes(ui, ui->lightbox_index);
+  const ccord_media_item *cached = lb_best_cached_item(ui, ui->lightbox_index);
   if (ui->d.host.save_image) {
-    bool ok = ui->d.host.save_image(ui->d.host.ud, fname, cached ? cached->data : nullptr,
-                                    cached ? cached->len : 0u, full);
+    const uint8_t *bytes = nullptr;
+    size_t len = 0;
+    char *owned = nullptr;
+    (void)lb_load_cached_bytes(cached, &bytes, &len, &owned);
+    bool ok = ui->d.host.save_image(ui->d.host.ud, fname, bytes, len, full);
+    ccord_free(owned);
     if (ok) {
       if (ui->d.host.haptic_impact) (void)ui->d.host.haptic_impact(ui->d.host.ud, 0);
       ui_notice(ui, "Saved to Photos");
@@ -332,11 +366,18 @@ static void lb_action_share(ccord_ui *ui)
   if (!full[0]) return;
   const ui_lightbox_item *meta = lb_item_at(ui, ui->lightbox_index);
   const char *fname = (meta && meta->filename[0]) ? meta->filename : "ccord_image.png";
-  const ccord_media_item *cached = lb_best_cached_bytes(ui, ui->lightbox_index);
-  if (ui->d.host.share_image && cached && cached->data && cached->len > 0) {
-    if (ui->d.host.share_image(ui->d.host.ud, fname, cached->data, cached->len, full)) {
-      if (ui->d.host.haptic_impact) (void)ui->d.host.haptic_impact(ui->d.host.ud, 0);
-      return;
+  const ccord_media_item *cached = lb_best_cached_item(ui, ui->lightbox_index);
+  if (ui->d.host.share_image) {
+    const uint8_t *bytes = nullptr;
+    size_t len = 0;
+    char *owned = nullptr;
+    if (lb_load_cached_bytes(cached, &bytes, &len, &owned)) {
+      bool ok = ui->d.host.share_image(ui->d.host.ud, fname, bytes, len, full);
+      ccord_free(owned);
+      if (ok) {
+        if (ui->d.host.haptic_impact) (void)ui->d.host.haptic_impact(ui->d.host.ud, 0);
+        return;
+      }
     }
   }
   if (ui->d.host.share_text && ui->d.host.share_text(ui->d.host.ud, fname, full)) {
@@ -658,6 +699,7 @@ static void lb_draw_mobile_details_sheet(ccord_ui *ui, ccord_renderer *r, bool h
   if (fsz == 0 && ui->d.session && full[0]) {
     const ccord_media_item *cm = ccord_session_get_media(ui->d.session, full);
     if (cm && cm->len > 0) fsz = cm->len;
+    else if (cm && cm->cache_path && cm->cache_path[0]) (void)ccord_file_size(cm->cache_path, &fsz);
   }
   char sz_buf[48];
   lb_format_bytes(fsz, sz_buf, sizeof sz_buf);

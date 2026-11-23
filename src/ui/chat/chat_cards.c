@@ -247,7 +247,7 @@ void dc_draw_attachment_card(ccord_ui *ui, ccord_renderer *r, const ccord_attach
   bool drew_tex = false;
   if (url[0]) {
     dc_record_link_hit(ui, card, url, strlen(url));
-    if (ccord_attachment_is_image(a) && !a->spoiler && ui_ensure_media(ui, r, url)) {
+    if (ccord_attachment_is_image(a) && !a->spoiler && ui_ensure_media_ex(ui, r, url, 128, false)) {
       ccord_draw_texture_rounded_anim(r, url, ib, 4.0f, 255, ui_media_animate(ui, ib));
       ui->dbg_attachment_textures_drawn++;
       drew_tex = true;
@@ -383,17 +383,22 @@ static const char *att_thumb_url(const ccord_attachment *a, char *buf, size_t ca
 
 // The loaded texture to draw for media with a preferred source and a fallback, or nullptr while neither is ready.
 // Whatever is already loaded is used as it is; the fallback is only asked for once the preferred source has failed.
-const char *dc_media_pick(ccord_ui *ui, ccord_renderer *r, const char *primary, const char *fallback)
+const char *dc_media_pick_max(ccord_ui *ui, ccord_renderer *r, const char *primary, const char *fallback, int max_dim)
 {
   if (!primary) primary = "";
   if (r && primary[0] && ccord_render_has_texture(r, primary, nullptr, nullptr)) return primary;
   if (r && fallback && fallback[0] && ccord_render_has_texture(r, fallback, nullptr, nullptr)) return fallback;
-  if (primary[0] && ui_ensure_media(ui, r, primary)) return primary;
+  if (primary[0] && ui_ensure_media_ex(ui, r, primary, max_dim, false)) return primary;
   if (fallback && fallback[0] && strcmp(primary, fallback) != 0 && (!primary[0] || ui_media_failed(ui, primary)) &&
-      ui_ensure_media(ui, r, fallback)) {
+      ui_ensure_media_ex(ui, r, fallback, max_dim, false)) {
     return fallback;
   }
   return nullptr;
+}
+
+const char *dc_media_pick(ccord_ui *ui, ccord_renderer *r, const char *primary, const char *fallback)
+{
+  return dc_media_pick_max(ui, r, primary, fallback, 0);
 }
 
 // Fits a w x h picture inside box, centred, keeping its shape.

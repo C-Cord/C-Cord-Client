@@ -122,6 +122,13 @@ void ccord_render_evict_caches(ccord_renderer *r)
 {
   if (!r) return;
   text_cache_flush(r);
+  if (r->engine) {
+    TTF_TextEngine *fresh = TTF_CreateRendererTextEngine(r->sdl);
+    if (fresh) {
+      TTF_DestroyRendererTextEngine(r->engine);
+      r->engine = fresh;
+    }
+  }
   while (r->tex_lru_head != -1) {
     tex_free_slot(r, r->tex_lru_head);
   }
@@ -150,6 +157,8 @@ void ccord_render_destroy(ccord_renderer *r)
   }
   for (int k = 0; k < r->nsys_fallbacks; k++) {
     if (r->fallback_base[k]) TTF_CloseFont(r->fallback_base[k]);
+    ccord_free(r->fallback_path[k]);
+    r->fallback_path[k] = nullptr;
   }
   if (r->engine) TTF_DestroyRendererTextEngine(r->engine);
   if (r->ttf_inited) TTF_Quit();
@@ -175,6 +184,11 @@ void ccord_render_begin(ccord_renderer *r, ccord_color clear)
   r->noff = 0;
   r->prev_frame_tick = r->frame_tick;
   r->frame_tick = r->tex_tick;
+  uint64_t now_ms = ccord_clock_ms();
+  if (now_ms >= r->last_idle_sweep_ms && (now_ms - r->last_idle_sweep_ms) >= 1000u) {
+    r->last_idle_sweep_ms = now_ms;
+    tex_cache_evict_idle(r);
+  }
   SDL_SetRenderClipRect(r->sdl, nullptr);
   SDL_SetRenderDrawBlendMode(r->sdl, SDL_BLENDMODE_BLEND);
   SDL_SetRenderDrawColor(r->sdl, clear.r, clear.g, clear.b, 255);

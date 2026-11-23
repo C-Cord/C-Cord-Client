@@ -67,6 +67,7 @@ typedef struct tex_entry {
   size_t anim_bytes;        // pixels held by anim.frames
   size_t anim_budget;       // above this the entry streams instead
   uint64_t stream_due_ms;   // streaming: when the next frame replaces the shown one
+  uint64_t last_used_ms;    // monotonic wall clock (ccord_clock_ms) of last touch/upload
 } tex_entry;
 
 typedef struct text_color_op {
@@ -153,7 +154,7 @@ struct ccord_renderer {
   bool bundled_probed[CCORD_BUNDLED_COUNT];
   TTF_Font *fallback_base[CCORD_MAX_FALLBACKS];  // system fallback fonts found at run time
   int nsys_fallbacks;
-  char fallback_path[CCORD_MAX_FALLBACKS][CCORD_FALLBACK_PATH_MAX];
+  char *fallback_path[CCORD_MAX_FALLBACKS];
   bool glyph_fixes_off;                          // test hook: no run-time font lookup, no control-character cutting
   bool android_font_deferred;                    // true if a glyph lookup was deferred while Android font index built
   uint32_t miss_cp[CCORD_MISS_CACHE_SIZE];       // code points no installed font covers (not searched again)
@@ -193,6 +194,7 @@ struct ccord_renderer {
   bool anim_activity;                            // an animated texture was drawn (animating) since the last take
   bool has_anim_next;                            // earliest anim clock deadline recorded since the last take
   uint64_t anim_next_ms;
+  uint64_t last_idle_sweep_ms;
 };
 
 // text.c
@@ -214,6 +216,7 @@ static inline uint8_t ccord_fx_alpha(const ccord_renderer *r, uint8_t a)
 // texture_cache.c
 void tex_cache_init(ccord_renderer *r);
 void tex_free_slot(ccord_renderer *r, int slot);
+void tex_cache_evict_idle(ccord_renderer *r);
 
 // Snaps a logical rect to whole physical pixels so neighbours sharing an edge never leave a seam.
 static inline SDL_FRect render_snap(const ccord_renderer *r, ccord_rect rc)
