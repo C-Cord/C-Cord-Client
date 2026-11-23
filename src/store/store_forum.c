@@ -128,6 +128,27 @@ void ccord_store_forum_cache_destroy(struct forum_cache *f)
   ccord_free(f);
 }
 
+void ccord_store_forum_forget_guild(ccord_store *s, ccord_id guild_id)
+{
+  if (!s || guild_id == CCORD_ID_NONE) return;
+  struct forum_cache **slot = ccord_store_forum_slot(s);
+  if (!slot || !*slot) return;
+  struct forum_cache *f = *slot;
+  size_t w = 0;
+  for (size_t i = 0; i < f->n; i++) {
+    if (f->e[i].guild_id != guild_id) {
+      f->e[w++] = f->e[i];
+      continue;
+    }
+    for (size_t k = 0; k < f->e[i].n; k++) post_free(&f->e[i].posts[k]);
+    ccord_free(f->e[i].posts);
+  }
+  if (w != f->n) {
+    f->n = w;
+    forum_reindex_posts(f);
+  }
+}
+
 static const struct forum_cache *cache_const(const ccord_store *s)
 {
   return ccord_store_forum_slot_const(s);

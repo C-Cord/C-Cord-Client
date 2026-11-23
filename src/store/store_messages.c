@@ -105,12 +105,40 @@ void store_history_remove(ccord_store *s, ccord_id channel_id)
     }
     if (i == SIZE_MAX) return;
   }
+  s->total_msgs -= s->hist[i].n <= s->total_msgs ? s->hist[i].n : s->total_msgs;
   for (size_t k = 0; k < s->hist[i].n; k++) store_msg_free(&s->hist[i].msgs[k]);
   ccord_free(s->hist[i].msgs);
   size_t last = s->nhist - 1u;
   if (i != last) s->hist[i] = s->hist[last];
   s->nhist--;
   store_hist_reindex(s);
+}
+
+static bool history_has_unconfirmed_echo(const history *h)
+{
+  for (size_t k = 0; k < h->n; k++) {
+    if (store_message_is_unconfirmed_echo(&h->msgs[k])) return true;
+  }
+  return false;
+}
+
+void store_evict_lru_histories(ccord_store *s, ccord_id protect_channel_id, size_t target_total)
+{
+  if (!s) return;
+  while (s->total_msgs > target_total) {
+    size_t best = SIZE_MAX;
+    for (size_t i = 0; i < s->nhist; i++) {
+      const history *h = &s->hist[i];
+      if (h->n == 0 || h->channel_id == CCORD_ID_NONE || h->channel_id == s->sel_channel ||
+          h->channel_id == protect_channel_id) {
+        continue;
+      }
+      if (history_has_unconfirmed_echo(h)) continue;
+      if (best == SIZE_MAX || h->last_access_tick < s->hist[best].last_access_tick) best = i;
+    }
+    if (best == SIZE_MAX) break;
+    store_history_remove(s, s->hist[best].channel_id);
+  }
 }
 
 
@@ -316,7 +344,12 @@ ccord_status ccord_store_set_history(ccord_store *s, ccord_id channel_id, const 
   }
   nin = w;
 
-  if (h->stale) history_reconcile(h, in, nin);
+  size_t old_n = h->n;
+  if (h->stale) {
+    history_reconcile(h, in, nin);
+    s->total_msgs = (s->total_msgs >= old_n ? s->total_msgs - old_n : 0u) + h->n;
+    old_n = h->n;
+  }
 
   if (h->n + nin > CCORD_MAX_MESSAGES_PER_CHANNEL) {
     for (size_t k = 0; k < nin; k++) store_msg_free(&in[k]);
@@ -370,6 +403,8 @@ ccord_status ccord_store_set_history(ccord_store *s, ccord_id channel_id, const 
     h->n = o;
     h->cap = cap;
   }
+  s->total_msgs = (s->total_msgs >= old_n ? s->total_msgs - old_n : 0u) + h->n;
+  h->last_access_tick = ++s->hist_tick;
   h->loaded = true;
   h->stale = false;
   h->stale_max_id = CCORD_ID_NONE;
@@ -394,6 +429,7 @@ ccord_status ccord_store_set_history(ccord_store *s, ccord_id channel_id, const 
       }
     }
   }
+  store_evict_lru_histories(s, channel_id, CCORD_STORE_MAX_TOTAL_MESSAGES);
   if (reorders) s->revision++; else store_bump_traffic(s);
   store_post(s, CCORD_EVT_MESSAGES_LOADED, CCORD_ID_NONE, channel_id, CCORD_ID_NONE, CCORD_ID_NONE, (int64_t)n);
   return CCORD_OK;
@@ -417,6 +453,7 @@ ccord_status ccord_store_append_message(ccord_store *s, const ccord_message *m, 
   }
   ccord_message copy;
   if (!msg_copy(&copy, m, err)) return CCORD_ERR_NOMEM;
+  size_t old_n = h->n;
   if (h->n >= CCORD_MAX_MESSAGES_PER_CHANNEL) {
     store_msg_free(&h->msgs[0]);
     memmove(h->msgs, h->msgs + 1, (h->n - 1) * sizeof *h->msgs);
@@ -435,6 +472,8 @@ ccord_status ccord_store_append_message(ccord_store *s, const ccord_message *m, 
   memmove(&h->msgs[pos + 1], &h->msgs[pos], (h->n - pos) * sizeof *h->msgs);
   h->msgs[pos] = copy;
   h->n++;
+  s->total_msgs = (s->total_msgs >= old_n ? s->total_msgs - old_n : 0u) + h->n;
+  h->last_access_tick = ++s->hist_tick;
   ccord_id guild_id = s->d.channels[ci].guild_id;
   bool reorders = false;   // a conversation with a newer message moves up the list
   if (!ccord_message_is_ephemeral(m) && !store_message_is_unconfirmed_echo(m)) {
@@ -463,6 +502,7 @@ ccord_status ccord_store_append_message(ccord_store *s, const ccord_message *m, 
     }
   }
   store_typing_remove(s, m->channel_id, m->author_id);
+  store_evict_lru_histories(s, m->channel_id, CCORD_STORE_MAX_TOTAL_MESSAGES);
   if (reorders) s->revision++; else store_bump_traffic(s);
   store_post(s, CCORD_EVT_MESSAGE_CREATE, guild_id, m->channel_id, m->id, m->author_id, 0);
   return CCORD_OK;
@@ -665,6 +705,7 @@ ccord_status ccord_store_delete_message(ccord_store *s, ccord_id channel_id, cco
   store_msg_free(&h->msgs[mi]);
   memmove(&h->msgs[mi], &h->msgs[mi + 1], (h->n - (size_t)mi - 1) * sizeof *h->msgs);
   h->n--;
+  if (s->total_msgs > 0) s->total_msgs--;
   ccord_id newest_before = s->d.channels[ci].last_message_id;
   unread_settle_after_delete(&s->d.channels[ci], h, message_id);
   if (s->d.channels[ci].guild_id == CCORD_DM_GUILD_ID && s->d.channels[ci].last_message_id != newest_before) s->revision++;
@@ -706,6 +747,7 @@ ccord_status ccord_store_delete_messages_bulk(ccord_store *s, ccord_id channel_i
       store_msg_free(&h->msgs[mi]);
       memmove(&h->msgs[mi], &h->msgs[mi + 1], (h->n - (size_t)mi - 1) * sizeof *h->msgs);
       h->n--;
+      if (s->total_msgs > 0) s->total_msgs--;
       ccord_id newest_before = s->d.channels[ci].last_message_id;
       unread_settle_after_delete(&s->d.channels[ci], h, message_id);
       if (s->d.channels[ci].guild_id == CCORD_DM_GUILD_ID && s->d.channels[ci].last_message_id != newest_before) {
@@ -735,12 +777,15 @@ ccord_status ccord_store_delete_messages_bulk(ccord_store *s, ccord_id channel_i
     store_post(s, CCORD_EVT_MESSAGE_DELETE, guild_id, channel_id, message_id, CCORD_ID_NONE, 0);
   }
   if (any_deleted) {
+    size_t old_n = h->n;
     size_t w = 0;
     for (size_t i = 0; i < h->n; i++) {
       if (dead[i]) store_msg_free(&h->msgs[i]);
       else h->msgs[w++] = h->msgs[i];
     }
     h->n = w;
+    size_t removed = old_n - w;
+    s->total_msgs -= removed <= s->total_msgs ? removed : s->total_msgs;
     unread_settle_after_delete(&s->d.channels[ci], h, deleted_newest ? newest_before : CCORD_ID_NONE);
     if (guild_id == CCORD_DM_GUILD_ID && s->d.channels[ci].last_message_id != newest_before) s->revision++;
     else store_bump_traffic(s);
@@ -1338,6 +1383,7 @@ ccord_status ccord_store_dismiss_ephemeral(ccord_store *s, ccord_id channel_id, 
   store_msg_free(&h->msgs[mi]);
   memmove(&h->msgs[mi], &h->msgs[mi + 1], (h->n - (size_t)mi - 1) * sizeof *h->msgs);
   h->n--;
+  if (s->total_msgs > 0) s->total_msgs--;
   store_bump_traffic(s);
   store_post(s, CCORD_EVT_MESSAGE_DELETE, s->d.channels[ci].guild_id, channel_id, message_id, CCORD_ID_NONE, 0);
   return CCORD_OK;

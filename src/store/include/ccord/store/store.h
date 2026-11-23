@@ -410,3 +410,5 @@ bool ccord_store_remove_scheduled_event(ccord_store *s, ccord_id guild_id, ccord
 size_t ccord_store_scheduled_event_count(const ccord_store *s, ccord_id guild_id);
 const ccord_scheduled_event *ccord_store_scheduled_event_at(const ccord_store *s, ccord_id guild_id, size_t i);
 const ccord_scheduled_event *ccord_store_find_scheduled_event(const ccord_store *s, ccord_id event_id);   // any guild
+// Releases expendable store caches (inactive channel histories / shrinking maps) under memory pressure.
+void ccord_store_trim_memory(ccord_store *s);

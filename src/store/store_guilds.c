@@ -675,6 +675,9 @@ ccord_status ccord_store_delete_guild(ccord_store *s, ccord_id guild_id, ccord_e
   ccord_store_member_list_size_forget_guild(s, guild_id);
   ccord_store_voice_forget_guild(s, guild_id);   // before the channels go, so status rows can be matched
   store_event_bucket_drop(s, guild_id);
+  store_slash_forget_guild(s, guild_id);
+  ccord_store_expr_forget_guild(s, guild_id);
+  ccord_store_forum_forget_guild(s, guild_id);
 
   // Compact deleted channels in a single O(C_total) pass, then reindex once.
   size_t ch_w = 0;

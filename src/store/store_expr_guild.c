@@ -194,15 +194,49 @@ static void emoji_reindex_all(ccord_expr_data *d)
   }
 }
 
-ccord_gif_category *expr_ensure_gif_cats(ccord_expr_data *d)
+static size_t next_gif_cap(size_t cur, size_t need, size_t max_cap)
 {
-  if (!d->gif_cats) d->gif_cats = ccord_calloc(EXPR_MAX_GIF_CATS, sizeof *d->gif_cats);
+  if (need > max_cap) need = max_cap;
+  size_t ncap = (cur >= 8u) ? cur : 8u;
+  while (ncap < need) {
+    if (ncap >= max_cap / 2u) {
+      ncap = max_cap;
+      break;
+    }
+    ncap *= 2u;
+  }
+  return ncap > max_cap ? max_cap : ncap;
+}
+
+ccord_gif_category *expr_ensure_gif_cats(ccord_expr_data *d, size_t need)
+{
+  if (!d || need == 0) return d ? d->gif_cats : nullptr;
+  if (need > EXPR_MAX_GIF_CATS) need = EXPR_MAX_GIF_CATS;
+  if (d->gif_cats && d->cap_gif_cats >= need) return d->gif_cats;
+  size_t ncap = next_gif_cap(d->cap_gif_cats, need, EXPR_MAX_GIF_CATS);
+  ccord_gif_category *nb = ccord_realloc_array(d->gif_cats, ncap, sizeof *nb);
+  if (!nb) return nullptr;
+  if (ncap > d->cap_gif_cats) {
+    memset(nb + d->cap_gif_cats, 0, (ncap - d->cap_gif_cats) * sizeof *nb);
+  }
+  d->gif_cats = nb;
+  d->cap_gif_cats = ncap;
   return d->gif_cats;
 }
 
-ccord_gif_item *expr_ensure_gif_buf(ccord_gif_item **slot, size_t cap)
+ccord_gif_item *expr_ensure_gif_buf(ccord_gif_item **slot, size_t *cap_slot, size_t need, size_t max_cap)
 {
-  if (!*slot) *slot = ccord_calloc(cap, sizeof **slot);
+  if (!slot || !cap_slot || need == 0 || max_cap == 0) return slot ? *slot : nullptr;
+  if (need > max_cap) need = max_cap;
+  if (*slot && *cap_slot >= need) return *slot;
+  size_t ncap = next_gif_cap(*cap_slot, need, max_cap);
+  ccord_gif_item *nb = ccord_realloc_array(*slot, ncap, sizeof *nb);
+  if (!nb) return nullptr;
+  if (ncap > *cap_slot) {
+    memset(nb + *cap_slot, 0, (ncap - *cap_slot) * sizeof *nb);
+  }
+  *slot = nb;
+  *cap_slot = ncap;
   return *slot;
 }
 
@@ -764,6 +798,37 @@ void ccord_store_clear_guild_expressions(ccord_store *s)
   ccord_store_expr_mutated_(s);
 }
 
+void ccord_store_expr_forget_guild(ccord_store *s, ccord_id guild_id)
+{
+  ccord_expr_data *d = expr_data_get(s, false);
+  if (!d || guild_id == CCORD_ID_NONE) return;
+  size_t idx = SIZE_MAX;
+  for (size_t i = 0; i < d->ng; i++) {
+    if (d->g[i].guild_id == guild_id) {
+      idx = i;
+      break;
+    }
+  }
+  if (idx == SIZE_MAX) return;
+  guild_emojis_free(&d->g[idx]);
+  guild_stickers_free(&d->g[idx]);
+  guild_sounds_free(&d->g[idx]);
+  size_t last = d->ng - 1u;
+  if (idx != last) d->g[idx] = d->g[last];
+  d->ng--;
+  ccord_idmap_clear(&d->guild_by_id);
+  d->guild_ix_ok = true;
+  for (size_t i = 0; i < d->ng; i++) {
+    if (d->g[i].guild_id != CCORD_ID_NONE && !ccord_idmap_put(&d->guild_by_id, d->g[i].guild_id, i)) {
+      d->guild_ix_ok = false;
+      break;
+    }
+  }
+  emoji_reindex_all(d);
+  d->revision++;
+  ccord_store_expr_mutated_(s);
+}
+
 void ccord_store_clear_all_expressions(ccord_store *s)
 {
   ccord_expr_data *d = expr_data_get(s, false);
@@ -796,15 +861,19 @@ void ccord_store_clear_all_expressions(ccord_store *s)
   ccord_free(d->gif_cats);
   d->gif_cats = nullptr;
   d->ngif_cats = 0;
+  d->cap_gif_cats = 0;
   ccord_free(d->gif_trending);
   d->gif_trending = nullptr;
   d->ngif_trending = 0;
+  d->cap_gif_trending = 0;
   ccord_free(d->gif_search);
   d->gif_search = nullptr;
   d->ngif_search = 0;
+  d->cap_gif_search = 0;
   ccord_free(d->fav_gifs);
   d->fav_gifs = nullptr;
   d->nfav_gifs = 0;
+  d->cap_fav_gifs = 0;
   ccord_free(d->settings_proto);
   d->settings_proto = nullptr;
   d->settings_proto_len = 0;

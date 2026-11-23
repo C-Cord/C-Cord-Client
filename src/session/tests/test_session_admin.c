@@ -294,9 +294,6 @@ static void test_session_expression_data_failure(void)
   CT_CHECK(ccord_store_expr_blob_state(store, CCORD_EXPR_GIF_TRENDING, "") == CCORD_EXPR_BLOB_PENDING);
   CT_CHECK(pump_all(s) == 1);
   CT_CHECK(ccord_store_expr_blob_state(store, CCORD_EXPR_GIF_TRENDING, "") == CCORD_EXPR_BLOB_READY);
-  size_t blob_len = 0;
-  const char *blob = ccord_store_expr_blob(store, CCORD_EXPR_GIF_TRENDING, "", &blob_len);
-  CT_CHECK(blob && blob_len == strlen(ft->body) && strcmp(blob, ft->body) == 0);
   CT_CHECK(ccord_store_gif_trending_count(store) == 1);
   const ccord_gif_item *g = ccord_store_gif_trending_at(store, 0);
   CT_CHECK(g && strcmp(g->url, "https://tenor.com/view/retry-gif-1") == 0);

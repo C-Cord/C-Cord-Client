@@ -4,6 +4,7 @@
 // Unified internal state & cross-TU helpers for ccord_store.
 #include <stdatomic.h>
 #include <ccord/core/idmap.h>
+#include <ccord/core/os.h>
 #include <ccord/model/rich.h>
 #include <ccord/store/store.h>
 #include <ccord/store/roles.h>
@@ -30,6 +31,7 @@ struct forum_cache;
 void ccord_store_forum_cache_destroy(struct forum_cache *f);
 struct forum_cache **ccord_store_forum_slot(ccord_store *s);
 const struct forum_cache *ccord_store_forum_slot_const(const ccord_store *s);
+void ccord_store_forum_forget_guild(ccord_store *s, ccord_id guild_id);
 // Bumps the revision and posts channel.upsert for the forum so the UI redraws.
 void ccord_store_forum_mutated(ccord_store *s, ccord_id guild_id, ccord_id forum_id);
 
@@ -105,6 +107,11 @@ void ccord_store_user_traffic(ccord_store *s);
 #define CCORD_STORE_TYPING_UNIX_THRESHOLD 1000000000000LL
 #define CCORD_STORE_TYPING_PRUNE_MARGIN_MS 15000LL
 #define CCORD_STORE_MAX_TYPING 256u
+#if CCORD_OS_ANDROID
+#define CCORD_STORE_MAX_TOTAL_MESSAGES 4000u
+#else
+#define CCORD_STORE_MAX_TOTAL_MESSAGES 12000u
+#endif
 
 typedef struct note_entry {
   ccord_id user_id;
@@ -147,6 +154,7 @@ typedef struct history {
   ccord_id stale_max_id;  // newest confirmed id cached when it was marked stale
   ccord_message *msgs;
   size_t n, cap;
+  uint64_t last_access_tick;
 } history;
 
 typedef struct typing_entry {
@@ -185,6 +193,8 @@ struct ccord_store {
   ccord_id sel_guild, sel_channel;
   history *hist;
   size_t nhist, caphist;
+  uint64_t hist_tick;
+  size_t total_msgs;
   ccord_idmap hist_by_chan;
   bool hist_ix_ok;
   typing_entry *typing;
@@ -238,6 +248,9 @@ void store_channels_reindex(store_data *d);
 void store_post(ccord_store *s, ccord_event_type t, ccord_id g, ccord_id c, ccord_id m, ccord_id u, int64_t value);
 void store_voice_servers_clear(ccord_store *s);
 void store_slash_clear(ccord_store *s);
+void store_slash_forget_guild(ccord_store *s, ccord_id guild_id);
+void ccord_store_expr_forget_guild(ccord_store *s, ccord_id guild_id);
+void store_evict_lru_histories(ccord_store *s, ccord_id protect_channel_id, size_t target_total);
 void store_pins_clear(ccord_store *s);
 void store_saved_clear(ccord_store *s);
 void store_events_clear(ccord_store *s);

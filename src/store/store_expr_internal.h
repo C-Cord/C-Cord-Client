@@ -71,14 +71,14 @@ struct ccord_expr_data {
   size_t nfav_stickers;
   ccord_sticker_pack sticker_packs[EXPR_MAX_STICKER_PACKS];
   size_t nsticker_packs;
-  ccord_gif_category *gif_cats;   // lazily allocated (EXPR_MAX_GIF_CATS) on first write
-  size_t ngif_cats;
-  ccord_gif_item *gif_trending;   // lazily allocated (EXPR_MAX_GIFS) on first write
-  size_t ngif_trending;
-  ccord_gif_item *gif_search;     // lazily allocated (EXPR_MAX_GIFS) on first write
-  size_t ngif_search;
-  ccord_gif_item *fav_gifs;       // lazily allocated (EXPR_MAX_FAV_GIFS) on first write
-  size_t nfav_gifs;
+  ccord_gif_category *gif_cats;   // dynamically grown up to EXPR_MAX_GIF_CATS on write
+  size_t ngif_cats, cap_gif_cats;
+  ccord_gif_item *gif_trending;   // dynamically grown up to EXPR_MAX_GIFS on write
+  size_t ngif_trending, cap_gif_trending;
+  ccord_gif_item *gif_search;     // dynamically grown up to EXPR_MAX_GIFS on write
+  size_t ngif_search, cap_gif_search;
+  ccord_gif_item *fav_gifs;       // dynamically grown up to EXPR_MAX_FAV_GIFS on write
+  size_t nfav_gifs, cap_fav_gifs;
   uint8_t *settings_proto;   // raw FrecencyUserSettings bytes, kept losslessly for the favorite-GIF PATCH
   size_t settings_proto_len;
   uint64_t revision, tick;
@@ -89,6 +89,6 @@ void expr_blob_free(expr_blob *b);
 void expr_sticker_packs_free(ccord_expr_data *d);
 ccord_expr_data *expr_data_get(ccord_store *s, bool create);
 const ccord_expr_data *expr_data_peek(const ccord_store *s);
-ccord_gif_category *expr_ensure_gif_cats(ccord_expr_data *d);
-ccord_gif_item *expr_ensure_gif_buf(ccord_gif_item **slot, size_t cap);
+ccord_gif_category *expr_ensure_gif_cats(ccord_expr_data *d, size_t need);
+ccord_gif_item *expr_ensure_gif_buf(ccord_gif_item **slot, size_t *cap_slot, size_t need, size_t max_cap);
 const char *expr_dup_or_empty(const char *s, size_t max);

@@ -24,6 +24,20 @@ void store_slash_clear(ccord_store *s)
   s->capslash = 0;
 }
 
+void store_slash_forget_guild(ccord_store *s, ccord_id guild_id)
+{
+  if (!s || guild_id == CCORD_ID_NONE) return;
+  for (size_t i = 0; i < s->nslash; i++) {
+    if (s->slash[i].guild_id != guild_id) continue;
+    ccord_free(s->slash[i].cmds);
+    ccord_free(s->slash[i].opts_pool);
+    size_t last = s->nslash - 1u;
+    if (i != last) s->slash[i] = s->slash[last];
+    s->nslash--;
+    return;
+  }
+}
+
 
 ccord_status ccord_store_set_slash_commands(ccord_store *s, ccord_id guild_id,
                                             const ccord_slash_command *cmds, size_t count,

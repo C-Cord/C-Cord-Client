@@ -506,6 +506,7 @@ void ccord_store_reset(ccord_store *s)
   s->hist = nullptr;
   s->nhist = 0;
   s->caphist = 0;
+  s->total_msgs = 0;
   ccord_idmap_free(&s->hist_by_chan);
   s->hist_ix_ok = true;
   ccord_free(s->typing);
@@ -686,6 +687,7 @@ ccord_status ccord_store_set_snapshot_ex(ccord_store *s, const ccord_snapshot *s
   ccord_store_roles_reset(s);   // a new snapshot brings its own roles (applied by the caller)
   ccord_store_admin_reset(s);
   ccord_store_notify_clear(s);  // and its own notification settings
+  ccord_store_forum_reset(s);
   store_slash_clear(s);
   store_pins_clear(s);
   ccord_store_member_list_size_clear(s);   // and the sizes of its member lists (the next update says them again)
@@ -745,8 +747,10 @@ ccord_status ccord_store_set_snapshot_ex(ccord_store *s, const ccord_snapshot *s
   data_free(&s->d);
   s->d = fresh;
   size_t kept = 0;
+  size_t kept_msgs = 0;
   for (size_t i = 0; i < s->nhist; i++) {
     if (keep && store_find_channel(&s->d, s->hist[i].channel_id) >= 0) {
+      kept_msgs += s->hist[i].n;
       s->hist[kept++] = s->hist[i];
       continue;
     }
@@ -754,6 +758,7 @@ ccord_status ccord_store_set_snapshot_ex(ccord_store *s, const ccord_snapshot *s
     ccord_free(s->hist[i].msgs);
   }
   s->nhist = kept;
+  s->total_msgs = kept_msgs;
   store_hist_reindex(s);
   s->ntyping = 0;
   store_voice_servers_clear(s);
@@ -763,6 +768,11 @@ ccord_status ccord_store_set_snapshot_ex(ccord_store *s, const ccord_snapshot *s
   s->nspeaking = 0;
   s->sel_guild = guild;
   s->sel_channel = channel;
+  if (channel != CCORD_ID_NONE) {
+    history *sh = store_find_history(s, channel);
+    if (sh) sh->last_access_tick = ++s->hist_tick;
+  }
+  store_evict_lru_histories(s, channel, CCORD_STORE_MAX_TOTAL_MESSAGES);
   s->revision++;
 
   store_post(s, CCORD_EVT_GUILDS_LOADED, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, (int64_t)s->d.nguilds);
@@ -784,6 +794,10 @@ ccord_status ccord_store_select_guild(ccord_store *s, ccord_id guild_id, ccord_e
     s->sel_guild = CCORD_DM_GUILD_ID;
     s->sel_channel = channel;
     s->d.dm_last = channel;
+    if (channel != CCORD_ID_NONE) {
+      history *sh = store_find_history(s, channel);
+      if (sh) sh->last_access_tick = ++s->hist_tick;
+    }
     s->revision++;
     store_post(s, CCORD_EVT_GUILD_SELECT, CCORD_DM_GUILD_ID, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, 0);
     if (channel != CCORD_ID_NONE) {
@@ -800,6 +814,10 @@ ccord_status ccord_store_select_guild(ccord_store *s, ccord_id guild_id, ccord_e
   s->sel_guild = guild_id;
   s->sel_channel = channel;
   s->d.guild_last[gi] = channel;
+  if (channel != CCORD_ID_NONE) {
+    history *sh = store_find_history(s, channel);
+    if (sh) sh->last_access_tick = ++s->hist_tick;
+  }
   s->revision++;
   store_post(s, CCORD_EVT_GUILD_SELECT, guild_id, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, 0);
   if (channel != CCORD_ID_NONE) {
@@ -829,6 +847,8 @@ ccord_status ccord_store_select_channel(ccord_store *s, ccord_id channel_id, cco
     store_post(s, CCORD_EVT_GUILD_SELECT, c->guild_id, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, 0);
   }
   s->sel_channel = channel_id;
+  history *sh = store_find_history(s, channel_id);
+  if (sh) sh->last_access_tick = ++s->hist_tick;
   if (c->kind != CCORD_CHANNEL_TEXT) {
     // A voice/stage chat is transient: the guild's remembered text channel stays what it was.
   } else if (c->guild_id == CCORD_DM_GUILD_ID) {
@@ -925,6 +945,38 @@ ccord_id ccord_store_selected_guild(const ccord_store *s)
 ccord_id ccord_store_selected_channel(const ccord_store *s)
 {
   return s ? s->sel_channel : CCORD_ID_NONE;
+}
+
+void ccord_store_trim_memory(ccord_store *s)
+{
+  if (!s) return;
+  store_evict_lru_histories(s, s->sel_channel, 0u);
+  if (s->d.profiles) {
+    size_t keep = 0;
+    for (size_t i = 0; i < s->d.nprofiles; i++) {
+      if (keep == 0 && s->d.self_id != CCORD_ID_NONE && s->d.profiles[i].user_id == s->d.self_id) {
+        if (i != 0) s->d.profiles[0] = s->d.profiles[i];
+        keep = 1;
+      } else {
+        store_profile_free(&s->d.profiles[i]);
+      }
+    }
+    s->d.nprofiles = keep;
+    if (keep == 0) {
+      ccord_free(s->d.profiles);
+      s->d.profiles = nullptr;
+      s->d.cap_profiles = 0;
+    } else if (s->d.cap_profiles > keep) {
+      ccord_user_profile *shrunk = ccord_realloc_array(s->d.profiles, keep, sizeof *shrunk);
+      if (shrunk) {
+        s->d.profiles = shrunk;
+        s->d.cap_profiles = keep;
+      }
+    }
+  }
+  ccord_idmap_shrink(&s->d.user_by_id);
+  ccord_idmap_shrink(&s->d.chan_by_id);
+  ccord_idmap_shrink(&s->hist_by_chan);
 }
 
 

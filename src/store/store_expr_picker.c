@@ -336,7 +336,7 @@ bool ccord_store_toggle_favorite_gif(ccord_store *s, const ccord_gif_item *gif)
     }
   }
   if (d->nfav_gifs >= EXPR_MAX_FAV_GIFS) return false;
-  if (!expr_ensure_gif_buf(&d->fav_gifs, EXPR_MAX_FAV_GIFS)) return false;
+  if (!expr_ensure_gif_buf(&d->fav_gifs, &d->cap_fav_gifs, d->nfav_gifs + 1u, EXPR_MAX_FAV_GIFS)) return false;
   ccord_gif_item fav = *gif;
   if (!fav.src[0]) (void)snprintf(fav.src, sizeof fav.src, "%s", gif->url);
   if (fav.width == 0) fav.width = 320;
@@ -463,8 +463,9 @@ static void parse_expr_blob_json(ccord_expr_data *d, unsigned kind, const char *
       if (cats && ccord_json_type_of(cats) == CCORD_JSON_ARRAY) {
         d->ngif_cats = 0;
         size_t n = ccord_json_array_len(cats);
-        if (n > 0 && expr_ensure_gif_cats(d)) {
-          for (size_t i = 0; i < n && d->ngif_cats < EXPR_MAX_GIF_CATS; i++) {
+        size_t need = (n > EXPR_MAX_GIF_CATS) ? EXPR_MAX_GIF_CATS : n;
+        if (need > 0 && expr_ensure_gif_cats(d, need)) {
+          for (size_t i = 0; i < need; i++) {
             const ccord_json *c = ccord_json_array_at(cats, i);
             if (!c || ccord_json_type_of(c) != CCORD_JSON_OBJECT) continue;
             const char *name = j_str(c, "name");
@@ -480,20 +481,23 @@ static void parse_expr_blob_json(ccord_expr_data *d, unsigned kind, const char *
     }
     // /gifs/trending also carries the first trending page; use it only until trending-gifs answers with rows.
     const ccord_json *gifs = gif_list_from_json(root);
-    if (gifs && d->ngif_trending == 0 && ccord_json_array_len(gifs) > 0 &&
-        expr_ensure_gif_buf(&d->gif_trending, EXPR_MAX_GIFS)) {
-      parse_gif_array(gifs, d->gif_trending, EXPR_MAX_GIFS, &d->ngif_trending);
+    size_t ng = gifs ? ccord_json_array_len(gifs) : 0;
+    if (gifs && d->ngif_trending == 0 && ng > 0 &&
+        expr_ensure_gif_buf(&d->gif_trending, &d->cap_gif_trending, ng, EXPR_MAX_GIFS)) {
+      parse_gif_array(gifs, d->gif_trending, d->cap_gif_trending, &d->ngif_trending);
     }
   } else if (kind == 2u) { // CCORD_EXPR_GIF_TRENDING
     const ccord_json *arr = gif_list_from_json(root);
     // An empty answer must not wipe the fallback rows already ingested from /gifs/trending.
-    if (arr && ccord_json_array_len(arr) > 0 && expr_ensure_gif_buf(&d->gif_trending, EXPR_MAX_GIFS)) {
-      parse_gif_array(arr, d->gif_trending, EXPR_MAX_GIFS, &d->ngif_trending);
+    size_t na = arr ? ccord_json_array_len(arr) : 0;
+    if (na > 0 && expr_ensure_gif_buf(&d->gif_trending, &d->cap_gif_trending, na, EXPR_MAX_GIFS)) {
+      parse_gif_array(arr, d->gif_trending, d->cap_gif_trending, &d->ngif_trending);
     }
   } else if (kind == 3u) { // CCORD_EXPR_GIF_SEARCH
     const ccord_json *arr = gif_list_from_json(root);
-    if (arr && ccord_json_array_len(arr) > 0 && expr_ensure_gif_buf(&d->gif_search, EXPR_MAX_GIFS)) {
-      parse_gif_array(arr, d->gif_search, EXPR_MAX_GIFS, &d->ngif_search);
+    size_t na = arr ? ccord_json_array_len(arr) : 0;
+    if (na > 0 && expr_ensure_gif_buf(&d->gif_search, &d->cap_gif_search, na, EXPR_MAX_GIFS)) {
+      parse_gif_array(arr, d->gif_search, d->cap_gif_search, &d->ngif_search);
     } else {
       d->ngif_search = 0;
     }
@@ -644,38 +648,46 @@ ccord_status ccord_store_set_expr_blob(ccord_store *s, unsigned kind, const char
   b->body = nullptr;
   b->len = 0;
   if (ok) {
-    // Keep total cached REST blob bytes within EXPR_BLOB_TOTAL_BYTES_MAX via LRU eviction of other slots.
-    size_t bi = (size_t)(b - d->blobs);
-    while (d->blob_bytes + len > EXPR_BLOB_TOTAL_BYTES_MAX && d->nblobs > 1u) {
-      size_t evict = SIZE_MAX;
-      for (size_t i = 0; i < d->nblobs; i++) {
-        if (i == bi || d->blobs[i].len == 0) continue;
-        if (evict == SIZE_MAX || d->blobs[i].tick < d->blobs[evict].tick) evict = i;
+    if (kind <= 5u) {
+      // Parsed into typed store arrays (or settings_proto separately); do not retain multi-MiB raw JSON text.
+      b->state = CCORD_EXPR_BLOB_READY;
+      if (kind >= 1u) {
+        parse_expr_blob_json(d, kind, body, len);
       }
-      if (evict == SIZE_MAX) break;
-      if (d->blob_bytes >= d->blobs[evict].len) d->blob_bytes -= d->blobs[evict].len;
-      else d->blob_bytes = 0;
-      expr_blob_free(&d->blobs[evict]);
-      size_t last = d->nblobs - 1u;
-      if (evict != last) {
-        d->blobs[evict] = d->blobs[last];
-        if (bi == last) bi = evict;
+    } else {
+      // Keep total cached REST blob bytes within EXPR_BLOB_TOTAL_BYTES_MAX via LRU eviction of other slots.
+      size_t bi = (size_t)(b - d->blobs);
+      while (d->blob_bytes + len > EXPR_BLOB_TOTAL_BYTES_MAX && d->nblobs > 1u) {
+        size_t evict = SIZE_MAX;
+        for (size_t i = 0; i < d->nblobs; i++) {
+          if (i == bi || d->blobs[i].len == 0) continue;
+          if (evict == SIZE_MAX || d->blobs[i].tick < d->blobs[evict].tick) evict = i;
+        }
+        if (evict == SIZE_MAX) break;
+        if (d->blob_bytes >= d->blobs[evict].len) d->blob_bytes -= d->blobs[evict].len;
+        else d->blob_bytes = 0;
+        expr_blob_free(&d->blobs[evict]);
+        size_t last = d->nblobs - 1u;
+        if (evict != last) {
+          d->blobs[evict] = d->blobs[last];
+          if (bi == last) bi = evict;
+        }
+        memset(&d->blobs[last], 0, sizeof d->blobs[0]);
+        d->nblobs--;
       }
-      memset(&d->blobs[last], 0, sizeof d->blobs[0]);
-      d->nblobs--;
+      b = &d->blobs[bi];
+      b->body = ccord_alloc_array(len + 1u, 1);
+      if (!b->body) {
+        b->state = CCORD_EXPR_BLOB_FAILED;
+        return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+      }
+      if (len && body) memcpy(b->body, body, len);
+      b->body[len] = '\0';
+      b->len = len;
+      d->blob_bytes += len;
+      b->state = CCORD_EXPR_BLOB_READY;
+      parse_expr_blob_json(d, kind, b->body, b->len);
     }
-    b = &d->blobs[bi];
-    b->body = ccord_alloc_array(len + 1u, 1);
-    if (!b->body) {
-      b->state = CCORD_EXPR_BLOB_FAILED;
-      return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
-    }
-    if (len && body) memcpy(b->body, body, len);
-    b->body[len] = '\0';
-    b->len = len;
-    d->blob_bytes += len;
-    b->state = CCORD_EXPR_BLOB_READY;
-    parse_expr_blob_json(d, kind, b->body, b->len);
   } else {
     b->state = CCORD_EXPR_BLOB_FAILED;
   }
