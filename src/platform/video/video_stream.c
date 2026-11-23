@@ -207,6 +207,40 @@ static bool probe_h264_encoders(ccord_video_stream *v, const char *preferred)
   return false;
 }
 
+static bool probe_av1_encoders(ccord_video_stream *v, const char *preferred)
+{
+  if (preferred && preferred[0] && strstr(preferred, "av1") != nullptr &&
+      open_video_codec_pair(v, avcodec_find_encoder_by_name(preferred))) {
+    return true;
+  }
+  static const char *const k_av1[] = {
+#if defined(__APPLE__)
+      "av1_videotoolbox",
+      "libsvtav1",
+#elif defined(_WIN32)
+      "av1_nvenc",
+      "av1_amf",
+      "av1_qsv",
+      "libsvtav1",
+#elif defined(__ANDROID__)
+      "av1_mediacodec",
+      "libsvtav1",
+#else
+      "av1_nvenc",
+      "av1_vaapi",
+      "av1_amf",
+      "av1_qsv",
+      "libsvtav1",
+#endif
+  };
+  for (size_t i = 0; i < sizeof(k_av1) / sizeof(k_av1[0]); i++) {
+    if (open_video_codec_pair(v, avcodec_find_encoder_by_name(k_av1[i]))) {
+      return true;
+    }
+  }
+  return open_video_codec_pair(v, avcodec_find_encoder(AV_CODEC_ID_AV1));
+}
+
 static bool probe_pipewire(void)
 {
 #if !CCORD_HAVE_PIPEWIRE
@@ -270,8 +304,9 @@ ccord_video_stream *ccord_video_stream_create(const ccord_video_config *cfg, cco
   if (c.codec == CCORD_VIDEO_CODEC_H264) {
     opened = probe_h264_encoders(v, c.preferred_encoder);
   } else {
-    opened = open_video_codec_pair(v, avcodec_find_encoder(AV_CODEC_ID_MPEG4));
+    opened = probe_av1_encoders(v, c.preferred_encoder);
     if (!opened) opened = probe_h264_encoders(v, c.preferred_encoder);
+    if (!opened) opened = open_video_codec_pair(v, avcodec_find_encoder(AV_CODEC_ID_MPEG4));
   }
   if (!opened) {
     ccord_video_stream_destroy(v);
