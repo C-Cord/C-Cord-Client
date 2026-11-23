@@ -92,9 +92,9 @@ typedef struct phit_item {
 #define PHIT_MAIN_CAP    384u
 #define PHIT_OVERLAY_CAP 48u
 
-static phit_item s_hits_main[PHIT_MAIN_CAP];
+static phit_item *s_hits_main;
 static size_t s_nhits_main;
-static phit_item s_hits_overlay[PHIT_OVERLAY_CAP];
+static phit_item *s_hits_overlay;
 static size_t s_nhits_overlay;
 
 // Navigation & filters
@@ -202,7 +202,7 @@ static ccord_rect s_log_box_rect;
 
 // Negative cache for invalid/oversized icon files so we never re-open them each frame
 #define BAD_ICON_CAP 32u
-static char s_bad_icons[BAD_ICON_CAP][CCORD_PATH_MAX];
+static uint64_t s_bad_icons[BAD_ICON_CAP];
 static size_t s_bad_icon_next;
 
 // ---------------------------------------------------------------- tiny utilities
@@ -268,6 +268,8 @@ static void phit_add_list(phit_item *arr, size_t *cnt, size_t cap, ccord_rect rc
 
 static void hit_main(ccord_rect rc, phit_act act, int arg, const char *id)
 {
+  if (!s_hits_main) s_hits_main = ccord_alloc_array(PHIT_MAIN_CAP, sizeof *s_hits_main);
+  if (!s_hits_main) return;
   phit_add_list(s_hits_main, &s_nhits_main, PHIT_MAIN_CAP, rc, act, arg, id);
 }
 
@@ -279,7 +281,19 @@ static void hit_main_clipped(ccord_rect rc, ccord_rect clip, phit_act act, int a
 
 static void hit_overlay(ccord_rect rc, phit_act act, int arg, const char *id)
 {
+  if (!s_hits_overlay) s_hits_overlay = ccord_alloc_array(PHIT_OVERLAY_CAP, sizeof *s_hits_overlay);
+  if (!s_hits_overlay) return;
   phit_add_list(s_hits_overlay, &s_nhits_overlay, PHIT_OVERLAY_CAP, rc, act, arg, id);
+}
+
+void ui_settings_plugins_free_scratch(void)
+{
+  ccord_free(s_hits_main);
+  s_hits_main = nullptr;
+  s_nhits_main = 0;
+  ccord_free(s_hits_overlay);
+  s_hits_overlay = nullptr;
+  s_nhits_overlay = 0;
 }
 
 static bool is_developer_mode(const ccord_ui *ui)
@@ -384,17 +398,24 @@ static const char *platform_badge_label(uint32_t mask, bool mobile_host, bool *o
 
 // ---------------------------------------------------------------- plugin icon tile (local/cached + monogram fallback)
 
+static uint64_t bad_icon_hash(const char *path)
+{
+  uint64_t h = fnv64(path);
+  return h == 0 ? 1u : h;
+}
+
 static bool icon_path_is_bad(const char *path)
 {
+  uint64_t h = bad_icon_hash(path);
   for (size_t i = 0; i < BAD_ICON_CAP; i++) {
-    if (s_bad_icons[i][0] && strcmp(s_bad_icons[i], path) == 0) return true;
+    if (s_bad_icons[i] == h) return true;
   }
   return false;
 }
 
 static void mark_icon_path_bad(const char *path)
 {
-  copy_str(s_bad_icons[s_bad_icon_next % BAD_ICON_CAP], CCORD_PATH_MAX, path);
+  s_bad_icons[s_bad_icon_next % BAD_ICON_CAP] = bad_icon_hash(path);
   s_bad_icon_next++;
 }
 
@@ -2929,9 +2950,11 @@ bool st_plugins_handle_click(ccord_ui *ui, const sgeom *g, float x, float y)
         click_simple_scrollbar(ui, x, y, s_sec_sb_track, &s_sec_scroll, s_sec_body_rect.h, s_sec_content_h)) {
       return true;
     }
-    for (size_t i = s_nhits_overlay; i > 0; i--) {
-      if (ui_in_rect(x, y, s_hits_overlay[i - 1].rc)) {
-        return dispatch_action(ui, &s_hits_overlay[i - 1]);
+    if (s_hits_overlay) {
+      for (size_t i = s_nhits_overlay; i > 0; i--) {
+        if (ui_in_rect(x, y, s_hits_overlay[i - 1].rc)) {
+          return dispatch_action(ui, &s_hits_overlay[i - 1]);
+        }
       }
     }
     if (s_uninst_id[0] && !ui_in_rect(x, y, s_uninst_box)) { s_uninst_id[0] = '\0'; return true; }
@@ -2958,15 +2981,17 @@ bool st_plugins_handle_click(ccord_ui *ui, const sgeom *g, float x, float y)
   }
 
   // 3. Recorded hit targets from last draw (reverse order so buttons win over full-card clicks)
-  for (size_t i = s_nhits_main; i > 0; i--) {
-    if (ui_in_rect(x, y, s_hits_main[i - 1].rc)) {
-      phit_act a = s_hits_main[i - 1].act;
-      if (a != ACT_INST_SEARCH_FOCUS && a != ACT_DISC_SEARCH_FOCUS) {
-        s_inst_search_focused = false;
-        s_disc_search_focused = false;
-        if (ui->touch_mode) ui->touch_text_focused = false;
+  if (s_hits_main) {
+    for (size_t i = s_nhits_main; i > 0; i--) {
+      if (ui_in_rect(x, y, s_hits_main[i - 1].rc)) {
+        phit_act a = s_hits_main[i - 1].act;
+        if (a != ACT_INST_SEARCH_FOCUS && a != ACT_DISC_SEARCH_FOCUS) {
+          s_inst_search_focused = false;
+          s_disc_search_focused = false;
+          if (ui->touch_mode) ui->touch_text_focused = false;
+        }
+        return dispatch_action(ui, &s_hits_main[i - 1]);
       }
-      return dispatch_action(ui, &s_hits_main[i - 1]);
     }
   }
 
@@ -3066,14 +3091,18 @@ int64_t st_plugins_hover_key(const ccord_ui *ui, const sgeom *g, float x, float 
 {
   (void)ui;
   if (st_plugins_has_overlay()) {
-    for (size_t i = s_nhits_overlay; i > 0; i--) {
-      if (ui_in_rect(x, y, s_hits_overlay[i - 1].rc)) return 9000 + (int64_t)i;
+    if (s_hits_overlay) {
+      for (size_t i = s_nhits_overlay; i > 0; i--) {
+        if (ui_in_rect(x, y, s_hits_overlay[i - 1].rc)) return 9000 + (int64_t)i;
+      }
     }
     return 8999;
   }
   if (ui_in_rect(x, y, st_extensions_toggle_rect(g))) return 600;
-  for (size_t i = s_nhits_main; i > 0; i--) {
-    if (ui_in_rect(x, y, s_hits_main[i - 1].rc)) return 601 + (int64_t)i;
+  if (s_hits_main) {
+    for (size_t i = s_nhits_main; i > 0; i--) {
+      if (ui_in_rect(x, y, s_hits_main[i - 1].rc)) return 601 + (int64_t)i;
+    }
   }
   return 0;
 }
@@ -3105,16 +3134,20 @@ static bool match_debug_item(const phit_item *it, const char *key)
 bool st_plugins_debug_find_rect(const char *key, ccord_rect *out)
 {
   if (!key || !key[0]) return false;
-  for (size_t i = s_nhits_overlay; i > 0; i--) {
-    if (match_debug_item(&s_hits_overlay[i - 1], key)) {
-      if (out) *out = s_hits_overlay[i - 1].rc;
-      return true;
+  if (s_hits_overlay) {
+    for (size_t i = s_nhits_overlay; i > 0; i--) {
+      if (match_debug_item(&s_hits_overlay[i - 1], key)) {
+        if (out) *out = s_hits_overlay[i - 1].rc;
+        return true;
+      }
     }
   }
-  for (size_t i = s_nhits_main; i > 0; i--) {
-    if (match_debug_item(&s_hits_main[i - 1], key)) {
-      if (out) *out = s_hits_main[i - 1].rc;
-      return true;
+  if (s_hits_main) {
+    for (size_t i = s_nhits_main; i > 0; i--) {
+      if (match_debug_item(&s_hits_main[i - 1], key)) {
+        if (out) *out = s_hits_main[i - 1].rc;
+        return true;
+      }
     }
   }
   return false;

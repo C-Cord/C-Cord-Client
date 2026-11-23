@@ -61,6 +61,7 @@ bool ui_settings_account_wants_text(const ccord_ui *ui);
 bool ui_settings_account_has_overlay(const ccord_ui *ui);
 bool ui_settings_account_dismiss_overlay(ccord_ui *ui);
 void ui_settings_account_release(ccord_ui *ui);
+void ui_settings_plugins_free_scratch(void);
 bool ui_settings_profile_has_overlay(const ccord_ui *ui);
 bool ui_settings_profile_dismiss_overlay(ccord_ui *ui);
 static inline bool ui_sound_kind_enabled(const ccord_ui *ui, unsigned kind)

@@ -28,6 +28,7 @@ bool ui_panels_try_draw_icon_override(ccord_ui *ui, ccord_renderer *r, const cha
 
 // ---- plugin_v3_ui.c ----
 void ui_plugin_v3_destroy(ccord_ui *ui);
+void ui_plugin_v3_trim_memory(ccord_ui *ui);
 void ui_plugin_v3_begin_frame(ccord_ui *ui);
 bool ui_plugin_security_surface_active(const ccord_ui *ui);
 // Theme wallpaper backgrounds ("window"|"chat"|"sidebar")

@@ -98,7 +98,7 @@ static void test_identity_helpers(void)
   ccord_identity_set_name(nullptr, "abc", 3);
 
   // add_guild copies the name and owner flag, and counts entries.
-  ccord_identity id;
+  ccord_identity id = {0};
   ccord_identity_clear(&id);
   CT_CHECK(ccord_identity_add_guild(&id, 42, "guild", 5, true));
   CT_CHECK(id.guild_count == 1 && id.guilds[0].id == 42 && id.guilds[0].owner);
@@ -118,7 +118,7 @@ static void test_identity_helpers(void)
   // clear zeroes every field.
   ccord_identity_clear(&id);
   CT_CHECK(id.user_id == 0 && id.guild_count == 0 && !id.guilds_truncated && id.scope_mask == 0);
-  CT_CHECK(id.username[0] == '\0' && id.display_name[0] == '\0' && id.guilds[0].name[0] == '\0');
+  CT_CHECK(id.username[0] == '\0' && id.display_name[0] == '\0' && id.guilds == nullptr);
   ccord_identity_clear(nullptr);
 }
 
@@ -126,7 +126,7 @@ int main(void)
 {
   test_identity_helpers();
 
-  ccord_identity id, truncated;
+  ccord_identity id = {0}, truncated = {0};
   make_identity(&id, false);
   make_identity(&truncated, true);
   ccord_account_view v;
@@ -192,5 +192,7 @@ int main(void)
   ccord_account_view_build(&v, CCORD_ACCOUNT_SIGNED_IN, CCORD_ACCOUNT_ERROR_NONE, true, nullptr);
   CT_CHECK(v.mode == CCORD_ACCOUNT_ERROR && v.error == CCORD_ACCOUNT_ERROR_BAD_RESPONSE);
 
+  ccord_identity_clear(&id);
+  ccord_identity_clear(&truncated);
   return CT_RESULT("test_ui_account_view");
 }

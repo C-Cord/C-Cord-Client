@@ -2,11 +2,14 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include <ccord/ui/account_identity.h>
 
+#include <ccord/core/alloc.h>
+
 #include <string.h>
 
 void ccord_identity_clear(ccord_identity *identity)
 {
   if (identity) {
+    ccord_free(identity->guilds);
     memset(identity, 0, sizeof *identity);
   }
 }
@@ -60,7 +63,16 @@ bool ccord_identity_add_guild(ccord_identity *identity, uint64_t id, const char 
     identity->guilds_truncated = true;
     return false;
   }
+  if (identity->guild_count >= identity->guilds_cap) {
+    size_t ncap = identity->guilds_cap ? identity->guilds_cap * 2u : 8u;
+    if (ncap > CCORD_IDENTITY_MAX_GUILDS) ncap = CCORD_IDENTITY_MAX_GUILDS;
+    ccord_identity_guild *g = ccord_realloc_array(identity->guilds, ncap, sizeof *g);
+    if (!g) return false;
+    identity->guilds = g;
+    identity->guilds_cap = ncap;
+  }
   ccord_identity_guild *guild = &identity->guilds[identity->guild_count];
+  memset(guild, 0, sizeof *guild);
   guild->id = id;
   guild->owner = owner;
   ccord_identity_set_name(guild->name, name, name_len);

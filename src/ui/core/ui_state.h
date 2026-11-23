@@ -681,8 +681,8 @@ struct ccord_ui {
   size_t ninbox_hits;
 
   // Saved Messages / bookmarks popover (Result 1) + header button.
-  ui_saved_msg saved_msgs[UI_SAVED_MSG_MAX];
-  size_t nsaved_msgs;
+  ui_saved_msg *saved_msgs;
+  size_t nsaved_msgs, cap_saved_msgs;
   bool saved_popover_open;
   float saved_scroll, saved_content_h;
   ccord_rect saved_thumb;   // drawn saved-list thumb (zero when it fits / is hidden)

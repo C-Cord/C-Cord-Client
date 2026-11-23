@@ -54,6 +54,15 @@ void ui_plugin_v3_destroy(ccord_ui *ui)
   ui->plugin_v3 = nullptr;
 }
 
+void ui_plugin_v3_trim_memory(ccord_ui *ui)
+{
+  if (!ui || !ui->plugin_v3) return;
+  const ui_plugin_v3 *v = ui->plugin_v3;
+  if (v->dlg.active_req_id == 0 && !v->set.open && v->hitl.active_req_id == 0) {
+    ui_plugin_v3_destroy(ui);
+  }
+}
+
 void ui_plugin_v3_begin_frame(ccord_ui *ui)
 {
   if (!ui || !ui->plugin_v3) return;
@@ -719,18 +728,23 @@ void ui_plugin_full_views_draw_rail(ccord_ui *ui, ccord_renderer *r, float rail_
 {
   if (!ui || !r || !ui->d.contrib || !io_y) return;
   if (ui_plugin_security_surface_active(ui)) return;
-  ui_plugin_v3 *v = pv3_v3_ensure(ui);
-  if (!v) return;
 
   size_t n = ccord_contrib_panel_count(ui->d.contrib);
+  if (n == 0) return;
+  ui_plugin_v3 *v = nullptr;
   bool drew_sep = false;
   float sz = ui->theme->m.guild_icon_size;
   if (sz < 36.0f) sz = 44.0f;
   float x = rail_x + (rail_w - sz) * 0.5f;
 
-  for (size_t i = 0; i < n && v->nrail_hits < V3_MAX_RAIL_HITS; i++) {
+  for (size_t i = 0; i < n; i++) {
     const ccord_panel_contribution *p = ccord_contrib_panel_at(ui->d.contrib, i);
     if (!p || !p->visible || p->slot != CCORD_PANEL_FULL_VIEW) continue;
+    if (!v) {
+      v = pv3_v3_ensure(ui);
+      if (!v) return;
+    }
+    if (v->nrail_hits >= V3_MAX_RAIL_HITS) break;
     if (!drew_sep) {
       uis_divider(ui, r, rail_x + rail_w * 0.25f, *io_y, rail_w * 0.5f);
       *io_y += 10.0f;

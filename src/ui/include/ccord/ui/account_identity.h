@@ -27,11 +27,12 @@ typedef struct ccord_identity {
   char display_name[CCORD_IDENTITY_NAME_BYTES + 1];   // global_name when present, else username
   uint32_t scope_mask;                                // granted scopes parsed from the token response
   size_t guild_count;                                 // entries in guilds[]
+  size_t guilds_cap;                                  // allocated entries in guilds[]
   bool guilds_truncated;                              // the list shown is not the whole list
-  ccord_identity_guild guilds[CCORD_IDENTITY_MAX_GUILDS];
+  ccord_identity_guild *guilds;                       // lazily grown up to CCORD_IDENTITY_MAX_GUILDS
 } ccord_identity;
 
-// The struct is about 86 KiB: keep it by value in owning state (ccord_account) or on the stack in tests.
+// Callers must zero-initialize ccord_identity before passing to ccord_identity_clear or add_guild.
 void ccord_identity_clear(ccord_identity *identity);
 
 // Copies at most CCORD_IDENTITY_NAME_MAX code points and CCORD_IDENTITY_NAME_BYTES bytes, cutting on a UTF-8

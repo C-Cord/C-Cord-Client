@@ -684,6 +684,8 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     ui_nav_caches_free(ui);
     ui_chat_caches_free(ui);
     ui_composer_format_free();
+    ui_plugin_v3_trim_memory(ui);
+    ui_settings_plugins_free_scratch();
     ui_vlist_shrink_tight(&ui->vlist);
     ccord_arena_free(&ui->hit_arena);
     ccord_arena_init(&ui->hit_arena, 4096u);

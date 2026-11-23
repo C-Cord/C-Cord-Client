@@ -288,7 +288,7 @@ typedef struct ui_select_target {
 
 typedef struct ui_draft {
   ccord_id channel_id;
-  char text[CCORD_SEND_MAX_BYTES + 1];
+  char *text;
 } ui_draft;
 
 typedef struct member_row {

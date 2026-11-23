@@ -743,6 +743,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     for (int i = 0; i < SP_COUNT; i++) {
       if (ui_in_rect(ev->x, ev->y, g.page[i]) && ui_in_rect(ev->x, ev->y, g.list)) {
         if (i == SP_VOICE && ui->settings_page != SP_VOICE) st_s_dev.valid = false;
+        if (ui->settings_page == SP_PLUGINS && i != SP_PLUGINS) ui_settings_plugins_free_scratch();
         ui->settings_page = i;
         ui->settings_category = st_k_pages[i].category;
         st_s_hover_key = -1;

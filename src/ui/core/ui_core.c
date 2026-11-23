@@ -670,6 +670,7 @@ void ccord_ui_destroy(ccord_ui *ui)
   ccord_text_edit_free(&ui->modal_edit2);
   ui_status_card_free(ui);
   ui_settings_profile_release(ui);
+  ui_settings_plugins_free_scratch();
   ccord_text_edit_free(&ui->discovery_edit);
   ui_free_inter_modal(ui);
   ccord_ui_clear_account_token_text(ui);
@@ -695,6 +696,9 @@ void ccord_ui_destroy(ccord_ui *ui)
   ui_chat_caches_free(ui);
   ui_composer_format_free();
   ccord_arena_free(&ui->hit_arena);
+  for (size_t i = 0; ui->drafts && i < ui->ndrafts; i++) {
+    ccord_free(ui->drafts[i].text);
+  }
   ccord_free(ui->drafts);
   ccord_free(ui->media_reqs);
   ui_bg_decoder_destroy(ui);

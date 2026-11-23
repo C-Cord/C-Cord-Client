@@ -22,9 +22,34 @@ static bool drafts_ensure(ccord_ui *ui, size_t need)
   if (ncap > UI_DRAFTS_MAX) ncap = UI_DRAFTS_MAX;
   ui_draft *n = ccord_realloc_array(ui->drafts, ncap, sizeof *n);
   if (!n) return false;
+  if (ncap > ui->cap_drafts) {
+    memset(n + ui->cap_drafts, 0, (ncap - ui->cap_drafts) * sizeof *n);
+  }
   ui->drafts = n;
   ui->cap_drafts = ncap;
   return true;
+}
+
+static bool draft_set_text(ui_draft *d, const char *s, size_t len)
+{
+  if (len > CCORD_SEND_MAX_BYTES) len = CCORD_SEND_MAX_BYTES;
+  char *dup = ccord_strndup(s ? s : "", len);
+  if (!dup) return false;
+  ccord_free(d->text);
+  d->text = dup;
+  return true;
+}
+
+static void draft_remove_at(ccord_ui *ui, size_t i)
+{
+  ccord_free(ui->drafts[i].text);
+  ui->drafts[i] = ui->drafts[--ui->ndrafts];
+  ui->drafts[ui->ndrafts] = (ui_draft){0};
+  if (ui->ndrafts == 0) {
+    ccord_free(ui->drafts);
+    ui->drafts = nullptr;
+    ui->cap_drafts = 0;
+  }
 }
 
 static void drafts_save(const ccord_ui *ui)
@@ -42,7 +67,7 @@ static void drafts_save(const ccord_ui *ui)
   ccord_jw_init(&jw, &b);
   ccord_jw_begin_object(&jw);
   for (size_t i = 0; ui->drafts && i < ui->ndrafts; i++) {
-    if (ui->drafts[i].channel_id == CCORD_ID_NONE || ui->drafts[i].text[0] == '\0') continue;
+    if (ui->drafts[i].channel_id == CCORD_ID_NONE || !ui->drafts[i].text || ui->drafts[i].text[0] == '\0') continue;
     char key[24];
     ccord_id_format(ui->drafts[i].channel_id, key);
     ccord_jw_key(&jw, key);
@@ -98,11 +123,12 @@ void uc_drafts_load(ccord_ui *ui)
         const char *v = ccord_json_string(val, &vlen);
         if (!v || vlen == 0 || !ccord_utf8_valid_text(v, vlen)) continue;
         if (!drafts_ensure(ui, ui->ndrafts + 1u)) break;
-        if (vlen >= sizeof ui->drafts[0].text) vlen = sizeof ui->drafts[0].text - 1u;
+        if (vlen > CCORD_SEND_MAX_BYTES) vlen = CCORD_SEND_MAX_BYTES;
+        char *copy = ccord_strndup(v, vlen);
+        if (!copy) break;
         size_t slot = ui->ndrafts++;
         ui->drafts[slot].channel_id = cid;
-        memcpy(ui->drafts[slot].text, v, vlen);
-        ui->drafts[slot].text[vlen] = '\0';
+        ui->drafts[slot].text = copy;
       }
     }
     ccord_arena_free(&arena);
@@ -118,28 +144,31 @@ void uc_save_channel_draft(ccord_ui *ui, ccord_id ch)
   for (size_t i = 0; ui->drafts && i < ui->ndrafts; i++) {
     if (ui->drafts[i].channel_id == ch) {
       if (len == 0) {
-        ui->drafts[i] = ui->drafts[--ui->ndrafts];
+        draft_remove_at(ui, i);
       } else {
-        if (len >= sizeof ui->drafts[i].text) len = sizeof ui->drafts[i].text - 1u;
-        memcpy(ui->drafts[i].text, txt, len);
-        ui->drafts[i].text[len] = '\0';
+        (void)draft_set_text(&ui->drafts[i], txt, len);
       }
       drafts_save(ui);
       return;
     }
   }
   if (len == 0) return;
+  if (len > CCORD_SEND_MAX_BYTES) len = CCORD_SEND_MAX_BYTES;
+  char *copy = ccord_strndup(txt, len);
+  if (!copy) return;
   size_t slot = 0;
   if (ui->ndrafts < UI_DRAFTS_MAX) {
-    if (!drafts_ensure(ui, ui->ndrafts + 1u)) return;
+    if (!drafts_ensure(ui, ui->ndrafts + 1u)) {
+      ccord_free(copy);
+      return;
+    }
     slot = ui->ndrafts++;
   } else {
     slot = UI_DRAFTS_MAX - 1u;
+    ccord_free(ui->drafts[slot].text);
   }
   ui->drafts[slot].channel_id = ch;
-  if (len >= sizeof ui->drafts[slot].text) len = sizeof ui->drafts[slot].text - 1u;
-  memcpy(ui->drafts[slot].text, txt, len);
-  ui->drafts[slot].text[len] = '\0';
+  ui->drafts[slot].text = copy;
   drafts_save(ui);
 }
 
@@ -148,7 +177,7 @@ void ui_clear_channel_draft(ccord_ui *ui, ccord_id channel_id)
   if (!ui || !ui->drafts || channel_id == CCORD_ID_NONE) return;
   for (size_t i = 0; i < ui->ndrafts; i++) {
     if (ui->drafts[i].channel_id == channel_id) {
-      ui->drafts[i] = ui->drafts[--ui->ndrafts];
+      draft_remove_at(ui, i);
       drafts_save(ui);
       return;
     }
@@ -234,7 +263,7 @@ void uc_restore_channel_draft(ccord_ui *ui, ccord_id ch)
   ccord_text_edit_clear(&ui->edit);
   if (ch == CCORD_ID_NONE || !ui->drafts) return;
   for (size_t i = 0; i < ui->ndrafts; i++) {
-    if (ui->drafts[i].channel_id == ch) {
+    if (ui->drafts[i].channel_id == ch && ui->drafts[i].text) {
       ccord_error err;
       size_t len = strlen(ui->drafts[i].text);
       (void)ccord_text_edit_insert(&ui->edit, ui->drafts[i].text, len, &err);
@@ -310,21 +339,31 @@ static bool return_failed_draft(ccord_ui *ui, const ccord_action_failure *f)
   }
   for (size_t i = 0; ui->drafts && i < ui->ndrafts; i++) {
     if (ui->drafts[i].channel_id != f->channel_id) continue;
-    size_t len = strlen(ui->drafts[i].text);
-    bool ok = prepend_text(ui->drafts[i].text, sizeof ui->drafts[i].text, &len, f->draft, f->draft_len);
-    if (ok) drafts_save(ui);
+    char buf[CCORD_SEND_MAX_BYTES + 1];
+    size_t len = ui->drafts[i].text ? strlen(ui->drafts[i].text) : 0;
+    if (len > CCORD_SEND_MAX_BYTES) len = CCORD_SEND_MAX_BYTES;
+    if (len > 0) memcpy(buf, ui->drafts[i].text, len);
+    buf[len] = '\0';
+    bool ok = prepend_text(buf, sizeof buf, &len, f->draft, f->draft_len);
+    if (ok && draft_set_text(&ui->drafts[i], buf, len)) drafts_save(ui);
+    else ok = false;
     return ok;
   }
+  char *copy = ccord_strndup(f->draft, f->draft_len);
+  if (!copy) return false;
   size_t slot = 0;
   if (ui->ndrafts < UI_DRAFTS_MAX) {
-    if (!drafts_ensure(ui, ui->ndrafts + 1u)) return false;
+    if (!drafts_ensure(ui, ui->ndrafts + 1u)) {
+      ccord_free(copy);
+      return false;
+    }
     slot = ui->ndrafts++;
   } else {
     slot = UI_DRAFTS_MAX - 1u;
+    ccord_free(ui->drafts[slot].text);
   }
   ui->drafts[slot].channel_id = f->channel_id;
-  memcpy(ui->drafts[slot].text, f->draft, f->draft_len);
-  ui->drafts[slot].text[f->draft_len] = '\0';
+  ui->drafts[slot].text = copy;
   drafts_save(ui);
   return true;
 }

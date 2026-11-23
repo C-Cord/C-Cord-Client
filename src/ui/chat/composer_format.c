@@ -441,15 +441,8 @@ static bool cf_ensure(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
   if (len == 0) {
     g_cf_nvl = 1;
     if (g_cf) {
-      G.len = 0;
-      G.nll = 0;
-      G.npieces = 0;
-      G.nvl = 1;
-      G.vl[0] = (cf_vline){0};
-      G.text[0] = '\0';
-      G.fh = g_cf_fm.fh;
-      G.pitch = g_cf_fm.pitch;
-      G.valid = false;
+      ccord_free(g_cf);
+      g_cf = nullptr;
     }
     return false;
   }

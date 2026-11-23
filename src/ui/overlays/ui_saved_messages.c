@@ -101,6 +101,21 @@ static void saved_fill(ccord_ui *ui, const ccord_message *m, ui_saved_msg *out)
   sanitize_line(m->content, out->preview, sizeof out->preview);
 }
 
+static bool saved_ensure(ccord_ui *ui, size_t need)
+{
+  if (!ui) return false;
+  if (need > UI_SAVED_MSG_MAX) need = UI_SAVED_MSG_MAX;
+  if (ui->saved_msgs && need <= ui->cap_saved_msgs) return true;
+  size_t ncap = ui->cap_saved_msgs ? ui->cap_saved_msgs : 8u;
+  while (ncap < need) ncap *= 2u;
+  if (ncap > UI_SAVED_MSG_MAX) ncap = UI_SAVED_MSG_MAX;
+  ui_saved_msg *n = ccord_realloc_array(ui->saved_msgs, ncap, sizeof *n);
+  if (!n) return false;
+  ui->saved_msgs = n;
+  ui->cap_saved_msgs = ncap;
+  return true;
+}
+
 // Insert / refresh at the front (newest first), matching the store's ordering.
 static void saved_list_upsert(ccord_ui *ui, const ui_saved_msg *e)
 {
@@ -114,6 +129,7 @@ static void saved_list_upsert(ccord_ui *ui, const ui_saved_msg *e)
     ui->nsaved_msgs--;
   }
   if (ui->nsaved_msgs >= UI_SAVED_MSG_MAX) ui->nsaved_msgs = UI_SAVED_MSG_MAX - 1u;   // oldest makes room
+  if (!saved_ensure(ui, ui->nsaved_msgs + 1u)) return;
   memmove(&ui->saved_msgs[1], &ui->saved_msgs[0], ui->nsaved_msgs * sizeof(ui->saved_msgs[0]));
   ui->saved_msgs[0] = *e;
   ui->nsaved_msgs++;
@@ -209,6 +225,7 @@ void ui_saved_messages_load_ini(ccord_ui *ui, const char *key, const char *value
   long long ts = 0;
   if (sscanf(nums, "%llu,%llu,%llu,%lld,%llu", &ch, &msg, &guild, &ts, &author) != 5) return;
   if (ch == 0 || msg == 0) return;
+  if (!saved_ensure(ui, ui->nsaved_msgs + 1u)) return;
   ui_saved_msg *e = &ui->saved_msgs[ui->nsaved_msgs++];
   memset(e, 0, sizeof *e);
   e->channel_id = (ccord_id)ch;
@@ -458,8 +475,12 @@ static void fwd_free(void)
 
 void ui_saved_messages_free(ccord_ui *ui)
 {
-  (void)ui;
   fwd_free();
+  if (!ui) return;
+  ccord_free(ui->saved_msgs);
+  ui->saved_msgs = nullptr;
+  ui->nsaved_msgs = 0;
+  ui->cap_saved_msgs = 0;
 }
 
 // Owner-tracked lazy heap state (the M5 pattern): heals when the ui address is reused or the modal kind taken over.

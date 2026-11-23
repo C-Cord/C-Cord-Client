@@ -531,6 +531,7 @@ void ui_open_settings(ccord_ui *ui, bool open)
     ui->mobile_settings_detail = false;
     ui_settings_account_release(ui);
     ui_settings_profile_release(ui);   // unsaved Profile edits are dropped with the page
+    ui_settings_plugins_free_scratch();
   }
   ui->hover_settings_page = -1;
   ui->hover_settings_close = false;

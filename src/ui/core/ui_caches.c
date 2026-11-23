@@ -450,6 +450,17 @@ done_channels:
     }
   }
   ui->chan_content_h = y + 8.0f;
+  if (ui->capcrow > 256u && ui->ncrow * 4u < ui->capcrow) {
+    size_t ncap = 64u;
+    while (ncap < ui->ncrow * 2u) ncap *= 2u;
+    if (ncap < ui->capcrow) {
+      chan_row *shrunk = ccord_realloc_array(ui->crow, ncap, sizeof *shrunk);
+      if (shrunk) {
+        ui->crow = shrunk;
+        ui->capcrow = ncap;
+      }
+    }
+  }
 }
 
 typedef struct msort {
@@ -502,13 +513,31 @@ static size_t member_group_shown(const ccord_ui *ui, ccord_id guild, const msort
   return known && told > held ? told : held;
 }
 
+static void shrink_mrow_if_needed(ccord_ui *ui)
+{
+  if (ui->capmrow > 256u && ui->nmrow * 4u < ui->capmrow) {
+    size_t ncap = 64u;
+    while (ncap < ui->nmrow * 2u) ncap *= 2u;
+    if (ncap < ui->capmrow) {
+      member_row *shrunk = ccord_realloc_array(ui->mrow, ncap, sizeof *shrunk);
+      if (shrunk) {
+        ui->mrow = shrunk;
+        ui->capmrow = ncap;
+      }
+    }
+  }
+}
+
 static void rebuild_member_rows(ccord_ui *ui)
 {
   ui->nmrow = 0;
   ui->member_content_h = 0.0f;
   ccord_id g = ccord_store_selected_guild(ui->d.store);
   size_t n = ccord_store_member_count(ui->d.store, g);
-  if (n == 0) return;
+  if (n == 0) {
+    shrink_mrow_if_needed(ui);
+    return;
+  }
   msort *tmp = ccord_alloc_array(n, sizeof *tmp);
   if (!tmp) return;
   for (size_t i = 0; i < n; i++) {
@@ -553,6 +582,7 @@ static void rebuild_member_rows(ccord_ui *ui)
   }
   ccord_free(tmp);
   ui->member_content_h = y + 8.0f;
+  shrink_mrow_if_needed(ui);
 }
 
 uint64_t uc_sig_mix_u64(uint64_t h, uint64_t v)

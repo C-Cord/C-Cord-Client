@@ -74,7 +74,7 @@ static void activate_entry(ccord_account *a, int idx)
   bool live = same ? a->live_connected : false;
 
   roster_mark_active(a, idx);
-  memset(&a->token_identity, 0, sizeof a->token_identity);
+  ccord_identity_clear(&a->token_identity);
   a->token_identity.user_id = e->user_id;
   copy_text(a->token_identity.username, sizeof a->token_identity.username, e->username);
   copy_text(a->token_identity.display_name, sizeof a->token_identity.display_name, e->display_name);
@@ -116,6 +116,7 @@ ccord_account *ccord_account_create(ccord_error *err)
 void ccord_account_destroy(ccord_account *a)
 {
   if (!a) return;
+  ccord_identity_clear(&a->token_identity);
   memset(a, 0, sizeof *a);
   ccord_free(a);
 }
@@ -173,7 +174,7 @@ void ccord_account_set_token_state(ccord_account *a, bool active, bool connected
   if (!a) return;
   a->token_signed_in = active;
   a->live_connected = active && connected;
-  memset(&a->token_identity, 0, sizeof a->token_identity);
+  ccord_identity_clear(&a->token_identity);
   if (active) {
     a->token_identity.user_id = user_id != 0 ? user_id : 1u;
     (void)snprintf(a->token_identity.username, sizeof a->token_identity.username, "%s",
@@ -252,7 +253,7 @@ ccord_status ccord_account_remove(ccord_account *a, uint64_t user_id, ccord_erro
       a->roster_active = CCORD_ACCOUNT_NO_ACTIVE;
       a->token_signed_in = false;
       a->live_connected = false;
-      memset(&a->token_identity, 0, sizeof a->token_identity);
+      ccord_identity_clear(&a->token_identity);
       refresh_view(a);
     } else {
       int next = (size_t)idx < a->roster_count ? idx : (int)a->roster_count - 1;
