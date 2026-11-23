@@ -203,6 +203,7 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
   ui->thread_join_rect = (ccord_rect){0, 0, 0, 0};
   ui->thread_archive_rect = (ccord_rect){0, 0, 0, 0};
   ui->thread_breadcrumb_rect = (ccord_rect){0, 0, 0, 0};
+  ui->announce_follow_rect = (ccord_rect){0, 0, 0, 0};
   ui_forum_set_breadcrumb_rect(ui, (ccord_rect){0}, CCORD_ID_NONE);
   const ccord_channel *ch = ui_selected_channel(ui);
   bool voice_stage = false;
@@ -243,12 +244,14 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
   float nw = 0.0f;
   float hdr_btn_left = hdr_leftmost - 8.0f;
   // On mobile reserve room for compact header action buttons (DM Call, Thread Join, Group DM Add/Edit) before drawing title.
+  bool is_announce_ch = !voice_stage && !is_dm && ch->discord_type == CCORD_DISCORD_CHANNEL_GUILD_ANNOUNCEMENT;
   float mob_action_res = 0.0f;
   if (ui->mobile_layout) {
     if (ui_stage_mobile_chat_active(ui)) mob_action_res = 76.0f;
     else if (is_dm && !group_dm) mob_action_res = 54.0f;
     else if (group_dm) mob_action_res = 92.0f;
     else if (is_thread_ch) mob_action_res = 64.0f;
+    else if (is_announce_ch) mob_action_res = 68.0f;
   }
   float title_max_w = ui->mobile_layout ? maxf(hdr_btn_left - tx - 8.0f - mob_action_res, 40.0f) : (h->w * 0.5f);
   if (parent_ch && parent_ch->name) {
@@ -309,6 +312,20 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
         ccord_text_draw(r, jlbl, strlen(jlbl), jr.x + 9.0f, jr.y + (jr.h - jbt.y) * 0.5f, &jbs, 0.0f);
         hdr_btn_left = jr.x - 6.0f;
       }
+    }
+  } else if (is_announce_ch) {
+    const char *flbl = "Follow";
+    ccord_text_style fbs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_on_brand));
+    ccord_vec2 fbt = ccord_text_measure(r, flbl, strlen(flbl), &fbs, 0.0f);
+    float bw = fbt.x + 18.0f;
+    float bh = uis_btn_h_for(ui, 24.0f);
+    ccord_rect fr = {hdr_btn_left - bw, cy - bh * 0.5f, bw, bh};
+    if (fr.x > tx + nw + 12.0f) {
+      ui->announce_follow_rect = fr;
+      bool fhv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, fr);
+      ccord_draw_rrect(r, fr, 4.0f, fhv ? COL(brand_hover) : COL(brand));
+      ccord_text_draw(r, flbl, strlen(flbl), fr.x + 9.0f, fr.y + (fr.h - fbt.y) * 0.5f, &fbs, 0.0f);
+      hdr_btn_left = fr.x - 6.0f;
     }
   } else if (group_dm) {
     const char *elbl = ui->mobile_layout ? "Edit" : "Edit Group";

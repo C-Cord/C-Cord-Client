@@ -419,6 +419,115 @@ void dc_new_dm_toggle_recipient(ccord_ui *ui, ccord_id uid, size_t max_add)
   ui->dirty = true;
 }
 
+void ui_follow_channel_modal_open(ccord_ui *ui, ccord_id src_channel_id)
+{
+  if (!ui || src_channel_id == CCORD_ID_NONE) return;
+  ui->modal_kind = UI_MODAL_FOLLOW_CHANNEL;
+  ui->modal_target_id = src_channel_id;
+  ui->follow_selected_guild = CCORD_ID_NONE;
+  ui->follow_selected_channel = CCORD_ID_NONE;
+  ui->nfollow_hits = 0;
+  ui->modal_focus_field = 0;
+  ccord_text_edit_clear(&ui->modal_edit1);
+  if (ui->mobile_layout) {
+    ui->left_drawer_open = false;
+    ui->right_drawer_open = false;
+  }
+  ui->dirty = true;
+}
+
+static void draw_follow_channel_modal(ccord_ui *ui, ccord_renderer *r)
+{
+  ui->nfollow_hits = 0;
+  ui_popup_begin(ui, r, "modal", (uint64_t)ui->modal_kind, UI_MODAL_MS, 10.0f);
+  bool mob = ui->mobile_layout;
+  float mw = clampf(ui->win_w - 64.0f, 300.0f, 460.0f);
+  float mh = mob ? 420.0f : 380.0f;
+  ccord_rect m = uis_modal_box(ui, mw, mh);
+  uis_modal_frame(ui, r, m);
+
+  const ccord_channel *src_ch = ccord_store_channel(ui->d.store, ui->modal_target_id);
+  char hdr[128];
+  snprintf(hdr, sizeof hdr, "Follow #%s", (src_ch && src_ch->name && src_ch->name[0]) ? src_ch->name : "announcement");
+  ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large), COL(text_header));
+  ccord_text_draw_ellipsis(r, hdr, strlen(hdr), m.x + 20.0f, m.y + 16.0f, m.w - 40.0f, &ts);
+  ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(text_muted));
+  const char *sub = "Pick a server text channel to receive published posts:";
+  ccord_text_draw_ellipsis(r, sub, strlen(sub), m.x + 20.0f, m.y + 42.0f, m.w - 40.0f, &ss);
+
+  float in_h = mob ? 42.0f : UIS_H_INPUT;
+  ccord_rect inp = {m.x + 20.0f, m.y + 66.0f, m.w - 40.0f, in_h};
+  ui->modal_input_rect = inp;
+  const char *q = ccord_text_edit_cstr(&ui->modal_edit1);
+  size_t qlen = ui->modal_edit1.len;
+  (void)uis_input(ui, r, inp, &ui->modal_edit1, "Filter destination channels...",
+                  (uis_state){.focused = true}, false, "folin", 0);
+
+  float ok_h = uis_btn_h_for(ui, UIS_H_BTN);
+  float fy = inp.y + inp.h + 10.0f;
+  float list_bot = m.y + m.h - (ok_h + 22.0f);
+  float row_h = mob ? 38.0f : 30.0f;
+  ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
+  ccord_text_style gs = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 2.0f, COL(text_muted));
+  ccord_id self_id = ccord_store_self_id(ui->d.store);
+  size_t ng = ccord_store_guild_count(ui->d.store);
+  for (size_t gi = 0; gi < ng && ui->nfollow_hits < 16u && fy + row_h <= list_bot; gi++) {
+    const ccord_guild *gd = ccord_store_guild_at(ui->d.store, gi);
+    if (!gd || gd->id == CCORD_DM_GUILD_ID) continue;
+    size_t nc = ccord_store_channel_count(ui->d.store, gd->id);
+    for (size_t ci = 0; ci < nc && ui->nfollow_hits < 16u && fy + row_h <= list_bot; ci++) {
+      const ccord_channel *c = ccord_store_channel_at(ui->d.store, gd->id, ci);
+      if (!c || c->kind != CCORD_CHANNEL_TEXT || c->id == ui->modal_target_id) continue;
+      if (ccord_discord_type_is_thread(c->discord_type) || ccord_discord_type_is_forum(c->discord_type)) continue;
+      if (!ui_channel_visible(ui, gd->id, c)) continue;
+      if (ccord_store_permissions_exact(ui->d.store, gd->id, self_id) &&
+          !ccord_store_has_permission(ui->d.store, gd->id, c->id, self_id, CCORD_PERM_MANAGE_WEBHOOKS)) {
+        continue;
+      }
+      if (qlen > 0 && !dc_substr_ci(c->name, q, qlen) && !dc_substr_ci(gd->name, q, qlen)) continue;
+      if (ui->follow_selected_channel == CCORD_ID_NONE) {
+        ui->follow_selected_guild = gd->id;
+        ui->follow_selected_channel = c->id;
+      }
+      ccord_rect rr = {m.x + 16.0f, fy, m.w - 32.0f, row_h};
+      bool sel = (ui->follow_selected_channel == c->id);
+      bool hv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, rr);
+      uis_list_row_fill(ui, r, rr, (uis_state){.hover = hv, .selected = sel}, "folrow", (uint64_t)c->id);
+      char clbl[128];
+      snprintf(clbl, sizeof clbl, "#%s", c->name ? c->name : "channel");
+      float cy_t = rr.y + (rr.h - ui_line_h(ui, ns.size)) * 0.5f;
+      ccord_text_draw_ellipsis(r, clbl, strlen(clbl), rr.x + 10.0f, cy_t, rr.w * 0.55f, &ns);
+      if (gd->name) {
+        ccord_vec2 gm = ccord_text_measure(r, gd->name, strlen(gd->name), &gs, 0.0f);
+        float gw = fminf(gm.x, rr.w * 0.38f);
+        ccord_text_draw_ellipsis(r, gd->name, strlen(gd->name), rr.x + rr.w - gw - 10.0f,
+                                 rr.y + (rr.h - ui_line_h(ui, gs.size)) * 0.5f, gw, &gs);
+      }
+      ui->follow_hits[ui->nfollow_hits].rect = rr;
+      ui->follow_hits[ui->nfollow_hits].guild_id = gd->id;
+      ui->follow_hits[ui->nfollow_hits].channel_id = c->id;
+      ui->nfollow_hits++;
+      fy += row_h + 3.0f;
+    }
+  }
+  if (ui->nfollow_hits == 0) {
+    ccord_text_draw(r, "No eligible destination channels found (requires Manage Webhooks).", 66,
+                    m.x + 20.0f, fy + 8.0f, &ss, m.w - 40.0f);
+  }
+  ccord_rect ok_r = {m.x + m.w - 130.0f, m.y + m.h - (ok_h + 12.0f), 110.0f, ok_h};
+  ccord_rect cn_r = {ok_r.x - 98.0f, ok_r.y, 88.0f, ok_h};
+  ui->modal_ok_rect = ok_r;
+  ui->inter_modal_box = m;
+  ui->inter_modal_cancel = cn_r;
+  bool can_ok = ui->follow_selected_guild != CCORD_ID_NONE && ui->follow_selected_channel != CCORD_ID_NONE;
+  uis_button(ui, r, cn_r, "Cancel", UIS_BTN_LINK, UIS_BTN_S_MD,
+             (uis_state){.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, cn_r)}, "folcancel", 0);
+  uis_button(ui, r, ok_r, "Follow", UIS_BTN_PRIMARY, UIS_BTN_S_MD,
+             (uis_state){.hover = can_ok && ui->mouse_in && ui_in_rect(ui->mx, ui->my, ok_r), .disabled = !can_ok},
+             "folok", 0);
+  ui_popup_end(r);
+}
+
 static void draw_group_dm_modal(ccord_ui *ui, ccord_renderer *r, bool is_add)
 {
   ui_popup_begin(ui, r, "modal", (uint64_t)ui->modal_kind, UI_MODAL_MS, 10.0f);
@@ -794,6 +903,8 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     draw_group_dm_modal(ui, r, ui->modal_kind == UI_MODAL_ADD_DM_RECIPIENT);
   } else if (ui->modal_kind == UI_MODAL_EDIT_GROUP_DM) {
     draw_edit_group_dm_modal(ui, r);
+  } else if (ui->modal_kind == UI_MODAL_FOLLOW_CHANNEL) {
+    draw_follow_channel_modal(ui, r);
   } else if (ui->modal_kind == UI_MODAL_MEMBER_VERIFICATION) {
     ui_member_verification_draw(ui, r);
   } else if (ui->modal_kind == UI_MODAL_INTERACTION && ui->inter_modal && ui->inter_modal_edits) {

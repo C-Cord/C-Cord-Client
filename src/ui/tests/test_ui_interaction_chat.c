@@ -304,13 +304,13 @@ static void test_vanilla_discord_gap_features(void)
   CT_CHECK(ccord_store_upsert_guild(F.store, &admin_g, nullptr, 0, nullptr, 0, nullptr, 0, &err) == CCORD_OK);
   frame(2);
 
-  // Right-clicking channel `dev` now includes Mute, Notification Settings, Edit Channel, Clone Channel,
-  // Create Channel, Create Thread, Delete Channel + plugin item (8 items)
+  // Right-clicking channel `dev` now includes Mute, Notification Settings, Pin Channel to Top, Copy Link,
+  // Edit Channel, Clone Channel, Create Channel, Create Thread, Delete Channel + plugin item (10 items)
   dev_y = scan_hover_channel(200.0f, dev);
   CT_CHECK(dev_y > 0.0f);
   mouse(CCORD_IN_MOUSE_DOWN, 3, 200.0f, dev_y);
   frame(1);
-  CT_CHECK(dbg().context_menu_open && dbg().context_menu_items == 8);
+  CT_CHECK(dbg().context_menu_open && dbg().context_menu_items == 10);
   key(CCORD_KEY_ESCAPE, 0);
   frame(1);
 }
@@ -941,7 +941,7 @@ static void test_admin_dialogs_call_discord(void)
   CT_CHECK(dev_y > 0.0f);
   mouse(CCORD_IN_MOUSE_DOWN, 3, 200.0f, dev_y);
   frame(1);
-  CT_CHECK(dbg().context_menu_open && dbg().context_menu_items == 8);
+  CT_CHECK(dbg().context_menu_open && dbg().context_menu_items == 10);
   CT_CHECK(menu_click_label("Delete Channel"));
   CT_CHECK(F.ui->modal_kind == UI_MODAL_CONFIRM && F.ui->confirm_op == CCORD_ADMIN_DELETE_CHANNEL);
   CT_CHECK(ccord_mock_admin_count(tr) == sent);

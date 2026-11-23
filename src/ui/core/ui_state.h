@@ -399,6 +399,20 @@ struct ccord_ui {
   size_t ninvite_hits;
   size_t dbg_invite_cards;
   ccord_rect thread_join_rect, thread_archive_rect, thread_breadcrumb_rect;
+  ccord_rect announce_follow_rect;
+  struct {
+    ccord_rect rect;
+    ccord_id guild_id;
+    ccord_id channel_id;
+  } follow_hits[16];
+  size_t nfollow_hits;
+  ccord_id follow_selected_guild, follow_selected_channel;
+  ccord_id hide_muted_guilds[64];
+  size_t nhide_muted_guilds;
+  ccord_id pinned_channels[64];
+  size_t npinned_channels;
+  ccord_id hidden_voice_names[64];
+  size_t nhidden_voice_names;
   size_t dbg_burst_reaction_pills;
   bool reactions_open;
   ccord_id reactions_channel_id, reactions_msg_id;

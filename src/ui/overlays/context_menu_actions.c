@@ -365,6 +365,59 @@ static void activate(ccord_ui *ui, size_t idx)
     ui_dm_toggle_favorite(ui, (ccord_id)it.arg);
     return;
   }
+  if (it.builtin == MENU_BUILTIN_HIDE_MUTED_CHANNELS) {
+    ccord_id gid = (ccord_id)it.arg != CCORD_ID_NONE ? (ccord_id)it.arg : ctx.guild_id;
+    ui_guild_toggle_hide_muted(ui, gid);
+    return;
+  }
+  if (it.builtin == MENU_BUILTIN_PIN_CHANNEL) {
+    ccord_id cid = (ccord_id)it.arg != CCORD_ID_NONE ? (ccord_id)it.arg : ctx.channel_id;
+    ui_channel_toggle_pin(ui, cid);
+    return;
+  }
+  if (it.builtin == MENU_BUILTIN_FOLLOW_CHANNEL) {
+    ccord_id cid = (ccord_id)it.arg != CCORD_ID_NONE ? (ccord_id)it.arg : ctx.channel_id;
+    ui_follow_channel_modal_open(ui, cid);
+    return;
+  }
+  if (it.builtin == MENU_BUILTIN_OPEN_VOICE_CHAT) {
+    ccord_id cid = (ccord_id)it.arg != CCORD_ID_NONE ? (ccord_id)it.arg : ctx.channel_id;
+    const ccord_channel *vch = ccord_store_channel(ui->d.store, cid);
+    if (vch) {
+      ui->stage_channel = cid;
+      ui->stage_chat_open = true;
+      ccord_error err;
+      if (ui->d.session) (void)ccord_session_select_channel(ui->d.session, cid, &err);
+      else (void)ccord_store_select_channel(ui->d.store, cid, &err);
+      if (ui->mobile_layout) {
+        ui->left_drawer_open = false;
+        ui->right_drawer_open = false;
+      }
+      ui_compute_layout(ui);
+      ui_sync_messages(ui);
+      ui->dirty = true;
+    }
+    return;
+  }
+  if (it.builtin == MENU_BUILTIN_TOGGLE_VOICE_NAMES) {
+    ccord_id cid = (ccord_id)it.arg != CCORD_ID_NONE ? (ccord_id)it.arg : ctx.channel_id;
+    ui_voice_toggle_names_hidden(ui, cid);
+    return;
+  }
+  if (it.builtin == MENU_BUILTIN_COPY_CHANNEL_LINK) {
+    ccord_id cid = (ccord_id)it.arg != CCORD_ID_NONE ? (ccord_id)it.arg : ctx.channel_id;
+    const ccord_channel *ch = ccord_store_channel(ui->d.store, cid);
+    if (ch && ui->d.host.clipboard_set) {
+      char gbuf[24], cbuf[24], link[96];
+      ccord_id_format(ch->guild_id, gbuf);
+      ccord_id_format(ch->id, cbuf);
+      snprintf(link, sizeof link, "https://discord.com/channels/%s/%s",
+               ch->guild_id == CCORD_DM_GUILD_ID ? "@me" : gbuf, cbuf);
+      ui->d.host.clipboard_set(ui->d.host.ud, link);
+      ui_notice(ui, "Copied channel link");
+    }
+    return;
+  }
   if (it.builtin == MENU_BUILTIN_START_CALL) {
     if (!ui->d.session) {
       ui_notice(ui, "Not connected");

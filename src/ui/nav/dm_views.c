@@ -469,7 +469,79 @@ void ui_dm_prefs_load_ini(ccord_ui *ui, const char *section, const char *key, co
       snprintf(ui->friend_nicks[ui->nfriend_nicks].nick, sizeof ui->friend_nicks[0].nick, "%s", value);
       ui->nfriend_nicks++;
     }
+  } else if (strcmp(section, "hide_muted_guilds") == 0) {
+    ccord_id id = CCORD_ID_NONE;
+    if (ccord_id_parse(value, strlen(value), &id) && id != CCORD_ID_NONE &&
+        !id_list_has(ui->hide_muted_guilds, ui->nhide_muted_guilds, id) &&
+        ui->nhide_muted_guilds < sizeof ui->hide_muted_guilds / sizeof ui->hide_muted_guilds[0]) {
+      ui->hide_muted_guilds[ui->nhide_muted_guilds++] = id;
+    }
+  } else if (strcmp(section, "pinned_channels") == 0) {
+    ccord_id id = CCORD_ID_NONE;
+    if (ccord_id_parse(value, strlen(value), &id) && id != CCORD_ID_NONE &&
+        !id_list_has(ui->pinned_channels, ui->npinned_channels, id) &&
+        ui->npinned_channels < sizeof ui->pinned_channels / sizeof ui->pinned_channels[0]) {
+      ui->pinned_channels[ui->npinned_channels++] = id;
+    }
+  } else if (strcmp(section, "hidden_voice_names") == 0) {
+    ccord_id id = CCORD_ID_NONE;
+    if (ccord_id_parse(value, strlen(value), &id) && id != CCORD_ID_NONE &&
+        !id_list_has(ui->hidden_voice_names, ui->nhidden_voice_names, id) &&
+        ui->nhidden_voice_names < sizeof ui->hidden_voice_names / sizeof ui->hidden_voice_names[0]) {
+      ui->hidden_voice_names[ui->nhidden_voice_names++] = id;
+    }
   }
+}
+
+bool ui_guild_hide_muted(const ccord_ui *ui, ccord_id guild_id)
+{
+  return ui && id_list_has(ui->hide_muted_guilds, ui->nhide_muted_guilds, guild_id);
+}
+
+void ui_guild_toggle_hide_muted(ccord_ui *ui, ccord_id guild_id)
+{
+  if (!ui || guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) return;
+  bool on = id_list_toggle(ui->hide_muted_guilds, &ui->nhide_muted_guilds,
+                           sizeof ui->hide_muted_guilds / sizeof ui->hide_muted_guilds[0], guild_id);
+  ui->built_rev = UINT64_MAX;
+  ui->built_lists_rev = UINT64_MAX;
+  ui_settings_save(ui);
+  ui_notice(ui, on ? "Hiding muted channels" : "Showing all channels");
+  ui->dirty = true;
+}
+
+bool ui_channel_is_pinned(const ccord_ui *ui, ccord_id ch_id)
+{
+  return ui && id_list_has(ui->pinned_channels, ui->npinned_channels, ch_id);
+}
+
+void ui_channel_toggle_pin(ccord_ui *ui, ccord_id ch_id)
+{
+  if (!ui || ch_id == CCORD_ID_NONE) return;
+  bool on = id_list_toggle(ui->pinned_channels, &ui->npinned_channels,
+                           sizeof ui->pinned_channels / sizeof ui->pinned_channels[0], ch_id);
+  ui->built_rev = UINT64_MAX;
+  ui->built_lists_rev = UINT64_MAX;
+  ui_settings_save(ui);
+  ui_notice(ui, on ? "Pinned channel to top" : "Unpinned channel");
+  ui->dirty = true;
+}
+
+bool ui_voice_names_hidden(const ccord_ui *ui, ccord_id ch_id)
+{
+  return ui && id_list_has(ui->hidden_voice_names, ui->nhidden_voice_names, ch_id);
+}
+
+void ui_voice_toggle_names_hidden(ccord_ui *ui, ccord_id ch_id)
+{
+  if (!ui || ch_id == CCORD_ID_NONE) return;
+  bool on = id_list_toggle(ui->hidden_voice_names, &ui->nhidden_voice_names,
+                           sizeof ui->hidden_voice_names / sizeof ui->hidden_voice_names[0], ch_id);
+  ui->built_rev = UINT64_MAX;
+  ui->built_lists_rev = UINT64_MAX;
+  ui_settings_save(ui);
+  ui_notice(ui, on ? "Hidden voice participant names" : "Showing voice participant names");
+  ui->dirty = true;
 }
 
 void ui_dm_prefs_save_ini(const ccord_ui *ui, FILE *f)
@@ -498,6 +570,24 @@ void ui_dm_prefs_save_ini(const ccord_ui *ui, FILE *f)
     for (size_t i = 0; i < ui->nfriend_nicks; i++) {
       if (ui->friend_nicks[i].nick[0] == '\0') continue;
       fprintf(f, "%llu = %s\n", (unsigned long long)ui->friend_nicks[i].user_id, ui->friend_nicks[i].nick);
+    }
+  }
+  if (ui->nhide_muted_guilds > 0) {
+    fprintf(f, "[hide_muted_guilds]\n");
+    for (size_t i = 0; i < ui->nhide_muted_guilds; i++) {
+      fprintf(f, "g_%zu = %llu\n", i, (unsigned long long)ui->hide_muted_guilds[i]);
+    }
+  }
+  if (ui->npinned_channels > 0) {
+    fprintf(f, "[pinned_channels]\n");
+    for (size_t i = 0; i < ui->npinned_channels; i++) {
+      fprintf(f, "ch_%zu = %llu\n", i, (unsigned long long)ui->pinned_channels[i]);
+    }
+  }
+  if (ui->nhidden_voice_names > 0) {
+    fprintf(f, "[hidden_voice_names]\n");
+    for (size_t i = 0; i < ui->nhidden_voice_names; i++) {
+      fprintf(f, "vc_%zu = %llu\n", i, (unsigned long long)ui->hidden_voice_names[i]);
     }
   }
 }

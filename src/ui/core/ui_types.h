@@ -403,6 +403,12 @@ typedef enum menu_builtin : uint8_t {
   MENU_BUILTIN_MENTION_USER,       // insert @username mention into the active composer
   MENU_BUILTIN_TOGGLE_MEMBER_ROLE, // arg = role_id: assign or remove a role on ctx.user_id
   MENU_BUILTIN_MOD_VIEW,           // open Server Settings -> Members Mod View drawer for ctx.user_id
+  MENU_BUILTIN_HIDE_MUTED_CHANNELS,// toggle hiding muted channels in ctx.guild_id
+  MENU_BUILTIN_PIN_CHANNEL,        // toggle pinning a guild channel to the top of its server list
+  MENU_BUILTIN_FOLLOW_CHANNEL,     // open Follow Announcement Channel modal for ctx.channel_id
+  MENU_BUILTIN_OPEN_VOICE_CHAT,    // open Text-in-Voice chat pane for voice channel ctx.channel_id
+  MENU_BUILTIN_TOGGLE_VOICE_NAMES, // toggle hiding participant names under voice channel ctx.channel_id
+  MENU_BUILTIN_COPY_CHANNEL_LINK,  // copy https://discord.com/channels/<gid>/<cid>
 } menu_builtin;
 typedef struct menu_item {
   char *label;
@@ -471,6 +477,7 @@ typedef enum ui_modal_kind : uint8_t {
   UI_MODAL_ACTIVITY_SHELF,     // Embedded activities: the voice channel's activity shelf (launch / join)
   UI_MODAL_USER_NOTE,          // Add / edit personal note on a user
   UI_MODAL_FRIEND_NICK,        // Add / edit local friend nickname
+  UI_MODAL_FOLLOW_CHANNEL,     // Pick a destination channel to follow an announcement channel
 } ui_modal_kind;
 // Overlays with a close transition (see ui_overlay_presence below).
 typedef enum ui_overlay {

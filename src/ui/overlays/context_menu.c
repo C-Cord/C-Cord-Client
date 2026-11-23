@@ -900,6 +900,37 @@ void ui_menu_open(ccord_ui *ui, float x, float y, const ccord_menu_context *ctx)
                       ccord_store_has_permission(st, gid, ctx->channel_id, self_id,
                                                  CCORD_PERM_VIEW_CHANNEL | CCORD_PERM_CREATE_PUBLIC_THREADS);
         bool sep = lead;
+        if (ch && ch->kind != CCORD_CHANNEL_CATEGORY && !ccord_discord_type_is_thread(ch->discord_type)) {
+          bool ch_pinned = ui_channel_is_pinned(ui, ch->id);
+          if (add_item_ex(ui, ch_pinned ? "Unpin Channel" : "Pin Channel to Top", nullptr, MENU_BUILTIN_PIN_CHANNEL,
+                          nullptr, nullptr, sep, false, false, (int64_t)ch->id)) {
+            builtin = true;
+            sep = false;
+          }
+        }
+        if (ch && ch->discord_type == CCORD_DISCORD_CHANNEL_GUILD_ANNOUNCEMENT) {
+          if (add_item_ex(ui, "Follow Channel", nullptr, MENU_BUILTIN_FOLLOW_CHANNEL, nullptr, nullptr, sep, false,
+                          false, (int64_t)ch->id)) {
+            builtin = true;
+            sep = false;
+          }
+        }
+        if (ch && (ch->kind == CCORD_CHANNEL_VOICE || ch->kind == CCORD_CHANNEL_STAGE)) {
+          if (add_item_ex(ui, "Open Chat", nullptr, MENU_BUILTIN_OPEN_VOICE_CHAT, nullptr, nullptr, sep, false, false,
+                          (int64_t)ch->id)) {
+            builtin = true;
+            sep = false;
+          }
+          bool names_hidden = ui_voice_names_hidden(ui, ch->id);
+          if (add_toggle_item(ui, "Hide Names", MENU_BUILTIN_TOGGLE_VOICE_NAMES, (int64_t)ch->id, names_hidden, false)) {
+            builtin = true;
+          }
+        }
+        if (ch && add_item_ex(ui, "Copy Link", nullptr, MENU_BUILTIN_COPY_CHANNEL_LINK, nullptr, nullptr, false, false,
+                              false, (int64_t)ch->id)) {
+          builtin = true;
+        }
+        sep = builtin;
         if (can_settings && add_item(ui, "Edit Channel", MENU_BUILTIN_EDIT_CHANNEL, nullptr, nullptr, sep)) { builtin = true; sep = false; }
         if (can_clone && add_item(ui, "Clone Channel", MENU_BUILTIN_CLONE_CHANNEL, nullptr, nullptr, sep)) { builtin = true; sep = false; }
         if (create && add_item(ui, "Create Channel", MENU_BUILTIN_CREATE_CHANNEL, nullptr, nullptr, sep)) { builtin = true; sep = false; }
@@ -941,6 +972,8 @@ void ui_menu_open(ccord_ui *ui, float x, float y, const ccord_menu_context *ctx)
       }
       // Scheduled events are visible to every member; creating/editing is gated inside the modal.
       builtin = add_item(ui, "Events", MENU_BUILTIN_GUILD_EVENTS, nullptr, nullptr, true) || builtin;
+      bool hm = ui_guild_hide_muted(ui, gid);
+      builtin = add_toggle_item(ui, "Hide Muted Channels", MENU_BUILTIN_HIDE_MUTED_CHANNELS, (int64_t)gid, hm, false) || builtin;
       if (ccord_store_has_permission(ui->d.store, gid, CCORD_ID_NONE, self_id, CCORD_PERM_MANAGE_CHANNELS)) {
         builtin = add_item(ui, "Create Channel", MENU_BUILTIN_CREATE_CHANNEL, nullptr, nullptr, false);
       }

@@ -572,7 +572,7 @@ static void test_context_menu(void)
   CT_CHECK(cy2 > 0);
   mouse(CCORD_IN_MOUSE_DOWN, 3, 200.0f, cy2);
   frame(1);
-  CT_CHECK(dbg().context_menu_open && dbg().context_menu_items == 8);
+  CT_CHECK(dbg().context_menu_open && dbg().context_menu_items == 10);
   key(CCORD_KEY_ESCAPE, 0);
   if (l->member_list_visible) {
     mouse(CCORD_IN_MOUSE_DOWN, 3, l->member_list.x + 60, l->member_list.y + 60);
@@ -1408,7 +1408,7 @@ static void test_media_and_redirects(void)
   float gy = gr1.y + gr1.h * 0.5f;
   mouse(CCORD_IN_MOUSE_DOWN, 3, gx, gy);
   frame(1);
-  CT_CHECK(dbg().context_menu_open && dbg().context_menu_items == 10);   // + Mute Server, Notification Settings, Events, Leave Server
+  CT_CHECK(dbg().context_menu_open && dbg().context_menu_items == 11);   // + Mute Server, Hide Muted Channels, Notification Settings, Events, Leave Server
   CT_CHECK(menu_click_label("Discord Nitro (Browser)"));
   CT_CHECK(!dbg().context_menu_open);
   CT_CHECK(strcmp(F.last_url, "https://discord.com/nitro") == 0);

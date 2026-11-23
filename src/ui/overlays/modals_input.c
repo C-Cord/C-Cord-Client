@@ -114,6 +114,23 @@ static void confirm_run(ccord_ui *ui, const char *reason)
 static void submit_modal(ccord_ui *ui)
 {
   if (!ui || ui->modal_kind == UI_MODAL_NONE) return;
+  if (ui->modal_kind == UI_MODAL_FOLLOW_CHANNEL) {
+    if (ui->follow_selected_guild != CCORD_ID_NONE && ui->follow_selected_channel != CCORD_ID_NONE &&
+        ui->modal_target_id != CCORD_ID_NONE) {
+      ccord_admin_request req;
+      ccord_error err;
+      if (ccord_admin_follow_channel(&req, ui->follow_selected_guild, ui->modal_target_id,
+                                     ui->follow_selected_channel, nullptr, &err) == CCORD_OK) {
+        ui_admin_submit(ui, &req);
+        ui_notice(ui, "Following announcement channel");
+      } else {
+        ui_notice(ui, "Couldn't follow: %s", err.message);
+      }
+    }
+    ui->modal_kind = UI_MODAL_NONE;
+    ui->dirty = true;
+    return;
+  }
   const char *val = ccord_text_edit_cstr(&ui->modal_edit1);
   size_t vlen = ui->modal_edit1.len;
   char name_buf[128];
@@ -901,6 +918,31 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
               ui->dirty = true;
               return true;
             }
+          }
+        }
+        return true;
+      }
+      if (ui->modal_kind == UI_MODAL_FOLLOW_CHANNEL) {
+        if (ui->inter_modal_box.w > 0.0f && !ui_in_rect(ev->x, ev->y, ui->inter_modal_box)) {
+          ui->modal_kind = UI_MODAL_NONE;
+          ui->dirty = true;
+          return true;
+        }
+        if (ui->inter_modal_cancel.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->inter_modal_cancel)) {
+          ui->modal_kind = UI_MODAL_NONE;
+          ui->dirty = true;
+          return true;
+        }
+        if (ui->modal_ok_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->modal_ok_rect)) {
+          submit_modal(ui);
+          return true;
+        }
+        for (size_t i = 0; i < ui->nfollow_hits; i++) {
+          if (ui_in_rect(ev->x, ev->y, ui->follow_hits[i].rect)) {
+            ui->follow_selected_guild = ui->follow_hits[i].guild_id;
+            ui->follow_selected_channel = ui->follow_hits[i].channel_id;
+            ui->dirty = true;
+            return true;
           }
         }
         return true;

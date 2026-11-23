@@ -117,7 +117,8 @@ static bool append_channel_and_children(ccord_ui *ui, ccord_id g, const chan_idx
       *py += th + 2.0f;
     }
   }
-  if (!is_cat && (ch->kind == CCORD_CHANNEL_VOICE || ch->kind == CCORD_CHANNEL_STAGE)) {
+  if (!is_cat && (ch->kind == CCORD_CHANNEL_VOICE || ch->kind == CCORD_CHANNEL_STAGE) &&
+      !ui_voice_names_hidden(ui, ch->id)) {
     size_t nv = ccord_store_voice_count(ui->d.store, ch->id);
     for (size_t v = 0; v < nv; v++) {
       const ccord_voice_state *vs = ccord_store_voice_at(ui->d.store, ch->id, v);
@@ -439,11 +440,29 @@ static void rebuild_channel_rows(ccord_ui *ui)
   }
 
   vis = compute_channel_visibility(ui, g, n, &cm);
+  bool hide_muted = ui_guild_hide_muted(ui, g);
+  const ccord_voice_state *self_vs = ui_self_voice(ui);
+  ccord_id self_vc = self_vs ? self_vs->channel_id : CCORD_ID_NONE;
 #define CHANNEL_SHOWN(i) (!vis || vis[i])
+#define CHANNEL_MUTED_SKIP(ch) \
+  ((ch) && (ch)->kind != CCORD_CHANNEL_CATEGORY && \
+   (hide_muted && ui_channel_muted(ui, (ch))) && \
+   (ch)->id != sel && (ch)->mention_count == 0 && (ch)->id != self_vc && \
+   !ui_channel_is_pinned(ui, (ch)->id) && !has_selected_thread(ui->d.store, g, (ch)->id, sel))
+
+  // Pinned guild channels appear first at the top of the server's channel list.
+  for (size_t i = 0; i < n; i++) {
+    const ccord_channel *ch = cm.chs[i];
+    if (!ch || ch->kind == CCORD_CHANNEL_CATEGORY || cm_is_thread(&cm, i) || !CHANNEL_SHOWN(i)) continue;
+    if (!ui_channel_is_pinned(ui, ch->id)) continue;
+    if (!append_channel_and_children(ui, g, &cm, i, ch, &y)) goto done_channels;
+  }
+
   // Group categorized channels into per-(category, kind) order-preserving lists in one O(C) pass.
   for (size_t i = 0; i < n; i++) {
     const ccord_channel *ch = cm.chs[i];
     if (!ch || cm_is_thread(&cm, i) || !cm_is_cat_child(&cm, i) || !CHANNEL_SHOWN(i)) continue;
+    if (ui_channel_is_pinned(ui, ch->id) || CHANNEL_MUTED_SKIP(ch)) continue;
     size_t kb = 3u;
     if (ch->kind == CCORD_CHANNEL_TEXT) kb = 0u;
     else if (ch->kind == CCORD_CHANNEL_VOICE) kb = 1u;
@@ -461,7 +480,7 @@ static void rebuild_channel_rows(ccord_ui *ui)
     for (size_t i = 0; i < n; i++) {
       const ccord_channel *ch = cm.chs[i];
       if (!ch || ch->kind != kinds[k] || cm_is_thread(&cm, i) || !CHANNEL_SHOWN(i)) continue;
-      if (cm_is_cat_child(&cm, i)) continue;
+      if (cm_is_cat_child(&cm, i) || ui_channel_is_pinned(ui, ch->id) || CHANNEL_MUTED_SKIP(ch)) continue;
       if (!append_channel_and_children(ui, g, &cm, i, ch, &y)) goto done_channels;
     }
   }
@@ -470,6 +489,9 @@ static void rebuild_channel_rows(ccord_ui *ui)
   for (size_t ci = 0; ci < n; ci++) {
     const ccord_channel *cat = cm.chs[ci];
     if (!cat || cat->kind != CCORD_CHANNEL_CATEGORY || !CHANNEL_SHOWN(ci)) continue;
+    bool has_any_child = cm.cat_head[ci * 3u + 0u] != UINT32_MAX || cm.cat_head[ci * 3u + 1u] != UINT32_MAX ||
+                         cm.cat_head[ci * 3u + 2u] != UINT32_MAX;
+    if (hide_muted && ui_channel_muted(ui, cat) && !has_any_child) continue;
     if (!append_channel_and_children(ui, g, &cm, ci, cat, &y)) goto done_channels;
     bool collapsed = ui_is_collapsed(ui, cat->id);
     for (size_t kb = 0; kb < 3u; kb++) {
@@ -483,6 +505,7 @@ static void rebuild_channel_rows(ccord_ui *ui)
   }
 
 done_channels:
+#undef CHANNEL_MUTED_SKIP
 #undef CHANNEL_SHOWN
   chan_idx_free(&cm);
   ccord_free(vis);
@@ -696,6 +719,12 @@ static uint64_t compute_chan_sig(const ccord_ui *ui, ccord_id g)
   }
   h = uc_sig_mix_u64(h, (uint64_t)ui->ncollapsed);
   for (size_t i = 0; i < ui->ncollapsed; i++) h = uc_sig_mix_u64(h, ui->collapsed[i]);
+  h = uc_sig_mix_u64(h, (uint64_t)ui->nhide_muted_guilds);
+  for (size_t i = 0; i < ui->nhide_muted_guilds; i++) h = uc_sig_mix_u64(h, ui->hide_muted_guilds[i]);
+  h = uc_sig_mix_u64(h, (uint64_t)ui->npinned_channels);
+  for (size_t i = 0; i < ui->npinned_channels; i++) h = uc_sig_mix_u64(h, ui->pinned_channels[i]);
+  h = uc_sig_mix_u64(h, (uint64_t)ui->nhidden_voice_names);
+  for (size_t i = 0; i < ui->nhidden_voice_names; i++) h = uc_sig_mix_u64(h, ui->hidden_voice_names[i]);
   bool preview = ui_role_preview_active_for(ui, g);
   ccord_id self = ccord_store_self_id(st);
   bool exact = ccord_store_permissions_exact(st, g, self);

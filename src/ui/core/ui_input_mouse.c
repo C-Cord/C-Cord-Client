@@ -279,6 +279,11 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
   }
+  if (!ui->discovery_open && ui->announce_follow_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->announce_follow_rect)) {
+    const ccord_channel *ch = ui_selected_channel(ui);
+    if (ch) ui_follow_channel_modal_open(ui, ch->id);
+    return true;
+  }
   if (!ui->discovery_open && ui->thread_join_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->thread_join_rect)) {
     const ccord_channel *ch = ui_selected_channel(ui);
     if (ch && ui->d.session) {

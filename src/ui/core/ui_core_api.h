@@ -238,6 +238,13 @@ const char *ui_voice_lock_reason_ex(const ccord_ui *ui, ccord_id guild_id, const
                                     ui_voice_lock_kind *out_kind);
 const char *ui_voice_lock_reason(const ccord_ui *ui, ccord_id guild_id, const ccord_channel *ch);
 bool ui_voice_can_join(const ccord_ui *ui, ccord_id guild_id, const ccord_channel *ch);
+bool ui_guild_hide_muted(const ccord_ui *ui, ccord_id guild_id);
+void ui_guild_toggle_hide_muted(ccord_ui *ui, ccord_id guild_id);
+bool ui_channel_is_pinned(const ccord_ui *ui, ccord_id ch_id);
+void ui_channel_toggle_pin(ccord_ui *ui, ccord_id ch_id);
+bool ui_voice_names_hidden(const ccord_ui *ui, ccord_id ch_id);
+void ui_voice_toggle_names_hidden(ccord_ui *ui, ccord_id ch_id);
+void ui_follow_channel_modal_open(ccord_ui *ui, ccord_id src_channel_id);
 // Unread and mention totals of a guild's listed channels (what the server icon's badge shows); channels the user cannot
 // view do not count.
 uint32_t ui_guild_unread(const ccord_ui *ui, ccord_id guild_id, uint32_t *mentions);
