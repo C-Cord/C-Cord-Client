@@ -101,8 +101,19 @@ void dc_draw_user_profile_modal(ccord_ui *ui, ccord_renderer *r)
     float msg_y = m.y + banner_h + (compact_h ? UIS_SP_2 : UIS_SP_3);
     ccord_rect mb = {m.x + m.w - pad_x - msg_w, msg_y, msg_w, UIS_H_BTN};
     ui->profile_modal_msg_rect = mb;
-    uis_button(ui, r, mb, "Send Message", UIS_BTN_SUCCESS, UIS_BTN_S_MD,
-               (uis_state){.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, mb)}, "pmmsg", 0);
+    bool mb_hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, mb);
+    if (look.has_theme) {
+      ccord_color bg = ui_profile_button_color(ui, &look);
+      if (mb_hov) bg = ui_mix(bg, (ccord_color){255, 255, 255, 255}, 0.14f);
+      ccord_draw_rrect(r, mb, ptk.r_control, bg);
+      ccord_text_style ms = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), (ccord_color){255, 255, 255, 255});
+      ccord_vec2 mt = ccord_text_measure(r, "Send Message", 12, &ms, 0.0f);
+      ccord_text_draw_ellipsis(r, "Send Message", 12, mb.x + maxf((mb.w - mt.x) * 0.5f, 8.0f),
+                               mb.y + (mb.h - mt.y) * 0.5f, maxf(mb.w - 16.0f, 16.0f), &ms);
+    } else {
+      uis_button(ui, r, mb, "Send Message", UIS_BTN_SUCCESS, UIS_BTN_S_MD,
+                 (uis_state){.hover = mb_hov}, "pmmsg", 0);
+    }
   }
 
   float hx = m.x + pad_x, hy = m.y + banner_h + (compact_h ? 36.0f : 46.0f), hw = m.w - 2.0f * pad_x;

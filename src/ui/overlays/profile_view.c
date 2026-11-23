@@ -197,11 +197,7 @@ void ui_profile_resolve(const ccord_user_profile *prof, ccord_id gid, ccord_user
 ccord_color ui_profile_banner_fill(const ccord_ui *ui, const ui_profile_look *look, const ccord_user *u)
 {
   (void)u;
-  if (look->has_fill) return ui_rgb_color(look->banner_rgb);
-  if (look->has_theme) {
-    ccord_color tint = look->light_text ? (ccord_color){0x11, 0x12, 0x14, 255} : (ccord_color){0xff, 0xff, 0xff, 255};
-    return ui_mix(ui_rgb_color(look->theme_top), tint, look->light_text ? (56.0f / 255.0f) : (64.0f / 255.0f));
-  }
+  if (look->has_fill || look->has_theme) return ui_rgb_color(look->banner_rgb);
   return ui_mix(COL(bg_tertiary), COL(bg_secondary), 0.35f);
 }
 
@@ -209,9 +205,59 @@ ccord_color ui_profile_card_bg(const ccord_ui *ui, const ui_profile_look *look, 
 {
   (void)ui;
   if (!look || !look->has_theme) return fallback;
-  ccord_color base = ui_rgb_color(look->theme_top);
-  ccord_color scrim = look->light_text ? (ccord_color){0x11, 0x12, 0x14, 255} : (ccord_color){0xff, 0xff, 0xff, 255};
-  return ui_mix(base, scrim, look->light_text ? (178.0f / 255.0f) : (188.0f / 255.0f));
+  // Match the body color directly under the banner (~16% down the Primary -> Accent gradient) under #00000099 / white scrim.
+  ccord_color base = ui_mix(ui_rgb_color(look->theme_top), ui_rgb_color(look->theme_bot), 0.16f);
+  ccord_color scrim = look->light_text ? (ccord_color){0, 0, 0, 255} : (ccord_color){255, 255, 255, 255};
+  return ui_mix(base, scrim, look->light_text ? (153.0f / 255.0f) : (166.0f / 255.0f));
+}
+
+static float hsl_hue2rgb(float p, float q, float t)
+{
+  if (t < 0.0f) t += 1.0f;
+  if (t > 1.0f) t -= 1.0f;
+  if (t < 1.0f / 6.0f) return p + (q - p) * 6.0f * t;
+  if (t < 0.5f) return q;
+  if (t < 2.0f / 3.0f) return p + (q - p) * (2.0f / 3.0f - t) * 6.0f;
+  return p;
+}
+
+ccord_color ui_profile_button_color(const ccord_ui *ui, const ui_profile_look *look)
+{
+  if (!look || !look->has_theme) return COL(brand);
+  float r = channel01((look->theme_top >> 16) & 0xffu);
+  float g = channel01((look->theme_top >> 8) & 0xffu);
+  float b = channel01(look->theme_top & 0xffu);
+  float mx = fmaxf(r, fmaxf(g, b)), mn = fminf(r, fminf(g, b));
+  float h = 0.0f, s = 0.0f, l = (mx + mn) * 0.5f;
+  float d = mx - mn;
+  if (d > 1e-5f) {
+    s = l > 0.5f ? d / (2.0f - mx - mn) : d / (mx + mn);
+    if (mx == r) h = (g - b) / d + (g < b ? 6.0f : 0.0f);
+    else if (mx == g) h = (b - r) / d + 2.0f;
+    else h = (r - g) / d + 4.0f;
+    h /= 6.0f;
+  }
+  // Discord --profile-gradient-button-color: clamp lightness so white label text stays crisp & saturated.
+  float lo = look->light_text ? 0.25f : 0.30f;
+  float hi = look->light_text ? 0.34f : 0.42f;
+  if (l < lo) l = lo;
+  if (l > hi) l = hi;
+  float rr, gg, bb;
+  if (s <= 1e-5f) {
+    rr = gg = bb = l;
+  } else {
+    float q = l < 0.5f ? l * (1.0f + s) : l + s - l * s;
+    float p = 2.0f * l - q;
+    rr = hsl_hue2rgb(p, q, h + 1.0f / 3.0f);
+    gg = hsl_hue2rgb(p, q, h);
+    bb = hsl_hue2rgb(p, q, h - 1.0f / 3.0f);
+  }
+  return (ccord_color){
+    (uint8_t)roundf(fminf(fmaxf(rr, 0.0f), 1.0f) * 255.0f),
+    (uint8_t)roundf(fminf(fmaxf(gg, 0.0f), 1.0f) * 255.0f),
+    (uint8_t)roundf(fminf(fmaxf(bb, 0.0f), 1.0f) * 255.0f),
+    255,
+  };
 }
 
 #define UI_PROFILE_BANNER_FADE_MS 180u
@@ -240,14 +286,10 @@ void ui_profile_draw_banner(ccord_ui *ui, ccord_renderer *r, const ui_profile_lo
   float img_vis = ui_fade_ms(ui, "pban", bkey, have_img, UI_PROFILE_BANNER_FADE_MS);
   uint8_t img_a = clamp_u8_alpha(255.0f * img_vis);
   if (look->has_theme) {
-    if (!have_img || img_a == 0) return;   // ui_profile_draw_theme_bg already painted the seamless themed banner + 4px border
-    const float border = 4.0f;
-    if (banner.w <= border * 2.0f || banner.h <= border) return;
-    ccord_rect inner = {banner.x + border, banner.y + border, banner.w - border * 2.0f, banner.h - border};
-    float ir = radius > border ? radius - border : 0.0f;
-    ccord_push_clip(r, inner);
-    ccord_draw_texture_cover(r, look->banner_url, (ccord_rect){inner.x, inner.y, inner.w, inner.h + ir * 2.0f}, ir,
-                             img_a, true);
+    if (!have_img || img_a == 0) return;   // ui_profile_draw_theme_bg already painted the flush vivid themed banner
+    ccord_push_clip(r, banner);
+    ccord_draw_texture_cover(r, look->banner_url, (ccord_rect){banner.x, banner.y, banner.w, banner.h + radius * 2.0f},
+                             radius, img_a, true);
     ccord_pop_clip(r);
     return;
   }
@@ -281,7 +323,7 @@ void ui_profile_draw_theme_bg(ccord_ui *ui, ccord_renderer *r, const ui_profile_
 {
   (void)ui;
   if (!look->has_theme || box.w <= 0.0f || box.h <= 0.0f) return;
-  enum { N = 28 };
+  enum { N = 32 };
   float bot = box.y + box.h;
   float h = box.h;
   ccord_color a = ui_rgb_color(look->theme_top), b = ui_rgb_color(look->theme_bot);
@@ -300,33 +342,30 @@ void ui_profile_draw_theme_bg(ccord_ui *ui, ccord_renderer *r, const ui_profile_
       ccord_draw_rect(r, strip, c);
     }
   }
-  const float border = 4.0f;
-  if (box.w <= border * 2.0f || h <= border * 2.0f) return;
-  float bx = box.x + border, bw = box.w - border * 2.0f;
-  float ir = radius > border ? radius - border : 0.0f;
   float bh = banner_h;
-  if (bh > h - border) bh = h - border;
-  if (bh > border) {
-    ccord_rect top_zone = {bx, box.y + border, bw, bh - border};
-    ccord_color banner_tint = look->light_text ? (ccord_color){0x11, 0x12, 0x14, 56}
-                                               : (ccord_color){0xff, 0xff, 0xff, 64};
+  if (bh > h) bh = h;
+  if (bh > 0.0f) {
+    // Vivid, flush top banner (pure banner_rgb / theme_top, zero dark scrim wash — matches Discord .fill_vNEdYY).
+    ccord_rect top_zone = {box.x, box.y, box.w, bh};
     ccord_push_clip(r, top_zone);
-    ccord_draw_rrect(r, (ccord_rect){top_zone.x, top_zone.y, top_zone.w, top_zone.h + ir * 2.0f}, ir, banner_tint);
+    ccord_draw_rrect(r, (ccord_rect){box.x, box.y, box.w, bh + radius * 2.0f}, radius,
+                     ui_rgb_color(look->banner_rgb));
     ccord_pop_clip(r);
   }
-  float body_y = bh > border ? box.y + bh : box.y + border;
-  float body_h = (bot - border) - body_y;
+  float body_y = bh > 0.0f ? box.y + bh : box.y;
+  float body_h = bot - body_y;
   if (body_h > 0.0f) {
-    ccord_rect body_zone = {bx, body_y, bw, body_h};
-    ccord_color scrim = look->light_text ? (ccord_color){0x11, 0x12, 0x14, 178}
-                                         : (ccord_color){0xff, 0xff, 0xff, 188};
-    if (bh > border) {
+    // Discord --profile-gradient-overlay-color: #00000099 (60% black) on dark themes, 65% white on light themes.
+    ccord_rect body_zone = {box.x, body_y, box.w, body_h};
+    ccord_color scrim = look->light_text ? (ccord_color){0, 0, 0, 153}
+                                         : (ccord_color){255, 255, 255, 166};
+    if (bh > 0.0f) {
       ccord_push_clip(r, body_zone);
-      ccord_draw_rrect(r, (ccord_rect){body_zone.x, body_zone.y - ir * 2.0f, body_zone.w, body_zone.h + ir * 2.0f},
-                       ir, scrim);
+      ccord_draw_rrect(r, (ccord_rect){box.x, body_y - radius * 2.0f, box.w, body_h + radius * 2.0f},
+                       radius, scrim);
       ccord_pop_clip(r);
     } else {
-      ccord_draw_rrect(r, body_zone, ir, scrim);
+      ccord_draw_rrect(r, body_zone, radius, scrim);
     }
   }
 }

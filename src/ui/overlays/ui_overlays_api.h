@@ -133,11 +133,13 @@ typedef struct ui_profile_text { ccord_color header, secondary, muted; } ui_prof
 void ui_profile_resolve(const ccord_user_profile *prof, ccord_id gid, ccord_user *view, ui_profile_look *look);
 ccord_color ui_profile_banner_fill(const ccord_ui *ui, const ui_profile_look *look, const ccord_user *u);
 ccord_color ui_profile_card_bg(const ccord_ui *ui, const ui_profile_look *look, ccord_color fallback);
+// Discord --profile-gradient-button-color: contrast-safe Primary tint for profile action buttons.
+ccord_color ui_profile_button_color(const ccord_ui *ui, const ui_profile_look *look);
 void ui_profile_draw_banner(ccord_ui *ui, ccord_renderer *r, const ui_profile_look *look, const ccord_user *u,
                             ccord_rect banner, float radius);
 ui_profile_text ui_profile_text_colors(const ccord_ui *ui, const ui_profile_look *look);
-// Full-card vertical gradient theme_primary -> theme_accent over box with 4px border, lightly tinted banner_h header,
-// and scrimmed body; no-op without a theme.
+// Full-card vertical gradient theme_primary -> theme_accent with flush vivid top banner and #00000099 / white body
+// scrim; no-op without a theme.
 void ui_profile_draw_theme_bg(ccord_ui *ui, ccord_renderer *r, const ui_profile_look *look, ccord_rect box, float banner_h,
                               float radius);
 // Badge icons wrapped to width w; returns the height used (0 with no badges). Tooltip is drawn by ui_profile_flush_tooltip.

@@ -508,6 +508,9 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
   if (ui->settings_page == SP_ACCOUNT && ui->account_mfa_required) {
     st_draw_mfa_popup(ui, r);
   }
+  if (ui->settings_page == SP_PROFILE_EDIT && (!ui->mobile_layout || ui->mobile_settings_detail)) {
+    ui_settings_profile_draw_overlays(ui, r);
+  }
   if (ui->settings_page == SP_PLUGINS && (!ui->mobile_layout || ui->mobile_settings_detail)) {
     st_draw_plugins_overlays(ui, r, &g);
   }

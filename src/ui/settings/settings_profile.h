@@ -37,9 +37,23 @@ typedef enum ui_profile_kind : uint8_t {
   UI_PROF_SAVE,
   UI_PROF_RESET,
   UI_PROF_WEB,            // "Open discord.com"
+  // Extended controls (always > UI_PROF_ACCENT_HEX to preserve text-field count contract)
+  UI_PROF_SUBTAB,         // arg = 0 Main Profile, 1 Per-Server Profiles
+  UI_PROF_GUILD_TOGGLE,   // open/close server dropdown
+  UI_PROF_GUILD_PICK,     // arg = index into joined guilds
+  UI_PROF_GUILD_RESET,    // reset per-server overrides
+  UI_PROF_BIO_FMT,        // arg = 0 Bold, 1 Italic, 2 Mono, 3 Spoiler, 4 Emoji
+  UI_PROF_IMG_CROP,       // arg = 0 avatar, 1 banner crop/zoom modal
+  UI_PROF_COLOR_PICK,     // arg = 0 Theme Primary, 1 Theme Accent, 2 Banner Accent -> HSV color picker
+  UI_PROF_THEME_CLEAR,    // reset custom profile theme
+  UI_PROF_COSMETIC_OPEN,  // arg = 1 Deco, 2 Effect, 3 Nameplate, 4 Server Tag, 7 Profile Frame
+  UI_PROF_LINK_ACCOUNT,   // jump to Settings > My Account
+  UI_PROF_LINK_PRIVACY,   // jump to Settings > Privacy & Safety
+  UI_PROF_THEME_PRI_HEX,  // Profile Theme Primary custom hex input
+  UI_PROF_THEME_ACC_HEX,  // Profile Theme Accent custom hex input
 } ui_profile_kind;
 
-#define UI_PROFILE_ITEMS_MAX 40u
+#define UI_PROFILE_ITEMS_MAX 128u
 
 // One hit-testable control, recorded by the last draw.
 typedef struct ui_profile_item {
@@ -50,7 +64,7 @@ typedef struct ui_profile_item {
 } ui_profile_item;
 
 // Field bits, the same numbering as ccord_profile_field (display name 0, avatar 1, banner 2, about me 3, pronouns 4,
-// accent 5).
+// accent 5, theme 6, deco 7, effect 8, nameplate 9, clan 10).
 typedef struct ui_profile_debug {
   bool live;
   uint32_t changed;                  // bit (1u << ccord_profile_field) per field that differs from the saved profile
@@ -67,10 +81,28 @@ typedef struct ui_profile_debug {
   ccord_rect bar, view;
   float scroll, max_scroll;
   const char *text[4];               // current text of name, pronouns, about me, hex
+  // Extended Profile revamp debug fields
+  int subtab;                        // 0 main, 1 per-server
+  ccord_id selected_guild;
+  int open_picker;                   // 0 none, 1 deco, 2 effect, 3 nameplate, 4 clan, 5 crop, 6 color, 7 frame
+  bool has_theme;
+  uint32_t theme_primary, theme_accent;
+  char deco_name[96];
+  char effect_name[96];
+  char frame_name[96];
+  char nameplate_name[96];
+  char clan_tag[16];
+  size_t avatar_draft_len;
+  size_t banner_draft_len;
+  float avatar_zoom;
+  float banner_zoom;
 } ui_profile_debug;
 
 void ui_settings_profile_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect content, ccord_rect panel);
+void ui_settings_profile_draw_overlays(ccord_ui *ui, ccord_renderer *r);
 bool ui_settings_profile_click(ccord_ui *ui, ccord_rect content, ccord_rect panel, float x, float y);
+bool ui_settings_profile_mouse_move(ccord_ui *ui, float x, float y);
+void ui_settings_profile_mouse_up(ccord_ui *ui);
 // Keyboard and text input for the focused field; true when consumed.
 bool ui_settings_profile_key(ccord_ui *ui, const ccord_input_event *ev);
 bool ui_settings_profile_wheel(ccord_ui *ui, float wheel);
@@ -93,3 +125,4 @@ bool ui_settings_profile_set_image_file(ccord_ui *ui, bool banner, const char *p
 // Test seams.
 size_t ui_settings_profile_items(const ccord_ui *ui, const ui_profile_item **out);
 void ui_settings_profile_debug(const ccord_ui *ui, ui_profile_debug *out);
+bool ui_settings_profile_picker_hit(const ccord_ui *ui, int kind, int arg, ccord_rect *out);

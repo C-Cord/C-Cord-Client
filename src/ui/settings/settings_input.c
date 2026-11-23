@@ -609,6 +609,9 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
   }
   sgeom g = st_geometry(ui);
   if (ev->type == CCORD_IN_MOUSE_MOVE) {
+    if (ui->settings_page == SP_PROFILE_EDIT && ui_settings_profile_has_overlay(ui)) {
+      if (ui_settings_profile_mouse_move(ui, ev->x, ev->y)) return true;
+    }
     int page = -1;
     for (int i = 0; i < SP_COUNT; i++) {
       if (ui_in_rect(ev->x, ev->y, g.page[i]) && ui_in_rect(ev->x, ev->y, g.list)) page = i;
@@ -621,6 +624,12 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     st_s_hover_key = hk;
     if (changed) ui->dirty = true;
     return true;
+  }
+  if (ev->type == CCORD_IN_MOUSE_UP) {
+    if (ui->settings_page == SP_PROFILE_EDIT && ui_settings_profile_has_overlay(ui)) {
+      ui_settings_profile_mouse_up(ui);
+      return true;
+    }
   }
   if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 3) {
     if (ui->settings_page == SP_ACCOUNT && (!ui->mobile_layout || ui->mobile_settings_detail)) {

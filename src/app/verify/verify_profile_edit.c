@@ -215,7 +215,10 @@ int ccord_verify_profile_edit_slice(const ccord_verify_ui_parity_ctx *ctx)
         ccord_rect probe = {x - 1.0f, y - 1.0f, 2.0f, 2.0f};
         for (size_t i = 0; i < nitems; i++) {
           bool risky = items[i].kind == UI_PROF_AVATAR_CHANGE || items[i].kind == UI_PROF_BANNER_CHANGE ||
-                       items[i].kind == UI_PROF_WEB || items[i].kind == UI_PROF_SAVE;
+                       items[i].kind == UI_PROF_WEB || items[i].kind == UI_PROF_SAVE ||
+                       items[i].kind == UI_PROF_SUBTAB || items[i].kind == UI_PROF_COSMETIC_OPEN ||
+                       items[i].kind == UI_PROF_IMG_CROP || items[i].kind == UI_PROF_COLOR_PICK ||
+                       items[i].kind == UI_PROF_LINK_ACCOUNT || items[i].kind == UI_PROF_LINK_PRIVACY;
           if (risky && x >= items[i].rect.x && x <= items[i].rect.x + items[i].rect.w && y >= items[i].rect.y &&
               y <= items[i].rect.y + items[i].rect.h) skip = true;
         }

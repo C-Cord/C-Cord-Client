@@ -103,6 +103,8 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
     if (ui->settings_open) {
       if (ui->account_mfa_required) {
         ui_settings_dismiss_mfa(ui);
+      } else if (ui_settings_profile_dismiss_overlay(ui)) {
+        // Dismissed active Profile Cosmetic Picker or Crop modal.
       } else if (ui_settings_plugins_dismiss_overlay(ui)) {
         // Dismissed active Plugins modal, popover, bottom sheet, or sub-view.
       } else if (!ui_is_login_screen(ui)) {
@@ -264,7 +266,9 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
     ui->dirty = true;
     return true;
   }
-  if (ui->settings_open && (ui->account_focus_field != 0 || ui->account_mfa_required)) {
+  if (ui->settings_open && (ui->account_focus_field != 0 || ui->account_mfa_required ||
+                            ui_settings_profile_wants_text(ui) || ui_settings_profile_has_overlay(ui) ||
+                            ui_settings_plugins_wants_text(ui))) {
     return ui_settings_handle(ui, ev);
   }
   // Up/Down step through the settings sidebar.
@@ -1174,7 +1178,9 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       }
       if (ui_server_settings_is_open(ui)) return ui_server_settings_handle(ui, ev);
       if (ui_channel_settings_is_open(ui)) return ui_channel_settings_handle(ui, ev);
-      if (ui->settings_open && (ui->account_focus_field != 0 || ui->account_mfa_required)) {
+      if (ui->settings_open && (ui->account_focus_field != 0 || ui->account_mfa_required ||
+                                ui_settings_profile_wants_text(ui) || ui_settings_profile_has_overlay(ui) ||
+                                ui_settings_plugins_wants_text(ui))) {
         return ui_settings_handle(ui, ev);
       }
       if (ui->menu.open || ui->settings_open || ui->go_live_open || ui->pins_open || ui->reactions_open ||
