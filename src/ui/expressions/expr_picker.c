@@ -225,6 +225,26 @@ void ui_expr_picker_open(ccord_ui *ui, int tab, ccord_id channel_id, ccord_id re
   ui->dirty = true;
 }
 
+void ui_expr_picker_open_query(ccord_ui *ui, int tab, ccord_id channel_id, const char *query, size_t qlen)
+{
+  if (!ui) return;
+  if (ui->emoji_picker_open) ui_expr_picker_close(ui);
+  ui_expr_picker_open(ui, tab, channel_id, CCORD_ID_NONE);
+  struct ui_expr_picker *ep = ui->expr;
+  ui_expr_body *b = ep ? ep->body : nullptr;
+  if (!b) return;
+  ccord_text_edit_clear(&b->search_edit);
+  if (query && qlen > 0) {
+    ccord_error err;
+    (void)ccord_text_edit_insert(&b->search_edit, query, qlen, &err);
+    if (tab == EXPR_TAB_GIFS && ui->d.session) {
+      b->gif_search_due_ms = ui->now_ms;
+      b->gif_search_pending = true;
+    }
+  }
+  ui->dirty = true;
+}
+
 // Ticks the wheel glides of the picker's grids and rail by fdt_ms (scroll.h). Dropped when the picker is closed.
 bool ui_expr_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced)
 {

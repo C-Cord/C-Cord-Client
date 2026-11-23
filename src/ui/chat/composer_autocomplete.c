@@ -299,11 +299,25 @@ void ui_update_autocomplete(ccord_ui *ui)
         }
         snprintf(it->insert, sizeof it->insert, "/%.88s ", cmds[i].name);
       }
-      // /tts is a built-in composer command (not an application command): always offered.
-      if ((qlen == 0 || dc_ascii_prefix_ci("tts", q, qlen)) && ui->nautocomplete < UI_AUTOCOMPLETE_MAX) {
+      // Built-in composer slash commands (always offered alongside server application commands).
+      static const struct { const char *name; const char *desc; bool guild_only; } k_builtin_cmds[] = {
+        {"tts",       "Send a text-to-speech message",             false},
+        {"shrug",     "Append \xC2\xAF\\_(\xE3\x83\x84)_/\xC2\xAF to your message", false},
+        {"tableflip", "Append (\xE2\x95\xAF\xC2\xB0\xE2\x96\xA1\xC2\xB0)\xE2\x95\xAF\xEF\xB8\xB5 \xE2\x94\xBB\xE2\x94\x81\xE2\x94\xBB", false},
+        {"unflip",    "Append \xE2\x94\xAC\xE2\x94\x80\xE2\x94\xAC\xE3\x83\x8E( \xC2\xBA _ \xC2\xBA\xE3\x83\x8E)", false},
+        {"me",        "Display text with emphasis",                false},
+        {"spoiler",   "Mark your message as a spoiler",            false},
+        {"nick",      "Change your nickname in this server",       true},
+        {"schedule",  "Schedule a message to send later",          false},
+        {"gif",       "Search and send a GIF",                     false},
+        {"sticker",   "Search and send a Sticker",                 false},
+      };
+      for (size_t bi = 0; bi < sizeof k_builtin_cmds / sizeof k_builtin_cmds[0] && ui->nautocomplete < UI_AUTOCOMPLETE_MAX; bi++) {
+        if (k_builtin_cmds[bi].guild_only && ch->guild_id == CCORD_DM_GUILD_ID) continue;
+        if (qlen > 0 && !dc_ascii_prefix_ci(k_builtin_cmds[bi].name, q, qlen)) continue;
         ui_autocomplete_item *it = &ui->autocomplete_items[ui->nautocomplete++];
-        snprintf(it->display, sizeof it->display, "/tts \xE2\x80\x94 Send a text-to-speech message");
-        snprintf(it->insert, sizeof it->insert, "/tts ");
+        snprintf(it->display, sizeof it->display, "/%s \xE2\x80\x94 %.54s", k_builtin_cmds[bi].name, k_builtin_cmds[bi].desc);
+        snprintf(it->insert, sizeof it->insert, "/%s ", k_builtin_cmds[bi].name);
       }
       // Plugin slash commands
       if (ui->d.contrib) {

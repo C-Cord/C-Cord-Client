@@ -569,6 +569,7 @@ void ui_send_composer(ccord_ui *ui)
   }
 
   // Slash commands (`/name ...`) when not uploading files or replying
+  char builtin_tx[CCORD_SEND_MAX_BYTES + 1];
   if (!has_files && ui->reply_message == CCORD_ID_NONE && len > 0 && t[0] == '/' &&
       memchr(t, '\n', len) == nullptr) {
     size_t n = strcspn(t + 1, " \t\n");
@@ -620,6 +621,81 @@ void ui_send_composer(ccord_ui *ui)
         ui->dirty = true;
         return;
       }
+      if (strcasecmp(name, "gif") == 0 || strcasecmp(name, "sticker") == 0) {
+        const char *arg = t + 1 + n;
+        while (*arg == ' ' || *arg == '\t') arg++;
+        int tab = strcasecmp(name, "gif") == 0 ? 0 : 1;   // EXPR_TAB_GIFS / EXPR_TAB_STICKERS
+        ccord_text_edit_clear(&ui->edit);
+        ui_clear_channel_draft(ui, ch->id);
+        ui->autocomplete_open = false;
+        ui->nautocomplete = 0;
+        ui->composer_scroll = 0.0f;
+        ui_expr_picker_open_query(ui, tab, ch->id, arg, strlen(arg));
+        return;
+      }
+      if (strcasecmp(name, "schedule") == 0) {
+        const char *arg = t + 1 + n;
+        while (*arg == ' ' || *arg == '\t') arg++;
+        char body_copy[CCORD_SEND_MAX_BYTES + 1];
+        snprintf(body_copy, sizeof body_copy, "%s", arg);
+        ccord_text_edit_clear(&ui->edit);
+        if (body_copy[0] != '\0') (void)ccord_text_edit_insert(&ui->edit, body_copy, strlen(body_copy), &err);
+        ui->autocomplete_open = false;
+        ui->nautocomplete = 0;
+        ui->composer_scroll = 0.0f;
+        ui_schedule_dialog_open(ui);
+        return;
+      }
+      if (strcasecmp(name, "nick") == 0) {
+        if (ch->guild_id == CCORD_DM_GUILD_ID) {
+          ui_notice(ui, "/nick can only be used in a server");
+          return;
+        }
+        const char *arg = t + 1 + n;
+        while (*arg == ' ' || *arg == '\t') arg++;
+        ccord_admin_request nreq;
+        ccord_id self_id = ccord_store_self_id(ui->d.store);
+        if (ccord_admin_set_nick(&nreq, ch->guild_id, self_id, true, arg, nullptr, &err) != CCORD_OK) {
+          ui_notice(ui, "Cannot change nickname: %s", err.message);
+          return;
+        }
+        ui_admin_submit(ui, &nreq);
+        ccord_text_edit_clear(&ui->edit);
+        ui_clear_channel_draft(ui, ch->id);
+        ui->autocomplete_open = false;
+        ui->nautocomplete = 0;
+        ui->composer_scroll = 0.0f;
+        ui_notice(ui, arg[0] ? "Nickname updated" : "Nickname cleared");
+        ui->dirty = true;
+        return;
+      }
+      // Built-in text-transform commands (/shrug, /tableflip, /unflip, /me, /spoiler):
+      // rewrite the outgoing text in place and fall through to normal send (preserving slowmode, plugins, shortcodes).
+      bool transformed = false;
+      const char *arg = t + 1 + n;
+      while (*arg == ' ' || *arg == '\t') arg++;
+      if (strcasecmp(name, "shrug") == 0) {
+        (void)snprintf(builtin_tx, sizeof builtin_tx, "%s%s\xC2\xAF\\_(\xE3\x83\x84)_/\xC2\xAF", arg, arg[0] ? " " : "");
+        transformed = true;
+      } else if (strcasecmp(name, "tableflip") == 0) {
+        (void)snprintf(builtin_tx, sizeof builtin_tx, "%s%s(\xE2\x95\xAF\xC2\xB0\xE2\x96\xA1\xC2\xB0)\xE2\x95\xAF\xEF\xB8\xB5 \xE2\x94\xBB\xE2\x94\x81\xE2\x94\xBB", arg, arg[0] ? " " : "");
+        transformed = true;
+      } else if (strcasecmp(name, "unflip") == 0) {
+        (void)snprintf(builtin_tx, sizeof builtin_tx, "%s%s\xE2\x94\xAC\xE2\x94\x80\xE2\x94\xAC\xE3\x83\x8E( \xC2\xBA _ \xC2\xBA\xE3\x83\x8E)", arg, arg[0] ? " " : "");
+        transformed = true;
+      } else if (strcasecmp(name, "me") == 0) {
+        if (arg[0] == '\0') { ui_notice(ui, "/me needs a message"); return; }
+        (void)snprintf(builtin_tx, sizeof builtin_tx, "*%s*", arg);
+        transformed = true;
+      } else if (strcasecmp(name, "spoiler") == 0) {
+        if (arg[0] == '\0') { ui_notice(ui, "/spoiler needs a message"); return; }
+        (void)snprintf(builtin_tx, sizeof builtin_tx, "||%s||", arg);
+        transformed = true;
+      }
+      if (transformed) {
+        t = builtin_tx;
+        len = strlen(builtin_tx);
+      } else {
       const ccord_slash_command *cmd = dc_find_slash_cmd(ui, ch->guild_id, name, n);
       if (cmd) {
         if (!ui->d.session) {
@@ -711,6 +787,7 @@ void ui_send_composer(ccord_ui *ui)
         ui->nautocomplete = 0;
         ui->dirty = true;
         return;
+      }
       }
     }
   }
