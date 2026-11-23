@@ -468,6 +468,20 @@ bool ui_search_panel_handle_click(ccord_ui *ui, float mx, float my)
 {
   if (!ui_search_panel_active(ui)) return false;
   if (!ui_in_rect(mx, my, ui_rect(ui->layout.member_list))) return false;
+  for (int i = 0; i < 3; i++) {
+    if (ui->search_sort_rects[i].w > 0.0f && ui_in_rect(mx, my, ui->search_sort_rects[i])) {
+      if (ui->search_sort != (uint8_t)i) {
+        ui->search_sort = (uint8_t)i;
+        ui->search_sent_key = 0;
+        ui->search_panel_scroll = 0.0f;
+        uc_search_send(ui, true);
+        ui->view_key = 0;
+        ui_sync_messages(ui);
+        ui->dirty = true;
+      }
+      return true;
+    }
+  }
   if (ui->search_prev_rect.w > 0.0f && ui_in_rect(mx, my, ui->search_prev_rect)) {
     ui_search_page_step(ui, -1);
     return true;
@@ -557,6 +571,37 @@ bool ui_search_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     if (ui_search_panel_handle_click(ui, ev->x, ev->y)) {
       return true;
+    }
+    if (ui->search_clear_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->search_clear_rect)) {
+      ccord_text_edit_clear(&ui->search_edit);
+      uc_search_reset(ui);
+      if (ui->mobile_layout) ui->right_drawer_open = false;
+      ui->view_key = 0;
+      ui_compute_layout(ui);
+      ccord_vlist_invalidate_all(&ui->vlist);
+      ui_sync_messages(ui);
+      ui->dirty = true;
+      return true;
+    }
+    for (size_t ci = 0; ci < ui->nsearch_chips; ci++) {
+      if (ui_in_rect(ev->x, ev->y, ui->search_chip_rects[ci]) && ui->search_chip_tokens[ci]) {
+        const char *tok = ui->search_chip_tokens[ci];
+        ccord_error serr;
+        // Add a leading space if the query doesn't already end with whitespace.
+        const char *cur = ccord_text_edit_cstr(&ui->search_edit);
+        if (ui->search_edit.len > 0 && cur[ui->search_edit.len - 1u] != ' ') {
+          (void)ccord_text_edit_insert(&ui->search_edit, " ", 1, &serr);
+        }
+        (void)ccord_text_edit_insert(&ui->search_edit, tok, strlen(tok), &serr);
+        if (strchr(tok, ':') != nullptr && tok[strlen(tok) - 1u] != ':') {
+          (void)ccord_text_edit_insert(&ui->search_edit, " ", 1, &serr);
+        }
+        ui_sync_messages(ui);
+        uc_search_send(ui, true);
+        if (ui->mobile_layout && ui->search_edit.len >= 2) ui->right_drawer_open = true;
+        ui->dirty = true;
+        return true;
+      }
     }
     if (!ui_in_rect(ev->x, ev->y, ui_search_popover_rect(ui))) {
       ui->search_open = false;

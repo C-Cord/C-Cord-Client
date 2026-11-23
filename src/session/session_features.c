@@ -550,9 +550,9 @@ static ccord_id resolve_search_channel(const ccord_store *st, ccord_id guild_id,
   return CCORD_ID_NONE;
 }
 
-ccord_status ccord_session_search_messages_page(ccord_session *s, ccord_id guild_id, ccord_id channel_id,
-                                                const char *query, size_t query_len, uint32_t offset,
-                                                ccord_error *err)
+ccord_status ccord_session_search_messages_sorted(ccord_session *s, ccord_id guild_id, ccord_id channel_id,
+                                                  const char *query, size_t query_len, uint32_t offset,
+                                                  ccord_search_sort sort, ccord_error *err)
 {
   SESSION_STALE_GUARD(s, err);
   ccord_error_clear(err);
@@ -568,6 +568,7 @@ ccord_status ccord_session_search_messages_page(ccord_session *s, ccord_id guild
   ccord_search_query sq;
   ccord_search_parse(query, query_len, &sq);
   sq.offset = offset;
+  if (sq.sort == CCORD_SEARCH_SORT_NEW && sort != CCORD_SEARCH_SORT_NEW) sq.sort = sort;
   if (sq.author_id == CCORD_ID_NONE && sq.from[0] != '\0') {
     sq.author_id = resolve_search_user(s->store, guild_id, sq.from);
   }
@@ -580,6 +581,13 @@ ccord_status ccord_session_search_messages_page(ccord_session *s, ccord_id guild
   ccord_status st = ccord_transport_search_messages_ex(s->transport, guild_id, channel_id, &sq, err);
   if (st == CCORD_OK) s->search_loading = true;
   return st;
+}
+
+ccord_status ccord_session_search_messages_page(ccord_session *s, ccord_id guild_id, ccord_id channel_id,
+                                                const char *query, size_t query_len, uint32_t offset,
+                                                ccord_error *err)
+{
+  return ccord_session_search_messages_sorted(s, guild_id, channel_id, query, query_len, offset, CCORD_SEARCH_SORT_NEW, err);
 }
 
 ccord_status ccord_session_search_messages(ccord_session *s, ccord_id guild_id, ccord_id channel_id,

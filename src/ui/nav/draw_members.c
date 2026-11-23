@@ -565,6 +565,7 @@ static void draw_search_results_panel(ccord_ui *ui, ccord_renderer *r, const cco
   ui->nsearch_card_hits = 0;
   ui->search_prev_rect = (ccord_rect){0};
   ui->search_next_rect = (ccord_rect){0};
+  for (int i = 0; i < 3; i++) ui->search_sort_rects[i] = (ccord_rect){0};
 
   size_t sc = 0;
   const ccord_message *sr = ui->d.session ? ccord_session_search_results(ui->d.session, &sc) : nullptr;
@@ -588,12 +589,27 @@ static void draw_search_results_panel(ccord_ui *ui, ccord_renderer *r, const cco
     if (below_sp > top_y) top_y = below_sp;
   }
   ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
-  ccord_text_draw_ellipsis(r, hdr, strlen(hdr), l->x + 12.0f, top_y + 11.0f, l->w - 24.0f, &hs);
-  ccord_draw_rect(r, (ccord_rect){l->x, top_y + 36.0f, l->w, 1.0f}, COL(border_subtle));
+  ccord_text_draw_ellipsis(r, hdr, strlen(hdr), l->x + 12.0f, top_y + 10.0f, l->w - 24.0f, &hs);
+
+  // Sort pills: New / Old / Relevant
+  static const char *const k_sorts[3] = {"New", "Old", "Relevant"};
+  float sh = ui->mobile_layout ? UIS_MOB_H_CHIP : 22.0f;
+  float sy = top_y + 32.0f;
+  float sgap = 6.0f;
+  float sw = fmaxf((l->w - 24.0f - 2.0f * sgap) / 3.0f, 44.0f);
+  for (int i = 0; i < 3; i++) {
+    ccord_rect sr_chip = {l->x + 12.0f + (float)i * (sw + sgap), sy, sw, sh};
+    ui->search_sort_rects[i] = sr_chip;
+    bool shv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, sr_chip);
+    uis_chip(ui, r, sr_chip, k_sorts[i], (uis_state){.hover = shv, .selected = ui->search_sort == (uint8_t)i}, "srchsort",
+             (uint64_t)i);
+  }
+  float hdr_bot = sy + sh + 8.0f;
+  ccord_draw_rect(r, (ccord_rect){l->x, hdr_bot, l->w, 1.0f}, COL(border_subtle));
 
   bool show_pager = use_session && (total > CCORD_SEARCH_PAGE_SIZE || offset > 0u);
-  float footer_h = show_pager ? 38.0f : 0.0f;
-  float body_y = top_y + 37.0f;
+  float footer_h = show_pager ? (ui->mobile_layout ? 46.0f : 38.0f) : 0.0f;
+  float body_y = hdr_bot + 1.0f;
   float body_h = (l->y + l->h) - body_y - footer_h;
   if (body_h < 0.0f) body_h = 0.0f;
 

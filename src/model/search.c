@@ -176,6 +176,10 @@ static bool parse_has_flag(const char *val, size_t vlen, uint32_t *out_flag)
     *out_flag = CCORD_SEARCH_HAS_POLL;
     return true;
   }
+  if (str_eq_ci(buf, "forward") || str_eq_ci(buf, "snapshot")) {
+    *out_flag = CCORD_SEARCH_HAS_FORWARD;
+    return true;
+  }
   return false;
 }
 
@@ -244,6 +248,46 @@ void ccord_search_parse(const char *raw, size_t len, ccord_search_query *out)
           out->has_operators = true;
         } else if (str_eq_ci(bbuf, "false")) {
           out->pinned = 0;
+          out->has_operators = true;
+        } else {
+          append_content_token(out, tok, tlen);
+        }
+      } else {
+        append_content_token(out, tok, tlen);
+      }
+    } else if (token_prefix_ci(tok, tlen, "author_type:", &val, &vlen)) {
+      char abuf[16];
+      if (vlen < sizeof abuf) {
+        memcpy(abuf, val, vlen);
+        abuf[vlen] = '\0';
+        if (str_eq_ci(abuf, "user")) {
+          out->author_type = CCORD_SEARCH_AUTHOR_USER;
+          out->has_operators = true;
+        } else if (str_eq_ci(abuf, "bot")) {
+          out->author_type = CCORD_SEARCH_AUTHOR_BOT;
+          out->has_operators = true;
+        } else if (str_eq_ci(abuf, "webhook")) {
+          out->author_type = CCORD_SEARCH_AUTHOR_WEBHOOK;
+          out->has_operators = true;
+        } else {
+          append_content_token(out, tok, tlen);
+        }
+      } else {
+        append_content_token(out, tok, tlen);
+      }
+    } else if (token_prefix_ci(tok, tlen, "sort:", &val, &vlen)) {
+      char sbuf[16];
+      if (vlen < sizeof sbuf) {
+        memcpy(sbuf, val, vlen);
+        sbuf[vlen] = '\0';
+        if (str_eq_ci(sbuf, "new") || str_eq_ci(sbuf, "newest")) {
+          out->sort = CCORD_SEARCH_SORT_NEW;
+          out->has_operators = true;
+        } else if (str_eq_ci(sbuf, "old") || str_eq_ci(sbuf, "oldest")) {
+          out->sort = CCORD_SEARCH_SORT_OLD;
+          out->has_operators = true;
+        } else if (str_eq_ci(sbuf, "relevant") || str_eq_ci(sbuf, "relevance")) {
+          out->sort = CCORD_SEARCH_SORT_RELEVANT;
           out->has_operators = true;
         } else {
           append_content_token(out, tok, tlen);
@@ -395,6 +439,14 @@ bool ccord_search_message_matches(const ccord_search_query *q, const ccord_messa
   }
   if ((q->has_mask & CCORD_SEARCH_HAS_POLL) != 0) {
     if (!rich || !rich->poll.present) return false;
+  }
+  if ((q->has_mask & CCORD_SEARCH_HAS_FORWARD) != 0) {
+    if (!rich || !rich->forward.present) return false;
+  }
+  if (q->author_type != CCORD_SEARCH_AUTHOR_ANY && ctx) {
+    if (q->author_type == CCORD_SEARCH_AUTHOR_BOT && !ctx->author_is_bot) return false;
+    if (q->author_type == CCORD_SEARCH_AUTHOR_WEBHOOK && !ctx->author_is_webhook) return false;
+    if (q->author_type == CCORD_SEARCH_AUTHOR_USER && (ctx->author_is_bot || ctx->author_is_webhook)) return false;
   }
 
   if (q->author_id != CCORD_ID_NONE) {

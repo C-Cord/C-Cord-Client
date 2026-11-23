@@ -1101,21 +1101,25 @@ ccord_status mock_search_messages_ex(ccord_transport *t, ccord_id guild_id, ccor
 
   size_t total = 0;
   size_t count = 0;
+  bool oldest = (query->sort == CCORD_SEARCH_SORT_OLD);
   for (size_t ci = 0; ci < m->nchannels; ci++) {
     const ccord_channel *ch = &m->channels[ci];
     if (ch->kind != CCORD_CHANNEL_TEXT) continue;
     if (eff_ch != CCORD_ID_NONE && ch->id != eff_ch) continue;
     if (guild_id != CCORD_ID_NONE && ch->guild_id != guild_id) continue;
     mock_search_ud su = {.m = m, .guild_id = ch->guild_id};
-    for (size_t mi = m->chn[ci]; mi > 0; mi--) {
-      const ccord_message *msg = &m->chmsgs[ci][mi - 1];
+    for (size_t step = 0; step < m->chn[ci]; step++) {
+      size_t idx = oldest ? step : (m->chn[ci] - 1u - step);
+      const ccord_message *msg = &m->chmsgs[ci][idx];
       const char *aname = "";
       const char *ahandle = "";
       const char *anick = "";
+      bool ais_bot = false;
       for (size_t u = 0; u < MOCK_NUM_USERS; u++) {
         if (m->users[u].id == msg->author_id) {
           aname = m->users[u].name ? m->users[u].name : "";
           ahandle = m->users[u].handle ? m->users[u].handle : "";
+          ais_bot = m->users[u].is_bot;
           break;
         }
       }
@@ -1131,6 +1135,7 @@ ccord_status mock_search_messages_ex(ccord_transport *t, ccord_id guild_id, ccor
         .author_handle = ahandle,
         .author_nick = anick,
         .channel_name = ch->name ? ch->name : "",
+        .author_is_bot = ais_bot,
         .user_matches = mock_search_user_matches,
         .ud = &su,
       };

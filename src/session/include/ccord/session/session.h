@@ -299,6 +299,9 @@ size_t ccord_session_active_uploads(const ccord_session *s, ccord_id channel_id,
 [[nodiscard]] ccord_status ccord_session_search_messages_page(ccord_session *s, ccord_id guild_id, ccord_id channel_id,
                                                               const char *query, size_t query_len, uint32_t offset,
                                                               ccord_error *err);
+[[nodiscard]] ccord_status ccord_session_search_messages_sorted(ccord_session *s, ccord_id guild_id, ccord_id channel_id,
+                                                                const char *query, size_t query_len, uint32_t offset,
+                                                                ccord_search_sort sort, ccord_error *err);
 size_t ccord_session_search_result_count(const ccord_session *s);
 const ccord_message *ccord_session_search_result_at(const ccord_session *s, size_t index);
 const ccord_message *ccord_session_search_results(const ccord_session *s, size_t *out_count);

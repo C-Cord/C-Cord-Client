@@ -809,12 +809,15 @@ ccord_rect ui_search_popover_rect(const ccord_ui *ui){
   float sl = ui->mobile_layout ? ui->safe_insets.left : 0.0f;
   float sr = ui->mobile_layout ? ui->safe_insets.right : 0.0f;
   float maxw = fmaxf(ui->win_w - sl - sr - 16.0f, 180.0f);
-  float w = fminf(280.0f, maxw);
+  float w = fminf(ui->mobile_layout ? 360.0f : 336.0f, maxw);
   float x = s.x + s.w - w;
   if (x < h->x + 8.0f) x = h->x + 8.0f;
   if (x < sl + 8.0f) x = sl + 8.0f;
   if (x + w > ui->win_w - sr - 8.0f) x = ui->win_w - sr - w - 8.0f;
-  return (ccord_rect){x, h->y + h->h + 6.0f, w, 68.0f};
+  // Compact when results are open on mobile so results underneath stay visible; taller with filter chips otherwise.
+  float pop_h = (ui->mobile_layout && ui->search_edit.len >= 2) ? 72.0f
+              : (ui->mobile_layout ? 204.0f : 162.0f);
+  return (ccord_rect){x, h->y + h->h + 6.0f, w, pop_h};
 }
 
 ccord_rect ui_pins_popover_rect(const ccord_ui *ui)
@@ -1008,6 +1011,7 @@ static bool message_matches_search(const ccord_ui *ui, const ccord_message *m, c
     .author_handle = (u && u->handle) ? u->handle : "",
     .author_nick = anick,
     .channel_name = (ch && ch->name) ? ch->name : "",
+    .author_is_bot = u ? u->is_bot : false,
     .user_matches = ui_search_user_matches,
     .ud = &uctx,
   };

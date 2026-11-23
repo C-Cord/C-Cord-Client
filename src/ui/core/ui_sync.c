@@ -860,6 +860,7 @@ static uint64_t search_key(const ccord_ui *ui, ccord_id guild, ccord_id channel)
   for (size_t i = 0; i < ui->search_edit.len; i++) h = (h ^ (uint8_t)q[i]) * 1099511628211ull;
   h = (h ^ guild) * 1099511628211ull;
   h = (h ^ channel) * 1099511628211ull;
+  h = (h ^ (uint64_t)ui->search_sort) * 1099511628211ull;
   return h ? h : 1u;
 }
 
@@ -880,8 +881,8 @@ void uc_search_send(ccord_ui *ui, bool explicit_enter)
   ui->search_panel_scroll = 0.0f;
   ccord_id req_g = (sg != CCORD_ID_NONE && sg != CCORD_DM_GUILD_ID) ? sg : CCORD_ID_NONE;
   ccord_id req_ch = (req_g != CCORD_ID_NONE) ? CCORD_ID_NONE : sch;
-  (void)ccord_session_search_messages_page(ui->d.session, req_g, req_ch, ccord_text_edit_cstr(&ui->search_edit),
-                                           ui->search_edit.len, 0u, &serr);
+  (void)ccord_session_search_messages_sorted(ui->d.session, req_g, req_ch, ccord_text_edit_cstr(&ui->search_edit),
+                                             ui->search_edit.len, 0u, (ccord_search_sort)ui->search_sort, &serr);
 }
 
 void ui_search_page_step(ccord_ui *ui, int dir)
@@ -905,8 +906,8 @@ void ui_search_page_step(ccord_ui *ui, int dir)
   ccord_id req_ch = (req_g != CCORD_ID_NONE) ? CCORD_ID_NONE : sch;
   ccord_error serr;
   ui->search_panel_scroll = 0.0f;
-  (void)ccord_session_search_messages_page(ui->d.session, req_g, req_ch, ccord_text_edit_cstr(&ui->search_edit),
-                                           ui->search_edit.len, next, &serr);
+  (void)ccord_session_search_messages_sorted(ui->d.session, req_g, req_ch, ccord_text_edit_cstr(&ui->search_edit),
+                                             ui->search_edit.len, next, (ccord_search_sort)ui->search_sort, &serr);
   ui->dirty = true;
 }
 

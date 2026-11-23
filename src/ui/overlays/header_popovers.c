@@ -7,16 +7,63 @@
 
 void ui_draw_search_popover(ccord_ui *ui, ccord_renderer *r)
 {
+  ui->nsearch_chips = 0;
+  ui->search_clear_rect = (ccord_rect){0};
   if (!ui->search_open) return;
   ccord_rect box = ui_search_popover_rect(ui);
   uis_tokens tk = uis_tokens_of(ui);
   uis_popover_frame(ui, r, box);
   ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));
   ccord_text_draw(r, "SEARCH MESSAGES", 15, box.x + 10.0f, box.y + 7.0f, &ls, 0.0f);
-  ccord_rect input = {box.x + UIS_SP_2, box.y + 24.0f, box.w - 2.0f * UIS_SP_2, UIS_H_INPUT};
+  float in_h = ui->mobile_layout ? 40.0f : UIS_H_INPUT;
+  ccord_rect input = {box.x + UIS_SP_2, box.y + 24.0f, box.w - 2.0f * UIS_SP_2, in_h};
   uis_state ist = {.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, input), .focused = true};
-  (void)uis_input_padded(ui, r, input, 30.0f, UIS_SP_2, &ui->search_edit, "Filter this channel", ist, false, "srchin", 0);
+  float pad_r = ui->search_edit.len > 0 ? (ui->mobile_layout ? 34.0f : 28.0f) : UIS_SP_2;
+  (void)uis_input_padded(ui, r, input, 30.0f, pad_r, &ui->search_edit, "Search (from:, in:, has:, author_type:)", ist, false,
+                         "srchin", 0);
   ui_icon_search(r, input.x + 15.0f, input.y + input.h * 0.5f, 14.0f, COL(text_muted));
+  if (ui->search_edit.len > 0) {
+    float csz = ui->mobile_layout ? 28.0f : 22.0f;
+    ccord_rect cr = {input.x + input.w - csz - 4.0f, input.y + (input.h - csz) * 0.5f, csz, csz};
+    ui->search_clear_rect = cr;
+    bool chv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, cr);
+    ccord_color ic = uis_icon_button(ui, r, cr, (uis_state){.hover = chv}, "srchclr", 0);
+    ui_icon_close(r, cr.x + cr.w * 0.5f, cr.y + cr.h * 0.5f, 11.0f, ic);
+  }
+  // Quick-insert filter chips when there is vertical room below the input.
+  float fy = input.y + input.h + 8.0f;
+  if (fy + 24.0f > box.y + box.h - 4.0f) return;
+  ccord_text_draw(r, "FILTERS", 7, box.x + 10.0f, fy, &ls, 0.0f);
+  fy += 16.0f;
+  static const struct { const char *label; const char *tok; } k_chips[12] = {
+    {"from:", "from:"},        {"in:", "in:"},              {"mentions:", "mentions:"},
+    {"pinned", "pinned:true"}, {"bot", "author_type:bot"},  {"image", "has:image"},
+    {"video", "has:video"},    {"file", "has:file"},        {"link", "has:link"},
+    {"poll", "has:poll"},      {"forward", "has:forward"},  {"sticker", "has:sticker"},
+  };
+  const char *cur_q = ccord_text_edit_cstr(&ui->search_edit);
+  float chip_h = ui->mobile_layout ? UIS_MOB_H_CHIP : 22.0f;
+  float gap = 5.0f;
+  float cx = box.x + UIS_SP_2;
+  float max_x = box.x + box.w - UIS_SP_2;
+  ccord_text_style cs = ui_style(ui, CCORD_FONT_BOLD, tk.fs_caption, COL(text_header));
+  for (size_t i = 0; i < 12u; i++) {
+    size_t lsz = strlen(k_chips[i].label);
+    float cw = ccord_text_measure(r, k_chips[i].label, lsz, &cs, 0.0f).x + (ui->mobile_layout ? 18.0f : 14.0f);
+    if (cx + cw > max_x && cx > box.x + UIS_SP_2) {
+      cx = box.x + UIS_SP_2;
+      fy += chip_h + gap;
+    }
+    if (fy + chip_h > box.y + box.h - 4.0f) break;
+    ccord_rect cr = {cx, fy, cw, chip_h};
+    bool active = cur_q && strstr(cur_q, k_chips[i].tok) != nullptr;
+    bool hv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, cr);
+    uis_chip(ui, r, cr, k_chips[i].label, (uis_state){.hover = hv, .selected = active}, "srchchip", i);
+    ui->search_chip_rects[ui->nsearch_chips] = cr;
+    ui->search_chip_tokens[ui->nsearch_chips] = k_chips[i].tok;
+    ui->nsearch_chips++;
+    cx += cw + gap;
+  }
 }
 
 static void draw_pin_row(ccord_ui *ui, ccord_renderer *r, const ccord_message *m, ccord_rect ir)

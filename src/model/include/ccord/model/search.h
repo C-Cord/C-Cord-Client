@@ -22,7 +22,21 @@ typedef enum ccord_search_has_flags : uint32_t {
   CCORD_SEARCH_HAS_SOUND = 1u << 5,
   CCORD_SEARCH_HAS_STICKER = 1u << 6,
   CCORD_SEARCH_HAS_POLL = 1u << 7,
+  CCORD_SEARCH_HAS_FORWARD = 1u << 8,
 } ccord_search_has_flags;
+
+typedef enum ccord_search_author_type : uint8_t {
+  CCORD_SEARCH_AUTHOR_ANY = 0u,
+  CCORD_SEARCH_AUTHOR_USER = 1u,
+  CCORD_SEARCH_AUTHOR_BOT = 2u,
+  CCORD_SEARCH_AUTHOR_WEBHOOK = 3u,
+} ccord_search_author_type;
+
+typedef enum ccord_search_sort : uint8_t {
+  CCORD_SEARCH_SORT_NEW = 0u,
+  CCORD_SEARCH_SORT_OLD = 1u,
+  CCORD_SEARCH_SORT_RELEVANT = 2u,
+} ccord_search_sort;
 
 typedef struct ccord_search_query {
   char content[CCORD_SEARCH_CONTENT_MAX_BYTES];
@@ -39,6 +53,8 @@ typedef struct ccord_search_query {
   bool min_exclusive;
   uint32_t has_mask;
   int8_t pinned;   // -1 = unset, 0 = false, 1 = true
+  ccord_search_author_type author_type;
+  ccord_search_sort sort;
   uint32_t offset;
   bool has_operators;
 } ccord_search_query;
@@ -49,6 +65,8 @@ typedef struct ccord_search_msg_ctx {
   const char *author_handle;
   const char *author_nick;
   const char *channel_name;
+  bool author_is_bot;
+  bool author_is_webhook;
   bool (*user_matches)(void *ud, ccord_id user_id, const char *needle);
   void *ud;
 } ccord_search_msg_ctx;

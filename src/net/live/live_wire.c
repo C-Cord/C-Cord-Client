@@ -290,7 +290,8 @@ ccord_status ccord_live_build_search_path(ccord_id guild_id, ccord_id channel_id
   }
   bool has_any = clen > 0 || query->author_id != CCORD_ID_NONE || query->mentions_id != CCORD_ID_NONE ||
                  query->has_mask != 0 || query->min_id != CCORD_ID_NONE || query->max_id != CCORD_ID_NONE ||
-                 query->pinned >= 0 || (is_guild && eff_ch != CCORD_ID_NONE);
+                 query->pinned >= 0 || query->author_type != CCORD_SEARCH_AUTHOR_ANY ||
+                 (is_guild && eff_ch != CCORD_ID_NONE);
   if (!has_any) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "live: empty search query");
   }
@@ -328,12 +329,20 @@ ccord_status ccord_live_build_search_path(ccord_id guild_id, ccord_id channel_id
     {CCORD_SEARCH_HAS_SOUND, "sound"},
     {CCORD_SEARCH_HAS_STICKER, "sticker"},
     {CCORD_SEARCH_HAS_POLL, "poll"},
+    {CCORD_SEARCH_HAS_FORWARD, "forward"},
   };
   for (size_t i = 0; i < sizeof k_has / sizeof k_has[0]; i++) {
     if ((query->has_mask & k_has[i].bit) != 0) {
       (void)ccord_buf_appendf(out, "%chas=%s", sep, k_has[i].name);
       sep = '&';
     }
+  }
+  if (query->author_type != CCORD_SEARCH_AUTHOR_ANY) {
+    const char *at = query->author_type == CCORD_SEARCH_AUTHOR_BOT       ? "bot"
+                   : query->author_type == CCORD_SEARCH_AUTHOR_WEBHOOK   ? "webhook"
+                                                                         : "user";
+    (void)ccord_buf_appendf(out, "%cauthor_type=%s", sep, at);
+    sep = '&';
   }
   if (query->min_id != CCORD_ID_NONE) {
     (void)ccord_buf_appendf(out, "%cmin_id=%llu", sep, (unsigned long long)query->min_id);
@@ -345,6 +354,13 @@ ccord_status ccord_live_build_search_path(ccord_id guild_id, ccord_id channel_id
   }
   if (query->pinned >= 0) {
     (void)ccord_buf_appendf(out, "%cpinned=%s", sep, query->pinned ? "true" : "false");
+    sep = '&';
+  }
+  if (query->sort == CCORD_SEARCH_SORT_OLD) {
+    (void)ccord_buf_appendf(out, "%csort_by=timestamp&sort_order=asc", sep);
+    sep = '&';
+  } else if (query->sort == CCORD_SEARCH_SORT_RELEVANT) {
+    (void)ccord_buf_appendf(out, "%csort_by=relevance", sep);
     sep = '&';
   }
   if (query->offset > 0) {

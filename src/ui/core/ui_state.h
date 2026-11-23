@@ -368,6 +368,12 @@ struct ccord_ui {
   size_t view_count;                     // messages currently in the list (filtered or full)
   float search_panel_scroll, search_panel_content_h;
   float search_panel_max;   // the draw's clamp for the results list (set by draw_members.c; the wheel bounds to it)
+  uint8_t search_sort;      // ccord_search_sort: 0=New, 1=Old, 2=Relevant
+  ccord_rect search_sort_rects[3];
+  ccord_rect search_clear_rect;
+  ccord_rect search_chip_rects[12];
+  const char *search_chip_tokens[12];
+  size_t nsearch_chips;
   ccord_rect search_prev_rect, search_next_rect;
   ui_search_card_hit search_card_hits[UI_SEARCH_CARD_HIT_MAX];
   size_t nsearch_card_hits;
