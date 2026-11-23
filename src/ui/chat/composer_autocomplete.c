@@ -615,18 +615,21 @@ void ui_update_autocomplete(ccord_ui *ui)
         if (nm == 0) nm = ccord_emoji_search(query, qlen, match_idx, UI_AUTOCOMPLETE_MAX);
         for (size_t i = 0; i < nm && ui->nautocomplete < UI_AUTOCOMPLETE_MAX; i++) {
           const ccord_emoji_entry *e = ccord_emoji_at(match_idx[i]);
-          if (!e || !e->utf8 || !e->name) continue;
+          if (!e) continue;
+          const char *u = ccord_emoji_utf8(e);
+          const char *nm_sc = ccord_emoji_name(e);
+          if (!u[0] || !nm_sc[0]) continue;
           bool dup = false;
           for (size_t k = 0; k < ui->nautocomplete; k++) {
-            if (strncmp(ui->autocomplete_items[k].insert, e->utf8, strlen(e->utf8)) == 0) {
+            if (strncmp(ui->autocomplete_items[k].insert, u, strlen(u)) == 0) {
               dup = true;
               break;
             }
           }
           if (dup) continue;
           ui_autocomplete_item *it = &ui->autocomplete_items[ui->nautocomplete++];
-          snprintf(it->display, sizeof it->display, "%s :%s:", e->utf8, e->name);
-          snprintf(it->insert, sizeof it->insert, "%s ", e->utf8);
+          snprintf(it->display, sizeof it->display, "%s :%s:", u, nm_sc);
+          snprintf(it->insert, sizeof it->insert, "%s ", u);
         }
       }
     }

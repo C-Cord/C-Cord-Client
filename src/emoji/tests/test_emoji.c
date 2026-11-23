@@ -46,7 +46,7 @@ static void test_categories(void)
   ccord_emoji_category_range(CCORD_EMOJI_FLAGS, nullptr, nullptr);  // null out pointers are fine
 
   // The picker opens on a grinning face and flags come last.
-  CT_CHECK(eq(ccord_emoji_at(0)->utf8, "\xF0\x9F\x98\x80"));
+  CT_CHECK(eq(ccord_emoji_utf8(ccord_emoji_at(0)), "\xF0\x9F\x98\x80"));
   CT_CHECK(eq(ccord_emoji_at(ccord_emoji_count() - 1)->category == CCORD_EMOJI_FLAGS ? "ok" : "", "ok"));
 }
 
@@ -54,14 +54,20 @@ static void test_entries_sane(void)
 {
   for (size_t i = 0; i < ccord_emoji_count(); i++) {
     const ccord_emoji_entry *e = ccord_emoji_at(i);
-    CT_CHECK(e->utf8 && e->utf8[0]);
-    CT_CHECK(e->name && e->name[0]);
-    CT_CHECK(e->cldr_name && e->cldr_name[0]);
-    CT_CHECK(ccord_emoji_find_shortcode(e->name, strlen(e->name)) == e);
-    if (e->aliases)
-      for (const char *const *a = e->aliases; *a; a++) CT_CHECK(ccord_emoji_find_shortcode(*a, strlen(*a)) == e);
+    const char *u = ccord_emoji_utf8(e);
+    const char *nm = ccord_emoji_name(e);
+    const char *cldr = ccord_emoji_cldr_name(e);
+    CT_CHECK(u && u[0]);
+    CT_CHECK(nm && nm[0]);
+    CT_CHECK(cldr && cldr[0]);
+    CT_CHECK(ccord_emoji_find_shortcode(nm, strlen(nm)) == e);
+    size_t na = ccord_emoji_alias_count(e);
+    for (size_t k = 0; k < na; k++) {
+      const char *al = ccord_emoji_alias_at(e, k);
+      CT_CHECK(al && ccord_emoji_find_shortcode(al, strlen(al)) == e);
+    }
     int tone = -1;
-    CT_CHECK(ccord_emoji_find_utf8(e->utf8, strlen(e->utf8), &tone) == e && tone == 0);
+    CT_CHECK(ccord_emoji_find_utf8(u, strlen(u), &tone) == e && tone == 0);
   }
 }
 
@@ -85,10 +91,10 @@ static void test_shortcodes(void)
   for (size_t i = 0; i < sizeof known / sizeof known[0]; i++) {
     const ccord_emoji_entry *e = sc(known[i][0]);
     CT_CHECK(e != nullptr);
-    if (e) CT_CHECK(eq(e->utf8, known[i][1]));
+    if (e) CT_CHECK(eq(ccord_emoji_utf8(e), known[i][1]));
   }
   CT_CHECK(sc("thumbsup") == sc("+1"));
-  CT_CHECK(eq(sc("thumbsup")->name, "thumbsup"));  // primary name, "+1" is an alias
+  CT_CHECK(eq(ccord_emoji_name(sc("thumbsup")), "thumbsup"));  // primary name, "+1" is an alias
   CT_CHECK(sc("THUMBSUP") == sc("thumbsup"));       // case-insensitive
   CT_CHECK(sc("Joy") == sc("joy"));
   CT_CHECK(sc("-1") != nullptr && sc("-1") != sc("+1"));
@@ -111,11 +117,11 @@ static void test_tones(void)
     size_t n = ccord_emoji_with_tone(base, t, tmp, sizeof tmp);
     CT_CHECK(n > 0 && n == strlen(tmp));
     if (t > 0) memcpy(buf[t - 1], tmp, n + 1);
-    else CT_CHECK(eq(tmp, base->utf8));
+    else CT_CHECK(eq(tmp, ccord_emoji_utf8(base)));
   }
   for (int a = 0; a < 5; a++) {
     for (int b = a + 1; b < 5; b++) CT_CHECK(!eq(buf[a], buf[b]));
-    CT_CHECK(!eq(buf[a], base->utf8));
+    CT_CHECK(!eq(buf[a], ccord_emoji_utf8(base)));
     int tone = -1;
     CT_CHECK(ccord_emoji_find_utf8(buf[a], strlen(buf[a]), &tone) == base);
     CT_CHECK(tone == a + 1);
@@ -138,9 +144,9 @@ static void test_tones(void)
   const ccord_emoji_entry *fire = sc("fire");
   CT_CHECK(fire && !fire->has_skin_tones);
   n = ccord_emoji_with_tone(fire, 3, tmp, sizeof tmp);
-  CT_CHECK(n > 0 && eq(tmp, fire->utf8));
+  CT_CHECK(n > 0 && eq(tmp, ccord_emoji_utf8(fire)));
   n = ccord_emoji_with_tone(base, 9, tmp, sizeof tmp);
-  CT_CHECK(n > 0 && eq(tmp, base->utf8));
+  CT_CHECK(n > 0 && eq(tmp, ccord_emoji_utf8(base)));
   // Overflow returns 0 and leaves an empty string.
   char tiny[4] = "xxx";
   CT_CHECK(ccord_emoji_with_tone(base, 1, tiny, sizeof tiny) == 0 && tiny[0] == '\0');
@@ -184,7 +190,7 @@ static void test_search(void)
   CT_CHECK(n >= 2 && ccord_emoji_at(idx[0]) == sc("fire"));
   size_t first_sub = n, last_prefix = 0;
   for (size_t i = 0; i < n; i++) {
-    const char *nm = ccord_emoji_at(idx[i])->name;
+    const char *nm = ccord_emoji_name(ccord_emoji_at(idx[i]));
     if (strncmp(nm, "fire", 4) == 0) last_prefix = i;
     else if (i < first_sub) first_sub = i;
   }
@@ -219,8 +225,9 @@ static void test_complete(void)
   CT_CHECK(n > 0);
   for (size_t i = 0; i < n; i++) {
     const ccord_emoji_entry *e = ccord_emoji_at(idx[i]);
-    bool ok = strncmp(e->name, "sho", 3) == 0;
-    for (const char *const *a = e->aliases; a && *a && !ok; a++) ok = strncmp(*a, "sho", 3) == 0;
+    bool ok = strncmp(ccord_emoji_name(e), "sho", 3) == 0;
+    size_t na = ccord_emoji_alias_count(e);
+    for (size_t k = 0; k < na && !ok; k++) ok = strncmp(ccord_emoji_alias_at(e, k), "sho", 3) == 0;
     CT_CHECK(ok);
   }
   // Exact first, then others: ":joy" -> joy, joystick, ...
@@ -237,7 +244,7 @@ static void test_complete(void)
     for (size_t j = i + 1; j < n; j++) CT_CHECK(idx[i] != idx[j]);
   // Prefix only: no substring matches.
   n = ccord_emoji_complete("eyebrow", 7, idx, 32);
-  for (size_t i = 0; i < n; i++) CT_CHECK(strstr(ccord_emoji_at(idx[i])->name, "eyebrow") != nullptr);
+  for (size_t i = 0; i < n; i++) CT_CHECK(strstr(ccord_emoji_name(ccord_emoji_at(idx[i])), "eyebrow") != nullptr);
   CT_CHECK(ccord_emoji_complete("zzzzzzqqqq", 10, idx, 32) == 0);
   CT_CHECK(ccord_emoji_complete("", 0, idx, 32) == 0);
   CT_CHECK(ccord_emoji_complete("sho", 3, idx, 1) == 1);
@@ -414,8 +421,9 @@ static void test_match_prefix(void)
   // Every fully-qualified base emoji in the table matches itself completely.
   for (size_t i = 0; i < ccord_emoji_count(); i++) {
     const ccord_emoji_entry *e = ccord_emoji_at(i);
-    size_t elen = strlen(e->utf8);
-    CT_CHECK(ccord_emoji_match_prefix(e->utf8, elen) == elen);
+    const char *u = ccord_emoji_utf8(e);
+    size_t elen = strlen(u);
+    CT_CHECK(ccord_emoji_match_prefix(u, elen) == elen);
   }
 }
 

@@ -477,9 +477,9 @@ static const luaL_Reg k_semver[] = {
 static void push_emoji_entry(lua_State *L, const ccord_emoji_entry *e)
 {
   lua_createtable(L, 0, 5);
-  lua_pushstring(L, e->utf8); lua_setfield(L, -2, "unicode");
-  lua_pushstring(L, e->name); lua_setfield(L, -2, "name");
-  lua_pushstring(L, e->cldr_name ? e->cldr_name : ""); lua_setfield(L, -2, "cldr_name");
+  lua_pushstring(L, ccord_emoji_utf8(e)); lua_setfield(L, -2, "unicode");
+  lua_pushstring(L, ccord_emoji_name(e)); lua_setfield(L, -2, "name");
+  lua_pushstring(L, ccord_emoji_cldr_name(e)); lua_setfield(L, -2, "cldr_name");
   lua_pushstring(L, ccord_emoji_category_name(e->category)); lua_setfield(L, -2, "category");
   lua_pushboolean(L, e->has_skin_tones ? 1 : 0); lua_setfield(L, -2, "has_skin_tones");
 }
@@ -502,7 +502,7 @@ static int api_emoji_to_shortcode(lua_State *L)
   int tone = 0;
   const ccord_emoji_entry *e = ccord_emoji_find_utf8(s, n, &tone);
   if (!e) { lua_pushnil(L); return 1; }
-  lua_pushstring(L, e->name);
+  lua_pushstring(L, ccord_emoji_name(e));
   lua_pushinteger(L, tone);
   return 2;
 }

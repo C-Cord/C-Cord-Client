@@ -20,13 +20,21 @@ typedef enum ccord_emoji_category : uint8_t {
 } ccord_emoji_category;
 
 typedef struct ccord_emoji_entry {
-  const char *utf8;               // fully-qualified default-tone sequence
-  const char *name;               // primary shortcode WITHOUT colons, e.g. "thumbsup"
-  const char *const *aliases;     // NULL-terminated array of further shortcodes, or nullptr
-  const char *cldr_name;          // Unicode CLDR short name, e.g. "thumbs up"
+  uint32_t utf8_off;              // byte offset into ccord_emoji_strtab (default-tone sequence)
+  uint32_t name_off;              // byte offset into ccord_emoji_strtab (primary shortcode)
+  uint32_t cldr_name_off;         // byte offset into ccord_emoji_strtab (Unicode CLDR short name)
+  uint16_t alias_start;           // start index in ccord_emoji_alias_offs
+  uint8_t alias_count;            // number of alias shortcodes
   ccord_emoji_category category;
   bool has_skin_tones;            // the five uniform tone variants exist (see ccord_emoji_with_tone)
 } ccord_emoji_entry;
+
+// Field accessors for ccord_emoji_entry (all strings live in shared .rodata).
+const char *ccord_emoji_utf8(const ccord_emoji_entry *e);
+const char *ccord_emoji_name(const ccord_emoji_entry *e);
+const char *ccord_emoji_cldr_name(const ccord_emoji_entry *e);
+size_t ccord_emoji_alias_count(const ccord_emoji_entry *e);
+const char *ccord_emoji_alias_at(const ccord_emoji_entry *e, size_t idx);
 
 // Number of base emoji (skin-tone variants are not separate entries).
 size_t ccord_emoji_count(void);

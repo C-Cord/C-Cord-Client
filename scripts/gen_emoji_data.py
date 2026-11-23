@@ -325,6 +325,7 @@ def emit(bases, spellings, claimed, out_path):
     for e in bases:
         intern_bytes(to_utf8(e["cps"]))
         intern_bytes(e["name_sc"].encode("ascii"))
+        intern_bytes(e["name"].encode("utf-8"))
         for al in e["aliases"]:
             intern_bytes(al.encode("ascii"))
 
@@ -334,31 +335,32 @@ def emit(bases, spellings, claimed, out_path):
     w("};")
     w("")
 
-    # alias pool
+    # alias offset pool (packed, no nullptr sentinels)
     pool = []
-    alias_off = {}
+    alias_ranges = {}
     for e in bases:
         if e["aliases"]:
-            alias_off[e["idx"]] = len(pool)
-            pool.extend(e["aliases"])
-            pool.append(None)
-    w("static const char *const k_aliases[] = {")
-    for n in pool:
-        if n is None:
-            w("    nullptr,")
-        else:
-            w("    ccord_emoji_strtab + %d," % strtab_off[n.encode("ascii")])
+            assert len(e["aliases"]) <= 255
+            alias_ranges[e["idx"]] = (len(pool), len(e["aliases"]))
+            for al in e["aliases"]:
+                pool.append(strtab_off[al.encode("ascii")])
+    assert len(pool) <= 65535
+    w("const uint32_t ccord_emoji_alias_offs[] = {")
+    for i in range(0, len(pool), 16):
+        w("    " + ", ".join(str(x) for x in pool[i:i + 16]) + ",")
     if not pool:
-        w("    nullptr,")
+        w("    0,")
     w("};")
+    w("const size_t ccord_emoji_alias_offs_count = %d;" % len(pool))
     w("")
     w("const ccord_emoji_entry ccord_emoji_data[] = {")
     for e in bases:
-        al = f"&k_aliases[{alias_off[e['idx']]}]" if e["idx"] in alias_off else "nullptr"
+        al_start, al_count = alias_ranges.get(e["idx"], (0, 0))
         uoff = strtab_off[to_utf8(e["cps"])]
         noff = strtab_off[e["name_sc"].encode("ascii")]
-        w("    {ccord_emoji_strtab + %d, ccord_emoji_strtab + %d, %s, %s, (ccord_emoji_category)%d, %s}," % (
-            uoff, noff, al, c_text(e["name"]), e["cat"],
+        coff = strtab_off[e["name"].encode("utf-8")]
+        w("    {%d, %d, %d, %d, %d, (ccord_emoji_category)%d, %s}," % (
+            uoff, noff, coff, al_start, al_count, e["cat"],
             "true" if e["has_tones"] else "false"))
     w("};")
     w("const size_t ccord_emoji_data_count = %d;" % len(bases))

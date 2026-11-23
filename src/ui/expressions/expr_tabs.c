@@ -234,11 +234,11 @@ void ep_draw_emoji_tab(ccord_ui *ui, ccord_renderer *r, struct ui_expr_picker *e
         cell_seq++;
       } else {
         char toned[32];
-        const char *u = e->utf8;
+        const char *u = ccord_emoji_utf8(e);
         if (e->has_skin_tones && ep->skin_tone > 0 && ccord_emoji_with_tone(e, ep->skin_tone, toned, sizeof toned) > 0) {
           u = toned;
         }
-        draw_emoji_cell(ui, r, b, cell, false, CCORD_ID_NONE, CCORD_ID_NONE, false, e->name, u,
+        draw_emoji_cell(ui, r, b, cell, false, CCORD_ID_NONE, CCORD_ID_NONE, false, ccord_emoji_name(e), u,
                         ccord_emoji_category_name(e->category), &cell_seq, grid_area);
       }
       if (++col >= cols) { col = 0; gy += step_y; }
@@ -264,12 +264,12 @@ void ep_draw_emoji_tab(ccord_ui *ui, ccord_renderer *r, struct ui_expr_picker *e
       const ccord_emoji_entry *e = ccord_emoji_find_shortcode(sc, strlen(sc));
       if (!e) continue;
       char toned[32];
-      const char *u = e->utf8;
+      const char *u = ccord_emoji_utf8(e);
       if (e->has_skin_tones && ep->skin_tone > 0 && ccord_emoji_with_tone(e, ep->skin_tone, toned, sizeof toned) > 0) {
         u = toned;
       }
       ccord_rect cell = {gx0 + (float)col * (cell_sz + gap), gy, cell_sz, cell_sz};
-      draw_emoji_cell(ui, r, b, cell, false, CCORD_ID_NONE, CCORD_ID_NONE, false, e->name, u,
+      draw_emoji_cell(ui, r, b, cell, false, CCORD_ID_NONE, CCORD_ID_NONE, false, ccord_emoji_name(e), u,
                       "Frequently Used", &cell_seq, grid_area);
       if (++col >= cols) { col = 0; gy += step_y; }
     }
@@ -280,12 +280,13 @@ void ep_draw_emoji_tab(ccord_ui *ui, ccord_renderer *r, struct ui_expr_picker *e
       const ccord_emoji_entry *e = ccord_emoji_find_shortcode(key, strlen(key));
       if (e) {
         bool dup = false;
+        const char *ename = ccord_emoji_name(e);
         for (size_t qi = 0; qi < UI_EMOJI_PICKER_COUNT; qi++) {
-          if (strcmp(e->name, k_quick_reaction_shortcodes[qi]) == 0) { dup = true; break; }
+          if (strcmp(ename, k_quick_reaction_shortcodes[qi]) == 0) { dup = true; break; }
         }
         if (dup) continue;
         ccord_rect cell = {gx0 + (float)col * (cell_sz + gap), gy, cell_sz, cell_sz};
-        draw_emoji_cell(ui, r, b, cell, false, CCORD_ID_NONE, CCORD_ID_NONE, false, e->name, e->utf8,
+        draw_emoji_cell(ui, r, b, cell, false, CCORD_ID_NONE, CCORD_ID_NONE, false, ename, ccord_emoji_utf8(e),
                         "Frequently Used", &cell_seq, grid_area);
         if (++col >= cols) { col = 0; gy += step_y; }
       } else {
@@ -329,8 +330,8 @@ void ep_draw_emoji_tab(ccord_ui *ui, ccord_renderer *r, struct ui_expr_picker *e
         const ccord_emoji_entry *e = ccord_emoji_find_shortcode(fk, strlen(fk));
         if (e) {
           ccord_rect cell = {gx0 + (float)col * (cell_sz + gap), gy, cell_sz, cell_sz};
-          draw_emoji_cell(ui, r, b, cell, false, CCORD_ID_NONE, CCORD_ID_NONE, false, e->name, e->utf8,
-                          "Favorites", &cell_seq, grid_area);
+          draw_emoji_cell(ui, r, b, cell, false, CCORD_ID_NONE, CCORD_ID_NONE, false, ccord_emoji_name(e),
+                          ccord_emoji_utf8(e), "Favorites", &cell_seq, grid_area);
           if (++col >= cols) { col = 0; gy += step_y; }
         }
       }
@@ -425,12 +426,12 @@ void ep_draw_emoji_tab(ccord_ui *ui, ccord_renderer *r, struct ui_expr_picker *e
         const ccord_emoji_entry *e = ccord_emoji_at(cfirst + ei);
         if (!e) continue;
         char toned[32];
-        const char *u = e->utf8;
+        const char *u = ccord_emoji_utf8(e);
         if (e->has_skin_tones && ep->skin_tone > 0 && ccord_emoji_with_tone(e, ep->skin_tone, toned, sizeof toned) > 0) {
           u = toned;
         }
         ccord_rect cell = {gx0 + (float)col * (cell_sz + gap), row_y, cell_sz, cell_sz};
-        draw_emoji_cell(ui, r, b, cell, false, CCORD_ID_NONE, CCORD_ID_NONE, false, e->name, u, cname,
+        draw_emoji_cell(ui, r, b, cell, false, CCORD_ID_NONE, CCORD_ID_NONE, false, ccord_emoji_name(e), u, cname,
                         &local_seq, grid_area);
         if (++col >= cols) { col = 0; row_y += step_y; }
       }

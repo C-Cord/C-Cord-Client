@@ -25,6 +25,33 @@ const ccord_emoji_entry *ccord_emoji_at(size_t i)
   return i < ccord_emoji_data_count ? &ccord_emoji_data[i] : nullptr;
 }
 
+const char *ccord_emoji_utf8(const ccord_emoji_entry *e)
+{
+  return e ? ccord_emoji_strtab + e->utf8_off : "";
+}
+
+const char *ccord_emoji_name(const ccord_emoji_entry *e)
+{
+  return e ? ccord_emoji_strtab + e->name_off : "";
+}
+
+const char *ccord_emoji_cldr_name(const ccord_emoji_entry *e)
+{
+  return e ? ccord_emoji_strtab + e->cldr_name_off : "";
+}
+
+size_t ccord_emoji_alias_count(const ccord_emoji_entry *e)
+{
+  return e ? e->alias_count : 0;
+}
+
+const char *ccord_emoji_alias_at(const ccord_emoji_entry *e, size_t idx)
+{
+  if (!e || idx >= e->alias_count) return nullptr;
+  size_t pos = (size_t)e->alias_start + idx;
+  return pos < ccord_emoji_alias_offs_count ? ccord_emoji_strtab + ccord_emoji_alias_offs[pos] : nullptr;
+}
+
 const char *ccord_emoji_category_name(ccord_emoji_category c)
 {
   return (unsigned)c < CCORD_EMOJI_CATEGORY_COUNT ? k_category_names[c] : "";
@@ -58,7 +85,7 @@ static const ccord_emoji_tone_set *find_tone_set(size_t idx)
 size_t ccord_emoji_with_tone(const ccord_emoji_entry *e, int tone, char *out, size_t cap)
 {
   if (!e || !out || cap == 0) return 0;
-  const char *src = e->utf8;
+  const char *src = ccord_emoji_utf8(e);
   if (tone >= 1 && tone <= 5 && e->has_skin_tones && e >= ccord_emoji_data &&
       e < ccord_emoji_data + ccord_emoji_data_count) {
     const ccord_emoji_tone_set *ts = find_tone_set((size_t)(e - ccord_emoji_data));
@@ -278,20 +305,22 @@ static bool ci_substr(const char *hay, size_t hlen, const char *nd, size_t nlen)
 // Tiers: 0 exact name/alias, 1 prefix of name, 2 prefix of alias, 3 substring of name/alias, 4 substring of CLDR name.
 static unsigned entry_tier(const ccord_emoji_entry *e, const char *q, size_t ql, unsigned max_tier)
 {
-  size_t nlen = strlen(e->name);
+  const char *name = ccord_emoji_name(e);
+  size_t nlen = strlen(name);
   unsigned best = TIER_NONE;
-  if (nlen == ql && ci_prefix(e->name, nlen, q, ql)) return 0;
-  if (max_tier >= 1 && ci_prefix(e->name, nlen, q, ql)) best = 1;
-  else if (max_tier >= 3 && ci_substr(e->name, nlen, q, ql)) best = 3;
-  if (e->aliases) {
-    for (const char *const *a = e->aliases; *a; a++) {
-      size_t alen = strlen(*a);
-      if (alen == ql && ci_prefix(*a, alen, q, ql)) return 0;
-      if (max_tier >= 2 && best > 2 && ci_prefix(*a, alen, q, ql)) best = 2;
-      else if (max_tier >= 3 && best > 3 && ci_substr(*a, alen, q, ql)) best = 3;
-    }
+  if (nlen == ql && ci_prefix(name, nlen, q, ql)) return 0;
+  if (max_tier >= 1 && ci_prefix(name, nlen, q, ql)) best = 1;
+  else if (max_tier >= 3 && ci_substr(name, nlen, q, ql)) best = 3;
+  size_t na = ccord_emoji_alias_count(e);
+  for (size_t ai = 0; ai < na; ai++) {
+    const char *a = ccord_emoji_alias_at(e, ai);
+    size_t alen = strlen(a);
+    if (alen == ql && ci_prefix(a, alen, q, ql)) return 0;
+    if (max_tier >= 2 && best > 2 && ci_prefix(a, alen, q, ql)) best = 2;
+    else if (max_tier >= 3 && best > 3 && ci_substr(a, alen, q, ql)) best = 3;
   }
-  if (best == TIER_NONE && max_tier >= 4 && ci_substr(e->cldr_name, strlen(e->cldr_name), q, ql)) best = 4;
+  const char *cldr = ccord_emoji_cldr_name(e);
+  if (best == TIER_NONE && max_tier >= 4 && ci_substr(cldr, strlen(cldr), q, ql)) best = 4;
   return best <= max_tier ? best : TIER_NONE;
 }
 
@@ -435,9 +464,10 @@ size_t ccord_emoji_complete(const char *prefix, size_t plen, size_t *out_idx, si
       if (k->len < ql || memcmp(key, q, ql) != 0) break;
       if (has_exact && k->entry == exact_entry) continue;
       const ccord_emoji_entry *e = &ccord_emoji_data[k->entry];
-      if (e->name == key || strcmp(e->name, key) == 0) {
+      const char *ename = ccord_emoji_name(e);
+      if (ename == key || strcmp(ename, key) == 0) {
         insert_sorted_u16(t1, &n1, cap1, k->entry);
-      } else if (n1 < cap1 && !str_has_prefix(e->name, q, ql)) {
+      } else if (n1 < cap1 && !str_has_prefix(ename, q, ql)) {
         insert_sorted_u16(t2, &n2, cap1 - n1, k->entry);
       }
     }
@@ -459,7 +489,8 @@ size_t ccord_emoji_complete(const char *prefix, size_t plen, size_t *out_idx, si
     end = i + 1u;
     if (has_exact && k->entry == exact_entry) continue;
     const ccord_emoji_entry *e = &ccord_emoji_data[k->entry];
-    if (e->name == key || strcmp(e->name, key) == 0) {
+    const char *ename = ccord_emoji_name(e);
+    if (ename == key || strcmp(ename, key) == 0) {
       insert_sorted_sz(out_idx + n, &n1, cap1, k->entry);
     }
   }
@@ -472,7 +503,8 @@ size_t ccord_emoji_complete(const char *prefix, size_t plen, size_t *out_idx, si
       const char *key = ccord_emoji_strtab + k->key_off;
       if (has_exact && k->entry == exact_entry) continue;
       const ccord_emoji_entry *e = &ccord_emoji_data[k->entry];
-      if (e->name != key && strcmp(e->name, key) != 0 && !str_has_prefix(e->name, q, ql)) {
+      const char *ename = ccord_emoji_name(e);
+      if (ename != key && strcmp(ename, key) != 0 && !str_has_prefix(ename, q, ql)) {
         insert_sorted_sz(out_idx + n, &n2, cap2, k->entry);
       }
     }

@@ -23,6 +23,8 @@ typedef struct ccord_emoji_utf8_key {
 } ccord_emoji_utf8_key;
 
 extern const char ccord_emoji_strtab[];
+extern const uint32_t ccord_emoji_alias_offs[];
+extern const size_t ccord_emoji_alias_offs_count;
 extern const ccord_emoji_entry ccord_emoji_data[];
 extern const size_t ccord_emoji_data_count;
 extern const uint16_t ccord_emoji_cat_start[CCORD_EMOJI_CATEGORY_COUNT + 1];
