@@ -340,14 +340,17 @@ static void fg_serve(int lfd, int wfd, int port, const char *url, fg_script_fn f
 {
   (void)kill(s->pid, SIGTERM);
   (void)waitpid(s->pid, nullptr, 0);
-  static char data[FG_MAX_EVENTS * 256];
+  const size_t cap_bytes = FG_MAX_EVENTS * 256u;
+  char *data = (char *)malloc(cap_bytes);
   size_t len = 0;
   for (;;) {
-    ssize_t n = read(s->pipe_rd, data + len, sizeof data - 1 - len);
+    if (!data || cap_bytes - 1u <= len) break;
+    ssize_t n = read(s->pipe_rd, data + len, cap_bytes - 1u - len);
     if (n <= 0) break;
     len += (size_t)n;
   }
   close(s->pipe_rd);
+  if (!data) return 0;
   data[len] = '\0';
   size_t count = 0;
   for (char *p = data; *p && count < cap;) {
@@ -365,6 +368,7 @@ static void fg_serve(int lfd, int wfd, int port, const char *url, fg_script_fn f
     }
     p = nl + 1;
   }
+  free(data);
   return count;
 }
 

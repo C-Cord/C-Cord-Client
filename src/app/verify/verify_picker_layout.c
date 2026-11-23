@@ -11,6 +11,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "ui_internal.h"
@@ -64,14 +65,14 @@ typedef struct pl_hits {
   ui_expr_inspect ins;
 } pl_hits;
 
-static pl_hits pl_snap;
+static pl_hits *pl_snap;
 
 static bool pl_snapshot(const ccord_ui *ui)
 {
-  if (!ui_expr_get_inspect(ui, &pl_snap.ins)) return false;
-  pl_snap.n = pl_snap.ins.nhits < PL_MAX_HITS ? pl_snap.ins.nhits : PL_MAX_HITS;
-  for (size_t i = 0; i < pl_snap.n; i++) {
-    if (!ui_expr_hit_at(ui, i, &pl_snap.h[i])) return false;
+  if (!pl_snap || !ui_expr_get_inspect(ui, &pl_snap->ins)) return false;
+  pl_snap->n = pl_snap->ins.nhits < PL_MAX_HITS ? pl_snap->ins.nhits : PL_MAX_HITS;
+  for (size_t i = 0; i < pl_snap->n; i++) {
+    if (!ui_expr_hit_at(ui, i, &pl_snap->h[i])) return false;
   }
   return true;
 }
@@ -95,12 +96,12 @@ static int pl_geometry(ccord_ui *ui, const char *tag, int tab, float win_w, floa
   }
   pl_checks++;
   if (!pl_snapshot(ui)) return pl_fail("%s: picker inspection unavailable", tag);
-  if (pl_snap.n == 0) return pl_fail("%s: the tab recorded no hit cells", tag);
-  const ccord_rect clip = pl_snap.ins.grid_view;
+  if (pl_snap->n == 0) return pl_fail("%s: the tab recorded no hit cells", tag);
+  const ccord_rect clip = pl_snap->ins.grid_view;
   if (!pl_inside_x(clip, box)) return pl_fail("%s: grid clip rect leaves the popover", tag);
   // 2. every hit rect (and star rect) lies horizontally inside the grid clip rect
-  for (size_t i = 0; i < pl_snap.n; i++) {
-    const ui_expr_hit_info *h = &pl_snap.h[i];
+  for (size_t i = 0; i < pl_snap->n; i++) {
+    const ui_expr_hit_info *h = &pl_snap->h[i];
     if (!pl_inside_x(h->rect, clip)) {
       return pl_fail("%s: hit %zu (kind %d) x=%.1f w=%.1f extends past the grid clip rect %.1f..%.1f", tag, i, h->kind,
                      (double)h->rect.x, (double)h->rect.w, (double)clip.x, (double)(clip.x + clip.w));
@@ -124,16 +125,16 @@ static int pl_geometry(ccord_ui *ui, const char *tag, int tab, float win_w, floa
   float xs[PL_MAX_HITS];
   size_t nx = 0, ntiles = 0;
   int best_row = 0;
-  for (size_t i = 0; i < pl_snap.n; i++) {
-    const ui_expr_hit_info *h = &pl_snap.h[i];
+  for (size_t i = 0; i < pl_snap->n; i++) {
+    const ui_expr_hit_info *h = &pl_snap->h[i];
     if (h->kind != kind && !(kind == 0 && h->kind == 1)) continue;
     ntiles++;
     bool seen = false;
     for (size_t k = 0; k < nx; k++) seen = seen || fabsf(xs[k] - h->rect.x) < 0.5f;
     if (!seen && nx < PL_MAX_HITS) xs[nx++] = h->rect.x;
     int row = 0;   // cells sharing this cell's top edge form one grid row
-    for (size_t k = 0; k < pl_snap.n; k++) {
-      const ui_expr_hit_info *o = &pl_snap.h[k];
+    for (size_t k = 0; k < pl_snap->n; k++) {
+      const ui_expr_hit_info *o = &pl_snap->h[k];
       if ((o->kind == kind || (kind == 0 && o->kind == 1)) && fabsf(o->rect.y - h->rect.y) < 0.5f) row++;
     }
     if (row > best_row) best_row = row;
@@ -155,11 +156,11 @@ static int pl_click_last(ccord_ui *ui, ccord_store *store, const char *tag, int 
 {
   int kind = tab == PL_TAB_GIFS ? 2 : (tab == PL_TAB_STICKERS ? 6 : 0);
   const ui_expr_hit_info *last = nullptr;
-  for (size_t i = 0; i < pl_snap.n; i++) {
-    const ui_expr_hit_info *h = &pl_snap.h[i];
+  for (size_t i = 0; i < pl_snap->n; i++) {
+    const ui_expr_hit_info *h = &pl_snap->h[i];
     if (h->kind != kind && !(kind == 0 && h->kind == 1)) continue;
     // Only a cell whose centre is in the grid view can be clicked (the rest is scrolled or clipped away).
-    const ccord_rect clip = pl_snap.ins.grid_view;
+    const ccord_rect clip = pl_snap->ins.grid_view;
     float mx = h->rect.x + h->rect.w * 0.5f, my = h->rect.y + h->rect.h * 0.5f;
     if (mx < clip.x || mx > clip.x + clip.w || my < clip.y || my > clip.y + clip.h) continue;
     if (!last || h->rect.x > last->rect.x) last = h;
@@ -220,10 +221,10 @@ static int pl_forum(ccord_ui *ui, ccord_store *store, ccord_session *session)
   pl_tick(8);
   if (!ui->emoji_picker_open) return pl_fail("forum: the picker did not open over the forum");
   if (!pl_snapshot(ui)) return pl_fail("forum: picker inspection unavailable");
-  const ccord_rect clip = pl_snap.ins.grid_view;
+  const ccord_rect clip = pl_snap->ins.grid_view;
   const ui_expr_hit_info *tile = nullptr;
-  for (size_t i = 0; i < pl_snap.n && !tile; i++) {
-    const ui_expr_hit_info *h = &pl_snap.h[i];
+  for (size_t i = 0; i < pl_snap->n && !tile; i++) {
+    const ui_expr_hit_info *h = &pl_snap->h[i];
     if (h->kind != 0 && h->kind != 1) continue;
     float mx = h->rect.x + h->rect.w * 0.5f, my = h->rect.y + h->rect.h * 0.5f;
     if (mx >= clip.x && mx <= clip.x + clip.w && my >= clip.y && my <= clip.y + clip.h) tile = h;
@@ -255,11 +256,8 @@ static int pl_forum(ccord_ui *ui, ccord_store *store, ccord_session *session)
   return 0;
 }
 
-int ccord_verify_picker_layout_slice(const ccord_verify_ui_parity_ctx *ctx)
+static int pl_run_body(const ccord_verify_ui_parity_ctx *ctx)
 {
-  if (!ctx || !ctx->session || !ctx->store || !ctx->ui || !ctx->frames || !ctx->input) {
-    return pl_fail("invalid context");
-  }
   pl_ctx = ctx;
   pl_checks = 0;
   ccord_ui *ui = ctx->ui;
@@ -310,9 +308,9 @@ int ccord_verify_picker_layout_slice(const ccord_verify_ui_parity_ctx *ctx)
         for (int k = 0; k < 40; k++) {
           if (pl_snapshot(ui)) {
             size_t tiles = 0;
-            const ccord_rect clip = pl_snap.ins.grid_view;
-            for (size_t i = 0; i < pl_snap.n; i++) {
-              const ui_expr_hit_info *h = &pl_snap.h[i];
+            const ccord_rect clip = pl_snap->ins.grid_view;
+            for (size_t i = 0; i < pl_snap->n; i++) {
+              const ui_expr_hit_info *h = &pl_snap->h[i];
               float my = h->rect.y + h->rect.h * 0.5f;
               tiles += h->kind == 2 && my >= clip.y && my <= clip.y + clip.h;
             }
@@ -338,4 +336,17 @@ int ccord_verify_picker_layout_slice(const ccord_verify_ui_parity_ctx *ctx)
   printf("picker-layout: PASS checks=%d\n", pl_checks);
   fflush(stdout);
   return 0;
+}
+
+int ccord_verify_picker_layout_slice(const ccord_verify_ui_parity_ctx *ctx)
+{
+  if (!ctx || !ctx->session || !ctx->store || !ctx->ui || !ctx->frames || !ctx->input) {
+    return pl_fail("invalid context");
+  }
+  pl_snap = calloc(1, sizeof *pl_snap);
+  if (!pl_snap) return pl_fail("out of memory");
+  int rc = pl_run_body(ctx);
+  free(pl_snap);
+  pl_snap = nullptr;
+  return rc;
 }

@@ -10,6 +10,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <ccord/core/error.h>
@@ -263,7 +264,7 @@ static unsigned gf_checks;
 
 // ---- transport wrapper ------------------------------------------------------------------------------------
 
-static struct {
+typedef struct gf_tr_state {
   ccord_transport_vtable patched;
   ccord_status (*orig_fetch)(ccord_transport *, const char *, ccord_error *);
   bool (*orig_poll)(ccord_transport *, ccord_net_event *);
@@ -271,7 +272,9 @@ static struct {
   unsigned patches;                // settings-proto PATCHes the app sent (the slice's own seeds included)
   uint8_t last_patch[16384];       // the last settings-proto body, to prove which favorites it carried
   size_t last_patch_len;
-} gf_tr;
+} gf_tr_state;
+
+static gf_tr_state *gf_tr;
 
 static gf_fixture *gf_find(const char *url)
 {
@@ -289,12 +292,12 @@ static ccord_status gf_fetch_media(ccord_transport *t, const char *url, ccord_er
   // The mock accepts any URL; the live transport refuses what is not https:// on its host list (live_fetch_media,
   // live_transport.c), so the wrapper applies the same gate and error.
   if (!ccord_live_media_url_allowed(url)) return ccord_error_set(err, CCORD_ERR_PERMISSION, "live: media url blocked");
-  return gf_tr.orig_fetch(t, url, err);
+  return gf_tr->orig_fetch(t, url, err);
 }
 
 static bool gf_poll(ccord_transport *t, ccord_net_event *out)
 {
-  if (!gf_tr.orig_poll(t, out)) return false;
+  if (!gf_tr->orig_poll(t, out)) return false;
   if (out->type == CCORD_NET_MEDIA_LOADED && out->status == CCORD_OK) {
     gf_fixture *f = gf_find(out->media_url);
     if (f) {
@@ -311,13 +314,13 @@ static bool gf_poll(ccord_transport *t, ccord_net_event *out)
 static ccord_status gf_patch_settings_proto(ccord_transport *t, const uint8_t *proto, size_t proto_len,
                                             ccord_error *err)
 {
-  gf_tr.patches++;
-  gf_tr.last_patch_len = 0;
-  if (proto && proto_len <= sizeof gf_tr.last_patch) {
-    memcpy(gf_tr.last_patch, proto, proto_len);
-    gf_tr.last_patch_len = proto_len;
+  gf_tr->patches++;
+  gf_tr->last_patch_len = 0;
+  if (proto && proto_len <= sizeof gf_tr->last_patch) {
+    memcpy(gf_tr->last_patch, proto, proto_len);
+    gf_tr->last_patch_len = proto_len;
   }
-  return gf_tr.orig_patch_settings(t, proto, proto_len, err);
+  return gf_tr->orig_patch_settings(t, proto, proto_len, err);
 }
 
 // Decodes the last settings-proto PATCH. *count is its favorite_gifs entry count, has_url/url_order report one URL in
@@ -329,10 +332,10 @@ static bool gf_last_patch_gifs(size_t *count, const char *url, bool *has_url, un
   *has_url = false;
   *url_order = 0;
   *top_order = 0;
-  if (gf_tr.last_patch_len == 0) return false;
+  if (gf_tr->last_patch_len == 0) return false;
   ccord_user_expressions ux = {0};
   ccord_error e = {0};
-  bool ok = ccord_user_expressions_decode(gf_tr.last_patch, gf_tr.last_patch_len, &ux, &e) == CCORD_OK;
+  bool ok = ccord_user_expressions_decode(gf_tr->last_patch, gf_tr->last_patch_len, &ux, &e) == CCORD_OK;
   if (ok) {
     *count = ux.gif_count;
     for (size_t i = 0; i < ux.gif_count; i++) {
@@ -601,12 +604,8 @@ static size_t gf_build_settings(uint8_t *out, const uint32_t *orders)
 
 // ---- the slice ----------------------------------------------------------------------------------------------
 
-int ccord_verify_gif_favorites_run(const ccord_verify_gif_favorites_ctx *ctx)
+static int gf_run_body(const ccord_verify_gif_favorites_ctx *ctx)
 {
-  if (!ctx || !ctx->session || !ctx->store || !ctx->ui || !ctx->renderer || !ctx->transport || !ctx->frames ||
-      !ctx->input) {
-    return gf_fail("invalid context");
-  }
   gf_ctx = ctx;
   for (size_t i = 0; i < GF_NFX; i++) {
     const char *src = gf_fx[i].src;
@@ -620,16 +619,16 @@ int ccord_verify_gif_favorites_run(const ccord_verify_gif_favorites_ctx *ctx)
   ccord_renderer *r = ctx->renderer;
   ccord_error err = {0};
 
-  gf_tr.orig_fetch = ctx->transport->vt->fetch_media;
-  gf_tr.orig_poll = ctx->transport->vt->poll;
-  gf_tr.orig_patch_settings = ctx->transport->vt->patch_settings_proto;
-  gf_tr.patched = *ctx->transport->vt;
-  gf_tr.patched.fetch_media = gf_fetch_media;
-  gf_tr.patched.poll = gf_poll;
-  gf_tr.patched.patch_settings_proto = gf_patch_settings_proto;
-  gf_tr.patches = 0;
-  gf_tr.last_patch_len = 0;
-  ctx->transport->vt = &gf_tr.patched;
+  gf_tr->orig_fetch = ctx->transport->vt->fetch_media;
+  gf_tr->orig_poll = ctx->transport->vt->poll;
+  gf_tr->orig_patch_settings = ctx->transport->vt->patch_settings_proto;
+  gf_tr->patched = *ctx->transport->vt;
+  gf_tr->patched.fetch_media = gf_fetch_media;
+  gf_tr->patched.poll = gf_poll;
+  gf_tr->patched.patch_settings_proto = gf_patch_settings_proto;
+  gf_tr->patches = 0;
+  gf_tr->last_patch_len = 0;
+  ctx->transport->vt = &gf_tr->patched;
 
   // The mock connects and auto-selects a channel; wait for that like the other mock slices do.
   ccord_id chan = CCORD_ID_NONE;
@@ -900,12 +899,12 @@ int ccord_verify_gif_favorites_run(const ccord_verify_gif_favorites_ctx *ctx)
   if (ccord_store_gif_trending_count(store) == 0) return gf_fail("star click: the mock trending GIFs did not load");
   ui_expr_hit_info tile_a;
   if (!gf_reveal_trend(ui, store, nullptr, &tile_a)) return gf_fail("star click: no clickable trending GIF tile");
-  unsigned n_before = gf_tr.patches;
+  unsigned n_before = gf_tr->patches;
   size_t fav_before = ccord_store_favorite_gif_count(store);
   gf_click(tile_a.star_rect.x + tile_a.star_rect.w * 0.5f, tile_a.star_rect.y + tile_a.star_rect.h * 0.5f);
   gf_tick(1);
-  if (gf_tr.patches != n_before + 1u) {
-    return gf_failf("star click: expected exactly 1 settings-proto PATCH, got %u", gf_tr.patches - n_before);
+  if (gf_tr->patches != n_before + 1u) {
+    return gf_failf("star click: expected exactly 1 settings-proto PATCH, got %u", gf_tr->patches - n_before);
   }
   gf_checks++;
   {
@@ -932,12 +931,12 @@ int ccord_verify_gif_favorites_run(const ccord_verify_gif_favorites_ctx *ctx)
   // 12. The right-click on a tile is the same star action and must also reach Discord.
   ui_expr_hit_info tile_b;
   if (!gf_reveal_trend(ui, store, tile_a.url, &tile_b)) return gf_fail("right-click: no second clickable trending GIF tile");
-  unsigned rb_before = gf_tr.patches;
+  unsigned rb_before = gf_tr->patches;
   size_t fav_rb = ccord_store_favorite_gif_count(store);
   gf_click_button(tile_b.rect.x + tile_b.rect.w * 0.5f, tile_b.rect.y + tile_b.rect.h * 0.5f, 3);
   gf_tick(1);
-  if (gf_tr.patches != rb_before + 1u) {
-    return gf_failf("right-click: expected exactly 1 settings-proto PATCH, got %u", gf_tr.patches - rb_before);
+  if (gf_tr->patches != rb_before + 1u) {
+    return gf_failf("right-click: expected exactly 1 settings-proto PATCH, got %u", gf_tr->patches - rb_before);
   }
   gf_checks++;
   {
@@ -977,12 +976,12 @@ int ccord_verify_gif_favorites_run(const ccord_verify_gif_favorites_ctx *ctx)
   // 14. Un-starring the first tile sends one more PATCH that no longer carries it, and the tile leaves Favorites.
   ui_expr_hit_info first;
   if (!gf_tile_by_url(ui, tile_b.url, &first)) return gf_fail("un-star click: the first Favorites tile is not clickable");
-  unsigned un_before = gf_tr.patches;
+  unsigned un_before = gf_tr->patches;
   size_t fav_un = ccord_store_favorite_gif_count(store);
   gf_click(first.star_rect.x + first.star_rect.w * 0.5f, first.star_rect.y + first.star_rect.h * 0.5f);
   gf_tick(1);
-  if (gf_tr.patches != un_before + 1u) {
-    return gf_failf("un-star click: expected exactly 1 settings-proto PATCH, got %u", gf_tr.patches - un_before);
+  if (gf_tr->patches != un_before + 1u) {
+    return gf_failf("un-star click: expected exactly 1 settings-proto PATCH, got %u", gf_tr->patches - un_before);
   }
   gf_checks++;
   {
@@ -1019,4 +1018,20 @@ int ccord_verify_gif_favorites_run(const ccord_verify_gif_favorites_ctx *ctx)
   printf("gif-favorites: PASS checks=%u\n", gf_checks);
   fflush(stdout);
   return 0;
+}
+
+int ccord_verify_gif_favorites_run(const ccord_verify_gif_favorites_ctx *ctx)
+{
+  if (!ctx || !ctx->session || !ctx->store || !ctx->ui || !ctx->renderer || !ctx->transport || !ctx->frames ||
+      !ctx->input) {
+    return gf_fail("invalid context");
+  }
+  const ccord_transport_vtable *saved_vt = ctx->transport->vt;
+  gf_tr = calloc(1, sizeof *gf_tr);
+  if (!gf_tr) return gf_fail("out of memory");
+  int rc = gf_run_body(ctx);
+  if (ctx->transport->vt == &gf_tr->patched) ctx->transport->vt = saved_vt;
+  free(gf_tr);
+  gf_tr = nullptr;
+  return rc;
 }

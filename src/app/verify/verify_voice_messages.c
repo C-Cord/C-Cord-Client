@@ -60,7 +60,7 @@
 
 static const ccord_verify_parity_ctx *v_ctx;
 static fd_server *v_http_server;
-static fd_hit v_hits[VM_MAX_HITS];
+static fd_hit *v_hits;
 static size_t v_nhits;
 
 // ---- small helpers -------------------------------------------------------------------------------------------------
@@ -642,18 +642,26 @@ int ccord_verify_voice_messages_slice(const ccord_verify_parity_ctx *ctx)
     return vm_fail("invalid context");
   }
   v_ctx = ctx;
+  v_hits = calloc(VM_MAX_HITS, sizeof *v_hits);
+  if (!v_hits) return vm_fail("out of memory");
   v_nhits = 0;
   ccord_error err = {0};
 
   // The UI persists settings / drafts under the data dir: point it at a scratch dir.
   char scratch[512];
-  if (!vm_make_scratch(scratch, sizeof scratch)) return vm_fail("mkdtemp scratch dir (no writable TMPDIR, XDG_RUNTIME_DIR or /tmp)");
+  if (!vm_make_scratch(scratch, sizeof scratch)) {
+    free(v_hits);
+    v_hits = nullptr;
+    return vm_fail("mkdtemp scratch dir (no writable TMPDIR, XDG_RUNTIME_DIR or /tmp)");
+  }
   char orig_data_dir[512];
   (void)snprintf(orig_data_dir, sizeof orig_data_dir, "%s", ccord_paths_data_dir());
   ccord_paths_set_data_dir(scratch);
 
   vm_servers srv;
   if (!vm_servers_start(&srv)) {
+    free(v_hits);
+    v_hits = nullptr;
     ccord_paths_set_data_dir(orig_data_dir);
     vm_rm_rf(scratch);
     return vm_fail("start fake servers");
@@ -696,6 +704,8 @@ int ccord_verify_voice_messages_slice(const ccord_verify_parity_ctx *ctx)
 
 cleanup:
   vm_servers_stop(&srv);
+  free(v_hits);
+  v_hits = nullptr;
   ccord_paths_set_data_dir(orig_data_dir);
   vm_rm_rf(scratch);
   if (rc != 0) return vm_fail(what[0] ? what : "unknown");

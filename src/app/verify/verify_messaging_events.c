@@ -50,7 +50,7 @@
 
 static const ccord_verify_parity_ctx *p_ctx;
 static fd_server *p_http_server;
-static fd_hit p_hits[PS_MAX_HITS];
+static fd_hit *p_hits;
 static size_t p_nhits;
 
 // ---- small helpers -----------------------------------------------------------------------------------------
@@ -667,6 +667,8 @@ int ccord_verify_messaging_slice(const ccord_verify_parity_ctx *ctx)
     return ps_fail("messaging", "invalid context");
   }
   p_ctx = ctx;
+  p_hits = calloc(PS_MAX_HITS, sizeof *p_hits);
+  if (!p_hits) return ps_fail("messaging", "out of memory");
   p_nhits = 0;
   ccord_store *store = ctx->store;
   ccord_ui *ui = ctx->ui;
@@ -674,13 +676,19 @@ int ccord_verify_messaging_slice(const ccord_verify_parity_ctx *ctx)
 
   // Saved Messages persistence writes settings.ini under the data dir: point it at a scratch dir.
   char scratch[512];
-  if (!ps_make_scratch(scratch, sizeof scratch)) return ps_fail("messaging", "mkdtemp scratch dir");
+  if (!ps_make_scratch(scratch, sizeof scratch)) {
+    free(p_hits);
+    p_hits = nullptr;
+    return ps_fail("messaging", "mkdtemp scratch dir");
+  }
   char orig_data_dir[512];
   (void)snprintf(orig_data_dir, sizeof orig_data_dir, "%s", ccord_paths_data_dir());
   ccord_paths_set_data_dir(scratch);
 
   ps_servers srv;
   if (!ps_servers_start(&srv, 1, nullptr, 0)) {
+    free(p_hits);
+    p_hits = nullptr;
     ccord_paths_set_data_dir(orig_data_dir);
     return ps_fail("messaging", "start fake servers");
   }
@@ -892,6 +900,8 @@ int ccord_verify_messaging_slice(const ccord_verify_parity_ctx *ctx)
 
 cleanup:
   ps_servers_stop(&srv);
+  free(p_hits);
+  p_hits = nullptr;
   ccord_paths_set_data_dir(orig_data_dir);
   if (rc != 0) return 1;
   printf("forward_msg_ref_type1=%d\n", forward_ok ? 1 : 0);
@@ -1006,6 +1016,8 @@ int ccord_verify_settings_proto_slice(const ccord_verify_parity_ctx *ctx)
     return ps_fail("settings-proto", "invalid context");
   }
   p_ctx = ctx;
+  p_hits = calloc(PS_MAX_HITS, sizeof *p_hits);
+  if (!p_hits) return ps_fail("settings-proto", "out of memory");
   p_nhits = 0;
   ccord_store *store = ctx->store;
   ccord_error err = {0};
@@ -1017,11 +1029,15 @@ int ccord_verify_settings_proto_slice(const ccord_verify_parity_ctx *ctx)
   uint8_t *seed = nullptr;
   size_t seed_len = 0;
   if (ccord_user_expressions_encode_gifs(&seed_gif, 1, k_ps_unknown, sizeof k_ps_unknown, &seed, &seed_len, &err) != CCORD_OK) {
+    free(p_hits);
+    p_hits = nullptr;
     return ps_fail("settings-proto", err.message);
   }
 
   ps_servers srv;
   if (!ps_servers_start(&srv, 2, seed, seed_len)) {
+    free(p_hits);
+    p_hits = nullptr;
     ccord_free(seed);
     return ps_fail("settings-proto", "start fake servers");
   }
@@ -1103,6 +1119,8 @@ int ccord_verify_settings_proto_slice(const ccord_verify_parity_ctx *ctx)
 
 cleanup:
   ps_servers_stop(&srv);
+  free(p_hits);
+  p_hits = nullptr;
   ccord_free(seed);
   if (rc != 0) return 1;
   printf("settings_proto_patch_sent=%d\n", patch_sent ? 1 : 0);
@@ -1121,13 +1139,19 @@ int ccord_verify_events_stage_slice(const ccord_verify_parity_ctx *ctx)
     return ps_fail("events-stage", "invalid context");
   }
   p_ctx = ctx;
+  p_hits = calloc(PS_MAX_HITS, sizeof *p_hits);
+  if (!p_hits) return ps_fail("events-stage", "out of memory");
   p_nhits = 0;
   ccord_store *store = ctx->store;
   ccord_ui *ui = ctx->ui;
   ccord_error err = {0};
 
   ps_servers srv;
-  if (!ps_servers_start(&srv, 3, nullptr, 0)) return ps_fail("events-stage", "start fake servers");
+  if (!ps_servers_start(&srv, 3, nullptr, 0)) {
+    free(p_hits);
+    p_hits = nullptr;
+    return ps_fail("events-stage", "start fake servers");
+  }
 
   int rc = 1;
   bool crud_ok = false, rsvp_ok = false, gw_sync_ok = false, stage_ok = false;
@@ -1340,6 +1364,8 @@ int ccord_verify_events_stage_slice(const ccord_verify_parity_ctx *ctx)
 
 cleanup:
   ps_servers_stop(&srv);
+  free(p_hits);
+  p_hits = nullptr;
   if (rc != 0) return 1;
   printf("scheduled_event_crud=%d\n", crud_ok ? 1 : 0);
   printf("scheduled_event_rsvp=%d\n", rsvp_ok ? 1 : 0);

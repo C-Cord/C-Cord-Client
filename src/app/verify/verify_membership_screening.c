@@ -63,7 +63,7 @@
 
 static const ccord_verify_parity_ctx *m_ctx;
 static fd_server *m_http_server;
-static fd_hit m_hits[MS_MAX_HITS];
+static fd_hit *m_hits;
 static size_t m_nhits;
 
 // ---- small helpers (same shapes as the ps_* scaffolding in verify_messaging_events.c) -----------------------
@@ -528,6 +528,8 @@ int ccord_verify_membership_screening_slice(const ccord_verify_parity_ctx *ctx)
     return ms_fail("invalid context");
   }
   m_ctx = ctx;
+  m_hits = calloc(MS_MAX_HITS, sizeof *m_hits);
+  if (!m_hits) return ms_fail("out of memory");
   m_nhits = 0;
   ccord_store *store = ctx->store;
   ccord_ui *ui = ctx->ui;
@@ -535,13 +537,19 @@ int ccord_verify_membership_screening_slice(const ccord_verify_parity_ctx *ctx)
   ccord_error err = {0};
 
   char scratch[MS_MARK_MAX - 32];
-  if (!ms_make_scratch(scratch, sizeof scratch)) return ms_fail("mkdtemp scratch dir");
+  if (!ms_make_scratch(scratch, sizeof scratch)) {
+    free(m_hits);
+    m_hits = nullptr;
+    return ms_fail("mkdtemp scratch dir");
+  }
   char joined[MS_MARK_MAX], submitted[MS_MARK_MAX];
   (void)snprintf(joined, sizeof joined, "%s/joined", scratch);
   (void)snprintf(submitted, sizeof submitted, "%s/submitted", scratch);
 
   ms_servers srv;
   if (!ms_servers_start(&srv, joined, submitted)) {
+    free(m_hits);
+    m_hits = nullptr;
     (void)rmdir(scratch);
     return ms_fail("start fake servers");
   }
@@ -694,6 +702,8 @@ int ccord_verify_membership_screening_slice(const ccord_verify_parity_ctx *ctx)
 
 cleanup:
   ms_servers_stop(&srv);
+  free(m_hits);
+  m_hits = nullptr;
   (void)unlink(joined);
   (void)unlink(submitted);
   (void)rmdir(scratch);

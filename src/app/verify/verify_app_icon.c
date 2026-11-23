@@ -42,11 +42,13 @@ static void count_px(const uint8_t *px, int size, size_t *clear, size_t *opaque,
 static int check_sizes(void)
 {
   static const int sizes[] = {16, 22, 24, 32, 48, 64, 128, 256, 100, 512};
-  static uint8_t buf[512 * 512 * 4 + 1];
+  const size_t buf_sz = 512u * 512u * 4u + 1u;
+  uint8_t *buf = malloc(buf_sz);
+  CHECK(buf != nullptr, "alloc icon buffer");
   for (size_t i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
     int sz = sizes[i];
     size_t n = (size_t)sz * (size_t)sz * 4u;
-    memset(buf, 0xAA, sizeof buf);
+    memset(buf, 0xAA, buf_sz);
     CHECK(ccord_app_icon_rgba(sz, buf, n), "app icon rgba");
     CHECK(buf[n] == 0xAA, "no write past the exact size");
     size_t clear, opaque, indigo, teal, white;
@@ -60,13 +62,18 @@ static int check_sizes(void)
     }
   }
   CHECK(!ccord_app_icon_rgba(256, buf, 256 * 256 * 4 - 1), "short buffer rejected");
-  CHECK(!ccord_app_icon_rgba(4, buf, sizeof buf), "tiny size rejected");
+  CHECK(!ccord_app_icon_rgba(4, buf, buf_sz), "tiny size rejected");
+  free(buf);
   return 0;
 }
 
 static int check_tray(void)
 {
-  static uint8_t base[48 * 48 * 4], badge[48 * 48 * 4], app[48 * 48 * 4];
+  const size_t px_sz = 48u * 48u * 4u;
+  uint8_t *base = malloc(px_sz);
+  uint8_t *badge = malloc(px_sz);
+  uint8_t *app = malloc(px_sz);
+  CHECK(base && badge && app, "alloc tray icon buffers");
   static const int sizes[] = {22, 24, 32, 48};
   for (size_t i = 0; i < 4; i++) {
     int sz = sizes[i];
@@ -85,6 +92,9 @@ static int check_tray(void)
     CHECK(corner_clear, "tray corner is free for the badge");
     CHECK(ccord_tray_icon_rgba(sz, 5, true, badge, n) && memcmp(base, badge, n) != 0, "badge drawn over the tray icon");
   }
+  free(base);
+  free(badge);
+  free(app);
   return 0;
 }
 

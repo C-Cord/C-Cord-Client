@@ -65,7 +65,7 @@
 
 static const ccord_verify_parity_ctx *a_ctx;
 static fd_server *a_http_server;
-static fd_hit a_hits[AV_MAX_HITS];
+static fd_hit *a_hits;
 static size_t a_nhits;
 
 // ---- small helpers (same shapes as the ms_* scaffolding in verify_membership_screening.c) ---------------------
@@ -548,6 +548,8 @@ int ccord_verify_activities_slice(const ccord_verify_parity_ctx *ctx)
     return av_fail("invalid context");
   }
   a_ctx = ctx;
+  a_hits = calloc(AV_MAX_HITS, sizeof *a_hits);
+  if (!a_hits) return av_fail("out of memory");
   a_nhits = 0;
   ccord_store *store = ctx->store;
   ccord_ui *ui = ctx->ui;
@@ -555,7 +557,11 @@ int ccord_verify_activities_slice(const ccord_verify_parity_ctx *ctx)
   ccord_error err = {0};
 
   char scratch[AV_MARK_MAX - 32];
-  if (!av_make_scratch(scratch, sizeof scratch)) return av_fail("mkdtemp scratch dir");
+  if (!av_make_scratch(scratch, sizeof scratch)) {
+    free(a_hits);
+    a_hits = nullptr;
+    return av_fail("mkdtemp scratch dir");
+  }
   char second[AV_MARK_MAX], ended[AV_MARK_MAX], inst2[AV_MARK_MAX], launched[AV_MARK_MAX], left[AV_MARK_MAX];
   (void)snprintf(second, sizeof second, "%s/second", scratch);
   (void)snprintf(ended, sizeof ended, "%s/ended", scratch);
@@ -565,6 +571,8 @@ int ccord_verify_activities_slice(const ccord_verify_parity_ctx *ctx)
 
   av_servers srv;
   if (!av_servers_start(&srv, scratch)) {
+    free(a_hits);
+    a_hits = nullptr;
     (void)rmdir(scratch);
     return av_fail("start fake servers");
   }
@@ -751,6 +759,8 @@ cleanup:
   if (host_swapped) ui->d.host.open_url = saved_open;
   ui->stage_channel = CCORD_ID_NONE;
   av_servers_stop(&srv);
+  free(a_hits);
+  a_hits = nullptr;
   (void)unlink(launched);
   (void)unlink(left);
   (void)unlink(second);

@@ -1131,8 +1131,8 @@ typedef struct ev_kind {
   bool use_noise;
 } ev_kind;
 
-static ev_kind ev_kinds[9];
-#define EV_NKINDS (sizeof ev_kinds / sizeof ev_kinds[0])
+static ev_kind *ev_kinds;
+#define EV_NKINDS 9u
 
 static const char *const ev_sig = "?ex=6740a1b2&is=673f5032&hm=8f3c2d1e9a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d2e1f0a9b8c7d6e5f4a3b2c1d&";
 #define EV_CH "%llu"
@@ -1451,12 +1451,8 @@ static bool ev_inject(const char *json)
 
 // ---- the slice -----------------------------------------------------------------------------------------------
 
-int ccord_verify_embed_video_run(const ccord_verify_embed_video_ctx *ctx)
+static int ev_run_body(const ccord_verify_embed_video_ctx *ctx)
 {
-  if (!ctx || !ctx->session || !ctx->store || !ctx->ui || !ctx->renderer || !ctx->transport || !ctx->frames ||
-      !ctx->input) {
-    return ev_fail("invalid context");
-  }
   ev_ctx = ctx;
   ccord_ui *ui = ctx->ui;
   ccord_renderer *r = ctx->renderer;
@@ -1603,4 +1599,18 @@ int ccord_verify_embed_video_run(const ccord_verify_embed_video_ctx *ctx)
   printf("embed-video: PASS checks=%u\n", ev_checks);
   fflush(stdout);
   return 0;
+}
+
+int ccord_verify_embed_video_run(const ccord_verify_embed_video_ctx *ctx)
+{
+  if (!ctx || !ctx->session || !ctx->store || !ctx->ui || !ctx->renderer || !ctx->transport || !ctx->frames ||
+      !ctx->input) {
+    return ev_fail("invalid context");
+  }
+  ev_kinds = calloc(EV_NKINDS, sizeof *ev_kinds);
+  if (!ev_kinds) return ev_fail("out of memory");
+  int rc = ev_run_body(ctx);
+  free(ev_kinds);
+  ev_kinds = nullptr;
+  return rc;
 }

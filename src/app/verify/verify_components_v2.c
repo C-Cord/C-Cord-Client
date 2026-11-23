@@ -60,7 +60,7 @@
 
 static const ccord_verify_parity_ctx *c_ctx;
 static fd_server *c_http_server;
-static fd_hit c_hits[CV_MAX_HITS];
+static fd_hit *c_hits;
 static size_t c_nhits;
 
 // ---- fixtures ------------------------------------------------------------------------------------------------------
@@ -582,18 +582,26 @@ int ccord_verify_components_v2_slice(const ccord_verify_parity_ctx *ctx)
     return cv_fail("invalid context");
   }
   c_ctx = ctx;
+  c_hits = calloc(CV_MAX_HITS, sizeof *c_hits);
+  if (!c_hits) return cv_fail("out of memory");
   c_nhits = 0;
   ccord_error err = {0};
 
   // The UI persists settings / drafts under the data dir: point it at a scratch dir.
   char scratch[512];
-  if (!cv_make_scratch(scratch, sizeof scratch)) return cv_fail("mkdtemp scratch dir");
+  if (!cv_make_scratch(scratch, sizeof scratch)) {
+    free(c_hits);
+    c_hits = nullptr;
+    return cv_fail("mkdtemp scratch dir");
+  }
   char orig_data_dir[512];
   (void)snprintf(orig_data_dir, sizeof orig_data_dir, "%s", ccord_paths_data_dir());
   ccord_paths_set_data_dir(scratch);
 
   cv_servers srv;
   if (!cv_servers_start(&srv)) {
+    free(c_hits);
+    c_hits = nullptr;
     ccord_paths_set_data_dir(orig_data_dir);
     cv_rm_rf(scratch);
     return cv_fail("start fake servers");
@@ -625,7 +633,11 @@ cleanup:
   cv_servers_stop(&srv);
   ccord_paths_set_data_dir(orig_data_dir);
   cv_rm_rf(scratch);
-  if (rc != 0) return 1;
+  if (rc != 0) {
+    free(c_hits);
+    c_hits = nullptr;
+    return 1;
+  }
 
   const bool results[CV_CHECKS] = {parse_ok, render_ok, nodup_ok, button_ok, select_ok, legacy_ok};
   const char *const names[CV_CHECKS] = {"cv2_parse", "cv2_render", "cv2_no_dup_attachments", "cv2_button_interaction",
@@ -635,6 +647,8 @@ cleanup:
     printf("%s=%d\n", names[i], results[i] ? 1 : 0);
     passed += results[i] ? 1 : 0;
   }
+  free(c_hits);
+  c_hits = nullptr;
   if (passed != CV_CHECKS) {
     fprintf(stderr, "ccord: --verify-slice components-v2: FAILED %d of %d checks\n", CV_CHECKS - passed, CV_CHECKS);
     return 1;

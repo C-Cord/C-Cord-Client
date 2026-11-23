@@ -773,8 +773,9 @@ static void ex_media_install(ccord_transport *tr, const char *base)
 
 // ---- input & pump helpers ----------------------------------------------------------------------------------
 
+#define EX_MAX_HITS 256u
 static fd_server *ex_http_server;
-static fd_hit ex_hits[256];
+static fd_hit *ex_hits;
 static size_t ex_nhits;
 
 // The fd child writes one fd_hit per request into a pipe the parent normally only drains at fd_stop.
@@ -792,7 +793,7 @@ static void ex_drain_hits(void)
       got += (size_t)n;
     }
     if (got < sizeof tmp) break;
-    if (ex_nhits < sizeof ex_hits / sizeof ex_hits[0]) ex_hits[ex_nhits++] = tmp;
+    if (ex_nhits < EX_MAX_HITS) ex_hits[ex_nhits++] = tmp;
   }
 }
 
@@ -854,12 +855,8 @@ static bool ex_hit_is(const ui_expr_hit_info *hi, int kind, const char *url_part
 
 // ---- the slice ----------------------------------------------------------------------------------------------
 
-int ccord_verify_expressions_run(const ccord_verify_expressions_ctx *ctx)
+static int ex_run_body(const ccord_verify_expressions_ctx *ctx)
 {
-  if (!ctx || !ctx->session || !ctx->store || !ctx->ui || !ctx->renderer || !ctx->frames ||
-      !ctx->advance_ms || !ctx->now_ms || !ctx->input || !ctx->set_transport) {
-    return ex_fail("invalid context");
-  }
   ex_ctx = ctx;
   ccord_store *store = ctx->store;
   ccord_ui *ui = ctx->ui;
@@ -1331,7 +1328,7 @@ cleanup:
   {
     fd_hit tail[64];
     size_t nt = fd_stop(&http, tail, 64);
-    for (size_t i = 0; i < nt && ex_nhits < sizeof ex_hits / sizeof ex_hits[0]; i++) ex_hits[ex_nhits++] = tail[i];
+    for (size_t i = 0; i < nt && ex_nhits < EX_MAX_HITS; i++) ex_hits[ex_nhits++] = tail[i];
   }
   ex_http_server = nullptr;
 
@@ -1372,4 +1369,19 @@ cleanup:
     return 1;
   }
   return 0;
+}
+
+int ccord_verify_expressions_run(const ccord_verify_expressions_ctx *ctx)
+{
+  if (!ctx || !ctx->session || !ctx->store || !ctx->ui || !ctx->renderer || !ctx->frames ||
+      !ctx->advance_ms || !ctx->now_ms || !ctx->input || !ctx->set_transport) {
+    return ex_fail("invalid context");
+  }
+  ex_hits = calloc(EX_MAX_HITS, sizeof *ex_hits);
+  if (!ex_hits) return ex_fail("out of memory");
+  ex_nhits = 0;
+  int rc = ex_run_body(ctx);
+  free(ex_hits);
+  ex_hits = nullptr;
+  return rc;
 }

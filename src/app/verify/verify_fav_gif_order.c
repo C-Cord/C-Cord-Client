@@ -16,6 +16,7 @@
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <ccord/core/error.h>
@@ -158,7 +159,7 @@ static void fo_store_dump(char *buf, size_t cap)
 // order, stable-sorted by order descending.
 #define FO_MAX 64u
 static const char *fo_exp[FO_MAX];
-static char fo_extra_url[FO_MAX][CCORD_URL_MAX_BYTES + 1];   // copies: the store's array shifts as favourites move
+static char (*fo_extra_url)[CCORD_URL_MAX_BYTES + 1];   // copies: the store's array shifts as favourites move
 static uint32_t fo_exp_order[FO_MAX];
 static size_t fo_nexp;
 static uint32_t fo_max_order;
@@ -171,7 +172,7 @@ static void fo_build_expected(void)
     bool ours = false;
     for (size_t k = 0; k < FO_N; k++) ours = ours || strcmp(it->url, fo_wire[k].url) == 0;
     if (ours) continue;
-    (void)snprintf(fo_extra_url[n], sizeof fo_extra_url[n], "%s", it->url);
+    (void)snprintf(fo_extra_url[n], CCORD_URL_MAX_BYTES + 1u, "%s", it->url);
     fo_exp[n] = fo_extra_url[n];
     fo_exp_order[n++] = it->order;
   }
@@ -283,12 +284,8 @@ static int fo_check_picker(const char *const *urls, size_t nurls, const char *wh
   return 0;
 }
 
-int ccord_verify_fav_gif_order_slice(const ccord_verify_ui_parity_ctx *ctx)
+static int fo_run_body(const ccord_verify_ui_parity_ctx *ctx)
 {
-  if (!ctx || !ctx->session || !ctx->store || !ctx->ui || !ctx->renderer || !ctx->transport || !ctx->frames ||
-      !ctx->input) {
-    return fo_fail("invalid context");
-  }
   fo_ctx = ctx;
   fo_checks = 0;
   ccord_error err = {0};
@@ -561,4 +558,18 @@ int ccord_verify_fav_gif_order_slice(const ccord_verify_ui_parity_ctx *ctx)
 
   printf("fav-gif-order: PASS checks=%u\n", fo_checks);
   return 0;
+}
+
+int ccord_verify_fav_gif_order_slice(const ccord_verify_ui_parity_ctx *ctx)
+{
+  if (!ctx || !ctx->session || !ctx->store || !ctx->ui || !ctx->renderer || !ctx->transport || !ctx->frames ||
+      !ctx->input) {
+    return fo_fail("invalid context");
+  }
+  fo_extra_url = calloc(FO_MAX, sizeof *fo_extra_url);
+  if (!fo_extra_url) return fo_fail("out of memory");
+  int rc = fo_run_body(ctx);
+  free(fo_extra_url);
+  fo_extra_url = nullptr;
+  return rc;
 }
