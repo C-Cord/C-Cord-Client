@@ -268,13 +268,17 @@ static void draw_streaming(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
   ccord_text_draw_ellipsis(r, note, strlen(note), g->content.x, st_stream_row_y(g, 5) + 4.0f, g->content.w, &ns);
 }
 
+static const char *const st_k_spoiler_modes[3] = {"On click", "When moderating", "Always"};
+
 static void draw_text_images(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 {
   draw_toggle_row(ui, r, g, 0, "INLINE EMBEDS", "Show link previews and embed cards in chat.", ui->settings_embeds, false);
   draw_toggle_row(ui, r, g, 1, "ATTACHMENT PREVIEWS", "Render image and file attachment cards.", ui->settings_attachments, false);
+  draw_row_label(ui, r, g, 2, "SHOW SPOILERS");
+  draw_chip_row(ui, r, g, 2, 3, st_k_spoiler_modes, (int)ui->settings_spoiler_mode);
   ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_muted));
   const char *note = "Turning a card off hides it locally; the message and its data stay in the channel.";
-  ccord_text_draw_ellipsis(r, note, strlen(note), g->content.x, st_row_y(g, 2) + 8.0f, g->content.w, &ns);
+  ccord_text_draw_ellipsis(r, note, strlen(note), g->content.x, st_row_y(g, 3) + 8.0f, g->content.w, &ns);
 }
 
 // True while a left press that started on `rc` is recent and the pointer is still on it.

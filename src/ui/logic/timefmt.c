@@ -7,6 +7,18 @@
 #include <stdio.h>
 #include <time.h>
 
+static ccord_timefmt_mode g_timefmt_mode = CCORD_TIMEFMT_AUTO;
+
+void ccord_timefmt_set_mode(ccord_timefmt_mode mode)
+{
+  if (mode <= CCORD_TIMEFMT_24H) g_timefmt_mode = mode;
+}
+
+ccord_timefmt_mode ccord_timefmt_get_mode(void)
+{
+  return g_timefmt_mode;
+}
+
 static bool to_tm(int64_t ts_ms, bool use_utc, struct tm *out)
 {
   int64_t secs = ts_ms >= 0 ? ts_ms / 1000 : -((-ts_ms + 999) / 1000);
@@ -22,8 +34,13 @@ size_t ccord_timefmt_clock(char *out, size_t cap, int64_t ts_ms, bool use_utc)
     out[0] = '\0';
     return 0;
   }
-  int h12 = tm.tm_hour % 12 == 0 ? 12 : tm.tm_hour % 12;
-  int n = snprintf(out, cap, "%d:%02d %s", h12, tm.tm_min, tm.tm_hour < 12 ? "AM" : "PM");
+  int n;
+  if (g_timefmt_mode == CCORD_TIMEFMT_24H) {
+    n = snprintf(out, cap, "%02d:%02d", tm.tm_hour, tm.tm_min);
+  } else {
+    int h12 = tm.tm_hour % 12 == 0 ? 12 : tm.tm_hour % 12;
+    n = snprintf(out, cap, "%d:%02d %s", h12, tm.tm_min, tm.tm_hour < 12 ? "AM" : "PM");
+  }
   if (n < 0) {
     out[0] = '\0';
     return 0;

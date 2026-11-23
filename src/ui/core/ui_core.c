@@ -591,6 +591,8 @@ ccord_ui *ccord_ui_create(const ccord_ui_deps *deps, ccord_error *err)
   ui->settings_animate_stickers = 0;   // 0 always, 1 hover/focus, 2 never
   ui->settings_gif_auto_play = true;
   ui->settings_animate_emoji = true;
+  ui->settings_underline_links = true;
+  ui->last_system_theme = -1;
   ui_settings_init(ui);   // defaults, then the persisted INI when present
   uc_drafts_load(ui);
   if (ccord_store_guild_count(ui->d.store) > 0) {
@@ -984,6 +986,7 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
   uc_auto_ack(ui);
   uc_search_tick(ui);
   ui_reminders_tick(ui);
+  ui_settings_m6_system_theme_tick(ui);
   if (ui->discovery_due_ms != 0) {
     if (!ui->discovery_open) {
       ui->discovery_due_ms = 0;

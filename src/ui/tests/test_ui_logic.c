@@ -414,6 +414,23 @@ static void test_timefmt(void)
   CT_CHECK(strcmp(out, "Wednesday, December 31, 1969 11:59 PM") == 0);
   CT_CHECK(ccord_timefmt_full(tiny, sizeof tiny, base, true) == 5 && strcmp(tiny, "Sunda") == 0);
   CT_CHECK(ccord_timefmt_full(tiny, 0, base, true) == 0);
+
+  // 24-hour / 12-hour / Auto clock modes
+  CT_CHECK(ccord_timefmt_get_mode() == CCORD_TIMEFMT_AUTO);
+  ccord_timefmt_set_mode(CCORD_TIMEFMT_24H);
+  CT_CHECK(ccord_timefmt_get_mode() == CCORD_TIMEFMT_24H);
+  ccord_timefmt_clock(out, sizeof out, base, true);
+  CT_CHECK(strcmp(out, "12:00") == 0);
+  ccord_timefmt_clock(out, sizeof out, base + 14 * 3600 * 1000LL + 34 * 60 * 1000LL, true);
+  CT_CHECK(strcmp(out, "02:34") == 0);
+  ccord_timefmt_clock(out, sizeof out, base - 12 * 3600 * 1000LL, true);
+  CT_CHECK(strcmp(out, "00:00") == 0);
+  ccord_timefmt_message(out, sizeof out, base + 2 * 3600 * 1000LL + 5 * 60 * 1000LL, base, true);
+  CT_CHECK(strcmp(out, "Today at 14:05") == 0);
+  ccord_timefmt_set_mode(CCORD_TIMEFMT_12H);
+  ccord_timefmt_clock(out, sizeof out, base + 2 * 3600 * 1000LL + 5 * 60 * 1000LL, true);
+  CT_CHECK(strcmp(out, "2:05 PM") == 0);
+  ccord_timefmt_set_mode(CCORD_TIMEFMT_AUTO);
 }
 
 int main(void)

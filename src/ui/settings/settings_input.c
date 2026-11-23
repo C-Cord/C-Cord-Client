@@ -281,6 +281,13 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         ui->dirty = true;
         return true;
       }
+      for (int i = 0; i < 3; i++) {
+        if (ui_in_rect(x, y, st_chips_rect(g, 2, i, 3))) {
+          ui->settings_spoiler_mode = (uint8_t)i;
+          ui->dirty = true;
+          return true;
+        }
+      }
       break;
     case SP_NOTIFICATIONS:
       // M6 rework: body, capability gating and the /tts PATCH live in settings_m6_prefs.c.
@@ -354,8 +361,8 @@ static int64_t settings_hover_key(const ccord_ui *ui, const sgeom *g, float x, f
       for (int i = 0; i < 2; i++) {
         if (ui_in_rect(x, y, st_chips_rect(&ga, 0, i, 2))) return 200 + i;
       }
-      for (int i = 0; i < 3; i++) {
-        if (ui_in_rect(x, y, st_chips_rect(&ga, 1, i, 3))) return 210 + i;
+      for (int i = 0; i < 4; i++) {
+        if (ui_in_rect(x, y, st_chips_rect(&ga, 1, i, 4))) return 210 + i;
       }
       if (ui_in_rect(x, y, st_vol_minus_rect(&ga, 2))) return 220;
       if (ui_in_rect(x, y, st_vol_plus_rect(&ga, 2))) return 221;

@@ -540,7 +540,8 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
     }
     bool has_role;
     ccord_color rc = ui_role_color(ui, guild, m->author_id, &has_role);
-    ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), has_role ? rc : COL(text_header));
+    ccord_color name_col = (has_role && ui->settings_role_color_mode == 0) ? rc : COL(text_header);
+    ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), name_col);
     float nw = ccord_text_measure(r, name, strlen(name), &ns, 0.0f).x;
     float max_name = maxf(ma->w - M(message_text_x) - M(message_pad_x) - 160.0f, 60.0f);
     dc_chat_sel_process_run(ui, r, name, strlen(name), &ns, text_x, y + top, fminf(nw, max_name), lh, 0.0f);
@@ -550,8 +551,10 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
     dc_record_user_hit(ui, au_rect, m->author_id);
     float x = text_x + nw + 8.0f;
     const char *role_icon = ui_member_role_icon(ui, guild, m->author_id);
+    bool show_role_dot = has_role && ui->settings_role_color_mode == 1;
     {   // the blank between the name and the time (badges included) is part of a selected header line
       float x_time = x;
+      if (show_role_dot) x_time += 14.0f;
       if (role_icon && role_icon[0]) {
         ccord_text_style is = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(text_header));
         x_time += ccord_text_measure(r, role_icon, strlen(role_icon), &is, 0.0f).x + 6.0f;
@@ -570,6 +573,10 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
                   6.0f;
       }
       dc_chat_sel_process_gap(ui, r, text_x + nw, y + top, 1, x_time - (text_x + nw), lh);
+    }
+    if (show_role_dot) {
+      ccord_draw_circle(r, x + 4.0f, y + top + lh * 0.5f, 4.0f, rc);
+      x += 14.0f;
     }
     if (role_icon && role_icon[0]) {
       ccord_text_style is = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(text_header));

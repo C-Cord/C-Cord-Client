@@ -19,6 +19,7 @@ bool ui_keybind_match(const ccord_ui *ui, int which, const ccord_input_event *ev
 void ui_quickcss_changed(ccord_ui *ui);
 // Advanced-page close-to-tray toggle rect (settings_m6_prefs.c; zero before the first draw).
 ccord_rect ui_settings_m6_close_tray_rect(const ccord_ui *ui);
+void ui_settings_m6_system_theme_tick(ccord_ui *ui);
 // ---- per-sound toggles (settings_m6_prefs.c) ----
 // One entry per earcon kind, in ccord_earcon_kind order (src/app/earcons.h keeps a static assert on the count).
 // `key` is the name the verify slice prints, `ini` the settings.ini key (default on, "sound_..." = 0/1).

@@ -330,7 +330,18 @@ static size_t resolve_token_label(const ccord_ui *ui, const ui_md_token *tok, ch
 
 bool dc_is_spoiler_revealed(const ccord_ui *ui, ccord_id msg_id)
 {
-  if (!ui || msg_id == CCORD_ID_NONE) return false;
+  if (!ui) return false;
+  if (ui->settings_spoiler_mode == 2) return true;   // Always show spoilers
+  if (ui->settings_spoiler_mode == 1 && ui->d.store) {
+    ccord_id g = ccord_store_selected_guild(ui->d.store);
+    ccord_id ch = ccord_store_selected_channel(ui->d.store);
+    ccord_id self_id = ccord_store_self_id(ui->d.store);
+    if (g != CCORD_ID_NONE && g != CCORD_DM_GUILD_ID &&
+        ccord_store_has_permission(ui->d.store, g, ch, self_id, CCORD_PERM_MANAGE_MESSAGES)) {
+      return true;
+    }
+  }
+  if (msg_id == CCORD_ID_NONE) return false;
   for (size_t i = 0; i < ui->nrevealed_spoilers; i++) {
     if (ui->revealed_spoilers[i] == msg_id) return true;
   }
@@ -647,8 +658,12 @@ static float md_inline_walk_core(ccord_ui *ui, ccord_renderer *r, const char *te
           dc_record_ts_hit(ui, (ccord_rect){x + cx, y + cy, tw, lh}, ts_ms, false);
         }
         if (tok.style == UI_MD_LINK && tok.url && tok.url_len > 0 && !invite_masked) {
-          ccord_draw_rect(r, (ccord_rect){x + cx, y + cy + lh - 2.0f, tw, 1.0f}, COL(text_link));
-          dc_record_link_hit(ui, (ccord_rect){x + cx, y + cy, tw, lh}, tok.url, tok.url_len);
+          ccord_rect lrc = {x + cx, y + cy, tw, lh};
+          bool lhv = ui && ui->mouse_in && ui_in_rect(ui->mx, ui->my, lrc);
+          if (!ui || ui->settings_underline_links || lhv) {
+            ccord_draw_rect(r, (ccord_rect){x + cx, y + cy + lh - 2.0f, tw, 1.0f}, COL(text_link));
+          }
+          dc_record_link_hit(ui, lrc, tok.url, tok.url_len);
         }
         if (!spoiler_hidden && (tok.style == UI_MD_UNDERLINE || tok.underline)) {
           ccord_draw_rect(r, (ccord_rect){x + cx, y + cy + lh - 2.0f, tw, 1.0f}, st.color);

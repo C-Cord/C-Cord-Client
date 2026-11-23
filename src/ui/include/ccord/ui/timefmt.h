@@ -2,6 +2,14 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #pragma once
 #include <ccord/core/config.h>
+typedef enum ccord_timefmt_mode : uint8_t {
+  CCORD_TIMEFMT_AUTO = 0,
+  CCORD_TIMEFMT_12H = 1,
+  CCORD_TIMEFMT_24H = 2,
+} ccord_timefmt_mode;
+// Process-wide clock display preference (Auto = 12-hour default, 12-hour, or 24-hour).
+void ccord_timefmt_set_mode(ccord_timefmt_mode mode);
+ccord_timefmt_mode ccord_timefmt_get_mode(void);
 // Timestamp text for message headers. No SDL.
 //   same calendar day as `now`      -> "Today at 2:34 PM"
 //   the day before                  -> "Yesterday at 2:34 PM"

@@ -92,10 +92,10 @@ typedef struct page_expect {
 static const page_expect k_expect[] = {
   // Signed out with no sign-in configured: the account page without a footer button (k_footer_* cover the footer).
   {"My Account", TP_ACCOUNT, 10, 3, 0, 0, 0, 0},
-  {"Appearance", TP_APPEARANCE, 3, 1, 3, 5, 0, 1},
+  {"Appearance", TP_APPEARANCE, 3, 1, 3, 6, 0, 1},
   {"Voice & Video", TP_VOICE, 6, 0, 4, 2, 4, 3},
   {"Streaming", TP_STREAMING, 0, 0, 0, 21, 0, 0},
-  {"Text & Images", TP_TEXT_IMAGES, 0, 0, 2, 0, 0, 0},
+  {"Text & Images", TP_TEXT_IMAGES, 0, 0, 2, 3, 0, 0},
   {"Notifications", TP_NOTIFICATIONS, 1, 0, 5, 4, 0, 0},
   {"Keybinds", TP_KEYBINDS, 5, 0, 0, 0, 0, 0},   // one key-cap button per keybind row: five rows
   {"Plugins", TP_PLUGINS, 1, 0, 1, 0, 0, 0},   // Sync button (sub-tabs & filter chips use uis_tab) + Extensions toggle
@@ -107,9 +107,9 @@ static const page_expect k_expect[] = {
   {"Devices", TP_DEVICES, 2, 0, 0, 0, 0, 0},
   // Seeded by the mock: three connections, each with a Disconnect button and three toggles, plus the footer button.
   {"Connections", TP_CONNECTIONS, 4, 0, 9, 0, 0, 0},
-  {"Accessibility", TP_ACCESSIBILITY, 0, 0, 3, 5, 0, 0},
+  {"Accessibility", TP_ACCESSIBILITY, 0, 0, 4, 8, 0, 0},
   {"Streamer Mode", TP_STREAMER, 0, 0, 6, 0, 0, 0},
-  {"Language", TP_LANGUAGE, 0, 0, 0, 0, 1, 0},
+  {"Language", TP_LANGUAGE, 0, 0, 0, 3, 1, 0},
   {"Advanced", TP_ADVANCED, 0, 0, 3, 0, 0, 0},
   // Jump-threshold stepper (two buttons + slider), game detection, tray badge, suppress-when-focused.
   {"C-Cord", TP_CCORD, 2, 0, 4, 0, 0, 1},

@@ -79,6 +79,7 @@ typedef struct ccord_settings_m6_prefs_debug {
   uint32_t caps;                      // desktop_capabilities() as last read (all bits when host is null)
   // Appearance theme/zoom block
   ccord_rect theme_chips[3];          // c-cord-dark / c-cord-light / c-cord-amoled
+  ccord_rect theme_chip_system;       // c-cord-system (Same as Device)
   ccord_rect zoom_minus, zoom_track, zoom_plus, zoom_reset;
   // Notifications
   ccord_rect notify_mentions, notify_messages, notify_sounds, notify_desktop;
@@ -92,10 +93,12 @@ typedef struct ccord_settings_m6_prefs_debug {
   bool notify_badge_on, notify_focus_suppress;
   // Accessibility
   ccord_rect gif_toggle, emoji_toggle, sticker_chips[3], reduced_motion_toggle, display_chips[2];
+  ccord_rect role_color_chips[3], underline_links_toggle;
   // Streamer Mode
   ccord_rect streamer_toggle, stream_notify_toggle;
   // Language
   ccord_rect language_row;
+  ccord_rect time_format_chips[3];
   int locale_index;                   // index of the confirmed locale in the fixed list, -1 when unknown
   // Advanced
   ccord_rect developer_toggle, hardware_toggle;

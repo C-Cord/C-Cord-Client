@@ -20,6 +20,8 @@
 #include "settings_m6_prefs.h"
 
 #include <ccord/core/paths.h>
+#include <ccord/ui/timefmt.h>
+#include <SDL3/SDL_video.h>
 
 #define M(name) (ui->theme->m.name)
 #define COL(name) (ui->theme->c.name)
@@ -214,12 +216,20 @@ static void prefs_submit_patch(ccord_ui *ui, const ccord_user_settings_patch *pa
 }
 
 // ---- Appearance theme / zoom ------------------------------------------------------------------
-static const char *const k_theme_ids[3] = {"c-cord-dark", "c-cord-light", "c-cord-amoled"};
-static const char *const k_theme_labels[3] = {"Graphite", "Stone", "Obsidian"};
+static const char *const k_theme_ids[4] = {"c-cord-dark", "c-cord-light", "c-cord-amoled", "c-cord-system"};
+static const char *const k_theme_labels[4] = {"Graphite", "Stone", "Obsidian", "System"};
+
+static const char *resolve_effective_theme_id(const char *id)
+{
+  if (id && strcmp(id, "c-cord-system") == 0) {
+    return SDL_GetSystemTheme() == SDL_SYSTEM_THEME_LIGHT ? "c-cord-light" : "c-cord-dark";
+  }
+  return (id && id[0]) ? id : "c-cord-dark";
+}
 
 static int theme_index(const char *id)
 {
-  for (int i = 0; i < 3; i++) {
+  for (int i = 0; i < 4; i++) {
     if (strcmp(id, k_theme_ids[i]) == 0) return i;
   }
   return 0;   // unknown id falls back to Dark (settings_load also normalizes to c-cord-dark)
@@ -229,8 +239,24 @@ static void prefs_set_theme(ccord_ui *ui, const char *id)
 {
   if (strcmp(ui->settings_theme_id, id) == 0) return;
   snprintf(ui->settings_theme_id, sizeof ui->settings_theme_id, "%s", id);
+  ui->last_system_theme = (int)SDL_GetSystemTheme();
   ui->dirty = true;
-  if (ui->d.host.apply_theme) ui->d.host.apply_theme(ui->d.host.ud, id);
+  if (ui->d.host.apply_theme) ui->d.host.apply_theme(ui->d.host.ud, resolve_effective_theme_id(id));
+}
+
+void ui_settings_m6_system_theme_tick(ccord_ui *ui)
+{
+  if (!ui || strcmp(ui->settings_theme_id, "c-cord-system") != 0) return;
+  if (ui->now_ms < ui->system_theme_next_ms) return;
+  ui->system_theme_next_ms = ui->now_ms + 1000u;
+  int st = (int)SDL_GetSystemTheme();
+  if (ui->last_system_theme != st) {
+    ui->last_system_theme = st;
+    if (ui->d.host.apply_theme) {
+      ui->d.host.apply_theme(ui->d.host.ud, resolve_effective_theme_id("c-cord-system"));
+    }
+    ui->dirty = true;
+  }
 }
 
 // Clamp to the renderer's zoom range and snap to the 0.05 slider step.
@@ -259,6 +285,8 @@ static const char *const k_notify_timeout[4] = {"3s", "5s", "10s", "Never"};
 static const int k_notify_timeout_ms[4] = {3000, 5000, 10000, 0};
 static const char *const k_sticker_modes[3] = {"Always", "On hover", "Never"};
 static const char *const k_display_mode[2] = {"Compact", "Cozy"};
+static const char *const k_role_color_modes[3] = {"In name", "Next to name", "Don't show"};
+static const char *const k_time_formats[3] = {"Auto", "12-hour", "24-hour"};
 
 static int notify_timeout_index(int ms)
 {
@@ -371,7 +399,7 @@ void ui_settings_m6_appearance_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect 
 {
   s_prefs.content = content;
   p_row_label(ui, r, content, 1, "THEME");
-  p_chip_row(ui, r, content, 1, 3, k_theme_labels, theme_index(ui->settings_theme_id), "pthm");
+  p_chip_row(ui, r, content, 1, 4, k_theme_labels, theme_index(ui->settings_theme_id), "pthm");
   float zoom_frac = (ui->settings_zoom - CCORD_ZOOM_MIN) / (CCORD_ZOOM_MAX - CCORD_ZOOM_MIN);
   int pct = (int)(ui->settings_zoom * 100.0f + 0.5f);
   char ztxt[16];
@@ -434,8 +462,8 @@ void ui_settings_m6_appearance_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect 
 bool ui_settings_m6_appearance_click(ccord_ui *ui, ccord_rect content, float x, float y)
 {
   s_prefs.content = content;
-  for (int i = 0; i < 3; i++) {
-    if (ui_in_rect(x, y, p_chip(ui, content, 1, i, 3))) {
+  for (int i = 0; i < 4; i++) {
+    if (ui_in_rect(x, y, p_chip(ui, content, 1, i, 4))) {
       if (ui->d.host.select_theme_preset) ui->d.host.select_theme_preset(ui->d.host.ud, "", "");
       prefs_set_theme(ui, k_theme_ids[i]);
       return true;
@@ -525,7 +553,7 @@ bool ui_settings_m6_prefs_ini_visit(ccord_ui *ui, const char *key, const char *v
       migrated_value = "c-cord-amoled";
     }
     const char *id = "c-cord-dark";   // unknown / hand-edited ids fall back to Dark
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
       if (strcmp(migrated_value, k_theme_ids[i]) == 0) {
         id = k_theme_ids[i];
         break;
@@ -533,6 +561,32 @@ bool ui_settings_m6_prefs_ini_visit(ccord_ui *ui, const char *key, const char *v
     }
     snprintf(ui->settings_theme_id, sizeof ui->settings_theme_id, "%s", id);
     s_prefs.loaded_theme = true;
+    return true;
+  }
+  if (strcmp(key, "time_format") == 0) {
+    char *end = nullptr;
+    long n = strtol(value, &end, 10);
+    if (end != value && end && *end == '\0' && n >= 0 && n <= 2) {
+      ui->settings_time_format = (uint8_t)n;
+      ccord_timefmt_set_mode((ccord_timefmt_mode)n);
+    }
+    return true;
+  }
+  if (strcmp(key, "role_color_mode") == 0) {
+    char *end = nullptr;
+    long n = strtol(value, &end, 10);
+    if (end != value && end && *end == '\0' && n >= 0 && n <= 2) ui->settings_role_color_mode = (uint8_t)n;
+    return true;
+  }
+  if (strcmp(key, "spoiler_mode") == 0) {
+    char *end = nullptr;
+    long n = strtol(value, &end, 10);
+    if (end != value && end && *end == '\0' && n >= 0 && n <= 2) ui->settings_spoiler_mode = (uint8_t)n;
+    return true;
+  }
+  if (strcmp(key, "underline_links") == 0) {
+    bool ubv;
+    if (p_ini_bool(value, &ubv)) ui->settings_underline_links = ubv;
     return true;
   }
   if (strcmp(key, "zoom") == 0) {
@@ -605,6 +659,10 @@ void ui_settings_m6_prefs_ini_save(const ccord_ui *ui, FILE *f)
 {
   fprintf(f, "theme = %s\n", ui->settings_theme_id);
   fprintf(f, "zoom = %.2f\n", (double)ui->settings_zoom);
+  fprintf(f, "time_format = %u\n", (unsigned)ui->settings_time_format);
+  fprintf(f, "role_color_mode = %u\n", (unsigned)ui->settings_role_color_mode);
+  fprintf(f, "spoiler_mode = %u\n", (unsigned)ui->settings_spoiler_mode);
+  fprintf(f, "underline_links = %d\n", ui->settings_underline_links ? 1 : 0);
   fprintf(f, "streamer_mode = %d\n", ui->settings_streamer_mode ? 1 : 0);
   fprintf(f, "streamer_hide_personal = %d\n", s_prefs.streamer_hide_personal ? 1 : 0);
   fprintf(f, "streamer_hide_invites = %d\n", s_prefs.streamer_hide_invites ? 1 : 0);
@@ -639,7 +697,11 @@ void ccord_ui_pref_set_game_detection(bool on) { s_prefs.game_detection = on; }
 
 void ui_settings_m6_prefs_apply_loaded(ccord_ui *ui)
 {
-  if (s_prefs.loaded_theme && ui->d.host.apply_theme) ui->d.host.apply_theme(ui->d.host.ud, ui->settings_theme_id);
+  ccord_timefmt_set_mode((ccord_timefmt_mode)ui->settings_time_format);
+  ui->last_system_theme = (int)SDL_GetSystemTheme();
+  if (s_prefs.loaded_theme && ui->d.host.apply_theme) {
+    ui->d.host.apply_theme(ui->d.host.ud, resolve_effective_theme_id(ui->settings_theme_id));
+  }
   if (s_prefs.loaded_zoom && ui->d.host.set_zoom) ui->d.host.set_zoom(ui->d.host.ud, ui->settings_zoom);
 }
 
@@ -945,8 +1007,12 @@ static void p_draw_accessibility(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
                ui->settings_reduced_motion, false, "m6pa", 3);
   p_row_label(ui, r, c, 4, "MESSAGE DISPLAY");
   p_chip_row(ui, r, c, 4, 2, k_display_mode, ui->settings_display_mode, "m6pa");
-  p_note(ui, r, c.x, p_row_y(ui, c, 5) + 8.0f, c.w,
-         "GIF, emoji and sticker playback sync to your Discord account; reduced motion and message display are local.");
+  p_row_label(ui, r, c, 5, "ROLE COLORS");
+  p_chip_row(ui, r, c, 5, 3, k_role_color_modes, (int)ui->settings_role_color_mode, "m6pa");
+  p_toggle_row(ui, r, c, 6, "ALWAYS UNDERLINE LINKS", "Always draw an underline beneath links in chat (local).",
+               ui->settings_underline_links, false, "m6pa", 6);
+  p_note(ui, r, c.x, p_row_y(ui, c, 7) + 8.0f, c.w,
+         "GIF, emoji and sticker playback sync to your Discord account; motion, display, role colors and links are local.");
 }
 
 static bool p_click_accessibility(ccord_ui *ui, ccord_rect c, float x, float y)
@@ -984,6 +1050,18 @@ static bool p_click_accessibility(ccord_ui *ui, ccord_rect c, float x, float y)
       ui->dirty = true;
       return true;
     }
+  }
+  for (int i = 0; i < 3; i++) {
+    if (ui_in_rect(x, y, p_chip(ui, c, 5, i, 3))) {
+      ui->settings_role_color_mode = (uint8_t)i;
+      ui->dirty = true;
+      return true;
+    }
+  }
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 6))) {
+    ui->settings_underline_links = !ui->settings_underline_links;
+    ui->dirty = true;
+    return true;
   }
   return false;
 }
@@ -1059,9 +1137,11 @@ static void p_draw_language(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
   if (idx >= 0) snprintf(label, sizeof label, "%s — %s", k_locales[idx].label, k_locales[idx].code);
   else snprintf(label, sizeof label, "%s", cur.locale);
   p_device_row(ui, r, c, 0, "LANGUAGE", label);
-  p_note(ui, r, c.x, p_row_y(ui, c, 1) + 8.0f, c.w,
-         "Syncs your Discord account language. C-Cord's interface is English only for now.");
-  p_note(ui, r, c.x, p_row_y(ui, c, 1) + 26.0f, c.w, "Click the selector to cycle through the available languages.");
+  p_row_label(ui, r, c, 1, "TIME FORMAT");
+  p_chip_row(ui, r, c, 1, 3, k_time_formats, (int)ui->settings_time_format, "m6pl");
+  p_note(ui, r, c.x, p_row_y(ui, c, 2) + 8.0f, c.w,
+         "Syncs your Discord account language. Time format applies locally to message timestamps.");
+  p_note(ui, r, c.x, p_row_y(ui, c, 2) + 26.0f, c.w, "Click the language selector to cycle through available languages.");
 }
 
 static bool p_click_language(ccord_ui *ui, ccord_rect c, float x, float y)
@@ -1074,6 +1154,15 @@ static bool p_click_language(ccord_ui *ui, ccord_rect c, float x, float y)
     snprintf(p.locale, sizeof p.locale, "%s", k_locales[next].code);
     prefs_submit_patch(ui, &p);
     return true;
+  }
+  for (int i = 0; i < 3; i++) {
+    if (ui_in_rect(x, y, p_chip(ui, c, 1, i, 3))) {
+      ui->settings_time_format = (uint8_t)i;
+      ccord_timefmt_set_mode((ccord_timefmt_mode)i);
+      ccord_vlist_invalidate_all(&ui->vlist);
+      ui->dirty = true;
+      return true;
+    }
   }
   return false;
 }
@@ -1320,7 +1409,8 @@ void ui_settings_m6_prefs_get_debug(const ccord_ui *ui, ccord_settings_m6_prefs_
   snprintf(out->mask_last, sizeof out->mask_last, "%s", s_prefs.mask_last);
   ccord_rect c = s_prefs.content;
   // Appearance theme/zoom geometry (deterministic from the content rect).
-  for (int i = 0; i < 3; i++) out->theme_chips[i] = p_chip(ui, c, 1, i, 3);
+  for (int i = 0; i < 3; i++) out->theme_chips[i] = p_chip(ui, c, 1, i, 4);
+  out->theme_chip_system = p_chip(ui, c, 1, 3, 4);
   out->zoom_minus = p_minus(ui, c, 2);
   out->zoom_track = p_track(ui, c, 2);
   out->zoom_plus = p_plus(ui, c, 2);
@@ -1361,6 +1451,8 @@ void ui_settings_m6_prefs_get_debug(const ccord_ui *ui, ccord_settings_m6_prefs_
     for (int i = 0; i < 3; i++) out->sticker_chips[i] = p_chip(ui, c, 2, i, 3);
     out->reduced_motion_toggle = p_toggle(ui, c, 3);
     for (int i = 0; i < 2; i++) out->display_chips[i] = p_chip(ui, c, 4, i, 2);
+    for (int i = 0; i < 3; i++) out->role_color_chips[i] = p_chip(ui, c, 5, i, 3);
+    out->underline_links_toggle = p_toggle(ui, c, 6);
     return;
   }
   if (page == CCORD_M6_PREFS_STREAMER) {
@@ -1370,6 +1462,7 @@ void ui_settings_m6_prefs_get_debug(const ccord_ui *ui, ccord_settings_m6_prefs_
   }
   if (page == CCORD_M6_PREFS_LANGUAGE) {
     out->language_row = p_device(ui, c, 0);
+    for (int i = 0; i < 3; i++) out->time_format_chips[i] = p_chip(ui, c, 1, i, 3);
     ccord_user_settings cur = prefs_current(ui);
     out->locale_index = locale_index(cur.locale);
     return;

@@ -553,6 +553,12 @@ struct ccord_ui {
   uint8_t settings_explicit_content_filter, settings_animate_stickers;
   bool settings_gif_auto_play, settings_animate_emoji, settings_enable_tts_command;
   bool settings_stream_notifications_enabled, settings_default_guilds_restricted, settings_allow_age_restricted;
+  uint8_t settings_time_format;      // 0 = Auto, 1 = 12-hour, 2 = 24-hour
+  uint8_t settings_role_color_mode;  // 0 = In name, 1 = Next to name, 2 = Don't show
+  uint8_t settings_spoiler_mode;     // 0 = On click, 1 = When moderating, 2 = Always
+  bool settings_underline_links;     // default true (always underline links in chat)
+  int last_system_theme;             // last observed SDL_SystemTheme for "c-cord-system"
+  uint64_t system_theme_next_ms;     // throttle SDL_GetSystemTheme polling to 1s
 
   char notice[128];
   uint64_t notice_until_ms;

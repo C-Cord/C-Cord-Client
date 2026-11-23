@@ -784,7 +784,8 @@ void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r)
     float tx = item.x + 8.0f + 32.0f + 12.0f;
     char act_line[160];
     bool has_status = ui_format_user_activity_line(ui, u, act_line, sizeof act_line);
-    ccord_color nc = row->name_color != 0 ? ui_rgb_color(row->name_color) : COL(text_normal);
+    ccord_color role_c = row->name_color != 0 ? ui_rgb_color(row->name_color) : COL(text_normal);
+    ccord_color nc = (row->name_color != 0 && ui->settings_role_color_mode == 0) ? role_c : COL(text_normal);
     if (offline) nc = ui_mix(nc, item_bg, 0.55f);
     ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_base), nc);
     float nh = ui_line_h(ui, ns.size);
@@ -792,14 +793,19 @@ void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r)
     float sh = ui_line_h(ui, ss.size);
     float ny = has_status ? cy - (nh + sh) * 0.5f + 1.0f : cy - nh * 0.5f;
     float maxw = item.x + item.w - tx - 8.0f;
+    bool show_dot = row->name_color != 0 && ui->settings_role_color_mode == 1;
     const char *ricon = ui_member_role_icon(ui, g, m->user_id);
-    float tag_w = (ricon ? 20.0f : 0.0f) +
+    float tag_w = (show_dot ? 14.0f : 0.0f) + (ricon ? 20.0f : 0.0f) +
                   (u->is_bot ? 34.0f : 0.0f) + (u->clan_tag[0] ? 44.0f : 0.0f);
     const char *mname = (m->nick[0] != '\0') ? m->nick : ((u->display_name && u->display_name[0]) ? u->display_name : u->name);
     float name_avail = maxw - tag_w;
     if (name_avail < 32.0f) name_avail = maxw;
     float nw = ccord_text_draw_ellipsis(r, mname, strlen(mname), tx, ny, name_avail, &ns);
     float bx = tx + nw + 6.0f;
+    if (show_dot && bx + 10.0f <= item.x + item.w - 4.0f) {
+      ccord_draw_circle(r, bx + 4.0f, ny + nh * 0.5f, 3.8f, offline ? ui_mix(role_c, item_bg, 0.55f) : role_c);
+      bx += 12.0f;
+    }
     if (ricon && bx + 16.0f <= item.x + item.w - 4.0f) {
       ccord_text_style ris = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(text_header));
       ccord_vec2 rim = ccord_text_measure(r, ricon, strlen(ricon), &ris, 0.0f);
