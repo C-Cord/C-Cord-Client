@@ -150,7 +150,8 @@ if(CCORD_BUILD_TESTS)
     test_ui_interaction_chat
     test_ui_interaction_media
     test_ui_interaction_admin
-    test_ui_interaction_ext)
+    test_ui_interaction_ext
+    test_ui_audit_features)
     ccord_add_test(NAME ${ui_inter_test} SOURCES tests/${ui_inter_test}.c tests/ui_interaction_harness.c
                    LIBS ccord_ui ccord_ui_internal_inc ccord_platform ccord_net_mock SDL3::SDL3 LABELS ui)
   endforeach()
