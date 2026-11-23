@@ -1278,6 +1278,52 @@ static void test_ipc(void)
   rmdir(dir);
 }
 
+static void test_zoom_event_scaling(void)
+{
+  const float zooms[] = {1.5f, 0.8f, 1.0f, 0.0f, -1.0f};
+  for (size_t zi = 0; zi < sizeof zooms / sizeof zooms[0]; zi++) {
+    float z = zooms[zi];
+    float div = (z > 0.0f) ? z : 1.0f;
+
+    const ccord_input_type xy_types[] = {
+      CCORD_IN_MOUSE_DOWN, CCORD_IN_MOUSE_MOVE, CCORD_IN_MOUSE_UP,
+      CCORD_IN_TOUCH_DOWN, CCORD_IN_TOUCH_MOVE, CCORD_IN_TOUCH_UP, CCORD_IN_TOUCH_CANCEL,
+      CCORD_IN_RESIZE,
+      (ccord_input_type)CCORD_EV_DROP_POSITION, (ccord_input_type)CCORD_EV_DROP_FILE,
+    };
+    for (size_t ti = 0; ti < sizeof xy_types / sizeof xy_types[0]; ti++) {
+      ccord_input_event ev = {.type = xy_types[ti], .x = 300.0f, .y = 600.0f};
+      ccord_app_desktop_scale_event_for_zoom(&ev, z);
+      CT_CHECK(fabsf(ev.x - 300.0f / div) < 1e-4f);
+      CT_CHECK(fabsf(ev.y - 600.0f / div) < 1e-4f);
+    }
+
+    ccord_input_event wheel = {.type = CCORD_IN_WHEEL, .x = 240.0f, .y = 480.0f, .wheel = -3.0f};
+    ccord_app_desktop_scale_event_for_zoom(&wheel, z);
+    CT_CHECK(fabsf(wheel.x - 240.0f / div) < 1e-4f);
+    CT_CHECK(fabsf(wheel.y - 480.0f / div) < 1e-4f);
+    CT_CHECK(fabsf(wheel.wheel - (-3.0f)) < 1e-4f);
+
+    ccord_input_event safe = {
+      .type = CCORD_IN_SAFE_AREA,
+      .inset_top = 48.0f,
+      .inset_right = 12.0f,
+      .inset_bottom = 36.0f,
+      .inset_left = 18.0f,
+    };
+    ccord_app_desktop_scale_event_for_zoom(&safe, z);
+    CT_CHECK(fabsf(safe.inset_top - 48.0f / div) < 1e-4f);
+    CT_CHECK(fabsf(safe.inset_right - 12.0f / div) < 1e-4f);
+    CT_CHECK(fabsf(safe.inset_bottom - 36.0f / div) < 1e-4f);
+    CT_CHECK(fabsf(safe.inset_left - 18.0f / div) < 1e-4f);
+
+    ccord_input_event kb = {.type = CCORD_IN_KEYBOARD_INSET, .inset_bottom = 300.0f};
+    ccord_app_desktop_scale_event_for_zoom(&kb, z);
+    CT_CHECK(fabsf(kb.inset_bottom - 300.0f / div) < 1e-4f);
+  }
+  ccord_app_desktop_scale_event_for_zoom(nullptr, 1.5f);
+}
+
 // ---------------------------------------------------------------- fixture
 
 static bool setup(const char *argv0)
@@ -1365,6 +1411,7 @@ int main(int argc, char **argv)
   test_keybinds();
   test_saved_accounts_ui();
   test_ipc();
+  test_zoom_event_scaling();
   CT_CHECK(ccord_app_desktop_next_wait_ms(F.desktop, 10000) == UINT32_MAX);
   teardown();
   return CT_RESULT("test_app_desktop");

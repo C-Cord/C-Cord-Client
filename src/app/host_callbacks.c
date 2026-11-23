@@ -258,10 +258,27 @@ static void host_set_zoom(void *ud, float zoom)
   if (!a || !a->desktop) return;
   ccord_app_desktop_set_zoom(a->desktop, zoom);
   if (a->ui && a->renderer) {
+    float eff = ccord_render_get_zoom(a->renderer);
+    if (eff <= 0.0f) eff = 1.0f;
     ccord_vec2 size = ccord_render_size(a->renderer);
     a->viewport_w = size.x;
     a->viewport_h = size.y;
     ccord_ui_set_viewport(a->ui, size.x, size.y);
+    if (a->platform) {
+      ccord_safe_insets raw_safe = ccord_platform_safe_area(a->platform);
+      a->last_safe = (ccord_safe_insets){
+        .top = raw_safe.top / eff,
+        .right = raw_safe.right / eff,
+        .bottom = raw_safe.bottom / eff,
+        .left = raw_safe.left / eff,
+      };
+      ccord_ui_set_safe_insets(a->ui, a->last_safe.top, a->last_safe.right, a->last_safe.bottom, a->last_safe.left);
+    }
+    a->last_kb_inset = a->raw_kb_inset / eff;
+    ccord_ui_set_keyboard_inset(a->ui, a->last_kb_inset);
+#if CCORD_WITH_PLUGINS
+    app_plugins_push_platform_state(a);
+#endif
   }
 }
 

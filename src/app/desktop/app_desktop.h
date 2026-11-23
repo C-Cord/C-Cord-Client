@@ -78,6 +78,8 @@ const ccord_theme *ccord_app_desktop_base_theme(const ccord_app_desktop *d);
 void ccord_app_desktop_apply_theme(void *ud, const char *builtin_id);
 void ccord_app_desktop_select_theme_preset(void *ud, const char *owner, const char *preset_id);
 void ccord_app_desktop_set_zoom(void *ud, float zoom);
+// Divides logical-px coordinates and insets on a platform input event by the active UI zoom.
+void ccord_app_desktop_scale_event_for_zoom(ccord_input_event *ev, float zoom);
 uint32_t ccord_app_desktop_capabilities(void *ud);
 // QuickCSS: remembers enabled+snippet, reloads the current base theme and applies the snippet live
 // via ccord_theme_apply_quick_css. apply_theme re-applies the remembered snippet after a base swap.

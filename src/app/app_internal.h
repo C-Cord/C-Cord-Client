@@ -130,6 +130,7 @@ typedef struct app {
   bool media_redraw;                        // a live video/camera texture was uploaded or evicted this pump
   char pending_open_url[512];               // invite / Discord URL passed at launch, opened once connected
   ccord_safe_insets last_safe;              // last safe-area insets pushed to UI & plugins
+  float raw_kb_inset;                       // last un-zoomed soft-keyboard height from platform
   float last_kb_inset;                      // last soft-keyboard height pushed to UI & plugins
   bool voice_fg_active;                     // last voice state pushed to Android Foreground Service
   bool voice_fg_muted;

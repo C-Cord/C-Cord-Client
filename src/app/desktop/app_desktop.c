@@ -449,6 +449,41 @@ void ccord_app_desktop_set_zoom(void *ud, float zoom)
   d->redraw = true;
 }
 
+void ccord_app_desktop_scale_event_for_zoom(ccord_input_event *ev, float zoom)
+{
+  if (!ev || !(zoom > 0.0f) || zoom == 1.0f) return;
+  if (ev->type == CCORD_EV_DROP_POSITION || ev->type == CCORD_EV_DROP_FILE) {
+    ev->x /= zoom;
+    ev->y /= zoom;
+    return;
+  }
+  switch (ev->type) {
+    case CCORD_IN_MOUSE_MOVE:
+    case CCORD_IN_MOUSE_DOWN:
+    case CCORD_IN_MOUSE_UP:
+    case CCORD_IN_WHEEL:
+    case CCORD_IN_TOUCH_DOWN:
+    case CCORD_IN_TOUCH_MOVE:
+    case CCORD_IN_TOUCH_UP:
+    case CCORD_IN_TOUCH_CANCEL:
+    case CCORD_IN_RESIZE:
+      ev->x /= zoom;
+      ev->y /= zoom;
+      break;
+    case CCORD_IN_SAFE_AREA:
+      ev->inset_top /= zoom;
+      ev->inset_right /= zoom;
+      ev->inset_bottom /= zoom;
+      ev->inset_left /= zoom;
+      break;
+    case CCORD_IN_KEYBOARD_INSET:
+      ev->inset_bottom /= zoom;
+      break;
+    default:
+      break;
+  }
+}
+
 #define APP_PLAYBACK_IDLE_MS 2000
 
 static ccord_audio *app_playback(ccord_app_desktop *d)

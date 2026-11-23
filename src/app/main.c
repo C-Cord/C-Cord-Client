@@ -392,6 +392,8 @@ static void run_interactive(app *a)
             .left = raw_safe.left / zoom,
           };
           ccord_ui_set_safe_insets(a->ui, a->last_safe.top, a->last_safe.right, a->last_safe.bottom, a->last_safe.left);
+          a->last_kb_inset = a->raw_kb_inset / zoom;
+          ccord_ui_set_keyboard_inset(a->ui, a->last_kb_inset);
           // Reconnect immediately if dropped, or probe live sockets with OP 1 after >= 45 s backgrounded instead
           // of tearing down healthy TLS connections; defer until after the resumed UI frame presents.
           if (a->session) {
@@ -438,41 +440,26 @@ static void run_interactive(app *a)
           }
           continue;
         }
+        if (ev.type == CCORD_IN_KEYBOARD_INSET) a->raw_kb_inset = ev.inset_bottom;
+        float zoom = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f;
+        ccord_app_desktop_scale_event_for_zoom(&ev, zoom);
         if (ev.type == CCORD_IN_SAFE_AREA) {
-          float zoom = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f;
-          if (zoom <= 0.0f) zoom = 1.0f;
-          ev.inset_top /= zoom;
-          ev.inset_right /= zoom;
-          ev.inset_bottom /= zoom;
-          ev.inset_left /= zoom;
           a->last_safe = (ccord_safe_insets){ev.inset_top, ev.inset_right, ev.inset_bottom, ev.inset_left};
 #if CCORD_WITH_PLUGINS
           app_plugins_push_platform_state(a);
 #endif
         } else if (ev.type == CCORD_IN_KEYBOARD_INSET) {
-          float zoom = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f;
-          if (zoom <= 0.0f) zoom = 1.0f;
-          ev.inset_bottom /= zoom;
           a->last_kb_inset = ev.inset_bottom;
 #if CCORD_WITH_PLUGINS
           app_plugins_push_platform_state(a);
 #endif
         } else if (ev.type == CCORD_IN_RESIZE) {
-          float zoom = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f;
-          if (zoom <= 0.0f) zoom = 1.0f;
-          ev.x /= zoom;
-          ev.y /= zoom;
           a->viewport_w = ev.x;
           a->viewport_h = ev.y;
 #if CCORD_WITH_PLUGINS
           app_plugins_push_platform_state(a);
           if (a->plugins) ccord_plugins_dispatch_window_resize(a->plugins, ev.x, ev.y);
 #endif
-        } else if (ev.type == CCORD_EV_DROP_POSITION) {
-          float zoom = a->renderer ? ccord_render_get_zoom(a->renderer) : 1.0f;
-          if (zoom <= 0.0f) zoom = 1.0f;
-          ev.x /= zoom;
-          ev.y /= zoom;
         } else if (ev.type == CCORD_IN_FOCUS) {
 #if CCORD_WITH_PLUGINS
           if (a->plugins) ccord_plugins_dispatch_window_focus(a->plugins, ev.focused);
@@ -1030,12 +1017,6 @@ int main(int argc, char **argv)
   ccord_vec2 logical = ccord_render_size(a.renderer);   // already divided by the saved UI zoom
   float lw = logical.x, lh = logical.y;
   bool is_mobile_ui = opt.mobile || ccord_platform_form_factor(a.platform) == CCORD_FORM_PHONE;
-  int saved_w = 0, saved_h = 0;
-  if (!is_mobile_ui && !ccord_platform_is_mobile(a.platform) &&
-      !opt.screenshot && !opt.verify_slice && ccord_ui_get_saved_window_size(a.ui, &saved_w, &saved_h)) {
-    lw = (float)saved_w;
-    lh = (float)saved_h;
-  }
   a.viewport_w = lw;
   a.viewport_h = lh;
   if (is_mobile_ui) ccord_ui_set_mobile_mode(a.ui, true);
