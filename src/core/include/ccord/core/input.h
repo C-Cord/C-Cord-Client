@@ -53,5 +53,6 @@ typedef enum ccord_cursor_kind : uint8_t {
   CCORD_CURSOR_NWSE_RESIZE,
   CCORD_CURSOR_NESW_RESIZE,
   CCORD_CURSOR_MOVE,
+  CCORD_CURSOR_NOT_ALLOWED,
   CCORD_CURSOR_COUNT
 } ccord_cursor_kind;

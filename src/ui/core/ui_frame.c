@@ -529,6 +529,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
         ui_draw_voice_bar(ui, r);
         ui_draw_user_panel(ui, r);
         ui_draw_server_rail_tooltip(ui, r);
+        ui_draw_channel_list_tooltip(ui, r);
       }
       ui_panels_draw(ui, r);
       ui_draw_stream_pip(ui, r);
@@ -539,6 +540,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
       ui_draw_voice_bar(ui, r);
       ui_draw_user_panel(ui, r);
       ui_draw_server_rail_tooltip(ui, r);
+      ui_draw_channel_list_tooltip(ui, r);
       ui_draw_stream_pip(ui, r);
     }
     ui_draw_notice(ui, r);

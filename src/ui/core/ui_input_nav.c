@@ -131,16 +131,20 @@ void uc_click_channel_row(ccord_ui *ui, size_t row)
   const ccord_channel *ch = ccord_store_channel_at(ui->d.store, g, ui->crow[row].index);
   if (!ch) return;
   if (ui->crow[row].is_voice_user) {
+    ccord_id uid = ui->crow[row].user_id;
     const ccord_voice_state *self = ui_self_voice(ui);
     bool already_in_stage = (self && self->channel_id == ch->id && ui->stage_channel == ch->id);
     if (!self || self->channel_id != ch->id) {
+      if (ui_voice_lock_reason(ui, g, ch) != nullptr) {
+        if (uid != CCORD_ID_NONE) ui_open_member_popover(ui, uid, ui->mx, ui->my, false);
+        return;
+      }
       uc_join_voice_channel(ui, g, ch);
     } else if (ui->stage_channel != ch->id) {
       ui->stage_channel = ch->id;
       ui->stage_armed = true;
       ui->dirty = true;
     }
-    ccord_id uid = ui->crow[row].user_id;
     const ccord_voice_state *vs = ccord_store_voice_user(ui->d.store, g, uid);
     bool started_watch = false;
     if (vs && vs->self_stream && uid != ccord_store_self_id(ui->d.store) && ui->d.session) {
@@ -164,19 +168,30 @@ void uc_click_channel_row(ccord_ui *ui, size_t row)
     return;
   }
   if (ch->kind == CCORD_CHANNEL_VOICE || ch->kind == CCORD_CHANNEL_STAGE) {
-    if (ui->discovery_open) {
-      ui->discovery_open = false;
-      ui_compute_layout(ui);
-    }
-    if (ui->mobile_layout) ui->left_drawer_open = false;
     const ccord_voice_state *self = ui_self_voice(ui);
-    if (self && self->channel_id == ch->id) {
+    if (self && self->channel_id == ch->id && !ui_role_preview_active_for(ui, g)) {
+      if (ui->discovery_open) {
+        ui->discovery_open = false;
+        ui_compute_layout(ui);
+      }
+      if (ui->mobile_layout) ui->left_drawer_open = false;
       ui->stage_channel = ch->id;   // clicking the joined channel reopens its stage
       ui->stage_chat_open = false;
       ui->stage_armed = true;
       ui->dirty = true;
       return;
     }
+    const char *lock_reason = ui_voice_lock_reason(ui, g, ch);
+    if (lock_reason) {
+      ui_notice(ui, "%s", lock_reason);
+      ui->dirty = true;
+      return;
+    }
+    if (ui->discovery_open) {
+      ui->discovery_open = false;
+      ui_compute_layout(ui);
+    }
+    if (ui->mobile_layout) ui->left_drawer_open = false;
     uc_join_voice_channel(ui, g, ch);
     return;
   }

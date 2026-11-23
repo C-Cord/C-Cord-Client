@@ -57,6 +57,7 @@ static void ccord_test_cleanup_dir(void) {
 #include <ccord/ui/ui.h>
 
 #include "../ui_internal.h"
+#include "../core/ui_style.h"
 #include "ui_voice_surfaces.h"
 
 #include "ccord_test.h"
@@ -2095,6 +2096,139 @@ static void test_stream_resize_fullscreen_pip(void)
   leave_voice_and_close();
 }
 
+static bool find_crow_center(ccord_id channel_id, bool voice_user, ccord_id user_id, float *ox, float *oy)
+{
+  ccord_id g = ccord_store_selected_guild(F.store);
+  const ccord_layout_rect *cs = &F.ui->layout.channel_scroll;
+  for (size_t i = 0; i < F.ui->ncrow; i++) {
+    const chan_row *r = &F.ui->crow[i];
+    if (r->dm_nav != DM_NAV_NONE || r->is_relationship || r->is_category) continue;
+    if (r->is_voice_user != voice_user) continue;
+    if (voice_user && r->user_id != user_id) continue;
+    const ccord_channel *c = ccord_store_channel_at(F.store, g, r->index);
+    if (!c || c->id != channel_id) continue;
+    float y = cs->y + r->y - F.ui->chan_scroll + r->h * 0.5f;
+    if (y < cs->y || y > cs->y + cs->h) {
+      F.ui->chan_scroll = r->y;
+      frame(2);
+      y = cs->y + r->y - F.ui->chan_scroll + r->h * 0.5f;
+    }
+    *ox = cs->x + cs->w * 0.5f;
+    *oy = y;
+    return true;
+  }
+  return false;
+}
+
+static void test_voice_restricted_channel_ui(void)
+{
+  ccord_error err;
+  ccord_id lua_g = 2002u;   // "Lua Lounge": Ada is owner, ME holds non-admin role -> exact perms without ADMINISTRATOR
+  CT_CHECK(ccord_session_select_guild(F.session, lua_g, &err) == CCORD_OK);
+  frame(3);
+  CT_CHECK(ccord_store_permissions_exact(F.store, lua_g, ME));
+
+  ccord_id locked_vc_id = 995101u;
+  ccord_id full_vc_id = 995102u;
+  ccord_id open_vc_id = 995103u;
+  ccord_channel locked_vc = {.id = locked_vc_id, .guild_id = lua_g, .kind = CCORD_CHANNEL_VOICE,
+                             .discord_type = 2, .name = "General 4", .topic = "", .user_limit = 1};
+  ccord_channel full_vc = {.id = full_vc_id, .guild_id = lua_g, .kind = CCORD_CHANNEL_VOICE,
+                           .discord_type = 2, .name = "Full Room", .topic = "", .user_limit = 1};
+  ccord_channel open_vc = {.id = open_vc_id, .guild_id = lua_g, .kind = CCORD_CHANNEL_VOICE,
+                           .discord_type = 2, .name = "Open Room", .topic = ""};
+  CT_CHECK(ccord_store_upsert_channel(F.store, &locked_vc, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_upsert_channel(F.store, &full_vc, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_upsert_channel(F.store, &open_vc, &err) == CCORD_OK);
+
+  // Deny CONNECT on locked_vc for @everyone (still visible via VIEW_CHANNEL).
+  ccord_overwrite deny_conn = {.id = lua_g, .kind = CCORD_OVERWRITE_ROLE, .deny = CCORD_PERM_CONNECT};
+  CT_CHECK(ccord_store_upsert_channel_overwrite(F.store, locked_vc_id, lua_g, &deny_conn, &err) == CCORD_OK);
+  // Occupy both locked_vc (for voice-user click test) and full_vc (to hit user_limit = 1).
+  ccord_voice_state vs_locked = {.guild_id = lua_g, .channel_id = locked_vc_id, .user_id = CHEN};
+  ccord_voice_state vs_full = {.guild_id = lua_g, .channel_id = full_vc_id, .user_id = BJORN};
+  CT_CHECK(ccord_store_set_voice_state(F.store, &vs_locked, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_set_voice_state(F.store, &vs_full, &err) == CCORD_OK);
+  frame(4);
+
+  // 1. Permission helper distinguishes permission-locked, full-locked, and unlocked channels.
+  ui_voice_lock_kind kind = UI_VOICE_LOCK_NONE;
+  const char *r_locked = ui_voice_lock_reason_ex(F.ui, lua_g, ccord_store_channel(F.store, locked_vc_id), &kind);
+  CT_CHECK(r_locked != nullptr && kind == UI_VOICE_LOCK_PERMISSION && !ui_voice_can_join(F.ui, lua_g, ccord_store_channel(F.store, locked_vc_id)));
+  const char *r_full = ui_voice_lock_reason_ex(F.ui, lua_g, ccord_store_channel(F.store, full_vc_id), &kind);
+  CT_CHECK(r_full != nullptr && kind == UI_VOICE_LOCK_FULL && !ui_voice_can_join(F.ui, lua_g, ccord_store_channel(F.store, full_vc_id)));
+  const char *r_open = ui_voice_lock_reason_ex(F.ui, lua_g, ccord_store_channel(F.store, open_vc_id), &kind);
+  CT_CHECK(r_open == nullptr && kind == UI_VOICE_LOCK_NONE && ui_voice_can_join(F.ui, lua_g, ccord_store_channel(F.store, open_vc_id)));
+
+  // 2. Hovering locked channel -> NOT_ALLOWED cursor + tooltip drawn; hovering open channel -> POINTER cursor.
+  float lx = 0, ly = 0, ox = 0, oy = 0, fx = 0, fy = 0, ux = 0, uy = 0;
+  CT_CHECK(find_crow_center(locked_vc_id, false, CCORD_ID_NONE, &lx, &ly));
+  uis_audit_reset();
+  mouse(CCORD_IN_MOUSE_MOVE, 0, lx, ly);
+  frame(4);
+  CT_CHECK(F.ui->cursor == CCORD_CURSOR_NOT_ALLOWED);
+  CT_CHECK(uis_audit_get()->kind[UIS_K_TOOLTIP].count >= 1u);
+  CT_CHECK(uis_anim_value(F.ui, "uistip", locked_vc_id ^ 0x564F4943454C4B00ULL) > 0.5f);
+
+  // Clicking locked channel must NOT attempt to join or open stage, and must show a notice.
+  F.ui->notice[0] = '\0';
+  click(lx, ly);
+  CT_CHECK(F.ui->stage_channel == CCORD_ID_NONE);
+  CT_CHECK(ccord_store_active_voice_channel(F.store) == CCORD_ID_NONE);
+  CT_CHECK(strstr(F.ui->notice, "permission") != nullptr);
+
+  // Clicking a participant inside the locked channel opens their profile popover instead of joining voice.
+  CT_CHECK(find_crow_center(locked_vc_id, true, CHEN, &ux, &uy));
+  click(ux, uy);
+  CT_CHECK(F.ui->stage_channel == CCORD_ID_NONE);
+  CT_CHECK(ccord_store_active_voice_channel(F.store) == CCORD_ID_NONE);
+  CT_CHECK(F.ui->member_popover_open && F.ui->member_popover_user_id == CHEN);
+  F.ui->member_popover_open = false;
+  frame(2);
+
+  // 3. Full channel -> NOT_ALLOWED cursor + tooltip; clicking does NOT join and reports full.
+  CT_CHECK(find_crow_center(full_vc_id, false, CCORD_ID_NONE, &fx, &fy));
+  uis_audit_reset();
+  mouse(CCORD_IN_MOUSE_MOVE, 0, fx, fy);
+  frame(4);
+  CT_CHECK(F.ui->cursor == CCORD_CURSOR_NOT_ALLOWED);
+  CT_CHECK(uis_audit_get()->kind[UIS_K_TOOLTIP].count >= 1u);
+  CT_CHECK(uis_anim_value(F.ui, "uistip", full_vc_id ^ 0x564F4943454C4B00ULL) > 0.5f);
+  F.ui->notice[0] = '\0';
+  click(fx, fy);
+  CT_CHECK(F.ui->stage_channel == CCORD_ID_NONE);
+  CT_CHECK(ccord_store_active_voice_channel(F.store) == CCORD_ID_NONE);
+  CT_CHECK(strstr(F.ui->notice, "full") != nullptr);
+
+  // 4. Open channel -> POINTER cursor (no locked tooltip).
+  CT_CHECK(find_crow_center(open_vc_id, false, CCORD_ID_NONE, &ox, &oy));
+  uis_audit_reset();
+  mouse(CCORD_IN_MOUSE_MOVE, 0, ox, oy);
+  frame(2);
+  CT_CHECK(F.ui->cursor == CCORD_CURSOR_POINTER);
+  CT_CHECK(uis_audit_get()->kind[UIS_K_TOOLTIP].count == 0u);
+
+  // 5. Role Preview: previewing @everyone shows locked_vc as locked even on an owned guild, and blocks joining.
+  F.ui->role_preview_guild = lua_g;
+  F.ui->role_preview_role_id = lua_g;
+  frame(2);
+  const char *r_prev = ui_voice_lock_reason_ex(F.ui, lua_g, ccord_store_channel(F.store, locked_vc_id), &kind);
+  CT_CHECK(r_prev != nullptr && kind == UI_VOICE_LOCK_PERMISSION && strstr(r_prev, "Selected role") != nullptr);
+  F.ui->role_preview_guild = CCORD_ID_NONE;
+  F.ui->role_preview_role_id = CCORD_ID_NONE;
+
+  // Cleanup synthetic channels & voice states.
+  vs_locked.channel_id = CCORD_ID_NONE;
+  vs_full.channel_id = CCORD_ID_NONE;
+  (void)ccord_store_set_voice_state(F.store, &vs_locked, &err);
+  (void)ccord_store_set_voice_state(F.store, &vs_full, &err);
+  (void)ccord_store_delete_channel(F.store, locked_vc_id, &err);
+  (void)ccord_store_delete_channel(F.store, full_vc_id, &err);
+  (void)ccord_store_delete_channel(F.store, open_vc_id, &err);
+  CT_CHECK(ccord_session_select_guild(F.session, HQ, &err) == CCORD_OK);
+  frame(2);
+}
+
 int main(int argc, char **argv)
 {
   if (!setup(argc > 0 ? argv[0] : "test_ui_voice_surfaces")) return 77;
@@ -2120,6 +2254,7 @@ int main(int argc, char **argv)
   test_prejoin_mute_deafen_and_voice_bar_layout();
   test_vc_profile_click_and_right_click();
   test_stream_resize_fullscreen_pip();
+  test_voice_restricted_channel_ui();
   teardown();
   return CT_RESULT("test_ui_voice_surfaces");
 }

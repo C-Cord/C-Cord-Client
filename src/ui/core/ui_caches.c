@@ -232,6 +232,62 @@ bool ui_channel_visible(const ccord_ui *ui, ccord_id guild, const ccord_channel 
   return (ui_effective_permissions(ui, guild, ch->id) & CCORD_PERM_VIEW_CHANNEL) != 0;
 }
 
+const char *ui_voice_lock_reason_ex(const ccord_ui *ui, ccord_id guild_id, const ccord_channel *ch,
+                                    ui_voice_lock_kind *out_kind)
+{
+  if (out_kind) *out_kind = UI_VOICE_LOCK_NONE;
+  if (!ui || !ui->d.store || !ch) return nullptr;
+  if (ch->kind != CCORD_CHANNEL_VOICE && ch->kind != CCORD_CHANNEL_STAGE) return nullptr;
+  if (guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) return nullptr;
+  const ccord_store *st = ui->d.store;
+  if (ui_role_preview_active_for(ui, guild_id)) {
+    uint64_t perms = ui_effective_permissions(ui, guild_id, ch->id);
+    if (!ccord_perm_has(perms, CCORD_PERM_VIEW_CHANNEL | CCORD_PERM_CONNECT)) {
+      if (out_kind) *out_kind = UI_VOICE_LOCK_PERMISSION;
+      return "Selected role does not have permission to connect.";
+    }
+    if (ch->kind == CCORD_CHANNEL_VOICE && ch->user_limit > 0 && !ccord_perm_has(perms, CCORD_PERM_MOVE_MEMBERS) &&
+        ccord_store_voice_count(st, ch->id) >= ch->user_limit) {
+      if (out_kind) *out_kind = UI_VOICE_LOCK_FULL;
+      return "Voice channel is full.";
+    }
+    return nullptr;
+  }
+  const ccord_voice_state *self_vs = ui_self_voice(ui);
+  if (self_vs && self_vs->channel_id == ch->id) return nullptr;
+  if (ui_self_pending(ui, guild_id)) {
+    if (out_kind) *out_kind = UI_VOICE_LOCK_PERMISSION;
+    return "Complete the server rules to join voice.";
+  }
+  ccord_id self = ccord_store_self_id(st);
+  if (!ccord_store_permissions_exact(st, guild_id, self)) return nullptr;
+  uint64_t perms = ccord_store_permissions(st, guild_id, ch->id, self, ui->now_unix_ms);
+  if (!ccord_perm_has(perms, CCORD_PERM_VIEW_CHANNEL | CCORD_PERM_CONNECT)) {
+    if (out_kind) *out_kind = UI_VOICE_LOCK_PERMISSION;
+    const ccord_member *me = ccord_store_find_member(st, guild_id, self);
+    if (me && me->timeout_until_ms > ui->now_unix_ms) {
+      return "You have been timed out and cannot join voice.";
+    }
+    return "You do not have permission to connect to this voice channel.";
+  }
+  if (ch->kind == CCORD_CHANNEL_VOICE && ch->user_limit > 0 && !ccord_perm_has(perms, CCORD_PERM_MOVE_MEMBERS) &&
+      ccord_store_voice_count(st, ch->id) >= ch->user_limit) {
+    if (out_kind) *out_kind = UI_VOICE_LOCK_FULL;
+    return "Voice channel is full.";
+  }
+  return nullptr;
+}
+
+const char *ui_voice_lock_reason(const ccord_ui *ui, ccord_id guild_id, const ccord_channel *ch)
+{
+  return ui_voice_lock_reason_ex(ui, guild_id, ch, nullptr);
+}
+
+bool ui_voice_can_join(const ccord_ui *ui, ccord_id guild_id, const ccord_channel *ch)
+{
+  return ui_voice_lock_reason_ex(ui, guild_id, ch, nullptr) == nullptr;
+}
+
 static void chan_idx_free(chan_idx_map *cm)
 {
   if (!cm->heap_alloc) return;

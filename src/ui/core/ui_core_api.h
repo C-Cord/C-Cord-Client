@@ -226,6 +226,17 @@ ccord_color ui_role_color(const ccord_ui *ui, ccord_id guild_id, ccord_id user_i
 ccord_color ui_rgb_color(uint32_t rgb);
 // Whether the channel is listed for the user (hidden only when the permission data is exact and says "cannot view").
 bool ui_channel_visible(const ccord_ui *ui, ccord_id guild, const ccord_channel *ch);
+typedef enum ui_voice_lock_kind : uint8_t {
+  UI_VOICE_LOCK_NONE = 0,
+  UI_VOICE_LOCK_PERMISSION,
+  UI_VOICE_LOCK_FULL,
+} ui_voice_lock_kind;
+// Non-null user-facing reason when a voice/stage channel cannot be joined right now (respects Role Preview,
+// pending membership screening, timeout, missing Connect permission, and user limit when permissions are exact).
+const char *ui_voice_lock_reason_ex(const ccord_ui *ui, ccord_id guild_id, const ccord_channel *ch,
+                                    ui_voice_lock_kind *out_kind);
+const char *ui_voice_lock_reason(const ccord_ui *ui, ccord_id guild_id, const ccord_channel *ch);
+bool ui_voice_can_join(const ccord_ui *ui, ccord_id guild_id, const ccord_channel *ch);
 // Unread and mention totals of a guild's listed channels (what the server icon's badge shows); channels the user cannot
 // view do not count.
 uint32_t ui_guild_unread(const ccord_ui *ui, ccord_id guild_id, uint32_t *mentions);
@@ -375,12 +386,15 @@ void ui_discovery_request(ccord_ui *ui, bool force);
 void ui_draw_server_list(ccord_ui *ui, ccord_renderer *r);
 void ui_draw_server_rail_tooltip(ccord_ui *ui, ccord_renderer *r);
 void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r);
+void ui_draw_channel_list_tooltip(ccord_ui *ui, ccord_renderer *r);
 void ui_draw_user_panel(ccord_ui *ui, ccord_renderer *r);
 
 // ---- icons.c ----
 typedef enum icon_dir : uint8_t { ICON_DOWN, ICON_RIGHT } icon_dir;
 void ui_icon_hash(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
 void ui_icon_speaker(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
+void ui_icon_lock(ccord_renderer *r, float cx, float cy, float size, ccord_color c, ccord_color bg);
+void ui_icon_speaker_locked(ccord_renderer *r, float cx, float cy, float size, ccord_color c, ccord_color bg);
 void ui_icon_gear(ccord_renderer *r, float cx, float cy, float size, ccord_color c, ccord_color hole);
 void ui_icon_chevron(ccord_renderer *r, float cx, float cy, float size, icon_dir dir, ccord_color c);
 void ui_icon_close(ccord_renderer *r, float cx, float cy, float size, ccord_color c);

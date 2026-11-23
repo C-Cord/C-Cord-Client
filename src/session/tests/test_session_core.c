@@ -1342,6 +1342,137 @@ static void test_session_server_settings(void)
 // desktop notification / sound. Where the user never chose, behaviour is what it always was (direct messages and
 // @mentions only).
 
+static size_t g_voice_join_calls;
+static ccord_status counting_join_voice(ccord_transport *t, ccord_id guild_id, ccord_id channel_id, ccord_error *err)
+{
+  (void)t; (void)guild_id; (void)channel_id;
+  g_voice_join_calls++;
+  ccord_error_clear(err);
+  return CCORD_OK;
+}
+
+static void test_session_voice_join_permissions(void)
+{
+  ccord_error err;
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  CT_CHECK(bus && store);
+  if (!bus || !store) return;
+
+  enum {
+    SELF = 1, PEER = 2, OWNER = 9,
+    G_EXACT = 10, G_UNKNOWN = 11,
+    VC_OPEN = 21, VC_LOCKED = 22, VC_HIDDEN = 23, VC_FULL = 24, STG_LOCKED = 25, VC_UNKNOWN = 31,
+    R_MEMBER = 200, R_MOVER = 201
+  };
+  ccord_user users[3] = {
+    {.id = SELF, .name = "You", .status_text = ""},
+    {.id = PEER, .name = "Peer", .status_text = ""},
+    {.id = OWNER, .name = "Owner", .status_text = ""},
+  };
+  ccord_guild guilds[2] = {
+    {.id = G_EXACT, .name = "Exact", .owner_id = OWNER},
+    {.id = G_UNKNOWN, .name = "Unknown", .owner_id = OWNER},
+  };
+  ccord_channel chans[6] = {
+    {.id = VC_OPEN, .guild_id = G_EXACT, .kind = CCORD_CHANNEL_VOICE, .discord_type = 2, .name = "Open", .topic = ""},
+    {.id = VC_LOCKED, .guild_id = G_EXACT, .kind = CCORD_CHANNEL_VOICE, .discord_type = 2, .name = "Locked", .topic = ""},
+    {.id = VC_HIDDEN, .guild_id = G_EXACT, .kind = CCORD_CHANNEL_VOICE, .discord_type = 2, .name = "Hidden", .topic = ""},
+    {.id = VC_FULL, .guild_id = G_EXACT, .kind = CCORD_CHANNEL_VOICE, .discord_type = 2, .name = "Full", .topic = "", .user_limit = 1},
+    {.id = STG_LOCKED, .guild_id = G_EXACT, .kind = CCORD_CHANNEL_STAGE, .discord_type = 13, .name = "Stage", .topic = ""},
+    {.id = VC_UNKNOWN, .guild_id = G_UNKNOWN, .kind = CCORD_CHANNEL_VOICE, .discord_type = 2, .name = "Uncached", .topic = ""},
+  };
+  ccord_member members[2] = {
+    {.guild_id = G_EXACT, .user_id = SELF, .role_name = "Member"},
+    {.guild_id = G_EXACT, .user_id = PEER, .role_name = "Member"},
+  };
+  ccord_voice_state vstates[1] = {
+    {.guild_id = G_EXACT, .channel_id = VC_FULL, .user_id = PEER},
+  };
+  ccord_snapshot snap = {
+    .self_id = SELF, .users = users, .user_count = 3, .guilds = guilds, .guild_count = 2,
+    .channels = chans, .channel_count = 6, .members = members, .member_count = 2,
+    .voice_states = vstates, .voice_state_count = 1,
+  };
+  ccord_role roles[3] = {
+    {.id = G_EXACT, .guild_id = G_EXACT, .name = "@everyone", .permissions = CCORD_PERM_VIEW_CHANNEL | CCORD_PERM_CONNECT},
+    {.id = R_MEMBER, .guild_id = G_EXACT, .name = "Member", .position = 1, .permissions = 0},
+    {.id = R_MOVER, .guild_id = G_EXACT, .name = "Mover", .position = 2, .permissions = CCORD_PERM_MOVE_MEMBERS},
+  };
+  ccord_id self_roles[1] = {R_MEMBER};
+  ccord_member_roles mroles[1] = {{.guild_id = G_EXACT, .user_id = SELF, .role_ids = self_roles, .count = 1}};
+  ccord_overwrite deny_conn[1] = {{.id = G_EXACT, .kind = CCORD_OVERWRITE_ROLE, .deny = CCORD_PERM_CONNECT}};
+  ccord_overwrite deny_view[1] = {{.id = G_EXACT, .kind = CCORD_OVERWRITE_ROLE, .deny = CCORD_PERM_VIEW_CHANNEL}};
+  ccord_channel_overwrites ow[3] = {
+    {.channel_id = VC_LOCKED, .items = deny_conn, .count = 1},
+    {.channel_id = VC_HIDDEN, .items = deny_view, .count = 1},
+    {.channel_id = STG_LOCKED, .items = deny_conn, .count = 1},
+  };
+
+  fake_transport *f = calloc(1, sizeof *f);
+  CT_CHECK(f != nullptr);
+  if (!f) return;
+  static ccord_transport_vtable vt;
+  vt = fake_vt;
+  vt.join_voice = counting_join_voice;
+  f->base.vt = &vt;
+  g_voice_join_calls = 0;
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap,
+                                    .roles = roles, .role_count = 3, .member_roles = mroles, .member_role_count = 1,
+                                    .overwrites = ow, .overwrite_count = 3};
+  ccord_session *s = ccord_session_create(bus, store, &f->base, &err);
+  CT_CHECK(s != nullptr);
+  if (!s) return;
+  CT_CHECK(ccord_session_pump(s) >= 1);
+  CT_CHECK(ccord_store_permissions_exact(store, G_EXACT, SELF));
+  CT_CHECK(!ccord_store_permissions_exact(store, G_UNKNOWN, SELF));
+
+  // Missing CONNECT (voice & stage) and missing VIEW_CHANNEL are blocked before hitting transport.
+  CT_CHECK(ccord_session_join_voice(s, G_EXACT, VC_LOCKED, &err) == CCORD_ERR_PERMISSION && g_voice_join_calls == 0);
+  CT_CHECK(ccord_session_join_voice(s, G_EXACT, STG_LOCKED, &err) == CCORD_ERR_PERMISSION && g_voice_join_calls == 0);
+  CT_CHECK(ccord_session_join_voice(s, G_EXACT, VC_HIDDEN, &err) == CCORD_ERR_PERMISSION && g_voice_join_calls == 0);
+
+  // Full channel (user_limit == 1 occupied by PEER) is blocked without MOVE_MEMBERS.
+  CT_CHECK(ccord_session_join_voice(s, G_EXACT, VC_FULL, &err) == CCORD_ERR_PERMISSION && g_voice_join_calls == 0);
+  CT_CHECK(strstr(err.message, "full") != nullptr);
+
+  // Open channel succeeds; unknown-permissions guild fails open.
+  CT_CHECK(ccord_session_join_voice(s, G_EXACT, VC_OPEN, &err) == CCORD_OK && g_voice_join_calls == 1);
+  CT_CHECK(ccord_session_join_voice(s, G_UNKNOWN, VC_UNKNOWN, &err) == CCORD_OK && g_voice_join_calls == 2);
+
+  // Granting MOVE_MEMBERS allows joining the full channel.
+  ccord_id mover_roles[2] = {R_MEMBER, R_MOVER};
+  CT_CHECK(ccord_store_set_member_roles(store, G_EXACT, SELF, mover_roles, 2, &err) == CCORD_OK);
+  CT_CHECK(ccord_session_join_voice(s, G_EXACT, VC_FULL, &err) == CCORD_OK && g_voice_join_calls == 3);
+  CT_CHECK(ccord_store_set_member_roles(store, G_EXACT, SELF, self_roles, 1, &err) == CCORD_OK);
+
+  // Timed-out member cannot join even an open voice channel.
+  ccord_member timed_out = {.guild_id = G_EXACT, .user_id = SELF, .role_name = "Member",
+                            .timeout_until_ms = 4102444800000LL};   // year 2100
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_GUILD_MEMBERS, .guild_id = G_EXACT,
+                                    .guild_members = &timed_out, .guild_member_count = 1};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_session_join_voice(s, G_EXACT, VC_OPEN, &err) == CCORD_ERR_PERMISSION && g_voice_join_calls == 3);
+  CT_CHECK(strstr(err.message, "timed out") != nullptr);
+  ccord_member cleared = {.guild_id = G_EXACT, .user_id = SELF, .role_name = "Member", .timeout_until_ms = 0};
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_GUILD_MEMBERS, .guild_id = G_EXACT,
+                                    .guild_members = &cleared, .guild_member_count = 1};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_session_join_voice(s, G_EXACT, VC_OPEN, &err) == CCORD_OK && g_voice_join_calls == 4);
+
+  // Pending membership screening blocks joining voice.
+  ccord_member pending = {.guild_id = G_EXACT, .user_id = SELF, .role_name = "Member", .pending = true};
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_GUILD_MEMBERS, .guild_id = G_EXACT,
+                                    .guild_members = &pending, .guild_member_count = 1};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_session_join_voice(s, G_EXACT, VC_OPEN, &err) == CCORD_ERR_PERMISSION && g_voice_join_calls == 4);
+  CT_CHECK(strstr(err.message, "screening") != nullptr);
+
+  ccord_session_destroy(s);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+}
+
 
 int main(void)
 {
@@ -1358,5 +1489,6 @@ int main(void)
   test_session_admin();
   test_session_permission_data();
   test_session_server_settings();
+  test_session_voice_join_permissions();
   return CT_RESULT("test_session_core");
 }

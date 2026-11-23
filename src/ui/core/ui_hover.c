@@ -488,7 +488,16 @@ bool uc_update_hover(ccord_ui *ui)
       } else if (h.disc_text) {
         k = CCORD_CURSOR_TEXT;
       } else if (h.crow >= 0) {
-        k = CCORD_CURSOR_POINTER;
+        bool locked_vc = false;
+        if ((size_t)h.crow < ui->ncrow) {
+          const chan_row *cr = &ui->crow[h.crow];
+          if (cr->dm_nav == DM_NAV_NONE && !cr->is_relationship && !cr->is_category && !cr->is_voice_user) {
+            ccord_id g = ccord_store_selected_guild(ui->d.store);
+            const ccord_channel *ch = ccord_store_channel_at(ui->d.store, g, cr->index);
+            if (ch && ui_voice_lock_reason(ui, g, ch) != nullptr) locked_vc = true;
+          }
+        }
+        k = locked_vc ? CCORD_CURSOR_NOT_ALLOWED : CCORD_CURSOR_POINTER;
       } else if (call_bar.w > 0.0f && ui_in_rect(ui->mx, ui->my, call_bar)) {
         k = CCORD_CURSOR_POINTER;   // the call bar is a button, never a text surface
       } else if (!ui->discovery_open && !ui->msg_req_banner_visible && !ui_is_dm_requests_view(ui) &&
@@ -642,6 +651,12 @@ void ui_clear_voice_stage(ccord_ui *ui)
 
 void uc_join_voice_channel(ccord_ui *ui, ccord_id guild, const ccord_channel *ch)
 {
+  const char *lock_reason = ui_voice_lock_reason(ui, guild, ch);
+  if (lock_reason) {
+    ui_notice(ui, "%s", lock_reason);
+    ui->dirty = true;
+    return;
+  }
   if (!ui->d.session) {
     ui_notice(ui, "Not connected");
     return;

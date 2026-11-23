@@ -512,6 +512,7 @@ void ccord_platform_set_cursor(ccord_platform *p, ccord_cursor_kind kind)
     [CCORD_CURSOR_NWSE_RESIZE] = SDL_SYSTEM_CURSOR_NWSE_RESIZE,
     [CCORD_CURSOR_NESW_RESIZE] = SDL_SYSTEM_CURSOR_NESW_RESIZE,
     [CCORD_CURSOR_MOVE] = SDL_SYSTEM_CURSOR_MOVE,
+    [CCORD_CURSOR_NOT_ALLOWED] = SDL_SYSTEM_CURSOR_NOT_ALLOWED,
   };
   if ((size_t)kind >= (size_t)CCORD_CURSOR_COUNT || p->cursor_unavailable[kind]) return;
   if (!p->cursors[kind]) {

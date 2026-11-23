@@ -313,6 +313,33 @@ ccord_status ccord_session_join_voice(ccord_session *s, ccord_id guild_id, ccord
   if (ch->kind != CCORD_CHANNEL_VOICE && ch->kind != CCORD_CHANNEL_STAGE) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "channel is not a voice channel");
   }
+  if (guild_id != CCORD_DM_GUILD_ID) {
+    if (ccord_session_self_pending(s, guild_id)) {
+      return ccord_error_set(err, CCORD_ERR_PERMISSION,
+                             "Complete the server's membership screening before joining voice.");
+    }
+    ccord_id self = ccord_store_self_id(s->store);
+    if (ccord_store_permissions_exact(s->store, guild_id, self)) {
+      int64_t now = session_now_unix_ms(s);
+      uint64_t perms = ccord_store_permissions(s->store, guild_id, channel_id, self, now);
+      if (!ccord_perm_has(perms, CCORD_PERM_VIEW_CHANNEL | CCORD_PERM_CONNECT)) {
+        const ccord_member *me = ccord_store_find_member(s->store, guild_id, self);
+        if (me && me->timeout_until_ms > now) {
+          return ccord_error_set(err, CCORD_ERR_PERMISSION, "You have been timed out and cannot join voice.");
+        }
+        return ccord_error_set(err, CCORD_ERR_PERMISSION,
+                               "You do not have permission to connect to this voice channel.");
+      }
+      if (ch->kind == CCORD_CHANNEL_VOICE && ch->user_limit > 0) {
+        const ccord_voice_state *cur = sess_self_voice(s, guild_id);
+        bool already_here = cur && cur->channel_id == channel_id;
+        if (!already_here && !ccord_perm_has(perms, CCORD_PERM_MOVE_MEMBERS) &&
+            ccord_store_voice_count(s->store, channel_id) >= ch->user_limit) {
+          return ccord_error_set(err, CCORD_ERR_PERMISSION, "This voice channel is full.");
+        }
+      }
+    }
+  }
   ccord_status st = ccord_transport_join_voice(s->transport, guild_id, channel_id, err);
   if (st == CCORD_OK) {
     s->pending_voice_guild = guild_id;

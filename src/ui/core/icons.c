@@ -32,6 +32,37 @@ void ui_icon_speaker(ccord_renderer *r, float cx, float cy, float size, ccord_co
   ccord_draw_line(r, (ccord_vec2){cx + s * 0.98f, cy}, (ccord_vec2){cx + s * 0.70f, cy + s * 0.70f}, t, c);
 }
 
+void ui_icon_lock(ccord_renderer *r, float cx, float cy, float size, ccord_color c, ccord_color bg)
+{
+  float s = size * 0.5f;
+  // Shackle arch above the body, punched with `bg` so the loop stays readable at small badge sizes.
+  float arch_cy = cy - s * 0.28f;
+  float outer_r = s * 0.52f;
+  float inner_r = s * 0.26f;
+  float leg_w = outer_r - inner_r;
+  ccord_push_clip(r, (ccord_rect){cx - s * 0.80f, cy - s * 1.10f, s * 1.60f, s * 1.12f});
+  ccord_draw_circle(r, cx, arch_cy, outer_r, c);
+  ccord_draw_circle(r, cx, arch_cy, inner_r, bg);
+  ccord_draw_rect(r, (ccord_rect){cx - outer_r, arch_cy, leg_w, s * 0.42f}, c);
+  ccord_draw_rect(r, (ccord_rect){cx + inner_r, arch_cy, leg_w, s * 0.42f}, c);
+  ccord_pop_clip(r);
+  // Padlock body.
+  ccord_draw_rrect(r, (ccord_rect){cx - s * 0.70f, cy - s * 0.04f, s * 1.40f, s * 0.96f}, s * 0.22f, c);
+}
+
+void ui_icon_speaker_locked(ccord_renderer *r, float cx, float cy, float size, ccord_color c, ccord_color bg)
+{
+  ui_icon_speaker(r, cx - size * 0.06f, cy + size * 0.05f, size * 0.90f, c);
+  float lsz = size * 0.64f;
+  float lx = cx + size * 0.30f;
+  float ly = cy - size * 0.22f;
+  float pad = 1.5f;
+  ccord_draw_rrect(r, (ccord_rect){lx - lsz * 0.42f - pad, ly - lsz * 0.52f - pad,
+                                   lsz * 0.84f + 2.0f * pad, lsz * 1.04f + 2.0f * pad},
+                   lsz * 0.26f, bg);
+  ui_icon_lock(r, lx, ly, lsz, c, bg);
+}
+
 void ui_icon_gear(ccord_renderer *r, float cx, float cy, float size, ccord_color c, ccord_color hole)
 {
   float s = size * 0.5f;

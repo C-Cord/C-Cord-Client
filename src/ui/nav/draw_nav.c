@@ -969,13 +969,22 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
     }
     bool selected = ch->id == sel_ch &&
                     (g != CCORD_DM_GUILD_ID || (!ui_is_dm_friends_view(ui) && !ui_is_dm_requests_view(ui)));
-    ui_row_state rs = ui_row_state_of(ui, "chan", ch->id, hover, selected, COL(bg_secondary));
+    ui_voice_lock_kind vlock_kind = UI_VOICE_LOCK_NONE;
+    const char *vlock = (g != CCORD_DM_GUILD_ID && !row->is_thread &&
+                         (ch->kind == CCORD_CHANNEL_VOICE || ch->kind == CCORD_CHANNEL_STAGE))
+                          ? ui_voice_lock_reason_ex(ui, g, ch, &vlock_kind)
+                          : nullptr;
+    bool voice_locked = (vlock != nullptr);
+    ui_row_state rs = ui_row_state_of(ui, "chan", ch->id, hover && !voice_locked, selected && !voice_locked,
+                                      COL(bg_secondary));
     if (selected) ui->dbg_chan_sel_fade = rs.s;
     // A muted channel is quiet: no unread marker or bold name, and its name sits back until you point at it.
     bool muted = ui_channel_muted(ui, ch);
-    bool has_unread = ch->unread_count > 0 && !muted;
-    ccord_color rest_tc = muted ? ui_mix(COL(text_muted), COL(bg_secondary), 0.45f) : COL(text_muted);
-    ccord_color tc = ui_row_state_text(&rs, rest_tc, COL(text_interactive_hover), COL(text_interactive_active));
+    bool has_unread = ch->unread_count > 0 && !muted && !voice_locked;
+    ccord_color rest_tc = (voice_locked || muted) ? ui_mix(COL(text_muted), COL(bg_secondary), 0.45f) : COL(text_muted);
+    ccord_color tc = voice_locked
+                       ? rest_tc
+                       : ui_row_state_text(&rs, rest_tc, COL(text_interactive_hover), COL(text_interactive_active));
     ccord_color item_bg = rs.bg;
     ui_row_state_fill(ui, r, &rs, item, M(channel_item_radius));
     // The unread marker grows in (and out) instead of blinking; text weight cannot ease, but its colour does.
@@ -1076,18 +1085,37 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
       ccord_draw_rect(r, (ccord_rect){item.x + 12.0f, icy - 0.75f, 6.0f, 1.5f}, COL(divider));
     }
     if (unread_t > 0.01f) draw_unread_pill(r, item.x + 2.5f, icy, 8.0f * unread_t, ui_alpha(COL(pill), unread_t));
-    if (ch->kind == CCORD_CHANNEL_VOICE || ch->kind == CCORD_CHANNEL_STAGE) ui_icon_speaker(r, icx, icy, 17.0f, tc);
-    else if (ccord_store_channel_is_forum(ui->d.store, ch->id)) ui_icon_forum(r, icx, icy, 17.0f, tc);
-    else ui_icon_hash(r, icx, icy, row->is_thread ? 14.0f : 17.0f, tc);
-    ccord_color name_tc = ui_row_state_text(&rs, has_unread ? COL(text_header) : rest_tc,
-                                            COL(text_interactive_hover), COL(text_interactive_active));
-    ccord_text_style st = ui_style(ui, (selected || has_unread) ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR,
+    if (ch->kind == CCORD_CHANNEL_VOICE || ch->kind == CCORD_CHANNEL_STAGE) {
+      if (vlock_kind == UI_VOICE_LOCK_PERMISSION) ui_icon_speaker_locked(r, icx, icy, 17.0f, tc, item_bg);
+      else ui_icon_speaker(r, icx, icy, 17.0f, tc);
+    } else if (ccord_store_channel_is_forum(ui->d.store, ch->id)) {
+      ui_icon_forum(r, icx, icy, 17.0f, tc);
+    } else {
+      ui_icon_hash(r, icx, icy, row->is_thread ? 14.0f : 17.0f, tc);
+    }
+    ccord_color name_tc = voice_locked
+                            ? rest_tc
+                            : ui_row_state_text(&rs, has_unread ? COL(text_header) : rest_tc,
+                                                COL(text_interactive_hover), COL(text_interactive_active));
+    ccord_text_style st = ui_style(ui, ((selected && !voice_locked) || has_unread) ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR,
                                    row->is_thread ? M(font_size_small) : M(font_size_base) - 0.5f, name_tc);
     float ty = item.y + (item.h - ui_line_h(ui, st.size)) * 0.5f;
     mention_badge_layout badge = ch->mention_count > 0 ? measure_mention_badge(ui, r, ch->mention_count) : (mention_badge_layout){0};
     bool show_gear = !row->is_thread && badge.len == 0 && hover &&
                      ui->nchan_gear_rects < 64 && ui_channel_settings_available(ui, g, ch->id);
-    float reserve = badge.len > 0 ? badge.w + 6.0f : (show_gear ? 22.0f : 0.0f);
+    char limit_buf[24] = "";
+    float limit_w = 0.0f;
+    bool show_limit = !row->is_thread && badge.len == 0 && !show_gear &&
+                      ch->kind == CCORD_CHANNEL_VOICE && ch->user_limit > 0;
+    ccord_text_style lim_st = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 3.0f,
+                                       vlock_kind == UI_VOICE_LOCK_FULL ? COL(danger) : rest_tc);
+    if (show_limit) {
+      size_t vcnt = ccord_store_voice_count(ui->d.store, ch->id);
+      snprintf(limit_buf, sizeof limit_buf, "%02zu/%02u", vcnt, (unsigned)ch->user_limit);
+      ccord_vec2 lt = ccord_text_measure(r, limit_buf, strlen(limit_buf), &lim_st, 0.0f);
+      limit_w = lt.x + 10.0f;
+    }
+    float reserve = badge.len > 0 ? badge.w + 6.0f : (show_gear ? 22.0f : (show_limit ? limit_w + 6.0f : 0.0f));
     float name_x = item.x + M(channel_item_pad_x) + 25.0f + thread_indent;
     float name_w = ccord_text_draw_ellipsis(r, ch->name, strlen(ch->name), name_x, ty,
                                             item.w - M(channel_item_pad_x) * 2.0f - 25.0f - thread_indent - reserve, &st);
@@ -1102,6 +1130,13 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
       ui->chan_gear_rects[ui->nchan_gear_rects].rect = gr;
       ui->chan_gear_rects[ui->nchan_gear_rects].channel_id = ch->id;
       ui->nchan_gear_rects++;
+    } else if (show_limit) {
+      ccord_rect lr = {item.x + item.w - limit_w - 4.0f, item.y + (item.h - 16.0f) * 0.5f, limit_w, 16.0f};
+      ccord_color lbg = vlock_kind == UI_VOICE_LOCK_FULL ? ui_alpha(COL(danger), 0.18f) : COL(bg_tertiary);
+      ccord_draw_rrect(r, lr, 4.0f, lbg);
+      ccord_vec2 lt = ccord_text_measure(r, limit_buf, strlen(limit_buf), &lim_st, 0.0f);
+      ccord_text_draw(r, limit_buf, strlen(limit_buf), lr.x + (lr.w - lt.x) * 0.5f, lr.y + (lr.h - lt.y) * 0.5f,
+                      &lim_st, 0.0f);
     }
   row_done:
     ccord_pop_alpha(r);
@@ -1113,6 +1148,33 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
     ccord_draw_circle(r, cs->x + 14.0f, ly, 3.5f, COL(brand));
   }
   ccord_pop_clip(r);
+}
+
+// Tooltip for a hovered locked/full voice channel (drawn outside channel_scroll clip so it extends cleanly to the right).
+void ui_draw_channel_list_tooltip(ccord_ui *ui, ccord_renderer *r)
+{
+  if (ui->touch_mode || !ui->mouse_in || ui->hover_crow < 0 || (size_t)ui->hover_crow >= ui->ncrow ||
+      ui->menu.open || ui->settings_open || ui->go_live_open ||
+      (ui->drag == DRAG_CHANNEL && ui->drag_active)) {
+    return;
+  }
+  for (size_t i = 0; i < ui->nchan_gear_rects; i++) {
+    if (ui_in_rect(ui->mx, ui->my, ui->chan_gear_rects[i].rect)) return;
+  }
+  const chan_row *row = &ui->crow[ui->hover_crow];
+  if (row->dm_nav != DM_NAV_NONE || row->is_relationship || row->is_category || row->is_voice_user || row->is_thread) {
+    return;
+  }
+  ccord_id g = ccord_store_selected_guild(ui->d.store);
+  const ccord_channel *ch = ccord_store_channel_at(ui->d.store, g, row->index);
+  if (!ch) return;
+  const char *lock = ui_voice_lock_reason(ui, g, ch);
+  if (!lock) return;
+  const ccord_layout_rect *cs = &ui->layout.channel_scroll;
+  float y = cs->y + row->y - ui->chan_scroll;
+  if (y + row->h < cs->y || y > cs->y + cs->h) return;
+  ccord_rect anchor = {cs->x, y, cs->w, row->h};
+  (void)uis_tooltip(ui, r, anchor, lock, UIS_TIP_RIGHT, ch->id ^ 0x564F4943454C4B00ULL);
 }
 
 // ---------------------------------------------------------------- user panel
