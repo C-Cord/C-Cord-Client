@@ -12,6 +12,25 @@ void ui_save_current_location(ccord_ui *ui)
   ccord_id g = ccord_store_selected_guild(ui->d.store);
   ccord_id ch = ccord_store_selected_channel(ui->d.store);
   if (g == CCORD_ID_NONE && ch == CCORD_ID_NONE) return;
+  // Record in MRU channel history for Quick Switcher's Previous Channels list.
+  if (ch != CCORD_ID_NONE) {
+    size_t existing = ui->nrecent_channels;
+    for (size_t i = 0; i < ui->nrecent_channels; i++) {
+      if (ui->recent_channels[i].channel_id == ch) { existing = i; break; }
+    }
+    if (existing > 0) {
+      size_t cap = sizeof ui->recent_channels / sizeof ui->recent_channels[0];
+      size_t move_from = existing < ui->nrecent_channels ? existing : (ui->nrecent_channels < cap ? ui->nrecent_channels : cap - 1u);
+      if (existing >= ui->nrecent_channels && ui->nrecent_channels < cap) ui->nrecent_channels++;
+      for (size_t i = move_from; i > 0; i--) ui->recent_channels[i] = ui->recent_channels[i - 1u];
+      ui->recent_channels[0].guild_id = g;
+      ui->recent_channels[0].channel_id = ch;
+    } else if (ui->nrecent_channels == 0) {
+      ui->recent_channels[0].guild_id = g;
+      ui->recent_channels[0].channel_id = ch;
+      ui->nrecent_channels = 1u;
+    }
+  }
   if (g == ui->saved_guild_id && ch == ui->saved_channel_id) return;
   ui->saved_guild_id = g;
   ui->saved_channel_id = ch;

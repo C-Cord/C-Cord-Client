@@ -314,11 +314,17 @@ struct ccord_ui {
     ccord_id guild_id;
     ccord_id channel_id;
     ccord_id user_id;
+    uint8_t action;   // 0 = navigate, 1..7 = $ quick action
     char label[96];
     char sub[64];
     ccord_rect rect;
-  } quick_switcher_items[10];
+  } quick_switcher_items[24];
   size_t nquick_switcher_items;
+  struct {
+    ccord_id guild_id;
+    ccord_id channel_id;
+  } recent_channels[12];
+  size_t nrecent_channels;
 
   // Friends view interactive hits & management modals
   ccord_rect add_friend_btn_rect;

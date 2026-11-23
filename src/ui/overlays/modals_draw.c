@@ -33,32 +33,118 @@ void ui_quick_switcher_reset_list(ccord_ui *ui)
   ccord_scroller_cancel(&ui->quick_switcher_glide);
 }
 
+enum {
+  QS_ACT_NONE = 0,
+  QS_ACT_SETTINGS = 1,
+  QS_ACT_INBOX = 2,
+  QS_ACT_SAVED = 3,
+  QS_ACT_FRIENDS = 4,
+  QS_ACT_MUTE = 5,
+  QS_ACT_DEAFEN = 6,
+  QS_ACT_SHORTCUTS = 7,
+};
+
+static bool qs_has_channel(const ccord_ui *ui, ccord_id cid)
+{
+  for (size_t i = 0; i < ui->nquick_switcher_items; i++) {
+    if (ui->quick_switcher_items[i].action == QS_ACT_NONE && ui->quick_switcher_items[i].channel_id == cid) return true;
+  }
+  return false;
+}
+
 void dc_populate_quick_switcher(ccord_ui *ui)
 {
   ui->nquick_switcher_items = 0;
   if (!ui || !ui->d.store) return;
+  const size_t k_max = sizeof ui->quick_switcher_items / sizeof ui->quick_switcher_items[0];
   const char *q = ccord_text_edit_cstr(&ui->quick_switcher_edit);
   size_t qlen = ui->quick_switcher_edit.len;
   char filter = '\0';
-  if (qlen > 0 && (q[0] == '@' || q[0] == '#' || q[0] == '!' || q[0] == '*')) {
+  if (qlen > 0 && (q[0] == '@' || q[0] == '#' || q[0] == '!' || q[0] == '*' || q[0] == '$')) {
     filter = q[0];
     q++;
     qlen--;
   }
   const ccord_store *st = ui->d.store;
 
+  // 0. Quick-action shortcuts ($)
+  if (filter == '$') {
+    static const struct { uint8_t act; const char *name; const char *sub; } k_acts[] = {
+      {QS_ACT_SETTINGS,  "$ Settings",  "Open User Settings"},
+      {QS_ACT_INBOX,     "$ Inbox",     "Open Unreads & Mentions"},
+      {QS_ACT_SAVED,     "$ Bookmarks", "Open Saved Messages"},
+      {QS_ACT_FRIENDS,   "$ Friends",   "Go to Friends & DMs"},
+      {QS_ACT_MUTE,      "$ Mute",      "Toggle Microphone Mute"},
+      {QS_ACT_DEAFEN,    "$ Deafen",    "Toggle Audio Deafen"},
+      {QS_ACT_SHORTCUTS, "$ Shortcuts", "View Keyboard Shortcuts"},
+    };
+    for (size_t i = 0; i < sizeof k_acts / sizeof k_acts[0] && ui->nquick_switcher_items < k_max; i++) {
+      if (qlen > 0 && !dc_substr_ci(k_acts[i].name + 2, q, qlen) && !dc_substr_ci(k_acts[i].sub, q, qlen)) continue;
+      auto it = &ui->quick_switcher_items[ui->nquick_switcher_items++];
+      *it = (typeof(*it)){.action = k_acts[i].act};
+      snprintf(it->label, sizeof it->label, "%s", k_acts[i].name);
+      snprintf(it->sub, sizeof it->sub, "%s", k_acts[i].sub);
+    }
+    if (ui->quick_switcher_sel >= ui->nquick_switcher_items) ui_quick_switcher_reset_list(ui);
+    return;
+  }
+
+  // 0b. Empty query: lead with Unread Mentions, then Previous Channels (MRU history).
+  if (filter == '\0' && qlen == 0) {
+    size_t ng0 = ccord_store_guild_count(st);
+    for (size_t g = 0; g < ng0 && ui->nquick_switcher_items < k_max; g++) {
+      const ccord_guild *gd = ccord_store_guild_at(st, g);
+      if (!gd) continue;
+      size_t nc0 = ccord_store_channel_count(st, gd->id);
+      for (size_t c = 0; c < nc0 && ui->nquick_switcher_items < k_max; c++) {
+        const ccord_channel *ch = ccord_store_channel_at(st, gd->id, c);
+        if (!ch || ch->mention_count == 0 || ch->kind == CCORD_CHANNEL_CATEGORY) continue;
+        if (gd->id == CCORD_DM_GUILD_ID && ch->is_message_request) continue;
+        if (gd->id != CCORD_DM_GUILD_ID && !ui_channel_visible(ui, gd->id, ch)) continue;
+        if (qs_has_channel(ui, ch->id)) continue;
+        auto it = &ui->quick_switcher_items[ui->nquick_switcher_items++];
+        *it = (typeof(*it)){.guild_id = gd->id, .channel_id = ch->id, .user_id = ch->user_id};
+        if (gd->id == CCORD_DM_GUILD_ID) {
+          const char *dname = ui_dm_display_name(ui, ch);
+          snprintf(it->label, sizeof it->label, "@ %s", dname ? dname : ch->name);
+        } else {
+          snprintf(it->label, sizeof it->label, "# %s", ch->name ? ch->name : "");
+        }
+        snprintf(it->sub, sizeof it->sub, "%u mention%s", (unsigned)ch->mention_count, ch->mention_count == 1u ? "" : "s");
+      }
+    }
+    for (size_t r = 0; r < ui->nrecent_channels && ui->nquick_switcher_items < k_max; r++) {
+      ccord_id gid = ui->recent_channels[r].guild_id;
+      ccord_id cid = ui->recent_channels[r].channel_id;
+      if (cid == CCORD_ID_NONE || qs_has_channel(ui, cid)) continue;
+      const ccord_channel *ch = ccord_store_channel(st, cid);
+      if (!ch || ch->kind == CCORD_CHANNEL_CATEGORY) continue;
+      if (gid == CCORD_DM_GUILD_ID && ch->is_message_request) continue;
+      if (gid != CCORD_DM_GUILD_ID && !ui_channel_visible(ui, gid, ch)) continue;
+      const ccord_guild *gd = ccord_store_guild(st, gid);
+      auto it = &ui->quick_switcher_items[ui->nquick_switcher_items++];
+      *it = (typeof(*it)){.guild_id = gid, .channel_id = cid, .user_id = ch->user_id};
+      if (gid == CCORD_DM_GUILD_ID) {
+        const char *dname = ui_dm_display_name(ui, ch);
+        snprintf(it->label, sizeof it->label, "@ %s", dname ? dname : ch->name);
+        snprintf(it->sub, sizeof it->sub, "Recent DM");
+      } else {
+        snprintf(it->label, sizeof it->label, "%s %s", ch->kind == CCORD_CHANNEL_VOICE ? "!" : "#", ch->name ? ch->name : "");
+        snprintf(it->sub, sizeof it->sub, "Recent \xC2\xB7 %.48s", gd && gd->name ? gd->name : "");
+      }
+    }
+  }
+
   // 1. DM channels (@)
   if (filter == '\0' || filter == '@') {
     size_t dmc = ccord_store_channel_count(st, CCORD_DM_GUILD_ID);
-    for (size_t i = 0; i < dmc && ui->nquick_switcher_items < 10; i++) {
+    for (size_t i = 0; i < dmc && ui->nquick_switcher_items < k_max; i++) {
       const ccord_channel *c = ccord_store_channel_at(st, CCORD_DM_GUILD_ID, i);
-      if (!c || c->is_message_request) continue;
+      if (!c || c->is_message_request || qs_has_channel(ui, c->id)) continue;
       const char *dname = ui_dm_display_name(ui, c);
       if (!dc_substr_ci(dname, q, qlen) && !dc_substr_ci(c->name, q, qlen)) continue;
       auto it = &ui->quick_switcher_items[ui->nquick_switcher_items++];
-      it->guild_id = CCORD_DM_GUILD_ID;
-      it->channel_id = c->id;
-      it->user_id = c->user_id;
+      *it = (typeof(*it)){.guild_id = CCORD_DM_GUILD_ID, .channel_id = c->id, .user_id = c->user_id};
       snprintf(it->label, sizeof it->label, "@ %s", dname ? dname : c->name);
       snprintf(it->sub, sizeof it->sub, "Direct Message");
     }
@@ -66,29 +152,26 @@ void dc_populate_quick_switcher(ccord_ui *ui)
 
   // 2. Guild channels (# text, ! voice) and Guilds (*)
   size_t gc = ccord_store_guild_count(st);
-  for (size_t g = 0; g < gc && ui->nquick_switcher_items < 10; g++) {
+  for (size_t g = 0; g < gc && ui->nquick_switcher_items < k_max; g++) {
     const ccord_guild *gd = ccord_store_guild_at(st, g);
     if (!gd) continue;
-    if ((filter == '\0' || filter == '*') && dc_substr_ci(gd->name, q, qlen) && ui->nquick_switcher_items < 10) {
+    if ((filter == '\0' || filter == '*') && dc_substr_ci(gd->name, q, qlen) && ui->nquick_switcher_items < k_max) {
       auto it = &ui->quick_switcher_items[ui->nquick_switcher_items++];
-      it->guild_id = gd->id;
-      it->channel_id = CCORD_ID_NONE;
-      it->user_id = CCORD_ID_NONE;
+      *it = (typeof(*it)){.guild_id = gd->id, .channel_id = CCORD_ID_NONE, .user_id = CCORD_ID_NONE};
       snprintf(it->label, sizeof it->label, "* %s", gd->name);
       snprintf(it->sub, sizeof it->sub, "Server");
     }
     if (filter == '*' || filter == '@') continue;
     size_t cc = ccord_store_channel_count(st, gd->id);
-    for (size_t c = 0; c < cc && ui->nquick_switcher_items < 10; c++) {
+    for (size_t c = 0; c < cc && ui->nquick_switcher_items < k_max; c++) {
       const ccord_channel *ch = ccord_store_channel_at(st, gd->id, c);
       if (!ch || ch->kind == CCORD_CHANNEL_CATEGORY || !ui_channel_visible(ui, gd->id, ch)) continue;
+      if (qs_has_channel(ui, ch->id)) continue;
       if (filter == '#' && ch->kind != CCORD_CHANNEL_TEXT) continue;
       if (filter == '!' && ch->kind != CCORD_CHANNEL_VOICE) continue;
       if (!dc_substr_ci(ch->name, q, qlen)) continue;
       auto it = &ui->quick_switcher_items[ui->nquick_switcher_items++];
-      it->guild_id = gd->id;
-      it->channel_id = ch->id;
-      it->user_id = CCORD_ID_NONE;
+      *it = (typeof(*it)){.guild_id = gd->id, .channel_id = ch->id, .user_id = CCORD_ID_NONE};
       snprintf(it->label, sizeof it->label, "%s %s", ch->kind == CCORD_CHANNEL_VOICE ? "!" : "#", ch->name);
       snprintf(it->sub, sizeof it->sub, "%s", gd->name ? gd->name : "");
     }
@@ -99,18 +182,40 @@ void dc_populate_quick_switcher(ccord_ui *ui)
 void dc_activate_quick_switcher_item(ccord_ui *ui, size_t idx)
 {
   if (!ui || idx >= ui->nquick_switcher_items) return;
-  auto it = &ui->quick_switcher_items[idx];
+  auto it = ui->quick_switcher_items[idx];
   ui->quick_switcher_open = false;
+  if (it.action != QS_ACT_NONE) {
+    ccord_error err;
+    switch (it.action) {
+      case QS_ACT_SETTINGS: ui->settings_open = true; break;
+      case QS_ACT_INBOX: ui->inbox_open = true; ui->inbox_scroll = 0.0f; break;
+      case QS_ACT_SAVED:
+        if (!ui->saved_popover_open) ui_saved_messages_toggle_popover(ui);
+        break;
+      case QS_ACT_FRIENDS:
+        if (ui->d.session) (void)ccord_session_select_guild(ui->d.session, CCORD_DM_GUILD_ID, &err);
+        else if (ui->d.store) (void)ccord_store_select_guild(ui->d.store, CCORD_DM_GUILD_ID, &err);
+        ui->dm_friends_view = true;
+        ui->dm_requests_view = false;
+        break;
+      case QS_ACT_MUTE: uc_toggle_voice_mute(ui); break;
+      case QS_ACT_DEAFEN: uc_toggle_voice_deafen(ui); break;
+      case QS_ACT_SHORTCUTS: ui->shortcuts_open = true; break;
+      default: break;
+    }
+    ui->dirty = true;
+    return;
+  }
   ui->dm_friends_view = false;
   ui->dm_requests_view = false;
   ccord_error err;
-  if (it->guild_id != CCORD_ID_NONE) {
-    if (ui->d.session) (void)ccord_session_select_guild(ui->d.session, it->guild_id, &err);
-    else (void)ccord_store_select_guild(ui->d.store, it->guild_id, &err);
+  if (it.guild_id != CCORD_ID_NONE) {
+    if (ui->d.session) (void)ccord_session_select_guild(ui->d.session, it.guild_id, &err);
+    else (void)ccord_store_select_guild(ui->d.store, it.guild_id, &err);
   }
-  if (it->channel_id != CCORD_ID_NONE) {
-    if (ui->d.session) (void)ccord_session_select_channel(ui->d.session, it->channel_id, &err);
-    else (void)ccord_store_select_channel(ui->d.store, it->channel_id, &err);
+  if (it.channel_id != CCORD_ID_NONE) {
+    if (ui->d.session) (void)ccord_session_select_channel(ui->d.session, it.channel_id, &err);
+    else (void)ccord_store_select_channel(ui->d.store, it.channel_id, &err);
   }
   ui_ensure_caches(ui);
   ui_sync_messages(ui);
@@ -527,10 +632,11 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     uis_modal_frame(ui, r, m);
     float in_h = ui->mobile_layout ? 42.0f : UIS_H_INPUT;
     ccord_rect inp = {m.x + UIS_SP_4, m.y + UIS_SP_4, m.w - 2.0f * UIS_SP_4, in_h};
-    (void)uis_input(ui, r, inp, &ui->quick_switcher_edit, "Where would you like to go? (@user, #channel, *server)",
+    (void)uis_input(ui, r, inp, &ui->quick_switcher_edit, "Where would you like to go? (@, #, !, *, $)",
                     (uis_state){.focused = true}, false, "qswin", 0);
     // The result list scrolls inside the dialog so every match stays reachable on short windows.
-    ccord_rect lview = {m.x + 12.0f, inp.y + inp.h + 12.0f, m.w - 24.0f, m.y + m.h - 10.0f - (inp.y + inp.h + 12.0f)};
+    float foot_h = 24.0f;
+    ccord_rect lview = {m.x + 12.0f, inp.y + inp.h + 10.0f, m.w - 24.0f, m.y + m.h - foot_h - 6.0f - (inp.y + inp.h + 10.0f)};
     if (lview.h < 0.0f) lview.h = 0.0f;
     float qrow_h = ui->mobile_layout ? 40.0f : 28.0f;
     float qstride = ui->mobile_layout ? 44.0f : 30.0f;
@@ -570,6 +676,10 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     ccord_pop_clip(r);
     ui->quick_switcher_thumb = ui_draw_list_scrollbar(ui, r, lview, content_h, ui->quick_switcher_scroll,
                                                       "qswitchlist", 0);
+    uis_divider(ui, r, m.x + UIS_SP_3, m.y + m.h - foot_h - 2.0f, m.w - 2.0f * UIS_SP_3);
+    const char *hint = "@ Users   # Channels   ! Voice   * Servers   $ Actions";
+    ccord_text_style hs = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 3.0f, COL(text_muted));
+    ccord_text_draw_ellipsis(r, hint, strlen(hint), m.x + UIS_SP_4, m.y + m.h - foot_h + 4.0f, m.w - 2.0f * UIS_SP_4, &hs);
     ui_popup_end(r);
   }
 
