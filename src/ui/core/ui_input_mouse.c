@@ -630,6 +630,7 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
   }
+  if (ui_guild_view_active(ui) && ui_guild_view_handle_mouse(ui, ev)) return true;
   if (ui_is_dm_friends_view(ui)) {
     if (ui_in_rect(ev->x, ev->y, ui->add_friend_btn_rect)) {
       ui->modal_kind = UI_MODAL_ADD_FRIEND;

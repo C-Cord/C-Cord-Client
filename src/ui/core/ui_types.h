@@ -88,7 +88,15 @@ typedef enum dm_nav_kind : uint8_t {
   DM_NAV_NITRO,
   DM_NAV_SHOP,
   DM_NAV_DM_HEADER,
+  DM_NAV_SERVER_GUIDE,
+  DM_NAV_CHANNELS_ROLES,
 } dm_nav_kind;
+
+typedef enum ui_guild_view : uint8_t {
+  UI_GUILD_VIEW_NONE = 0,
+  UI_GUILD_VIEW_SERVER_GUIDE = 1,
+  UI_GUILD_VIEW_CHANNELS_ROLES = 2,
+} ui_guild_view;
 
 #define UI_UPLOADS_SHOW_MAX 4u
 typedef struct ui_upload_debug {

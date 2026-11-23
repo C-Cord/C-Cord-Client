@@ -569,6 +569,11 @@ static void select_dm_guild(ccord_ui *ui)
   }
   ui->dm_friends_view = false;
   ui->dm_requests_view = false;
+  if (ui->guild_view != UI_GUILD_VIEW_NONE) {
+    ui->guild_view = UI_GUILD_VIEW_NONE;
+    ui->guild_view_guild_id = CCORD_ID_NONE;
+    ui_compute_layout(ui);
+  }
   uc_stage_chat_leave(ui);   // the split chat pane binds the voice channel; its selection goes back to text
   ccord_error err;
   ccord_status st = ui->d.session ? ccord_session_select_guild(ui->d.session, CCORD_DM_GUILD_ID, &err)
@@ -591,6 +596,11 @@ void uc_select_guild_at(ccord_ui *ui, size_t i)
   }
   ui->dm_friends_view = false;
   ui->dm_requests_view = false;
+  if (ui->guild_view != UI_GUILD_VIEW_NONE) {
+    ui->guild_view = UI_GUILD_VIEW_NONE;
+    ui->guild_view_guild_id = CCORD_ID_NONE;
+    ui_compute_layout(ui);
+  }
   uc_stage_chat_leave(ui);   // the split chat pane binds the voice channel; its selection goes back to text
   size_t ng = ui_guild_real_rows(ui);
   if (i - 1 >= ng) return;
@@ -668,6 +678,10 @@ void uc_join_voice_channel(ccord_ui *ui, ccord_id guild, const ccord_channel *ch
   if (ccord_session_join_voice(ui->d.session, guild, ch->id, &err) != CCORD_OK) {
     ui_notice(ui, "Cannot join voice: %s", err.message);
     return;
+  }
+  if (ui->guild_view != UI_GUILD_VIEW_NONE) {
+    ui->guild_view = UI_GUILD_VIEW_NONE;
+    ui->guild_view_guild_id = CCORD_ID_NONE;
   }
   ui->stage_channel = ch->id;
   ui->stage_armed = false;

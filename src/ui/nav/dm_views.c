@@ -490,6 +490,20 @@ void ui_dm_prefs_load_ini(ccord_ui *ui, const char *section, const char *key, co
         ui->nhidden_voice_names < sizeof ui->hidden_voice_names / sizeof ui->hidden_voice_names[0]) {
       ui->hidden_voice_names[ui->nhidden_voice_names++] = id;
     }
+  } else if (strcmp(section, "hidden_channels") == 0) {
+    ccord_id id = CCORD_ID_NONE;
+    if (ccord_id_parse(value, strlen(value), &id) && id != CCORD_ID_NONE &&
+        !id_list_has(ui->hidden_channels, ui->nhidden_channels, id) &&
+        ui->nhidden_channels < sizeof ui->hidden_channels / sizeof ui->hidden_channels[0]) {
+      ui->hidden_channels[ui->nhidden_channels++] = id;
+    }
+  } else if (strcmp(section, "show_all_channels") == 0) {
+    ccord_id id = CCORD_ID_NONE;
+    if (ccord_id_parse(value, strlen(value), &id) && id != CCORD_ID_NONE &&
+        !id_list_has(ui->show_all_guilds, ui->nshow_all_guilds, id) &&
+        ui->nshow_all_guilds < sizeof ui->show_all_guilds / sizeof ui->show_all_guilds[0]) {
+      ui->show_all_guilds[ui->nshow_all_guilds++] = id;
+    }
   }
 }
 
@@ -588,6 +602,18 @@ void ui_dm_prefs_save_ini(const ccord_ui *ui, FILE *f)
     fprintf(f, "[hidden_voice_names]\n");
     for (size_t i = 0; i < ui->nhidden_voice_names; i++) {
       fprintf(f, "vc_%zu = %llu\n", i, (unsigned long long)ui->hidden_voice_names[i]);
+    }
+  }
+  if (ui->nhidden_channels > 0) {
+    fprintf(f, "[hidden_channels]\n");
+    for (size_t i = 0; i < ui->nhidden_channels; i++) {
+      fprintf(f, "hc_%zu = %llu\n", i, (unsigned long long)ui->hidden_channels[i]);
+    }
+  }
+  if (ui->nshow_all_guilds > 0) {
+    fprintf(f, "[show_all_channels]\n");
+    for (size_t i = 0; i < ui->nshow_all_guilds; i++) {
+      fprintf(f, "sa_%zu = %llu\n", i, (unsigned long long)ui->show_all_guilds[i]);
     }
   }
 }

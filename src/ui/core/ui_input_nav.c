@@ -110,6 +110,12 @@ void uc_click_channel_row(ccord_ui *ui, size_t row)
       case DM_NAV_SHOP:
         (void)ui_open_url(ui, "https://discord.com/shop", "Shop");
         break;
+      case DM_NAV_SERVER_GUIDE:
+        ui_guild_view_open(ui, UI_GUILD_VIEW_SERVER_GUIDE);
+        break;
+      case DM_NAV_CHANNELS_ROLES:
+        ui_guild_view_open(ui, UI_GUILD_VIEW_CHANNELS_ROLES);
+        break;
       case DM_NAV_DM_HEADER:
       case DM_NAV_NONE:
         break;
@@ -202,6 +208,11 @@ void uc_click_channel_row(ccord_ui *ui, size_t row)
   if (ui->mobile_layout) ui->left_drawer_open = false;
   ui->dm_friends_view = false;
   ui->dm_requests_view = false;
+  if (ui->guild_view != UI_GUILD_VIEW_NONE) {
+    ui->guild_view = UI_GUILD_VIEW_NONE;
+    ui->guild_view_guild_id = CCORD_ID_NONE;
+    ui_compute_layout(ui);
+  }
   ui->stage_channel = CCORD_ID_NONE;
   ui->stage_chat_open = false;
   ui->stage_chat_return = CCORD_ID_NONE;
@@ -327,6 +338,10 @@ void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
       }
       return;
     }
+  }
+  if (ui_guild_view_active(ui) && ui_guild_view_handle_wheel(ui, ev)) {
+    ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
+    return;
   }
   if (ui_forum_is_active(ui) && ui_forum_handle_event(ui, ev)) {
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;

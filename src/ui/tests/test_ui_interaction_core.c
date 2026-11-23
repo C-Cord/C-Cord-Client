@@ -1532,7 +1532,19 @@ static void test_screenshot_pixels(void)
   CT_CHECK(pixel_is(s, 120, 780, c->bg_user_panel, 1));                 // user panel
   ccord_rect box = {l->composer.x + F.theme.m.composer_margin_x, l->composer.y, l->composer.w - 2 * F.theme.m.composer_margin_x, F.theme.m.composer_min_height};
   CT_CHECK(pixel_is(s, (int)(box.x + box.w - 40), (int)(box.y + 6), c->bg_input, 1));   // composer
-  CT_CHECK(pixel_is(s, 275, 98, c->bg_item_selected, 1) || pixel_is(s, 275, 99, c->bg_item_selected, 1));   // selected channel row
+  int sel_ch_y = 98;
+  ccord_id sel_cid = ccord_store_selected_channel(F.store);
+  ccord_id sel_gid = ccord_store_selected_guild(F.store);
+  for (size_t i = 0; i < F.ui->ncrow; i++) {
+    const chan_row *cr = &F.ui->crow[i];
+    if (cr->dm_nav != DM_NAV_NONE || cr->is_category || cr->is_voice_user || cr->is_relationship) continue;
+    const ccord_channel *rc = ccord_store_channel_at(F.store, sel_gid, cr->index);
+    if (rc && rc->id == sel_cid) {
+      sel_ch_y = (int)(l->channel_scroll.y + cr->y - F.ui->chan_scroll + cr->h * 0.5f);
+      break;
+    }
+  }
+  CT_CHECK(pixel_is(s, 275, sel_ch_y, c->bg_item_selected, 1) || pixel_is(s, 275, sel_ch_y + 1, c->bg_item_selected, 1));   // selected channel row
   ccord_rect sel_g = ui_guild_icon_rect(F.ui, 1);
   CT_CHECK(pixel_is(s, 2, (int)(sel_g.y + sel_g.h * 0.5f), c->pill, 2));                              // selected server pill
   // The context menu body is drawn at the pointer position.

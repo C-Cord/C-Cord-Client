@@ -648,6 +648,20 @@ struct ccord_ui {
   ccord_rect dm_friends_thumb;   // drawn list thumb (zero when it fits / is hidden)
   ccord_id dm_profile_requested_user;
 
+  // Member-facing Server Guide & Channels & Roles (Customize + Browse Channels)
+  ui_guild_view guild_view;
+  ccord_id guild_view_guild_id;
+  ccord_id guild_view_req_guild;
+  int cr_tab;                        // 0 = Customize, 1 = Browse Channels
+  float guild_view_scroll;
+  float guild_view_content_h;
+  ccord_id hidden_channels[128];     // channels unchecked in Browse Channels (persisted)
+  size_t nhidden_channels;
+  ccord_id show_all_guilds[64];      // guilds with "Show All Channels" toggled on
+  size_t nshow_all_guilds;
+  ccord_id onboarding_opts[64];      // selected onboarding option IDs
+  size_t nonboarding_opts;
+
   // message hover action bar hit rects
   ccord_id hover_bar_msg_id;
   ccord_rect hover_bar_rect;   // the whole bar frame; it hangs above its row, so hover must keep the row

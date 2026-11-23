@@ -440,13 +440,22 @@ static void rebuild_channel_rows(ccord_ui *ui)
   }
 
   vis = compute_channel_visibility(ui, g, n, &cm);
+  const ccord_guild *cur_gd = ccord_store_guild(ui->d.store, g);
+  if (cur_gd && cur_gd->feature_community && grow_crow(ui, ui->ncrow + 2u)) {
+    float gnh = ui->mobile_layout ? 42.0f : 34.0f;
+    ui->crow[ui->ncrow++] = (chan_row){false, false, false, false, SIZE_MAX, 0, y, gnh, DM_NAV_SERVER_GUIDE};
+    y += gnh + 2.0f;
+    ui->crow[ui->ncrow++] = (chan_row){false, false, false, false, SIZE_MAX, 0, y, gnh, DM_NAV_CHANNELS_ROLES};
+    y += gnh + 8.0f;
+  }
   bool hide_muted = ui_guild_hide_muted(ui, g);
+  bool show_all_ch = ui_guild_show_all_channels(ui, g);
   const ccord_voice_state *self_vs = ui_self_voice(ui);
   ccord_id self_vc = self_vs ? self_vs->channel_id : CCORD_ID_NONE;
 #define CHANNEL_SHOWN(i) (!vis || vis[i])
 #define CHANNEL_MUTED_SKIP(ch) \
   ((ch) && (ch)->kind != CCORD_CHANNEL_CATEGORY && \
-   (hide_muted && ui_channel_muted(ui, (ch))) && \
+   ((hide_muted && ui_channel_muted(ui, (ch))) || (!show_all_ch && ui_channel_is_hidden(ui, (ch)->id))) && \
    (ch)->id != sel && (ch)->mention_count == 0 && (ch)->id != self_vc && \
    !ui_channel_is_pinned(ui, (ch)->id) && !has_selected_thread(ui->d.store, g, (ch)->id, sel))
 
@@ -725,6 +734,12 @@ static uint64_t compute_chan_sig(const ccord_ui *ui, ccord_id g)
   for (size_t i = 0; i < ui->npinned_channels; i++) h = uc_sig_mix_u64(h, ui->pinned_channels[i]);
   h = uc_sig_mix_u64(h, (uint64_t)ui->nhidden_voice_names);
   for (size_t i = 0; i < ui->nhidden_voice_names; i++) h = uc_sig_mix_u64(h, ui->hidden_voice_names[i]);
+  h = uc_sig_mix_u64(h, (uint64_t)ui->nhidden_channels);
+  for (size_t i = 0; i < ui->nhidden_channels; i++) h = uc_sig_mix_u64(h, ui->hidden_channels[i]);
+  h = uc_sig_mix_u64(h, (uint64_t)ui->nshow_all_guilds);
+  for (size_t i = 0; i < ui->nshow_all_guilds; i++) h = uc_sig_mix_u64(h, ui->show_all_guilds[i]);
+  const ccord_guild *gd_sig = ccord_store_guild(st, g);
+  h = uc_sig_mix_u64(h, (gd_sig && gd_sig->feature_community) ? 1u : 0u);
   bool preview = ui_role_preview_active_for(ui, g);
   ccord_id self = ccord_store_self_id(st);
   bool exact = ccord_store_permissions_exact(st, g, self);

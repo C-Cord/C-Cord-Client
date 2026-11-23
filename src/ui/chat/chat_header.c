@@ -199,6 +199,14 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
     }
     return;
   }
+  if (ui_guild_view_active(ui)) {
+    const char *gv_title = (ui->guild_view == UI_GUILD_VIEW_SERVER_GUIDE) ? "Server Guide" : "Channels & Roles";
+    ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
+    float ty = cy - ui_line_h(ui, ns.size) * 0.5f;
+    ccord_text_draw_ellipsis(r, gv_title, strlen(gv_title), left_x + 8.0f, ty,
+                             maxf(hdr_leftmost - (left_x + 16.0f), 60.0f), &ns);
+    return;
+  }
   ui->add_friend_btn_rect = (ccord_rect){0, 0, 0, 0};
   ui->thread_join_rect = (ccord_rect){0, 0, 0, 0};
   ui->thread_archive_rect = (ccord_rect){0, 0, 0, 0};

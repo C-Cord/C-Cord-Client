@@ -1005,6 +1005,10 @@ bool ccord_ui_handle_back(ccord_ui *ui)
     ui->dirty = true;
     return true;
   }
+  if (ui_guild_view_active(ui)) {
+    ui_guild_view_close(ui);
+    return true;
+  }
   if (ui->vm.recording || ui->vm.reviewing) {
     ui_vm_cancel(ui);
     ui->dirty = true;

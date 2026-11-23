@@ -427,6 +427,9 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
         if (!ui->mobile_layout || ui_stage_split_active(ui)) ui_draw_composer(ui, r);
         if (ui_stage_split_active(ui)) ui_draw_stage_split_divider(ui, r);
       }
+    } else if (ui_guild_view_active(ui)) {
+      ui_draw_guild_view(ui, r);
+      ui_draw_chat_header(ui, r);
     } else if (ui_forum_is_active(ui)) {
       ui_draw_forum(ui, r);
       ui_draw_chat_header(ui, r);

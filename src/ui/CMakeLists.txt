@@ -50,6 +50,7 @@ add_library(ccord_ui STATIC
   nav/draw_nav.c
   nav/draw_members.c
   nav/dm_views.c
+  nav/guild_views.c
   # Chat
   chat/md_inline.c
   chat/md_render.c

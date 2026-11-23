@@ -1152,7 +1152,7 @@ void ui_compute_layout(ccord_ui *ui)
   ui->panel_state = ui_panel_state(ui);
   bool panel_hidden = ui_panel_hidden(ui);   // a 1:1 DM's profile and every member list (guild, group DM) toggle separately
   bool search_panel = ui->search_open && ui->search_edit.len >= 2 && !ui->discovery_open;
-  if (ui->discovery_open) panel_hidden = true;
+  if (ui->discovery_open || ui_guild_view_active(ui)) panel_hidden = true;
   if (split) panel_hidden = true;   // the two panes own the chat column; the stage lists its own users
   if (search_panel) panel_hidden = false;   // the results panel takes the right-hand column whatever hid it
   if (panel_hidden && ui->members_available) {

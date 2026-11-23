@@ -744,7 +744,7 @@ static float approach(float v, float target, float step)
 bool uc_composer_accepts_text(const ccord_ui *ui)
 {
   if (!ui) return false;
-  if (ui_is_dm_friends_view(ui) || ui_is_dm_requests_view(ui)) return false;
+  if (ui_is_dm_friends_view(ui) || ui_is_dm_requests_view(ui) || ui_guild_view_active(ui)) return false;
   if (ui->stage_channel != CCORD_ID_NONE && !ui_stage_chat_active(ui)) return false;
   if (ui_vm_is_active(ui)) return false;
   if (ui_selected_channel(ui) == nullptr) return false;

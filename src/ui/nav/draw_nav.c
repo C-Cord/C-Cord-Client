@@ -827,7 +827,11 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
       }
       ccord_rect item = {cs->x + M(channel_item_margin_x), y, cs->w - 2.0f * M(channel_item_margin_x), row->h};
       bool nav_sel = (row->dm_nav == DM_NAV_FRIENDS && ui_is_dm_friends_view(ui)) ||
-                     (row->dm_nav == DM_NAV_MESSAGE_REQUESTS && ui_is_dm_requests_view(ui));
+                     (row->dm_nav == DM_NAV_MESSAGE_REQUESTS && ui_is_dm_requests_view(ui)) ||
+                     (row->dm_nav == DM_NAV_SERVER_GUIDE && ui_guild_view_active(ui) &&
+                      ui->guild_view == UI_GUILD_VIEW_SERVER_GUIDE) ||
+                     (row->dm_nav == DM_NAV_CHANNELS_ROLES && ui_guild_view_active(ui) &&
+                      ui->guild_view == UI_GUILD_VIEW_CHANNELS_ROLES);
       ui_row_state nav_rs = ui_row_state_of(ui, "dmnav", (uint64_t)row->dm_nav, hover, nav_sel, COL(bg_secondary));
       ccord_color tc = ui_row_state_text(&nav_rs, COL(text_secondary), COL(text_interactive_hover), COL(text_interactive_active));
       ccord_color item_bg = nav_rs.bg;
@@ -850,6 +854,22 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
         ccord_draw_rrect(r, (ccord_rect){icx - 7.0f, icy - 6.0f, 14.0f, 12.0f}, 2.5f, tc);
         ccord_draw_rect(r, (ccord_rect){icx - 4.0f, icy - 9.0f, 8.0f, 3.0f}, tc);
         label = "Shop";
+      } else if (row->dm_nav == DM_NAV_SERVER_GUIDE) {
+        // Open-book / guide glyph
+        ccord_draw_rrect(r, (ccord_rect){icx - 7.5f, icy - 6.0f, 7.0f, 12.0f}, 1.5f, tc);
+        ccord_draw_rrect(r, (ccord_rect){icx + 0.5f, icy - 6.0f, 7.0f, 12.0f}, 1.5f, tc);
+        ccord_draw_rect(r, (ccord_rect){icx - 5.5f, icy - 4.0f, 3.5f, 8.0f}, item_bg);
+        ccord_draw_rect(r, (ccord_rect){icx + 2.0f, icy - 4.0f, 3.5f, 8.0f}, item_bg);
+        label = "Server Guide";
+      } else if (row->dm_nav == DM_NAV_CHANNELS_ROLES) {
+        // Checklist / browse glyph
+        for (int li = -1; li <= 1; li++) {
+          float ly = icy + (float)li * 4.5f;
+          ccord_draw_rrect(r, (ccord_rect){icx - 7.0f, ly - 1.2f, 2.6f, 2.6f}, 1.0f, tc);
+          ccord_draw_rrect(r, (ccord_rect){icx - 2.5f, ly - 1.0f, 9.5f, 2.0f}, 1.0f, tc);
+        }
+        ccord_draw_rect(r, (ccord_rect){cs->x + 12.0f, item.y + item.h + 4.0f, cs->w - 24.0f, 1.0f}, COL(border_subtle));
+        label = "Channels & Roles";
       }
       ccord_text_style ns = ui_style(ui, nav_sel ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR, M(font_size_base) - 0.5f, tc);
       float tx = item.x + M(channel_item_pad_x) + 32.0f;
