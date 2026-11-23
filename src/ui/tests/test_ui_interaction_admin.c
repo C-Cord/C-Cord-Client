@@ -763,15 +763,52 @@ static void test_m3c_group_dms_requests_profiles_and_custom_status(void)
   ccord_id req_cid = 0, spam_cid = 0;
   CT_CHECK(ccord_mock_push_message_request(tr, 1008, "Can we collaborate on SDL3?", false, &req_cid, &err) == CCORD_OK);
   CT_CHECK(ccord_mock_push_message_request(tr, 1009, "Claim free gift link", true, &spam_cid, &err) == CCORD_OK);
-  frame(4);
+  frame(8);
   d = dbg();
   CT_CHECK(d.dm_requests_nav_rect.w > 0.0f && d.dm_requests_badge_count == 1);
+  // Regression check: the row badge must be vertically centered inside the nav row and inset by channel_item_pad_x
+  // (never anchored to the bottom-right corner overhanging the row).
+  {
+    const char *bshot = ui_test_file("msg_req_badge.png");
+    ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+    ccord_ui_draw(F.ui, F.renderer);
+    CT_CHECK(ccord_render_screenshot(F.renderer, bshot, &err) == CCORD_OK);
+    ccord_render_end(F.renderer);
+    SDL_Surface *bs = SDL_LoadPNG(bshot);
+    CT_CHECK(bs != nullptr);
+    if (bs) {
+      ccord_rect nr = d.dm_requests_nav_rect;
+      int x0 = (int)nr.x, x1 = (int)(nr.x + nr.w) + 4;
+      int y0 = (int)nr.y - 4, y1 = (int)(nr.y + nr.h) + 6;
+      int min_x = bs->w, max_x = -1, min_y = bs->h, max_y = -1;
+      for (int py = y0; py <= y1; py++) {
+        for (int px = x0; px <= x1; px++) {
+          if (pixel_is(bs, px, py, F.theme.c.danger, 6)) {
+            if (px < min_x) min_x = px;
+            if (px > max_x) max_x = px;
+            if (py < min_y) min_y = py;
+            if (py > max_y) max_y = py;
+          }
+        }
+      }
+      CT_CHECK(max_x >= min_x && max_y >= min_y);
+      float badge_cy = 0.5f * (float)(min_y + max_y);
+      float row_cy = nr.y + nr.h * 0.5f;
+      CT_CHECK(fabsf(badge_cy - row_cy) <= 1.5f);
+      CT_CHECK(min_y >= (int)nr.y && max_y < (int)(nr.y + nr.h));
+      float right_gap = (nr.x + nr.w) - (float)(max_x + 1);
+      CT_CHECK(fabsf(right_gap - F.theme.m.channel_item_pad_x) <= 1.5f);
+      SDL_DestroySurface(bs);
+    }
+    remove(bshot);
+  }
 
   // Click Message Requests nav row -> switch Requests / Spam tabs, reject spam, preview regular request (composer locked, 0 ACKs), accept!
   click_rect(d.dm_requests_nav_rect);
   frame(2);
   d = dbg();
   CT_CHECK(d.dm_requests_view && d.dm_requests_tab == 0 && d.dm_request_card_count == 1);
+  save_optional_screenshot("dm_requests_badge.png");
 
   click_rect(d.dm_requests_tab_rects[1]); // Spam tab
   frame(2);

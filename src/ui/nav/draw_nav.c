@@ -225,19 +225,50 @@ static void draw_unread_pill(ccord_renderer *r, float x, float cy, float h, ccor
   ccord_draw_rrect(r, (ccord_rect){x, cy - h * 0.5f, 3.0f, h}, 1.5f, color);
 }
 
+typedef struct mention_badge_layout {
+  char label[16];
+  size_t len;
+  ccord_text_style st;
+  ccord_vec2 text_sz;
+  float w, h;
+} mention_badge_layout;
+
+static mention_badge_layout measure_mention_badge(ccord_ui *ui, ccord_renderer *r, uint32_t count)
+{
+  mention_badge_layout b = {0};
+  if (count == 0) return b;
+  if (count > 99) snprintf(b.label, sizeof b.label, "99+");
+  else snprintf(b.label, sizeof b.label, "%u", count);
+  b.len = strlen(b.label);
+  b.st = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 5.0f, COL(text_on_brand));
+  b.text_sz = ccord_text_measure(r, b.label, b.len, &b.st, 0.0f);
+  b.h = 16.0f;
+  b.w = maxf(b.text_sz.x + 9.0f, 16.0f);
+  return b;
+}
+
+static void draw_mention_badge_at(ccord_ui *ui, ccord_renderer *r, const mention_badge_layout *b, float x, float y)
+{
+  if (!b || b->len == 0) return;
+  ccord_draw_rrect(r, (ccord_rect){x, y, b->w, b->h}, b->h * 0.5f, COL(danger));
+  ccord_text_draw(r, b->label, b->len, x + (b->w - b->text_sz.x) * 0.5f, y + (b->h - b->text_sz.y) * 0.5f, &b->st, 0.0f);
+}
+
 static void draw_mention_badge(ccord_ui *ui, ccord_renderer *r, ccord_rect icon, uint32_t count, bool top)
 {
-  if (count == 0) return;
-  char label[16];
-  if (count > 99) snprintf(label, sizeof label, "99+");
-  else snprintf(label, sizeof label, "%u", count);
-  ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 5.0f, COL(text_on_brand));
-  ccord_vec2 t = ccord_text_measure(r, label, strlen(label), &st, 0.0f);
-  float h = 16.0f, w = maxf(t.x + 9.0f, 16.0f);
-  float x = icon.x + icon.w - w + 3.0f;
-  float y = top ? icon.y - 2.0f : icon.y + icon.h - h + 2.0f;
-  ccord_draw_rrect(r, (ccord_rect){x, y, w, h}, h * 0.5f, COL(danger));
-  ccord_text_draw(r, label, strlen(label), x + (w - t.x) * 0.5f, y + (h - t.y) * 0.5f, &st, 0.0f);
+  mention_badge_layout b = measure_mention_badge(ui, r, count);
+  if (b.len == 0) return;
+  float x = icon.x + icon.w - b.w + 3.0f;
+  float y = top ? icon.y - 2.0f : icon.y + icon.h - b.h + 2.0f;
+  draw_mention_badge_at(ui, r, &b, x, y);
+}
+
+static void draw_row_mention_badge(ccord_ui *ui, ccord_renderer *r, ccord_rect item, const mention_badge_layout *b)
+{
+  if (!b || b->len == 0) return;
+  float x = item.x + item.w - M(channel_item_pad_x) - b->w;
+  float y = item.y + (item.h - b->h) * 0.5f;
+  draw_mention_badge_at(ui, r, b, x, y);
 }
 
 // ---------------------------------------------------------------- server list
@@ -823,12 +854,14 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
       ccord_text_style ns = ui_style(ui, nav_sel ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR, M(font_size_base) - 0.5f, tc);
       float tx = item.x + M(channel_item_pad_x) + 32.0f;
       float ty = item.y + (item.h - ui_line_h(ui, ns.size)) * 0.5f;
-      float reserve_nav = (row->dm_nav == DM_NAV_MESSAGE_REQUESTS && ui->dm_requests_badge_count > 0) ? 28.0f : 0.0f;
-      ccord_text_draw_ellipsis(r, label, strlen(label), tx, ty, item.w - 44.0f - reserve_nav, &ns);
+      mention_badge_layout badge = {0};
       if (row->dm_nav == DM_NAV_MESSAGE_REQUESTS && ui->dm_requests_badge_count > 0) {
-        draw_mention_badge(ui, r, (ccord_rect){item.x + item.w - 21.0f, item.y, 14.0f, item.h},
-                           ui->dm_requests_badge_count, false);
+        badge = measure_mention_badge(ui, r, ui->dm_requests_badge_count);
       }
+      float reserve_nav = badge.len > 0 ? badge.w + 6.0f : 0.0f;
+      float avail_nav = item.w - (tx - item.x) - M(channel_item_pad_x) - reserve_nav;
+      ccord_text_draw_ellipsis(r, label, strlen(label), tx, ty, avail_nav, &ns);
+      if (badge.len > 0) draw_row_mention_badge(ui, r, item, &badge);
       goto row_done;
     }
     if (row->is_relationship) {
@@ -1008,8 +1041,9 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
                                      M(font_size_base), dm_tc);
       bool dm_pinned = ui_dm_is_pinned(ui, ch->id);
       bool dm_fav = ui_dm_is_favorite(ui, ch->id);
+      mention_badge_layout badge = ch->mention_count > 0 ? measure_mention_badge(ui, r, ch->mention_count) : (mention_badge_layout){0};
       float tx = item.x + M(channel_item_pad_x) + av_sz + 12.0f;
-      float reserve = ch->mention_count > 0 ? 30.0f : ((dm_pinned || dm_fav || hover) ? 22.0f : 0.0f);
+      float reserve = badge.len > 0 ? badge.w + 6.0f : ((dm_pinned || dm_fav || hover) ? 22.0f : 0.0f);
       float avail_w = item.w - (tx - item.x) - M(channel_item_pad_x) - reserve;
       if (dm_u.status_text && dm_u.status_text[0]) {
         ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(text_muted));
@@ -1021,8 +1055,8 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
         float ty = item.y + (item.h - ui_line_h(ui, st.size)) * 0.5f;
         ccord_text_draw_ellipsis(r, dm_name, strlen(dm_name), tx, ty, avail_w, &st);
       }
-      if (ch->mention_count > 0) {
-        draw_mention_badge(ui, r, (ccord_rect){item.x + item.w - 21.0f, item.y, 14.0f, item.h}, ch->mention_count, false);
+      if (badge.len > 0) {
+        draw_row_mention_badge(ui, r, item, &badge);
       } else if (hover && ui->ndm_close_rects < 32) {
         ccord_rect cr = {item.x + item.w - 24.0f, item.y + (item.h - 18.0f) * 0.5f, 18.0f, 18.0f};
         ui_icon_close(r, cr.x + cr.w * 0.5f, cr.y + cr.h * 0.5f, 10.0f, COL(text_muted));
@@ -1050,15 +1084,16 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
     ccord_text_style st = ui_style(ui, (selected || has_unread) ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR,
                                    row->is_thread ? M(font_size_small) : M(font_size_base) - 0.5f, name_tc);
     float ty = item.y + (item.h - ui_line_h(ui, st.size)) * 0.5f;
-    bool show_gear = !row->is_thread && ch->mention_count == 0 && hover &&
+    mention_badge_layout badge = ch->mention_count > 0 ? measure_mention_badge(ui, r, ch->mention_count) : (mention_badge_layout){0};
+    bool show_gear = !row->is_thread && badge.len == 0 && hover &&
                      ui->nchan_gear_rects < 64 && ui_channel_settings_available(ui, g, ch->id);
-    float reserve = ch->mention_count > 0 ? 30.0f : (show_gear ? 22.0f : 0.0f);
+    float reserve = badge.len > 0 ? badge.w + 6.0f : (show_gear ? 22.0f : 0.0f);
     float name_x = item.x + M(channel_item_pad_x) + 25.0f + thread_indent;
     float name_w = ccord_text_draw_ellipsis(r, ch->name, strlen(ch->name), name_x, ty,
                                             item.w - M(channel_item_pad_x) * 2.0f - 25.0f - thread_indent - reserve, &st);
     (void)ui_decor_draw_inline_badges(ui, r, CCORD_DECOR_CHANNEL_BADGE, ch->id, name_x + name_w + 4.0f, item.y, item.h, item_bg);
-    if (ch->mention_count > 0) {
-      draw_mention_badge(ui, r, (ccord_rect){item.x + item.w - 21.0f, item.y, 14.0f, item.h}, ch->mention_count, false);
+    if (badge.len > 0) {
+      draw_row_mention_badge(ui, r, item, &badge);
     } else if (show_gear) {
       ccord_rect gr = {item.x + item.w - 22.0f, item.y + (item.h - 18.0f) * 0.5f, 18.0f, 18.0f};
       bool ghov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, gr);
