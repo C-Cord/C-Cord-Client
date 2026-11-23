@@ -697,7 +697,9 @@ void ccord_ui_destroy(ccord_ui *ui)
   ccord_arena_free(&ui->hit_arena);
   ccord_free(ui->drafts);
   ccord_free(ui->media_reqs);
+  ui_bg_decoder_destroy(ui);
   ccord_free(ui->lightbox_urls);
+  ccord_free(ui->lightbox_items);
   ccord_free(ui->select_opts);
   ccord_free(ui->select_target);
   ccord_free(ui->vmap);
@@ -1021,6 +1023,10 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
   {
     float prev_lt = ui->left_drawer_t, prev_rt = ui->right_drawer_t;
     if (ui_touch_update(ui, now_ms, fdt)) {
+      anim = true;
+      ui->dirty = true;
+    }
+    if (ui_lightbox_update(ui, now_ms, fdt)) {
       anim = true;
       ui->dirty = true;
     }

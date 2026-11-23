@@ -297,7 +297,21 @@ bool dc_slash_opt_in_scope(const ccord_slash_command *cmd, size_t i, const slash
 void dc_slash_parse_args(const ccord_slash_command *cmd, const char *text, size_t limit, slash_parsed *out);
 bool dc_validate_slash_opt_val(const ccord_store *store, ccord_id guild_id, const ccord_slash_option *opt, char val[static 256], char err_msg[static 128]);
 ccord_text_style dc_md_token_style_sized(const ccord_ui *ui, const ui_md_token *tok, ccord_color base, float size);
+typedef struct dc_img_hit_extra {
+  const char *const *preview_urls;
+  const char *const *hd_urls;
+  const char *const *filenames;
+  const char *const *descriptions;
+  const uint32_t *orig_w;
+  const uint32_t *orig_h;
+  const uint64_t *file_sizes;
+  ccord_id msg_id;
+  ccord_id author_id;
+} dc_img_hit_extra;
+
 void dc_record_img_hit(ccord_ui *ui, ccord_rect rect, const char *const *urls, size_t count, size_t index);
+void dc_record_img_hit_ex(ccord_ui *ui, ccord_rect rect, const char *const *urls, size_t count, size_t index,
+                          const dc_img_hit_extra *extra);
 void dc_record_link_hit(ccord_ui *ui, ccord_rect rect, const char *url, size_t url_len);
 void dc_record_spoiler_hit(ccord_ui *ui, ccord_rect rect, ccord_id key);
 void dc_record_text_hit(ccord_ui *ui, ccord_rect rect);

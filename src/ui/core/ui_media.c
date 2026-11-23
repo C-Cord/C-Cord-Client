@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _POSIX_C_SOURCE 200809L
 #include "ui_core_internal.h"
+#include <ccord/render/anim.h>
 
 #define UI_PLAYER_MAX_DIM 960         // inline video is decoded no larger than this
 #define UI_PLAYER_SYNC_BUDGET_MS 12u  // decode time per frame of the app; behind that, the clock waits
@@ -716,25 +717,133 @@ bool ccord_ui_open_url(ccord_ui *ui, const char *url)
   return ui_open_url(ui, url, "Invite");
 }
 
+static void lightbox_reset_view_state(ccord_ui *ui)
+{
+  ui->lightbox_zoom = 1.0f;
+  ui->lightbox_pan_x = 0.0f;
+  ui->lightbox_pan_y = 0.0f;
+  ui->lightbox_target_zoom = 1.0f;
+  ui->lightbox_target_pan_x = 0.0f;
+  ui->lightbox_target_pan_y = 0.0f;
+  ui->lightbox_spring_active = false;
+  ui->lightbox_vel_x = 0.0f;
+  ui->lightbox_vel_y = 0.0f;
+  ui->lightbox_swipe_x = 0.0f;
+  ui->lightbox_dismiss_y = 0.0f;
+  ui->lightbox_mouse_dragging = false;
+  ui->lightbox_hd_ready_cur = false;
+  ui->lightbox_hd_ready_ms = 0;
+  ui->lightbox_prog_smooth = 0.0f;
+  ui->lightbox_prog_indeterminate = false;
+  ui->lightbox_dl_now = 0;
+  ui->lightbox_dl_total = 0;
+}
+
+static void lightbox_extract_filename_from_url(const char *url, char *out, size_t cap)
+{
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  if (!url || !url[0]) return;
+  const char *end = strpbrk(url, "?#");
+  size_t len = end ? (size_t)(end - url) : strlen(url);
+  while (len > 0 && url[len - 1] == '/') len--;
+  const char *slash = nullptr;
+  for (size_t i = 0; i < len; i++) {
+    if (url[i] == '/') slash = url + i;
+  }
+  const char *base = slash ? slash + 1 : url;
+  size_t blen = (size_t)((url + len) - base);
+  if (blen == 0) return;
+  if (blen >= cap) blen = cap - 1u;
+  memcpy(out, base, blen);
+  out[blen] = '\0';
+}
+
+void ui_lightbox_select_index(ccord_ui *ui, size_t index)
+{
+  if (!ui || !ui->lightbox_open || ui->lightbox_count == 0) return;
+  if (index >= ui->lightbox_count) index = ui->lightbox_count - 1u;
+  ui->lightbox_index = index;
+  if (ui->lightbox_urls) {
+    ui_url_copy(ui->lightbox_url, sizeof ui->lightbox_url, ui->lightbox_urls[index]);
+  }
+  lightbox_reset_view_state(ui);
+  ui->lightbox_open_ms = ui->now_ms;
+  ui->dirty = true;
+}
+
+void ui_open_lightbox_hit(ccord_ui *ui, const ui_img_hit *hit)
+{
+  if (!ui || !hit || hit->count == 0) return;
+  size_t count = hit->count > CCORD_RICH_MAX_ATTACHMENTS ? CCORD_RICH_MAX_ATTACHMENTS : hit->count;
+  size_t index = hit->index < count ? hit->index : 0;
+  if (!hit->urls[index] || !hit->urls[index][0]) return;
+  if (!ui->lightbox_urls) {
+    ui->lightbox_urls = ccord_calloc(CCORD_RICH_MAX_ATTACHMENTS, sizeof *ui->lightbox_urls);
+    if (!ui->lightbox_urls) return;
+  }
+  if (!ui->lightbox_items) {
+    ui->lightbox_items = ccord_calloc(CCORD_RICH_MAX_ATTACHMENTS, sizeof *ui->lightbox_items);
+    if (!ui->lightbox_items) return;
+  }
+  memset(ui->lightbox_items, 0, CCORD_RICH_MAX_ATTACHMENTS * sizeof *ui->lightbox_items);
+  ui->lightbox_count = count;
+  ui->lightbox_index = index;
+  for (size_t i = 0; i < count; i++) {
+    const char *full = hit->urls[i] ? hit->urls[i] : "";
+    const char *prev = (hit->preview_urls[i] && hit->preview_urls[i][0]) ? hit->preview_urls[i] : "";
+    const char *hd = (hit->hd_urls[i] && hit->hd_urls[i][0]) ? hit->hd_urls[i] : full;
+    ui_url_copy(ui->lightbox_urls[i], sizeof ui->lightbox_urls[i], full);
+    ui_url_copy(ui->lightbox_items[i].full_url, sizeof ui->lightbox_items[i].full_url, full);
+    ui_url_copy(ui->lightbox_items[i].preview_url, sizeof ui->lightbox_items[i].preview_url, prev);
+    ui_url_copy(ui->lightbox_items[i].hd_url, sizeof ui->lightbox_items[i].hd_url, hd);
+    if (hit->filenames[i] && hit->filenames[i][0]) {
+      snprintf(ui->lightbox_items[i].filename, sizeof ui->lightbox_items[i].filename, "%s", hit->filenames[i]);
+    } else {
+      lightbox_extract_filename_from_url(full, ui->lightbox_items[i].filename, sizeof ui->lightbox_items[i].filename);
+    }
+    if (hit->descriptions[i] && hit->descriptions[i][0]) {
+      snprintf(ui->lightbox_items[i].description, sizeof ui->lightbox_items[i].description, "%s", hit->descriptions[i]);
+    }
+    ui->lightbox_items[i].orig_w = hit->orig_w[i];
+    ui->lightbox_items[i].orig_h = hit->orig_h[i];
+    ui->lightbox_items[i].file_size = hit->file_sizes[i];
+  }
+  ui_url_copy(ui->lightbox_url, sizeof ui->lightbox_url, ui->lightbox_urls[index]);
+  ui->lightbox_author_id = hit->author_id;
+  ui->lightbox_timestamp_ms = 0;
+  if (ui->d.store && hit->msg_id != CCORD_ID_NONE) {
+    ccord_id ch = ccord_store_selected_channel(ui->d.store);
+    const ccord_message *m = ch != CCORD_ID_NONE ? ccord_store_find_message(ui->d.store, ch, hit->msg_id) : nullptr;
+    if (m) {
+      ui->lightbox_timestamp_ms = m->timestamp_ms;
+      if (ui->lightbox_author_id == CCORD_ID_NONE) ui->lightbox_author_id = m->author_id;
+    }
+  }
+  ui->lightbox_origin_rect = hit->rect;
+  lightbox_reset_view_state(ui);
+  ui->lightbox_hud_visible = true;
+  ui->lightbox_hud_alpha = 1.0f;
+  ui->lightbox_details_open = false;
+  ui->lightbox_details_t = 0.0f;
+  ui->lightbox_open_ms = ui->now_ms;
+  ui->lightbox_open = true;
+  ui->dirty = true;
+}
+
 void ui_open_lightbox(ccord_ui *ui, const char *const *urls, size_t count, size_t index)
 {
   if (!ui || !urls || count == 0) return;
   if (count > CCORD_RICH_MAX_ATTACHMENTS) count = CCORD_RICH_MAX_ATTACHMENTS;
   if (index >= count) index = 0;
-  if (!urls[index] || !urls[index][0]) return;
-  if (!ui->lightbox_urls) {
-    ui->lightbox_urls = ccord_calloc(CCORD_RICH_MAX_ATTACHMENTS, sizeof *ui->lightbox_urls);
-    if (!ui->lightbox_urls) return;
-  }
-  ui->lightbox_count = count;
-  ui->lightbox_index = index;
+  ui_img_hit synth = {0};
+  synth.count = count;
+  synth.index = index;
   for (size_t i = 0; i < count; i++) {
-    ui_url_copy(ui->lightbox_urls[i], sizeof ui->lightbox_urls[i], urls[i]);
+    synth.urls[i] = urls[i] ? urls[i] : "";
+    synth.hd_urls[i] = synth.urls[i];
   }
-  ui_url_copy(ui->lightbox_url, sizeof ui->lightbox_url, ui->lightbox_urls[index]);
-  ui->lightbox_zoom = 1.0f;
-  ui->lightbox_open = true;
-  ui->dirty = true;
+  ui_open_lightbox_hit(ui, &synth);
 }
 
 void ui_close_lightbox(ccord_ui *ui)
@@ -744,8 +853,14 @@ void ui_close_lightbox(ccord_ui *ui)
   ui->lightbox_open = false;
   ui->lightbox_count = 0;
   ui->lightbox_index = 0;
+  ui->lightbox_details_open = false;
+  ui->lightbox_details_t = 0.0f;
+  ui->lightbox_mouse_dragging = false;
+  lightbox_reset_view_state(ui);
   ccord_free(ui->lightbox_urls);
   ui->lightbox_urls = nullptr;
+  ccord_free(ui->lightbox_items);
+  ui->lightbox_items = nullptr;
   if (was_open) ui->dirty = true;
 }
 
@@ -1023,6 +1138,236 @@ static bool is_fixed_size_media_url(const ccord_ui *ui, const char *url)
   return false;
 }
 
+// ---- Asynchronous static image decoder worker (offloads large HD decodes > 96 KiB from UI thread) ----
+
+#define UI_BG_DEC_THRESHOLD (96u * 1024u)
+#define UI_BG_DEC_CAP 8u
+
+typedef struct ui_bg_dec_job {
+  char url[UI_URL_MAX];
+  uint8_t *compressed;
+  size_t compressed_len;
+  int max_dim;
+  uint8_t *rgba;
+  int w, h;
+  bool ok;
+} ui_bg_dec_job;
+
+struct ui_bg_decoder {
+  ccord_mutex *mtx;
+  ccord_cond *cv;
+  ccord_thread *th;
+  bool stop;
+  ui_bg_dec_job pending[UI_BG_DEC_CAP];
+  size_t pend_head, pend_count;
+  char active_url[UI_URL_MAX];
+  bool active;
+  ui_bg_dec_job done[UI_BG_DEC_CAP];
+  size_t done_head, done_count;
+};
+
+static void bg_dec_worker(void *arg)
+{
+  struct ui_bg_decoder *d = arg;
+  for (;;) {
+    ui_bg_dec_job job = {0};
+    ccord_mutex_lock(d->mtx);
+    while (!d->stop && d->pend_count == 0) {
+      ccord_cond_wait(d->cv, d->mtx);
+    }
+    if (d->stop) {
+      ccord_mutex_unlock(d->mtx);
+      break;
+    }
+    job = d->pending[d->pend_head];
+    memset(&d->pending[d->pend_head], 0, sizeof d->pending[d->pend_head]);
+    d->pend_head = (d->pend_head + 1u) % UI_BG_DEC_CAP;
+    d->pend_count--;
+    ui_url_copy(d->active_url, sizeof d->active_url, job.url);
+    d->active = true;
+    ccord_mutex_unlock(d->mtx);
+
+    ccord_error err;
+    uint8_t *rgba = nullptr;
+    int w = 0, h = 0;
+    bool ok = ccord_image_decode_rgba_max(job.compressed, job.compressed_len, job.max_dim,
+                                          &rgba, &w, &h, &err) == CCORD_OK;
+    ccord_free(job.compressed);
+    job.compressed = nullptr;
+    job.compressed_len = 0;
+    job.rgba = ok ? rgba : nullptr;
+    job.w = ok ? w : 0;
+    job.h = ok ? h : 0;
+    job.ok = ok;
+    if (!ok) ccord_free(rgba);
+
+    ccord_mutex_lock(d->mtx);
+    d->active = false;
+    d->active_url[0] = '\0';
+    if (d->stop || d->done_count >= UI_BG_DEC_CAP) {
+      ccord_free(job.rgba);
+    } else {
+      size_t tail = (d->done_head + d->done_count) % UI_BG_DEC_CAP;
+      d->done[tail] = job;
+      d->done_count++;
+    }
+    ccord_mutex_unlock(d->mtx);
+  }
+}
+
+static struct ui_bg_decoder *bg_dec_ensure(ccord_ui *ui)
+{
+  if (!ui) return nullptr;
+  if (ui->bg_dec) return ui->bg_dec;
+  struct ui_bg_decoder *d = ccord_calloc(1, sizeof *d);
+  if (!d) return nullptr;
+  d->mtx = ccord_mutex_create();
+  d->cv = ccord_cond_create();
+  if (!d->mtx || !d->cv) {
+    ccord_cond_destroy(d->cv);
+    ccord_mutex_destroy(d->mtx);
+    ccord_free(d);
+    return nullptr;
+  }
+  d->th = ccord_thread_create(bg_dec_worker, d);
+  if (!d->th) {
+    ccord_cond_destroy(d->cv);
+    ccord_mutex_destroy(d->mtx);
+    ccord_free(d);
+    return nullptr;
+  }
+  ui->bg_dec = d;
+  return d;
+}
+
+void ui_bg_decoder_destroy(ccord_ui *ui)
+{
+  if (!ui || !ui->bg_dec) return;
+  struct ui_bg_decoder *d = ui->bg_dec;
+  ui->bg_dec = nullptr;
+  ccord_mutex_lock(d->mtx);
+  d->stop = true;
+  ccord_cond_signal(d->cv);
+  ccord_mutex_unlock(d->mtx);
+  ccord_thread_join(d->th);
+  for (size_t i = 0; i < d->pend_count; i++) {
+    size_t idx = (d->pend_head + i) % UI_BG_DEC_CAP;
+    ccord_free(d->pending[idx].compressed);
+  }
+  for (size_t i = 0; i < d->done_count; i++) {
+    size_t idx = (d->done_head + i) % UI_BG_DEC_CAP;
+    ccord_free(d->done[idx].rgba);
+  }
+  ccord_cond_destroy(d->cv);
+  ccord_mutex_destroy(d->mtx);
+  ccord_free(d);
+}
+
+bool ui_media_is_decoding(const ccord_ui *ui, const char *url)
+{
+  if (!ui || !ui->bg_dec || !url || !url[0]) return false;
+  struct ui_bg_decoder *d = ui->bg_dec;
+  bool found = false;
+  ccord_mutex_lock(d->mtx);
+  if (d->active && strcmp(d->active_url, url) == 0) found = true;
+  for (size_t i = 0; !found && i < d->pend_count; i++) {
+    size_t idx = (d->pend_head + i) % UI_BG_DEC_CAP;
+    if (strcmp(d->pending[idx].url, url) == 0) found = true;
+  }
+  for (size_t i = 0; !found && i < d->done_count; i++) {
+    size_t idx = (d->done_head + i) % UI_BG_DEC_CAP;
+    if (strcmp(d->done[idx].url, url) == 0) found = true;
+  }
+  ccord_mutex_unlock(d->mtx);
+  return found;
+}
+
+static bool bg_dec_submit(ccord_ui *ui, const char *url, const uint8_t *data, size_t len, int max_dim)
+{
+  if (!ui || !url || !url[0] || !data || len < UI_BG_DEC_THRESHOLD) return false;
+  struct ui_bg_decoder *d = bg_dec_ensure(ui);
+  if (!d) return false;
+  uint8_t *copy = ccord_malloc(len);
+  if (!copy) return false;
+  memcpy(copy, data, len);
+  ccord_mutex_lock(d->mtx);
+  // Deduplicate if already queued or decoding.
+  bool dup = d->active && strcmp(d->active_url, url) == 0;
+  for (size_t i = 0; !dup && i < d->pend_count; i++) {
+    if (strcmp(d->pending[(d->pend_head + i) % UI_BG_DEC_CAP].url, url) == 0) dup = true;
+  }
+  if (dup || d->pend_count >= UI_BG_DEC_CAP) {
+    ccord_mutex_unlock(d->mtx);
+    ccord_free(copy);
+    return dup;   // if duplicate, already in flight; if full, caller falls back to sync decode
+  }
+  size_t tail = (d->pend_head + d->pend_count) % UI_BG_DEC_CAP;
+  ui_bg_dec_job *slot = &d->pending[tail];
+  memset(slot, 0, sizeof *slot);
+  ui_url_copy(slot->url, sizeof slot->url, url);
+  slot->compressed = copy;
+  slot->compressed_len = len;
+  slot->max_dim = max_dim > 0 ? max_dim : (CCORD_OS_ANDROID ? 2048 : 4096);
+  d->pend_count++;
+  ccord_cond_signal(d->cv);
+  ccord_mutex_unlock(d->mtx);
+  return true;
+}
+
+static bool bg_dec_drain(ccord_ui *ui, ccord_renderer *r, bool *out_invalidate_vlist)
+{
+  if (!ui || !ui->bg_dec || !r) return false;
+  struct ui_bg_decoder *d = ui->bg_dec;
+  bool any = false;
+  for (int guard = 0; guard < 2; guard++) {
+    ui_bg_dec_job job = {0};
+    ccord_mutex_lock(d->mtx);
+    if (d->done_count == 0) {
+      bool still_busy = d->active || d->pend_count > 0;
+      ccord_mutex_unlock(d->mtx);
+      if (still_busy && ui->lightbox_open) ui->dirty = true;
+      break;
+    }
+    job = d->done[d->done_head];
+    memset(&d->done[d->done_head], 0, sizeof d->done[d->done_head]);
+    d->done_head = (d->done_head + 1u) % UI_BG_DEC_CAP;
+    d->done_count--;
+    ccord_mutex_unlock(d->mtx);
+
+    ui_media_req *q = ui_media_req_find(ui, job.url, false);
+    if (q) q->pending = false;
+    bool uploaded = false;
+    if (job.ok && job.rgba && job.w > 0 && job.h > 0) {
+      ccord_error err;
+      uploaded = ccord_render_upload_rgba(r, job.url, job.rgba, job.w, job.h, &err) == CCORD_OK;
+    }
+    ccord_free(job.rgba);
+    if (uploaded) {
+      ui->dbg_media_textures++;
+      ui_media_req_loaded(q);
+      if (out_invalidate_vlist && !is_fixed_size_media_url(ui, job.url)) *out_invalidate_vlist = true;
+      ui->dirty = true;
+      any = true;
+    } else {
+      ui_media_warn(job.url, "async decode failed");
+      if (q) {
+        q->bad = true;
+        q->failed = true;
+        ui->dirty = true;
+      }
+    }
+  }
+  return any;
+}
+
+static bool ui_should_async_decode(const uint8_t *data, size_t len, const ui_media_req *q)
+{
+  if (!data || len < UI_BG_DEC_THRESHOLD) return false;
+  if (q && q->video) return false;
+  if (ccord_anim_sniff(data, len)) return false;
+  return true;
+}
+
 void ui_pump_media(ccord_ui *ui, ccord_renderer *r)
 {
   if (!ui || !ui->d.session || !r) return;
@@ -1031,6 +1376,7 @@ void ui_pump_media(ccord_ui *ui, ccord_renderer *r)
   uint64_t t0 = ccord_clock_ms();
   size_t uploaded = 0;
   bool invalidate_vlist = false;
+  if (bg_dec_drain(ui, r, &invalidate_vlist)) uploaded++;
   ccord_media_item item;
   while (uploaded < max_uploads_per_frame && ccord_session_pop_media(ui->d.session, &item)) {
     if ((ui->media_url[0] && strcmp(item.url, ui->media_url) == 0) ||
@@ -1040,6 +1386,13 @@ void ui_pump_media(ccord_ui *ui, ccord_renderer *r)
       continue;
     }
     ui_media_req *q = ui_media_req_find(ui, item.url, false);
+    if (ui_should_async_decode(item.data, item.len, q)) {
+      int mdim = (q && q->max_dim > 0) ? (int)q->max_dim : (CCORD_OS_ANDROID ? 2048 : 4096);
+      if (bg_dec_submit(ui, item.url, item.data, item.len, mdim)) {
+        ui->dirty = true;
+        continue;
+      }
+    }
     if (q) q->pending = false;
     if (ui_upload_media_bytes(r, item.url, item.data, item.len, q)) {
       ui->dbg_media_textures++;
@@ -1076,8 +1429,16 @@ bool ui_ensure_media_ex(ccord_ui *ui, ccord_renderer *r, const char *url, int ma
   if (!q || q->bad) return false;
   if (max_dim > 0) q->max_dim = (uint16_t)(max_dim > 4096 ? 4096 : max_dim);
   if (video) q->video = true;
+  if (ui_media_is_decoding(ui, url)) return false;
   const ccord_media_item *cached = ccord_session_get_media(ui->d.session, url);
   if (cached && cached->data && cached->len > 0) {
+    if (ui_should_async_decode(cached->data, cached->len, q)) {
+      int mdim = (q->max_dim > 0) ? (int)q->max_dim : (CCORD_OS_ANDROID ? 2048 : 4096);
+      if (bg_dec_submit(ui, url, cached->data, cached->len, mdim)) {
+        ui->dirty = true;
+        return false;
+      }
+    }
     q->pending = false;
     if (!r) return false;
     if (ui_upload_media_bytes(r, url, cached->data, cached->len, q)) {
@@ -1123,6 +1484,19 @@ bool ui_ensure_media_ex(ccord_ui *ui, ccord_renderer *r, const char *url, int ma
     q->retry_at_ms = ui->now_ms + (refused ? 600000u : ui_media_backoff_ms(q->tries));
   }
   return false;
+}
+
+bool ui_media_retry(ccord_ui *ui, ccord_renderer *r, const char *url, int max_dim, bool video)
+{
+  if (!ui || !url || !url[0]) return false;
+  ui_media_req *q = ui_media_req_find(ui, url, false);
+  if (q) {
+    q->failed = false;
+    q->bad = false;
+    q->pending = false;
+    q->retry_at_ms = 0;
+  }
+  return ui_ensure_media_ex(ui, r, url, max_dim, video);
 }
 
 bool ui_ensure_media(ccord_ui *ui, ccord_renderer *r, const char *url)

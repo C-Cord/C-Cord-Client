@@ -499,110 +499,11 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     return;
   }
 
-  // 1. Inline Image Lightbox
-  if (!ui->lightbox_open) {
-    if (ui->lightbox_urls) ui_close_lightbox(ui);
-    ui->lightbox_img_rect = (ccord_rect){0, 0, 0, 0};
-    ui->lightbox_open_btn = (ccord_rect){0, 0, 0, 0};
-    ui->lightbox_prev_btn = (ccord_rect){0, 0, 0, 0};
-    ui->lightbox_next_btn = (ccord_rect){0, 0, 0, 0};
-    ui->lightbox_close_btn = (ccord_rect){0, 0, 0, 0};
-    ui->lightbox_zoom_btn = (ccord_rect){0, 0, 0, 0};
+  // 1. Inline Image Lightbox (progressive preview-first + purpose-built mobile OLED viewer)
+  if (!ui->lightbox_open && (ui->lightbox_urls || ui->lightbox_items)) {
+    ui_close_lightbox(ui);
   }
-  if (ui->lightbox_open && (ui->lightbox_url[0] || ui->lightbox_count > 0)) {
-    if (ui->lightbox_count == 0 && ui->lightbox_url[0]) {
-      const char *one = ui->lightbox_url;
-      ui_open_lightbox(ui, &one, 1u, 0u);
-    }
-    if (ui->lightbox_index >= ui->lightbox_count && ui->lightbox_count > 0) {
-      ui->lightbox_index = ui->lightbox_count - 1u;
-    }
-    if (ui->lightbox_urls && ui->lightbox_count > 0) {
-      ui_url_copy(ui->lightbox_url, sizeof ui->lightbox_url, ui->lightbox_urls[ui->lightbox_index]);
-    }
-    if (ui->lightbox_zoom < 0.5f || ui->lightbox_zoom > 4.0f) ui->lightbox_zoom = 1.0f;
-
-    ui_popup_begin(ui, r, "lightbox", 0, UI_MODAL_MS, 8.0f);
-    ccord_draw_rect(r, (ccord_rect){0, 0, ui->win_w, ui->win_h}, COL(overlay));
-    bool lb_vid = ui_url_path_ends(ui->lightbox_url, ".mp4") || ui_url_path_ends(ui->lightbox_url, ".webm") ||
-                  ui_url_path_ends(ui->lightbox_url, ".mov") || ui_url_path_ends(ui->lightbox_url, ".m4v");
-    (void)ui_ensure_media_ex(ui, r, ui->lightbox_url, 0, lb_vid);
-    int tw = 0, th = 0;
-    bool has_tex = ccord_render_has_texture(r, ui->lightbox_url, &tw, &th);
-    float lb_l = ui->safe_insets.left, lb_r = ui->safe_insets.right;
-    float lb_t = ui->safe_insets.top, lb_b = ui->safe_insets.bottom;
-    float lb_aw = maxf(ui->win_w - lb_l - lb_r, 120.0f);
-    float lb_ah = maxf(ui->win_h - lb_t - lb_b, 120.0f);
-    float max_w = clampf(lb_aw * (ui->mobile_layout ? 0.88f : 0.74f), 200.0f, 920.0f);
-    float max_h = clampf(lb_ah * 0.68f, 160.0f, 680.0f);
-    float base_w = fminf(max_w, 480.0f), base_h = fminf(max_h, 320.0f);
-    if (has_tex && tw > 4 && th > 4) {
-      float scale = fminf(max_w / (float)tw, max_h / (float)th);
-      if (scale > 2.0f) scale = 2.0f;
-      base_w = maxf((float)tw * scale, 120.0f);
-      base_h = maxf((float)th * scale, 90.0f);
-    }
-    float iw = base_w * ui->lightbox_zoom;
-    float ih = base_h * ui->lightbox_zoom;
-    ccord_rect img_r = {lb_l + (lb_aw - iw) * 0.5f, lb_t + (lb_ah - ih) * 0.5f - 14.0f, iw, ih};
-    ui->lightbox_img_rect = img_r;
-    ccord_draw_rrect(r, (ccord_rect){img_r.x - 4.0f, img_r.y - 4.0f, img_r.w + 8.0f, img_r.h + 8.0f}, 8.0f,
-                     COL(bg_secondary));
-    if (has_tex) {
-      ccord_draw_texture_rounded(r, ui->lightbox_url, img_r, 6.0f, 255);
-    } else {
-      ui_icon_attachment(r, img_r.x + img_r.w * 0.5f, img_r.y + img_r.h * 0.5f, 32.0f, COL(text_secondary));
-    }
-
-    float bar_y = clampf(img_r.y + img_r.h + 10.0f, lb_t + 16.0f, maxf(ui->win_h - lb_b - 42.0f, lb_t + 16.0f));
-    float bar_x = clampf(img_r.x, lb_l + 16.0f, maxf(ui->win_w - lb_r - 280.0f, lb_l + 16.0f));
-    ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_link));
-    const char *open_lbl = "Open in Browser";
-    ccord_vec2 ot = ccord_text_measure(r, open_lbl, strlen(open_lbl), &ls, 0.0f);
-    ui->lightbox_open_btn = (ccord_rect){bar_x, bar_y, ot.x + 20.0f, 28.0f};
-    ccord_draw_rrect(r, ui->lightbox_open_btn, 5.0f, COL(bg_secondary));
-    ccord_text_draw(r, open_lbl, strlen(open_lbl), bar_x + 10.0f, bar_y + (28.0f - ot.y) * 0.5f, &ls, 0.0f);
-
-    char zbuf[24];
-    snprintf(zbuf, sizeof zbuf, "%d%%", (int)lroundf(ui->lightbox_zoom * 100.0f));
-    ccord_text_style zs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(text_header));
-    ccord_vec2 zt = ccord_text_measure(r, zbuf, strlen(zbuf), &zs, 0.0f);
-    ui->lightbox_zoom_btn = (ccord_rect){ui->lightbox_open_btn.x + ui->lightbox_open_btn.w + 8.0f, bar_y,
-                                         zt.x + 18.0f, 28.0f};
-    ccord_draw_rrect(r, ui->lightbox_zoom_btn, 5.0f, COL(bg_secondary));
-    ccord_text_draw(r, zbuf, strlen(zbuf), ui->lightbox_zoom_btn.x + 9.0f, bar_y + (28.0f - zt.y) * 0.5f, &zs, 0.0f);
-
-    ui->lightbox_close_btn = (ccord_rect){ui->win_w - lb_r - 48.0f, lb_t + 16.0f, 32.0f, 32.0f};
-    ccord_draw_rrect(r, ui->lightbox_close_btn, 16.0f, COL(bg_secondary));
-    ui_icon_close(r, ui->lightbox_close_btn.x + 16.0f, ui->lightbox_close_btn.y + 16.0f, 14.0f, COL(text_header));
-
-    if (ui->lightbox_count > 1u) {
-      char cbuf[32];
-      snprintf(cbuf, sizeof cbuf, "%zu / %zu", ui->lightbox_index + 1u, ui->lightbox_count);
-      ccord_text_style cs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(text_secondary));
-      ccord_vec2 ct = ccord_text_measure(r, cbuf, strlen(cbuf), &cs, 0.0f);
-      ccord_rect cpill = {ui->lightbox_zoom_btn.x + ui->lightbox_zoom_btn.w + 8.0f, bar_y, ct.x + 18.0f, 28.0f};
-      ccord_draw_rrect(r, cpill, 5.0f, COL(bg_secondary));
-      ccord_text_draw(r, cbuf, strlen(cbuf), cpill.x + 9.0f, bar_y + (28.0f - ct.y) * 0.5f, &cs, 0.0f);
-
-      float arr_y = lb_t + (lb_ah - 44.0f) * 0.5f;
-      ui->lightbox_prev_btn = (ccord_rect){lb_l + 14.0f, arr_y, 40.0f, 44.0f};
-      ui->lightbox_next_btn = (ccord_rect){ui->win_w - lb_r - 54.0f, arr_y, 40.0f, 44.0f};
-      ccord_draw_rrect(r, ui->lightbox_prev_btn, 8.0f, COL(bg_secondary));
-      ccord_draw_rrect(r, ui->lightbox_next_btn, 8.0f, COL(bg_secondary));
-      ccord_text_style as = ui_style(ui, CCORD_FONT_BOLD, M(font_size_large) + 2.0f, COL(text_header));
-      ccord_vec2 lt = ccord_text_measure(r, "<", 1, &as, 0.0f);
-      ccord_vec2 rt = ccord_text_measure(r, ">", 1, &as, 0.0f);
-      ccord_text_draw(r, "<", 1, ui->lightbox_prev_btn.x + (40.0f - lt.x) * 0.5f,
-                      ui->lightbox_prev_btn.y + (44.0f - lt.y) * 0.5f, &as, 0.0f);
-      ccord_text_draw(r, ">", 1, ui->lightbox_next_btn.x + (40.0f - rt.x) * 0.5f,
-                      ui->lightbox_next_btn.y + (44.0f - rt.y) * 0.5f, &as, 0.0f);
-    } else {
-      ui->lightbox_prev_btn = (ccord_rect){0, 0, 0, 0};
-      ui->lightbox_next_btn = (ccord_rect){0, 0, 0, 0};
-    }
-    ui_popup_end(r);
-  }
+  ui_lightbox_draw(ui, r);
 
   // 2. Quick Switcher (Ctrl+K)
   if (ui->quick_switcher_open) {

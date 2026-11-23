@@ -39,6 +39,10 @@ typedef struct mob_fixture {
   int last_haptic_style;
   int dismiss_kb_calls;
   int share_calls;
+  int save_image_calls;
+  int share_image_calls;
+  char last_saved_filename[128];
+  char last_shared_filename[128];
   char clip[256];
 } mob_fixture;
 
@@ -103,6 +107,22 @@ static bool host_share_text(void *ud, const char *title, const char *text)
 {
   (void)ud; (void)title; (void)text;
   F.share_calls++;
+  return true;
+}
+
+static bool host_save_image(void *ud, const char *filename, const uint8_t *data, size_t len, const char *fallback_url)
+{
+  (void)ud; (void)data; (void)len; (void)fallback_url;
+  F.save_image_calls++;
+  snprintf(F.last_saved_filename, sizeof F.last_saved_filename, "%s", filename ? filename : "");
+  return true;
+}
+
+static bool host_share_image(void *ud, const char *filename, const uint8_t *data, size_t len, const char *fallback_url)
+{
+  (void)ud; (void)data; (void)len; (void)fallback_url;
+  F.share_image_calls++;
+  snprintf(F.last_shared_filename, sizeof F.last_shared_filename, "%s", filename ? filename : "");
   return true;
 }
 
@@ -182,6 +202,8 @@ static bool fixture_init(void)
       .haptic_impact = host_haptic_impact,
       .dismiss_keyboard = host_dismiss_keyboard,
       .share_text = host_share_text,
+      .save_image = host_save_image,
+      .share_image = host_share_image,
     },
     .fixed_now_unix_ms = 1793534400000LL,
   };
@@ -506,6 +528,8 @@ static void test_mobile_copy_paste_and_autofill_login(void)
       .haptic_impact = host_haptic_impact,
       .dismiss_keyboard = host_dismiss_keyboard,
       .share_text = host_share_text,
+      .save_image = host_save_image,
+      .share_image = host_share_image,
     },
     .fixed_now_unix_ms = 1793534400000LL,
   };
@@ -1656,6 +1680,29 @@ static void test_plugins_revamp_mobile(void)
   step_frames(2, 25);
 }
 
+static void upload_test_gradient_rgba(const char *key, int w, int h, uint8_t r0, uint8_t g0, uint8_t b0,
+                                      uint8_t r1, uint8_t g1, uint8_t b1)
+{
+  uint8_t *px = ccord_malloc((size_t)w * (size_t)h * 4u);
+  CT_CHECK(px != nullptr);
+  if (!px) return;
+  for (int y = 0; y < h; y++) {
+    float ty = h > 1 ? (float)y / (float)(h - 1) : 0.0f;
+    for (int x = 0; x < w; x++) {
+      float tx = w > 1 ? (float)x / (float)(w - 1) : 0.0f;
+      float t = 0.5f * (tx + ty);
+      size_t off = ((size_t)y * (size_t)w + (size_t)x) * 4u;
+      px[off + 0] = (uint8_t)((float)r0 + ((float)r1 - (float)r0) * t);
+      px[off + 1] = (uint8_t)((float)g0 + ((float)g1 - (float)g0) * t);
+      px[off + 2] = (uint8_t)((float)b0 + ((float)b1 - (float)b0) * t);
+      px[off + 3] = 255u;
+    }
+  }
+  ccord_error err = {0};
+  CT_CHECK(ccord_render_upload_rgba(F.renderer, key, px, w, h, &err) == CCORD_OK);
+  ccord_free(px);
+}
+
 static void test_mobile_midscreen_drawer_gestures_and_exclusions(void)
 {
   ccord_ui_set_viewport(F.ui, 412.0f, 915.0f);
@@ -1741,6 +1788,189 @@ static void test_mobile_midscreen_drawer_gestures_and_exclusions(void)
   CT_CHECK(F.ui->left_drawer_t < 0.02f);
 }
 
+static void test_mobile_progressive_image_viewer(void)
+{
+  ccord_ui_set_viewport(F.ui, 412.0f, 915.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+  step_frames(4, 30);
+
+  const char *prev0 = "https://cdn.example/img0_preview.png";
+  const char *hd0 = "https://cdn.example/img0_hd.png";
+  const char *full0 = "https://cdn.example/img0_full.png";
+  const char *prev1 = "https://cdn.example/img1_preview.png";
+  const char *hd1 = "https://cdn.example/img1_hd.png";
+  const char *full1 = "https://cdn.example/img1_full.png";
+
+  // Seed ONLY the lower-res chat previews before opening the viewer (simulating instant 0ms preview display).
+  upload_test_gradient_rgba(prev0, 160, 100, 42, 65, 130, 240, 132, 92);
+  upload_test_gradient_rgba(prev1, 100, 140, 34, 145, 118, 92, 74, 210);
+
+  ui_img_hit hit = {0};
+  hit.count = 2u;
+  hit.index = 0u;
+  hit.urls[0] = full0;
+  hit.preview_urls[0] = prev0;
+  hit.hd_urls[0] = hd0;
+  hit.filenames[0] = "sunset_4k.png";
+  hit.descriptions[0] = "Golden sunset over mountains captured on mobile";
+  hit.orig_w[0] = 3840u;
+  hit.orig_h[0] = 2400u;
+  hit.file_sizes[0] = 2457600u;
+  hit.urls[1] = full1;
+  hit.preview_urls[1] = prev1;
+  hit.hd_urls[1] = hd1;
+  hit.filenames[1] = "aurora_portrait.webp";
+  hit.descriptions[1] = "";
+  hit.orig_w[1] = 1440u;
+  hit.orig_h[1] = 2016u;
+  hit.file_sizes[1] = 890112u;
+  hit.author_id = ccord_store_self_id(F.store);
+  ui_open_lightbox_hit(F.ui, &hit);
+  F.ui->lightbox_timestamp_ms = 1793534000000LL;
+  CT_CHECK(F.ui->lightbox_open);
+  CT_CHECK(F.ui->lightbox_count == 2u);
+  CT_CHECK(F.ui->lightbox_index == 0u);
+  CT_CHECK(F.ui->lightbox_hud_visible);
+
+  // Frame 0 WITHOUT pumping session: preview displays immediately while HD is still downloading!
+  F.now += 16;
+  (void)ccord_ui_update(F.ui, F.now);
+  ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+  ccord_ui_draw(F.ui, F.renderer);
+  ccord_render_end(F.renderer);
+  F.now += 40;
+  (void)ccord_ui_update(F.ui, F.now);
+  ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+  ccord_ui_draw(F.ui, F.renderer);
+  ccord_render_end(F.renderer);
+
+  CT_CHECK(!F.ui->lightbox_hd_ready_cur);
+  CT_CHECK(F.ui->lightbox_prog_smooth > 0.0f);
+  CT_CHECK(ccord_ui_next_wait_ms(F.ui, F.now) == 0u);
+  save_mobile_screenshot("mobile_lightbox_loading_preview.png");
+
+  // Simulate HD arrival -> texture uploads, progress reaches 100%, crossfade timestamp recorded.
+  upload_test_gradient_rgba(hd0, 640, 400, 35, 58, 138, 250, 142, 88);
+  upload_test_gradient_rgba(hd1, 400, 560, 28, 160, 128, 102, 70, 224);
+  step_frames(3, 30);
+  CT_CHECK(F.ui->lightbox_hd_ready_cur);
+  CT_CHECK(F.ui->lightbox_hd_ready_ms > 0u);
+  CT_CHECK(F.ui->lightbox_prog_smooth >= 0.99f);
+  save_mobile_screenshot("mobile_lightbox_hd_ready.png");
+
+  // Wait past crossfade & HD badge hold, then test double-tap focal zoom (1.0x -> 2.5x -> 1.0x).
+  step_frames(4, 300);
+  touch_ev(CCORD_IN_TOUCH_DOWN, 70, 290.0f, 450.0f);
+  step_frames(1, 20);
+  touch_ev(CCORD_IN_TOUCH_UP, 70, 290.0f, 450.0f);
+  step_frames(1, 70);
+  touch_ev(CCORD_IN_TOUCH_DOWN, 71, 292.0f, 451.0f);
+  step_frames(1, 20);
+  touch_ev(CCORD_IN_TOUCH_UP, 71, 292.0f, 451.0f);
+  step_frames(12, 30);
+  CT_CHECK(fabsf(F.ui->lightbox_zoom - 2.5f) < 0.08f);
+  CT_CHECK(F.ui->lightbox_pan_x < -10.0f);
+
+  // 1-finger pan while zoomed moves pan_x within clamped bounds.
+  float pan_before = F.ui->lightbox_pan_x;
+  touch_ev(CCORD_IN_TOUCH_DOWN, 72, 200.0f, 450.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 72, 270.0f, 450.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_UP, 72, 270.0f, 450.0f);
+  step_frames(2, 16);
+  CT_CHECK(F.ui->lightbox_pan_x > pan_before + 20.0f);
+
+  // Second double-tap springs back to 1.0x centered.
+  touch_ev(CCORD_IN_TOUCH_DOWN, 73, 206.0f, 450.0f);
+  step_frames(1, 20);
+  touch_ev(CCORD_IN_TOUCH_UP, 73, 206.0f, 450.0f);
+  step_frames(1, 70);
+  touch_ev(CCORD_IN_TOUCH_DOWN, 74, 208.0f, 452.0f);
+  step_frames(1, 20);
+  touch_ev(CCORD_IN_TOUCH_UP, 74, 208.0f, 452.0f);
+  step_frames(14, 30);
+  CT_CHECK(fabsf(F.ui->lightbox_zoom - 1.0f) < 0.05f);
+  CT_CHECK(fabsf(F.ui->lightbox_pan_x) < 1.0f);
+
+  // Single-tap toggles immersive HUD visibility after the 280ms double-tap window.
+  touch_ev(CCORD_IN_TOUCH_DOWN, 75, 206.0f, 450.0f);
+  step_frames(1, 20);
+  touch_ev(CCORD_IN_TOUCH_UP, 75, 206.0f, 450.0f);
+  step_frames(1, 50);
+  CT_CHECK(F.ui->lightbox_hud_visible);   // still waiting for double-tap window
+  step_frames(10, 40);                    // > 280ms -> HUD toggles off and fades out
+  CT_CHECK(!F.ui->lightbox_hud_visible);
+  CT_CHECK(F.ui->lightbox_hud_alpha < 0.05f);
+
+  // Single-tap again restores HUD.
+  touch_ev(CCORD_IN_TOUCH_DOWN, 76, 206.0f, 450.0f);
+  step_frames(1, 20);
+  touch_ev(CCORD_IN_TOUCH_UP, 76, 206.0f, 450.0f);
+  step_frames(12, 40);
+  CT_CHECK(F.ui->lightbox_hud_visible);
+  CT_CHECK(F.ui->lightbox_hud_alpha > 0.95f);
+
+  // Horizontal gallery swipe advances from image 0 -> image 1.
+  touch_ev(CCORD_IN_TOUCH_DOWN, 77, 320.0f, 450.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 77, 160.0f, 452.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_UP, 77, 160.0f, 452.0f);
+  step_frames(6, 30);
+  CT_CHECK(F.ui->lightbox_index == 1u);
+
+  // Filmstrip thumbnail tap jumps straight back to image 0.
+  ccord_rect th0 = F.ui->lightbox_thumb_rects[0];
+  CT_CHECK(th0.w > 20.0f && th0.h > 20.0f);
+  touch_tap(th0.x + th0.w * 0.5f, th0.y + th0.h * 0.5f);
+  step_frames(4, 30);
+  CT_CHECK(F.ui->lightbox_index == 0u);
+
+  // Details bottom sheet opens on Info tap, and Android Back closes Details BEFORE Lightbox.
+  ccord_rect ib = F.ui->lightbox_info_btn;
+  CT_CHECK(ib.w > 20.0f && ib.h > 20.0f);
+  touch_tap(ib.x + ib.w * 0.5f, ib.y + ib.h * 0.5f);
+  step_frames(10, 30);
+  CT_CHECK(F.ui->lightbox_details_open);
+  CT_CHECK(F.ui->lightbox_details_t > 0.9f);
+  save_mobile_screenshot("mobile_lightbox_details_sheet.png");
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(10, 30);
+  CT_CHECK(!F.ui->lightbox_details_open);
+  CT_CHECK(F.ui->lightbox_open);
+
+  // Action dock: Save, Copy, Share invoke native host callbacks.
+  F.save_image_calls = 0;
+  F.share_image_calls = 0;
+  F.share_calls = 0;
+  F.clip[0] = '\0';
+  ccord_rect sb = F.ui->lightbox_save_btn;
+  ccord_rect cb = F.ui->lightbox_copy_btn;
+  ccord_rect shb = F.ui->lightbox_share_btn;
+  CT_CHECK(sb.w > 20.0f && cb.w > 20.0f && shb.w > 20.0f);
+  touch_tap(sb.x + sb.w * 0.5f, sb.y + sb.h * 0.5f);
+  CT_CHECK(F.save_image_calls == 1);
+  CT_CHECK(strcmp(F.last_saved_filename, "sunset_4k.png") == 0);
+  touch_tap(cb.x + cb.w * 0.5f, cb.y + cb.h * 0.5f);
+  CT_CHECK(strcmp(F.clip, full0) == 0);
+  touch_tap(shb.x + shb.w * 0.5f, shb.y + shb.h * 0.5f);
+  CT_CHECK(F.share_image_calls > 0 || F.share_calls > 0);
+
+  // Vertical swipe-to-dismiss closes the lightbox cleanly.
+  touch_ev(CCORD_IN_TOUCH_DOWN, 78, 206.0f, 340.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 78, 206.0f, 470.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 78, 206.0f, 560.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_UP, 78, 206.0f, 560.0f);
+  step_frames(4, 25);
+  CT_CHECK(!F.ui->lightbox_open);
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -1753,6 +1983,7 @@ int main(void)
   test_mobile_composer_and_send();
   test_mobile_scroll_and_long_press_sheet();
   test_mobile_lightbox_pinch_and_back_cascade();
+  test_mobile_progressive_image_viewer();
   test_mobile_copy_paste_and_autofill_login();
   test_mobile_safe_area_rail_and_background_focus();
   test_mobile_drawer_occlusion();

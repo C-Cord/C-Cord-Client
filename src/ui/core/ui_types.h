@@ -160,10 +160,29 @@ typedef struct ui_ts_hit {
 
 typedef struct ui_img_hit {
   ccord_rect rect;
-  const char *urls[CCORD_RICH_MAX_ATTACHMENTS];   // pointers into ui->hit_arena (or "" sentinel)
+  const char *urls[CCORD_RICH_MAX_ATTACHMENTS];          // original/full URLs (points into ui->hit_arena)
+  const char *preview_urls[CCORD_RICH_MAX_ATTACHMENTS];  // exact chat preview texture key already in GPU VRAM
+  const char *hd_urls[CCORD_RICH_MAX_ATTACHMENTS];       // display HD URL (2048px proxy on mobile when larger, else full)
+  const char *filenames[CCORD_RICH_MAX_ATTACHMENTS];
+  const char *descriptions[CCORD_RICH_MAX_ATTACHMENTS];  // alt-text
+  uint32_t orig_w[CCORD_RICH_MAX_ATTACHMENTS];
+  uint32_t orig_h[CCORD_RICH_MAX_ATTACHMENTS];
+  uint64_t file_sizes[CCORD_RICH_MAX_ATTACHMENTS];
+  ccord_id msg_id;
+  ccord_id author_id;
   size_t count;
   size_t index;
 } ui_img_hit;
+
+typedef struct ui_lightbox_item {
+  char full_url[UI_URL_MAX];
+  char preview_url[UI_URL_MAX];
+  char hd_url[UI_URL_MAX];
+  char filename[160];
+  char description[256];
+  uint32_t orig_w, orig_h;
+  uint64_t file_size;
+} ui_lightbox_item;
 
 typedef struct ui_media_hit {
   ccord_rect play_rect;

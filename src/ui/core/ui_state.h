@@ -226,9 +226,36 @@ struct ccord_ui {
   bool lightbox_open;
   char lightbox_url[UI_URL_MAX];
   char (*lightbox_urls)[UI_URL_MAX];   // lazily heap-allocated [CCORD_RICH_MAX_ATTACHMENTS] while lightbox is open
+  ui_lightbox_item *lightbox_items;    // lazily heap-allocated [CCORD_RICH_MAX_ATTACHMENTS] progressive/mobile metadata
   size_t lightbox_count, lightbox_index;
   float lightbox_zoom;
+  float lightbox_pan_x, lightbox_pan_y;
+  float lightbox_target_zoom, lightbox_target_pan_x, lightbox_target_pan_y;
+  bool lightbox_spring_active;
+  float lightbox_vel_x, lightbox_vel_y;
+  float lightbox_swipe_x;              // horizontal gallery drag offset (logical px)
+  float lightbox_dismiss_y;            // vertical swipe-to-dismiss drag offset (logical px)
+  float lightbox_hud_alpha;            // 0..1 immersive HUD opacity
+  bool lightbox_hud_visible;
+  bool lightbox_details_open;
+  float lightbox_details_t;            // 0..1 slide-up details sheet progress
+  bool lightbox_hd_ready_cur;          // tracks preview -> HD transition for 140ms crossfade
+  uint64_t lightbox_hd_ready_ms;
+  uint64_t lightbox_open_ms;
+  float lightbox_prog_smooth;          // 0..1 smoothed HD download/decode progress bar value
+  bool lightbox_prog_indeterminate;
+  uint64_t lightbox_dl_now;
+  uint64_t lightbox_dl_total;
+  ccord_id lightbox_author_id;
+  int64_t lightbox_timestamp_ms;
+  ccord_rect lightbox_origin_rect;
+  bool lightbox_mouse_dragging;
+  float lightbox_drag_last_x, lightbox_drag_last_y;
   ccord_rect lightbox_img_rect, lightbox_open_btn, lightbox_prev_btn, lightbox_next_btn, lightbox_close_btn, lightbox_zoom_btn;
+  ccord_rect lightbox_save_btn, lightbox_share_btn, lightbox_copy_btn, lightbox_info_btn, lightbox_retry_btn;
+  ccord_rect lightbox_details_sheet_rect;
+  ccord_rect lightbox_thumb_rects[CCORD_RICH_MAX_ATTACHMENTS];
+  struct ui_bg_decoder *bg_dec;        // lazy worker thread for decoding large static images (>96 KiB) off UI thread
   ui_img_hit img_hits[UI_IMG_HIT_MAX];
   size_t nimg_hits;
   ui_media_hit media_hits[UI_MEDIA_HIT_MAX];
@@ -857,6 +884,14 @@ struct ccord_ui {
     float second_x, second_y;
     float pinch_start_dist;
     float pinch_start_zoom;
+    float pinch_mid_x, pinch_mid_y;
+    float pinch_start_pan_x, pinch_start_pan_y;
+    // Double-tap recognition (lightbox 1x <-> 2.5x focal zoom).
+    uint64_t last_tap_ms;
+    float last_tap_x, last_tap_y;
+    bool pending_single_tap;
+    uint64_t pending_tap_ms;
+    float pending_tap_x, pending_tap_y;
   } touch;
 };
 

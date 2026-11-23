@@ -497,6 +497,13 @@ float dc_gallery_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, floa
   if (!draw) return total_h;
 
   const char *rev_urls[CCORD_RICH_MAX_ATTACHMENTS];
+  const char *rev_previews[CCORD_RICH_MAX_ATTACHMENTS];
+  const char *rev_hds[CCORD_RICH_MAX_ATTACHMENTS];
+  const char *rev_names[CCORD_RICH_MAX_ATTACHMENTS];
+  const char *rev_descs[CCORD_RICH_MAX_ATTACHMENTS];
+  uint32_t rev_w[CCORD_RICH_MAX_ATTACHMENTS];
+  uint32_t rev_h[CCORD_RICH_MAX_ATTACHMENTS];
+  uint64_t rev_sizes[CCORD_RICH_MAX_ATTACHMENTS];
   size_t rev_idx[CCORD_RICH_MAX_ATTACHMENTS];
   size_t rev_count = 0;
   for (size_t k = 0; k < n; k++) {
@@ -504,8 +511,27 @@ float dc_gallery_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, floa
     bool hidden = p->att[k].spoiler && !dc_is_spoiler_revealed(ui, sk);
     const char *u = dc_attachment_url(&p->att[k]);
     if (!hidden && u[0]) {
+      char pbuf[UI_URL_MAX];
+      const char *thumb = att_thumb_url(&p->att[k], pbuf, sizeof pbuf);
+      char hbuf[UI_URL_MAX];
+      const char *hd = u;
+      // On Android / mobile, cap in-viewer HD fetch to 2048px proxy when original exceeds 2048px (saves cellular
+      // bandwidth & stays inside Android's 48 MiB VRAM budget), while Save/Share/Browser still use full `u`.
+      if ((CCORD_OS_ANDROID || ui->mobile_layout) && p->att[k].proxy_url && p->att[k].proxy_url[0] &&
+          (p->att[k].width > 2048u || p->att[k].height > 2048u) &&
+          ui_media_sized_url(p->att[k].proxy_url, p->att[k].width, p->att[k].height, 2048u, 2048u,
+                             att_keeps_format(&p->att[k]), hbuf, sizeof hbuf)) {
+        hd = hbuf;
+      }
       rev_idx[k] = rev_count;
       rev_urls[rev_count] = u;
+      rev_previews[rev_count] = ui_hit_cstr(ui, thumb);
+      rev_hds[rev_count] = ui_hit_cstr(ui, hd);
+      rev_names[rev_count] = p->att[k].filename ? p->att[k].filename : "";
+      rev_descs[rev_count] = p->att[k].description ? p->att[k].description : "";
+      rev_w[rev_count] = p->att[k].width;
+      rev_h[rev_count] = p->att[k].height;
+      rev_sizes[rev_count] = p->att[k].size;
       rev_count++;
     } else {
       rev_idx[k] = SIZE_MAX;
@@ -539,7 +565,19 @@ float dc_gallery_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, floa
                       tiles[k].y + (tiles[k].h - mt.y) * 0.5f, &ms, 0.0f);
     }
     if (rev_idx[k] < rev_count) {
-      dc_record_img_hit(ui, tiles[k], rev_urls, rev_count, rev_idx[k]);
+      if (tex && tex[0]) rev_previews[rev_idx[k]] = ui_hit_cstr(ui, tex);
+      dc_img_hit_extra extra = {
+        .preview_urls = rev_previews,
+        .hd_urls = rev_hds,
+        .filenames = rev_names,
+        .descriptions = rev_descs,
+        .orig_w = rev_w,
+        .orig_h = rev_h,
+        .file_sizes = rev_sizes,
+        .msg_id = p->msg_id,
+        .author_id = p->author_id,
+      };
+      dc_record_img_hit_ex(ui, tiles[k], rev_urls, rev_count, rev_idx[k], &extra);
     }
   }
   return total_h;

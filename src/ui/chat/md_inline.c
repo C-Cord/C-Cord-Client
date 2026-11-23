@@ -555,21 +555,51 @@ void dc_record_spoiler_hit(ccord_ui *ui, ccord_rect rect, ccord_id key)
   ui->nspoiler_hits++;
 }
 
-void dc_record_img_hit(ccord_ui *ui, ccord_rect rect, const char *const *urls, size_t count, size_t index)
+void dc_record_img_hit_ex(ccord_ui *ui, ccord_rect rect, const char *const *urls, size_t count, size_t index,
+                          const dc_img_hit_extra *extra)
 {
   if (!ui || !urls || count == 0 || index >= count || rect.w <= 0.0f || rect.h <= 0.0f) return;
   if (!urls[index] || !urls[index][0] || ui->nimg_hits >= UI_IMG_HIT_MAX) return;
   ui_img_hit *hit = &ui->img_hits[ui->nimg_hits++];
+  memset(hit, 0, sizeof *hit);
   hit->rect = rect;
   if (count > CCORD_RICH_MAX_ATTACHMENTS) count = CCORD_RICH_MAX_ATTACHMENTS;
   hit->count = count;
   hit->index = index < count ? index : 0;
+  hit->msg_id = extra ? extra->msg_id : CCORD_ID_NONE;
+  hit->author_id = extra ? extra->author_id : CCORD_ID_NONE;
   for (size_t i = 0; i < count; i++) {
     const char *u = (urls[i] && strlen(urls[i]) < UI_URL_MAX) ? urls[i] : "";
+    const char *pu = (extra && extra->preview_urls && extra->preview_urls[i] &&
+                      strlen(extra->preview_urls[i]) < UI_URL_MAX)
+                       ? extra->preview_urls[i]
+                       : "";
+    const char *hu = (extra && extra->hd_urls && extra->hd_urls[i] &&
+                      strlen(extra->hd_urls[i]) < UI_URL_MAX)
+                       ? extra->hd_urls[i]
+                       : u;
+    const char *fn = (extra && extra->filenames && extra->filenames[i]) ? extra->filenames[i] : "";
+    const char *desc = (extra && extra->descriptions && extra->descriptions[i]) ? extra->descriptions[i] : "";
     hit->urls[i] = ui_hit_cstr(ui, u);
+    hit->preview_urls[i] = ui_hit_cstr(ui, pu);
+    hit->hd_urls[i] = ui_hit_cstr(ui, hu);
+    hit->filenames[i] = ui_hit_cstr(ui, fn);
+    hit->descriptions[i] = ui_hit_cstr(ui, desc);
+    hit->orig_w[i] = (extra && extra->orig_w) ? extra->orig_w[i] : 0u;
+    hit->orig_h[i] = (extra && extra->orig_h) ? extra->orig_h[i] : 0u;
+    hit->file_sizes[i] = (extra && extra->file_sizes) ? extra->file_sizes[i] : 0u;
   }
   for (size_t i = count; i < CCORD_RICH_MAX_ATTACHMENTS; i++) {
     hit->urls[i] = "";
+    hit->preview_urls[i] = "";
+    hit->hd_urls[i] = "";
+    hit->filenames[i] = "";
+    hit->descriptions[i] = "";
   }
+}
+
+void dc_record_img_hit(ccord_ui *ui, ccord_rect rect, const char *const *urls, size_t count, size_t index)
+{
+  dc_record_img_hit_ex(ui, rect, urls, count, index, nullptr);
 }
 

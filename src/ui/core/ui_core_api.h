@@ -128,7 +128,19 @@ void ui_draw_group_dm_icon(ccord_ui *ui, ccord_renderer *r, const ccord_channel 
 bool ui_open_url(ccord_ui *ui, const char *url, const char *label);
 bool ui_activate_link(ccord_ui *ui, const char *url);
 void ui_open_lightbox(ccord_ui *ui, const char *const *urls, size_t count, size_t index);
+void ui_open_lightbox_hit(ccord_ui *ui, const ui_img_hit *hit);
+void ui_lightbox_select_index(ccord_ui *ui, size_t index);
 void ui_close_lightbox(ccord_ui *ui);
+void ui_lightbox_draw(ccord_ui *ui, ccord_renderer *r);
+bool ui_lightbox_handle_input(ccord_ui *ui, const ccord_input_event *ev);
+bool ui_lightbox_update(ccord_ui *ui, uint64_t now_ms, float dt_ms);
+bool ui_lightbox_point_in_chrome(const ccord_ui *ui, float x, float y);
+void ui_lightbox_double_tap_at(ccord_ui *ui, float x, float y);
+void ui_lightbox_clamp_pan(const ccord_ui *ui, float zoom, float *pan_x, float *pan_y);
+void ui_lightbox_toggle_hud(ccord_ui *ui);
+bool ui_media_retry(ccord_ui *ui, ccord_renderer *r, const char *url, int max_dim, bool video);
+bool ui_media_is_decoding(const ccord_ui *ui, const char *url);
+void ui_bg_decoder_destroy(ccord_ui *ui);
 void ui_close_select_dropdown(ccord_ui *ui);
 void ui_free_inter_modal(ccord_ui *ui);
 static inline const char *ui_hit_dup(ccord_ui *ui, const char *s, size_t len)

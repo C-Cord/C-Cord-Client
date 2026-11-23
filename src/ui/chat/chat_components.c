@@ -246,7 +246,16 @@ static float cv2_thumbnail(ccord_ui *ui, ccord_renderer *r, const decor_part *p,
   }
   if (url[0]) {
     const char *one_url = url;
-    dc_record_img_hit(ui, tr, &one_url, 1u, 0u);
+    const char *one_prev = url;
+    uint32_t ow = media->width, oh = media->height;
+    dc_img_hit_extra extra = {
+      .preview_urls = &one_prev,
+      .orig_w = &ow,
+      .orig_h = &oh,
+      .msg_id = p->msg_id,
+      .author_id = p->author_id,
+    };
+    dc_record_img_hit_ex(ui, tr, &one_url, 1u, 0u, &extra);
   }
   return th;
 }

@@ -479,9 +479,8 @@ static const allow k_funcs[] = {
   {"overlays/modals_draw.c", "draw_group_dm_modal", {0, 0, 0, 4}, "recipient check box shapes"},
   {"overlays/modals_draw.c", "draw_edit_group_dm_modal", {0}, ""},
   {"overlays/profile_surfaces.c", "dc_draw_user_profile_modal", {0, 0, 0, 2}, "bot tag and server icon shapes inside the profile card"},
-  {"overlays/modals_draw.c", "ui_draw_overlays", {1, 0, 1, 13},
-   "lightbox scrim and its media chrome (full-bleed image viewer, not a dialog); multi-line interaction-modal field (no shared "
-   "helper for it yet); select-dropdown checkbox and dot glyphs; invite preview icon"},
+  {"overlays/modals_draw.c", "ui_draw_overlays", {0, 0, 1, 6},
+   "multi-line interaction-modal field (no shared helper for it yet); select-dropdown checkbox and dot glyphs; invite preview icon"},
   {"overlays/context_menu_actions.c", "draw_panel", {0}, ""},
   {"voice/ui_scheduled_events.c", "ev_modal_begin", {0}, ""},
   {"voice/ui_scheduled_events.c", "ev_input", {0}, ""},

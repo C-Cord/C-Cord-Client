@@ -14,9 +14,18 @@ enum {
   TOUCH_SWIPE_RIGHT_DRAWER = 4,
   TOUCH_LONG_PRESS_FIRED = 5,
   TOUCH_PINCH = 6,
+  TOUCH_LB_PAN = 7,
+  TOUCH_LB_SWIPE_X = 8,
+  TOUCH_LB_DISMISS_Y = 9,
+  TOUCH_LB_SHEET_DRAG = 10,
 };
 
 #define TOUCH_SLOP_PX             10.0f
+#define TOUCH_DOUBLE_TAP_MS       280u
+#define TOUCH_DOUBLE_TAP_PX       28.0f
+#define TOUCH_LB_DISMISS_PX       110.0f
+#define TOUCH_LB_DISMISS_V        600.0f
+#define TOUCH_LB_SWIPE_V          320.0f
 #define TOUCH_DRAWER_OPEN_SLOP    16.0f   // deliberate horizontal travel before opening a closed drawer
 #define TOUCH_DRAWER_CLOSE_SLOP   12.0f   // relaxed horizontal travel to close an already-open drawer
 #define TOUCH_DRAWER_OPEN_RATIO   1.65f   // ~31 deg cone from horizontal so diagonal scrolls never open drawers
@@ -112,9 +121,17 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         ui->touch.second_x = ev->x;
         ui->touch.second_y = ev->y;
         ui->touch.mode = TOUCH_PINCH;
+        ui->touch.pending_single_tap = false;
         ui->touch.pinch_start_dist = finger_dist(ui->touch.last_x, ui->touch.last_y, ev->x, ev->y);
         if (ui->touch.pinch_start_dist < 16.0f) ui->touch.pinch_start_dist = 16.0f;
         ui->touch.pinch_start_zoom = ui->lightbox_zoom > 0.1f ? ui->lightbox_zoom : 1.0f;
+        ui->touch.pinch_mid_x = (ui->touch.last_x + ev->x) * 0.5f;
+        ui->touch.pinch_mid_y = (ui->touch.last_y + ev->y) * 0.5f;
+        ui->touch.pinch_start_pan_x = ui->lightbox_pan_x;
+        ui->touch.pinch_start_pan_y = ui->lightbox_pan_y;
+        ui->lightbox_spring_active = false;
+        ui->lightbox_vel_x = 0.0f;
+        ui->lightbox_vel_y = 0.0f;
         ui->dirty = true;
         return true;
       }
@@ -134,7 +151,16 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         if (ui->touch.second_active && ui->lightbox_open) {
           float dist = finger_dist(ui->touch.last_x, ui->touch.last_y, ui->touch.second_x, ui->touch.second_y);
           float ratio = dist / ui->touch.pinch_start_dist;
-          ui->lightbox_zoom = clampf(ui->touch.pinch_start_zoom * ratio, 0.5f, 4.0f);
+          float nz = clampf(ui->touch.pinch_start_zoom * ratio, 0.75f, 5.5f);
+          float mx = (ui->touch.last_x + ui->touch.second_x) * 0.5f;
+          float my = (ui->touch.last_y + ui->touch.second_y) * 0.5f;
+          float cx = ui->win_w * 0.5f;
+          float cy = ui->win_h * 0.5f;
+          float zscale = nz / ui->touch.pinch_start_zoom;
+          ui->lightbox_zoom = nz;
+          ui->lightbox_pan_x = (mx - cx) - (ui->touch.pinch_mid_x - cx - ui->touch.pinch_start_pan_x) * zscale;
+          ui->lightbox_pan_y = (my - cy) - (ui->touch.pinch_mid_y - cy - ui->touch.pinch_start_pan_y) * zscale;
+          ui_lightbox_clamp_pan(ui, nz, &ui->lightbox_pan_x, &ui->lightbox_pan_y);
           ui->dirty = true;
           return true;
         }
@@ -156,6 +182,69 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       ui->touch.last_x = ev->x;
       ui->touch.last_y = ev->y;
       ui->touch.last_ms = now;
+
+      if (ui->lightbox_open) {
+        if (ui->touch.mode == TOUCH_PENDING) {
+          float adx = fabsf(total_dx);
+          float ady = fabsf(total_dy);
+          if (adx < TOUCH_SLOP_PX && ady < TOUCH_SLOP_PX) return false;
+          ui->touch.pending_single_tap = false;
+          ui->lightbox_spring_active = false;
+          ui->lightbox_vel_x = 0.0f;
+          ui->lightbox_vel_y = 0.0f;
+          if (ui->lightbox_details_open) {
+            ui->touch.mode = TOUCH_LB_SHEET_DRAG;
+          } else if (ui->lightbox_zoom > 1.02f) {
+            ui->touch.mode = TOUCH_LB_PAN;
+          } else if (ui->lightbox_count > 1u && adx > ady * 1.2f) {
+            ui->touch.mode = TOUCH_LB_SWIPE_X;
+            ui->touch.drag_origin_x = ui->touch.down_x + copysignf(TOUCH_SLOP_PX, total_dx);
+          } else {
+            ui->touch.mode = TOUCH_LB_DISMISS_Y;
+          }
+        }
+        if (ui->touch.mode == TOUCH_LB_SHEET_DRAG) {
+          if (total_dy > 44.0f) {
+            ui->lightbox_details_open = false;
+            ui->touch.mode = TOUCH_LONG_PRESS_FIRED;   // consume rest of gesture
+            ui->dirty = true;
+          }
+          return true;
+        }
+        if (ui->touch.mode == TOUCH_LB_PAN) {
+          float prev_px = ui->lightbox_pan_x;
+          ui->lightbox_pan_x += dx;
+          ui->lightbox_pan_y += dy;
+          ui_lightbox_clamp_pan(ui, ui->lightbox_zoom, &ui->lightbox_pan_x, &ui->lightbox_pan_y);
+          // Edge handoff: if panned flush against the photo edge and pushing further horizontally in a gallery, swipe!
+          bool at_edge = fabsf(ui->lightbox_pan_x - prev_px) < 0.25f && fabsf(dx) > 2.0f && fabsf(dx) > fabsf(dy) * 1.6f;
+          if (at_edge && ui->lightbox_count > 1u) {
+            bool can_prev = dx > 0.0f && ui->lightbox_index > 0;
+            bool can_next = dx < 0.0f && ui->lightbox_index + 1u < ui->lightbox_count;
+            if (can_prev || can_next) {
+              ui->touch.mode = TOUCH_LB_SWIPE_X;
+              ui->touch.drag_origin_x = ev->x;
+              ui->lightbox_swipe_x = 0.0f;
+            }
+          }
+          ui->dirty = true;
+          return true;
+        }
+        if (ui->touch.mode == TOUCH_LB_SWIPE_X) {
+          float sdx = ev->x - ui->touch.drag_origin_x;
+          bool rubber = (sdx > 0.0f && ui->lightbox_index == 0) ||
+                        (sdx < 0.0f && ui->lightbox_index + 1u >= ui->lightbox_count);
+          ui->lightbox_swipe_x = rubber ? (sdx * 0.32f) : sdx;
+          ui->dirty = true;
+          return true;
+        }
+        if (ui->touch.mode == TOUCH_LB_DISMISS_Y) {
+          ui->lightbox_dismiss_y = total_dy;
+          ui->dirty = true;
+          return true;
+        }
+        return true;
+      }
 
       if (ui->touch.mode == TOUCH_PENDING) {
         float adx = fabsf(total_dx);
@@ -238,6 +327,13 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       if (!ui->touch.active) return false;
       if (ui->touch.second_active && ev->finger_id == ui->touch.second_id) {
         ui->touch.second_active = false;
+        if (ui->lightbox_open && (ui->lightbox_zoom < 1.0f || ui->lightbox_zoom > 5.0f)) {
+          ui->lightbox_target_zoom = clampf(ui->lightbox_zoom, 1.0f, 5.0f);
+          ui->lightbox_target_pan_x = ui->lightbox_pan_x;
+          ui->lightbox_target_pan_y = ui->lightbox_pan_y;
+          ui_lightbox_clamp_pan(ui, ui->lightbox_target_zoom, &ui->lightbox_target_pan_x, &ui->lightbox_target_pan_y);
+          ui->lightbox_spring_active = true;
+        }
         return true;
       }
       if (ev->finger_id != ui->touch.primary_id) return false;
@@ -253,6 +349,84 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       if (ev->type == CCORD_IN_TOUCH_CANCEL) {
         // OS intercepted the gesture (e.g. system Back/Home): settle gracefully back to pre-gesture drawer state.
         ui->mouse_in = false;
+        ui->dirty = true;
+        return true;
+      }
+
+      if (ui->lightbox_open) {
+        if (mode == TOUCH_PINCH) {
+          if (ui->lightbox_zoom < 1.0f || ui->lightbox_zoom > 5.0f) {
+            ui->lightbox_target_zoom = clampf(ui->lightbox_zoom, 1.0f, 5.0f);
+            ui->lightbox_target_pan_x = ui->lightbox_pan_x;
+            ui->lightbox_target_pan_y = ui->lightbox_pan_y;
+            ui_lightbox_clamp_pan(ui, ui->lightbox_target_zoom, &ui->lightbox_target_pan_x, &ui->lightbox_target_pan_y);
+            ui->lightbox_spring_active = true;
+          }
+          ui->dirty = true;
+          return true;
+        }
+        if (mode == TOUCH_LB_PAN) {
+          if (fabsf(vx) > 120.0f || fabsf(vy) > 120.0f) {
+            ui->lightbox_vel_x = clampf(vx, -2400.0f, 2400.0f);
+            ui->lightbox_vel_y = clampf(vy, -2400.0f, 2400.0f);
+          }
+          ui->dirty = true;
+          return true;
+        }
+        if (mode == TOUCH_LB_SWIPE_X) {
+          float thresh = ui->win_w * 0.24f;
+          if ((ui->lightbox_swipe_x < -thresh || vx < -TOUCH_LB_SWIPE_V) &&
+              ui->lightbox_index + 1u < ui->lightbox_count) {
+            haptic_tick(ui, 0);
+            ui_lightbox_select_index(ui, ui->lightbox_index + 1u);
+          } else if ((ui->lightbox_swipe_x > thresh || vx > TOUCH_LB_SWIPE_V) && ui->lightbox_index > 0) {
+            haptic_tick(ui, 0);
+            ui_lightbox_select_index(ui, ui->lightbox_index - 1u);
+          }
+          ui->dirty = true;
+          return true;
+        }
+        if (mode == TOUCH_LB_DISMISS_Y) {
+          if (fabsf(ui->lightbox_dismiss_y) > TOUCH_LB_DISMISS_PX || fabsf(vy) > TOUCH_LB_DISMISS_V) {
+            haptic_tick(ui, 0);
+            ui_close_lightbox(ui);
+          }
+          ui->dirty = true;
+          return true;
+        }
+        if (mode == TOUCH_PENDING) {
+          // Taps on HUD buttons, filmstrip, or details sheet execute immediately with zero double-tap latency.
+          if (ui_lightbox_point_in_chrome(ui, ux, uy)) {
+            ui->touch.pending_single_tap = false;
+            ui->touch.last_tap_ms = 0;
+            bool r1 = ui_dispatch_synthetic_mouse(ui, CCORD_IN_MOUSE_DOWN, 1, ux, uy);
+            bool r2 = ui_dispatch_synthetic_mouse(ui, CCORD_IN_MOUSE_UP, 1, ux, uy);
+            ui->mouse_in = false;
+            ui->dirty = true;
+            return r1 || r2 || true;
+          }
+          // Photo canvas tap: detect double-tap for focal 1x <-> 2.5x zoom, else defer single-tap HUD toggle.
+          bool is_dtap = ui->touch.last_tap_ms > 0 && now >= ui->touch.last_tap_ms &&
+                         (now - ui->touch.last_tap_ms) <= TOUCH_DOUBLE_TAP_MS &&
+                         finger_dist(ux, uy, ui->touch.last_tap_x, ui->touch.last_tap_y) <= TOUCH_DOUBLE_TAP_PX;
+          if (is_dtap) {
+            ui->touch.pending_single_tap = false;
+            ui->touch.last_tap_ms = 0;
+            haptic_tick(ui, 0);
+            ui_lightbox_double_tap_at(ui, ux, uy);
+          } else {
+            ui->touch.last_tap_ms = now;
+            ui->touch.last_tap_x = ux;
+            ui->touch.last_tap_y = uy;
+            ui->touch.pending_single_tap = true;
+            ui->touch.pending_tap_ms = now + TOUCH_DOUBLE_TAP_MS;
+            ui->touch.pending_tap_x = ux;
+            ui->touch.pending_tap_y = uy;
+          }
+          ui->mouse_in = false;
+          ui->dirty = true;
+          return true;
+        }
         ui->dirty = true;
         return true;
       }
@@ -318,8 +492,21 @@ bool ui_touch_update(ccord_ui *ui, uint64_t now_ms, float dt_ms)
   if (!ui) return false;
   bool animating = false;
 
-  // Long-press detection while finger holds stationary.
-  if (ui->touch.active && ui->touch.mode == TOUCH_PENDING &&
+  // Pending single-tap on lightbox canvas -> toggle immersive HUD once double-tap window expires.
+  if (ui->touch.pending_single_tap) {
+    if (!ui->lightbox_open) {
+      ui->touch.pending_single_tap = false;
+    } else if (now_ms >= ui->touch.pending_tap_ms) {
+      ui->touch.pending_single_tap = false;
+      ui_lightbox_toggle_hud(ui);
+      animating = true;
+    } else {
+      animating = true;
+    }
+  }
+
+  // Long-press detection while finger holds stationary (suppressed over full-bleed lightbox canvas).
+  if (ui->touch.active && ui->touch.mode == TOUCH_PENDING && !ui->lightbox_open &&
       now_ms >= ui->touch.down_ms + TOUCH_LONG_PRESS_MS) {
     ui->touch.mode = TOUCH_LONG_PRESS_FIRED;
     if (!tap_in_drawer_scrim(ui, ui->touch.down_x, ui->touch.down_y)) {

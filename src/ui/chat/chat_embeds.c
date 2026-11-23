@@ -410,7 +410,16 @@ float dc_embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, f
       const char *big = active_clip[0] ? active_clip : (gifv ? clip_url : pic);
       if (big[0]) {
         const char *one_url = big;
-        dc_record_img_hit(ui, box, &one_url, 1u, 0u);
+        const char *one_prev = (shown && shown[0]) ? shown : still;
+        uint32_t ow = mw, oh = mh;
+        dc_img_hit_extra extra = {
+          .preview_urls = &one_prev,
+          .orig_w = &ow,
+          .orig_h = &oh,
+          .msg_id = p->msg_id,
+          .author_id = p->author_id,
+        };
+        dc_record_img_hit_ex(ui, box, &one_url, 1u, 0u, &extra);
       }
     }
     return ih;
@@ -487,7 +496,16 @@ float dc_embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, f
         ui->dbg_attachment_textures_drawn++;
       }
       const char *one_thumb = thumb_url;
-      dc_record_img_hit(ui, tr, &one_thumb, 1u, 0u);
+      const char *one_prev = (shown && shown[0]) ? shown : small;
+      uint32_t ow = e->thumbnail.width, oh = e->thumbnail.height;
+      dc_img_hit_extra extra = {
+        .preview_urls = &one_prev,
+        .orig_w = &ow,
+        .orig_h = &oh,
+        .msg_id = p->msg_id,
+        .author_id = p->author_id,
+      };
+      dc_record_img_hit_ex(ui, tr, &one_thumb, 1u, 0u, &extra);
     }
   }
 
@@ -665,7 +683,16 @@ float dc_embed_card_walk(ccord_ui *ui, ccord_renderer *r, const decor_part *p, f
           ui->dbg_attachment_textures_drawn++;
         }
         const char *one_big = big_url;
-        dc_record_img_hit(ui, ir, &one_big, 1u, 0u);
+        const char *one_prev = (shown && shown[0]) ? shown : sized;
+        uint32_t ow = big_m->width, oh = big_m->height;
+        dc_img_hit_extra extra = {
+          .preview_urls = &one_prev,
+          .orig_w = &ow,
+          .orig_h = &oh,
+          .msg_id = p->msg_id,
+          .author_id = p->author_id,
+        };
+        dc_record_img_hit_ex(ui, ir, &one_big, 1u, 0u, &extra);
       }
       cy += ih + 6.0f;
     }

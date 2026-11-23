@@ -330,7 +330,12 @@ bool uc_update_hover(ccord_ui *ui)
                          ui_in_rect(ui->mx, ui->my, ui->lightbox_prev_btn) ||
                          ui_in_rect(ui->mx, ui->my, ui->lightbox_next_btn) ||
                          ui_in_rect(ui->mx, ui->my, ui->lightbox_close_btn) ||
-                         ui_in_rect(ui->mx, ui->my, ui->lightbox_zoom_btn))) {
+                         ui_in_rect(ui->mx, ui->my, ui->lightbox_zoom_btn) ||
+                         ui_in_rect(ui->mx, ui->my, ui->lightbox_save_btn) ||
+                         ui_in_rect(ui->mx, ui->my, ui->lightbox_share_btn) ||
+                         ui_in_rect(ui->mx, ui->my, ui->lightbox_copy_btn) ||
+                         ui_in_rect(ui->mx, ui->my, ui->lightbox_info_btn) ||
+                         ui_in_rect(ui->mx, ui->my, ui->lightbox_retry_btn))) {
       k = CCORD_CURSOR_POINTER;
     }
   } else if (ui->select_open) {

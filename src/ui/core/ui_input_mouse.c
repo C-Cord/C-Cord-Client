@@ -825,7 +825,7 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
   }
   for (size_t i = 0; i < ui->nimg_hits; i++) {
     if (ui_in_rect(ev->x, ev->y, ui->img_hits[i].rect)) {
-      ui_open_lightbox(ui, ui->img_hits[i].urls, ui->img_hits[i].count, ui->img_hits[i].index);
+      ui_open_lightbox_hit(ui, &ui->img_hits[i]);
       return true;
     }
   }
