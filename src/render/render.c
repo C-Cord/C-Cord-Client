@@ -152,6 +152,10 @@ void ccord_render_destroy(ccord_renderer *r)
       TTF_CloseFont(r->base[i]);
     }
   }
+  if (r->mono_base) {
+    TTF_ClearFallbackFonts(r->mono_base);
+    TTF_CloseFont(r->mono_base);
+  }
   for (int k = 0; k < CCORD_BUNDLED_COUNT; k++) {
     if (r->bundled_base[k]) TTF_CloseFont(r->bundled_base[k]);
   }

@@ -14,7 +14,7 @@
 #define CCORD_TEXT_CACHE_SIZE 1024
 #define CCORD_ELLIPSIS_SETS 256
 #define CCORD_ELLIPSIS_WAYS 2
-#define CCORD_FONT_CACHE_SIZE 48
+#define CCORD_FONT_CACHE_SIZE 64
 #define CCORD_COLOR_GLYPH_CACHE_SIZE 256
 #define CCORD_DISC_CACHE_SIZE 48
 #define CCORD_TEX_CACHE_SIZE 1024
@@ -150,6 +150,8 @@ struct ccord_renderer {
   bool software;        // true when SDL renderer is the CPU "software" backend
 
   TTF_Font *base[2];    // one open font per style; sized copies come from font_cache
+  TTF_Font *mono_base;  // lazily probed monospace base face for CCORD_FONT_MONO / CCORD_FONT_MONO_BOLD
+  bool mono_probed;
   TTF_Font *bundled_base[CCORD_BUNDLED_COUNT];   // 0 = Emoji, 1 = CJK; opened lazily & independently
   bool bundled_probed[CCORD_BUNDLED_COUNT];
   TTF_Font *fallback_base[CCORD_MAX_FALLBACKS];  // system fallback fonts found at run time

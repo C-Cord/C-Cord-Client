@@ -736,7 +736,8 @@ static void md_ansi_draw_runs(ccord_ui *ui, ccord_renderer *r, const char *text,
   float cx = x;
   for (size_t i = 0; i < nruns; i++) {
     const ccord_ansi_state *s = &runs[i].st;
-    ccord_text_style st = ui_style(ui, s->bold ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR, size, s->has_fg ? md_rgb(s->fg) : base->color);
+    ccord_text_style st = ui_style(ui, s->bold ? CCORD_FONT_MONO_BOLD : CCORD_FONT_MONO, size,
+                                   s->has_fg ? md_rgb(s->fg) : base->color);
     ccord_vec2 m = ccord_text_measure(r, text + runs[i].off, runs[i].len, &st, 0.0f);
     if (s->has_bg) ccord_draw_rect(r, (ccord_rect){cx, y, m.x, lh}, md_rgb(s->bg));
     ccord_text_draw(r, text + runs[i].off, runs[i].len, cx, y, &st, 0.0f);
@@ -756,7 +757,7 @@ float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
   float lh = ui_line_h(ui, M(font_size_base));
   float code_size = maxf(M(font_size_small), 10.0f);
   float code_lh = ui_line_h(ui, code_size);
-  ccord_text_style code_st = ui_style(ui, CCORD_FONT_REGULAR, code_size, COL(text_secondary));
+  ccord_text_style code_st = ui_style(ui, CCORD_FONT_MONO, code_size, COL(text_secondary));
   float total = 0.0f, py = y;
   size_t pos = 0;
   bool fenced = false;

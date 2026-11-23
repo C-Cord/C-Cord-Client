@@ -866,6 +866,86 @@ static int font_px(const ccord_renderer *r, const ccord_text_style *st)
   return px < 4 ? 4 : (px > 512 ? 512 : px);
 }
 
+static TTF_Font *open_mono_candidate(const char *path, int face)
+{
+  if (!path || path[0] == '\0') return nullptr;
+  SDL_PropertiesID props = SDL_CreateProperties();
+  if (!props) return nullptr;
+  SDL_SetStringProperty(props, TTF_PROP_FONT_CREATE_FILENAME_STRING, path);
+  SDL_SetFloatProperty(props, TTF_PROP_FONT_CREATE_SIZE_FLOAT, 16.0f);
+  SDL_SetNumberProperty(props, TTF_PROP_FONT_CREATE_FACE_NUMBER, face);
+  TTF_Font *f = TTF_OpenFontWithProperties(props);
+  SDL_DestroyProperties(props);
+  return f;
+}
+
+// Lazily opens a monospace font face on first CCORD_FONT_MONO use (never at startup, preserving cold-start budget).
+static void mono_font_ensure(ccord_renderer *r)
+{
+  if (!r || r->mono_probed) return;
+  r->mono_probed = true;
+  char path[1024];
+  ccord_error err;
+  if (ccord_paths_join(path, sizeof path, ccord_paths_asset_dir(), "fonts/NotoSansMono-Regular.ttf", &err) == CCORD_OK) {
+    r->mono_base = TTF_OpenFont(path, 16.0f);
+    if (r->mono_base) return;
+  }
+  if (r->glyph_fixes_off) return;
+#if CCORD_HAVE_FONTCONFIG
+  FcConfig *cfg = FcInitLoadConfigAndFonts();
+  if (cfg) {
+    FcPattern *pat = FcPatternCreate();
+    if (pat) {
+      FcPatternAddString(pat, FC_FAMILY, (const FcChar8 *)"monospace");
+      FcPatternAddInteger(pat, FC_WEIGHT, FC_WEIGHT_REGULAR);
+      FcPatternAddInteger(pat, FC_SLANT, FC_SLANT_ROMAN);
+      FcConfigSubstitute(cfg, pat, FcMatchPattern);
+      FcDefaultSubstitute(pat);
+      FcResult res;
+      FcPattern *match = FcFontMatch(cfg, pat, &res);
+      if (match) {
+        FcChar8 *file = nullptr;
+        int idx = 0;
+        if (FcPatternGetString(match, FC_FILE, 0, &file) == FcResultMatch && file && font_file_ext((const char *)file)) {
+          (void)FcPatternGetInteger(match, FC_INDEX, 0, &idx);
+          r->mono_base = open_mono_candidate((const char *)file, idx & 0xFFFF);
+        }
+        FcPatternDestroy(match);
+      }
+      FcPatternDestroy(pat);
+    }
+    FcConfigDestroy(cfg);
+  }
+#elif defined(__ANDROID__)
+  static const char *const k_mono_paths[] = {
+    "/system/fonts/DroidSansMono.ttf",
+    "/system/fonts/RobotoMono-Regular.ttf",
+    "/system/fonts/CutiveMono.ttf",
+  };
+  for (size_t i = 0; i < sizeof k_mono_paths / sizeof k_mono_paths[0] && !r->mono_base; i++) {
+    r->mono_base = open_mono_candidate(k_mono_paths[i], 0);
+  }
+#elif defined(__APPLE__)
+  static const char *const k_mono_paths[] = {
+    "/System/Library/Fonts/SFNSMono.ttf",
+    "/System/Library/Fonts/Menlo.ttc",
+    "/Library/Fonts/Courier New.ttf",
+  };
+  for (size_t i = 0; i < sizeof k_mono_paths / sizeof k_mono_paths[0] && !r->mono_base; i++) {
+    r->mono_base = open_mono_candidate(k_mono_paths[i], 0);
+  }
+#elif defined(_WIN32)
+  const char *windir = getenv("WINDIR");
+  const char *base_dir = (windir && windir[0]) ? windir : "C:/Windows";
+  static const char *const k_win_mono[] = {"consola.ttf", "CascadiaMono.ttf", "cour.ttf"};
+  for (size_t i = 0; i < sizeof k_win_mono / sizeof k_win_mono[0] && !r->mono_base; i++) {
+    if (snprintf(path, sizeof path, "%s/Fonts/%s", base_dir, k_win_mono[i]) < (int)sizeof path) {
+      r->mono_base = open_mono_candidate(path, 0);
+    }
+  }
+#endif
+}
+
 static font_entry *font_entry_get(ccord_renderer *r, ccord_font_style style, int px)
 {
   for (int i = 0; i < r->nfonts; i++) {
@@ -876,9 +956,24 @@ static font_entry *font_entry_get(ccord_renderer *r, ccord_font_style style, int
     text_cache_flush(r);
   }
   TTF_Font *src_base = nullptr;
+  TTF_FontStyleFlags ttf_flags = TTF_STYLE_NORMAL;
   if (style == CCORD_FONT_EMOJI) {
     bundled_fallback_ensure(r, CCORD_BUNDLED_EMOJI);
     src_base = r->bundled_base[CCORD_BUNDLED_EMOJI];
+  } else if (style == CCORD_FONT_MONO || style == CCORD_FONT_MONO_BOLD) {
+    mono_font_ensure(r);
+    if (r->mono_base) {
+      src_base = r->mono_base;
+      if (style == CCORD_FONT_MONO_BOLD) ttf_flags = TTF_STYLE_BOLD;
+    } else {
+      src_base = r->base[style == CCORD_FONT_MONO_BOLD ? 1 : 0];
+    }
+  } else if (style == CCORD_FONT_ITALIC) {
+    src_base = r->base[0];
+    ttf_flags = TTF_STYLE_ITALIC;
+  } else if (style == CCORD_FONT_BOLD_ITALIC) {
+    src_base = r->base[1];
+    ttf_flags = TTF_STYLE_ITALIC;
   }
   if (!src_base) src_base = r->base[style == CCORD_FONT_BOLD ? 1 : 0];
   TTF_Font *f = TTF_CopyFont(src_base);
@@ -887,6 +982,7 @@ static font_entry *font_entry_get(ccord_renderer *r, ccord_font_style style, int
     return nullptr;
   }
   TTF_SetFontSize(f, (float)px);
+  if (ttf_flags != TTF_STYLE_NORMAL) TTF_SetFontStyle(f, ttf_flags);
   TTF_SetFontHinting(f, TTF_HINTING_LIGHT);
   int skip = (style == CCORD_FONT_EMOJI && src_base == r->bundled_base[CCORD_BUNDLED_EMOJI])
                  ? px
@@ -1701,7 +1797,32 @@ size_t ccord_text_hit_test(ccord_renderer *r, const char *utf8, size_t len, cons
     off = e->s2o ? e->s2o[best] : best;
     return off > len ? len : off;
   }
-  if (ix > sub.rect.x + sub.rect.w / 2) {
+  // Synthetic or real italic glyphs can overhang into the next cluster's x range, causing
+  // TTF_GetTextSubStringForPoint to return the previous cluster when ix sits inside the next one.
+  // Advance across overlapping clusters on the same line until ix lies within the logical advance cell.
+  int cell_w = sub.rect.w;
+  for (;;) {
+    size_t send = soff + (size_t)sub.length;
+    if (send >= e->slen) break;
+    TTF_SubString next_sub;
+    if (!TTF_GetTextSubString(e->text, (int)send, &next_sub) || next_sub.line_index != sub.line_index) break;
+    if (next_sub.rect.x <= sub.rect.x) break;
+    if (ix >= next_sub.rect.x) {
+      sub = next_sub;
+      soff = (size_t)sub.offset;
+      if (soff >= e->slen) return len;
+      off = e->s2o ? e->s2o[soff] : soff;
+      if (off >= len) return len;
+      if (su[soff] == '\n' || utf8[off] == '\n') return off;
+      cell_w = sub.rect.w;
+      continue;
+    }
+    if (next_sub.rect.x < sub.rect.x + sub.rect.w) {
+      cell_w = next_sub.rect.x - sub.rect.x;
+    }
+    break;
+  }
+  if (ix > sub.rect.x + cell_w / 2) {
     size_t send = soff + (size_t)sub.length;
     if (send > e->slen) send = e->slen;
     off = e->s2o ? e->s2o[send] : send;

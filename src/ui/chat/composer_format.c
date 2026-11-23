@@ -249,11 +249,13 @@ static ccord_text_style cf_piece_style(const ccord_ui *ui, uint16_t fl)
   ccord_color col = COL(text_normal);
   ccord_font_style font = CCORD_FONT_REGULAR;
   if (fl & UI_CF_CODE) {
+    font = CCORD_FONT_MONO;
     size = cf_maxf(size - 1.0f, 10.0f);
     col = COL(text_header);
   } else {
-    if (fl & UI_CF_BOLD) font = CCORD_FONT_BOLD;
-    if (fl & UI_CF_ITALIC) col = ui_mix(col, COL(text_secondary), (fl & UI_CF_BOLD) ? 0.25f : 0.35f);
+    if ((fl & UI_CF_BOLD) && (fl & UI_CF_ITALIC)) font = CCORD_FONT_BOLD_ITALIC;
+    else if (fl & UI_CF_BOLD) font = CCORD_FONT_BOLD;
+    else if (fl & UI_CF_ITALIC) font = CCORD_FONT_ITALIC;
     if (fl & UI_CF_MENTION) {
       font = CCORD_FONT_BOLD;
       col = COL(text_link);
@@ -404,7 +406,7 @@ static void cf_ensure_metrics(const ccord_ui *ui, ccord_renderer *r, float size)
   }
   ccord_text_style reg = ui_style(ui, CCORD_FONT_REGULAR, size, COL(text_normal));
   ccord_text_style bold = ui_style(ui, CCORD_FONT_BOLD, size, COL(text_normal));
-  ccord_text_style code = ui_style(ui, CCORD_FONT_REGULAR, cf_maxf(size - 1.0f, 10.0f), COL(text_normal));
+  ccord_text_style code = ui_style(ui, CCORD_FONT_MONO, cf_maxf(size - 1.0f, 10.0f), COL(text_normal));
   float fh = ccord_text_measure(r, "A", 1, &reg, 0.0f).y;
   float pitch = ccord_text_caret_rect(r, "A\nA", 3, &reg, 0.0f, 2).y;
   if (pitch < 1.0f) pitch = fh;

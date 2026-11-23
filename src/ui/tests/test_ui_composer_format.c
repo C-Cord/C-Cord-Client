@@ -238,7 +238,7 @@ static void test_spans_and_markers(void)
   const ui_cf_trace_piece *i = piece_of(src, "i*");
   NEED(i);
   CT_CHECK(i && (i->flags & UI_CF_ITALIC) && !(i->flags & UI_CF_MARKER));
-  CT_CHECK(i && memcmp(&i->st.color, &F.theme.c.text_normal, sizeof(ccord_color)) != 0);   // italic is shown by tone
+  CT_CHECK(i && i->st.font == CCORD_FONT_ITALIC);   // italic uses true italic font style
   const ui_cf_trace_piece *u = piece_of(src, "u__");
   NEED(u);
   CT_CHECK(u && (u->flags & UI_CF_UNDER) && !(u->flags & UI_CF_MARKER));
@@ -247,7 +247,7 @@ static void test_spans_and_markers(void)
   CT_CHECK(s && (s->flags & UI_CF_STRIKE) && !(s->flags & UI_CF_MARKER));
   const ui_cf_trace_piece *c = piece_of(src, "c`");
   NEED(c);
-  CT_CHECK(c && (c->flags & UI_CF_CODE) && c->has_bg && c->st.size < base_size());
+  CT_CHECK(c && (c->flags & UI_CF_CODE) && c->has_bg && c->st.font == CCORD_FONT_MONO && c->st.size < base_size());
   const ui_cf_trace_piece *sp = piece_of(src, "sp||");
   NEED(sp);
   CT_CHECK(sp && (sp->flags & UI_CF_SPOILER) && sp->has_bg &&
@@ -404,7 +404,9 @@ static void test_wrap_caret_hit(void)
       p = piece_at(pos);
       CT_CHECK(p != nullptr);
       if (p) {
-        expect_x = p->x + (pos > p->start ? ccord_text_measure(F.renderer, t + p->start, pos - p->start, &p->st, 0.0f).x : 0.0f);
+        expect_x = p->x + (pos > p->start
+                               ? ccord_text_caret_rect(F.renderer, t + p->start, p->len, &p->st, 0.0f, pos - p->start).x
+                               : 0.0f);
         expect_y = p->y;
       }
     }
@@ -446,9 +448,12 @@ static void test_selection(void)
       CT_CHECK(p != nullptr);
       if (!p) continue;
       size_t nx = next_boundary(t, pos);
-      float gx0 = p->x + (pos > p->start ? ccord_text_measure(F.renderer, t + p->start, pos - p->start, &p->st, 0.0f).x : 0.0f);
-      float gx1 = nx >= p->start + p->len ? p->x + p->w
-                                          : p->x + ccord_text_measure(F.renderer, t + p->start, nx - p->start, &p->st, 0.0f).x;
+      float gx0 = p->x + (pos > p->start
+                              ? ccord_text_caret_rect(F.renderer, t + p->start, p->len, &p->st, 0.0f, pos - p->start).x
+                              : 0.0f);
+      float gx1 = nx >= p->start + p->len
+                      ? p->x + p->w
+                      : p->x + ccord_text_caret_rect(F.renderer, t + p->start, p->len, &p->st, 0.0f, nx - p->start).x;
       bool inside = false;
       for (size_t k = 0; k < n; k++) {
         if (rects[k].stub || fabsf(rects[k].rc.y - p->y) > 0.51f) continue;

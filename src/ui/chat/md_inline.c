@@ -497,11 +497,9 @@ ccord_text_style dc_md_token_style_sized(const ccord_ui *ui, const ui_md_token *
     return ui_style(ui, CCORD_FONT_BOLD, size, COL(text_link));
   }
   if (tok->style == UI_MD_BOLD) return ui_style(ui, CCORD_FONT_BOLD, size, base);
-  if (tok->style == UI_MD_BOLD_ITALIC) {
-    return ui_style(ui, CCORD_FONT_BOLD, size, ui_mix(base, COL(text_secondary), 0.25f));
-  }
-  if (tok->style == UI_MD_CODE) return ui_style(ui, CCORD_FONT_REGULAR, maxf(size - 1.0f, 10.0f), COL(text_header));
-  if (tok->style == UI_MD_ITALIC) return ui_style(ui, CCORD_FONT_REGULAR, size, ui_mix(base, COL(text_secondary), 0.35f));
+  if (tok->style == UI_MD_BOLD_ITALIC) return ui_style(ui, CCORD_FONT_BOLD_ITALIC, size, base);
+  if (tok->style == UI_MD_CODE) return ui_style(ui, CCORD_FONT_MONO, maxf(size - 1.0f, 10.0f), COL(text_header));
+  if (tok->style == UI_MD_ITALIC) return ui_style(ui, CCORD_FONT_ITALIC, size, base);
   if (tok->style == UI_MD_SPOILER || tok->spoiler) {
     return ui_style(ui, CCORD_FONT_REGULAR, size, COL(text_secondary));
   }

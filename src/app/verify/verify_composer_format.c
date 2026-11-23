@@ -159,15 +159,16 @@ static int cf_check_spans(cf_slice *m)
            "b is not drawn bold");
   const ui_cf_trace_piece *i = cf_piece_of(m, k_spans, "i*");
   CF_CHECK(m, "italic span", i && (i->flags & UI_CF_ITALIC) && !(i->flags & UI_CF_MARKER) &&
-                                 !cf_same_color(i->st.color, ui->theme->c.text_normal),
+                                 i->st.font == CCORD_FONT_ITALIC,
            "i is not drawn italic");
   const ui_cf_trace_piece *u = cf_piece_of(m, k_spans, "u__");
   CF_CHECK(m, "underline span", u && (u->flags & UI_CF_UNDER) && !(u->flags & UI_CF_MARKER), "u is not underlined");
   const ui_cf_trace_piece *s = cf_piece_of(m, k_spans, "s~~");
   CF_CHECK(m, "strike span", s && (s->flags & UI_CF_STRIKE) && !(s->flags & UI_CF_MARKER), "s is not struck through");
   const ui_cf_trace_piece *c = cf_piece_of(m, k_spans, "c`");
-  CF_CHECK(m, "code span", c && (c->flags & UI_CF_CODE) && c->has_bg && c->st.size < ui->theme->m.font_size_base,
-           "c has no code style and background");
+  CF_CHECK(m, "code span", c && (c->flags & UI_CF_CODE) && c->has_bg && c->st.font == CCORD_FONT_MONO &&
+                               c->st.size < ui->theme->m.font_size_base,
+           "c has no monospace code style and background");
   const ui_cf_trace_piece *sp = cf_piece_of(m, k_spans, "sp||");
   CF_CHECK(m, "spoiler span", sp && (sp->flags & UI_CF_SPOILER) && sp->has_bg &&
                                   cf_same_color(sp->st.color, ui->theme->c.text_normal),

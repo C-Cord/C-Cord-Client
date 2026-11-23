@@ -7,7 +7,15 @@
 // Immediate-mode 2D API. ALL coordinates are logical px (float); the renderer multiplies by display scale * UI zoom.
 typedef struct ccord_rect { float x, y, w, h; } ccord_rect;
 typedef struct ccord_vec2 { float x, y; } ccord_vec2;
-typedef enum ccord_font_style : uint8_t { CCORD_FONT_REGULAR, CCORD_FONT_BOLD, CCORD_FONT_EMOJI } ccord_font_style;
+typedef enum ccord_font_style : uint8_t {
+  CCORD_FONT_REGULAR,
+  CCORD_FONT_BOLD,
+  CCORD_FONT_EMOJI,
+  CCORD_FONT_ITALIC,
+  CCORD_FONT_BOLD_ITALIC,
+  CCORD_FONT_MONO,
+  CCORD_FONT_MONO_BOLD,
+} ccord_font_style;
 typedef struct ccord_text_style { ccord_font_style font; float size; ccord_color color; } ccord_text_style;
 typedef struct ccord_renderer ccord_renderer;
 // Fonts are opened from the asset dir using theme->font_regular / font_bold. Bundled emoji (Twemoji) and CJK
