@@ -824,7 +824,9 @@ float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
         hl_nruns = ccord_md_hl_tokenize(fence_lang, fline, flen, hl_runs, 64, &hl_st);
       }
       ccord_vec2 ct = ccord_text_measure(r, fline, flen, &code_st, cw);
+      float btn_h = (ui && ui->mobile_layout) ? 26.0f : 18.0f;
       float h = maxf(ct.y, code_lh) + 8.0f;
+      if (fence_first_line && h < btn_h + 6.0f) h = btn_h + 6.0f;
       if (draw) {
         ccord_draw_rrect(r, (ccord_rect){x, py, wrap, h}, 4.0f, COL(bg_tertiary));
         ccord_draw_rect(r, (ccord_rect){x, py + 4.0f, 3.0f, h - 8.0f}, COL(brand));
@@ -842,17 +844,18 @@ float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
         }
         if (fence_first_line && ui && ui->ncode_copy_hits < 16) {
           fence_first_line = false;
-          ccord_rect cbtn = {x + wrap - 48.0f, py + 3.0f, 44.0f, 18.0f};
+          float btn_w = ui->mobile_layout ? 56.0f : 44.0f;
+          ccord_rect cbtn = {x + wrap - btn_w - 4.0f, py + 3.0f, btn_w, btn_h};
           ccord_draw_rrect(r, cbtn, 3.0f, COL(bg_secondary));
           ccord_text_style cbs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 4.0f, COL(text_muted));
           ccord_vec2 cbt = ccord_text_measure(r, "Copy", 4, &cbs, 0.0f);
           ccord_text_draw(r, "Copy", 4, cbtn.x + (cbtn.w - cbt.x) * 0.5f, cbtn.y + (cbtn.h - cbt.y) * 0.5f, &cbs, 0.0f);
-          if (fence_label[0] != '\0' && wrap > 44.0f + 90.0f) {
+          if (fence_label[0] != '\0' && wrap > btn_w + 90.0f) {
             size_t llen = strlen(fence_label);
             ccord_vec2 lsz = ccord_text_measure(r, fence_label, llen, &cbs, 0.0f);
             float lw = lsz.x + 10.0f;
             if (x + 10.0f + ct.x + 8.0f < cbtn.x - lw - 4.0f) {
-              ccord_rect lpill = {cbtn.x - lw - 4.0f, cbtn.y, lw, 18.0f};
+              ccord_rect lpill = {cbtn.x - lw - 4.0f, cbtn.y, lw, btn_h};
               ccord_draw_rrect(r, lpill, 3.0f, COL(bg_secondary));
               ccord_text_draw(r, fence_label, llen, lpill.x + 5.0f, lpill.y + (lpill.h - lsz.y) * 0.5f, &cbs, 0.0f);
             }

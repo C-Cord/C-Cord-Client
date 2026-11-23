@@ -42,6 +42,13 @@
 #define UIS_RADIO_D 20.0f    // radio indicator, a circle this wide and tall
 #define UIS_SLIDER_H 8.0f    // slider track (its thumb is a 12 px circle centred on the track)
 #define UIS_SCROLL_ARROW_H 20.0f // scrollbar arrow (16 px wide): a uis_icon_button, so its height is a token here
+// Mobile touch-target tokens (used only when ui->mobile_layout is true; desktop heights stay unchanged).
+#define UIS_MOB_H_BTN_SM 38.0f
+#define UIS_MOB_H_BTN 40.0f
+#define UIS_MOB_H_BTN_LG 44.0f
+#define UIS_MOB_H_CHIP 36.0f
+#define UIS_MOB_ICON_BTN 40.0f
+#define UIS_MOB_TOUCH_H 40.0f
 
 // ---- modal widths ----
 #define UIS_MODAL_W_SM 440.0f   // prompts and confirmations
@@ -231,6 +238,15 @@ void uis_scroll_arrow(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, bool up, u
 // A hint badge, key cap or status tag: a filled rounded rect at the caller's radius (a theme radius, normally
 // uis_tokens_of().r_control). Draws no text and has no hover. Audited as UIS_K_PLATE so a slice sees its radius.
 void uis_plate(ccord_ui *ui, ccord_renderer *r, ccord_rect box, float radius, ccord_color fill);
+
+// Returns `desktop_h` on desktop, or the scaled mobile height when ui->mobile_layout is true.
+float uis_btn_h_for(const ccord_ui *ui, float desktop_h);
+// Returns UIS_H_CHIP on desktop, or at least UIS_MOB_H_CHIP on mobile.
+float uis_chip_h_for(const ccord_ui *ui, float desktop_h);
+// Returns UIS_ICON_BTN on desktop, or UIS_MOB_ICON_BTN on mobile.
+float uis_icon_btn_for(const ccord_ui *ui);
+// Expands non-empty `r` around its centre up to at least `min_w x min_h` for forgiving touch hit-testing.
+ccord_rect uis_hit_padded(ccord_rect r, float min_w, float min_h);
 
 // ---- audit (for the ui-style verify slice) ----
 typedef enum uis_kind : uint8_t {

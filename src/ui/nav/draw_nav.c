@@ -1258,9 +1258,10 @@ void ui_draw_user_panel(ccord_ui *ui, ccord_renderer *r)
   for (int i = 0; i < 3; i++) {
     ccord_rect b = ui_user_btn_rect(ui, i);
     bool hover = hovers[i] && !ui->menu.open && !ui->settings_open && !ui->go_live_open;
-    // The hit rect is 28 px; the shared icon button is drawn at its 32 px token size around the same centre.
+    // The desktop hit rect is 28 px; on mobile it matches the enlarged touch target.
     float cx = b.x + b.w * 0.5f, cym = b.y + b.h * 0.5f;
-    ccord_rect vb = {cx - UIS_ICON_BTN * 0.5f, cym - UIS_ICON_BTN * 0.5f, UIS_ICON_BTN, UIS_ICON_BTN};
+    float vsz = ui->mobile_layout ? b.w : UIS_ICON_BTN;
+    ccord_rect vb = {cx - vsz * 0.5f, cym - vsz * 0.5f, vsz, vsz};
     ccord_color ic = uis_icon_button(ui, r, vb, (uis_state){.hover = hover}, "userbtn", (uint64_t)i);
     if ((i == 0 && muted) || (i == 1 && deafened)) ic = COL(danger);
     if (hover && !ui->touch_mode) uis_tooltip(ui, r, vb, i == 0 ? (muted ? "Unmute" : "Mute") : i == 1 ? (deafened ? "Undeafen" : "Deafen") : "User Settings",
@@ -1312,7 +1313,8 @@ void ui_draw_voice_bar(ccord_ui *ui, ccord_renderer *r)
   for (int i = 0; i < 3; i++) {
     ccord_rect b = ui_voice_btn_rect(ui, i);
     float cx = b.x + b.w * 0.5f, cym = b.y + b.h * 0.5f;
-    ccord_rect vb = {cx - UIS_ICON_BTN * 0.5f, cym - UIS_ICON_BTN * 0.5f, UIS_ICON_BTN, UIS_ICON_BTN};
+    float vsz = ui->mobile_layout ? b.w : UIS_ICON_BTN;
+    ccord_rect vb = {cx - vsz * 0.5f, cym - vsz * 0.5f, vsz, vsz};
     ccord_color ic = uis_icon_button(ui, r, vb, (uis_state){.hover = hovers[i] && !ui->go_live_open}, "voicebtn", (uint64_t)i);
     if (i == 0) ui_icon_camera(r, cx, cym, 18.0f, ic, ui->camera_on);
     else if (i == 1) ui_icon_screen(r, cx, cym, 18.0f, ic);

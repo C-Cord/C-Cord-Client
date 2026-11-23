@@ -129,7 +129,7 @@ void ui_call_draw(ccord_ui *ui, ccord_renderer *r)
     const char *who = ch ? ui_dm_display_name(ui, ch) : "Unknown";
     float sl = 8.0f + ui->safe_insets.left, sr = 8.0f + ui->safe_insets.right;
     float avail_w = fmaxf(ui->win_w - sl - sr, 240.0f);
-    float bw = fminf(380.0f, avail_w), bh = 64.0f;
+    float bw = fminf(380.0f, avail_w), bh = ui->mobile_layout ? 68.0f : 64.0f;
     ccord_rect box = {sl + (avail_w - bw) * 0.5f, ui->safe_insets.top + 10.0f, bw, bh};
     ui_popup_begin(ui, r, "callring", 0, UI_POPUP_MS, 6.0f);
     ccord_draw_rrect(r, (ccord_rect){box.x - 1.0f, box.y - 1.0f, box.w + 2.0f, box.h + 2.0f}, 9.0f, COL(border_subtle));
@@ -137,8 +137,9 @@ void ui_call_draw(ccord_ui *ui, ccord_renderer *r)
     ui_icon_speaker(r, box.x + 22.0f, box.y + bh * 0.5f, 20.0f, COL(status_online));
     float dec_w = bw < 350.0f ? 68.0f : 82.0f;
     float acc_w = bw < 350.0f ? 66.0f : 78.0f;
-    st->ring_accept = (ccord_rect){box.x + box.w - 10.0f - acc_w, box.y + (bh - 30.0f) * 0.5f, acc_w, 30.0f};
-    st->ring_decline = (ccord_rect){st->ring_accept.x - 6.0f - dec_w, st->ring_accept.y, dec_w, 30.0f};
+    float rbh = uis_btn_h_for(ui, 30.0f);
+    st->ring_accept = (ccord_rect){box.x + box.w - 10.0f - acc_w, box.y + (bh - rbh) * 0.5f, acc_w, rbh};
+    st->ring_decline = (ccord_rect){st->ring_accept.x - 6.0f - dec_w, st->ring_accept.y, dec_w, rbh};
     char line[160];
     snprintf(line, sizeof line, "Incoming call — %s", who);
     ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
@@ -179,7 +180,8 @@ void ui_call_draw(ccord_ui *ui, ccord_renderer *r)
       ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
       ccord_text_draw_ellipsis(r, line, strlen(line), bar.x + 32.0f, bar.y + (bar.h - ui_line_h(ui, ts.size)) * 0.5f,
                                bar.w - 140.0f, &ts);
-      st->bar_leave = (ccord_rect){bar.x + bar.w - 96.0f, bar.y + 5.0f, 86.0f, 26.0f};
+      float lbh = ui->mobile_layout ? 32.0f : 26.0f;
+      st->bar_leave = (ccord_rect){bar.x + bar.w - 96.0f, bar.y + (bar.h - lbh) * 0.5f, 86.0f, lbh};
       bool hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, st->bar_leave);
       ccord_draw_rrect(r, st->bar_leave, 5.0f, hov ? ui_mix(COL(danger), COL(bg_item_hover), 0.25f) : COL(danger));
       ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(text_on_brand));
@@ -257,9 +259,10 @@ void ui_call_draw_header_button(ccord_ui *ui, ccord_renderer *r, float *hdr_btn_
   ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f,
                                   in_call ? COL(text_secondary) : COL(text_on_brand));
   ccord_vec2 bt = ccord_text_measure(r, lbl, strlen(lbl), &bs, 0.0f);
-  float pad = ui->mobile_layout ? 12.0f : 18.0f;
+  float pad = ui->mobile_layout ? 16.0f : 18.0f;
   float bw = bt.x + pad;
-  ccord_rect br = {*hdr_btn_left - bw, cy - 12.0f, bw, 24.0f};
+  float bh = uis_btn_h_for(ui, 24.0f);
+  ccord_rect br = {*hdr_btn_left - bw, cy - bh * 0.5f, bw, bh};
   if (br.x <= min_x) return;
   st->header_btn = br;
   st->header_channel = ch->id;
@@ -368,8 +371,10 @@ void ui_call_prompt_draw(ccord_ui *ui, ccord_renderer *r)
     ccord_draw_rect(r, (ccord_rect){caretx, st->prompt_input.y + (st->prompt_input.h - vlh) * 0.5f, 1.5f, vlh},
                     COL(text_normal));
   }
-  st->prompt_cancel = (ccord_rect){m.x + m.w - 196.0f, m.y + m.h - 48.0f, 84.0f, 30.0f};
-  st->prompt_ok = (ccord_rect){m.x + m.w - 104.0f, m.y + m.h - 48.0f, 84.0f, 30.0f};
+  float pbh = uis_btn_h_for(ui, 30.0f);
+  float py = m.y + m.h - (ui->mobile_layout ? 52.0f : 48.0f);
+  st->prompt_cancel = (ccord_rect){m.x + m.w - 196.0f, py, 84.0f, pbh};
+  st->prompt_ok = (ccord_rect){m.x + m.w - 104.0f, py, 84.0f, pbh};
   ccord_draw_rrect(r, st->prompt_cancel, 4.0f, COL(bg_tertiary));
   ccord_draw_rrect(r, st->prompt_ok, 4.0f, COL(brand));
   ccord_text_style cs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_secondary));

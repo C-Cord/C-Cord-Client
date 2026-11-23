@@ -641,7 +641,7 @@ size_t ui_guild_rows(const ccord_ui *ui)
 ccord_rect ui_gear_rect(const ccord_ui *ui)
 {
   const ccord_layout_rect *p = &ui->layout.user_panel;
-  float sz = 32.0f;
+  float sz = ui->mobile_layout ? 38.0f : 32.0f;
   return (ccord_rect){p->x + p->w - sz - 8.0f, p->y + (p->h - sz) * 0.5f, sz, sz};
 }
 
@@ -649,12 +649,16 @@ ccord_rect ui_user_btn_rect(const ccord_ui *ui, int slot)
 {
   if (slot == 2) return ui_gear_rect(ui);
   ccord_rect gear = ui_gear_rect(ui);
-  float sz = 28.0f;
-  float right = gear.x - 4.0f - (float)(slot == 0 ? 1 : 0) * (sz + 2.0f);
+  float sz = ui->mobile_layout ? 36.0f : 28.0f;
+  float gap = ui->mobile_layout ? 4.0f : 2.0f;
+  float right = gear.x - 4.0f - (float)(slot == 0 ? 1 : 0) * (sz + gap);
   return (ccord_rect){right - sz, gear.y + (gear.h - sz) * 0.5f, sz, sz};
 }
 
-#define UI_VOICE_BAR_H 40.0f
+static float voice_bar_h(const ccord_ui *ui)
+{
+  return (ui && ui->mobile_layout) ? 48.0f : 40.0f;
+}
 
 const ccord_voice_state *ui_self_voice(const ccord_ui *ui)
 {
@@ -671,14 +675,16 @@ ccord_rect ui_voice_bar_rect(const ccord_ui *ui)
 {
   if (!ui_self_voice(ui)) return (ccord_rect){0, 0, 0, 0};
   const ccord_layout_rect *p = &ui->layout.user_panel;
-  return (ccord_rect){p->x, p->y - UI_VOICE_BAR_H, p->w, UI_VOICE_BAR_H};
+  float bh = voice_bar_h(ui);
+  return (ccord_rect){p->x, p->y - bh, p->w, bh};
 }
 
 ccord_rect ui_voice_btn_rect(const ccord_ui *ui, int slot)
 {
   ccord_rect bar = ui_voice_bar_rect(ui);
-  float sz = 28.0f;
-  float x = bar.x + bar.w - 8.0f - sz - (float)(2 - slot) * (sz + 2.0f);
+  float sz = ui->mobile_layout ? 38.0f : 28.0f;
+  float gap = ui->mobile_layout ? 4.0f : 2.0f;
+  float x = bar.x + bar.w - 8.0f - sz - (float)(2 - slot) * (sz + gap);
   return (ccord_rect){x, bar.y + (bar.h - sz) * 0.5f, sz, sz};
 }
 
@@ -715,7 +721,8 @@ ccord_rect ui_stage_chat_btn(const ccord_ui *ui)
     ccord_rect lm = ui_saved_messages_rect(ui);
     if (lm.w <= 0.0f) lm = ui_pin_rect(ui);
     float right = lm.w > 0.0f ? (lm.x - 6.0f) : (h->x + h->w - 8.0f);
-    return (ccord_rect){right - 68.0f, h->y + (h->h - 26.0f) * 0.5f, 68.0f, 26.0f};
+    float bh = uis_btn_h_for(ui, 26.0f);
+    return (ccord_rect){right - 76.0f, h->y + (h->h - bh) * 0.5f, 76.0f, bh};
   }
   ccord_rect ma = ui_stage_area(ui);
   return (ccord_rect){ma.x + ma.w - 8.0f - 110.0f, ma.y + 10.0f, 110.0f, 28.0f};
@@ -753,12 +760,13 @@ void ui_stream_set_fullscreen(ccord_ui *ui, bool on)
 
 static float header_icon_size(const ccord_ui *ui)
 {
-  return (ui && ui->mobile_layout && ui->win_w < 520.0f) ? 28.0f : 32.0f;
+  if (!ui || !ui->mobile_layout) return 32.0f;
+  return ui->win_w >= 400.0f ? 38.0f : 36.0f;
 }
 
 static float header_icon_gap(const ccord_ui *ui)
 {
-  return (ui && ui->mobile_layout && ui->win_w < 520.0f) ? 2.0f : 4.0f;
+  return (ui && ui->mobile_layout) ? 2.0f : 4.0f;
 }
 
 ccord_rect ui_search_rect(const ccord_ui *ui)
@@ -834,7 +842,9 @@ ccord_rect ui_pins_popover_rect(const ccord_ui *ui)
     }
   }
   size_t vis = n > UI_PIN_POPOVER_MAX ? UI_PIN_POPOVER_MAX : n;
-  float extra_h = (vis > 0 && ccord_store_channel_pins_has_more(ui->d.store, ch)) ? 34.0f : 0.0f;
+  float extra_h = (vis > 0 && ccord_store_channel_pins_has_more(ui->d.store, ch))
+                    ? (ui->mobile_layout ? 46.0f : 34.0f)
+                    : 0.0f;
   float hgt = 34.0f + (vis ? (float)vis * 44.0f : 38.0f) + 10.0f + extra_h;
   float y = h->y + h->h + 6.0f;
   float maxh = ui->win_h - sb - y - 8.0f;
@@ -850,7 +860,7 @@ ccord_rect ui_pins_item_rect(const ccord_ui *ui, size_t index)
 
 ccord_rect ui_go_live_rect(const ccord_ui *ui)
 {
-  return uis_modal_box(ui, 560.0f, 520.0f);
+  return uis_modal_box(ui, 560.0f, (ui && ui->mobile_layout) ? 556.0f : 520.0f);
 }
 
 int ui_go_live_option_count(int category)
@@ -882,34 +892,42 @@ ccord_rect ui_go_live_option_rect(const ccord_ui *ui, int category, int option)
   if (cw < 20.0f) cw = 20.0f;
   float ry;
   if (compact) {
-    float qy = m.y + 306.0f;
-    ry = (category == 3) ? (qy + 22.0f) : (qy + 70.0f);
+    float qy = ui->mobile_layout ? (m.y + 310.0f) : (m.y + 306.0f);
+    if (ui->mobile_layout) {
+      ry = (category == 3) ? (qy + 24.0f) : (qy + 86.0f);
+    } else {
+      ry = (category == 3) ? (qy + 22.0f) : (qy + 70.0f);
+    }
   } else {
     ry = (category == 3) ? (m.y + 331.0f) : (m.y + 369.0f);
   }
-  return (ccord_rect){x0 + (float)option * (cw + gap), ry, cw, UIS_H_BTN_SM};
+  return (ccord_rect){x0 + (float)option * (cw + gap), ry, cw, uis_btn_h_for(ui, UIS_H_BTN_SM)};
 }
 
 ccord_rect ui_go_live_start_rect(const ccord_ui *ui)
 {
   ccord_rect m = ui_go_live_rect(ui);
   float pad = m.w < 440.0f ? 16.0f : 24.0f;
-  return (ccord_rect){m.x + m.w - pad - 132.0f, m.y + m.h - 52.0f, 132.0f, UIS_H_BTN};
+  float bh = uis_btn_h_for(ui, UIS_H_BTN);
+  return (ccord_rect){m.x + m.w - pad - 132.0f, m.y + m.h - (ui->mobile_layout ? (bh + 14.0f) : 52.0f), 132.0f, bh};
 }
 
 ccord_rect ui_go_live_close_rect(const ccord_ui *ui)
 {
   ccord_rect m = ui_go_live_rect(ui);
-  return (ccord_rect){m.x + m.w - UIS_ICON_BTN - UIS_SP_3, m.y + 13.0f, UIS_ICON_BTN, UIS_ICON_BTN};
+  float sz = uis_icon_btn_for(ui);
+  return (ccord_rect){m.x + m.w - sz - UIS_SP_3, m.y + 11.0f, sz, sz};
 }
 
 ccord_rect ui_go_live_audio_rect(const ccord_ui *ui)
 {
   ccord_rect m = ui_go_live_rect(ui);
   if (m.w < 440.0f) {
-    return (ccord_rect){m.x + 16.0f, m.y + 418.0f, m.w - 32.0f, 28.0f};
+    float ay = ui->mobile_layout ? (m.y + 446.0f) : (m.y + 418.0f);
+    float ah = ui->mobile_layout ? UIS_MOB_TOUCH_H : 28.0f;
+    return (ccord_rect){m.x + 16.0f, ay, m.w - 32.0f, ah};
   }
-  return (ccord_rect){m.x + 24.0f, m.y + 416.0f, m.w - 48.0f, 30.0f};
+  return (ccord_rect){m.x + 24.0f, m.y + 416.0f, m.w - 48.0f, ui->mobile_layout ? UIS_MOB_TOUCH_H : 30.0f};
 }
 
 bool ccord_ui_go_live_share_audio(const ccord_ui *ui)
@@ -1086,15 +1104,18 @@ bool ui_search_panel_active(const ccord_ui *ui)
 
 void ui_compute_layout(ccord_ui *ui)
 {
+  bool prev_mobile = ui->mobile_layout;
   ui->mobile_layout = ui->force_mobile_mode || (ui->win_w > 0.0f && ui->win_w < CCORD_MOBILE_BREAKPOINT_W);
+  if (ui->mobile_layout != prev_mobile) ui_invalidate_rows(ui);
   if (ui->mobile_layout) {
     ccord_layout_compute_mobile(&ui->theme->m, ui->win_w, ui->win_h, ui->composer_box_h,
                                 ui->safe_insets, ui->keyboard_inset,
                                 ui->left_drawer_t, ui->right_drawer_t, &ui->layout);
     ui->members_available = !ui->discovery_open;
     ui->panel_state = ui_panel_state(ui);
-    if (ui_self_voice(ui) && ui->layout.channel_scroll.h > UI_VOICE_BAR_H) {
-      ui->layout.channel_scroll.h -= UI_VOICE_BAR_H;
+    float vbh = voice_bar_h(ui);
+    if (ui_self_voice(ui) && ui->layout.channel_scroll.h > vbh) {
+      ui->layout.channel_scroll.h -= vbh;
     }
     ui->built_voice_bar = (ui_self_voice(ui) != nullptr);
     ui_panels_apply_layout(ui);
@@ -1156,8 +1177,9 @@ void ui_compute_layout(ccord_ui *ui)
     l->member_list_visible = true;
   }
   // The Voice Connected bar sits between the channel list and the user panel.
-  if (ui_self_voice(ui) && ui->layout.channel_scroll.h > UI_VOICE_BAR_H) {
-    ui->layout.channel_scroll.h -= UI_VOICE_BAR_H;
+  float vbh = voice_bar_h(ui);
+  if (ui_self_voice(ui) && ui->layout.channel_scroll.h > vbh) {
+    ui->layout.channel_scroll.h -= vbh;
   }
   ui->built_voice_bar = (ui_self_voice(ui) != nullptr);
   ui_panels_apply_layout(ui);
@@ -1195,7 +1217,7 @@ ccord_rect ui_drawer_btn_rect(const ccord_ui *ui)
 {
   if (!ui || !ui->mobile_layout) return (ccord_rect){0.0f, 0.0f, 0.0f, 0.0f};
   const ccord_layout_rect *h = &ui->layout.chat_header;
-  float sz = 36.0f;
+  float sz = UIS_MOB_ICON_BTN;
   return (ccord_rect){h->x + 6.0f, h->y + (h->h - sz) * 0.5f, sz, sz};
 }
 
@@ -1204,6 +1226,7 @@ void ccord_ui_set_viewport(ccord_ui *ui, float logical_w, float logical_h)
   if (!(logical_w > 0.0f) || !(logical_h > 0.0f)) return;
   ui->win_w = logical_w;
   ui->win_h = logical_h;
+  ui->ime_rect = (ccord_rect){0};
   ui_compute_layout(ui);
   ccord_vlist_invalidate_all(&ui->vlist);   // widths changed; the bottom anchor is kept
   ui_menu_close(ui);

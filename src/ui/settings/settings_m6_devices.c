@@ -32,47 +32,72 @@
 #define M6_CARD_GAP 10.0f
 #define M6_SCROLL_STEP 108.0f
 
-static float privacy_row_y(ccord_rect content, int row)
+static float m6_row_h(const ccord_ui *ui)
 {
-  return content.y + M6_TITLE_H + (float)row * M6_ROW_H;
+  return (ui && ui->mobile_layout) ? 74.0f : M6_ROW_H;
 }
 
-// The row a Privacy toggle sits in: UIS_H_BTN_SM tall, the switch is centred in it and flush right.
-static ccord_rect privacy_row_rect(ccord_rect content, int row)
+static float privacy_harvest_card_h(const ccord_ui *ui)
 {
-  return (ccord_rect){content.x, privacy_row_y(content, row), content.w, UIS_H_BTN_SM};
+  return (ui && ui->mobile_layout) ? 100.0f : 82.0f;
 }
 
-static ccord_rect privacy_toggle_rect(ccord_rect content, int row)
+static float m6_footer_h(const ccord_ui *ui)
 {
-  return uis_toggle_rect(privacy_row_rect(content, row));
+  return (ui && ui->mobile_layout) ? 58.0f : M6_FOOTER_H;
 }
 
-static ccord_rect privacy_chip_rect(ccord_rect content, int row, int opt, int count)
+static float privacy_row_y(const ccord_ui *ui, ccord_rect content, int row)
+{
+  return content.y + M6_TITLE_H + (float)row * m6_row_h(ui);
+}
+
+// The row a Privacy toggle sits in: UIS_H_BTN_SM tall (UIS_MOB_H_BTN_SM on mobile), switch centred and flush right.
+static ccord_rect privacy_row_rect(const ccord_ui *ui, ccord_rect content, int row)
+{
+  return (ccord_rect){content.x, privacy_row_y(ui, content, row), content.w, uis_btn_h_for(ui, UIS_H_BTN_SM)};
+}
+
+static ccord_rect privacy_toggle_rect(const ccord_ui *ui, ccord_rect content, int row)
+{
+  return uis_toggle_rect(privacy_row_rect(ui, content, row));
+}
+
+static ccord_rect privacy_toggle_hit(const ccord_ui *ui, ccord_rect content, int row)
+{
+  ccord_rect r = privacy_toggle_rect(ui, content, row);
+  return (ui && ui->mobile_layout) ? uis_hit_padded(r, 56.0f, UIS_MOB_TOUCH_H) : r;
+}
+
+static ccord_rect privacy_chip_rect(const ccord_ui *ui, ccord_rect content, int row, int opt, int count)
 {
   if (count < 1) return (ccord_rect){0, 0, 0, 0};
   float gap = 8.0f;
   float cw = (content.w - gap * (float)(count - 1)) / (float)count;
   if (cw > 144.0f) cw = 144.0f;
   if (cw < 44.0f) cw = 44.0f;
-  return (ccord_rect){content.x + (float)opt * (cw + gap), privacy_row_y(content, row) + 20.0f, cw, UIS_H_CHIP};
+  float chip_off = (ui && ui->mobile_layout) ? 24.0f : 20.0f;
+  return (ccord_rect){content.x + (float)opt * (cw + gap), privacy_row_y(ui, content, row) + chip_off, cw,
+                      uis_chip_h_for(ui, UIS_H_CHIP)};
 }
 
-static ccord_rect privacy_harvest_card_rect(ccord_rect content)
+static ccord_rect privacy_harvest_card_rect(const ccord_ui *ui, ccord_rect content)
 {
-  return (ccord_rect){content.x, privacy_row_y(content, 8) + 6.0f, content.w, 82.0f};
+  return (ccord_rect){content.x, privacy_row_y(ui, content, 8) + 6.0f, content.w, privacy_harvest_card_h(ui)};
 }
 
-static ccord_rect privacy_harvest_btn_rect(ccord_rect content)
+static ccord_rect privacy_harvest_btn_rect(const ccord_ui *ui, ccord_rect content)
 {
-  ccord_rect card = privacy_harvest_card_rect(content);
+  ccord_rect card = privacy_harvest_card_rect(ui, content);
   float bw = card.w < 360.0f ? 128.0f : 148.0f;
-  return (ccord_rect){card.x + card.w - bw - 12.0f, card.y + (card.h - UIS_H_BTN) * 0.5f, bw, UIS_H_BTN};
+  float bh = uis_btn_h_for(ui, UIS_H_BTN);
+  return (ccord_rect){card.x + card.w - bw - 12.0f, card.y + (card.h - bh) * 0.5f, bw, bh};
 }
 
-static float m6_card_h(int page)
+static float m6_card_h(const ccord_ui *ui, int page)
 {
-  return page == CCORD_M6_PAGE_DEVICES ? M6_DEV_CARD_H : M6_CONN_CARD_H;
+  if (page == CCORD_M6_PAGE_DEVICES) return (ui && ui->mobile_layout) ? 102.0f : M6_DEV_CARD_H;
+  return (ui && ui->mobile_layout) ? 160.0f : M6_CONN_CARD_H;
 }
 
 static size_t m6_list_count(const ccord_ui *ui, int page)
@@ -89,50 +114,66 @@ static float m6_list_top(ccord_rect content)
   return content.y + M6_TITLE_H + M6_INTRO_H;
 }
 
-static float m6_content_height(int page, size_t n)
+static float m6_content_height(const ccord_ui *ui, int page, size_t n)
 {
   if (page == CCORD_M6_PAGE_PRIVACY) {
-    return M6_TITLE_H + 8.0f * M6_ROW_H + 6.0f + 82.0f + 16.0f;
+    return M6_TITLE_H + 8.0f * m6_row_h(ui) + 6.0f + privacy_harvest_card_h(ui) + 16.0f;
   }
-  return M6_TITLE_H + M6_INTRO_H + (float)n * (m6_card_h(page) + M6_CARD_GAP) + M6_FOOTER_H;
+  return M6_TITLE_H + M6_INTRO_H + (float)n * (m6_card_h(ui, page) + M6_CARD_GAP) + m6_footer_h(ui);
 }
 
-static float m6_max_scroll(int page, ccord_rect content, size_t n)
+static float m6_max_scroll(const ccord_ui *ui, int page, ccord_rect content, size_t n)
 {
-  float m = m6_content_height(page, n) - content.h;
+  float m = m6_content_height(ui, page, n) - content.h;
   return m > 0.0f ? m : 0.0f;
 }
 
-static ccord_rect m6_card_rect(ccord_rect content, int page, size_t i, float scroll)
+static ccord_rect m6_card_rect(const ccord_ui *ui, ccord_rect content, int page, size_t i, float scroll)
 {
-  float h = m6_card_h(page);
+  float h = m6_card_h(ui, page);
   return (ccord_rect){content.x, m6_list_top(content) + (float)i * (h + M6_CARD_GAP) - scroll, content.w, h};
 }
 
-static ccord_rect m6_footer_rect(ccord_rect content, int page, size_t n, float scroll)
+static ccord_rect m6_footer_rect(const ccord_ui *ui, ccord_rect content, int page, size_t n, float scroll)
 {
-  float y = m6_list_top(content) + (float)n * (m6_card_h(page) + M6_CARD_GAP) + 6.0f - scroll;
-  return (ccord_rect){content.x, y, 250.0f, UIS_H_BTN};
+  float y = m6_list_top(content) + (float)n * (m6_card_h(ui, page) + M6_CARD_GAP) + 6.0f - scroll;
+  float fw = (ui && ui->mobile_layout) ? fminf(280.0f, content.w) : 250.0f;
+  return (ccord_rect){content.x, y, fw, uis_btn_h_for(ui, UIS_H_BTN)};
 }
 
-static ccord_rect m6_retry_rect(ccord_rect content)
+static ccord_rect m6_retry_rect(const ccord_ui *ui, ccord_rect content)
 {
-  return (ccord_rect){content.x, m6_list_top(content), 140.0f, UIS_H_BTN_SM};
+  return (ccord_rect){content.x, m6_list_top(content), 140.0f, uis_btn_h_for(ui, UIS_H_BTN_SM)};
 }
 
-static ccord_rect m6_device_logout_rect(ccord_rect card)
+static ccord_rect m6_device_logout_rect(const ccord_ui *ui, ccord_rect card)
 {
+  if (ui && ui->mobile_layout) {
+    return (ccord_rect){card.x + card.w - 104.0f, card.y + 8.0f, 92.0f, uis_btn_h_for(ui, UIS_H_BTN_SM)};
+  }
   return (ccord_rect){card.x + card.w - 96.0f, card.y + 8.0f, 84.0f, UIS_H_BTN_SM};
 }
 
-static ccord_rect m6_conn_disconnect_rect(ccord_rect card)
+static ccord_rect m6_conn_disconnect_rect(const ccord_ui *ui, ccord_rect card)
 {
+  if (ui && ui->mobile_layout) {
+    return (ccord_rect){card.x + card.w - 120.0f, card.y + 8.0f, 108.0f, uis_btn_h_for(ui, UIS_H_BTN_SM)};
+  }
   return (ccord_rect){card.x + card.w - 110.0f, card.y + 8.0f, 98.0f, UIS_H_BTN_SM};
 }
 
-static ccord_rect m6_conn_toggle_rect(ccord_rect card, int idx)
+static ccord_rect m6_conn_toggle_rect(const ccord_ui *ui, ccord_rect card, int idx)
 {
+  if (ui && ui->mobile_layout) {
+    return (ccord_rect){card.x + card.w - 58.0f, card.y + 50.0f + (float)idx * 38.0f, 46.0f, 24.0f};
+  }
   return (ccord_rect){card.x + card.w - 56.0f, card.y + 44.0f + (float)idx * 28.0f, 44.0f, 24.0f};
+}
+
+static ccord_rect m6_conn_toggle_hit(const ccord_ui *ui, ccord_rect card, int idx)
+{
+  ccord_rect r = m6_conn_toggle_rect(ui, card, idx);
+  return (ui && ui->mobile_layout) ? uis_hit_padded(r, 56.0f, UIS_MOB_TOUCH_H) : r;
 }
 
 static ccord_rect m6_scroll_track(ccord_rect content)
@@ -154,10 +195,10 @@ static ccord_rect m6_scroll_down(ccord_rect content)
   return (ccord_rect){t.x - 4.0f, t.y + t.h + 4.0f, 16.0f, 20.0f};
 }
 
-static float m6_thumb_h(ccord_rect content, int page, size_t n)
+static float m6_thumb_h(const ccord_ui *ui, ccord_rect content, int page, size_t n)
 {
   ccord_rect t = m6_scroll_track(content);
-  float h = t.h * (content.h / m6_content_height(page, n));
+  float h = t.h * (content.h / m6_content_height(ui, page, n));
   return h < 24.0f ? 24.0f : h;
 }
 
@@ -291,7 +332,7 @@ static bool m6_privacy_click(ccord_ui *ui, ccord_rect content, float x, float y)
 {
   if (m6_scroll_click(ui, CCORD_M6_PAGE_PRIVACY, content, 0, x, y)) return true;
   if (!ui_in_rect(x, y, content)) return false;
-  float max = m6_max_scroll(CCORD_M6_PAGE_PRIVACY, content, 0);
+  float max = m6_max_scroll(ui, CCORD_M6_PAGE_PRIVACY, content, 0);
   if (s_m6.scroll[CCORD_M6_PAGE_PRIVACY] > max) s_m6.scroll[CCORD_M6_PAGE_PRIVACY] = max;
   ccord_rect sc = content;
   sc.y -= s_m6.scroll[CCORD_M6_PAGE_PRIVACY];
@@ -300,13 +341,13 @@ static bool m6_privacy_click(ccord_ui *ui, ccord_rect content, float x, float y)
 
   ccord_user_settings cur = m6_privacy_current(ui);
   ccord_user_settings_patch p = CCORD_USER_SETTINGS_PATCH_INIT;
-  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 0))) {
+  if (ui_in_rect(x, y, privacy_toggle_hit(ui, sc, 0))) {
     p.default_guilds_restricted = cur.default_guilds_restricted ? 0 : 1;   // the UI toggle is inverted
     m6_submit_patch(ui, &p);
     return true;
   }
   for (int i = 0; i < 3; i++) {
-    if (ui_in_rect(x, y, privacy_chip_rect(sc, 1, i, 3))) {
+    if (ui_in_rect(x, y, privacy_chip_rect(ui, sc, 1, i, 3))) {
       if (cur.explicit_content_filter != (uint8_t)i) {
         p.explicit_content_filter = (int16_t)i;
         m6_submit_patch(ui, &p);
@@ -314,28 +355,28 @@ static bool m6_privacy_click(ccord_ui *ui, ccord_rect content, float x, float y)
       return true;
     }
   }
-  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 2))) {
+  if (ui_in_rect(x, y, privacy_toggle_hit(ui, sc, 2))) {
     p.friend_source_all = cur.friend_source_all ? 0 : 1;
     m6_submit_patch(ui, &p);
     return true;
   }
-  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 3))) {
+  if (ui_in_rect(x, y, privacy_toggle_hit(ui, sc, 3))) {
     p.friend_source_mutual_friends = cur.friend_source_mutual_friends ? 0 : 1;
     m6_submit_patch(ui, &p);
     return true;
   }
-  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 4))) {
+  if (ui_in_rect(x, y, privacy_toggle_hit(ui, sc, 4))) {
     p.friend_source_mutual_guilds = cur.friend_source_mutual_guilds ? 0 : 1;
     m6_submit_patch(ui, &p);
     return true;
   }
-  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 5))) {
+  if (ui_in_rect(x, y, privacy_toggle_hit(ui, sc, 5))) {
     p.allow_access_to_age_restricted_servers = cur.allow_access_to_age_restricted_servers ? 0 : 1;
     m6_submit_patch(ui, &p);
     return true;
   }
   for (int i = 0; i < 3; i++) {
-    if (ui_in_rect(x, y, privacy_chip_rect(sc, 6, i, 3))) {
+    if (ui_in_rect(x, y, privacy_chip_rect(ui, sc, 6, i, 3))) {
       if (cur.profile_privacy_scope != (uint8_t)i) {
         p.profile_privacy_scope = (int16_t)i;
         m6_submit_patch(ui, &p);
@@ -343,12 +384,12 @@ static bool m6_privacy_click(ccord_ui *ui, ccord_rect content, float x, float y)
       return true;
     }
   }
-  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 7))) {
+  if (ui_in_rect(x, y, privacy_toggle_hit(ui, sc, 7))) {
     p.share_profile_updates = cur.share_profile_updates ? 0 : 1;
     m6_submit_patch(ui, &p);
     return true;
   }
-  if (ui_in_rect(x, y, privacy_harvest_btn_rect(sc))) {
+  if (ui_in_rect(x, y, privacy_harvest_btn_rect(ui, sc))) {
     if (!ui->d.session) {
       ui_notice(ui, "Sign in to request your Discord data.");
       return true;
@@ -371,9 +412,14 @@ static bool m6_privacy_click(ccord_ui *ui, ccord_rect content, float x, float y)
 // The fixed scrollbar lives outside the content width, so answer it before clipping rows.
 static bool m6_scroll_click(ccord_ui *ui, int page, ccord_rect content, size_t n, float x, float y)
 {
-  float max = m6_max_scroll(page, content, n);
+  float max = m6_max_scroll(ui, page, content, n);
   if (max <= 0.0f) return false;
   ccord_rect up = m6_scroll_up(content), down = m6_scroll_down(content), tr = m6_scroll_track(content);
+  if (ui && ui->mobile_layout) {
+    up = uis_hit_padded(up, 36.0f, 36.0f);
+    down = uis_hit_padded(down, 36.0f, 36.0f);
+    tr = uis_hit_padded(tr, 28.0f, 0.0f);
+  }
   float *scroll = &s_m6.scroll[page];
   ccord_scroller_cancel(&s_m6.glide[page]);   // a scrollbar press replaces any wheel glide
   if (ui_in_rect(x, y, up)) {
@@ -381,7 +427,7 @@ static bool m6_scroll_click(ccord_ui *ui, int page, ccord_rect content, size_t n
   } else if (ui_in_rect(x, y, down)) {
     *scroll += M6_SCROLL_STEP;
   } else if (ui_in_rect(x, y, tr)) {
-    float th = m6_thumb_h(content, page, n);
+    float th = m6_thumb_h(ui, content, page, n);
     float ty = tr.y + (tr.h - th) * (*scroll / max);
     if (y < ty) *scroll -= M6_SCROLL_STEP;
     else *scroll += M6_SCROLL_STEP;
@@ -400,7 +446,7 @@ static bool m6_devices_click(ccord_ui *ui, ccord_rect content, float x, float y)
   ccord_fetch_state state = ui->d.session ? ccord_session_auth_sessions_state(ui->d.session) : CCORD_FETCH_IDLE;
   if (m6_scroll_click(ui, CCORD_M6_PAGE_DEVICES, content, n, x, y)) return true;
   if (!ui_in_rect(x, y, content)) return false;
-  if (state == CCORD_FETCH_FAILED && ui_in_rect(x, y, m6_retry_rect(content))) {
+  if (state == CCORD_FETCH_FAILED && ui_in_rect(x, y, m6_retry_rect(ui, content))) {
     m6_fetch_list(ui, CCORD_M6_PAGE_DEVICES);
     return true;
   }
@@ -413,7 +459,7 @@ static bool m6_devices_click(ccord_ui *ui, ccord_rect content, float x, float y)
   if (list) {
     for (size_t i = 0; i < n; i++) {
       if (list[i].current) continue;   // the API refuses to log out the current session
-      ccord_rect b = m6_device_logout_rect(m6_card_rect(content, CCORD_M6_PAGE_DEVICES, i, scroll));
+      ccord_rect b = m6_device_logout_rect(ui, m6_card_rect(ui, content, CCORD_M6_PAGE_DEVICES, i, scroll));
       if (ui_in_rect(x, y, b)) {
         if (armed_one && armed_idx == i) {
           char hashes[1][64];
@@ -428,7 +474,7 @@ static bool m6_devices_click(ccord_ui *ui, ccord_rect content, float x, float y)
       }
     }
   }
-  ccord_rect all = m6_footer_rect(content, CCORD_M6_PAGE_DEVICES, n, scroll);
+  ccord_rect all = m6_footer_rect(ui, content, CCORD_M6_PAGE_DEVICES, n, scroll);
   if (ui_in_rect(x, y, all)) {
     size_t others = 0;
     if (list) {
@@ -465,7 +511,7 @@ static bool m6_connections_click(ccord_ui *ui, ccord_rect content, float x, floa
   ccord_fetch_state state = ui->d.session ? ccord_session_connections_state(ui->d.session) : CCORD_FETCH_IDLE;
   if (m6_scroll_click(ui, CCORD_M6_PAGE_CONNECTIONS, content, n, x, y)) return true;
   if (!ui_in_rect(x, y, content)) return false;
-  if (state == CCORD_FETCH_FAILED && ui_in_rect(x, y, m6_retry_rect(content))) {
+  if (state == CCORD_FETCH_FAILED && ui_in_rect(x, y, m6_retry_rect(ui, content))) {
     m6_fetch_list(ui, CCORD_M6_PAGE_CONNECTIONS);
     return true;
   }
@@ -476,24 +522,24 @@ static bool m6_connections_click(ccord_ui *ui, ccord_rect content, float x, floa
   s_m6.confirm_kind = 0;
   if (list) {
     for (size_t i = 0; i < n; i++) {
-      ccord_rect card = m6_card_rect(content, CCORD_M6_PAGE_CONNECTIONS, i, scroll);
+      ccord_rect card = m6_card_rect(ui, content, CCORD_M6_PAGE_CONNECTIONS, i, scroll);
       ccord_connection_edit edit = {.visibility = -1, .friend_sync = -1, .show_activity = -1};
-      if (ui_in_rect(x, y, m6_conn_toggle_rect(card, 0))) {
+      if (ui_in_rect(x, y, m6_conn_toggle_hit(ui, card, 0))) {
         edit.visibility = list[i].visibility ? 0 : 1;
         m6_submit_conn_edit(ui, &list[i], &edit);
         return true;
       }
-      if (ui_in_rect(x, y, m6_conn_toggle_rect(card, 1))) {
+      if (ui_in_rect(x, y, m6_conn_toggle_hit(ui, card, 1))) {
         edit.show_activity = list[i].show_activity ? 0 : 1;
         m6_submit_conn_edit(ui, &list[i], &edit);
         return true;
       }
-      if (ui_in_rect(x, y, m6_conn_toggle_rect(card, 2))) {
+      if (ui_in_rect(x, y, m6_conn_toggle_hit(ui, card, 2))) {
         edit.friend_sync = list[i].friend_sync ? 0 : 1;
         m6_submit_conn_edit(ui, &list[i], &edit);
         return true;
       }
-      if (ui_in_rect(x, y, m6_conn_disconnect_rect(card))) {
+      if (ui_in_rect(x, y, m6_conn_disconnect_rect(ui, card))) {
         if (armed_disc && armed_idx == i) {
           m6_submit_conn_delete(ui, &list[i]);
         } else {
@@ -505,7 +551,7 @@ static bool m6_connections_click(ccord_ui *ui, ccord_rect content, float x, floa
       }
     }
   }
-  if (ui_in_rect(x, y, m6_footer_rect(content, CCORD_M6_PAGE_CONNECTIONS, n, scroll))) {
+  if (ui_in_rect(x, y, m6_footer_rect(ui, content, CCORD_M6_PAGE_CONNECTIONS, n, scroll))) {
     // Connecting a NEW account is an OAuth flow: browser redirect, never a local form (design D6).
     ui_open_url(ui, "https://discord.com/connections", "Connections");
     return true;
@@ -518,7 +564,7 @@ static bool m6_connections_click(ccord_ui *ui, ccord_rect content, float x, floa
 bool ui_settings_m6_wheel(ccord_ui *ui, int page, ccord_rect content, float wheel, bool direct)
 {
   if (!ui || page < 0 || page >= CCORD_M6_PAGE_COUNT) return false;
-  float max = m6_max_scroll(page, content, m6_list_count(ui, page));
+  float max = m6_max_scroll(ui, page, content, m6_list_count(ui, page));
   if (max <= 0.0f) return false;
   ccord_scroller_scroll(&s_m6.glide[page], &s_m6.scroll[page], -wheel * M6_SCROLL_STEP, max, direct);
   ui->dirty = true;
@@ -558,7 +604,7 @@ bool ui_settings_m6_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced)
       ccord_scroller_cancel(g);
       continue;
     }
-    float max = m6_max_scroll(page, s_m6.content, m6_list_count(ui, page));
+    float max = m6_max_scroll(ui, page, s_m6.content, m6_list_count(ui, page));
     moving = ccord_scroller_tick(g, &s_m6.scroll[page], fdt_ms, max, reduced) || moving;
     ui->dirty = true;
   }
@@ -581,7 +627,7 @@ bool ui_settings_m6_click(ccord_ui *ui, int page, ccord_rect content, ccord_rect
 static void m6_row_label(ccord_ui *ui, ccord_renderer *r, ccord_rect content, int row, const char *label)
 {
   ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_caption, COL(text_muted));
-  ccord_text_draw(r, label, strlen(label), content.x, privacy_row_y(content, row), &ls, 0.0f);
+  ccord_text_draw(r, label, strlen(label), content.x, privacy_row_y(ui, content, row), &ls, 0.0f);
 }
 
 static void m6_toggle_row(ccord_ui *ui, ccord_renderer *r, ccord_rect content, int row, const char *label,
@@ -590,18 +636,20 @@ static void m6_toggle_row(ccord_ui *ui, ccord_renderer *r, ccord_rect content, i
   m6_row_label(ui, r, content, row, label);
   if (note && note[0]) {
     ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_muted));
-    ccord_text_draw_ellipsis(r, note, strlen(note), content.x, privacy_row_y(content, row) + 18.0f,
-                             content.w - 60.0f, &ns);
+    float note_off = (ui && ui->mobile_layout) ? 22.0f : 18.0f;
+    float note_pad = (ui && ui->mobile_layout) ? 68.0f : 60.0f;
+    ccord_text_draw_ellipsis(r, note, strlen(note), content.x, privacy_row_y(ui, content, row) + note_off,
+                             content.w - note_pad, &ns);
   }
-  uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, privacy_toggle_rect(content, row))};
-  uis_toggle(ui, r, privacy_row_rect(content, row), on, st, "m6sw", id);
+  uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, privacy_toggle_hit(ui, content, row))};
+  uis_toggle(ui, r, privacy_row_rect(ui, content, row), on, st, "m6sw", id);
 }
 
 static void m6_chip_row(ccord_ui *ui, ccord_renderer *r, ccord_rect content, int row, int count,
                         const char *const *labels, int selected)
 {
   for (int i = 0; i < count; i++) {
-    ccord_rect o = privacy_chip_rect(content, row, i, count);
+    ccord_rect o = privacy_chip_rect(ui, content, row, i, count);
     uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, o), .selected = i == selected};
     uint64_t cid = (uint64_t)row * 64u + (uint64_t)i;
     uis_chip(ui, r, o, labels[i], st, "m6chip", cid);
@@ -629,7 +677,7 @@ static void m6_draw_scrollbar(ccord_ui *ui, ccord_renderer *r, ccord_rect conten
 
 static void m6_draw_privacy(ccord_ui *ui, ccord_renderer *r, ccord_rect content)
 {
-  float max = m6_max_scroll(CCORD_M6_PAGE_PRIVACY, content, 0);
+  float max = m6_max_scroll(ui, CCORD_M6_PAGE_PRIVACY, content, 0);
   if (s_m6.scroll[CCORD_M6_PAGE_PRIVACY] > max) s_m6.scroll[CCORD_M6_PAGE_PRIVACY] = max;
   float scroll = s_m6.scroll[CCORD_M6_PAGE_PRIVACY];
   m6_draw_scrollbar(ui, r, content, CCORD_M6_PAGE_PRIVACY, 0, scroll);
@@ -659,8 +707,8 @@ static void m6_draw_privacy(ccord_ui *ui, ccord_renderer *r, ccord_rect content)
   m6_toggle_row(ui, r, sc, 7, "SHARE PROFILE UPDATES",
                 "Allow friends to see when you update your avatar, banner, or bio.", cur.share_profile_updates, 7);
 
-  ccord_rect hcard = privacy_harvest_card_rect(sc);
-  ccord_rect hbtn = privacy_harvest_btn_rect(sc);
+  ccord_rect hcard = privacy_harvest_card_rect(ui, sc);
+  ccord_rect hbtn = privacy_harvest_btn_rect(ui, sc);
   uis_card(ui, r, hcard);
   float text_w = fmaxf(hbtn.x - hcard.x - 24.0f, 80.0f);
   ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_caption, COL(text_header));
@@ -676,10 +724,10 @@ static void m6_draw_privacy(ccord_ui *ui, ccord_renderer *r, ccord_rect content)
 
 static void m6_draw_scrollbar(ccord_ui *ui, ccord_renderer *r, ccord_rect content, int page, size_t n, float scroll)
 {
-  float max = m6_max_scroll(page, content, n);
+  float max = m6_max_scroll(ui, page, content, n);
   if (max <= 0.0f) return;
   ccord_rect tr = m6_scroll_track(content), up = m6_scroll_up(content), down = m6_scroll_down(content);
-  float th = m6_thumb_h(content, page, n);
+  float th = m6_thumb_h(ui, content, page, n);
   float ty = tr.y + (tr.h - th) * (scroll / max);
   uis_scrollbar(ui, r, tr, (ccord_rect){tr.x, ty, tr.w, th});
   uis_state us = {.hover = ui_in_rect(ui->mx, ui->my, up)}, ds = {.hover = ui_in_rect(ui->mx, ui->my, down)};
@@ -692,23 +740,28 @@ static void m6_draw_device_card(ccord_ui *ui, ccord_renderer *r, ccord_rect card
                                 bool armed)
 {
   uis_card(ui, r, card);
+  ccord_rect b = m6_device_logout_rect(ui, card);
   ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_body, COL(text_header));
   const char *dev = s->device[0] ? s->device : "Unknown device";
-  ccord_text_draw_ellipsis(r, dev, strlen(dev), card.x + 12.0f, card.y + 10.0f, card.w - 130.0f, &hs);
+  float title_w = fmaxf(b.x - card.x - 20.0f, 60.0f);
+  ccord_text_draw_ellipsis(r, dev, strlen(dev), card.x + 12.0f, card.y + 10.0f, title_w, &hs);
   ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_secondary));
   char line[160];
   if (s->os[0] && s->browser[0]) snprintf(line, sizeof line, "%s · %s", s->os, s->browser);
   else if (s->os[0]) snprintf(line, sizeof line, "%s", s->os);
   else if (s->browser[0]) snprintf(line, sizeof line, "%s", s->browser);
   else snprintf(line, sizeof line, "Unknown OS");
-  ccord_text_draw_ellipsis(r, line, strlen(line), card.x + 12.0f, card.y + 32.0f, card.w - 24.0f, &ns);
+  float os_y = (ui && ui->mobile_layout) ? (card.y + 34.0f) : (card.y + 32.0f);
+  float os_w = (ui && ui->mobile_layout) ? fmaxf(b.x - card.x - 20.0f, 60.0f) : (card.w - 24.0f);
+  ccord_text_draw_ellipsis(r, line, strlen(line), card.x + 12.0f, os_y, os_w, &ns);
   snprintf(line, sizeof line, "%s", s->location[0] ? s->location : "Unknown location");
-  ccord_text_draw_ellipsis(r, line, strlen(line), card.x + 12.0f, card.y + 52.0f, card.w - 24.0f, &ns);
+  ccord_text_draw_ellipsis(r, line, strlen(line), card.x + 12.0f,
+                           (ui && ui->mobile_layout) ? (card.y + 56.0f) : (card.y + 52.0f), card.w - 24.0f, &ns);
   char when[64];
   ccord_timefmt_message(when, sizeof when, s->approx_last_used_ms, ui->now_unix_ms, ui->use_utc);
   snprintf(line, sizeof line, "Last used: %s", when);
-  ccord_text_draw_ellipsis(r, line, strlen(line), card.x + 12.0f, card.y + 70.0f, card.w - 24.0f, &ns);
-  ccord_rect b = m6_device_logout_rect(card);
+  ccord_text_draw_ellipsis(r, line, strlen(line), card.x + 12.0f,
+                           (ui && ui->mobile_layout) ? (card.y + 76.0f) : (card.y + 70.0f), card.w - 24.0f, &ns);
   if (s->current) {
     uis_plate(ui, r, b, uis_tokens_of(ui).r_control, ui_alpha(COL(brand), 0.25f));
     ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_control, COL(brand));
@@ -725,7 +778,7 @@ static void m6_draw_devices(ccord_ui *ui, ccord_renderer *r, ccord_rect content)
   ccord_fetch_state state = ui->d.session ? ccord_session_auth_sessions_state(ui->d.session) : CCORD_FETCH_IDLE;
   size_t n = 0;
   const ccord_auth_session *list = ui->d.session ? ccord_session_auth_sessions(ui->d.session, &n) : nullptr;
-  float max = m6_max_scroll(CCORD_M6_PAGE_DEVICES, content, n);
+  float max = m6_max_scroll(ui, CCORD_M6_PAGE_DEVICES, content, n);
   if (s_m6.scroll[CCORD_M6_PAGE_DEVICES] > max) s_m6.scroll[CCORD_M6_PAGE_DEVICES] = max;
   float scroll = s_m6.scroll[CCORD_M6_PAGE_DEVICES];
   m6_draw_scrollbar(ui, r, content, CCORD_M6_PAGE_DEVICES, n, scroll);   // fixed, outside the clip
@@ -736,13 +789,13 @@ static void m6_draw_devices(ccord_ui *ui, ccord_renderer *r, ccord_rect content)
     m6_note(ui, r, content.x, m6_list_top(content), content.w, "Sign in to see your devices.");
   } else if (state == CCORD_FETCH_FAILED) {
     m6_note(ui, r, content.x, m6_list_top(content), content.w, "Couldn't load your devices.");
-    m6_button(ui, r, m6_retry_rect(content), "Retry", false, false);
+    m6_button(ui, r, m6_retry_rect(ui, content), "Retry", false, false);
   } else if (state != CCORD_FETCH_READY) {
     m6_note(ui, r, content.x, m6_list_top(content), content.w, "Loading your devices...");
   } else {
     for (size_t i = 0; i < n; i++) {
       bool armed = s_m6.confirm_kind == 2 && s_m6.confirm_index == i;
-      m6_draw_device_card(ui, r, m6_card_rect(content, CCORD_M6_PAGE_DEVICES, i, scroll), &list[i], armed);
+      m6_draw_device_card(ui, r, m6_card_rect(ui, content, CCORD_M6_PAGE_DEVICES, i, scroll), &list[i], armed);
     }
   }
   size_t others = 0;
@@ -752,7 +805,7 @@ static void m6_draw_devices(ccord_ui *ui, ccord_renderer *r, ccord_rect content)
     }
   }
   bool armed_all = s_m6.confirm_kind == 1;
-  m6_button(ui, r, m6_footer_rect(content, CCORD_M6_PAGE_DEVICES, n, scroll),
+  m6_button(ui, r, m6_footer_rect(ui, content, CCORD_M6_PAGE_DEVICES, n, scroll),
             armed_all ? "Confirm Log Out" : "Log Out All Known Devices", false, others == 0);
   ccord_pop_clip(r);
 }
@@ -769,7 +822,7 @@ static void m6_draw_conn_card(ccord_ui *ui, ccord_renderer *r, ccord_rect card, 
   ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_body, COL(text_header));
   ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_control, COL(status_online));
   ccord_text_style rs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_control, COL(danger));
-  ccord_rect disc = m6_conn_disconnect_rect(card);
+  ccord_rect disc = m6_conn_disconnect_rect(ui, card);
   float badge_w = 0.0f;
   float ver_w = 0.0f, rev_w = 0.0f;
   if (c->verified) { ver_w = ccord_text_measure(r, "Verified", 8, &bs, 0.0f).x; badge_w += ver_w + 10.0f; }
@@ -790,10 +843,10 @@ static void m6_draw_conn_card(ccord_ui *ui, ccord_renderer *r, ccord_rect card, 
   const bool on[3] = {c->visibility != 0, c->show_activity, c->friend_sync};
   ccord_text_style ls = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_secondary));
   for (int k = 0; k < 3; k++) {
-    ccord_rect t = m6_conn_toggle_rect(card, k);
+    ccord_rect t = m6_conn_toggle_rect(ui, card, k);
     ccord_text_draw(r, k_labels[k], strlen(k_labels[k]), card.x + 12.0f,
                     t.y + (t.h - ui_line_h(ui, ls.size)) * 0.5f, &ls, 0.0f);
-    uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, t)};
+    uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, m6_conn_toggle_hit(ui, card, k))};
     uis_toggle(ui, r, (ccord_rect){card.x, t.y, card.w - 12.0f, t.h}, on[k], st, "m6conn",
                (uint64_t)ui_name_id(c->type) * 4u + (uint64_t)k);
   }
@@ -804,7 +857,7 @@ static void m6_draw_connections(ccord_ui *ui, ccord_renderer *r, ccord_rect cont
   ccord_fetch_state state = ui->d.session ? ccord_session_connections_state(ui->d.session) : CCORD_FETCH_IDLE;
   size_t n = 0;
   const ccord_connection *list = ui->d.session ? ccord_session_connections(ui->d.session, &n) : nullptr;
-  float max = m6_max_scroll(CCORD_M6_PAGE_CONNECTIONS, content, n);
+  float max = m6_max_scroll(ui, CCORD_M6_PAGE_CONNECTIONS, content, n);
   if (s_m6.scroll[CCORD_M6_PAGE_CONNECTIONS] > max) s_m6.scroll[CCORD_M6_PAGE_CONNECTIONS] = max;
   float scroll = s_m6.scroll[CCORD_M6_PAGE_CONNECTIONS];
   m6_draw_scrollbar(ui, r, content, CCORD_M6_PAGE_CONNECTIONS, n, scroll);
@@ -815,16 +868,16 @@ static void m6_draw_connections(ccord_ui *ui, ccord_renderer *r, ccord_rect cont
     m6_note(ui, r, content.x, m6_list_top(content), content.w, "Sign in to see your connections.");
   } else if (state == CCORD_FETCH_FAILED) {
     m6_note(ui, r, content.x, m6_list_top(content), content.w, "Couldn't load your connections.");
-    m6_button(ui, r, m6_retry_rect(content), "Retry", false, false);
+    m6_button(ui, r, m6_retry_rect(ui, content), "Retry", false, false);
   } else if (state != CCORD_FETCH_READY) {
     m6_note(ui, r, content.x, m6_list_top(content), content.w, "Loading your connections...");
   } else {
     for (size_t i = 0; i < n; i++) {
       bool armed = s_m6.confirm_kind == 3 && s_m6.confirm_index == i;
-      m6_draw_conn_card(ui, r, m6_card_rect(content, CCORD_M6_PAGE_CONNECTIONS, i, scroll), &list[i], armed);
+      m6_draw_conn_card(ui, r, m6_card_rect(ui, content, CCORD_M6_PAGE_CONNECTIONS, i, scroll), &list[i], armed);
     }
   }
-  m6_button(ui, r, m6_footer_rect(content, CCORD_M6_PAGE_CONNECTIONS, n, scroll), "Connect More Accounts", false,
+  m6_button(ui, r, m6_footer_rect(ui, content, CCORD_M6_PAGE_CONNECTIONS, n, scroll), "Connect More Accounts", false,
             false);
   ccord_pop_clip(r);
 }
@@ -866,42 +919,42 @@ void ui_settings_m6_get_debug(const ccord_ui *ui, ccord_settings_m6_debug *out)
   if (page == CCORD_M6_PAGE_PRIVACY) {
     ccord_rect sc = content;
     sc.y -= s_m6.scroll[CCORD_M6_PAGE_PRIVACY];
-    out->dm_toggle = privacy_toggle_rect(sc, 0);
-    for (int i = 0; i < 3; i++) out->filter_chips[i] = privacy_chip_rect(sc, 1, i, 3);
-    out->friend_all_toggle = privacy_toggle_rect(sc, 2);
-    out->friend_mutual_toggle = privacy_toggle_rect(sc, 3);
-    out->friend_guild_toggle = privacy_toggle_rect(sc, 4);
-    out->age_toggle = privacy_toggle_rect(sc, 5);
-    for (int i = 0; i < 3; i++) out->profile_privacy_chips[i] = privacy_chip_rect(sc, 6, i, 3);
-    out->share_updates_toggle = privacy_toggle_rect(sc, 7);
-    out->harvest_data_btn = privacy_harvest_btn_rect(sc);
+    out->dm_toggle = privacy_toggle_rect(ui, sc, 0);
+    for (int i = 0; i < 3; i++) out->filter_chips[i] = privacy_chip_rect(ui, sc, 1, i, 3);
+    out->friend_all_toggle = privacy_toggle_rect(ui, sc, 2);
+    out->friend_mutual_toggle = privacy_toggle_rect(ui, sc, 3);
+    out->friend_guild_toggle = privacy_toggle_rect(ui, sc, 4);
+    out->age_toggle = privacy_toggle_rect(ui, sc, 5);
+    for (int i = 0; i < 3; i++) out->profile_privacy_chips[i] = privacy_chip_rect(ui, sc, 6, i, 3);
+    out->share_updates_toggle = privacy_toggle_rect(ui, sc, 7);
+    out->harvest_data_btn = privacy_harvest_btn_rect(ui, sc);
     return;
   }
   size_t n = m6_list_count(ui, page);
   float scroll = s_m6.scroll[page];
-  float max = m6_max_scroll(page, content, n);
+  float max = m6_max_scroll(ui, page, content, n);
   if (scroll > max) scroll = max;
   if (page == CCORD_M6_PAGE_DEVICES) {
     out->device_count = n;
     size_t an = 0;
     const ccord_auth_session *list = ui->d.session ? ccord_session_auth_sessions(ui->d.session, &an) : nullptr;
     for (size_t i = 0; i < n && list; i++) {
-      if (!list[i].current) out->device_logout[i] = m6_device_logout_rect(m6_card_rect(content, page, i, scroll));
+      if (!list[i].current) out->device_logout[i] = m6_device_logout_rect(ui, m6_card_rect(ui, content, page, i, scroll));
     }
-    out->logout_all_btn = m6_footer_rect(content, page, n, scroll);
-    if (out->devices_state == CCORD_FETCH_FAILED) out->devices_retry_btn = m6_retry_rect(content);
+    out->logout_all_btn = m6_footer_rect(ui, content, page, n, scroll);
+    if (out->devices_state == CCORD_FETCH_FAILED) out->devices_retry_btn = m6_retry_rect(ui, content);
     return;
   }
   out->connection_count = n;
   size_t cn = 0;
   const ccord_connection *list = ui->d.session ? ccord_session_connections(ui->d.session, &cn) : nullptr;
   for (size_t i = 0; i < n && list; i++) {
-    ccord_rect card = m6_card_rect(content, page, i, scroll);
-    out->conn_visibility[i] = m6_conn_toggle_rect(card, 0);
-    out->conn_activity[i] = m6_conn_toggle_rect(card, 1);
-    out->conn_sync[i] = m6_conn_toggle_rect(card, 2);
-    out->conn_disconnect[i] = m6_conn_disconnect_rect(card);
+    ccord_rect card = m6_card_rect(ui, content, page, i, scroll);
+    out->conn_visibility[i] = m6_conn_toggle_rect(ui, card, 0);
+    out->conn_activity[i] = m6_conn_toggle_rect(ui, card, 1);
+    out->conn_sync[i] = m6_conn_toggle_rect(ui, card, 2);
+    out->conn_disconnect[i] = m6_conn_disconnect_rect(ui, card);
   }
-  out->conn_add_btn = m6_footer_rect(content, page, n, scroll);
-  if (out->connections_state == CCORD_FETCH_FAILED) out->connections_retry_btn = m6_retry_rect(content);
+  out->conn_add_btn = m6_footer_rect(ui, content, page, n, scroll);
+  if (out->connections_state == CCORD_FETCH_FAILED) out->connections_retry_btn = m6_retry_rect(ui, content);
 }

@@ -607,6 +607,21 @@ static float pill_flow_bottom(const pill_flow *f)
   return f->y + UIS_H_CHIP;
 }
 
+static float pl_btn_sm(const ccord_ui *ui)
+{
+  return uis_btn_h_for(ui, UIS_H_BTN_SM);
+}
+
+static float pl_btn(const ccord_ui *ui)
+{
+  return uis_btn_h_for(ui, UIS_H_BTN);
+}
+
+static uis_btn_size pl_sz_sm(const ccord_ui *ui)
+{
+  return (ui && ui->mobile_layout) ? UIS_BTN_S_MD : UIS_BTN_S_SM;
+}
+
 static float btn_w_sm(ccord_ui *ui, ccord_renderer *r, const char *label, float max_w)
 {
   float w = ceilf(uis_label_width(ui, r, label)) + 4.0f;
@@ -1269,34 +1284,36 @@ static void draw_debug_log_view(ccord_ui *ui, ccord_renderer *r, float x, float 
   draw_plugin_icon(ui, r, (ccord_rect){x, ly, 28.0f, 28.0f}, p->id, p->name, p->icon_path);
   char hdr[128];
   snprintf(hdr, sizeof hdr, "Debug Log · %s", p->name);
+  float bh = pl_btn_sm(ui);
+  uis_btn_size bsz = pl_sz_sm(ui);
   if (w >= btns_w + 180.0f) {
     ccord_text_draw_ellipsis(r, hdr, strlen(hdr), x + 36.0f, ly + 4.0f, w - btns_w - 44.0f, &ns);
     float rx = x + w - bw_back;
-    ccord_rect rb = {rx, ly, bw_back, UIS_H_BTN_SM};
+    ccord_rect rb = {rx, ly, bw_back, bh};
     rx -= bw_clr + 6.0f;
-    ccord_rect rc = {rx, ly, bw_clr, UIS_H_BTN_SM};
+    ccord_rect rc = {rx, ly, bw_clr, bh};
     rx -= bw_rel + 6.0f;
-    ccord_rect rr = {rx, ly, bw_rel, UIS_H_BTN_SM};
-    draw_btn(ui, r, rr, "Reload", UIS_BTN_SECONDARY, UIS_BTN_S_SM, false, "plog", 1);
-    draw_btn(ui, r, rc, "Clear", UIS_BTN_SECONDARY, UIS_BTN_S_SM, false, "plog", 2);
-    draw_btn(ui, r, rb, "Back", UIS_BTN_PRIMARY, UIS_BTN_S_SM, false, "plog", 3);
+    ccord_rect rr = {rx, ly, bw_rel, bh};
+    draw_btn(ui, r, rr, "Reload", UIS_BTN_SECONDARY, bsz, false, "plog", 1);
+    draw_btn(ui, r, rc, "Clear", UIS_BTN_SECONDARY, bsz, false, "plog", 2);
+    draw_btn(ui, r, rb, "Back", UIS_BTN_PRIMARY, bsz, false, "plog", 3);
     hit_main(rr, ACT_LOG_RELOAD, 0, p->id);
     hit_main(rc, ACT_LOG_CLEAR, 0, p->id);
     hit_main(rb, ACT_LOG_BACK, 0, "");
-    ly += UIS_H_BTN_SM + 8.0f;
+    ly += bh + 8.0f;
   } else {
     ccord_text_draw_ellipsis(r, hdr, strlen(hdr), x + 36.0f, ly + 4.0f, w - 40.0f, &ns);
     ly += 34.0f;
-    ccord_rect rr = {x, ly, bw_rel, UIS_H_BTN_SM};
-    ccord_rect rc = {x + bw_rel + 6.0f, ly, bw_clr, UIS_H_BTN_SM};
-    ccord_rect rb = {x + bw_rel + bw_clr + 12.0f, ly, bw_back, UIS_H_BTN_SM};
-    draw_btn(ui, r, rr, "Reload", UIS_BTN_SECONDARY, UIS_BTN_S_SM, false, "plog", 1);
-    draw_btn(ui, r, rc, "Clear", UIS_BTN_SECONDARY, UIS_BTN_S_SM, false, "plog", 2);
-    draw_btn(ui, r, rb, "Back", UIS_BTN_PRIMARY, UIS_BTN_S_SM, false, "plog", 3);
+    ccord_rect rr = {x, ly, bw_rel, bh};
+    ccord_rect rc = {x + bw_rel + 6.0f, ly, bw_clr, bh};
+    ccord_rect rb = {x + bw_rel + bw_clr + 12.0f, ly, bw_back, bh};
+    draw_btn(ui, r, rr, "Reload", UIS_BTN_SECONDARY, bsz, false, "plog", 1);
+    draw_btn(ui, r, rc, "Clear", UIS_BTN_SECONDARY, bsz, false, "plog", 2);
+    draw_btn(ui, r, rb, "Back", UIS_BTN_PRIMARY, bsz, false, "plog", 3);
     hit_main(rr, ACT_LOG_RELOAD, 0, p->id);
     hit_main(rc, ACT_LOG_CLEAR, 0, p->id);
     hit_main(rb, ACT_LOG_BACK, 0, "");
-    ly += UIS_H_BTN_SM + 8.0f;
+    ly += bh + 8.0f;
   }
 
   // Count per severity and draw level filter chips
@@ -1317,13 +1334,13 @@ static void draw_debug_log_view(ccord_ui *ui, ccord_renderer *r, float x, float 
   float fx = x;
   for (int k = 0; k < 4; k++) {
     float cw = btn_w_sm(ui, r, flbl[k], w);
-    if (fx > x && fx + cw > x + w) { fx = x; ly += UIS_H_BTN_SM + 4.0f; }
-    ccord_rect cr = {fx, ly, cw, UIS_H_BTN_SM};
+    if (fx > x && fx + cw > x + w) { fx = x; ly += bh + 4.0f; }
+    ccord_rect cr = {fx, ly, cw, bh};
     draw_filter_chip(ui, r, cr, flbl[k], s_log_level_filter == k, "plogf", (uint64_t)k);
     hit_main(cr, ACT_LOG_LEVEL, k, "");
     fx += cw + 6.0f;
   }
-  ly += UIS_H_BTN_SM + 8.0f;
+  ly += bh + 8.0f;
 
   ccord_rect box = {x, ly, w, fmaxf(body_bottom - ly, 96.0f)};
   s_log_box_rect = box;
@@ -1394,14 +1411,17 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   ccord_push_clip(r, body_clip);
   float start_y = y;
 
+  float bh_sm = pl_btn_sm(ui);
+  float bh = pl_btn(ui);
+  uis_btn_size bsz_sm = pl_sz_sm(ui);
   float bw_back = btn_w_sm(ui, r, "< Back", 104.0f);
-  ccord_rect r_back = {x, y, bw_back, UIS_H_BTN_SM};
-  draw_btn(ui, r, r_back, "< Back", UIS_BTN_SECONDARY, UIS_BTN_S_SM, false, "pdet", 1);
+  ccord_rect r_back = {x, y, bw_back, bh_sm};
+  draw_btn(ui, r, r_back, "< Back", UIS_BTN_SECONDARY, bsz_sm, false, "pdet", 1);
   hit_main_clipped(r_back, body_clip, ACT_DETAIL_BACK, 0, "");
-  y += UIS_H_BTN_SM + 10.0f;
+  y += bh_sm + 10.0f;
 
   if (!have_cat && !inst) {
-    ccord_rect box = {x, y, w, 136.0f};
+    ccord_rect box = {x, y, w, ui->mobile_layout ? 142.0f : 136.0f};
     uis_card(ui, r, box);
     bool busy = cst && cst->detail_loading;
     char hdr[140];
@@ -1412,7 +1432,7 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
                            : (cst && cst->detail_error[0]) ? cst->detail_error
                                                            : "Verify the plugin ID on plugins.c-cord.org or click Retry.";
     ccord_text_draw(r, sub, strlen(sub), box.x + 16.0f, box.y + 44.0f, &ms, box.w - 32.0f);
-    ccord_rect r_ret = {box.x + 16.0f, box.y + box.h - 44.0f, btn_w_sm(ui, r, "Retry", 120.0f), UIS_H_BTN};
+    ccord_rect r_ret = {box.x + 16.0f, box.y + box.h - bh - 10.0f, btn_w_sm(ui, r, "Retry", 120.0f), bh};
     draw_btn(ui, r, r_ret, "Retry", UIS_BTN_PRIMARY, UIS_BTN_S_MD, busy, "pdet", 2);
     if (!busy) hit_main_clipped(r_ret, body_clip, ACT_DETAIL_RETRY, 0, s_detail_id);
     st_s_plugins_content_h = (box.y + box.h + 12.0f) - start_y;
@@ -1481,7 +1501,7 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   if (have_cat && e->sha256 && e->sha256[0]) {
     cur_h += 28.0f + 10.0f;
   }
-  cur_h += UIS_H_BTN + 22.0f;
+  cur_h += bh + 22.0f;
 
   // Pass 2: draw detail card
   ccord_rect box = {x, y, w, cur_h};
@@ -1550,24 +1570,24 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
 
   // Action footer buttons (dynamically measured, zero cutoff)
   float fx = box.x + 16.0f;
-  float fy = box.y + box.h - UIS_H_BTN - 14.0f;
+  float fy = box.y + box.h - bh - 14.0f;
   if (have_cat && !d_bundled) {
     bool blocked = plat_warn;
     if (e->installing) {
       float bw = btn_w_sm(ui, r, "Verifying SHA-256...", inner_w);
-      draw_btn(ui, r, (ccord_rect){fx, fy, bw, UIS_H_BTN}, "Verifying SHA-256...", UIS_BTN_PRIMARY, UIS_BTN_S_MD, true, "pdet", 10);
+      draw_btn(ui, r, (ccord_rect){fx, fy, bw, bh}, "Verifying SHA-256...", UIS_BTN_PRIMARY, UIS_BTN_S_MD, true, "pdet", 10);
       fx += bw + 8.0f;
     } else if (!e->installed) {
       const char *lbl = blocked ? "Desktop Only" : (e->api_class >= 2 ? "Review & Install" : "Install");
       float bw = btn_w_sm(ui, r, lbl, inner_w);
-      ccord_rect rb = {fx, fy, bw, UIS_H_BTN};
+      ccord_rect rb = {fx, fy, bw, bh};
       draw_btn(ui, r, rb, lbl, UIS_BTN_PRIMARY, UIS_BTN_S_MD, blocked, "pdet", 11);
       if (!blocked) hit_main_clipped(rb, body_clip, ACT_CAT_INSTALL, 0, e->id);
       fx += bw + 8.0f;
     } else if (e->update_available) {
       const char *lbl = e->update_needs_review ? "Review & Update" : "Update Now";
       float bw = btn_w_sm(ui, r, lbl, inner_w);
-      ccord_rect rb = {fx, fy, bw, UIS_H_BTN};
+      ccord_rect rb = {fx, fy, bw, bh};
       draw_btn(ui, r, rb, lbl, UIS_BTN_PRIMARY, UIS_BTN_S_MD, false, "pdet", 12);
       hit_main_clipped(rb, body_clip, ACT_CAT_INSTALL, 0, e->id);
       fx += bw + 8.0f;
@@ -1575,14 +1595,14 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   }
   if (inst && ui->d.contrib && ccord_contrib_plugin_settings(ui->d.contrib, inst->id)) {
     float bw = btn_w_sm(ui, r, "Configure", inner_w);
-    ccord_rect rb = {fx, fy, bw, UIS_H_BTN};
+    ccord_rect rb = {fx, fy, bw, bh};
     draw_btn(ui, r, rb, "Configure", UIS_BTN_SECONDARY, UIS_BTN_S_MD, false, "pdet", 13);
     hit_main_clipped(rb, body_clip, ACT_CARD_CONFIGURE, 0, inst->id);
     fx += bw + 8.0f;
   }
   if (inst && !d_bundled) {
     float bw = btn_w_sm(ui, r, "Uninstall...", inner_w);
-    ccord_rect rb = {fx, fy, bw, UIS_H_BTN};
+    ccord_rect rb = {fx, fy, bw, bh};
     draw_btn(ui, r, rb, "Uninstall...", UIS_BTN_DANGER_SOFT, UIS_BTN_S_MD, false, "pdet", 14);
     hit_main_clipped(rb, body_clip, ACT_CARD_UNINSTALL_ASK, 0, inst->id);
   }
@@ -1622,15 +1642,19 @@ static float layout_or_draw_installed_card(ccord_ui *ui, ccord_renderer *r, cons
   const char *plat_lbl = platform_badge_label(p->platforms, mob, &plat_warn);
 
   // Measure header right controls: [Toggle or Review] + [...]
-  float ov_w = 32.0f;
+  float bh_sm = pl_btn_sm(ui);
+  float bh = pl_btn(ui);
+  uis_btn_size bsz_sm = pl_sz_sm(ui);
+  float ov_w = ui->mobile_layout ? 40.0f : 32.0f;
   float right_ctrl_w = ov_w;
   if (!p->revoked && !needs_consent) right_ctrl_w += UIS_TOGGLE_W + 8.0f;
 
   // Pills flow beneath title
   float pills_x = x + pad + icon_sz + 10.0f;
   float pills_w = fmaxf(x + w - pad - pills_x, 80.0f);
+  float pills_off = ui->mobile_layout ? 32.0f : 22.0f;
   pill_flow pf;
-  pill_flow_init(&pf, pills_x, y + pad + 22.0f, pills_w);
+  pill_flow_init(&pf, pills_x, y + pad + pills_off, pills_w);
   pill_flow_add(ui, r, &pf, tier_label(p->tier, p->is_bundled), tier_color(ui, p->tier, p->is_bundled), false);
   uint8_t api_cls = (uint8_t)(p->risk_class + 1);
   pill_flow_add(ui, r, &pf, api_class_label(api_cls), api_class_color(ui, api_cls), false);
@@ -1659,7 +1683,7 @@ static float layout_or_draw_installed_card(ccord_ui *ui, ccord_renderer *r, cons
     float btnw = btn_w_sm(ui, r, "Uninstall", 104.0f);
     float tw = narrow ? (inner_w - 20.0f) : fmaxf(inner_w - btnw - 30.0f, 80.0f);
     float th = fmaxf(line_h, ccord_text_measure(r, rev_txt, strlen(rev_txt), &ms, tw).y);
-    rev_h = narrow ? (th + UIS_H_BTN_SM + 22.0f) : fmaxf(UIS_H_BTN_SM + 16.0f, th + 16.0f);
+    rev_h = narrow ? (th + bh_sm + 22.0f) : fmaxf(bh_sm + 16.0f, th + 16.0f);
     cy += rev_h + 8.0f;
   }
   if (needs_consent) {
@@ -1667,7 +1691,7 @@ static float layout_or_draw_installed_card(ccord_ui *ui, ccord_renderer *r, cons
     float btnw = btn_w_sm(ui, r, "Review & Approve", 156.0f);
     float tw = narrow ? (inner_w - 20.0f) : fmaxf(inner_w - btnw - 30.0f, 80.0f);
     float th = fmaxf(line_h, ccord_text_measure(r, ctxt, strlen(ctxt), &ms, tw).y);
-    consent_h = narrow ? (th + UIS_H_BTN_SM + 22.0f) : fmaxf(UIS_H_BTN_SM + 16.0f, th + 16.0f);
+    consent_h = narrow ? (th + bh_sm + 22.0f) : fmaxf(bh_sm + 16.0f, th + 16.0f);
     cy += consent_h + 8.0f;
   }
   char wtxt[320] = "";
@@ -1697,7 +1721,7 @@ static float layout_or_draw_installed_card(ccord_ui *ui, ccord_renderer *r, cons
     float btnw = btn_w_sm(ui, r, ulbl, 152.0f);
     float tw = narrow ? (inner_w - 20.0f) : fmaxf(inner_w - btnw - 30.0f, 80.0f);
     float th = fmaxf(line_h, ccord_text_measure(r, utxt, strlen(utxt), &cs, tw).y);
-    upd_h = narrow ? (th + UIS_H_BTN_SM + 20.0f) : fmaxf(UIS_H_BTN_SM + 14.0f, th + 14.0f);
+    upd_h = narrow ? (th + bh_sm + 20.0f) : fmaxf(bh_sm + 14.0f, th + 14.0f);
     cy += upd_h + 8.0f;
   }
 
@@ -1719,11 +1743,11 @@ static float layout_or_draw_installed_card(ccord_ui *ui, ccord_renderer *r, cons
     float bw = btn_w_sm(ui, r, foot[i].lbl, inner_w);
     if (fx > x + pad && fx + bw > x + w - pad) {
       fx = x + pad;
-      fy += UIS_H_BTN_SM + 6.0f;
+      fy += bh_sm + 6.0f;
     }
     fx += bw + 6.0f;
   }
-  float total_h = (fy + UIS_H_BTN_SM + pad) - y;
+  float total_h = (fy + bh_sm + pad) - y;
 
   if (!paint) return total_h;
   if (y + total_h < body_clip.y || y > body_clip.y + body_clip.h) return total_h;
@@ -1746,8 +1770,8 @@ static float layout_or_draw_installed_card(ccord_ui *ui, ccord_renderer *r, cons
   }
 
   // Right controls: overflow '...' button + native toggle switch
-  ccord_rect r_ov = {x + w - pad - ov_w, y + pad, ov_w, UIS_H_BTN_SM};
-  draw_btn(ui, r, r_ov, "...", UIS_BTN_SECONDARY, UIS_BTN_S_SM, false, "pov", (uint64_t)idx);
+  ccord_rect r_ov = {x + w - pad - ov_w, y + pad, ov_w, bh_sm};
+  draw_btn(ui, r, r_ov, "...", UIS_BTN_SECONDARY, bsz_sm, false, "pov", (uint64_t)idx);
   hit_main_clipped(r_ov, body_clip, ACT_CARD_OVERFLOW, (int)idx, p->id);
   if (s_overflow_id[0] && strcmp(s_overflow_id, p->id) == 0) {
     s_overflow_anchor = r_ov;
@@ -1755,15 +1779,16 @@ static float layout_or_draw_installed_card(ccord_ui *ui, ccord_renderer *r, cons
 
   if (!p->revoked && !needs_consent) {
     bool is_on = (p->state == CCORD_PLUGIN_READY || p->state == CCORD_PLUGIN_STARTING || p->enabled);
-    ccord_rect sw_row = {r_ov.x - 8.0f - UIS_TOGGLE_W, y + pad, UIS_TOGGLE_W, UIS_H_BTN_SM};
+    ccord_rect sw_row = {r_ov.x - 8.0f - UIS_TOGGLE_W, y + pad, UIS_TOGGLE_W, bh_sm};
     ccord_rect sw_hit = uis_toggle_rect(sw_row);
+    if (ui->mobile_layout) sw_hit = uis_hit_padded(sw_hit, 56.0f, UIS_MOB_TOUCH_H);
     uis_state swst = {.hover = !st_plugins_has_overlay() && ui_in_rect(ui->mx, ui->my, sw_hit), .disabled = !ui->extensions_on};
     uis_toggle(ui, r, sw_row, is_on && ui->extensions_on, swst, "psw", (uint64_t)idx);
     if (ui->extensions_on) hit_main_clipped(sw_hit, body_clip, ACT_CARD_TOGGLE, (int)idx, p->id);
   }
 
   // Pills row
-  pill_flow_init(&pf, pills_x, y + pad + 22.0f, pills_w);
+  pill_flow_init(&pf, pills_x, y + pad + pills_off, pills_w);
   pill_flow_add(ui, r, &pf, tier_label(p->tier, p->is_bundled), tier_color(ui, p->tier, p->is_bundled), true);
   pill_flow_add(ui, r, &pf, api_class_label(api_cls), api_class_color(ui, api_cls), true);
   pill_flow_add(ui, r, &pf, sn, sc, true);
@@ -1786,9 +1811,9 @@ static float layout_or_draw_installed_card(ccord_ui *ui, ccord_renderer *r, cons
     ccord_text_style rs = ui_style(ui, CCORD_FONT_BOLD, tk.fs_control, COL(danger));
     float tw = narrow ? (b.w - 20.0f) : fmaxf(b.w - btnw - 30.0f, 80.0f);
     ccord_text_draw(r, rev_txt, strlen(rev_txt), b.x + 12.0f, b.y + 8.0f, &rs, tw);
-    ccord_rect rb = narrow ? (ccord_rect){b.x + 12.0f, b.y + b.h - UIS_H_BTN_SM - 8.0f, btnw, UIS_H_BTN_SM}
-                           : (ccord_rect){b.x + b.w - btnw - 8.0f, b.y + (b.h - UIS_H_BTN_SM) * 0.5f, btnw, UIS_H_BTN_SM};
-    draw_btn(ui, r, rb, "Uninstall", UIS_BTN_DANGER, UIS_BTN_S_SM, false, "prev", (uint64_t)idx);
+    ccord_rect rb = narrow ? (ccord_rect){b.x + 12.0f, b.y + b.h - bh_sm - 8.0f, btnw, bh_sm}
+                           : (ccord_rect){b.x + b.w - btnw - 8.0f, b.y + (b.h - bh_sm) * 0.5f, btnw, bh_sm};
+    draw_btn(ui, r, rb, "Uninstall", UIS_BTN_DANGER, bsz_sm, false, "prev", (uint64_t)idx);
     hit_main_clipped(rb, body_clip, ACT_CARD_UNINSTALL_ASK, (int)idx, p->id);
     cy += rev_h + 8.0f;
   }
@@ -1801,9 +1826,9 @@ static float layout_or_draw_installed_card(ccord_ui *ui, ccord_renderer *r, cons
     ccord_text_style as = ui_style(ui, CCORD_FONT_BOLD, tk.fs_control, COL(status_idle));
     float tw = narrow ? (b.w - 20.0f) : fmaxf(b.w - btnw - 30.0f, 80.0f);
     ccord_text_draw(r, ctxt, strlen(ctxt), b.x + 12.0f, b.y + 8.0f, &as, tw);
-    ccord_rect rb = narrow ? (ccord_rect){b.x + 12.0f, b.y + b.h - UIS_H_BTN_SM - 8.0f, btnw, UIS_H_BTN_SM}
-                           : (ccord_rect){b.x + b.w - btnw - 8.0f, b.y + (b.h - UIS_H_BTN_SM) * 0.5f, btnw, UIS_H_BTN_SM};
-    draw_btn(ui, r, rb, "Review & Approve", UIS_BTN_PRIMARY, UIS_BTN_S_SM, false, "pcon", (uint64_t)idx);
+    ccord_rect rb = narrow ? (ccord_rect){b.x + 12.0f, b.y + b.h - bh_sm - 8.0f, btnw, bh_sm}
+                           : (ccord_rect){b.x + b.w - btnw - 8.0f, b.y + (b.h - bh_sm) * 0.5f, btnw, bh_sm};
+    draw_btn(ui, r, rb, "Review & Approve", UIS_BTN_PRIMARY, bsz_sm, false, "pcon", (uint64_t)idx);
     hit_main_clipped(rb, body_clip, ACT_CARD_REVIEW_CONSENT, (int)idx, p->id);
     cy += consent_h + 8.0f;
   }
@@ -1834,9 +1859,9 @@ static float layout_or_draw_installed_card(ccord_ui *ui, ccord_renderer *r, cons
     ccord_text_style us = ui_style(ui, CCORD_FONT_BOLD, tk.fs_caption, uc);
     float tw = narrow ? (b.w - 20.0f) : fmaxf(b.w - btnw - 30.0f, 80.0f);
     ccord_text_draw(r, utxt, strlen(utxt), b.x + 12.0f, b.y + 7.0f, &us, tw);
-    ccord_rect rb = narrow ? (ccord_rect){b.x + 12.0f, b.y + b.h - UIS_H_BTN_SM - 7.0f, btnw, UIS_H_BTN_SM}
-                           : (ccord_rect){b.x + b.w - btnw - 8.0f, b.y + (b.h - UIS_H_BTN_SM) * 0.5f, btnw, UIS_H_BTN_SM};
-    draw_btn(ui, r, rb, ulbl, UIS_BTN_PRIMARY, UIS_BTN_S_SM, false, "pupd", (uint64_t)idx);
+    ccord_rect rb = narrow ? (ccord_rect){b.x + 12.0f, b.y + b.h - bh_sm - 7.0f, btnw, bh_sm}
+                           : (ccord_rect){b.x + b.w - btnw - 8.0f, b.y + (b.h - bh_sm) * 0.5f, btnw, bh_sm};
+    draw_btn(ui, r, rb, ulbl, UIS_BTN_PRIMARY, bsz_sm, false, "pupd", (uint64_t)idx);
     hit_main_clipped(rb, body_clip, p->update_needs_review ? ACT_CARD_UPDATE_REVIEW : ACT_CARD_UPDATE_SAFE, (int)idx, p->id);
     cy += upd_h + 8.0f;
   }
@@ -1849,13 +1874,14 @@ static float layout_or_draw_installed_card(ccord_ui *ui, ccord_renderer *r, cons
     float bw = btn_w_sm(ui, r, foot[i].lbl, inner_w);
     if (fx > x + pad && fx + bw > x + w - pad) {
       fx = x + pad;
-      fy += UIS_H_BTN_SM + 6.0f;
+      fy += bh_sm + 6.0f;
     }
-    ccord_rect rb = {fx, fy, bw, UIS_H_BTN_SM};
-    draw_btn(ui, r, rb, foot[i].lbl, UIS_BTN_SECONDARY, UIS_BTN_S_SM, false, "pft", (uint64_t)idx * 8u + (uint64_t)i);
+    ccord_rect rb = {fx, fy, bw, bh_sm};
+    draw_btn(ui, r, rb, foot[i].lbl, UIS_BTN_SECONDARY, bsz_sm, false, "pft", (uint64_t)idx * 8u + (uint64_t)i);
     hit_main_clipped(rb, body_clip, foot[i].act, (int)idx, p->id);
     fx += bw + 6.0f;
   }
+  (void)bh;
   return total_h;
 }
 
@@ -1876,7 +1902,8 @@ static void draw_installed_tab(ccord_ui *ui, ccord_renderer *r, float x, float y
   }
 
   // Search box + filter chips
-  ccord_rect r_q = {x, y, w, UIS_H_BTN};
+  float bh_sm = pl_btn_sm(ui);
+  ccord_rect r_q = {x, y, w, pl_btn(ui)};
   y = draw_search_input(ui, r, r_q, s_inst_search, "Filter installed plugins...",
                         s_inst_search_focused, ACT_INST_SEARCH_FOCUS, ACT_INST_SEARCH_CLEAR, body_clip, true) + 8.0f;
 
@@ -1888,13 +1915,13 @@ static void draw_installed_tab(ccord_ui *ui, ccord_renderer *r, float x, float y
   float fx = x;
   for (int k = 0; k < 4; k++) {
     float bw = btn_w_sm(ui, r, flbl[k], w);
-    if (fx > x && fx + bw > x + w) { fx = x; y += UIS_H_BTN_SM + 6.0f; }
-    ccord_rect cr = {fx, y, bw, UIS_H_BTN_SM};
+    if (fx > x && fx + bw > x + w) { fx = x; y += bh_sm + 6.0f; }
+    ccord_rect cr = {fx, y, bw, bh_sm};
     draw_filter_chip(ui, r, cr, flbl[k], (int)s_inst_filter == k, "pifilt", (uint64_t)k);
     hit_main_clipped(cr, body_clip, ACT_INST_FILTER, k, "");
     fx += bw + 6.0f;
   }
-  y += UIS_H_BTN_SM + 10.0f;
+  y += bh_sm + 10.0f;
 
   if (s_status_msg[0]) {
     ccord_text_draw_ellipsis(r, s_status_msg, strlen(s_status_msg), x, y, w, &ms);
@@ -1968,8 +1995,10 @@ static float layout_or_draw_discover_card(ccord_ui *ui, ccord_renderer *r, const
   float line_h = ui_line_h(ui, tk.fs_control);
   float desc_h = line_h * 2.0f;
   cy += desc_h + 8.0f;
+  float bh_sm = pl_btn_sm(ui);
+  uis_btn_size bsz_sm = pl_sz_sm(ui);
   if (has_w) cy += 22.0f;
-  float calc_h = (cy + UIS_H_BTN_SM + pad + 4.0f) - y;
+  float calc_h = (cy + bh_sm + pad + 4.0f) - y;
   float h = fixed_h > calc_h ? fixed_h : calc_h;
 
   if (!paint) return h;
@@ -2018,7 +2047,7 @@ static float layout_or_draw_discover_card(ccord_ui *ui, ccord_renderer *r, const
   }
 
   // Bottom footer pinned cleanly to card bottom
-  float fy = y + h - pad - UIS_H_BTN_SM;
+  float fy = y + h - pad - bh_sm;
   const char *cta = e->installing ? "Installing..."
                   : e->bundled ? "Bundled"
                   : plat_warn && !e->installed ? "Desktop Only"
@@ -2029,13 +2058,14 @@ static float layout_or_draw_discover_card(ccord_ui *ui, ccord_renderer *r, const
                       (e->installed && !e->update_available);
   uis_btn_kind kind = (!cta_disabled && (!e->installed || e->update_available)) ? UIS_BTN_PRIMARY : UIS_BTN_SECONDARY;
   float bw = btn_w_sm(ui, r, cta, inner_w * 0.62f);
-  ccord_rect r_cta = {x + w - pad - bw, fy, bw, UIS_H_BTN_SM};
-  draw_btn(ui, r, r_cta, cta, kind, UIS_BTN_S_SM, cta_disabled, "pdact", (uint64_t)idx);
+  ccord_rect r_cta = {x + w - pad - bw, fy, bw, bh_sm};
+  draw_btn(ui, r, r_cta, cta, kind, bsz_sm, cta_disabled, "pdact", (uint64_t)idx);
   if (!cta_disabled) hit_main_clipped(r_cta, body_clip, ACT_CAT_INSTALL, (int)idx, e->id);
 
   char dls[32];
   format_downloads(e->downloads, dls, sizeof dls);
-  ccord_text_draw_ellipsis(r, dls, strlen(dls), x + pad, fy + 6.0f, fmaxf(r_cta.x - (x + pad) - 8.0f, 30.0f), &cs);
+  ccord_text_draw_ellipsis(r, dls, strlen(dls), x + pad, fy + (ui->mobile_layout ? 10.0f : 6.0f),
+                           fmaxf(r_cta.x - (x + pad) - 8.0f, 30.0f), &cs);
   return h;
 }
 
@@ -2054,34 +2084,37 @@ static void draw_discover_tab(ccord_ui *ui, ccord_renderer *r, float x, float y,
   float go_w = btn_w_sm(ui, r, "Search", 96.0f);
   float sort_w = fmaxf(ceilf(ccord_text_measure(r, slbl, strlen(slbl), &sel_st, 0.0f).x) + 60.0f, 148.0f);
   if (sort_w > 224.0f) sort_w = 224.0f;
+  float bh_sm = pl_btn_sm(ui);
+  float bh = pl_btn(ui);
+  uis_btn_size bsz_sm = pl_sz_sm(ui);
   if (w < 460.0f) {
-    ccord_rect r_q = {x, y, w, UIS_H_BTN};
+    ccord_rect r_q = {x, y, w, bh};
     y = draw_search_input(ui, r, r_q, s_disc_search, "Search catalog plugins...",
                           s_disc_search_focused, ACT_DISC_SEARCH_FOCUS, ACT_DISC_SEARCH_CLEAR, body_clip, true) + 6.0f;
-    ccord_rect r_go = {x, y, go_w, UIS_H_BTN_SM};
+    ccord_rect r_go = {x, y, go_w, bh_sm};
     float sw = fminf(sort_w, fmaxf(w - go_w - 6.0f, 84.0f));
-    ccord_rect r_sort = {x + go_w + 6.0f, y, sw, UIS_H_BTN_SM};
-    draw_btn(ui, r, r_go, "Search", UIS_BTN_PRIMARY, UIS_BTN_S_SM, false, "pds", 1);
+    ccord_rect r_sort = {x + go_w + 6.0f, y, sw, bh_sm};
+    draw_btn(ui, r, r_go, "Search", UIS_BTN_PRIMARY, bsz_sm, false, "pds", 1);
     uis_state sst = {.hover = !st_plugins_has_overlay() && ui_in_rect(ui->mx, ui->my, r_sort), .selected = s_sort_open};
     uis_select(ui, r, r_sort, slbl, sst, "pdsort", 0);
     s_sort_anchor = r_sort;
     hit_main_clipped(r_go, body_clip, ACT_DISC_SEARCH_GO, 0, "");
     hit_main_clipped(r_sort, body_clip, ACT_DISC_SORT_TOGGLE, 0, "");
-    y += UIS_H_BTN_SM + 8.0f;
+    y += bh_sm + 8.0f;
   } else {
     float q_w = fmaxf(w - go_w - sort_w - 12.0f, 120.0f);
-    ccord_rect r_q = {x, y, q_w, UIS_H_BTN};
+    ccord_rect r_q = {x, y, q_w, bh};
     (void)draw_search_input(ui, r, r_q, s_disc_search, "Search plugins by name, author, or description...",
                             s_disc_search_focused, ACT_DISC_SEARCH_FOCUS, ACT_DISC_SEARCH_CLEAR, body_clip, true);
-    ccord_rect r_go = {x + q_w + 6.0f, y + 2.0f, go_w, UIS_H_BTN_SM};
-    ccord_rect r_sort = {x + q_w + go_w + 12.0f, y + 2.0f, sort_w, UIS_H_BTN_SM};
-    draw_btn(ui, r, r_go, "Search", UIS_BTN_PRIMARY, UIS_BTN_S_SM, false, "pds", 1);
+    ccord_rect r_go = {x + q_w + 6.0f, y + 2.0f, go_w, bh_sm};
+    ccord_rect r_sort = {x + q_w + go_w + 12.0f, y + 2.0f, sort_w, bh_sm};
+    draw_btn(ui, r, r_go, "Search", UIS_BTN_PRIMARY, bsz_sm, false, "pds", 1);
     uis_state sst = {.hover = !st_plugins_has_overlay() && ui_in_rect(ui->mx, ui->my, r_sort), .selected = s_sort_open};
     uis_select(ui, r, r_sort, slbl, sst, "pdsort", 0);
     s_sort_anchor = r_sort;
     hit_main_clipped(r_go, body_clip, ACT_DISC_SEARCH_GO, 0, "");
     hit_main_clipped(r_sort, body_clip, ACT_DISC_SORT_TOGGLE, 0, "");
-    y += UIS_H_BTN + 8.0f;
+    y += bh + 8.0f;
   }
 
   // Row 2: Dynamic wrapping filter chips (Trust + Class 1 Safe + Platform)
@@ -2089,8 +2122,8 @@ static void draw_discover_tab(ccord_ui *ui, ccord_renderer *r, float x, float y,
   static const char *const k_tiers[4] = {"All", "Official", "Verified", "Community"};
   for (int t = 0; t < 4; t++) {
     float bw = btn_w_sm(ui, r, k_tiers[t], w);
-    if (fx > x && fx + bw > x + w) { fx = x; y += UIS_H_BTN_SM + 6.0f; }
-    ccord_rect cr = {fx, y, bw, UIS_H_BTN_SM};
+    if (fx > x && fx + bw > x + w) { fx = x; y += bh_sm + 6.0f; }
+    ccord_rect cr = {fx, y, bw, bh_sm};
     draw_filter_chip(ui, r, cr, k_tiers[t], s_disc_tier_filter == t, "pdt", (uint64_t)t);
     hit_main_clipped(cr, body_clip, ACT_DISC_TIER, t, "");
     fx += bw + 6.0f;
@@ -2098,8 +2131,8 @@ static void draw_discover_tab(ccord_ui *ui, ccord_renderer *r, float x, float y,
   {
     const char *c1 = "Class 1 Safe";
     float bw = btn_w_sm(ui, r, c1, w);
-    if (fx > x && fx + bw > x + w) { fx = x; y += UIS_H_BTN_SM + 6.0f; }
-    ccord_rect cr = {fx, y, bw, UIS_H_BTN_SM};
+    if (fx > x && fx + bw > x + w) { fx = x; y += bh_sm + 6.0f; }
+    ccord_rect cr = {fx, y, bw, bh_sm};
     draw_filter_chip(ui, r, cr, c1, s_disc_class1_only, "pdc1", 0);
     hit_main_clipped(cr, body_clip, ACT_DISC_CLASS1, 0, "");
     fx += bw + 6.0f;
@@ -2107,13 +2140,13 @@ static void draw_discover_tab(ccord_ui *ui, ccord_renderer *r, float x, float y,
   static const char *const k_plats[3] = {"All Platforms", "Desktop", "Android"};
   for (int p = 0; p < 3; p++) {
     float bw = btn_w_sm(ui, r, k_plats[p], w);
-    if (fx > x && fx + bw > x + w) { fx = x; y += UIS_H_BTN_SM + 6.0f; }
-    ccord_rect cr = {fx, y, bw, UIS_H_BTN_SM};
+    if (fx > x && fx + bw > x + w) { fx = x; y += bh_sm + 6.0f; }
+    ccord_rect cr = {fx, y, bw, bh_sm};
     draw_filter_chip(ui, r, cr, k_plats[p], (int)s_disc_plat_filter == p, "pdp", (uint64_t)p);
     hit_main_clipped(cr, body_clip, ACT_DISC_PLAT, p, "");
     fx += bw + 6.0f;
   }
-  y += UIS_H_BTN_SM + 12.0f;
+  y += bh_sm + 12.0f;
 
   size_t cn = ui->d.contrib ? ccord_contrib_catalog_count(ui->d.contrib) : 0;
   if (cn == 0) {
@@ -2144,15 +2177,16 @@ static void draw_discover_tab(ccord_ui *ui, ccord_renderer *r, float x, float y,
   if (cst && cst->has_more) {
     const char *mlbl = cst->loading_more ? "Loading..." : "Load More";
     float bw = btn_w_sm(ui, r, mlbl, 148.0f);
-    ccord_rect r_more = {x, y + 2.0f, bw, UIS_H_BTN_SM};
-    draw_btn(ui, r, r_more, mlbl, UIS_BTN_SECONDARY, UIS_BTN_S_SM, cst->loading_more, "pdmore", 0);
+    ccord_rect r_more = {x, y + 2.0f, bw, bh_sm};
+    draw_btn(ui, r, r_more, mlbl, UIS_BTN_SECONDARY, bsz_sm, cst->loading_more, "pdmore", 0);
     if (!cst->loading_more) hit_main_clipped(r_more, body_clip, ACT_DISC_LOAD_MORE, 0, "");
     char pinfo[96];
     snprintf(pinfo, sizeof pinfo, "Loaded %zu of %zu plugins", cn, cst->total_count);
     if (w >= bw + 140.0f) {
-      ccord_text_draw_ellipsis(r, pinfo, strlen(pinfo), x + bw + 12.0f, r_more.y + 6.0f, w - bw - 16.0f, &cs);
+      ccord_text_draw_ellipsis(r, pinfo, strlen(pinfo), x + bw + 12.0f,
+                               r_more.y + (bh_sm - ui_line_h(ui, cs.size)) * 0.5f, w - bw - 16.0f, &cs);
     }
-    y += UIS_H_BTN_SM + 16.0f;
+    y += bh_sm + 16.0f;
   }
   st_s_plugins_content_h = (y + 12.0f) - start_y;
 }
@@ -2176,7 +2210,9 @@ static float draw_update_card(ccord_ui *ui, ccord_renderer *r, const ccord_catal
                    : e->update_needs_review ? "Review & Update" : "Update";
   float bw = btn_w_sm(ui, r, blbl, 152.0f);
   bool has_cl = e->changelog && e->changelog[0];
-  float ch = (narrow ? 124.0f : 78.0f) + (has_cl ? 20.0f : 0.0f);
+  float ch = (narrow ? (ui->mobile_layout ? 136.0f : 124.0f) : 78.0f) + (has_cl ? 20.0f : 0.0f);
+  float bh_sm = pl_btn_sm(ui);
+  uis_btn_size bsz_sm = pl_sz_sm(ui);
 
   if (y + ch >= body_clip.y && y <= body_clip.y + body_clip.h) {
     ccord_rect uc = {x, y, w, ch};
@@ -2226,9 +2262,9 @@ static float draw_update_card(ccord_ui *ui, ccord_renderer *r, const ccord_catal
                                cl_y, narrow ? inner_w : fmaxf(inner_w - bw - 12.0f, 60.0f), &cs);
     }
 
-    ccord_rect r_btn = narrow ? (ccord_rect){uc.x + pad + 4.0f, uc.y + uc.h - pad - UIS_H_BTN_SM, bw, UIS_H_BTN_SM}
-                              : (ccord_rect){uc.x + uc.w - pad - bw, uc.y + (uc.h - UIS_H_BTN_SM) * 0.5f, bw, UIS_H_BTN_SM};
-    draw_btn(ui, r, r_btn, blbl, UIS_BTN_PRIMARY, UIS_BTN_S_SM, e->installing, "puact", (uint64_t)idx);
+    ccord_rect r_btn = narrow ? (ccord_rect){uc.x + pad + 4.0f, uc.y + uc.h - pad - bh_sm, bw, bh_sm}
+                              : (ccord_rect){uc.x + uc.w - pad - bw, uc.y + (uc.h - bh_sm) * 0.5f, bw, bh_sm};
+    draw_btn(ui, r, r_btn, blbl, UIS_BTN_PRIMARY, bsz_sm, e->installing, "puact", (uint64_t)idx);
     if (!e->installing) {
       hit_main_clipped(r_btn, body_clip, ACT_CAT_INSTALL, (int)idx, e->id);
     }
@@ -2243,6 +2279,8 @@ static void draw_updates_tab(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   ccord_text_style ms = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_control, COL(text_muted));
   ccord_text_style ovs = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));
   float start_y = y;
+  float bh_sm = pl_btn_sm(ui);
+  uis_btn_size bsz_sm = pl_sz_sm(ui);
 
   // Count pending safe vs review-needed updates
   size_t un = ui->d.contrib ? ccord_contrib_catalog_update_count(ui->d.contrib) : 0;
@@ -2265,19 +2303,19 @@ static void draw_updates_tab(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   if (w >= bw_safe + 190.0f) {
     ccord_text_draw(r, hdr, strlen(hdr), x, y + 6.0f, &ovs, 0.0f);
     if (n_safe > 0) {
-      ccord_rect r_all = {x + w - bw_safe, y, bw_safe, UIS_H_BTN_SM};
-      draw_btn(ui, r, r_all, safe_lbl, UIS_BTN_PRIMARY, UIS_BTN_S_SM, false, "puall", 0);
+      ccord_rect r_all = {x + w - bw_safe, y, bw_safe, bh_sm};
+      draw_btn(ui, r, r_all, safe_lbl, UIS_BTN_PRIMARY, bsz_sm, false, "puall", 0);
       hit_main_clipped(r_all, body_clip, ACT_UPD_RUN_SAFE, 0, "");
     }
-    y += UIS_H_BTN_SM + 10.0f;
+    y += bh_sm + 10.0f;
   } else {
     ccord_text_draw(r, hdr, strlen(hdr), x, y, &ovs, 0.0f);
     y += 18.0f;
     if (n_safe > 0) {
-      ccord_rect r_all = {x, y, bw_safe, UIS_H_BTN_SM};
-      draw_btn(ui, r, r_all, safe_lbl, UIS_BTN_PRIMARY, UIS_BTN_S_SM, false, "puall", 0);
+      ccord_rect r_all = {x, y, bw_safe, bh_sm};
+      draw_btn(ui, r, r_all, safe_lbl, UIS_BTN_PRIMARY, bsz_sm, false, "puall", 0);
       hit_main_clipped(r_all, body_clip, ACT_UPD_RUN_SAFE, 0, "");
-      y += UIS_H_BTN_SM + 10.0f;
+      y += bh_sm + 10.0f;
     }
   }
 
@@ -2286,7 +2324,7 @@ static void draw_updates_tab(ccord_ui *ui, ccord_renderer *r, float x, float y, 
     uis_card(ui, r, ok_card);
     float chk_w = btn_w_sm(ui, r, "Check Now", 118.0f);
     bool stack = w < 380.0f;
-    if (stack) ok_card.h = 104.0f;
+    if (stack) ok_card.h = ui->mobile_layout ? 116.0f : 104.0f;
     ccord_text_style gs = ui_style(ui, CCORD_FONT_BOLD, tk.fs_body, COL(status_online));
     const char *ok1 = "Everything is up to date";
     const char *ok2 = "All installed catalog plugins are on their latest verified release.";
@@ -2294,9 +2332,9 @@ static void draw_updates_tab(ccord_ui *ui, ccord_renderer *r, float x, float y, 
                              stack ? (ok_card.w - 28.0f) : (ok_card.w - chk_w - 36.0f), &gs);
     ccord_text_draw_ellipsis(r, ok2, strlen(ok2), ok_card.x + 14.0f, ok_card.y + 38.0f,
                              stack ? (ok_card.w - 28.0f) : (ok_card.w - chk_w - 36.0f), &ms);
-    ccord_rect r_chk = stack ? (ccord_rect){ok_card.x + 14.0f, ok_card.y + ok_card.h - UIS_H_BTN_SM - 12.0f, chk_w, UIS_H_BTN_SM}
-                             : (ccord_rect){ok_card.x + ok_card.w - chk_w - 14.0f, ok_card.y + (ok_card.h - UIS_H_BTN_SM) * 0.5f, chk_w, UIS_H_BTN_SM};
-    draw_btn(ui, r, r_chk, "Check Now", UIS_BTN_SECONDARY, UIS_BTN_S_SM, false, "puchk", 0);
+    ccord_rect r_chk = stack ? (ccord_rect){ok_card.x + 14.0f, ok_card.y + ok_card.h - bh_sm - 12.0f, chk_w, bh_sm}
+                             : (ccord_rect){ok_card.x + ok_card.w - chk_w - 14.0f, ok_card.y + (ok_card.h - bh_sm) * 0.5f, chk_w, bh_sm};
+    draw_btn(ui, r, r_chk, "Check Now", UIS_BTN_SECONDARY, bsz_sm, false, "puchk", 0);
     hit_main_clipped(r_chk, body_clip, ACT_UPD_CHECK, 0, "");
     y += ok_card.h + 14.0f;
   } else {
@@ -2338,7 +2376,7 @@ static void draw_updates_tab(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   float pad = 14.0f;
   float inner_w = fmaxf(w - pad * 2.0f, 80.0f);
   bool narrow_pol = w < 440.0f;
-  float hdr_h = narrow_pol ? 62.0f : 54.0f;
+  float hdr_h = narrow_pol ? (ui->mobile_layout ? 68.0f : 62.0f) : 54.0f;
   float policy_h = hdr_h;
   float chips_end_y = 0.0f;
   if (s_policy_expanded) {
@@ -2347,10 +2385,10 @@ static void draw_updates_tab(ccord_ui *ui, ccord_renderer *r, float x, float y, 
     float tx = x + pad, ty = y + hdr_h + nh + 10.0f;
     for (int k = 0; k < 3; k++) {
       float cw = btn_w_sm(ui, r, k_tlbl[k], inner_w);
-      if (tx > x + pad && tx + cw > x + w - pad) { tx = x + pad; ty += UIS_H_BTN_SM + 6.0f; }
+      if (tx > x + pad && tx + cw > x + w - pad) { tx = x + pad; ty += bh_sm + 6.0f; }
       tx += cw + 8.0f;
     }
-    chips_end_y = ty + UIS_H_BTN_SM + 14.0f;
+    chips_end_y = ty + bh_sm + 14.0f;
     policy_h = chips_end_y - y;
   }
 
@@ -2358,9 +2396,10 @@ static void draw_updates_tab(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   uis_card(ui, r, pbox);
   const char *exp_lbl = s_policy_expanded ? "Hide" : "Configure";
   float exp_w = btn_w_sm(ui, r, exp_lbl, 96.0f);
-  ccord_rect r_exp = {pbox.x + pbox.w - pad - exp_w, pbox.y + (hdr_h - UIS_H_BTN_SM) * 0.5f, exp_w, UIS_H_BTN_SM};
-  ccord_rect sw_row = {r_exp.x - 10.0f - UIS_TOGGLE_W, pbox.y + (hdr_h - UIS_H_BTN_SM) * 0.5f, UIS_TOGGLE_W, UIS_H_BTN_SM};
+  ccord_rect r_exp = {pbox.x + pbox.w - pad - exp_w, pbox.y + (hdr_h - bh_sm) * 0.5f, exp_w, bh_sm};
+  ccord_rect sw_row = {r_exp.x - 10.0f - UIS_TOGGLE_W, pbox.y + (hdr_h - bh_sm) * 0.5f, UIS_TOGGLE_W, bh_sm};
   ccord_rect sw_hit = uis_toggle_rect(sw_row);
+  if (ui->mobile_layout) sw_hit = uis_hit_padded(sw_hit, 56.0f, UIS_MOB_TOUCH_H);
   float pl_avail = fmaxf(sw_row.x - (pbox.x + pad) - 8.0f, 60.0f);
 
   if (narrow_pol) {
@@ -2380,7 +2419,7 @@ static void draw_updates_tab(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   uis_state swst = {.hover = !st_plugins_has_overlay() && ui_in_rect(ui->mx, ui->my, sw_hit)};
   uis_toggle(ui, r, sw_row, pr.auto_update_enabled, swst, "swautoupd", 0);
   hit_main_clipped(sw_hit, body_clip, ACT_UPD_POLICY_TOGGLE, 0, "");
-  draw_btn(ui, r, r_exp, exp_lbl, UIS_BTN_SECONDARY, UIS_BTN_S_SM, false, "pupexp", 0);
+  draw_btn(ui, r, r_exp, exp_lbl, UIS_BTN_SECONDARY, bsz_sm, false, "pupexp", 0);
   hit_main_clipped(r_exp, body_clip, ACT_UPD_POLICY_EXPAND, 0, "");
 
   if (s_policy_expanded) {
@@ -2390,8 +2429,8 @@ static void draw_updates_tab(ccord_ui *ui, ccord_renderer *r, float x, float y, 
     float tx = pbox.x + pad, ty = pbox.y + hdr_h + nh + 10.0f;
     for (int k = 0; k < 3; k++) {
       float cw = btn_w_sm(ui, r, k_tlbl[k], inner_w);
-      if (tx > pbox.x + pad && tx + cw > pbox.x + pbox.w - pad) { tx = pbox.x + pad; ty += UIS_H_BTN_SM + 6.0f; }
-      ccord_rect tr = {tx, ty, cw, UIS_H_BTN_SM};
+      if (tx > pbox.x + pad && tx + cw > pbox.x + pbox.w - pad) { tx = pbox.x + pad; ty += bh_sm + 6.0f; }
+      ccord_rect tr = {tx, ty, cw, bh_sm};
       draw_filter_chip(ui, r, tr, k_tlbl[k], pr.auto_update_min_tier == (uint8_t)(k + 1), "putier", (uint64_t)k);
       hit_main_clipped(tr, body_clip, ACT_UPD_POLICY_TIER, k + 1, "");
       tx += cw + 8.0f;
@@ -2426,7 +2465,7 @@ void st_draw_plugins(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
   }
 
   float x = g->content.x, w = g->content.w;
-  float tab_y = st_row_y(g, 0) + 46.0f;
+  float tab_y = st_row_y(g, 0) + (ui->mobile_layout ? 48.0f : 46.0f);
 
   size_t inst_n = ui->d.contrib ? ccord_contrib_plugin_count(ui->d.contrib) : 0;
   const ccord_catalog_status *cst = ccord_contrib_catalog_status(ui->d.contrib);
@@ -2444,34 +2483,36 @@ void st_draw_plugins(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
   float w_upd = btn_w_sm(ui, r, l_upd, w);
   float w_sync = btn_w_sm(ui, r, l_sync, w);
 
+  float bh_sm = pl_btn_sm(ui);
+  uis_btn_size bsz_sm = pl_sz_sm(ui);
   float tx = x, ty = tab_y;
   bool on_sub = !s_detail_id[0] && !s_log_id[0];
-  ccord_rect r_inst = {tx, ty, w_inst, UIS_H_BTN_SM};
+  ccord_rect r_inst = {tx, ty, w_inst, bh_sm};
   tx += w_inst + 6.0f;
-  if (tx + w_disc > x + w) { tx = x; ty += UIS_H_BTN_SM + 6.0f; }
-  ccord_rect r_disc = {tx, ty, w_disc, UIS_H_BTN_SM};
+  if (tx + w_disc > x + w) { tx = x; ty += bh_sm + 6.0f; }
+  ccord_rect r_disc = {tx, ty, w_disc, bh_sm};
   tx += w_disc + 6.0f;
-  if (tx + w_upd > x + w) { tx = x; ty += UIS_H_BTN_SM + 6.0f; }
-  ccord_rect r_upd = {tx, ty, w_upd, UIS_H_BTN_SM};
+  if (tx + w_upd > x + w) { tx = x; ty += bh_sm + 6.0f; }
+  ccord_rect r_upd = {tx, ty, w_upd, bh_sm};
   tx += w_upd + 6.0f;
   ccord_rect r_sync;
   if (tx + w_sync <= x + w) {
-    r_sync = (ccord_rect){x + w - w_sync, ty, w_sync, UIS_H_BTN_SM};
+    r_sync = (ccord_rect){x + w - w_sync, ty, w_sync, bh_sm};
   } else {
-    ty += UIS_H_BTN_SM + 6.0f;
-    r_sync = (ccord_rect){x, ty, w_sync, UIS_H_BTN_SM};
+    ty += bh_sm + 6.0f;
+    r_sync = (ccord_rect){x, ty, w_sync, bh_sm};
   }
 
   draw_filter_chip(ui, r, r_inst, l_inst, on_sub && s_subtab == 0, "ptab", 0);
   draw_filter_chip(ui, r, r_disc, "Discover", on_sub && s_subtab == 1, "ptab", 1);
   draw_filter_chip(ui, r, r_upd, l_upd, on_sub && s_subtab == 2, "ptab", 2);
-  draw_btn(ui, r, r_sync, l_sync, UIS_BTN_SECONDARY, UIS_BTN_S_SM, cst && cst->syncing, "psync", 0);
+  draw_btn(ui, r, r_sync, l_sync, UIS_BTN_SECONDARY, bsz_sm, cst && cst->syncing, "psync", 0);
   hit_main(r_inst, ACT_TAB, 0, "");
   hit_main(r_disc, ACT_TAB, 1, "");
   hit_main(r_upd, ACT_TAB, 2, "");
   if (!(cst && cst->syncing)) hit_main(r_sync, ACT_SYNC, 0, "");
 
-  float body_top = ty + UIS_H_BTN_SM + 10.0f;
+  float body_top = ty + bh_sm + 10.0f;
 
   // Global paused banner when master Extensions switch is off
   if (!ui->extensions_on) {
@@ -2575,8 +2616,9 @@ static void draw_overflow_menu(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 
   if (ui->mobile_layout) {
     // Mobile Slide-Up Bottom Sheet
-    float row_h = 40.0f;
-    float sh = 74.0f + (float)vis * row_h + (has_sep ? 10.0f : 0.0f) + UIS_H_BTN + 24.0f;
+    float row_h = 44.0f;
+    float can_h = pl_btn(ui);
+    float sh = 74.0f + (float)vis * row_h + (has_sep ? 10.0f : 0.0f) + can_h + 24.0f;
     float max_h = g->panel.h - 48.0f;
     if (sh > max_h) sh = max_h;
     float sx = g->panel.x + 8.0f;
@@ -2608,7 +2650,7 @@ static void draw_overflow_menu(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
       hit_overlay(row, items[i].act, 0, p->id);
       ry += row_h;
     }
-    ccord_rect rc_cancel = {sx + 16.0f, sy + sh - UIS_H_BTN - 12.0f, sw - 32.0f, UIS_H_BTN};
+    ccord_rect rc_cancel = {sx + 16.0f, sy + sh - can_h - 12.0f, sw - 32.0f, can_h};
     draw_overlay_btn(ui, r, rc_cancel, "Cancel", UIS_BTN_SECONDARY, UIS_BTN_S_MD, false, "pmobs", 99);
     hit_overlay(rc_cancel, ACT_OV_CLOSE, 0, "");
     return;
@@ -2751,7 +2793,8 @@ static void draw_protected_security_modal(ccord_ui *ui, ccord_renderer *r)
 
   // Scrollable body viewport
   float body_y = box.y + 114.0f;
-  float footer_y = box.y + box.h - 60.0f;
+  float bh = pl_btn(ui);
+  float footer_y = box.y + box.h - (ui->mobile_layout ? 68.0f : 60.0f);
   float body_h = fmaxf(footer_y - body_y - 8.0f, 60.0f);
   ccord_rect body_vp = {box.x + 16.0f, body_y, box.w - 32.0f, body_h};
   s_sec_body_rect = body_vp;
@@ -2796,8 +2839,8 @@ static void draw_protected_security_modal(ccord_ui *ui, ccord_renderer *r)
                                                  : "Approve & Install";
   float ok_w = btn_w_sm(ui, r, ok_lbl, box.w * 0.56f);
   float can_w = btn_w_sm(ui, r, "Cancel", 104.0f);
-  ccord_rect r_ok = {box.x + box.w - 20.0f - ok_w, footer_y + 14.0f, ok_w, UIS_H_BTN};
-  ccord_rect r_can = {r_ok.x - 10.0f - can_w, footer_y + 14.0f, can_w, UIS_H_BTN};
+  ccord_rect r_ok = {box.x + box.w - 20.0f - ok_w, footer_y + 14.0f, ok_w, bh};
+  ccord_rect r_can = {r_ok.x - 10.0f - can_w, footer_y + 14.0f, can_w, bh};
   draw_overlay_btn(ui, r, r_can, "Cancel", UIS_BTN_SECONDARY, UIS_BTN_S_MD, false, "psec", 1);
   draw_overlay_btn(ui, r, r_ok, ok_lbl, is_class3 ? UIS_BTN_DANGER : UIS_BTN_PRIMARY, UIS_BTN_S_MD, false, "psec", 2);
   hit_overlay(r_can, ACT_SEC_CANCEL, 0, "");
@@ -2810,7 +2853,8 @@ static void draw_uninstall_modal(ccord_ui *ui, ccord_renderer *r)
 {
   uis_tokens tk = uis_tokens_of(ui);
   float mw = fminf(UIS_MODAL_W_SM, ui->win_w - 28.0f);
-  ccord_rect box = uis_modal_box(ui, mw, 184.0f);
+  float bh = pl_btn(ui);
+  ccord_rect box = uis_modal_box(ui, mw, ui->mobile_layout ? 196.0f : 184.0f);
   s_uninst_box = box;
   uis_modal_frame(ui, r, box);
 
@@ -2823,8 +2867,8 @@ static void draw_uninstall_modal(ccord_ui *ui, ccord_renderer *r)
 
   float u_w = btn_w_sm(ui, r, "Uninstall", 124.0f);
   float c_w = btn_w_sm(ui, r, "Cancel", 96.0f);
-  ccord_rect r_del = uis_modal_footer_button(box, 0, u_w);
-  ccord_rect r_can = {r_del.x - UIS_SP_2 - c_w, r_del.y, c_w, UIS_H_BTN};
+  ccord_rect r_del = {box.x + box.w - UIS_SP_5 - u_w, box.y + box.h - UIS_SP_5 - bh, u_w, bh};
+  ccord_rect r_can = {r_del.x - UIS_SP_2 - c_w, r_del.y, c_w, bh};
   draw_overlay_btn(ui, r, r_can, "Cancel", UIS_BTN_SECONDARY, UIS_BTN_S_MD, false, "puni", 1);
   draw_overlay_btn(ui, r, r_del, "Uninstall", UIS_BTN_DANGER, UIS_BTN_S_MD, false, "puni", 2);
   hit_overlay(r_can, ACT_UNINST_CANCEL, 0, "");

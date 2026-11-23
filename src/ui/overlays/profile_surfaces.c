@@ -78,7 +78,8 @@ void dc_draw_user_profile_modal(ccord_ui *ui, ccord_renderer *r)
   ui_profile_draw_theme_bg(ui, r, &look, m, banner_h, ptk.r_surface);
   ccord_rect banner = {m.x, m.y, m.w, banner_h};
   ui_profile_draw_banner(ui, r, &look, u, banner, ptk.r_surface);
-  ui->profile_modal_close_rect = (ccord_rect){m.x + m.w - UIS_ICON_BTN - UIS_SP_2, m.y + UIS_SP_2, UIS_ICON_BTN, UIS_ICON_BTN};
+  float csz = uis_icon_btn_for(ui);
+  ui->profile_modal_close_rect = (ccord_rect){m.x + m.w - csz - UIS_SP_2, m.y + UIS_SP_2, csz, csz};
   {
     ccord_rect cr = ui->profile_modal_close_rect;
     ccord_draw_rrect(r, cr, ptk.r_control, ui_alpha(COL(bg_tertiary), 0.8f));   // scrim chip so the glyph reads on a banner
@@ -99,7 +100,7 @@ void dc_draw_user_profile_modal(ccord_ui *ui, ccord_renderer *r)
     float max_msg_w = maxf((m.x + m.w - pad_x) - av_right, 88.0f);
     if (msg_w > max_msg_w) msg_w = max_msg_w;
     float msg_y = m.y + banner_h + (compact_h ? UIS_SP_2 : UIS_SP_3);
-    ccord_rect mb = {m.x + m.w - pad_x - msg_w, msg_y, msg_w, UIS_H_BTN};
+    ccord_rect mb = {m.x + m.w - pad_x - msg_w, msg_y, msg_w, uis_btn_h_for(ui, UIS_H_BTN)};
     ui->profile_modal_msg_rect = mb;
     bool mb_hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, mb);
     if (look.has_theme) {
@@ -169,7 +170,7 @@ void dc_draw_user_profile_modal(ccord_ui *ui, ccord_renderer *r)
   float tab_fs = M(font_size_small);
   float tab_pad = 16.0f;
   float tab_gap = 10.0f;
-  float tab_h = compact_w ? 32.0f : 28.0f;
+  float tab_h = ui->mobile_layout ? UIS_MOB_H_CHIP : (compact_w ? 32.0f : 28.0f);
   ccord_text_style tab_ms = ui_style(ui, CCORD_FONT_BOLD, tab_fs, ptx.header);
   float tab_w[3];
   float tabs_total = 0.0f;
@@ -281,9 +282,11 @@ void dc_draw_user_profile_modal(ccord_ui *ui, ccord_renderer *r)
     cy += ui_line_h(ui, hdr_s.size) + 4.0f;
     bool note_focused = !ui->touch_mode || ui->touch_text_focused;
     float save_w = fmaxf(84.0f, ceilf(uis_label_width(ui, r, "Save Note")));
+    float in_h = ui->mobile_layout ? 42.0f : UIS_H_INPUT;
+    float nbh = uis_btn_h_for(ui, UIS_H_BTN);
     if (iw < save_w + 116.0f) {
-      ccord_rect nr = {ix, cy, iw, UIS_H_INPUT};
-      ccord_rect nsb = {ix, cy + UIS_H_INPUT + UIS_SP_2, iw, UIS_H_BTN};
+      ccord_rect nr = {ix, cy, iw, in_h};
+      ccord_rect nsb = {ix, cy + in_h + UIS_SP_2, iw, nbh};
       if (nr.y + nr.h > body_y0 && nr.y < body_y1) {
         float ny0 = maxf(nr.y, body_y0), ny1 = fminf(nr.y + nr.h, body_y1);
         ui->profile_modal_note_rect = (ccord_rect){nr.x, ny0, nr.w, ny1 - ny0};
@@ -295,10 +298,10 @@ void dc_draw_user_profile_modal(ccord_ui *ui, ccord_renderer *r)
       (void)uis_input(ui, r, nr, &ui->modal_edit1, "Click to add a note", (uis_state){.focused = note_focused}, false, "pmnote", 0);
       uis_button(ui, r, nsb, "Save Note", UIS_BTN_PRIMARY, UIS_BTN_S_MD,
                  (uis_state){.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, nsb)}, "pmnotesave", 0);
-      cy += UIS_H_INPUT + UIS_SP_2 + UIS_H_BTN + UIS_SP_3;
+      cy += in_h + UIS_SP_2 + nbh + UIS_SP_3;
     } else {
-      ccord_rect nr = {ix, cy, iw - save_w - 8.0f, UIS_H_INPUT};
-      ccord_rect nsb = {nr.x + nr.w + 8.0f, cy + 2.0f, save_w, UIS_H_BTN};
+      ccord_rect nr = {ix, cy, iw - save_w - 8.0f, in_h};
+      ccord_rect nsb = {nr.x + nr.w + 8.0f, cy + (ui->mobile_layout ? 1.0f : 2.0f), save_w, nbh};
       if (nr.y + nr.h > body_y0 && nr.y < body_y1) {
         float ny0 = maxf(nr.y, body_y0), ny1 = fminf(nr.y + nr.h, body_y1);
         ui->profile_modal_note_rect = (ccord_rect){nr.x, ny0, nr.w, ny1 - ny0};
@@ -308,7 +311,7 @@ void dc_draw_user_profile_modal(ccord_ui *ui, ccord_renderer *r)
       (void)uis_input(ui, r, nr, &ui->modal_edit1, "Click to add a note", (uis_state){.focused = note_focused}, false, "pmnote", 0);
       uis_button(ui, r, nsb, "Save Note", UIS_BTN_PRIMARY, UIS_BTN_S_MD,
                  (uis_state){.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, nsb)}, "pmnotesave", 0);
-      cy += 44.0f;
+      cy += ui->mobile_layout ? 50.0f : 44.0f;
     }
 
     if (prof && prof->connection_count > 0) {

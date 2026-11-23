@@ -99,7 +99,9 @@ static bool append_channel_and_children(ccord_ui *ui, ccord_id g, const chan_idx
 {
   bool is_cat = ch->kind == CCORD_CHANNEL_CATEGORY;
   if (!grow_crow(ui, ui->ncrow + 1)) return false;
-  float h = is_cat ? M(category_height) : (g == CCORD_DM_GUILD_ID ? 48.0f : M(channel_item_height));
+  float chan_h = M(channel_item_height);
+  if (ui->mobile_layout && chan_h < 42.0f) chan_h = 42.0f;
+  float h = is_cat ? M(category_height) : (g == CCORD_DM_GUILD_ID ? (ui->mobile_layout ? 52.0f : 48.0f) : chan_h);
   ui->crow[ui->ncrow++] = (chan_row){is_cat, false, false, false, i, 0, *py, h, DM_NAV_NONE};
   *py += h + (is_cat ? 0.0f : (g == CCORD_DM_GUILD_ID ? 3.0f : 2.0f));
   if (!is_cat && ch->kind == CCORD_CHANNEL_TEXT && cm->thread_head) {
@@ -110,7 +112,7 @@ static bool append_channel_and_children(ccord_ui *ui, ccord_id g, const chan_idx
       if (!tc) continue;
       if ((is_forum || tc->thread_archived) && tc->id != sel_cid) continue;
       if (!grow_crow(ui, ui->ncrow + 1)) return false;
-      float th = M(channel_item_height) - 4.0f;
+      float th = ui->mobile_layout ? (M(channel_item_height) < 40.0f ? 40.0f : M(channel_item_height)) : (M(channel_item_height) - 4.0f);
       ui->crow[ui->ncrow++] = (chan_row){false, false, false, true, (size_t)t, 0, *py, th, DM_NAV_NONE};
       *py += th + 2.0f;
     }
@@ -121,7 +123,7 @@ static bool append_channel_and_children(ccord_ui *ui, ccord_id g, const chan_idx
       const ccord_voice_state *vs = ccord_store_voice_at(ui->d.store, ch->id, v);
       if (!vs) continue;
       if (!grow_crow(ui, ui->ncrow + 1)) return false;
-      float vh = 26.0f;
+      float vh = ui->mobile_layout ? 38.0f : 26.0f;
       ui->crow[ui->ncrow++] = (chan_row){false, true, false, false, i, vs->user_id, *py, vh, DM_NAV_NONE};
       *py += vh;
     }
@@ -400,7 +402,7 @@ static void rebuild_channel_rows(ccord_ui *ui)
       if (ch && ch->is_message_request) show_requests = true;
     }
     if (grow_crow(ui, ui->ncrow + (show_requests ? 5u : 4u))) {
-      float ih = 36.0f;
+      float ih = ui->mobile_layout ? 42.0f : 36.0f;
       ui->crow[ui->ncrow++] = (chan_row){false, false, false, false, 0, 0, y, ih, DM_NAV_FRIENDS};
       y += ih + 2.0f;
       if (show_requests) {

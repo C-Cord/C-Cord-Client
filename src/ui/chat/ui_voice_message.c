@@ -334,6 +334,15 @@ ccord_rect ui_vm_mic_rect(ccord_rect box)
   return (ccord_rect){box.x + box.w - 8.0f - 26.0f, box.y + (box.h - 24.0f) * 0.5f, 26.0f, 24.0f};
 }
 
+ccord_rect ui_vm_mic_rect_for(const ccord_ui *ui, ccord_rect box)
+{
+  if (ui && ui->mobile_layout) {
+    float sz = 38.0f;
+    return (ccord_rect){box.x + box.w - 6.0f - sz, box.y + (box.h - sz) * 0.5f, sz, sz};
+  }
+  return ui_vm_mic_rect(box);
+}
+
 bool ui_vm_handle_click(ccord_ui *ui, float x, float y)
 {
   if (ui_vm_is_active(ui)) {
@@ -360,7 +369,7 @@ bool ui_vm_handle_click(ccord_ui *ui, float x, float y)
 
 void ui_vm_draw_mic(ccord_ui *ui, ccord_renderer *r, ccord_rect box)
 {
-  ccord_rect rc = ui_vm_mic_rect(box);
+  ccord_rect rc = ui_vm_mic_rect_for(ui, box);
   ui->vm.mic_rect = rc;
   bool hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, rc);
   // The glyph eases between the two greys (ui_fade), so it does not snap on the pointer.
@@ -380,10 +389,11 @@ void ui_vm_draw_bar(ccord_ui *ui, ccord_renderer *r, ccord_rect box)
   ui->vm.bar_rect = box;
   uis_surface(ui, r, box, COL(bg_input));
   // Both buttons are as wide as the longer label, so "Discard" is never cut short.
-  float by = box.y + (box.h - UIS_H_BTN_SM) * 0.5f;
+  float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  float by = box.y + (box.h - bh) * 0.5f;
   float bw = uis_label_width(ui, r, "Discard");
-  ccord_rect cancel = {box.x + UIS_SP_2, by, bw, UIS_H_BTN_SM};
-  ccord_rect send = {box.x + box.w - UIS_SP_2 - bw, by, bw, UIS_H_BTN_SM};
+  ccord_rect cancel = {box.x + UIS_SP_2, by, bw, bh};
+  ccord_rect send = {box.x + box.w - UIS_SP_2 - bw, by, bw, bh};
   ui->vm.cancel_rect = cancel;
   ui->vm.send_rect = send;
   bool rec = ui->vm.recording;
@@ -427,7 +437,7 @@ void ui_vm_draw_bar(ccord_ui *ui, ccord_renderer *r, ccord_rect box)
       v = wv[i * nw / nb];
     }
     float h = 2.0f + (float)v / 255.0f * (box.h - 16.0f);
-    ccord_draw_rrect(r, (ccord_rect){x0 + (float)i * 3.0f, by + UIS_H_BTN_SM * 0.5f - h * 0.5f, 2.0f, h}, 1.0f,
+    ccord_draw_rrect(r, (ccord_rect){x0 + (float)i * 3.0f, by + bh * 0.5f - h * 0.5f, 2.0f, h}, 1.0f,
                      rec ? COL(text_muted) : COL(brand));
   }
 }

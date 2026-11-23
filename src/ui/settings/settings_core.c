@@ -389,6 +389,7 @@ bool st_sidebar_key_step(ccord_ui *ui, int dir)
 sgeom st_geometry(const ccord_ui *ui)
 {
   sgeom g = {0};   // every page rect starts empty: the retired slot never gets one
+  g.mobile = ui->mobile_layout;
   // The settings page is full-window, like server and channel settings: no floating frame and no scrim.
   float pw = ui->win_w, ph = ui->win_h;
   g.panel = (ccord_rect){0.0f, 0.0f, pw, ph};
@@ -401,17 +402,18 @@ sgeom st_geometry(const ccord_ui *ui)
     float uh = ph - st - sb_in;
     if (uw < 200.0f) uw = pw;
     if (uh < 160.0f) uh = ph;
-    g.close = (ccord_rect){sl + uw - UIS_ICON_BTN - UIS_SP_3, st + UIS_SP_3, UIS_ICON_BTN, UIS_ICON_BTN};
+    float close_sz = UIS_MOB_ICON_BTN;
+    g.close = (ccord_rect){sl + uw - close_sz - UIS_SP_3, st + UIS_SP_3, close_sz, close_sz};
     if (ui->mobile_settings_detail) {
-      g.back = (ccord_rect){sl + UIS_SP_3, st + UIS_SP_3, 76.0f, UIS_ICON_BTN};
-      float top = st + UIS_SP_3 + UIS_ICON_BTN + UIS_SP_3;
+      g.back = (ccord_rect){sl + UIS_SP_3, st + UIS_SP_3, 90.0f, close_sz};
+      float top = st + UIS_SP_3 + close_sz + UIS_SP_3;
       g.content = (ccord_rect){sl + UIS_SP_4, top, uw - 2.0f * UIS_SP_4, uh - (top - st) - UIS_SP_4};
       return g;
     }
     // Level 1: full-width category & page list.
     g.sidebar = (ccord_rect){sl, st, uw, uh};
     float row_h = M(channel_item_height);
-    if (row_h < 42.0f) row_h = 42.0f;
+    if (row_h < 46.0f) row_h = 46.0f;
     float pitch = row_h + 2.0f;
     int order[SP_COUNT];
     int n = st_sidebar_order(order);
@@ -420,7 +422,7 @@ sgeom st_geometry(const ccord_ui *ui)
       if (k == 0 || st_k_pages[order[k]].category != st_k_pages[order[k - 1]].category) total += (k != 0 ? 12.0f : 0.0f) + 24.0f;
       total += pitch;
     }
-    float top = st + UIS_SP_3 + UIS_ICON_BTN + UIS_SP_2;
+    float top = st + UIS_SP_3 + close_sz + UIS_SP_2;
     float view_h = uh - (top - st) - UIS_SP_2;
     g.list = (ccord_rect){sl, top, uw, view_h};
     g.step = pitch;
@@ -582,15 +584,21 @@ size_t ui_settings_control_table(ui_settings_control_entry *out, size_t cap)
 
 // ---- shared row st_geometry (used by both drawing and hit-testing) ----
 
-float st_row_y(const sgeom *g, int row)
+float st_row_h(const sgeom *g)
 {
-  return g->content.y + 44.0f + (float)row * 54.0f;
+  return g->mobile ? 74.0f : 54.0f;
 }
 
-// The row a toggle sits in: UIS_H_BTN_SM tall, the switch is centred in it and flush right.
+float st_row_y(const sgeom *g, int row)
+{
+  return g->content.y + 44.0f + (float)row * st_row_h(g);
+}
+
+// The row a toggle sits in: UIS_H_BTN_SM (or UIS_MOB_H_BTN_SM on mobile) tall, switch flush right.
 ccord_rect st_row_rect(const sgeom *g, int row)
 {
-  return (ccord_rect){g->content.x, st_row_y(g, row), g->content.w, UIS_H_BTN_SM};
+  float h = g->mobile ? UIS_MOB_H_BTN_SM : UIS_H_BTN_SM;
+  return (ccord_rect){g->content.x, st_row_y(g, row), g->content.w, h};
 }
 
 ccord_rect st_toggle_rect(const sgeom *g, int row)
@@ -605,25 +613,38 @@ ccord_rect st_chips_rect(const sgeom *g, int row, int opt, int count)
   float cw = (g->content.w - gap * (float)(count - 1)) / (float)count;
   if (cw > 132.0f) cw = 132.0f;
   if (cw < 44.0f) cw = 44.0f;
-  return (ccord_rect){g->content.x + (float)opt * (cw + gap), st_row_y(g, row) + 20.0f, cw, UIS_H_CHIP};
+  float ch = g->mobile ? UIS_MOB_H_CHIP : UIS_H_CHIP;
+  float yoff = g->mobile ? 22.0f : 20.0f;
+  return (ccord_rect){g->content.x + (float)opt * (cw + gap), st_row_y(g, row) + yoff, cw, ch};
 }
 
 ccord_rect st_device_rect(const sgeom *g, int row)
 {
+  if (g->mobile) {
+    return (ccord_rect){g->content.x, st_row_y(g, row) + 20.0f, g->content.w, UIS_MOB_H_BTN};
+  }
   float w = g->content.w * 0.7f;
   if (w > 300.0f) w = 300.0f;
   return (ccord_rect){g->content.x, st_row_y(g, row) + 18.0f, w, UIS_H_BTN_SM};
 }
 
-// Volume row: [-] track [+] value. The buttons are UIS_H_BTN_SM squares; the track is UIS_SLIDER_H tall and
-// centred on the buttons.
+// Volume row: [-] track [+] value.
 ccord_rect st_vol_minus_rect(const sgeom *g, int row)
 {
+  if (g->mobile) {
+    return (ccord_rect){g->content.x, st_row_y(g, row) + 22.0f, UIS_MOB_H_BTN_SM, UIS_MOB_H_BTN_SM};
+  }
   return (ccord_rect){g->content.x, st_row_y(g, row) + 18.0f, UIS_H_BTN_SM, UIS_H_BTN_SM};
 }
 
 ccord_rect st_vol_track_rect(const sgeom *g, int row)
 {
+  if (g->mobile) {
+    float btn = UIS_MOB_H_BTN_SM;
+    float by = st_row_y(g, row) + 22.0f;
+    float tw = fmaxf(g->content.w - 2.0f * btn - 16.0f - 60.0f, 48.0f);
+    return (ccord_rect){g->content.x + btn + 8.0f, by + (btn - UIS_SLIDER_H) * 0.5f, tw, UIS_SLIDER_H};
+  }
   float tw = g->content.w < 330.0f ? fmaxf(g->content.w - 130.0f, 80.0f) : 200.0f;
   return (ccord_rect){g->content.x + 36.0f, st_row_y(g, row) + 28.0f, tw, UIS_SLIDER_H};
 }
@@ -631,6 +652,9 @@ ccord_rect st_vol_track_rect(const sgeom *g, int row)
 ccord_rect st_vol_plus_rect(const sgeom *g, int row)
 {
   ccord_rect tr = st_vol_track_rect(g, row);
+  if (g->mobile) {
+    return (ccord_rect){tr.x + tr.w + 8.0f, st_row_y(g, row) + 22.0f, UIS_MOB_H_BTN_SM, UIS_MOB_H_BTN_SM};
+  }
   return (ccord_rect){tr.x + tr.w + 8.0f, st_row_y(g, row) + 18.0f, UIS_H_BTN_SM, UIS_H_BTN_SM};
 }
 
@@ -645,15 +669,19 @@ static bool stream_wraps_row(const sgeom *g, int row)
 
 float st_stream_row_y(const sgeom *g, int row)
 {
+  float ch = g->mobile ? UIS_MOB_H_CHIP : UIS_H_CHIP;
   float extra = 0.0f;
   for (int r = 0; r < row; r++) {
-    if (stream_wraps_row(g, r)) extra += UIS_H_CHIP + 6.0f;
+    if (stream_wraps_row(g, r)) extra += ch + 6.0f;
   }
   return st_row_y(g, row) + extra;
 }
 
 ccord_rect st_stream_auto_pill_rect(const sgeom *g, int row)
 {
+  if (g->mobile) {
+    return (ccord_rect){g->content.x + g->content.w - 98.0f, st_stream_row_y(g, row) - 5.0f, 98.0f, 28.0f};
+  }
   return (ccord_rect){g->content.x + g->content.w - 92.0f, st_stream_row_y(g, row) - 4.0f, 92.0f, UIS_H_CHIP};
 }
 
@@ -661,6 +689,8 @@ ccord_rect st_stream_chip_rect(const sgeom *g, int row, int opt, int count)
 {
   if (count < 1) return (ccord_rect){0, 0, 0, 0};
   float ry = st_stream_row_y(g, row);
+  float ch = g->mobile ? UIS_MOB_H_CHIP : UIS_H_CHIP;
+  float yoff = g->mobile ? 24.0f : 20.0f;
   if (stream_wraps_row(g, row)) {
     int per_row = 3;
     int sub_row = opt / per_row;
@@ -670,23 +700,29 @@ ccord_rect st_stream_chip_rect(const sgeom *g, int row, int opt, int count)
     if (cw > 132.0f) cw = 132.0f;
     if (cw < 44.0f) cw = 44.0f;
     return (ccord_rect){g->content.x + (float)col * (cw + gap),
-                        ry + 20.0f + (float)sub_row * (UIS_H_CHIP + 6.0f), cw, UIS_H_CHIP};
+                        ry + yoff + (float)sub_row * (ch + 6.0f), cw, ch};
   }
   float gap = g->content.w < 380.0f ? 6.0f : 8.0f;
   float cw = (g->content.w - gap * (float)(count - 1)) / (float)count;
   if (cw > 132.0f) cw = 132.0f;
   if (cw < 44.0f) cw = 44.0f;
-  return (ccord_rect){g->content.x + (float)opt * (cw + gap), ry + 20.0f, cw, UIS_H_CHIP};
+  return (ccord_rect){g->content.x + (float)opt * (cw + gap), ry + yoff, cw, ch};
 }
 
 // Keybind box (click it, then press the chord) and the "Automatic" pill at the end of a streaming chip row.
 ccord_rect st_keybind_rect(const sgeom *g, int row)
 {
+  if (g->mobile) {
+    return (ccord_rect){g->content.x, st_row_y(g, row) + 20.0f, fminf(g->content.w, 200.0f), UIS_MOB_H_BTN};
+  }
   return (ccord_rect){g->content.x, st_row_y(g, row) + 18.0f, 168.0f, UIS_H_BTN_SM};
 }
 
 ccord_rect st_auto_pill_rect(const sgeom *g, int row)
 {
+  if (g->mobile) {
+    return (ccord_rect){g->content.x + g->content.w - 98.0f, st_row_y(g, row) - 5.0f, 98.0f, 28.0f};
+  }
   return (ccord_rect){g->content.x + g->content.w - 92.0f, st_row_y(g, row) - 4.0f, 92.0f, UIS_H_CHIP};
 }
 
@@ -698,9 +734,14 @@ ccord_rect st_extensions_toggle_rect(const sgeom *g)
 float st_account_web_y(const ccord_ui *ui, const sgeom *g)
 {
   size_t shown = ui ? (ui->saved_account_count < SAVED_ACCOUNT_ROWS ? ui->saved_account_count : SAVED_ACCOUNT_ROWS) : 0;
-  float min_y = g->content.y + 372.0f + (float)(shown > 0 ? shown : 1u) * 40.0f + 32.0f;
+  float base = g->mobile ? (g->content.y + 440.0f) : (g->content.y + 372.0f);
+  float step = g->mobile ? 48.0f : 40.0f;
+  float min_y = base + (float)(shown > 0 ? shown : 1u) * step + 32.0f;
   if (ui && ui->saved_account_count > SAVED_ACCOUNT_ROWS) min_y += 22.0f;
-  float bottom_y = g->content.y + g->content.h - (g->content.w < 380.0f ? 122.0f : 80.0f);
+  float bh = g->mobile ? UIS_MOB_H_BTN : UIS_H_BTN;
+  float bot_pad = g->mobile ? (g->content.w < 380.0f ? (2.0f * bh + 22.0f) : (bh + 18.0f))
+                            : (g->content.w < 380.0f ? 122.0f : 80.0f);
+  float bottom_y = g->content.y + g->content.h - bot_pad;
   return bottom_y > min_y ? bottom_y : min_y;
 }
 
@@ -709,6 +750,7 @@ ccord_rect st_account_web_btn_rect(const ccord_ui *ui, const sgeom *g, int idx)
   ccord_rect cached = {0};
   if (st_account_cached_web_btn(ui, idx, &cached)) return cached;
   float by = st_account_web_y(ui, g);
+  float bh = g->mobile ? UIS_MOB_H_BTN : UIS_H_BTN;
   if (g->content.w < 380.0f) {
     float gap = 6.0f;
     int row = idx < 3 ? 0 : 1;
@@ -716,18 +758,20 @@ ccord_rect st_account_web_btn_rect(const ccord_ui *ui, const sgeom *g, int idx)
     int cols = row == 0 ? 3 : 2;
     float bw = floorf((g->content.w - (float)(cols - 1) * gap) / (float)cols);
     if (bw < 60.0f) bw = 60.0f;
-    return (ccord_rect){g->content.x + (float)col * (bw + gap), by + (float)row * (UIS_H_BTN + 6.0f), bw, UIS_H_BTN};
+    return (ccord_rect){g->content.x + (float)col * (bw + gap), by + (float)row * (bh + 6.0f), bw, bh};
   }
   float gap = 8.0f;
   float bw = (g->content.w - 4.0f * gap) / 5.0f;
   if (bw < 60.0f) bw = 60.0f;
-  return (ccord_rect){g->content.x + (float)idx * (bw + gap), by, bw, UIS_H_BTN};
+  return (ccord_rect){g->content.x + (float)idx * (bw + gap), by, bw, bh};
 }
 
 ccord_rect st_account_email_box_rect(const sgeom *g)
 {
+  float off = g->mobile ? 32.0f : 0.0f;
+  float ih = g->mobile ? 42.0f : UIS_H_INPUT;
   float w = (g->content.w - 8.0f) * 0.52f;
-  return (ccord_rect){g->content.x, g->content.y + 114.0f, w, UIS_H_INPUT};
+  return (ccord_rect){g->content.x, g->content.y + 114.0f + off, w, ih};
 }
 
 ccord_rect st_account_password_box_rect(const sgeom *g)
@@ -735,23 +779,31 @@ ccord_rect st_account_password_box_rect(const sgeom *g)
   ccord_rect em = st_account_email_box_rect(g);
   float x = em.x + em.w + 8.0f;
   float w = g->content.x + g->content.w - x;
-  return (ccord_rect){x, g->content.y + 114.0f, w, UIS_H_INPUT};
+  return (ccord_rect){x, em.y, w, em.h};
 }
 
 ccord_rect st_account_login_btn_rect(const sgeom *g)
 {
+  if (g->mobile) {
+    return (ccord_rect){g->content.x, g->content.y + 202.0f, fminf(g->content.w, 200.0f), UIS_MOB_H_BTN};
+  }
   return (ccord_rect){g->content.x, g->content.y + 168.0f, 180.0f, UIS_H_BTN};
 }
 
 ccord_rect st_account_token_box_rect(const sgeom *g)
 {
+  if (g->mobile) {
+    return (ccord_rect){g->content.x, g->content.y + 282.0f, g->content.w, 42.0f};
+  }
   return (ccord_rect){g->content.x, g->content.y + 236.0f, g->content.w, UIS_H_INPUT};
 }
 
 ccord_rect st_account_token_paste_rect(const sgeom *g)
 {
+  float y = g->mobile ? (g->content.y + 334.0f) : (g->content.y + 284.0f);
+  float bh = g->mobile ? UIS_MOB_H_BTN : UIS_H_BTN;
   float pw = g->content.w < 320.0f ? floorf((g->content.w - 12.0f) * 0.22f) : 68.0f;
-  return (ccord_rect){g->content.x, g->content.y + 284.0f, pw, UIS_H_BTN};
+  return (ccord_rect){g->content.x, y, pw, bh};
 }
 
 ccord_rect st_account_token_save_rect(const sgeom *g)
@@ -759,7 +811,7 @@ ccord_rect st_account_token_save_rect(const sgeom *g)
   ccord_rect p = st_account_token_paste_rect(g);
   float gap = g->content.w < 320.0f ? 6.0f : 8.0f;
   float sw = g->content.w < 320.0f ? floorf((g->content.w - 12.0f) * 0.46f) : 136.0f;
-  return (ccord_rect){p.x + p.w + gap, g->content.y + 284.0f, sw, UIS_H_BTN};
+  return (ccord_rect){p.x + p.w + gap, p.y, sw, p.h};
 }
 
 ccord_rect st_account_token_clear_rect(const sgeom *g)
@@ -767,36 +819,45 @@ ccord_rect st_account_token_clear_rect(const sgeom *g)
   ccord_rect s = st_account_token_save_rect(g);
   float gap = g->content.w < 320.0f ? 6.0f : 8.0f;
   float cw = g->content.w < 320.0f ? fmaxf(g->content.x + g->content.w - (s.x + s.w + gap), 60.0f) : 96.0f;
-  return (ccord_rect){s.x + s.w + gap, g->content.y + 284.0f, cw, UIS_H_BTN};
+  return (ccord_rect){s.x + s.w + gap, s.y, cw, s.h};
 }
 
 // QuickCSS snippet editor (Appearance, row 6).
 ccord_rect st_quickcss_box_rect(const sgeom *g)
 {
+  if (g->mobile) {
+    return (ccord_rect){g->content.x, st_row_y(g, 6) + 20.0f, g->content.w, 42.0f};
+  }
   return (ccord_rect){g->content.x, st_row_y(g, 6) + 18.0f, g->content.w, UIS_H_INPUT};
 }
 
 // Multi-account switcher (My Account): roster rows between the token buttons and the web links.
 ccord_rect st_account_add_btn_rect(const sgeom *g)
 {
+  if (g->mobile) {
+    return (ccord_rect){g->content.x + g->content.w - 136.0f, g->content.y + 390.0f, 136.0f, UIS_MOB_H_BTN};
+  }
   return (ccord_rect){g->content.x + g->content.w - 136.0f, g->content.y + 330.0f, 136.0f, UIS_H_BTN};
 }
 
 ccord_rect st_saved_account_row_rect(const sgeom *g, int i)
 {
+  if (g->mobile) {
+    return (ccord_rect){g->content.x, g->content.y + 440.0f + (float)i * 48.0f, g->content.w, UIS_MOB_H_BTN};
+  }
   return (ccord_rect){g->content.x, g->content.y + 372.0f + (float)i * 40.0f, g->content.w, UIS_H_BTN};
 }
 
 ccord_rect st_saved_account_switch_rect(const sgeom *g, int i)
 {
   ccord_rect row = st_saved_account_row_rect(g, i);
-  return (ccord_rect){row.x + row.w - 156.0f, row.y, 72.0f, UIS_H_BTN};
+  return (ccord_rect){row.x + row.w - 156.0f, row.y, 72.0f, row.h};
 }
 
 ccord_rect st_saved_account_remove_rect(const sgeom *g, int i)
 {
   ccord_rect row = st_saved_account_row_rect(g, i);
-  return (ccord_rect){row.x + row.w - 80.0f, row.y, 72.0f, UIS_H_BTN};
+  return (ccord_rect){row.x + row.w - 80.0f, row.y, 72.0f, row.h};
 }
 
 bool ui_is_login_screen(const ccord_ui *ui)
@@ -1049,14 +1110,14 @@ int st_clamp_volume(const ccord_rect *track, float x)
 // through a content rect shifted by -st_s_voice_scroll; the scrollbar itself stays fixed.
 #define VOICE_SCROLL_STEP 108.0f
 
-static float voice_content_height(void)
+static float voice_content_height(const sgeom *g)
 {
-  return 44.0f + (float)VOICE_ROWS * 54.0f + VOICE_DIAG_H + 8.0f;
+  return 44.0f + (float)VOICE_ROWS * st_row_h(g) + VOICE_DIAG_H + (g->mobile ? 24.0f : 8.0f);
 }
 
 float st_voice_max_scroll(const sgeom *g)
 {
-  float m = voice_content_height() - g->content.h;
+  float m = voice_content_height(g) - g->content.h;
   return m > 0.0f ? m : 0.0f;
 }
 
@@ -1072,6 +1133,7 @@ float st_page_max_scroll(const ccord_ui *ui, const sgeom *g)
 {
   if (!ui || !g) return 0.0f;
   float total = 0.0f;
+  float rh = st_row_h(g);
   switch (ui->settings_page) {
     case SP_ACCOUNT: {
       if (ui->account_view.signed_in) {
@@ -1080,20 +1142,43 @@ float st_page_max_scroll(const ccord_ui *ui, const sgeom *g)
         return m > 0.0f ? m : 0.0f;
       }
       float web_y = st_account_web_y(ui, g);
-      float extra_web = g->content.w < 380.0f ? (UIS_H_BTN + 6.0f) : 0.0f;
-      total = (web_y - g->content.y) + UIS_H_BTN + extra_web + 52.0f;
+      float bh = g->mobile ? UIS_MOB_H_BTN : UIS_H_BTN;
+      float extra_web = g->content.w < 380.0f ? (bh + 6.0f) : 0.0f;
+      total = (web_y - g->content.y) + bh + extra_web + (g->mobile ? 58.0f : 52.0f);
       break;
     }
     case SP_APPEARANCE:
-      total = 44.0f + 8.0f * 54.0f + 16.0f;
+      total = 44.0f + 8.0f * rh + (g->mobile ? 24.0f : 16.0f);
       break;
     case SP_STREAMING:
       total = (st_stream_row_y(g, 5) - g->content.y) + 40.0f;
       break;
+    case SP_TEXT_IMAGES:
+      total = 44.0f + 3.5f * rh + 24.0f;
+      break;
+    case SP_NOTIFICATIONS:
+      if (ui->settings_sounds_open) return 0.0f;
+      total = 44.0f + 6.0f * rh + 24.0f;
+      break;
+    case SP_ACCESSIBILITY:
+      total = 44.0f + 8.0f * rh + 36.0f;
+      break;
+    case SP_STREAMER:
+      total = 44.0f + 7.0f * rh + 36.0f;
+      break;
+    case SP_LANGUAGE:
+      total = 44.0f + 3.5f * rh + 48.0f;
+      break;
+    case SP_ADVANCED:
+      total = 44.0f + 4.0f * rh + 24.0f;
+      break;
+    case SP_CCORD:
+      total = 44.0f + 6.0f * rh + 64.0f;
+      break;
     case SP_KEYBINDS: {
       size_t npk = ui->d.contrib ? ccord_contrib_keybind_count(ui->d.contrib) : 0;
       if (npk > 8u) npk = 8u;
-      total = 44.0f + (float)(6u + npk) * 54.0f + 16.0f;
+      total = 44.0f + (float)(6u + npk) * rh + (g->mobile ? 24.0f : 16.0f);
       break;
     }
     case SP_PLUGINS: {
@@ -1124,7 +1209,7 @@ ccord_rect st_voice_scroll_down_rect(const sgeom *g)
 float st_voice_scroll_thumb_h(const sgeom *g)
 {
   ccord_rect t = st_voice_scroll_track(g);
-  float h = t.h * (g->content.h / voice_content_height());
+  float h = t.h * (g->content.h / voice_content_height(g));
   return h < 24.0f ? 24.0f : h;
 }
 

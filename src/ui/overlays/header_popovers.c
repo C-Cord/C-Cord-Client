@@ -104,10 +104,13 @@ void ui_draw_pins_popover(ccord_ui *ui, ccord_renderer *r)
 
   if (ui->dbg_pins_has_more) {
     bool loading = ui->d.session && ccord_session_pins_loading(ui->d.session, ch);
-    ccord_rect lm = {box.x + UIS_SP_2, box.y + box.h - 34.0f, box.w - 2.0f * UIS_SP_2, UIS_H_BTN_SM};
+    float lm_h = uis_btn_h_for(ui, UIS_H_BTN_SM);
+    ccord_rect lm = {box.x + UIS_SP_2, box.y + box.h - (ui->mobile_layout ? 44.0f : 34.0f),
+                     box.w - 2.0f * UIS_SP_2, lm_h};
     ui->pins_load_more_rect = lm;
     bool hv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, lm);
-    uis_button(ui, r, lm, loading ? "Loading..." : "Load more", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+    uis_button(ui, r, lm, loading ? "Loading..." : "Load more", UIS_BTN_SECONDARY,
+               ui->mobile_layout ? UIS_BTN_S_MD : UIS_BTN_S_SM,
                (uis_state){.hover = hv, .disabled = loading}, "pinmore", 0);
   }
 }
@@ -138,28 +141,40 @@ void ui_draw_reactions_popover(ccord_ui *ui, ccord_renderer *r)
   float side_w = box.w < 380.0f ? 96.0f : 126.0f;
   ccord_draw_rect(r, (ccord_rect){box.x + side_w, box.y, 1.0f, box.h}, COL(divider));
   ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
-  ccord_text_draw(r, "Reactions", 9, box.x + 12.0f, box.y + 10.0f, &hs, 0.0f);
+  ccord_text_draw(r, "Reactions", 9, box.x + 12.0f, box.y + (ui->mobile_layout ? 13.0f : 10.0f), &hs, 0.0f);
 
-  ccord_rect close_r = {box.x + box.w - 34.0f, box.y + 8.0f, 26.0f, 24.0f};
+  float rcsz = uis_icon_btn_for(ui);
+  ccord_rect close_r = ui->mobile_layout
+                         ? (ccord_rect){box.x + box.w - rcsz - 8.0f, box.y + 6.0f, rcsz, rcsz}
+                         : (ccord_rect){box.x + box.w - 34.0f, box.y + 8.0f, 26.0f, 24.0f};
   ui->reactions_close_rect = close_r;
   ccord_draw_rrect(r, close_r, 4.0f, COL(bg_tertiary));
-  ccord_text_draw(r, "X", 1, close_r.x + 9.0f, close_r.y + 4.0f, &hs, 0.0f);
+  if (ui->mobile_layout) {
+    ccord_vec2 xt = ccord_text_measure(r, "X", 1, &hs, 0.0f);
+    ccord_text_draw(r, "X", 1, close_r.x + (close_r.w - xt.x) * 0.5f,
+                    close_r.y + (close_r.h - xt.y) * 0.5f, &hs, 0.0f);
+  } else {
+    ccord_text_draw(r, "X", 1, close_r.x + 9.0f, close_r.y + 4.0f, &hs, 0.0f);
+  }
 
   // Emoji tab column: count kinds, clamp scroll, keep the active tab in view, then clip + cull.
-  ccord_rect tab_view = {box.x, box.y + 38.0f, side_w, box.h - 46.0f};
+  ccord_rect tab_view = {box.x, box.y + (ui->mobile_layout ? 48.0f : 38.0f),
+                         side_w, box.h - (ui->mobile_layout ? 56.0f : 46.0f)};
   size_t ntabs = 0;
   for (size_t i = 0; i < m->reaction_kind_count && ntabs < 16u; i++) {
     const ccord_reaction *rx = &m->reactions[i];
     if (!rx->emoji || rx->count == 0) continue;
     ntabs++;
   }
-  float tab_content_h = (float)ntabs * 32.0f;
+  float tab_row_h = ui->mobile_layout ? 38.0f : 28.0f;
+  float tab_step = ui->mobile_layout ? 42.0f : 32.0f;
+  float tab_content_h = (float)ntabs * tab_step;
   float tab_max_s = maxf(tab_content_h - tab_view.h, 0.0f);
   ui->reactions_tab_max = tab_max_s;
   ui->reactions_tab_scroll = clampf(ui->reactions_tab_scroll, 0.0f, tab_max_s);
   if (ui->reactions_tab < ntabs) {
-    float sel_top = (float)ui->reactions_tab * 32.0f;
-    float sel_bot = sel_top + 28.0f;
+    float sel_top = (float)ui->reactions_tab * tab_step;
+    float sel_bot = sel_top + tab_row_h;
     if (sel_top < ui->reactions_tab_scroll) ui->reactions_tab_scroll = sel_top;
     else if (sel_bot > ui->reactions_tab_scroll + tab_view.h)
       ui->reactions_tab_scroll = clampf(sel_bot - tab_view.h, 0.0f, tab_max_s);
@@ -169,10 +184,10 @@ void ui_draw_reactions_popover(ccord_ui *ui, ccord_renderer *r)
   for (size_t i = 0; i < m->reaction_kind_count && tab_idx < 16u; i++) {
     const ccord_reaction *rx = &m->reactions[i];
     if (!rx->emoji || rx->count == 0) continue;
-    float ty = tab_view.y + (float)tab_idx * 32.0f - ui->reactions_tab_scroll;
-    ccord_rect tr = {box.x + 8.0f, ty, side_w - 16.0f, 28.0f};
+    float ty = tab_view.y + (float)tab_idx * tab_step - ui->reactions_tab_scroll;
+    ccord_rect tr = {box.x + 8.0f, ty, side_w - 16.0f, tab_row_h};
     snprintf(ui->reactions_tab_emojis[tab_idx], sizeof ui->reactions_tab_emojis[tab_idx], "%.95s", rx->emoji);
-    if (ty + 28.0f < tab_view.y || ty > tab_view.y + tab_view.h) {
+    if (ty + tab_row_h < tab_view.y || ty > tab_view.y + tab_view.h) {
       ui->reactions_tab_rects[tab_idx] = (ccord_rect){0, 0, 0, 0};
       tab_idx++;
       continue;
@@ -188,7 +203,7 @@ void ui_draw_reactions_popover(ccord_ui *ui, ccord_renderer *r)
     }
     ccord_text_style ts = ui_style(ui, active ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR, M(font_size_small) - 1.0f,
                                    active ? COL(text_header) : COL(text_secondary));
-    ccord_text_draw_ellipsis(r, tlbl, strlen(tlbl), tr.x + 8.0f, tr.y + 6.0f, tr.w - 14.0f, &ts);
+    ccord_text_draw_ellipsis(r, tlbl, strlen(tlbl), tr.x + 8.0f, tr.y + (ui->mobile_layout ? 10.0f : 6.0f), tr.w - 14.0f, &ts);
     tab_idx++;
   }
   ccord_pop_clip(r);
@@ -431,11 +446,13 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
   ccord_text_draw(r, "Inbox", 5, box.x + 14.0f, box.y + 12.0f, &hs, 0.0f);
 
   bool compact_hdr = box.w < 390.0f;
+  float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  uis_btn_size bsz = ui->mobile_layout ? UIS_BTN_S_MD : UIS_BTN_S_SM;
   static const char *const k_tabs[2] = {"Unreads", "Mentions"};
   float tx = compact_hdr ? (box.x + 12.0f) : (box.x + 76.0f);
-  float ty = compact_hdr ? (box.y + 40.0f) : (box.y + 8.0f);
+  float ty = compact_hdr ? (box.y + bh + 12.0f) : (box.y + 8.0f);
   for (int t = 0; t < 2; t++) {
-    ccord_rect tr = {tx, ty, uis_label_width(ui, r, k_tabs[t]), UIS_H_BTN_SM};
+    ccord_rect tr = {tx, ty, uis_label_width(ui, r, k_tabs[t]), bh};
     ui->inbox_tab_rects[t] = tr;
     bool thv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, tr);
     uis_tab(ui, r, tr, k_tabs[t], (uis_state){.hover = thv, .selected = ui->inbox_tab == t}, "inboxtab", (uint64_t)t);
@@ -454,20 +471,20 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
   }
   const char *malbl = "Mark All Read";
   float maw = uis_label_width(ui, r, malbl);
-  ccord_rect mar = {box.x + box.w - maw - 12.0f, box.y + 8.0f, maw, UIS_H_BTN_SM};
+  ccord_rect mar = {box.x + box.w - maw - 12.0f, box.y + 8.0f, maw, bh};
   ui->inbox_mark_all_rect = mar;
   bool mahv = has_ackable && ui->mouse_in && ui_in_rect(ui->mx, ui->my, mar);
-  uis_button(ui, r, mar, malbl, UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){.hover = mahv, .disabled = !has_ackable},
+  uis_button(ui, r, mar, malbl, UIS_BTN_SECONDARY, bsz, (uis_state){.hover = mahv, .disabled = !has_ackable},
              "inboxall", 0);
 
-  float div_y = compact_hdr ? (box.y + 74.0f) : (box.y + 44.0f);
+  float div_y = compact_hdr ? (ty + bh + 6.0f) : (box.y + bh + 16.0f);
   uis_divider(ui, r, box.x, div_y, box.w);
 
   float list_x = box.x + 10.0f;
   float list_y = div_y + 8.0f;
   float list_w = box.w - 20.0f;
   float list_h = maxf((box.y + box.h) - list_y - 8.0f, 40.0f);
-  float card_h = 62.0f, gap = 6.0f;
+  float card_h = ui->mobile_layout ? 72.0f : 62.0f, gap = 6.0f;
   ui->inbox_content_h = nentries > 0 ? (float)nentries * (card_h + gap) - gap : 0.0f;
   float max_s = ui->inbox_content_h > list_h ? ui->inbox_content_h - list_h : 0.0f;
   ui->inbox_max = max_s;
@@ -491,7 +508,7 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
       ccord_rect ack_r = {0};
       bool can_ack = entries[i].unread_count > 0 || entries[i].mention_count > 0;
       if (can_ack) {
-        ack_r = (ccord_rect){card.x + card.w - 84.0f, card.y + 4.0f, 76.0f, UIS_H_BTN_SM};
+        ack_r = (ccord_rect){card.x + card.w - 84.0f, card.y + 4.0f, 76.0f, bh};
       }
       // Only fully visible cards are clickable; clipped ones must be scrolled into view first.
       if (cy >= list_y && cy + card_h <= list_y + list_h && ui->ninbox_hits < UI_INBOX_HIT_MAX) {
@@ -535,10 +552,10 @@ void ui_draw_inbox_popover(ccord_ui *ui, ccord_renderer *r)
         ccord_text_draw_ellipsis(r, entries[i].title, strlen(entries[i].title), card.x + 10.0f, card.y + 8.0f, avail_t, &cts);
       }
       ccord_text_draw_ellipsis(r, entries[i].subtitle, strlen(entries[i].subtitle),
-                               card.x + 10.0f, card.y + 34.0f, card.w - 20.0f, &css);
+                               card.x + 10.0f, card.y + (ui->mobile_layout ? 44.0f : 34.0f), card.w - 20.0f, &css);
 
       if (can_ack) {
-        uis_button(ui, r, ack_r, "Mark Read", UIS_BTN_SECONDARY, UIS_BTN_S_SM, (uis_state){.hover = ahv}, "inboxack", (uint64_t)i);
+        uis_button(ui, r, ack_r, "Mark Read", UIS_BTN_SECONDARY, bsz, (uis_state){.hover = ahv}, "inboxack", (uint64_t)i);
       }
     }
   }
@@ -558,7 +575,8 @@ void ui_draw_shortcuts_modal(ccord_ui *ui, ccord_renderer *r)
   ui->shortcuts_modal_rect = box;
   uis_modal_frame(ui, r, box);
 
-  ccord_rect close_r = {box.x + box.w - UIS_SP_1 - UIS_ICON_BTN - UIS_SP_2, box.y + 12.0f, UIS_ICON_BTN, UIS_ICON_BTN};
+  float csz = uis_icon_btn_for(ui);
+  ccord_rect close_r = {box.x + box.w - UIS_SP_1 - csz - UIS_SP_2, box.y + 12.0f, csz, csz};
   ui->shortcuts_close_rect = close_r;
   bool chv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, close_r);
   ccord_color cg = uis_icon_button(ui, r, close_r, (uis_state){.hover = chv}, "scclose", 0);

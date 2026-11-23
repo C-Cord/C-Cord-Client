@@ -17,6 +17,7 @@
 #include "plugin_panel_internal.h"
 #include "plugin_v3_internal.h"
 #include "settings_internal.h"
+#include "settings_m6_devices.h"
 #include "settings_m6_prefs.h"
 #include "status_card.h"
 #include "ccord_test.h"
@@ -1971,6 +1972,153 @@ static void test_mobile_progressive_image_viewer(void)
   CT_CHECK(!F.ui->lightbox_open);
 }
 
+static void test_mobile_zoom_and_touch_targets(void)
+{
+  ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+
+  ccord_error err = {0};
+  const ccord_guild *g0 = ccord_store_guild_at(F.store, 0);
+  CT_CHECK(g0 != nullptr);
+  if (!g0) return;
+  F.ui->dm_friends_view = false;
+  F.ui->dm_requests_view = false;
+  CT_CHECK(ccord_session_select_guild(F.session, g0->id, &err) == CCORD_OK);
+  step_frames(6, 25);
+
+  // Header & chrome touch targets enlarged on mobile.
+  CT_CHECK(ui_drawer_btn_rect(F.ui).h >= 38.0f);
+  CT_CHECK(ui_search_rect(F.ui).h >= 36.0f);
+  CT_CHECK(ui_pin_rect(F.ui).h >= 36.0f);
+  CT_CHECK(ui_inbox_rect(F.ui).h >= 36.0f);
+  CT_CHECK(ui_saved_messages_rect(F.ui).h >= 36.0f);
+  CT_CHECK(ui_members_btn_rect(F.ui).h >= 36.0f);
+  CT_CHECK(ui_gear_rect(F.ui).h >= 36.0f);
+  CT_CHECK(ui_user_btn_rect(F.ui, 0).h >= 36.0f);
+
+  // Composer targets (+ attach, Emoji button, Mic/Send) enlarged and responsive.
+  ccord_ui_debug dbg = {0};
+  ccord_ui_get_debug(F.ui, &dbg);
+  CT_CHECK(dbg.composer_attach_btn.h >= 38.0f && dbg.composer_attach_btn.w >= 38.0f);
+  ccord_rect cbox = ui_composer_box(F.ui);
+  ccord_rect mic = ui_vm_mic_rect_for(F.ui, cbox);
+  CT_CHECK(mic.h >= 36.0f && mic.w >= 36.0f);
+  touch_tap(mic.x - 24.0f, cbox.y + cbox.h * 0.5f);
+  step_frames(4, 25);
+  ccord_ui_get_debug(F.ui, &dbg);
+  CT_CHECK(dbg.emoji_picker_open);
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+  CT_CHECK(!F.ui->emoji_picker_open);
+
+  CT_CHECK(ccord_text_edit_insert(&F.ui->edit, "hi", 2, &err) == CCORD_OK);
+  step_frames(2, 25);
+  CT_CHECK(F.ui->mobile_send_btn_rect.h >= 36.0f && F.ui->mobile_send_btn_rect.w >= 36.0f);
+  ccord_text_edit_clear(&F.ui->edit);
+  step_frames(2, 25);
+
+  // Friends tabs and Add Friend button enlarged.
+  CT_CHECK(ccord_session_select_guild(F.session, CCORD_DM_GUILD_ID, &err) == CCORD_OK);
+  F.ui->dm_friends_view = true;
+  step_frames(4, 25);
+  for (int i = 0; i < 4; i++) CT_CHECK(F.ui->dm_friends_tab_rects[i].h >= 36.0f);
+  CT_CHECK(F.ui->add_friend_btn_rect.h >= 36.0f);
+  F.ui->dm_friends_view = false;
+  CT_CHECK(ccord_session_select_guild(F.session, g0->id, &err) == CCORD_OK);
+  step_frames(4, 25);
+
+  // Inbox popover controls & Profile modal touch targets enlarged.
+  F.ui->inbox_open = true;
+  step_frames(4, 25);
+  CT_CHECK(F.ui->inbox_tab_rects[0].h >= 36.0f && F.ui->inbox_tab_rects[1].h >= 36.0f);
+  if (F.ui->inbox_mark_all_rect.w > 0.0f) CT_CHECK(F.ui->inbox_mark_all_rect.h >= 36.0f);
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+
+  ui_open_user_profile_modal(F.ui, ccord_store_self_id(F.store), g0->id);
+  step_frames(4, 25);
+  ccord_ui_get_debug(F.ui, &dbg);
+  CT_CHECK(dbg.profile_modal_open);
+  CT_CHECK(dbg.profile_modal_close_btn.h >= 38.0f && dbg.profile_modal_close_btn.w >= 38.0f);
+  CT_CHECK(dbg.profile_modal_tab_rects[0].h >= 36.0f);
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(2, 25);
+
+  // Privacy toggles/chips & request button enlarged.
+  ui_open_settings(F.ui, true);
+  F.ui->settings_page = SP_PRIVACY;
+  F.ui->mobile_settings_detail = true;
+  step_frames(6, 25);
+  ccord_settings_m6_debug pd = {0};
+  ui_settings_m6_get_debug(F.ui, &pd);
+  CT_CHECK(pd.filter_chips[0].h >= 36.0f);
+  CT_CHECK(pd.harvest_data_btn.h >= 38.0f);
+
+  // Appearance Zoom controls enlarged + live zoom transitions keep all controls clickable & aligned.
+  F.ui->settings_page = SP_APPEARANCE;
+  F.ui->settings_zoom = 1.0f;
+  step_frames(6, 25);
+  ccord_settings_m6_prefs_debug m6d = {0};
+  ui_settings_m6_prefs_get_debug(F.ui, &m6d);
+  CT_CHECK(m6d.theme_chips[0].h >= 36.0f);
+  CT_CHECK(m6d.zoom_minus.h >= 36.0f);
+  CT_CHECK(m6d.zoom_plus.h >= 36.0f);
+  CT_CHECK(m6d.zoom_reset.h >= 36.0f);
+  CT_CHECK(rect_in_bounds(m6d.zoom_reset, 0.0f, 44.0f, 360.0f, 746.0f));
+  CT_CHECK(rects_disjoint(m6d.zoom_plus, m6d.zoom_reset));
+
+  // Zoom in via + button and push simulated zoomed viewport + safe insets.
+  touch_tap(m6d.zoom_plus.x + m6d.zoom_plus.w * 0.5f, m6d.zoom_plus.y + m6d.zoom_plus.h * 0.5f);
+  float z1 = F.ui->settings_zoom;
+  CT_CHECK(z1 > 1.0f);
+  ccord_ui_set_viewport(F.ui, 360.0f / z1, 780.0f / z1);
+  ccord_ui_set_safe_insets(F.ui, 44.0f / z1, 0.0f, 34.0f / z1, 0.0f);
+  step_frames(6, 25);
+  ui_settings_m6_prefs_get_debug(F.ui, &m6d);
+  CT_CHECK(rect_in_bounds(m6d.zoom_minus, 0.0f, 44.0f / z1, 360.0f / z1 + 0.5f, 746.0f / z1 + 0.5f));
+  CT_CHECK(rect_in_bounds(m6d.zoom_plus, 0.0f, 44.0f / z1, 360.0f / z1 + 0.5f, 746.0f / z1 + 0.5f));
+  CT_CHECK(rect_in_bounds(m6d.zoom_reset, 0.0f, 44.0f / z1, 360.0f / z1 + 0.5f, 746.0f / z1 + 0.5f));
+  CT_CHECK(rects_disjoint(m6d.zoom_plus, m6d.zoom_reset));
+
+  // Step down below 1.0x using - button twice, rescaling viewport after each tap.
+  touch_tap(m6d.zoom_minus.x + m6d.zoom_minus.w * 0.5f, m6d.zoom_minus.y + m6d.zoom_minus.h * 0.5f);
+  float z_mid = F.ui->settings_zoom;
+  ccord_ui_set_viewport(F.ui, 360.0f / z_mid, 780.0f / z_mid);
+  ccord_ui_set_safe_insets(F.ui, 44.0f / z_mid, 0.0f, 34.0f / z_mid, 0.0f);
+  step_frames(4, 25);
+  ui_settings_m6_prefs_get_debug(F.ui, &m6d);
+
+  touch_tap(m6d.zoom_minus.x + m6d.zoom_minus.w * 0.5f, m6d.zoom_minus.y + m6d.zoom_minus.h * 0.5f);
+  float z2 = F.ui->settings_zoom;
+  CT_CHECK(z2 < 1.0f);
+  ccord_ui_set_viewport(F.ui, 360.0f / z2, 780.0f / z2);
+  ccord_ui_set_safe_insets(F.ui, 44.0f / z2, 0.0f, 34.0f / z2, 0.0f);
+  step_frames(6, 25);
+  ui_settings_m6_prefs_get_debug(F.ui, &m6d);
+  CT_CHECK(rect_in_bounds(m6d.zoom_reset, 0.0f, 44.0f / z2, 360.0f / z2 + 0.5f, 746.0f / z2 + 0.5f));
+  CT_CHECK(rects_disjoint(m6d.zoom_plus, m6d.zoom_reset));
+
+  // Tap Reset and confirm zoom returns cleanly to 1.0x and chat drawer button remains responsive.
+  touch_tap(m6d.zoom_reset.x + m6d.zoom_reset.w * 0.5f, m6d.zoom_reset.y + m6d.zoom_reset.h * 0.5f);
+  CT_CHECK(fabsf(F.ui->settings_zoom - 1.0f) < 1e-3f);
+  ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ui_open_settings(F.ui, false);
+  step_frames(4, 25);
+
+  ccord_rect db = ui_drawer_btn_rect(F.ui);
+  touch_tap(db.x + db.w * 0.5f, db.y + db.h * 0.5f);
+  step_frames(10, 25);
+  CT_CHECK(ccord_ui_left_drawer_open(F.ui));
+  ccord_ui_set_left_drawer(F.ui, false);
+  step_frames(4, 25);
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -1995,6 +2143,7 @@ int main(void)
   test_mobile_plugin_v3_dialog_and_full_view();
   test_plugins_revamp_mobile();
   test_mobile_anim_pacing();
+  test_mobile_zoom_and_touch_targets();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");
 }

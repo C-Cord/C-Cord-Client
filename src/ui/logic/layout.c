@@ -104,13 +104,13 @@ void ccord_layout_compute_mobile(const ccord_theme_metrics *m, float win_w, floa
   float uh_full = maxf(win_h - st - sb, 0.0f);
   float uh_chat = maxf(win_h - st - bottom_chat, 0.0f);
 
-  float hh = clampf(maxf(m->header_height, 48.0f), 0.0f, uh_chat);
-  float up = clampf(maxf(m->user_panel_height, 56.0f), 0.0f, maxf(uh_full - hh, 0.0f));
+  float hh = clampf(maxf(m->header_height, 52.0f), 0.0f, uh_chat);
+  float up = clampf(maxf(m->user_panel_height, 60.0f), 0.0f, maxf(uh_full - hh, 0.0f));
 
   // Full-width chat column inside the safe area, lifting smoothly above the soft keyboard.
   out->chat_header = (ccord_layout_rect){sl, st, uw, hh};
   float max_comp = minf(m->composer_max_height, maxf(uh_chat * 0.36f, m->composer_min_height));
-  float box_h = clampf(composer_height, maxf(m->composer_min_height, 44.0f), maxf(max_comp, 44.0f));
+  float box_h = clampf(composer_height, maxf(m->composer_min_height, 48.0f), maxf(max_comp, 48.0f));
   float comp_margin = ime > sb ? 8.0f : minf(m->composer_margin_bottom, 12.0f);
   float strip = clampf(box_h + comp_margin, 0.0f, maxf(uh_chat - hh, 0.0f));
   out->composer = (ccord_layout_rect){sl, st + uh_chat - strip, uw, strip};

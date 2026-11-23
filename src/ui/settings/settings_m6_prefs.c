@@ -24,72 +24,117 @@
 #define M(name) (ui->theme->m.name)
 #define COL(name) (ui->theme->c.name)
 
-// ---- geometry (matches the settings.c 54 px row grid so the legacy debug rects stay valid) ----
+// ---- geometry (matches the settings.c row grid so the legacy debug rects stay valid) ----
 #define P_TITLE_H 44.0f
 #define P_ROW_H 54.0f
 
-static float p_row_y(ccord_rect c, int row)
+static float p_row_h(const ccord_ui *ui)
 {
-  return c.y + P_TITLE_H + (float)row * P_ROW_H;
+  return (ui && ui->mobile_layout) ? 74.0f : P_ROW_H;
 }
 
-// The row a toggle sits in: UIS_H_BTN_SM tall; the switch is centred in it and flush right.
-static ccord_rect p_row_rect(ccord_rect c, int row)
+static float p_row_y(const ccord_ui *ui, ccord_rect c, int row)
 {
-  return (ccord_rect){c.x, p_row_y(c, row), c.w, UIS_H_BTN_SM};
+  return c.y + P_TITLE_H + (float)row * p_row_h(ui);
 }
 
-static ccord_rect p_toggle(ccord_rect c, int row)
+// The row a toggle sits in: UIS_H_BTN_SM (or UIS_MOB_H_BTN_SM on mobile) tall; switch flush right.
+static ccord_rect p_row_rect(const ccord_ui *ui, ccord_rect c, int row)
 {
-  return uis_toggle_rect(p_row_rect(c, row));
+  return (ccord_rect){c.x, p_row_y(ui, c, row), c.w, uis_btn_h_for(ui, UIS_H_BTN_SM)};
 }
 
-static ccord_rect p_chip(ccord_rect c, int row, int opt, int count)
+static ccord_rect p_toggle(const ccord_ui *ui, ccord_rect c, int row)
+{
+  return uis_toggle_rect(p_row_rect(ui, c, row));
+}
+
+static ccord_rect p_toggle_hit(const ccord_ui *ui, ccord_rect c, int row)
+{
+  ccord_rect tr = p_toggle(ui, c, row);
+  return (ui && ui->mobile_layout) ? uis_hit_padded(tr, 56.0f, UIS_MOB_TOUCH_H) : tr;
+}
+
+static ccord_rect p_chip(const ccord_ui *ui, ccord_rect c, int row, int opt, int count)
 {
   if (count < 1) return (ccord_rect){0, 0, 0, 0};
   float gap = 8.0f;
   float cw = (c.w - gap * (float)(count - 1)) / (float)count;
   if (cw > 132.0f) cw = 132.0f;
   if (cw < 44.0f) cw = 44.0f;
-  return (ccord_rect){c.x + (float)opt * (cw + gap), p_row_y(c, row) + 20.0f, cw, UIS_H_CHIP};
+  float ch = uis_chip_h_for(ui, UIS_H_CHIP);
+  float yoff = (ui && ui->mobile_layout) ? 22.0f : 20.0f;
+  return (ccord_rect){c.x + (float)opt * (cw + gap), p_row_y(ui, c, row) + yoff, cw, ch};
 }
 
-static ccord_rect p_minus(ccord_rect c, int row)
+static bool p_slider_narrow(const ccord_ui *ui, ccord_rect c)
 {
-  return (ccord_rect){c.x, p_row_y(c, row) + 18.0f, UIS_H_BTN_SM, UIS_H_BTN_SM};
+  return (ui && ui->mobile_layout) || c.w < 340.0f;
 }
 
-static ccord_rect p_track(ccord_rect c, int row)
+static ccord_rect p_minus(const ccord_ui *ui, ccord_rect c, int row)
 {
+  float sz = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  float yoff = (ui && ui->mobile_layout) ? 34.0f : (p_slider_narrow(ui, c) ? 30.0f : 18.0f);
+  return (ccord_rect){c.x, p_row_y(ui, c, row) + yoff, sz, sz};
+}
+
+static ccord_rect p_track(const ccord_ui *ui, ccord_rect c, int row)
+{
+  if (p_slider_narrow(ui, c)) {
+    float btn = uis_btn_h_for(ui, UIS_H_BTN_SM);
+    float yoff = (ui && ui->mobile_layout) ? 34.0f : 30.0f;
+    float by = p_row_y(ui, c, row) + yoff;
+    float val_res = (row == 0) ? 94.0f : 52.0f;
+    float tw = fmaxf(c.w - 2.0f * btn - 16.0f - val_res, 44.0f);
+    return (ccord_rect){c.x + btn + 8.0f, by + (btn - UIS_SLIDER_H) * 0.5f, tw, UIS_SLIDER_H};
+  }
   float tw = c.w < 430.0f ? fmaxf(c.w - 208.0f, 64.0f) : 200.0f;
-  return (ccord_rect){c.x + 36.0f, p_row_y(c, row) + 28.0f, tw, UIS_SLIDER_H};
+  return (ccord_rect){c.x + 36.0f, p_row_y(ui, c, row) + 28.0f, tw, UIS_SLIDER_H};
 }
 
-static ccord_rect p_plus(ccord_rect c, int row)
+static ccord_rect p_track_hit(const ccord_ui *ui, ccord_rect c, int row)
 {
-  ccord_rect tr = p_track(c, row);
-  return (ccord_rect){tr.x + tr.w + 8.0f, p_row_y(c, row) + 18.0f, UIS_H_BTN_SM, UIS_H_BTN_SM};
+  ccord_rect tr = p_track(ui, c, row);
+  return p_slider_narrow(ui, c) ? uis_hit_padded(tr, tr.w, UIS_MOB_TOUCH_H) : tr;
 }
 
-static ccord_rect p_device(ccord_rect c, int row)
+static ccord_rect p_plus(const ccord_ui *ui, ccord_rect c, int row)
 {
+  ccord_rect tr = p_track(ui, c, row);
+  float sz = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  float yoff = (ui && ui->mobile_layout) ? 34.0f : (p_slider_narrow(ui, c) ? 30.0f : 18.0f);
+  return (ccord_rect){tr.x + tr.w + 8.0f, p_row_y(ui, c, row) + yoff, sz, sz};
+}
+
+static ccord_rect p_device(const ccord_ui *ui, ccord_rect c, int row)
+{
+  if (ui && ui->mobile_layout) {
+    return (ccord_rect){c.x, p_row_y(ui, c, row) + 20.0f, c.w, UIS_MOB_H_BTN};
+  }
   float w = c.w * 0.7f;
   if (w > 300.0f) w = 300.0f;
-  return (ccord_rect){c.x, p_row_y(c, row) + 18.0f, w, UIS_H_BTN_SM};
+  return (ccord_rect){c.x, p_row_y(ui, c, row) + 18.0f, w, UIS_H_BTN_SM};
 }
 
-static ccord_rect p_zoom_reset(ccord_rect c)
+static ccord_rect p_zoom_reset(const ccord_ui *ui, ccord_rect c)
 {
+  if (p_slider_narrow(ui, c)) {
+    float rw = (ui && ui->mobile_layout) ? 80.0f : 72.0f;
+    float rh = uis_btn_h_for(ui, 30.0f);
+    float ry = p_row_y(ui, c, 2) + ((ui && ui->mobile_layout) ? -6.0f : -4.0f);
+    return (ccord_rect){c.x + c.w - rw, ry, rw, rh};
+  }
   if (c.w < 430.0f) {
     float rw = 70.0f;
-    return (ccord_rect){c.x + c.w - rw, p_row_y(c, 2) + 18.0f, rw, UIS_H_BTN_SM};
+    return (ccord_rect){c.x + c.w - rw, p_row_y(ui, c, 2) + 18.0f, rw, UIS_H_BTN_SM};
   }
-  return (ccord_rect){c.x + 330.0f, p_row_y(c, 2) + 18.0f, 90.0f, UIS_H_BTN_SM};
+  return (ccord_rect){c.x + 330.0f, p_row_y(ui, c, 2) + 18.0f, 90.0f, UIS_H_BTN_SM};
 }
 
-ccord_rect ui_settings_m6_zoom_reset_rect(ccord_rect content)
+ccord_rect ui_settings_m6_zoom_reset_rect(const ccord_ui *ui, ccord_rect content)
 {
-  return p_zoom_reset(content);
+  return p_zoom_reset(ui, content);
 }
 
 // ---- transient module state (one settings modal at a time; reset from ui_settings_init) ----
@@ -247,7 +292,7 @@ static int locale_index(const char *code)
 static void p_row_label(ccord_ui *ui, ccord_renderer *r, ccord_rect c, int row, const char *label)
 {
   ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_caption, COL(text_muted));
-  ccord_text_draw(r, label, strlen(label), c.x, p_row_y(c, row), &ls, 0.0f);
+  ccord_text_draw(r, label, strlen(label), c.x, p_row_y(ui, c, row), &ls, 0.0f);
 }
 
 static void p_note(ccord_ui *ui, ccord_renderer *r, float x, float y, float w, const char *text)
@@ -262,17 +307,19 @@ static void p_toggle_row(ccord_ui *ui, ccord_renderer *r, ccord_rect c, int row,
   p_row_label(ui, r, c, row, label);
   if (note && note[0]) {
     ccord_text_style ns2 = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_muted));
-    ccord_text_draw_ellipsis(r, note, strlen(note), c.x, p_row_y(c, row) + 18.0f, c.w - 60.0f, &ns2);
+    ccord_text_draw_ellipsis(r, note, strlen(note), c.x,
+                             p_row_y(ui, c, row) + (ui && ui->mobile_layout ? 20.0f : 18.0f),
+                             c.w - 60.0f, &ns2);
   }
-  uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, p_toggle(c, row)), .disabled = dim};
-  uis_toggle(ui, r, p_row_rect(c, row), on, st, ns, id);
+  uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, p_toggle(ui, c, row)), .disabled = dim};
+  uis_toggle(ui, r, p_row_rect(ui, c, row), on, st, ns, id);
 }
 
 static void p_chip_row(ccord_ui *ui, ccord_renderer *r, ccord_rect c, int row, int count,
                        const char *const *labels, int selected, const char *ns)
 {
   for (int i = 0; i < count; i++) {
-    ccord_rect o = p_chip(c, row, i, count);
+    ccord_rect o = p_chip(ui, c, row, i, count);
     uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, o), .selected = i == selected};
     uint64_t cid = (uint64_t)row * 64u + (uint64_t)i;
     uis_chip(ui, r, o, labels[i], st, ns, cid);
@@ -288,27 +335,33 @@ static void p_button(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char 
   uis_button(ui, r, rc, label, primary ? UIS_BTN_PRIMARY : UIS_BTN_SECONDARY, size, st, "pbtn", id);
 }
 
-static void p_volume_row(ccord_ui *ui, ccord_renderer *r, ccord_rect c, int row, const char *label, int value,
-                         const char *suffix)
+static void p_slider_row(ccord_ui *ui, ccord_renderer *r, ccord_rect c, int row, const char *label, float fraction,
+                         const char *val_text)
 {
   p_row_label(ui, r, c, row, label);
-  ccord_rect minus = p_minus(c, row), plus = p_plus(c, row), track = p_track(c, row);
+  ccord_rect minus = p_minus(ui, c, row), plus = p_plus(ui, c, row), track = p_track(ui, c, row);
   uint64_t vid = (uint64_t)row;
   uis_state bst = {.hover = ui_in_rect(ui->mx, ui->my, minus)};
-  uis_button(ui, r, minus, "-", UIS_BTN_SECONDARY, UIS_BTN_S_SM, bst, "pzm", vid);
+  uis_btn_size bsz = (ui && ui->mobile_layout) ? UIS_BTN_S_MD : UIS_BTN_S_SM;
+  uis_button(ui, r, minus, "-", UIS_BTN_SECONDARY, bsz, bst, "pzm", vid);
   bst.hover = ui_in_rect(ui->mx, ui->my, plus);
-  uis_button(ui, r, plus, "+", UIS_BTN_SECONDARY, UIS_BTN_S_SM, bst, "pzp", vid);
-  uis_slider(ui, r, track, (float)value / 100.0f, (uis_state){0});
-  char vs[24];
-  snprintf(vs, sizeof vs, "%d%s", value, suffix);
+  uis_button(ui, r, plus, "+", UIS_BTN_SECONDARY, bsz, bst, "pzp", vid);
+  uis_slider(ui, r, track, fraction, (uis_state){0});
   ccord_text_style vsl = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_secondary));
-  ccord_text_draw(r, vs, strlen(vs), plus.x + plus.w + 12.0f, p_row_y(c, row) + 26.0f, &vsl, 0.0f);
+  float vx = plus.x + plus.w + (p_slider_narrow(ui, c) ? 8.0f : 12.0f);
+  float vy = p_slider_narrow(ui, c)
+               ? (plus.y + (plus.h - ui_line_h(ui, vsl.size)) * 0.5f)
+               : (p_row_y(ui, c, row) + 26.0f);
+  float vw = c.x + c.w - vx;
+  if (vw > 12.0f) {
+    ccord_text_draw_ellipsis(r, val_text, strlen(val_text), vx, vy, vw, &vsl);
+  }
 }
 
 static void p_device_row(ccord_ui *ui, ccord_renderer *r, ccord_rect c, int row, const char *label, const char *value)
 {
   p_row_label(ui, r, c, row, label);
-  ccord_rect d = p_device(c, row);
+  ccord_rect d = p_device(ui, c, row);
   uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, d)};
   uis_select(ui, r, d, value, st, "pdev", (uint64_t)row);
 }
@@ -319,13 +372,16 @@ void ui_settings_m6_appearance_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect 
   s_prefs.content = content;
   p_row_label(ui, r, content, 1, "THEME");
   p_chip_row(ui, r, content, 1, 3, k_theme_labels, theme_index(ui->settings_theme_id), "pthm");
-  int pct = (int)((ui->settings_zoom - CCORD_ZOOM_MIN) / (CCORD_ZOOM_MAX - CCORD_ZOOM_MIN) * 100.0f + 0.5f);
-  p_volume_row(ui, r, content, 2, "UI ZOOM", pct, "%");
-  p_button(ui, r, p_zoom_reset(content), "Reset", false, false);
+  float zoom_frac = (ui->settings_zoom - CCORD_ZOOM_MIN) / (CCORD_ZOOM_MAX - CCORD_ZOOM_MIN);
+  int pct = (int)(ui->settings_zoom * 100.0f + 0.5f);
+  char ztxt[16];
+  snprintf(ztxt, sizeof ztxt, "%d%%", pct);
+  p_slider_row(ui, r, content, 2, "UI ZOOM", zoom_frac, ztxt);
+  p_button(ui, r, p_zoom_reset(ui, content), "Reset", false, false);
 
   // Compact theme summary + color swatches (row 3), replacing the old tall label_value block.
   const ccord_theme *t = ui->theme;
-  float x = content.x, y = p_row_y(content, 3) + 8.0f, w = content.w;
+  float x = content.x, y = p_row_y(ui, content, 3) + 8.0f, w = content.w;
   char sum[512];
   snprintf(sum, sizeof sum, "%s (%s)  ·  fonts: %s, %s", t->name, t->id, t->font_regular, t->font_bold);
   p_note(ui, r, x, y, w, sum);
@@ -357,6 +413,7 @@ void ui_settings_m6_appearance_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect 
     ccord_text_draw(r, "PLUGIN THEMES", 13, x, py, &ph, 0.0f);
     py += ui_line_h(ui, ph.size) + UIS_SP_1;
     float px = x;
+    float pb_h = uis_btn_h_for(ui, UIS_H_BTN_SM);
     size_t np = ccord_contrib_theme_preset_count(ui->d.contrib);
     for (size_t i = 0; i < np && i < 16u; i++) {
       const ccord_theme_preset *pr = ccord_contrib_theme_preset_at(ui->d.contrib, i);
@@ -364,9 +421,9 @@ void ui_settings_m6_appearance_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect 
       float bw = uis_label_width(ui, r, pr->name);
       if (px > x && px + bw > x + w) {
         px = x;
-        py += UIS_H_BTN_SM + UIS_SP_1;
+        py += pb_h + UIS_SP_1;
       }
-      ccord_rect brc = {px, py, bw, UIS_H_BTN_SM};
+      ccord_rect brc = {px, py, bw, pb_h};
       uis_state bst = {.hover = ui_in_rect(ui->mx, ui->my, brc)};
       uis_button(ui, r, brc, pr->name, UIS_BTN_SECONDARY, UIS_BTN_S_SM, bst, "ptheme", (uint64_t)i);
       px += bw + UIS_SP_2;
@@ -378,7 +435,7 @@ bool ui_settings_m6_appearance_click(ccord_ui *ui, ccord_rect content, float x, 
 {
   s_prefs.content = content;
   for (int i = 0; i < 3; i++) {
-    if (ui_in_rect(x, y, p_chip(content, 1, i, 3))) {
+    if (ui_in_rect(x, y, p_chip(ui, content, 1, i, 3))) {
       if (ui->d.host.select_theme_preset) ui->d.host.select_theme_preset(ui->d.host.ud, "", "");
       prefs_set_theme(ui, k_theme_ids[i]);
       return true;
@@ -393,10 +450,11 @@ bool ui_settings_m6_appearance_click(ccord_ui *ui, ccord_rect content, float x, 
     if (per_row > 8) per_row = 8;
     size_t swatch_rows = (8u + per_row - 1u) / per_row;
     float sw_off = swatch_rows <= 1u ? 54.0f : (float)swatch_rows * (cell + 16.0f);
-    float base_y = p_row_y(content, 3) + 8.0f + ui_line_h(ui, tk.fs_control) + 8.0f + sw_off +
+    float base_y = p_row_y(ui, content, 3) + 8.0f + ui_line_h(ui, tk.fs_control) + 8.0f + sw_off +
                    ui_line_h(ui, tk.fs_overline) + UIS_SP_1;
     float px = content.x;
     float py = base_y;
+    float pb_h = uis_btn_h_for(ui, UIS_H_BTN_SM);
     size_t np = ccord_contrib_theme_preset_count(ui->d.contrib);
     for (size_t i = 0; i < np && i < 16u; i++) {
       const ccord_theme_preset *pr = ccord_contrib_theme_preset_at(ui->d.contrib, i);
@@ -404,9 +462,9 @@ bool ui_settings_m6_appearance_click(ccord_ui *ui, ccord_rect content, float x, 
       float bw = uis_label_width(ui, ui->last_renderer, pr->name);
       if (px > content.x && px + bw > content.x + content.w) {
         px = content.x;
-        py += UIS_H_BTN_SM + UIS_SP_1;
+        py += pb_h + UIS_SP_1;
       }
-      ccord_rect brc = {px, py, bw, UIS_H_BTN_SM};
+      ccord_rect brc = {px, py, bw, pb_h};
       if (ui_in_rect(x, y, brc)) {
         if (ui->d.host.select_theme_preset) {
           ui->d.host.select_theme_preset(ui->d.host.ud, pr->owner, pr->preset_id);
@@ -416,23 +474,23 @@ bool ui_settings_m6_appearance_click(ccord_ui *ui, ccord_rect content, float x, 
       px += bw + UIS_SP_2;
     }
   }
-  if (ui_in_rect(x, y, p_minus(content, 2))) {
+  if (ui_in_rect(x, y, p_minus(ui, content, 2))) {
     prefs_set_zoom(ui, ui->settings_zoom - 0.05f);
     return true;
   }
-  if (ui_in_rect(x, y, p_plus(content, 2))) {
+  if (ui_in_rect(x, y, p_plus(ui, content, 2))) {
     prefs_set_zoom(ui, ui->settings_zoom + 0.05f);
     return true;
   }
-  if (ui_in_rect(x, y, p_track(content, 2))) {
-    ccord_rect tr = p_track(content, 2);
+  if (ui_in_rect(x, y, p_track_hit(ui, content, 2))) {
+    ccord_rect tr = p_track(ui, content, 2);
     float t = (x - tr.x) / tr.w;
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
     prefs_set_zoom(ui, CCORD_ZOOM_MIN + t * (CCORD_ZOOM_MAX - CCORD_ZOOM_MIN));
     return true;
   }
-  if (ui_in_rect(x, y, p_zoom_reset(content))) {
+  if (ui_in_rect(x, y, p_zoom_reset(ui, content))) {
     prefs_set_zoom(ui, 1.0f);
     return true;
   }
@@ -618,9 +676,8 @@ ui_streamer_opts ui_streamer_get_opts(const ccord_ui *ui)
 
 void ui_streamer_toggle_rects(const ccord_ui *ui, ccord_rect out[4])
 {
-  (void)ui;
   for (int i = 0; i < 4; i++) {
-    out[i] = s_prefs.content.w > 0.0f ? p_toggle(s_prefs.content, 2 + i) : (ccord_rect){0, 0, 0, 0};
+    out[i] = s_prefs.content.w > 0.0f ? p_toggle(ui, s_prefs.content, 2 + i) : (ccord_rect){0, 0, 0, 0};
   }
 }
 
@@ -651,63 +708,81 @@ const ui_sound_kind ui_sound_kinds[UI_SOUND_KIND_COUNT] = {
 #define P_SOUND_ROWS 10   // two columns of ten, filled column by column
 #define P_SOUND_ROW_H 36.0f
 
+static float p_sound_row_h(const ccord_ui *ui)
+{
+  return (ui && ui->mobile_layout) ? 46.0f : P_SOUND_ROW_H;
+}
+
 static bool p_sounds_single_col(ccord_rect c)
 {
   return c.w < 440.0f;
 }
 
-static float p_sounds_max_scroll(ccord_rect c)
+static float p_sounds_max_scroll(const ccord_ui *ui, ccord_rect c)
 {
   float list_y = c.y + P_TITLE_H + 24.0f;
   float view_h = fmaxf(c.y + c.h - list_y, 40.0f);
-  float total_h = p_sounds_single_col(c) ? ((float)UI_SOUND_KIND_COUNT * P_SOUND_ROW_H + 8.0f)
-                                         : ((float)P_SOUND_ROWS * P_SOUND_ROW_H + 8.0f);
+  float srh = p_sound_row_h(ui);
+  float total_h = p_sounds_single_col(c) ? ((float)UI_SOUND_KIND_COUNT * srh + 8.0f)
+                                         : ((float)P_SOUND_ROWS * srh + 8.0f);
   float m = total_h - view_h;
   return m > 0.0f ? m : 0.0f;
 }
 
-static ccord_rect p_sound_row(ccord_rect c, int kind)
+static ccord_rect p_sound_row(const ccord_ui *ui, ccord_rect c, int kind)
 {
-  float max_s = p_sounds_max_scroll(c);
+  float max_s = p_sounds_max_scroll(ui, c);
   float scroll = s_prefs.sounds_scroll;
   if (scroll < 0.0f) scroll = 0.0f;
   if (scroll > max_s) scroll = max_s;
+  float srh = p_sound_row_h(ui);
+  float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
   if (p_sounds_single_col(c)) {
-    return (ccord_rect){c.x, c.y + P_TITLE_H + 24.0f + (float)kind * P_SOUND_ROW_H - scroll, c.w, UIS_H_BTN_SM};
+    return (ccord_rect){c.x, c.y + P_TITLE_H + 24.0f + (float)kind * srh - scroll, c.w, bh};
   }
   float colw = (c.w - 24.0f) * 0.5f;
   int col = kind / P_SOUND_ROWS, row = kind % P_SOUND_ROWS;
   float x = c.x + (float)col * (colw + 24.0f);
-  return (ccord_rect){x, c.y + P_TITLE_H + 24.0f + (float)row * P_SOUND_ROW_H - scroll, colw, UIS_H_BTN_SM};
+  return (ccord_rect){x, c.y + P_TITLE_H + 24.0f + (float)row * srh - scroll, colw, bh};
 }
 
-static ccord_rect p_sound_toggle(ccord_rect c, int kind)
+static ccord_rect p_sound_toggle(const ccord_ui *ui, ccord_rect c, int kind)
 {
-  return uis_toggle_rect(p_sound_row(c, kind));
+  return uis_toggle_rect(p_sound_row(ui, c, kind));
 }
 
-static ccord_rect p_sounds_customize(ccord_rect c)
+static ccord_rect p_sound_toggle_hit(const ccord_ui *ui, ccord_rect c, int kind)
 {
-  return (ccord_rect){c.x + c.w - 44.0f - 12.0f - 96.0f, p_row_y(c, 2), 96.0f, UIS_H_BTN_SM};
+  ccord_rect tr = p_sound_toggle(ui, c, kind);
+  return (ui && ui->mobile_layout) ? uis_hit_padded(tr, 56.0f, UIS_MOB_TOUCH_H) : tr;
 }
 
-static ccord_rect p_sounds_back(ccord_rect c)
+static ccord_rect p_sounds_customize(const ccord_ui *ui, ccord_rect c)
 {
-  return (ccord_rect){c.x + c.w - 80.0f, c.y, 80.0f, UIS_H_BTN_SM};
+  float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  float gap = (ui && ui->mobile_layout) ? 14.0f : 12.0f;
+  return (ccord_rect){c.x + c.w - UIS_TOGGLE_W - gap - 96.0f, p_row_y(ui, c, 2), 96.0f, bh};
+}
+
+static ccord_rect p_sounds_back(const ccord_ui *ui, ccord_rect c)
+{
+  float bw = (ui && ui->mobile_layout) ? 88.0f : 80.0f;
+  float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  return (ccord_rect){c.x + c.w - bw, c.y, bw, bh};
 }
 
 ccord_rect ui_settings_sounds_customize_rect(const ccord_ui *ui)
 {
   if (!ui || ui->settings_sounds_open || s_prefs.content.w <= 0.0f || s_prefs.drawn_page != CCORD_M6_PREFS_NOTIFICATIONS)
     return (ccord_rect){0, 0, 0, 0};
-  return p_sounds_customize(s_prefs.content);
+  return p_sounds_customize(ui, s_prefs.content);
 }
 
 ccord_rect ui_settings_sounds_back_rect(const ccord_ui *ui)
 {
   if (!ui || !ui->settings_sounds_open || s_prefs.content.w <= 0.0f || s_prefs.drawn_page != CCORD_M6_PREFS_NOTIFICATIONS)
     return (ccord_rect){0, 0, 0, 0};
-  return p_sounds_back(s_prefs.content);
+  return p_sounds_back(ui, s_prefs.content);
 }
 
 ccord_rect ui_settings_sound_toggle_rect(const ccord_ui *ui, int kind)
@@ -715,16 +790,16 @@ ccord_rect ui_settings_sound_toggle_rect(const ccord_ui *ui, int kind)
   if (!ui || !ui->settings_sounds_open || kind < 0 || kind >= UI_SOUND_KIND_COUNT || s_prefs.content.w <= 0.0f ||
       s_prefs.drawn_page != CCORD_M6_PREFS_NOTIFICATIONS)
     return (ccord_rect){0, 0, 0, 0};
-  return p_sound_toggle(s_prefs.content, kind);
+  return p_sound_toggle(ui, s_prefs.content, kind);
 }
 
 static void p_draw_sounds(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
 {
   bool master = ui->settings_notify_sounds;
-  p_button(ui, r, p_sounds_back(c), "Back", false, false);
+  p_button(ui, r, p_sounds_back(ui, c), "Back", false, false);
   p_note(ui, r, c.x, c.y + P_TITLE_H, c.w,
          master ? "Choose which sounds play." : "Sounds are off: turn SOUNDS on to change these.");
-  float max_s = p_sounds_max_scroll(c);
+  float max_s = p_sounds_max_scroll(ui, c);
   if (s_prefs.sounds_scroll < 0.0f) s_prefs.sounds_scroll = 0.0f;
   if (s_prefs.sounds_scroll > max_s) s_prefs.sounds_scroll = max_s;
   float list_y = c.y + P_TITLE_H + 22.0f;
@@ -733,7 +808,7 @@ static void p_draw_sounds(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
   float colw = single ? c.w : (c.w - 24.0f) * 0.5f;
   ccord_push_clip(r, clip);
   for (int k = 0; k < UI_SOUND_KIND_COUNT; k++) {
-    ccord_rect row = p_sound_row(c, k);
+    ccord_rect row = p_sound_row(ui, c, k);
     if (row.y + row.h < clip.y || row.y > clip.y + clip.h) continue;
     ccord_rect t = uis_toggle_rect(row);
     ccord_text_style ls = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, master ? COL(text_header) : COL(text_muted));
@@ -748,7 +823,7 @@ static void p_draw_sounds(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
 
 static bool p_click_sounds(ccord_ui *ui, ccord_rect c, float x, float y)
 {
-  if (ui_in_rect(x, y, p_sounds_back(c))) {
+  if (ui_in_rect(x, y, p_sounds_back(ui, c))) {
     ui->settings_sounds_open = false;
     s_prefs.sounds_scroll = 0.0f;
     ui->dirty = true;
@@ -759,7 +834,7 @@ static bool p_click_sounds(ccord_ui *ui, ccord_rect c, float x, float y)
   ccord_rect clip = {c.x, list_y, c.w, fmaxf(c.y + c.h - list_y, 20.0f)};
   if (!ui_in_rect(x, y, clip)) return false;
   for (int k = 0; k < UI_SOUND_KIND_COUNT; k++) {
-    if (ui_in_rect(x, y, p_sound_toggle(c, k))) {
+    if (ui_in_rect(x, y, p_sound_toggle_hit(ui, c, k))) {
       ui->settings_sounds_off ^= 1u << k;
       ui->dirty = true;
       return true;
@@ -771,7 +846,7 @@ static bool p_click_sounds(ccord_ui *ui, ccord_rect c, float x, float y)
 bool ui_settings_m6_prefs_wheel(ccord_ui *ui, int page, ccord_rect content, float wheel)
 {
   if (!ui || page != CCORD_M6_PREFS_NOTIFICATIONS || !ui->settings_sounds_open) return false;
-  float max_s = p_sounds_max_scroll(content);
+  float max_s = p_sounds_max_scroll(ui, content);
   if (max_s <= 0.0f) return false;
   s_prefs.sounds_scroll -= wheel * 48.0f;
   if (s_prefs.sounds_scroll < 0.0f) s_prefs.sounds_scroll = 0.0f;
@@ -794,11 +869,11 @@ static void p_draw_notifications(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
   p_toggle_row(ui, r, c, 1, "ALL MESSAGES", "Notify for every new message in this account.", ui->settings_notify_messages, false, "m6pn", 1);
   // SOUNDS row: the note is shortened to leave room for the Customize button (per-sound toggles).
   p_row_label(ui, r, c, 2, "SOUNDS");
-  p_note(ui, r, c.x, p_row_y(c, 2) + 18.0f, c.w - 60.0f - 108.0f,
+  p_note(ui, r, c.x, p_row_y(ui, c, 2) + (ui && ui->mobile_layout ? 20.0f : 18.0f), c.w - 60.0f - 108.0f,
          audio ? "Play sounds for messages, voice and call activity." : "Unavailable: no audio playback device.");
-  p_button(ui, r, p_sounds_customize(c), "Customize", false, !audio);
-  uis_state sst = {.hover = ui_in_rect(ui->mx, ui->my, p_toggle(c, 2)), .disabled = !audio};
-  uis_toggle(ui, r, p_row_rect(c, 2), ui->settings_notify_sounds && audio, sst, "m6pn", 2);
+  p_button(ui, r, p_sounds_customize(ui, c), "Customize", false, !audio);
+  uis_state sst = {.hover = ui_in_rect(ui->mx, ui->my, p_toggle(ui, c, 2)), .disabled = !audio};
+  uis_toggle(ui, r, p_row_rect(ui, c, 2), ui->settings_notify_sounds && audio, sst, "m6pn", 2);
   p_toggle_row(ui, r, c, 3, "DESKTOP NOTIFICATIONS",
                notif ? "Forward notifications to the desktop notification daemon."
                      : "Unavailable: desktop notifications are not supported here.",
@@ -814,39 +889,39 @@ static bool p_click_notifications(ccord_ui *ui, ccord_rect c, float x, float y)
 {
   uint32_t caps = prefs_caps(ui);
   if (ui->settings_sounds_open) return p_click_sounds(ui, c, x, y);
-  if ((caps & CCORD_UI_CAP_AUDIO_PLAYBACK) && ui_in_rect(x, y, p_sounds_customize(c))) {
+  if ((caps & CCORD_UI_CAP_AUDIO_PLAYBACK) && ui_in_rect(x, y, p_sounds_customize(ui, c))) {
     ui->settings_sounds_open = true;
     ui->dirty = true;
     return true;
   }
-  if (ui_in_rect(x, y, p_toggle(c, 0))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 0))) {
     ui->settings_notify_mentions = !ui->settings_notify_mentions;
     ui->dirty = true;
     return true;
   }
-  if (ui_in_rect(x, y, p_toggle(c, 1))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 1))) {
     ui->settings_notify_messages = !ui->settings_notify_messages;
     ui->dirty = true;
     return true;
   }
-  if ((caps & CCORD_UI_CAP_AUDIO_PLAYBACK) && ui_in_rect(x, y, p_toggle(c, 2))) {
+  if ((caps & CCORD_UI_CAP_AUDIO_PLAYBACK) && ui_in_rect(x, y, p_toggle_hit(ui, c, 2))) {
     ui->settings_notify_sounds = !ui->settings_notify_sounds;
     ui->dirty = true;
     return true;
   }
-  if ((caps & CCORD_UI_CAP_NOTIFICATIONS) && ui_in_rect(x, y, p_toggle(c, 3))) {
+  if ((caps & CCORD_UI_CAP_NOTIFICATIONS) && ui_in_rect(x, y, p_toggle_hit(ui, c, 3))) {
     ui->settings_notify_desktop = !ui->settings_notify_desktop;
     ui->dirty = true;
     return true;
   }
   for (int i = 0; i < 4; i++) {
-    if (ui_in_rect(x, y, p_chip(c, 4, i, 4))) {
+    if (ui_in_rect(x, y, p_chip(ui, c, 4, i, 4))) {
       ui->settings_notify_timeout_ms = k_notify_timeout_ms[i];
       ui->dirty = true;
       return true;
     }
   }
-  if (ui_in_rect(x, y, p_toggle(c, 5))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 5))) {
     ccord_user_settings cur = prefs_current(ui);
     ccord_user_settings_patch p = CCORD_USER_SETTINGS_PATCH_INIT;
     p.enable_tts_command = cur.enable_tts_command ? 0 : 1;
@@ -870,7 +945,7 @@ static void p_draw_accessibility(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
                ui->settings_reduced_motion, false, "m6pa", 3);
   p_row_label(ui, r, c, 4, "MESSAGE DISPLAY");
   p_chip_row(ui, r, c, 4, 2, k_display_mode, ui->settings_display_mode, "m6pa");
-  p_note(ui, r, c.x, p_row_y(c, 5) + 8.0f, c.w,
+  p_note(ui, r, c.x, p_row_y(ui, c, 5) + 8.0f, c.w,
          "GIF, emoji and sticker playback sync to your Discord account; reduced motion and message display are local.");
 }
 
@@ -878,18 +953,18 @@ static bool p_click_accessibility(ccord_ui *ui, ccord_rect c, float x, float y)
 {
   ccord_user_settings cur = prefs_current(ui);
   ccord_user_settings_patch p = CCORD_USER_SETTINGS_PATCH_INIT;
-  if (ui_in_rect(x, y, p_toggle(c, 0))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 0))) {
     p.gif_auto_play = cur.gif_auto_play ? 0 : 1;
     prefs_submit_patch(ui, &p);
     return true;
   }
-  if (ui_in_rect(x, y, p_toggle(c, 1))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 1))) {
     p.animate_emoji = cur.animate_emoji ? 0 : 1;
     prefs_submit_patch(ui, &p);
     return true;
   }
   for (int i = 0; i < 3; i++) {
-    if (ui_in_rect(x, y, p_chip(c, 2, i, 3))) {
+    if (ui_in_rect(x, y, p_chip(ui, c, 2, i, 3))) {
       if (cur.animate_stickers != (uint8_t)i) {
         p.animate_stickers = (int16_t)i;
         prefs_submit_patch(ui, &p);
@@ -897,14 +972,14 @@ static bool p_click_accessibility(ccord_ui *ui, ccord_rect c, float x, float y)
       return true;
     }
   }
-  if (ui_in_rect(x, y, p_toggle(c, 3))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 3))) {
     ui->settings_reduced_motion = !ui->settings_reduced_motion;
     ui->anim.reduced_motion = ui->settings_reduced_motion;
     ui->dirty = true;
     return true;
   }
   for (int i = 0; i < 2; i++) {
-    if (ui_in_rect(x, y, p_chip(c, 4, i, 2))) {
+    if (ui_in_rect(x, y, p_chip(ui, c, 4, i, 2))) {
       ui->settings_display_mode = i;
       ui->dirty = true;
       return true;
@@ -932,19 +1007,19 @@ static void p_draw_streamer(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
                s_prefs.streamer_disable_sounds, !on, "m6ps", 4);
   p_toggle_row(ui, r, c, 5, "DISABLE NOTIFICATIONS", "Don't show desktop notifications while streaming.",
                s_prefs.streamer_disable_notifications, !on, "m6ps", 5);
-  p_note(ui, r, c.x, p_row_y(c, 6) + 8.0f, c.w,
+  p_note(ui, r, c.x, p_row_y(ui, c, 6) + 8.0f, c.w,
          "Streamer Mode is a local preference (like Discord's). The options above apply while it is on and persist to settings.ini.");
 }
 
 static bool p_click_streamer(ccord_ui *ui, ccord_rect c, float x, float y)
 {
-  if (ui_in_rect(x, y, p_toggle(c, 0))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 0))) {
     ui->settings_streamer_mode = !ui->settings_streamer_mode;
     if (ui->d.contrib) ccord_contrib_set_streamer_mode(ui->d.contrib, ui->settings_streamer_mode);
     ui->dirty = true;
     return true;
   }
-  if (ui_in_rect(x, y, p_toggle(c, 1))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 1))) {
     ccord_user_settings cur = prefs_current(ui);
     ccord_user_settings_patch p = CCORD_USER_SETTINGS_PATCH_INIT;
     p.stream_notifications_enabled = cur.stream_notifications_enabled ? 0 : 1;
@@ -952,22 +1027,22 @@ static bool p_click_streamer(ccord_ui *ui, ccord_rect c, float x, float y)
     return true;
   }
   if (!ui->settings_streamer_mode) return false;   // the option rows are dimmed until enabled
-  if (ui_in_rect(x, y, p_toggle(c, 2))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 2))) {
     s_prefs.streamer_hide_personal = !s_prefs.streamer_hide_personal;
     ui->dirty = true;
     return true;
   }
-  if (ui_in_rect(x, y, p_toggle(c, 3))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 3))) {
     s_prefs.streamer_hide_invites = !s_prefs.streamer_hide_invites;
     ui->dirty = true;
     return true;
   }
-  if (ui_in_rect(x, y, p_toggle(c, 4))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 4))) {
     s_prefs.streamer_disable_sounds = !s_prefs.streamer_disable_sounds;
     ui->dirty = true;
     return true;
   }
-  if (ui_in_rect(x, y, p_toggle(c, 5))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 5))) {
     s_prefs.streamer_disable_notifications = !s_prefs.streamer_disable_notifications;
     ui->dirty = true;
     return true;
@@ -984,14 +1059,14 @@ static void p_draw_language(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
   if (idx >= 0) snprintf(label, sizeof label, "%s — %s", k_locales[idx].label, k_locales[idx].code);
   else snprintf(label, sizeof label, "%s", cur.locale);
   p_device_row(ui, r, c, 0, "LANGUAGE", label);
-  p_note(ui, r, c.x, p_row_y(c, 1) + 8.0f, c.w,
+  p_note(ui, r, c.x, p_row_y(ui, c, 1) + 8.0f, c.w,
          "Syncs your Discord account language. C-Cord's interface is English only for now.");
-  p_note(ui, r, c.x, p_row_y(c, 1) + 26.0f, c.w, "Click the selector to cycle through the available languages.");
+  p_note(ui, r, c.x, p_row_y(ui, c, 1) + 26.0f, c.w, "Click the selector to cycle through the available languages.");
 }
 
 static bool p_click_language(ccord_ui *ui, ccord_rect c, float x, float y)
 {
-  if (ui_in_rect(x, y, p_device(c, 0))) {
+  if (ui_in_rect(x, y, p_device(ui, c, 0))) {
     ccord_user_settings cur = prefs_current(ui);
     int idx = locale_index(cur.locale);
     int next = (idx + 1) % P_LOCALE_COUNT;   // unknown locale (-1) cycles to the first entry
@@ -1020,24 +1095,25 @@ static void p_draw_advanced(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
 #endif
   p_row_label(ui, r, c, 3, "DATA DIRECTORY");
   const char *dir = ccord_paths_data_dir();
-  p_note(ui, r, c.x, p_row_y(c, 3) + 18.0f, c.w, dir && dir[0] ? dir : "(not available)");
+  p_note(ui, r, c.x, p_row_y(ui, c, 3) + (ui && ui->mobile_layout ? 20.0f : 18.0f), c.w,
+         dir && dir[0] ? dir : "(not available)");
 }
 
 static bool p_click_advanced(ccord_ui *ui, ccord_rect c, float x, float y)
 {
-  if (ui_in_rect(x, y, p_toggle(c, 0))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 0))) {
     ccord_user_settings cur = prefs_current(ui);
     ccord_user_settings_patch p = CCORD_USER_SETTINGS_PATCH_INIT;
     p.developer_mode = cur.developer_mode ? 0 : 1;
     prefs_submit_patch(ui, &p);
     return true;
   }
-  if (ui_in_rect(x, y, p_toggle(c, 1))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 1))) {
     ui->settings_hardware_accel = !ui->settings_hardware_accel;
     ui->dirty = true;
     return true;
   }
-  if (ui_in_rect(x, y, p_toggle(c, 2))) {
+  if (ui_in_rect(x, y, p_toggle_hit(ui, c, 2))) {
     s_prefs.close_background = !s_prefs.close_background;
     ui->dirty = true;
     if (ui->d.host.set_close_to_tray) ui->d.host.set_close_to_tray(ui->d.host.ud, s_prefs.close_background);
@@ -1065,14 +1141,19 @@ size_t ui_settings_ccord_controls(const ui_settings_control **out)
   return sizeof k_ccord_controls / sizeof k_ccord_controls[0];
 }
 
-static ccord_rect p_update_primary_btn(ccord_rect c)
+static ccord_rect p_update_primary_btn(const ccord_ui *ui, ccord_rect c)
 {
-  return (ccord_rect){c.x, p_row_y(c, 5) + 46.0f, 152.0f, 30.0f};
+  float bh = uis_btn_h_for(ui, 30.0f);
+  return (ccord_rect){c.x, p_row_y(ui, c, 5) + 46.0f, 152.0f, bh};
 }
 
-static ccord_rect p_update_notes_btn(ccord_rect c)
+static ccord_rect p_update_notes_btn(const ccord_ui *ui, ccord_rect c)
 {
-  return (ccord_rect){c.x + 162.0f, p_row_y(c, 5) + 46.0f, 118.0f, 30.0f};
+  float bh = uis_btn_h_for(ui, 30.0f);
+  if (ui && ui->mobile_layout && c.w < 290.0f) {
+    return (ccord_rect){c.x, p_row_y(ui, c, 5) + 46.0f + bh + 8.0f, 152.0f, bh};
+  }
+  return (ccord_rect){c.x + 162.0f, p_row_y(ui, c, 5) + 46.0f, 118.0f, bh};
 }
 
 static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
@@ -1080,18 +1161,10 @@ static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
   uint32_t caps = prefs_caps(ui);
   bool tray = (caps & CCORD_UI_CAP_TRAY) != 0;
   int n = s_prefs.jump_present_messages;
-  p_row_label(ui, r, c, 0, k_ccord_controls[0].label);
-  ccord_rect minus = p_minus(c, 0), plus = p_plus(c, 0), track = p_track(c, 0);
-  uis_state bst = {.hover = ui_in_rect(ui->mx, ui->my, minus)};
-  uis_button(ui, r, minus, "-", UIS_BTN_SECONDARY, UIS_BTN_S_SM, bst, "pjm", 0);
-  bst.hover = ui_in_rect(ui->mx, ui->my, plus);
-  uis_button(ui, r, plus, "+", UIS_BTN_SECONDARY, UIS_BTN_S_SM, bst, "pjp", 0);
-  uis_slider(ui, r, track, (float)(n - P_JUMP_PRESENT_MIN) / (float)(P_JUMP_PRESENT_MAX - P_JUMP_PRESENT_MIN),
-             (uis_state){0});
   char vs[24];
   snprintf(vs, sizeof vs, "%d messages", n);
-  ccord_text_style vsl = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_secondary));
-  ccord_text_draw(r, vs, strlen(vs), plus.x + plus.w + 12.0f, p_row_y(c, 0) + 26.0f, &vsl, 0.0f);
+  float jfrac = (float)(n - P_JUMP_PRESENT_MIN) / (float)(P_JUMP_PRESENT_MAX - P_JUMP_PRESENT_MIN);
+  p_slider_row(ui, r, c, 0, k_ccord_controls[0].label, jfrac, vs);
   p_toggle_row(ui, r, c, 1, k_ccord_controls[1].label, "Detected games are shown as your activity.",
                s_prefs.game_detection, false, "m6pc", 1);
   p_toggle_row(ui, r, c, 2, k_ccord_controls[2].label,
@@ -1110,7 +1183,7 @@ static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
   } else {
     snprintf(ver_line, sizeof ver_line, "C-Cord v%s", CCORD_VERSION_STRING);
   }
-  p_note(ui, r, c.x, p_row_y(c, 5) + 4.0f, c.w, ver_line);
+  p_note(ui, r, c.x, p_row_y(ui, c, 5) + 4.0f, c.w, ver_line);
   if (ui->update_info.self_updatable || ui->update_info.install_kind[0]) {
     const char *fallback_status = ui->update_info.self_updatable
                                     ? "Automatic updates enabled via c-cord.org"
@@ -1118,8 +1191,8 @@ static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
                                          ? "Updates are managed via F-Droid or Releases."
                                          : "Updates are managed by your system package manager.");
     const char *status = ui->update_info.status_text[0] ? ui->update_info.status_text : fallback_status;
-    p_note(ui, r, c.x, p_row_y(c, 5) + 22.0f, c.w, status);
-    ccord_rect btn = p_update_primary_btn(c);
+    p_note(ui, r, c.x, p_row_y(ui, c, 5) + 22.0f, c.w, status);
+    ccord_rect btn = p_update_primary_btn(ui, c);
     bool can_inst = ui->update_info.self_updatable && ui->update_info.can_install;
     bool busy = ui->update_info.state == CCORD_UI_UPDATE_CHECKING || ui->update_info.state == CCORD_UI_UPDATE_DOWNLOADING;
     const char *lbl = "Check for Updates";
@@ -1133,7 +1206,7 @@ static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
     uis_button(ui, r, btn, lbl, kind, UIS_BTN_S_SM,
                (uis_state){.hover = ui_in_rect(ui->mx, ui->my, btn), .disabled = busy}, "m6up", 0);
     if (ui->update_info.release_url[0]) {
-      ccord_rect nb = p_update_notes_btn(c);
+      ccord_rect nb = p_update_notes_btn(ui, c);
       uis_button(ui, r, nb, "Release Notes", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
                  (uis_state){.hover = ui_in_rect(ui->mx, ui->my, nb)}, "m6un", 0);
     }
@@ -1144,37 +1217,37 @@ static bool p_click_ccord(ccord_ui *ui, ccord_rect c, float x, float y)
 {
   int n = s_prefs.jump_present_messages;
   int want = n;
-  if (ui_in_rect(x, y, p_minus(c, 0))) want = n - 1;
-  else if (ui_in_rect(x, y, p_plus(c, 0))) want = n + 1;
-  else if (ui_in_rect(x, y, p_track(c, 0))) {
-    ccord_rect tr = p_track(c, 0);
+  if (ui_in_rect(x, y, p_minus(ui, c, 0))) want = n - 1;
+  else if (ui_in_rect(x, y, p_plus(ui, c, 0))) want = n + 1;
+  else if (ui_in_rect(x, y, p_track_hit(ui, c, 0))) {
+    ccord_rect tr = p_track(ui, c, 0);
     float t = (x - tr.x) / tr.w;
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
     want = P_JUMP_PRESENT_MIN + (int)(t * (float)(P_JUMP_PRESENT_MAX - P_JUMP_PRESENT_MIN) + 0.5f);
-  } else if (ui_in_rect(x, y, p_toggle(c, 1))) {
+  } else if (ui_in_rect(x, y, p_toggle_hit(ui, c, 1))) {
     s_prefs.game_detection = !s_prefs.game_detection;
     ui->dirty = true;
     ui_settings_save(ui);
     return true;
-  } else if ((prefs_caps(ui) & CCORD_UI_CAP_TRAY) && ui_in_rect(x, y, p_toggle(c, 2))) {
+  } else if ((prefs_caps(ui) & CCORD_UI_CAP_TRAY) && ui_in_rect(x, y, p_toggle_hit(ui, c, 2))) {
     s_prefs.notify_badge = !s_prefs.notify_badge;
     ui->dirty = true;
     ui_settings_save(ui);
     return true;
-  } else if (ui_in_rect(x, y, p_toggle(c, 3))) {
+  } else if (ui_in_rect(x, y, p_toggle_hit(ui, c, 3))) {
     s_prefs.notify_focus_suppress = !s_prefs.notify_focus_suppress;
     ui->dirty = true;
     ui_settings_save(ui);
     return true;
-  } else if (ui_in_rect(x, y, p_toggle(c, 4))) {
+  } else if (ui_in_rect(x, y, p_toggle_hit(ui, c, 4))) {
     s_prefs.close_background = !s_prefs.close_background;
     ui->dirty = true;
     if (ui->d.host.set_close_to_tray) ui->d.host.set_close_to_tray(ui->d.host.ud, s_prefs.close_background);
     ui_settings_save(ui);
     return true;
   } else if ((ui->update_info.self_updatable || ui->update_info.install_kind[0]) &&
-             ui_in_rect(x, y, p_update_primary_btn(c))) {
+             ui_in_rect(x, y, p_update_primary_btn(ui, c))) {
     bool can_inst = ui->update_info.self_updatable && ui->update_info.can_install;
     if (can_inst && ui->update_info.state == CCORD_UI_UPDATE_AVAILABLE) {
       if (ui->d.host.update_install) ui->d.host.update_install(ui->d.host.ud);
@@ -1186,7 +1259,7 @@ static bool p_click_ccord(ccord_ui *ui, ccord_rect c, float x, float y)
     return true;
   } else if ((ui->update_info.self_updatable || ui->update_info.install_kind[0]) &&
              ui->update_info.release_url[0] &&
-             ui_in_rect(x, y, p_update_notes_btn(c))) {
+             ui_in_rect(x, y, p_update_notes_btn(ui, c))) {
     if (ui->d.host.open_url) (void)ui->d.host.open_url(ui->d.host.ud, ui->update_info.release_url);
     return true;
   } else {
@@ -1201,9 +1274,8 @@ static bool p_click_ccord(ccord_ui *ui, ccord_rect c, float x, float y)
 // Close-to-tray toggle rect for the settings debug seam (zero before the first Advanced draw).
 ccord_rect ui_settings_m6_close_tray_rect(const ccord_ui *ui)
 {
-  (void)ui;
   if (s_prefs.content.w <= 0.0f) return (ccord_rect){0, 0, 0, 0};
-  return p_toggle(s_prefs.content, 2);
+  return p_toggle(ui, s_prefs.content, 2);
 }
 
 // ---- dispatch ---------------------------------------------------------------------------------
@@ -1248,35 +1320,35 @@ void ui_settings_m6_prefs_get_debug(const ccord_ui *ui, ccord_settings_m6_prefs_
   snprintf(out->mask_last, sizeof out->mask_last, "%s", s_prefs.mask_last);
   ccord_rect c = s_prefs.content;
   // Appearance theme/zoom geometry (deterministic from the content rect).
-  for (int i = 0; i < 3; i++) out->theme_chips[i] = p_chip(c, 1, i, 3);
-  out->zoom_minus = p_minus(c, 2);
-  out->zoom_track = p_track(c, 2);
-  out->zoom_plus = p_plus(c, 2);
-  out->zoom_reset = p_zoom_reset(c);
+  for (int i = 0; i < 3; i++) out->theme_chips[i] = p_chip(ui, c, 1, i, 3);
+  out->zoom_minus = p_minus(ui, c, 2);
+  out->zoom_track = p_track(ui, c, 2);
+  out->zoom_plus = p_plus(ui, c, 2);
+  out->zoom_reset = p_zoom_reset(ui, c);
   if (s_prefs.drawn_page < 0) return;
   int page = s_prefs.drawn_page;
   out->drawn_page = page;
   out->content = c;
   if (page == CCORD_M6_PREFS_NOTIFICATIONS) {
-    out->notify_mentions = p_toggle(c, 0);
-    out->notify_messages = p_toggle(c, 1);
-    out->notify_sounds = p_toggle(c, 2);
-    out->notify_desktop = p_toggle(c, 3);
-    for (int i = 0; i < 4; i++) out->notify_timeout[i] = p_chip(c, 4, i, 4);
-    out->tts_toggle = p_toggle(c, 5);
+    out->notify_mentions = p_toggle(ui, c, 0);
+    out->notify_messages = p_toggle(ui, c, 1);
+    out->notify_sounds = p_toggle(ui, c, 2);
+    out->notify_desktop = p_toggle(ui, c, 3);
+    for (int i = 0; i < 4; i++) out->notify_timeout[i] = p_chip(ui, c, 4, i, 4);
+    out->tts_toggle = p_toggle(ui, c, 5);
     return;
   }
   if (page == CCORD_M6_PREFS_CCORD) {
-    out->jump_minus = p_minus(c, 0);
-    out->jump_track = p_track(c, 0);
-    out->jump_plus = p_plus(c, 0);
-    out->game_toggle = p_toggle(c, 1);
-    out->notify_badge = p_toggle(c, 2);
-    out->notify_focus = p_toggle(c, 3);
-    out->close_background = p_toggle(c, 4);
+    out->jump_minus = p_minus(ui, c, 0);
+    out->jump_track = p_track(ui, c, 0);
+    out->jump_plus = p_plus(ui, c, 0);
+    out->game_toggle = p_toggle(ui, c, 1);
+    out->notify_badge = p_toggle(ui, c, 2);
+    out->notify_focus = p_toggle(ui, c, 3);
+    out->close_background = p_toggle(ui, c, 4);
     if (ui && (ui->update_info.self_updatable || ui->update_info.install_kind[0])) {
-      out->update_primary = p_update_primary_btn(c);
-      if (ui->update_info.release_url[0]) out->update_notes = p_update_notes_btn(c);
+      out->update_primary = p_update_primary_btn(ui, c);
+      if (ui->update_info.release_url[0]) out->update_notes = p_update_notes_btn(ui, c);
     }
     out->close_background_on = s_prefs.close_background;
     out->jump_value = s_prefs.jump_present_messages;
@@ -1284,24 +1356,24 @@ void ui_settings_m6_prefs_get_debug(const ccord_ui *ui, ccord_settings_m6_prefs_
     return;
   }
   if (page == CCORD_M6_PREFS_ACCESSIBILITY) {
-    out->gif_toggle = p_toggle(c, 0);
-    out->emoji_toggle = p_toggle(c, 1);
-    for (int i = 0; i < 3; i++) out->sticker_chips[i] = p_chip(c, 2, i, 3);
-    out->reduced_motion_toggle = p_toggle(c, 3);
-    for (int i = 0; i < 2; i++) out->display_chips[i] = p_chip(c, 4, i, 2);
+    out->gif_toggle = p_toggle(ui, c, 0);
+    out->emoji_toggle = p_toggle(ui, c, 1);
+    for (int i = 0; i < 3; i++) out->sticker_chips[i] = p_chip(ui, c, 2, i, 3);
+    out->reduced_motion_toggle = p_toggle(ui, c, 3);
+    for (int i = 0; i < 2; i++) out->display_chips[i] = p_chip(ui, c, 4, i, 2);
     return;
   }
   if (page == CCORD_M6_PREFS_STREAMER) {
-    out->streamer_toggle = p_toggle(c, 0);
-    out->stream_notify_toggle = p_toggle(c, 1);
+    out->streamer_toggle = p_toggle(ui, c, 0);
+    out->stream_notify_toggle = p_toggle(ui, c, 1);
     return;
   }
   if (page == CCORD_M6_PREFS_LANGUAGE) {
-    out->language_row = p_device(c, 0);
+    out->language_row = p_device(ui, c, 0);
     ccord_user_settings cur = prefs_current(ui);
     out->locale_index = locale_index(cur.locale);
     return;
   }
-  out->developer_toggle = p_toggle(c, 0);
-  out->hardware_toggle = p_toggle(c, 1);
+  out->developer_toggle = p_toggle(ui, c, 0);
+  out->hardware_toggle = p_toggle(ui, c, 1);
 }

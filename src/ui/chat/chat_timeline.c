@@ -138,8 +138,7 @@ bool dc_message_has_reactions(const ccord_message *m)
 
 static float reaction_badge_h(const ccord_ui *ui)
 {
-  (void)ui;
-  return UIS_H_CHIP + 2.0f;   // the shared chip height plus a 1 px margin
+  return (ui && ui->mobile_layout) ? 34.0f : (UIS_H_CHIP + 2.0f);
 }
 
 typedef struct reaction_pill {
@@ -205,7 +204,7 @@ float dc_reaction_pills_walk(ccord_ui *ui, ccord_renderer *r, const ccord_messag
     }
     float ew = is_custom ? (bh - 6.0f) : ccord_text_measure(r, p.emoji, p.elen, &es, 0.0f).x;
     float cw = ccord_text_measure(r, label, (size_t)ll, &cs, 0.0f).x;
-    float pw = maxf(ew + cw + 20.0f, 34.0f);
+    float pw = maxf(ew + cw + 20.0f, ui->mobile_layout ? 42.0f : 34.0f);
     if (any && cx > x && cx + pw > x + wrap) {
       cx = x;
       cy += bh + gap_y;
@@ -273,7 +272,7 @@ float dc_reaction_pills_walk(ccord_ui *ui, ccord_renderer *r, const ccord_messag
     any = true;
   }
   if (any && draw && ui->nreaction_hits < UI_REACTION_HIT_MAX) {
-    float add_w = 26.0f;
+    float add_w = ui->mobile_layout ? 34.0f : 26.0f;
     if (cx + add_w <= x + wrap) {
       ccord_rect ar = {cx, cy, add_w, bh};
       uis_chip(ui, r, ar, "+", (uis_state){.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, ar)}, "reactadd", m->id);
@@ -1198,13 +1197,13 @@ void ui_draw_messages(ccord_ui *ui, ccord_renderer *r)
     ccord_text_style jst = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_on_brand));
     ccord_vec2 jt = ccord_text_measure(r, jtxt, strlen(jtxt), &jst, 0.0f);
     float jw = fminf(jt.x + 28.0f, ma.w - 32.0f);
-    float jh = 26.0f;
+    float jh = ui->mobile_layout ? 38.0f : 26.0f;
     ccord_rect jbar = {ma.x + (ma.w - jw) * 0.5f, ma.y + ma.h - jh - 8.0f, jw, jh};
     if (jump_on) ui->jump_present_rect = jbar;
     if (jp_t > 0.004f) {
       ccord_push_alpha(r, jp_t);
       ccord_push_offset(r, 0.0f, (1.0f - jp_t) * UI_BAR_SLIDE);   // it rises from below
-      ccord_draw_rrect(r, jbar, 13.0f, COL(brand));
+      ccord_draw_rrect(r, jbar, jh * 0.5f, COL(brand));
       ccord_text_draw_ellipsis(r, jtxt, strlen(jtxt), jbar.x + 14.0f, jbar.y + (jbar.h - jt.y) * 0.5f, jbar.w - 28.0f, &jst);
       ccord_pop_offset(r);
       ccord_pop_alpha(r);

@@ -79,6 +79,7 @@ typedef struct sgeom {
   ccord_rect sb_up, sb_down;   // sidebar scroll buttons (zero size when every page fits)
   float step;                  // one sidebar scroll step: one row pitch
   ccord_rect page[SP_COUNT];
+  bool mobile;
 } sgeom;
 
 #if defined(_WIN32)
@@ -216,6 +217,7 @@ ccord_rect st_mfa_popup_verify_rect(const ccord_rect *pop);
 void st_ptt_binding_name(const ccord_ui *ui, char *out, size_t cap);
 ccord_rect st_quickcss_box_rect(const sgeom *g);
 ccord_rect st_row_rect(const sgeom *g, int row);
+float st_row_h(const sgeom *g);
 float st_row_y(const sgeom *g, int row);
 extern st_dev_cache st_s_dev;
 extern st_drawn_cache st_s_drawn;

@@ -457,7 +457,7 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
     }
   }
   area_y = (ctl_cy > ma.y + 66.0f) ? (ctl_cy + 26.0f) : (ma.y + 96.0f);
-  float mob_bar_h = (ui->mobile_layout && self_here) ? 60.0f : 0.0f;
+  float mob_bar_h = (ui->mobile_layout && self_here) ? 68.0f : 0.0f;
   float stage_bottom = ma.y + ma.h - mob_bar_h;
 
   if (self_streaming || watching_remote) {
@@ -723,7 +723,8 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
   size_t act_n = dc_activity_instance_total(ui, ch, &act_inst);
   float act_blk_h = dc_activity_block_h_w(act_n, area_w);
   content_h += act_blk_h;
-  if (ncards > 0) content_h += 18.0f + (float)((ncards + (size_t)card_cols - 1u) / (size_t)card_cols) * 62.0f;
+  if (ncards > 0) content_h += 18.0f + (float)((ncards + (size_t)card_cols - 1u) / (size_t)card_cols) *
+                                         (ui->mobile_layout ? 70.0f : 62.0f);
 
   ccord_rect sview = {ma.x, area_y, ma.w, stage_bottom - area_y};
   if (sview.h < 0.0f) sview.h = 0.0f;
@@ -816,11 +817,13 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
       card_y += 18.0f;
       card_hdr = true;
     }
-    ccord_rect card = {card_x, card_y, card_w, 50.0f};
+    float card_h = ui->mobile_layout ? 58.0f : 50.0f;
+    float card_stride = ui->mobile_layout ? 70.0f : 62.0f;
+    ccord_rect card = {card_x, card_y, card_w, card_h};
     card_x += card_w + 12.0f;
     if (card_x + card_w > area_x + area_w + 1.0f) {
       card_x = area_x;
-      card_y += 62.0f;
+      card_y += card_stride;
     }
     if (card.y + card.h < sview.y || card.y > sview.y + sview.h) continue;
     ccord_draw_rrect(r, card, 6.0f, COL(bg_secondary));
@@ -828,15 +831,18 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
     char cl[160];
     snprintf(cl, sizeof cl, "%s", bu ? bu->name : "Live");
     ccord_text_style cs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_header));
-    ccord_text_draw_ellipsis(r, cl, strlen(cl), card.x + 10.0f, card.y + 6.0f, card.w - 100.0f, &cs);
+    ccord_text_draw_ellipsis(r, cl, strlen(cl), card.x + 10.0f, card.y + (ui->mobile_layout ? 9.0f : 6.0f),
+                             card.w - (ui->mobile_layout ? 112.0f : 100.0f), &cs);
     uint32_t viewers = ccord_store_stream_viewer_count(ui->d.store, ch->id, bcs->user_id);
     char vl[48];
     snprintf(vl, sizeof vl, "%u watching", (unsigned)viewers);
     ccord_text_style vs2 = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 3.0f, COL(text_muted));
-    ccord_text_draw(r, vl, strlen(vl), card.x + 10.0f, card.y + 26.0f, &vs2, 0.0f);
+    ccord_text_draw(r, vl, strlen(vl), card.x + 10.0f, card.y + (ui->mobile_layout ? 30.0f : 26.0f), &vs2, 0.0f);
     bool is_watched = watching_remote && ws && ws->user_id == bcs->user_id;
     bool is_self_card = bcs->user_id == self_id;
-    ccord_rect wb = {card.x + card.w - 82.0f, card.y + (card.h - 22.0f) * 0.5f, 72.0f, 22.0f};
+    float wb_w = ui->mobile_layout ? 84.0f : 72.0f;
+    float wb_h = uis_btn_h_for(ui, 22.0f);
+    ccord_rect wb = {card.x + card.w - wb_w - 10.0f, card.y + (card.h - wb_h) * 0.5f, wb_w, wb_h};
     if (!is_self_card) {
       ccord_draw_rrect(r, wb, 4.0f, is_watched ? COL(bg_tertiary) : COL(brand));
       const char *wl = is_watched ? "Watching" : "Watch";
@@ -872,7 +878,7 @@ void ui_draw_voice_stage(ccord_ui *ui, ccord_renderer *r)
     float bpad = 10.0f, bgap = 8.0f;
     float bw = floorf((bar.w - 2.0f * bpad - 4.0f * bgap) / 5.0f);
     if (bw < 36.0f) bw = 36.0f;
-    float btn_h = 40.0f, by = bar.y + (bar.h - btn_h) * 0.5f;
+    float btn_h = UIS_MOB_H_BTN_LG, by = bar.y + (bar.h - btn_h) * 0.5f;
     float bx = bar.x + (bar.w - (5.0f * bw + 4.0f * bgap)) * 0.5f;
     sst->mob_mute = (ccord_rect){bx, by, bw, btn_h}; bx += bw + bgap;
     sst->mob_deaf = (ccord_rect){bx, by, bw, btn_h}; bx += bw + bgap;

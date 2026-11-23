@@ -425,15 +425,17 @@ bool st_handle_mfa_popup(ccord_ui *ui, const ccord_input_event *ev)
 
 void st_account_buttons(const ccord_ui *ui, const sgeom *g, ccord_rect *primary, ccord_rect *secondary)
 {
+  float bh = uis_btn_h_for(ui, UIS_H_BTN);
   float wy = st_account_web_y(ui, g);
-  float extra_web = g->content.w < 380.0f ? (UIS_H_BTN + 6.0f) : 0.0f;
-  float min_by = wy + UIS_H_BTN + extra_web + 6.0f;
-  float bot_by = g->content.y + g->content.h - 42.0f;
+  float extra_web = g->content.w < 380.0f ? (bh + 6.0f) : 0.0f;
+  float min_by = wy + bh + extra_web + 6.0f;
+  float bot_pad = (ui && ui->mobile_layout) ? 48.0f : 42.0f;
+  float bot_by = g->content.y + g->content.h - bot_pad;
   float by = bot_by > min_by ? bot_by : min_by;
   float pw = fminf(156.0f, fmaxf((g->content.w - 12.0f) * 0.54f, 96.0f));
   float sw = fminf(132.0f, fmaxf(g->content.w - pw - 12.0f, 84.0f));
-  *primary = (ccord_rect){g->content.x, by, pw, UIS_H_BTN};
-  *secondary = (ccord_rect){g->content.x + pw + 12.0f, by, sw, UIS_H_BTN};
+  *primary = (ccord_rect){g->content.x, by, pw, bh};
+  *secondary = (ccord_rect){g->content.x + pw + 12.0f, by, sw, bh};
 }
 
 void st_draw_button(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char *label, bool primary)
@@ -536,16 +538,18 @@ static float draw_detail_row(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));
   ccord_text_style vs = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_body, COL(text_normal));
 
-  float row_h = 52.0f;
+  float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  float row_h = ui->mobile_layout ? 64.0f : 52.0f;
   float btn_right = x + w;
-  float by = y + (row_h - UIS_H_BTN_SM) * 0.5f;
+  float by = y + (row_h - bh) * 0.5f;
+  uis_btn_size bsz = ui->mobile_layout ? UIS_BTN_S_MD : UIS_BTN_S_SM;
 
   // Draw up to 3 right-aligned compact buttons (b3 rightmost, then b2, then b1)
   if (b3_lbl) {
     float bw = fmaxf(uis_label_width(ui, r, b3_lbl), 58.0f);
     btn_right -= bw;
-    ccord_rect rc = {btn_right, by, bw, UIS_H_BTN_SM};
-    uis_button(ui, r, rc, b3_lbl, UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+    ccord_rect rc = {btn_right, by, bw, bh};
+    uis_button(ui, r, rc, b3_lbl, UIS_BTN_SECONDARY, bsz,
                (uis_state){.hover = !b3_disabled && ui_in_rect(ui->mx, ui->my, rc), .disabled = b3_disabled},
                "adr", (uint64_t)b3_kind);
     if (!b3_disabled) acct_add_hit(b3_kind, 0, nullptr, rc);
@@ -554,8 +558,8 @@ static float draw_detail_row(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   if (b2_lbl) {
     float bw = fmaxf(uis_label_width(ui, r, b2_lbl), 58.0f);
     btn_right -= bw;
-    ccord_rect rc = {btn_right, by, bw, UIS_H_BTN_SM};
-    uis_button(ui, r, rc, b2_lbl, UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+    ccord_rect rc = {btn_right, by, bw, bh};
+    uis_button(ui, r, rc, b2_lbl, UIS_BTN_SECONDARY, bsz,
                (uis_state){.hover = !b2_disabled && ui_in_rect(ui->mx, ui->my, rc), .disabled = b2_disabled},
                "adr", (uint64_t)b2_kind);
     if (!b2_disabled) acct_add_hit(b2_kind, 0, nullptr, rc);
@@ -564,8 +568,8 @@ static float draw_detail_row(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   if (b1_lbl) {
     float bw = fmaxf(uis_label_width(ui, r, b1_lbl), 58.0f);
     btn_right -= bw;
-    ccord_rect rc = {btn_right, by, bw, UIS_H_BTN_SM};
-    uis_button(ui, r, rc, b1_lbl, UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+    ccord_rect rc = {btn_right, by, bw, bh};
+    uis_button(ui, r, rc, b1_lbl, UIS_BTN_SECONDARY, bsz,
                (uis_state){.hover = !b1_disabled && ui_in_rect(ui->mx, ui->my, rc), .disabled = b1_disabled},
                "adr", (uint64_t)b1_kind);
     if (!b1_disabled) acct_add_hit(b1_kind, 0, nullptr, rc);
@@ -573,12 +577,12 @@ static float draw_detail_row(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   }
 
   float avail = fmaxf(btn_right - x - UIS_SP_2, 80.0f);
-  ccord_text_draw(r, label, strlen(label), x, y + 6.0f, &ls, 0.0f);
+  ccord_text_draw(r, label, strlen(label), x, y + (ui->mobile_layout ? 10.0f : 6.0f), &ls, 0.0f);
   if (pill_txt && pill_txt[0]) {
     float lw = ccord_text_measure(r, label, strlen(label), &ls, 0.0f).x;
-    acct_draw_pill(ui, r, x + lw + 8.0f, y + 3.0f, pill_txt, pill_fg, ui_alpha(pill_fg, 0.16f), nullptr);
+    acct_draw_pill(ui, r, x + lw + 8.0f, y + (ui->mobile_layout ? 7.0f : 3.0f), pill_txt, pill_fg, ui_alpha(pill_fg, 0.16f), nullptr);
   }
-  ccord_text_draw_ellipsis(r, value, strlen(value), x, y + 25.0f, avail, &vs);
+  ccord_text_draw_ellipsis(r, value, strlen(value), x, y + (ui->mobile_layout ? 30.0f : 25.0f), avail, &vs);
   return row_h;
 }
 
@@ -606,10 +610,11 @@ static void draw_signed_in_standing(ccord_ui *ui, ccord_renderer *r, float x, fl
   ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_control, COL(text_secondary));
   ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));
 
+  float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
   char title[96];
   snprintf(title, sizeof title, "Your Account is %s", standing_tier_label(tier));
   float ref_w = 104.0f;
-  ccord_rect ref_btn = {card.x + card.w - ref_w - 16.0f, card.y + 14.0f, ref_w, UIS_H_BTN_SM};
+  ccord_rect ref_btn = {card.x + card.w - ref_w - 16.0f, card.y + 14.0f, ref_w, bh};
   ccord_text_draw_ellipsis(r, title, strlen(title), card.x + 16.0f, card.y + 16.0f, card.w - ref_w - 40.0f, &hs);
   st_draw_button(ui, r, ref_btn, "Refresh", false);
   acct_add_hit(AH_REFRESH_STANDING, 0, nullptr, ref_btn);
@@ -677,17 +682,19 @@ static void draw_signed_in_standing(ccord_ui *ui, ccord_renderer *r, float x, fl
   }
 
   // Privacy & Data cross-link card
-  ccord_rect pc = {x, y, w, 66.0f};
+  float pc_h = ui->mobile_layout ? 76.0f : 66.0f;
+  ccord_rect pc = {x, y, w, pc_h};
   uis_card(ui, r, pc);
   float pbw = 152.0f;
-  ccord_rect pbtn = {pc.x + pc.w - pbw - 14.0f, pc.y + (pc.h - UIS_H_BTN_SM) * 0.5f, pbw, UIS_H_BTN_SM};
+  ccord_rect pbtn = {pc.x + pc.w - pbw - 14.0f, pc.y + (pc.h - bh) * 0.5f, pbw, bh};
   ccord_text_style pt = ui_style(ui, CCORD_FONT_BOLD, tk.fs_body, COL(text_header));
-  ccord_text_draw_ellipsis(r, "Privacy & Your Data", 19, pc.x + 16.0f, pc.y + 12.0f, pbtn.x - pc.x - 24.0f, &pt);
+  ccord_text_draw_ellipsis(r, "Privacy & Your Data", 19, pc.x + 16.0f, pc.y + (ui->mobile_layout ? 16.0f : 12.0f),
+                           pbtn.x - pc.x - 24.0f, &pt);
   ccord_text_draw_ellipsis(r, "Manage DM filters, profile privacy, and Request My Data.", 55,
-                           pc.x + 16.0f, pc.y + 34.0f, pbtn.x - pc.x - 24.0f, &ss);
+                           pc.x + 16.0f, pc.y + (ui->mobile_layout ? 38.0f : 34.0f), pbtn.x - pc.x - 24.0f, &ss);
   st_draw_button(ui, r, pbtn, "Privacy & Safety ->", false);
   acct_add_hit(AH_OPEN_PRIVACY, 0, nullptr, pbtn);
-  y += 66.0f + UIS_SP_4;
+  y += pc_h + UIS_SP_4;
 
   *io_y = y;
 }
@@ -696,6 +703,7 @@ static void draw_signed_in_mfa(ccord_ui *ui, ccord_renderer *r, float x, float *
 {
   uis_tokens tk = uis_tokens_of(ui);
   float y = *io_y;
+  float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
   const ccord_account_private *ap = ui->d.session ? ccord_session_account_private(ui->d.session) : nullptr;
   bool mfa_on = ap && ap->valid && ap->mfa_enabled;
   bool totp_on = ap && ap->valid && ((ap->authenticator_types & CCORD_AUTH_TYPE_TOTP) != 0 || ap->mfa_enabled);
@@ -709,10 +717,10 @@ static void draw_signed_in_mfa(ccord_ui *ui, ccord_renderer *r, float x, float *
   }
 
   // Back header
-  ccord_rect back_btn = {x, y, 160.0f, UIS_H_BTN_SM};
+  ccord_rect back_btn = {x, y, 160.0f, bh};
   st_draw_button(ui, r, back_btn, "< Back to My Account", false);
   acct_add_hit(AH_BACK_OVERVIEW, 0, nullptr, back_btn);
-  y += UIS_H_BTN_SM + UIS_SP_4;
+  y += bh + UIS_SP_4;
 
   ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, tk.fs_title, COL(text_header));
   ccord_text_style bt = ui_style(ui, CCORD_FONT_BOLD, tk.fs_body, COL(text_header));
@@ -723,7 +731,7 @@ static void draw_signed_in_mfa(ccord_ui *ui, ccord_renderer *r, float x, float *
   y += ui_line_h(ui, hs.size) + UIS_SP_3;
 
   // 1. Authenticator App (TOTP) Card
-  float totp_h = 108.0f;
+  float totp_h = ui->mobile_layout ? 118.0f : 108.0f;
   ccord_rect tc = {x, y, w, totp_h};
   uis_card(ui, r, tc);
   ccord_text_draw(r, "Authenticator App (TOTP)", 24, tc.x + 16.0f, tc.y + 14.0f, &bt, 0.0f);
@@ -739,12 +747,12 @@ static void draw_signed_in_mfa(ccord_ui *ui, ccord_renderer *r, float x, float *
   float bx = tc.x + 16.0f;
   float by = tc.y + 66.0f;
   if (!totp_on) {
-    ccord_rect eb = {bx, by, 192.0f, UIS_H_BTN_SM};
+    ccord_rect eb = {bx, by, 192.0f, bh};
     st_draw_button(ui, r, eb, "Set Up Authenticator App", true);
     acct_add_hit(AH_TOTP_ENABLE, 0, nullptr, eb);
   } else {
-    ccord_rect bc = {bx, by, 152.0f, UIS_H_BTN_SM};
-    ccord_rect db = {bx + 160.0f, by, 126.0f, UIS_H_BTN_SM};
+    ccord_rect bc = {bx, by, 152.0f, bh};
+    ccord_rect db = {bx + 160.0f, by, 126.0f, bh};
     st_draw_button(ui, r, bc, "View Backup Codes", false);
     acct_add_hit(AH_VIEW_BACKUP_CODES, 0, nullptr, bc);
     draw_danger_btn(ui, r, db, "Disable 2FA", true, false);
@@ -753,18 +761,19 @@ static void draw_signed_in_mfa(ccord_ui *ui, ccord_renderer *r, float x, float *
   y += totp_h + UIS_SP_3;
 
   // 2. SMS Backup Authentication Card
-  float sms_h = 84.0f;
+  float sms_h = ui->mobile_layout ? 94.0f : 84.0f;
   ccord_rect sc = {x, y, w, sms_h};
   uis_card(ui, r, sc);
   float sbw = 136.0f;
-  ccord_rect sbtn = {sc.x + sc.w - sbw - 14.0f, sc.y + (sc.h - UIS_H_BTN_SM) * 0.5f, sbw, UIS_H_BTN_SM};
+  ccord_rect sbtn = {sc.x + sc.w - sbw - 14.0f, sc.y + (sc.h - bh) * 0.5f, sbw, bh};
   ccord_text_draw_ellipsis(r, "SMS Backup Authentication", 25, sc.x + 16.0f, sc.y + 14.0f, sbtn.x - sc.x - 24.0f, &bt);
   const char *sdesc = (!mfa_on || !has_phone)
                           ? "Enable Authenticator 2FA and add a verified phone number to use SMS backup."
                           : (sms_on ? "SMS backup codes are enabled on your phone." : "Receive fallback codes via SMS.");
   ccord_text_draw(r, sdesc, strlen(sdesc), sc.x + 16.0f, sc.y + 38.0f, &ss, fmaxf(sbtn.x - sc.x - 24.0f, 80.0f));
   bool sms_disabled = (!mfa_on || !has_phone);
-  uis_button(ui, r, sbtn, sms_on ? "Disable SMS" : "Enable SMS", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+  uis_button(ui, r, sbtn, sms_on ? "Disable SMS" : "Enable SMS", UIS_BTN_SECONDARY,
+             ui->mobile_layout ? UIS_BTN_S_MD : UIS_BTN_S_SM,
              (uis_state){.hover = !sms_disabled && ui_in_rect(ui->mx, ui->my, sbtn), .disabled = sms_disabled},
              "asms", 1);
   if (!sms_disabled) acct_add_hit(AH_SMS_TOGGLE, sms_on ? 0 : 1, nullptr, sbtn);
@@ -778,36 +787,38 @@ static void draw_signed_in_mfa(ccord_ui *ui, ccord_renderer *r, float x, float *
                                         : nullptr;
   ccord_text_draw(r, "SECURITY KEYS & PASSKEYS (WEBAUTHN)", 36, x, y, &ls, 0.0f);
   y += 20.0f;
-  float klist_h = 84.0f + (float)(nkeys > 0 ? nkeys : 1u) * 48.0f;
+  float krow_h = ui->mobile_layout ? 48.0f : 40.0f;
+  float krow_step = ui->mobile_layout ? 56.0f : 48.0f;
+  float klist_h = (ui->mobile_layout ? 94.0f : 84.0f) + (float)(nkeys > 0 ? nkeys : 1u) * krow_step;
   ccord_rect kc = {x, y, w, klist_h};
   uis_card(ui, r, kc);
   float ky = kc.y + 14.0f;
   if (!keys_loaded) {
     ccord_text_draw(r, "Loading registered security keys...", 35, kc.x + 16.0f, ky + 6.0f, &ss, kc.w - 32.0f);
-    ky += 48.0f;
+    ky += krow_step;
   } else if (nkeys == 0) {
     ccord_text_draw(r, "No hardware security keys or passkeys registered.", 49, kc.x + 16.0f, ky + 6.0f, &ss, kc.w - 32.0f);
-    ky += 48.0f;
+    ky += krow_step;
   } else {
     for (size_t i = 0; i < nkeys; i++) {
-      ccord_rect krow = {kc.x + 12.0f, ky, kc.w - 24.0f, 40.0f};
+      ccord_rect krow = {kc.x + 12.0f, ky, kc.w - 24.0f, krow_h};
       uis_plate(ui, r, krow, tk.r_control, COL(bg_primary));
       bool armed = A.webauthn_confirm_idx == (int)i;
       float rbw = armed ? 92.0f : 78.0f;
-      ccord_rect rbtn = {krow.x + krow.w - rbw - 8.0f, krow.y + (krow.h - UIS_H_BTN_SM) * 0.5f, rbw, UIS_H_BTN_SM};
+      ccord_rect rbtn = {krow.x + krow.w - rbw - 8.0f, krow.y + (krow.h - bh) * 0.5f, rbw, bh};
       const char *kn = keys[i].name[0] ? keys[i].name : "Security Key";
       ccord_text_draw_ellipsis(r, kn, strlen(kn), krow.x + 12.0f,
                                krow.y + (krow.h - ui_line_h(ui, bt.size)) * 0.5f,
                                fmaxf(rbtn.x - krow.x - 20.0f, 60.0f), &bt);
       draw_danger_btn(ui, r, rbtn, armed ? "Confirm" : "Remove", armed, false);
       acct_add_hit(AH_WEBAUTHN_DELETE, (int)i, keys[i].id, rbtn);
-      ky += 48.0f;
+      ky += krow_step;
     }
   }
   uis_divider(ui, r, kc.x + 16.0f, ky, kc.w - 32.0f);
   ky += 12.0f;
   float wbw = 196.0f;
-  ccord_rect wbtn = {kc.x + kc.w - wbw - 14.0f, ky + 4.0f, wbw, UIS_H_BTN_SM};
+  ccord_rect wbtn = {kc.x + kc.w - wbw - 14.0f, ky + 4.0f, wbw, bh};
   const char *wnote = "Enrolling a new FIDO2 Passkey uses browser WebAuthn.";
   ccord_text_draw(r, wnote, strlen(wnote), kc.x + 16.0f, ky + 6.0f, &ss, fmaxf(wbtn.x - kc.x - 24.0f, 80.0f));
   st_draw_button(ui, r, wbtn, "Add Key on discord.com", false);
@@ -840,12 +851,16 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
   memset(A.saved_remove, 0, sizeof A.saved_remove);
   A.token_box = A.token_paste = A.token_save = A.token_clear = A.add_btn = (ccord_rect){0};
 
+  float bh_sm = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  float bh = uis_btn_h_for(ui, UIS_H_BTN);
+
   // Top Sub-tab bar (Security | Standing) when not inside MFA sub-view
   if (A.subview != ACCT_SUB_MFA) {
     float t1w = fmaxf(uis_label_width(ui, r, "Security"), 92.0f);
     float t2w = fmaxf(uis_label_width(ui, r, "Standing"), 92.0f);
-    ccord_rect r1 = {x, y, t1w, UIS_H_CHIP + 4.0f};
-    ccord_rect r2 = {x + t1w + UIS_SP_2, y, t2w, UIS_H_CHIP + 4.0f};
+    float sub_h = ui->mobile_layout ? UIS_MOB_H_CHIP : (UIS_H_CHIP + 4.0f);
+    ccord_rect r1 = {x, y, t1w, sub_h};
+    ccord_rect r2 = {x + t1w + UIS_SP_2, y, t2w, sub_h};
     uis_chip(ui, r, r1, "Security",
              (uis_state){.hover = ui_in_rect(ui->mx, ui->my, r1), .selected = A.subview == ACCT_SUB_OVERVIEW},
              "asub", 0);
@@ -854,7 +869,7 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
              "asub", 1);
     acct_add_hit(AH_SUBTAB_OVERVIEW, 0, nullptr, r1);
     acct_add_hit(AH_SUBTAB_STANDING, 0, nullptr, r2);
-    y += UIS_H_CHIP + 16.0f;
+    y += sub_h + 12.0f;
   }
 
   if (A.subview == ACCT_SUB_STANDING) {
@@ -879,9 +894,11 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
   char handle[CCORD_IDENTITY_NAME_BYTES + 2];
   snprintf(handle, sizeof handle, "@%s", mun);
 
+  float detail_row_h = ui->mobile_layout ? 64.0f : 52.0f;
+  float meta_h = ui->mobile_layout ? 50.0f : 42.0f;
   float banner_h = 68.0f;
-  float header_h = compact ? 108.0f : 68.0f;
-  float details_h = 4.0f * 52.0f + 42.0f;
+  float header_h = compact ? (ui->mobile_layout ? 116.0f : 108.0f) : 68.0f;
+  float details_h = 4.0f * detail_row_h + meta_h;
   float hero_h = banner_h + header_h + details_h + 24.0f;
   ccord_rect hero = {x, y, w, hero_h};
   uis_card(ui, r, hero);
@@ -919,9 +936,9 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
   float ep_w = fmaxf(uis_label_width(ui, r, "Edit User Profile"), 138.0f);
   ccord_rect ep_btn;
   if (compact) {
-    ep_btn = (ccord_rect){hero.x + 16.0f, hero.y + banner_h + 58.0f, fminf(ep_w, hero.w - 32.0f), UIS_H_BTN_SM};
+    ep_btn = (ccord_rect){hero.x + 16.0f, hero.y + banner_h + 58.0f, fminf(ep_w, hero.w - 32.0f), bh_sm};
   } else {
-    ep_btn = (ccord_rect){hero.x + hero.w - ep_w - 16.0f, info_y + 4.0f, ep_w, UIS_H_BTN_SM};
+    ep_btn = (ccord_rect){hero.x + hero.w - ep_w - 16.0f, info_y + 4.0f, ep_w, bh_sm};
   }
   float name_max_w = compact ? (hero.x + hero.w - info_x - 16.0f)
                              : fmaxf(ep_btn.x - info_x - 12.0f, 80.0f);
@@ -1005,9 +1022,10 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
   snprintf(meta, sizeof meta, "ID: %s  ·  %zu guild%s  ·  %s",
            mid_s[0] ? mid_s : "—", v->guild_count, v->guild_count == 1 ? "" : "s",
            v->status ? v->status : "Connected");
-  ccord_rect cpy_btn = {ix + iw - 78.0f, iy + 4.0f, 78.0f, UIS_H_BTN_SM};
-  ccord_text_draw_ellipsis(r, meta, strlen(meta), ix, iy + 10.0f, fmaxf(cpy_btn.x - ix - 8.0f, 60.0f), &ms);
-  uis_button(ui, r, cpy_btn, "Copy ID", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+  ccord_rect cpy_btn = {ix + iw - 78.0f, iy + (ui->mobile_layout ? 6.0f : 4.0f), 78.0f, bh_sm};
+  ccord_text_draw_ellipsis(r, meta, strlen(meta), ix, iy + (ui->mobile_layout ? 14.0f : 10.0f),
+                           fmaxf(cpy_btn.x - ix - 8.0f, 60.0f), &ms);
+  uis_button(ui, r, cpy_btn, "Copy ID", UIS_BTN_SECONDARY, ui->mobile_layout ? UIS_BTN_S_MD : UIS_BTN_S_SM,
              (uis_state){.hover = ui_in_rect(ui->mx, ui->my, cpy_btn)}, "acid", 1);
   acct_add_hit(AH_COPY_USER_ID, 0, nullptr, cpy_btn);
 
@@ -1021,15 +1039,15 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
   ccord_text_draw(r, "PASSWORD AND AUTHENTICATION", 27, x, y, &ls, 0.0f);
   y += 18.0f;
   bool mfa_on = ap && ap->valid && ap->mfa_enabled;
-  float sec_h = compact ? 168.0f : 138.0f;
+  float sec_h = compact ? (ui->mobile_layout ? 190.0f : 168.0f) : (ui->mobile_layout ? 160.0f : 138.0f);
   ccord_rect scard = {x, y, w, sec_h};
   uis_card(ui, r, scard);
 
   float sy = scard.y + 14.0f;
-  ccord_rect pw_btn = {scard.x + 16.0f, sy, 152.0f, UIS_H_BTN_SM};
+  ccord_rect pw_btn = {scard.x + 16.0f, sy, 152.0f, bh_sm};
   st_draw_button(ui, r, pw_btn, "Change Password", true);
   acct_add_hit(AH_CHANGE_PASSWORD, 0, nullptr, pw_btn);
-  sy += UIS_H_BTN_SM + 12.0f;
+  sy += bh_sm + 12.0f;
   uis_divider(ui, r, scard.x + 16.0f, sy, scard.w - 32.0f);
   sy += 12.0f;
 
@@ -1042,11 +1060,13 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
                              : "Add an extra layer of security with an Authenticator App (TOTP) or Passkeys.";
   ccord_text_draw_ellipsis(r, mdesc, strlen(mdesc), scard.x + 16.0f, sy + 22.0f, scard.w - 32.0f, &ss);
   float mby = sy + 46.0f;
-  ccord_rect mfa_btn = {scard.x + 16.0f, mby, 154.0f, UIS_H_BTN_SM};
+  float mfa_w = (mfa_on && compact) ? fminf(154.0f, floorf((scard.w - 40.0f) * 0.5f)) : 154.0f;
+  ccord_rect mfa_btn = {scard.x + 16.0f, mby, mfa_w, bh_sm};
   st_draw_button(ui, r, mfa_btn, mfa_on ? "Manage 2FA & Keys" : "Enable 2FA", !mfa_on);
   acct_add_hit(AH_OPEN_MFA, 0, nullptr, mfa_btn);
   if (mfa_on) {
-    ccord_rect bkc_btn = {mfa_btn.x + mfa_btn.w + 8.0f, mby, 146.0f, UIS_H_BTN_SM};
+    float bkc_w = compact ? fminf(146.0f, fmaxf(scard.w - 40.0f - mfa_w, 80.0f)) : 146.0f;
+    ccord_rect bkc_btn = {mfa_btn.x + mfa_btn.w + 8.0f, mby, bkc_w, bh_sm};
     st_draw_button(ui, r, bkc_btn, "View Backup Codes", false);
     acct_add_hit(AH_VIEW_BACKUP_CODES, 0, nullptr, bkc_btn);
   }
@@ -1055,7 +1075,7 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
   // ---- 3. Devices & Account Status Card ----
   ccord_text_draw(r, "DEVICES & ACCOUNT STATUS", 24, x, y, &ls, 0.0f);
   y += 18.0f;
-  float st_h = 116.0f;
+  float st_h = 2.0f * detail_row_h + 12.0f;
   ccord_rect stcard = {x, y, w, st_h};
   uis_card(ui, r, stcard);
   float dy = stcard.y + 4.0f;
@@ -1078,10 +1098,10 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
 
   // ---- 4. Saved Accounts Card ----
   ccord_text_draw(r, "SAVED ACCOUNTS", 14, x, y + 6.0f, &ls, 0.0f);
-  A.add_btn = (ccord_rect){x + w - 126.0f, y, 126.0f, UIS_H_BTN_SM};
+  A.add_btn = (ccord_rect){x + w - 126.0f, y, 126.0f, bh_sm};
   st_draw_button(ui, r, A.add_btn, "Add Account", false);
   acct_add_hit(AH_ADD_ACCOUNT, 0, nullptr, A.add_btn);
-  y += UIS_H_BTN_SM + 10.0f;
+  y += bh_sm + 10.0f;
 
   size_t shown = ui->saved_account_count < SAVED_ACCOUNT_ROWS ? ui->saved_account_count : SAVED_ACCOUNT_ROWS;
   if (shown == 0) {
@@ -1095,15 +1115,15 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
     ccord_text_style ract = ui_style(ui, CCORD_FONT_BOLD, tk.fs_control, COL(brand));
     for (size_t i = 0; i < shown; i++) {
       const ccord_ui_saved_account *sa = &ui->saved_accounts[i];
-      ccord_rect row = {x, y, w, UIS_H_BTN + 6.0f};
+      ccord_rect row = {x, y, w, bh + (ui->mobile_layout ? 10.0f : 6.0f)};
       A.saved_row[i] = row;
       uis_card(ui, r, row);
       if (sa->active) uis_list_row_fill(ui, r, row, (uis_state){.selected = true}, "sacc", (uint64_t)i);
       const char *name = sa->display_name[0] ? sa->display_name : (sa->username[0] ? sa->username : "Saved account");
       char line[160];
       snprintf(line, sizeof line, "%s%s", name, sa->active ? "  (active)" : "");
-      ccord_rect rbtn = {row.x + row.w - 78.0f - 8.0f, row.y + (row.h - UIS_H_BTN_SM) * 0.5f, 78.0f, UIS_H_BTN_SM};
-      ccord_rect sbtn = {rbtn.x - 72.0f - 6.0f, rbtn.y, 72.0f, UIS_H_BTN_SM};
+      ccord_rect rbtn = {row.x + row.w - 78.0f - 8.0f, row.y + (row.h - bh_sm) * 0.5f, 78.0f, bh_sm};
+      ccord_rect sbtn = {rbtn.x - 72.0f - 6.0f, rbtn.y, 72.0f, bh_sm};
       A.saved_switch[i] = sbtn;
       A.saved_remove[i] = rbtn;
       ccord_text_draw_ellipsis(r, line, strlen(line), row.x + 12.0f,
@@ -1121,26 +1141,27 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
   }
 
   // ---- 5. Standalone Discord Token (Collapsible Advanced Disclosure) ----
-  float tok_h = A.token_expanded ? 142.0f : 48.0f;
+  float tok_h = A.token_expanded ? (ui->mobile_layout ? 168.0f : 142.0f) : (ui->mobile_layout ? 58.0f : 48.0f);
   ccord_rect tcard = {x, y, w, tok_h};
   uis_card(ui, r, tcard);
-  ccord_rect ttoggle = {tcard.x + tcard.w - 84.0f - 12.0f, tcard.y + 10.0f, 84.0f, UIS_H_BTN_SM};
+  ccord_rect ttoggle = {tcard.x + tcard.w - 84.0f - 12.0f, tcard.y + 10.0f, 84.0f, bh_sm};
   ccord_text_draw_ellipsis(r, "STANDALONE DISCORD TOKEN (ADVANCED)", 35,
                            tcard.x + 14.0f, tcard.y + 16.0f, fmaxf(ttoggle.x - tcard.x - 20.0f, 80.0f), &ls);
   st_draw_button(ui, r, ttoggle, A.token_expanded ? "Hide" : "Show", false);
   acct_add_hit(AH_TOKEN_TOGGLE, 0, nullptr, ttoggle);
   if (A.token_expanded) {
-    A.token_box = (ccord_rect){tcard.x + 14.0f, tcard.y + 50.0f, tcard.w - 28.0f, UIS_H_INPUT};
+    float tok_inp_h = ui->mobile_layout ? 42.0f : UIS_H_INPUT;
+    A.token_box = (ccord_rect){tcard.x + 14.0f, tcard.y + (ui->mobile_layout ? 58.0f : 50.0f), tcard.w - 28.0f, tok_inp_h};
     draw_input_field(ui, r, A.token_box, &ui->account_token_edit, ui->account_focus_field == 1, true,
                      "Paste Discord user token...");
     acct_add_hit(AH_TOKEN_BOX, 0, nullptr, A.token_box);
-    float bty = A.token_box.y + UIS_H_INPUT + 10.0f;
+    float bty = A.token_box.y + tok_inp_h + 10.0f;
     float pw = compact ? floorf((tcard.w - 40.0f) * 0.24f) : 74.0f;
     float sw = compact ? floorf((tcard.w - 40.0f) * 0.46f) : 142.0f;
     float cw = compact ? fmaxf(tcard.w - 40.0f - pw - sw, 64.0f) : 96.0f;
-    A.token_paste = (ccord_rect){tcard.x + 14.0f, bty, pw, UIS_H_BTN_SM};
-    A.token_save = (ccord_rect){A.token_paste.x + pw + 6.0f, bty, sw, UIS_H_BTN_SM};
-    A.token_clear = (ccord_rect){A.token_save.x + sw + 6.0f, bty, cw, UIS_H_BTN_SM};
+    A.token_paste = (ccord_rect){tcard.x + 14.0f, bty, pw, bh_sm};
+    A.token_save = (ccord_rect){A.token_paste.x + pw + 6.0f, bty, sw, bh_sm};
+    A.token_clear = (ccord_rect){A.token_save.x + sw + 6.0f, bty, cw, bh_sm};
     st_draw_button(ui, r, A.token_paste, "Paste", false);
     st_draw_button(ui, r, A.token_save, "Save & Connect", true);
     st_draw_button(ui, r, A.token_clear, "Sign Out", false);
@@ -1153,23 +1174,27 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
   // ---- 6. Account Removal (Danger) Card ----
   ccord_text_draw(r, "ACCOUNT REMOVAL", 15, x, y, &ls, 0.0f);
   y += 18.0f;
-  ccord_rect dcard = {x, y, w, 96.0f};
+  float dcard_h = ui->mobile_layout ? 108.0f : 96.0f;
+  ccord_rect dcard = {x, y, w, dcard_h};
   uis_card(ui, r, dcard);
   ccord_draw_rect(r, (ccord_rect){dcard.x, dcard.y + 8.0f, 3.0f, dcard.h - 16.0f}, COL(danger));
   const char *rnote = "Disabling your account means you can recover it at any time. Deleting is permanent.";
   ccord_text_draw_ellipsis(r, rnote, strlen(rnote), dcard.x + 16.0f, dcard.y + 14.0f, dcard.w - 32.0f, &ss);
-  ccord_rect dis_btn = {dcard.x + 16.0f, dcard.y + 48.0f, 138.0f, UIS_H_BTN_SM};
-  ccord_rect del_btn = {dis_btn.x + dis_btn.w + 10.0f, dcard.y + 48.0f, 134.0f, UIS_H_BTN_SM};
+  float dis_w = compact ? fminf(138.0f, floorf((dcard.w - 42.0f) * 0.5f)) : 138.0f;
+  float del_w = compact ? fminf(134.0f, fmaxf(dcard.w - 42.0f - dis_w, 80.0f)) : 134.0f;
+  float dby = dcard.y + (ui->mobile_layout ? 54.0f : 48.0f);
+  ccord_rect dis_btn = {dcard.x + 16.0f, dby, dis_w, bh_sm};
+  ccord_rect del_btn = {dis_btn.x + dis_btn.w + 10.0f, dby, del_w, bh_sm};
   draw_danger_btn(ui, r, dis_btn, "Disable Account", false, false);
   draw_danger_btn(ui, r, del_btn, "Delete Account", true, false);
   acct_add_hit(AH_DISABLE_ACCOUNT, 0, nullptr, dis_btn);
   acct_add_hit(AH_DELETE_ACCOUNT, 0, nullptr, del_btn);
-  y += 96.0f + UIS_SP_5;
+  y += dcard_h + UIS_SP_5;
 
   // ---- 7. Billing, Nitro, Shop & Web Settings Card ----
   ccord_text_draw(r, "BILLING, NITRO, SHOP & WEB SETTINGS", 35, x, y, &ls, 0.0f);
   y += 18.0f;
-  float web_h = w < 380.0f ? (2.0f * UIS_H_BTN + 6.0f) : UIS_H_BTN;
+  float web_h = w < 380.0f ? (2.0f * bh + 6.0f) : bh;
   for (int i = 0; i < 5; i++) {
     ccord_rect brc;
     if (w < 380.0f) {
@@ -1178,11 +1203,11 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
       int col = i < 3 ? i : (i - 3);
       int cols = row == 0 ? 3 : 2;
       float bw = floorf((w - (float)(cols - 1) * gap) / (float)cols);
-      brc = (ccord_rect){x + (float)col * (bw + gap), y + (float)row * (UIS_H_BTN + gap), bw, UIS_H_BTN};
+      brc = (ccord_rect){x + (float)col * (bw + gap), y + (float)row * (bh + gap), bw, bh};
     } else {
       float gap = 8.0f;
       float bw = (w - 4.0f * gap) / 5.0f;
-      brc = (ccord_rect){x + (float)i * (bw + gap), y, bw, UIS_H_BTN};
+      brc = (ccord_rect){x + (float)i * (bw + gap), y, bw, bh};
     }
     A.web_btn[i] = brc;
     st_draw_button(ui, r, brc, st_k_web_labels[i], false);
@@ -1193,15 +1218,15 @@ static void draw_signed_in_account(ccord_ui *ui, ccord_renderer *r, const sgeom 
   // ---- 8. Session Footer (Refresh & Sign Out) ----
   float fx = x;
   if (v->can_refresh) {
-    ccord_rect rf_btn = {fx, y, 156.0f, UIS_H_BTN};
+    ccord_rect rf_btn = {fx, y, 156.0f, bh};
     st_draw_button(ui, r, rf_btn, "Refresh", true);
     acct_add_hit(AH_REFRESH, 0, nullptr, rf_btn);
     fx += 156.0f + UIS_SP_3;
   }
-  ccord_rect so_btn = {fx, y, 132.0f, UIS_H_BTN};
+  ccord_rect so_btn = {fx, y, 132.0f, bh};
   st_draw_button(ui, r, so_btn, "Sign out", false);
   acct_add_hit(AH_SIGN_OUT, 0, nullptr, so_btn);
-  y += UIS_H_BTN + UIS_SP_4;
+  y += bh + UIS_SP_4;
 
   A.content_h = (y - start_y) + 20.0f;
 }
@@ -1268,8 +1293,11 @@ void st_draw_account(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 
   {
     ccord_text_style rls = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_overline, COL(text_muted));
-    ccord_text_draw(r, "SAVED ACCOUNTS", 14, x, g->content.y + 338.0f, &rls, 0.0f);
-    st_draw_button(ui, r, st_account_add_btn_rect(g), "Add Account", false);
+    ccord_rect add_r = st_account_add_btn_rect(g);
+    ccord_rect row0 = st_saved_account_row_rect(g, 0);
+    float row_step = g->mobile ? 48.0f : 40.0f;
+    ccord_text_draw(r, "SAVED ACCOUNTS", 14, x, add_r.y + (g->mobile ? 12.0f : 8.0f), &rls, 0.0f);
+    st_draw_button(ui, r, add_r, "Add Account", false);
     ccord_text_style rns = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_normal));
     ccord_text_style ract = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_control, COL(brand));
     size_t shown = ui->saved_account_count < SAVED_ACCOUNT_ROWS ? ui->saved_account_count : SAVED_ACCOUNT_ROWS;
@@ -1290,12 +1318,12 @@ void st_draw_account(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
     if (ui->saved_account_count == 0) {
       ccord_text_style empty = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_muted));
       const char *msg = "No saved accounts yet. Sign in to add one to the switcher.";
-      ccord_text_draw_ellipsis(r, msg, strlen(msg), x, g->content.y + 372.0f, w - 120.0f, &empty);
+      ccord_text_draw_ellipsis(r, msg, strlen(msg), x, row0.y, w - 120.0f, &empty);
     } else if (ui->saved_account_count > SAVED_ACCOUNT_ROWS) {
       char more[48];
       snprintf(more, sizeof more, "+%zu more", ui->saved_account_count - SAVED_ACCOUNT_ROWS);
       ccord_text_style ms = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_caption, COL(text_muted));
-      ccord_text_draw(r, more, strlen(more), x, g->content.y + 372.0f + SAVED_ACCOUNT_ROWS * 40.0f + 8.0f, &ms, 0.0f);
+      ccord_text_draw(r, more, strlen(more), x, row0.y + (float)SAVED_ACCOUNT_ROWS * row_step + 8.0f, &ms, 0.0f);
     }
   }
 

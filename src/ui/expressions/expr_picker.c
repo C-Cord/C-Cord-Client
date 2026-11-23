@@ -515,15 +515,16 @@ void ui_expr_draw_composer_buttons(ccord_ui *ui, ccord_renderer *r, ccord_rect b
   float by = box.y + (box.h - btn_h) * 0.5f;
   if (ui->mobile_layout) {
     // Compact mobile composer: single Emoji button (opens tabbed Emoji/GIFs/Stickers sheet) left of Send/Mic.
-    float right = box.x + box.w - 42.0f;
-    ccord_rect emoji_r = {right - 28.0f, box.y + (box.h - 28.0f) * 0.5f, 28.0f, 28.0f};
+    float right = box.x + box.w - 48.0f;
+    float sz = 38.0f;
+    ccord_rect emoji_r = {right - sz, box.y + (box.h - sz) * 0.5f, sz, sz};
     ep->composer_btn_rects[EXPR_TAB_GIFS] = (ccord_rect){0};
     ep->composer_btn_rects[EXPR_TAB_STICKERS] = (ccord_rect){0};
     ep->composer_btn_rects[EXPR_TAB_EMOJI] = emoji_r;
     bool emj_active = ui->emoji_picker_open && ui->emoji_picker_msg_id == CCORD_ID_NONE;
     ccord_color emj_col =
         ui_state_mix(ui, "eemjbtn", 0, false, emj_active, COL(text_secondary), COL(status_idle), COL(brand));
-    ui_expr_draw_smiley(r, emoji_r.x + emoji_r.w * 0.5f, emoji_r.y + emoji_r.h * 0.5f, 19.0f, emj_col);
+    ui_expr_draw_smiley(r, emoji_r.x + emoji_r.w * 0.5f, emoji_r.y + emoji_r.h * 0.5f, 22.0f, emj_col);
     return;
   }
   // The voice message mic button takes the rightmost 26px slot (ui_vm_mic_rect), so the trio starts 30px further left.
@@ -637,12 +638,15 @@ void ui_expr_picker_draw(ccord_ui *ui, ccord_renderer *r)
   static const char *const k_tab_names[4] = {"GIFs", "Stickers", "Emoji", "Sounds"};
   float tab_y = box.y + UIS_SP_2;
   float tx = box.x + UIS_SP_3;
+  float tab_h = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  float icon_sz = uis_icon_btn_for(ui);
+  float inp_h = ui->mobile_layout ? 42.0f : UIS_H_INPUT;
   bool reaction_mode = (ui->emoji_picker_msg_id != CCORD_ID_NONE);
   int ntabs = reaction_mode ? 3 : 4;
   for (int t = 0; t < 4; t++) {
     b->tab_rects[t] = (ccord_rect){0, 0, 0, 0};
     if (t >= ntabs) continue;
-    ccord_rect tr = {tx, tab_y, uis_label_width(ui, r, k_tab_names[t]), UIS_H_BTN_SM};
+    ccord_rect tr = {tx, tab_y, uis_label_width(ui, r, k_tab_names[t]), tab_h};
     b->tab_rects[t] = tr;
     bool hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, tr);
     uis_tab(ui, r, tr, k_tab_names[t], (uis_state){.hover = hov && !reaction_mode, .selected = ep->tab == t}, "etab",
@@ -652,17 +656,17 @@ void ui_expr_picker_draw(ccord_ui *ui, ccord_renderer *r)
   if (reaction_mode) {
     const char *rm_lbl = "Add Reaction";
     ccord_rect badge = {box.x + box.w - UIS_SP_3 - uis_label_width(ui, r, rm_lbl), tab_y, uis_label_width(ui, r, rm_lbl),
-                        UIS_H_BTN_SM};
+                        tab_h};
     uis_button(ui, r, badge, rm_lbl, UIS_BTN_PRIMARY, UIS_BTN_S_SM,
                (uis_state){.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, badge)}, "eaddrx", 0);
   }
 
   // Search bar + skin tone button (Emoji tab). The search is a shared input; its leading glyph and trailing clear button sit
   // in the EXPR_SEARCH_PAD insets.
-  float search_y = tab_y + UIS_H_BTN_SM + UIS_SP_2;
+  float search_y = tab_y + tab_h + UIS_SP_2;
   bool emoji_tab = (ep->tab == EXPR_TAB_EMOJI);
-  float search_w = emoji_tab ? box.w - 2.0f * UIS_SP_3 - UIS_SP_2 - UIS_ICON_BTN : box.w - 2.0f * UIS_SP_3;
-  b->search_rect = (ccord_rect){box.x + UIS_SP_3, search_y, search_w, UIS_H_INPUT};
+  float search_w = emoji_tab ? box.w - 2.0f * UIS_SP_3 - UIS_SP_2 - icon_sz : box.w - 2.0f * UIS_SP_3;
+  b->search_rect = (ccord_rect){box.x + UIS_SP_3, search_y, search_w, inp_h};
 
   const char *q = ccord_text_edit_cstr(&b->search_edit);
   const char *placeholder = (ep->tab == EXPR_TAB_GIFS)     ? "Search GIFs"
@@ -699,9 +703,9 @@ void ui_expr_picker_draw(ccord_ui *ui, ccord_renderer *r)
   }
 
   if (q[0]) {
-    b->search_clear_rect = (ccord_rect){b->search_rect.x + b->search_rect.w - UIS_ICON_BTN - 2.0f,
-                                        b->search_rect.y + (b->search_rect.h - UIS_ICON_BTN) * 0.5f, UIS_ICON_BTN,
-                                        UIS_ICON_BTN};
+    b->search_clear_rect = (ccord_rect){b->search_rect.x + b->search_rect.w - icon_sz - 2.0f,
+                                        b->search_rect.y + (b->search_rect.h - icon_sz) * 0.5f, icon_sz,
+                                        icon_sz};
     bool chv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, b->search_clear_rect);
     ccord_color cc = uis_icon_button(ui, r, b->search_clear_rect, (uis_state){.hover = chv}, "esearchclr", 0);
     ui_icon_close(r, b->search_clear_rect.x + b->search_clear_rect.w * 0.5f,
@@ -712,7 +716,7 @@ void ui_expr_picker_draw(ccord_ui *ui, ccord_renderer *r)
 
   if (emoji_tab) {
     b->skin_btn_rect = (ccord_rect){b->search_rect.x + b->search_rect.w + UIS_SP_2,
-                                    search_y + (UIS_H_INPUT - UIS_ICON_BTN) * 0.5f, UIS_ICON_BTN, UIS_ICON_BTN};
+                                    search_y + (inp_h - icon_sz) * 0.5f, icon_sz, icon_sz};
     bool shov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, b->skin_btn_rect);
     uis_icon_button(ui, r, b->skin_btn_rect, (uis_state){.hover = shov, .selected = b->skin_popup_open}, "eskinbtn", 0);
     const char *sw = ep_k_skin_tone_swatches[ep->skin_tone % 6u];
@@ -724,7 +728,7 @@ void ui_expr_picker_draw(ccord_ui *ui, ccord_renderer *r)
     b->skin_btn_rect = (ccord_rect){0, 0, 0, 0};
   }
 
-  float body_y = search_y + UIS_H_INPUT + UIS_SP_2 + 1.0f;
+  float body_y = search_y + inp_h + UIS_SP_2 + 1.0f;
   ccord_draw_rect(r, (ccord_rect){box.x, body_y - 1.0f, box.w, 1.0f}, COL(border_subtle));
 
   // Tab Body

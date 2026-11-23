@@ -16,6 +16,7 @@ bool ui_vm_send_clip(ccord_ui *ui);                     // sends the reviewed cl
 bool ui_vm_is_active(const ccord_ui *ui);               // recording or reviewing: the composer shows the bar
 bool ui_vm_handle_click(ccord_ui *ui, float x, float y); // true when the click belongs to the voice controls
 ccord_rect ui_vm_mic_rect(ccord_rect box);              // the mic button in the composer box (26x24, right edge - 8)
+ccord_rect ui_vm_mic_rect_for(const ccord_ui *ui, ccord_rect box);
 void ui_vm_draw_mic(ccord_ui *ui, ccord_renderer *r, ccord_rect box);
 void ui_vm_draw_bar(ccord_ui *ui, ccord_renderer *r, ccord_rect box);
 size_t ui_vm_waveform_bars(const char *b64, uint8_t *out, size_t cap);   // decodes Discord's waveform; 0 when invalid

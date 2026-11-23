@@ -443,14 +443,16 @@ void uis_chip(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char *label,
     fill = ui_alpha(fill, UIS_DISABLED_BG);
     fg = ui_alpha(fg, UIS_DISABLED_FG);
   }
-  ccord_rect pill = {rc.x, rc.y + (rc.h - UIS_H_CHIP) * 0.5f, rc.w, UIS_H_CHIP};
-  float rad = UIS_H_CHIP * 0.5f;
+  float chip_h = (ui && ui->mobile_layout && rc.h > UIS_H_CHIP) ? rc.h : UIS_H_CHIP;
+  ccord_rect pill = {rc.x, rc.y + (rc.h - chip_h) * 0.5f, rc.w, chip_h};
+  float rad = chip_h * 0.5f;
   ccord_draw_rrect(r, pill, rad, fill);
-  ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, t.fs_caption, fg);
+  float fs = (ui && ui->mobile_layout && chip_h > UIS_H_CHIP) ? t.fs_control : t.fs_caption;
+  ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, fs, fg);
   ccord_vec2 m = ccord_text_measure(r, label, strlen(label), &ts, 0.0f);
   float x = m.x < pill.w ? pill.x + (pill.w - m.x) * 0.5f : pill.x + UIS_SP_2;
   ccord_text_draw_ellipsis(r, label, strlen(label), x, pill.y + (pill.h - m.y) * 0.5f, pill.w - 2.0f * UIS_SP_2, &ts);
-  audit(UIS_K_CHIP, pill, rad, t.fs_caption, fill);
+  audit(UIS_K_CHIP, pill, rad, fs, fill);
 }
 
 // ---------------------------------------------------------------- select
@@ -551,9 +553,43 @@ void uis_slider(ccord_ui *ui, ccord_renderer *r, ccord_rect track, float fractio
   float fill = track.w * f;
   ccord_color fc = st.disabled ? ui_alpha(CO(brand), UIS_DISABLED_BG) : CO(brand);
   if (fill > 0.0f) ccord_draw_rrect(r, (ccord_rect){track.x, track.y, fill, track.h}, rad, fc);
-  ccord_draw_circle(r, track.x + fill, track.y + track.h * 0.5f, 6.0f,
+  float thumb_r = (ui && ui->mobile_layout) ? 8.5f : 6.0f;
+  ccord_draw_circle(r, track.x + fill, track.y + track.h * 0.5f, thumb_r,
                     st.disabled ? ui_alpha(CO(text_header), 0.5f) : CO(text_header));
   audit(UIS_K_SLIDER, track, rad, 0.0f, fc);
+}
+
+float uis_btn_h_for(const ccord_ui *ui, float desktop_h)
+{
+  if (!ui || !ui->mobile_layout) return desktop_h;
+  if (desktop_h >= UIS_H_BTN_LG) return desktop_h > UIS_MOB_H_BTN_LG ? desktop_h : UIS_MOB_H_BTN_LG;
+  if (desktop_h >= UIS_H_BTN) return UIS_MOB_H_BTN;
+  return UIS_MOB_H_BTN_SM;
+}
+
+float uis_chip_h_for(const ccord_ui *ui, float desktop_h)
+{
+  if (!ui || !ui->mobile_layout) return desktop_h;
+  return desktop_h > UIS_MOB_H_CHIP ? desktop_h : UIS_MOB_H_CHIP;
+}
+
+float uis_icon_btn_for(const ccord_ui *ui)
+{
+  return (ui && ui->mobile_layout) ? UIS_MOB_ICON_BTN : UIS_ICON_BTN;
+}
+
+ccord_rect uis_hit_padded(ccord_rect r, float min_w, float min_h)
+{
+  if (r.w <= 0.0f || r.h <= 0.0f) return r;
+  if (r.w < min_w) {
+    r.x -= (min_w - r.w) * 0.5f;
+    r.w = min_w;
+  }
+  if (r.h < min_h) {
+    r.y -= (min_h - r.h) * 0.5f;
+    r.h = min_h;
+  }
+  return r;
 }
 
 float uis_anim_value(const ccord_ui *ui, const char *ns, uint64_t id)

@@ -1095,7 +1095,8 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
   if (ui->staged_file_count > 0) {
     size_t cols = ui->staged_file_count <= 2u ? ui->staged_file_count : (ui->staged_file_count <= 6u ? 3u : 5u);
     size_t frows = (ui->staged_file_count + cols - 1u) / cols;
-    float fh = 28.0f * (float)frows;
+    float row_h = ui->mobile_layout ? 38.0f : 28.0f;
+    float fh = row_h * (float)frows;
     box.y += fh;
     box.h -= fh;
   }

@@ -514,10 +514,13 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     if (ev->type == CCORD_IN_WHEEL) {
       ccord_rect m = ui_quick_switcher_rect(ui);
-      ccord_rect lview = {m.x + 12.0f, m.y + 66.0f, m.w - 24.0f, m.h - 76.0f};
-      float content_h = (float)ui->nquick_switcher_items * 30.0f;
+      ccord_rect lview = ui->mobile_layout
+                           ? (ccord_rect){m.x + 12.0f, m.y + 74.0f, m.w - 24.0f, m.h - 84.0f}
+                           : (ccord_rect){m.x + 12.0f, m.y + 66.0f, m.w - 24.0f, m.h - 76.0f};
+      float qstride = ui->mobile_layout ? 44.0f : 30.0f;
+      float content_h = (float)ui->nquick_switcher_items * qstride;
       float max_s = maxf(content_h - lview.h, 0.0f);
-      ccord_scroller_scroll(&ui->quick_switcher_glide, &ui->quick_switcher_scroll, -ev->wheel * 30.0f, max_s,
+      ccord_scroller_scroll(&ui->quick_switcher_glide, &ui->quick_switcher_scroll, -ev->wheel * qstride, max_s,
                             ui_wheel_direct(ui, ev));
       ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
       ui->dirty = true;

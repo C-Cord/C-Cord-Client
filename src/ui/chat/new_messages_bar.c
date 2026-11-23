@@ -51,7 +51,7 @@ void ui_nmb_draw(ccord_ui *ui, ccord_renderer *r, const ccord_rect *ma, ccord_id
         if (first_new_row != SIZE_MAX && first_new_row < ui->vlist.count) {
           ui->vlist.stick_bottom = false;
           ui->vlist.anchor_index = first_new_row;
-          ui->vlist.anchor_offset = first_new_row > 0 ? 34.0f : 0.0f;
+          ui->vlist.anchor_offset = first_new_row > 0 ? (ui->mobile_layout ? 46.0f : 34.0f) : 0.0f;
         }
       } else {
         ui->vlist.stick_bottom = false;
@@ -95,7 +95,8 @@ void ui_nmb_draw(ccord_ui *ui, ccord_renderer *r, const ccord_rect *ma, ccord_id
     const char *ack_lbl = "Mark as Read";
     ccord_vec2 at = ccord_text_measure(r, ack_lbl, strlen(ack_lbl), &bst, 0.0f);
     float ack_w = fminf(at.x + 20.0f, ma->w * 0.45f);
-    ccord_rect bar = {ma->x + 12.0f, ma->y + 4.0f, ma->w - 24.0f, 26.0f};
+    float bh = ui->mobile_layout ? 38.0f : 26.0f;
+    ccord_rect bar = {ma->x + 12.0f, ma->y + 4.0f, ma->w - 24.0f, bh};
     ccord_rect ack_r = {bar.x + bar.w - ack_w, bar.y, ack_w, bar.h};
     if (nb_on) {
       ui->new_bar_rect = bar;
@@ -129,7 +130,7 @@ bool ui_nmb_click(ccord_ui *ui, float x, float y)
   if (ui->new_bar_target_row != SIZE_MAX && ui->new_bar_target_row < ui->vlist.count) {
     ui->vlist.stick_bottom = false;
     ui->vlist.anchor_index = ui->new_bar_target_row;
-    ui->vlist.anchor_offset = ui->new_bar_target_row > 0 ? 34.0f : 0.0f;
+    ui->vlist.anchor_offset = ui->new_bar_target_row > 0 ? (ui->mobile_layout ? 46.0f : 34.0f) : 0.0f;
   } else if (ui->vlist.count > 0) {
     ui->vlist.stick_bottom = false;
     ui->vlist.anchor_index = 0;

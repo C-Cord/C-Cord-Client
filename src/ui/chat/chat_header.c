@@ -283,7 +283,8 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
       ccord_text_style abs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_secondary));
       ccord_vec2 abt = ccord_text_measure(r, albl, strlen(albl), &abs, 0.0f);
       float bw = abt.x + 18.0f;
-      ccord_rect ar = {hdr_btn_left - bw, cy - 12.0f, bw, 24.0f};
+      float bh = uis_btn_h_for(ui, 24.0f);
+      ccord_rect ar = {hdr_btn_left - bw, cy - bh * 0.5f, bw, bh};
       if (ar.x > tx + nw + 12.0f) {
         ui->thread_archive_rect = ar;
         bool ahv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, ar);
@@ -298,7 +299,8 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
                                       ch->thread_joined ? COL(text_secondary) : COL(text_on_brand));
       ccord_vec2 jbt = ccord_text_measure(r, jlbl, strlen(jlbl), &jbs, 0.0f);
       float bw = jbt.x + 18.0f;
-      ccord_rect jr = {hdr_btn_left - bw, cy - 12.0f, bw, 24.0f};
+      float bh = uis_btn_h_for(ui, 24.0f);
+      ccord_rect jr = {hdr_btn_left - bw, cy - bh * 0.5f, bw, bh};
       if (jr.x > tx + nw + 12.0f) {
         ui->thread_join_rect = jr;
         bool jhv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, jr);
@@ -312,9 +314,10 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
     const char *elbl = ui->mobile_layout ? "Edit" : "Edit Group";
     ccord_text_style ebs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_secondary));
     ccord_vec2 ebt = ccord_text_measure(r, elbl, strlen(elbl), &ebs, 0.0f);
-    float epad = ui->mobile_layout ? 10.0f : 16.0f;
+    float epad = 16.0f;
     float ebw = ebt.x + epad;
-    ccord_rect er = {hdr_btn_left - ebw, cy - 12.0f, ebw, 24.0f};
+    float ebh = uis_btn_h_for(ui, 24.0f);
+    ccord_rect er = {hdr_btn_left - ebw, cy - ebh * 0.5f, ebw, ebh};
     if (er.x > tx + nw + 6.0f) {
       ui->gdm_edit_btn_rect = er;
       bool ehv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, er);
@@ -325,9 +328,10 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
     const char *albl = ui->mobile_layout ? "+ Add" : "Add Member";
     ccord_text_style abs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_on_brand));
     ccord_vec2 abt = ccord_text_measure(r, albl, strlen(albl), &abs, 0.0f);
-    float apad = ui->mobile_layout ? 10.0f : 16.0f;
+    float apad = 16.0f;
     float abw = abt.x + apad;
-    ccord_rect ar = {hdr_btn_left - abw, cy - 12.0f, abw, 24.0f};
+    float abh = uis_btn_h_for(ui, 24.0f);
+    ccord_rect ar = {hdr_btn_left - abw, cy - abh * 0.5f, abw, abh};
     if (ar.x > tx + nw + 6.0f) {
       ui->gdm_add_btn_rect = ar;
       ccord_draw_rrect(r, ar, 4.0f, COL(brand));

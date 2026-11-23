@@ -30,7 +30,7 @@ void dc_draw_dm_friends_view(ccord_ui *ui, ccord_renderer *r, const ccord_rect *
     float tx = x;
     for (int t = 0; t < 4; t++) {
       bool active = (tab == t);
-      ccord_rect tab_r = {tx, y, tw, 30.0f};
+      ccord_rect tab_r = {tx, y, tw, 38.0f};
       ui->dm_friends_tab_rects[t] = tab_r;
       ui_row_state tab_rs = ui_row_state_of(ui, "ftab", (uint64_t)t,
                                             ui->mouse_in && ui_in_rect(ui->mx, ui->my, tab_r), active, COL(bg_primary));
@@ -43,7 +43,7 @@ void dc_draw_dm_friends_view(ccord_ui *ui, ccord_renderer *r, const ccord_rect *
                                tab_r.y + (tab_r.h - tt.y) * 0.5f, maxf(tab_r.w - 8.0f, 16.0f), &ts);
       tx += tw + gap;
     }
-    y += 38.0f;
+    y += 46.0f;
     ccord_draw_rect(r, (ccord_rect){x, y - 4.0f, w, 1.0f}, COL(border_subtle));
   }
 
@@ -53,14 +53,14 @@ void dc_draw_dm_friends_view(ccord_ui *ui, ccord_renderer *r, const ccord_rect *
   if (ui->mobile_layout) {
     ccord_text_style afs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(text_on_brand));
     ccord_vec2 aft = ccord_text_measure(r, "Add Friend", 10, &afs, 0.0f);
-    float afw = aft.x + 20.0f;
-    ccord_rect af_r = {x + w - afw, y, afw, 28.0f};
+    float afw = aft.x + 24.0f;
+    ccord_rect af_r = {x + w - afw, y, afw, 38.0f};
     ui->add_friend_btn_rect = af_r;
     ccord_draw_rrect(r, af_r, 6.0f, COL(status_online));
     ccord_text_draw(r, "Add Friend", 10, af_r.x + (af_r.w - aft.x) * 0.5f, af_r.y + (af_r.h - aft.y) * 0.5f, &afs, 0.0f);
-    ccord_text_draw_ellipsis(r, hdr, strlen(hdr), x, y + (28.0f - ui_line_h(ui, hs.size)) * 0.5f,
+    ccord_text_draw_ellipsis(r, hdr, strlen(hdr), x, y + (38.0f - ui_line_h(ui, hs.size)) * 0.5f,
                              maxf(af_r.x - x - 8.0f, 40.0f), &hs);
-    y += 36.0f;
+    y += 46.0f;
   } else {
     ccord_text_draw_ellipsis(r, hdr, strlen(hdr), x, y, w, &hs);
     y += 28.0f;
@@ -68,7 +68,9 @@ void dc_draw_dm_friends_view(ccord_ui *ui, ccord_renderer *r, const ccord_rect *
   // The rows scroll under the fixed header; off-fold friends stay reachable via wheel + thumb.
   ccord_rect view = {ma->x, y, ma->w, ma->y + ma->h - y};
   if (view.h < 0.0f) view.h = 0.0f;
-  ui->dm_friends_content_h = (float)matched * 56.0f;
+  float row_pitch = ui->mobile_layout ? 64.0f : 56.0f;
+  float row_h = ui->mobile_layout ? 60.0f : 52.0f;
+  ui->dm_friends_content_h = (float)matched * row_pitch;
   float max_s = maxf(ui->dm_friends_content_h - view.h, 0.0f);
   ui->dm_friends_scroll = clampf(ui->dm_friends_scroll, 0.0f, max_s);
   ccord_push_clip(r, view);
@@ -77,14 +79,14 @@ void dc_draw_dm_friends_view(ccord_ui *ui, ccord_renderer *r, const ccord_rect *
     const ccord_relationship *rel = ccord_store_relationship_at(ui->d.store, i);
     const ccord_user *u = rel ? ccord_store_user(ui->d.store, rel->user_id) : nullptr;
     if (!dc_friend_matches_tab(rel, u, tab)) continue;
-    ccord_rect row_r = {x, ry + 2.0f, w, 52.0f};
+    ccord_rect row_r = {x, ry + 2.0f, w, row_h};
     ccord_rect sep_r = {x, ry, w, 1.0f};
-    ry += 56.0f;
+    ry += row_pitch;
     if (row_r.y + row_r.h < view.y || row_r.y > view.y + view.h) continue;
     bool fully_visible = row_r.y >= view.y && row_r.y + row_r.h <= view.y + view.h;
     ccord_draw_rect(r, sep_r, COL(border_subtle));
     ui_state_fill(ui, r, row_r, 6.0f, "frow", rel->user_id, ui->mouse_in && ui_in_rect(ui->mx, ui->my, row_r), false);
-    ui_draw_avatar(ui, r, u, x + 24.0f, row_r.y + 26.0f, 36.0f, COL(bg_primary), false);
+    ui_draw_avatar(ui, r, u, x + 24.0f, row_r.y + row_h * 0.5f, 36.0f, COL(bg_primary), false);
     const char *fnick = ui_friend_nickname(ui, rel->user_id);
     const char *dname = (fnick && fnick[0]) ? fnick
                         : ((u && u->display_name && u->display_name[0]) ? u->display_name
@@ -92,37 +94,45 @@ void dc_draw_dm_friends_view(ccord_ui *ui, ccord_renderer *r, const ccord_rect *
     ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_secondary));
     ccord_rect msg_r = {0, 0, 0, 0}, acc_r = {0, 0, 0, 0}, rem_r = {0, 0, 0, 0};
     float btn_left = x + w - 8.0f;
+    float bh = uis_btn_h_for(ui, 28.0f);
+    float by = row_r.y + (row_r.h - bh) * 0.5f;
+    float br = bh * 0.5f;
     if (rel->kind == CCORD_RELATIONSHIP_PENDING_INCOMING) {
-      acc_r = (ccord_rect){x + w - 144.0f, row_r.y + 12.0f, 64.0f, 28.0f};
-      rem_r = (ccord_rect){x + w - 72.0f, row_r.y + 12.0f, 64.0f, 28.0f};
+      float aw = ui->mobile_layout ? 70.0f : 64.0f;
+      acc_r = (ccord_rect){x + w - 2.0f * aw - 16.0f, by, aw, bh};
+      rem_r = (ccord_rect){x + w - aw - 8.0f, by, aw, bh};
       btn_left = acc_r.x;
-      ccord_draw_rrect(r, acc_r, 14.0f, COL(status_online));
-      ccord_draw_rrect(r, rem_r, 14.0f, COL(bg_secondary));
+      ccord_draw_rrect(r, acc_r, br, COL(status_online));
+      ccord_draw_rrect(r, rem_r, br, COL(bg_secondary));
       ccord_text_style abs_st = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_on_brand));
       ccord_vec2 at = ccord_text_measure(r, "Accept", 6, &abs_st, 0.0f);
       ccord_vec2 rt = ccord_text_measure(r, "Ignore", 6, &bs, 0.0f);
       ccord_text_draw(r, "Accept", 6, acc_r.x + (acc_r.w - at.x) * 0.5f, acc_r.y + (acc_r.h - at.y) * 0.5f, &abs_st, 0.0f);
       ccord_text_draw(r, "Ignore", 6, rem_r.x + (rem_r.w - rt.x) * 0.5f, rem_r.y + (rem_r.h - rt.y) * 0.5f, &bs, 0.0f);
     } else if (rel->kind == CCORD_RELATIONSHIP_PENDING_OUTGOING || rel->kind == CCORD_RELATIONSHIP_BLOCKED) {
-      rem_r = (ccord_rect){x + w - 76.0f, row_r.y + 12.0f, 68.0f, 28.0f};
+      float rw = ui->mobile_layout ? 76.0f : 68.0f;
+      rem_r = (ccord_rect){x + w - rw - 8.0f, by, rw, bh};
       btn_left = rem_r.x;
-      ccord_draw_rrect(r, rem_r, 14.0f, COL(bg_secondary));
+      ccord_draw_rrect(r, rem_r, br, COL(bg_secondary));
       const char *lbl = (rel->kind == CCORD_RELATIONSHIP_BLOCKED) ? "Unblock" : "Cancel";
       ccord_vec2 bt = ccord_text_measure(r, lbl, strlen(lbl), &bs, 0.0f);
       ccord_text_draw(r, lbl, strlen(lbl), rem_r.x + (rem_r.w - bt.x) * 0.5f, rem_r.y + (rem_r.h - bt.y) * 0.5f, &bs, 0.0f);
     } else {
-      msg_r = (ccord_rect){x + w - 112.0f, row_r.y + 12.0f, 68.0f, 28.0f};
-      rem_r = (ccord_rect){x + w - 36.0f, row_r.y + 12.0f, 28.0f, 28.0f};
+      float rsz = bh;
+      float mw = ui->mobile_layout ? 74.0f : 68.0f;
+      rem_r = (ccord_rect){x + w - rsz - 8.0f, by, rsz, rsz};
+      msg_r = (ccord_rect){rem_r.x - 8.0f - mw, by, mw, bh};
       btn_left = msg_r.x;
-      ccord_draw_rrect(r, msg_r, 14.0f, COL(bg_secondary));
-      ccord_draw_rrect(r, rem_r, 14.0f, COL(bg_secondary));
+      ccord_draw_rrect(r, msg_r, br, COL(bg_secondary));
+      ccord_draw_rrect(r, rem_r, br, COL(bg_secondary));
       ccord_vec2 bt = ccord_text_measure(r, "Message", 7, &bs, 0.0f);
       ccord_text_draw(r, "Message", 7, msg_r.x + (msg_r.w - bt.x) * 0.5f, msg_r.y + (msg_r.h - bt.y) * 0.5f, &bs, 0.0f);
-      ui_icon_close(r, rem_r.x + rem_r.w * 0.5f, rem_r.y + rem_r.h * 0.5f, 11.0f, COL(text_muted));
+      ui_icon_close(r, rem_r.x + rem_r.w * 0.5f, rem_r.y + rem_r.h * 0.5f, ui->mobile_layout ? 13.0f : 11.0f, COL(text_muted));
     }
     float text_w = maxf(btn_left - (x + 52.0f) - 8.0f, 40.0f);
+    float ty0 = row_r.y + (ui->mobile_layout ? 12.0f : 8.0f);
     ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), COL(text_header));
-    ccord_text_draw_ellipsis(r, dname, strlen(dname), x + 52.0f, row_r.y + 8.0f, text_w, &ns);
+    ccord_text_draw_ellipsis(r, dname, strlen(dname), x + 52.0f, ty0, text_w, &ns);
     const char *sub = (u && u->status_text && u->status_text[0]) ? u->status_text
                       : (rel->kind == CCORD_RELATIONSHIP_PENDING_INCOMING ? "Incoming Friend Request"
                       : (rel->kind == CCORD_RELATIONSHIP_PENDING_OUTGOING ? "Outgoing Friend Request"
@@ -131,7 +141,7 @@ void dc_draw_dm_friends_view(ccord_ui *ui, ccord_renderer *r, const ccord_rect *
                       : (u && u->presence == CCORD_PRESENCE_IDLE ? "Idle"
                       : (u && u->presence == CCORD_PRESENCE_DND ? "Do Not Disturb" : "Offline"))))));
     ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 2.0f, COL(text_muted));
-    ccord_text_draw_ellipsis(r, sub, strlen(sub), x + 52.0f, row_r.y + 28.0f, text_w, &ss);
+    ccord_text_draw_ellipsis(r, sub, strlen(sub), x + 52.0f, ty0 + 20.0f, text_w, &ss);
     // Only fully visible rows are clickable: a half-clipped row must not catch hits outside the fold.
     if (fully_visible && ui->nfriend_row_hits < 32) {
       ui->friend_row_hits[ui->nfriend_row_hits].row_rect = row_r;
@@ -176,7 +186,7 @@ void dc_draw_dm_requests_view(ccord_ui *ui, ccord_renderer *r, const ccord_rect 
     float ty = ma->y + 10.0f;
     for (int t = 0; t < 2; t++) {
       bool active = (ui->dm_requests_tab == t);
-      ccord_rect tab_r = {tx, ty, tw, 30.0f};
+      ccord_rect tab_r = {tx, ty, tw, 38.0f};
       ui->dm_requests_tab_rects[t] = tab_r;
       ui_row_state tab_rs = ui_row_state_of(ui, "reqtab", (uint64_t)t,
                                             ui->mouse_in && ui_in_rect(ui->mx, ui->my, tab_r), active, COL(bg_primary));
@@ -189,11 +199,11 @@ void dc_draw_dm_requests_view(ccord_ui *ui, ccord_renderer *r, const ccord_rect 
                                tab_r.y + (tab_r.h - tt.y) * 0.5f, maxf(tab_r.w - 8.0f, 16.0f), &ts);
       tx += tw + 8.0f;
     }
-    list_y = ty + 38.0f;
+    list_y = ty + 46.0f;
     ccord_draw_rect(r, (ccord_rect){ma->x + pad, list_y - 4.0f, bar_w, 1.0f}, COL(border_subtle));
   }
   ccord_rect view = {ma->x, list_y, ma->w, maxf(ma->y + ma->h - list_y, 0.0f)};
-  float card_h = compact ? 108.0f : 74.0f;
+  float card_h = compact ? (ui->mobile_layout ? 118.0f : 108.0f) : 74.0f;
   float gap = 10.0f;
   ui->dm_requests_content_h = matched > 0 ? (pad * 2.0f + (float)matched * (card_h + gap)) : 0.0f;
   float max_s = maxf(ui->dm_requests_content_h - view.h, 0.0f);
@@ -252,9 +262,10 @@ void dc_draw_dm_requests_view(ccord_ui *ui, ccord_renderer *r, const ccord_rect 
     ccord_rect acc_r, rej_r;
     if (compact) {
       float bw = floorf((card.w - 32.0f) * 0.5f);
-      float by = card.y + card.h - 38.0f;
-      acc_r = (ccord_rect){card.x + 12.0f, by, bw, 30.0f};
-      rej_r = (ccord_rect){acc_r.x + bw + 8.0f, by, bw, 30.0f};
+      float bh = uis_btn_h_for(ui, 30.0f);
+      float by = card.y + card.h - (ui->mobile_layout ? 46.0f : 38.0f);
+      acc_r = (ccord_rect){card.x + 12.0f, by, bw, bh};
+      rej_r = (ccord_rect){acc_r.x + bw + 8.0f, by, bw, bh};
     } else {
       rej_r = (ccord_rect){card.x + card.w - 86.0f, card.y + (card.h - 30.0f) * 0.5f, 72.0f, 30.0f};
       acc_r = (ccord_rect){rej_r.x - 80.0f, rej_r.y, 72.0f, 30.0f};

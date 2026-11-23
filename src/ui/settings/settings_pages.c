@@ -37,8 +37,8 @@ static void draw_toggle_row(ccord_ui *ui, ccord_renderer *r, const sgeom *g, int
   draw_row_label(ui, r, g, row, label);
   if (note && note[0]) {
     ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_muted));
-    ccord_text_draw_ellipsis(r, note, strlen(note), g->content.x, st_row_y(g, row) + 18.0f,
-                             g->content.w - 60.0f, &ns);
+    ccord_text_draw_ellipsis(r, note, strlen(note), g->content.x,
+                             st_row_y(g, row) + (g->mobile ? 20.0f : 18.0f), g->content.w - 60.0f, &ns);
   }
   uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, st_toggle_rect(g, row)), .disabled = dim};
   uis_toggle(ui, r, st_row_rect(g, row), on, st, "swset", (uint64_t)ui->settings_page * 64u + (uint64_t)row);
@@ -68,7 +68,9 @@ static void draw_volume_row(ccord_ui *ui, ccord_renderer *r, const sgeom *g, int
   char vs[24];
   snprintf(vs, sizeof vs, "%d%s", value, suffix);
   ccord_text_style vsl = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_secondary));
-  ccord_text_draw(r, vs, strlen(vs), plus.x + plus.w + 12.0f, st_row_y(g, row) + 26.0f, &vsl, 0.0f);
+  float vx = plus.x + plus.w + (g->mobile ? 8.0f : 12.0f);
+  float vy = g->mobile ? (plus.y + (plus.h - ui_line_h(ui, vsl.size)) * 0.5f) : (st_row_y(g, row) + 26.0f);
+  ccord_text_draw(r, vs, strlen(vs), vx, vy, &vsl, 0.0f);
 }
 
 // ---- pages ----
@@ -208,7 +210,8 @@ static void draw_voice(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
   if (!vad) {
     ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_muted));
     const char *note = "Push to Talk is active; the mic opens while the bound key is held.";
-    ccord_text_draw_ellipsis(r, note, strlen(note), gv.content.x, st_row_y(&gv, 11) + 40.0f, gv.content.w - 60.0f, &ns);
+    ccord_text_draw_ellipsis(r, note, strlen(note), gv.content.x,
+                             st_row_y(&gv, 11) + (gv.mobile ? 62.0f : 40.0f), gv.content.w - 60.0f, &ns);
   }
 
   draw_voice_diagnostics(ui, r, &gv);
@@ -437,7 +440,11 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
     const char *title = st_k_pages[ui->settings_page].label;
     ccord_text_draw(r, title, strlen(title), g.content.x, g.content.y, &ts, 0.0f);
     bool page_scrolls = ui->settings_page == SP_ACCOUNT || ui->settings_page == SP_APPEARANCE ||
-                        ui->settings_page == SP_STREAMING || ui->settings_page == SP_KEYBINDS;
+                        ui->settings_page == SP_STREAMING || ui->settings_page == SP_TEXT_IMAGES ||
+                        (ui->settings_page == SP_NOTIFICATIONS && !ui->settings_sounds_open) ||
+                        ui->settings_page == SP_ACCESSIBILITY || ui->settings_page == SP_STREAMER ||
+                        ui->settings_page == SP_LANGUAGE || ui->settings_page == SP_ADVANCED ||
+                        ui->settings_page == SP_CCORD || ui->settings_page == SP_KEYBINDS;
     sgeom gs = g;
     ccord_rect body_clip = g.panel;
     if (page_scrolls) {
@@ -447,8 +454,9 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
       if (max_p > 0.0f) {
         gs.content.y -= st_s_page_scroll;
         body_clip = (ccord_rect){g.content.x - 4.0f, g.content.y + 34.0f, g.content.w + 8.0f, fmaxf(g.content.h - 34.0f, 20.0f)};
-        float tx = g.content.w < 460.0f ? (g.content.x + g.content.w - 4.0f) : (g.content.x + g.content.w + 10.0f);
-        float max_tx = g.panel.x + g.panel.w - 10.0f;
+        float right_limit = g.mobile ? (g.panel.x + g.panel.w - ui->safe_insets.right) : (g.panel.x + g.panel.w);
+        float tx = g.content.x + g.content.w + (g.mobile ? 5.0f : 10.0f);
+        float max_tx = right_limit - 10.0f;
         if (tx > max_tx) tx = max_tx;
         ccord_rect tr = {tx, g.content.y + 38.0f, 6.0f, fmaxf(g.content.h - 42.0f, 32.0f)};
         float view_h = fmaxf(g.content.h - 38.0f, 40.0f);
@@ -465,24 +473,25 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
       case SP_APPEARANCE: draw_appearance(ui, r, &gs); break;
       case SP_VOICE: draw_voice(ui, r, &g); break;
       case SP_STREAMING: draw_streaming(ui, r, &gs); break;
-      case SP_TEXT_IMAGES: draw_text_images(ui, r, &g); break;
+      case SP_TEXT_IMAGES: draw_text_images(ui, r, &gs); break;
       case SP_NOTIFICATIONS:
-        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_NOTIFICATIONS, g.content, g.panel);
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_NOTIFICATIONS,
+                                  ui->settings_sounds_open ? g.content : gs.content, g.panel);
         break;
       case SP_ACCESSIBILITY:
-        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_ACCESSIBILITY, g.content, g.panel);
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_ACCESSIBILITY, gs.content, g.panel);
         break;
       case SP_STREAMER:
-        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_STREAMER, g.content, g.panel);
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_STREAMER, gs.content, g.panel);
         break;
       case SP_LANGUAGE:
-        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_LANGUAGE, g.content, g.panel);
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_LANGUAGE, gs.content, g.panel);
         break;
       case SP_ADVANCED:
-        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_ADVANCED, g.content, g.panel);
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_ADVANCED, gs.content, g.panel);
         break;
       case SP_CCORD:
-        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_CCORD, g.content, g.panel);
+        ui_settings_m6_prefs_draw(ui, r, CCORD_M6_PREFS_CCORD, gs.content, g.panel);
         break;
       case SP_KEYBINDS: draw_keybinds(ui, r, &gs); break;
       case SP_PRIVACY:

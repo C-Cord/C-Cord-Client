@@ -176,59 +176,67 @@ bool dc_parse_folder_hex_color(const char *s, uint32_t *out)
 modal_geom dc_modal_layout(const ccord_ui *ui)
 {
   modal_geom g = {0};
+  bool mob = ui && ui->mobile_layout;
+  float bh = uis_btn_h_for(ui, UIS_H_BTN);
+  float bh_sm = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  float chip_h = mob ? UIS_MOB_H_CHIP : 28.0f;
+  float in_h = mob ? 42.0f : 36.0f;
+  float chip_row = chip_h + 6.0f;
   float mw = clampf(ui->win_w - 64.0f, 300.0f, ui->modal_kind == UI_MODAL_ADD_SERVER ? 460.0f : 440.0f);
   float est_bw = uis_modal_box(ui, mw, 220.0f).w;
-  float mh = 220.0f;
+  float mh = mob ? 236.0f : 220.0f;
   bool wrap_chips = false;
   if (ui->modal_kind == UI_MODAL_CONFIRM) {
     size_t n = 0;
     (void)dc_confirm_choices(ui->confirm_op, &n);
     bool no_input = (ui->confirm_op == CCORD_ADMIN_LEAVE_GUILD || ui->confirm_op == CCORD_ADMIN_TRANSFER_OWNERSHIP);
     wrap_chips = (n > 3u && (est_bw - 40.0f) / (float)n < 56.0f);
-    float choices_h = n ? (wrap_chips ? 90.0f : 56.0f) : 0.0f;
-    mh = 56.0f + 64.0f + choices_h + (no_input ? 0.0f : 52.0f) + 62.0f;   // title, body, choices, input, buttons
+    float choices_h = n ? (wrap_chips ? (22.0f + 2.0f * chip_row) : (22.0f + chip_row)) : 0.0f;
+    mh = 56.0f + 64.0f + choices_h + (no_input ? 0.0f : (in_h + 16.0f)) + (bh + 28.0f);
   } else if (ui->modal_kind == UI_MODAL_ADD_SERVER) {
-    mh = (ui->modal_type_sel == 0) ? 318.0f : 246.0f;
+    mh = (ui->modal_type_sel == 0) ? (mob ? 356.0f : 318.0f) : (mob ? 280.0f : 246.0f);
   } else if (ui->modal_kind == UI_MODAL_FOLDER_SETTINGS) {
-    mh = 296.0f;
+    mh = mob ? 336.0f : 296.0f;
   }
   g.box = uis_modal_box(ui, mw, mh);
   float bw = g.box.w;
   float ok_w = fminf(140.0f, maxf(bw - 140.0f, 96.0f));
   float cn_w = fminf(90.0f, maxf(bw - ok_w - 48.0f, 64.0f));
-  g.ok = (ccord_rect){g.box.x + bw - 20.0f - ok_w, g.box.y + g.box.h - 46.0f, ok_w, UIS_H_BTN};
+  g.ok = (ccord_rect){g.box.x + bw - 20.0f - ok_w, g.box.y + g.box.h - (bh + 12.0f), ok_w, bh};
   if (ui->modal_kind == UI_MODAL_ADD_SERVER) {
     float tw = (bw - 48.0f) * 0.5f;
-    g.tabs[0] = (ccord_rect){g.box.x + 20.0f, g.box.y + 55.0f, tw, UIS_H_BTN_SM};
-    g.tabs[1] = (ccord_rect){g.tabs[0].x + tw + 8.0f, g.box.y + 55.0f, tw, UIS_H_BTN_SM};
+    g.tabs[0] = (ccord_rect){g.box.x + 20.0f, g.box.y + 55.0f, tw, bh_sm};
+    g.tabs[1] = (ccord_rect){g.tabs[0].x + tw + 8.0f, g.box.y + 55.0f, tw, bh_sm};
+    float inp_y = g.box.y + (mob ? 124.0f : 114.0f);
     if (ui->modal_type_sel == 0) {
       float pw = fminf(84.0f, maxf(bw * 0.28f, 68.0f));
-      g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 114.0f, maxf(bw - 40.0f - pw - 8.0f, 80.0f), 36.0f};
-      g.preview_btn = (ccord_rect){g.input.x + g.input.w + 8.0f, g.input.y + 2.0f, pw, UIS_H_BTN};
+      g.input = (ccord_rect){g.box.x + 20.0f, inp_y, maxf(bw - 40.0f - pw - 8.0f, 80.0f), in_h};
+      g.preview_btn = (ccord_rect){g.input.x + g.input.w + 8.0f, g.input.y + (mob ? (in_h - bh) * 0.5f : 2.0f), pw, bh};
     } else {
-      g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 114.0f, bw - 40.0f, 36.0f};
+      g.input = (ccord_rect){g.box.x + 20.0f, inp_y, bw - 40.0f, in_h};
     }
-    g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, UIS_H_BTN};
+    g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, bh};
     return g;
   }
   if (ui->modal_kind == UI_MODAL_FOLDER_SETTINGS) {
-    g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 74.0f, bw - 40.0f, 36.0f};
-    g.input2 = (ccord_rect){g.box.x + 20.0f, g.box.y + 142.0f, bw - 40.0f, 36.0f};
+    g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + (mob ? 76.0f : 74.0f), bw - 40.0f, in_h};
+    g.input2 = (ccord_rect){g.box.x + 20.0f, g.box.y + (mob ? 154.0f : 142.0f), bw - 40.0f, in_h};
     float gap = 8.0f, inner = bw - 40.0f;
     float cw = (inner - gap * 5.0f) / 6.0f;
+    float cy = g.box.y + (mob ? 208.0f : 190.0f);
     for (size_t i = 0; i < 6u; i++) {
-      g.chip[i] = (ccord_rect){g.box.x + 20.0f + (float)i * (cw + gap), g.box.y + 190.0f, cw, 28.0f};
+      g.chip[i] = (ccord_rect){g.box.x + 20.0f + (float)i * (cw + gap), cy, cw, chip_h};
     }
     g.nchips = 6u;
-    g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, UIS_H_BTN};
+    g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, bh};
     return g;
   }
   if (ui->modal_kind != UI_MODAL_CONFIRM) {
-    g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 64.0f, bw - 40.0f, 36.0f};
-    g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, UIS_H_BTN};
+    g.input = (ccord_rect){g.box.x + 20.0f, g.box.y + 64.0f, bw - 40.0f, in_h};
+    g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, bh};
     return g;
   }
-  g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, UIS_H_BTN};
+  g.cancel = (ccord_rect){g.ok.x - cn_w - 10.0f, g.ok.y, cn_w, bh};
   size_t n = 0;
   (void)dc_confirm_choices(ui->confirm_op, &n);
   g.body_y = g.box.y + 54.0f;
@@ -241,21 +249,21 @@ modal_geom dc_modal_layout(const ccord_ui *ui)
       float cw = (inner - gap * (float)(cols - 1u)) / (float)cols;
       for (size_t i = 0; i < n; i++) {
         size_t col = i % cols, row = i / cols;
-        g.chip[i] = (ccord_rect){g.box.x + 20.0f + (float)col * (cw + gap), y + 20.0f + (float)row * 34.0f, cw, 28.0f};
+        g.chip[i] = (ccord_rect){g.box.x + 20.0f + (float)col * (cw + gap), y + 20.0f + (float)row * chip_row, cw, chip_h};
       }
       g.nchips = n;
-      y += 90.0f;
+      y += 22.0f + 2.0f * chip_row;
     } else {
       float cw = (inner - gap * (float)(n - 1u)) / (float)n;
       for (size_t i = 0; i < n; i++) {
-        g.chip[i] = (ccord_rect){g.box.x + 20.0f + (float)i * (cw + gap), y + 20.0f, cw, 28.0f};
+        g.chip[i] = (ccord_rect){g.box.x + 20.0f + (float)i * (cw + gap), y + 20.0f, cw, chip_h};
       }
       g.nchips = n;
-      y += 56.0f;
+      y += 22.0f + chip_row;
     }
   }
   if (ui->confirm_op != CCORD_ADMIN_LEAVE_GUILD && ui->confirm_op != CCORD_ADMIN_TRANSFER_OWNERSHIP) {
-    g.input = (ccord_rect){g.box.x + 20.0f, y, bw - 40.0f, 36.0f};
+    g.input = (ccord_rect){g.box.x + 20.0f, y, bw - 40.0f, in_h};
   }
   return g;
 }
@@ -386,17 +394,20 @@ static void draw_group_dm_modal(ccord_ui *ui, ccord_renderer *r, bool is_add)
     fy += 31.0f;
   }
 
+  float ok_h = uis_btn_h_for(ui, 32.0f);
   if (!is_add) {
+    float inp2_h = ui->mobile_layout ? 42.0f : UIS_H_INPUT;
     ccord_text_style gls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_muted));
-    ccord_text_draw(r, "GROUP NAME (OPTIONAL)", 21, m.x + 20.0f, m.y + m.h - 108.0f, &gls, 0.0f);
-    ccord_rect inp2 = {m.x + 20.0f, m.y + m.h - 92.0f, m.w - 40.0f, UIS_H_INPUT};
+    float lbl_y = m.y + m.h - (ok_h + inp2_h + 34.0f);
+    ccord_text_draw(r, "GROUP NAME (OPTIONAL)", 21, m.x + 20.0f, lbl_y, &gls, 0.0f);
+    ccord_rect inp2 = {m.x + 20.0f, lbl_y + 16.0f, m.w - 40.0f, inp2_h};
     ui->modal_input2_rect = inp2;
     (void)uis_input(ui, r, inp2, &ui->modal_edit2, "Optional group name", (uis_state){.focused = ui->modal_focus_field == 1}, false,
                     "gdmin2", 0);
   }
 
-  ccord_rect ok_r = {m.x + m.w - 160.0f, m.y + m.h - 44.0f, 140.0f, 32.0f};
-  ccord_rect cn_r = {ok_r.x - 98.0f, ok_r.y, 88.0f, 32.0f};
+  ccord_rect ok_r = {m.x + m.w - 160.0f, m.y + m.h - (ok_h + 12.0f), 140.0f, ok_h};
+  ccord_rect cn_r = {ok_r.x - 98.0f, ok_r.y, 88.0f, ok_h};
   ui->modal_ok_rect = ok_r;
   ui->inter_modal_box = m;
   ui->inter_modal_cancel = cn_r;
@@ -410,7 +421,7 @@ static void draw_group_dm_modal(ccord_ui *ui, ccord_renderer *r, bool is_add)
 static void draw_edit_group_dm_modal(ccord_ui *ui, ccord_renderer *r)
 {
   ui_popup_begin(ui, r, "modal", (uint64_t)ui->modal_kind, UI_MODAL_MS, 10.0f);
-  float mw = clampf(ui->win_w - 64.0f, 300.0f, 440.0f), mh = 248.0f;
+  float mw = clampf(ui->win_w - 64.0f, 300.0f, 440.0f), mh = ui->mobile_layout ? 276.0f : 248.0f;
   ccord_rect m = uis_modal_box(ui, mw, mh);
   ui->inter_modal_box = m;
   uis_modal_frame(ui, r, m);
@@ -420,18 +431,20 @@ static void draw_edit_group_dm_modal(ccord_ui *ui, ccord_renderer *r)
   ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_muted));
   ccord_text_draw(r, "GROUP NAME", 10, m.x + 20.0f, m.y + 56.0f, &ls, 0.0f);
 
-  ccord_rect inp = {m.x + 20.0f, m.y + 74.0f, m.w - 40.0f, 36.0f};
+  float in_h = ui->mobile_layout ? 42.0f : 36.0f;
+  ccord_rect inp = {m.x + 20.0f, m.y + 74.0f, m.w - 40.0f, in_h};
   ui->modal_input_rect = inp;
   (void)uis_input(ui, r, inp, &ui->modal_edit1, "Group DM Name", (uis_state){.focused = true}, false, "egdmin", 0);
 
-  ccord_rect ic_chip = {m.x + 20.0f, m.y + 124.0f, 180.0f, 28.0f};
+  ccord_rect ic_chip = {m.x + 20.0f, inp.y + inp.h + 14.0f, 180.0f, uis_chip_h_for(ui, 28.0f)};
   ui->modal_tab_rects[0] = ic_chip;
   bool clr_icon = (ui->modal_type_sel == 1);
   uis_tab(ui, r, ic_chip, clr_icon ? "Removing Group Icon" : "Remove Group Icon",
           (uis_state){.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, ic_chip), .selected = clr_icon}, "egdmicon", 0);
 
-  ccord_rect ok_r = {m.x + m.w - 150.0f, m.y + m.h - 44.0f, 130.0f, 32.0f};
-  ccord_rect cn_r = {ok_r.x - 96.0f, ok_r.y, 86.0f, 32.0f};
+  float ok_h = uis_btn_h_for(ui, 32.0f);
+  ccord_rect ok_r = {m.x + m.w - 150.0f, m.y + m.h - (ok_h + 12.0f), 130.0f, ok_h};
+  ccord_rect cn_r = {ok_r.x - 96.0f, ok_r.y, 86.0f, ok_h};
   ui->modal_ok_rect = ok_r;
   ui->inter_modal_cancel = cn_r;
   uis_button(ui, r, cn_r, "Cancel", UIS_BTN_LINK, UIS_BTN_S_MD,
@@ -512,19 +525,22 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     ui_popup_begin(ui, r, "qswitch", 0, UI_MODAL_MS, 8.0f);
     ccord_rect m = ui_quick_switcher_rect(ui);
     uis_modal_frame(ui, r, m);
-    ccord_rect inp = {m.x + UIS_SP_4, m.y + UIS_SP_4, m.w - 2.0f * UIS_SP_4, UIS_H_INPUT};
+    float in_h = ui->mobile_layout ? 42.0f : UIS_H_INPUT;
+    ccord_rect inp = {m.x + UIS_SP_4, m.y + UIS_SP_4, m.w - 2.0f * UIS_SP_4, in_h};
     (void)uis_input(ui, r, inp, &ui->quick_switcher_edit, "Where would you like to go? (@user, #channel, *server)",
                     (uis_state){.focused = true}, false, "qswin", 0);
     // The result list scrolls inside the dialog so every match stays reachable on short windows.
     ccord_rect lview = {m.x + 12.0f, inp.y + inp.h + 12.0f, m.w - 24.0f, m.y + m.h - 10.0f - (inp.y + inp.h + 12.0f)};
     if (lview.h < 0.0f) lview.h = 0.0f;
-    float content_h = (float)ui->nquick_switcher_items * 30.0f;
+    float qrow_h = ui->mobile_layout ? 40.0f : 28.0f;
+    float qstride = ui->mobile_layout ? 44.0f : 30.0f;
+    float content_h = (float)ui->nquick_switcher_items * qstride;
     float max_s = maxf(content_h - lview.h, 0.0f);
     ui->quick_switcher_scroll = clampf(ui->quick_switcher_scroll, 0.0f, max_s);
     // Follow the selection only when it moved (keys, reopen), so a wheel offset is not snapped back each frame.
     if (ui->quick_switcher_sel != ui->quick_switcher_sel_seen && ui->quick_switcher_sel < ui->nquick_switcher_items) {
-      float sel_top = (float)ui->quick_switcher_sel * 30.0f;
-      float sel_bot = sel_top + 28.0f;
+      float sel_top = (float)ui->quick_switcher_sel * qstride;
+      float sel_bot = sel_top + qrow_h;
       ccord_scroller_cancel(&ui->quick_switcher_glide);   // the follow-scroll replaces a wheel glide (scroll.h)
       if (sel_top < ui->quick_switcher_scroll) ui->quick_switcher_scroll = sel_top;
       else if (sel_bot > ui->quick_switcher_scroll + lview.h)
@@ -536,18 +552,20 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 2.0f, COL(text_muted));
     for (size_t i = 0; i < ui->nquick_switcher_items; i++) {
       auto it = &ui->quick_switcher_items[i];
-      float ry = lview.y + (float)i * 30.0f - ui->quick_switcher_scroll;
-      if (ry + 28.0f < lview.y || ry > lview.y + lview.h) {
+      float ry = lview.y + (float)i * qstride - ui->quick_switcher_scroll;
+      if (ry + qrow_h < lview.y || ry > lview.y + lview.h) {
         it->rect = (ccord_rect){0, 0, 0, 0};
         continue;
       }
-      ccord_rect rr = {lview.x, ry, lview.w, 28.0f};
+      ccord_rect rr = {lview.x, ry, lview.w, qrow_h};
       it->rect = rr;
       uis_list_row_fill(ui, r, rr, (uis_state){.selected = i == ui->quick_switcher_sel}, "qsw", i);
-      ccord_text_draw_ellipsis(r, it->label, strlen(it->label), rr.x + 10.0f, rr.y + 4.0f, rr.w - 140.0f, &ls);
+      float t_y = rr.y + (ui->mobile_layout ? (rr.h - ui_line_h(ui, ls.size)) * 0.5f : 4.0f);
+      float s_y = rr.y + (ui->mobile_layout ? (rr.h - ui_line_h(ui, ss.size)) * 0.5f : 6.0f);
+      ccord_text_draw_ellipsis(r, it->label, strlen(it->label), rr.x + 10.0f, t_y, rr.w - 140.0f, &ls);
       ccord_vec2 st = ccord_text_measure(r, it->sub, strlen(it->sub), &ss, 0.0f);
       ccord_text_draw_ellipsis(r, it->sub, strlen(it->sub), rr.x + rr.w - fminf(st.x, 120.0f) - 10.0f,
-                               rr.y + 6.0f, 120.0f, &ss);
+                               s_y, 120.0f, &ss);
     }
     ccord_pop_clip(r);
     ui->quick_switcher_thumb = ui_draw_list_scrollbar(ui, r, lview, content_h, ui->quick_switcher_scroll,
@@ -777,7 +795,8 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
       const ccord_invite_preview *prev = ui->d.session
         ? ccord_session_invite_preview(ui->d.session, &prev_loading)
         : nullptr;
-      ccord_rect pcard = {m.x + 20.0f, m.y + 162.0f, m.w - 40.0f, 92.0f};
+      ccord_rect pcard = {m.x + 20.0f, ui->mobile_layout ? (mg.input.y + mg.input.h + 12.0f) : (m.y + 162.0f),
+                          m.w - 40.0f, 92.0f};
       uis_plate(ui, r, pcard, uis_tokens_of(ui).r_surface, COL(bg_tertiary));
       if (prev && prev->guild_id != CCORD_ID_NONE) {
         ccord_rect pic = {pcard.x + 12.0f, pcard.y + 12.0f, 40.0f, 40.0f};
@@ -814,7 +833,8 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
     } else {
       const char *chint = "By creating a server, you get text and voice channels ready to invite friends.";
       ccord_text_style hst = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(text_muted));
-      ccord_text_draw(r, chint, strlen(chint), m.x + 20.0f, m.y + 160.0f, &hst, m.w - 40.0f);
+      ccord_text_draw(r, chint, strlen(chint), m.x + 20.0f,
+                      ui->mobile_layout ? (mg.input.y + mg.input.h + 10.0f) : (m.y + 160.0f), &hst, m.w - 40.0f);
     }
 
     uis_button(ui, r, mg.cancel, "Cancel", UIS_BTN_LINK, UIS_BTN_S_MD,
@@ -836,7 +856,8 @@ void ui_draw_overlays(ccord_ui *ui, ccord_renderer *r)
 
     ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_muted));
     ccord_text_draw(r, "FOLDER NAME", 11, m.x + 20.0f, m.y + 54.0f, &ls, 0.0f);
-    ccord_text_draw(r, "FOLDER COLOR (#RRGGBB)", 22, m.x + 20.0f, m.y + 122.0f, &ls, 0.0f);
+    ccord_text_draw(r, "FOLDER COLOR (#RRGGBB)", 22, m.x + 20.0f,
+                    ui->mobile_layout ? (mg.input2.y - 20.0f) : (m.y + 122.0f), &ls, 0.0f);
 
     ccord_rect boxes[2] = {mg.input, mg.input2};
     ccord_text_edit *edits[2] = {&ui->modal_edit1, &ui->modal_edit2};

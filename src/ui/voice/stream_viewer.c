@@ -692,24 +692,27 @@ void ui_stream_pip_drag_end(ccord_ui *ui)
 
 // ---------------------------------------------------------------- Go Live modal
 
-static ccord_rect go_live_tab_rect(const ccord_rect *m, int tab)
+static ccord_rect go_live_tab_rect(const ccord_ui *ui, const ccord_rect *m, int tab)
 {
   bool compact = m->w < 440.0f;
   float pad = compact ? 16.0f : 24.0f;
   float tw = compact ? fminf(128.0f, floorf((m->w - 2.0f * pad - 8.0f) * 0.5f)) : 128.0f;
-  return (ccord_rect){m->x + pad + (float)tab * (tw + 8.0f), m->y + 62.0f, tw, 28.0f};
+  float th = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  float ty = (ui && ui->mobile_layout) ? (m->y + 60.0f) : (m->y + 62.0f);
+  return (ccord_rect){m->x + pad + (float)tab * (tw + 8.0f), ty, tw, th};
 }
 
-static ccord_rect go_live_source_card_rect(const ccord_rect *m, size_t idx)
+static ccord_rect go_live_source_card_rect(const ccord_ui *ui, const ccord_rect *m, size_t idx)
 {
   bool compact = m->w < 440.0f;
   float pad = compact ? 16.0f : 24.0f;
-  float grid_x = m->x + pad, grid_y = m->y + 98.0f;
+  float grid_x = m->x + pad;
+  float grid_y = (ui && ui->mobile_layout) ? (m->y + 104.0f) : (m->y + 98.0f);
   float grid_w = m->w - 2.0f * pad;
   size_t cols = compact ? 2u : 3u;
   float gap = compact ? 8.0f : 12.0f;
   float card_w = (grid_w - gap * (float)(cols - 1u)) / (float)cols;
-  float card_h = compact ? 64.0f : 102.0f;
+  float card_h = compact ? ((ui && ui->mobile_layout) ? 62.0f : 64.0f) : 102.0f;
   size_t col = idx % cols, row = idx / cols;
   return (ccord_rect){grid_x + (float)col * (card_w + gap), grid_y + (float)row * (card_h + gap), card_w, card_h};
 }
@@ -772,7 +775,7 @@ void ui_draw_go_live(ccord_ui *ui, ccord_renderer *r)
   // Source Picker Tabs: Applications | Screens
   static const char *const k_tabs[2] = {"Applications", "Screens"};
   for (int t = 0; t < 2; t++) {
-    ccord_rect tr = go_live_tab_rect(&m, t);
+    ccord_rect tr = go_live_tab_rect(ui, &m, t);
     bool active = (ui->go_live_tab == (uint8_t)t);
     uis_tab(ui, r, tr, k_tabs[t], (uis_state){.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, tr), .selected = active},
             "gltab", (uint64_t)t);
@@ -782,7 +785,7 @@ void ui_draw_go_live(ccord_ui *ui, ccord_renderer *r)
   bool gl_compact = m.w < 440.0f;
   float gl_pad = gl_compact ? 16.0f : 24.0f;
   for (size_t i = 0; i < ui->go_live_source_count && i < 6; i++) {
-    ccord_rect card = go_live_source_card_rect(&m, i);
+    ccord_rect card = go_live_source_card_rect(ui, &m, i);
     bool sel = (i == ui->go_live_selected_source);
     if (sel) {
       ccord_draw_rrect(r, (ccord_rect){card.x - 2.0f, card.y - 2.0f, card.w + 4.0f, card.h + 4.0f}, 8.0f, COL(brand));
@@ -806,14 +809,16 @@ void ui_draw_go_live(ccord_ui *ui, ccord_renderer *r)
   }
 
   // Stream Quality Box (Resolution & Frame Rate ONLY — encoder/codec/framework are in Settings)
+  float qy_comp = ui->mobile_layout ? (m.y + 310.0f) : (m.y + 306.0f);
+  float qh_comp = ui->mobile_layout ? 130.0f : 104.0f;
   ccord_rect qbox = gl_compact
-                      ? (ccord_rect){m.x + gl_pad, m.y + 306.0f, m.w - 2.0f * gl_pad, 104.0f}
+                      ? (ccord_rect){m.x + gl_pad, qy_comp, m.w - 2.0f * gl_pad, qh_comp}
                       : (ccord_rect){m.x + 24.0f, m.y + 320.0f, m.w - 48.0f, 86.0f};
   uis_plate(ui, r, qbox, gtk.r_control, COL(bg_primary));
   ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 3.0f, COL(text_muted));
   if (gl_compact) {
-    ccord_text_draw(r, "RESOLUTION", 10, m.x + 24.0f, qbox.y + 7.0f, &ls, 0.0f);
-    ccord_text_draw(r, "FRAME RATE", 10, m.x + 24.0f, qbox.y + 55.0f, &ls, 0.0f);
+    ccord_text_draw(r, "RESOLUTION", 10, m.x + 24.0f, qbox.y + (ui->mobile_layout ? 6.0f : 7.0f), &ls, 0.0f);
+    ccord_text_draw(r, "FRAME RATE", 10, m.x + 24.0f, qbox.y + (ui->mobile_layout ? 68.0f : 55.0f), &ls, 0.0f);
   } else {
     ccord_text_draw(r, "RESOLUTION", 10, m.x + 36.0f, m.y + 338.0f, &ls, 0.0f);
     ccord_text_draw(r, "FRAME RATE", 10, m.x + 36.0f, m.y + 376.0f, &ls, 0.0f);
@@ -859,7 +864,8 @@ void ui_draw_go_live(ccord_ui *ui, ccord_renderer *r)
   if (ui->go_live_selected_source < ui->go_live_source_count) {
     char sel_lbl[192];
     snprintf(sel_lbl, sizeof sel_lbl, "Selected: %s", ui->go_live_sources[ui->go_live_selected_source].title);
-    ccord_text_draw_ellipsis(r, sel_lbl, strlen(sel_lbl), m.x + 24.0f, start.y + 7.0f, start.x - (m.x + 36.0f), &ss);
+    ccord_text_draw_ellipsis(r, sel_lbl, strlen(sel_lbl), m.x + 24.0f,
+                             start.y + (start.h - ui_line_h(ui, ss.size)) * 0.5f, start.x - (m.x + 36.0f), &ss);
   }
   bool live = ccord_store_stream_active(ui->d.store);
   uis_button(ui, r, start, live ? "Stop Stream" : "Go Live", live ? UIS_BTN_DANGER : UIS_BTN_PRIMARY, UIS_BTN_S_MD,
@@ -877,7 +883,7 @@ bool ui_go_live_handle(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   for (int t = 0; t < 2; t++) {
-    if (ui_in_rect(ev->x, ev->y, go_live_tab_rect(&m, t))) {
+    if (ui_in_rect(ev->x, ev->y, go_live_tab_rect(ui, &m, t))) {
       if (ui->go_live_tab != (uint8_t)t) {
         ui->go_live_tab = (uint8_t)t;
         ui->go_live_selected_source = 0;
@@ -888,7 +894,7 @@ bool ui_go_live_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
   }
   for (size_t i = 0; i < ui->go_live_source_count && i < 6; i++) {
-    if (ui_in_rect(ev->x, ev->y, go_live_source_card_rect(&m, i))) {
+    if (ui_in_rect(ev->x, ev->y, go_live_source_card_rect(ui, &m, i))) {
       ui->go_live_selected_source = i;
       ui->dirty = true;
       return true;

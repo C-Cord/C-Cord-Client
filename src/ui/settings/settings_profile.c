@@ -1541,16 +1541,23 @@ static void bio_toolbar(dctx *c)
   static const char *const k_labels[5] = {"Bold", "Italic", "Monospace", "Spoiler", "Emoji"};
   float bx = c->x;
   float by = c->top + c->y;
+  float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  uis_btn_size bsz = ui->mobile_layout ? UIS_BTN_S_MD : UIS_BTN_S_SM;
   for (int i = 0; i < 5; i++) {
     float bw = ceilf(uis_label_width(ui, c->r, k_glyphs[i])) + 4.0f;
     if (bw < 38.0f) bw = 38.0f;
-    ccord_rect rc = {bx, by, bw, UIS_H_BTN_SM};
-    uis_button(ui, c->r, rc, k_glyphs[i], UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+    if (bx > c->x && bx + bw > c->x + c->w) {
+      bx = c->x;
+      by += bh + UIS_SP_1;
+      c->y += bh + UIS_SP_1;
+    }
+    ccord_rect rc = {bx, by, bw, bh};
+    uis_button(ui, c->r, rc, k_glyphs[i], UIS_BTN_SECONDARY, bsz,
                (uis_state){.hover = hovered(ui, rc, false)}, "pbfmt", (uint64_t)i);
     add_item(UI_PROF_BIO_FMT, i, rc, k_labels[i]);
     bx += bw + UIS_SP_1;
   }
-  c->y += UIS_H_BTN_SM + UIS_SP_2;
+  c->y += bh + UIS_SP_2;
 }
 
 static void bio_box(dctx *c)
@@ -1864,11 +1871,12 @@ static void theme_and_banner_section(dctx *c)
 static void cosmetic_launcher_card(dctx *c, int pick_kind, const char *title, const char *equipped, bool has_equipped)
 {
   ccord_ui *ui = c->ui;
-  ccord_rect card = {c->x, c->top + c->y, c->w, 56.0f};
+  float card_h = ui->mobile_layout ? 64.0f : 56.0f;
+  ccord_rect card = {c->x, c->top + c->y, c->w, card_h};
   uis_card(ui, c->r, card);
 
   // Real miniature Discord CDN preview thumbnail on left (visual-only, zero text overlay)
-  ccord_rect thumb = {card.x + 12.0f, card.y + 10.0f, 36.0f, 36.0f};
+  ccord_rect thumb = {card.x + 12.0f, card.y + (card_h - 36.0f) * 0.5f, 36.0f, 36.0f};
   uis_plate(ui, c->r, thumb, c->tk.r_control, COL(bg_tertiary));
   if (has_equipped) {
     if (pick_kind == PROF_PICK_DECO) {
@@ -1919,19 +1927,20 @@ static void cosmetic_launcher_card(dctx *c, int pick_kind, const char *title, co
   }
 
   float bw = 90.0f;
-  ccord_rect btn = {card.x + card.w - bw - 12.0f, card.y + (card.h - UIS_H_BTN_SM) * 0.5f, bw, UIS_H_BTN_SM};
+  float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
+  ccord_rect btn = {card.x + card.w - bw - 12.0f, card.y + (card.h - bh) * 0.5f, bw, bh};
   ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, c->tk.fs_control, COL(text_header));
   ccord_text_style ss = ui_style(ui, CCORD_FONT_REGULAR, c->tk.fs_caption, has_equipped ? COL(brand) : COL(text_muted));
   float tx = thumb.x + thumb.w + 12.0f;
   float tw = fmaxf(btn.x - tx - 10.0f, 60.0f);
-  ccord_text_draw_ellipsis(c->r, title, strlen(title), tx, card.y + 10.0f, tw, &ts);
+  ccord_text_draw_ellipsis(c->r, title, strlen(title), tx, card.y + (ui->mobile_layout ? 12.0f : 10.0f), tw, &ts);
   const char *eq = (has_equipped && equipped && equipped[0]) ? equipped : "None equipped";
-  ccord_text_draw_ellipsis(c->r, eq, strlen(eq), tx, card.y + 30.0f, tw, &ss);
+  ccord_text_draw_ellipsis(c->r, eq, strlen(eq), tx, card.y + (ui->mobile_layout ? 34.0f : 30.0f), tw, &ss);
 
-  uis_button(ui, c->r, btn, "Choose >", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+  uis_button(ui, c->r, btn, "Choose >", UIS_BTN_SECONDARY, ui->mobile_layout ? UIS_BTN_S_MD : UIS_BTN_S_SM,
              (uis_state){.hover = hovered(ui, btn, false)}, "pcos", (uint64_t)pick_kind);
   add_item(UI_PROF_COSMETIC_OPEN, pick_kind, btn, title);
-  c->y += 56.0f + UIS_SP_2;
+  c->y += card_h + UIS_SP_2;
 }
 
 // Live Markdown renderer for the Preview Card's About Me bio
@@ -2139,14 +2148,15 @@ static float draw_preview(dctx *c, float px, float py, float pw)
 
   // Theme-tinted sample "Message" action button showing how Primary color tints buttons
   ty += UIS_SP_2;
-  ccord_rect msg_btn = {tx, ty, 96.0f, 28.0f};
+  float msg_h = ui->mobile_layout ? UIS_MOB_H_BTN_SM : 28.0f;
+  ccord_rect msg_btn = {tx, ty, ui->mobile_layout ? 104.0f : 96.0f, msg_h};
   ccord_color btn_bg = use_theme ? ui_profile_button_color(ui, &look) : COL(brand);
   ccord_draw_rrect(r, msg_btn, tk->r_control, btn_bg);
   ccord_text_style mbs = ui_style(ui, CCORD_FONT_BOLD, tk->fs_caption, (ccord_color){255, 255, 255, 255});
   ccord_vec2 mbt = ccord_text_measure(r, "Message", 7, &mbs, 0.0f);
   ccord_text_draw(r, "Message", 7, msg_btn.x + (msg_btn.w - mbt.x) * 0.5f,
                   msg_btn.y + (msg_btn.h - mbt.y) * 0.5f, &mbs, 0.0f);
-  ty += 28.0f + UIS_SP_3;
+  ty += msg_h + UIS_SP_3;
 
   uis_divider(ui, r, tx, ty, tw);
   ty += UIS_SP_3;
@@ -2292,8 +2302,9 @@ void ui_settings_profile_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect conten
 
   // Fixed visible scrollbar when scrolling
   if (max_scroll > 0.0f) {
-    float tx = content.w < 460.0f ? (content.x + content.w - 4.0f) : (content.x + content.w + 10.0f);
-    float max_tx = panel.x + panel.w - 10.0f;
+    float right_limit = ui->mobile_layout ? (panel.x + panel.w - ui->safe_insets.right) : (panel.x + panel.w);
+    float tx = content.x + content.w + (ui->mobile_layout ? 5.0f : 10.0f);
+    float max_tx = right_limit - 10.0f;
     if (tx > max_tx) tx = max_tx;
     ccord_rect tr = {tx, top, 6.0f, fmaxf(S->view_h - 8.0f, 32.0f)};
     float th = fmaxf(24.0f, tr.h * (S->view_h / (S->view_h + max_scroll)));
@@ -2313,13 +2324,21 @@ void ui_settings_profile_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect conten
   // ---- Main Profile | Per-Server Profiles Subtabs ----
   float st1w = fmaxf(uis_label_width(ui, r, "Main Profile"), 112.0f);
   float st2w = fmaxf(uis_label_width(ui, r, "Per-Server Profiles"), 152.0f);
-  ccord_rect t1 = {c.x, c.top + c.y, st1w, UIS_H_CHIP + 4.0f};
-  ccord_rect t2 = {c.x + st1w + UIS_SP_2, c.top + c.y, st2w, UIS_H_CHIP + 4.0f};
+  float sub_h = ui->mobile_layout ? UIS_MOB_H_CHIP : (UIS_H_CHIP + 4.0f);
+  float st_x2 = c.x + st1w + UIS_SP_2;
+  float st_y2 = c.top + c.y;
+  ccord_rect t1 = {c.x, st_y2, st1w, sub_h};
+  if (st_x2 + st2w > c.x + c.w) {
+    st_x2 = c.x;
+    st_y2 += sub_h + UIS_SP_2;
+    c.y += sub_h + UIS_SP_2;
+  }
+  ccord_rect t2 = {st_x2, st_y2, st2w, sub_h};
   uis_chip(ui, r, t1, "Main Profile", (uis_state){.hover = hovered(ui, t1, false), .selected = S->subtab == 0}, "psub", 0);
   uis_chip(ui, r, t2, "Per-Server Profiles", (uis_state){.hover = hovered(ui, t2, false), .selected = S->subtab == 1}, "psub", 1);
   add_item(UI_PROF_SUBTAB, 0, t1, "Main Profile");
   add_item(UI_PROF_SUBTAB, 1, t2, "Per-Server Profiles");
-  c.y += UIS_H_CHIP + 16.0f;
+  c.y += sub_h + 12.0f;
 
   // Per-server selector bar
   if (S->subtab == 1) {
@@ -2331,22 +2350,25 @@ void ui_settings_profile_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect conten
     }
     float rst_w = 128.0f;
     float sel_w = fmaxf(c.w - rst_w - UIS_SP_2, 120.0f);
-    ccord_rect sbox = {c.x, c.top + c.y, sel_w, UIS_H_BTN_SM};
-    ccord_rect rbtn = {sbox.x + sbox.w + UIS_SP_2, c.top + c.y, rst_w, UIS_H_BTN_SM};
+    float bh = uis_btn_h_for(ui, UIS_H_BTN_SM);
+    ccord_rect sbox = {c.x, c.top + c.y, sel_w, bh};
+    ccord_rect rbtn = {sbox.x + sbox.w + UIS_SP_2, c.top + c.y, rst_w, bh};
     uis_select(ui, r, sbox, gname, (uis_state){.hover = hovered(ui, sbox, false), .focused = S->guild_dropdown_open}, "pgsel", 1);
-    uis_button(ui, r, rbtn, "Reset Overrides", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+    uis_button(ui, r, rbtn, "Reset Overrides", UIS_BTN_SECONDARY, ui->mobile_layout ? UIS_BTN_S_MD : UIS_BTN_S_SM,
                (uis_state){.hover = hovered(ui, rbtn, false)}, "pgrst", 1);
     add_item(UI_PROF_GUILD_TOGGLE, 0, sbox, "Choose Server");
     add_item(UI_PROF_GUILD_RESET, 0, rbtn, "Reset Overrides");
-    c.y += UIS_H_BTN_SM + UIS_SP_2;
+    c.y += bh + UIS_SP_2;
 
     if (S->guild_dropdown_open && ui->d.store) {
       size_t ng = ccord_store_guild_count(ui->d.store);
       int idx = 0;
+      float grow_h = ui->mobile_layout ? 40.0f : 30.0f;
+      float gstep = ui->mobile_layout ? 44.0f : 32.0f;
       for (size_t gi = 0; gi < ng && idx < 12; gi++) {
         const ccord_guild *g = ccord_store_guild_at(ui->d.store, gi);
         if (!g || g->id == CCORD_ID_NONE || g->id == CCORD_DM_GUILD_ID) continue;
-        ccord_rect grow = {c.x, c.top + c.y, sel_w, 30.0f};
+        ccord_rect grow = {c.x, c.top + c.y, sel_w, grow_h};
         uis_card(ui, r, grow);
         if (g->id == S->selected_guild) uis_list_row_fill(ui, r, grow, (uis_state){.selected = true}, "pgopt", (uint64_t)idx);
         ccord_text_style gs = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_control, COL(text_header));
@@ -2354,7 +2376,7 @@ void ui_settings_profile_draw(ccord_ui *ui, ccord_renderer *r, ccord_rect conten
         ccord_text_draw_ellipsis(r, gn, strlen(gn), grow.x + 10.0f,
                                  grow.y + (grow.h - ui_line_h(ui, gs.size)) * 0.5f, grow.w - 20.0f, &gs);
         add_item(UI_PROF_GUILD_PICK, idx, grow, gn);
-        c.y += 32.0f;
+        c.y += gstep;
         idx++;
       }
       c.y += UIS_SP_2;

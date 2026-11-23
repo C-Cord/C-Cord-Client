@@ -7,10 +7,11 @@
 
 static float composer_wrap(const ccord_ui *ui)
 {
-  // The text area of ui_draw_composer: the box less its padding, the '+' button (28) and the right-hand buttons
-  // (desktop: GIF + Sticker + Emoji + Mic = 128px; mobile: Emoji + Send/Mic = 76px).
-  float right_reserve = ui->mobile_layout ? 76.0f : 128.0f;
-  return maxf(ui->layout.composer.w - 2.0f * M(composer_margin_x) - 2.0f * M(composer_pad_x) - 28.0f - right_reserve, 20.0f);
+  // The text area of ui_draw_composer: the box less its padding, the '+' button and the right-hand buttons
+  // (desktop: GIF + Sticker + Emoji + Mic = 128px; mobile: Emoji + Send/Mic = 88px).
+  float left_pad = ui->mobile_layout ? 38.0f : 28.0f;
+  float right_reserve = ui->mobile_layout ? 88.0f : 128.0f;
+  return maxf(ui->layout.composer.w - 2.0f * M(composer_margin_x) - 2.0f * M(composer_pad_x) - left_pad - right_reserve, 20.0f);
 }
 
 
@@ -45,7 +46,8 @@ static float ui_staged_banner_height(const ccord_ui *ui)
   if (!ui || ui->staged_file_count == 0) return 0.0f;
   size_t cols = ui->staged_file_count <= 2u ? ui->staged_file_count : (ui->staged_file_count <= 6u ? 3u : 5u);
   size_t frows = (ui->staged_file_count + cols - 1u) / cols;
-  return 28.0f * (float)frows;
+  float row_h = ui->mobile_layout ? 38.0f : 28.0f;
+  return row_h * (float)frows;
 }
 
 float ui_composer_measure(ccord_ui *ui, ccord_renderer *r)
@@ -88,8 +90,9 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
     const char *who = ui_dm_display_name(ui, sel_ch);
     char prompt[192];
     snprintf(prompt, sizeof prompt, "Do you want to let %s message you?", who && who[0] ? who : "this user");
-    ccord_rect rej_r = {box.x + box.w - 86.0f, box.y + (box.h - 28.0f) * 0.5f, 74.0f, 28.0f};
-    ccord_rect acc_r = {rej_r.x - 82.0f, rej_r.y, 74.0f, 28.0f};
+    float mrbh = uis_btn_h_for(ui, 28.0f);
+    ccord_rect rej_r = {box.x + box.w - 86.0f, box.y + (box.h - mrbh) * 0.5f, 74.0f, mrbh};
+    ccord_rect acc_r = {rej_r.x - 82.0f, rej_r.y, 74.0f, mrbh};
     ui->msg_req_banner_accept_rect = acc_r;
     ui->msg_req_banner_reject_rect = rej_r;
     bool ahv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, acc_r);
@@ -110,7 +113,8 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
     const char *why = ui_composer_lock_reason(ui);
     if (!why) why = "Complete the server rules to send messages.";
     float bw = uis_label_width(ui, r, "Complete the rules");
-    ccord_rect btn = {box.x + box.w - bw - 12.0f, box.y + (box.h - 28.0f) * 0.5f, bw, 28.0f};
+    float bh = uis_btn_h_for(ui, 28.0f);
+    ccord_rect btn = {box.x + box.w - bw - 12.0f, box.y + (box.h - bh) * 0.5f, bw, bh};
     ui->mv.composer_btn = btn;
     bool bhv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, btn);
     uis_button(ui, r, btn, "Complete the rules", UIS_BTN_PRIMARY, UIS_BTN_S_SM, (uis_state){.hover = bhv}, "mvcomp", 0);
@@ -275,23 +279,28 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
     size_t max_cols = box.w < 260.0f ? 1u : (box.w < 460.0f ? 2u : (ui->staged_file_count <= 6u ? 3u : 5u));
     size_t cols = ui->staged_file_count < max_cols ? ui->staged_file_count : max_cols;
     size_t frows = (ui->staged_file_count + cols - 1u) / cols;
-    float fbanner_h = 28.0f * (float)frows;
+    float row_h = ui->mobile_layout ? 38.0f : 28.0f;
+    float cell_h = ui->mobile_layout ? 34.0f : 24.0f;
+    float fbanner_h = row_h * (float)frows;
     ccord_rect fbanner = {box.x, box.y, box.w, fbanner_h};
     ccord_draw_rrect(r, fbanner, 4.0f, COL(bg_secondary));
     float cell_w = box.w / (float)cols;
     for (size_t i = 0; i < ui->staged_file_count; i++) {
       size_t col = i % cols;
       size_t row = i / cols;
-      ccord_rect cell = {box.x + (float)col * cell_w + 2.0f, box.y + (float)row * 28.0f + 2.0f,
-                         maxf(cell_w - 4.0f, 20.0f), 24.0f};
+      ccord_rect cell = {box.x + (float)col * cell_w + 2.0f, box.y + (float)row * row_h + 2.0f,
+                         maxf(cell_w - 4.0f, 20.0f), cell_h};
       bool sp = ui->staged_files[i].spoiler;
       ccord_draw_rrect(r, cell, 4.0f, COL(bg_tertiary));
       ccord_draw_rect(r, (ccord_rect){cell.x, cell.y + 3.0f, 2.0f, cell.h - 6.0f},
                       sp ? COL(status_idle) : COL(status_online));
-      ccord_rect rem_rc = {cell.x + cell.w - 22.0f, cell.y + 1.0f, 20.0f, 22.0f};
+      float rem_sz = ui->mobile_layout ? 32.0f : 20.0f;
+      float rem_h = ui->mobile_layout ? 32.0f : 22.0f;
+      ccord_rect rem_rc = {cell.x + cell.w - rem_sz - 2.0f, cell.y + (cell.h - rem_h) * 0.5f, rem_sz, rem_h};
       ui->staged_remove_rects[i] = rem_rc;
-      float sp_w = cols <= 2u ? 54.0f : 30.0f;
-      ccord_rect sp_rc = {rem_rc.x - sp_w - 3.0f, cell.y + 2.0f, sp_w, 20.0f};
+      float sp_w = cols <= 2u ? (ui->mobile_layout ? 64.0f : 54.0f) : (ui->mobile_layout ? 40.0f : 30.0f);
+      float sp_h = ui->mobile_layout ? 30.0f : 20.0f;
+      ccord_rect sp_rc = {rem_rc.x - sp_w - 4.0f, cell.y + (cell.h - sp_h) * 0.5f, sp_w, sp_h};
       ui->staged_spoiler_rects[i] = sp_rc;
       ccord_draw_rrect(r, sp_rc, 4.0f, sp ? ui_alpha(COL(status_idle), 0.30f) : COL(bg_secondary));
       const char *slbl = cols <= 2u ? "SPOILER" : "SP";
@@ -319,17 +328,19 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
   if (replying) {   // the reply bar sits on the box: its top edge is square
     ccord_draw_rect(r, (ccord_rect){box.x, box.y, box.w, fminf(M(composer_radius), box.h)}, COL(bg_input));
   }
-  float attach_w = UIS_ICON_BTN;
-  ui->composer_attach_rect = (ccord_rect){box.x + 4.0f, box.y + (box.h - attach_w) * 0.5f, attach_w, attach_w};
+  float attach_w = uis_icon_btn_for(ui);
+  ui->composer_attach_rect = (ccord_rect){box.x + (ui->mobile_layout ? 2.0f : 4.0f),
+                                          box.y + (box.h - attach_w) * 0.5f, attach_w, attach_w};
   bool attach_hv = ui->mouse_in && !ui->menu.open && !ui->settings_open && ui_in_rect(ui->mx, ui->my, ui->composer_attach_rect);
   ccord_text_style pls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base),
                                   uis_icon_button(ui, r, ui->composer_attach_rect, (uis_state){.hover = attach_hv, .selected = ui->plus_menu_open}, "compattach", 0));
   ccord_vec2 plt = ccord_text_measure(r, "+", 1, &pls, 0.0f);
   ccord_text_draw(r, "+", 1, ui->composer_attach_rect.x + (attach_w - plt.x) * 0.5f,
                   ui->composer_attach_rect.y + (attach_w - plt.y) * 0.5f, &pls, 0.0f);
-  float right_reserve = ui->mobile_layout ? 76.0f : 128.0f;
-  ccord_rect area = {box.x + M(composer_pad_x) + 28.0f, box.y + M(composer_pad_y),
-                     box.w - 2.0f * M(composer_pad_x) - 28.0f - right_reserve, box.h - 2.0f * M(composer_pad_y)};
+  float left_pad = ui->mobile_layout ? 38.0f : 28.0f;
+  float right_reserve = ui->mobile_layout ? 88.0f : 128.0f;
+  ccord_rect area = {box.x + M(composer_pad_x) + left_pad, box.y + M(composer_pad_y),
+                     box.w - 2.0f * M(composer_pad_x) - left_pad - right_reserve, box.h - 2.0f * M(composer_pad_y)};
   ccord_text_style st = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_base), COL(text_normal));
   float wrap = composer_wrap(ui);   // = max(area.w, 20); the styled layout wraps, measures and draws at this width
   const char *text = ccord_text_edit_cstr(&ui->edit);
@@ -418,8 +429,8 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
   ui_expr_draw_composer_buttons(ui, r, box);
   bool mobile_send = ui->mobile_layout && !locked && (ui->edit.len > 0 || ui->staged_file_count > 0);
   if (mobile_send) {
-    float sw = 32.0f, sh = 30.0f;
-    ccord_rect sb = {box.x + box.w - sw - 6.0f, box.y + (box.h - sh) * 0.5f, sw, sh};
+    float sw = 40.0f, sh = 38.0f;
+    ccord_rect sb = {box.x + box.w - sw - 5.0f, box.y + (box.h - sh) * 0.5f, sw, sh};
     ui->mobile_send_btn_rect = sb;
     ccord_draw_rrect(r, sb, sh * 0.5f, COL(brand));
     // Crisp send arrow icon centered in the pill.

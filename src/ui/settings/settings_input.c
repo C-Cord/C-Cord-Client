@@ -2,6 +2,18 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include "settings_internal.h"
 
+static ccord_rect st_hit_toggle(const sgeom *g, int row)
+{
+  ccord_rect tr = st_toggle_rect(g, row);
+  return (g && g->mobile) ? uis_hit_padded(tr, 56.0f, UIS_MOB_TOUCH_H) : tr;
+}
+
+static ccord_rect st_hit_track(const sgeom *g, int row)
+{
+  ccord_rect tr = st_vol_track_rect(g, row);
+  return (g && g->mobile) ? uis_hit_padded(tr, tr.w, UIS_MOB_TOUCH_H) : tr;
+}
+
 static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
 {
   switch (ui->settings_page) {
@@ -21,7 +33,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
           return true;
         }
       }
-      if (ui_in_rect(x, y, st_toggle_rect(g, 5))) {
+      if (ui_in_rect(x, y, st_hit_toggle(g, 5))) {
         ui->settings_quickcss_enabled = !ui->settings_quickcss_enabled;
         ui_quickcss_changed(ui);   // live apply through the host + persist
         st_settings_save_flush(ui);
@@ -34,7 +46,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         ui->dirty = true;
         return false;   // focusing the box does not modify any persisted setting
       }
-      if (ui_in_rect(x, y, st_toggle_rect(g, 7))) {
+      if (ui_in_rect(x, y, st_hit_toggle(g, 7))) {
         ui->settings_reduced_motion = !ui->settings_reduced_motion;
         ui->anim.reduced_motion = ui->settings_reduced_motion;
         ui->dirty = true;
@@ -72,7 +84,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         ui->dirty = true;
         return true;
       }
-      if (ui_in_rect(x, y, st_vol_track_rect(g, 2))) {
+      if (ui_in_rect(x, y, st_hit_track(g, 2))) {
         ccord_rect tr = st_vol_track_rect(g, 2);
         ui->settings_input_volume = st_clamp_volume(&tr, x);
         ui->dirty = true;
@@ -88,7 +100,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         ui->dirty = true;
         return true;
       }
-      if (ui_in_rect(x, y, st_vol_track_rect(g, 3))) {
+      if (ui_in_rect(x, y, st_hit_track(g, 3))) {
         ccord_rect tr = st_vol_track_rect(g, 3);
         ui->settings_output_volume = st_clamp_volume(&tr, x);
         ui->dirty = true;
@@ -102,22 +114,22 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         }
       }
       bool dsp = ccord_dsp_available();
-      if (dsp && ui_in_rect(x, y, st_toggle_rect(g, 5))) {
+      if (dsp && ui_in_rect(x, y, st_hit_toggle(g, 5))) {
         ui->settings_noise_suppression = !ui->settings_noise_suppression;
         st_voice_config_apply(ui);
         return true;
       }
-      if (dsp && ui_in_rect(x, y, st_toggle_rect(g, 6))) {
+      if (dsp && ui_in_rect(x, y, st_hit_toggle(g, 6))) {
         ui->settings_echo_cancel = !ui->settings_echo_cancel;
         st_voice_config_apply(ui);
         return true;
       }
-      if (dsp && ui_in_rect(x, y, st_toggle_rect(g, 7))) {
+      if (dsp && ui_in_rect(x, y, st_hit_toggle(g, 7))) {
         ui->settings_auto_gain = !ui->settings_auto_gain;
         st_voice_config_apply(ui);
         return true;
       }
-      if (ui_in_rect(x, y, st_toggle_rect(g, 8))) {
+      if (ui_in_rect(x, y, st_hit_toggle(g, 8))) {
         ui->settings_hardware_accel = !ui->settings_hardware_accel;
         ui->dirty = true;
         return true;
@@ -148,7 +160,7 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
           st_voice_config_apply(ui);
           return true;
         }
-        if (ui_in_rect(x, y, st_vol_track_rect(g, 11))) {
+        if (ui_in_rect(x, y, st_hit_track(g, 11))) {
           ccord_rect tr = st_vol_track_rect(g, 11);
           ui->settings_vad_sensitivity = st_clamp_volume(&tr, x);
           st_voice_config_apply(ui);
@@ -252,12 +264,12 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
       break;
     }
     case SP_TEXT_IMAGES:
-      if (ui_in_rect(x, y, st_toggle_rect(g, 0))) {
+      if (ui_in_rect(x, y, st_hit_toggle(g, 0))) {
         ui->settings_embeds = !ui->settings_embeds;
         ui->dirty = true;
         return true;
       }
-      if (ui_in_rect(x, y, st_toggle_rect(g, 1))) {
+      if (ui_in_rect(x, y, st_hit_toggle(g, 1))) {
         ui->settings_attachments = !ui->settings_attachments;
         ui->dirty = true;
         return true;
@@ -341,7 +353,7 @@ static int64_t settings_hover_key(const ccord_ui *ui, const sgeom *g, float x, f
       if (ui_in_rect(x, y, st_vol_minus_rect(&ga, 2))) return 220;
       if (ui_in_rect(x, y, st_vol_plus_rect(&ga, 2))) return 221;
       if (ui_in_rect(x, y, st_vol_track_rect(&ga, 2))) return 222;
-      if (ui_in_rect(x, y, ui_settings_m6_zoom_reset_rect(ga.content))) return 223;
+      if (ui_in_rect(x, y, ui_settings_m6_zoom_reset_rect(ui, ga.content))) return 223;
       if (ui_in_rect(x, y, st_toggle_rect(&ga, 5))) return 225;
       if (ui_in_rect(x, y, st_quickcss_box_rect(&ga))) return 226;
       if (ui_in_rect(x, y, st_toggle_rect(&ga, 7))) return 227;
@@ -884,12 +896,17 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
     bool handled = false;
+    bool page_scrolls = ui->settings_page == SP_APPEARANCE || ui->settings_page == SP_STREAMING ||
+                        ui->settings_page == SP_TEXT_IMAGES ||
+                        (ui->settings_page == SP_NOTIFICATIONS && !ui->settings_sounds_open) ||
+                        ui->settings_page == SP_ACCESSIBILITY || ui->settings_page == SP_STREAMER ||
+                        ui->settings_page == SP_LANGUAGE || ui->settings_page == SP_ADVANCED ||
+                        ui->settings_page == SP_CCORD || ui->settings_page == SP_KEYBINDS;
     if (ui->settings_page == SP_VOICE) {
       sgeom gv = g;
       gv.content.y -= st_s_voice_scroll;   // rows scroll; hit-testing matches the drawn positions
       handled = handle_page_controls(ui, &gv, ev->x, ev->y);
-    } else if (ui->settings_page == SP_APPEARANCE || ui->settings_page == SP_STREAMING ||
-               ui->settings_page == SP_KEYBINDS) {
+    } else if (page_scrolls) {
       sgeom gs = g;
       float max_p = st_page_max_scroll(ui, &g);
       if (max_p > 0.0f) {
