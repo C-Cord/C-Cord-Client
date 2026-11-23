@@ -465,7 +465,7 @@ ccord_status mk_build_dataset(mock *m, ccord_error *err)
     "Pixel art & sprite bot.",
   };
   static const char *const user_pronouns[MOCK_NUM_USERS] = {
-    "they/them", "she/her", "he/him", "he/they", "she/they", "he/him",
+    "c/cord", "she/her", "he/him", "he/they", "she/they", "he/him",
     "she/her", "they/them", "she/her", "he/him", "bot", "bot",
   };
   static const char *const user_handles[MOCK_NUM_USERS] = {
