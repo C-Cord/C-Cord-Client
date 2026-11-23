@@ -5,7 +5,11 @@
 -- Sandbox guarantees & limits:
 -- - Stdlibs: base, table, string (minus string.dump), math, utf8, coroutine, plugin-scoped require().
 -- - Removed globals: os, io, package, debug, dofile, loadfile, load, print, warn, collectgarbage.
--- - Heap limit: 64 MiB (desktop out-of-process host) / 32 MiB (Android in-process worker).
+-- - Heap limit: 64 MiB cap (default 32 MiB, desktop out-of-process host) / 32 MiB cap (default 16 MiB, Android in-process worker).
+--   Manifest `limits.memory_bytes` (floor 1 MiB) is clamped to these ceilings.
+-- - Instruction budget: default 50,000,000 instructions per event/callback (manifest `limits.instructions` up to 100,000,000).
+-- - OS sandbox (desktop `ccord-plugin-host`): Linux fail-closed PR_SET_NO_NEW_PRIVS + Landlock (ABI v1-v3) + seccomp-BPF denylist;
+--   macOS Seatbelt; Windows Job Object process/UI limits + token privilege stripping.
 -- - Storage quota (shared by storage.* and settings.*): max 128 keys, 256 KiB total.
 -- - Frozen API tables are read-only proxy tables without __pairs (do not iterate them with pairs()).
 -- - Calling any Class 2 or Class 3 API without declaring its permission in plugin.json fatally
@@ -46,9 +50,11 @@ function plugin.asset_exists(rel_path) end
 function plugin.list_assets(rel_dir) end
 
 ---@class CcordExposeOpts
----@field allow_lower_class? boolean Allow lower-security-class plugins to invoke this RPC (default false)
+---@field allow_lower_class? boolean Opt out of restricted-permission subset enforcement so callers lacking this plugin's Class 2/3 restricted permissions may invoke this RPC (default false)
 
 ---Expose a JSON-callable RPC function to other plugins (max 64 per plugin; receives up to 16 args; 500 ms timeout).
+---Anti-escalation enforces restricted-permission subset matching: callers must hold every Class 2/3 restricted permission
+---held by the target plugin (not merely the same coarse class), unless `{ allow_lower_class = true }` is set.
 ---@param name string Function name (`^[a-z][a-z0-9_-]{0,62}$`)
 ---@param fn fun(...: any): any
 ---@param opts? CcordExposeOpts
@@ -1232,7 +1238,8 @@ function hooks.on_before_edit(fn) end
 ---@param fn (fun(data: { guild_id: string, channel_id: string, message_id: string, author_id: string, content: string, title: string, body: string, is_mention: boolean, is_dm: boolean }): boolean|{ suppress?: boolean, cancel?: boolean, title?: string, body?: string, silent?: boolean }|nil)|nil
 ---@return boolean
 function hooks.on_notification(fn) end
----Class 2 ("notifications.hook"): string or `{ url }` rewrite is accepted only for `http://` or `https://` URLs.
+---Class 2 ("notifications.hook"): string or `{ url }` rewrite must remain `http://` or `https://` on the exact same host as the original URL
+---(tracking-parameter stripping and same-host path rewrites are allowed; cross-host redirects and non-HTTP(S) schemes are rejected).
 ---@param fn (fun(data: { url: string }): string|boolean|{ url?: string, cancel?: boolean }|nil)|nil
 ---@return boolean
 function hooks.on_link_open(fn) end
@@ -1405,7 +1412,10 @@ function window.tray.add_item(spec) end
 function window.tray.remove_item(id) end
 
 gateway = {}
----Class 2 ("gateway.raw"): subscribe to Discord Gateway op 0 dispatch payloads (`READY` & `READY_SUPPLEMENTAL` excluded; max 64 specific events).
+---Class 2 ("gateway.raw"): subscribe to Discord Gateway op 0 dispatch payloads (max 64 specific events).
+---Live transport filters sensitive session/settings events, and the plugin dispatcher strips/redacts sensitive auth/session/PII fields
+---(`token`, `analytics_token`, `session_id`, `resume_gateway_url`, `auth_session_id_hash`, `mfa_enabled`, `email`, `phone`) from
+---`READY`, `READY_SUPPLEMENTAL`, `SESSIONS_REPLACE`, and `AUTH_SESSION_CHANGE` payloads.
 ---Specific event handlers receive `(payload)`; wildcard `"*"` receives `(payload, event_name)`. Pass explicit `nil` to unsubscribe.
 ---@param event_name string
 ---@param fn (fun(payload: table, event_name?: string))|nil
@@ -1460,7 +1470,10 @@ net = {
 }
 net["local"] = net.local_net
 
----Class 3 ("network.http", or "network.local" for localhost URLs): async HTTPS request (TLS 1.2/1.3, no redirects, 4 MiB body cap, respects `allowed_hosts`).
+---Class 3 ("network.http" for public HTTPS; loopback targets strictly require "network.local"): async HTTP(S) request (TLS 1.2/1.3, no redirects, 4 MiB body cap).
+---`network.http` strictly targets public `https://` hosts: enforces manifest `allowed_hosts` (exact domains or `*.example.com`),
+---blocks loopback (`localhost`, `127.0.0.0/8`, `::1`, `0.0.0.0`), and applies a socket-level SSRF filter blocking RFC 1918 private IPs,
+---link-local / cloud metadata (`169.254.169.254`), IPv6 ULA (`fc00::/7`), and NAT64 private ranges.
 ---Returns `req_id` when called with `cb`, or yields `(resp, err)` inside `async.spawn()`.
 ---@param opts CcordHttpOpts
 ---@param cb? fun(resp: CcordHttpResponse|nil, err: string|nil)
@@ -1503,19 +1516,22 @@ function net.http.patch(url, body, opts, cb) end
 ---@return string|nil err
 function net.http.delete(url, opts, cb) end
 
----Class 3 ("network.ws", or "network.local" for loopback `ws://127.0.0.1` / `localhost` / `[::1]`): open WebSocket (global cap 32).
+---Class 3 ("network.ws" for public `wss://`; all loopback `ws://`/`wss://` targets strictly require "network.local"): open WebSocket (global cap 32).
+---`network.ws` enforces manifest `allowed_hosts`, blocks loopback, and applies the socket-level SSRF filter (RFC 1918, link-local/cloud metadata, IPv6 ULA, NAT64 private ranges).
 ---@param url string
 ---@param opts? { headers?: table<string, string>, on_open?: fun(ev: table), on_message?: fun(ev: { binary: boolean, data?: string, b64?: string }), on_close?: fun(ev: { code: integer, reason: string }), on_error?: fun(ev: { message: string }) }
 ---@return CcordWsHandle
 function net.ws.connect(url, opts) end
 
----Class 3 ("network.local"): HTTP request restricted to `127.0.0.1` / `localhost` / `[::1]` (also accessible as `net["local"].request`; POSIX-only for loopback `http://`).
+---Class 3 ("network.local"): HTTP request restricted to loopback (`127.0.0.1` / `localhost` / `[::1]`; also accessible as `net["local"].request`; POSIX-only for loopback `http://`).
 ---@param opts CcordHttpOpts
 ---@param cb? fun(resp: CcordHttpResponse|nil, err: string|nil)
 ---@return CcordHttpResponse|integer|nil resp_or_req_id
 ---@return string|nil err
 function net.local_net.request(opts, cb) end
 ---Class 3 ("network.local"): send data to a POSIX Unix domain socket and read UTF-8 response (<= 256 KiB, 3 s timeout; also `net["local"].unix_send`).
+---Blocks C-Cord protected paths, symlinks, abstract sockets, and high-risk host system sockets
+---(`docker.sock`, `podman.sock`, `containerd.sock`, `dbus`, `systemd`, `ssh-agent`, `gpg-agent`, `discord-ipc-*`, `ccord-*`).
 ---@param socket_path string
 ---@param data string
 ---@param cb? fun(resp: { data: string }|nil, err: string|nil)
@@ -1524,7 +1540,10 @@ function net.local_net.request(opts, cb) end
 function net.local_net.unix_send(socket_path, data, cb) end
 
 fs = {}
----Class 3 ("fs.read"): read regular file (<= 16 MiB; C-Cord config/data/plugin directories always protected).
+---Class 3 ("fs.read"): read regular file (<= 16 MiB).
+---On POSIX, `fs.*` uses `O_NOFOLLOW`/`lstat` to reject symlinks and blocks C-Cord config/data/plugin directories,
+---the running C-Cord executable/AppImage, `~/.ssh`, `~/.gnupg`, `~/.config/autostart`, and shell startup rc files
+---(`~/.bashrc`, `~/.profile`, `~/.zshrc`, `~/.bash_profile`).
 ---@param path string
 ---@return string|nil data
 ---@return string|nil err
@@ -1634,12 +1653,16 @@ function system.open_url(url) end
 ---@return boolean
 function system.notify(title, body, opts) end
 ---Class 3 ("system.exec"): run one-shot subprocess via direct argv (POSIX-only; max 64 args, default timeout 10 s, 512 KiB UTF-8 stdout/stderr cap).
+---Scrubs sensitive environment variables (`*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, `*AUTH*`, `CCORD_*`, etc.)
+---and closes inherited file descriptors `>= 3` before `execvp`.
 ---@param spec { cmd: string, args?: string[], cwd?: string, stdin?: string, timeout_ms?: integer }
 ---@param cb? fun(res: { code: integer, stdout: string, stderr: string }|nil, err: string|nil)
 ---@return { code: integer, stdout: string, stderr: string }|integer|nil res_or_req_id
 ---@return string|nil err
 function system.exec(spec, cb) end
 ---Class 3 ("system.exec"): spawn streaming subprocess via direct argv (POSIX-only; max 64 args, global cap 32 procs, UTF-8 stdout/stderr chunks).
+---Scrubs sensitive environment variables (`*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*API_KEY*`, `*AUTH*`, `CCORD_*`, etc.)
+---and closes inherited file descriptors `>= 3` before `execvp`.
 ---@param spec { cmd: string, args?: string[], cwd?: string, on_stdout?: fun(ev: { data: string }), on_stderr?: fun(ev: { data: string }), on_exit?: fun(ev: { code: integer }) }
 ---@return CcordProcHandle
 function system.spawn(spec) end
