@@ -89,6 +89,7 @@ add_library(ccord_ui STATIC
   overlays/lightbox_viewer.c
   overlays/ui_saved_messages.c
   overlays/status_card.c
+  overlays/audio_popover.c
   overlays/poll_composer.c
   overlays/schedule_dialog.c
   overlays/profile_view.c

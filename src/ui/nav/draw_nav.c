@@ -1269,6 +1269,12 @@ void ui_draw_user_panel(ccord_ui *ui, ccord_renderer *r)
     if (i == 0) ui_icon_mic(r, cx, cym, 18.0f, ic, muted);
     else if (i == 1) ui_icon_headphones(r, cx, cym, 18.0f, ic, deafened);
     else ui_icon_gear(r, cx, cym, 18.0f, ic, hover ? COL(bg_item_hover) : COL(bg_user_panel));
+    if (i == 0 || i == 1) {
+      ccord_rect cr = ui_audio_caret_rect(ui, i);
+      bool chv = ui->mouse_in && !ui->menu.open && !ui->settings_open && ui_in_rect(ui->mx, ui->my, cr);
+      ccord_color ccol = chv ? COL(text_header) : COL(text_muted);
+      ui_icon_chevron(r, cr.x + cr.w * 0.5f, cr.y + cr.h * 0.5f, 7.0f, ICON_DOWN, ccol);
+    }
   }
 }
 

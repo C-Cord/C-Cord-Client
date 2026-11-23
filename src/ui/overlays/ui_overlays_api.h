@@ -195,6 +195,13 @@ typedef struct ccord_buf ccord_buf;
 [[nodiscard]] ccord_status ui_poll_composer_build_body(const ccord_ui *ui, ccord_buf *out, ccord_error *err);
 
 void ui_schedule_dialog_open(ccord_ui *ui);
+// Quick Audio Device / Profile / Volume popover (audio_popover.c).
+ccord_rect ui_audio_caret_rect(const ccord_ui *ui, int slot);
+void ui_audio_popover_open(ccord_ui *ui, int mode);   // 1 = input, 2 = output
+void ui_audio_popover_close(ccord_ui *ui);
+bool ui_audio_popover_is_open(const ccord_ui *ui);
+void ui_audio_popover_draw(ccord_ui *ui, ccord_renderer *r);
+bool ui_audio_popover_handle(ccord_ui *ui, const ccord_input_event *ev);
 void ui_schedule_dialog_close(ccord_ui *ui);
 bool ui_schedule_dialog_is_open(const ccord_ui *ui);
 size_t ui_schedule_dialog_debug_first_row_attachments(void);   // verify slices: count drawn on the first pending row

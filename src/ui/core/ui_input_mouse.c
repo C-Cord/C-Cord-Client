@@ -106,8 +106,16 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
       if (hd.user_status) { ui_status_card_open(ui); uc_reset_caret_blink(ui); return true; }
       if (hd.guild >= 0) { uc_select_guild_at(ui, (size_t)hd.guild); return true; }
       if (hd.crow >= 0) { uc_click_channel_row(ui, (size_t)hd.crow); return true; }
-      if (hd.mute) { uc_toggle_voice_mute(ui); return true; }
-      if (hd.deafen) { uc_toggle_voice_deafen(ui); return true; }
+      if (hd.mute) {
+        if (ui_in_rect(ev->x, ev->y, ui_audio_caret_rect(ui, 0))) ui_audio_popover_open(ui, 1);
+        else uc_toggle_voice_mute(ui);
+        return true;
+      }
+      if (hd.deafen) {
+        if (ui_in_rect(ev->x, ev->y, ui_audio_caret_rect(ui, 1))) ui_audio_popover_open(ui, 2);
+        else uc_toggle_voice_deafen(ui);
+        return true;
+      }
       if (hd.gear) { ui_open_settings(ui, true); return true; }
       if (hd.camera) {
         bool next = !ui->camera_on;
@@ -926,11 +934,13 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (h.mute) {
-    uc_toggle_voice_mute(ui);
+    if (ui_in_rect(ev->x, ev->y, ui_audio_caret_rect(ui, 0))) ui_audio_popover_open(ui, 1);
+    else uc_toggle_voice_mute(ui);
     return true;
   }
   if (h.deafen) {
-    uc_toggle_voice_deafen(ui);
+    if (ui_in_rect(ev->x, ev->y, ui_audio_caret_rect(ui, 1))) ui_audio_popover_open(ui, 2);
+    else uc_toggle_voice_deafen(ui);
     return true;
   }
   if (h.gear) {

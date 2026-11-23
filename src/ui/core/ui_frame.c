@@ -561,6 +561,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
     draw_overlay_popup(ui, r, UI_OVL_MEMBER_POPOVER, "mpop", ui->member_popover_open, &ui->member_popover_open, UI_POPUP_MS,
                        UI_POPUP_CLOSE_MS, 6.0f, ui_draw_member_popover);
     ui_status_card_draw(ui, r);
+    ui_audio_popover_draw(ui, r);
     ui_plus_menu_draw(ui, r);
   }
   draw_popup(ui, r, full_settings, "settings", UI_MODAL_MS, 0.0f, ui_settings_draw);

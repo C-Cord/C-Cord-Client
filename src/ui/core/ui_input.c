@@ -740,6 +740,8 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
   }
   if (ui->sc.open && ev->type != CCORD_IN_RESIZE && ev->type != CCORD_IN_FOCUS && ev->type != CCORD_IN_QUIT &&
       ui_status_card_handle(ui, ev)) return true;   // account card
+  if (ui_audio_popover_is_open(ui) && ev->type != CCORD_IN_RESIZE && ev->type != CCORD_IN_FOCUS &&
+      ev->type != CCORD_IN_QUIT && ui_audio_popover_handle(ui, ev)) return true;
   switch (ev->type) {
     case CCORD_IN_RESIZE:
       ccord_ui_set_viewport(ui, ev->x, ev->y);

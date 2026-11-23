@@ -398,6 +398,16 @@ bool uc_handle_right_click(ccord_ui *ui, const ccord_input_event *ev)
     if (l->right_drawer_visible && ev->x < l->member_list.x) return false;
   }
   hover_state h = uc_compute_hover(ui);
+  if (!ui->touch_mode) {
+    if (h.mute) {
+      ui_audio_popover_open(ui, 1);
+      return true;
+    }
+    if (h.deafen) {
+      ui_audio_popover_open(ui, 2);
+      return true;
+    }
+  }
   if (h.rail_slot >= 0) {
     size_t nslots = 0;
     const ui_rail_slot *slots = ui_rail_slots_cached(ui, &nslots, nullptr);
