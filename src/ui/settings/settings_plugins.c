@@ -947,6 +947,7 @@ bool ui_settings_security_modal_open(const ccord_ui *ui)
 {
   if (s_sec_mode != SEC_NONE) return true;
   if (ui && (ui->login_screen || ui->account_mfa_required)) return true;
+  if (st_account_security_active(ui)) return true;
   return false;
 }
 

@@ -301,6 +301,9 @@ static int64_t settings_hover_key(const ccord_ui *ui, const sgeom *g, float x, f
 
   switch (ui->settings_page) {
     case SP_ACCOUNT: {
+      if (ui->account_view.signed_in || st_account_modal_open()) {
+        return st_account_hover_key(ui, g, x, y);
+      }
       sgeom ga = *g;
       if (st_page_max_scroll(ui, g) > 0.0f) ga.content.y -= st_s_page_scroll;
       for (int i = 0; i < 5; i++) {
@@ -672,6 +675,18 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     st_s_press_y = ev->y;
     st_s_press_until_ms = ui->now_ms + SETTINGS_PRESS_MS;
     ui->dirty = true;
+    if (ui->settings_page == SP_ACCOUNT && (!ui->mobile_layout || ui->mobile_settings_detail) &&
+        st_account_modal_open()) {
+      (void)st_account_handle_click(ui, &g, ev->x, ev->y);
+      st_s_hover_key = -1;
+      return true;
+    }
+    if (ui->settings_page == SP_PROFILE_EDIT && (!ui->mobile_layout || ui->mobile_settings_detail) &&
+        ui_settings_profile_has_overlay(ui)) {
+      (void)ui_settings_profile_click(ui, g.content, g.panel, ev->x, ev->y);
+      st_s_hover_key = -1;
+      return true;
+    }
     if (ui->settings_page == SP_PLUGINS && (!ui->mobile_layout || ui->mobile_settings_detail) &&
         st_plugins_has_overlay()) {
       (void)st_plugins_handle_click(ui, &g, ev->x, ev->y);
@@ -687,6 +702,12 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       if (ui->settings_page == SP_NOTIFICATIONS && ui->settings_sounds_open) {
         ui->settings_sounds_open = false;
         ui->dirty = true;
+        return true;
+      }
+      if (ui->settings_page == SP_ACCOUNT && st_account_handle_back(ui)) {
+        return true;
+      }
+      if (ui->settings_page == SP_PROFILE_EDIT && ui_settings_profile_dismiss_overlay(ui)) {
         return true;
       }
       if (ui->settings_page == SP_PLUGINS && st_plugins_handle_back(ui)) {
@@ -734,6 +755,10 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       return true;   // Level 1 categories screen: page content is not visible
     }
     if (ui->settings_page == SP_ACCOUNT) {
+      if (ui->account_view.signed_in) {
+        (void)st_account_handle_click(ui, &g, ev->x, ev->y);
+        return true;
+      }
       sgeom ga = g;
       float max_a = st_page_max_scroll(ui, &g);
       if (max_a > 0.0f) {
@@ -885,6 +910,7 @@ bool ui_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     return true;
   }
+  if (ui->settings_page == SP_ACCOUNT && st_account_handle_key(ui, ev)) return true;
   if (ui->settings_page == SP_PROFILE_EDIT && ui_settings_profile_key(ui, ev)) return true;
   if (ui->settings_page == SP_PLUGINS && st_plugins_handle_key(ui, ev)) return true;
   if (ui->settings_page == SP_APPEARANCE && ui->account_focus_field == 6) {

@@ -103,6 +103,8 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
     if (ui->settings_open) {
       if (ui->account_mfa_required) {
         ui_settings_dismiss_mfa(ui);
+      } else if (ui_settings_account_dismiss_overlay(ui)) {
+        // Dismissed active Account Protected Modal or sub-view.
       } else if (ui_settings_profile_dismiss_overlay(ui)) {
         // Dismissed active Profile Cosmetic Picker or Crop modal.
       } else if (ui_settings_plugins_dismiss_overlay(ui)) {
@@ -267,6 +269,7 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (ui->settings_open && (ui->account_focus_field != 0 || ui->account_mfa_required ||
+                            ui_settings_account_wants_text(ui) || ui_settings_account_has_overlay(ui) ||
                             ui_settings_profile_wants_text(ui) || ui_settings_profile_has_overlay(ui) ||
                             ui_settings_plugins_wants_text(ui))) {
     return ui_settings_handle(ui, ev);
@@ -1179,6 +1182,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       if (ui_server_settings_is_open(ui)) return ui_server_settings_handle(ui, ev);
       if (ui_channel_settings_is_open(ui)) return ui_channel_settings_handle(ui, ev);
       if (ui->settings_open && (ui->account_focus_field != 0 || ui->account_mfa_required ||
+                                ui_settings_account_wants_text(ui) || ui_settings_account_has_overlay(ui) ||
                                 ui_settings_profile_wants_text(ui) || ui_settings_profile_has_overlay(ui) ||
                                 ui_settings_plugins_wants_text(ui))) {
         return ui_settings_handle(ui, ev);

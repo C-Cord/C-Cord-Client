@@ -70,7 +70,7 @@ const char *const st_k_resolutions[4] = {"720p", "1080p", "1440p", "Source"};
 const char *const st_k_fps[3] = {"15", "30", "60"};
 const char *const st_k_display_mode[2] = {"Compact", "Cozy"};
 const char *const st_k_voice_mode[2] = {"Voice Activity", "Push to Talk"};
-const char *const st_k_web_labels[5] = {"Billing", "Nitro", "Shop", "Server Boost", "Account"};
+const char *const st_k_web_labels[5] = {"Billing", "Nitro", "Shop", "Server Boost", "Web Settings"};
 const char *const st_k_web_urls[5] = {
   "https://discord.com/settings/billing",
   "https://discord.com/nitro",
@@ -706,6 +706,8 @@ float st_account_web_y(const ccord_ui *ui, const sgeom *g)
 
 ccord_rect st_account_web_btn_rect(const ccord_ui *ui, const sgeom *g, int idx)
 {
+  ccord_rect cached = {0};
+  if (st_account_cached_web_btn(ui, idx, &cached)) return cached;
   float by = st_account_web_y(ui, g);
   if (g->content.w < 380.0f) {
     float gap = 6.0f;
@@ -1072,6 +1074,11 @@ float st_page_max_scroll(const ccord_ui *ui, const sgeom *g)
   float total = 0.0f;
   switch (ui->settings_page) {
     case SP_ACCOUNT: {
+      if (ui->account_view.signed_in) {
+        float view_h = fmaxf(g->content.h - 38.0f, 40.0f);
+        float m = st_account_content_height(ui, g) - view_h;
+        return m > 0.0f ? m : 0.0f;
+      }
       float web_y = st_account_web_y(ui, g);
       float extra_web = g->content.w < 380.0f ? (UIS_H_BTN + 6.0f) : 0.0f;
       total = (web_y - g->content.y) + UIS_H_BTN + extra_web + 52.0f;
@@ -1205,6 +1212,7 @@ bool ui_settings_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced)
 {
   bool moving = ui_settings_m6_scroll_tick(ui, fdt_ms, reduced);
   if (ui_settings_profile_tick(ui)) moving = true;   // Discord's answer to Save, and the brief success state
+  if (st_account_tick(ui)) moving = true;            // 30s reveal auto-remask timer
   if (st_s_save_pending && st_s_save_ui == ui) {
     if (!ui->settings_open || ui->now_ms >= st_s_save_due_ms) {
       st_settings_save(ui);

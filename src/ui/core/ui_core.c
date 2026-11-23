@@ -803,10 +803,11 @@ static void sync_text_input(ccord_ui *ui)
       field = (ui->account_focus_field == 4);
       kind = 3;
     } else if (ui_is_login_screen(ui) || ui->settings_page == 0) {
-      field = (ui->account_focus_field != 0);
+      field = (ui->account_focus_field != 0) || ui_settings_account_wants_text(ui);
       if (ui->account_focus_field == 2) kind = 1;
       else if (ui->account_focus_field == 1 || ui->account_focus_field == 3) kind = 2;
       else if (ui->account_focus_field == 4) kind = 3;
+      else if (ui_settings_account_wants_text(ui)) kind = 4;
     } else if (ui->settings_page == 2 && ui->account_focus_field == 6) {
       field = true;
       kind = 0;
@@ -877,7 +878,7 @@ static bool ui_caret_wants_blink(const ccord_ui *ui)
   if (ui_is_loading_screen(ui) || ui->stream_fullscreen) return false;
   if (ui->settings_open) {
     if (ui->account_mfa_required) return ui->account_focus_field == 4;
-    if (ui_is_login_screen(ui) || ui->settings_page == 0) return ui->account_focus_field != 0;
+    if (ui_is_login_screen(ui) || ui->settings_page == 0) return ui->account_focus_field != 0 || ui_settings_account_wants_text(ui);
     if (ui->settings_page == 2 && ui->account_focus_field == 6) return true;
     return ui_settings_profile_wants_text(ui) || ui_settings_plugins_wants_text(ui);
   }

@@ -116,9 +116,43 @@ typedef struct st_drawn_cache {
   int body;
 } st_drawn_cache;
 
+enum st_acct_modal_kind {
+  ST_AMOD_NONE = 0,
+  ST_AMOD_USERNAME,
+  ST_AMOD_EMAIL,
+  ST_AMOD_PHONE_ADD,
+  ST_AMOD_PHONE_REMOVE,
+  ST_AMOD_PASSWORD,
+  ST_AMOD_TOTP_SETUP,
+  ST_AMOD_TOTP_DISABLE,
+  ST_AMOD_BACKUP_CODES,
+  ST_AMOD_SMS_TOGGLE,
+  ST_AMOD_DISABLE_ACCT,
+  ST_AMOD_DELETE_ACCT,
+  ST_AMOD_MFA_CHALLENGE,
+};
+
 // Cross-TU internal declarations
 void st_account_buttons(const ccord_ui *ui, const sgeom *g, ccord_rect *primary, ccord_rect *secondary);
 void st_draw_account(ccord_ui *ui, ccord_renderer *r, const sgeom *g);
+void st_draw_account_overlays(ccord_ui *ui, ccord_renderer *r, const sgeom *g);
+bool st_account_security_active(const ccord_ui *ui);
+bool st_account_handle_click(ccord_ui *ui, const sgeom *g, float x, float y);
+bool st_account_handle_key(ccord_ui *ui, const ccord_input_event *ev);
+bool st_account_handle_back(ccord_ui *ui);
+int64_t st_account_hover_key(const ccord_ui *ui, const sgeom *g, float x, float y);
+bool st_account_tick(ccord_ui *ui);
+void st_account_release(ccord_ui *ui);
+float st_account_content_height(const ccord_ui *ui, const sgeom *g);
+bool st_account_cached_web_btn(const ccord_ui *ui, int idx, ccord_rect *out);
+void st_account_fill_debug_rects(const ccord_ui *ui, ccord_ui_settings_debug *out);
+void st_account_open_modal(ccord_ui *ui, int modal_kind, const char *ctx_str);
+void st_account_draw_modal(ccord_ui *ui, ccord_renderer *r);
+bool st_account_modal_open(void);
+bool st_account_modal_wants_text(void);
+bool st_account_modal_handle_click(ccord_ui *ui, float x, float y);
+bool st_account_modal_handle_key(ccord_ui *ui, const ccord_input_event *ev);
+void st_account_modal_close(ccord_ui *ui);
 void st_draw_button(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char *label, bool primary);
 void st_draw_login_screen(ccord_ui *ui, ccord_renderer *r);
 void st_draw_mfa_popup(ccord_ui *ui, ccord_renderer *r);

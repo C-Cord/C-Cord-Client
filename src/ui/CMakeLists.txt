@@ -104,6 +104,7 @@ add_library(ccord_ui STATIC
   settings/settings_pages.c
   settings/settings_plugins.c
   settings/settings_account.c
+  settings/settings_account_modals.c
   settings/settings_m6_devices.c
   settings/settings_m6_prefs.c
   settings/streamer_mask.c

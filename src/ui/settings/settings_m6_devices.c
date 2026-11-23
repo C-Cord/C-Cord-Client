@@ -14,6 +14,7 @@
 
 #include "settings_m6_devices.h"
 #include "settings_m6_prefs.h"   // ui_settings_m6_mask (Streamer Mode personal-info masking)
+#include <ccord/net/account_edit.h>
 
 #define M(name) (ui->theme->m.name)
 #define COL(name) (ui->theme->c.name)
@@ -52,9 +53,21 @@ static ccord_rect privacy_chip_rect(ccord_rect content, int row, int opt, int co
   if (count < 1) return (ccord_rect){0, 0, 0, 0};
   float gap = 8.0f;
   float cw = (content.w - gap * (float)(count - 1)) / (float)count;
-  if (cw > 132.0f) cw = 132.0f;
+  if (cw > 144.0f) cw = 144.0f;
   if (cw < 44.0f) cw = 44.0f;
   return (ccord_rect){content.x + (float)opt * (cw + gap), privacy_row_y(content, row) + 20.0f, cw, UIS_H_CHIP};
+}
+
+static ccord_rect privacy_harvest_card_rect(ccord_rect content)
+{
+  return (ccord_rect){content.x, privacy_row_y(content, 8) + 6.0f, content.w, 82.0f};
+}
+
+static ccord_rect privacy_harvest_btn_rect(ccord_rect content)
+{
+  ccord_rect card = privacy_harvest_card_rect(content);
+  float bw = card.w < 360.0f ? 128.0f : 148.0f;
+  return (ccord_rect){card.x + card.w - bw - 12.0f, card.y + (card.h - UIS_H_BTN) * 0.5f, bw, UIS_H_BTN};
 }
 
 static float m6_card_h(int page)
@@ -65,7 +78,7 @@ static float m6_card_h(int page)
 static size_t m6_list_count(const ccord_ui *ui, int page)
 {
   size_t n = 0;
-  if (!ui->d.session) return 0;
+  if (!ui->d.session || page == CCORD_M6_PAGE_PRIVACY) return 0;
   if (page == CCORD_M6_PAGE_DEVICES) (void)ccord_session_auth_sessions(ui->d.session, &n);
   else (void)ccord_session_connections(ui->d.session, &n);
   return n;
@@ -78,6 +91,9 @@ static float m6_list_top(ccord_rect content)
 
 static float m6_content_height(int page, size_t n)
 {
+  if (page == CCORD_M6_PAGE_PRIVACY) {
+    return M6_TITLE_H + 8.0f * M6_ROW_H + 6.0f + 82.0f + 16.0f;
+  }
   return M6_TITLE_H + M6_INTRO_H + (float)n * (m6_card_h(page) + M6_CARD_GAP) + M6_FOOTER_H;
 }
 
@@ -154,8 +170,12 @@ static struct {
   ccord_rect content;  // content rect of the last draw/click (for the debug seam)
   float scroll[CCORD_M6_PAGE_COUNT];
   ccord_scroller glide[CCORD_M6_PAGE_COUNT];   // wheel glides of the list pages (scroll.h)
-  int confirm_kind;    // 0 none, 1 log-out-all, 2 one device, 3 disconnect
+  int confirm_kind;    // 0 none, 1 log-out-all, 2 one device, 3 disconnect, 4 harvest
   size_t confirm_index;
+  ccord_fetch_state last_dev_state;
+  size_t last_dev_count;
+  ccord_fetch_state last_conn_state;
+  size_t last_conn_count;
 } s_m6 = {.drawn_page = -1, .visited_page = -1};
 
 void ui_settings_m6_reset(void)
@@ -169,6 +189,10 @@ void ui_settings_m6_reset(void)
   }
   s_m6.confirm_kind = 0;
   s_m6.confirm_index = 0;
+  s_m6.last_dev_state = CCORD_FETCH_IDLE;
+  s_m6.last_dev_count = 0;
+  s_m6.last_conn_state = CCORD_FETCH_IDLE;
+  s_m6.last_conn_count = 0;
 }
 
 // ---- governed intents -------------------------------------------------------------------------
@@ -247,19 +271,42 @@ static void m6_submit_conn_delete(ccord_ui *ui, const ccord_connection *c)
   }
 }
 
+static void m6_harvest_done(void *ud, const ccord_account_result *res)
+{
+  ccord_ui *ui = ud;
+  if (!ui) return;
+  if (res && res->status == CCORD_OK) {
+    ui_notice(ui, "Data export requested. Discord will email your archive when ready.");
+  } else {
+    ui_notice(ui, "%s", (res && res->message[0]) ? res->message : "Couldn't request your Discord data.");
+  }
+  ui->dirty = true;
+}
+
+static bool m6_scroll_click(ccord_ui *ui, int page, ccord_rect content, size_t n, float x, float y);
+
 // ---- click handling ---------------------------------------------------------------------------
 
 static bool m6_privacy_click(ccord_ui *ui, ccord_rect content, float x, float y)
 {
+  if (m6_scroll_click(ui, CCORD_M6_PAGE_PRIVACY, content, 0, x, y)) return true;
+  if (!ui_in_rect(x, y, content)) return false;
+  float max = m6_max_scroll(CCORD_M6_PAGE_PRIVACY, content, 0);
+  if (s_m6.scroll[CCORD_M6_PAGE_PRIVACY] > max) s_m6.scroll[CCORD_M6_PAGE_PRIVACY] = max;
+  ccord_rect sc = content;
+  sc.y -= s_m6.scroll[CCORD_M6_PAGE_PRIVACY];
+  bool armed_harvest = s_m6.confirm_kind == 4;
+  s_m6.confirm_kind = 0;
+
   ccord_user_settings cur = m6_privacy_current(ui);
   ccord_user_settings_patch p = CCORD_USER_SETTINGS_PATCH_INIT;
-  if (ui_in_rect(x, y, privacy_toggle_rect(content, 0))) {
+  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 0))) {
     p.default_guilds_restricted = cur.default_guilds_restricted ? 0 : 1;   // the UI toggle is inverted
     m6_submit_patch(ui, &p);
     return true;
   }
   for (int i = 0; i < 3; i++) {
-    if (ui_in_rect(x, y, privacy_chip_rect(content, 1, i, 3))) {
+    if (ui_in_rect(x, y, privacy_chip_rect(sc, 1, i, 3))) {
       if (cur.explicit_content_filter != (uint8_t)i) {
         p.explicit_content_filter = (int16_t)i;
         m6_submit_patch(ui, &p);
@@ -267,24 +314,55 @@ static bool m6_privacy_click(ccord_ui *ui, ccord_rect content, float x, float y)
       return true;
     }
   }
-  if (ui_in_rect(x, y, privacy_toggle_rect(content, 2))) {
+  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 2))) {
     p.friend_source_all = cur.friend_source_all ? 0 : 1;
     m6_submit_patch(ui, &p);
     return true;
   }
-  if (ui_in_rect(x, y, privacy_toggle_rect(content, 3))) {
+  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 3))) {
     p.friend_source_mutual_friends = cur.friend_source_mutual_friends ? 0 : 1;
     m6_submit_patch(ui, &p);
     return true;
   }
-  if (ui_in_rect(x, y, privacy_toggle_rect(content, 4))) {
+  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 4))) {
     p.friend_source_mutual_guilds = cur.friend_source_mutual_guilds ? 0 : 1;
     m6_submit_patch(ui, &p);
     return true;
   }
-  if (ui_in_rect(x, y, privacy_toggle_rect(content, 5))) {
+  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 5))) {
     p.allow_access_to_age_restricted_servers = cur.allow_access_to_age_restricted_servers ? 0 : 1;
     m6_submit_patch(ui, &p);
+    return true;
+  }
+  for (int i = 0; i < 3; i++) {
+    if (ui_in_rect(x, y, privacy_chip_rect(sc, 6, i, 3))) {
+      if (cur.profile_privacy_scope != (uint8_t)i) {
+        p.profile_privacy_scope = (int16_t)i;
+        m6_submit_patch(ui, &p);
+      }
+      return true;
+    }
+  }
+  if (ui_in_rect(x, y, privacy_toggle_rect(sc, 7))) {
+    p.share_profile_updates = cur.share_profile_updates ? 0 : 1;
+    m6_submit_patch(ui, &p);
+    return true;
+  }
+  if (ui_in_rect(x, y, privacy_harvest_btn_rect(sc))) {
+    if (!ui->d.session) {
+      ui_notice(ui, "Sign in to request your Discord data.");
+      return true;
+    }
+    if (armed_harvest) {
+      ccord_account_req req = {.op = CCORD_ACCT_OP_HARVEST_DATA};
+      ccord_error err = {0};
+      if (ccord_session_account_submit(ui->d.session, &req, m6_harvest_done, ui, &err) != CCORD_OK) {
+        ui_notice(ui, "%s", err.message[0] ? err.message : "Couldn't request your Discord data.");
+      }
+    } else {
+      s_m6.confirm_kind = 4;
+    }
+    ui->dirty = true;
     return true;
   }
   return false;
@@ -435,11 +513,11 @@ static bool m6_connections_click(ccord_ui *ui, ccord_rect content, float x, floa
   return false;
 }
 
-// Wheel over a list page: queues one notch (M6_SCROLL_STEP px) on the page's glide. Returns false for
-// pages that do not scroll (Privacy) or lists that fit, so the wheel is left unused as before.
+// Wheel over a list/privacy page: queues one notch (M6_SCROLL_STEP px) on the page's glide. Returns false when
+// the page fits without scrolling.
 bool ui_settings_m6_wheel(ccord_ui *ui, int page, ccord_rect content, float wheel, bool direct)
 {
-  if (!ui || (page != CCORD_M6_PAGE_DEVICES && page != CCORD_M6_PAGE_CONNECTIONS)) return false;
+  if (!ui || page < 0 || page >= CCORD_M6_PAGE_COUNT) return false;
   float max = m6_max_scroll(page, content, m6_list_count(ui, page));
   if (max <= 0.0f) return false;
   ccord_scroller_scroll(&s_m6.glide[page], &s_m6.scroll[page], -wheel * M6_SCROLL_STEP, max, direct);
@@ -447,10 +525,32 @@ bool ui_settings_m6_wheel(ccord_ui *ui, int page, ccord_rect content, float whee
   return true;
 }
 
-// Ticks the list-page glides by fdt_ms (scroll.h). A glide survives only while its page is the drawn one.
+// Ticks the list-page glides by fdt_ms (scroll.h) and triggers immediate redraw when async session lists land.
 bool ui_settings_m6_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced)
 {
   bool moving = false;
+  if (!ui->settings_open) {
+    s_m6.visited_page = -1;
+  } else if (ui->d.session) {
+    ccord_fetch_state ds = ccord_session_auth_sessions_state(ui->d.session);
+    size_t dn = 0;
+    (void)ccord_session_auth_sessions(ui->d.session, &dn);
+    ccord_fetch_state cs = ccord_session_connections_state(ui->d.session);
+    size_t cn = 0;
+    (void)ccord_session_connections(ui->d.session, &cn);
+    if (ds != s_m6.last_dev_state || dn != s_m6.last_dev_count ||
+        cs != s_m6.last_conn_state || cn != s_m6.last_conn_count) {
+      s_m6.last_dev_state = ds;
+      s_m6.last_dev_count = dn;
+      s_m6.last_conn_state = cs;
+      s_m6.last_conn_count = cn;
+      ui->dirty = true;
+    }
+    if ((s_m6.drawn_page == CCORD_M6_PAGE_DEVICES && ds == CCORD_FETCH_LOADING) ||
+        (s_m6.drawn_page == CCORD_M6_PAGE_CONNECTIONS && cs == CCORD_FETCH_LOADING)) {
+      moving = true;
+    }
+  }
   for (int page = 0; page < CCORD_M6_PAGE_COUNT; page++) {
     ccord_scroller *g = &s_m6.glide[page];
     if (g->pending == 0.0f) continue;
@@ -525,22 +625,53 @@ static void m6_note(ccord_ui *ui, ccord_renderer *r, float x, float y, float w, 
 
 // ---- page bodies ------------------------------------------------------------------------------
 
+static void m6_draw_scrollbar(ccord_ui *ui, ccord_renderer *r, ccord_rect content, int page, size_t n, float scroll);
+
 static void m6_draw_privacy(ccord_ui *ui, ccord_renderer *r, ccord_rect content)
 {
+  float max = m6_max_scroll(CCORD_M6_PAGE_PRIVACY, content, 0);
+  if (s_m6.scroll[CCORD_M6_PAGE_PRIVACY] > max) s_m6.scroll[CCORD_M6_PAGE_PRIVACY] = max;
+  float scroll = s_m6.scroll[CCORD_M6_PAGE_PRIVACY];
+  m6_draw_scrollbar(ui, r, content, CCORD_M6_PAGE_PRIVACY, 0, scroll);
+  ccord_rect clip = {content.x, content.y + M6_TITLE_H - 4.0f, content.w, fmaxf(content.h - M6_TITLE_H + 4.0f, 20.0f)};
+  ccord_rect sc = content;
+  sc.y -= scroll;
+  ccord_push_clip(r, clip);
+
   ccord_user_settings cur = m6_privacy_current(ui);
-  m6_toggle_row(ui, r, content, 0, "ALLOW DIRECT MESSAGES FROM SERVER MEMBERS",
+  m6_toggle_row(ui, r, sc, 0, "ALLOW DIRECT MESSAGES FROM SERVER MEMBERS",
                 "When off, new server members cannot DM you by default.", !cur.default_guilds_restricted, 0);
-  m6_row_label(ui, r, content, 1, "DIRECT MESSAGE SPAM FILTER");
+  m6_row_label(ui, r, sc, 1, "DIRECT MESSAGE SPAM FILTER");
   static const char *const k_filter[3] = {"Don't scan", "Non-friends", "Everyone"};
-  m6_chip_row(ui, r, content, 1, 3, k_filter, (int)cur.explicit_content_filter);
-  m6_toggle_row(ui, r, content, 2, "FRIEND REQUESTS: EVERYONE", "Allow anyone to send you a friend request.",
+  m6_chip_row(ui, r, sc, 1, 3, k_filter, (int)cur.explicit_content_filter);
+  m6_toggle_row(ui, r, sc, 2, "FRIEND REQUESTS: EVERYONE", "Allow anyone to send you a friend request.",
                 cur.friend_source_all, 2);
-  m6_toggle_row(ui, r, content, 3, "FRIEND REQUESTS: FRIENDS OF FRIENDS",
+  m6_toggle_row(ui, r, sc, 3, "FRIEND REQUESTS: FRIENDS OF FRIENDS",
                 "Allow friends of your friends to send you a friend request.", cur.friend_source_mutual_friends, 3);
-  m6_toggle_row(ui, r, content, 4, "FRIEND REQUESTS: SERVER MEMBERS",
+  m6_toggle_row(ui, r, sc, 4, "FRIEND REQUESTS: SERVER MEMBERS",
                 "Allow members of your servers to send you a friend request.", cur.friend_source_mutual_guilds, 4);
-  m6_toggle_row(ui, r, content, 5, "AGE-RESTRICTED SERVERS", "Allow access to age-restricted servers.",
+  m6_toggle_row(ui, r, sc, 5, "AGE-RESTRICTED SERVERS", "Allow access to age-restricted servers.",
                 cur.allow_access_to_age_restricted_servers, 5);
+
+  m6_row_label(ui, r, sc, 6, "PROFILE PRIVACY");
+  static const char *const k_priv[3] = {"All Servers", "Small Servers", "Friends Only"};
+  m6_chip_row(ui, r, sc, 6, 3, k_priv, (int)cur.profile_privacy_scope);
+  m6_toggle_row(ui, r, sc, 7, "SHARE PROFILE UPDATES",
+                "Allow friends to see when you update your avatar, banner, or bio.", cur.share_profile_updates, 7);
+
+  ccord_rect hcard = privacy_harvest_card_rect(sc);
+  ccord_rect hbtn = privacy_harvest_btn_rect(sc);
+  uis_card(ui, r, hcard);
+  float text_w = fmaxf(hbtn.x - hcard.x - 24.0f, 80.0f);
+  ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, uis_tokens_of(ui).fs_caption, COL(text_header));
+  ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_muted));
+  ccord_text_draw_ellipsis(r, "REQUEST ALL OF MY DATA", 22, hcard.x + 12.0f, hcard.y + 12.0f, text_w, &hs);
+  const char *hdesc = "Request a downloadable copy of your Discord account data (delivered via email).";
+  ccord_text_draw(r, hdesc, strlen(hdesc), hcard.x + 12.0f, hcard.y + 32.0f, &ns, text_w);
+  bool armed = s_m6.confirm_kind == 4;
+  m6_button(ui, r, hbtn, armed ? "Confirm Request" : "Request Data", armed, false);
+
+  ccord_pop_clip(r);
 }
 
 static void m6_draw_scrollbar(ccord_ui *ui, ccord_renderer *r, ccord_rect content, int page, size_t n, float scroll)
@@ -566,7 +697,10 @@ static void m6_draw_device_card(ccord_ui *ui, ccord_renderer *r, ccord_rect card
   ccord_text_draw_ellipsis(r, dev, strlen(dev), card.x + 12.0f, card.y + 10.0f, card.w - 130.0f, &hs);
   ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, uis_tokens_of(ui).fs_control, COL(text_secondary));
   char line[160];
-  snprintf(line, sizeof line, "%s · %s", s->os[0] ? s->os : "Unknown OS", s->browser[0] ? s->browser : "Unknown browser");
+  if (s->os[0] && s->browser[0]) snprintf(line, sizeof line, "%s · %s", s->os, s->browser);
+  else if (s->os[0]) snprintf(line, sizeof line, "%s", s->os);
+  else if (s->browser[0]) snprintf(line, sizeof line, "%s", s->browser);
+  else snprintf(line, sizeof line, "Unknown OS");
   ccord_text_draw_ellipsis(r, line, strlen(line), card.x + 12.0f, card.y + 32.0f, card.w - 24.0f, &ns);
   snprintf(line, sizeof line, "%s", s->location[0] ? s->location : "Unknown location");
   ccord_text_draw_ellipsis(r, line, strlen(line), card.x + 12.0f, card.y + 52.0f, card.w - 24.0f, &ns);
@@ -730,12 +864,17 @@ void ui_settings_m6_get_debug(const ccord_ui *ui, ccord_settings_m6_debug *out)
   out->content = content;
   out->scroll = s_m6.scroll[page];
   if (page == CCORD_M6_PAGE_PRIVACY) {
-    out->dm_toggle = privacy_toggle_rect(content, 0);
-    for (int i = 0; i < 3; i++) out->filter_chips[i] = privacy_chip_rect(content, 1, i, 3);
-    out->friend_all_toggle = privacy_toggle_rect(content, 2);
-    out->friend_mutual_toggle = privacy_toggle_rect(content, 3);
-    out->friend_guild_toggle = privacy_toggle_rect(content, 4);
-    out->age_toggle = privacy_toggle_rect(content, 5);
+    ccord_rect sc = content;
+    sc.y -= s_m6.scroll[CCORD_M6_PAGE_PRIVACY];
+    out->dm_toggle = privacy_toggle_rect(sc, 0);
+    for (int i = 0; i < 3; i++) out->filter_chips[i] = privacy_chip_rect(sc, 1, i, 3);
+    out->friend_all_toggle = privacy_toggle_rect(sc, 2);
+    out->friend_mutual_toggle = privacy_toggle_rect(sc, 3);
+    out->friend_guild_toggle = privacy_toggle_rect(sc, 4);
+    out->age_toggle = privacy_toggle_rect(sc, 5);
+    for (int i = 0; i < 3; i++) out->profile_privacy_chips[i] = privacy_chip_rect(sc, 6, i, 3);
+    out->share_updates_toggle = privacy_toggle_rect(sc, 7);
+    out->harvest_data_btn = privacy_harvest_btn_rect(sc);
     return;
   }
   size_t n = m6_list_count(ui, page);

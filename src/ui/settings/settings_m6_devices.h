@@ -44,6 +44,9 @@ typedef struct ccord_settings_m6_debug {
   ccord_rect dm_toggle;               // allow DMs from server members (inverted default_guilds_restricted)
   ccord_rect filter_chips[3];         // DM spam filter: 0 off, 1 non-friends, 2 everyone
   ccord_rect friend_all_toggle, friend_mutual_toggle, friend_guild_toggle, age_toggle;
+  ccord_rect profile_privacy_chips[3]; // 0 all servers, 1 small servers, 2 friends only
+  ccord_rect share_updates_toggle;    // share profile updates with friends
+  ccord_rect harvest_data_btn;        // Request My Data button
   // Devices
   int devices_state;                  // ccord_fetch_state of the auth-session list
   size_t device_count;

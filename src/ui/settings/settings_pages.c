@@ -447,6 +447,14 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
       if (max_p > 0.0f) {
         gs.content.y -= st_s_page_scroll;
         body_clip = (ccord_rect){g.content.x - 4.0f, g.content.y + 34.0f, g.content.w + 8.0f, fmaxf(g.content.h - 34.0f, 20.0f)};
+        float tx = g.content.w < 460.0f ? (g.content.x + g.content.w - 4.0f) : (g.content.x + g.content.w + 10.0f);
+        float max_tx = g.panel.x + g.panel.w - 10.0f;
+        if (tx > max_tx) tx = max_tx;
+        ccord_rect tr = {tx, g.content.y + 38.0f, 6.0f, fmaxf(g.content.h - 42.0f, 32.0f)};
+        float view_h = fmaxf(g.content.h - 38.0f, 40.0f);
+        float th = fmaxf(24.0f, tr.h * (view_h / (view_h + max_p)));
+        float ty = tr.y + (tr.h - th) * (st_s_page_scroll / max_p);
+        uis_scrollbar(ui, r, tr, (ccord_rect){tr.x, ty, tr.w, th});
       }
     }
     ccord_push_clip(r, body_clip);
@@ -507,6 +515,9 @@ void ui_settings_draw(ccord_ui *ui, ccord_renderer *r)
   ui_icon_close(r, g.close.x + g.close.w * 0.5f, g.close.y + g.close.h * 0.5f, UIS_ICON_GLYPH, cc);
   if (ui->settings_page == SP_ACCOUNT && ui->account_mfa_required) {
     st_draw_mfa_popup(ui, r);
+  }
+  if (ui->settings_page == SP_ACCOUNT && (!ui->mobile_layout || ui->mobile_settings_detail)) {
+    st_draw_account_overlays(ui, r, &g);
   }
   if (ui->settings_page == SP_PROFILE_EDIT && (!ui->mobile_layout || ui->mobile_settings_detail)) {
     ui_settings_profile_draw_overlays(ui, r);
@@ -612,6 +623,7 @@ void ccord_ui_get_settings_debug(const ccord_ui *ui, ccord_ui_settings_debug *ou
   out->account_token_paste_btn = st_account_token_paste_rect(&g);
   out->account_token_save_btn = st_account_token_save_rect(&g);
   out->account_token_clear_btn = st_account_token_clear_rect(&g);
+  st_account_fill_debug_rects(ui, out);
   out->account_email_box = st_account_email_box_rect(&g);
   out->account_password_box = st_account_password_box_rect(&g);
   out->account_mfa_box = (ccord_rect){0};
