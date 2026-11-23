@@ -179,3 +179,33 @@ typedef struct ccord_member {
   char nameplate_asset[128];                   // guild_member collectibles.nameplate asset (empty when none)
   char nameplate_palette[24];                  // guild_member collectibles.nameplate palette (empty when none)
 } ccord_member;
+
+// Discord per-file attachment upload size limits (bytes).
+// Effective channel limit is max(user_limit(premium_type), is_guild ? guild_limit(premium_tier) : 0).
+#define CCORD_UPLOAD_LIMIT_FREE        (20ULL * 1024ULL * 1024ULL)   // 20 MiB (standard account)
+#define CCORD_UPLOAD_LIMIT_NITRO_BASIC (50ULL * 1024ULL * 1024ULL)   // 50 MiB (Nitro Basic / Nitro Classic)
+#define CCORD_UPLOAD_LIMIT_TIER2       (50ULL * 1024ULL * 1024ULL)   // 50 MiB (Server Boost Level 2)
+#define CCORD_UPLOAD_LIMIT_TIER3       (100ULL * 1024ULL * 1024ULL)  // 100 MiB (Server Boost Level 3)
+#define CCORD_UPLOAD_LIMIT_NITRO       (1024ULL * 1024ULL * 1024ULL) // 1 GiB (Full Nitro)
+#define CCORD_UPLOAD_MAX_BYTES         CCORD_UPLOAD_LIMIT_NITRO      // absolute transport ceiling
+
+typedef enum ccord_upload_limit_source : uint8_t {
+  CCORD_UPLOAD_SRC_FREE = 0,
+  CCORD_UPLOAD_SRC_NITRO_CLASSIC = 1,
+  CCORD_UPLOAD_SRC_NITRO = 2,
+  CCORD_UPLOAD_SRC_NITRO_BASIC = 3,
+  CCORD_UPLOAD_SRC_GUILD_TIER2 = 4,
+  CCORD_UPLOAD_SRC_GUILD_TIER3 = 5,
+} ccord_upload_limit_source;
+
+// Personal per-file upload limit from Discord user.premium_type (0 none, 1 Nitro Classic, 2 Nitro, 3 Nitro Basic).
+[[nodiscard]] uint64_t ccord_user_upload_limit(uint8_t premium_type);
+// Server-boost per-file upload limit from Discord guild.premium_tier (0..3+; applies to all members in that server).
+[[nodiscard]] uint64_t ccord_guild_upload_limit(uint8_t premium_tier);
+// Effective per-file upload limit for a channel: max(user limit, server boost limit when is_guild is true).
+[[nodiscard]] uint64_t ccord_effective_upload_limit(uint8_t premium_type, uint8_t guild_premium_tier, bool is_guild,
+                                                    ccord_upload_limit_source *out_source);
+// Short human-readable label for a limit source ("Free", "Nitro Basic", "Nitro", "Server Boost Lv. 2", etc.).
+const char *ccord_upload_limit_source_label(ccord_upload_limit_source src);
+// Formats a byte cap cleanly for notices and UI pills (e.g. "20 MB", "50 MB", "100 MB", "1 GB").
+void ccord_format_upload_limit(uint64_t bytes, char *out, size_t cap);

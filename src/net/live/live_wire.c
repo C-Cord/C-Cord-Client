@@ -16,6 +16,7 @@ ccord_status live_http_status_error(long status, ccord_error *err, const char *w
     return ccord_error_set(err, CCORD_ERR_PERMISSION, "rest: %s denied", what);
   }
   if (status == 404) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "rest: %s not found", what);
+  if (status == 413) return ccord_error_set(err, CCORD_ERR_RANGE, "rest: %s too large", what);
   if (status == 429) return ccord_error_set(err, CCORD_ERR_RANGE, "rest: %s rate limited", what);
   return ccord_error_set(err, CCORD_ERR_PROTOCOL, "rest: %s failed with HTTP %ld", what, status);
 }
@@ -135,7 +136,7 @@ ccord_status ccord_live_build_upload_slots_body(const ccord_upload_file *files, 
     if (!files[i].data || files[i].size == 0) {
       return ccord_error_set(err, CCORD_ERR_INVALID, "live: empty file data");
     }
-    if (files[i].size > 25u * 1024u * 1024u) {
+    if ((uint64_t)files[i].size > CCORD_UPLOAD_MAX_BYTES) {
       return ccord_error_set(err, CCORD_ERR_RANGE, "live: file too large");
     }
     char wname[CCORD_RICH_SHORT_MAX_BYTES + 1];

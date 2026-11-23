@@ -489,6 +489,20 @@ bool ccord_session_history_has_more(const ccord_session *s, ccord_id channel_id)
 }
 
 
+uint64_t ccord_session_upload_limit(const ccord_session *s, ccord_id channel_id,
+                                    ccord_upload_limit_source *out_source)
+{
+  uint8_t premium_type = (s && s->account_private.valid) ? s->account_private.premium_type : 0u;
+  const ccord_channel *ch = (s && s->store && channel_id != CCORD_ID_NONE)
+                              ? ccord_store_channel(s->store, channel_id)
+                              : nullptr;
+  if (ch && ch->guild_id != CCORD_ID_NONE && ch->guild_id != CCORD_DM_GUILD_ID) {
+    const ccord_guild *gd = ccord_store_guild(s->store, ch->guild_id);
+    if (gd) return ccord_effective_upload_limit(premium_type, gd->premium_tier, true, out_source);
+  }
+  return ccord_effective_upload_limit(premium_type, 0u, false, out_source);
+}
+
 ccord_status ccord_session_send_message_with_files(ccord_session *s, ccord_id channel_id,
                                                    ccord_id reply_to_id, bool mention_author,
                                                    const char *utf8, size_t len,
@@ -521,6 +535,14 @@ ccord_status ccord_session_send_message_with_files(ccord_session *s, ccord_id ch
   const ccord_channel *ch = ccord_store_channel(s->store, channel_id);
   if (!ch) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "unknown channel");
   if (!session_channel_has_chat(ch)) return ccord_error_set(err, CCORD_ERR_INVALID, "channel has no chat");
+  uint64_t upload_cap = ccord_session_upload_limit(s, channel_id, nullptr);
+  for (size_t i = 0; i < file_count; i++) {
+    if ((uint64_t)files[i].size > upload_cap) {
+      char lim_s[32];
+      ccord_format_upload_limit(upload_cap, lim_s, sizeof lim_s);
+      return ccord_error_set(err, CCORD_ERR_RANGE, "File exceeds the %s upload limit", lim_s);
+    }
+  }
   if (ch->guild_id == CCORD_DM_GUILD_ID && ch->is_message_request) {
     return ccord_error_set(err, CCORD_ERR_PERMISSION, "Accept the message request before replying.");
   }

@@ -3,6 +3,7 @@
 #include <ccord/model/model.h>
 #include <ccord/model/rich.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -577,5 +578,77 @@ uint32_t ccord_guild_soundboard_slot_limit(uint8_t premium_tier)
     case 1: return 24u;
     case 2: return 36u;
     default: return 48u;
+  }
+}
+
+uint64_t ccord_user_upload_limit(uint8_t premium_type)
+{
+  switch (premium_type) {
+    case 1: return CCORD_UPLOAD_LIMIT_NITRO_BASIC;
+    case 2: return CCORD_UPLOAD_LIMIT_NITRO;
+    case 3: return CCORD_UPLOAD_LIMIT_NITRO_BASIC;
+    default: return CCORD_UPLOAD_LIMIT_FREE;
+  }
+}
+
+uint64_t ccord_guild_upload_limit(uint8_t premium_tier)
+{
+  if (premium_tier >= 3u) return CCORD_UPLOAD_LIMIT_TIER3;
+  if (premium_tier == 2u) return CCORD_UPLOAD_LIMIT_TIER2;
+  return CCORD_UPLOAD_LIMIT_FREE;
+}
+
+uint64_t ccord_effective_upload_limit(uint8_t premium_type, uint8_t guild_premium_tier, bool is_guild,
+                                      ccord_upload_limit_source *out_source)
+{
+  uint64_t ulim = ccord_user_upload_limit(premium_type);
+  ccord_upload_limit_source src = CCORD_UPLOAD_SRC_FREE;
+  if (premium_type == 1u) src = CCORD_UPLOAD_SRC_NITRO_CLASSIC;
+  else if (premium_type == 2u) src = CCORD_UPLOAD_SRC_NITRO;
+  else if (premium_type == 3u) src = CCORD_UPLOAD_SRC_NITRO_BASIC;
+
+  if (is_guild) {
+    uint64_t glim = ccord_guild_upload_limit(guild_premium_tier);
+    if (glim > ulim) {
+      ulim = glim;
+      src = guild_premium_tier >= 3u ? CCORD_UPLOAD_SRC_GUILD_TIER3 : CCORD_UPLOAD_SRC_GUILD_TIER2;
+    }
+  }
+  if (out_source) *out_source = src;
+  return ulim;
+}
+
+const char *ccord_upload_limit_source_label(ccord_upload_limit_source src)
+{
+  switch (src) {
+    case CCORD_UPLOAD_SRC_NITRO_CLASSIC: return "Nitro Classic";
+    case CCORD_UPLOAD_SRC_NITRO: return "Nitro";
+    case CCORD_UPLOAD_SRC_NITRO_BASIC: return "Nitro Basic";
+    case CCORD_UPLOAD_SRC_GUILD_TIER2: return "Server Boost Lv. 2";
+    case CCORD_UPLOAD_SRC_GUILD_TIER3: return "Server Boost Lv. 3";
+    case CCORD_UPLOAD_SRC_FREE:
+    default: return "Free";
+  }
+}
+
+void ccord_format_upload_limit(uint64_t bytes, char *out, size_t cap)
+{
+  if (!out || cap == 0) return;
+  const uint64_t gib = 1024ULL * 1024ULL * 1024ULL;
+  const uint64_t mib = 1024ULL * 1024ULL;
+  if (bytes >= gib) {
+    if (bytes % gib == 0) {
+      (void)snprintf(out, cap, "%llu GB", (unsigned long long)(bytes / gib));
+    } else {
+      (void)snprintf(out, cap, "%.1f GB", (double)bytes / (double)gib);
+    }
+  } else if (bytes >= mib) {
+    if (bytes % mib == 0) {
+      (void)snprintf(out, cap, "%llu MB", (unsigned long long)(bytes / mib));
+    } else {
+      (void)snprintf(out, cap, "%.1f MB", (double)bytes / (double)mib);
+    }
+  } else {
+    (void)snprintf(out, cap, "%llu KB", (unsigned long long)((bytes + 1023ULL) / 1024ULL));
   }
 }

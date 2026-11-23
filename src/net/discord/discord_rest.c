@@ -27,6 +27,7 @@
 #include <ccord/core/alloc.h>
 #include <ccord/core/json.h>
 #include <ccord/core/os.h>
+#include <ccord/model/guild.h>
 
 static bool ascii_eq_ci(const char *a, const char *b, size_t n)
 {
@@ -95,23 +96,23 @@ static CURLcode set_method(CURL *curl, ccord_rest_method method, const char *bod
     case CCORD_REST_POST:
       curl_easy_setopt(curl, CURLOPT_POST, 1L);
       curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "");
-      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)len);
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)len);
       return CURLE_OK;
     case CCORD_REST_PATCH:
       curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PATCH");
       curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "");
-      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)len);
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)len);
       return CURLE_OK;
     case CCORD_REST_PUT:
       curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
       curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body ? body : "");
-      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)len);
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)len);
       return CURLE_OK;
     case CCORD_REST_DELETE:
       curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "DELETE");
       if (body && len > 0) {
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)len);
+        curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)len);
       }
       return CURLE_OK;
   }
@@ -968,7 +969,17 @@ ccord_status ccord_rest_queue_submit(ccord_rest_queue *q, const ccord_rest_reque
   ccord_rest_job *job = ccord_calloc(1, sizeof *job);
   if (!job) return ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
   ccord_buf_init(&job->url, 8192);
-  ccord_buf_init(&job->body, 0);
+  // Raw bulk PUT uploads can exceed ccord_buf's 64 MiB default cap (e.g., Boost Lv.3 100 MiB or Nitro up to 1 GiB).
+  // Exact-sizing job->body to req->body_len also avoids geometric 2x allocation overshoot.
+  size_t body_cap = 0;
+  if (raw && req->bulk && req->method == CCORD_REST_PUT && req->body_len > 0) {
+    if ((uint64_t)req->body_len > CCORD_UPLOAD_MAX_BYTES) {
+      rest_job_free(job);
+      return ccord_error_set(err, CCORD_ERR_RANGE, "rest: body too large");
+    }
+    body_cap = req->body_len + 1u;
+  }
+  ccord_buf_init(&job->body, body_cap);
   ccord_buf_init(&job->resp, 0);
   ccord_gov_response_init(&job->hdrs, 0);
   job->cb = req->cb;

@@ -814,6 +814,48 @@ static void test_contrib_v3(void)
   ccord_contrib_destroy(c);
 }
 
+static void test_upload_size_limits(void)
+{
+  // Personal limits by premium_type: 0 Free (20 MiB), 1 Nitro Classic (50 MiB), 2 Nitro (1 GiB), 3 Nitro Basic (50 MiB).
+  CT_CHECK(ccord_user_upload_limit(0) == CCORD_UPLOAD_LIMIT_FREE);
+  CT_CHECK(ccord_user_upload_limit(1) == CCORD_UPLOAD_LIMIT_NITRO_BASIC);
+  CT_CHECK(ccord_user_upload_limit(2) == CCORD_UPLOAD_LIMIT_NITRO);
+  CT_CHECK(ccord_user_upload_limit(3) == CCORD_UPLOAD_LIMIT_NITRO_BASIC);
+
+  // Server boost limits: Tier 0/1 base (20 MiB), Tier 2 (50 MiB), Tier 3+ (100 MiB).
+  CT_CHECK(ccord_guild_upload_limit(0) == CCORD_UPLOAD_LIMIT_FREE);
+  CT_CHECK(ccord_guild_upload_limit(1) == CCORD_UPLOAD_LIMIT_FREE);
+  CT_CHECK(ccord_guild_upload_limit(2) == CCORD_UPLOAD_LIMIT_TIER2);
+  CT_CHECK(ccord_guild_upload_limit(3) == CCORD_UPLOAD_LIMIT_TIER3);
+
+  ccord_upload_limit_source src = CCORD_UPLOAD_SRC_FREE;
+  // Free user in unboosted server -> 20 MiB (Free)
+  CT_CHECK(ccord_effective_upload_limit(0, 0, true, &src) == CCORD_UPLOAD_LIMIT_FREE && src == CCORD_UPLOAD_SRC_FREE);
+  // Free user in Boost Lv. 2 server -> 50 MiB (Server Boost Lv. 2)
+  CT_CHECK(ccord_effective_upload_limit(0, 2, true, &src) == CCORD_UPLOAD_LIMIT_TIER2 && src == CCORD_UPLOAD_SRC_GUILD_TIER2);
+  // Free user in Boost Lv. 3 server -> 100 MiB (Server Boost Lv. 3)
+  CT_CHECK(ccord_effective_upload_limit(0, 3, true, &src) == CCORD_UPLOAD_LIMIT_TIER3 && src == CCORD_UPLOAD_SRC_GUILD_TIER3);
+  // Free user in DM ignores guild tier -> 20 MiB (Free)
+  CT_CHECK(ccord_effective_upload_limit(0, 3, false, &src) == CCORD_UPLOAD_LIMIT_FREE && src == CCORD_UPLOAD_SRC_FREE);
+  // Nitro Basic in Boost Lv. 2 keeps personal Nitro Basic (50 MiB); in Boost Lv. 3 upgrades to Server Boost Lv. 3 (100 MiB)
+  CT_CHECK(ccord_effective_upload_limit(3, 2, true, &src) == CCORD_UPLOAD_LIMIT_NITRO_BASIC && src == CCORD_UPLOAD_SRC_NITRO_BASIC);
+  CT_CHECK(ccord_effective_upload_limit(3, 3, true, &src) == CCORD_UPLOAD_LIMIT_TIER3 && src == CCORD_UPLOAD_SRC_GUILD_TIER3);
+  // Full Nitro wins everywhere (1 GiB)
+  CT_CHECK(ccord_effective_upload_limit(2, 3, true, &src) == CCORD_UPLOAD_LIMIT_NITRO && src == CCORD_UPLOAD_SRC_NITRO);
+  CT_CHECK(ccord_effective_upload_limit(2, 0, false, &src) == CCORD_UPLOAD_LIMIT_NITRO && src == CCORD_UPLOAD_SRC_NITRO);
+
+  char buf[32];
+  ccord_format_upload_limit(CCORD_UPLOAD_LIMIT_FREE, buf, sizeof buf);
+  CT_CHECK(strcmp(buf, "20 MB") == 0);
+  ccord_format_upload_limit(CCORD_UPLOAD_LIMIT_TIER2, buf, sizeof buf);
+  CT_CHECK(strcmp(buf, "50 MB") == 0);
+  ccord_format_upload_limit(CCORD_UPLOAD_LIMIT_TIER3, buf, sizeof buf);
+  CT_CHECK(strcmp(buf, "100 MB") == 0);
+  ccord_format_upload_limit(CCORD_UPLOAD_LIMIT_NITRO, buf, sizeof buf);
+  CT_CHECK(strcmp(buf, "1 GB") == 0);
+  CT_CHECK(strcmp(ccord_upload_limit_source_label(CCORD_UPLOAD_SRC_GUILD_TIER3), "Server Boost Lv. 3") == 0);
+}
+
 int main(void)
 {
   test_ids();
@@ -826,5 +868,6 @@ int main(void)
   test_m4a_guild_settings_and_audit_changes();
   test_m4b_expression_slot_limits();
   test_m5_stage_and_dm_call_snapshot();
+  test_upload_size_limits();
   return CT_RESULT("test_model");
 }

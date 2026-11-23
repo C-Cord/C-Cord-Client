@@ -285,6 +285,10 @@ bool ccord_session_pop_video_resolved(ccord_session *s, ccord_video_resolved *ou
 // Copies up to `max` entries into `out` (when `out` is non-null and `max > 0`) and returns the matching active count.
 size_t ccord_session_active_uploads(const ccord_session *s, ccord_id channel_id,
                                     ccord_upload_progress *out, size_t max);
+// Effective per-file upload size cap (bytes) for `channel_id`, combining the signed-in account's Nitro tier
+// (`account_private.premium_type`) and the destination server's boost tier (`guild.premium_tier`, guild channels only).
+[[nodiscard]] uint64_t ccord_session_upload_limit(const ccord_session *s, ccord_id channel_id,
+                                                  ccord_upload_limit_source *out_source);
 [[nodiscard]] ccord_status ccord_session_send_reply_ex(ccord_session *s, ccord_id channel_id, ccord_id reply_to_id,
                                                        bool mention_author, const char *utf8, size_t len,
                                                        ccord_error *err);

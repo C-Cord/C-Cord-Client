@@ -454,6 +454,8 @@ static ccord_status send_with_files(ccord_session *session, const sm_entry *e, c
   void *data[CCORD_RICH_MAX_ATTACHMENTS] = {0};
   ccord_status st = CCORD_OK;
   size_t n = e->npaths <= CCORD_RICH_MAX_ATTACHMENTS ? e->npaths : CCORD_RICH_MAX_ATTACHMENTS;
+  uint64_t upload_cap = ccord_session_upload_limit(session, e->channel_id, nullptr);
+  bool had_large = false;
   for (size_t k = 0; k < n && st == CCORD_OK; k++) {
     const char *path = e->paths[k];
     const char *base = strrchr(path, '/');
@@ -466,8 +468,10 @@ static ccord_status send_with_files(ccord_session *session, const sm_entry *e, c
     FILE *f = nullptr;
     if (!ccord_path_is_file(path) || !ccord_file_size(path, &fsz)) {
       st = ccord_error_set(err, CCORD_ERR_NOT_FOUND, "Attachment %.80s is missing.", base);
-    } else if (fsz == 0 || fsz > (uint64_t)(25u * 1024u * 1024u)) {
-      st = ccord_error_set(err, CCORD_ERR_RANGE, "Attachment %.80s must be between 1 B and 25 MB.", base);
+    } else if (fsz == 0 || fsz > upload_cap) {
+      char lim_s[32];
+      ccord_format_upload_limit(upload_cap, lim_s, sizeof lim_s);
+      st = ccord_error_set(err, CCORD_ERR_RANGE, "Attachment %.80s must be between 1 B and %s.", base, lim_s);
     } else if (!(f = fopen(path, "rb"))) {
       st = ccord_error_set(err, CCORD_ERR_IO, "Attachment %.80s cannot be read.", base);
     } else {
@@ -476,6 +480,8 @@ static ccord_status send_with_files(ccord_session *session, const sm_entry *e, c
         st = ccord_error_set(err, CCORD_ERR_NOMEM, "Out of memory.");
       } else if (fread(data[k], 1, (size_t)fsz, f) != (size_t)fsz) {
         st = ccord_error_set(err, CCORD_ERR_IO, "Attachment %.80s cannot be read.", base);
+      } else if (fsz >= (1024ULL * 1024ULL)) {
+        had_large = true;
       }
       up[k] = (ccord_upload_file){.filename = base, .data = data[k], .size = (size_t)fsz, .spoiler = e->spoilers[k]};
     }
@@ -485,6 +491,7 @@ static ccord_status send_with_files(ccord_session *session, const sm_entry *e, c
     st = ccord_session_send_message_with_files(session, e->channel_id, CCORD_ID_NONE, false, e->text, e->len, up, n, err);
   }
   for (size_t k = 0; k < n; k++) ccord_free(data[k]);
+  if (had_large) ccord_os_trim_memory();
   return st;
 }
 

@@ -656,7 +656,7 @@ ccord_status live_send_message_with_files(ccord_transport *t, ccord_id channel_i
     if (!files[i].data || files[i].size == 0) {
       return ccord_error_set(err, CCORD_ERR_INVALID, "live: empty file data");
     }
-    if (files[i].size > 25u * 1024u * 1024u) {
+    if ((uint64_t)files[i].size > CCORD_UPLOAD_MAX_BYTES) {
       return ccord_error_set(err, CCORD_ERR_RANGE, "live: file too large");
     }
     ccord_status vst = live_upload_voice_check(&files[i], err);

@@ -312,6 +312,7 @@ static void live_action_reason(ccord_action_kind action, ccord_status st, long h
   else if (http == 429) msg = "Discord is rate limiting you. Try again shortly.";
   else if (http == 400 || http == 422) msg = "Discord rejected it.";
   else if (http == 409) msg = "It conflicts with something that changed.";
+  else if (http == 413) msg = "File is too large for Discord to accept.";
   else if (st == CCORD_ERR_TIMEOUT) {
     msg = may_have_applied ? "Timed out. It may still have gone through." : "Timed out talking to Discord.";
   } else if (st == CCORD_ERR_RANGE) msg = "It is too large.";
