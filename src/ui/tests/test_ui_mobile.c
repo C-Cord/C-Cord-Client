@@ -419,8 +419,9 @@ static void test_mobile_lightbox_pinch_and_back_cascade(void)
   CT_CHECK(ccord_ui_handle_back(F.ui));
   CT_CHECK(!F.ui->lightbox_open);
 
-  // Full Android Back unwind cascade: IME -> settings detail -> settings -> drawer -> root (false).
-  ccord_ui_set_left_drawer(F.ui, true);
+  // Full Android Back unwind cascade: IME -> settings detail -> settings -> right drawer -> chat -> left drawer -> exit.
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, true);
   F.ui->settings_open = true;
   F.ui->mobile_settings_detail = true;
   F.ui->touch_text_focused = true;
@@ -442,12 +443,18 @@ static void test_mobile_lightbox_pinch_and_back_cascade(void)
   CT_CHECK(ccord_ui_handle_back(F.ui));
   CT_CHECK(!F.ui->settings_open);
 
-  // Step 4: Back closes left drawer.
+  // Step 4: Back closes right member drawer back to chat.
   CT_CHECK(ccord_ui_handle_back(F.ui));
-  CT_CHECK(!ccord_ui_left_drawer_open(F.ui));
+  CT_CHECK(!ccord_ui_right_drawer_open(F.ui));
 
-  // Step 5: At root chat, Back returns false so Android minimizes the Activity.
+  // Step 5: At root chat, Back opens the Left Server/Channel Drawer instead of minimizing the app.
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  CT_CHECK(ccord_ui_left_drawer_open(F.ui));
+
+  // Step 6: From the Left Drawer, Back returns false so Android backgrounds the Activity.
   CT_CHECK(!ccord_ui_handle_back(F.ui));
+  ccord_ui_set_left_drawer(F.ui, false);
+  step_frames(8, 40);
 }
 
 static void test_mobile_copy_paste_and_autofill_login(void)
@@ -1649,6 +1656,91 @@ static void test_plugins_revamp_mobile(void)
   step_frames(2, 25);
 }
 
+static void test_mobile_midscreen_drawer_gestures_and_exclusions(void)
+{
+  ccord_ui_set_viewport(F.ui, 412.0f, 915.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+  step_frames(10, 40);
+  CT_CHECK(!ccord_ui_left_drawer_open(F.ui) && !ccord_ui_right_drawer_open(F.ui));
+
+  // 1. Mid-screen right swipe (x=200 -> 370, safely outside Android's bezel Back zone) opens Left Drawer.
+  int haptics_before = F.haptic_calls;
+  touch_ev(CCORD_IN_TOUCH_DOWN, 60, 200.0f, 440.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 60, 260.0f, 443.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 60, 360.0f, 446.0f);
+  step_frames(1, 16);
+  CT_CHECK(F.ui->left_drawer_t > 0.35f);
+  touch_ev(CCORD_IN_TOUCH_UP, 60, 360.0f, 446.0f);
+  step_frames(12, 30);
+  CT_CHECK(ccord_ui_left_drawer_open(F.ui));
+  CT_CHECK(F.ui->left_drawer_t > 0.95f);
+  CT_CHECK(F.haptic_calls > haptics_before);
+
+  // 2. Mid-screen left swipe closes Left Drawer cleanly.
+  touch_ev(CCORD_IN_TOUCH_DOWN, 61, 240.0f, 440.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 61, 160.0f, 442.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 61, 70.0f, 444.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_UP, 61, 70.0f, 444.0f);
+  step_frames(12, 30);
+  CT_CHECK(!ccord_ui_left_drawer_open(F.ui));
+  CT_CHECK(F.ui->left_drawer_t < 0.05f);
+
+  // 3. Mid-screen left swipe from root chat opens Right Member Drawer.
+  touch_ev(CCORD_IN_TOUCH_DOWN, 62, 230.0f, 440.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 62, 140.0f, 442.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 62, 60.0f, 443.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_UP, 62, 60.0f, 443.0f);
+  step_frames(12, 30);
+  CT_CHECK(ccord_ui_right_drawer_open(F.ui));
+  ccord_ui_set_right_drawer(F.ui, false);
+  step_frames(12, 30);
+  CT_CHECK(!ccord_ui_right_drawer_open(F.ui));
+
+  // 4. Diagonal vertical scroll (|dx|=36, |dy|=56 -> ratio 0.64 < 1.65) must NOT trigger drawer swipe.
+  touch_ev(CCORD_IN_TOUCH_DOWN, 63, 200.0f, 420.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 63, 218.0f, 448.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 63, 236.0f, 476.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_UP, 63, 236.0f, 476.0f);
+  step_frames(4, 20);
+  CT_CHECK(!ccord_ui_left_drawer_open(F.ui));
+  CT_CHECK(F.ui->left_drawer_t < 0.01f);
+
+  // 5. Horizontal drag starting inside a media scrub bar must NOT hijack into a drawer swipe.
+  F.ui->nmedia_hits = 1u;
+  memset(&F.ui->media_hits[0], 0, sizeof F.ui->media_hits[0]);
+  F.ui->media_hits[0].scrub_rect = (ccord_rect){40.0f, 520.0f, 320.0f, 28.0f};
+  touch_ev(CCORD_IN_TOUCH_DOWN, 64, 120.0f, 534.0f);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 64, 240.0f, 534.0f);
+  touch_ev(CCORD_IN_TOUCH_UP, 64, 240.0f, 534.0f);
+  CT_CHECK(!ccord_ui_left_drawer_open(F.ui));
+  CT_CHECK(F.ui->left_drawer_t < 0.01f);
+  step_frames(2, 20);
+
+  // 6. Clean CCORD_IN_TOUCH_CANCEL during partial drawer drag settles cleanly back to closed.
+  touch_ev(CCORD_IN_TOUCH_DOWN, 65, 200.0f, 440.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 65, 290.0f, 442.0f);
+  step_frames(1, 16);
+  CT_CHECK(F.ui->left_drawer_t > 0.1f);
+  touch_ev(CCORD_IN_TOUCH_CANCEL, 65, 290.0f, 442.0f);
+  step_frames(14, 30);
+  CT_CHECK(!ccord_ui_left_drawer_open(F.ui));
+  CT_CHECK(F.ui->left_drawer_t < 0.02f);
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -1657,6 +1749,7 @@ int main(void)
     return 1;
   }
   test_mobile_drawers_and_gestures();
+  test_mobile_midscreen_drawer_gestures_and_exclusions();
   test_mobile_composer_and_send();
   test_mobile_scroll_and_long_press_sheet();
   test_mobile_lightbox_pinch_and_back_cascade();

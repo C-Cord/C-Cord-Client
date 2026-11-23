@@ -967,11 +967,25 @@ bool ccord_ui_handle_back(ccord_ui *ui)
   }
   if (ui->editing_message != CCORD_ID_NONE) { ui_cancel_edit(ui); return true; }
   if (ui->reply_message != CCORD_ID_NONE) { ui_cancel_reply(ui); return true; }
-  if (ui->left_drawer_open || ui->right_drawer_open) {
-    ui->left_drawer_open = false;
+  // Hierarchical mobile Back: Right Member Drawer -> Chat -> Left Server/Channel Drawer -> minimize app.
+  // Opening the Left Drawer from root chat ensures accidental Android edge-Back swipes never kick the user home.
+  if (ui->right_drawer_open) {
     ui->right_drawer_open = false;
     ui->dirty = true;
     return true;
   }
-  return false;   // at root chat: let Android background the Activity
+  if (ui->mobile_layout) {
+    if (!ui->left_drawer_open) {
+      ui->left_drawer_open = true;
+      ui->dirty = true;
+      return true;
+    }
+    return false;   // Back from Left Drawer: let Android background the Activity
+  }
+  if (ui->left_drawer_open) {
+    ui->left_drawer_open = false;
+    ui->dirty = true;
+    return true;
+  }
+  return false;
 }

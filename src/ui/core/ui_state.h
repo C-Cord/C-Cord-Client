@@ -850,6 +850,7 @@ struct ccord_ui {
     uint64_t last_ms;
     float vx_ema, vy_ema;  // px / sec smoothed velocity for fling & drawer snap
     float drawer_start_t;
+    float drag_origin_x;   // finger x where drawer drag locked in (avoids deadzone jump)
     // Secondary finger for 2-finger pinch-to-zoom (lightbox).
     bool second_active;
     int64_t second_id;

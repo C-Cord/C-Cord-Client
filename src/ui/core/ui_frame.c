@@ -394,6 +394,13 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
     }
     ccord_draw_rect(r, (ccord_rect){0, 0, ui->win_w, ui->win_h}, c->bg_primary);
     ui_theme_bg_draw(ui, r, "window", (ccord_rect){0, 0, ui->win_w, ui->win_h});
+    // Subtle chat parallax when sliding mobile drawers for smooth spatial continuity.
+    float mobile_parallax = 0.0f;
+    if (ui->mobile_layout && !ui->anim.reduced_motion && !ui->discovery_open) {
+      mobile_parallax = (ui->left_drawer_t * 28.0f) - (ui->right_drawer_t * 28.0f);
+      if (fabsf(mobile_parallax) > 0.25f) ccord_push_offset(r, mobile_parallax, 0.0f);
+      else mobile_parallax = 0.0f;
+    }
     if (ui->discovery_open) {
       ui_draw_discovery(ui, r);
     } else if (ui_panels_has_active_full_view(ui)) {
@@ -431,6 +438,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
     ui_anchor_remember(ui);
     ui_draw_stale_bar(ui, r);
     ui_draw_update_bar(ui, r);
+    if (mobile_parallax != 0.0f) ccord_pop_offset(r);
     if (!ui->mobile_layout && !ui->discovery_open && ui->layout.member_list_visible) ui_draw_member_list(ui, r);
     if (ui->d.store && !ui->discovery_open &&
         ui_role_preview_active_for(ui, ccord_store_selected_guild(ui->d.store))) {

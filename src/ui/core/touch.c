@@ -16,16 +16,36 @@ enum {
   TOUCH_PINCH = 6,
 };
 
-#define TOUCH_SLOP_PX       10.0f
-#define TOUCH_EDGE_PX       44.0f
-#define TOUCH_LONG_PRESS_MS 420u
-#define TOUCH_FLING_MIN_V   110.0f   // px/s threshold to trigger momentum glide
-#define TOUCH_FLING_TAU     0.24f    // seconds of velocity converted into eased glide distance
-#define TOUCH_FLING_MAX_PX  1600.0f
-#define TOUCH_DRAWER_SNAP_V 280.0f   // px/s horizontal flick threshold
-#define TOUCH_DRAWER_MS     200.0f
+#define TOUCH_SLOP_PX             10.0f
+#define TOUCH_DRAWER_OPEN_SLOP    16.0f   // deliberate horizontal travel before opening a closed drawer
+#define TOUCH_DRAWER_CLOSE_SLOP   12.0f   // relaxed horizontal travel to close an already-open drawer
+#define TOUCH_DRAWER_OPEN_RATIO   1.65f   // ~31 deg cone from horizontal so diagonal scrolls never open drawers
+#define TOUCH_DRAWER_CLOSE_RATIO  1.25f
+#define TOUCH_LONG_PRESS_MS       420u
+#define TOUCH_FLING_MIN_V         110.0f  // px/s threshold to trigger momentum glide
+#define TOUCH_FLING_TAU           0.24f   // seconds of velocity converted into eased glide distance
+#define TOUCH_FLING_MAX_PX        1600.0f
+#define TOUCH_DRAWER_SNAP_V       240.0f  // px/s horizontal flick threshold
+#define TOUCH_DRAWER_COMMIT_T     0.35f   // distance threshold to commit open/close
+#define TOUCH_DRAWER_TAU_MS       48.0f   // exponential ease-out time constant for drawer settle
 
 static float clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+// Exclude interactive horizontal controls (video/audio scrub bars, voice waveforms) from full-screen drawer swipes.
+static bool point_in_horizontal_control(const ccord_ui *ui, float x, float y)
+{
+  if (!ui) return false;
+  for (size_t i = 0; i < ui->nmedia_hits; i++) {
+    ccord_rect sr = ui->media_hits[i].scrub_rect;
+    if (sr.w > 0.0f && sr.h > 0.0f) {
+      if (x >= sr.x - 10.0f && x <= sr.x + sr.w + 10.0f &&
+          y >= sr.y - 12.0f && y <= sr.y + sr.h + 12.0f) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 static bool overlays_block_drawers(const ccord_ui *ui)
 {
@@ -138,21 +158,36 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       ui->touch.last_ms = now;
 
       if (ui->touch.mode == TOUCH_PENDING) {
-        if (fabsf(total_dx) < TOUCH_SLOP_PX && fabsf(total_dy) < TOUCH_SLOP_PX) return false;
-        bool horizontal = fabsf(total_dx) > fabsf(total_dy) * 1.15f;
-        if (horizontal && ui->mobile_layout && !overlays_block_drawers(ui)) {
-          if (ui->left_drawer_open || (!ui->right_drawer_open && total_dx > 0.0f && ui->touch.down_x <= ui->safe_insets.left + TOUCH_EDGE_PX)) {
+        float adx = fabsf(total_dx);
+        float ady = fabsf(total_dy);
+        bool drawer_open = ui->left_drawer_open || ui->right_drawer_open;
+        float h_slop = drawer_open ? TOUCH_DRAWER_CLOSE_SLOP : TOUCH_DRAWER_OPEN_SLOP;
+        float h_ratio = drawer_open ? TOUCH_DRAWER_CLOSE_RATIO : TOUCH_DRAWER_OPEN_RATIO;
+        if (adx < TOUCH_SLOP_PX && ady < TOUCH_SLOP_PX) return false;
+
+        bool can_drawer = ui->mobile_layout && !overlays_block_drawers(ui) &&
+                          (drawer_open || !point_in_horizontal_control(ui, ui->touch.down_x, ui->touch.down_y));
+        // If vertical movement crossed slop and is not within the horizontal cone, commit to scroll right away.
+        if (ady >= TOUCH_SLOP_PX && (!can_drawer || adx <= ady * h_ratio)) {
+          ui->touch.mode = TOUCH_SCROLL;
+        } else if (can_drawer && adx >= h_slop && adx > ady * h_ratio) {
+          // Full-viewport horizontal drawer swipe (no bezel-edge requirement that collides with Android Back).
+          if (ui->left_drawer_open || (!ui->right_drawer_open && total_dx > 0.0f)) {
             ui->touch.mode = TOUCH_SWIPE_LEFT_DRAWER;
             ui->touch.drawer_start_t = ui->left_drawer_t;
+            ui->touch.drag_origin_x = ui->left_drawer_open ? ui->touch.down_x
+                                                           : (ui->touch.down_x + copysignf(h_slop, total_dx));
             ui->right_drawer_open = false;
             ui->right_drawer_t = 0.0f;
             if (ui->touch_text_focused) {
               ui->touch_text_focused = false;
               if (ui->d.host.dismiss_keyboard) ui->d.host.dismiss_keyboard(ui->d.host.ud);
             }
-          } else if (ui->right_drawer_open || (!ui->left_drawer_open && total_dx < 0.0f && ui->touch.down_x >= ui->win_w - ui->safe_insets.right - TOUCH_EDGE_PX)) {
+          } else if (ui->right_drawer_open || (!ui->left_drawer_open && total_dx < 0.0f)) {
             ui->touch.mode = TOUCH_SWIPE_RIGHT_DRAWER;
             ui->touch.drawer_start_t = ui->right_drawer_t;
+            ui->touch.drag_origin_x = ui->right_drawer_open ? ui->touch.down_x
+                                                            : (ui->touch.down_x + copysignf(h_slop, total_dx));
             ui->left_drawer_open = false;
             ui->left_drawer_t = 0.0f;
             if (ui->touch_text_focused) {
@@ -162,8 +197,11 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
           } else {
             ui->touch.mode = TOUCH_SCROLL;
           }
-        } else {
+        } else if (!can_drawer) {
           ui->touch.mode = TOUCH_SCROLL;
+        } else {
+          // Horizontal travel between 10dp and 16dp: wait a few px more before locking drawer vs scroll.
+          return false;
         }
       }
 
@@ -179,14 +217,16 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
 
       if (ui->touch.mode == TOUCH_SWIPE_LEFT_DRAWER) {
         float w = ui->layout.left_drawer_w > 1.0f ? ui->layout.left_drawer_w : 280.0f;
-        ui->left_drawer_t = clampf(ui->touch.drawer_start_t + total_dx / w, 0.0f, 1.0f);
+        float drag_dx = ev->x - ui->touch.drag_origin_x;
+        ui->left_drawer_t = clampf(ui->touch.drawer_start_t + drag_dx / w, 0.0f, 1.0f);
         ui->dirty = true;
         return true;
       }
 
       if (ui->touch.mode == TOUCH_SWIPE_RIGHT_DRAWER) {
         float w = ui->layout.right_drawer_w > 1.0f ? ui->layout.right_drawer_w : 260.0f;
-        ui->right_drawer_t = clampf(ui->touch.drawer_start_t - total_dx / w, 0.0f, 1.0f);
+        float drag_dx = ev->x - ui->touch.drag_origin_x;
+        ui->right_drawer_t = clampf(ui->touch.drawer_start_t - drag_dx / w, 0.0f, 1.0f);
         ui->dirty = true;
         return true;
       }
@@ -211,6 +251,8 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       ui->touch.mode = TOUCH_NONE;
 
       if (ev->type == CCORD_IN_TOUCH_CANCEL) {
+        // OS intercepted the gesture (e.g. system Back/Home): settle gracefully back to pre-gesture drawer state.
+        ui->mouse_in = false;
         ui->dirty = true;
         return true;
       }
@@ -242,7 +284,8 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         bool was = ui->left_drawer_open;
         bool open = (vx > TOUCH_DRAWER_SNAP_V) ? true
                   : (vx < -TOUCH_DRAWER_SNAP_V) ? false
-                  : (ui->left_drawer_t >= 0.42f);
+                  : (was ? (ui->left_drawer_t >= (1.0f - TOUCH_DRAWER_COMMIT_T))
+                         : (ui->left_drawer_t >= TOUCH_DRAWER_COMMIT_T));
         ui->left_drawer_open = open;
         if (open != was) haptic_tick(ui, 0);
         ui->dirty = true;
@@ -253,7 +296,8 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         bool was = ui->right_drawer_open;
         bool open = (vx < -TOUCH_DRAWER_SNAP_V) ? true
                   : (vx > TOUCH_DRAWER_SNAP_V) ? false
-                  : (ui->right_drawer_t >= 0.42f);
+                  : (was ? (ui->right_drawer_t >= (1.0f - TOUCH_DRAWER_COMMIT_T))
+                         : (ui->right_drawer_t >= TOUCH_DRAWER_COMMIT_T));
         ui->right_drawer_open = open;
         if (open != was) haptic_tick(ui, 0);
         ui->dirty = true;
@@ -291,25 +335,27 @@ bool ui_touch_update(ccord_ui *ui, uint64_t now_ms, float dt_ms)
     }
   }
 
-  // Smooth drawer open/close animation when not actively dragging.
+  // Smooth exponential ease-out drawer animation when not actively dragging.
   if (ui->mobile_layout) {
-    float step = ui->anim.reduced_motion ? 1.0f : clampf(dt_ms / TOUCH_DRAWER_MS, 0.0f, 1.0f);
+    float blend = (ui->anim.reduced_motion || dt_ms <= 0.0f)
+                    ? (ui->anim.reduced_motion ? 1.0f : 0.0f)
+                    : (1.0f - expf(-dt_ms / TOUCH_DRAWER_TAU_MS));
     if (ui->touch.mode != TOUCH_SWIPE_LEFT_DRAWER) {
       float target = ui->left_drawer_open ? 1.0f : 0.0f;
-      if (fabsf(ui->left_drawer_t - target) > 0.001f) {
-        if (ui->left_drawer_t < target) ui->left_drawer_t = fminf(target, ui->left_drawer_t + step);
-        else ui->left_drawer_t = fmaxf(target, ui->left_drawer_t - step);
-        animating = true;
+      if (fabsf(ui->left_drawer_t - target) > 0.003f) {
+        ui->left_drawer_t += (target - ui->left_drawer_t) * blend;
+        if (fabsf(ui->left_drawer_t - target) <= 0.003f) ui->left_drawer_t = target;
+        else animating = true;
       } else {
         ui->left_drawer_t = target;
       }
     }
     if (ui->touch.mode != TOUCH_SWIPE_RIGHT_DRAWER) {
       float target = ui->right_drawer_open ? 1.0f : 0.0f;
-      if (fabsf(ui->right_drawer_t - target) > 0.001f) {
-        if (ui->right_drawer_t < target) ui->right_drawer_t = fminf(target, ui->right_drawer_t + step);
-        else ui->right_drawer_t = fmaxf(target, ui->right_drawer_t - step);
-        animating = true;
+      if (fabsf(ui->right_drawer_t - target) > 0.003f) {
+        ui->right_drawer_t += (target - ui->right_drawer_t) * blend;
+        if (fabsf(ui->right_drawer_t - target) <= 0.003f) ui->right_drawer_t = target;
+        else animating = true;
       } else {
         ui->right_drawer_t = target;
       }
