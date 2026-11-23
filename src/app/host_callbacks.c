@@ -289,15 +289,24 @@ void app_host_keybinds_changed(void *ud)
   if (a && a->desktop) (void)ccord_app_desktop_bind_shortcuts(a->desktop);
 }
 
+static void host_ensure_updater(app *a)
+{
+  if (!a || a->updater) return;
+  a->updater_deferred = false;
+  a->updater = ccord_updater_create(CCORD_VERSION_STRING, ccord_paths_data_dir(), false);
+}
+
 static void host_update_check(void *ud)
 {
   app *a = ud;
+  host_ensure_updater(a);
   if (a && a->updater) ccord_updater_check_now(a->updater);
 }
 
 static void host_update_install(void *ud)
 {
   app *a = ud;
+  host_ensure_updater(a);
   if (a && a->updater) ccord_updater_install_now(a->updater);
 }
 

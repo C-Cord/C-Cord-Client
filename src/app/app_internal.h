@@ -119,6 +119,11 @@ typedef struct app {
   bool last_streamer_mode;                  // tracks streamer mode transitions for plugin dispatch
   ccord_warm *warm;                         // warm-start disk cache of the account (null-safe everywhere)
   ccord_updater *updater;                   // native in-app updater (checks all platforms; self-updates AppImage, Windows, macOS)
+  bool updater_deferred;                    // defer updater thread creation until post-first-frame idle
+  bool updater_auto_check;                  // saved auto_check flag for deferred updater creation
+  uint64_t updater_due_ms;                  // monotonic ms when deferred updater initializes
+  uint64_t boot_t0_ms;                      // monotonic ms at main() entry for startup milestone telemetry
+  ccord_id last_warm_ch;                    // tracks selected channel to hydrate deferred warm history on switch
   uint64_t start_ms;                        // now_ms() when the session was started (READY latency log)
   bool warm_was_stale;                      // the previous loop iteration saw the session stale
   bool saved_accounts_pushed;               // the saved-account roster was pushed to the UI at least once

@@ -48,6 +48,9 @@ struct ccord_warm {
   bool saved_once;
   uint64_t last_save_mono;   // monotonic ms of the last save
   uint64_t connected_since;  // monotonic ms the session was first seen connected and fresh (0 = not yet)
+  ccord_id deferred_hist_ids[CCORD_WARM_MAX_HISTORY_CHANNELS * 4];
+  size_t deferred_hist_count;
+  size_t deferred_hist_seeded;
 };
 
 // Shared internal helpers (warm_cache.c)

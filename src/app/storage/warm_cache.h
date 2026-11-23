@@ -66,6 +66,17 @@ const char *ccord_warm_dir(const ccord_warm *w);
 [[nodiscard]] ccord_status ccord_warm_load(ccord_warm *w, ccord_store *store, ccord_session *session,
                                            ccord_warm_load_result *out, ccord_error *err);
 
+// Two-phase warm load: when `initial_only` is true, loads state.json and ONLY the selected channel's history page
+// before Frame 1, queuing remaining cached channel histories for lazy/idle loading via the helpers below.
+[[nodiscard]] ccord_status ccord_warm_load_ex(ccord_warm *w, ccord_store *store, ccord_session *session,
+                                              bool initial_only, ccord_warm_load_result *out, ccord_error *err);
+
+// Loads one deferred channel history page (returns true if a page was seeded into `store`). No-op once drained.
+bool ccord_warm_pump_deferred_history(ccord_warm *w, ccord_store *store);
+
+// Immediately loads `channel_id`'s deferred warm history if queued (call on channel switch while stale).
+bool ccord_warm_load_channel_history(ccord_warm *w, ccord_store *store, ccord_id channel_id);
+
 // Serialises the store (never while the caller knows it is stale). `sync` fsyncs the file and its directory.
 [[nodiscard]] ccord_status ccord_warm_save(ccord_warm *w, const ccord_store *store, bool sync, ccord_error *err);
 

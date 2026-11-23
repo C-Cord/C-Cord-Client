@@ -434,6 +434,76 @@ static void test_legacy_state_missing_user_fields(void)
   ccord_warm_close(w);
 }
 
+static void test_two_phase_deferred_history(void)
+{
+  fresh_root("twophase");
+  env a;
+  CT_CHECK(env_init(&a, true));
+  ccord_id g = ccord_store_selected_guild(a.store);
+  ccord_id c_sel = ccord_store_selected_channel(a.store);
+  size_t nch = ccord_store_channel_count(a.store, g);
+  ccord_id c_other = CCORD_ID_NONE;
+  for (size_t i = 0; i < nch; i++) {
+    const ccord_channel *ch = ccord_store_channel_at(a.store, g, i);
+    if (ch && ch->id != c_sel && ch->kind == CCORD_CHANNEL_TEXT) {
+      c_other = ch->id;
+      break;
+    }
+  }
+  CT_CHECK(c_sel != CCORD_ID_NONE && c_other != CCORD_ID_NONE);
+
+  ccord_error err = {0};
+  // Populate history in both channels so warm_save writes both history files.
+  (void)ccord_session_select_channel(a.s, c_other, &err);
+  for (int i = 0; i < 30; i++) { g_now += 50; (void)ccord_session_pump(a.s); }
+  (void)ccord_session_select_channel(a.s, c_sel, &err);
+  for (int i = 0; i < 30; i++) { g_now += 50; (void)ccord_session_pump(a.s); }
+  CT_CHECK(ccord_store_message_count(a.store, c_sel) > 0);
+  CT_CHECK(ccord_store_message_count(a.store, c_other) > 0);
+
+  ccord_warm *w = open_warm(g_root, "tok-twophase", 0);
+  CT_CHECK(w != nullptr);
+  CT_CHECK(ccord_warm_save(w, a.store, true, &err) == CCORD_OK);
+
+  // Seed cached REST history pages for both the selected channel and a second channel.
+  char hist_sel[512], hist_other[512];
+  snprintf(hist_sel, sizeof hist_sel,
+           "[{\"id\":\"900001\",\"channel_id\":\"%llu\",\"content\":\"hello selected\","
+           "\"timestamp\":\"2026-01-01T00:00:00.000000+00:00\","
+           "\"author\":{\"id\":\"1001\",\"username\":\"alice\"}}]",
+           (unsigned long long)c_sel);
+  snprintf(hist_other, sizeof hist_other,
+           "[{\"id\":\"900002\",\"channel_id\":\"%llu\",\"content\":\"hello deferred\","
+           "\"timestamp\":\"2026-01-01T00:00:01.000000+00:00\","
+           "\"author\":{\"id\":\"1001\",\"username\":\"alice\"}}]",
+           (unsigned long long)c_other);
+  CT_CHECK(ccord_warm_put_history(w, c_sel, hist_sel, strlen(hist_sel), &err) == CCORD_OK);
+  CT_CHECK(ccord_warm_put_history(w, c_other, hist_other, strlen(hist_other), &err) == CCORD_OK);
+
+  // Phase 1: initial_only=true loads state + ONLY the active channel's history immediately.
+  env b;
+  CT_CHECK(env_init(&b, false));
+  ccord_warm_load_result r = {0};
+  CT_CHECK(ccord_warm_load_ex(w, b.store, b.s, true, &r, &err) == CCORD_OK);
+  CT_CHECK(r.loaded);
+  CT_CHECK(ccord_store_selected_channel(b.store) == c_sel);
+  CT_CHECK(ccord_store_message_count(b.store, c_sel) == 1);
+  CT_CHECK(ccord_store_message_count(b.store, c_other) == 0);
+
+  // Phase 2a: on-demand channel switch loads `c_other` immediately without waiting for background pump.
+  CT_CHECK(ccord_warm_load_channel_history(w, b.store, c_other));
+  CT_CHECK(ccord_store_message_count(b.store, c_other) == 1);
+
+  // Phase 2b: pump any remaining deferred channels to completion.
+  for (int guard = 0; guard < 64 && ccord_warm_pump_deferred_history(w, b.store); guard++) {
+  }
+  CT_CHECK(!ccord_warm_pump_deferred_history(w, b.store));
+
+  env_done(&b);
+  ccord_warm_close(w);
+  env_done(&a);
+}
+
 int main(void)
 {
   test_roundtrip_and_modes();
@@ -441,6 +511,7 @@ int main(void)
   test_disabled();
   test_fingerprint_forget_prune_cap();
   test_legacy_state_missing_user_fields();
+  test_two_phase_deferred_history();
   ccord_error err;
   (void)ccord_rmtree(g_root, &err);
   return CT_RESULT("test_warm_cache");

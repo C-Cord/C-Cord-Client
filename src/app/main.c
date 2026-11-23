@@ -559,14 +559,25 @@ static void run_interactive(app *a)
       redraw = true;
     }
     ccord_scheduled_messages_tick(a->session, ccord_clock_unix_ms());
-    // Warm-start cache: READY latency log, a periodic save once the user has been idle for 2 s (no hitch while typing),
-    // and a synced save when the window goes to the background (the process may be killed there).
+    // Warm-start cache: hydrate deferred channel histories lazily (1 page/idle tick or immediately on channel switch),
+    // log READY latency, save periodically once idle, and synced-save on backgrounding.
     {
       bool stale = ccord_session_is_stale(a->session);
       if (a->warm_was_stale && !stale) {
-        CCORD_LOG_I("session: READY applied %llu ms after start", (unsigned long long)(app_now_ms(a) - a->start_ms));
+        CCORD_LOG_I("boot: +%llu ms gw_ready (READY applied %llu ms after start)",
+                    (unsigned long long)(ccord_clock_ms() - a->boot_t0_ms),
+                    (unsigned long long)(app_now_ms(a) - a->start_ms));
       }
       a->warm_was_stale = stale;
+      if (stale && a->warm && a->store) {
+        ccord_id cur_ch = ccord_store_selected_channel(a->store);
+        if (cur_ch != a->last_warm_ch) {
+          a->last_warm_ch = cur_ch;
+          if (ccord_warm_load_channel_history(a->warm, a->store, cur_ch)) redraw = true;
+        } else if (!animating && ccord_warm_pump_deferred_history(a->warm, a->store)) {
+          redraw = true;
+        }
+      }
       bool visible = ccord_app_desktop_should_draw(a->platform);
       if (was_visible && !visible && !stale) {
         ccord_error werr;
@@ -575,6 +586,18 @@ static void run_interactive(app *a)
         (void)ccord_warm_maybe_save(a->warm, a->store, a->session, app_now_ms(a));
       }
       was_visible = visible;
+    }
+    if (a->updater_deferred && !a->updater && app_now_ms(a) >= a->updater_due_ms) {
+      a->updater_deferred = false;
+      a->updater = ccord_updater_create(CCORD_VERSION_STRING, ccord_paths_data_dir(), a->updater_auto_check);
+      if (a->updater) {
+        ccord_ui_update_info uinfo = {0};
+        bool req_quit = false;
+        if (ccord_updater_poll(a->updater, &uinfo, &req_quit) && uinfo.install_kind[0]) {
+          ccord_ui_set_update_info(a->ui, &uinfo);
+          redraw = true;
+        }
+      }
     }
     if (ccord_app_desktop_take_redraw(a->desktop)) redraw = true;
     if (a->media_redraw) {
@@ -744,7 +767,7 @@ int main(int argc, char **argv)
     return 0;
   }
 
-  app a = {.opt = &opt};
+  app a = {.opt = &opt, .boot_t0_ms = ccord_clock_ms()};
   a.virtual_clock = opt.screenshot != nullptr || opt.verify_slice != nullptr;
   a.token_file = opt.token_file;
   ccord_theme *theme = ccord_calloc(1, sizeof *theme);
@@ -892,14 +915,19 @@ int main(int argc, char **argv)
     goto done;
   }
   // Warm start: seed the store from the on-disk cache before the UI exists, so the first frame draws real content
-  // (stale-while-revalidate: the session is marked stale until the gateway READY replaces it). A missing, corrupt or
-  // foreign cache is a cold start: the connecting screen as before.
+  // (stale-while-revalidate: the session is marked stale until the gateway READY replaces it). Interactive runs use
+  // two-phase loading (state.json + ONLY sel_channel before Frame 1; remaining channels load lazily post-Frame-1).
   ccord_warm_load_result warm_res = {0};
   {
     ccord_error werr;
-    if (ccord_warm_load(a.warm, a.store, a.session, &warm_res, &werr) != CCORD_OK) {
+    bool two_phase = !opt.verify_slice && !opt.screenshot;
+    if (ccord_warm_load_ex(a.warm, a.store, a.session, two_phase, &warm_res, &werr) != CCORD_OK) {
       CCORD_LOG_W("warm: load failed: %s", werr.message);
     }
+    a.last_warm_ch = warm_res.sel_channel;
+    CCORD_LOG_I("boot: +%llu ms warm_loaded (loaded=%d guilds=%zu hist=%zu)",
+                (unsigned long long)(ccord_clock_ms() - a.boot_t0_ms), warm_res.loaded ? 1 : 0, warm_res.guilds,
+                warm_res.history_channels);
   }
   // Own-profile edits go through a REST backend the session owns: mock under --mock, else the live account's.
   if (use_mock) {
@@ -917,6 +945,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "ccord: %s\n", err.message);
     goto done;
   }
+  CCORD_LOG_I("boot: +%llu ms platform_ready", (unsigned long long)(ccord_clock_ms() - a.boot_t0_ms));
   // Tray wiring before the first frame: Close-to-Tray startup pref + SNI menu/click actions.
   ccord_platform_set_close_to_tray(a.platform, startup.close_to_tray);
   ccord_platform_set_tray_callback(a.platform, app_host_tray_action, &a);
@@ -926,6 +955,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "ccord: %s\n", err.message);
     goto done;
   }
+  CCORD_LOG_I("boot: +%llu ms render_ready", (unsigned long long)(ccord_clock_ms() - a.boot_t0_ms));
   // M6: saved UI zoom applies to the logical viewport (renderer clamps to 0.75..2.0).
   ccord_render_set_zoom(a.renderer, startup.zoom);
   ccord_app_desktop_deps desktop_deps = {.store = a.store, .session = a.session, .platform = a.platform,
@@ -985,14 +1015,14 @@ int main(int argc, char **argv)
   if (warm_res.loaded) ccord_ui_set_stale_saved_ms(a.ui, warm_res.saved_ms);
   ccord_app_desktop_attach_ui(a.desktop, a.ui);
   (void)ccord_app_desktop_bind_shortcuts(a.desktop);
-  bool auto_upd = !opt.headless && !opt.mock && !opt.screenshot && !opt.verify_slice;
-  a.updater = ccord_updater_create(CCORD_VERSION_STRING, ccord_paths_data_dir(), auto_upd);
-  if (a.updater) {
-    ccord_ui_update_info uinfo = {0};
-    bool req_quit = false;
-    if (ccord_updater_poll(a.updater, &uinfo, &req_quit) && uinfo.install_kind[0]) {
-      ccord_ui_set_update_info(a.ui, &uinfo);
-    }
+  bool auto_upd = !opt.headless && !opt.mock && !opt.screenshot && !opt.verify_slice && !CCORD_OS_ANDROID;
+  if (opt.verify_slice || opt.screenshot) {
+    a.updater = ccord_updater_create(CCORD_VERSION_STRING, ccord_paths_data_dir(), false);
+  } else {
+    // Defer updater thread creation + GitHub release check until 3s post-first-frame so startup stays lean.
+    a.updater_deferred = true;
+    a.updater_auto_check = auto_upd;
+    a.updater_due_ms = app_now_ms(&a) + 3000u;
   }
 
   // M5: runtime media coordinator (voice devices/PTT/DSP, Go Live send/receive, soundboard decode).
@@ -1020,12 +1050,20 @@ int main(int argc, char **argv)
     ccord_ui_open_account_settings(a.ui);
   }
 
-  // Render and present the first UI frame BEFORE starting extensions so mobile & desktop show the UI immediately.
+  // Render and present the first UI frame BEFORE starting extensions or network so mobile & desktop show UI immediately.
   if (!opt.screenshot && !opt.verify_slice) {
     (void)ccord_ui_update(a.ui, app_now_ms(&a));
     app_draw_frame(&a);
     ccord_platform_notify_first_frame(a.platform);
+    CCORD_LOG_I("boot: +%llu ms first_frame", (unsigned long long)(ccord_clock_ms() - a.boot_t0_ms));
   }
+
+  // Start the Discord Gateway session BEFORE plugin initialization so TCP/TLS handshake overlaps Lua startup.
+  a.start_ms = app_now_ms(&a);
+  a.warm_was_stale = ccord_session_is_stale(a.session);
+  ccord_session_start(a.session, &err) == CCORD_OK ? (void)0 : (void)fprintf(stderr, "ccord: %s\n", err.message);
+  if (ccord_session_state(a.session) == CCORD_CONN_FAILED) goto done;
+  CCORD_LOG_I("boot: +%llu ms session_started", (unsigned long long)(ccord_clock_ms() - a.boot_t0_ms));
 
 #if CCORD_WITH_PLUGINS
   // --verify-slice runs the built-in pipeline hermetically: third-party extensions are non-deterministic
@@ -1037,10 +1075,6 @@ int main(int argc, char **argv)
   (void)opt.no_plugins;
   (void)opt.plugin_dirs;
 #endif
-  a.start_ms = app_now_ms(&a);
-  a.warm_was_stale = ccord_session_is_stale(a.session);
-  ccord_session_start(a.session, &err) == CCORD_OK ? (void)0 : (void)fprintf(stderr, "ccord: %s\n", err.message);
-  if (ccord_session_state(a.session) == CCORD_CONN_FAILED) goto done;
   {
     ccord_event ready = {.type = CCORD_EVT_APP_READY};
     (void)ccord_bus_post(a.bus, ready);

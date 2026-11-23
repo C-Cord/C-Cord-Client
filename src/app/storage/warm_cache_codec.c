@@ -768,11 +768,76 @@ static void apply_extras(const ccord_json *root, ccord_store *store)
   ccord_arena_free(&scratch);
 }
 
-// Reads every warm/history/<id>.json whose channel exists; returns how many pages were seeded.
-static size_t load_history(const ccord_warm *w, ccord_store *store)
+// Reads one warm/history/<id>.json file and seeds it into `store`. Returns true if seeded.
+static bool load_one_history(const ccord_warm *w, ccord_store *store, ccord_id ch_id)
 {
+  if (!w || !store || ch_id == CCORD_ID_NONE) return false;
+  if (!ccord_store_channel(store, ch_id)) return false;   // channel gone: the file ages out with the prune
+  if (ccord_store_message_count(store, ch_id) > 0) return false;   // live history already arrived
+  char path[1400];
+  if (!warm_history_path(w, ch_id, path, sizeof path)) return false;
+  if (!ccord_path_exists(path)) return false;
+  ccord_error err;
+  size_t len = 0;
+  char *json = ccord_file_read_max(path, CCORD_WARM_MAX_HISTORY_FILE_BYTES, &len, &err);
+  if (!json) {
+    drop_file(path, err.message);
+    return false;
+  }
+  bool seeded = false;
+#if CCORD_LIVE_ACCOUNT
+  ccord_live_event ev;
+  ccord_live_event_init(&ev);
+  if (ccord_live_json_history(json, len, ch_id, &ev, &err) != CCORD_OK) {
+    ccord_live_event_free(&ev);
+    ccord_free(json);
+    drop_file(path, err.message);
+    return false;
+  }
+  ccord_free(json);
+  for (size_t u = 0; u < ev.user_count; u++) (void)ccord_store_upsert_user(store, &ev.users[u], &err);
+  if (ev.message_count > 0) {
+    if (ccord_store_set_history(store, ch_id, ev.messages, ev.message_count, &err) == CCORD_OK) {
+      ccord_store_mark_history_stale(store, ch_id);
+      seeded = true;
+    } else {
+      drop_file(path, err.message);
+    }
+  }
+  ccord_live_event_free(&ev);
+#else
+  ccord_free(json);
+#endif
+  return seeded;
+}
+
+// Reads warm/history/*.json; when `initial_only` is true, loads ONLY `sel_ch` now and queues the rest.
+static size_t load_history(ccord_warm *w, ccord_store *store, ccord_id sel_ch, bool initial_only)
+{
+  w->deferred_hist_count = 0;
+  w->deferred_hist_seeded = 0;
   char dir[1300];
   if (snprintf(dir, sizeof dir, "%s/warm/history", w->dir) >= (int)sizeof dir) return 0;
+  if (initial_only) {
+    size_t seeded = 0;
+    if (sel_ch != CCORD_ID_NONE && load_one_history(w, store, sel_ch)) seeded = 1;
+    ccord_dir *d = ccord_dir_open(dir);
+    if (d) {
+      char nm[256];
+      size_t cap = sizeof w->deferred_hist_ids / sizeof w->deferred_hist_ids[0];
+      while (ccord_dir_next(d, nm, sizeof nm, nullptr) && w->deferred_hist_count < cap) {
+        size_t l = strlen(nm);
+        if (l < 6 || strcmp(nm + l - 5, ".json") != 0) continue;
+        ccord_id id = CCORD_ID_NONE;
+        if (!ccord_id_parse(nm, l - 5, &id) || id == sel_ch) continue;
+        if (!ccord_store_channel(store, id)) continue;
+        w->deferred_hist_ids[w->deferred_hist_count++] = id;
+      }
+      ccord_dir_close(d);
+    }
+    w->deferred_hist_seeded = seeded;
+    return seeded;
+  }
   ccord_dir *d = ccord_dir_open(dir);
   if (!d) return 0;
   ccord_id ids[CCORD_WARM_MAX_HISTORY_CHANNELS * 4];
@@ -788,45 +853,49 @@ static size_t load_history(const ccord_warm *w, ccord_store *store)
   ccord_dir_close(d);
   size_t seeded = 0;
   for (size_t i = 0; i < n && seeded < CCORD_WARM_MAX_HISTORY_CHANNELS; i++) {
-    char path[1400];
-    if (!warm_history_path(w, ids[i], path, sizeof path)) continue;
-    if (!ccord_store_channel(store, ids[i])) continue;   // channel gone: the file ages out with the prune
-    ccord_error err;
-    size_t len = 0;
-    char *json = ccord_file_read_max(path, CCORD_WARM_MAX_HISTORY_FILE_BYTES, &len, &err);
-    if (!json) {
-      drop_file(path, err.message);
-      continue;
-    }
-#if CCORD_LIVE_ACCOUNT
-    ccord_live_event ev;
-    ccord_live_event_init(&ev);
-    if (ccord_live_json_history(json, len, ids[i], &ev, &err) != CCORD_OK) {
-      ccord_live_event_free(&ev);
-      ccord_free(json);
-      drop_file(path, err.message);
-      continue;
-    }
-    ccord_free(json);
-    for (size_t u = 0; u < ev.user_count; u++) (void)ccord_store_upsert_user(store, &ev.users[u], &err);
-    if (ev.message_count > 0) {
-      if (ccord_store_set_history(store, ids[i], ev.messages, ev.message_count, &err) == CCORD_OK) {
-        ccord_store_mark_history_stale(store, ids[i]);
-        seeded++;
-      } else {
-        drop_file(path, err.message);
-      }
-    }
-    ccord_live_event_free(&ev);
-#else
-    ccord_free(json);
-#endif
+    if (load_one_history(w, store, ids[i])) seeded++;
   }
   return seeded;
 }
 
+bool ccord_warm_pump_deferred_history(ccord_warm *w, ccord_store *store)
+{
+  if (!w || !store || !w->enabled || w->forgotten) return false;
+  while (w->deferred_hist_count > 0 && w->deferred_hist_seeded < CCORD_WARM_MAX_HISTORY_CHANNELS) {
+    ccord_id id = w->deferred_hist_ids[--w->deferred_hist_count];
+    if (load_one_history(w, store, id)) {
+      w->deferred_hist_seeded++;
+      return true;
+    }
+  }
+  w->deferred_hist_count = 0;
+  return false;
+}
+
+bool ccord_warm_load_channel_history(ccord_warm *w, ccord_store *store, ccord_id channel_id)
+{
+  if (!w || !store || !w->enabled || w->forgotten || channel_id == CCORD_ID_NONE) return false;
+  for (size_t i = 0; i < w->deferred_hist_count; i++) {
+    if (w->deferred_hist_ids[i] == channel_id) {
+      w->deferred_hist_ids[i] = w->deferred_hist_ids[--w->deferred_hist_count];
+      if (load_one_history(w, store, channel_id)) {
+        w->deferred_hist_seeded++;
+        return true;
+      }
+      return false;
+    }
+  }
+  return false;
+}
+
 ccord_status ccord_warm_load(ccord_warm *w, ccord_store *store, ccord_session *session, ccord_warm_load_result *out,
                              ccord_error *err)
+{
+  return ccord_warm_load_ex(w, store, session, false, out, err);
+}
+
+ccord_status ccord_warm_load_ex(ccord_warm *w, ccord_store *store, ccord_session *session, bool initial_only,
+                                ccord_warm_load_result *out, ccord_error *err)
 {
   ccord_error_clear(err);
   ccord_warm_load_result res = {0};
@@ -941,9 +1010,10 @@ ccord_status ccord_warm_load(ccord_warm *w, ccord_store *store, ccord_session *s
   res.self_id = snap.self_id;
   ccord_arena_free(&parse_a);
 
-  res.history_channels = load_history(w, store);
+  ccord_id active_ch = ccord_store_selected_channel(store);
+  res.history_channels = load_history(w, store, active_ch, initial_only);
   res.sel_guild = ccord_store_selected_guild(store);
-  res.sel_channel = ccord_store_selected_channel(store);
+  res.sel_channel = active_ch;
   res.guilds = ccord_store_guild_count(store);
   for (size_t gi = 0, gn = scope_count(store); gi < gn; gi++) res.channels += ccord_store_channel_count(store, scope_id(store, gi));
   res.users = ccord_store_user_count(store);
