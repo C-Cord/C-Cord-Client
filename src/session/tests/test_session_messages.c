@@ -821,7 +821,7 @@ static void test_session_polls_components_and_modals(void)
       .present = true,
       .question = "Preferred build tool?",
       .answer_count = 2,
-      .answers = {
+      .answers = (ccord_poll_answer[]){
         {.id = 1, .text = "Ninja", .votes = 3},
         {.id = 2, .text = "Make", .votes = 1},
       },

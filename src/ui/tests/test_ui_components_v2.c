@@ -303,7 +303,7 @@ static void test_v2_rendering(void)
     .embeds = &emb, .embed_count = 1,
     .stickers = &stk, .sticker_count = 1,
     .poll = {.present = true, .question = "must not draw?", .answer_count = 1,
-             .answers = {{.id = 1, .text = "no"}}},
+             .answers = (ccord_poll_answer[]){{.id = 1, .text = "no"}}},
     .v2_components = top, .v2_component_count = 3,
   };
   ccord_id plain_mid = post_v2(&(ccord_message_rich){.present = CCORD_RICH_ALL});   // a text-less baseline row

@@ -32,9 +32,9 @@ typedef enum ccord_notify_level : uint8_t {
 typedef struct ccord_notify_scope {
   ccord_id guild_id;
   ccord_id channel_id;
+  int64_t mute_until_ms;           // unix ms; with `muted`, 0 = until the user turns it back on
   ccord_notify_level level;
   bool muted;
-  int64_t mute_until_ms;           // unix ms; with `muted`, 0 = until the user turns it back on
   bool suppress_everyone, suppress_roles;
 } ccord_notify_scope;
 

@@ -1072,13 +1072,14 @@ ccord_status ccord_live_json_upload_slot(const char *json, size_t len, char *out
 }
 
 // Discord nests options at most SUB_COMMAND_GROUP -> SUB_COMMAND -> leaf. Flatten the tree depth-first into
-// cmd->options; parent_plus_one is the 1-based index of the owning container option (0 for root options).
+// dst; parent_plus_one is the 1-based index of the owning container option (0 for root options).
 // Malformed nesting (a group inside a group, a leaf inside a group, ...) is skipped, which also bounds the
 // recursion depth regardless of the payload.
-static void slash_flatten_options(ccord_slash_command *cmd, const ccord_json *opts, uint8_t parent_plus_one)
+static void slash_flatten_options(ccord_slash_option *dst, size_t *count, const ccord_json *opts,
+                                  uint8_t parent_plus_one)
 {
   size_t no = dj_is_json_array(opts) ? ccord_json_array_len(opts) : 0;
-  for (size_t k = 0; k < no && cmd->option_count < CCORD_SLASH_MAX_OPTIONS; k++) {
+  for (size_t k = 0; k < no && *count < CCORD_SLASH_MAX_OPTIONS; k++) {
     const ccord_json *oj = ccord_json_array_at(opts, k);
     if (!dj_is_json_object(oj)) continue;
     int64_t okind = dj_json_i64(oj, "type", 0);
@@ -1088,7 +1089,7 @@ static void slash_flatten_options(ccord_slash_command *cmd, const ccord_json *op
     dj_copy_json_str(opt.name, sizeof opt.name, oj, "name");
     dj_copy_json_str(opt.description, sizeof opt.description, oj, "description");
     if (opt.name[0] == '\0') continue;
-    const ccord_slash_option *parent = parent_plus_one ? &cmd->options[parent_plus_one - 1u] : nullptr;
+    const ccord_slash_option *parent = parent_plus_one ? &dst[parent_plus_one - 1u] : nullptr;
     if (opt.kind == CCORD_SLASH_OPT_SUB_COMMAND_GROUP) {
       if (parent) continue;   // groups only live at the root
     } else if (opt.kind == CCORD_SLASH_OPT_SUB_COMMAND) {
@@ -1101,9 +1102,9 @@ static void slash_flatten_options(ccord_slash_command *cmd, const ccord_json *op
                           opt.kind == CCORD_SLASH_OPT_NUMBER);
     }
     opt.parent_plus_one = parent_plus_one;
-    cmd->options[cmd->option_count++] = opt;
+    dst[(*count)++] = opt;
     if (opt.kind == CCORD_SLASH_OPT_SUB_COMMAND_GROUP || opt.kind == CCORD_SLASH_OPT_SUB_COMMAND) {
-      slash_flatten_options(cmd, ccord_json_get(oj, "options"), (uint8_t)cmd->option_count);
+      slash_flatten_options(dst, count, ccord_json_get(oj, "options"), (uint8_t)(*count));
     }
   }
 }
@@ -1177,10 +1178,23 @@ ccord_status ccord_live_json_slash_commands(const char *json, size_t len, ccord_
     }
     const ccord_json *dmj = ccord_json_get(cj, "dm_permission");
     cmd.dm_permission = dmj && ccord_json_type_of(dmj) == CCORD_JSON_BOOL ? ccord_json_bool(dmj, true) : true;
+    ccord_slash_option flat_opts[CCORD_SLASH_MAX_OPTIONS];
+    size_t flat_n = 0;
     // Context-menu commands carry no options; CHAT_INPUT options arrive as a group/subcommand/leaf tree.
-    if (cmd.command_type == 1) slash_flatten_options(&cmd, ccord_json_get(cj, "options"), 0);
+    if (cmd.command_type == 1) slash_flatten_options(flat_opts, &flat_n, ccord_json_get(cj, "options"), 0);
+    cmd.options = flat_n > 0 ? flat_opts : nullptr;
+    cmd.option_count = flat_n;
     ccord_error verr;
     if (ccord_slash_command_validate(&cmd, &verr) != CCORD_OK) continue;
+    if (flat_n > 0) {
+      ccord_slash_option *dst_opts = ccord_arena_alloc(&out->arena, flat_n * sizeof *dst_opts, _Alignof(ccord_slash_option));
+      if (!dst_opts) {
+        st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+        goto done;
+      }
+      memcpy(dst_opts, flat_opts, flat_n * sizeof *dst_opts);
+      cmd.options = dst_opts;
+    }
     cmds[out_n++] = cmd;
   }
   out->ev.type = CCORD_NET_SLASH_COMMANDS;

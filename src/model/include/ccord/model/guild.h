@@ -65,29 +65,29 @@ typedef struct ccord_guild {
   ccord_id owner_id;                           // guild owner user id (0 when unknown)
   uint64_t self_permissions;                   // computed guild permissions for self (0 when unknown)
   ccord_id folder_id;                          // server folder id (0 when ungrouped)
-  char folder_name[64];                        // server folder display name
-  uint32_t folder_color;                       // 0xRRGGBB folder tint (0 = default)
-  char banner_url[256];                        // CDN banner URL (empty when none)
   ccord_id system_channel_id;                  // system messages channel (0 = none)
-  uint32_t system_channel_flags;               // CCORD_SYSCHAN_* bitmask
-  uint8_t default_message_notifications;       // 0 = all messages, 1 = only @mentions
   ccord_id afk_channel_id;                     // inactive voice channel (0 = none)
+  ccord_id rules_channel_id;                   // community rules channel (0 = none)
+  ccord_id public_updates_channel_id;          // community public updates channel (0 = none)
+  int64_t invites_disabled_until_ms;           // unix ms (0 = not paused)
+  int64_t dms_disabled_until_ms;               // unix ms (0 = not paused)
+  uint32_t folder_color;                       // 0xRRGGBB folder tint (0 = default)
+  uint32_t system_channel_flags;               // CCORD_SYSCHAN_* bitmask
   uint32_t afk_timeout;                        // 60 / 300 / 900 / 1800 / 3600 seconds (0 = unset)
+  uint32_t premium_subscription_count;         // total server boosts
+  uint8_t default_message_notifications;       // 0 = all messages, 1 = only @mentions
   uint8_t verification_level;                  // 0..4 (None, Low, Medium, High, Highest)
   uint8_t explicit_content_filter;             // 0..2 (Disabled, Members without roles, All members)
   uint8_t premium_tier;                        // 0..3 boost tier
-  uint32_t premium_subscription_count;         // total server boosts
-  char vanity_url_code[64];                    // vanity invite slug (empty when none)
-  ccord_id rules_channel_id;                   // community rules channel (0 = none)
-  ccord_id public_updates_channel_id;          // community public updates channel (0 = none)
   bool feature_community;                      // COMMUNITY in guild.features
   bool feature_vanity_url;                     // VANITY_URL in guild.features
   bool feature_banner;                         // BANNER in guild.features
   bool feature_guild_tags;                     // GUILD_TAGS or CLAN in guild.features
   bool has_guild_settings;                     // true when overview/safety fields were populated
   bool has_incidents_data;                     // true when incidents_data was populated
-  int64_t invites_disabled_until_ms;           // unix ms (0 = not paused)
-  int64_t dms_disabled_until_ms;               // unix ms (0 = not paused)
+  char folder_name[64];                        // server folder display name
+  char banner_url[256];                        // CDN banner URL (empty when none)
+  char vanity_url_code[64];                    // vanity invite slug (empty when none)
 } ccord_guild;
 // Ordered entry in the user's server rail / folder layout (guild_folders in user settings).
 typedef struct ccord_guild_folder_item {
@@ -165,16 +165,16 @@ typedef struct ccord_member_verification {
 typedef struct ccord_member {
   ccord_id guild_id, user_id;
   const char *role_name;                       // group header in member list, e.g. "Admins"
-  uint32_t role_color;                         // 0xRRGGBB, 0 = default text colour
-  uint8_t role_rank;                           // lower = listed first; offline members are grouped last by UI
-  char nick[CCORD_NAME_MAX_BYTES + 1];         // server-specific nickname (empty when none set)
   uint64_t permissions;                        // computed member permissions in the guild (0 when unset)
   int64_t timeout_until_ms;                    // communication_disabled_until unix ms (0 when not timed out)
   int64_t joined_at_ms;                        // joined_at unix ms (0 when unknown)
+  uint32_t role_color;                         // 0xRRGGBB, 0 = default text colour
+  uint8_t role_rank;                           // lower = listed first; offline members are grouped last by UI
   bool mute, deaf;                             // server-enforced voice mute / deafen
   bool omit_mute, omit_deaf;                   // true when partial gateway payload omitted mute / deaf
   bool pending;                                // membership screening not completed yet; self cannot send until accepted
   bool omit_pending;                           // true when a partial gateway payload omitted pending
+  char nick[CCORD_NAME_MAX_BYTES + 1];         // server-specific nickname (empty when none set)
   char avatar_decoration_url[256];             // guild_member avatar_decoration_data URL (empty when none)
   char nameplate_asset[128];                   // guild_member collectibles.nameplate asset (empty when none)
   char nameplate_palette[24];                  // guild_member collectibles.nameplate palette (empty when none)

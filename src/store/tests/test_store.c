@@ -2532,7 +2532,7 @@ static void test_poll_vote_mutator(void)
       .present = true,
       .question = "Pick a protocol",
       .answer_count = 2,
-      .answers = {
+      .answers = (ccord_poll_answer[]){
         {.id = 10, .text = "QUIC", .votes = 1, .me_voted = false},
         {.id = 20, .text = "TCP", .votes = 0, .me_voted = false},
       },
@@ -4066,28 +4066,30 @@ static void test_gif_favorites_and_settings_proto(void)
 static void test_slash_nested_commands_validate(void)
 {
   ccord_error err = {0};
+  const ccord_slash_option cmd_opts[6] = {
+    {.kind = CCORD_SLASH_OPT_SUB_COMMAND_GROUP, .name = "ban", .description = "Ban tools", .parent_plus_one = 0},
+    {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "add", .description = "Ban a user", .parent_plus_one = 1},
+    {.kind = CCORD_SLASH_OPT_USER, .name = "target", .description = "Who", .required = true, .parent_plus_one = 2},
+    {.kind = CCORD_SLASH_OPT_STRING, .name = "reason", .description = "Why", .parent_plus_one = 2},
+    {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "remove", .description = "Unban", .parent_plus_one = 1},
+    {.kind = CCORD_SLASH_OPT_USER, .name = "target", .description = "Who", .parent_plus_one = 5},
+  };
   ccord_slash_command cmd = {
     .id = 9100, .application_id = 1011, .name = "mod", .description = "Moderation",
     .default_member_permissions = UINT64_MAX, .dm_permission = true, .option_count = 6,
-    .options = {
-      {.kind = CCORD_SLASH_OPT_SUB_COMMAND_GROUP, .name = "ban", .description = "Ban tools", .parent_plus_one = 0},
-      {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "add", .description = "Ban a user", .parent_plus_one = 1},
-      {.kind = CCORD_SLASH_OPT_USER, .name = "target", .description = "Who", .required = true, .parent_plus_one = 2},
-      {.kind = CCORD_SLASH_OPT_STRING, .name = "reason", .description = "Why", .parent_plus_one = 2},
-      {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "remove", .description = "Unban", .parent_plus_one = 1},
-      {.kind = CCORD_SLASH_OPT_USER, .name = "target", .description = "Who", .parent_plus_one = 5},
-    },
+    .options = cmd_opts,
   };
   CT_CHECK(ccord_slash_command_validate(&cmd, &err) == CCORD_OK);
 
   // Flat subcommands with leaf children are valid too.
+  const ccord_slash_option flat_opts[3] = {
+    {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "set", .description = "Set", .parent_plus_one = 0},
+    {.kind = CCORD_SLASH_OPT_STRING, .name = "value", .description = "Value", .parent_plus_one = 1},
+    {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "get", .description = "Get", .parent_plus_one = 0},
+  };
   ccord_slash_command flat = {
     .id = 9101, .application_id = 1011, .name = "cfg", .description = "Config", .option_count = 3,
-    .options = {
-      {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "set", .description = "Set", .parent_plus_one = 0},
-      {.kind = CCORD_SLASH_OPT_STRING, .name = "value", .description = "Value", .parent_plus_one = 1},
-      {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "get", .description = "Get", .parent_plus_one = 0},
-    },
+    .options = flat_opts,
   };
   CT_CHECK(ccord_slash_command_validate(&flat, &err) == CCORD_OK);
 
@@ -4102,38 +4104,41 @@ static void test_slash_nested_commands_validate(void)
   ctx.command_type = 4;
   CT_CHECK(ccord_slash_command_validate(&ctx, &err) == CCORD_ERR_INVALID);
 
+  ccord_slash_option bad_opts[6];
   ccord_slash_command bad = cmd;
-  bad.options[1].kind = CCORD_SLASH_OPT_STRING;   // a group's child must be a subcommand
+  bad.options = bad_opts;
+  memcpy(bad_opts, cmd_opts, sizeof cmd_opts);
+  bad_opts[1].kind = CCORD_SLASH_OPT_STRING;   // a group's child must be a subcommand
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
-  bad = cmd;
-  bad.options[2].kind = CCORD_SLASH_OPT_SUB_COMMAND;   // a subcommand's child must be a leaf
+  memcpy(bad_opts, cmd_opts, sizeof cmd_opts);
+  bad_opts[2].kind = CCORD_SLASH_OPT_SUB_COMMAND;   // a subcommand's child must be a leaf
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
-  bad = cmd;
-  bad.options[3].parent_plus_one = 3;   // parent is a leaf (USER at index 2)
+  memcpy(bad_opts, cmd_opts, sizeof cmd_opts);
+  bad_opts[3].parent_plus_one = 3;   // parent is a leaf (USER at index 2)
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
-  bad = cmd;
-  bad.options[1].parent_plus_one = 99;   // out of bounds
+  memcpy(bad_opts, cmd_opts, sizeof cmd_opts);
+  bad_opts[1].parent_plus_one = 99;   // out of bounds
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
-  bad = cmd;
-  bad.options[1].parent_plus_one = 2;   // self-parent
+  memcpy(bad_opts, cmd_opts, sizeof cmd_opts);
+  bad_opts[1].parent_plus_one = 2;   // self-parent
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
-  bad = cmd;
-  bad.options[0].parent_plus_one = 1;   // the first option cannot have a parent
+  memcpy(bad_opts, cmd_opts, sizeof cmd_opts);
+  bad_opts[0].parent_plus_one = 1;   // the first option cannot have a parent
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
-  bad = cmd;
-  bad.options[3].parent_plus_one = 5;   // forward reference (parent comes later)
+  memcpy(bad_opts, cmd_opts, sizeof cmd_opts);
+  bad_opts[3].parent_plus_one = 5;   // forward reference (parent comes later)
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
-  bad = cmd;
-  bad.options[0].kind = CCORD_SLASH_OPT_STRING;   // root mixes a leaf with subcommands
+  memcpy(bad_opts, cmd_opts, sizeof cmd_opts);
+  bad_opts[0].kind = CCORD_SLASH_OPT_STRING;   // root mixes a leaf with subcommands
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
-  bad = cmd;
-  bad.options[1].autocomplete = true;   // subcommands cannot autocomplete
+  memcpy(bad_opts, cmd_opts, sizeof cmd_opts);
+  bad_opts[1].autocomplete = true;   // subcommands cannot autocomplete
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
-  bad = cmd;
-  bad.options[0].kind = (ccord_slash_opt_kind)0;
+  memcpy(bad_opts, cmd_opts, sizeof cmd_opts);
+  bad_opts[0].kind = (ccord_slash_opt_kind)0;
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
-  bad = cmd;
-  bad.options[0].kind = (ccord_slash_opt_kind)11;
+  memcpy(bad_opts, cmd_opts, sizeof cmd_opts);
+  bad_opts[0].kind = (ccord_slash_opt_kind)11;
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
 }
 

@@ -30,30 +30,31 @@ typedef struct ccord_user {
   const char *avatar_decoration_url;           // CDN URL or "" / nullptr if none
   ccord_id avatar_decoration_sku_id;           // avatar_decoration_data.sku_id (0 when none/unknown)
   const char *banner_url;                      // CDN URL or "" / nullptr if none
-  uint32_t accent_color;                       // 0xRRGGBB (0 if none)
-  bool has_accent_color;
-  bool has_presence;
   const char *bio;                             // profile bio / about me, "" / nullptr if none
   const char *pronouns;                        // profile pronouns, "" / nullptr if none
-  ccord_presence presence; bool is_bot;
-  uint8_t avatar_palette;                      // index into theme avatar_0..5 (taken mod 6)
-  char clan_tag[16];                           // server identity / clan tag badge (empty when none)
   ccord_id clan_guild_id;
-  char clan_badge[64];
   ccord_id nameplate_sku_id;                   // collectibles.nameplate.sku_id (0 when none/unknown)
+  int64_t custom_status_expires_ms;            // unix ms (0 = never / unset)
+  int64_t activity_start_ms;                   // unix ms (0 = unset)
+  int64_t activity_end_ms;                     // unix ms (0 = unset)
+  uint32_t accent_color;                       // 0xRRGGBB (0 if none)
+  ccord_presence presence;
+  bool has_accent_color;
+  bool has_presence;
+  bool is_bot;
+  uint8_t avatar_palette;                      // index into theme avatar_0..5 (taken mod 6)
+  bool has_activity;
+  uint8_t activity_type;                       // ccord_activity_type (0, 1, 2, 3, 5)
+  char clan_tag[16];                           // server identity / clan tag badge (empty when none)
+  char clan_badge[64];
   char nameplate_asset[128];                   // collectibles.nameplate asset path or CDN URL (empty when none)
   char nameplate_palette[24];                  // collectibles.nameplate palette slug (e.g. "cobalt", empty when none)
   // Custom status (activity type 4 / user_settings.custom_status) and primary rich-presence activity (types 0..3, 5).
   char custom_status_emoji[CCORD_EMOJI_MAX_BYTES + 1];
   char custom_status_text[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
-  int64_t custom_status_expires_ms;            // unix ms (0 = never / unset)
-  bool has_activity;
-  uint8_t activity_type;                       // ccord_activity_type (0, 1, 2, 3, 5)
   char activity_name[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
   char activity_details[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
   char activity_state[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
-  int64_t activity_start_ms;                   // unix ms (0 = unset)
-  int64_t activity_end_ms;                     // unix ms (0 = unset)
 } ccord_user;
 typedef struct ccord_profile_connection {
   char type[32];                               // platform slug ("github", "steam", "twitch", "spotify", ...)
@@ -140,9 +141,11 @@ typedef struct ccord_owned_collectible {
   char static_url[256];                        // static / reduced-motion CDN URL (deco passthrough=false or effect/frame static)
   int64_t expires_at_ms;                       // unix ms when rental/quest reward expires (0 = permanent)
   bool has_effect;                             // true when `effect` holds resolved profile effect layers/URLs
-  ccord_profile_effect_config effect;
   bool has_frame;                              // true when `frame` holds resolved profile frame layers/overflow
-  ccord_profile_frame_config frame;
+  union {
+    ccord_profile_effect_config effect;
+    ccord_profile_frame_config frame;
+  };
 } ccord_owned_collectible;
 typedef struct ccord_user_profile {
   union {

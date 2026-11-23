@@ -296,6 +296,7 @@ ccord_status ccord_message_rich_validate(const ccord_message_rich *r, ccord_erro
   if (st != CCORD_OK) return st;
   const ccord_poll *p = &r->poll;
   if (p->answer_count > CCORD_RICH_MAX_POLL_ANSWERS) return ccord_error_set(err, CCORD_ERR_RANGE, "message: too many poll answers");
+  if (p->answer_count > 0 && !p->answers) return vbad(err, "poll answers");
   if (p->expiry_ms < 0) return vbad(err, "poll expiry");
   if (!text_ok(p->question, CCORD_RICH_SHORT_MAX_BYTES * 2u)) return vbad(err, "poll question");
   for (size_t i = 0; i < p->answer_count; i++) {
@@ -359,6 +360,7 @@ ccord_status ccord_slash_command_validate(const ccord_slash_command *cmd, ccord_
   if (cmd->option_count > CCORD_SLASH_MAX_OPTIONS) {
     return ccord_error_set(err, CCORD_ERR_RANGE, "slash: too many options");
   }
+  if (cmd->option_count > 0 && !cmd->options) return vbad(err, "slash options");
   bool root_has_sub = false, root_has_leaf = false;
   for (size_t i = 0; i < cmd->option_count; i++) {
     const ccord_slash_option *o = &cmd->options[i];

@@ -763,9 +763,11 @@ static void test_rich_message_rendering(void)
   F.ui->settings_embeds = true;
 
   // A poll draws one card; a sticker draws one sticker.
-  ccord_message_rich poll = {.present = CCORD_RICH_ALL, .poll = {.present = true, .question = "Pizza?", .answer_count = 2}};
-  poll.poll.answers[0] = (ccord_poll_answer){.id = 1, .text = "Yes", .votes = 3, .me_voted = true};
-  poll.poll.answers[1] = (ccord_poll_answer){.id = 2, .text = "No", .votes = 1};
+  ccord_poll_answer poll_ans[2] = {
+    {.id = 1, .text = "Yes", .votes = 3, .me_voted = true},
+    {.id = 2, .text = "No", .votes = 1},
+  };
+  ccord_message_rich poll = {.present = CCORD_RICH_ALL, .poll = {.present = true, .question = "Pizza?", .answers = poll_ans, .answer_count = 2}};
   id = append_rich_message(ch, "", &poll);
   d = dbg();
   CT_CHECK(d.poll_cards == 1 && d.sticker_cards == 0);

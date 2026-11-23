@@ -38,10 +38,10 @@ typedef struct ccord_attachment {
   const char *content_type;  // MIME type, "" when Discord did not say
   const char *url;
   const char *proxy_url;
+  const char *waveform_b64;  // voice message waveform, base64 text; "" when Discord sent none
   uint64_t size;             // bytes
   uint32_t width, height;    // pixels; 0 when it is not an image or video
   uint32_t duration_ms;      // audio / video / voice message; 0 when unknown
-  const char *waveform_b64;  // voice message waveform, base64 text; "" when Discord sent none
   uint32_t flags;            // Discord attachment flags (1 << 2 is_remix)
   bool spoiler;              // "SPOILER_" filename prefix
 } ccord_attachment;
@@ -59,16 +59,16 @@ typedef struct ccord_embed_field {
   bool inline_;                  // side by side with its neighbours
 } ccord_embed_field;
 typedef struct ccord_embed {
-  ccord_embed_kind kind;
   const char *title, *description, *url;
   const char *provider;
   const char *author_name, *author_url, *author_icon;
   const char *footer_text, *footer_icon;
   int64_t timestamp_ms;          // 0 = none
-  uint32_t color;                // 0xRRGGBB, meaningful when has_color
-  bool has_color;
   ccord_embed_media image, thumbnail, video;
   const ccord_embed_field *fields; size_t field_count;
+  uint32_t color;                // 0xRRGGBB, meaningful when has_color
+  ccord_embed_kind kind;
+  bool has_color;
 } ccord_embed;
 
 typedef struct ccord_msg_sticker {
@@ -84,38 +84,38 @@ typedef struct ccord_msg_reference {
 } ccord_msg_reference;
 // The message a reply points at, as Discord attached it (a snippet, enough for the line above the reply).
 typedef struct ccord_ref_preview {
-  bool present;                  // Discord sent the replied-to message
-  bool deleted;                  // it said the message no longer exists
   ccord_id author_id;
   const char *author_name;       // display name, "" when unknown
   const char *content;           // first CCORD_RICH_SNIPPET_MAX_BYTES of its text
+  bool present;                  // Discord sent the replied-to message
+  bool deleted;                  // it said the message no longer exists
   bool has_attachments;          // it carried files (shown as an icon when it has no text)
 } ccord_ref_preview;
 
 // A forwarded message: Discord sends a snapshot of the original inside the new one.
 typedef struct ccord_forward {
-  bool present;
   const char *content;
   int64_t timestamp_ms;
   const ccord_attachment *attachments; size_t attachment_count;
   const ccord_embed *embeds; size_t embed_count;
   const ccord_msg_sticker *stickers; size_t sticker_count;
+  bool present;
 } ccord_forward;
 
 typedef struct ccord_poll_answer {
-  uint32_t id;                   // answer_id
   const char *text;
   const char *emoji;             // Unicode emoji or custom emoji name, "" when none
   ccord_id emoji_id;
+  uint32_t id;                   // answer_id
   uint32_t votes;
   bool me_voted;
 } ccord_poll_answer;
 typedef struct ccord_poll {
-  bool present;
   const char *question;
-  ccord_poll_answer answers[CCORD_RICH_MAX_POLL_ANSWERS];
+  ccord_poll_answer *answers;    // up to CCORD_RICH_MAX_POLL_ANSWERS (mutable for in-place vote updates)
   size_t answer_count;
   int64_t expiry_ms;             // 0 = none
+  bool present;
   bool multiselect;
   bool finalized;                // voting is over and the counts are final
 } ccord_poll;
@@ -268,12 +268,12 @@ typedef struct ccord_slash_command {
   ccord_id application_id;
   ccord_id guild_id;             // 0 = global command
   ccord_id version;              // Discord command version snowflake (0 -> id)
+  uint64_t default_member_permissions;  // UINT64_MAX = unrestricted, else required permission mask
+  const ccord_slash_option *options;
+  size_t option_count;
   char name[CCORD_SLASH_NAME_MAX_BYTES + 1];
   char description[CCORD_SLASH_DESC_MAX_BYTES + 1];
-  uint64_t default_member_permissions;  // UINT64_MAX = unrestricted, else required permission mask
   bool dm_permission;
-  ccord_slash_option options[CCORD_SLASH_MAX_OPTIONS];
-  size_t option_count;
   uint8_t command_type;          // 0/1 = CHAT_INPUT (slash), 2 = USER, 3 = MESSAGE context-menu command
 } ccord_slash_command;
 
@@ -314,12 +314,6 @@ enum {
 #define CCORD_MSGFLAG_IS_COMPONENTS_V2 (1u << 15)   // `components` is a v2 tree: no content, embeds, stickers or poll
 
 typedef struct ccord_message_rich {
-  uint32_t present;              // CCORD_RICH_HAS_*: what this block says (everything for a whole message)
-  bool text_absent;              // (an update) it did not carry the message text: the store keeps the stored text.
-                                 // Never set on a stored block.
-  uint16_t type;                 // Discord message type: 0 default, 19 reply, 7 join, 8 boost, 6 pin ...
-  uint32_t flags;                // CCORD_MSGFLAG_*
-  bool mention_everyone;         // @everyone or @here was used
   const ccord_id *mention_users; size_t mention_user_count;
   const ccord_id *mention_roles; size_t mention_role_count;
   const ccord_attachment *attachments; size_t attachment_count;
@@ -336,6 +330,12 @@ typedef struct ccord_message_rich {
   // message with CCORD_MSGFLAG_IS_COMPONENTS_V2 carries its components here instead of in `components`. They travel with
   // CCORD_RICH_HAS_COMPONENTS: an update that carries components replaces both.
   const ccord_component *v2_components; size_t v2_component_count;
+  uint32_t present;              // CCORD_RICH_HAS_*: what this block says (everything for a whole message)
+  uint32_t flags;                // CCORD_MSGFLAG_*
+  uint16_t type;                 // Discord message type: 0 default, 19 reply, 7 join, 8 boost, 6 pin ...
+  bool text_absent;              // (an update) it did not carry the message text: the store keeps the stored text.
+                                 // Never set on a stored block.
+  bool mention_everyone;         // @everyone or @here was used
 } ccord_message_rich;
 
 // A deep copy in one owned block (every string becomes ""-or-owned). nullptr when `src` is null (err stays clear) or on

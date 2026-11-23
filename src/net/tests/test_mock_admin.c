@@ -88,7 +88,7 @@ static void test_mock_polls_components_and_modals(void)
       .present = true,
       .question = "Best allocator?",
       .answer_count = 3,
-      .answers = {
+      .answers = (ccord_poll_answer[]){
         {.id = 1, .text = "Arena", .votes = 2},
         {.id = 2, .text = "jemalloc", .votes = 5},
         {.id = 3, .text = "System", .votes = 1},

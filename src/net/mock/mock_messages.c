@@ -1027,14 +1027,16 @@ ccord_status mock_create_poll(ccord_transport *t, ccord_id channel_id, const cco
     it.ev.text = m->late_poll_fail;
     return mk_push_item(m, &it, err);
   }
+  ccord_poll_answer answers[CCORD_RICH_MAX_POLL_ANSWERS] = {0};
   ccord_message_rich rich = {.present = CCORD_RICH_ALL};
   rich.poll.present = true;
   rich.poll.question = poll->question;
+  rich.poll.answers = answers;
   rich.poll.answer_count = poll->answer_count;
   rich.poll.multiselect = poll->allow_multiselect;
   rich.poll.expiry_ms = mk_message_time(m) + (int64_t)poll->duration_hours * 3600 * 1000;
-  for (size_t i = 0; i < poll->answer_count; i++) {
-    rich.poll.answers[i] = (ccord_poll_answer){.id = (uint32_t)i + 1u, .text = poll->answers[i], .emoji = ""};
+  for (size_t i = 0; i < poll->answer_count && i < CCORD_RICH_MAX_POLL_ANSWERS; i++) {
+    answers[i] = (ccord_poll_answer){.id = (uint32_t)i + 1u, .text = poll->answers[i], .emoji = ""};
   }
   ccord_message msg = mk_store_new_rich(m, ci, m->self_id, "", 0, &rich, err, &st);
   if (st != CCORD_OK) return st;

@@ -18,6 +18,7 @@ typedef struct sample {
   ccord_embed_field ffields[1];
   ccord_embed fwd_emb[1];
   ccord_attachment fwd_att[1];
+  ccord_poll_answer pa[2];
   ccord_message_rich r;
 } sample;
 
@@ -60,11 +61,11 @@ static void fill(sample *s)
     .ref_preview = {.present = true, .author_id = 11, .author_name = "Ann", .content = s->rtext, .has_attachments = true},
     .forward = {.present = true, .content = "forwarded", .timestamp_ms = 5, .attachments = s->fwd_att, .attachment_count = 1,
                 .embeds = s->fwd_emb, .embed_count = 1},
-    .poll = {.present = true, .question = s->pq, .answer_count = 2, .expiry_ms = 42, .multiselect = true},
+    .poll = {.present = true, .question = s->pq, .answers = s->pa, .answer_count = 2, .expiry_ms = 42, .multiselect = true},
     .thread = {.id = 31, .name = s->tname, .message_count = 4},
   };
-  s->r.poll.answers[0] = (ccord_poll_answer){.id = 1, .text = s->pa0, .emoji = "x", .votes = 3, .me_voted = true};
-  s->r.poll.answers[1] = (ccord_poll_answer){.id = 2, .text = s->pa1, .votes = 1};
+  s->pa[0] = (ccord_poll_answer){.id = 1, .text = s->pa0, .emoji = "x", .votes = 3, .me_voted = true};
+  s->pa[1] = (ccord_poll_answer){.id = 2, .text = s->pa1, .votes = 1};
 }
 
 static void test_clone_is_deep(void)
@@ -330,8 +331,9 @@ static void test_validation(void)
 
   ccord_message_rich rp = {.reference = {.kind = (ccord_ref_kind)(CCORD_REF_FORWARD + 1)}};
   CT_CHECK(ccord_message_rich_validate(&rp, &err) != CCORD_OK);
-  ccord_message_rich rq = {.poll = {.present = true, .question = "q", .answer_count = CCORD_RICH_MAX_POLL_ANSWERS}};
-  for (size_t i = 0; i < CCORD_RICH_MAX_POLL_ANSWERS; i++) { rq.poll.answers[i].text = "a"; rq.poll.answers[i].emoji = ""; }
+  ccord_poll_answer pa[CCORD_RICH_MAX_POLL_ANSWERS];
+  for (size_t i = 0; i < CCORD_RICH_MAX_POLL_ANSWERS; i++) pa[i] = (ccord_poll_answer){.text = "a", .emoji = ""};
+  ccord_message_rich rq = {.poll = {.present = true, .question = "q", .answers = pa, .answer_count = CCORD_RICH_MAX_POLL_ANSWERS}};
   CT_CHECK(ccord_message_rich_validate(&rq, &err) == CCORD_OK);
   rq.poll.answer_count = CCORD_RICH_MAX_POLL_ANSWERS + 1;
   CT_CHECK(ccord_message_rich_validate(&rq, &err) == CCORD_ERR_RANGE);
@@ -339,7 +341,7 @@ static void test_validation(void)
   rq.poll.expiry_ms = -3;
   CT_CHECK(ccord_message_rich_validate(&rq, &err) != CCORD_OK);
   rq.poll.expiry_ms = 0;
-  rq.poll.answers[0].text = "bad\xFE";
+  pa[0].text = "bad\xFE";
   CT_CHECK(ccord_message_rich_validate(&rq, &err) != CCORD_OK);
 
   // A null string in a producer-built block is an empty text (clone normalises it to "").
@@ -874,6 +876,10 @@ static void test_ephemeral_and_slash_commands(void)
   CT_CHECK(!ccord_message_is_ephemeral(&nm));
   CT_CHECK(!ccord_message_is_ephemeral(nullptr));
 
+  const ccord_slash_option opts[2] = {
+    {.kind = CCORD_SLASH_OPT_STRING, .name = "subject", .description = "Topic name", .required = true, .autocomplete = true},
+    {.kind = CCORD_SLASH_OPT_BOOLEAN, .name = "ephemeral", .description = "Private reply", .required = false, .autocomplete = false},
+  };
   ccord_slash_command cmd = {
     .id = 9001,
     .application_id = 1011,
@@ -883,10 +889,7 @@ static void test_ephemeral_and_slash_commands(void)
     .default_member_permissions = UINT64_MAX,
     .dm_permission = true,
     .option_count = 2,
-    .options = {
-      {.kind = CCORD_SLASH_OPT_STRING, .name = "subject", .description = "Topic name", .required = true, .autocomplete = true},
-      {.kind = CCORD_SLASH_OPT_BOOLEAN, .name = "ephemeral", .description = "Private reply", .required = false, .autocomplete = false},
-    },
+    .options = opts,
   };
   CT_CHECK(ccord_slash_command_validate(&cmd, &err) == CCORD_OK);
   CT_CHECK(ccord_slash_command_validate(nullptr, &err) == CCORD_ERR_INVALID);
@@ -900,11 +903,16 @@ static void test_ephemeral_and_slash_commands(void)
   bad = cmd;
   bad.option_count = CCORD_SLASH_MAX_OPTIONS + 1;
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_RANGE);
+  ccord_slash_option bad_opts[2];
   bad = cmd;
-  bad.options[0].kind = (ccord_slash_opt_kind)99;
+  memcpy(bad_opts, opts, sizeof opts);
+  bad.options = bad_opts;
+  bad_opts[0].kind = (ccord_slash_opt_kind)99;
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
   bad = cmd;
-  bad.options[1].autocomplete = true; // BOOLEAN cannot have autocomplete
+  memcpy(bad_opts, opts, sizeof opts);
+  bad.options = bad_opts;
+  bad_opts[1].autocomplete = true; // BOOLEAN cannot have autocomplete
   CT_CHECK(ccord_slash_command_validate(&bad, &err) == CCORD_ERR_INVALID);
 }
 

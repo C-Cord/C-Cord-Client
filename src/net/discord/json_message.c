@@ -367,6 +367,8 @@ static void rich_poll(ccord_arena *a, const ccord_json *p, ccord_poll *out)
   const ccord_json *answers = ccord_json_get(p, "answers");
   size_t n = dj_is_json_array(answers) ? ccord_json_array_len(answers) : 0;
   if (n > CCORD_RICH_MAX_POLL_ANSWERS) n = CCORD_RICH_MAX_POLL_ANSWERS;
+  out->answers = n > 0 ? rich_alloc(a, n, sizeof *out->answers) : nullptr;
+  if (n > 0 && !out->answers) n = 0;
   for (size_t i = 0; i < n; i++) {
     const ccord_json *aj = ccord_json_array_at(answers, i);
     if (!dj_is_json_object(aj)) continue;

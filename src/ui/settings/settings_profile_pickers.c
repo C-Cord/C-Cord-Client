@@ -311,7 +311,8 @@ static size_t gather_real_clan_options(const ccord_ui *ui, clan_option *out, siz
 
 // Gathers owned collectibles of `want_kind` from session cache, plus the currently equipped item if not in cache.
 static size_t gather_real_collectibles(const ccord_ui *ui, const profile_state *s, ccord_collectible_kind want_kind,
-                                       ccord_owned_collectible *out, size_t max_out)
+                                       const ccord_owned_collectible **out, size_t max_out,
+                                       ccord_owned_collectible *eq_buf)
 {
   if (!ui || !out || max_out == 0) return 0;
   size_t count = 0;
@@ -320,99 +321,105 @@ static size_t gather_real_collectibles(const ccord_ui *ui, const profile_state *
     const ccord_owned_collectible *list = ccord_session_collectibles(ui->d.session, &total);
     for (size_t i = 0; i < total && count < max_out; i++) {
       if (list[i].kind != want_kind) continue;
-      out[count++] = list[i];
+      out[count++] = &list[i];
     }
   }
   // Ensure the user's currently equipped item is always selectable/visible even before inventory completes or
   // if acquired via a special entitlement not returned by collectibles-purchases.
-  if (s && count < max_out) {
+  if (s && eq_buf && count < max_out) {
     if (want_kind == CCORD_COLLECTIBLE_AVATAR_DECORATION &&
         (s->base.deco_sku_id != CCORD_ID_NONE || s->base.deco_url[0])) {
       bool found = false;
       for (size_t i = 0; i < count; i++) {
-        if ((s->base.deco_sku_id != CCORD_ID_NONE && out[i].sku_id == s->base.deco_sku_id) ||
-            url_contains_asset(s->base.deco_url, out[i].asset)) {
+        if ((s->base.deco_sku_id != CCORD_ID_NONE && out[i]->sku_id == s->base.deco_sku_id) ||
+            url_contains_asset(s->base.deco_url, out[i]->asset)) {
           found = true;
           break;
         }
       }
       if (!found && s->base.deco_sku_id != CCORD_ID_NONE) {
-        ccord_owned_collectible eq = {
+        *eq_buf = (ccord_owned_collectible){
           .kind = CCORD_COLLECTIBLE_AVATAR_DECORATION,
           .sku_id = s->base.deco_sku_id,
           .item_id = s->base.deco_sku_id,
         };
-        snprintf(eq.name, sizeof eq.name, "%s", s->base.deco_name[0] ? s->base.deco_name : "Equipped Decoration");
-        snprintf(eq.category, sizeof eq.category, "Equipped");
-        snprintf(eq.asset, sizeof eq.asset, "%s", s->base.deco_asset);
-        build_deco_cdn_url(s->base.deco_url[0] ? s->base.deco_url : s->base.deco_asset, true, eq.cdn_url);
-        build_deco_cdn_url(s->base.deco_url[0] ? s->base.deco_url : s->base.deco_asset, false, eq.static_url);
-        out[count++] = eq;
+        snprintf(eq_buf->name, sizeof eq_buf->name, "%s",
+                 s->base.deco_name[0] ? s->base.deco_name : "Equipped Decoration");
+        snprintf(eq_buf->category, sizeof eq_buf->category, "Equipped");
+        snprintf(eq_buf->asset, sizeof eq_buf->asset, "%s", s->base.deco_asset);
+        build_deco_cdn_url(s->base.deco_url[0] ? s->base.deco_url : s->base.deco_asset, true, eq_buf->cdn_url);
+        build_deco_cdn_url(s->base.deco_url[0] ? s->base.deco_url : s->base.deco_asset, false, eq_buf->static_url);
+        out[count++] = eq_buf;
       }
     } else if (want_kind == CCORD_COLLECTIBLE_PROFILE_EFFECT && s->base.effect_id[0]) {
       ccord_id eid = CCORD_ID_NONE;
       (void)ccord_id_parse(s->base.effect_id, strlen(s->base.effect_id), &eid);
       bool found = false;
       for (size_t i = 0; i < count; i++) {
-        if (eid != CCORD_ID_NONE && (out[i].item_id == eid || out[i].sku_id == eid)) { found = true; break; }
+        if (eid != CCORD_ID_NONE && (out[i]->item_id == eid || out[i]->sku_id == eid)) { found = true; break; }
       }
       if (!found && eid != CCORD_ID_NONE) {
-        ccord_owned_collectible eq = {
+        *eq_buf = (ccord_owned_collectible){
           .kind = CCORD_COLLECTIBLE_PROFILE_EFFECT,
           .sku_id = eid,
           .item_id = eid,
           .has_effect = s->base.has_effect_cfg,
           .effect = s->base.effect_cfg,
         };
-        snprintf(eq.name, sizeof eq.name, "%s", s->base.effect_name[0] ? s->base.effect_name : "Equipped Effect");
-        snprintf(eq.category, sizeof eq.category, "Equipped");
-        snprintf(eq.cdn_url, sizeof eq.cdn_url, "%s", s->base.effect_thumb);
-        snprintf(eq.static_url, sizeof eq.static_url, "%s", s->base.effect_thumb);
-        out[count++] = eq;
+        snprintf(eq_buf->name, sizeof eq_buf->name, "%s",
+                 s->base.effect_name[0] ? s->base.effect_name : "Equipped Effect");
+        snprintf(eq_buf->category, sizeof eq_buf->category, "Equipped");
+        snprintf(eq_buf->cdn_url, sizeof eq_buf->cdn_url, "%s", s->base.effect_thumb);
+        snprintf(eq_buf->static_url, sizeof eq_buf->static_url, "%s", s->base.effect_thumb);
+        out[count++] = eq_buf;
       }
     } else if (want_kind == CCORD_COLLECTIBLE_NAMEPLATE &&
                (s->base.nameplate_sku_id != CCORD_ID_NONE || s->base.nameplate_asset[0])) {
       bool found = false;
       for (size_t i = 0; i < count; i++) {
-        if ((s->base.nameplate_sku_id != CCORD_ID_NONE && out[i].sku_id == s->base.nameplate_sku_id) ||
-            (s->base.nameplate_asset[0] && strcmp(out[i].asset, s->base.nameplate_asset) == 0)) {
+        if ((s->base.nameplate_sku_id != CCORD_ID_NONE && out[i]->sku_id == s->base.nameplate_sku_id) ||
+            (s->base.nameplate_asset[0] && strcmp(out[i]->asset, s->base.nameplate_asset) == 0)) {
           found = true;
           break;
         }
       }
       if (!found && s->base.nameplate_sku_id != CCORD_ID_NONE) {
-        ccord_owned_collectible eq = {
+        *eq_buf = (ccord_owned_collectible){
           .kind = CCORD_COLLECTIBLE_NAMEPLATE,
           .sku_id = s->base.nameplate_sku_id,
           .item_id = s->base.nameplate_sku_id,
         };
-        snprintf(eq.name, sizeof eq.name, "%s", s->base.nameplate_name[0] ? s->base.nameplate_name : "Equipped Nameplate");
-        snprintf(eq.category, sizeof eq.category, "Equipped");
-        snprintf(eq.asset, sizeof eq.asset, "%s", s->base.nameplate_asset);
-        snprintf(eq.palette, sizeof eq.palette, "%s", s->base.nameplate_palette[0] ? s->base.nameplate_palette : "cobalt");
-        out[count++] = eq;
+        snprintf(eq_buf->name, sizeof eq_buf->name, "%s",
+                 s->base.nameplate_name[0] ? s->base.nameplate_name : "Equipped Nameplate");
+        snprintf(eq_buf->category, sizeof eq_buf->category, "Equipped");
+        snprintf(eq_buf->asset, sizeof eq_buf->asset, "%s", s->base.nameplate_asset);
+        snprintf(eq_buf->palette, sizeof eq_buf->palette, "%s",
+                 s->base.nameplate_palette[0] ? s->base.nameplate_palette : "cobalt");
+        out[count++] = eq_buf;
       }
     } else if (want_kind == CCORD_COLLECTIBLE_PROFILE_FRAME && s->base.frame_sku_id != CCORD_ID_NONE) {
       bool found = false;
       for (size_t i = 0; i < count; i++) {
-        if (out[i].sku_id == s->base.frame_sku_id || out[i].frame.sku_id == s->base.frame_sku_id) {
+        if (out[i]->sku_id == s->base.frame_sku_id ||
+            (out[i]->has_frame && out[i]->frame.sku_id == s->base.frame_sku_id)) {
           found = true;
           break;
         }
       }
       if (!found) {
-        ccord_owned_collectible eq = {
+        *eq_buf = (ccord_owned_collectible){
           .kind = CCORD_COLLECTIBLE_PROFILE_FRAME,
           .sku_id = s->base.frame_sku_id,
           .item_id = s->base.frame_sku_id,
           .has_frame = s->base.has_frame_cfg,
           .frame = s->base.frame_cfg,
         };
-        snprintf(eq.name, sizeof eq.name, "%s", s->base.frame_name[0] ? s->base.frame_name : "Equipped Frame");
-        snprintf(eq.category, sizeof eq.category, "Equipped");
-        snprintf(eq.cdn_url, sizeof eq.cdn_url, "%s", s->base.frame_thumb);
-        snprintf(eq.static_url, sizeof eq.static_url, "%s", s->base.frame_thumb);
-        out[count++] = eq;
+        snprintf(eq_buf->name, sizeof eq_buf->name, "%s",
+                 s->base.frame_name[0] ? s->base.frame_name : "Equipped Frame");
+        snprintf(eq_buf->category, sizeof eq_buf->category, "Equipped");
+        snprintf(eq_buf->cdn_url, sizeof eq_buf->cdn_url, "%s", s->base.frame_thumb);
+        snprintf(eq_buf->static_url, sizeof eq_buf->static_url, "%s", s->base.frame_thumb);
+        out[count++] = eq_buf;
       }
     }
   }
@@ -420,13 +427,13 @@ static size_t gather_real_collectibles(const ccord_ui *ui, const profile_state *
 }
 
 // Collect unique real categories/palettes from the user's actual owned items (filter[0] is always "All").
-static size_t collect_real_filters(const ccord_owned_collectible *items, size_t nitems,
+static size_t collect_real_filters(const ccord_owned_collectible *const *items, size_t nitems,
                                    char filters[6][48])
 {
   snprintf(filters[0], 48, "All");
   size_t nf = 1;
   for (size_t i = 0; i < nitems && nf < 6u; i++) {
-    const char *cat = items[i].category[0] ? items[i].category : items[i].palette;
+    const char *cat = items[i]->category[0] ? items[i]->category : items[i]->palette;
     if (!cat || !cat[0]) continue;
     bool dup = false;
     for (size_t k = 1; k < nf; k++) {
@@ -915,7 +922,8 @@ void sp_picker_draw(ccord_ui *ui, ccord_renderer *r, profile_state *s)
   }
 
   // Gather real owned items (or real guild server tags)
-  ccord_owned_collectible owned[CCORD_COLLECTIBLES_MAX];
+  const ccord_owned_collectible *owned[CCORD_COLLECTIBLES_MAX];
+  ccord_owned_collectible eq_fallback;
   size_t nowned = 0;
   clan_option clans[64];
   size_t nclans = 0;
@@ -923,7 +931,7 @@ void sp_picker_draw(ccord_ui *ui, ccord_renderer *r, profile_state *s)
   if (p->kind == PROF_PICK_CLAN) {
     nclans = gather_real_clan_options(ui, clans, 64, &clans_loading);
   } else {
-    nowned = gather_real_collectibles(ui, s, ckind, owned, CCORD_COLLECTIBLES_MAX);
+    nowned = gather_real_collectibles(ui, s, ckind, owned, CCORD_COLLECTIBLES_MAX, &eq_fallback);
   }
 
   // Search box + dynamic real filter chips
@@ -1054,7 +1062,7 @@ void sp_picker_draw(ccord_ui *ui, ccord_renderer *r, profile_state *s)
     }
   } else {
     for (size_t i = 0; i < nowned; i++) {
-      const ccord_owned_collectible *e = &owned[i];
+      const ccord_owned_collectible *e = owned[i];
       const char *ecat = e->category[0] ? e->category : e->palette;
       if (active_cat && (!ecat || strcmp(ecat, active_cat) != 0)) continue;
       if (!ci_contains(e->name, query) && !ci_contains(ecat, query)) continue;
@@ -1430,10 +1438,11 @@ bool sp_picker_click(ccord_ui *ui, profile_state *s, float x, float y)
                                      : (p->kind == PROF_PICK_EFFECT) ? CCORD_COLLECTIBLE_PROFILE_EFFECT
                                      : (p->kind == PROF_PICK_FRAME) ? CCORD_COLLECTIBLE_PROFILE_FRAME
                                                                     : CCORD_COLLECTIBLE_NAMEPLATE;
-        ccord_owned_collectible owned[CCORD_COLLECTIBLES_MAX];
-        size_t nowned = gather_real_collectibles(ui, s, ckind, owned, CCORD_COLLECTIBLES_MAX);
+        const ccord_owned_collectible *owned[CCORD_COLLECTIBLES_MAX];
+        ccord_owned_collectible eq_fallback;
+        size_t nowned = gather_real_collectibles(ui, s, ckind, owned, CCORD_COLLECTIBLES_MAX, &eq_fallback);
         if ((size_t)h->arg < nowned) {
-          const ccord_owned_collectible *e = &owned[h->arg];
+          const ccord_owned_collectible *e = owned[h->arg];
           p->staged_sku = e->sku_id;
           snprintf(p->staged_name, sizeof p->staged_name, "%s", e->name);
           if (p->kind == PROF_PICK_EFFECT) {

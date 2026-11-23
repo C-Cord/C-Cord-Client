@@ -324,9 +324,11 @@ static void measure_rich(rich_sizer *sz, const ccord_message_rich *src)
     size_t n_ans = src->poll.answer_count < CCORD_RICH_MAX_POLL_ANSWERS
                      ? src->poll.answer_count
                      : CCORD_RICH_MAX_POLL_ANSWERS;
-    for (size_t i = 0; i < n_ans && sz->ok; i++) {
-      size_str(sz, src->poll.answers[i].text);
-      size_str(sz, src->poll.answers[i].emoji);
+    if (size_array(sz, src->poll.answers, n_ans, sizeof(ccord_poll_answer))) {
+      for (size_t i = 0; i < n_ans && sz->ok; i++) {
+        size_str(sz, src->poll.answers[i].text);
+        size_str(sz, src->poll.answers[i].emoji);
+      }
     }
   }
   size_str(sz, src->thread.name);
@@ -362,21 +364,17 @@ static void write_rich(rich_writer *w, const ccord_message_rich *src, ccord_mess
     size_t n_ans = src->poll.answer_count < CCORD_RICH_MAX_POLL_ANSWERS
                      ? src->poll.answer_count
                      : CCORD_RICH_MAX_POLL_ANSWERS;
-    out->poll.answer_count = n_ans;
-    for (size_t i = 0; i < n_ans; i++) {
-      out->poll.answers[i].text = write_str(w, src->poll.answers[i].text);
-      out->poll.answers[i].emoji = write_str(w, src->poll.answers[i].emoji);
-    }
-    for (size_t i = n_ans; i < CCORD_RICH_MAX_POLL_ANSWERS; i++) {
-      out->poll.answers[i].text = "";
-      out->poll.answers[i].emoji = "";
+    ccord_poll_answer *pa = write_array(w, src->poll.answers, n_ans, sizeof *pa);
+    out->poll.answers = pa;
+    out->poll.answer_count = pa ? n_ans : 0u;
+    for (size_t i = 0; pa && i < n_ans; i++) {
+      pa[i].text = write_str(w, src->poll.answers[i].text);
+      pa[i].emoji = write_str(w, src->poll.answers[i].emoji);
     }
   } else {
     out->poll.question = "";
+    out->poll.answers = nullptr;
     out->poll.answer_count = 0;
-    for (size_t i = 0; i < CCORD_RICH_MAX_POLL_ANSWERS; i++) {
-      out->poll.answers[i] = (ccord_poll_answer){.text = "", .emoji = ""};
-    }
   }
   out->thread.name = write_str(w, src->thread.name);
   out->components = write_components(w, src->components, src->component_row_count);

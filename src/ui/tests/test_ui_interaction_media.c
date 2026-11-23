@@ -1675,7 +1675,7 @@ static void test_polls_components_and_modals(void)
       .present = true,
       .question = "Best rendering backend?",
       .answer_count = 2,
-      .answers = {
+      .answers = (ccord_poll_answer[]){
         {.id = 1, .text = "Vulkan", .votes = 2},
         {.id = 2, .text = "OpenGL", .votes = 1},
       },

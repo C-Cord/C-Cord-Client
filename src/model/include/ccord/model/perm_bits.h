@@ -90,9 +90,9 @@ typedef enum ccord_member_group_kind : uint8_t {
   CCORD_MEMBER_GROUP_OFFLINE,
 } ccord_member_group_kind;
 typedef struct ccord_member_group {
-  ccord_member_group_kind kind;
   ccord_id role_id;              // CCORD_MEMBER_GROUP_ROLE only
   uint32_t count;
+  ccord_member_group_kind kind;
 } ccord_member_group;
 typedef struct ccord_channel_overwrites {
   ccord_id channel_id;

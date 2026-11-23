@@ -157,6 +157,7 @@ typedef struct typing_entry {
 typedef struct slash_bucket {
   ccord_id guild_id;
   ccord_slash_command *cmds;
+  ccord_slash_option *opts_pool;
   size_t n;
 } slash_bucket;
 

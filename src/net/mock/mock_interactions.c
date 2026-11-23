@@ -24,6 +24,24 @@ ccord_status mock_request_slash_commands(ccord_transport *t, ccord_id guild_id, 
   it.slash_own = ccord_calloc(7, sizeof *it.slash_own);
   if (!it.slash_own) return ccord_error_set(err, CCORD_ERR_NOMEM, "mock: out of memory");
 
+  static const ccord_slash_option k_echo_opts[] = {
+    {.kind = CCORD_SLASH_OPT_STRING, .name = "text", .description = "Message text to echo", .required = true},
+    {.kind = CCORD_SLASH_OPT_BOOLEAN, .name = "ephemeral", .description = "Only show to you", .required = false},
+  };
+  static const ccord_slash_option k_topic_opts[] = {
+    {.kind = CCORD_SLASH_OPT_STRING, .name = "subject", .description = "Topic name", .required = true, .autocomplete = true},
+  };
+  static const ccord_slash_option k_purge_opts[] = {
+    {.kind = CCORD_SLASH_OPT_INTEGER, .name = "count", .description = "How many messages", .required = true},
+  };
+  static const ccord_slash_option k_config_opts[] = {
+    {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "show", .description = "Show current settings", .parent_plus_one = 0},
+    {.kind = CCORD_SLASH_OPT_SUB_COMMAND_GROUP, .name = "theme", .description = "Manage theme settings", .parent_plus_one = 0},
+    {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "set", .description = "Set active theme preset", .parent_plus_one = 2},
+    {.kind = CCORD_SLASH_OPT_STRING, .name = "preset", .description = "Theme preset name", .required = true, .parent_plus_one = 3},
+    {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "reset", .description = "Reset theme to default", .parent_plus_one = 2},
+  };
+
   ccord_id app_id = m->users[10].id; // Lua Bot (1011)
   size_t count = 0;
   it.slash_own[count++] = (ccord_slash_command){
@@ -34,41 +52,32 @@ ccord_status mock_request_slash_commands(ccord_transport *t, ccord_id guild_id, 
   it.slash_own[count++] = (ccord_slash_command){
     .id = 9102, .application_id = app_id, .guild_id = 0, .version = 9102, .command_type = 1,
     .name = "echo", .description = "Repeat text publicly or ephemerally",
-    .default_member_permissions = UINT64_MAX, .dm_permission = true, .option_count = 2,
-    .options = {
-      {.kind = CCORD_SLASH_OPT_STRING, .name = "text", .description = "Message text to echo", .required = true},
-      {.kind = CCORD_SLASH_OPT_BOOLEAN, .name = "ephemeral", .description = "Only show to you", .required = false},
-    },
+    .default_member_permissions = UINT64_MAX, .dm_permission = true,
+    .option_count = sizeof k_echo_opts / sizeof k_echo_opts[0],
+    .options = k_echo_opts,
   };
   it.slash_own[count++] = (ccord_slash_command){
     .id = 9103, .application_id = app_id, .guild_id = 0, .version = 9103, .command_type = 1,
     .name = "topic", .description = "Look up an engineering topic",
-    .default_member_permissions = UINT64_MAX, .dm_permission = true, .option_count = 1,
-    .options = {
-      {.kind = CCORD_SLASH_OPT_STRING, .name = "subject", .description = "Topic name", .required = true, .autocomplete = true},
-    },
+    .default_member_permissions = UINT64_MAX, .dm_permission = true,
+    .option_count = sizeof k_topic_opts / sizeof k_topic_opts[0],
+    .options = k_topic_opts,
   };
   if (guild_id != CCORD_DM_GUILD_ID && guild_id != CCORD_ID_NONE) {
     it.slash_own[count++] = (ccord_slash_command){
       .id = 9104, .application_id = app_id, .guild_id = guild_id, .version = 9104, .command_type = 1,
       .name = "purge", .description = "Delete recent messages (moderators only)",
-      .default_member_permissions = CCORD_PERM_MANAGE_MESSAGES, .dm_permission = false, .option_count = 1,
-      .options = {
-        {.kind = CCORD_SLASH_OPT_INTEGER, .name = "count", .description = "How many messages", .required = true},
-      },
+      .default_member_permissions = CCORD_PERM_MANAGE_MESSAGES, .dm_permission = false,
+      .option_count = sizeof k_purge_opts / sizeof k_purge_opts[0],
+      .options = k_purge_opts,
     };
   }
   it.slash_own[count++] = (ccord_slash_command){
     .id = 9105, .application_id = app_id, .guild_id = 0, .version = 9105, .command_type = 1,
     .name = "config", .description = "Inspect or change bot configuration",
-    .default_member_permissions = UINT64_MAX, .dm_permission = true, .option_count = 5,
-    .options = {
-      {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "show", .description = "Show current settings", .parent_plus_one = 0},
-      {.kind = CCORD_SLASH_OPT_SUB_COMMAND_GROUP, .name = "theme", .description = "Manage theme settings", .parent_plus_one = 0},
-      {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "set", .description = "Set active theme preset", .parent_plus_one = 2},
-      {.kind = CCORD_SLASH_OPT_STRING, .name = "preset", .description = "Theme preset name", .required = true, .parent_plus_one = 3},
-      {.kind = CCORD_SLASH_OPT_SUB_COMMAND, .name = "reset", .description = "Reset theme to default", .parent_plus_one = 2},
-    },
+    .default_member_permissions = UINT64_MAX, .dm_permission = true,
+    .option_count = sizeof k_config_opts / sizeof k_config_opts[0],
+    .options = k_config_opts,
   };
   it.slash_own[count++] = (ccord_slash_command){
     .id = 9106, .application_id = app_id, .guild_id = 0, .version = 9106, .command_type = 2,

@@ -53,10 +53,10 @@ typedef struct ccord_stream_config {
 } ccord_stream_config;
 typedef struct ccord_voice_state {
   ccord_id guild_id, channel_id, user_id;      // channel_id = 0 means disconnected
+  int64_t request_to_speak_timestamp;          // unix ms of the pending stage ask (0 = none)
   bool self_mute, self_deaf, self_video, self_stream;
   bool mute, deaf;                             // server-enforced mute / deafen
   bool suppress;                               // stage audience: mic suppressed until invited to speak
-  int64_t request_to_speak_timestamp;          // unix ms of the pending stage ask (0 = none)
   bool omit_suppress, omit_request_to_speak;   // true when partial gateway payload omitted suppress / request_to_speak_timestamp
 } ccord_voice_state;
 typedef struct ccord_voice_server {

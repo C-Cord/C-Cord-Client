@@ -14,7 +14,10 @@
 void store_slash_clear(ccord_store *s)
 {
   if (!s) return;
-  for (size_t i = 0; i < s->nslash; i++) ccord_free(s->slash[i].cmds);
+  for (size_t i = 0; i < s->nslash; i++) {
+    ccord_free(s->slash[i].cmds);
+    ccord_free(s->slash[i].opts_pool);
+  }
   ccord_free(s->slash);
   s->slash = nullptr;
   s->nslash = 0;
@@ -37,10 +40,12 @@ ccord_status ccord_store_set_slash_commands(ccord_store *s, ccord_id guild_id,
   }
 
   ccord_slash_command *copy = nullptr;
+  ccord_slash_option *pool = nullptr;
   size_t kept = 0;
   if (count > 0) {
     copy = ccord_alloc_array(count, sizeof *copy);
     if (!copy) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    size_t total_opts = 0;
     for (size_t i = 0; i < count; i++) {
       bool dup = false;
       for (size_t k = 0; k < kept; k++) {
@@ -49,14 +54,38 @@ ccord_status ccord_store_set_slash_commands(ccord_store *s, ccord_id guild_id,
           break;
         }
       }
-      if (!dup) copy[kept++] = cmds[i];
+      if (!dup) {
+        copy[kept] = cmds[i];
+        total_opts += cmds[i].option_count;
+        kept++;
+      }
+    }
+    if (total_opts > 0) {
+      pool = ccord_alloc_array(total_opts, sizeof *pool);
+      if (!pool) {
+        ccord_free(copy);
+        return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+      }
+    }
+    size_t off = 0;
+    for (size_t i = 0; i < kept; i++) {
+      size_t no = copy[i].option_count;
+      if (no > 0) {
+        memcpy(pool + off, copy[i].options, no * sizeof *pool);
+        copy[i].options = pool + off;
+        off += no;
+      } else {
+        copy[i].options = nullptr;
+      }
     }
   }
 
   for (size_t i = 0; i < s->nslash; i++) {
     if (s->slash[i].guild_id == guild_id) {
       ccord_free(s->slash[i].cmds);
+      ccord_free(s->slash[i].opts_pool);
       s->slash[i].cmds = copy;
+      s->slash[i].opts_pool = pool;
       s->slash[i].n = kept;
       store_bump_traffic(s);
       return CCORD_OK;
@@ -68,12 +97,13 @@ ccord_status ccord_store_set_slash_commands(ccord_store *s, ccord_id guild_id,
     slash_bucket *grown = ccord_realloc_array(s->slash, ncap, sizeof *grown);
     if (!grown) {
       ccord_free(copy);
+      ccord_free(pool);
       return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
     }
     s->slash = grown;
     s->capslash = ncap;
   }
-  s->slash[s->nslash++] = (slash_bucket){.guild_id = guild_id, .cmds = copy, .n = kept};
+  s->slash[s->nslash++] = (slash_bucket){.guild_id = guild_id, .cmds = copy, .opts_pool = pool, .n = kept};
   store_bump_traffic(s);
   return CCORD_OK;
 }
