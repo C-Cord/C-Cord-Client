@@ -792,12 +792,20 @@ void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r)
     float sh = ui_line_h(ui, ss.size);
     float ny = has_status ? cy - (nh + sh) * 0.5f + 1.0f : cy - nh * 0.5f;
     float maxw = item.x + item.w - tx - 8.0f;
-    float tag_w = (u->is_bot ? 34.0f : 0.0f) + (u->clan_tag[0] ? 44.0f : 0.0f);
+    const char *ricon = ui_member_role_icon(ui, g, m->user_id);
+    float tag_w = (ricon ? 20.0f : 0.0f) +
+                  (u->is_bot ? 34.0f : 0.0f) + (u->clan_tag[0] ? 44.0f : 0.0f);
     const char *mname = (m->nick[0] != '\0') ? m->nick : ((u->display_name && u->display_name[0]) ? u->display_name : u->name);
     float name_avail = maxw - tag_w;
     if (name_avail < 32.0f) name_avail = maxw;
     float nw = ccord_text_draw_ellipsis(r, mname, strlen(mname), tx, ny, name_avail, &ns);
     float bx = tx + nw + 6.0f;
+    if (ricon && bx + 16.0f <= item.x + item.w - 4.0f) {
+      ccord_text_style ris = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(text_header));
+      ccord_vec2 rim = ccord_text_measure(r, ricon, strlen(ricon), &ris, 0.0f);
+      ccord_text_draw(r, ricon, strlen(ricon), bx, ny + (nh - rim.y) * 0.5f, &ris, 0.0f);
+      bx += rim.x + 5.0f;
+    }
     if (u->clan_tag[0] && bx + 32.0f <= item.x + item.w - 4.0f) {
       bx += ui_draw_clan_badge_ex(ui, r, u->clan_guild_id, u->clan_tag, u->clan_badge, bx, ny, nh,
                                   UI_CLAN_LAYER_NONE) + 4.0f;

@@ -117,6 +117,7 @@ void ui_member_look_of(const ccord_ui *ui, ccord_id guild, const ccord_member *m
     out->color = d.color;
     out->badge = d.top_name;
     out->badge_color = d.top_color;
+    out->icon_emoji = d.icon_emoji;
     return;
   }
   bool plain = (!m->role_name || m->role_name[0] == '\0' || strcmp(m->role_name, "Members") == 0) && m->role_rank == 255;
@@ -137,6 +138,16 @@ ccord_color ui_role_color(const ccord_ui *ui, ccord_id guild_id, ccord_id user_i
   const ccord_member *m = ccord_store_find_member(ui->d.store, guild_id, user_id);
   if (m) return rgb_or_none(m->role_color, has);
   return (ccord_color){0, 0, 0, 0};
+}
+
+const char *ui_member_role_icon(const ccord_ui *ui, ccord_id guild_id, ccord_id user_id)
+{
+  if (!ui || !ui->d.store || guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) return nullptr;
+  ccord_member_display d;
+  if (ccord_store_member_display(ui->d.store, guild_id, user_id, &d) && d.icon_emoji && d.icon_emoji[0]) {
+    return d.icon_emoji;
+  }
+  return nullptr;
 }
 
 const ccord_channel *ui_selected_channel(const ccord_ui *ui)

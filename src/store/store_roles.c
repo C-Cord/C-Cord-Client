@@ -602,13 +602,14 @@ bool ccord_store_member_display(const ccord_store *s, ccord_id guild_id, ccord_i
   if (!e) return false;
   const ccord_id *ids = kv_slot_data_const(e);
   size_t n = e->n;
-  const ccord_role *group = nullptr, *top = nullptr, *tint = nullptr;
+  const ccord_role *group = nullptr, *top = nullptr, *tint = nullptr, *icon = nullptr;
   for (size_t i = 0; i < n; i++) {
     const ccord_role *r = guild_role_find(g, ids[i]);
     if (!r) continue;   // a role we have no record of cannot be displayed (@everyone is never in the member's list)
     if (!top || role_before(r, top)) top = r;
     if (r->hoist && (!group || role_before(r, group))) group = r;
     if (r->color != 0 && (!tint || role_before(r, tint))) tint = r;
+    if (r->unicode_emoji[0] != '\0' && (!icon || role_before(r, icon))) icon = r;
   }
   if (group) {
     out->group = group->name;
@@ -616,6 +617,7 @@ bool ccord_store_member_display(const ccord_store *s, ccord_id guild_id, ccord_i
     out->group_position = group->position;
   }
   if (tint) out->color = tint->color;
+  if (icon) out->icon_emoji = icon->unicode_emoji;
   if (top) {
     out->top_name = top->name;
     out->top_color = top->color;

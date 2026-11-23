@@ -275,8 +275,10 @@ typedef struct ui_member_look {
   uint32_t color;            // 0 = default text colour
   const char *badge;         // highest role, nullptr = none
   uint32_t badge_color;
+  const char *icon_emoji;    // highest role unicode_emoji icon, nullptr = none
 } ui_member_look;
 void ui_member_look_of(const ccord_ui *ui, ccord_id guild, const ccord_member *m, ui_member_look *out);
+const char *ui_member_role_icon(const ccord_ui *ui, ccord_id guild_id, ccord_id user_id);
 bool ui_in_rect(float x, float y, ccord_rect r);
 ccord_rect ui_rect(ccord_layout_rect r);
 void ui_open_settings(ccord_ui *ui, bool open);

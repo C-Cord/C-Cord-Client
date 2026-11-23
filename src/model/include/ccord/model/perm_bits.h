@@ -68,6 +68,7 @@ typedef struct ccord_role {
   bool hoist;                                  // listed separately in the member list
   bool mentionable;
   bool managed;                                // belongs to a bot or integration: cannot be assigned by hand
+  char unicode_emoji[16];                      // optional UTF-8 role icon emoji ("" when none)
 } ccord_role;
 // Server-administration lists (Server Settings). Strings are borrowed; the store deep-copies them.
 

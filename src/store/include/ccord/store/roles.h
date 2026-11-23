@@ -46,6 +46,7 @@ typedef struct ccord_member_display {
   uint32_t color;           // name colour, 0 = the default one
   const char *top_name;     // their highest role of any kind; nullptr = only @everyone
   uint32_t top_color;
+  const char *icon_emoji;   // highest role's unicode_emoji icon; nullptr = none
 } ccord_member_display;
 // False (and *out zeroed) when the guild's roles or the member's roles are unknown: then use the member's own role_*
 // fields. Strings are the store's and stay valid until the next role mutation.

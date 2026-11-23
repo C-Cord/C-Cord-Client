@@ -674,13 +674,16 @@ bool dj_perm_add_role(ccord_arena *a, perm_lists *L, const ccord_json *rj, ccord
   if (pos < INT32_MIN) pos = INT32_MIN;
   if (pos > INT32_MAX) pos = INT32_MAX;
   int64_t color = dj_json_i64(rj, "color", 0);
-  L->roles[L->nroles++] = (ccord_role){
+  ccord_role role = {
     .id = rid, .guild_id = gid,
     .name = dj_opt_text_dup(a, dj_jstr(rj, "name"), CCORD_NAME_MAX_BYTES * 4u),
     .color = color > 0 ? (uint32_t)(color & 0xFFFFFF) : 0u,
     .position = (int32_t)pos, .permissions = perms,
     .hoist = dj_perm_bool(rj, "hoist"), .mentionable = dj_perm_bool(rj, "mentionable"), .managed = dj_perm_bool(rj, "managed"),
   };
+  const char *ue = dj_jstr(rj, "unicode_emoji");
+  if (ue && ue[0]) snprintf(role.unicode_emoji, sizeof role.unicode_emoji, "%s", ue);
+  L->roles[L->nroles++] = role;
   return true;
 }
 
