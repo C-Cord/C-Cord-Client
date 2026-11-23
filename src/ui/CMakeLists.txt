@@ -54,6 +54,7 @@ add_library(ccord_ui STATIC
   chat/md_inline.c
   chat/md_render.c
   chat/md_ansi.c
+  chat/md_highlight.c
   chat/chat_header.c
   chat/chat_measure.c
   chat/chat_timeline.c

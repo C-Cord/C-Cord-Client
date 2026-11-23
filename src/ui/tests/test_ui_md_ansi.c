@@ -56,10 +56,62 @@ static void test_state_carries(void)
   CT_CHECK(nr == 1 && runs[0].st.has_fg && runs[0].st.fg == 0x859900);
 }
 
+static void test_md_highlight(void)
+{
+  char lbl[16];
+  CT_CHECK(ccord_md_hl_detect_lang("c", 1, lbl, sizeof lbl) == CCORD_HL_C && strcmp(lbl, "c") == 0);
+  CT_CHECK(ccord_md_hl_detect_lang("python", 6, lbl, sizeof lbl) == CCORD_HL_PYTHON);
+  CT_CHECK(ccord_md_hl_detect_lang("rs", 2, lbl, sizeof lbl) == CCORD_HL_RUST);
+  CT_CHECK(ccord_md_hl_detect_lang("diff", 4, lbl, sizeof lbl) == CCORD_HL_DIFF);
+  CT_CHECK(ccord_md_hl_detect_lang("json", 4, lbl, sizeof lbl) == CCORD_HL_JSON);
+  CT_CHECK(ccord_md_hl_detect_lang("", 0, lbl, sizeof lbl) == CCORD_HL_NONE);
+
+  // C tokenization: keyword + type + string + number + comment
+  ccord_hl_run runs[32];
+  ccord_hl_state st = {0};
+  const char *cline = "static int x = 42; // hi";
+  size_t nr = ccord_md_hl_tokenize(CCORD_HL_C, cline, strlen(cline), runs, 32, &st);
+  CT_CHECK(nr >= 5 && !st.in_block_comment);
+  bool saw_kw = false, saw_num = false, saw_cmt = false;
+  size_t total = 0;
+  for (size_t i = 0; i < nr; i++) {
+    total += runs[i].len;
+    if (runs[i].kind == CCORD_HL_KEYWORD) saw_kw = true;
+    if (runs[i].kind == CCORD_HL_NUMBER) saw_num = true;
+    if (runs[i].kind == CCORD_HL_COMMENT) saw_cmt = true;
+  }
+  CT_CHECK(total == strlen(cline) && saw_kw && saw_num && saw_cmt);
+
+  // Multi-line block comment state persists across lines and terminates cleanly.
+  const char *bc1 = "int a; /* start";
+  const char *bc2 = "middle";
+  const char *bc3 = "end */ return 0;";
+  (void)ccord_md_hl_tokenize(CCORD_HL_C, bc1, strlen(bc1), runs, 32, &st);
+  CT_CHECK(st.in_block_comment);
+  nr = ccord_md_hl_tokenize(CCORD_HL_C, bc2, strlen(bc2), runs, 32, &st);
+  CT_CHECK(st.in_block_comment && nr == 1 && runs[0].kind == CCORD_HL_COMMENT);
+  nr = ccord_md_hl_tokenize(CCORD_HL_C, bc3, strlen(bc3), runs, 32, &st);
+  CT_CHECK(!st.in_block_comment && nr >= 2 && runs[0].kind == CCORD_HL_COMMENT);
+
+  // Diff lines classify +/- cleanly
+  st = (ccord_hl_state){0};
+  nr = ccord_md_hl_tokenize(CCORD_HL_DIFF, "+added line", 11, runs, 32, &st);
+  CT_CHECK(nr == 1 && runs[0].kind == CCORD_HL_DIFF_ADD);
+  nr = ccord_md_hl_tokenize(CCORD_HL_DIFF, "-removed", 8, runs, 32, &st);
+  CT_CHECK(nr == 1 && runs[0].kind == CCORD_HL_DIFF_DEL);
+
+  // Dark vs light background palette adapts brightness for legibility.
+  ccord_color dark_bg = {30, 31, 34, 255}, light_bg = {245, 245, 248, 255}, fb = {220, 220, 220, 255};
+  ccord_color kw_dark = ccord_md_hl_color(CCORD_HL_KEYWORD, dark_bg, fb);
+  ccord_color kw_light = ccord_md_hl_color(CCORD_HL_KEYWORD, light_bg, fb);
+  CT_CHECK((int)kw_dark.r + (int)kw_dark.g + (int)kw_dark.b > (int)kw_light.r + (int)kw_light.g + (int)kw_light.b);
+}
+
 int main(void)
 {
   test_sample();
   test_malformed();
   test_state_carries();
+  test_md_highlight();
   return CT_RESULT("test_ui_md_ansi");
 }

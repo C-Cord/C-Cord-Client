@@ -748,6 +748,23 @@ static void md_ansi_draw_runs(ccord_ui *ui, ccord_renderer *r, const char *text,
   }
 }
 
+// Draws one syntax-highlighted code line as consecutive monospace token runs on a single row.
+static void md_hl_draw_runs(ccord_ui *ui, ccord_renderer *r, const char *text, const ccord_hl_run *runs, size_t nruns,
+                            float x, float y, float size, const ccord_text_style *base)
+{
+  float cx = x;
+  ccord_color bg = COL(bg_tertiary);
+  for (size_t i = 0; i < nruns; i++) {
+    ccord_hl_kind k = runs[i].kind;
+    ccord_font_style font = (k == CCORD_HL_KEYWORD) ? CCORD_FONT_MONO_BOLD : CCORD_FONT_MONO;
+    ccord_color fg = ccord_md_hl_color(k, bg, base->color);
+    ccord_text_style st = ui_style(ui, font, size, fg);
+    ccord_vec2 m = ccord_text_measure(r, text + runs[i].off, runs[i].len, &st, 0.0f);
+    ccord_text_draw(r, text + runs[i].off, runs[i].len, cx, y, &st, 0.0f);
+    cx += m.x;
+  }
+}
+
 // Fenced code blocks (``` ... ```), headings (#/##/###/-#), > / >>> blockquotes, lists, and plain paragraphs.
 // Returns total height and, when draw is true, paints the block decorations and text.
 float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t len, float x, float y,
@@ -765,7 +782,10 @@ float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
   bool fence_first_line = false;
   size_t fence_code_start = 0;
   bool fence_ansi = false;
+  ccord_hl_lang fence_lang = CCORD_HL_NONE;
+  char fence_label[24] = {0};
   ccord_ansi_state ansi_st = {0};
+  ccord_hl_state hl_st = {0};
   while (pos <= len) {
     size_t end = pos;
     while (end < len && text[end] != '\n') end++;
@@ -777,7 +797,10 @@ float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
       if (fenced) {
         fence_first_line = true;
         fence_ansi = md_fence_is_ansi(line + 3, ll - 3);
+        fence_label[0] = '\0';
+        fence_lang = fence_ansi ? CCORD_HL_NONE : ccord_md_hl_detect_lang(line + 3, ll - 3, fence_label, sizeof fence_label);
         ansi_st = (ccord_ansi_state){0};
+        hl_st = (ccord_hl_state){0};
         fence_code_start = (end < len) ? (end + 1) : len;
       }
     } else if (fenced) {
@@ -795,6 +818,11 @@ float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
         flen = ccord_md_ansi_parse(fline, flen, ansi_buf, sizeof ansi_buf, ansi_runs, 32, &ansi_nruns, &ansi_st);
         fline = ansi_buf;
       }
+      ccord_hl_run hl_runs[64];
+      size_t hl_nruns = 0;
+      if (!fence_ansi && fence_lang != CCORD_HL_NONE && flen > 0) {
+        hl_nruns = ccord_md_hl_tokenize(fence_lang, fline, flen, hl_runs, 64, &hl_st);
+      }
       ccord_vec2 ct = ccord_text_measure(r, fline, flen, &code_st, cw);
       float h = maxf(ct.y, code_lh) + 8.0f;
       if (draw) {
@@ -805,6 +833,9 @@ float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
         dc_record_text_hit(ui, (ccord_rect){x + 10.0f, py + 4.0f, ct.x, maxf(ct.y, code_lh)});
         if (fence_ansi && flen && ct.x <= cw + 0.5f) {
           md_ansi_draw_runs(ui, r, fline, ansi_runs, ansi_nruns, x + 10.0f, py + 4.0f, code_size, code_lh, &code_st);
+        } else if (hl_nruns > 0 && flen && ct.x <= cw + 0.5f) {
+          md_hl_draw_runs(ui, r, fline, hl_runs, hl_nruns, x + 10.0f, py + 4.0f, code_size, &code_st);
+          md_dbg_code_run(ui, fline, flen, code_st.color, false, code_st.color, false, false, false);
         } else if (flen) {
           ccord_text_draw(r, fline, flen, x + 10.0f, py + 4.0f, &code_st, cw);
           md_dbg_code_run(ui, fline, flen, code_st.color, false, code_st.color, false, false, fence_ansi);
@@ -816,6 +847,16 @@ float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
           ccord_text_style cbs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 4.0f, COL(text_muted));
           ccord_vec2 cbt = ccord_text_measure(r, "Copy", 4, &cbs, 0.0f);
           ccord_text_draw(r, "Copy", 4, cbtn.x + (cbtn.w - cbt.x) * 0.5f, cbtn.y + (cbtn.h - cbt.y) * 0.5f, &cbs, 0.0f);
+          if (fence_label[0] != '\0' && wrap > 44.0f + 90.0f) {
+            size_t llen = strlen(fence_label);
+            ccord_vec2 lsz = ccord_text_measure(r, fence_label, llen, &cbs, 0.0f);
+            float lw = lsz.x + 10.0f;
+            if (x + 10.0f + ct.x + 8.0f < cbtn.x - lw - 4.0f) {
+              ccord_rect lpill = {cbtn.x - lw - 4.0f, cbtn.y, lw, 18.0f};
+              ccord_draw_rrect(r, lpill, 3.0f, COL(bg_secondary));
+              ccord_text_draw(r, fence_label, llen, lpill.x + 5.0f, lpill.y + (lpill.h - lsz.y) * 0.5f, &cbs, 0.0f);
+            }
+          }
           size_t cend = fence_code_start;
           while (cend + 3 <= len) {
             if ((cend == fence_code_start || text[cend - 1] == '\n') && memcmp(text + cend, "```", 3) == 0) break;

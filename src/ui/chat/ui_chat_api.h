@@ -170,3 +170,41 @@ typedef struct ccord_ansi_run { size_t off, len; ccord_ansi_state st; } ccord_an
 // the style across lines. Returns the stripped length.
 size_t ccord_md_ansi_parse(const char *in, size_t len, char *out, size_t out_cap, ccord_ansi_run *runs,
                            size_t max_runs, size_t *nruns, ccord_ansi_state *st);
+
+// Syntax highlighting for fenced code blocks (md_highlight.c). Pure: source line + language -> token runs.
+typedef enum ccord_hl_lang : uint8_t {
+  CCORD_HL_NONE = 0,
+  CCORD_HL_C,
+  CCORD_HL_RUST,
+  CCORD_HL_PYTHON,
+  CCORD_HL_JS,
+  CCORD_HL_GO,
+  CCORD_HL_SHELL,
+  CCORD_HL_LUA,
+  CCORD_HL_JSON,
+  CCORD_HL_SQL,
+  CCORD_HL_MARKUP,
+  CCORD_HL_CONFIG,
+  CCORD_HL_DIFF,
+} ccord_hl_lang;
+
+typedef enum ccord_hl_kind : uint8_t {
+  CCORD_HL_PLAIN = 0,
+  CCORD_HL_KEYWORD,
+  CCORD_HL_TYPE,
+  CCORD_HL_STRING,
+  CCORD_HL_NUMBER,
+  CCORD_HL_COMMENT,
+  CCORD_HL_PREPROC,
+  CCORD_HL_FUNC,
+  CCORD_HL_DIFF_ADD,
+  CCORD_HL_DIFF_DEL,
+} ccord_hl_kind;
+
+typedef struct ccord_hl_state { bool in_block_comment; } ccord_hl_state;
+typedef struct ccord_hl_run { size_t off, len; ccord_hl_kind kind; } ccord_hl_run;
+
+ccord_hl_lang ccord_md_hl_detect_lang(const char *tag, size_t len, char *out_label, size_t label_cap);
+size_t ccord_md_hl_tokenize(ccord_hl_lang lang, const char *line, size_t len, ccord_hl_run *runs, size_t max_runs,
+                            ccord_hl_state *st);
+ccord_color ccord_md_hl_color(ccord_hl_kind kind, ccord_color bg, ccord_color fallback);
