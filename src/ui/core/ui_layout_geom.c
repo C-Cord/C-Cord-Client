@@ -1137,13 +1137,16 @@ void ui_compute_layout(ccord_ui *ui)
     }
     return;
   }
-  // Side-by-side stage + Text Chat: the stage pane takes the left of the chat column, the chat
-  // pane (header / timeline / composer) keeps the right. Falls back to the full-width stage when
-  // the window cannot hold both panes.
-  bool split = ui->stage_channel != CCORD_ID_NONE && ui->stage_chat_open;
+  // Side-by-side stage + Text Chat, or side-by-side parent channel + Thread Split View.
+  bool stage_split = ui->stage_channel != CCORD_ID_NONE && ui->stage_chat_open;
+  bool thread_split = !stage_split && ui->settings_threads_split_view &&
+                      ui->stage_channel == CCORD_ID_NONE && !ui->discovery_open &&
+                      !ui_guild_view_active(ui) && ui_thread_split_parent(ui) != nullptr;
+  bool split = stage_split || thread_split;
+  float split_ratio = stage_split ? ui->stage_split_ratio : ui->thread_split_ratio;
   if (split) {
     ccord_layout_compute_split_ratio(&ui->theme->m, ui->win_w, ui->win_h, ui->composer_box_h,
-                                     ui->stage_split_ratio, &ui->layout);
+                                     split_ratio, &ui->layout);
   } else {
     ccord_layout_compute(&ui->theme->m, ui->win_w, ui->win_h, ui->composer_box_h, &ui->layout);
   }
@@ -1161,7 +1164,7 @@ void ui_compute_layout(ccord_ui *ui)
     m.hide_members_below_width = ui->win_w + 1.0f;
     if (split) {
       ccord_layout_compute_split_ratio(&m, ui->win_w, ui->win_h, ui->composer_box_h,
-                                       ui->stage_split_ratio, &ui->layout);
+                                       split_ratio, &ui->layout);
     } else {
       ccord_layout_compute(&m, ui->win_w, ui->win_h, ui->composer_box_h, &ui->layout);
     }

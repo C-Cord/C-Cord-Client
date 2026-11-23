@@ -52,6 +52,13 @@ static bool handle_page_controls(ccord_ui *ui, const sgeom *g, float x, float y)
         ui->dirty = true;
         return true;
       }
+      if (ui_in_rect(x, y, st_hit_toggle(g, 8))) {
+        ui->settings_threads_split_view = !ui->settings_threads_split_view;
+        ui_compute_layout(ui);
+        ccord_vlist_invalidate_all(&ui->vlist);
+        ui->dirty = true;
+        return true;
+      }
       break;
     case SP_VOICE: {
       // g arrives shifted by -st_s_voice_scroll. The fixed scrollbar lives in the right margin
@@ -357,6 +364,7 @@ static int64_t settings_hover_key(const ccord_ui *ui, const sgeom *g, float x, f
       if (ui_in_rect(x, y, st_toggle_rect(&ga, 5))) return 225;
       if (ui_in_rect(x, y, st_quickcss_box_rect(&ga))) return 226;
       if (ui_in_rect(x, y, st_toggle_rect(&ga, 7))) return 227;
+      if (ui_in_rect(x, y, st_toggle_rect(&ga, 8))) return 228;
       return 0;
     }
     case SP_VOICE: {

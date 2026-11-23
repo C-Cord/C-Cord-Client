@@ -434,9 +434,11 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
       ui_draw_forum(ui, r);
       ui_draw_chat_header(ui, r);
     } else {
+      if (ui_thread_split_active(ui)) ui_draw_thread_parent_pane(ui, r);
       ui_draw_messages(ui, r);
       ui_draw_chat_header(ui, r);
       ui_draw_composer(ui, r);
+      if (ui_thread_split_active(ui)) ui_draw_thread_split_divider(ui, r);
     }
     ui_anchor_remember(ui);
     ui_draw_stale_bar(ui, r);

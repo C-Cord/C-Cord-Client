@@ -1148,7 +1148,7 @@ float st_page_max_scroll(const ccord_ui *ui, const sgeom *g)
       break;
     }
     case SP_APPEARANCE:
-      total = 44.0f + 8.0f * rh + (g->mobile ? 24.0f : 16.0f);
+      total = 44.0f + 9.0f * rh + (g->mobile ? 24.0f : 16.0f);
       break;
     case SP_STREAMING:
       total = (st_stream_row_y(g, 5) - g->content.y) + 40.0f;

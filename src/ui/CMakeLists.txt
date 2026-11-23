@@ -59,6 +59,7 @@ add_library(ccord_ui STATIC
   chat/chat_header.c
   chat/chat_measure.c
   chat/chat_timeline.c
+  chat/thread_split.c
   chat/chat_cards.c
   chat/chat_embeds.c
   chat/chat_components.c

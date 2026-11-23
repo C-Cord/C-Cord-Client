@@ -211,6 +211,7 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
   ui->thread_join_rect = (ccord_rect){0, 0, 0, 0};
   ui->thread_archive_rect = (ccord_rect){0, 0, 0, 0};
   ui->thread_breadcrumb_rect = (ccord_rect){0, 0, 0, 0};
+  ui->thread_split_toggle_rect = (ccord_rect){0, 0, 0, 0};
   ui->announce_follow_rect = (ccord_rect){0, 0, 0, 0};
   ui_forum_set_breadcrumb_rect(ui, (ccord_rect){0}, CCORD_ID_NONE);
   const ccord_channel *ch = ui_selected_channel(ui);
@@ -270,7 +271,9 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
     ui_forum_set_breadcrumb_rect(ui, bc_r, parent_ch->id);
     ui_icon_chevron(r, tx + pnw + 10.0f, cy, 10.0f, ICON_RIGHT, COL(text_muted));
     float post_x = tx + pnw + 20.0f;
-    float post_w = ccord_text_draw_ellipsis(r, ch_name, strlen(ch_name), post_x, ty, maxf(hdr_btn_left - post_x - 8.0f, 30.0f), &ns);
+    float th_res = (!ui->mobile_layout && is_thread_ch) ? 148.0f : 8.0f;
+    float post_w = ccord_text_draw_ellipsis(r, ch_name, strlen(ch_name), post_x, ty,
+                                            maxf(hdr_btn_left - post_x - th_res, 30.0f), &ns);
     nw = (post_x - tx) + post_w;
     if (is_thread_ch && ch->thread_archived) {
       ccord_text_style abs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 3.0f, COL(text_muted));
@@ -319,6 +322,21 @@ void ui_draw_chat_header(ccord_ui *ui, ccord_renderer *r)
         ccord_draw_rrect(r, jr, 4.0f, jbg);
         ccord_text_draw(r, jlbl, strlen(jlbl), jr.x + 9.0f, jr.y + (jr.h - jbt.y) * 0.5f, &jbs, 0.0f);
         hdr_btn_left = jr.x - 6.0f;
+      }
+    }
+    if (!ui->mobile_layout && !ui_thread_split_active(ui) && ui_thread_split_parent(ui) != nullptr) {
+      const char *slbl = "Split";
+      ccord_text_style sbs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f, COL(text_secondary));
+      ccord_vec2 sbt = ccord_text_measure(r, slbl, strlen(slbl), &sbs, 0.0f);
+      float bw = sbt.x + 16.0f;
+      float bh = uis_btn_h_for(ui, 24.0f);
+      ccord_rect spr = {hdr_btn_left - bw, cy - bh * 0.5f, bw, bh};
+      if (spr.x > tx + nw + 12.0f) {
+        ui->thread_split_toggle_rect = spr;
+        bool shv = ui->mouse_in && ui_in_rect(ui->mx, ui->my, spr);
+        ccord_draw_rrect(r, spr, 4.0f, shv ? COL(bg_item_hover) : COL(bg_tertiary));
+        ccord_text_draw(r, slbl, strlen(slbl), spr.x + 8.0f, spr.y + (spr.h - sbt.y) * 0.5f, &sbs, 0.0f);
+        hdr_btn_left = spr.x - 6.0f;
       }
     }
   } else if (is_announce_ch) {

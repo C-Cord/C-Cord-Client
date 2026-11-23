@@ -1037,6 +1037,18 @@ bool ccord_ui_handle_back(ccord_ui *ui)
   }
   if (ui->mobile_layout) {
     if (!ui->left_drawer_open) {
+      const ccord_channel *cur_ch = ui->d.store ? ui_selected_channel(ui) : nullptr;
+      if (cur_ch && ccord_discord_type_is_thread(cur_ch->discord_type) && cur_ch->parent_id != CCORD_ID_NONE) {
+        ccord_error err;
+        if (ui->d.session) (void)ccord_session_select_channel(ui->d.session, cur_ch->parent_id, &err);
+        else (void)ccord_store_select_channel(ui->d.store, cur_ch->parent_id, &err);
+        ui_invalidate_rows(ui);
+        ui_ensure_caches(ui);
+        ui_sync_messages(ui);
+        ui_save_current_location(ui);
+        ui->dirty = true;
+        return true;
+      }
       ui->left_drawer_open = true;
       ui->dirty = true;
       return true;

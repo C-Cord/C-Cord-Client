@@ -570,6 +570,8 @@ ccord_ui *ccord_ui_create(const ccord_ui_deps *deps, ccord_error *err)
   ccord_text_edit_init(&ui->quickcss_edit, 256);
   ui->stage_channel = CCORD_ID_NONE;
   ui->stage_split_ratio = 0.55f;
+  ui->settings_threads_split_view = true;
+  ui->thread_split_ratio = 0.50f;
   ui->stream_pip_w = 320.0f;
   ui->reply_channel = ui->reply_message = CCORD_ID_NONE;
   ui->reply_ping = true;

@@ -874,6 +874,16 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
           ui->dirty = true;
           changed = true;
         }
+      } else if (ui->drag == DRAG_THREAD_SPLIT) {
+        float x0 = ui->layout.stage_pane.x;
+        float total_w = ui->win_w - x0;
+        if (total_w > 1.0f) {
+          ui->thread_split_ratio = uc_clampf((ev->x - x0) / total_w, 0.25f, 0.75f);
+          ui_compute_layout(ui);
+          ccord_vlist_invalidate_all(&ui->vlist);
+          ui->dirty = true;
+          changed = true;
+        }
       } else if (ui->drag == DRAG_STREAM_PIP_MOVE || ui->drag == DRAG_STREAM_PIP_RESIZE) {
         ui_stream_pip_drag_move(ui, ev->x, ev->y);
         changed = true;
@@ -1100,7 +1110,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       return handled;
     }
     case CCORD_IN_MOUSE_UP:
-      if (ui->drag == DRAG_STREAM_STAGE_H || ui->drag == DRAG_STAGE_SPLIT) {
+      if (ui->drag == DRAG_STREAM_STAGE_H || ui->drag == DRAG_STAGE_SPLIT || ui->drag == DRAG_THREAD_SPLIT) {
         ui->drag = DRAG_NONE;
         ui_settings_save(ui);
         uc_update_hover(ui);

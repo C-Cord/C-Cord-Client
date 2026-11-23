@@ -624,6 +624,7 @@ void ui_sync_messages(ccord_ui *ui)
     }
     ui->vlist_channel = ch;
     ui->msg_scroll_vel = 0.0f;
+    ui_compute_layout(ui);
     ui->chat_sel_active = false;
     ui->chat_sel_len = 0;
     ui->chat_sel_buf[0] = '\0';

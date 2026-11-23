@@ -343,6 +343,10 @@ void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
     return;
   }
+  if (ui_thread_split_active(ui) && ui_thread_parent_handle_wheel(ui, ev)) {
+    ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
+    return;
+  }
   if (ui_forum_is_active(ui) && ui_forum_handle_event(ui, ev)) {
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
     ui->dirty = true;

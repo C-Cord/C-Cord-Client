@@ -459,6 +459,7 @@ typedef enum drag_kind : uint8_t {
   DRAG_CHANNEL,
   DRAG_STREAM_STAGE_H,
   DRAG_STAGE_SPLIT,
+  DRAG_THREAD_SPLIT,
   DRAG_STREAM_PIP_MOVE,
   DRAG_STREAM_PIP_RESIZE,
 } drag_kind;

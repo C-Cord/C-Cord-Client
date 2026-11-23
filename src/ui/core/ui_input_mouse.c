@@ -180,6 +180,19 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     ui->dirty = true;
     return true;
   }
+  ccord_rect th_split_h = ui_thread_split_handle_rect(ui);
+  if (th_split_h.w > 0.0f && ui_in_rect(ev->x, ev->y, th_split_h)) {
+    if (ev->clicks >= 2) {
+      ui->thread_split_ratio = 0.50f;
+      ui_compute_layout(ui);
+      ccord_vlist_invalidate_all(&ui->vlist);
+      ui_settings_save(ui);
+    } else {
+      ui->drag = DRAG_THREAD_SPLIT;
+    }
+    ui->dirty = true;
+    return true;
+  }
   if (ui->mobile_layout && ui_in_rect(ev->x, ev->y, ui_drawer_btn_rect(ui))) {
     ui->left_drawer_open = !ui->left_drawer_open;
     ui->right_drawer_open = false;
@@ -318,6 +331,14 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
         }
       }
     }
+    ui->dirty = true;
+    return true;
+  }
+  if (ui->thread_split_toggle_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->thread_split_toggle_rect)) {
+    ui->settings_threads_split_view = true;
+    ui_settings_save(ui);
+    ui_compute_layout(ui);
+    ccord_vlist_invalidate_all(&ui->vlist);
     ui->dirty = true;
     return true;
   }
@@ -631,6 +652,7 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     }
   }
   if (ui_guild_view_active(ui) && ui_guild_view_handle_mouse(ui, ev)) return true;
+  if (ui_thread_split_active(ui) && ui_thread_parent_handle_mouse(ui, ev)) return true;
   if (ui_is_dm_friends_view(ui)) {
     if (ui_in_rect(ev->x, ev->y, ui->add_friend_btn_rect)) {
       ui->modal_kind = UI_MODAL_ADD_FRIEND;

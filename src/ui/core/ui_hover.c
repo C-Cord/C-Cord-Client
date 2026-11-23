@@ -25,6 +25,7 @@ hover_state uc_compute_hover(ccord_ui *ui)
     return h;
   }
   if (ui->stream_fullscreen || ui->drag == DRAG_STREAM_STAGE_H || ui->drag == DRAG_STAGE_SPLIT ||
+      ui->drag == DRAG_THREAD_SPLIT ||
       ui->drag == DRAG_STREAM_PIP_MOVE || ui->drag == DRAG_STREAM_PIP_RESIZE) {
     return h;
   }
@@ -311,7 +312,7 @@ bool uc_update_hover(ccord_ui *ui)
     k = ui_upload_error_cursor(ui);
   } else if (ui->drag == DRAG_STREAM_STAGE_H) {
     k = CCORD_CURSOR_NS_RESIZE;
-  } else if (ui->drag == DRAG_STAGE_SPLIT) {
+  } else if (ui->drag == DRAG_STAGE_SPLIT || ui->drag == DRAG_THREAD_SPLIT) {
     k = CCORD_CURSOR_EW_RESIZE;
   } else if (ui->drag == DRAG_STREAM_PIP_MOVE || ui->drag == DRAG_STREAM_PIP_RESIZE) {
     k = ui_stream_pip_cursor(ui, ui->mx, ui->my);
@@ -455,9 +456,11 @@ bool uc_update_hover(ccord_ui *ui)
     }
   } else if (ui->mouse_in) {
     ccord_rect split_h = ui_stage_split_handle_rect(ui);
+    ccord_rect th_split_h = ui_thread_split_handle_rect(ui);
     if (ui_stream_pip_active(ui) && ui->stream_pip_rect.w > 0.0f && ui_in_rect(ui->mx, ui->my, ui->stream_pip_rect)) {
       k = ui_stream_pip_cursor(ui, ui->mx, ui->my);
-    } else if (split_h.w > 0.0f && ui_in_rect(ui->mx, ui->my, split_h)) {
+    } else if ((split_h.w > 0.0f && ui_in_rect(ui->mx, ui->my, split_h)) ||
+               (th_split_h.w > 0.0f && ui_in_rect(ui->mx, ui->my, th_split_h))) {
       k = CCORD_CURSOR_EW_RESIZE;
     } else if (ui->stage_channel != CCORD_ID_NONE && ui->stream_stage_resize_rect.w > 0.0f &&
                ui_in_rect(ui->mx, ui->my, ui->stream_stage_resize_rect)) {

@@ -211,6 +211,11 @@ static bool settings_visit(const char *section, const char *key, const char *val
   } else if (strcmp(key, "stage_split_pct") == 0 && ini_int(value, &iv)) {
     clamp_int(&iv, 15, 85);
     ui->stage_split_ratio = (float)iv / 100.0f;
+  } else if (strcmp(key, "threads_split_view") == 0 && ini_bool(value, &bv)) {
+    ui->settings_threads_split_view = bv;
+  } else if (strcmp(key, "thread_split_pct") == 0 && ini_int(value, &iv)) {
+    clamp_int(&iv, 25, 75);
+    ui->thread_split_ratio = (float)iv / 100.0f;
   } else if (strcmp(key, "stream_pip_width") == 0 && ini_int(value, &iv)) {
     clamp_int(&iv, 200, 960);
     ui->stream_pip_w = (float)iv;
@@ -329,6 +334,9 @@ static void settings_write_ini(ccord_ui *ui, FILE *f)
           ui->stream_stage_height_frac > 0.0f ? (int)lroundf(ui->stream_stage_height_frac * 100.0f) : 0);
   fprintf(f, "stage_split_pct = %d\n",
           (int)lroundf((ui->stage_split_ratio > 0.0f ? ui->stage_split_ratio : 0.55f) * 100.0f));
+  fprintf(f, "threads_split_view = %d\n", ui->settings_threads_split_view ? 1 : 0);
+  fprintf(f, "thread_split_pct = %d\n",
+          (int)lroundf((ui->thread_split_ratio > 0.0f ? ui->thread_split_ratio : 0.50f) * 100.0f));
   fprintf(f, "stream_pip_width = %d\n",
           (int)lroundf(ui->stream_pip_w > 1.0f ? ui->stream_pip_w : 320.0f));
   if (ui->saved_guild_id != CCORD_ID_NONE) {

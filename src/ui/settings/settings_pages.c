@@ -99,6 +99,8 @@ static void draw_appearance(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
                   ui->settings_quickcss_enabled, false);
   draw_toggle_row(ui, r, g, 7, "REDUCED MOTION", "Turn off fades, slides and other animations.",
                   ui->settings_reduced_motion, false);
+  draw_toggle_row(ui, r, g, 8, "SPLIT-VIEW THREADS", "Keep the parent channel open alongside threads on desktop.",
+                  ui->settings_threads_split_view, false);
   draw_row_label(ui, r, g, 6, "STYLE OVERRIDE SNIPPET");
   ccord_rect qbox = st_quickcss_box_rect(g);
   uis_state qst = {.focused = ui->account_focus_field == 6};

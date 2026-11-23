@@ -662,6 +662,16 @@ struct ccord_ui {
   ccord_id onboarding_opts[64];      // selected onboarding option IDs
   size_t nonboarding_opts;
 
+  // Desktop Split-View Threads (parent channel on left, active thread on right)
+  bool settings_threads_split_view;  // default true
+  float thread_split_ratio;          // default 0.50
+  float thread_parent_scroll;
+  float thread_parent_content_h;
+  ccord_id thread_parent_last_id;
+  ccord_rect thread_parent_close_rect;
+  ccord_rect thread_parent_focus_rect;
+  ccord_rect thread_split_toggle_rect;
+
   // message hover action bar hit rects
   ccord_id hover_bar_msg_id;
   ccord_rect hover_bar_rect;   // the whole bar frame; it hangs above its row, so hover must keep the row
