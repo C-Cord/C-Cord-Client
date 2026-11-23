@@ -37,4 +37,5 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
 bool ext_handle_audio_hooks_gw_rpc(ccord_plugins *m, plugin *p, uint32_t id, const char *method, const ccord_json *params);
 bool ext_handle_messages_store_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *method, const ccord_json *params);
 bool ext_handle_presence_voice_social_window(ccord_plugins *m, plugin *p, uint32_t id, const char *method, const ccord_json *params);
+bool ext_handle_account_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *method, const ccord_json *params);
 bool ext_handle_class3_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *method, const ccord_json *params);

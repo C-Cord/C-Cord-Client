@@ -62,6 +62,10 @@ bool sb_event_perm_v3(const char *name, size_t n, ccord_perm *perm)
     *perm = CCORD_PERM_VOICE_LEVELS;
     return true;
   }
+  if (sb_eq(name, n, "account.update")) {
+    *perm = CCORD_PERM_ACCOUNT_READ;
+    return true;
+  }
   return false;
 }
 

@@ -60,6 +60,9 @@ struct ccord_contrib {
   uint64_t earcons_rev;
   ccord_plugin_dialog active_dialog;
   bool has_active_dialog;
+  ccord_account_hitl_req active_hitl;
+  bool has_active_hitl;
+  bool streamer_mode;
   // Plugins & catalog
   plugin_slot *plugins;
   size_t nplugins, capplugins;

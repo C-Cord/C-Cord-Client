@@ -77,6 +77,15 @@ static void free_dialog(ccord_plugin_dialog *d)
   memset(d, 0, sizeof *d);
 }
 
+static void free_hitl(ccord_account_hitl_req *h)
+{
+  contrib_free_str(h->owner);
+  contrib_free_str(h->plugin_name);
+  contrib_free_str(h->target_value);
+  contrib_free_str(h->summary);
+  memset(h, 0, sizeof *h);
+}
+
 
 void contrib_ext_destroy(ccord_contrib *c)
 {
@@ -94,6 +103,7 @@ void contrib_ext_destroy(ccord_contrib *c)
   for (size_t i = 0; i < c->nautocompletes; i++) free_ac(&c->autocompletes[i]);
   ccord_free(c->autocompletes);
   if (c->has_active_dialog) free_dialog(&c->active_dialog);
+  if (c->has_active_hitl) free_hitl(&c->active_hitl);
 }
 
 bool contrib_ext_remove_owner(ccord_contrib *c, const char *owner)
@@ -151,6 +161,11 @@ bool contrib_ext_remove_owner(ccord_contrib *c, const char *owner)
   if (c->has_active_dialog && strcmp(c->active_dialog.owner, owner) == 0) {
     free_dialog(&c->active_dialog);
     c->has_active_dialog = false;
+    changed = true;
+  }
+  if (c->has_active_hitl && strcmp(c->active_hitl.owner, owner) == 0) {
+    free_hitl(&c->active_hitl);
+    c->has_active_hitl = false;
     changed = true;
   }
   return changed;
@@ -674,6 +689,64 @@ void ccord_contrib_resolve_dialog(ccord_contrib *c, uint64_t req_id, bool accept
   if (c->handlers.dialog_result) {
     c->handlers.dialog_result(c->handlers.ud, owner, req_id, accepted, result_json ? result_json : "null");
   }
+}
+
+// ---- Class 3 HITL Account Change Requests & Streamer Mode ----
+ccord_status ccord_contrib_open_account_hitl(ccord_contrib *c, const ccord_account_hitl_req *req, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!c || !req || !contrib_text_ok(req->owner, CONTRIB_OWNER_MAX, false) || !req->req_id ||
+      !contrib_text_ok(req->summary, 256u, false)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: bad account confirmation request");
+  }
+  if (c->has_active_hitl) {
+    return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: another account confirmation modal is already open");
+  }
+  ccord_account_hitl_req h = {
+    .owner = ccord_strdup(req->owner),
+    .plugin_name = dup_opt(req->plugin_name && req->plugin_name[0] ? req->plugin_name : req->owner),
+    .req_id = req->req_id,
+    .kind = req->kind,
+    .target_value = dup_opt(req->target_value),
+    .summary = ccord_strdup(req->summary),
+  };
+  if (!h.owner || !h.plugin_name || !h.target_value || !h.summary) {
+    free_hitl(&h);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "oom");
+  }
+  c->active_hitl = h;
+  c->has_active_hitl = true;
+  c->revision++;
+  return CCORD_OK;
+}
+
+const ccord_account_hitl_req *ccord_contrib_active_account_hitl(const ccord_contrib *c)
+{
+  return (c && c->has_active_hitl) ? &c->active_hitl : nullptr;
+}
+
+void ccord_contrib_resolve_account_hitl(ccord_contrib *c, uint64_t req_id, bool approved, const char *err_msg)
+{
+  if (!c || !c->has_active_hitl || c->active_hitl.req_id != req_id) return;
+  char owner[65];
+  snprintf(owner, sizeof owner, "%s", c->active_hitl.owner ? c->active_hitl.owner : "");
+  free_hitl(&c->active_hitl);
+  c->has_active_hitl = false;
+  c->revision++;
+  if (c->handlers.account_hitl_result) {
+    c->handlers.account_hitl_result(c->handlers.ud, owner, req_id, approved, err_msg);
+  }
+}
+
+void ccord_contrib_set_streamer_mode(ccord_contrib *c, bool enabled)
+{
+  if (!c) return;
+  c->streamer_mode = enabled;
+}
+
+bool ccord_contrib_streamer_mode(const ccord_contrib *c)
+{
+  return c && c->streamer_mode;
 }
 
 // ---- Dispatchers & UI hook forwarders ----

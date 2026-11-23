@@ -975,6 +975,7 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     .keybind_triggered = plugins_ext_on_keybind_triggered,
     .action_btn_click = plugins_ext_on_action_btn_click,
     .dialog_result = plugins_ext_on_dialog_result,
+    .account_hitl_result = plugins_ext_on_account_hitl_result,
     .autocomplete_query = plugins_ext_on_autocomplete_query,
     .before_send_hook = plugins_ext_on_before_send,
     .before_edit_hook = plugins_ext_on_before_edit,

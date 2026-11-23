@@ -502,7 +502,10 @@ bool ui_settings_m6_prefs_ini_visit(ccord_ui *ui, const char *key, const char *v
     return true;
   }
   if (strcmp(key, "streamer_mode") == 0) {
-    if (p_ini_bool(value, &bv)) ui->settings_streamer_mode = bv;
+    if (p_ini_bool(value, &bv)) {
+      ui->settings_streamer_mode = bv;
+      if (ui->d.contrib) ccord_contrib_set_streamer_mode(ui->d.contrib, bv);
+    }
     return true;
   }
   if (strcmp(key, "streamer_hide_personal") == 0) {
@@ -937,6 +940,7 @@ static bool p_click_streamer(ccord_ui *ui, ccord_rect c, float x, float y)
 {
   if (ui_in_rect(x, y, p_toggle(c, 0))) {
     ui->settings_streamer_mode = !ui->settings_streamer_mode;
+    if (ui->d.contrib) ccord_contrib_set_streamer_mode(ui->d.contrib, ui->settings_streamer_mode);
     ui->dirty = true;
     return true;
   }

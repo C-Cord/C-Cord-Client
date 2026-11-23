@@ -247,6 +247,7 @@ void ccord_plugins_pump(ccord_plugins *m, uint64_t now_ms)
     if (p->storage_enabled && p->dirty && now_ms - p->last_save_ms >= SAVE_INTERVAL_MS) pl_storage_save(m, p, now_ms);
   }
   if (m->workers) pw_pump(m->workers, plugins_ext_on_worker_event, m);
+  plugins_ext_poll_account_update(m);
   if (m->dev_auto_reload) plugins_ext_dev_poll(m, now_ms);
   if (m->catalog) ccord_catalog_pump(m->catalog, now_ms);
 }

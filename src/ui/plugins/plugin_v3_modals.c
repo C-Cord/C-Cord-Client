@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include "plugin_v3_internal.h"
+#include <ccord/net/account_edit.h>
+#include <ccord/session/session.h>
 
 // ---- Shared Form Field Parser & Text Input Helpers ----
 
@@ -380,15 +382,469 @@ static void v3_dialog_submit(ccord_ui *ui, const ccord_plugin_dialog *dlg, bool 
   ui->dirty = true;
 }
 
+// ---- Protected Class 3 HITL Account Change Confirmation Modal ----
+
+static void hitl_wipe_edit(ccord_text_edit *ed)
+{
+  if (!ed) return;
+  if (ed->data && ed->cap > 0) {
+    volatile unsigned char *p = (volatile unsigned char *)ed->data;
+    for (size_t i = 0; i < ed->cap; i++) p[i] = 0;
+  }
+  ccord_text_edit_clear(ed);
+}
+
+static bool hitl_needs_password(ccord_account_hitl_kind k)
+{
+  return k == CCORD_HITL_USERNAME || k == CCORD_HITL_EMAIL;
+}
+
+static const char *const k_hitl_mfa_labels[4] = {"Authenticator", "Backup Code", "SMS", "Password"};
+static const char *const k_hitl_mfa_types[4] = {"totp", "backup", "sms", "password"};
+static const uint32_t k_hitl_mfa_bits[4] = {
+  CCORD_MFA_METHOD_TOTP, CCORD_MFA_METHOD_BACKUP, CCORD_MFA_METHOD_SMS, CCORD_MFA_METHOD_PASSWORD
+};
+
+static int hitl_first_mfa_method(uint32_t mask)
+{
+  for (int i = 0; i < 4; i++) {
+    if (mask & k_hitl_mfa_bits[i]) return i;
+  }
+  return 0;
+}
+
+static void v3_hitl_sync(ccord_ui *ui, const ccord_account_hitl_req *req)
+{
+  ui_plugin_v3 *v = pv3_v3_ensure(ui);
+  if (!v || !req) return;
+  v3_hitl_state *h = &v->hitl;
+  if (h->active_req_id == req->req_id) return;
+  h->active_req_id = req->req_id;
+  if (!h->pw_inited) {
+    ccord_text_edit_init(&h->pw_edit, 256);
+    h->pw_inited = true;
+  } else {
+    hitl_wipe_edit(&h->pw_edit);
+  }
+  if (!h->mfa_inited) {
+    ccord_text_edit_init(&h->mfa_edit, 64);
+    h->mfa_inited = true;
+  } else {
+    hitl_wipe_edit(&h->mfa_edit);
+  }
+  h->pw_focused = hitl_needs_password(req->kind);
+  h->mfa_focused = false;
+  h->pending = false;
+  h->mfa_required = false;
+  h->mfa_methods = 0;
+  h->mfa_method_idx = 0;
+  h->error[0] = '\0';
+  h->cb_gen++;
+}
+
+typedef struct hitl_cb_ctx {
+  ccord_ui *ui;
+  uint64_t req_id;
+  uint64_t gen;
+  char plugin_name[96];
+} hitl_cb_ctx;
+
+static void v3_hitl_on_account_done(void *ud, const ccord_account_result *res)
+{
+  hitl_cb_ctx *ctx = ud;
+  if (!ctx) return;
+  ccord_ui *ui = ctx->ui;
+  uint64_t req_id = ctx->req_id;
+  uint64_t gen = ctx->gen;
+  char pname[96];
+  snprintf(pname, sizeof pname, "%s", ctx->plugin_name);
+  ccord_free(ctx);
+
+  if (!ui || !ui->plugin_v3 || !ui->d.contrib) return;
+  v3_hitl_state *h = &ui->plugin_v3->hitl;
+  if (h->active_req_id != req_id || h->cb_gen != gen) return;
+  h->pending = false;
+  if (!res) {
+    snprintf(h->error, sizeof h->error, "Account request failed.");
+    ui->dirty = true;
+    return;
+  }
+  if (res->status == CCORD_OK) {
+    hitl_wipe_edit(&h->pw_edit);
+    hitl_wipe_edit(&h->mfa_edit);
+    h->active_req_id = 0;
+    h->mfa_required = false;
+    h->pw_focused = false;
+    h->mfa_focused = false;
+    ccord_contrib_resolve_account_hitl(ui->d.contrib, req_id, true, nullptr);
+    ui_notice(ui, "Approved account request from %s", pname[0] ? pname : "plugin");
+    if (ui->touch_mode) ui->touch_text_focused = false;
+    ui->dirty = true;
+    return;
+  }
+  if (res->mfa_challenge_required) {
+    h->mfa_required = true;
+    h->mfa_methods = res->mfa_methods ? res->mfa_methods : CCORD_MFA_METHOD_TOTP;
+    h->mfa_method_idx = hitl_first_mfa_method(h->mfa_methods);
+    hitl_wipe_edit(&h->mfa_edit);
+    h->pw_focused = false;
+    h->mfa_focused = true;
+    h->error[0] = '\0';
+    ui->dirty = true;
+    return;
+  }
+  if (res->captcha_required) {
+    snprintf(h->error, sizeof h->error, "Discord requires CAPTCHA verification in a web browser.");
+  } else if (res->message[0]) {
+    snprintf(h->error, sizeof h->error, "%s", res->message);
+  } else {
+    snprintf(h->error, sizeof h->error, "Discord rejected this account change.");
+  }
+  ui->dirty = true;
+}
+
+static void v3_hitl_deny(ccord_ui *ui, const ccord_account_hitl_req *req, const char *reason)
+{
+  ui_plugin_v3 *v = ui->plugin_v3;
+  if (!ui->d.contrib || !req || !v) return;
+  v3_hitl_state *h = &v->hitl;
+  if (h->mfa_required && ui->d.session) ccord_session_account_cancel_mfa(ui->d.session);
+  hitl_wipe_edit(&h->pw_edit);
+  hitl_wipe_edit(&h->mfa_edit);
+  h->active_req_id = 0;
+  h->pending = false;
+  h->mfa_required = false;
+  h->pw_focused = false;
+  h->mfa_focused = false;
+  h->error[0] = '\0';
+  h->cb_gen++;
+  ccord_contrib_resolve_account_hitl(ui->d.contrib, req->req_id, false, reason ? reason : "Denied by user");
+  if (ui->touch_mode) ui->touch_text_focused = false;
+  ui->dirty = true;
+}
+
+static void v3_hitl_approve(ccord_ui *ui, const ccord_account_hitl_req *req)
+{
+  ui_plugin_v3 *v = ui->plugin_v3;
+  if (!ui->d.contrib || !req || !v) return;
+  v3_hitl_state *h = &v->hitl;
+  if (h->pending) return;
+  h->error[0] = '\0';
+
+  if (!ui->d.session) {
+    snprintf(h->error, sizeof h->error, "Not connected to Discord.");
+    ui->dirty = true;
+    return;
+  }
+
+  if (h->mfa_required) {
+    const char *code = ccord_text_edit_cstr(&h->mfa_edit);
+    if (!code || !code[0]) {
+      snprintf(h->error, sizeof h->error, "Enter your verification code.");
+      ui->dirty = true;
+      return;
+    }
+    int midx = (h->mfa_method_idx >= 0 && h->mfa_method_idx < 4) ? h->mfa_method_idx : 0;
+    hitl_cb_ctx *ctx = ccord_calloc(1, sizeof *ctx);
+    if (!ctx) return;
+    ctx->ui = ui;
+    ctx->req_id = req->req_id;
+    ctx->gen = h->cb_gen;
+    snprintf(ctx->plugin_name, sizeof ctx->plugin_name, "%s",
+             (req->plugin_name && req->plugin_name[0]) ? req->plugin_name : (req->owner ? req->owner : ""));
+    ccord_error err = {0};
+    ccord_status st = ccord_session_account_finish_mfa(ui->d.session, k_hitl_mfa_types[midx], code,
+                                                       v3_hitl_on_account_done, ctx, &err);
+    hitl_wipe_edit(&h->mfa_edit);
+    if (st != CCORD_OK) {
+      ccord_free(ctx);
+      snprintf(h->error, sizeof h->error, "%s", err.message[0] ? err.message : "Failed to verify MFA.");
+    } else {
+      h->pending = true;
+    }
+    ui->dirty = true;
+    return;
+  }
+
+  if (req->kind == CCORD_HITL_DEVICE_LOGOUT) {
+    if (!req->target_value || !req->target_value[0]) {
+      v3_hitl_deny(ui, req, "Missing session id_hash");
+      return;
+    }
+    char hashes[1][64] = {{0}};
+    snprintf(hashes[0], sizeof hashes[0], "%.63s", req->target_value);
+    ccord_error err = {0};
+    if (ccord_session_logout_auth_sessions(ui->d.session, hashes, 1, &err) != CCORD_OK) {
+      snprintf(h->error, sizeof h->error, "%s", err.message[0] ? err.message : "Could not log out device.");
+      ui->dirty = true;
+      return;
+    }
+    h->active_req_id = 0;
+    ccord_contrib_resolve_account_hitl(ui->d.contrib, req->req_id, true, nullptr);
+    ui_notice(ui, "Logged out device as requested by %s",
+              (req->plugin_name && req->plugin_name[0]) ? req->plugin_name : req->owner);
+    ui->dirty = true;
+    return;
+  }
+
+  ccord_account_req areq = {0};
+  const char *pw = ccord_text_edit_cstr(&h->pw_edit);
+  if (req->kind == CCORD_HITL_USERNAME) {
+    if (!pw || !pw[0]) {
+      snprintf(h->error, sizeof h->error, "Enter your current password to confirm.");
+      ui->dirty = true;
+      return;
+    }
+    areq.op = CCORD_ACCT_OP_USERNAME;
+    areq.value = req->target_value;
+    areq.password = pw;
+  } else if (req->kind == CCORD_HITL_EMAIL) {
+    if (!pw || !pw[0]) {
+      snprintf(h->error, sizeof h->error, "Enter your current password to confirm.");
+      ui->dirty = true;
+      return;
+    }
+    areq.op = CCORD_ACCT_OP_EMAIL;
+    areq.value = req->target_value;
+    areq.password = pw;
+  } else if (req->kind == CCORD_HITL_DATA_EXPORT) {
+    areq.op = CCORD_ACCT_OP_HARVEST_DATA;
+  } else {
+    v3_hitl_deny(ui, req, "Unsupported HITL operation");
+    return;
+  }
+
+  hitl_cb_ctx *ctx = ccord_calloc(1, sizeof *ctx);
+  if (!ctx) return;
+  ctx->ui = ui;
+  ctx->req_id = req->req_id;
+  ctx->gen = h->cb_gen;
+  snprintf(ctx->plugin_name, sizeof ctx->plugin_name, "%s",
+           (req->plugin_name && req->plugin_name[0]) ? req->plugin_name : (req->owner ? req->owner : ""));
+  ccord_error err = {0};
+  ccord_status st = ccord_session_account_submit(ui->d.session, &areq, v3_hitl_on_account_done, ctx, &err);
+  hitl_wipe_edit(&h->pw_edit);
+  if (st != CCORD_OK) {
+    ccord_free(ctx);
+    snprintf(h->error, sizeof h->error, "%s", err.message[0] ? err.message : "Could not submit account request.");
+  } else {
+    h->pending = true;
+  }
+  ui->dirty = true;
+}
+
+static void v3_hitl_draw(ccord_ui *ui, ccord_renderer *r, const ccord_account_hitl_req *req)
+{
+  v3_hitl_sync(ui, req);
+  ui_plugin_v3 *v = ui->plugin_v3;
+  if (!v) return;
+  v3_hitl_state *h = &v->hitl;
+
+  // Protected Security Surface: always draw with C-Cord's immutable native theme so plugins cannot camouflage it.
+  const ccord_theme *saved_theme = ui->theme;
+  if (ui->d.protected_theme) ui->theme = ui->d.protected_theme;
+
+  uis_tokens tk = uis_tokens_of(ui);
+  float mw = UIS_MODAL_W_MD;
+  ccord_rect probe = uis_modal_box(ui, mw, 260.0f);
+  float inner_w = fmaxf(probe.w - UIS_SP_5 * 2.0f, 140.0f);
+
+  ccord_text_style sum_st = ui_style(ui, CCORD_FONT_BOLD, tk.fs_body, ui->theme->c.text_header);
+  ccord_text_style note_st = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_caption, ui->theme->c.text_muted);
+  ccord_text_style err_st = ui_style(ui, CCORD_FONT_BOLD, tk.fs_caption, ui->theme->c.danger);
+  ccord_text_style lbl_st = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, ui->theme->c.text_muted);
+
+  const char *summary = (req->summary && req->summary[0]) ? req->summary : "Modify your Discord account settings.";
+  float sum_h = ccord_text_measure(r, summary, strlen(summary), &sum_st, inner_w - 20.0f).y + 20.0f;
+  const char *notice = "This plugin cannot see your password, 2FA code, or Discord token.";
+  float notice_h = ccord_text_measure(r, notice, strlen(notice), &note_st, inner_w).y + UIS_SP_2;
+  float input_h = 0.0f;
+  if (h->mfa_required) {
+    input_h = UIS_H_CHIP + UIS_SP_3 + 18.0f + UIS_H_INPUT + UIS_SP_3;
+  } else if (hitl_needs_password(req->kind)) {
+    input_h = 18.0f + UIS_H_INPUT + UIS_SP_3;
+  }
+  float err_h = h->error[0] ? (ccord_text_measure(r, h->error, strlen(h->error), &err_st, inner_w - 16.0f).y + 18.0f) : 0.0f;
+  float mh = 78.0f + UIS_H_CHIP + UIS_SP_3 + sum_h + UIS_SP_2 + notice_h + input_h + err_h + UIS_H_BTN + UIS_SP_5;
+  if (mh < 240.0f) mh = 240.0f;
+
+  ccord_rect box = uis_modal_box(ui, mw, mh);
+  h->box_rect = box;
+  inner_w = fmaxf(box.w - UIS_SP_5 * 2.0f, 140.0f);
+
+  uis_modal_frame(ui, r, box);
+  // Top red security stripe identifying a Protected Class 3 confirmation surface.
+  ccord_draw_rrect(r, (ccord_rect){box.x, box.y, box.w, 4.0f}, 2.0f, ui->theme->c.danger);
+
+  const char *title = h->mfa_required ? "Verify Identity (2FA)" : "Confirm Account Change Request";
+  float y = uis_modal_title(ui, r, box, title);
+  float x = box.x + UIS_SP_5;
+
+  char badge[140];
+  snprintf(badge, sizeof badge, "Class 3 Plugin Request · %s",
+           (req->plugin_name && req->plugin_name[0]) ? req->plugin_name : (req->owner ? req->owner : "plugin"));
+  ccord_text_style bst = ui_style(ui, CCORD_FONT_BOLD, tk.fs_caption, ui->theme->c.danger);
+  float bw = fminf(ccord_text_measure(r, badge, strlen(badge), &bst, 0.0f).x + 16.0f, inner_w);
+  ccord_rect brc = {x, y, bw, UIS_H_CHIP};
+  uis_plate(ui, r, brc, tk.r_control, ui_alpha(ui->theme->c.danger, 0.14f));
+  ccord_text_draw_ellipsis(r, badge, strlen(badge), brc.x + 8.0f,
+                           brc.y + (brc.h - ui_line_h(ui, bst.size)) * 0.5f, brc.w - 16.0f, &bst);
+  y += UIS_H_CHIP + UIS_SP_3;
+
+  // C-Cord-generated summary card
+  ccord_rect scard = {x, y, inner_w, sum_h};
+  uis_card(ui, r, scard);
+  ccord_draw_rect(r, (ccord_rect){scard.x, scard.y, 3.0f, scard.h}, ui->theme->c.danger);
+  ccord_text_draw(r, summary, strlen(summary), scard.x + 12.0f, scard.y + 10.0f, &sum_st, inner_w - 20.0f);
+  y += sum_h + UIS_SP_2;
+
+  ccord_text_draw(r, notice, strlen(notice), x, y, &note_st, inner_w);
+  y += notice_h;
+
+  h->pw_rect = (ccord_rect){0};
+  h->mfa_rect = (ccord_rect){0};
+  for (int i = 0; i < 4; i++) h->mfa_chip_rects[i] = (ccord_rect){0};
+
+  if (h->mfa_required) {
+    float cx = x;
+    for (int i = 0; i < 4; i++) {
+      if (!(h->mfa_methods & k_hitl_mfa_bits[i])) continue;
+      float cw = uis_label_width(ui, r, k_hitl_mfa_labels[i]);
+      if (cx + cw > x + inner_w) break;
+      ccord_rect crc = {cx, y, cw, UIS_H_CHIP};
+      h->mfa_chip_rects[i] = crc;
+      uis_chip(ui, r, crc, k_hitl_mfa_labels[i],
+               (uis_state){.hover = ui_in_rect(ui->mx, ui->my, crc), .selected = h->mfa_method_idx == i},
+               "hitlmfa", (uint64_t)i);
+      cx += cw + UIS_SP_2;
+    }
+    y += UIS_H_CHIP + UIS_SP_3;
+    const char *mlbl = h->mfa_method_idx == 3 ? "ACCOUNT PASSWORD" : "VERIFICATION CODE";
+    ccord_text_draw(r, mlbl, strlen(mlbl), x, y, &lbl_st, 0.0f);
+    y += 18.0f;
+    h->mfa_rect = (ccord_rect){x, y, inner_w, UIS_H_INPUT};
+    (void)uis_input(ui, r, h->mfa_rect, &h->mfa_edit,
+                    h->mfa_method_idx == 3 ? "Password" : "Enter 6-digit or backup code",
+                    (uis_state){.hover = ui_in_rect(ui->mx, ui->my, h->mfa_rect), .focused = h->mfa_focused},
+                    h->mfa_method_idx == 3, "hitl_mfa", req->req_id);
+    if (h->mfa_focused) ui->text_area = h->mfa_rect;
+    y += UIS_H_INPUT + UIS_SP_3;
+  } else if (hitl_needs_password(req->kind)) {
+    ccord_text_draw(r, "CURRENT PASSWORD", 16, x, y, &lbl_st, 0.0f);
+    y += 18.0f;
+    h->pw_rect = (ccord_rect){x, y, inner_w, UIS_H_INPUT};
+    (void)uis_input(ui, r, h->pw_rect, &h->pw_edit, "Enter your Discord password",
+                    (uis_state){.hover = ui_in_rect(ui->mx, ui->my, h->pw_rect), .focused = h->pw_focused},
+                    true, "hitl_pw", req->req_id);
+    if (h->pw_focused) ui->text_area = h->pw_rect;
+    y += UIS_H_INPUT + UIS_SP_3;
+  }
+
+  if (h->error[0]) {
+    ccord_rect erc = {x, y, inner_w, err_h - 6.0f};
+    uis_plate(ui, r, erc, tk.r_control, ui_alpha(ui->theme->c.danger, 0.14f));
+    ccord_text_draw(r, h->error, strlen(h->error), erc.x + 8.0f, erc.y + 6.0f, &err_st, inner_w - 16.0f);
+  }
+
+  const char *ok_lbl = h->pending ? "Working..." : (h->mfa_required ? "Verify & Approve" : "Approve Change");
+  float ok_w = fmaxf(uis_label_width(ui, r, ok_lbl), 110.0f);
+  float deny_w = fmaxf(uis_label_width(ui, r, "Deny"), 84.0f);
+  h->approve_rect = uis_modal_footer_button(box, 0, ok_w);
+  h->deny_rect = (ccord_rect){h->approve_rect.x - UIS_SP_2 - deny_w, h->approve_rect.y, deny_w, UIS_H_BTN};
+
+  uis_button(ui, r, h->deny_rect, "Deny", UIS_BTN_SECONDARY, UIS_BTN_S_MD,
+             (uis_state){.hover = ui_in_rect(ui->mx, ui->my, h->deny_rect), .disabled = h->pending}, "hitl_btn", 1);
+  uis_button(ui, r, h->approve_rect, ok_lbl, UIS_BTN_DANGER, UIS_BTN_S_MD,
+             (uis_state){.hover = ui_in_rect(ui->mx, ui->my, h->approve_rect), .disabled = h->pending}, "hitl_btn", 2);
+
+  ui->theme = saved_theme;
+}
+
+static bool v3_hitl_handle_input(ccord_ui *ui, const ccord_input_event *ev, const ccord_account_hitl_req *req)
+{
+  v3_hitl_sync(ui, req);
+  ui_plugin_v3 *v = ui->plugin_v3;
+  if (!v) return true;
+  v3_hitl_state *h = &v->hitl;
+
+  if (ev->type == CCORD_IN_MOUSE_DOWN && ev->button == 1) {
+    if (!h->pending && (!ui_in_rect(ev->x, ev->y, h->box_rect) || ui_in_rect(ev->x, ev->y, h->deny_rect))) {
+      v3_hitl_deny(ui, req, "Denied by user");
+      return true;
+    }
+    if (!h->pending && ui_in_rect(ev->x, ev->y, h->approve_rect)) {
+      v3_hitl_approve(ui, req);
+      return true;
+    }
+    if (h->mfa_required) {
+      for (int i = 0; i < 4; i++) {
+        if (h->mfa_chip_rects[i].w > 0.0f && ui_in_rect(ev->x, ev->y, h->mfa_chip_rects[i])) {
+          h->mfa_method_idx = i;
+          h->mfa_focused = true;
+          ui->dirty = true;
+          return true;
+        }
+      }
+      if (ui_in_rect(ev->x, ev->y, h->mfa_rect)) {
+        h->mfa_focused = true;
+        if (ui->touch_mode) ui->touch_text_focused = true;
+        ui->dirty = true;
+        return true;
+      }
+      h->mfa_focused = false;
+    } else if (hitl_needs_password(req->kind)) {
+      if (ui_in_rect(ev->x, ev->y, h->pw_rect)) {
+        h->pw_focused = true;
+        if (ui->touch_mode) ui->touch_text_focused = true;
+        ui->dirty = true;
+        return true;
+      }
+      h->pw_focused = false;
+    }
+    if (ui->touch_mode) ui->touch_text_focused = false;
+    ui->dirty = true;
+    return true;
+  }
+
+  if (ev->type == CCORD_IN_KEY_DOWN) {
+    if (ev->key == CCORD_KEY_ESCAPE && !h->pending) {
+      v3_hitl_deny(ui, req, "Denied by user");
+      return true;
+    }
+    if (ev->key == CCORD_KEY_RETURN && !h->pending) {
+      v3_hitl_approve(ui, req);
+      return true;
+    }
+  }
+
+  if (h->mfa_required && h->mfa_focused) {
+    if (v3_handle_text_edit_event(ui, &h->mfa_edit, h->mfa_method_idx == 3, ev)) {
+      ui->dirty = true;
+      return true;
+    }
+  } else if (!h->mfa_required && h->pw_focused && hitl_needs_password(req->kind)) {
+    if (v3_handle_text_edit_event(ui, &h->pw_edit, true, ev)) {
+      ui->dirty = true;
+      return true;
+    }
+  }
+  return true;
+}
+
 bool ui_plugin_dialog_is_open(const ccord_ui *ui)
 {
   if (!ui || !ui->d.contrib) return false;
+  if (ccord_contrib_active_account_hitl(ui->d.contrib) != nullptr) return true;
   return ccord_contrib_active_dialog(ui->d.contrib) != nullptr;
 }
 
 bool ui_plugin_dialog_wants_text(const ccord_ui *ui)
 {
   if (!ui_plugin_dialog_is_open(ui) || !ui->plugin_v3) return false;
+  if (ccord_contrib_active_account_hitl(ui->d.contrib) != nullptr) {
+    const v3_hitl_state *h = &ui->plugin_v3->hitl;
+    return h->mfa_required ? h->mfa_focused : h->pw_focused;
+  }
   const v3_dialog_state *d = &ui->plugin_v3->dlg;
   if (d->focused_idx < 0 || (size_t)d->focused_idx >= d->nfields) return false;
   v3_field_kind k = d->fields[d->focused_idx].kind;
@@ -398,6 +854,11 @@ bool ui_plugin_dialog_wants_text(const ccord_ui *ui)
 void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r)
 {
   if (!ui || !r || !ui->d.contrib) return;
+  const ccord_account_hitl_req *hitl = ccord_contrib_active_account_hitl(ui->d.contrib);
+  if (hitl) {
+    v3_hitl_draw(ui, r, hitl);
+    return;
+  }
   const ccord_plugin_dialog *dlg = ccord_contrib_active_dialog(ui->d.contrib);
   if (!dlg) return;
   v3_dialog_sync(ui, dlg);
@@ -481,6 +942,8 @@ void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r)
 bool ui_plugin_dialog_handle_input(ccord_ui *ui, const ccord_input_event *ev)
 {
   if (!ui || !ev || !ui->d.contrib) return false;
+  const ccord_account_hitl_req *hitl = ccord_contrib_active_account_hitl(ui->d.contrib);
+  if (hitl) return v3_hitl_handle_input(ui, ev, hitl);
   const ccord_plugin_dialog *dlg = ccord_contrib_active_dialog(ui->d.contrib);
   if (!dlg) return false;
   v3_dialog_sync(ui, dlg);

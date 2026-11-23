@@ -27,11 +27,29 @@ void pv3_v3_clear_fields(v3_field *fields, size_t *nfields)
   *nfields = 0;
 }
 
+static void pv3_wipe_edit(ccord_text_edit *ed)
+{
+  if (!ed) return;
+  if (ed->data && ed->cap > 0) {
+    volatile unsigned char *p = (volatile unsigned char *)ed->data;
+    for (size_t i = 0; i < ed->cap; i++) p[i] = 0;
+  }
+  ccord_text_edit_clear(ed);
+}
+
 void ui_plugin_v3_destroy(ccord_ui *ui)
 {
   if (!ui || !ui->plugin_v3) return;
   pv3_v3_clear_fields(ui->plugin_v3->dlg.fields, &ui->plugin_v3->dlg.nfields);
   pv3_v3_clear_fields(ui->plugin_v3->set.fields, &ui->plugin_v3->set.nfields);
+  if (ui->plugin_v3->hitl.pw_inited) {
+    pv3_wipe_edit(&ui->plugin_v3->hitl.pw_edit);
+    ccord_text_edit_free(&ui->plugin_v3->hitl.pw_edit);
+  }
+  if (ui->plugin_v3->hitl.mfa_inited) {
+    pv3_wipe_edit(&ui->plugin_v3->hitl.mfa_edit);
+    ccord_text_edit_free(&ui->plugin_v3->hitl.mfa_edit);
+  }
   ccord_free(ui->plugin_v3);
   ui->plugin_v3 = nullptr;
 }

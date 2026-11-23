@@ -689,6 +689,103 @@ static int api_tray_remove_item(lua_State *L)
   return sb_api_ui_actbtn_remove(L);
 }
 
+// ---------------------------------------------------------------- Class 3: account.* (opt-in, strictly isolated)
+
+static int api_account_info(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_ACCOUNT_READ, "account.info")) return sb_push_undeclared(L);
+  return sb_sync_call(L, sb, "account.info", "{}");
+}
+
+static int api_account_standing(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_ACCOUNT_READ, "account.standing")) return sb_push_undeclared(L);
+  return sb_sync_call(L, sb, "account.standing", "{}");
+}
+
+static int api_account_devices(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_ACCOUNT_READ, "account.devices")) return sb_push_undeclared(L);
+  return sb_sync_call(L, sb, "account.devices", "{}");
+}
+
+static int api_account_profile_get(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_PROFILE_WRITE, "account.profile.get")) return sb_push_undeclared(L);
+  const char *gid = luaL_optstring(L, 1, "");
+  if (gid[0]) {
+    ccord_buf b; ccord_buf_init(&b, 64); ccord_jw w; ccord_jw_init(&w, &b);
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "guild_id"); ccord_jw_cstr(&w, gid);
+    ccord_jw_end_object(&w);
+    int rc = sb_sync_call(L, sb, "account.profile.get", ccord_jw_ok(&w) ? ccord_buf_cstr(&b) : "{}");
+    ccord_buf_free(&b);
+    return rc;
+  }
+  return sb_sync_call(L, sb, "account.profile.get", "{}");
+}
+
+static int api_account_profile_update(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_PROFILE_WRITE, "account.profile.update")) return sb_push_undeclared(L);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  int cb_idx = lua_type(L, 2) == LUA_TFUNCTION ? 2 : 0;
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "opts");
+  if (!sb_encode_lua(L, 1, &w, 0)) {
+    ccord_buf_free(&b);
+    return luaL_error(L, "account.profile.update: invalid options table");
+  }
+  ccord_jw_end_object(&w);
+  if (!ccord_jw_ok(&w)) {
+    ccord_buf_free(&b);
+    return luaL_error(L, "account.profile.update: encode failed");
+  }
+  return sb_async_dispatch(L, sb, "account.profile.update", &b, cb_idx);
+}
+
+static int api_account_hitl_value(lua_State *L, const char *api_name, const char *method, bool need_val)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_ACCOUNT_WRITE, api_name)) return sb_push_undeclared(L);
+  const char *val = need_val ? luaL_checkstring(L, 1) : "";
+  int cb_arg = need_val ? 2 : 1;
+  int cb_idx = lua_type(L, cb_arg) == LUA_TFUNCTION ? cb_arg : 0;
+  ccord_buf b; ccord_buf_init(&b, 128); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  if (need_val) {
+    ccord_jw_key(&w, "value"); ccord_jw_cstr(&w, val);
+  }
+  ccord_jw_end_object(&w);
+  if (!ccord_jw_ok(&w)) {
+    ccord_buf_free(&b);
+    return luaL_error(L, "%s: encode failed", api_name);
+  }
+  return sb_async_dispatch(L, sb, method, &b, cb_idx);
+}
+
+static int api_account_req_username(lua_State *L)
+{
+  return api_account_hitl_value(L, "account.request_username_change", "account.request_username_change", true);
+}
+static int api_account_req_email(lua_State *L)
+{
+  return api_account_hitl_value(L, "account.request_email_change", "account.request_email_change", true);
+}
+static int api_account_req_device_logout(lua_State *L)
+{
+  return api_account_hitl_value(L, "account.request_device_logout", "account.request_device_logout", true);
+}
+static int api_account_req_data_export(lua_State *L)
+{
+  return api_account_hitl_value(L, "account.request_data_export", "account.request_data_export", false);
+}
 
 
 void sb_open_v3_discord(lua_State *L)
@@ -708,6 +805,28 @@ void sb_open_v3_discord(lua_State *L)
   sb_v3_set_ro_sub(L, -1, "tray", k_tray);
   sb_make_readonly(L);
   lua_setglobal(L, "window");
+
+  // account.* (+ account.profile.*) — strictly Class 3 opt-in
+  static const luaL_Reg k_account[] = {
+    {"info", api_account_info},
+    {"standing", api_account_standing},
+    {"devices", api_account_devices},
+    {"request_username_change", api_account_req_username},
+    {"request_email_change", api_account_req_email},
+    {"request_device_logout", api_account_req_device_logout},
+    {"request_data_export", api_account_req_data_export},
+    {nullptr, nullptr},
+  };
+  static const luaL_Reg k_account_profile[] = {
+    {"get", api_account_profile_get},
+    {"update", api_account_profile_update},
+    {nullptr, nullptr},
+  };
+  lua_newtable(L);
+  luaL_setfuncs(L, k_account, 0);
+  sb_v3_set_ro_sub(L, -1, "profile", k_account_profile);
+  sb_make_readonly(L);
+  lua_setglobal(L, "account");
 }
 
 void sb_extend_v3_discord(lua_State *L)

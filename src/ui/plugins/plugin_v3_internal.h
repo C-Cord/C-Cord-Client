@@ -119,6 +119,28 @@ typedef struct v3_settings_state {
   ccord_rect done_rect;
 } v3_settings_state;
 
+typedef struct v3_hitl_state {
+  uint64_t active_req_id;
+  ccord_text_edit pw_edit;
+  bool pw_inited;
+  bool pw_focused;
+  ccord_text_edit mfa_edit;
+  bool mfa_inited;
+  bool mfa_focused;
+  bool pending;
+  bool mfa_required;
+  uint32_t mfa_methods;
+  int mfa_method_idx;
+  char error[200];
+  ccord_rect box_rect;
+  ccord_rect pw_rect;
+  ccord_rect mfa_rect;
+  ccord_rect mfa_chip_rects[4];
+  ccord_rect approve_rect;
+  ccord_rect deny_rect;
+  uint64_t cb_gen;
+} v3_hitl_state;
+
 struct ui_plugin_v3 {
   v3_decor_hit decor_hits[V3_MAX_DECOR_HITS];
   size_t ndecor_hits;
@@ -134,6 +156,7 @@ struct ui_plugin_v3 {
 
   v3_dialog_state dlg;
   v3_settings_state set;
+  v3_hitl_state hitl;
 };
 
 

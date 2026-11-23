@@ -60,6 +60,9 @@ typedef enum ccord_perm : uint64_t {
   CCORD_PERM_SYSTEM_MEDIA      = 1ull << 44,  // "system.media"
   CCORD_PERM_SYSTEM_PROCESSES  = 1ull << 45,  // "system.processes"
   CCORD_PERM_CLIPBOARD_IMAGE   = 1ull << 46,  // "clipboard.image"
+  CCORD_PERM_ACCOUNT_READ      = 1ull << 47,  // "account.read"
+  CCORD_PERM_PROFILE_WRITE     = 1ull << 48,  // "account.profile"
+  CCORD_PERM_ACCOUNT_WRITE     = 1ull << 49,  // "account.write"
 } ccord_perm;
 
 typedef uint64_t ccord_perm_set;

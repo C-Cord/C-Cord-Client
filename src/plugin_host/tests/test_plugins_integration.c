@@ -10,7 +10,11 @@
 #include <sys/time.h>
 #include <ccord/core/event_bus.h>
 #include <ccord/model/contrib.h>
+#include <ccord/net/account_edit.h>
+#include <ccord/net/mock_transport.h>
+#include <ccord/net/profile_edit.h>
 #include <ccord/plugins/plugins.h>
+#include <ccord/session/session.h>
 #include <ccord/store/store.h>
 
 #include <signal.h>
@@ -553,6 +557,183 @@ static void test_api_v3_integration(void)
   (void)rmdir(root);
 }
 
+static uint64_t acct_fake_now(void *ud)
+{
+  (void)ud;
+  return now_ms();
+}
+
+static bool acct_pump_clip(ccord_plugins *pm, ccord_session *sess, ccord_bus *bus, v3_clip_log *cl, const char *prefix)
+{
+  uint64_t deadline = now_ms() + WAIT_MS;
+  while (now_ms() < deadline) {
+    if (v3_has_clip(cl, prefix)) return true;
+    ccord_plugins_pump(pm, now_ms());
+    if (sess) (void)ccord_session_pump(sess);
+    ccord_bus_drain(bus);
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 5 * 1000 * 1000};
+    (void)nanosleep(&ts, nullptr);
+  }
+  return v3_has_clip(cl, prefix);
+}
+
+// End-to-end Class 3 Account API & isolation test:
+// - Class 2 plugin without account.* permissions is blocked from account.info().
+// - Class 3 plugin requires explicit consent; once granted:
+//   * account.info() returns private metadata without ever exposing tokens/passwords/secrets;
+//   * Streamer Mode masks email/phone in account.info();
+//   * account.profile.update() succeeds once and rate-limits rapid second calls (10s cooldown);
+//   * account.request_username_change() queues a native HITL request in contrib (never mutates silently).
+static void test_account_class3_plugins(void)
+{
+  char root_tmpl[] = "/tmp/ccord_acct_c3_XXXXXX";
+  char *root = mkdtemp(root_tmpl);
+  CT_CHECK(root != nullptr);
+  if (!root) return;
+
+  char plugins_dir[512], data_dir[512], d_c2[600], d_c3[600];
+  snprintf(plugins_dir, sizeof plugins_dir, "%s/plugins", root);
+  snprintf(data_dir, sizeof data_dir, "%s/data", root);
+  snprintf(d_c2, sizeof d_c2, "%s/c2_noacct", plugins_dir);
+  snprintf(d_c3, sizeof d_c3, "%s/c3_acct", plugins_dir);
+  CT_CHECK(mkdir(plugins_dir, 0700) == 0);
+  CT_CHECK(mkdir(data_dir, 0700) == 0);
+  CT_CHECK(mkdir(d_c2, 0700) == 0);
+  CT_CHECK(mkdir(d_c3, 0700) == 0);
+
+  write_file(d_c2, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.noacct\",\"name\":\"NoAcct\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"clipboard.write\",\"store.read\"]}");
+  write_file(d_c2, "main.lua",
+             "local info, err = account.info()\n"
+             "clipboard.write('c2_acct:' .. tostring(info == nil) .. ':' .. tostring(err ~= nil))\n");
+
+  write_file(d_c3, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.c3acct\",\"name\":\"AcctHelper\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\","
+             "\"permissions\":[\"clipboard.write\",\"account.read\",\"account.profile\",\"account.write\",\"commands\"]}");
+  write_file(d_c3, "main.lua",
+             "local info = account.info()\n"
+             "local has_tok = (info.token ~= nil) or (info.password ~= nil) or (info.totp_secret ~= nil)\n"
+             "clipboard.write('c3_info:' .. tostring(info.email) .. ':' .. tostring(has_tok))\n"
+             "local prof = account.profile.get()\n"
+             "clipboard.write('c3_prof_get:' .. tostring(prof ~= nil))\n"
+             "account.profile.update({ bio = 'Plugin Bio V3' }, function(res, err)\n"
+             "  clipboard.write('c3_prof1:' .. tostring(res and res.ok) .. ':' .. tostring(err))\n"
+             "  account.profile.update({ bio = 'Too Fast' }, function(res2, err2)\n"
+             "    clipboard.write('c3_prof2:' .. tostring(res2 ~= nil) .. ':' .. tostring(err2))\n"
+             "  end)\n"
+             "end)\n"
+             "commands.register('check_streamer', 'Check masked info', function()\n"
+             "  local si = account.info()\n"
+             "  clipboard.write('c3_stream:' .. tostring(si.streamer_masked) .. ':' .. tostring(si.email))\n"
+             "end)\n"
+             "commands.register('ask_hitl', 'Request username change', function()\n"
+             "  account.request_username_change('new_plugin_handle', function(res, err)\n"
+             "    clipboard.write('c3_hitl:' .. tostring(res ~= nil) .. ':' .. tostring(err))\n"
+             "  end)\n"
+             "end)\n");
+
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  ccord_contrib *contrib = ccord_contrib_create(&err);
+  ccord_mock_config mcfg = {.seed = 11, .latency_ms = 0, .now_ms = acct_fake_now};
+  ccord_transport *tr = ccord_mock_transport_create(&mcfg, &err);
+  ccord_session *sess = ccord_session_create(bus, store, tr, &err);
+  CT_CHECK(bus && store && contrib && sess);
+  CT_CHECK(ccord_session_start(sess, &err) == CCORD_OK);
+  for (int i = 0; i < 8; i++) (void)ccord_session_pump(sess);
+  ccord_id self_id = ccord_store_self_id(store);
+  CT_CHECK(self_id != CCORD_ID_NONE);
+  ccord_profile_rest *prest = ccord_profile_rest_create_mock(self_id, &err);
+  ccord_account_rest *arest = ccord_account_rest_create_mock(self_id, &err);
+  CT_CHECK(prest && arest);
+  CT_CHECK(ccord_session_set_profile_rest(sess, prest) == CCORD_OK);
+  CT_CHECK(ccord_session_set_account_rest(sess, arest) == CCORD_OK);
+
+  v3_clip_log cl = {0};
+  const char *dirs[] = {plugins_dir};
+  ccord_plugins_config cfg = {
+    .store = store, .session = sess, .contrib = contrib, .bus = bus,
+    .search_dirs = dirs, .search_dir_count = 1,
+    .data_dir = data_dir, .host_exe = CCORD_PLUGIN_HOST_BIN,
+    .clipboard_write = v3_on_clip, .clipboard_ud = &cl,
+  };
+  ccord_plugins *pm = ccord_plugins_create(&cfg, &err);
+  CT_CHECK(pm != nullptr);
+  (void)ccord_plugins_load_all(pm);
+
+  // Class 2 (store.read) and Class 3 (account.*) both require explicit consent.
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.noacct", CCORD_PLUGIN_NEEDS_CONSENT));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.c3acct", CCORD_PLUGIN_NEEDS_CONSENT));
+  const ccord_plugin_info *ic2 = find_info(contrib, "dev.test.noacct");
+  const ccord_plugin_info *ic3 = find_info(contrib, "dev.test.c3acct");
+  CT_CHECK(ic2 && ic3);
+  ccord_contrib_plugin_consent_accept_for(contrib, "dev.test.noacct", ic2->perms_mask);
+  ccord_contrib_plugin_consent_accept_for(contrib, "dev.test.c3acct", ic3->perms_mask);
+  // Class 2 plugin calling undeclared Class 3 account.info() is immediately terminated.
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.noacct", CCORD_PLUGIN_FAILED));
+  CT_CHECK(!v3_has_clip(&cl, "c2_acct:"));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.c3acct", CCORD_PLUGIN_READY));
+  // Class 3 with account.read reads mock email and NEVER receives token/password/totp_secret.
+  CT_CHECK(acct_pump_clip(pm, sess, bus, &cl, "c3_info:you@example.test:false"));
+  CT_CHECK(acct_pump_clip(pm, sess, bus, &cl, "c3_prof_get:true"));
+  // First profile update succeeds; immediate second hits 10s rate limit!
+  CT_CHECK(acct_pump_clip(pm, sess, bus, &cl, "c3_prof1:true:nil"));
+  CT_CHECK(acct_pump_clip(pm, sess, bus, &cl, "c3_prof2:false:rate limited"));
+
+  // Streamer Mode masks email & phone returned to Class 3 plugins.
+  ccord_contrib_set_streamer_mode(contrib, true);
+  CT_CHECK(ccord_contrib_run_command(contrib, "check_streamer", "", 100, 200, &err) == CCORD_OK);
+  CT_CHECK(acct_pump_clip(pm, sess, bus, &cl, "c3_stream:true:"));
+  CT_CHECK(!v3_has_clip(&cl, "c3_stream:true:you@example.test"));
+  ccord_contrib_set_streamer_mode(contrib, false);
+
+  // Class 3 account.write MUST queue a HITL confirmation request and wait for native user resolution.
+  CT_CHECK(ccord_contrib_run_command(contrib, "ask_hitl", "", 100, 200, &err) == CCORD_OK);
+  uint64_t deadline = now_ms() + WAIT_MS;
+  const ccord_account_hitl_req *hreq = nullptr;
+  while (now_ms() < deadline) {
+    ccord_plugins_pump(pm, now_ms());
+    (void)ccord_session_pump(sess);
+    ccord_bus_drain(bus);
+    hreq = ccord_contrib_active_account_hitl(contrib);
+    if (hreq) break;
+    struct timespec ts = {.tv_sec = 0, .tv_nsec = 5 * 1000 * 1000};
+    (void)nanosleep(&ts, nullptr);
+  }
+  CT_CHECK(hreq != nullptr);
+  if (hreq) {
+    CT_CHECK(hreq->kind == CCORD_HITL_USERNAME);
+    CT_CHECK(strcmp(hreq->target_value, "new_plugin_handle") == 0);
+    CT_CHECK(strstr(hreq->summary, "new_plugin_handle") != nullptr);
+    ccord_contrib_resolve_account_hitl(contrib, hreq->req_id, false, "Denied by user");
+  }
+  CT_CHECK(acct_pump_clip(pm, sess, bus, &cl, "c3_hitl:false:Denied by user"));
+
+  ccord_plugins_shutdown(pm);
+  ccord_plugins_destroy(pm);
+  ccord_session_destroy(sess);
+  ccord_contrib_destroy(contrib);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+
+  char fp[700];
+  snprintf(fp, sizeof fp, "%s/main.lua", d_c2); (void)unlink(fp);
+  snprintf(fp, sizeof fp, "%s/plugin.json", d_c2); (void)unlink(fp);
+  snprintf(fp, sizeof fp, "%s/main.lua", d_c3); (void)unlink(fp);
+  snprintf(fp, sizeof fp, "%s/plugin.json", d_c3); (void)unlink(fp);
+  (void)rmdir(d_c2); (void)rmdir(d_c3); (void)rmdir(plugins_dir);
+  snprintf(fp, sizeof fp, "%s/plugins.json", data_dir); (void)unlink(fp);
+  snprintf(fp, sizeof fp, "%s/plugins/dev.test.noacct/storage.json", data_dir); (void)unlink(fp);
+  snprintf(fp, sizeof fp, "%s/plugins/dev.test.noacct", data_dir); (void)rmdir(fp);
+  snprintf(fp, sizeof fp, "%s/plugins/dev.test.c3acct/storage.json", data_dir); (void)unlink(fp);
+  snprintf(fp, sizeof fp, "%s/plugins/dev.test.c3acct", data_dir); (void)rmdir(fp);
+  snprintf(fp, sizeof fp, "%s/plugins", data_dir); (void)rmdir(fp);
+  (void)rmdir(data_dir); (void)rmdir(root);
+}
+
 int main(void)
 {
   char root[] = "/tmp/ccord-it-XXXXXX";
@@ -929,6 +1110,8 @@ int main(void)
   (void)rmdir(hog);
   (void)rmdir(plugins_dir);
   (void)rmdir(root);
+
   test_api_v3_integration();
+  test_account_class3_plugins();
   return CT_RESULT("test_plugins_integration");
 }

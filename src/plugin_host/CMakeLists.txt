@@ -48,7 +48,7 @@ endif()
 
 if(CCORD_BUILD_TESTS AND NOT ANDROID)
   ccord_add_test(NAME test_host_sandbox SOURCES tests/test_host_sandbox.c LIBS ccord_host_sandbox LABELS unit)
-  ccord_add_test(NAME test_plugins_integration SOURCES tests/test_plugins_integration.c LIBS ccord_plugins ccord_store ccord_model ccord_core LABELS integration)
+  ccord_add_test(NAME test_plugins_integration SOURCES tests/test_plugins_integration.c LIBS ccord_plugins ccord_session ccord_net_mock ccord_net_services ccord_store ccord_model ccord_core LABELS integration)
   target_compile_definitions(test_plugins_integration PRIVATE CCORD_PLUGIN_HOST_BIN="$<TARGET_FILE:ccord-plugin-host>")
   add_dependencies(test_plugins_integration ccord-plugin-host)
   ccord_add_test(NAME test_plugins_mobile_api SOURCES tests/test_plugins_mobile_api.c LIBS ccord_plugin_host_core ccord_plugins ccord_store ccord_model ccord_core LABELS integration)

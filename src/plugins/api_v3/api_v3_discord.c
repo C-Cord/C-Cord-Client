@@ -42,6 +42,7 @@ bool plugins_ext_event_bit_for(const char *name, uint64_t *bit, ccord_perm *perm
   if (strcmp(name, "settings.change") == 0) { *bit = EVB_SETTINGS_CHANGE; *perm = CCORD_PERM_EVENTS_NAVIGATION; return true; }
   if (strcmp(name, "composer.change") == 0) { *bit = EVB_COMPOSER_CHANGE; *perm = CCORD_PERM_UI_COMPOSER; return true; }
   if (strcmp(name, "voice.levels") == 0) { *bit = EVB_VOICE_LEVELS; *perm = CCORD_PERM_VOICE_LEVELS; return true; }
+  if (strcmp(name, "account.update") == 0) { *bit = EVB_ACCOUNT_UPDATE; *perm = CCORD_PERM_ACCOUNT_READ; return true; }
   return false;
 }
 
@@ -990,6 +991,7 @@ void ccord_plugins_dispatch_window_resize(ccord_plugins *m, float width, float h
 void ccord_plugins_dispatch_streamer_mode(ccord_plugins *m, bool enabled)
 {
   if (!m) return;
+  ccord_contrib_set_streamer_mode(m->contrib, enabled);
   pl_broadcast_event_json(m, EVB_STREAMER_MODE, "streamer_mode.change", enabled ? "{\"enabled\":true}" : "{\"enabled\":false}");
 }
 
@@ -1041,4 +1043,407 @@ void ccord_plugins_dispatch_voice_levels(ccord_plugins *m, const char *levels_js
 {
   if (!m || !levels_json) return;
   pl_broadcast_event_json(m, EVB_VOICE_LEVELS, "voice.levels", levels_json);
+}
+
+// ---------------------------------------------------------------- Class 3: account.* APIs (opt-in, isolated)
+
+static void write_account_info_json(ccord_jw *w, const ccord_plugins *m)
+{
+  const ccord_account_private *ap = m && m->session ? ccord_session_account_private(m->session) : nullptr;
+  bool masked = ccord_contrib_streamer_mode(m ? m->contrib : nullptr);
+  ccord_jw_begin_object(w);
+  if (!ap || !ap->valid) {
+    ccord_jw_key(w, "signed_in"); ccord_jw_bool(w, false);
+    ccord_jw_end_object(w);
+    return;
+  }
+  ccord_jw_key(w, "signed_in"); ccord_jw_bool(w, true);
+  ccord_jw_key(w, "streamer_masked"); ccord_jw_bool(w, masked);
+  ccord_jw_key(w, "email");
+  if (!ap->email[0]) ccord_jw_null(w);
+  else if (masked) ccord_jw_cstr(w, "••••@••••");
+  else ccord_jw_cstr(w, ap->email);
+  ccord_jw_key(w, "phone");
+  if (!ap->phone[0]) ccord_jw_null(w);
+  else if (masked) ccord_jw_cstr(w, "•••••••");
+  else ccord_jw_cstr(w, ap->phone);
+  ccord_jw_key(w, "verified"); ccord_jw_bool(w, ap->verified);
+  ccord_jw_key(w, "mfa_enabled"); ccord_jw_bool(w, ap->mfa_enabled);
+  ccord_jw_key(w, "sms_mfa_enabled"); ccord_jw_bool(w, ap->sms_mfa_enabled);
+  ccord_jw_key(w, "nsfw_allowed"); ccord_jw_bool(w, ap->nsfw_allowed);
+  ccord_jw_key(w, "premium_type"); ccord_jw_int(w, (int64_t)ap->premium_type);
+  ccord_jw_key(w, "authenticator_types");
+  ccord_jw_begin_array(w);
+  if (ap->authenticator_types & CCORD_AUTH_TYPE_WEBAUTHN) ccord_jw_cstr(w, "webauthn");
+  if (ap->authenticator_types & CCORD_AUTH_TYPE_TOTP) ccord_jw_cstr(w, "totp");
+  if (ap->authenticator_types & CCORD_AUTH_TYPE_SMS) ccord_jw_cstr(w, "sms");
+  ccord_jw_end_array(w);
+  ccord_jw_end_object(w);
+}
+
+static const char *standing_tier_name(ccord_account_standing_tier t)
+{
+  switch (t) {
+    case CCORD_STANDING_ALL_GOOD: return "all_good";
+    case CCORD_STANDING_LIMITED: return "limited";
+    case CCORD_STANDING_VERY_LIM: return "very_limited";
+    case CCORD_STANDING_AT_RISK: return "at_risk";
+    case CCORD_STANDING_SUSPENDED: return "suspended";
+    default: return "unknown";
+  }
+}
+
+typedef struct plugin_profile_cb_ctx {
+  ccord_plugins *m;
+  char owner[65];
+  uint64_t req_id;
+} plugin_profile_cb_ctx;
+
+static void on_plugin_profile_edit_done(void *ud, const ccord_profile_edit_result *res)
+{
+  plugin_profile_cb_ctx *ctx = ud;
+  plugin *p = pl_find_owner(ctx->m, ctx->owner);
+  if (p && p->state == CCORD_PLUGIN_READY) {
+    if (res->status == CCORD_OK) {
+      ext_send_async_reply(ctx->m, p, ctx->req_id, true, "{\"ok\":true}", nullptr);
+    } else {
+      ext_send_async_reply(ctx->m, p, ctx->req_id, false, nullptr,
+                           res->message[0] ? res->message : "profile update failed");
+    }
+  }
+  ccord_free(ctx);
+}
+
+void plugins_ext_on_account_hitl_result(void *ud, const char *owner, uint64_t req_id, bool approved, const char *err_msg)
+{
+  ccord_plugins *m = ud;
+  plugin *p = pl_find_owner(m, owner);
+  if (!p || p->state != CCORD_PLUGIN_READY) return;
+  if (approved) {
+    ext_send_async_reply(m, p, req_id, true, "{\"approved\":true}", nullptr);
+  } else {
+    ext_send_async_reply(m, p, req_id, false, nullptr,
+                         (err_msg && err_msg[0]) ? err_msg : "user denied account change request");
+  }
+}
+
+void plugins_ext_poll_account_update(ccord_plugins *m)
+{
+  if (!m || !m->session) return;
+  uint64_t rev = ccord_session_account_revision(m->session);
+  if (rev == m->last_account_rev) return;
+  m->last_account_rev = rev;
+  // Only serialize and emit if at least one READY plugin holds account.read and subscribes to account.update.
+  bool any = false;
+  for (size_t i = 0; i < m->nplugins; i++) {
+    const plugin *p = m->plugins[i];
+    if (p->used && p->state == CCORD_PLUGIN_READY && (p->subs & EVB_ACCOUNT_UPDATE) &&
+        pl_has_perm(p, CCORD_PERM_ACCOUNT_READ)) {
+      any = true;
+      break;
+    }
+  }
+  if (!any) return;
+  ccord_buf b; ccord_buf_init(&b, 256); ccord_jw w; ccord_jw_init(&w, &b);
+  write_account_info_json(&w, m);
+  if (ccord_jw_ok(&w)) {
+    for (size_t i = 0; i < m->nplugins; i++) {
+      plugin *p = m->plugins[i];
+      if (!p->used || p->state != CCORD_PLUGIN_READY || !p->ipc) continue;
+      if (!(p->subs & EVB_ACCOUNT_UPDATE) || !pl_has_perm(p, CCORD_PERM_ACCOUNT_READ)) continue;
+      ccord_buf env; ccord_buf_init(&env, b.len + 64u);
+      ccord_jw ew; ccord_jw_init(&ew, &env);
+      ccord_jw_begin_object(&ew);
+      ccord_jw_key(&ew, "event"); ccord_jw_cstr(&ew, "account.update");
+      ccord_jw_key(&ew, "data");
+      ccord_arena ar; ccord_arena_init(&ar, 0);
+      ccord_error pe = {0};
+      const ccord_json *dj = ccord_json_parse(&ar, ccord_buf_cstr(&b), b.len, &k_ext_limits, &pe);
+      if (dj) pl_jw_copy_json(&ew, dj); else ccord_jw_null(&ew);
+      ccord_arena_free(&ar);
+      ccord_jw_end_object(&ew);
+      if (ccord_jw_ok(&ew)) pl_send_ntf(m, p, "event", ccord_buf_cstr(&env));
+      ccord_buf_free(&env);
+    }
+  }
+  ccord_buf_free(&b);
+}
+
+bool ext_handle_account_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *method, const ccord_json *params)
+{
+  if (strncmp(method, "account.", 8) != 0) return false;
+
+  if (strcmp(method, "account.info") == 0) {
+    if (!pl_has_perm(p, CCORD_PERM_ACCOUNT_READ)) {
+      pl_fail_plugin(m, p, "undeclared restricted API called: account.read");
+      return true;
+    }
+    ccord_buf b; ccord_buf_init(&b, 256); ccord_jw w; ccord_jw_init(&w, &b);
+    write_account_info_json(&w, m);
+    pl_reply_ok(m, p, id, ccord_jw_ok(&w) ? ccord_buf_cstr(&b) : "null");
+    ccord_buf_free(&b);
+    return true;
+  }
+
+  if (strcmp(method, "account.standing") == 0) {
+    if (!pl_has_perm(p, CCORD_PERM_ACCOUNT_READ)) {
+      pl_fail_plugin(m, p, "undeclared restricted API called: account.read");
+      return true;
+    }
+    const ccord_account_standing *st = m->session ? ccord_session_account_standing(m->session) : nullptr;
+    ccord_buf b; ccord_buf_init(&b, 256); ccord_jw w; ccord_jw_init(&w, &b);
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "loaded"); ccord_jw_bool(&w, st && st->loaded);
+    ccord_jw_key(&w, "tier"); ccord_jw_int(&w, st ? (int64_t)st->tier : 0);
+    ccord_jw_key(&w, "tier_name"); ccord_jw_cstr(&w, st ? standing_tier_name(st->tier) : "all_good");
+    ccord_jw_key(&w, "violations");
+    ccord_jw_begin_array(&w);
+    if (st) {
+      for (size_t i = 0; i < st->violation_count; i++) {
+        ccord_jw_begin_object(&w);
+        ccord_jw_key(&w, "id"); ccord_jw_cstr(&w, st->violations[i].id);
+        ccord_jw_key(&w, "title"); ccord_jw_cstr(&w, st->violations[i].title);
+        ccord_jw_key(&w, "detail"); ccord_jw_cstr(&w, st->violations[i].detail);
+        ccord_jw_key(&w, "expires_at_ms"); ccord_jw_int(&w, st->violations[i].expires_at_ms);
+        ccord_jw_end_object(&w);
+      }
+    }
+    ccord_jw_end_array(&w);
+    ccord_jw_end_object(&w);
+    pl_reply_ok(m, p, id, ccord_jw_ok(&w) ? ccord_buf_cstr(&b) : "null");
+    ccord_buf_free(&b);
+    return true;
+  }
+
+  if (strcmp(method, "account.devices") == 0) {
+    if (!pl_has_perm(p, CCORD_PERM_ACCOUNT_READ)) {
+      pl_fail_plugin(m, p, "undeclared restricted API called: account.read");
+      return true;
+    }
+    bool masked = ccord_contrib_streamer_mode(m->contrib);
+    size_t n = 0;
+    const ccord_auth_session *list = m->session ? ccord_session_auth_sessions(m->session, &n) : nullptr;
+    ccord_buf b; ccord_buf_init(&b, 256); ccord_jw w; ccord_jw_init(&w, &b);
+    ccord_jw_begin_array(&w);
+    for (size_t i = 0; i < n; i++) {
+      ccord_jw_begin_object(&w);
+      ccord_jw_key(&w, "id_hash"); ccord_jw_cstr(&w, list[i].id_hash);
+      ccord_jw_key(&w, "os"); ccord_jw_cstr(&w, list[i].os);
+      ccord_jw_key(&w, "browser"); ccord_jw_cstr(&w, list[i].browser);
+      ccord_jw_key(&w, "device"); ccord_jw_cstr(&w, list[i].device);
+      ccord_jw_key(&w, "location"); ccord_jw_cstr(&w, masked ? "••••" : list[i].location);
+      ccord_jw_key(&w, "approx_last_used_ms"); ccord_jw_int(&w, list[i].approx_last_used_ms);
+      ccord_jw_key(&w, "current"); ccord_jw_bool(&w, list[i].current);
+      ccord_jw_end_object(&w);
+    }
+    ccord_jw_end_array(&w);
+    pl_reply_ok(m, p, id, ccord_jw_ok(&w) ? ccord_buf_cstr(&b) : "[]");
+    ccord_buf_free(&b);
+    return true;
+  }
+
+  if (strcmp(method, "account.profile.get") == 0) {
+    if (!pl_has_perm(p, CCORD_PERM_PROFILE_WRITE)) {
+      pl_fail_plugin(m, p, "undeclared restricted API called: account.profile");
+      return true;
+    }
+    ccord_id self = m->store ? ccord_store_self_id(m->store) : CCORD_ID_NONE;
+    const ccord_user *u = (m->store && self != CCORD_ID_NONE) ? ccord_store_user(m->store, self) : nullptr;
+    const ccord_user_profile *pr = (m->store && self != CCORD_ID_NONE) ? ccord_store_user_profile(m->store, self) : nullptr;
+    ccord_buf b; ccord_buf_init(&b, 512); ccord_jw w; ccord_jw_init(&w, &b);
+    if (!u) {
+      pl_reply_ok(m, p, id, "null");
+      ccord_buf_free(&b);
+      return true;
+    }
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "id"); ccord_jw_id(&w, u->id);
+    ccord_jw_key(&w, "display_name"); ccord_jw_cstr(&w, u->name ? u->name : "");
+    ccord_jw_key(&w, "handle"); ccord_jw_cstr(&w, u->handle ? u->handle : "");
+    ccord_jw_key(&w, "bio"); ccord_jw_cstr(&w, u->bio ? u->bio : "");
+    ccord_jw_key(&w, "pronouns"); ccord_jw_cstr(&w, u->pronouns ? u->pronouns : "");
+    ccord_jw_key(&w, "accent_color");
+    if (u->has_accent_color) ccord_jw_int(&w, (int64_t)u->accent_color); else ccord_jw_null(&w);
+    ccord_jw_key(&w, "avatar_url"); ccord_jw_cstr(&w, u->avatar_url ? u->avatar_url : "");
+    ccord_jw_key(&w, "banner_url"); ccord_jw_cstr(&w, u->banner_url ? u->banner_url : "");
+    ccord_jw_key(&w, "avatar_decoration_url"); ccord_jw_cstr(&w, u->avatar_decoration_url ? u->avatar_decoration_url : "");
+    ccord_jw_key(&w, "nameplate_asset"); ccord_jw_cstr(&w, u->nameplate_asset);
+    ccord_jw_key(&w, "nameplate_palette"); ccord_jw_cstr(&w, u->nameplate_palette);
+    ccord_jw_key(&w, "clan_guild_id");
+    if (u->clan_guild_id != CCORD_ID_NONE) ccord_jw_id(&w, u->clan_guild_id); else ccord_jw_null(&w);
+    ccord_jw_key(&w, "clan_tag"); ccord_jw_cstr(&w, u->clan_tag);
+    if (pr && pr->has_theme) {
+      ccord_jw_key(&w, "theme_colors");
+      ccord_jw_begin_array(&w);
+      ccord_jw_int(&w, (int64_t)pr->theme_primary);
+      ccord_jw_int(&w, (int64_t)pr->theme_accent);
+      ccord_jw_end_array(&w);
+    }
+    if (pr && pr->profile_effect_id != CCORD_ID_NONE) {
+      ccord_jw_key(&w, "profile_effect_id"); ccord_jw_id(&w, pr->profile_effect_id);
+    }
+    ccord_jw_end_object(&w);
+    pl_reply_ok(m, p, id, ccord_jw_ok(&w) ? ccord_buf_cstr(&b) : "null");
+    ccord_buf_free(&b);
+    return true;
+  }
+
+  if (strcmp(method, "account.profile.update") == 0) {
+    if (!pl_has_perm(p, CCORD_PERM_PROFILE_WRITE)) {
+      pl_fail_plugin(m, p, "undeclared restricted API called: account.profile");
+      return true;
+    }
+    int64_t req_id = 0;
+    (void)ccord_json_int64(ccord_json_get(params, "req_id"), &req_id);
+    uint64_t now = m->now_ms ? m->now_ms : ccord_clock_ms();
+    if (p->last_profile_write_ms != 0 && now >= p->last_profile_write_ms && (now - p->last_profile_write_ms) < 10000u) {
+      pl_reply_ok(m, p, id, nullptr);
+      ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr,
+                           "rate limited: account.profile.update allows 1 call per 10 seconds");
+      return true;
+    }
+    const ccord_json *opts = ccord_json_get(params, "opts");
+    if (!opts || ccord_json_type_of(opts) != CCORD_JSON_OBJECT || !m->session) {
+      pl_reply_ok(m, p, id, nullptr);
+      ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "invalid profile update options");
+      return true;
+    }
+    ccord_profile_edit edit = CCORD_PROFILE_EDIT_INIT;
+    edit.guild_id = pl_parse_id_param(opts, "guild_id");
+    size_t sl = 0;
+    if (ccord_json_get(opts, "display_name")) {
+      edit.has_display_name = true;
+      edit.display_name = pl_str_param(opts, "display_name", &sl);
+    }
+    if (ccord_json_get(opts, "bio")) {
+      edit.has_bio = true;
+      edit.bio = pl_str_param(opts, "bio", &sl);
+    }
+    if (ccord_json_get(opts, "pronouns")) {
+      edit.has_pronouns = true;
+      edit.pronouns = pl_str_param(opts, "pronouns", &sl);
+    }
+    const ccord_json *acj = ccord_json_get(opts, "accent_color");
+    if (acj) {
+      edit.has_accent = true;
+      if (ccord_json_type_of(acj) == CCORD_JSON_NULL) edit.accent_color = -1;
+      else {
+        int64_t v = -1;
+        (void)ccord_json_int64(acj, &v);
+        edit.accent_color = (int32_t)v;
+      }
+    }
+    const ccord_json *tcj = ccord_json_get(opts, "theme_colors");
+    if (tcj) {
+      edit.has_theme_colors = true;
+      if (ccord_json_type_of(tcj) == CCORD_JSON_NULL) {
+        edit.clear_theme_colors = true;
+      } else if (ccord_json_type_of(tcj) == CCORD_JSON_ARRAY && ccord_json_array_len(tcj) >= 2) {
+        int64_t c0 = 0, c1 = 0;
+        if (ccord_json_int64(ccord_json_array_at(tcj, 0), &c0) && ccord_json_int64(ccord_json_array_at(tcj, 1), &c1)) {
+          edit.theme_primary = (uint32_t)c0;
+          edit.theme_accent = (uint32_t)c1;
+        }
+      }
+    }
+    if (ccord_json_get(opts, "avatar_decoration_sku_id")) {
+      edit.has_avatar_decoration = true;
+      edit.avatar_decoration_sku_id = pl_parse_id_param(opts, "avatar_decoration_sku_id");
+    }
+    if (ccord_json_get(opts, "profile_effect_id")) {
+      edit.has_profile_effect = true;
+      edit.profile_effect_id = pl_str_param(opts, "profile_effect_id", &sl);
+    }
+    if (ccord_json_get(opts, "nameplate_sku_id")) {
+      edit.has_nameplate = true;
+      edit.nameplate_sku_id = pl_parse_id_param(opts, "nameplate_sku_id");
+    }
+    if (ccord_json_get(opts, "clan_guild_id")) {
+      edit.has_clan_guild = true;
+      edit.clan_guild_id = pl_parse_id_param(opts, "clan_guild_id");
+    }
+    plugin_profile_cb_ctx *ctx = ccord_calloc(1, sizeof *ctx);
+    if (!ctx) {
+      pl_reply_ok(m, p, id, nullptr);
+      ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "out of memory");
+      return true;
+    }
+    ctx->m = m;
+    snprintf(ctx->owner, sizeof ctx->owner, "%s", p->m.id);
+    ctx->req_id = (uint64_t)req_id;
+    ccord_error err = {0};
+    ccord_status st = ccord_session_edit_profile(m->session, &edit, on_plugin_profile_edit_done, ctx, &err);
+    pl_reply_ok(m, p, id, nullptr);
+    if (st != CCORD_OK) {
+      ccord_free(ctx);
+      ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, err.message[0] ? err.message : "profile update rejected");
+    } else {
+      p->last_profile_write_ms = now;
+    }
+    return true;
+  }
+
+  // Class 3 HITL-only account change requests (NEVER execute silently!)
+  bool is_u = strcmp(method, "account.request_username_change") == 0;
+  bool is_e = strcmp(method, "account.request_email_change") == 0;
+  bool is_d = strcmp(method, "account.request_device_logout") == 0;
+  bool is_h = strcmp(method, "account.request_data_export") == 0;
+  if (is_u || is_e || is_d || is_h) {
+    if (!pl_has_perm(p, CCORD_PERM_ACCOUNT_WRITE)) {
+      pl_fail_plugin(m, p, "undeclared restricted API called: account.write");
+      return true;
+    }
+    int64_t req_id = 0;
+    (void)ccord_json_int64(ccord_json_get(params, "req_id"), &req_id);
+    size_t vl = 0;
+    const char *val = pl_str_param(params, "value", &vl);
+    if (!val) val = "";
+    char summary[256] = "";
+    ccord_account_hitl_kind kind = CCORD_HITL_DATA_EXPORT;
+    if (is_u) {
+      if (vl < 2u || vl > 32u) {
+        pl_reply_ok(m, p, id, nullptr);
+        ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "username must be 2..32 characters");
+        return true;
+      }
+      kind = CCORD_HITL_USERNAME;
+      snprintf(summary, sizeof summary, "Change your Discord username to \"%s\"", val);
+    } else if (is_e) {
+      if (!strchr(val, '@') || vl > 127u) {
+        pl_reply_ok(m, p, id, nullptr);
+        ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "invalid email address");
+        return true;
+      }
+      kind = CCORD_HITL_EMAIL;
+      snprintf(summary, sizeof summary, "Change your Discord account email to \"%s\"", val);
+    } else if (is_d) {
+      if (vl == 0 || vl > 63u) {
+        pl_reply_ok(m, p, id, nullptr);
+        ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "invalid device session hash");
+        return true;
+      }
+      kind = CCORD_HITL_DEVICE_LOGOUT;
+      snprintf(summary, sizeof summary, "Sign out remote device session (%.16s...)", val);
+    } else {
+      kind = CCORD_HITL_DATA_EXPORT;
+      snprintf(summary, sizeof summary, "Request a copy of your Discord account data package");
+    }
+    ccord_account_hitl_req hreq = {
+      .owner = p->m.id,
+      .plugin_name = p->m.name,
+      .req_id = (uint64_t)req_id,
+      .kind = kind,
+      .target_value = val,
+      .summary = summary,
+    };
+    ccord_error err = {0};
+    ccord_status st = ccord_contrib_open_account_hitl(m->contrib, &hreq, &err);
+    pl_reply_ok(m, p, id, nullptr);
+    if (st != CCORD_OK) {
+      ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, err.message[0] ? err.message : "could not queue confirmation");
+    }
+    return true;
+  }
+
+  return false;
 }

@@ -1678,3 +1678,97 @@ function system.processes.list() end
 ---@return { title: string, focused: boolean }|nil win
 ---@return string|nil err
 function system.processes.active_window() end
+
+-- ============================================================================
+-- Account Namespace (Class 3 — Strictly Opt-In, Isolated)
+-- ============================================================================
+
+---@class CcordAccountInfo
+---@field signed_in boolean
+---@field streamer_masked? boolean
+---@field email? string|nil Masked when Streamer Mode is active
+---@field phone? string|nil Masked when Streamer Mode is active
+---@field verified? boolean
+---@field mfa_enabled? boolean
+---@field sms_mfa_enabled? boolean
+---@field nsfw_allowed? boolean
+---@field premium_type? integer 0=none, 1=Nitro Classic, 2=Nitro, 3=Nitro Basic
+---@field authenticator_types? ("webauthn"|"totp"|"sms")[]
+
+---@class CcordAccountStanding
+---@field loaded boolean
+---@field tier integer 0=all_good, 1=limited, 2=very_limited, 3=at_risk, 4=suspended
+---@field tier_name "all_good"|"limited"|"very_limited"|"at_risk"|"suspended"
+---@field violations { id: string, title: string, detail: string, expires_at_ms: integer }[]
+
+---@class CcordAccountDevice
+---@field id_hash string
+---@field os string
+---@field browser string
+---@field device string
+---@field location string Masked when Streamer Mode is active
+---@field approx_last_used_ms integer
+---@field current boolean
+
+---@class CcordAccountProfileUpdate
+---@field guild_id? string Omit for main profile; guild snowflake for per-server profile
+---@field display_name? string|nil
+---@field bio? string|nil
+---@field pronouns? string|nil
+---@field accent_color? integer|nil 0..0xFFFFFF or nil to clear
+---@field theme_colors? integer[]|nil [primary, accent] or nil to clear
+---@field avatar_decoration_sku_id? string|nil
+---@field profile_effect_id? string|nil
+---@field nameplate_sku_id? string|nil
+---@field clan_guild_id? string|nil Global profile only
+
+account = {
+  profile = {},
+}
+
+---Class 3 ("account.read"): private self-account metadata (masked in Streamer Mode; never exposes tokens/passwords/secrets/backup codes).
+---@return CcordAccountInfo|nil info
+---@return string|nil err
+function account.info() end
+---Class 3 ("account.read"): cached Account Standing & violations.
+---@return CcordAccountStanding|nil standing
+---@return string|nil err
+function account.standing() end
+---Class 3 ("account.read"): active Discord device sessions.
+---@return CcordAccountDevice[]|nil devices
+---@return string|nil err
+function account.devices() end
+---Class 3 ("account.profile"): read own profile fields.
+---@param guild_id? string
+---@return table|nil profile
+---@return string|nil err
+function account.profile.get(guild_id) end
+---Class 3 ("account.profile"): update own global or per-server profile (rate-limited 1 call per 10 seconds per plugin).
+---@param opts CcordAccountProfileUpdate
+---@param cb? fun(res: { ok: boolean }|nil, err: string|nil)
+---@return { ok: boolean }|integer|nil
+---@return string|nil err
+function account.profile.update(opts, cb) end
+---Class 3 ("account.write"): HITL-only — opens a native Protected Confirmation Modal asking the user to approve changing their username.
+---@param username string
+---@param cb? fun(res: { approved: boolean }|nil, err: string|nil)
+---@return { approved: boolean }|integer|nil
+---@return string|nil err
+function account.request_username_change(username, cb) end
+---Class 3 ("account.write"): HITL-only — opens a native Protected Confirmation Modal asking the user to approve changing their email.
+---@param email string
+---@param cb? fun(res: { approved: boolean }|nil, err: string|nil)
+---@return { approved: boolean }|integer|nil
+---@return string|nil err
+function account.request_email_change(email, cb) end
+---Class 3 ("account.write"): HITL-only — opens a native Protected Confirmation Modal asking the user to approve signing out a remote device session.
+---@param session_id_hash string
+---@param cb? fun(res: { approved: boolean }|nil, err: string|nil)
+---@return { approved: boolean }|integer|nil
+---@return string|nil err
+function account.request_device_logout(session_id_hash, cb) end
+---Class 3 ("account.write"): HITL-only — opens a native Protected Confirmation Modal asking the user to approve requesting their Discord data package.
+---@param cb? fun(res: { approved: boolean }|nil, err: string|nil)
+---@return { approved: boolean }|integer|nil
+---@return string|nil err
+function account.request_data_export(cb) end

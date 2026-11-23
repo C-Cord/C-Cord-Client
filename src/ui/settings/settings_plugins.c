@@ -938,6 +938,49 @@ static float draw_permissions_section(ccord_ui *ui, ccord_renderer *r, float x, 
     cy += bh + 8.0f;
   }
 
+  // Class 3 Account Privacy & Exfiltration callouts whenever account.* permissions are declared
+  bool has_acct_read = (perms_mask & (uint64_t)CCORD_PERM_ACCOUNT_READ) != 0;
+  bool has_acct_prof = (perms_mask & (uint64_t)CCORD_PERM_PROFILE_WRITE) != 0;
+  bool has_acct_write = (perms_mask & (uint64_t)CCORD_PERM_ACCOUNT_WRITE) != 0;
+  if (has_acct_read || has_acct_prof || has_acct_write) {
+    char acct_txt[480];
+    snprintf(acct_txt, sizeof acct_txt,
+             "Class 3 Account Access:%s%s%s Passwords, 2FA secrets, backup codes, and Discord tokens are never exposed to plugins.",
+             has_acct_read ? " reads private account details (email, phone, 2FA status, standing, devices);" : "",
+             has_acct_prof ? " modifies your Discord profile;" : "",
+             has_acct_write ? " can prompt you for account changes via native confirmation;" : "");
+    ccord_color sc = COL(danger);
+    ccord_text_style ss = ui_style(ui, CCORD_FONT_BOLD, tk.fs_caption, sc);
+    float tw = fmaxf(w - 24.0f, 60.0f);
+    float sh = fmaxf(16.0f, ccord_text_measure(r, acct_txt, strlen(acct_txt), &ss, tw).y);
+    float bh = sh + 16.0f;
+    if (paint) {
+      uis_plate(ui, r, (ccord_rect){x, cy, w, bh}, tk.r_control, with_alpha(sc, 26));
+      ccord_draw_rect(r, (ccord_rect){x, cy, 3.0f, bh}, sc);
+      ccord_text_draw(r, acct_txt, strlen(acct_txt), x + 12.0f, cy + 8.0f, &ss, tw);
+    }
+    cy += bh + 8.0f;
+  }
+
+  bool uses_any_net = (perms_mask & ((uint64_t)CCORD_PERM_NETWORK_HTTP | (uint64_t)CCORD_PERM_NETWORK_WS |
+                                     (uint64_t)CCORD_PERM_NETWORK_LOCAL)) != 0;
+  if (has_acct_read && uses_any_net) {
+    const char *combo_txt =
+        "HIGH RISK COMBINATION: This plugin requests both account.read and network access. "
+        "It could transmit your private account metadata (email, phone, standing, devices) to an external server.";
+    ccord_color sc = COL(danger);
+    ccord_text_style ss = ui_style(ui, CCORD_FONT_BOLD, tk.fs_caption, sc);
+    float tw = fmaxf(w - 24.0f, 60.0f);
+    float sh = fmaxf(16.0f, ccord_text_measure(r, combo_txt, strlen(combo_txt), &ss, tw).y);
+    float bh = sh + 16.0f;
+    if (paint) {
+      uis_plate(ui, r, (ccord_rect){x, cy, w, bh}, tk.r_control, with_alpha(sc, 38));
+      ccord_draw_rect(r, (ccord_rect){x, cy, 3.0f, bh}, sc);
+      ccord_text_draw(r, combo_txt, strlen(combo_txt), x + 12.0f, cy + 8.0f, &ss, tw);
+    }
+    cy += bh + 8.0f;
+  }
+
   return cy - y;
 }
 
@@ -947,6 +990,7 @@ bool ui_settings_security_modal_open(const ccord_ui *ui)
 {
   if (s_sec_mode != SEC_NONE) return true;
   if (ui && (ui->login_screen || ui->account_mfa_required)) return true;
+  if (ui && ui->d.contrib && ccord_contrib_active_account_hitl(ui->d.contrib) != nullptr) return true;
   if (st_account_security_active(ui)) return true;
   return false;
 }

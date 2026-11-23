@@ -556,6 +556,7 @@ bool plugins_ext_handle_request(ccord_plugins *m, plugin *p, const ccord_ipc_msg
   if (ext_handle_audio_hooks_gw_rpc(m, p, id, method, params)) return true;
   if (ext_handle_messages_store_v3(m, p, id, method, params)) return true;
   if (ext_handle_presence_voice_social_window(m, p, id, method, params)) return true;
+  if (ext_handle_account_v3(m, p, id, method, params)) return true;
   if (ext_handle_class3_v3(m, p, id, method, params)) return true;
   return false;
 }

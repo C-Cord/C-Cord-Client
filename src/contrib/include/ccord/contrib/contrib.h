@@ -413,6 +413,26 @@ typedef struct ccord_plugin_log_entry {
   uint8_t level;                  // 0=debug, 1=info, 2=warn, 3=error
   const char *message;
 } ccord_plugin_log_entry;
+
+// Class 3 Human-in-the-Loop (HITL) account change confirmation request.
+// Plugins with `account.write` can ONLY enqueue a request; the native Protected Modal prompts the user
+// for explicit approval (and password/2FA when required) before C-Cord executes the action.
+typedef enum ccord_account_hitl_kind : uint8_t {
+  CCORD_HITL_USERNAME = 0,
+  CCORD_HITL_EMAIL = 1,
+  CCORD_HITL_DEVICE_LOGOUT = 2,
+  CCORD_HITL_DATA_EXPORT = 3,
+} ccord_account_hitl_kind;
+
+typedef struct ccord_account_hitl_req {
+  const char *owner;
+  const char *plugin_name;
+  uint64_t req_id;
+  ccord_account_hitl_kind kind;
+  const char *target_value;       // new username, new email, or device session id_hash ("" for data export)
+  const char *summary;            // C-Cord-generated human-readable summary (never plugin-supplied)
+} ccord_account_hitl_req;
+
 typedef struct ccord_contrib ccord_contrib;
 typedef struct ccord_contrib_handlers {
   void *ud;
@@ -427,6 +447,7 @@ typedef struct ccord_contrib_handlers {
   void (*keybind_triggered)(void *ud, const char *owner, const char *bind_id);
   void (*action_btn_click)(void *ud, const ccord_action_btn_contribution *btn, const ccord_menu_context *ctx);
   void (*dialog_result)(void *ud, const char *owner, uint64_t req_id, bool accepted, const char *result_json);
+  void (*account_hitl_result)(void *ud, const char *owner, uint64_t req_id, bool approved, const char *err_msg);
   size_t (*autocomplete_query)(void *ud, const char *owner, const char *provider_id, const char *query,
                                ccord_id guild_id, ccord_id channel_id, ccord_autocomplete_item *out, size_t max_items);
   // Synchronous bounded-timeout interception hooks (return false to cancel/suppress).
@@ -587,6 +608,13 @@ size_t ccord_contrib_autocomplete_count(const ccord_contrib *c);
 const ccord_autocomplete_provider *ccord_contrib_autocomplete_at(const ccord_contrib *c, size_t i);
 const ccord_earcon_override *ccord_contrib_find_earcon_override(const ccord_contrib *c, const char *kind_name);
 const ccord_plugin_dialog *ccord_contrib_active_dialog(const ccord_contrib *c);
+// Class 3 HITL account change modal queue & streamer-mode privacy flag.
+[[nodiscard]] ccord_status ccord_contrib_open_account_hitl(ccord_contrib *c, const ccord_account_hitl_req *req,
+                                                           ccord_error *err);
+const ccord_account_hitl_req *ccord_contrib_active_account_hitl(const ccord_contrib *c);
+void ccord_contrib_resolve_account_hitl(ccord_contrib *c, uint64_t req_id, bool approved, const char *err_msg);
+void ccord_contrib_set_streamer_mode(ccord_contrib *c, bool enabled);
+bool ccord_contrib_streamer_mode(const ccord_contrib *c);
 size_t ccord_contrib_plugin_count(const ccord_contrib *c);
 const ccord_plugin_info *ccord_contrib_plugin_at(const ccord_contrib *c, size_t i);
 size_t ccord_contrib_catalog_count(const ccord_contrib *c);

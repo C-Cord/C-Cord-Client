@@ -58,6 +58,9 @@ static const struct {
   {CCORD_PERM_SYSTEM_MEDIA,      CCORD_PERM_CLASS_SYSTEM, "system.media",      "Read and control OS media playback (Now Playing)"},
   {CCORD_PERM_SYSTEM_PROCESSES,  CCORD_PERM_CLASS_SYSTEM, "system.processes",  "Inspect running processes and active foreground window"},
   {CCORD_PERM_CLIPBOARD_IMAGE,   CCORD_PERM_CLASS_SYSTEM, "clipboard.image",   "Read and write images on the system clipboard"},
+  {CCORD_PERM_ACCOUNT_READ,      CCORD_PERM_CLASS_SYSTEM, "account.read",      "Read private account details (email, phone, 2FA status, standing, devices)"},
+  {CCORD_PERM_PROFILE_WRITE,     CCORD_PERM_CLASS_SYSTEM, "account.profile",   "Read and edit your Discord global and per-server profile"},
+  {CCORD_PERM_ACCOUNT_WRITE,     CCORD_PERM_CLASS_SYSTEM, "account.write",     "Request sensitive account changes with your confirmation (username, email, logout, data export)"},
 };
 
 const char *ccord_perm_name(ccord_perm p)

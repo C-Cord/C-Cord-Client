@@ -67,6 +67,7 @@
 #define EVB_COMPOSER_CHANGE  (1ULL << 29)
 #define EVB_VOICE_LEVELS     (1ULL << 30)
 #define EVB_SETTINGS_CHANGE  (1ULL << 31)
+#define EVB_ACCOUNT_UPDATE   (1ULL << 32)
 
 #define HOOK_BEFORE_SEND     (1u << 0)
 #define HOOK_BEFORE_EDIT     (1u << 1)
@@ -145,6 +146,7 @@ typedef struct plugin {
   plugin_exposed_fn *exposed;
   size_t nexposed;
   int64_t dev_mtime_sec;
+  uint64_t last_profile_write_ms;   // Class 3 account.profile rate limit (10s per plugin)
 } plugin;
 
 struct ccord_plugins {
@@ -183,6 +185,7 @@ struct ccord_plugins {
   plugin_workers *workers;
   bool dev_auto_reload;
   uint64_t last_dev_scan_ms;
+  uint64_t last_account_rev;
 };
 
 // Shared helpers defined in plugins.c
@@ -233,6 +236,8 @@ void plugins_ext_on_setting_changed(void *ud, const char *owner, const char *key
 void plugins_ext_on_keybind_triggered(void *ud, const char *owner, const char *bind_id);
 void plugins_ext_on_action_btn_click(void *ud, const ccord_action_btn_contribution *btn, const ccord_menu_context *ctx);
 void plugins_ext_on_dialog_result(void *ud, const char *owner, uint64_t req_id, bool accepted, const char *result_json);
+void plugins_ext_on_account_hitl_result(void *ud, const char *owner, uint64_t req_id, bool approved, const char *err_msg);
+void plugins_ext_poll_account_update(ccord_plugins *m);
 size_t plugins_ext_on_autocomplete_query(void *ud, const char *owner, const char *provider_id, const char *query,
                                          ccord_id guild_id, ccord_id channel_id, ccord_autocomplete_item *out,
                                          size_t max_items);
