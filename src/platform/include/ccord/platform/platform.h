@@ -28,6 +28,13 @@ typedef struct ccord_platform_config {
 #define CCORD_EV_IME_PREEDIT ((ccord_input_type)(CCORD_IN_TEXT + 2))
 // Global shortcut triggered via the XDG GlobalShortcuts portal (or injected in tests); text holds the shortcut id.
 #define CCORD_EV_HOTKEY ((ccord_input_type)(CCORD_IN_TEXT + 3))
+// File drag-and-drop hover lifecycle from SDL_EVENT_DROP_BEGIN / POSITION / COMPLETE.
+// BEGIN: drag entered the window (mods holds current modifier state).
+// POSITION: drag moved over the window (x, y in logical px; mods holds current modifier state).
+// COMPLETE: drag finished or left the window without dropping.
+#define CCORD_EV_DROP_BEGIN ((ccord_input_type)(CCORD_IN_TEXT + 4))
+#define CCORD_EV_DROP_POSITION ((ccord_input_type)(CCORD_IN_TEXT + 5))
+#define CCORD_EV_DROP_COMPLETE ((ccord_input_type)(CCORD_IN_TEXT + 6))
 
 ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_error *err);
 void ccord_platform_destroy(ccord_platform *p);

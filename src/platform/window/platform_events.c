@@ -351,6 +351,19 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
       out->ime_length = (int32_t)length;
       return true;
     }
+    case SDL_EVENT_DROP_BEGIN:
+      out->type = CCORD_EV_DROP_BEGIN;
+      out->mods = translate_mods(SDL_GetModState());
+      return true;
+    case SDL_EVENT_DROP_POSITION:
+      out->type = CCORD_EV_DROP_POSITION;
+      out->x = to_logical(p, e->drop.x);
+      out->y = to_logical(p, e->drop.y);
+      out->mods = translate_mods(SDL_GetModState());
+      return true;
+    case SDL_EVENT_DROP_COMPLETE:
+      out->type = CCORD_EV_DROP_COMPLETE;
+      return true;
     case SDL_EVENT_DROP_FILE: {
       const char *path = e->drop.data;
       size_t n = path ? strlen(path) : 0;
@@ -373,6 +386,7 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
       out->type = CCORD_EV_DROP_FILE;
       out->x = to_logical(p, e->drop.x);
       out->y = to_logical(p, e->drop.y);
+      out->mods = translate_mods(SDL_GetModState());
       platform_copy_utf8_prefix(out->text, sizeof out->text, path, n);
       return true;
     }

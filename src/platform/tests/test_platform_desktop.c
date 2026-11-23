@@ -396,6 +396,27 @@ static void test_offline(void)
   CT_CHECK(strcmp(ev.text, "hk-first") == 0);
   CT_CHECK(ccord_platform_next_event(p, &ev, 0) && ev.type == CCORD_EV_DROP_FILE);
 
+  // SDL3 file drag-and-drop hover lifecycle: BEGIN -> POSITION -> COMPLETE.
+  {
+    SDL_Event sd = {0};
+    sd.type = SDL_EVENT_DROP_BEGIN;
+    SDL_PushEvent(&sd);
+    CT_CHECK(ccord_platform_next_event(p, &ev, 0) && ev.type == CCORD_EV_DROP_BEGIN);
+
+    memset(&sd, 0, sizeof sd);
+    sd.type = SDL_EVENT_DROP_POSITION;
+    sd.drop.x = 320.0f;
+    sd.drop.y = 240.0f;
+    SDL_PushEvent(&sd);
+    CT_CHECK(ccord_platform_next_event(p, &ev, 0) && ev.type == CCORD_EV_DROP_POSITION);
+    CT_CHECK(ev.x > 0.0f && ev.y > 0.0f);
+
+    memset(&sd, 0, sizeof sd);
+    sd.type = SDL_EVENT_DROP_COMPLETE;
+    SDL_PushEvent(&sd);
+    CT_CHECK(ccord_platform_next_event(p, &ev, 0) && ev.type == CCORD_EV_DROP_COMPLETE);
+  }
+
   // IME preedit translation: codepoint cursor/selection bounds, UTF-8 and size validation.
   push_editing("にほん", 1, 2);   // 3 codepoints: start+length == 3 is inside
   CT_CHECK(ccord_platform_next_event(p, &ev, 0));
