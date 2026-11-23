@@ -1039,7 +1039,11 @@ int main(int argc, char **argv)
   if (warm_res.loaded) ccord_ui_set_stale_saved_ms(a.ui, warm_res.saved_ms);
   ccord_app_desktop_attach_ui(a.desktop, a.ui);
   (void)ccord_app_desktop_bind_shortcuts(a.desktop);
-  bool auto_upd = !opt.headless && !opt.mock && !opt.screenshot && !opt.verify_slice && !CCORD_OS_ANDROID;
+#if CCORD_OS_ANDROID
+  bool auto_upd = false;
+#else
+  bool auto_upd = !opt.headless && !opt.mock && !opt.screenshot && !opt.verify_slice;
+#endif
   if (opt.verify_slice || opt.screenshot) {
     a.updater = ccord_updater_create(CCORD_VERSION_STRING, ccord_paths_data_dir(), false);
   } else {
