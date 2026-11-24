@@ -309,6 +309,12 @@ size_t ccord_plugins_wait_info(const ccord_plugins *m, ccord_socket_t *out_fds, 
       }
     }
   }
+  if (m->workers) {
+    uint32_t wto = UINT32_MAX;
+    size_t avail = (out_fds && n < cap) ? (cap - n) : 0u;
+    n += pw_wait_info(m->workers, avail > 0 ? &out_fds[n] : nullptr, avail, &wto);
+    if (wto < timeout) timeout = wto;
+  }
   if (out_timeout_ms) *out_timeout_ms = timeout;
   return n;
 }

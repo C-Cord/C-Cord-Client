@@ -13,7 +13,9 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -63,6 +65,9 @@ typedef struct pw_ws_slot {
   bool joined;
   pthread_mutex_t send_mu;
   int tcp_fd;            // >=0 for built-in loopback ws://
+#if !CCORD_OS_WINDOWS
+  int wake_r, wake_w;    // self-pipe signaled on stop/close/destroy so recv_exact blocks in poll(..., -1)
+#endif
   void *ext_handle;      // non-null when using ops.ws_*
   char url[1024];
   char *headers_json;
@@ -82,6 +87,7 @@ typedef struct pw_proc_slot {
   int stdin_fd;
   int stdout_fd;
   int stderr_fd;
+  int wake_r, wake_w;    // self-pipe signaled on stop/kill/destroy so spawn_worker_fn blocks in poll(..., -1)
 #endif
   pthread_mutex_t io_mu;
   plugin_workers *parent;
@@ -92,13 +98,19 @@ struct plugin_workers {
   pthread_mutex_t ev_mu;
   pw_event *events;
   size_t nevents, capevents;
+  _Atomic bool ev_pending;
   _Atomic bool shutting_down;
   _Atomic int active_jobs;
+#if !CCORD_OS_WINDOWS
+  int shutdown_wake_r, shutdown_wake_w;   // wakes one-shot exec workers immediately on pw_destroy()
+#endif
   // fs.watch
 #if defined(__linux__) && !CCORD_OS_WINDOWS
   int inotify_fd;
 #endif
   pw_watch *watches[PW_MAX_WATCHES];
+  size_t watch_count;
+  size_t fallback_watch_count;
   uint64_t last_watch_poll_ms;
   // ws & spawned procs
   pthread_mutex_t slot_mu;
@@ -113,6 +125,39 @@ void pw_push_ev(plugin_workers *w, const pw_event *ev);
 void pw_b64_encode(const uint8_t *in, size_t n, ccord_buf *out);
 #if !CCORD_OS_WINDOWS
 bool pw_ws_send_tcp_frame(int fd, uint8_t opcode, const uint8_t *data, size_t len);
+
+static inline void pw_make_wake_pipe(int *r_fd, int *w_fd)
+{
+  *r_fd = -1;
+  *w_fd = -1;
+  int fds[2];
+#if defined(__linux__)
+  if (pipe2(fds, O_NONBLOCK | O_CLOEXEC) != 0) return;
+#else
+  if (pipe(fds) != 0) return;
+  for (int i = 0; i < 2; i++) {
+    int fl = fcntl(fds[i], F_GETFL, 0);
+    if (fl >= 0) (void)fcntl(fds[i], F_SETFL, fl | O_NONBLOCK);
+    int fdfl = fcntl(fds[i], F_GETFD, 0);
+    if (fdfl >= 0) (void)fcntl(fds[i], F_SETFD, fdfl | FD_CLOEXEC);
+  }
+#endif
+  *r_fd = fds[0];
+  *w_fd = fds[1];
+}
+
+static inline void pw_signal_wake(int w_fd)
+{
+  if (w_fd < 0) return;
+  uint8_t b = 1;
+  (void)write(w_fd, &b, 1);
+}
+
+static inline void pw_close_wake_pipe(int *r_fd, int *w_fd)
+{
+  if (*r_fd >= 0) { close(*r_fd); *r_fd = -1; }
+  if (*w_fd >= 0) { close(*w_fd); *w_fd = -1; }
+}
 #endif
 #if defined(__linux__) && !CCORD_OS_WINDOWS
 static inline void pw_inotify_rm_watch(int fd, int wd)

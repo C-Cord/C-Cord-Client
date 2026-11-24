@@ -26,6 +26,7 @@ void pw_push_ev(plugin_workers *w, const pw_event *ev)
     }
     if (w->nevents < w->capevents) {
       w->events[w->nevents++] = *ev;
+      atomic_store_explicit(&w->ev_pending, true, memory_order_release);
     } else {
       ccord_free(ev->json);
     }
@@ -205,8 +206,12 @@ plugin_workers *pw_create(const ccord_plugin_platform_ops *ops)
   plugin_workers *w = ccord_calloc(1, sizeof *w);
   if (!w) return nullptr;
   if (ops) w->ops = *ops;
+  atomic_init(&w->ev_pending, false);
   pthread_mutex_init(&w->ev_mu, nullptr);
   pthread_mutex_init(&w->slot_mu, nullptr);
+#if !CCORD_OS_WINDOWS
+  pw_make_wake_pipe(&w->shutdown_wake_r, &w->shutdown_wake_w);
+#endif
 #if defined(__linux__) && !CCORD_OS_WINDOWS
   w->inotify_fd = -1;
 #endif
@@ -220,8 +225,12 @@ void pw_remove_owner(plugin_workers *w, const char *owner)
     pw_watch *wt = w->watches[i];
     if (wt && wt->active && strcmp(wt->owner, owner) == 0) {
 #if defined(__linux__) && !CCORD_OS_WINDOWS
+      if (wt->wd < 0 && w->fallback_watch_count > 0) w->fallback_watch_count--;
       pw_inotify_rm_watch(w->inotify_fd, wt->wd);
+#else
+      if (w->fallback_watch_count > 0) w->fallback_watch_count--;
 #endif
+      if (w->watch_count > 0) w->watch_count--;
       ccord_free(wt);
       w->watches[i] = nullptr;
     }
@@ -234,6 +243,7 @@ void pw_remove_owner(plugin_workers *w, const char *owner)
       pthread_mutex_lock(&w->ws[i]->send_mu);
       if (w->ws[i]->tcp_fd >= 0) shutdown(w->ws[i]->tcp_fd, SHUT_RDWR);
       pthread_mutex_unlock(&w->ws[i]->send_mu);
+      pw_signal_wake(w->ws[i]->wake_w);
 #endif
     }
   }
@@ -242,6 +252,7 @@ void pw_remove_owner(plugin_workers *w, const char *owner)
       atomic_store(&w->procs[i]->stop, true);
 #if !CCORD_OS_WINDOWS
       if (w->procs[i]->pid > 0) kill(w->procs[i]->pid, SIGKILL);
+      pw_signal_wake(w->procs[i]->wake_w);
 #endif
     }
   }
@@ -252,6 +263,9 @@ void pw_destroy(plugin_workers *w)
 {
   if (!w) return;
   atomic_store(&w->shutting_down, true);
+#if !CCORD_OS_WINDOWS
+  pw_signal_wake(w->shutdown_wake_w);
+#endif
 
   // Stop all websockets and spawned processes and join their threads.
   pw_ws_slot *ws_join[PW_MAX_WS] = {0};
@@ -264,6 +278,7 @@ void pw_destroy(plugin_workers *w)
       pthread_mutex_lock(&w->ws[i]->send_mu);
       if (w->ws[i]->tcp_fd >= 0) shutdown(w->ws[i]->tcp_fd, SHUT_RDWR);
       pthread_mutex_unlock(&w->ws[i]->send_mu);
+      pw_signal_wake(w->ws[i]->wake_w);
 #endif
       ws_join[i] = w->ws[i];
       w->ws[i] = nullptr;
@@ -274,6 +289,7 @@ void pw_destroy(plugin_workers *w)
       atomic_store(&w->procs[i]->stop, true);
 #if !CCORD_OS_WINDOWS
       if (w->procs[i]->pid > 0) kill(w->procs[i]->pid, SIGKILL);
+      pw_signal_wake(w->procs[i]->wake_w);
 #endif
       pr_join[i] = w->procs[i];
       w->procs[i] = nullptr;
@@ -284,6 +300,9 @@ void pw_destroy(plugin_workers *w)
   for (size_t i = 0; i < PW_MAX_WS; i++) {
     if (ws_join[i]) {
       pthread_join(ws_join[i]->thr, nullptr);
+#if !CCORD_OS_WINDOWS
+      pw_close_wake_pipe(&ws_join[i]->wake_r, &ws_join[i]->wake_w);
+#endif
       pthread_mutex_destroy(&ws_join[i]->send_mu);
       ccord_free(ws_join[i]->headers_json);
       ccord_free(ws_join[i]);
@@ -292,6 +311,9 @@ void pw_destroy(plugin_workers *w)
   for (size_t i = 0; i < PW_MAX_PROCS; i++) {
     if (pr_join[i]) {
       pthread_join(pr_join[i]->thr, nullptr);
+#if !CCORD_OS_WINDOWS
+      pw_close_wake_pipe(&pr_join[i]->wake_r, &pr_join[i]->wake_w);
+#endif
       pthread_mutex_destroy(&pr_join[i]->io_mu);
       ccord_free(pr_join[i]);
     }
@@ -301,6 +323,9 @@ void pw_destroy(plugin_workers *w)
   for (int i = 0; i < 100 && atomic_load(&w->active_jobs) > 0; i++) {
     ccord_sleep_ms(10);
   }
+#if !CCORD_OS_WINDOWS
+  pw_close_wake_pipe(&w->shutdown_wake_r, &w->shutdown_wake_w);
+#endif
 #if defined(__linux__) && !CCORD_OS_WINDOWS
   if (w->inotify_fd >= 0) close(w->inotify_fd);
 #endif
@@ -308,6 +333,8 @@ void pw_destroy(plugin_workers *w)
     ccord_free(w->watches[i]);
     w->watches[i] = nullptr;
   }
+  w->watch_count = 0;
+  w->fallback_watch_count = 0;
   pthread_mutex_lock(&w->ev_mu);
   for (size_t i = 0; i < w->nevents; i++) ccord_free(w->events[i].json);
   ccord_free(w->events);
@@ -322,10 +349,12 @@ void pw_destroy(plugin_workers *w)
 void pw_pump(plugin_workers *w, void (*on_event)(void *ud, const pw_event *ev), void *ud)
 {
   if (!w) return;
-  pw_poll_watches(w);
+  if (w->watch_count > 0) pw_poll_watches(w);
+  if (!atomic_load_explicit(&w->ev_pending, memory_order_acquire)) return;
   pw_event *batch = nullptr;
   size_t n = 0;
   pthread_mutex_lock(&w->ev_mu);
+  atomic_store_explicit(&w->ev_pending, false, memory_order_relaxed);
   if (w->nevents > 0) {
     batch = w->events;
     n = w->nevents;
@@ -339,4 +368,30 @@ void pw_pump(plugin_workers *w, void (*on_event)(void *ud, const pw_event *ev), 
     ccord_free(batch[i].json);
   }
   ccord_free(batch);
+}
+
+size_t pw_wait_info(const plugin_workers *w, ccord_socket_t *out_fds, size_t cap, uint32_t *out_timeout_ms)
+{
+  if (out_timeout_ms) *out_timeout_ms = UINT32_MAX;
+  if (!w) return 0;
+  size_t n = 0;
+  uint32_t timeout = UINT32_MAX;
+#if defined(__linux__) && !CCORD_OS_WINDOWS
+  if (w->watch_count > 0 && w->inotify_fd >= 0 && out_fds && n < cap) {
+    out_fds[n++] = (ccord_socket_t)w->inotify_fd;
+  }
+#else
+  (void)out_fds;
+  (void)cap;
+#endif
+  if (atomic_load_explicit(&w->ev_pending, memory_order_acquire)) {
+    timeout = 0u;
+  } else if (w->fallback_watch_count > 0) {
+    uint64_t now = ccord_clock_ms();
+    uint64_t due = w->last_watch_poll_ms + 250u;
+    uint64_t rem = due > now ? (due - now) : 0u;
+    if (rem < (uint64_t)timeout) timeout = (uint32_t)rem;
+  }
+  if (out_timeout_ms) *out_timeout_ms = timeout;
+  return n;
 }

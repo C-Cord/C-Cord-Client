@@ -53,7 +53,11 @@ bool pw_fs_watch_add(plugin_workers *w, const char *owner, uint64_t watch_id, co
                    ? inotify_add_watch(w->inotify_fd, path,
                                        IN_MODIFY | IN_CLOSE_WRITE | IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO | IN_DELETE_SELF)
                    : -1;
+      if (slot->wd < 0) w->fallback_watch_count++;
+#else
+      w->fallback_watch_count++;
 #endif
+      w->watch_count++;
       return true;
     }
   }
@@ -67,8 +71,12 @@ void pw_fs_watch_remove(plugin_workers *w, const char *owner, uint64_t watch_id)
     pw_watch *wt = w->watches[i];
     if (wt && wt->active && wt->watch_id == watch_id && strcmp(wt->owner, owner) == 0) {
 #if defined(__linux__) && !CCORD_OS_WINDOWS
+      if (wt->wd < 0 && w->fallback_watch_count > 0) w->fallback_watch_count--;
       pw_inotify_rm_watch(w->inotify_fd, wt->wd);
+#else
+      if (w->fallback_watch_count > 0) w->fallback_watch_count--;
 #endif
+      if (w->watch_count > 0) w->watch_count--;
       ccord_free(wt);
       w->watches[i] = nullptr;
       return;
@@ -78,14 +86,7 @@ void pw_fs_watch_remove(plugin_workers *w, const char *owner, uint64_t watch_id)
 
 void pw_poll_watches(plugin_workers *w)
 {
-  bool any_watch = false;
-  for (size_t i = 0; i < PW_MAX_WATCHES; i++) {
-    if (w->watches[i] && w->watches[i]->active) {
-      any_watch = true;
-      break;
-    }
-  }
-  if (!any_watch) return;
+  if (!w || w->watch_count == 0) return;
 #if defined(__linux__) && !CCORD_OS_WINDOWS
   if (w->inotify_fd >= 0) {
     alignas(struct inotify_event) char buf[4096];
@@ -123,6 +124,7 @@ void pw_poll_watches(plugin_workers *w)
     }
   }
 #endif
+  if (w->fallback_watch_count == 0) return;
   uint64_t now = ccord_clock_ms();
   if (now - w->last_watch_poll_ms < 250u) return;
   w->last_watch_poll_ms = now;
@@ -276,14 +278,30 @@ static void *exec_worker_fn(void *arg)
       bool open_out = true, open_err = true;
       bool timed_out = false;
       while ((open_out || open_err) && !atomic_load(&w->shutting_down)) {
-        if (ccord_clock_ms() >= deadline) { timed_out = true; kill(pid, SIGKILL); break; }
-        struct pollfd pfs[2]; int np = 0;
+        uint64_t now = ccord_clock_ms();
+        if (now >= deadline) { timed_out = true; kill(pid, SIGKILL); break; }
+        uint64_t rem = deadline - now;
+        int poll_ms = rem > (uint64_t)INT_MAX ? INT_MAX : (int)rem;
+        struct pollfd pfs[3];
+        int np = 0;
+        int wake_idx = -1;
         if (open_out) pfs[np++] = (struct pollfd){.fd = out_p[0], .events = POLLIN};
         if (open_err) pfs[np++] = (struct pollfd){.fd = err_p[0], .events = POLLIN};
-        int pr = poll(pfs, (nfds_t)np, 50);
+        if (w->shutdown_wake_r >= 0) {
+          wake_idx = np;
+          pfs[np++] = (struct pollfd){.fd = w->shutdown_wake_r, .events = POLLIN};
+        } else if (poll_ms > 50) {
+          poll_ms = 50;
+        }
+        int pr = poll(pfs, (nfds_t)np, poll_ms);
         if (pr <= 0) continue;
+        if (wake_idx >= 0 && (pfs[wake_idx].revents & (POLLIN | POLLHUP | POLLERR))) {
+          kill(pid, SIGKILL);
+          break;
+        }
         char tmp[4096];
         for (int k = 0; k < np; k++) {
+          if (k == wake_idx) continue;
           if (!(pfs[k].revents & (POLLIN | POLLHUP | POLLERR))) continue;
           ssize_t r = read(pfs[k].fd, tmp, sizeof tmp);
           if (r > 0) {
@@ -391,13 +409,21 @@ static void *spawn_worker_fn(void *arg)
   plugin_workers *w = s->parent;
   bool open_out = s->stdout_fd >= 0, open_err = s->stderr_fd >= 0;
   while ((open_out || open_err) && !atomic_load(&s->stop) && !atomic_load(&w->shutting_down)) {
-    struct pollfd pfs[2]; int np = 0;
+    struct pollfd pfs[3];
+    int np = 0;
+    int wake_idx = -1;
     if (open_out) pfs[np++] = (struct pollfd){.fd = s->stdout_fd, .events = POLLIN};
     if (open_err) pfs[np++] = (struct pollfd){.fd = s->stderr_fd, .events = POLLIN};
-    int pr = poll(pfs, (nfds_t)np, 50);
+    if (s->wake_r >= 0) {
+      wake_idx = np;
+      pfs[np++] = (struct pollfd){.fd = s->wake_r, .events = POLLIN};
+    }
+    int pr = poll(pfs, (nfds_t)np, wake_idx >= 0 ? -1 : 50);
     if (pr <= 0) continue;
+    if (wake_idx >= 0 && (pfs[wake_idx].revents & (POLLIN | POLLHUP | POLLERR))) break;
     char tmp[4096];
     for (int k = 0; k < np; k++) {
+      if (k == wake_idx) continue;
       if (!(pfs[k].revents & (POLLIN | POLLHUP | POLLERR))) continue;
       ssize_t r = read(pfs[k].fd, tmp, sizeof tmp);
       if (r > 0) {
@@ -470,6 +496,7 @@ bool pw_start_spawn(plugin_workers *w, const char *owner, uint64_t proc_id, cons
   if (!s) { kill(pid, SIGKILL); close(in_p[1]); close(out_p[0]); close(err_p[0]); return false; }
   s->active = true; s->proc_id = proc_id; s->parent = w; s->pid = pid;
   s->stdin_fd = in_p[1]; s->stdout_fd = out_p[0]; s->stderr_fd = err_p[0];
+  pw_make_wake_pipe(&s->wake_r, &s->wake_w);
   snprintf(s->owner, sizeof s->owner, "%s", owner);
   pthread_mutex_init(&s->io_mu, nullptr);
 
@@ -482,6 +509,7 @@ bool pw_start_spawn(plugin_workers *w, const char *owner, uint64_t proc_id, cons
   if (slot == PW_MAX_PROCS || pthread_create(&s->thr, nullptr, spawn_worker_fn, s) != 0) {
     if (slot < PW_MAX_PROCS) { pthread_mutex_lock(&w->slot_mu); w->procs[slot] = nullptr; pthread_mutex_unlock(&w->slot_mu); }
     kill(pid, SIGKILL); close(in_p[1]); close(out_p[0]); close(err_p[0]);
+    pw_close_wake_pipe(&s->wake_r, &s->wake_w);
     pthread_mutex_destroy(&s->io_mu); ccord_free(s);
     return false;
   }
@@ -522,6 +550,7 @@ void pw_proc_kill(plugin_workers *w, const char *owner, uint64_t proc_id)
       atomic_store(&s->stop, true);
 #if !CCORD_OS_WINDOWS
       if (s->pid > 0) kill(s->pid, SIGKILL);
+      pw_signal_wake(s->wake_w);
 #endif
       break;
     }

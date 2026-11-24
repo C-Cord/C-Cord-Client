@@ -618,14 +618,23 @@ bool pw_ws_send_tcp_frame(int fd, uint8_t opcode, const uint8_t *data, size_t le
   return ok;
 }
 
-static bool recv_exact(int fd, uint8_t *dst, size_t n, const _Atomic bool *stop)
+static bool recv_exact(int fd, int wake_fd, uint8_t *dst, size_t n,
+                       const _Atomic bool *stop, const _Atomic bool *shutting_down)
 {
   size_t got = 0;
-  while (got < n && !atomic_load(stop)) {
-    struct pollfd pf = {.fd = fd, .events = POLLIN};
-    int pr = poll(&pf, 1, 100);
+  while (got < n && !atomic_load(stop) && !atomic_load(shutting_down)) {
+    struct pollfd pfs[2];
+    nfds_t np = 0;
+    pfs[np++] = (struct pollfd){.fd = fd, .events = POLLIN};
+    if (wake_fd >= 0) pfs[np++] = (struct pollfd){.fd = wake_fd, .events = POLLIN};
+    int pr = poll(pfs, np, wake_fd >= 0 ? -1 : 100);
     if (pr == 0) continue;
-    if (pr < 0) return false;
+    if (pr < 0) {
+      if (errno == EINTR) continue;
+      return false;
+    }
+    if (np > 1 && (pfs[1].revents & (POLLIN | POLLHUP | POLLERR))) return false;
+    if (!(pfs[0].revents & (POLLIN | POLLHUP | POLLERR))) continue;
     ssize_t r = recv(fd, dst + got, n - got, 0);
     if (r <= 0) return false;
     got += (size_t)r;
@@ -756,9 +765,9 @@ static void *ws_worker_fn(void *arg)
     char rbuf[2048];
     size_t rlen = 0;
     bool hs_ok = false;
-    while (rlen + 1 < sizeof rbuf && !atomic_load(&s->stop)) {
+    while (rlen + 1 < sizeof rbuf && !atomic_load(&s->stop) && !atomic_load(&w->shutting_down)) {
       uint8_t ch = 0;
-      if (!recv_exact(fd, &ch, 1, &s->stop)) break;
+      if (!recv_exact(fd, s->wake_r, &ch, 1, &s->stop, &w->shutting_down)) break;
       rbuf[rlen++] = (char)ch; rbuf[rlen] = '\0';
       if (rlen >= 4 && memcmp(rbuf + rlen - 4, "\r\n\r\n", 4) == 0) {
         hs_ok = strstr(rbuf, " 101 ") != nullptr;
@@ -779,25 +788,25 @@ static void *ws_worker_fn(void *arg)
     uint16_t close_code = 1000;
     while (!atomic_load(&s->stop) && !atomic_load(&w->shutting_down)) {
       uint8_t h2[2];
-      if (!recv_exact(fd, h2, 2, &s->stop)) break;
+      if (!recv_exact(fd, s->wake_r, h2, 2, &s->stop, &w->shutting_down)) break;
       uint8_t op = h2[0] & 0x0fu;
       bool masked = (h2[1] & 0x80u) != 0;
       uint64_t plen = h2[1] & 0x7fu;
       if (plen == 126u) {
         uint8_t e2[2];
-        if (!recv_exact(fd, e2, 2, &s->stop)) break;
+        if (!recv_exact(fd, s->wake_r, e2, 2, &s->stop, &w->shutting_down)) break;
         plen = ((uint64_t)e2[0] << 8) | (uint64_t)e2[1];
       } else if (plen == 127u) {
         uint8_t e8[8];
-        if (!recv_exact(fd, e8, 8, &s->stop)) break;
+        if (!recv_exact(fd, s->wake_r, e8, 8, &s->stop, &w->shutting_down)) break;
         plen = 0;
         for (int i = 0; i < 8; i++) plen = (plen << 8) | e8[i];
       }
       if (plen > 512u * 1024u) break;
       uint8_t mk[4] = {0};
-      if (masked && !recv_exact(fd, mk, 4, &s->stop)) break;
+      if (masked && !recv_exact(fd, s->wake_r, mk, 4, &s->stop, &w->shutting_down)) break;
       uint8_t *pay = plen ? ccord_malloc((size_t)plen + 1u) : nullptr;
-      if (plen && (!pay || !recv_exact(fd, pay, (size_t)plen, &s->stop))) { ccord_free(pay); break; }
+      if (plen && (!pay || !recv_exact(fd, s->wake_r, pay, (size_t)plen, &s->stop, &w->shutting_down))) { ccord_free(pay); break; }
       if (pay) {
         if (masked) { for (size_t i = 0; i < (size_t)plen; i++) pay[i] ^= mk[i & 3u]; }
         pay[plen] = 0;
@@ -870,6 +879,9 @@ bool pw_ws_connect(plugin_workers *w, const char *owner, uint64_t ws_id, const c
   if (!s) return false;
   s->active = true;
   s->tcp_fd = -1;
+#if !CCORD_OS_WINDOWS
+  pw_make_wake_pipe(&s->wake_r, &s->wake_w);
+#endif
   s->ws_id = ws_id;
   s->allow_local = allow_local;
   s->parent = w;
@@ -885,11 +897,17 @@ bool pw_ws_connect(plugin_workers *w, const char *owner, uint64_t ws_id, const c
   }
   pthread_mutex_unlock(&w->slot_mu);
   if (slot == PW_MAX_WS) {
+#if !CCORD_OS_WINDOWS
+    pw_close_wake_pipe(&s->wake_r, &s->wake_w);
+#endif
     pthread_mutex_destroy(&s->send_mu); ccord_free(s->headers_json); ccord_free(s);
     return false;
   }
   if (pthread_create(&s->thr, nullptr, ws_worker_fn, s) != 0) {
     pthread_mutex_lock(&w->slot_mu); w->ws[slot] = nullptr; pthread_mutex_unlock(&w->slot_mu);
+#if !CCORD_OS_WINDOWS
+    pw_close_wake_pipe(&s->wake_r, &s->wake_w);
+#endif
     pthread_mutex_destroy(&s->send_mu); ccord_free(s->headers_json); ccord_free(s);
     return false;
   }
@@ -938,6 +956,7 @@ void pw_ws_close(plugin_workers *w, const char *owner, uint64_t ws_id, uint16_t 
         shutdown(s->tcp_fd, SHUT_RDWR);
       }
       pthread_mutex_unlock(&s->send_mu);
+      pw_signal_wake(s->wake_w);
 #endif
       break;
     }

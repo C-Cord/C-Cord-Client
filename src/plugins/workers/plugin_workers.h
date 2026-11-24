@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #pragma once
+#include <ccord/core/os.h>
 #include <ccord/plugins/plugins.h>
 
 #include <stdbool.h>
@@ -31,6 +32,8 @@ void pw_destroy(plugin_workers *w);
 void pw_remove_owner(plugin_workers *w, const char *owner);
 // Drains completed worker events into caller callback on main thread.
 void pw_pump(plugin_workers *w, void (*on_event)(void *ud, const pw_event *ev), void *ud);
+// Exports any active worker wait descriptors (e.g. Linux inotify_fd while watches exist) and next timer deadline.
+size_t pw_wait_info(const plugin_workers *w, ccord_socket_t *out_fds, size_t cap, uint32_t *out_timeout_ms);
 
 // URL & local target validation helpers
 bool pw_extract_url_host_port(const char *url, char *scheme_out, size_t scap, char *host_out, size_t hcap,
