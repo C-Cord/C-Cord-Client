@@ -432,7 +432,17 @@ ccord_status ccord_ipc_send_error(ccord_ipc *ipc, uint32_t id, const char *code,
 ccord_status ccord_ipc_flush(ccord_ipc *ipc, int timeout_ms, ccord_error *err)
 {
   if (!ipc) return CCORD_ERR_INVALID;
-  uint64_t deadline = ccord_clock_ms() + (timeout_ms > 0 ? (uint64_t)timeout_ms : 0);
+  if (ipc->out_len == ipc->out_off) {
+    ipc->out_len = 0;
+    ipc->out_off = 0;
+    if (ipc->out_cap > IPC_SHRINK_THRESHOLD) {
+      ccord_free(ipc->out);
+      ipc->out = nullptr;
+      ipc->out_cap = 0;
+    }
+    return CCORD_OK;
+  }
+  uint64_t deadline = timeout_ms > 0 ? ccord_clock_ms() + (uint64_t)timeout_ms : 0;
   while (ipc->out_len > ipc->out_off) {
     bool would_block = false;
     ptrdiff_t n = ccord_sock_send(ipc->fd, ipc->out + ipc->out_off, ipc->out_len - ipc->out_off, &would_block);
@@ -441,8 +451,9 @@ ccord_status ccord_ipc_flush(ccord_ipc *ipc, int timeout_ms, ccord_error *err)
       continue;
     }
     if (would_block) {
+      if (timeout_ms <= 0) return CCORD_OK;
       uint64_t now = ccord_clock_ms();
-      if (timeout_ms <= 0 || now >= deadline) return timeout_ms <= 0 ? CCORD_OK : CCORD_ERR_TIMEOUT;
+      if (now >= deadline) return CCORD_ERR_TIMEOUT;
       uint64_t left = deadline - now;
       int ms = left > (uint64_t)INT_MAX ? INT_MAX : (int)left;
       (void)ccord_sock_poll1(ipc->fd, CCORD_POLL_OUT, ms);

@@ -244,7 +244,9 @@ void ccord_plugins_pump(ccord_plugins *m, uint64_t now_ms)
       char reason[160];
       (void)pl_reap_wait(p, 0, reason, sizeof reason);
     }
-    if (p->storage_enabled && p->dirty && now_ms - p->last_save_ms >= SAVE_INTERVAL_MS) pl_storage_save(m, p, now_ms);
+    if (p->storage_enabled && p->dirty && now_ms - p->last_save_ms >= SAVE_INTERVAL_MS) {
+      pl_storage_save(m, p, now_ms, false);
+    }
   }
   if (m->workers) pw_pump(m->workers, plugins_ext_on_worker_event, m);
   plugins_ext_poll_account_update(m);
@@ -512,7 +514,7 @@ void pl_stop_host(ccord_plugins *m, plugin *p)
       (void)ccord_ipc_send_notify(p->ipc, "shutdown", "{}", &err);
       (void)ccord_ipc_flush(p->ipc, 100, &err);
     }
-    pl_storage_save(m, p, m->now_ms);
+    pl_storage_save(m, p, m->now_ms, true);
     char reason[160];
     if (pl_host_is_running(p) && !pl_reap_wait(p, 1000, reason, sizeof reason)) {
       pl_kill_host_process(p);

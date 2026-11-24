@@ -31,7 +31,7 @@
 #define CMD_DEADLINE_MS 2000u
 #define PING_INTERVAL_MS 5000u
 #define PING_TIMEOUT_MS 5000u
-#define SAVE_INTERVAL_MS 1000u
+#define SAVE_INTERVAL_MS 5000u
 #define EXIT_WAIT_MS 300u
 
 #define EVB_MESSAGE          (1ULL << 0)
@@ -270,7 +270,7 @@ stored_value *pl_store_find(plugin *p, const char *key);
 void pl_store_remove_at(plugin *p, size_t i);
 void pl_storage_load(plugin *p);
 void pl_mkdir_ok(const char *path);
-void pl_storage_save(ccord_plugins *m, plugin *p, uint64_t now);
+void pl_storage_save(ccord_plugins *m, plugin *p, uint64_t now, bool sync);
 void pl_storage_setup(ccord_plugins *m, plugin *p);
 void pl_format_hosts_csv(const ccord_manifest *man, char *out, size_t cap);
 const ccord_json *pl_consent_parse_file(const ccord_plugins *m, ccord_arena *ar);

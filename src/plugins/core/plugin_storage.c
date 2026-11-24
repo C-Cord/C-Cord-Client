@@ -170,7 +170,7 @@ void pl_mkdir_ok(const char *path)
   if (ccord_mkdir_p(path, 0700, &err) != CCORD_OK) CCORD_LOG_W("storage: mkdir %s: %s", path, err.message);
 }
 
-void pl_storage_save(ccord_plugins *m, plugin *p, uint64_t now)
+void pl_storage_save(ccord_plugins *m, plugin *p, uint64_t now, bool sync)
 {
   if (!p->storage_enabled || !p->dirty || !p->storage_dir || !m->data_dir) return;
   ccord_buf b;
@@ -205,7 +205,7 @@ void pl_storage_save(ccord_plugins *m, plugin *p, uint64_t now)
     return;
   }
   ccord_error werr = {0};
-  if (ccord_file_write_atomic(final_path, b.data, b.len, 0600, true, &werr) != CCORD_OK) {
+  if (ccord_file_write_atomic(final_path, b.data, b.len, 0600, sync, &werr) != CCORD_OK) {
     CCORD_LOG_W("plugin %s: storage save failed: %s", p->m.id, werr.message);
   } else {
     p->dirty = false;
