@@ -952,10 +952,12 @@ struct ccord_ui {
   bool mobile_server_settings_detail;
   bool mobile_channel_settings_detail;
   bool mobile_menu_in_sub;
-  int8_t touch_scroll_direct_override;  // 0=normal, 1=force direct 1:1 drag, -1=force eased fling
+  int8_t touch_scroll_direct_override;  // 0=normal, 1=force direct 1:1 drag/fling, -1=force eased fling
+  float touch_scroll_px;                // exact logical px delta for ui_scroll_at_px() (used when override != 0)
+  bool touch_scroll_hit_bound;          // set by handlers when a direct touch fling hits a scroll boundary
   bool in_synthetic_mouse;              // true while touch.c dispatches a synthetic click/context-menu
   ccord_rect mobile_send_btn_rect;
-  // Touch gesture state (owned by src/ui/touch.c).
+  // Touch gesture state (owned by src/ui/core/touch.c).
   struct {
     bool active;
     int64_t primary_id;
@@ -964,7 +966,23 @@ struct ccord_ui {
     float last_x, last_y;
     uint64_t down_ms;
     uint64_t last_ms;
-    float vx_ema, vy_ema;  // px / sec smoothed velocity for fling & drawer snap
+    float vx_ema, vy_ema;  // px / sec smoothed velocity (kept updated for diagnostics)
+    // Trailing sample ring buffer for accurate release velocity across 60-240 Hz touch batching.
+    float sample_x[16];
+    float sample_y[16];
+    uint64_t sample_t_ns[16];
+    uint8_t sample_head;
+    uint8_t sample_count;
+    bool samples_use_ev_ts;
+    uint64_t last_move_t_ns;
+    // Continuous viscous-friction kinetic fling driven per-frame in ui_touch_update().
+    bool fling_active;
+    bool fling_fresh;          // true until the first frame after TOUCH_UP
+    bool scrolled_this_frame;  // true if TOUCH_MOVE scrolled during this frame (avoids double-step on lift frame)
+    bool caught_fling;         // true when TOUCH_DOWN halted a moving fling (suppresses accidental tap click)
+    float fling_x, fling_y;
+    float fling_vy;            // px / sec in scroll-offset coordinates (> 0 scrolls towards end of list)
+    uint64_t fling_view_sig;   // active view/overlay/channel signature; cancels fling on view switch
     float drawer_start_t;
     float drag_origin_x;   // finger x where drawer drag locked in (avoids deadzone jump)
     // Secondary finger for 2-finger pinch-to-zoom (lightbox).
@@ -982,5 +1000,8 @@ struct ccord_ui {
     uint64_t pending_tap_ms;
     float pending_tap_x, pending_tap_y;
   } touch;
+
 };
+
+#define UI_TOUCH_LONG_PRESS_MS 420u
 

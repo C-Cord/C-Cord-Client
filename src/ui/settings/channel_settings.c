@@ -938,7 +938,7 @@ static int cs_hit_at(const struct ui_channel_settings *cs, float x, float y)
 static void cs_wheel_by(ccord_ui *ui, const ccord_input_event *ev, float dy)
 {
   struct ui_channel_settings *cs = ui->cs;
-  ccord_scroller_scroll(&cs->glide, &cs->scroll, dy, fmaxf(0.0f, cs->content_h - cs->view_h), ui_wheel_direct(ui, ev));
+  ui_scroller_scroll_ui(ui, &cs->glide, &cs->scroll, dy, fmaxf(0.0f, cs->content_h - cs->view_h), ui_wheel_direct(ui, ev));
   ui->dirty = true;
 }
 
@@ -1053,7 +1053,7 @@ bool ui_channel_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
     case CCORD_IN_WHEEL:
-      cs_wheel_by(ui, ev, -ev->wheel * 52.0f);
+      cs_wheel_by(ui, ev, ui_wheel_delta_px(ui, ev, 52.0f));
       return true;
     case CCORD_IN_KEY_DOWN: {
       if (cs->focus != CSF_NONE) return cs_handle_field_key(ui, ev);

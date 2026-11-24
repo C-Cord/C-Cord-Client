@@ -279,7 +279,8 @@ bool ui_activity_shelf_handle(ccord_ui *ui, const ccord_input_event *ev)
   if (ev->type == CCORD_IN_WHEEL) {
     float notch = 3.0f * ui_line_h(ui, M(font_size_base));
     float max_s = st->list_content_h > st->list_view.h ? st->list_content_h - st->list_view.h : 0.0f;
-    ccord_scroller_scroll(&st->list_glide, &st->list_scroll, -ev->wheel * notch, max_s, ui_wheel_direct(ui, ev));
+    ui_scroller_scroll_ui(ui, &st->list_glide, &st->list_scroll, ui_wheel_delta_px(ui, ev, notch), max_s,
+                          ui_wheel_direct(ui, ev));
     ui->dirty = true;
     return true;
   }

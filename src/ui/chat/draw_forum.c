@@ -967,8 +967,8 @@ bool ui_forum_handle_event(ccord_ui *ui, const ccord_input_event *ev)
 
     case CCORD_IN_WHEEL:
       if (ui_in_rect(ev->x, ev->y, f->area_rect)) {
-        ccord_scroller_scroll(&f->glide, &f->scroll_y, -ev->wheel * 42.0f, fmaxf(f->content_h - f->viewport_h, 0.0f),
-                              ui_wheel_direct(ui, ev));
+        ui_scroller_scroll_ui(ui, &f->glide, &f->scroll_y, ui_wheel_delta_px(ui, ev, 42.0f),
+                              fmaxf(f->content_h - f->viewport_h, 0.0f), ui_wheel_direct(ui, ev));
         ui_mark_dirty(ui);
         return true;
       }

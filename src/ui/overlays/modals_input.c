@@ -537,8 +537,8 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
       float qstride = ui->mobile_layout ? 44.0f : 30.0f;
       float content_h = (float)ui->nquick_switcher_items * qstride;
       float max_s = maxf(content_h - lview.h, 0.0f);
-      ccord_scroller_scroll(&ui->quick_switcher_glide, &ui->quick_switcher_scroll, -ev->wheel * qstride, max_s,
-                            ui_wheel_direct(ui, ev));
+      ui_scroller_scroll_ui(ui, &ui->quick_switcher_glide, &ui->quick_switcher_scroll,
+                            ui_wheel_delta_px(ui, ev, qstride), max_s, ui_wheel_direct(ui, ev));
       ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
       ui->dirty = true;
       return true;
@@ -568,7 +568,7 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
     }
     bool is_multi = ui->select_target->max_values > 1u;
     if (ev->type == CCORD_IN_WHEEL) {
-      ui->select_scroll = clampf(ui->select_scroll - ev->wheel * 36.0f, 0.0f, ui->select_max);
+      ui_scroll_offset_by(ui, &ui->select_scroll, ui_wheel_delta_px(ui, ev, 36.0f), ui->select_max);
       ui->dirty = true;
       return true;
     }
@@ -643,7 +643,7 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
     size_t nf = ui->inter_modal->field_count;
     size_t focus = nf > 0 && ui->inter_modal_focus < nf ? ui->inter_modal_focus : 0;
     if (ev->type == CCORD_IN_WHEEL) {
-      ui->inter_modal_scroll = clampf(ui->inter_modal_scroll - ev->wheel * 36.0f, 0.0f, ui->inter_modal_max);
+      ui_scroll_offset_by(ui, &ui->inter_modal_scroll, ui_wheel_delta_px(ui, ev, 36.0f), ui->inter_modal_max);
       ui->dirty = true;
       return true;
     }
@@ -743,8 +743,8 @@ bool ui_overlays_handle(ccord_ui *ui, const ccord_input_event *ev)
     bool shift = (ev->mods & CCORD_MOD_SHIFT) != 0;
     if (ev->type == CCORD_IN_WHEEL && ui->modal_kind == UI_MODAL_USER_PROFILE) {
       float step = 42.0f;
-      ccord_scroller_scroll(&ui->profile_modal_glide, &ui->profile_modal_scroll, -ev->wheel * step,
-                            ui->profile_modal_max, ui_wheel_direct(ui, ev));
+      ui_scroller_scroll_ui(ui, &ui->profile_modal_glide, &ui->profile_modal_scroll,
+                            ui_wheel_delta_px(ui, ev, step), ui->profile_modal_max, ui_wheel_direct(ui, ev));
       ui->dirty = true;
       return true;
     }

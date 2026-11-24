@@ -3214,9 +3214,7 @@ bool st_plugins_handle_wheel(ccord_ui *ui, const sgeom *g, const ccord_input_eve
   if (s_sec_mode != SEC_NONE) {
     float max_s = s_sec_content_h > s_sec_body_rect.h ? (s_sec_content_h - s_sec_body_rect.h) : 0.0f;
     if (max_s > 0.0f) {
-      s_sec_scroll -= ev->wheel * 48.0f;
-      if (s_sec_scroll < 0.0f) s_sec_scroll = 0.0f;
-      if (s_sec_scroll > max_s) s_sec_scroll = max_s;
+      ui_scroll_offset_by(ui, &s_sec_scroll, ui_wheel_delta_px(ui, ev, 48.0f), max_s);
       ui->dirty = true;
     }
     return true;
@@ -3225,9 +3223,7 @@ bool st_plugins_handle_wheel(ccord_ui *ui, const sgeom *g, const ccord_input_eve
   if (s_log_id[0] && ui_in_rect(ev->x, ev->y, s_log_box_rect)) {
     float max_ls = s_log_content_h > s_log_box_rect.h ? (s_log_content_h - s_log_box_rect.h) : 0.0f;
     if (max_ls > 0.0f) {
-      s_log_scroll -= ev->wheel * 44.0f;
-      if (s_log_scroll < 0.0f) s_log_scroll = 0.0f;
-      if (s_log_scroll > max_ls) s_log_scroll = max_ls;
+      ui_scroll_offset_by(ui, &s_log_scroll, ui_wheel_delta_px(ui, ev, 44.0f), max_ls);
       ui->dirty = true;
       return true;
     }
@@ -3235,9 +3231,7 @@ bool st_plugins_handle_wheel(ccord_ui *ui, const sgeom *g, const ccord_input_eve
   if (!s_log_id[0] && s_page_view_h > 0.0f) {
     float max_p = st_s_plugins_content_h > s_page_view_h ? (st_s_plugins_content_h - s_page_view_h) : 0.0f;
     if (max_p > 0.0f) {
-      st_s_page_scroll -= ev->wheel * 56.0f;
-      if (st_s_page_scroll < 0.0f) st_s_page_scroll = 0.0f;
-      if (st_s_page_scroll > max_p) st_s_page_scroll = max_p;
+      ui_scroll_offset_by(ui, &st_s_page_scroll, ui_wheel_delta_px(ui, ev, 56.0f), max_p);
       ui->dirty = true;
       return true;
     }

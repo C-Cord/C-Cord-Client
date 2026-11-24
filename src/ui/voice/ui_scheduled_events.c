@@ -1015,7 +1015,8 @@ static bool events_handle_list(ccord_ui *ui, const ccord_input_event *ev)
   }
   if (ev->type == CCORD_IN_WHEEL) {
     float max_s = st->list_content_h > st->list_view.h ? st->list_content_h - st->list_view.h : 0.0f;
-    ccord_scroller_scroll(&st->glide, &st->scroll, -ev->wheel * 48.0f, max_s, ui_wheel_direct(ui, ev));
+    ui_scroller_scroll_ui(ui, &st->glide, &st->scroll, ui_wheel_delta_px(ui, ev, 48.0f), max_s,
+                          ui_wheel_direct(ui, ev));
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
     ui->dirty = true;
     return true;
@@ -1111,7 +1112,7 @@ static bool events_handle_form(ccord_ui *ui, const ccord_input_event *ev)
   }
   if (ev->type == CCORD_IN_WHEEL) {
     if (st->form_max > 0.0f) {
-      st->form_scroll = clampf(st->form_scroll - ev->wheel * 36.0f, 0.0f, st->form_max);
+      ui_scroll_offset_by(ui, &st->form_scroll, ui_wheel_delta_px(ui, ev, 36.0f), st->form_max);
       ui->dirty = true;
     }
     return true;

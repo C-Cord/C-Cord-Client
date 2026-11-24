@@ -48,6 +48,7 @@ typedef struct sd_state {
   float click_x, click_y;
   float msg_scroll;
   float body_scroll, body_max, body_content_h;
+  float row_wheel_acc;
 } sd_state;
 
 static sd_state *sd;
@@ -616,12 +617,24 @@ bool ui_schedule_dialog_input(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     case CCORD_IN_WHEEL:
       if (sd->body_max > 0.0f) {
-        sd->body_scroll = fminf(fmaxf(sd->body_scroll - ev->wheel * 36.0f, 0.0f), sd->body_max);
+        ui_scroll_offset_by(ui, &sd->body_scroll, ui_wheel_delta_px(ui, ev, 36.0f), sd->body_max);
         ui->dirty = true;
       } else if (sd->nitems > SD_ROWS_MAX) {
         size_t max_first = sd->nitems - SD_ROWS_MAX;
-        if (ev->wheel > 0.0f && sd->first_row > 0) sd->first_row--;
-        else if (ev->wheel < 0.0f && sd->first_row < max_first) sd->first_row++;
+        if (ui->touch_scroll_direct_override != 0) {
+          sd->row_wheel_acc += ui->touch_scroll_px;
+          while (sd->row_wheel_acc >= SD_ROW_H) {
+            if (sd->first_row < max_first) sd->first_row++;
+            sd->row_wheel_acc -= SD_ROW_H;
+          }
+          while (sd->row_wheel_acc <= -SD_ROW_H) {
+            if (sd->first_row > 0) sd->first_row--;
+            sd->row_wheel_acc += SD_ROW_H;
+          }
+        } else {
+          if (ev->wheel > 0.0f && sd->first_row > 0) sd->first_row--;
+          else if (ev->wheel < 0.0f && sd->first_row < max_first) sd->first_row++;
+        }
         ui->dirty = true;
       }
       return true;

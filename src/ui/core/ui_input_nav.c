@@ -237,6 +237,11 @@ float uc_page_step(const ccord_ui *ui)
 
 void uc_scroll_messages(ccord_ui *ui, float dy)
 {
+  if (ui->touch_scroll_direct_override > 0 &&
+      ((dy > 0.0f && ui->vlist.stick_bottom) ||
+       (dy < 0.0f && ui->vlist.anchor_index == 0 && ui->vlist.anchor_offset >= 0.0f))) {
+    ui->touch_scroll_hit_bound = true;
+  }
   if (dy < 0.0f) ui->scroll_up_pending = true;   // reaching the top will page older history in
   ccord_vlist_scroll_by(&ui->vlist, dy);
   if (dy > 0.0f && ui->vlist.stick_bottom && ui->msg_scroll_vel > 0.0f) {
@@ -273,16 +278,16 @@ bool uc_glide_tick(ccord_ui *ui, ccord_scroller *s, float *offset, bool open, fl
 void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
 {
   float notch = 3.0f * ui_line_h(ui, M(font_size_base));
-  float dy = -ev->wheel * notch;   // wheel > 0 = towards older content = content moves down
+  float dy = ui_wheel_delta_px(ui, ev, notch);   // wheel > 0 = towards older content = content moves down
   bool direct = ui_wheel_direct(ui, ev);
   if (ui->inbox_open && ui_in_rect(ev->x, ev->y, ui->inbox_popover_rect)) {
-    ccord_scroller_scroll(&ui->inbox_glide, &ui->inbox_scroll, dy, ui->inbox_max, direct);
+    ui_scroller_scroll_ui(ui, &ui->inbox_glide, &ui->inbox_scroll, dy, ui->inbox_max, direct);
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
     ui->dirty = true;
     return;
   }
   if (ui->saved_popover_open && ui_in_rect(ev->x, ev->y, ui->saved_popover_rect)) {
-    ccord_scroller_scroll(&ui->saved_glide, &ui->saved_scroll, dy, ui->saved_max, direct);
+    ui_scroller_scroll_ui(ui, &ui->saved_glide, &ui->saved_scroll, dy, ui->saved_max, direct);
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
     ui->dirty = true;
     return;
@@ -290,16 +295,16 @@ void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
   if (ui->reactions_open && ui_in_rect(ev->x, ev->y, ui->reactions_popover_rect)) {
     if (ev->x < ui->reactions_popover_rect.x + UI_REACTIONS_SIDE_W) {
       // The emoji tab column scrolls independently of the user list.
-      ccord_scroller_scroll(&ui->reactions_tab_glide, &ui->reactions_tab_scroll, dy, ui->reactions_tab_max, direct);
+      ui_scroller_scroll_ui(ui, &ui->reactions_tab_glide, &ui->reactions_tab_scroll, dy, ui->reactions_tab_max, direct);
     } else {
-      ccord_scroller_scroll(&ui->reactions_glide, &ui->reactions_scroll, dy, ui->reactions_max, direct);
+      ui_scroller_scroll_ui(ui, &ui->reactions_glide, &ui->reactions_scroll, dy, ui->reactions_max, direct);
     }
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
     ui->dirty = true;
     return;
   }
   if (ui->pins_open && ui_in_rect(ev->x, ev->y, ui_pins_popover_rect(ui))) {
-    ccord_scroller_scroll(&ui->pins_glide, &ui->pins_scroll, dy, ui->pins_max, direct);
+    ui_scroller_scroll_ui(ui, &ui->pins_glide, &ui->pins_scroll, dy, ui->pins_max, direct);
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
     ui->dirty = true;
     return;
@@ -311,14 +316,14 @@ void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
     if (l->left_drawer_visible) {
       if (ui_in_rect(ev->x, ev->y, ui_rect(l->channel_scroll))) {
         float max = ui->chan_content_h - l->channel_scroll.h;
-        ccord_scroller_scroll(&ui->chan_scroller, &ui->chan_scroll, dy, max, direct);
+        ui_scroller_scroll_ui(ui, &ui->chan_scroller, &ui->chan_scroll, dy, max, direct);
         ui->animating = true;
         ui->dirty = true;
       } else if (ui_in_rect(ev->x, ev->y, ui_rect(l->server_list))) {
         float total = 0.0f;
         (void)ui_rail_slots_cached(ui, nullptr, &total);
         float max = total - l->server_list.h;
-        ccord_scroller_scroll(&ui->server_scroller, &ui->server_scroll, dy, max, direct);
+        ui_scroller_scroll_ui(ui, &ui->server_scroller, &ui->server_scroll, dy, max, direct);
         ui->animating = true;
         ui->dirty = true;
       }
@@ -328,10 +333,10 @@ void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
       if (ui_in_rect(ev->x, ev->y, ui_rect(l->member_list))) {
         if (ui_search_panel_active(ui)) {
           float max = ui->search_panel_max;
-          ccord_scroller_scroll(&ui->search_panel_glide, &ui->search_panel_scroll, dy, max, direct);
+          ui_scroller_scroll_ui(ui, &ui->search_panel_glide, &ui->search_panel_scroll, dy, max, direct);
         } else {
           float max = ui->member_content_h - l->member_list.h;
-          ccord_scroller_scroll(&ui->member_scroller, &ui->member_scroll, dy, max, direct);
+          ui_scroller_scroll_ui(ui, &ui->member_scroller, &ui->member_scroll, dy, max, direct);
         }
         ui->animating = true;
         ui->dirty = true;
@@ -354,21 +359,21 @@ void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
   }
   if (ui_is_dm_requests_view(ui) && ui_in_rect(ev->x, ev->y, ui_rect(l->message_area))) {
     float max = ui->dm_requests_content_h - l->message_area.h;
-    ccord_scroller_scroll(&ui->dm_requests_glide, &ui->dm_requests_scroll, dy, max, direct);
+    ui_scroller_scroll_ui(ui, &ui->dm_requests_glide, &ui->dm_requests_scroll, dy, max, direct);
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
     ui->dirty = true;
     return;
   }
   if (ui_is_dm_friends_view(ui) && ui_in_rect(ev->x, ev->y, ui_rect(l->message_area))) {
     float max = ui->dm_friends_content_h - (l->message_area.h - 48.0f);
-    ccord_scroller_scroll(&ui->dm_friends_glide, &ui->dm_friends_scroll, dy, max, direct);
+    ui_scroller_scroll_ui(ui, &ui->dm_friends_glide, &ui->dm_friends_scroll, dy, max, direct);
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
     ui->dirty = true;
     return;
   }
   if (ui->stage_channel != CCORD_ID_NONE && !ui_stage_mobile_chat_active(ui) && ui_in_rect(ev->x, ev->y, ui_stage_area(ui))) {
     float max = ui->stage_content_h - ui->stage_view_h;
-    ccord_scroller_scroll(&ui->stage_glide, &ui->stage_scroll, dy, max, direct);
+    ui_scroller_scroll_ui(ui, &ui->stage_glide, &ui->stage_scroll, dy, max, direct);
     ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
     ui->dirty = true;
     return;
@@ -378,20 +383,20 @@ void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
     if (now != 0.0f) uc_scroll_messages(ui, now);
   } else if (ui_in_rect(ev->x, ev->y, ui_rect(l->channel_scroll))) {
     float max = ui->chan_content_h - l->channel_scroll.h;
-    ccord_scroller_scroll(&ui->chan_scroller, &ui->chan_scroll, dy, max, direct);
+    ui_scroller_scroll_ui(ui, &ui->chan_scroller, &ui->chan_scroll, dy, max, direct);
   } else if (l->member_list_visible && ui_in_rect(ev->x, ev->y, ui_rect(l->member_list))) {
     if (ui_search_panel_active(ui)) {
       float max = ui->search_panel_max;   // the same bound the results draw clamps to
-      ccord_scroller_scroll(&ui->search_panel_glide, &ui->search_panel_scroll, dy, max, direct);
+      ui_scroller_scroll_ui(ui, &ui->search_panel_glide, &ui->search_panel_scroll, dy, max, direct);
     } else {
       float max = ui->member_content_h - l->member_list.h;
-      ccord_scroller_scroll(&ui->member_scroller, &ui->member_scroll, dy, max, direct);
+      ui_scroller_scroll_ui(ui, &ui->member_scroller, &ui->member_scroll, dy, max, direct);
     }
   } else if (ui_in_rect(ev->x, ev->y, ui_rect(l->server_list))) {
     float total = 0.0f;
     (void)ui_rail_slots_cached(ui, nullptr, &total);
     float max = total - l->server_list.h;
-    ccord_scroller_scroll(&ui->server_scroller, &ui->server_scroll, dy, max, direct);
+    ui_scroller_scroll_ui(ui, &ui->server_scroller, &ui->server_scroll, dy, max, direct);
   } else {
     return;
   }
@@ -1123,7 +1128,7 @@ bool ui_shortcuts_handle(ccord_ui *ui, const ccord_input_event *ev)
     return true;
   }
   if (ev->type == CCORD_IN_WHEEL) {
-    ui->shortcuts_scroll = uc_clampf(ui->shortcuts_scroll - ev->wheel * 36.0f, 0.0f, ui->shortcuts_max);
+    ui_scroll_offset_by(ui, &ui->shortcuts_scroll, ui_wheel_delta_px(ui, ev, 36.0f), ui->shortcuts_max);
     ui->dirty = true;
     return true;
   }

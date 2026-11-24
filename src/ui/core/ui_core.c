@@ -943,7 +943,8 @@ static bool ui_caret_wants_blink(const ccord_ui *ui)
 
 bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
 {
-  uint64_t dt = ui->last_anim_ms && now_ms > ui->last_anim_ms ? now_ms - ui->last_anim_ms : 0;
+  uint64_t prev_anim_ms = ui->last_anim_ms;
+  uint64_t dt = prev_anim_ms && now_ms > prev_anim_ms ? now_ms - prev_anim_ms : 0;
   ui->last_anim_ms = now_ms;
   ui->now_ms = now_ms;
   if (ui->settings_save_dirty && now_ms >= ui->settings_save_due_ms) {
@@ -1049,8 +1050,10 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
     }
   }
 
-  // Touch gestures (long-press timer) and mobile slide-out drawer animation.
-  float fdt = dt > 0 ? (float)(dt < 100 ? dt : 100) : 16.0f;
+  // Touch gestures (long-press timer, kinetic fling) and mobile slide-out drawer animation.
+  // Use actual elapsed dt (0 when called twice in the same millisecond, e.g. triple-buffered EGL) so
+  // animations and flings never fabricate a 16 ms jump in 0 ms of wall time.
+  float fdt = prev_anim_ms == 0 ? 16.0f : (float)(dt < 100u ? dt : 100u);
   {
     float prev_lt = ui->left_drawer_t, prev_rt = ui->right_drawer_t;
     if (ui_touch_update(ui, now_ms, fdt)) {

@@ -1079,18 +1079,18 @@ static void ss_wheel_by(ccord_ui *ui, const ccord_input_event *ev, float dy)
   bool direct = ui_wheel_direct(ui, ev);
   if (ui->mobile_layout && !ui->mobile_server_settings_detail) {
     float max_sb = fmaxf(0.0f, ss->sb_content_h - ss->sb_view_h);
-    ss->sb_scroll = fminf(fmaxf(ss->sb_scroll + dy, 0.0f), max_sb);
+    ui_scroll_offset_by(ui, &ss->sb_scroll, dy, max_sb);
     ui->dirty = true;
     return;
   }
   if (ss->page == SS_ROLES && ss->list_view.w > 0.0f && ev->x < ss->list_view.x + ss->list_view.w + 12.0f) {
-    ccord_scroller_scroll(&ss->list_glide, &ss->list_scroll, dy, fmaxf(0.0f, ss->list_content_h - ss->list_view.h), direct);
+    ui_scroller_scroll_ui(ui, &ss->list_glide, &ss->list_scroll, dy, fmaxf(0.0f, ss->list_content_h - ss->list_view.h), direct);
   } else if (ss->page == SS_MEMBERS && ss->modview_uid != CCORD_ID_NONE &&
              ss->modview_rect.w > 0.0f && ev->x >= ss->modview_rect.x) {
-    ccord_scroller_scroll(&ss->modview_glide, &ss->modview_scroll, dy, fmaxf(0.0f, ss->modview_content_h - ss->modview_rect.h),
-                          direct);
+    ui_scroller_scroll_ui(ui, &ss->modview_glide, &ss->modview_scroll, dy,
+                          fmaxf(0.0f, ss->modview_content_h - ss->modview_rect.h), direct);
   } else {
-    ccord_scroller_scroll(&ss->scroll_glide, &ss->scroll, dy, fmaxf(0.0f, ss->content_h - ss->view_h), direct);
+    ui_scroller_scroll_ui(ui, &ss->scroll_glide, &ss->scroll, dy, fmaxf(0.0f, ss->content_h - ss->view_h), direct);
   }
   ui->dirty = true;
 }
@@ -1277,7 +1277,7 @@ bool ui_server_settings_handle(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
     case CCORD_IN_WHEEL:
-      ss_wheel_by(ui, ev, -ev->wheel * 52.0f);
+      ss_wheel_by(ui, ev, ui_wheel_delta_px(ui, ev, 52.0f));
       return true;
     case CCORD_IN_KEY_DOWN: {
       if (ss->focus != SSF_NONE) return ss_handle_field_key(ui, ev);

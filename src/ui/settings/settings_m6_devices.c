@@ -566,7 +566,8 @@ bool ui_settings_m6_wheel(ccord_ui *ui, int page, ccord_rect content, float whee
   if (!ui || page < 0 || page >= CCORD_M6_PAGE_COUNT) return false;
   float max = m6_max_scroll(ui, page, content, m6_list_count(ui, page));
   if (max <= 0.0f) return false;
-  ccord_scroller_scroll(&s_m6.glide[page], &s_m6.scroll[page], -wheel * M6_SCROLL_STEP, max, direct);
+  float dy = ui->touch_scroll_direct_override != 0 ? ui->touch_scroll_px : (-wheel * M6_SCROLL_STEP);
+  ui_scroller_scroll_ui(ui, &s_m6.glide[page], &s_m6.scroll[page], dy, max, direct);
   ui->dirty = true;
   return true;
 }

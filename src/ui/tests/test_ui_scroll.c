@@ -75,6 +75,13 @@ static void test_retarget_and_reverse(void)
   CT_CHECK(near(s.pending, -30.0f));
   (void)ccord_scroller_push(&s, 66.0f, false);
   CT_CHECK(near(ccord_scroller_push(&s, -5.0f, true), -5.0f) && !ccord_scroller_active(&s));   // direct reversal cancels
+  (void)ccord_scroller_push(&s, 66.0f, false);
+  CT_CHECK(near(ccord_scroller_push(&s, 5.0f, true), 5.0f) && !ccord_scroller_active(&s));     // direct same-way cancels too
+  // Zero-dt advance is a no-op and preserves the idle-wakeup cap for the first real frame.
+  (void)ccord_scroller_push(&s, 66.0f, false);
+  CT_CHECK(near(ccord_scroller_advance(&s, 0.0f, false), 0.0f) && s.fresh && near(s.pending, 66.0f));
+  float d_wake = ccord_scroller_advance(&s, 100.0f, false);
+  CT_CHECK(d_wake > 0.0f && d_wake <= 0.35f * 66.0f);
 }
 
 static void test_offset_limits(void)

@@ -651,6 +651,12 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
   if (ev->type == CCORD_IN_APP_BACKGROUND) {
     ui_menu_close(ui);
     ui_drop_overlay_end(ui);
+    ui->touch.active = false;
+    ui->touch.second_active = false;
+    ui->touch.mode = 0;
+    ui->touch.fling_active = false;
+    ui->touch.fling_vy = 0.0f;
+    ui->touch.caught_fling = false;
     ui->touch_text_focused = false;
     ui->ime_active = false;
     ui->window_focused = false;
@@ -1162,6 +1168,10 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       }
       return false;
     case CCORD_IN_WHEEL:
+      if (ui->touch_scroll_direct_override == 0) {
+        ui->touch.fling_active = false;
+        ui->touch.fling_vy = 0.0f;
+      }
       ui->mx = ev->x;
       ui->my = ev->y;
       if (ui->stream_fullscreen) return true;

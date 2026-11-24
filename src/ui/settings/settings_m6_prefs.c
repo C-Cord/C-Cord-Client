@@ -910,9 +910,8 @@ bool ui_settings_m6_prefs_wheel(ccord_ui *ui, int page, ccord_rect content, floa
   if (!ui || page != CCORD_M6_PREFS_NOTIFICATIONS || !ui->settings_sounds_open) return false;
   float max_s = p_sounds_max_scroll(ui, content);
   if (max_s <= 0.0f) return false;
-  s_prefs.sounds_scroll -= wheel * 48.0f;
-  if (s_prefs.sounds_scroll < 0.0f) s_prefs.sounds_scroll = 0.0f;
-  if (s_prefs.sounds_scroll > max_s) s_prefs.sounds_scroll = max_s;
+  float dy = ui->touch_scroll_direct_override != 0 ? ui->touch_scroll_px : (-wheel * 48.0f);
+  ui_scroll_offset_by(ui, &s_prefs.sounds_scroll, dy, max_s);
   ui->dirty = true;
   return true;
 }

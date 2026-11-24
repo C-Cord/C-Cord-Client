@@ -287,6 +287,7 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
       else if (e->type == SDL_EVENT_FINGER_UP) out->type = CCORD_IN_TOUCH_UP;
       else out->type = CCORD_IN_TOUCH_CANCEL;
       out->finger_id = (int64_t)e->tfinger.fingerID;
+      out->timestamp_ns = e->tfinger.timestamp;
       out->x = e->tfinger.x * lw;
       out->y = e->tfinger.y * lh;
       return true;

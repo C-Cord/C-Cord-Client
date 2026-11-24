@@ -215,8 +215,8 @@ bool ui_discovery_handle(ccord_ui *ui, const ccord_input_event *ev)
   if (ev->type == CCORD_IN_WHEEL) {
     if (!ui_in_rect(ev->x, ev->y, pane)) return false;
     // The draw computed the bound (discovery_max) from the card area it lays out; reuse it so both clamp alike.
-    ccord_scroller_scroll(&ui->discovery_glide, &ui->discovery_scroll, -ev->wheel * 48.0f, ui->discovery_max,
-                          ui_wheel_direct(ui, ev));
+    ui_scroller_scroll_ui(ui, &ui->discovery_glide, &ui->discovery_scroll, ui_wheel_delta_px(ui, ev, 48.0f),
+                          ui->discovery_max, ui_wheel_direct(ui, ev));
     ui->dirty = true;
     return true;
   }

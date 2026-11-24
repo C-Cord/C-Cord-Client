@@ -205,9 +205,7 @@ bool ui_thread_parent_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
   if (!ui_in_rect(ev->x, ev->y, pane)) return false;
   float view_h = fmaxf(pane.h - ui->layout.chat_header.h, 0.0f);
   float max_s = fmaxf(ui->thread_parent_content_h - view_h, 0.0f);
-  ui->thread_parent_scroll -= ev->wheel * 44.0f;
-  if (ui->thread_parent_scroll < 0.0f) ui->thread_parent_scroll = 0.0f;
-  if (ui->thread_parent_scroll > max_s) ui->thread_parent_scroll = max_s;
+  ui_scroll_offset_by(ui, &ui->thread_parent_scroll, ui_wheel_delta_px(ui, ev, 44.0f), max_s);
   ui->dirty = true;
   return true;
 }

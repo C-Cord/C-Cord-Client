@@ -1131,7 +1131,7 @@ bool ui_report_flow_input(ccord_ui *ui, const ccord_input_event *ev)
       if (ev->button == 1) rf_click(ui, s, ev->x, ev->y);
       return true;
     case CCORD_IN_WHEEL:
-      s->scroll -= ev->wheel * 48.0f;   // clamped at the next layout
+      s->scroll += ui_wheel_delta_px(ui, ev, 48.0f);   // clamped at the next layout
       if (s->scroll < 0.0f) s->scroll = 0.0f;
       ui->dirty = true;
       return true;

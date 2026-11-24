@@ -576,7 +576,7 @@ bool ui_poll_composer_input(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     case CCORD_IN_WHEEL:
       if (s->max_scroll > 0.0f) {
-        s->scroll = fminf(fmaxf(s->scroll - ev->wheel * 36.0f, 0.0f), s->max_scroll);
+        ui_scroll_offset_by(ui, &s->scroll, ui_wheel_delta_px(ui, ev, 36.0f), s->max_scroll);
         ui->dirty = true;
       }
       return true;

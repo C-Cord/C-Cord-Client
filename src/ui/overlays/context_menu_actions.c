@@ -933,12 +933,12 @@ bool ui_menu_handle_mouse(ccord_ui *ui, const ccord_input_event *ev)
       float full = cm_sub_content_height(ui);
       float visible = cm_sub_box(ui).h;
       float max_s = full > visible ? full - visible : 0.0f;
-      ccord_scroller_scroll(&ui->menu_sub_glide, &ui->menu.sub_scroll_y, -ev->wheel * M(context_menu_item_height), max_s,
-                            ui_wheel_direct(ui, ev));
+      ui_scroller_scroll_ui(ui, &ui->menu_sub_glide, &ui->menu.sub_scroll_y,
+                            ui_wheel_delta_px(ui, ev, M(context_menu_item_height)), max_s, ui_wheel_direct(ui, ev));
     } else {
       float max_s = ui->menu.content_h > ui->menu.h ? ui->menu.content_h - ui->menu.h : 0.0f;
-      ccord_scroller_scroll(&ui->menu_glide, &ui->menu.scroll_y, -ev->wheel * M(context_menu_item_height), max_s,
-                            ui_wheel_direct(ui, ev));
+      ui_scroller_scroll_ui(ui, &ui->menu_glide, &ui->menu.scroll_y,
+                            ui_wheel_delta_px(ui, ev, M(context_menu_item_height)), max_s, ui_wheel_direct(ui, ev));
     }
     ui->dirty = true;
     return true;

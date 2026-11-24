@@ -907,18 +907,18 @@ bool ui_expr_handle_event(ccord_ui *ui, const ccord_input_event *ev)
   if (ev->type == CCORD_IN_WHEEL) {
     if (!ui_in_rect(ev->x, ev->y, box)) return false;
     float step = 42.0f * 2.5f;
-    float dy = -ev->wheel * step;
+    float dy = ui_wheel_delta_px(ui, ev, step);
     bool direct = ui_wheel_direct(ui, ev);
     if ((ep->tab == EXPR_TAB_EMOJI || ep->tab == EXPR_TAB_STICKERS) &&
         b->rail_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, b->rail_rect)) {
       // Wheel over the 40px rail scrolls only the rail, never the grid. The rail's rects move with its offset.
       float off = (ep->tab == EXPR_TAB_STICKERS) ? ep->sticker_rail_scroll_y : ep->rail_scroll_y;
-      ccord_scroller_scroll(&b->rail_glide, &off, dy, ep_maxf(b->rail_content_h - b->rail_view.h, 0.0f), direct);
+      ui_scroller_scroll_ui(ui, &b->rail_glide, &off, dy, ep_maxf(b->rail_content_h - b->rail_view.h, 0.0f), direct);
       ep_expr_rail_set_scroll(ep, off);
     } else {
       int t = ep->tab;
       float max_s = ep_maxf(b->content_h[t] - (box.h - 125.0f), 0.0f);
-      ccord_scroller_scroll(&b->glide[t], &ep->scroll_y[t], dy, max_s, direct);
+      ui_scroller_scroll_ui(ui, &b->glide[t], &ep->scroll_y[t], dy, max_s, direct);
     }
     b->last_hover_key = -1;
     ui->dirty = true;

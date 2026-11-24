@@ -1457,9 +1457,8 @@ bool ui_settings_profile_wheel(ccord_ui *ui, float wheel)
   float max = S->content_h - S->view_h;
   if (max <= 0.0f) return false;
   float old = S->scroll;
-  S->scroll -= wheel * WHEEL_STEP;
-  if (S->scroll < 0.0f) S->scroll = 0.0f;
-  if (S->scroll > max) S->scroll = max;
+  float dy = ui->touch_scroll_direct_override != 0 ? ui->touch_scroll_px : (-wheel * WHEEL_STEP);
+  ui_scroll_offset_by(ui, &S->scroll, dy, max);
   ui->dirty = true;
   return S->scroll != old;
 }

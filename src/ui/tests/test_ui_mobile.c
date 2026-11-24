@@ -2201,6 +2201,196 @@ static void test_mobile_systemic_button_chip_and_ellipsis(void)
   CT_CHECK(fabsf(ca->rec[3].font_px - tk.fs_caption) < 0.01f);
 }
 
+static void touch_ev_ts(ccord_input_type type, int64_t finger, float x, float y, uint64_t timestamp_ns)
+{
+  ccord_input_event ev = {.type = type, .finger_id = finger, .x = x, .y = y, .timestamp_ns = timestamp_ns};
+  (void)ccord_ui_handle_input(F.ui, &ev);
+}
+
+static void test_mobile_smooth_kinetic_scrolling(void)
+{
+  ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+  F.ui->settings_open = false;
+  F.ui->shortcuts_open = false;
+  F.ui->discovery_open = false;
+  F.ui->dm_friends_view = false;
+  F.ui->dm_requests_view = false;
+
+  ccord_error err = {0};
+  const ccord_guild *g0 = ccord_store_guild_at(F.store, 0);
+  CT_CHECK(g0 != nullptr);
+  if (g0) CT_CHECK(ccord_session_select_guild(F.session, g0->id, &err) == CCORD_OK);
+  step_frames(4, 20);
+
+  ccord_id ch = ccord_store_selected_channel(F.store);
+  CT_CHECK(ch != CCORD_ID_NONE);
+  for (int i = 0; i < 80; i++) {
+    char msg[64];
+    snprintf(msg, sizeof msg, "Smooth mobile kinetic scroll message #%d", i);
+    (void)ccord_session_send_message(F.session, ch, msg, strlen(msg), &err);
+  }
+  ccord_vlist_reset_bottom(&F.ui->vlist);
+  step_frames(4, 20);
+
+  ccord_layout_rect ma = F.ui->layout.message_area;
+  float cx = ma.x + ma.w * 0.5f;
+
+  // 1. Velocity-matched continuous kinetic fling on chat timeline:
+  //    - 1.0x velocity handoff (no 2.57x jump on lift)
+  //    - Zero-dt call (e.g. triple-buffered EGL) advances 0 px
+  //    - Monotonically decaying steps continuing smoothly past 280 ms (no abrupt wheel-notch cliff)
+  uint64_t ts = 10000000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_DOWN, 90, cx, ma.y + 100.0f, ts);
+  for (int i = 1; i <= 6; i++) {
+    step_frames(1, 16);
+    ts += 16000000ULL;
+    // +24 px per 16 ms = +1500 px/s finger downward -> -1500 px/s scroll velocity (scrolling up into history)
+    touch_ev_ts(CCORD_IN_TOUCH_MOVE, 90, cx, ma.y + 100.0f + (float)i * 24.0f, ts);
+  }
+  step_frames(1, 16);
+  ts += 16000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_UP, 90, cx, ma.y + 244.0f, ts);
+  CT_CHECK(F.ui->touch.fling_active);
+  CT_CHECK(fabsf(F.ui->touch.fling_vy - (-1500.0f)) < 120.0f);
+
+  // Zero-dt update must NOT fabricate a 16 ms jump!
+  size_t a_zero = F.ui->vlist.anchor_index;
+  float off_zero = F.ui->vlist.anchor_offset;
+  float vy_zero = F.ui->touch.fling_vy;
+  (void)ccord_ui_update(F.ui, F.now);
+  CT_CHECK(F.ui->touch.fling_active);
+  CT_CHECK(F.ui->vlist.anchor_index == a_zero && fabsf(F.ui->vlist.anchor_offset - off_zero) < 0.001f);
+  CT_CHECK(fabsf(F.ui->touch.fling_vy - vy_zero) < 0.001f);
+
+  // Step 22 frames at 16 ms (352 ms > old 280 ms cliff): velocity decays smoothly and stays active past 300 ms.
+  float prev_abs_vy = fabsf(F.ui->touch.fling_vy);
+  float top_prev = 0.0f, sz_tmp = 0.0f;
+  ccord_vlist_thumb(&F.ui->vlist, ma.h, &top_prev, &sz_tmp);
+  for (int f = 0; f < 22; f++) {
+    step_frames(1, 16);
+    if (f < 20) {
+      CT_CHECK(F.ui->touch.fling_active);
+      CT_CHECK(ccord_ui_next_wait_ms(F.ui, F.now) == 0u);
+    }
+    float cur_abs_vy = fabsf(F.ui->touch.fling_vy);
+    CT_CHECK(cur_abs_vy < prev_abs_vy);
+    prev_abs_vy = cur_abs_vy;
+    float top_cur = 0.0f;
+    ccord_vlist_thumb(&F.ui->vlist, ma.h, &top_cur, &sz_tmp);
+    CT_CHECK(top_cur <= top_prev + 0.0001f);
+    top_prev = top_cur;
+  }
+  CT_CHECK(F.ui->touch.fling_active);   // still smoothly coasting past 352 ms
+
+  // 2. Catching a running fling on TOUCH_DOWN halts momentum immediately and lifting without dragging
+  //    does NOT fire a synthetic click on the control underneath (e.g. composer / drawer button).
+  ccord_layout_rect comp = F.ui->layout.composer;
+  F.ui->touch_text_focused = false;
+  touch_ev_ts(CCORD_IN_TOUCH_DOWN, 91, comp.x + comp.w * 0.5f, comp.y + comp.h * 0.5f, ts + 400000000ULL);
+  CT_CHECK(!F.ui->touch.fling_active);
+  step_frames(1, 20);
+  touch_ev_ts(CCORD_IN_TOUCH_UP, 91, comp.x + comp.w * 0.5f, comp.y + comp.h * 0.5f, ts + 420000000ULL);
+  step_frames(2, 20);
+  CT_CHECK(!F.ui->touch_text_focused);   // catch-tap did not accidentally open the keyboard
+
+  // A subsequent tap once stationary DOES focus the composer normally.
+  touch_tap(comp.x + comp.w * 0.5f, comp.y + comp.h * 0.5f);
+  CT_CHECK(F.ui->touch_text_focused);
+  F.ui->touch_text_focused = false;
+  step_frames(2, 20);
+
+  // 3. Batched 240 Hz TOUCH_MOVE events within a single frame (same ui->now_ms) + trailing 0-delta lift jitter
+  //    preserve accurate velocity from ev->timestamp_ns instead of underestimating 4x.
+  ccord_vlist_reset_bottom(&F.ui->vlist);
+  step_frames(2, 16);
+  uint64_t bts = 20000000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_DOWN, 92, cx, ma.y + 100.0f, bts);
+  for (int i = 1; i <= 8; i++) {
+    bts += 4000000ULL;   // 4 ms apart (250 Hz digitizer), ALL inside the same frame!
+    // +6 px per 4 ms = +1500 px/s
+    touch_ev_ts(CCORD_IN_TOUCH_MOVE, 92, cx, ma.y + 100.0f + (float)i * 6.0f, bts);
+  }
+  // Trailing 0-delta lift jitter 4 ms later (common on Android capacitive screens):
+  bts += 4000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_MOVE, 92, cx, ma.y + 148.0f, bts);
+  bts += 4000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_UP, 92, cx, ma.y + 148.0f, bts);
+  CT_CHECK(F.ui->touch.fling_active);
+  CT_CHECK(fabsf(F.ui->touch.fling_vy - (-1500.0f)) < 150.0f);
+  // Lift happened in the same frame as TOUCH_MOVE: first update defers fling start to next VSync (no 2x lift jump).
+  float vy_before_defer = F.ui->touch.fling_vy;
+  step_frames(1, 16);
+  CT_CHECK(F.ui->touch.fling_active);
+  CT_CHECK(fabsf(F.ui->touch.fling_vy - vy_before_defer) < 0.01f);
+  // Next frame begins smooth deceleration.
+  step_frames(1, 16);
+  CT_CHECK(fabsf(F.ui->touch.fling_vy) < fabsf(vy_before_defer));
+  // Cancel cleanly via TOUCH_CANCEL.
+  touch_ev_ts(CCORD_IN_TOUCH_DOWN, 93, cx, ma.y + 200.0f, bts + 50000000ULL);
+  touch_ev_ts(CCORD_IN_TOUCH_CANCEL, 93, cx, ma.y + 200.0f, bts + 66000000ULL);
+  CT_CHECK(!F.ui->touch.fling_active);
+
+  // 4. Pausing stationary >= 75 ms before lifting produces zero fling momentum.
+  uint64_t pts = 30000000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_DOWN, 94, cx, ma.y + 100.0f, pts);
+  for (int i = 1; i <= 4; i++) {
+    step_frames(1, 16);
+    pts += 16000000ULL;
+    touch_ev_ts(CCORD_IN_TOUCH_MOVE, 94, cx, ma.y + 100.0f + (float)i * 25.0f, pts);
+  }
+  step_frames(6, 16);   // hold still for 96 ms
+  pts += 96000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_UP, 94, cx, ma.y + 200.0f, pts);
+  CT_CHECK(!F.ui->touch.fling_active);
+
+  // 5. Non-ccord_scroller surface (Shortcuts modal): exact 1:1 drag + smooth multi-frame kinetic fling
+  //    (no single-frame teleport) + automatic stop on boundary.
+  F.ui->shortcuts_open = true;
+  F.ui->shortcuts_scroll = 0.0f;
+  step_frames(4, 20);
+  CT_CHECK(F.ui->shortcuts_max > 80.0f);
+  ccord_rect sm = F.ui->shortcuts_modal_rect;
+  float sx = sm.x + sm.w * 0.5f;
+  float sy = sm.y + sm.h * 0.7f;
+  uint64_t sts = 40000000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_DOWN, 95, sx, sy, sts);
+  step_frames(1, 16);
+  sts += 16000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_MOVE, 95, sx, sy - 12.0f, sts);   // crosses 8dp slop, scrolls +12 px
+  CT_CHECK(fabsf(F.ui->shortcuts_scroll - 12.0f) < 0.25f);
+  step_frames(1, 16);
+  sts += 16000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_MOVE, 95, sx, sy - 36.0f, sts);   // +24 px -> exact 36.0 px total (1:1!)
+  CT_CHECK(fabsf(F.ui->shortcuts_scroll - 36.0f) < 0.25f);
+  step_frames(1, 16);
+  sts += 16000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_UP, 95, sx, sy - 36.0f, sts);
+  CT_CHECK(F.ui->touch.fling_active);
+  float s_at_lift = F.ui->shortcuts_scroll;
+  CT_CHECK(fabsf(s_at_lift - 36.0f) < 0.25f);                  // did NOT teleport on TOUCH_UP!
+  float prev_s = s_at_lift;
+  int moving_frames = 0;
+  for (int f = 0; f < 8; f++) {
+    step_frames(1, 16);
+    float cur_s = F.ui->shortcuts_scroll;
+    CT_CHECK(cur_s >= prev_s - 0.001f);
+    if (cur_s > prev_s + 0.1f) moving_frames++;
+    prev_s = cur_s;
+  }
+  CT_CHECK(moving_frames >= 3);                                // glides smoothly across multiple frames
+  // Closing the modal via Back cancels the active fling automatically via touch_view_sig.
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  step_frames(1, 16);
+  CT_CHECK(!F.ui->shortcuts_open);
+  CT_CHECK(!F.ui->touch.fling_active);
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -2227,6 +2417,7 @@ int main(void)
   test_mobile_anim_pacing();
   test_mobile_zoom_and_touch_targets();
   test_mobile_systemic_button_chip_and_ellipsis();
+  test_mobile_smooth_kinetic_scrolling();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");
 }

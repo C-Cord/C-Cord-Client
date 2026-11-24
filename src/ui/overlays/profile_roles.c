@@ -441,7 +441,7 @@ bool ui_profile_roles_input(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     case CCORD_IN_WHEEL:
       if (ui_in_rect(ui->mx, ui->my, pk->box)) {
-        pk->wheel_acc += ev->wheel;
+        pk->wheel_acc -= ui_wheel_delta_px(ui, ev, 28.0f) / 28.0f;
         while (pk->wheel_acc <= -1.0f) {
           if (pk->scroll + PR_VISIBLE_ROWS < pk->nmatches) pk->scroll++;
           pk->wheel_acc += 1.0f;

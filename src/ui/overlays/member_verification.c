@@ -315,8 +315,8 @@ bool ui_member_verification_handle(ccord_ui *ui, const ccord_input_event *ev)
       }
       return true;
     case CCORD_IN_WHEEL:
-      ccord_scroller_scroll(&mv->glide, &mv->scroll, -ev->wheel * 42.0f, maxf(mv->content_h - mv->view.h, 0.0f),
-                            ui_wheel_direct(ui, ev));
+      ui_scroller_scroll_ui(ui, &mv->glide, &mv->scroll, ui_wheel_delta_px(ui, ev, 42.0f),
+                            maxf(mv->content_h - mv->view.h, 0.0f), ui_wheel_direct(ui, ev));
       ui->dirty = true;
       return true;
     case CCORD_IN_MOUSE_DOWN:

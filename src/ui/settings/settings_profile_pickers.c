@@ -1500,9 +1500,8 @@ bool sp_picker_wheel(ccord_ui *ui, profile_state *s, float wheel)
   if (!ui || !s || s->picker.kind == PROF_PICK_NONE) return false;
   prof_picker_state *p = &s->picker;
   if (p->max_scroll <= 0.0f) return true;
-  p->scroll -= wheel * 48.0f;
-  if (p->scroll < 0.0f) p->scroll = 0.0f;
-  if (p->scroll > p->max_scroll) p->scroll = p->max_scroll;
+  float dy = ui->touch_scroll_direct_override != 0 ? ui->touch_scroll_px : (-wheel * 48.0f);
+  ui_scroll_offset_by(ui, &p->scroll, dy, p->max_scroll);
   ui->dirty = true;
   return true;
 }

@@ -754,9 +754,7 @@ bool ui_guild_view_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
   if (!ui_guild_view_active(ui) || !ev || g_gv.owner != ui) return false;
   if (!ui_in_rect(ev->x, ev->y, g_gv.view_rect)) return false;
   float max_s = fmaxf(ui->guild_view_content_h - g_gv.view_rect.h, 0.0f);
-  ui->guild_view_scroll -= ev->wheel * 44.0f;
-  if (ui->guild_view_scroll < 0.0f) ui->guild_view_scroll = 0.0f;
-  if (ui->guild_view_scroll > max_s) ui->guild_view_scroll = max_s;
+  ui_scroll_offset_by(ui, &ui->guild_view_scroll, ui_wheel_delta_px(ui, ev, 44.0f), max_s);
   ui->dirty = true;
   return true;
 }

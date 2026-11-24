@@ -20,7 +20,7 @@ float ccord_scroller_push(ccord_scroller *s, float delta, bool direct)
 {
   if (!s || delta == 0.0f || !isfinite(delta)) return 0.0f;
   if (direct) {
-    if (s->pending * delta < 0.0f) ccord_scroller_cancel(s);   // the user reversed: stop gliding the old way
+    if (s->pending != 0.0f) ccord_scroller_cancel(s);   // direct input takes over: drop any wheel glide in flight
     return delta;
   }
   if (s->pending * delta <= 0.0f) s->pending = delta;
@@ -37,6 +37,7 @@ float ccord_scroller_advance(ccord_scroller *s, float dt_ms, bool reduced)
     s->elapsed_ms = 0.0f;
     return 0.0f;
   }
+  if (dt_ms <= 0.0f && !reduced) return 0.0f;
   if (dt_ms < 0.0f) dt_ms = 0.0f;
   if (s->fresh) {
     if (dt_ms > CCORD_SCROLL_WAKE_MS) dt_ms = CCORD_SCROLL_FIRST_MS;

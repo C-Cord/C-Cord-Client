@@ -751,9 +751,12 @@ bool ui_scroll_at_px(ccord_ui *ui, float x, float y, float dy_px, bool direct)
     .wheel = -(dy_px / notch),
   };
   int8_t prev_override = ui->touch_scroll_direct_override;
+  float prev_px = ui->touch_scroll_px;
   ui->touch_scroll_direct_override = direct ? 1 : -1;
+  ui->touch_scroll_px = dy_px;
   bool r = ccord_ui_handle_input(ui, &wev);
   ui->touch_scroll_direct_override = prev_override;
+  ui->touch_scroll_px = prev_px;
   return r;
 }
 

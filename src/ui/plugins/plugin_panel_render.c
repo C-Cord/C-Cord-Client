@@ -1209,7 +1209,7 @@ bool ui_panels_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         uint64_t sk = pp_widget_key(h->owner, h->panel_id, h->node_id);
         panel_scroll_state *sst = pp_get_scroll_state(m, sk);
         if (sst && sst->max_scroll > 0.0f) {
-          sst->scroll_y = pp_p_clampf(sst->scroll_y - ev->wheel * 36.0f, 0.0f, sst->max_scroll);
+          ui_scroll_offset_by(ui, &sst->scroll_y, ui_wheel_delta_px(ui, ev, 36.0f), sst->max_scroll);
           ui->dirty = true;
           return true;
         }

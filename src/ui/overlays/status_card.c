@@ -638,7 +638,7 @@ bool ui_status_card_handle(ccord_ui *ui, const ccord_input_event *ev)
     case CCORD_IN_MOUSE_UP: return inside;
     case CCORD_IN_WHEEL:
       if (inside && sc->max_scroll > 0.0f) {
-        sc->scroll = fminf(fmaxf(sc->scroll - ev->wheel * 36.0f, 0.0f), sc->max_scroll);
+        ui_scroll_offset_by(ui, &sc->scroll, ui_wheel_delta_px(ui, ev, 36.0f), sc->max_scroll);
         ui->dirty = true;
       }
       return inside;

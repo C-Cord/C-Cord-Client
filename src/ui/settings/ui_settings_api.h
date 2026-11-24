@@ -38,6 +38,36 @@ static inline bool ui_wheel_direct(const ccord_ui *ui, const ccord_input_event *
   float notches = fabsf(ev->wheel);
   return ui->anim.reduced_motion || notches >= 10.0f || notches < 0.999f;
 }
+// Pixel delta for a wheel or touch-scroll event: real desktop wheels scale by the surface's notch step,
+// while touch drag and kinetic fling supply exact 1:1 logical pixels via ui_scroll_at_px().
+static inline float ui_wheel_delta_px(const ccord_ui *ui, const ccord_input_event *ev, float wheel_step_px)
+{
+  if (ui && ui->touch_scroll_direct_override != 0) return ui->touch_scroll_px;
+  return -ev->wheel * wheel_step_px;
+}
+// Clamped offset step that flags touch_scroll_hit_bound when a direct touch fling reaches an edge.
+static inline void ui_scroll_offset_by(ccord_ui *ui, float *offset, float delta, float max)
+{
+  float hi = max > 0.0f ? max : 0.0f;
+  float before = *offset;
+  float next = before + delta;
+  if (next < 0.0f) next = 0.0f;
+  if (next > hi) next = hi;
+  *offset = next;
+  if (ui && ui->touch_scroll_direct_override > 0 && next == before) {
+    ui->touch_scroll_hit_bound = true;
+  }
+}
+// Shared scroller wrapper that also flags touch_scroll_hit_bound when direct touch scrolling hits a limit.
+static inline void ui_scroller_scroll_ui(ccord_ui *ui, ccord_scroller *s, float *offset, float delta, float max,
+                                         bool direct)
+{
+  float before = *offset;
+  ccord_scroller_scroll(s, offset, delta, max, direct);
+  if (direct && ui && ui->touch_scroll_direct_override > 0 && *offset == before) {
+    ui->touch_scroll_hit_bound = true;
+  }
+}
 // Per-surface glide ticks for surfaces whose state lives in their own file. Each advances its scroller by fdt_ms
 // (ccord_ui_update) and returns true while a glide is still moving. They clear their glide when the surface is shut.
 bool ui_settings_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced);

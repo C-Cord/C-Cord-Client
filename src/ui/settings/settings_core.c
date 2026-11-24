@@ -1247,25 +1247,28 @@ bool ui_settings_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
     float need = ui->account_mfa_required ? 290.0f : 404.0f;
     float max_s = need > box.h ? (need - box.h) : 0.0f;
     if (max_s <= 0.0f) return false;
-    st_s_login_scroll -= ev->wheel * 48.0f;
-    if (st_s_login_scroll < 0.0f) st_s_login_scroll = 0.0f;
-    if (st_s_login_scroll > max_s) st_s_login_scroll = max_s;
+    ui_scroll_offset_by(ui, &st_s_login_scroll, ui_wheel_delta_px(ui, ev, 48.0f), max_s);
     ui->dirty = true;
     return true;
   }
   sgeom g = st_geometry(ui);
   if (!ui_in_rect(ev->x, ev->y, g.panel)) return false;
   if (g.list.w > 0.0f && ui_in_rect(ev->x, ev->y, g.list)) {
-    st_s_sidebar_scroll -= ev->wheel * g.step;
+    float before = st_s_sidebar_scroll;
+    st_s_sidebar_scroll += ui_wheel_delta_px(ui, ev, g.step);
     if (st_s_sidebar_scroll < 0.0f) st_s_sidebar_scroll = 0.0f;
     (void)st_geometry(ui);   // clamps st_s_sidebar_scroll to max_scroll
+    if (ui->touch_scroll_direct_override > 0 && st_s_sidebar_scroll == before) {
+      ui->touch_scroll_hit_bound = true;
+    }
     ui->dirty = true;
     return true;
   }
   if (ui->settings_page == SP_VOICE) {
     float max = st_voice_max_scroll(&g);
     if (max <= 0.0f) return false;
-    ccord_scroller_scroll(&st_s_voice_glide, &st_s_voice_scroll, -ev->wheel * VOICE_SCROLL_STEP, max, ui_wheel_direct(ui, ev));
+    ui_scroller_scroll_ui(ui, &st_s_voice_glide, &st_s_voice_scroll, ui_wheel_delta_px(ui, ev, VOICE_SCROLL_STEP),
+                          max, ui_wheel_direct(ui, ev));
     ui->dirty = true;
     return true;
   }
@@ -1282,9 +1285,7 @@ bool ui_settings_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
   {
     float max_p = st_page_max_scroll(ui, &g);
     if (max_p > 0.0f) {
-      st_s_page_scroll -= ev->wheel * 56.0f;
-      if (st_s_page_scroll < 0.0f) st_s_page_scroll = 0.0f;
-      if (st_s_page_scroll > max_p) st_s_page_scroll = max_p;
+      ui_scroll_offset_by(ui, &st_s_page_scroll, ui_wheel_delta_px(ui, ev, 56.0f), max_p);
       ui->dirty = true;
       return true;
     }

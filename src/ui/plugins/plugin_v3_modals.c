@@ -952,9 +952,7 @@ bool ui_plugin_dialog_handle_input(ccord_ui *ui, const ccord_input_event *ev)
 
   if (ev->type == CCORD_IN_WHEEL) {
     float max_scroll = v->dlg.content_h > v->dlg.body_rect.h ? (v->dlg.content_h - v->dlg.body_rect.h) : 0.0f;
-    v->dlg.scroll_y -= ev->wheel * 32.0f;
-    if (v->dlg.scroll_y < 0.0f) v->dlg.scroll_y = 0.0f;
-    if (v->dlg.scroll_y > max_scroll) v->dlg.scroll_y = max_scroll;
+    ui_scroll_offset_by(ui, &v->dlg.scroll_y, ui_wheel_delta_px(ui, ev, 32.0f), max_scroll);
     ui->dirty = true;
     return true;
   }
@@ -1170,9 +1168,7 @@ bool ui_plugin_settings_handle_input(ccord_ui *ui, const ccord_input_event *ev)
 
   if (ev->type == CCORD_IN_WHEEL) {
     float max_scroll = s->content_h > s->body_rect.h ? (s->content_h - s->body_rect.h) : 0.0f;
-    s->scroll_y -= ev->wheel * 32.0f;
-    if (s->scroll_y < 0.0f) s->scroll_y = 0.0f;
-    if (s->scroll_y > max_scroll) s->scroll_y = max_scroll;
+    ui_scroll_offset_by(ui, &s->scroll_y, ui_wheel_delta_px(ui, ev, 32.0f), max_scroll);
     ui->dirty = true;
     return true;
   }

@@ -42,6 +42,7 @@ typedef struct ccord_input_event {
   int32_t ime_start;   // IME_PREEDIT: cursor offset within text, in codepoints (0 when unset)
   int32_t ime_length;  // IME_PREEDIT: selection length within text, in codepoints (0 when none)
   int64_t finger_id;   // TOUCH_*: stable touch pointer id
+  uint64_t timestamp_ns; // TOUCH_*: monotonic event timestamp in nanoseconds (0 = unset, falls back to UI clock)
   float inset_top, inset_right, inset_bottom, inset_left;   // SAFE_AREA: logical px insets
 } ccord_input_event;
 typedef enum ccord_cursor_kind : uint8_t {
