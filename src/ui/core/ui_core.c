@@ -1318,3 +1318,13 @@ bool ccord_ui_streamer_mode(const ccord_ui *ui)
   return ui && ui->settings_streamer_mode;
 }
 
+void ccord_ui_show_drop_error(ccord_ui *ui, const char *title, const char *body, const char *pill)
+{
+  ui_drop_error_open(ui, title, body, pill);
+}
+
+void ccord_ui_on_plugin_imported(ccord_ui *ui, const char *plugin_id, const char *pkg_path)
+{
+  ui_settings_plugins_on_imported(ui, plugin_id, pkg_path);
+}
+

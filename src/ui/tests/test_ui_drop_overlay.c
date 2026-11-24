@@ -345,6 +345,50 @@ static void test_dynamic_discord_limits_and_error_modal(void)
   CT_CHECK(ccord_session_send_message_with_files(F.session, ch, CCORD_ID_NONE, true, "", 0, &huge, 1, &serr) == CCORD_ERR_RANGE);
   CT_CHECK(strstr(serr.message, "20 MB") != nullptr);
 
+  // 6. .cce plugin drop error modal (topmost over Settings > Plugins) and post-import consent flow.
+  F.ui->settings_open = true;
+  F.ui->settings_page = UI_SETTINGS_PAGE_PLUGINS;
+  F.ui->extensions_on = true;
+  (void)ccord_ui_handle_input(F.ui, &db);
+  ccord_ui_show_drop_error(
+    F.ui, "Couldn't install extension",
+    "message-logger.cce: plugin id 'dev.ccord.message-logger' uses reserved 'dev.ccord.' prefix.",
+    ".cce plugin package");
+  (void)ccord_ui_handle_input(F.ui, &dc);   // DROP_COMPLETE must not dismiss the error modal
+  CT_CHECK(ui_upload_error_is_open(F.ui) && !ui_drop_overlay_active(F.ui));
+  frame_step(3, 80);
+  ui_drop_overlay_debug_get(F.ui, &d);
+  CT_CHECK(d.error_open && d.error_box.w > 200.0f && d.error_ok_btn.w > 40.0f);
+  CT_CHECK(strstr(d.error_title, "Couldn't install") != nullptr);
+  CT_CHECK(strstr(d.error_body, "dev.ccord.message-logger") != nullptr);
+  ccord_input_event esc = {.type = CCORD_IN_KEY_DOWN, .key = CCORD_KEY_ESCAPE};
+  CT_CHECK(ccord_ui_handle_input(F.ui, &esc));
+  CT_CHECK(!ui_upload_error_is_open(F.ui));
+  frame_step(5, 50);
+  ui_drop_overlay_debug_get(F.ui, &d);
+  CT_CHECK(!d.alloc_live);
+
+  F.ui->settings_open = false;
+  ccord_plugin_info imp = {
+    .id = "io.test.dropped",
+    .name = "Dropped Ext",
+    .version = "1.0.0",
+    .description = "Test dropped package",
+    .permissions = "ui.panel",
+    .perms_mask = (1ull << 16),
+    .risk_class = 1,
+    .state = CCORD_PLUGIN_NEEDS_CONSENT,
+  };
+  ccord_error perr = {0};
+  CT_CHECK(ccord_contrib_set_plugin(F.contrib, &imp, &perr) == CCORD_OK);
+  ccord_ui_on_plugin_imported(F.ui, "io.test.dropped", "/tmp/dropped.cce");
+  CT_CHECK(F.ui->settings_open && F.ui->settings_page == UI_SETTINGS_PAGE_PLUGINS);
+  CT_CHECK(ui_settings_security_modal_open(F.ui));
+  frame_step(2, 60);
+  CT_CHECK(ccord_ui_handle_input(F.ui, &esc));   // dismiss consent modal
+  CT_CHECK(!ui_settings_security_modal_open(F.ui));
+  F.ui->settings_open = false;
+
   remove(f25);
   remove(f60);
   remove(f120);

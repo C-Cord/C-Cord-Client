@@ -482,6 +482,10 @@ void ccord_ui_clear_attachment(ccord_ui *ui);
 size_t ccord_ui_staged_attachment_count(const ccord_ui *ui);
 bool ccord_ui_toggle_attachment_spoiler(ccord_ui *ui, size_t index);
 bool ccord_ui_remove_staged_attachment(ccord_ui *ui, size_t index);
+// Shows the topmost drag-and-drop error modal (renders above Settings, modals, and chat).
+void ccord_ui_show_drop_error(ccord_ui *ui, const char *title, const char *body, const char *pill);
+// Presents a newly imported .cce extension in Settings -> Plugins (opening consent review if required).
+void ccord_ui_on_plugin_imported(ccord_ui *ui, const char *plugin_id, const char *pkg_path);
 size_t ccord_ui_serialize_mentions(const ccord_store *store, ccord_id guild_id,
                                    const char *in, size_t in_len, char *out, size_t out_cap);
 struct ccord_capture_source;

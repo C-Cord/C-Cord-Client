@@ -269,6 +269,7 @@ bool ui_drop_overlay_active(const ccord_ui *ui);
 bool ui_drop_overlay_shift_held(const ccord_ui *ui);
 void ui_upload_error_open(ccord_ui *ui, const char *filename, uint64_t file_size, uint64_t limit_bytes,
                           ccord_upload_limit_source limit_src);
+void ui_drop_error_open(ccord_ui *ui, const char *title, const char *body, const char *pill);
 bool ui_upload_error_is_open(const ccord_ui *ui);
 void ui_upload_error_close(ccord_ui *ui);
 bool ui_upload_error_handle(ccord_ui *ui, const ccord_input_event *ev);

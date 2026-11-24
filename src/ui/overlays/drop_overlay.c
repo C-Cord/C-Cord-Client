@@ -42,6 +42,7 @@ struct ui_drop_overlay {
   char err_channel[96];
   char err_title[64];
   char err_body[384];
+  char err_pill[96];
 };
 
 static struct ui_drop_overlay *drop_ovl_ensure(ccord_ui *ui)
@@ -361,9 +362,39 @@ void ui_upload_error_open(ccord_ui *ui, const char *filename, uint64_t file_size
                    s->err_filename, size_s, lim_s, s->err_channel);
   }
 
+  (void)snprintf(s->err_pill, sizeof s->err_pill, "Active limit: %s (%s)",
+                 lim_s, ccord_upload_limit_source_label(s->err_limit_src));
+
   s->hover_open = false;
   s->has_drag_pos = false;
   s->pointer_over_card = false;
+  ui->dirty = true;
+}
+
+void ui_drop_error_open(ccord_ui *ui, const char *title, const char *body, const char *pill)
+{
+  if (!ui || ui_is_login_screen(ui) || ui_is_loading_screen(ui)) return;
+  struct ui_drop_overlay *s = drop_ovl_ensure(ui);
+  if (!s) return;
+  s->error_open = true;
+  s->err_ok_pressed = false;
+  s->err_extra_rejected = 0;
+  s->err_file_bytes = 0;
+  s->err_limit_bytes = 0;
+  s->err_filename[0] = '\0';
+  s->err_channel[0] = '\0';
+  (void)snprintf(s->err_title, sizeof s->err_title, "%s", (title && title[0]) ? title : "Couldn't open file");
+  (void)snprintf(s->err_body, sizeof s->err_body, "%s",
+                 (body && body[0]) ? body : "The dropped file could not be processed.");
+  if (pill && pill[0]) {
+    (void)snprintf(s->err_pill, sizeof s->err_pill, "%s", pill);
+  } else {
+    s->err_pill[0] = '\0';
+  }
+  s->hover_open = false;
+  s->has_drag_pos = false;
+  s->pointer_over_card = false;
+  s->shift_held = false;
   ui->dirty = true;
 }
 
@@ -552,8 +583,9 @@ static void draw_error_modal(ccord_ui *ui, ccord_renderer *r, struct ui_drop_ove
   ccord_text_style body_st = ui_style(ui, CCORD_FONT_REGULAR, t.fs_control, COL(text_secondary));
   ccord_vec2 bm = ccord_text_measure(r, s->err_body, strlen(s->err_body), &body_st, text_w);
   float title_lh = ui_line_h(ui, t.fs_title);
+  bool has_pill = s->err_pill[0] != '\0';
   float pill_h = UIS_H_CHIP + UIS_SP_1;
-  float content_h = title_lh + UIS_SP_2 + bm.y + UIS_SP_3 + pill_h;
+  float content_h = title_lh + UIS_SP_2 + bm.y + (has_pill ? (UIS_SP_3 + pill_h) : 0.0f);
   if (content_h < icon_d) content_h = icon_d;
   float mh = UIS_SP_5 + content_h + UIS_SP_4 + 1.0f + UIS_SP_3 + UIS_H_BTN + UIS_SP_5;
 
@@ -578,20 +610,18 @@ static void draw_error_modal(ccord_ui *ui, ccord_renderer *r, struct ui_drop_ove
   float by = ty + title_lh + UIS_SP_2;
   ccord_text_draw(r, s->err_body, strlen(s->err_body), tx, by, &body_st, text_w);
 
-  // Active limit pill
-  char lim_s[32], pill_txt[96];
-  ccord_format_upload_limit(s->err_limit_bytes, lim_s, sizeof lim_s);
-  (void)snprintf(pill_txt, sizeof pill_txt, "Active limit: %s (%s)",
-                 lim_s, ccord_upload_limit_source_label(s->err_limit_src));
-  ccord_text_style cap_st = ui_style(ui, CCORD_FONT_REGULAR, t.fs_caption, COL(text_secondary));
-  ccord_vec2 pm = ccord_text_measure(r, pill_txt, strlen(pill_txt), &cap_st, 0.0f);
-  float pw = fminf(pm.x + 2.0f * UIS_SP_2, text_w);
-  ccord_rect pill_rc = {tx, by + bm.y + UIS_SP_3, pw, pill_h};
-  uis_plate(ui, r, pill_rc, t.r_control, COL(bg_tertiary));
-  ccord_text_draw_ellipsis(r, pill_txt, strlen(pill_txt),
-                           pill_rc.x + UIS_SP_2,
-                           pill_rc.y + (pill_rc.h - ui_line_h(ui, t.fs_caption)) * 0.5f,
-                           fmaxf(pill_rc.w - 2.0f * UIS_SP_2, 8.0f), &cap_st);
+  // Context pill (e.g. active upload limit or ".cce plugin package")
+  if (has_pill) {
+    ccord_text_style cap_st = ui_style(ui, CCORD_FONT_REGULAR, t.fs_caption, COL(text_secondary));
+    ccord_vec2 pm = ccord_text_measure(r, s->err_pill, strlen(s->err_pill), &cap_st, 0.0f);
+    float pw = fminf(pm.x + 2.0f * UIS_SP_2, text_w);
+    ccord_rect pill_rc = {tx, by + bm.y + UIS_SP_3, pw, pill_h};
+    uis_plate(ui, r, pill_rc, t.r_control, COL(bg_tertiary));
+    ccord_text_draw_ellipsis(r, s->err_pill, strlen(s->err_pill),
+                             pill_rc.x + UIS_SP_2,
+                             pill_rc.y + (pill_rc.h - ui_line_h(ui, t.fs_caption)) * 0.5f,
+                             fmaxf(pill_rc.w - 2.0f * UIS_SP_2, 8.0f), &cap_st);
+  }
 
   // Footer divider + primary OK button
   ccord_rect ok_btn = uis_modal_footer_button(box, 0, 88.0f);

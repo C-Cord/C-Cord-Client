@@ -1262,6 +1262,61 @@ bool ui_open_plugin_install_prompt(ccord_ui *ui, const char *plugin_id)
   return true;
 }
 
+void ui_settings_plugins_on_imported(ccord_ui *ui, const char *plugin_id, const char *pkg_path)
+{
+  if (!ui) return;
+  ui_drop_overlay_end(ui);
+  if (ui_is_login_screen(ui) || ui_is_loading_screen(ui)) return;
+
+  const ccord_plugin_info *p =
+    (ui->d.contrib && plugin_id && plugin_id[0]) ? find_plugin_info(ui->d.contrib, plugin_id) : nullptr;
+
+  st_settings_init_defaults(ui);
+  ui_open_settings(ui, true);
+  ui->settings_page = SP_PLUGINS;
+  ui->settings_category = st_k_pages[SP_PLUGINS].category;
+  if (ui->mobile_layout) ui->mobile_settings_detail = true;
+  s_subtab = 0;
+  s_inst_filter = IFILT_ALL;
+  s_inst_search[0] = '\0';
+  s_inst_search_focused = false;
+  s_detail_id[0] = '\0';
+  s_log_id[0] = '\0';
+  s_overflow_id[0] = '\0';
+  s_uninst_id[0] = '\0';
+  s_sort_open = false;
+  st_s_page_scroll = 0.0f;
+
+  if (p) {
+    const char *label = (p->name && p->name[0]) ? p->name : p->id;
+    if (p->state == CCORD_PLUGIN_NEEDS_CONSENT) {
+      snprintf(s_status_msg, sizeof s_status_msg, "Imported %.96s (v%.24s) \xC2\xB7 review permissions to enable.",
+               label, p->version ? p->version : "");
+      if (s_sec_mode == SEC_NONE) {
+        open_sec_modal_for_installed_consent(p);
+      }
+    } else if (p->state == CCORD_PLUGIN_FAILED) {
+      const char *why = (p->error && p->error[0]) ? p->error : "plugin failed to start";
+      snprintf(s_status_msg, sizeof s_status_msg, "Imported %.64s, but it failed to start: %.88s", label, why);
+      char body[384];
+      snprintf(body, sizeof body, "%.96s was extracted, but failed to start: %.220s", label, why);
+      ui_drop_error_open(ui, "Extension failed to start", body, ".cce plugin package");
+    } else {
+      snprintf(s_status_msg, sizeof s_status_msg, "Installed %.112s (v%.24s).",
+               label, p->version ? p->version : "");
+    }
+  } else {
+    const char *base = pkg_path ? strrchr(pkg_path, '/') : nullptr;
+#if CCORD_OS_WINDOWS
+    const char *bs = pkg_path ? strrchr(pkg_path, '\\') : nullptr;
+    if (bs && (!base || bs > base)) base = bs;
+#endif
+    base = base ? base + 1 : (pkg_path ? pkg_path : "package.cce");
+    snprintf(s_status_msg, sizeof s_status_msg, "Imported plugin package: %.150s", base);
+  }
+  ui->dirty = true;
+}
+
 // ---------------------------------------------------------------- Sub-view renderers
 
 static void draw_debug_log_view(ccord_ui *ui, ccord_renderer *r, float x, float y0, float w, float body_bottom)

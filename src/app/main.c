@@ -338,6 +338,9 @@ static void run_interactive(app *a)
     // debouncers) and bus callbacks never stamp pre-sleep timestamps from the previous idle frame.
     uint64_t wake_ms = app_now_ms(a);
     if (a->ui) ccord_ui_set_now_ms(a->ui, wake_ms);
+    if (ccord_platform_consume_file_dialog_cancelled(a->platform)) {
+      a->file_dialog_pending = false;
+    }
     if (got_ev) {
       last_input_ms = wake_ms;
       bool saw_picker_drop = false;
@@ -354,26 +357,47 @@ static void run_interactive(app *a)
         }
         if (ev.type == CCORD_EV_DROP_FILE) {
           char dpath[1024] = {0};
-          if (!ccord_platform_pop_drop_file(a->platform, dpath, sizeof dpath) || !dpath[0]) {
+          bool from_os_drop = false;
+          if (!ccord_platform_pop_drop_file_ex(a->platform, dpath, sizeof dpath, &from_os_drop) || !dpath[0]) {
             snprintf(dpath, sizeof dpath, "%s", ev.text);
           }
           if (dpath[0]) {
-            bool from_picker = a->file_dialog_pending;
+            if (from_os_drop) a->file_dialog_pending = false;
+            bool from_picker = !from_os_drop && a->file_dialog_pending;
             if (from_picker) saw_picker_drop = true;
             size_t dl = strlen(dpath);
             bool is_pkg = !from_picker && (dl > 4 && ccord_strcasecmp(dpath + dl - 4, ".cce") == 0);
             if (is_pkg && a->contrib) {
               char ebuf[256] = "";
+              const char *base = strrchr(dpath, '/');
+#if CCORD_OS_WINDOWS
+              const char *bs = strrchr(dpath, '\\');
+              if (bs && (!base || bs > base)) base = bs;
+#endif
+              base = base ? base + 1 : dpath;
 #if CCORD_WITH_PLUGINS
               if (!a->plugins) {
                 CCORD_LOG_W("ignored dropped plugin package %s: Extensions are disabled in Settings", dpath);
+                ccord_ui_show_drop_error(
+                  a->ui, "Extensions are disabled",
+                  "Enable Extensions in Settings -> Plugins before installing .cce plugin packages.",
+                  "Extensions off");
               } else if (ccord_contrib_plugin_import_package(a->contrib, dpath, ebuf, sizeof ebuf)) {
                 CCORD_LOG_I("imported plugin package: %s", dpath);
+                ccord_ui_on_plugin_imported(a->ui, ccord_plugins_last_imported_id(a->plugins), dpath);
               } else {
                 CCORD_LOG_W("failed to import plugin package %s: %s", dpath, ebuf);
+                char err_body[384];
+                snprintf(err_body, sizeof err_body, "%.110s: %.240s",
+                         base, ebuf[0] ? ebuf : "invalid or unreadable .cce package");
+                ccord_ui_show_drop_error(a->ui, "Couldn't install extension", err_body, ".cce plugin package");
               }
 #else
               (void)ebuf;
+              (void)base;
+              ccord_ui_show_drop_error(a->ui, "Extensions unavailable",
+                                       "This build of C-Cord does not include plugin support.",
+                                       ".cce plugin package");
 #endif
             } else {
               size_t before = ccord_ui_staged_attachment_count(a->ui);
@@ -395,7 +419,7 @@ static void run_interactive(app *a)
           }
           continue;
         }
-        if (ev.type == CCORD_IN_MOUSE_DOWN || ev.type == CCORD_IN_KEY_DOWN) {
+        if (ev.type == CCORD_IN_MOUSE_DOWN || ev.type == CCORD_IN_KEY_DOWN || ev.type == CCORD_EV_DROP_BEGIN) {
           a->file_dialog_pending = false;
         }
         if (ev.type == CCORD_EV_HOTKEY) {
