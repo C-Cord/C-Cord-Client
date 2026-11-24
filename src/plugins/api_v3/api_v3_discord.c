@@ -349,6 +349,120 @@ bool ext_handle_audio_hooks_gw_rpc(ccord_plugins *m, plugin *p, uint32_t id, con
   return false;
 }
 
+static uint32_t lmsg_owner_hash32(const char *s)
+{
+  uint32_t h = 2166136261u;
+  for (; s && *s; s++) { h ^= (unsigned char)*s; h *= 16777619u; }
+  return h;
+}
+
+static void lmsg_cleanup_auto_textures(ccord_contrib *c, const char *owner, uint64_t lid)
+{
+  if (!c || !owner || lid == 0) return;
+  uint32_t oh = lmsg_owner_hash32(owner);
+  for (size_t i = 0; i < 10u; i++) {
+    char key[64];
+    snprintf(key, sizeof key, "__lmsg__:%08x:%llu:%zu", (unsigned)oh, (unsigned long long)lid, i);
+    (void)ccord_contrib_remove_texture(c, owner, key);
+  }
+}
+
+static bool lmsg_attachments_check_perms(ccord_plugins *m, plugin *p, uint32_t req_id, const ccord_json *atts)
+{
+  if (!atts || ccord_json_type_of(atts) != CCORD_JSON_ARRAY) return true;
+  size_t n = ccord_json_array_len(atts);
+  if (n > 10u) n = 10u;
+  for (size_t i = 0; i < n; i++) {
+    const ccord_json *it = ccord_json_array_at(atts, i);
+    if (!it || ccord_json_type_of(it) != CCORD_JSON_OBJECT) continue;
+    size_t lp_len = 0;
+    const char *lp = pl_str_param(it, "local_path", &lp_len);
+    if (lp && lp_len > 0) {
+      if (!pl_has_perm(p, CCORD_PERM_FS_READ)) {
+        pl_fail_plugin(m, p, "undeclared restricted API called: fs.read");
+        return false;
+      }
+      if (pl_fs_path_is_protected(m, lp)) {
+        pl_reply_err(m, p, req_id, "permission_denied", "access to C-Cord internal config/plugin paths is forbidden");
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+static bool lmsg_normalize_attachments(ccord_plugins *m, plugin *p, uint64_t lid, const ccord_json *atts,
+                                       ccord_buf *out_json, const char **out_err_code, char *err_buf, size_t err_cap)
+{
+  if (!atts || ccord_json_type_of(atts) != CCORD_JSON_ARRAY) return true;
+  lmsg_cleanup_auto_textures(m->contrib, p->m.id, lid);
+  uint32_t oh = lmsg_owner_hash32(p->m.id);
+  size_t n = ccord_json_array_len(atts);
+  if (n > 10u) n = 10u;
+  ccord_jw w;
+  ccord_jw_init(&w, out_json);
+  ccord_jw_begin_array(&w);
+  for (size_t i = 0; i < n; i++) {
+    const ccord_json *it = ccord_json_array_at(atts, i);
+    if (!it || ccord_json_type_of(it) != CCORD_JSON_OBJECT) continue;
+    size_t fnl = 0, ctl = 0, tkl = 0, lpl = 0;
+    const char *fn = pl_str_param(it, "filename", &fnl);
+    const char *ct = pl_str_param(it, "content_type", &ctl);
+    const char *tk = pl_str_param(it, "texture_key", &tkl);
+    const char *lp = pl_str_param(it, "local_path", &lpl);
+    int64_t sz = 0, aw = 0, ah = 0;
+    (void)ccord_json_int64(ccord_json_get(it, "size"), &sz);
+    (void)ccord_json_int64(ccord_json_get(it, "width"), &aw);
+    (void)ccord_json_int64(ccord_json_get(it, "height"), &ah);
+    bool sp = ccord_json_bool(ccord_json_get(it, "spoiler"), false);
+
+    char gen_key[64] = "";
+    const char *eff_tk = (tk && tkl > 0) ? tk : "";
+    if (!eff_tk[0] && lp && lpl > 0) {
+      snprintf(gen_key, sizeof gen_key, "__lmsg__:%08x:%llu:%zu", (unsigned)oh, (unsigned long long)lid, i);
+      int tw = 0, th = 0;
+      const char *ecode = nullptr;
+      char ebuf[256] = "";
+      if (ext_upload_texture_from_file(m, p, gen_key, lp, 512, 512, &tw, &th, &ecode, ebuf, sizeof ebuf)) {
+        eff_tk = gen_key;
+        if (aw <= 0) aw = tw;
+        if (ah <= 0) ah = th;
+      } else if (ecode && strcmp(ecode, "permission_denied") == 0) {
+        lmsg_cleanup_auto_textures(m->contrib, p->m.id, lid);
+        if (out_err_code) *out_err_code = ecode;
+        if (err_buf && err_cap) snprintf(err_buf, err_cap, "%s", ebuf);
+        return false;
+      }
+    }
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "filename"); ccord_jw_cstr(&w, (fn && fnl > 0) ? fn : "attachment");
+    if (ct && ctl > 0) { ccord_jw_key(&w, "content_type"); ccord_jw_cstr(&w, ct); }
+    if (sz > 0) { ccord_jw_key(&w, "size"); ccord_jw_int(&w, sz); }
+    if (aw > 0) { ccord_jw_key(&w, "width"); ccord_jw_int(&w, aw); }
+    if (ah > 0) { ccord_jw_key(&w, "height"); ccord_jw_int(&w, ah); }
+    if (eff_tk[0]) { ccord_jw_key(&w, "texture_key"); ccord_jw_cstr(&w, eff_tk); }
+    if (sp) { ccord_jw_key(&w, "spoiler"); ccord_jw_bool(&w, true); }
+    ccord_jw_end_object(&w);
+  }
+  ccord_jw_end_array(&w);
+  return ccord_jw_ok(&w);
+}
+
+static bool parse_local_pos(const char *s, ccord_local_msg_pos *out)
+{
+  if (!s || strcmp(s, "bottom") == 0) { *out = CCORD_LOCAL_POS_BOTTOM; return true; }
+  if (strcmp(s, "timeline") == 0) { *out = CCORD_LOCAL_POS_TIMELINE; return true; }
+  return false;
+}
+
+static bool parse_local_compact(const char *s, ccord_local_compact *out)
+{
+  if (!s || strcmp(s, "auto") == 0) { *out = CCORD_LOCAL_COMPACT_AUTO; return true; }
+  if (strcmp(s, "always") == 0) { *out = CCORD_LOCAL_COMPACT_ALWAYS; return true; }
+  if (strcmp(s, "never") == 0) { *out = CCORD_LOCAL_COMPACT_NEVER; return true; }
+  return false;
+}
+
 bool ext_handle_messages_store_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *method,
                                      const ccord_json *params)
 {
@@ -525,40 +639,261 @@ bool ext_handle_messages_store_v3(ccord_plugins *m, plugin *p, uint32_t id, cons
       return true;
     }
     if (strcmp(method, "messages.inject_local") == 0) {
-      if (!pl_has_perm(p, CCORD_PERM_UI_PANEL)) { pl_fail_plugin(m, p, "undeclared restricted API called: ui.panel"); return true; }
+      if (!pl_has_perm(p, CCORD_PERM_UI_PANEL) && !pl_has_perm(p, CCORD_PERM_UI_DECORATE)) {
+        pl_fail_plugin(m, p, "undeclared restricted API called: ui.panel or ui.decorate");
+        return true;
+      }
       ccord_id cid = pl_parse_id_param(params, "channel_id");
       const ccord_json *mj = ccord_json_get(params, "msg");
       if (!cid || !mj || ccord_json_type_of(mj) != CCORD_JSON_OBJECT) {
         pl_reply_err(m, p, id, "invalid_argument", "channel_id and msg required");
         return true;
       }
-      size_t al = 0, bl = 0, cl = 0;
+      const ccord_json *atts_j = ccord_json_get(mj, "attachments");
+      if (!lmsg_attachments_check_perms(m, p, id, atts_j)) return true;
+
+      size_t posl = 0, cmpl = 0;
+      const char *pos_s = pl_str_param(mj, "position", &posl);
+      ccord_local_msg_pos pos = CCORD_LOCAL_POS_BOTTOM;
+      if (pos_s && !parse_local_pos(pos_s, &pos)) {
+        pl_reply_err(m, p, id, "invalid_argument", "position must be 'bottom' or 'timeline'");
+        return true;
+      }
+      const char *cmp_s = pl_str_param(mj, "compact", &cmpl);
+      ccord_local_compact cmp = CCORD_LOCAL_COMPACT_AUTO;
+      if (cmp_s && !parse_local_compact(cmp_s, &cmp)) {
+        pl_reply_err(m, p, id, "invalid_argument", "compact must be 'auto', 'always', or 'never'");
+        return true;
+      }
+
+      size_t idl = 0, al = 0, acl = 0, bl = 0, bcl = 0, cl = 0, tcl = 0, accl = 0, tnl = 0;
+      const char *client_id = pl_str_param(mj, "id", &idl);
+      ccord_id author_id = pl_parse_id_param(mj, "author_id");
+      const char *author_s = pl_str_param(mj, "author", &al);
+      if (!author_s || al == 0) {
+        const ccord_user *su = (m->store && author_id) ? ccord_store_user(m->store, author_id) : nullptr;
+        author_s = (su && su->name && su->name[0]) ? su->name : p->m.name;
+      }
+      const ccord_json *badge_j = ccord_json_get(mj, "badge");
+      const char *badge_s = badge_j ? pl_str_param(mj, "badge", &bl) : nullptr;
+      if (!badge_j) badge_s = (pos == CCORD_LOCAL_POS_TIMELINE) ? "" : "PLUGIN";
+      else if (!badge_s) badge_s = "";
+
+      int64_t ts_ms = ccord_clock_unix_ms();
+      if (ccord_json_get(mj, "timestamp_ms")) {
+        int64_t t = 0;
+        if (ccord_json_int64(ccord_json_get(mj, "timestamp_ms"), &t) && t > 0) ts_ms = t;
+      }
+      const ccord_json *avop_j = ccord_json_get(mj, "avatar_opacity");
+      bool has_av_op = avop_j && ccord_json_type_of(avop_j) == CCORD_JSON_NUMBER;
+
       ccord_buf emb_b; ccord_buf_init(&emb_b, 0);
       if (ccord_json_get(mj, "embeds")) ext_encode_json_str(ccord_json_get(mj, "embeds"), &emb_b);
       else if (ccord_json_get(mj, "embed")) ext_encode_json_str(ccord_json_get(mj, "embed"), &emb_b);
+
+      bool existed = client_id && idl > 0 &&
+                     ccord_contrib_find_local_message_owned(m->contrib, p->m.id, 0, client_id) != nullptr;
       ccord_local_message lm = {
-        .owner = p->m.id, .channel_id = cid,
-        .author_name = pl_str_param(mj, "author", &al) ? pl_str_param(mj, "author", &al) : p->m.name,
-        .author_badge = pl_str_param(mj, "badge", &bl) ? pl_str_param(mj, "badge", &bl) : "PLUGIN",
+        .owner = p->m.id,
+        .client_id = client_id ? client_id : "",
+        .channel_id = cid,
+        .position = pos,
+        .sort_id = pl_parse_id_param(mj, "sort_id"),
+        .after_message_id = pl_parse_id_param(mj, "after_message_id"),
+        .before_message_id = pl_parse_id_param(mj, "before_message_id"),
+        .author_id = author_id,
+        .author_name = author_s,
+        .author_color = pl_str_param(mj, "author_color", &acl) ? pl_str_param(mj, "author_color", &acl) : "",
+        .author_badge = badge_s,
+        .badge_color = pl_str_param(mj, "badge_color", &bcl) ? pl_str_param(mj, "badge_color", &bcl) : "",
         .content = pl_str_param(mj, "content", &cl) ? pl_str_param(mj, "content", &cl) : "",
+        .text_color = pl_str_param(mj, "text_color", &tcl) ? pl_str_param(mj, "text_color", &tcl) : "",
+        .accent_color = pl_str_param(mj, "accent_color", &accl) ? pl_str_param(mj, "accent_color", &accl) : "",
+        .tint_color = pl_str_param(mj, "tint_color", &tnl) ? pl_str_param(mj, "tint_color", &tnl) : "",
         .embed_json = emb_b.len ? ccord_buf_cstr(&emb_b) : "",
-        .timestamp_ms = (uint64_t)ccord_clock_unix_ms(),
-        .dismissible = ccord_json_bool(ccord_json_get(mj, "dismissible"), true),
+        .attachments_json = "",
+        .timestamp_ms = (uint64_t)ts_ms,
+        .dismissible = ccord_json_bool(ccord_json_get(mj, "dismissible"), pos == CCORD_LOCAL_POS_BOTTOM),
+        .avatar_grayscale = ccord_json_bool(ccord_json_get(mj, "avatar_grayscale"), false),
+        .has_avatar_opacity = has_av_op,
+        .avatar_opacity = has_av_op ? (float)ccord_json_number(avop_j, 1.0) : 1.0f,
+        .compact_mode = cmp,
+        .break_group = ccord_json_bool(ccord_json_get(mj, "break_group"), false),
+        .clip_to_history = ccord_json_bool(ccord_json_get(mj, "clip_to_history"), pos == CCORD_LOCAL_POS_TIMELINE),
+        .has_on_event = ccord_json_bool(ccord_json_get(mj, "has_on_event"), false),
       };
       uint64_t lid = 0;
       ccord_status st = ccord_contrib_add_local_message(m->contrib, &lm, &lid, &err);
       ccord_buf_free(&emb_b);
       if (st != CCORD_OK) { pl_reply_err(m, p, id, "invalid_argument", err.message); return true; }
+
+      if (atts_j && ccord_json_type_of(atts_j) == CCORD_JSON_ARRAY) {
+        ccord_buf att_b; ccord_buf_init(&att_b, 0);
+        const char *acode = "invalid_argument";
+        char abuf[256] = "";
+        if (!lmsg_normalize_attachments(m, p, lid, atts_j, &att_b, &acode, abuf, sizeof abuf)) {
+          ccord_buf_free(&att_b);
+          if (!existed) (void)ccord_contrib_dismiss_local_message_owned(m->contrib, p->m.id, lid, nullptr, nullptr);
+          pl_reply_err(m, p, id, acode, abuf);
+          return true;
+        }
+        ccord_local_message ap = {.attachments_json = att_b.len ? ccord_buf_cstr(&att_b) : ""};
+        (void)ccord_contrib_update_local_message(m->contrib, p->m.id, lid, nullptr, &ap,
+                                                 CCORD_LPATCH_ATTACHMENTS_JSON, nullptr, &err);
+        ccord_buf_free(&att_b);
+      } else if (existed) {
+        lmsg_cleanup_auto_textures(m->contrib, p->m.id, lid);
+      }
       char buf[32];
       snprintf(buf, sizeof buf, "%llu", (unsigned long long)lid);
       pl_reply_ok(m, p, id, buf);
       return true;
     }
+    if (strcmp(method, "messages.update_local") == 0) {
+      if (!pl_has_perm(p, CCORD_PERM_UI_PANEL) && !pl_has_perm(p, CCORD_PERM_UI_DECORATE)) {
+        pl_fail_plugin(m, p, "undeclared restricted API called: ui.panel or ui.decorate");
+        return true;
+      }
+      int64_t lid_in = 0;
+      (void)ccord_json_int64(ccord_json_get(params, "local_id"), &lid_in);
+      size_t cidl = 0;
+      const char *cid_in = pl_str_param(params, "id", &cidl);
+      const ccord_json *pj = ccord_json_get(params, "patch");
+      if ((lid_in <= 0 && (!cid_in || cidl == 0)) || !pj || ccord_json_type_of(pj) != CCORD_JSON_OBJECT) {
+        pl_reply_err(m, p, id, "invalid_argument", "update_local requires id/local_id and patch table");
+        return true;
+      }
+      const ccord_local_message *cur = ccord_contrib_find_local_message_owned(
+        m->contrib, p->m.id, lid_in > 0 ? (uint64_t)lid_in : 0, cid_in);
+      if (!cur) {
+        pl_reply_err(m, p, id, "not_found", "local message not found");
+        return true;
+      }
+      uint64_t target_lid = cur->local_id;
+      const ccord_json *atts_j = ccord_json_get(pj, "attachments");
+      if (atts_j && !lmsg_attachments_check_perms(m, p, id, atts_j)) return true;
+
+      ccord_local_message pm = {0};
+      uint32_t mask = 0;
+      ccord_buf emb_b, att_b;
+      ccord_buf_init(&emb_b, 0);
+      ccord_buf_init(&att_b, 0);
+      if (ccord_json_get(pj, "channel_id")) { pm.channel_id = pl_parse_id_param(pj, "channel_id"); mask |= CCORD_LPATCH_CHANNEL; }
+      if (ccord_json_get(pj, "position")) {
+        size_t l = 0; const char *s = pl_str_param(pj, "position", &l);
+        if (!parse_local_pos(s, &pm.position)) {
+          ccord_buf_free(&emb_b); ccord_buf_free(&att_b);
+          pl_reply_err(m, p, id, "invalid_argument", "invalid position");
+          return true;
+        }
+        mask |= CCORD_LPATCH_POSITION;
+      }
+      if (ccord_json_get(pj, "sort_id")) { pm.sort_id = pl_parse_id_param(pj, "sort_id"); mask |= CCORD_LPATCH_SORT_ID; }
+      if (ccord_json_get(pj, "after_message_id")) { pm.after_message_id = pl_parse_id_param(pj, "after_message_id"); mask |= CCORD_LPATCH_AFTER_ID; }
+      if (ccord_json_get(pj, "before_message_id")) { pm.before_message_id = pl_parse_id_param(pj, "before_message_id"); mask |= CCORD_LPATCH_BEFORE_ID; }
+      if (ccord_json_get(pj, "author_id")) { pm.author_id = pl_parse_id_param(pj, "author_id"); mask |= CCORD_LPATCH_AUTHOR_ID; }
+      size_t sl = 0;
+      if (ccord_json_get(pj, "author")) { pm.author_name = pl_str_param(pj, "author", &sl); mask |= CCORD_LPATCH_AUTHOR_NAME; }
+      if (ccord_json_get(pj, "author_color")) { pm.author_color = pl_str_param(pj, "author_color", &sl); mask |= CCORD_LPATCH_AUTHOR_COLOR; }
+      if (ccord_json_get(pj, "badge")) { pm.author_badge = pl_str_param(pj, "badge", &sl); mask |= CCORD_LPATCH_BADGE; }
+      if (ccord_json_get(pj, "badge_color")) { pm.badge_color = pl_str_param(pj, "badge_color", &sl); mask |= CCORD_LPATCH_BADGE_COLOR; }
+      if (ccord_json_get(pj, "content")) { pm.content = pl_str_param(pj, "content", &sl); mask |= CCORD_LPATCH_CONTENT; }
+      if (ccord_json_get(pj, "text_color")) { pm.text_color = pl_str_param(pj, "text_color", &sl); mask |= CCORD_LPATCH_TEXT_COLOR; }
+      if (ccord_json_get(pj, "accent_color")) { pm.accent_color = pl_str_param(pj, "accent_color", &sl); mask |= CCORD_LPATCH_ACCENT_COLOR; }
+      if (ccord_json_get(pj, "tint_color")) { pm.tint_color = pl_str_param(pj, "tint_color", &sl); mask |= CCORD_LPATCH_TINT_COLOR; }
+      if (ccord_json_get(pj, "embeds")) {
+        ext_encode_json_str(ccord_json_get(pj, "embeds"), &emb_b);
+        pm.embed_json = emb_b.len ? ccord_buf_cstr(&emb_b) : "";
+        mask |= CCORD_LPATCH_EMBED_JSON;
+      } else if (ccord_json_get(pj, "embed")) {
+        ext_encode_json_str(ccord_json_get(pj, "embed"), &emb_b);
+        pm.embed_json = emb_b.len ? ccord_buf_cstr(&emb_b) : "";
+        mask |= CCORD_LPATCH_EMBED_JSON;
+      }
+      if (atts_j) {
+        if (ccord_json_type_of(atts_j) == CCORD_JSON_ARRAY) {
+          const char *acode = "invalid_argument";
+          char abuf[256] = "";
+          if (!lmsg_normalize_attachments(m, p, target_lid, atts_j, &att_b, &acode, abuf, sizeof abuf)) {
+            ccord_buf_free(&emb_b); ccord_buf_free(&att_b);
+            pl_reply_err(m, p, id, acode, abuf);
+            return true;
+          }
+          pm.attachments_json = att_b.len ? ccord_buf_cstr(&att_b) : "";
+        } else {
+          lmsg_cleanup_auto_textures(m->contrib, p->m.id, target_lid);
+          pm.attachments_json = "";
+        }
+        mask |= CCORD_LPATCH_ATTACHMENTS_JSON;
+      }
+      if (ccord_json_get(pj, "timestamp_ms")) {
+        int64_t t = 0;
+        if (ccord_json_int64(ccord_json_get(pj, "timestamp_ms"), &t) && t >= 0) {
+          pm.timestamp_ms = (uint64_t)t;
+          mask |= CCORD_LPATCH_TIMESTAMP;
+        }
+      }
+      if (ccord_json_get(pj, "dismissible")) { pm.dismissible = ccord_json_bool(ccord_json_get(pj, "dismissible"), false); mask |= CCORD_LPATCH_DISMISSIBLE; }
+      if (ccord_json_get(pj, "avatar_grayscale")) { pm.avatar_grayscale = ccord_json_bool(ccord_json_get(pj, "avatar_grayscale"), false); mask |= CCORD_LPATCH_AVATAR_GRAYSCALE; }
+      if (ccord_json_get(pj, "avatar_opacity")) {
+        pm.has_avatar_opacity = (ccord_json_type_of(ccord_json_get(pj, "avatar_opacity")) == CCORD_JSON_NUMBER);
+        pm.avatar_opacity = (float)ccord_json_number(ccord_json_get(pj, "avatar_opacity"), 1.0);
+        mask |= CCORD_LPATCH_AVATAR_OPACITY;
+      }
+      if (ccord_json_get(pj, "compact")) {
+        const char *cs = pl_str_param(pj, "compact", &sl);
+        if (!parse_local_compact(cs, &pm.compact_mode)) {
+          ccord_buf_free(&emb_b); ccord_buf_free(&att_b);
+          pl_reply_err(m, p, id, "invalid_argument", "invalid compact mode");
+          return true;
+        }
+        mask |= CCORD_LPATCH_COMPACT;
+      }
+      if (ccord_json_get(pj, "break_group")) { pm.break_group = ccord_json_bool(ccord_json_get(pj, "break_group"), false); mask |= CCORD_LPATCH_BREAK_GROUP; }
+      if (ccord_json_get(pj, "clip_to_history")) { pm.clip_to_history = ccord_json_bool(ccord_json_get(pj, "clip_to_history"), true); mask |= CCORD_LPATCH_CLIP_TO_HISTORY; }
+      if (ccord_json_get(pj, "has_on_event")) { pm.has_on_event = ccord_json_bool(ccord_json_get(pj, "has_on_event"), false); mask |= CCORD_LPATCH_ON_EVENT; }
+
+      uint64_t out_lid = 0;
+      ccord_status st = ccord_contrib_update_local_message(m->contrib, p->m.id, target_lid, nullptr, &pm, mask, &out_lid, &err);
+      ccord_buf_free(&emb_b);
+      ccord_buf_free(&att_b);
+      if (st != CCORD_OK) { pl_reply_err(m, p, id, "invalid_argument", err.message); return true; }
+      char buf[32];
+      snprintf(buf, sizeof buf, "%llu", (unsigned long long)out_lid);
+      pl_reply_ok(m, p, id, buf);
+      return true;
+    }
     if (strcmp(method, "messages.dismiss_local") == 0) {
-      if (!pl_has_perm(p, CCORD_PERM_UI_PANEL)) { pl_fail_plugin(m, p, "undeclared restricted API called: ui.panel"); return true; }
+      if (!pl_has_perm(p, CCORD_PERM_UI_PANEL) && !pl_has_perm(p, CCORD_PERM_UI_DECORATE)) {
+        pl_fail_plugin(m, p, "undeclared restricted API called: ui.panel or ui.decorate");
+        return true;
+      }
       int64_t lid = 0; (void)ccord_json_int64(ccord_json_get(params, "local_id"), &lid);
-      (void)ccord_contrib_dismiss_local_message(m->contrib, (uint64_t)lid);
-      pl_reply_ok(m, p, id, nullptr);
+      size_t cidl = 0; const char *cid_s = pl_str_param(params, "id", &cidl);
+      uint64_t removed_lid = 0;
+      bool ok = ccord_contrib_dismiss_local_message_owned(m->contrib, p->m.id, lid > 0 ? (uint64_t)lid : 0, cid_s, &removed_lid);
+      if (ok) lmsg_cleanup_auto_textures(m->contrib, p->m.id, removed_lid);
+      char buf[64];
+      snprintf(buf, sizeof buf, "{\"ok\":%s,\"local_id\":%llu}", ok ? "true" : "false", (unsigned long long)removed_lid);
+      pl_reply_ok(m, p, id, buf);
+      return true;
+    }
+    if (strcmp(method, "messages.clear_local") == 0) {
+      if (!pl_has_perm(p, CCORD_PERM_UI_PANEL) && !pl_has_perm(p, CCORD_PERM_UI_DECORATE)) {
+        pl_fail_plugin(m, p, "undeclared restricted API called: ui.panel or ui.decorate");
+        return true;
+      }
+      ccord_id ch = pl_parse_id_param(params, "channel_id");
+      // Evict any auto-generated attachment textures for the messages being removed.
+      size_t total = ccord_contrib_local_message_count(m->contrib, ch);
+      for (size_t k = 0; k < total; k++) {
+        const ccord_local_message *lm = ccord_contrib_local_message_at(m->contrib, ch, k);
+        if (lm && strcmp(lm->owner, p->m.id) == 0) {
+          lmsg_cleanup_auto_textures(m->contrib, p->m.id, lm->local_id);
+        }
+      }
+      (void)ccord_contrib_clear_local_messages(m->contrib, p->m.id, ch);
+      pl_reply_ok(m, p, id, "true");
       return true;
     }
     return false;

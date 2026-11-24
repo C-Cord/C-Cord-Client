@@ -36,6 +36,7 @@
 #define SB_KEY_KEYBINDS "ccord.keybinds"
 #define SB_KEY_ACTBTNS "ccord.actbtns"
 #define SB_KEY_DECORS "ccord.decors"
+#define SB_KEY_LOCAL_MSG "ccord.local_msg"
 #define SB_KEY_AUTOCOMPLETE "ccord.autocomplete"
 #define SB_KEY_FS_WATCH "ccord.fs_watch"
 #define SB_KEY_WS "ccord.ws"

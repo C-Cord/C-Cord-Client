@@ -95,6 +95,19 @@ bool pv3_v3_parse_hex_color(const char *s, ccord_color *out)
   if (!s) return false;
   if (s[0] == '#') s++;
   size_t len = strlen(s);
+  if (len == 3 || len == 4) {
+    uint8_t d[4] = {0, 0, 0, 15};
+    for (size_t i = 0; i < len; i++) {
+      int v = -1;
+      if (s[i] >= '0' && s[i] <= '9') v = s[i] - '0';
+      else if (s[i] >= 'a' && s[i] <= 'f') v = 10 + (s[i] - 'a');
+      else if (s[i] >= 'A' && s[i] <= 'F') v = 10 + (s[i] - 'A');
+      else return false;
+      d[i] = (uint8_t)v;
+    }
+    *out = (ccord_color){(uint8_t)(d[0] * 17u), (uint8_t)(d[1] * 17u), (uint8_t)(d[2] * 17u), (uint8_t)(d[3] * 17u)};
+    return true;
+  }
   if (len != 6 && len != 8) return false;
   uint32_t v = 0;
   for (size_t i = 0; i < len; i++) {
@@ -111,6 +124,23 @@ bool pv3_v3_parse_hex_color(const char *s, ccord_color *out)
     *out = v3_rgba_u32(v);
   }
   return true;
+}
+
+bool ui_resolve_color_spec(const ccord_ui *ui, const char *spec, ccord_color *out)
+{
+  if (!spec || !spec[0] || !out) return false;
+  if (spec[0] == '#') return pv3_v3_parse_hex_color(spec, out);
+  if (!ui || !ui->theme) return false;
+  if (ccord_theme_color_get(ui->theme, spec, out)) return true;
+  if (strcmp(spec, "text_primary") == 0) { *out = ui->theme->c.text_normal; return true; }
+  if (strcmp(spec, "bg_hover") == 0) { *out = ui->theme->c.bg_item_hover; return true; }
+  if (strcmp(spec, "bg_selected") == 0) { *out = ui->theme->c.bg_item_selected; return true; }
+  if (strcmp(spec, "border") == 0) { *out = ui->theme->c.border_subtle; return true; }
+  if (strcmp(spec, "online") == 0) { *out = ui->theme->c.status_online; return true; }
+  if (strcmp(spec, "idle") == 0) { *out = ui->theme->c.status_idle; return true; }
+  if (strcmp(spec, "dnd") == 0) { *out = ui->theme->c.status_dnd; return true; }
+  if (strcmp(spec, "offline") == 0) { *out = ui->theme->c.status_offline; return true; }
+  return false;
 }
 
 static void v3_draw_named_icon(ccord_ui *ui, ccord_renderer *r, const char *name,
@@ -218,13 +248,13 @@ static bool decor_matches(const ccord_decorator_contribution *d, ccord_decor_tar
   return d->target_id == 0 || d->target_id == id;
 }
 
-bool ui_decor_message_style(const ccord_ui *ui, ccord_id msg_id, ccord_color *out_accent, ccord_color *out_tint,
-                            bool *out_collapsed, const char **out_collapse_label)
+bool ui_decor_message_style_ex(const ccord_ui *ui, ccord_id msg_id, ui_msg_style_ov *out)
 {
-  if (out_accent) *out_accent = (ccord_color){0, 0, 0, 0};
-  if (out_tint) *out_tint = (ccord_color){0, 0, 0, 0};
-  if (out_collapsed) *out_collapsed = false;
-  if (out_collapse_label) *out_collapse_label = nullptr;
+  if (out) {
+    memset(out, 0, sizeof *out);
+    out->avatar_opacity = 1.0f;
+    out->opacity = 1.0f;
+  }
   if (!ui || !ui->d.contrib || msg_id == CCORD_ID_NONE) return false;
   if (ui_plugin_security_surface_active(ui)) return false;
 
@@ -237,15 +267,36 @@ bool ui_decor_message_style(const ccord_ui *ui, ccord_id msg_id, ccord_color *ou
     if (any && d->priority < best_prio) continue;
     best_prio = d->priority;
     any = true;
-    if (d->accent_rgba && out_accent) *out_accent = v3_rgba_u32(d->accent_rgba);
-    if (d->tint_rgba && out_tint) *out_tint = v3_rgba_u32(d->tint_rgba);
+    if (!out) continue;
+    if (d->accent_rgba) out->accent = v3_rgba_u32(d->accent_rgba);
+    else if (d->accent_color && d->accent_color[0]) (void)ui_resolve_color_spec(ui, d->accent_color, &out->accent);
+    if (d->tint_rgba) out->tint = v3_rgba_u32(d->tint_rgba);
+    else if (d->tint_color && d->tint_color[0]) (void)ui_resolve_color_spec(ui, d->tint_color, &out->tint);
+    if (d->text_rgba) { out->text_color = v3_rgba_u32(d->text_rgba); out->has_text_color = true; }
+    else if (d->text_color && d->text_color[0] && ui_resolve_color_spec(ui, d->text_color, &out->text_color)) out->has_text_color = true;
+    if (d->author_rgba) { out->author_color = v3_rgba_u32(d->author_rgba); out->has_author_color = true; }
+    else if (d->author_color && d->author_color[0] && ui_resolve_color_spec(ui, d->author_color, &out->author_color)) out->has_author_color = true;
+    if (d->avatar_grayscale) out->avatar_grayscale = true;
+    if (d->has_avatar_opacity) { out->has_avatar_opacity = true; out->avatar_opacity = d->avatar_opacity; }
+    if (d->dim) out->dim = true;
+    if (d->has_opacity) { out->has_opacity = true; out->opacity = d->opacity; }
     if (d->collapsed) {
-      if (out_collapsed) *out_collapsed = true;
-      if (out_collapse_label && d->collapse_label && d->collapse_label[0]) {
-        *out_collapse_label = d->collapse_label;
-      }
+      out->collapsed = true;
+      if (d->collapse_label && d->collapse_label[0]) out->collapse_label = d->collapse_label;
     }
   }
+  return any;
+}
+
+bool ui_decor_message_style(const ccord_ui *ui, ccord_id msg_id, ccord_color *out_accent, ccord_color *out_tint,
+                            bool *out_collapsed, const char **out_collapse_label)
+{
+  ui_msg_style_ov ov;
+  bool any = ui_decor_message_style_ex(ui, msg_id, &ov);
+  if (out_accent) *out_accent = ov.accent;
+  if (out_tint) *out_tint = ov.tint;
+  if (out_collapsed) *out_collapsed = ov.collapsed;
+  if (out_collapse_label) *out_collapse_label = ov.collapse_label;
   return any;
 }
 
@@ -533,12 +584,30 @@ bool ui_actbtns_handle_click(ccord_ui *ui, const ccord_input_event *ev)
 
 // ---- Local Ephemeral Messages ----
 
+void ui_local_messages_record_dismiss_hit(ccord_ui *ui, uint64_t local_id, ccord_rect dismiss_rect)
+{
+  if (!ui || !local_id || dismiss_rect.w <= 0.0f || dismiss_rect.h <= 0.0f) return;
+  ui_plugin_v3 *v = pv3_v3_ensure(ui);
+  if (!v || v->nlocal_hits >= V3_MAX_LOCAL_HITS) return;
+  v->local_hits[v->nlocal_hits++] = (v3_local_hit){.local_id = local_id, .dismiss_rect = dismiss_rect};
+}
+
 void ui_local_messages_draw(ccord_ui *ui, ccord_renderer *r, ccord_id channel_id, ccord_rect area)
 {
   if (!ui || !r || !ui->d.contrib || channel_id == CCORD_ID_NONE) return;
   if (ui_plugin_security_surface_active(ui)) return;
   size_t n = ccord_contrib_local_message_count(ui->d.contrib, channel_id);
   if (n == 0) return;
+
+  // Collect only CCORD_LOCAL_POS_BOTTOM messages (positioned timeline messages render inline in the vlist).
+  const ccord_local_message *bottoms[4];
+  size_t nbot = 0;
+  for (size_t idx = n; idx > 0 && nbot < 4u; idx--) {
+    const ccord_local_message *m = ccord_contrib_local_message_at(ui->d.contrib, channel_id, idx - 1u);
+    if (!m || m->position != CCORD_LOCAL_POS_BOTTOM) continue;
+    bottoms[nbot++] = m;
+  }
+  if (nbot == 0) return;
   ui_plugin_v3 *v = pv3_v3_ensure(ui);
   if (!v) return;
 
@@ -547,21 +616,24 @@ void ui_local_messages_draw(ccord_ui *ui, ccord_renderer *r, ccord_id channel_id
   float card_w = area.w - UIS_SP_4 * 2.0f;
   if (card_w < 140.0f) return;
 
-  // Stack newest at the bottom of the message area (up to 4 visible).
-  size_t show = n > 4 ? 4 : n;
-  size_t start = n - show;
   float cur_bottom = area.y + area.h - UIS_SP_2;
 
   ccord_push_clip(r, area);
-  for (size_t idx = n; idx > start; idx--) {
-    const ccord_local_message *m = ccord_contrib_local_message_at(ui->d.contrib, channel_id, idx - 1u);
-    if (!m) continue;
+  for (size_t bi = 0; bi < nbot; bi++) {
+    const ccord_local_message *m = bottoms[bi];
     const char *author = (m->author_name && m->author_name[0]) ? m->author_name : m->owner;
-    const char *badge = (m->author_badge && m->author_badge[0]) ? m->author_badge : "PLUGIN";
+    const char *badge = m->author_badge ? m->author_badge : "";
     const char *body = m->content ? m->content : "";
 
-    ccord_text_style ast = ui_style(ui, CCORD_FONT_BOLD, tk.fs_control, ui->theme->c.text_header);
-    ccord_text_style bst = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_control, ui->theme->c.text_normal);
+    ccord_color acol = ui->theme->c.text_header;
+    (void)ui_resolve_color_spec(ui, m->author_color, &acol);
+    ccord_color bcol = ui->theme->c.text_normal;
+    (void)ui_resolve_color_spec(ui, m->text_color, &bcol);
+    ccord_color accent = ui->theme->c.brand;
+    (void)ui_resolve_color_spec(ui, m->accent_color, &accent);
+
+    ccord_text_style ast = ui_style(ui, CCORD_FONT_BOLD, tk.fs_control, acol);
+    ccord_text_style bst = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_control, bcol);
     ccord_text_style hst = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_caption, ui->theme->c.text_muted);
 
     float text_w = card_w - pad * 2.0f - 28.0f;
@@ -572,26 +644,37 @@ void ui_local_messages_draw(ccord_ui *ui, ccord_renderer *r, ccord_id channel_id
 
     ccord_rect card = {area.x + UIS_SP_4, cur_bottom - card_h, card_w, card_h};
     uis_frame(ui, r, card, tk.r_surface, ui->theme->c.bg_secondary, UIS_ELEV_POPOVER);
-    // Left brand accent bar
-    ccord_draw_rect(r, (ccord_rect){card.x, card.y + 4.0f, 3.0f, card.h - 8.0f}, ui->theme->c.brand);
+    ccord_color tint = {0};
+    if (ui_resolve_color_spec(ui, m->tint_color, &tint) && tint.a > 0) {
+      ccord_draw_rrect(r, card, tk.r_surface, tint);
+    }
+    ccord_draw_rect(r, (ccord_rect){card.x, card.y + 4.0f, 3.0f, card.h - 8.0f}, accent);
 
     float tx = card.x + pad + 4.0f;
     float ty = card.y + pad;
     ccord_vec2 am = ccord_text_measure(r, author, strlen(author), &ast, 0.0f);
     ccord_text_draw(r, author, strlen(author), tx, ty + (UIS_H_CHIP - am.y) * 0.5f, &ast, 0.0f);
 
-    float badge_w = uis_label_width(ui, r, badge);
-    ccord_rect brc = {tx + am.x + UIS_SP_2, ty, badge_w, UIS_H_CHIP};
-    uis_chip(ui, r, brc, badge, (uis_state){.selected = true}, "lmsg_badge", m->local_id);
+    if (badge[0]) {
+      float badge_w = uis_label_width(ui, r, badge);
+      ccord_rect brc = {tx + am.x + UIS_SP_2, ty, badge_w, UIS_H_CHIP};
+      ccord_color bbg = {0};
+      if (ui_resolve_color_spec(ui, m->badge_color, &bbg) && bbg.a > 0) {
+        ccord_draw_rrect(r, brc, brc.h * 0.5f, bbg);
+        ccord_text_style bgst = ui_style(ui, CCORD_FONT_BOLD, tk.fs_caption, ui->theme->c.text_on_brand);
+        ccord_vec2 btm = ccord_text_measure(r, badge, strlen(badge), &bgst, 0.0f);
+        ccord_text_draw(r, badge, strlen(badge), brc.x + (brc.w - btm.x) * 0.5f, brc.y + (brc.h - btm.y) * 0.5f, &bgst, 0.0f);
+      } else {
+        uis_chip(ui, r, brc, badge, (uis_state){.selected = true}, "lmsg_badge", m->local_id);
+      }
+    }
 
     if (m->dismissible) {
       ccord_rect xrc = {card.x + card.w - pad - 24.0f, ty - 2.0f, 24.0f, 24.0f};
       bool xhov = ui_in_rect(ui->mx, ui->my, xrc);
       ccord_color xfg = uis_icon_button(ui, r, xrc, (uis_state){.hover = xhov}, "lmsg_x", m->local_id);
       ui_icon_close(r, xrc.x + xrc.w * 0.5f, xrc.y + xrc.h * 0.5f, 12.0f, xfg);
-      if (v->nlocal_hits < V3_MAX_LOCAL_HITS) {
-        v->local_hits[v->nlocal_hits++] = (v3_local_hit){.local_id = m->local_id, .dismiss_rect = xrc};
-      }
+      ui_local_messages_record_dismiss_hit(ui, m->local_id, xrc);
     }
 
     float by = ty + UIS_H_CHIP + UIS_SP_1;
@@ -608,18 +691,38 @@ void ui_local_messages_draw(ccord_ui *ui, ccord_renderer *r, ccord_id channel_id
 
 bool ui_local_messages_handle_click(ccord_ui *ui, const ccord_input_event *ev)
 {
-  if (!ui || !ui->plugin_v3 || !ui->d.contrib || !ev || ev->type != CCORD_IN_MOUSE_DOWN || ev->button != 1) {
+  if (!ui || !ui->d.contrib || !ev || ev->type != CCORD_IN_MOUSE_DOWN || ev->button != 1) {
     return false;
   }
   if (ui->mobile_layout && (ui->layout.left_drawer_visible || ui->layout.right_drawer_visible)) {
     return false;
   }
-  ui_plugin_v3 *v = ui->plugin_v3;
-  for (size_t i = 0; i < v->nlocal_hits; i++) {
-    if (ui_in_rect(ev->x, ev->y, v->local_hits[i].dismiss_rect)) {
-      ccord_contrib_dismiss_local_message(ui->d.contrib, v->local_hits[i].local_id);
-      ui->dirty = true;
-      return true;
+  if (ui->plugin_v3) {
+    ui_plugin_v3 *v = ui->plugin_v3;
+    for (size_t i = 0; i < v->nlocal_hits; i++) {
+      if (ui_in_rect(ev->x, ev->y, v->local_hits[i].dismiss_rect)) {
+        uint64_t lid = v->local_hits[i].local_id;
+        (void)ccord_contrib_dispatch_local_msg_event(ui->d.contrib, lid, "dismiss", ev->x, ev->y);
+        ccord_contrib_dismiss_local_message(ui->d.contrib, lid);
+        ui->dirty = true;
+        return true;
+      }
+    }
+  }
+  // Left-click on a positioned timeline local message with an on_event handler.
+  if (ui_in_rect(ev->x, ev->y, ui_rect(ui->layout.message_area)) &&
+      !(ui->thumb_h > 0.0f && ev->x >= ui->thumb_x - 4.0f)) {
+    for (size_t i = 0; i < ui->nlinks; i++) {
+      if (ui_in_rect(ev->x, ev->y, ui->links[i].rect)) return false;
+    }
+    for (size_t i = 0; i < ui->nvis; i++) {
+      if (ui->vis[i].is_local && ev->y >= ui->vis[i].y && ev->y < ui->vis[i].y + ui->vis[i].h) {
+        if (ccord_contrib_dispatch_local_msg_event(ui->d.contrib, ui->vis[i].local_id, "click", ev->x, ev->y)) {
+          ui->dirty = true;
+          return true;
+        }
+        break;
+      }
     }
   }
   return false;

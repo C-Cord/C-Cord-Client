@@ -10,15 +10,31 @@ struct ui_chat_caches *dc_chat_caches_ensure(ccord_ui *ui)
   return ui->chat_caches;
 }
 
+static void free_chat_caches_inner(struct ui_chat_caches *cc)
+{
+  if (!cc) return;
+  ccord_free(cc->tl_rows);
+  cc->tl_rows = nullptr;
+  cc->tl_count = cc->tl_cap = 0;
+  for (size_t i = 0; i < LOCAL_PARSE_CACHE_SLOTS; i++) {
+    if (cc->lparse[i].inited) {
+      ccord_arena_free(&cc->lparse[i].arena);
+      cc->lparse[i].inited = false;
+    }
+  }
+}
+
 void ui_chat_caches_clear(ccord_ui *ui)
 {
   if (!ui || !ui->chat_caches) return;
+  free_chat_caches_inner(ui->chat_caches);
   memset(ui->chat_caches, 0, sizeof *ui->chat_caches);
 }
 
 void ui_chat_caches_free(ccord_ui *ui)
 {
   if (!ui) return;
+  free_chat_caches_inner(ui->chat_caches);
   ccord_free(ui->chat_caches);
   ui->chat_caches = nullptr;
 }
@@ -628,9 +644,310 @@ float dc_decor_reply_h(const decor_info *d)
   return 0.0f;
 }
 
+// ---- Merged timeline cache (live store messages + positioned plugin local messages) ----
+
+static ccord_id local_eff_sort_id(const ccord_local_message *lm)
+{
+  if (!lm) return 0;
+  if (lm->sort_id != CCORD_ID_NONE) return lm->sort_id;
+  int64_t ms = (int64_t)lm->timestamp_ms - 1420070400000LL;
+  if (ms < 0) ms = 0;
+  return ((uint64_t)ms) << 22;
+}
+
+static int cmp_local_chrono(const void *a, const void *b)
+{
+  const ccord_local_message *la = *(const ccord_local_message *const *)a;
+  const ccord_local_message *lb = *(const ccord_local_message *const *)b;
+  ccord_id sa = local_eff_sort_id(la), sb = local_eff_sort_id(lb);
+  if (sa != sb) return sa < sb ? -1 : 1;
+  if (la->timestamp_ms != lb->timestamp_ms) return la->timestamp_ms < lb->timestamp_ms ? -1 : 1;
+  if (la->local_id != lb->local_id) return la->local_id < lb->local_id ? -1 : 1;
+  return 0;
+}
+
+static timeline_row make_live_tl_row(size_t store_i, const ccord_message *m)
+{
+  return (timeline_row){
+    .is_local = false,
+    .store_i = store_i,
+    .local_id = 0,
+    .sort_id = m ? m->id : CCORD_ID_NONE,
+    .timestamp_ms = m ? m->timestamp_ms : 0,
+    .author_id = m ? m->author_id : CCORD_ID_NONE,
+    .break_group = false,
+    .compact_mode = CCORD_LOCAL_COMPACT_AUTO,
+  };
+}
+
+static timeline_row make_local_tl_row(const ccord_local_message *lm)
+{
+  return (timeline_row){
+    .is_local = true,
+    .store_i = SIZE_MAX,
+    .local_id = lm->local_id,
+    .sort_id = local_eff_sort_id(lm),
+    .timestamp_ms = (int64_t)lm->timestamp_ms,
+    .author_id = lm->author_id,
+    .break_group = lm->break_group,
+    .compact_mode = lm->compact_mode,
+  };
+}
+
+void dc_timeline_sync(ccord_ui *ui, ccord_id channel_id)
+{
+  if (!ui) return;
+  struct ui_chat_caches *cc = dc_chat_caches_ensure(ui);
+  if (!cc) return;
+  uint64_t srev = ui->d.store ? ccord_store_revision(ui->d.store) : 0;
+  uint64_t lrev = ui->d.contrib ? ccord_contrib_local_messages_revision(ui->d.contrib) : 0;
+  bool hmore = (channel_id != CCORD_ID_NONE && ui->d.session)
+                 ? ccord_session_history_has_more(ui->d.session, channel_id)
+                 : false;
+  if (cc->tl_valid && cc->tl_chan == channel_id && cc->tl_store_rev == srev &&
+      cc->tl_local_rev == lrev && cc->tl_hist_more == hmore) {
+    return;
+  }
+  cc->tl_valid = true;
+  cc->tl_chan = channel_id;
+  cc->tl_store_rev = srev;
+  cc->tl_local_rev = lrev;
+  cc->tl_hist_more = hmore;
+
+  size_t store_n = (channel_id != CCORD_ID_NONE && ui->d.store)
+                     ? ccord_store_message_count(ui->d.store, channel_id)
+                     : 0u;
+  size_t n_all_loc = (channel_id != CCORD_ID_NONE && ui->d.contrib)
+                       ? ccord_contrib_local_message_count(ui->d.contrib, channel_id)
+                       : 0u;
+  if (n_all_loc == 0u || ui_plugin_security_surface_active(ui)) {
+    cc->tl_merged = false;
+    cc->tl_count = store_n;
+    return;
+  }
+
+  const ccord_local_message *chrono[256];
+  const ccord_local_message *anchored[256];
+  size_t nchrono = 0, nanc = 0;
+  const ccord_message *oldest_live = store_n > 0 ? ccord_store_message_at(ui->d.store, channel_id, 0) : nullptr;
+  ccord_id oldest_live_id = oldest_live ? oldest_live->id : CCORD_ID_NONE;
+
+  for (size_t i = 0; i < n_all_loc && (nchrono + nanc) < 256u; i++) {
+    const ccord_local_message *lm = ccord_contrib_local_message_at(ui->d.contrib, channel_id, i);
+    if (!lm || lm->position != CCORD_LOCAL_POS_TIMELINE) continue;
+    bool has_anc = (lm->after_message_id != CCORD_ID_NONE || lm->before_message_id != CCORD_ID_NONE);
+    if (lm->clip_to_history && store_n > 0 && hmore) {
+      bool anc_loaded = false;
+      if (lm->after_message_id != CCORD_ID_NONE &&
+          ccord_store_find_message(ui->d.store, channel_id, lm->after_message_id) != nullptr) anc_loaded = true;
+      if (lm->before_message_id != CCORD_ID_NONE &&
+          ccord_store_find_message(ui->d.store, channel_id, lm->before_message_id) != nullptr) anc_loaded = true;
+      if (!anc_loaded && local_eff_sort_id(lm) < oldest_live_id) continue;
+    }
+    if (has_anc) anchored[nanc++] = lm;
+    else chrono[nchrono++] = lm;
+  }
+  if (nchrono == 0 && nanc == 0) {
+    cc->tl_merged = false;
+    cc->tl_count = store_n;
+    return;
+  }
+
+  if (nchrono > 1u) qsort(chrono, nchrono, sizeof chrono[0], cmp_local_chrono);
+  if (nanc > 1u) qsort(anchored, nanc, sizeof anchored[0], cmp_local_chrono);
+
+  size_t need = store_n + nchrono + nanc;
+  if (need > cc->tl_cap) {
+    size_t ncap = need < 64u ? 64u : need;
+    timeline_row *nr = ccord_realloc_array(cc->tl_rows, ncap, sizeof *nr);
+    if (!nr) {
+      cc->tl_merged = false;
+      cc->tl_count = store_n;
+      return;
+    }
+    cc->tl_rows = nr;
+    cc->tl_cap = ncap;
+  }
+
+  // Two-pointer merge of live store messages and chronological locals.
+  size_t out_n = 0, si = 0, ci = 0;
+  while (si < store_n || ci < nchrono) {
+    bool take_live = false;
+    if (si < store_n && ci < nchrono) {
+      const ccord_message *m = ccord_store_message_at(ui->d.store, channel_id, si);
+      ccord_id lsid = local_eff_sort_id(chrono[ci]);
+      if (!m) {
+        take_live = true;
+      } else if (m->send_state != CCORD_MSG_SEND_CONFIRMED) {
+        take_live = (m->timestamp_ms <= (int64_t)chrono[ci]->timestamp_ms);
+      } else {
+        take_live = (m->id <= lsid);
+      }
+    } else if (si < store_n) {
+      take_live = true;
+    }
+    if (take_live) {
+      const ccord_message *m = ccord_store_message_at(ui->d.store, channel_id, si);
+      cc->tl_rows[out_n++] = make_live_tl_row(si, m);
+      si++;
+    } else {
+      cc->tl_rows[out_n++] = make_local_tl_row(chrono[ci]);
+      ci++;
+    }
+  }
+
+  // Resolve anchored items (supporting chains up to depth 16).
+  bool resolved[256] = {0};
+  ccord_id *after_tag = nanc > 0 ? ccord_calloc(need, sizeof *after_tag) : nullptr;
+  for (int pass = 0; pass < 16 && nanc > 0; pass++) {
+    bool progress = false;
+    for (size_t ai = 0; ai < nanc; ai++) {
+      if (resolved[ai]) continue;
+      const ccord_local_message *lm = anchored[ai];
+      bool is_after = (lm->after_message_id != CCORD_ID_NONE);
+      ccord_id aid = is_after ? lm->after_message_id : lm->before_message_id;
+      size_t pos = SIZE_MAX;
+      for (size_t k = 0; k < out_n; k++) {
+        if (cc->tl_rows[k].sort_id == aid) { pos = k; break; }
+      }
+      if (pos == SIZE_MAX) continue;
+      size_t ins = is_after ? (pos + 1u) : pos;
+      if (is_after && after_tag) {
+        while (ins < out_n && cc->tl_rows[ins].is_local && after_tag[ins] == aid) ins++;
+      }
+      memmove(&cc->tl_rows[ins + 1u], &cc->tl_rows[ins], (out_n - ins) * sizeof cc->tl_rows[0]);
+      if (after_tag) {
+        memmove(&after_tag[ins + 1u], &after_tag[ins], (out_n - ins) * sizeof after_tag[0]);
+        after_tag[ins] = is_after ? aid : CCORD_ID_NONE;
+      }
+      cc->tl_rows[ins] = make_local_tl_row(lm);
+      out_n++;
+      resolved[ai] = true;
+      progress = true;
+    }
+    if (!progress) break;
+  }
+  ccord_free(after_tag);
+
+  // Any anchored item whose anchor wasn't found falls back to chronological placement.
+  for (size_t ai = 0; ai < nanc; ai++) {
+    if (resolved[ai]) continue;
+    const ccord_local_message *lm = anchored[ai];
+    ccord_id lsid = local_eff_sort_id(lm);
+    size_t ins = out_n;
+    for (size_t k = 0; k < out_n; k++) {
+      if (cc->tl_rows[k].sort_id > lsid) { ins = k; break; }
+    }
+    memmove(&cc->tl_rows[ins + 1u], &cc->tl_rows[ins], (out_n - ins) * sizeof cc->tl_rows[0]);
+    cc->tl_rows[ins] = make_local_tl_row(lm);
+    out_n++;
+  }
+
+  cc->tl_merged = true;
+  cc->tl_count = out_n;
+}
+
+static bool tl_cache_matches(const ccord_ui *ui, ccord_id ch)
+{
+  const struct ui_chat_caches *cc = ui ? ui->chat_caches : nullptr;
+  if (!cc || !cc->tl_valid || !cc->tl_merged || cc->tl_chan != ch) return false;
+  uint64_t srev = ui->d.store ? ccord_store_revision(ui->d.store) : 0;
+  uint64_t lrev = ui->d.contrib ? ccord_contrib_local_messages_revision(ui->d.contrib) : 0;
+  return cc->tl_store_rev == srev && cc->tl_local_rev == lrev;
+}
+
+size_t ui_timeline_count(const ccord_ui *ui, ccord_id channel_id)
+{
+  if (!ui || channel_id == CCORD_ID_NONE) return 0u;
+  if (tl_cache_matches(ui, channel_id)) return ui->chat_caches->tl_count;
+  return ui->d.store ? ccord_store_message_count(ui->d.store, channel_id) : 0u;
+}
+
+bool ui_timeline_row_info(const ccord_ui *ui, ccord_id channel_id, size_t view_i,
+                          bool *out_is_local, size_t *out_store_i, uint64_t *out_local_id,
+                          int64_t *out_ts_ms, ccord_id *out_author_id, bool *out_break_group,
+                          ccord_local_compact *out_compact_mode)
+{
+  if (!ui || channel_id == CCORD_ID_NONE) return false;
+  if (tl_cache_matches(ui, channel_id)) {
+    const struct ui_chat_caches *cc = ui->chat_caches;
+    if (view_i >= cc->tl_count) return false;
+    const timeline_row *tr = &cc->tl_rows[view_i];
+    if (out_is_local) *out_is_local = tr->is_local;
+    if (out_store_i) *out_store_i = tr->store_i;
+    if (out_local_id) *out_local_id = tr->local_id;
+    if (out_ts_ms) *out_ts_ms = tr->timestamp_ms;
+    if (out_author_id) *out_author_id = tr->author_id;
+    if (out_break_group) *out_break_group = tr->break_group;
+    if (out_compact_mode) *out_compact_mode = tr->compact_mode;
+    return true;
+  }
+  const ccord_message *m = ui->d.store ? ccord_store_message_at(ui->d.store, channel_id, view_i) : nullptr;
+  if (!m) return false;
+  if (out_is_local) *out_is_local = false;
+  if (out_store_i) *out_store_i = view_i;
+  if (out_local_id) *out_local_id = 0;
+  if (out_ts_ms) *out_ts_ms = m->timestamp_ms;
+  if (out_author_id) *out_author_id = m->author_id;
+  if (out_break_group) *out_break_group = false;
+  if (out_compact_mode) *out_compact_mode = CCORD_LOCAL_COMPACT_AUTO;
+  return true;
+}
+
+size_t ui_timeline_view_index_for_store(const ccord_ui *ui, ccord_id channel_id, size_t store_i)
+{
+  if (!ui || channel_id == CCORD_ID_NONE || store_i == SIZE_MAX) return SIZE_MAX;
+  if (!tl_cache_matches(ui, channel_id)) return store_i;
+  const struct ui_chat_caches *cc = ui->chat_caches;
+  for (size_t i = 0; i < cc->tl_count; i++) {
+    if (!cc->tl_rows[i].is_local && cc->tl_rows[i].store_i == store_i) return i;
+  }
+  return SIZE_MAX;
+}
+
+size_t ui_timeline_view_index_for_msg_id(const ccord_ui *ui, ccord_id channel_id, ccord_id msg_id)
+{
+  if (!ui || channel_id == CCORD_ID_NONE || msg_id == CCORD_ID_NONE) return SIZE_MAX;
+  size_t lo = 0, hi = ccord_store_message_count(ui->d.store, channel_id);
+  size_t found_si = SIZE_MAX;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    const ccord_message *m = ccord_store_message_at(ui->d.store, channel_id, mid);
+    if (!m) break;
+    if (m->id == msg_id) { found_si = mid; break; }
+    if (m->id < msg_id) lo = mid + 1u;
+    else hi = mid;
+  }
+  if (found_si == SIZE_MAX) return SIZE_MAX;
+  return ui_timeline_view_index_for_store(ui, channel_id, found_si);
+}
+
+size_t ui_timeline_view_index_for_local_id(const ccord_ui *ui, ccord_id channel_id, uint64_t local_id)
+{
+  if (!ui || channel_id == CCORD_ID_NONE || local_id == 0) return SIZE_MAX;
+  if (!tl_cache_matches(ui, channel_id)) return SIZE_MAX;
+  const struct ui_chat_caches *cc = ui->chat_caches;
+  for (size_t i = 0; i < cc->tl_count; i++) {
+    if (cc->tl_rows[i].is_local && cc->tl_rows[i].local_id == local_id) return i;
+  }
+  return SIZE_MAX;
+}
+
+const ccord_local_message *dc_view_local_at(const ccord_ui *ui, ccord_id channel, size_t view_i)
+{
+  if (!ui || !ui->d.contrib || !tl_cache_matches(ui, channel)) return nullptr;
+  const struct ui_chat_caches *cc = ui->chat_caches;
+  if (view_i >= cc->tl_count || !cc->tl_rows[view_i].is_local) return nullptr;
+  return ccord_contrib_find_local_message(ui->d.contrib, cc->tl_rows[view_i].local_id);
+}
+
 const ccord_message *dc_view_message_at(const ccord_ui *ui, ccord_id channel, size_t view_i, size_t *out_store_i)
 {
   size_t raw = (size_t)ui_view_index(ui, view_i);
+  if (raw == SIZE_MAX) {
+    if (out_store_i) *out_store_i = SIZE_MAX;
+    return nullptr;
+  }
   if ((raw & (1ULL << 62)) != 0) {
     size_t si = raw & ~(1ULL << 62);
     if (out_store_i) *out_store_i = SIZE_MAX;
@@ -640,6 +957,227 @@ const ccord_message *dc_view_message_at(const ccord_ui *ui, ccord_id channel, si
   }
   if (out_store_i) *out_store_i = raw;
   return ccord_store_message_at(ui->d.store, channel, raw);
+}
+
+// ---- Parsed local message attachments & embeds cache ----
+
+static const char *lp_astr(ccord_arena *a, const ccord_json *obj, const char *key)
+{
+  if (!obj) return nullptr;
+  size_t n = 0;
+  const char *s = ccord_json_string(ccord_json_get(obj, key), &n);
+  return (s && n > 0) ? ccord_arena_strndup(a, s, n) : nullptr;
+}
+
+static void parse_local_embed_obj(ccord_arena *a, const ccord_json *ej, ccord_embed *out, const char **out_img_key)
+{
+  memset(out, 0, sizeof *out);
+  *out_img_key = nullptr;
+  if (!ej || ccord_json_type_of(ej) != CCORD_JSON_OBJECT) return;
+  out->title = lp_astr(a, ej, "title");
+  out->description = lp_astr(a, ej, "description");
+  out->url = lp_astr(a, ej, "url");
+  const ccord_json *aj = ccord_json_get(ej, "author");
+  if (aj && ccord_json_type_of(aj) == CCORD_JSON_OBJECT) {
+    out->author_name = lp_astr(a, aj, "name");
+    out->author_url = lp_astr(a, aj, "url");
+  }
+  const ccord_json *fj = ccord_json_get(ej, "footer");
+  if (fj && ccord_json_type_of(fj) == CCORD_JSON_OBJECT) {
+    out->footer_text = lp_astr(a, fj, "text");
+  }
+  const ccord_json *cj = ccord_json_get(ej, "color");
+  if (cj && ccord_json_type_of(cj) == CCORD_JSON_NUMBER) {
+    int64_t cv = 0;
+    if (ccord_json_int64(cj, &cv) && cv >= 0) {
+      out->color = (uint32_t)cv & 0xFFFFFFu;
+      out->has_color = true;
+    }
+  } else if (cj && ccord_json_type_of(cj) == CCORD_JSON_STRING) {
+    size_t cl = 0; const char *cs = ccord_json_string(cj, &cl);
+    if (cs && cs[0] == '#' && cl == 7) {
+      uint32_t cv = (uint32_t)strtoul(cs + 1, nullptr, 16);
+      out->color = cv & 0xFFFFFFu;
+      out->has_color = true;
+    }
+  }
+  const ccord_json *tsj = ccord_json_get(ej, "timestamp_ms");
+  if (tsj) (void)ccord_json_int64(tsj, &out->timestamp_ms);
+
+  // Local texture_key on embed image/thumbnail (never auto-fetch remote HTTP URLs from plugins!)
+  const ccord_json *imj = ccord_json_get(ej, "image");
+  if (imj && ccord_json_type_of(imj) == CCORD_JSON_OBJECT) {
+    *out_img_key = lp_astr(a, imj, "texture_key");
+  }
+  if (!*out_img_key) {
+    const ccord_json *thj = ccord_json_get(ej, "thumbnail");
+    if (thj && ccord_json_type_of(thj) == CCORD_JSON_OBJECT) {
+      *out_img_key = lp_astr(a, thj, "texture_key");
+    }
+  }
+  const ccord_json *flj = ccord_json_get(ej, "fields");
+  if (flj && ccord_json_type_of(flj) == CCORD_JSON_ARRAY) {
+    size_t nf = ccord_json_array_len(flj);
+    if (nf > 25u) nf = 25u;
+    if (nf > 0) {
+      ccord_embed_field *flds = ccord_arena_alloc(a, nf * sizeof *flds, _Alignof(ccord_embed_field));
+      if (flds) {
+        size_t cnt = 0;
+        for (size_t i = 0; i < nf; i++) {
+          const ccord_json *fi = ccord_json_array_at(flj, i);
+          if (!fi || ccord_json_type_of(fi) != CCORD_JSON_OBJECT) continue;
+          flds[cnt++] = (ccord_embed_field){
+            .name = lp_astr(a, fi, "name"),
+            .value = lp_astr(a, fi, "value"),
+            .inline_ = ccord_json_bool(ccord_json_get(fi, "inline"), false),
+          };
+        }
+        out->fields = flds;
+        out->field_count = cnt;
+      }
+    }
+  }
+}
+
+const local_msg_parsed *dc_local_parsed_get(ccord_ui *ui, const ccord_local_message *lm)
+{
+  if (!ui || !lm) return nullptr;
+  struct ui_chat_caches *cc = dc_chat_caches_ensure(ui);
+  if (!cc) return nullptr;
+  size_t victim = 0;
+  for (size_t i = 0; i < LOCAL_PARSE_CACHE_SLOTS; i++) {
+    if (cc->lparse[i].inited && cc->lparse[i].local_id == lm->local_id && cc->lparse[i].revision == lm->revision) {
+      cc->lparse[i].lru_tick = ++cc->lparse_tick;
+      return &cc->lparse[i];
+    }
+    if (!cc->lparse[i].inited) victim = i;
+    else if (cc->lparse[victim].inited && cc->lparse[i].lru_tick < cc->lparse[victim].lru_tick) victim = i;
+  }
+  local_msg_parsed *sl = &cc->lparse[victim];
+  if (!sl->inited) {
+    ccord_arena_init(&sl->arena, 0);
+    sl->inited = true;
+  } else {
+    ccord_arena_reset(&sl->arena);
+  }
+  sl->local_id = lm->local_id;
+  sl->revision = lm->revision;
+  sl->lru_tick = ++cc->lparse_tick;
+  sl->natts = 0;
+  sl->nembeds = 0;
+
+  static const ccord_json_limits k_llim = {12, 2048, 65536};
+  ccord_error err = {0};
+  if (lm->attachments_json && lm->attachments_json[0]) {
+    const ccord_json *aj = ccord_json_parse(&sl->arena, lm->attachments_json, strlen(lm->attachments_json), &k_llim, &err);
+    if (aj && ccord_json_type_of(aj) == CCORD_JSON_ARRAY) {
+      size_t n = ccord_json_array_len(aj);
+      if (n > LOCAL_MAX_ATTS) n = LOCAL_MAX_ATTS;
+      for (size_t i = 0; i < n; i++) {
+        const ccord_json *it = ccord_json_array_at(aj, i);
+        if (!it || ccord_json_type_of(it) != CCORD_JSON_OBJECT) continue;
+        int64_t sz = 0, w = 0, h = 0;
+        (void)ccord_json_int64(ccord_json_get(it, "size"), &sz);
+        (void)ccord_json_int64(ccord_json_get(it, "width"), &w);
+        (void)ccord_json_int64(ccord_json_get(it, "height"), &h);
+        sl->atts[sl->natts++] = (local_att_parsed){
+          .filename = lp_astr(&sl->arena, it, "filename"),
+          .content_type = lp_astr(&sl->arena, it, "content_type"),
+          .texture_key = lp_astr(&sl->arena, it, "texture_key"),
+          .size = sz > 0 ? (uint64_t)sz : 0u,
+          .width = w > 0 ? (uint32_t)w : 0u,
+          .height = h > 0 ? (uint32_t)h : 0u,
+          .spoiler = ccord_json_bool(ccord_json_get(it, "spoiler"), false),
+        };
+      }
+    }
+  }
+  if (lm->embed_json && lm->embed_json[0]) {
+    const ccord_json *ej = ccord_json_parse(&sl->arena, lm->embed_json, strlen(lm->embed_json), &k_llim, &err);
+    if (ej && ccord_json_type_of(ej) == CCORD_JSON_ARRAY) {
+      size_t n = ccord_json_array_len(ej);
+      if (n > LOCAL_MAX_EMBEDS) n = LOCAL_MAX_EMBEDS;
+      for (size_t i = 0; i < n; i++) {
+        const ccord_json *it = ccord_json_array_at(ej, i);
+        if (!it || ccord_json_type_of(it) != CCORD_JSON_OBJECT) continue;
+        parse_local_embed_obj(&sl->arena, it, &sl->embeds[sl->nembeds], &sl->embed_img_keys[sl->nembeds]);
+        sl->nembeds++;
+      }
+    } else if (ej && ccord_json_type_of(ej) == CCORD_JSON_OBJECT) {
+      parse_local_embed_obj(&sl->arena, ej, &sl->embeds[0], &sl->embed_img_keys[0]);
+      sl->nembeds = 1;
+    }
+  }
+  return sl;
+}
+
+static void fit_thumb_box(int tw, int th, float max_w, float max_h, float *out_w, float *out_h)
+{
+  float fw = tw > 0 ? (float)tw : 240.0f;
+  float fh = th > 0 ? (float)th : 160.0f;
+  float s = fminf(1.0f, fminf(max_w / fw, max_h / fh));
+  *out_w = maxf(floorf(fw * s), 48.0f);
+  *out_h = maxf(floorf(fh * s), 48.0f);
+}
+
+float dc_local_cards_walk(ccord_ui *ui, ccord_renderer *r, const ccord_local_message *lm,
+                          float x, float y, float card_w, bool draw)
+{
+  const local_msg_parsed *lp = dc_local_parsed_get(ui, lm);
+  if (!lp || (lp->natts == 0 && lp->nembeds == 0)) return 0.0f;
+  float cy = 0.0f;
+  const float gap = M(message_line_gap) + 4.0f;
+  const float max_img_w = fminf(card_w, 400.0f);
+  const float max_img_h = 300.0f;
+
+  for (size_t i = 0; i < lp->natts; i++) {
+    const local_att_parsed *a = &lp->atts[i];
+    int tw = 0, th = 0;
+    bool has_tex = r && a->texture_key && a->texture_key[0] && ccord_render_has_texture(r, a->texture_key, &tw, &th);
+    if (has_tex) {
+      if (tw <= 0 && a->width > 0) tw = (int)a->width;
+      if (th <= 0 && a->height > 0) th = (int)a->height;
+      float dw = 0.0f, dh = 0.0f;
+      fit_thumb_box(tw, th, max_img_w, max_img_h, &dw, &dh);
+      if (draw) {
+        ccord_rect rc = {x, y + cy, dw, dh};
+        ccord_draw_texture_rounded(r, a->texture_key, rc, 6.0f, 255);
+      }
+      cy += dh + gap;
+    } else {
+      if (draw) {
+        ccord_attachment fa = {
+          .filename = a->filename ? a->filename : "attachment",
+          .content_type = a->content_type ? a->content_type : "",
+          .size = a->size,
+          .width = a->width,
+          .height = a->height,
+        };
+        dc_draw_attachment_card(ui, r, &fa, x, y + cy, card_w);
+      }
+      cy += 46.0f + gap;
+    }
+  }
+  for (size_t i = 0; i < lp->nembeds; i++) {
+    decor_part ep = {
+      .kind = DECOR_EMBED,
+      .emb = &lp->embeds[i],
+      .count = 1u,
+      .msg_id = lm->local_id | (1ULL << 62),
+      .edit_rev = (uint32_t)lm->revision,
+    };
+    float eh = dc_embed_card_walk(ui, r, &ep, x, y + cy, card_w, draw);
+    if (eh > 0.0f) cy += eh + gap;
+    const char *ek = lp->embed_img_keys[i];
+    int tw = 0, th = 0;
+    if (r && ek && ek[0] && ccord_render_has_texture(r, ek, &tw, &th)) {
+      float dw = 0.0f, dh = 0.0f;
+      fit_thumb_box(tw, th, max_img_w, max_img_h, &dw, &dh);
+      if (draw) ccord_draw_texture_rounded(r, ek, (ccord_rect){x, y + cy, dw, dh}, 6.0f, 255);
+      cy += dh + gap;
+    }
+  }
+  return cy;
 }
 
 // Compact rows hide the header line, so an edit marker is appended to the body text there.
@@ -884,17 +1422,90 @@ float dc_chat_jumbo_emoji_walk(ccord_ui *ui, ccord_renderer *r, const ui_jumbo_i
   return cy + line_h;
 }
 
+static float dc_measure_local_row(msg_ctx *c, size_t view_i, const ccord_local_message *lm, float width)
+{
+  ccord_ui *ui = c->ui;
+  bool has_intro = dc_is_dm_intro_row(ui, c->channel, view_i);
+  bool has_div = ui_view_has_date_divider(ui, c->channel, view_i);
+  bool compact = ui_view_is_compact(ui, c->channel, view_i);
+  float tpad = dc_tail_pad(ui, view_i);
+  const char *content = lm->content ? lm->content : "";
+  size_t content_len = strlen(content);
+
+  struct ui_chat_caches *cc = dc_chat_caches_ensure(ui);
+  int width_q = (int)lroundf(width * 2.0f);
+  float zoom = c->r ? ccord_render_get_zoom(c->r) : 1.0f;
+  int scale_q = (int)lroundf(zoom * 100.0f) * 256 + (int)lroundf(M(font_size_base) * 4.0f);
+  uint32_t flags = (compact ? 1u : 0u) | (ui_messages_compact(ui) ? 2u : 0u) | (has_intro ? 4u : 0u) |
+                   (has_div ? 8u : 0u) | (tpad > 0.0f ? (1u << 13) : 0u) | (ui->mobile_layout ? (1u << 18) : 0u) |
+                   (1u << 30);
+  uint32_t meta_sig = (uint32_t)(lm->revision * 2654435761u);
+  if (ui->d.contrib) meta_sig ^= (uint32_t)(ccord_contrib_textures_revision(ui->d.contrib) * 40503u);
+  ccord_id cache_id = lm->local_id | (1ULL << 62);
+  uint64_t chash = hash_bytes_fnv(content, content_len);
+  if (cc) {
+    dc_rowh_cache_sync(cc, ui, c->r);
+    for (size_t k = 0; k < CHAT_ROWH_CACHE_SLOTS; k++) {
+      chat_rowh_entry *e = &cc->rowh[k];
+      if (e->msg_id == cache_id && e->edit_rev == (uint32_t)lm->revision && e->content_len == content_len &&
+          e->content_hash == chash && e->width_q == width_q && e->scale_q == scale_q &&
+          e->flags == flags && e->meta_sig == meta_sig) {
+        e->lru_tick = ++cc->rh_tick;
+        return e->height;
+      }
+    }
+  }
+
+  float lh = ui_line_h(ui, M(font_size_base));
+  float wrap = dc_content_wrap(ui, width);
+  float intro_w = maxf(width - 2.0f * M(message_pad_x), 40.0f);
+  float card_w = maxf(width - M(message_text_x) - M(message_pad_x), 40.0f);
+  const local_msg_parsed *lp = dc_local_parsed_get(ui, lm);
+  bool has_cards = lp && (lp->natts > 0 || lp->nembeds > 0);
+  float body_h = (content_len == 0 && has_cards)
+                   ? 0.0f
+                   : maxf(dc_md_body_walk(ui, c->r, content, content_len, 0.0f, 0.0f, wrap, COL(text_normal), false), lh);
+  float cards_h = has_cards ? (M(message_line_gap) * 0.5f + dc_local_cards_walk(ui, c->r, lm, 0.0f, 0.0f, card_w, false)) : 0.0f;
+  float top = compact ? M(message_line_gap)
+                      : (ui_messages_compact(ui)
+                           ? M(message_line_gap) + (M(message_group_gap) - M(message_line_gap)) * 0.35f
+                           : M(message_group_gap));
+  float header = compact ? 0.0f : lh;
+  float intro = has_intro
+                  ? dc_dm_intro_walk(ui, c->r, ccord_store_channel(ui->d.store, c->channel),
+                                     0.0f, 0.0f, intro_w, has_div, false)
+                  : 0.0f;
+  float div_h = has_div ? UI_CHAT_DIVIDER_H : 0.0f;
+  float total_h = intro + div_h + top + header + body_h + cards_h + M(message_line_gap) + tpad;
+  if (cc) {
+    size_t victim = 0;
+    for (size_t k = 0; k < CHAT_ROWH_CACHE_SLOTS; k++) {
+      if (cc->rowh[k].msg_id == CCORD_ID_NONE) { victim = k; break; }
+      if (cc->rowh[k].lru_tick < cc->rowh[victim].lru_tick) victim = k;
+    }
+    cc->rowh[victim] = (chat_rowh_entry){
+      .content_hash = chash, .msg_id = cache_id, .edited_ts = 0,
+      .edit_rev = (uint32_t)lm->revision, .content_len = content_len,
+      .width_q = width_q, .scale_q = scale_q, .flags = flags, .meta_sig = meta_sig,
+      .height = total_h, .lru_tick = ++cc->rh_tick,
+    };
+  }
+  return total_h;
+}
+
 float dc_measure_row(size_t i, float width, void *ud)
 {
   msg_ctx *c = ud;
   ccord_ui *ui = c->ui;
+  const ccord_local_message *lm = dc_view_local_at(ui, c->channel, i);
+  if (lm) return dc_measure_local_row(c, i, lm, width);
   size_t store_i = 0;
   const ccord_message *m = dc_view_message_at(ui, c->channel, i, &store_i);
   if (!m) return 1.0f;
   blocked_run br = dc_blocked_run_at(ui, c->channel, store_i, m);
-  bool has_intro = dc_is_dm_intro_row(ui, c->channel, store_i);
+  bool has_intro = dc_is_dm_intro_row(ui, c->channel, i);
   bool has_div = store_i != SIZE_MAX &&
-                 (ui_row_has_date_divider(ui, c->channel, store_i, m) ||
+                 (ui_view_has_date_divider(ui, c->channel, i) ||
                   ui_row_has_new_divider(ui, c->channel, store_i, m));
   float intro_w = maxf(width - 2.0f * M(message_pad_x), 40.0f);
   if (br.blocked) {
@@ -910,7 +1521,7 @@ float dc_measure_row(size_t i, float width, void *ud)
   }
   bool is_system = m->rich && ccord_message_type_is_system(m->rich->type);
   bool has_wave = dc_message_has_wave_cta(ui, c->channel, store_i, m);
-  bool compact = !is_system && store_i != SIZE_MAX && ui_is_compact(ui, c->channel, store_i, m);
+  bool compact = !is_system && store_i != SIZE_MAX && ui_view_is_compact(ui, c->channel, i);
   float tpad = dc_tail_pad(ui, i);
   const char *content = m->content ? m->content : "";
   size_t content_len = strlen(content);

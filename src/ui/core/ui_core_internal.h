@@ -45,6 +45,7 @@ typedef struct hover_state {
   bool new_bar, reply_card, rich_ctrl, disc_btn, disc_text;
   bool user_status, msg_req_ctrl, gdm_ctrl;
   ccord_id msg, user;
+  uint64_t local_msg_id;
   bool members;
 } hover_state;
 

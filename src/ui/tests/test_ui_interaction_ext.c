@@ -3064,6 +3064,139 @@ static void test_power_efficiency_and_wave2_helpers(void)
   F.now += 50u;
 }
 
+typedef struct tl_ev_log {
+  int count;
+  uint64_t last_lid;
+  char last_type[32];
+} tl_ev_log;
+
+static void on_tl_local_ev(void *ud, const ccord_local_message *m, const char *ev_type, float x, float y)
+{
+  (void)x; (void)y;
+  tl_ev_log *l = ud;
+  l->count++;
+  l->last_lid = m ? m->local_id : 0;
+  snprintf(l->last_type, sizeof l->last_type, "%s", ev_type ? ev_type : "");
+}
+
+static void test_positioned_timeline_messages_and_style(void)
+{
+  ccord_error err = {0};
+  const ccord_guild *g0 = ccord_store_guild_at(F.store, 0);
+  ccord_id gid = g0 ? g0->id : CCORD_ID_NONE;
+  ccord_id ch = gid != CCORD_ID_NONE ? find_channel(gid, "general", CCORD_CHANNEL_TEXT) : CCORD_ID_NONE;
+  if (gid != CCORD_ID_NONE && ch != CCORD_ID_NONE) {
+    (void)ccord_store_select_guild(F.store, gid, &err);
+    (void)ccord_store_select_channel(F.store, ch, &err);
+    frame(2);
+  }
+  ch = ccord_store_selected_channel(F.store);
+  size_t base_n = ccord_store_message_count(F.store, ch);
+  CT_CHECK(ch != CCORD_ID_NONE && base_n >= 2);
+  if (base_n < 2) return;
+
+  const ccord_message *m_prev = ccord_store_message_at(F.store, ch, base_n - 2);
+  const ccord_message *m_last = ccord_store_message_at(F.store, ch, base_n - 1);
+  CT_CHECK(m_prev != nullptr && m_last != nullptr);
+  if (!m_prev || !m_last) return;
+
+  tl_ev_log evlog = {0};
+  ccord_contrib_set_handlers(F.contrib, &(ccord_contrib_handlers){
+    .ud = &evlog,
+    .local_msg_event = on_tl_local_ev,
+  });
+
+  // Upload a tiny 8x8 RGBA texture for inline local attachment preview.
+  uint8_t px[8 * 8 * 4];
+  for (int i = 0; i < 64; i++) {
+    px[i * 4 + 0] = 220; px[i * 4 + 1] = 60; px[i * 4 + 2] = 60; px[i * 4 + 3] = 255;
+  }
+  CT_CHECK(ccord_contrib_set_texture(F.contrib, "dev.test.tlui", "tl_thumb", px, sizeof px, 8, 8, true, &err) == CCORD_OK);
+
+  // 1. Insert a timeline local message anchored immediately AFTER m_prev (so it sits between m_prev and m_last!)
+  //    with same author_id + compact=AUTO within 7 min -> merges compactly under m_prev,
+  //    AND break_group=true -> forces m_last to draw a full non-compact header even if same author!
+  uint64_t lid_after = 0;
+  ccord_local_message lm1 = {
+    .owner = "dev.test.tlui", .client_id = "del-mid", .channel_id = ch,
+    .position = CCORD_LOCAL_POS_TIMELINE,
+    .after_message_id = m_prev->id,
+    .author_id = m_prev->author_id, .author_name = "DeletedAuthor",
+    .author_color = "#e5484d", .text_color = "#e5484d",
+    .author_badge = "DELETED", .badge_color = "#e5484d",
+    .content = "This **deleted** message sits right between live rows",
+    .attachments_json = "[{\"filename\":\"archived.png\",\"texture_key\":\"tl_thumb\",\"width\":8,\"height\":8}]",
+    .embed_json = "[{\"title\":\"Archived Embed\",\"description\":\"Stored locally\",\"color\":15026253}]",
+    .timestamp_ms = (uint64_t)(m_prev->timestamp_ms + 10000),
+    .avatar_grayscale = true, .has_avatar_opacity = true, .avatar_opacity = 0.45f,
+    .compact_mode = CCORD_LOCAL_COMPACT_AUTO, .break_group = true,
+    .clip_to_history = true, .dismissible = true, .has_on_event = true,
+  };
+  CT_CHECK(ccord_contrib_add_local_message(F.contrib, &lm1, &lid_after, &err) == CCORD_OK);
+
+  // 2. Insert a second timeline local message after m_last with compact=NEVER (full native avatar gutter + red username).
+  uint64_t lid_tail = 0;
+  ccord_local_message lm2 = {
+    .owner = "dev.test.tlui", .client_id = "del-tail", .channel_id = ch,
+    .position = CCORD_LOCAL_POS_TIMELINE,
+    .sort_id = m_last->id + 100u,
+    .author_id = m_last->author_id, .author_name = "TailDeleted",
+    .author_color = "danger", .text_color = "#e5484d",
+    .avatar_grayscale = true, .has_avatar_opacity = true, .avatar_opacity = 0.5f,
+    .content = "Tail deleted header message",
+    .compact_mode = CCORD_LOCAL_COMPACT_NEVER, .dismissible = true, .has_on_event = true,
+  };
+  CT_CHECK(ccord_contrib_add_local_message(F.contrib, &lm2, &lid_tail, &err) == CCORD_OK);
+
+  // 3. Apply extended ui.decorate.message_style to m_last (text_color, author_color, avatar_grayscale, dim).
+  ccord_decorator_contribution mst = {
+    .owner = "dev.test.tlui", .decor_id = "st1", .target = CCORD_DECOR_MESSAGE_STYLE, .target_id = m_last->id,
+    .text_color = "#ffa500", .author_color = "danger", .avatar_grayscale = true, .dim = true,
+  };
+  CT_CHECK(ccord_contrib_set_decorator(F.contrib, &mst, &err) == CCORD_OK);
+
+  frame(3);
+
+  // Total view count = base_n + 2 timeline locals.
+  CT_CHECK(ui_view_count(F.ui) == base_n + 2u);
+  size_t vi_prev = ui_timeline_view_index_for_msg_id(F.ui, ch, m_prev->id);
+  size_t vi_lm1 = ui_timeline_view_index_for_local_id(F.ui, ch, lid_after);
+  size_t vi_last = ui_timeline_view_index_for_msg_id(F.ui, ch, m_last->id);
+  size_t vi_lm2 = ui_timeline_view_index_for_local_id(F.ui, ch, lid_tail);
+  CT_CHECK(vi_prev != SIZE_MAX && vi_lm1 == vi_prev + 1u && vi_last == vi_lm1 + 1u && vi_lm2 == vi_last + 1u);
+
+  // Check compact grouping rules: lm1 merged compactly under m_prev; m_last broke group after lm1; lm2 has full header.
+  CT_CHECK(ui_view_is_compact(F.ui, ch, vi_lm1));
+  CT_CHECK(!ui_view_is_compact(F.ui, ch, vi_last));
+  CT_CHECK(!ui_view_is_compact(F.ui, ch, vi_lm2));
+
+  // Locate lm2 in visible rows -> has real avatar gutter rect AND author rect.
+  const vis_row *vr_lm2 = nullptr;
+  for (size_t i = 0; i < F.ui->nvis; i++) {
+    if (F.ui->vis[i].is_local && F.ui->vis[i].local_id == lid_tail) { vr_lm2 = &F.ui->vis[i]; break; }
+  }
+  CT_CHECK(vr_lm2 != nullptr && vr_lm2->avatar_rect.w > 20.0f && vr_lm2->author_rect.w > 10.0f);
+
+  if (vr_lm2) {
+    float cx = F.ui->layout.message_area.x + 160.0f;
+    float cy = vr_lm2->y + vr_lm2->h * 0.5f;
+    // Left-click dispatches local_msg_event("click").
+    click(cx, cy);
+    CT_CHECK(evlog.count >= 1 && evlog.last_lid == lid_tail && strcmp(evlog.last_type, "click") == 0);
+    // Right-click dispatches local_msg_event("right_click") and does NOT open native message context menu!
+    mouse(CCORD_IN_MOUSE_DOWN, 3, cx, cy);
+    mouse(CCORD_IN_MOUSE_UP, 3, cx, cy);
+    frame(1);
+    CT_CHECK(evlog.last_lid == lid_tail && strcmp(evlog.last_type, "right_click") == 0);
+    CT_CHECK(!F.ui->menu.open);
+  }
+
+  // Cleanup owner removes both timeline locals, decorator, and texture, restoring exact base_n count.
+  ccord_contrib_remove_owner(F.contrib, "dev.test.tlui");
+  frame(2);
+  CT_CHECK(ui_view_count(F.ui) == base_n);
+}
+
 
 int main(int argc, char **argv)
 {
@@ -3098,6 +3231,7 @@ int main(int argc, char **argv)
   test_nameplate_visibility_and_animation();
   test_same_dm_refocus_and_open_latest_message();
   test_power_efficiency_and_wave2_helpers();
+  test_positioned_timeline_messages_and_style();
   ui_test_teardown();
   ct_failures += ui_test_harness_failures();
   return CT_RESULT("test_ui_interaction_ext");

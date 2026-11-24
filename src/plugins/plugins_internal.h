@@ -234,6 +234,7 @@ size_t plugins_ext_on_command_complete(void *ud, const ccord_command_contributio
                                        size_t max_items);
 void plugins_ext_on_decor_event(void *ud, const ccord_decorator_contribution *decor, ccord_id target_id,
                                 const ccord_panel_event *ev);
+void plugins_ext_on_local_msg_event(void *ud, const ccord_local_message *lm, const char *ev_type, float x, float y);
 void plugins_ext_on_setting_changed(void *ud, const char *owner, const char *key, const char *value_json);
 void plugins_ext_on_keybind_triggered(void *ud, const char *owner, const char *bind_id);
 void plugins_ext_on_action_btn_click(void *ud, const ccord_action_btn_contribution *btn, const ccord_menu_context *ctx);

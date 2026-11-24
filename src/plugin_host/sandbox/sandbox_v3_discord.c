@@ -239,34 +239,218 @@ static int api_msg_scheduled_cancel(lua_State *L)
   return rc;
 }
 
+static bool local_spec_has_local_path(lua_State *L, int spec_idx)
+{
+  int abs_idx = lua_absindex(L, spec_idx);
+  bool found = false;
+  if (sb_raw_getfield(L, abs_idx, "attachments") == LUA_TTABLE) {
+    lua_Integer n = (lua_Integer)lua_rawlen(L, -1);
+    for (lua_Integer i = 1; i <= n && !found; i++) {
+      if (lua_rawgeti(L, -1, i) == LUA_TTABLE) {
+        if (sb_raw_getfield(L, -1, "local_path") == LUA_TSTRING) {
+          size_t l = 0;
+          const char *s = lua_tolstring(L, -1, &l);
+          if (s && l > 0) found = true;
+        }
+        lua_pop(L, 1);
+      }
+      lua_pop(L, 1);
+    }
+  }
+  lua_pop(L, 1);
+  return found;
+}
+
+static bool encode_local_spec_obj(lua_State *L, int tbl_idx, ccord_jw *w, bool *out_has_on_event, bool *out_clear_on_event)
+{
+  int abs_idx = lua_absindex(L, tbl_idx);
+  bool has_ev = false, clr_ev = false;
+  ccord_jw_begin_object(w);
+  lua_pushnil(L);
+  while (lua_next(L, abs_idx) != 0) {
+    if (lua_type(L, -2) == LUA_TSTRING) {
+      const char *k = lua_tostring(L, -2);
+      if (strcmp(k, "on_event") == 0) {
+        if (lua_type(L, -1) == LUA_TFUNCTION) has_ev = true;
+        else if (lua_type(L, -1) == LUA_TBOOLEAN && !lua_toboolean(L, -1)) clr_ev = true;
+      } else if (lua_type(L, -1) != LUA_TFUNCTION) {
+        ccord_jw_key(w, k);
+        if (!sb_encode_lua(L, -1, w, 0)) {
+          lua_pop(L, 2);
+          return false;
+        }
+      }
+    }
+    lua_pop(L, 1);
+  }
+  if (has_ev) {
+    ccord_jw_key(w, "has_on_event");
+    ccord_jw_bool(w, true);
+  } else if (clr_ev) {
+    ccord_jw_key(w, "has_on_event");
+    ccord_jw_bool(w, false);
+  }
+  ccord_jw_end_object(w);
+  if (out_has_on_event) *out_has_on_event = has_ev;
+  if (out_clear_on_event) *out_clear_on_event = clr_ev;
+  return !w->failed;
+}
+
 static int api_msg_inject_local(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
-  if (!sb_check_perm(L, sb, CCORD_PERM_UI_PANEL, "messages.inject_local")) return sb_push_undeclared(L);
+  if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "messages.inject_local")) return sb_push_undeclared(L);
   const char *cid = luaL_checkstring(L, 1);
   luaL_checktype(L, 2, LUA_TTABLE);
+  if (local_spec_has_local_path(L, 2)) {
+    if (!sb_check_perm(L, sb, CCORD_PERM_FS_READ, "messages.inject_local(local_path)")) return sb_push_undeclared(L);
+  }
+  bool has_ev = false, clr_ev = false;
   ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w);
   ccord_jw_key(&w, "channel_id"); ccord_jw_cstr(&w, cid);
   ccord_jw_key(&w, "msg");
-  if (!sb_encode_lua(L, 2, &w, 0)) { ccord_buf_free(&b); return luaL_error(L, "messages.inject_local: invalid msg"); }
+  if (!encode_local_spec_obj(L, 2, &w, &has_ev, &clr_ev)) {
+    ccord_buf_free(&b);
+    return luaL_error(L, "messages.inject_local: invalid msg");
+  }
   ccord_jw_end_object(&w);
   int rc = sb_sync_call(L, sb, "messages.inject_local", ccord_buf_cstr(&b));
   ccord_buf_free(&b);
+  if (rc == 1 && lua_isinteger(L, -1)) {
+    lua_Integer lid = lua_tointeger(L, -1);
+    if (has_ev) {
+      lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_LOCAL_MSG);
+      sb_raw_getfield(L, 2, "on_event");
+      lua_rawseti(L, -2, lid);
+      lua_pop(L, 1);
+    } else if (clr_ev) {
+      lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_LOCAL_MSG);
+      lua_pushnil(L);
+      lua_rawseti(L, -2, lid);
+      lua_pop(L, 1);
+    }
+  }
+  return rc;
+}
+
+static int api_msg_update_local(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "messages.update_local")) return sb_push_undeclared(L);
+  bool is_num = lua_type(L, 1) == LUA_TNUMBER;
+  bool is_str = lua_type(L, 1) == LUA_TSTRING;
+  if (!is_num && !is_str) return luaL_argerror(L, 1, "expected local_id integer or id string");
+  luaL_checktype(L, 2, LUA_TTABLE);
+  if (local_spec_has_local_path(L, 2)) {
+    if (!sb_check_perm(L, sb, CCORD_PERM_FS_READ, "messages.update_local(local_path)")) return sb_push_undeclared(L);
+  }
+  bool has_ev = false, clr_ev = false;
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  if (is_num) {
+    ccord_jw_key(&w, "local_id"); ccord_jw_int(&w, lua_tointeger(L, 1));
+  } else {
+    size_t il = 0; const char *s = lua_tolstring(L, 1, &il);
+    ccord_jw_key(&w, "id"); ccord_jw_string(&w, s, il);
+  }
+  ccord_jw_key(&w, "patch");
+  if (!encode_local_spec_obj(L, 2, &w, &has_ev, &clr_ev)) {
+    ccord_buf_free(&b);
+    return luaL_error(L, "messages.update_local: invalid patch");
+  }
+  ccord_jw_end_object(&w);
+  int rc = sb_sync_call(L, sb, "messages.update_local", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  if (rc == 1 && lua_isinteger(L, -1)) {
+    lua_Integer lid = lua_tointeger(L, -1);
+    if (has_ev) {
+      lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_LOCAL_MSG);
+      sb_raw_getfield(L, 2, "on_event");
+      lua_rawseti(L, -2, lid);
+      lua_pop(L, 1);
+    } else if (clr_ev) {
+      lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_LOCAL_MSG);
+      lua_pushnil(L);
+      lua_rawseti(L, -2, lid);
+      lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  if (rc == 2) {
+    // Convert (nil, err) to (false, err) matching boolean|err contract
+    lua_pushboolean(L, 0);
+    lua_replace(L, -3);
+    return 2;
+  }
   return rc;
 }
 
 static int api_msg_dismiss_local(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
-  if (!sb_check_perm(L, sb, CCORD_PERM_UI_PANEL, "messages.dismiss_local")) return sb_push_undeclared(L);
-  lua_Integer id = luaL_checkinteger(L, 1);
+  if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "messages.dismiss_local")) return sb_push_undeclared(L);
+  bool is_num = lua_type(L, 1) == LUA_TNUMBER;
+  bool is_str = lua_type(L, 1) == LUA_TSTRING;
+  if (!is_num && !is_str) return luaL_argerror(L, 1, "expected local_id integer or id string");
   ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
-  ccord_jw_begin_object(&w); ccord_jw_key(&w, "local_id"); ccord_jw_int(&w, id); ccord_jw_end_object(&w);
-  if (ccord_jw_ok(&w)) sb_request(sb, "messages.dismiss_local", ccord_buf_cstr(&b));
+  ccord_jw_begin_object(&w);
+  if (is_num) {
+    ccord_jw_key(&w, "local_id"); ccord_jw_int(&w, lua_tointeger(L, 1));
+  } else {
+    size_t il = 0; const char *s = lua_tolstring(L, 1, &il);
+    ccord_jw_key(&w, "id"); ccord_jw_string(&w, s, il);
+  }
+  ccord_jw_end_object(&w);
+  int rc = sb_sync_call(L, sb, "messages.dismiss_local", ccord_buf_cstr(&b));
   ccord_buf_free(&b);
-  lua_pushboolean(L, 1);
-  return 1;
+  if (rc == 1 && lua_istable(L, -1)) {
+    sb_raw_getfield(L, -1, "ok");
+    bool ok = lua_toboolean(L, -1) != 0;
+    lua_pop(L, 1);
+    sb_raw_getfield(L, -1, "local_id");
+    lua_Integer lid = lua_isinteger(L, -1) ? lua_tointeger(L, -1) : 0;
+    lua_pop(L, 2);
+    if (ok && lid > 0) {
+      lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_LOCAL_MSG);
+      lua_pushnil(L);
+      lua_rawseti(L, -2, lid);
+      lua_pop(L, 1);
+    }
+    lua_pushboolean(L, ok ? 1 : 0);
+    return 1;
+  }
+  if (rc == 2) {
+    lua_pop(L, 2);
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+  return rc;
+}
+
+static int api_msg_clear_local(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "messages.clear_local")) return sb_push_undeclared(L);
+  const char *cid = lua_isnoneornil(L, 1) ? nullptr : luaL_checkstring(L, 1);
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  if (cid && cid[0]) { ccord_jw_key(&w, "channel_id"); ccord_jw_cstr(&w, cid); }
+  ccord_jw_end_object(&w);
+  int rc = sb_sync_call(L, sb, "messages.clear_local", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  if (!cid || !cid[0]) {
+    lua_newtable(L);
+    lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_LOCAL_MSG);
+  }
+  if (rc == 2) {
+    lua_pop(L, 2);
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+  return rc;
 }
 
 // ---------------------------------------------------------------- Class 2: store.* v3
@@ -841,7 +1025,8 @@ void sb_extend_v3_discord(lua_State *L)
     {"save", api_msg_save}, {"unsave", api_msg_unsave}, {"saved", api_msg_saved},
     {"schedule", api_msg_schedule}, {"scheduled_list", api_msg_scheduled_list},
     {"scheduled_cancel", api_msg_scheduled_cancel},
-    {"inject_local", api_msg_inject_local}, {"dismiss_local", api_msg_dismiss_local},
+    {"inject_local", api_msg_inject_local}, {"update_local", api_msg_update_local},
+    {"dismiss_local", api_msg_dismiss_local}, {"clear_local", api_msg_clear_local},
     {nullptr, nullptr},
   };
   sb_v3_extend_ro_global(L, "messages", k_msg_extra, nullptr, nullptr);

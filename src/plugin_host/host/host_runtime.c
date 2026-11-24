@@ -507,6 +507,14 @@ static void handle_v3_ntf(host *h, const ccord_ipc_msg *msg)
     const char *did = str_of(msg->params, "decor_id", &dl);
     const char *tid = str_of(msg->params, "target_id", &tl);
     if (did) (void)ccord_sandbox_decor_event(h->sb, did, tid, ccord_json_get(msg->params, "event"), &err);
+  } else if (strcmp(msg->method, "local_msg.event") == 0) {
+    int64_t lid = 0; (void)ccord_json_int64(ccord_json_get(msg->params, "local_id"), &lid);
+    size_t il = 0, tl = 0;
+    const char *cid = str_of(msg->params, "id", &il);
+    const char *tp = str_of(msg->params, "type", &tl);
+    float x = (float)ccord_json_number(ccord_json_get(msg->params, "x"), 0.0);
+    float y = (float)ccord_json_number(ccord_json_get(msg->params, "y"), 0.0);
+    if (lid > 0 && tp) (void)ccord_sandbox_local_msg_event(h->sb, (uint64_t)lid, cid, tp, x, y, &err);
   } else if (strcmp(msg->method, "settings.change") == 0) {
     size_t kl = 0; const char *k = str_of(msg->params, "key", &kl);
     if (k) (void)ccord_sandbox_setting_changed(h->sb, k, ccord_json_get(msg->params, "value"), &err);

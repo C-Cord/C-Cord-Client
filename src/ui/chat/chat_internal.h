@@ -17,6 +17,8 @@
 #include "ui_voice_surfaces.h"
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/arena.h>
+#include <ccord/core/json.h>
 #include <ccord/core/log.h>
 #include <ccord/core/utf8.h>
 #include <ccord/emoji/emoji.h>
@@ -62,6 +64,44 @@ typedef struct chat_embedh_entry {
   uint64_t lru_tick;
 } chat_embedh_entry;
 
+typedef struct timeline_row {
+  bool is_local;
+  size_t store_i;       // valid when !is_local
+  uint64_t local_id;    // valid when is_local
+  ccord_id sort_id;     // live m->id or local sort_id / derived snowflake
+  int64_t timestamp_ms;
+  ccord_id author_id;
+  bool break_group;
+  ccord_local_compact compact_mode;
+} timeline_row;
+
+#define LOCAL_PARSE_CACHE_SLOTS 16u
+#define LOCAL_MAX_ATTS 10u
+#define LOCAL_MAX_EMBEDS 4u
+
+typedef struct local_att_parsed {
+  const char *filename;
+  const char *content_type;
+  const char *texture_key;
+  uint64_t size;
+  uint32_t width;
+  uint32_t height;
+  bool spoiler;
+} local_att_parsed;
+
+typedef struct local_msg_parsed {
+  uint64_t local_id;
+  uint64_t revision;
+  uint64_t lru_tick;
+  bool inited;
+  ccord_arena arena;
+  local_att_parsed atts[LOCAL_MAX_ATTS];
+  size_t natts;
+  ccord_embed embeds[LOCAL_MAX_EMBEDS];
+  const char *embed_img_keys[LOCAL_MAX_EMBEDS];
+  size_t nembeds;
+} local_msg_parsed;
+
 struct ui_chat_caches {
   uint64_t mention_rev;
   ccord_id mention_guild;
@@ -84,6 +124,20 @@ struct ui_chat_caches {
   uint64_t rh_tick;
   chat_rowh_entry rowh[CHAT_ROWH_CACHE_SLOTS];
   chat_embedh_entry embedh[CHAT_EMBEDH_CACHE_SLOTS];
+
+  // Merged timeline cache (zero-cost fast path when channel has 0 timeline local messages)
+  bool tl_valid;
+  bool tl_merged;
+  ccord_id tl_chan;
+  uint64_t tl_store_rev;
+  uint64_t tl_local_rev;
+  bool tl_hist_more;
+  timeline_row *tl_rows;
+  size_t tl_count, tl_cap;
+
+  // Parsed attachment & embed cache for timeline local messages
+  uint64_t lparse_tick;
+  local_msg_parsed lparse[LOCAL_PARSE_CACHE_SLOTS];
 };
 
 typedef struct msg_ctx {
@@ -280,6 +334,10 @@ bool dc_url_host_in_list(const char *url, const char *const *hosts, size_t nhost
 bool dc_url_is_anim_image(const char *u);
 void dc_video_box_size(uint32_t vw, uint32_t vh, float max_w, float max_h, float *bw, float *bh);
 const ccord_message * dc_view_message_at(const ccord_ui *ui, ccord_id channel, size_t view_i, size_t *out_store_i);
+const ccord_local_message * dc_view_local_at(const ccord_ui *ui, ccord_id channel, size_t view_i);
+const local_msg_parsed * dc_local_parsed_get(ccord_ui *ui, const ccord_local_message *lm);
+float dc_local_cards_walk(ccord_ui *ui, ccord_renderer *r, const ccord_local_message *lm,
+                          float x, float y, float card_w, bool draw);
 float dc_content_wrap(const ccord_ui *ui, float width);
 bool dc_friend_matches_tab(const ccord_relationship *rel, const ccord_user *u, int tab);
 bool dc_is_dm_intro_row(const ccord_ui *ui, ccord_id channel_id, size_t store_i);

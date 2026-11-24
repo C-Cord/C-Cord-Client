@@ -941,6 +941,164 @@ static void draw_send_status(ccord_ui *ui, ccord_renderer *r, const ccord_messag
   ui->dbg_failed_echoes++;
 }
 
+static void draw_local_timeline_row(msg_ctx *c, size_t i, const ccord_local_message *lm, float y, float h,
+                                    const ccord_rect *ma, ccord_rect *out_avatar_rect, ccord_rect *out_author_rect)
+{
+  ccord_ui *ui = c->ui;
+  ccord_renderer *r = c->r;
+  bool has_date = ui_view_has_date_divider(ui, c->channel, i);
+  if (dc_is_dm_intro_row(ui, c->channel, i)) {
+    float intro_h = dc_dm_intro_walk(ui, r, ccord_store_channel(ui->d.store, c->channel),
+                                     ma->x + M(message_pad_x), y, ma->w - 2.0f * M(message_pad_x),
+                                     has_date, true);
+    y += intro_h;
+    h -= intro_h;
+  }
+  if (has_date) {
+    draw_chat_divider(ui, r, ma->x + M(message_pad_x), y, ma->w - 2.0f * M(message_pad_x),
+                      (int64_t)lm->timestamp_ms, true, false);
+    ui->dbg_date_dividers++;
+    y += UI_CHAT_DIVIDER_H;
+    h -= UI_CHAT_DIVIDER_H;
+  }
+  bool compact = ui_view_is_compact(ui, c->channel, i);
+  bool dense = ui_messages_compact(ui);
+  float lh = ui_line_h(ui, M(font_size_base));
+  float top = compact ? M(message_line_gap)
+                      : (dense ? M(message_line_gap) + (M(message_group_gap) - M(message_line_gap)) * 0.35f
+                               : M(message_group_gap));
+  float skip = compact ? 0.0f : M(message_group_gap) * 0.5f;
+  float row_h_vis = maxf(h - skip - dc_tail_pad(ui, i), 0.0f);
+
+  ccord_color tint = {0}, accent = {0};
+  if (ui_resolve_color_spec(ui, lm->tint_color, &tint) && tint.a > 0) {
+    ccord_draw_rect(r, (ccord_rect){ma->x, y + skip, ma->w, row_h_vis}, tint);
+  }
+  if (ui_resolve_color_spec(ui, lm->accent_color, &accent) && accent.a > 0) {
+    ccord_draw_rect(r, (ccord_rect){ma->x, y + skip, 3.0f, row_h_vis}, accent);
+  }
+  bool hover = lm->local_id == ui->hover_local_msg_id && ui->mouse_in && !ui->settings_open && !ui->menu.open;
+  float row_hv = ui_fade(ui, "lmsg", lm->local_id, hover);
+  if (row_hv > 0.004f) {
+    ccord_draw_rect(r, (ccord_rect){ma->x, y + skip, ma->w, row_h_vis}, ui_alpha(COL(bg_message_hover), row_hv));
+  }
+
+  float text_x = ma->x + M(message_text_x);
+  float content_y = y + top;
+  ccord_id guild = ccord_store_selected_guild(ui->d.store);
+
+  if (!compact) {
+    const ccord_user *u = lm->author_id != CCORD_ID_NONE ? ccord_store_user(ui->d.store, lm->author_id) : nullptr;
+    const ccord_user_profile *prof = lm->author_id != CCORD_ID_NONE ? ccord_store_user_profile(ui->d.store, lm->author_id) : nullptr;
+    const char *name = (lm->author_name && lm->author_name[0]) ? lm->author_name
+                       : ((u && u->name && u->name[0]) ? u->name
+                       : ((prof && prof->display_name && prof->display_name[0]) ? prof->display_name : lm->owner));
+    const ccord_member *gm = (lm->author_id != CCORD_ID_NONE && guild != CCORD_ID_NONE && guild != CCORD_DM_GUILD_ID)
+                               ? ccord_store_find_member(ui->d.store, guild, lm->author_id)
+                               : nullptr;
+    const char *row_deco = (gm && gm->avatar_decoration_url[0] != '\0')
+                             ? gm->avatar_decoration_url
+                             : ((u && u->avatar_decoration_url && u->avatar_decoration_url[0])
+                                  ? u->avatar_decoration_url
+                                  : ((prof && prof->avatar_decoration_url) ? prof->avatar_decoration_url : ""));
+    ccord_user row_u = {
+      .id = lm->author_id,
+      .name = name,
+      .handle = (u && u->handle && u->handle[0]) ? u->handle : ((prof && prof->handle) ? prof->handle : ""),
+      .status_text = (u && u->status_text) ? u->status_text : "",
+      .avatar_url = (u && u->avatar_url && u->avatar_url[0]) ? u->avatar_url
+                    : ((prof && prof->avatar_url) ? prof->avatar_url : ""),
+      .avatar_decoration_url = row_deco,
+      .presence = u ? u->presence : CCORD_PRESENCE_OFFLINE,
+      .is_bot = u ? u->is_bot : false,
+      .avatar_palette = u ? u->avatar_palette : (uint8_t)((lm->author_id ? lm->author_id : lm->local_id) % 6u),
+    };
+    if (!dense) {
+      float ax = ma->x + M(message_pad_x);
+      float ay = y + top + 2.0f;
+      float asz = M(avatar_size);
+      float av_op = lm->has_avatar_opacity ? lm->avatar_opacity : 1.0f;
+      ui_draw_avatar_ex(ui, r, &row_u, ax + asz * 0.5f, ay + asz * 0.5f, asz, (ccord_color){0, 0, 0, 0}, false,
+                        lm->avatar_grayscale, av_op);
+      ccord_rect av_rect = {ax, ay, asz, asz};
+      if (out_avatar_rect) *out_avatar_rect = av_rect;
+    }
+    bool has_role = false;
+    ccord_color rc = lm->author_id != CCORD_ID_NONE ? ui_role_color(ui, guild, lm->author_id, &has_role) : COL(text_header);
+    ccord_color name_col = (has_role && ui->settings_role_color_mode == 0) ? rc : COL(text_header);
+    (void)ui_resolve_color_spec(ui, lm->author_color, &name_col);
+    ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), name_col);
+    float nw = ccord_text_measure(r, name, strlen(name), &ns, 0.0f).x;
+    float max_name = maxf(ma->w - M(message_text_x) - M(message_pad_x) - 160.0f, 60.0f);
+    dc_chat_sel_process_run(ui, r, name, strlen(name), &ns, text_x, y + top, fminf(nw, max_name), lh, 0.0f);
+    nw = ccord_text_draw_ellipsis(r, name, strlen(name), text_x, y + top, max_name, &ns);
+    ccord_rect au_rect = {text_x, y + top, maxf(nw, 4.0f), lh};
+    if (out_author_rect) *out_author_rect = au_rect;
+    float x = text_x + nw + 8.0f;
+
+    if (lm->author_badge && lm->author_badge[0]) {
+      ccord_color bbg = COL(brand);
+      (void)ui_resolve_color_spec(ui, lm->badge_color, &bbg);
+      ccord_text_style bs = ui_style(ui, CCORD_FONT_BOLD, 10.0f, COL(text_on_brand));
+      size_t bl = strlen(lm->author_badge);
+      ccord_vec2 bt = ccord_text_measure(r, lm->author_badge, bl, &bs, 0.0f);
+      ccord_rect tag = {x, y + top + (lh - 15.0f) * 0.5f + 0.5f, bt.x + 9.0f, 15.0f};
+      ccord_draw_rrect(r, tag, 3.0f, bbg);
+      ccord_text_draw(r, lm->author_badge, bl, tag.x + 4.5f, tag.y + (tag.h - bt.y) * 0.5f, &bs, 0.0f);
+      x += tag.w + 6.0f;
+    }
+    char when[48];
+    size_t wl = ccord_timefmt_message(when, sizeof when, (int64_t)lm->timestamp_ms, ui->now_unix_ms, ui->use_utc);
+    ccord_text_style ts = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 2.0f, COL(text_muted));
+    float wy = y + top + (lh - ui_line_h(ui, ts.size)) * 0.5f;
+    ccord_vec2 when_sz = ccord_text_measure(r, when, wl, &ts, 0.0f);
+    dc_chat_sel_process_run(ui, r, when, wl, &ts, x, y + top, when_sz.x, lh, 0.0f);
+    ccord_text_draw(r, when, wl, x, wy, &ts, 0.0f);
+    if (lm->timestamp_ms > 0) dc_record_ts_hit(ui, (ccord_rect){x, y + top, when_sz.x, lh}, (int64_t)lm->timestamp_ms, false);
+    dc_chat_sel_line_end(ui, r, x + when_sz.x, y + top, ts.size * 0.4f, lh, true);
+    content_y += lh;
+  }
+
+  if (compact && hover && lm->timestamp_ms > 0) {
+    char clock[24];
+    size_t cl = ccord_timefmt_clock(clock, sizeof clock, (int64_t)lm->timestamp_ms, ui->use_utc);
+    ccord_text_style ts = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 3.0f, COL(text_muted));
+    ccord_vec2 tw = ccord_text_measure(r, clock, cl, &ts, 0.0f);
+    float gutter = M(message_text_x) - M(message_pad_x);
+    float clock_x = ma->x + M(message_pad_x) + (gutter - tw.x) * 0.5f - 4.0f;
+    ccord_text_draw(r, clock, cl, clock_x, content_y + (lh - ui_line_h(ui, ts.size)) * 0.5f, &ts, 0.0f);
+    dc_record_ts_hit(ui, (ccord_rect){clock_x, content_y, tw.x, lh}, (int64_t)lm->timestamp_ms, false);
+  }
+
+  float wrap = dc_content_wrap(ui, ma->w);
+  ccord_color body_c = COL(text_normal);
+  (void)ui_resolve_color_spec(ui, lm->text_color, &body_c);
+  const char *content = lm->content ? lm->content : "";
+  size_t content_len = strlen(content);
+  const local_msg_parsed *lp = dc_local_parsed_get(ui, lm);
+  bool has_cards = lp && (lp->natts > 0 || lp->nembeds > 0);
+  float body_h = 0.0f;
+  if (content_len > 0 || !has_cards) {
+    ui->current_drawing_msg_id = lm->local_id | (1ULL << 62);
+    body_h = dc_md_body_walk(ui, r, content, content_len, text_x, content_y, wrap, body_c, true);
+    ui->current_drawing_msg_id = CCORD_ID_NONE;
+  }
+  if (has_cards) {
+    float card_y = content_y + body_h + M(message_line_gap) * 0.5f;
+    float card_w = maxf(ma->w - M(message_text_x) - M(message_pad_x), 40.0f);
+    (void)dc_local_cards_walk(ui, r, lm, text_x, card_y, card_w, true);
+  }
+  if (lm->dismissible && !ui->touch_mode && row_hv > 0.004f) {
+    ccord_rect xrc = {ma->x + ma->w - 38.0f, y + skip + 4.0f, 22.0f, 22.0f};
+    ccord_push_alpha(r, row_hv);
+    bool xhov = ui_in_rect(ui->mx, ui->my, xrc);
+    ccord_color xfg = uis_icon_button(ui, r, xrc, (uis_state){.hover = xhov}, "tl_lmsg_x", lm->local_id);
+    ui_icon_close(r, xrc.x + xrc.w * 0.5f, xrc.y + xrc.h * 0.5f, 11.0f, xfg);
+    ccord_pop_alpha(r);
+    if (hover) ui_local_messages_record_dismiss_hit(ui, lm->local_id, xrc);
+  }
+}
+
 static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *ma,
                      ccord_rect *out_avatar_rect, ccord_rect *out_author_rect)
 {
@@ -948,12 +1106,17 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
   ccord_renderer *r = c->r;
   if (out_avatar_rect) *out_avatar_rect = (ccord_rect){0, 0, 0, 0};
   if (out_author_rect) *out_author_rect = (ccord_rect){0, 0, 0, 0};
+  const ccord_local_message *lm = dc_view_local_at(ui, c->channel, i);
+  if (lm) {
+    draw_local_timeline_row(c, i, lm, y, h, ma, out_avatar_rect, out_author_rect);
+    return;
+  }
   size_t store_i = 0;
   const ccord_message *m = dc_view_message_at(ui, c->channel, i, &store_i);
   if (!m) return;
-  bool has_date = store_i != SIZE_MAX && ui_row_has_date_divider(ui, c->channel, store_i, m);
+  bool has_date = store_i != SIZE_MAX && ui_view_has_date_divider(ui, c->channel, i);
   bool has_new = store_i != SIZE_MAX && ui_row_has_new_divider(ui, c->channel, store_i, m);
-  if (dc_is_dm_intro_row(ui, c->channel, store_i)) {
+  if (dc_is_dm_intro_row(ui, c->channel, i)) {
     float intro_h = dc_dm_intro_walk(ui, r, ccord_store_channel(ui->d.store, c->channel),
                                      ma->x + M(message_pad_x), y, ma->w - 2.0f * M(message_pad_x),
                                      has_date || has_new, true);
@@ -983,7 +1146,7 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
   float wave_h = has_wave ? dc_wave_cta_walk(ui, r, m, ma->x + M(message_pad_x), 0.0f,
                                              ma->w - 2.0f * M(message_pad_x), false)
                           : 0.0f;
-  bool compact = !is_system && store_i != SIZE_MAX && ui_is_compact(ui, c->channel, store_i, m);
+  bool compact = !is_system && store_i != SIZE_MAX && ui_view_is_compact(ui, c->channel, i);
   decor_info d;
   dc_decor_scan(ui, m, compact, &d);
   bool menu_target = ui->menu.open && ui->menu.ctx.target == CCORD_MENU_MESSAGE && ui->menu.ctx.message_id == m->id;
@@ -1001,14 +1164,12 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
   float row_h_vis = maxf(h - skip - dc_tail_pad(ui, i) - wave_h, 0.0f);
   if (has_wave && !menu_target && ui->mouse_in && ui->my > y + skip + row_h_vis) hover = false;
   bool ephem = ccord_message_is_ephemeral(m);
-  ccord_color dec_accent = {0}, dec_tint = {0};
-  bool dec_collapsed = false;
-  const char *dec_collapse_label = nullptr;
-  bool has_dec_style = ui_decor_message_style(ui, m->id, &dec_accent, &dec_tint, &dec_collapsed, &dec_collapse_label);
-  if (dec_collapsed) {
+  ui_msg_style_ov dec_st = {0};
+  bool has_dec_style = ui_decor_message_style_ex(ui, m->id, &dec_st);
+  if (dec_st.collapsed) {
     ccord_rect crow = {ma->x + M(message_pad_x), y + 2.0f, maxf(ma->w - M(message_pad_x) * 2.0f, 40.0f), 24.0f};
     ccord_draw_rrect(r, crow, 4.0f, COL(bg_secondary));
-    const char *clbl = (dec_collapse_label && dec_collapse_label[0]) ? dec_collapse_label : "Message collapsed by plugin";
+    const char *clbl = (dec_st.collapse_label && dec_st.collapse_label[0]) ? dec_st.collapse_label : "Message collapsed by plugin";
     ccord_text_style cst = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f, COL(text_muted));
     ccord_text_draw_ellipsis(r, clbl, strlen(clbl), crow.x + 10.0f, crow.y + 4.0f, crow.w - 20.0f, &cst);
     return;
@@ -1021,9 +1182,15 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
     ccord_draw_rect(r, (ccord_rect){ma->x, y + skip, 2.0f, row_h_vis}, COL(status_idle));
   }
   if (has_dec_style) {
-    if (dec_tint.a > 0) ccord_draw_rect(r, (ccord_rect){ma->x, y + skip, ma->w, row_h_vis}, dec_tint);
-    if (dec_accent.a > 0) ccord_draw_rect(r, (ccord_rect){ma->x, y + skip, 3.0f, row_h_vis}, dec_accent);
+    if (dec_st.tint.a > 0) ccord_draw_rect(r, (ccord_rect){ma->x, y + skip, ma->w, row_h_vis}, dec_st.tint);
+    if (dec_st.accent.a > 0) ccord_draw_rect(r, (ccord_rect){ma->x, y + skip, 3.0f, row_h_vis}, dec_st.accent);
   }
+  float dec_row_alpha = 1.0f;
+  if (has_dec_style) {
+    if (dec_st.has_opacity) dec_row_alpha = dec_st.opacity;
+    else if (dec_st.dim) dec_row_alpha = 0.55f;
+  }
+  if (dec_row_alpha < 0.999f) ccord_push_alpha(r, dec_row_alpha);
   if (ui->jump_highlight_msg_id == m->id && ui->now_ms < ui->jump_highlight_until_ms) {
     float flash = jump_flash_strength(ui);
     ui->dbg_jump_flash = flash;
@@ -1074,7 +1241,9 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
       float ax = ma->x + M(message_pad_x);
       float ay = y + top + 2.0f;
       float asz = M(avatar_size);
-      ui_draw_avatar(ui, r, &row_u, ax + asz * 0.5f, ay + asz * 0.5f, asz, (ccord_color){0, 0, 0, 0}, false);
+      ui_draw_avatar_ex(ui, r, &row_u, ax + asz * 0.5f, ay + asz * 0.5f, asz, (ccord_color){0, 0, 0, 0}, false,
+                        has_dec_style && dec_st.avatar_grayscale,
+                        (has_dec_style && dec_st.has_avatar_opacity) ? dec_st.avatar_opacity : 1.0f);
       ccord_rect av_rect = {ax, ay, asz, asz};
       if (out_avatar_rect) *out_avatar_rect = av_rect;
       dc_record_user_hit(ui, av_rect, m->author_id);
@@ -1082,6 +1251,7 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
     bool has_role;
     ccord_color rc = ui_role_color(ui, guild, m->author_id, &has_role);
     ccord_color name_col = (has_role && ui->settings_role_color_mode == 0) ? rc : COL(text_header);
+    if (has_dec_style && dec_st.has_author_color) name_col = dec_st.author_color;
     ccord_text_style ns = ui_style(ui, CCORD_FONT_BOLD, M(font_size_base), name_col);
     float nw = ccord_text_measure(r, name, strlen(name), &ns, 0.0f).x;
     float max_name = maxf(ma->w - M(message_text_x) - M(message_pad_x) - 160.0f, 60.0f);
@@ -1194,7 +1364,8 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
     ui->dbg_system_rows++;
   } else {
     ccord_color body_c = COL(text_normal);
-    if (m->send_state == CCORD_MSG_SEND_PENDING) body_c = ui_alpha(COL(text_normal), 0.55f);
+    if (has_dec_style && dec_st.has_text_color) body_c = dec_st.text_color;
+    if (m->send_state == CCORD_MSG_SEND_PENDING) body_c = ui_alpha(body_c, 0.55f);
     else if (m->send_state == CCORD_MSG_SEND_FAILED) body_c = COL(danger);
     if (compact && m->tts) ui->dbg_tts_badges++;   // the "(tts)" body marker is this row's badge
     body_h = no_body
@@ -1246,6 +1417,7 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
     float wy = after_cards_y + M(message_line_gap) * 0.5f;
     (void)dc_wave_cta_walk(ui, r, m, ma->x + M(message_pad_x), wy, ma->w - 2.0f * M(message_pad_x), true);
   }
+  if (dec_row_alpha < 0.999f) ccord_pop_alpha(r);
   if (!ui->touch_mode && row_hv > 0.004f && !message_send_unconfirmed(m)) {
     // Unconfirmed local echoes have no server-side message yet: reactions, reply, pin and the overflow
     // menu would all fail against their synthetic ids, so only Retry is offered.
@@ -1520,9 +1692,20 @@ static void maybe_request_older(ccord_ui *ui, size_t first_visible)
 {
   // Search keeps the full timeline, so paging older history works while the panel is open too.
   if (!ui->scroll_up_pending || !ui->d.session) return;
-  if (first_visible > 5 || ui->vlist.stick_bottom || ui->vlist.count == 0) return;
+  if (ui->vlist.stick_bottom || ui->vlist.count == 0) return;
   ccord_id ch = ccord_store_selected_channel(ui->d.store);
   if (ch == CCORD_ID_NONE) return;
+  // Find the first live store row index at or after first_visible so unclipped local rows never block paging.
+  size_t first_live_si = SIZE_MAX;
+  for (size_t vi = first_visible; vi < ui->vlist.count; vi++) {
+    bool is_loc = false;
+    size_t si = SIZE_MAX;
+    if (ui_timeline_row_info(ui, ch, vi, &is_loc, &si, nullptr, nullptr, nullptr, nullptr, nullptr) && !is_loc && si != SIZE_MAX) {
+      first_live_si = si;
+      break;
+    }
+  }
+  if (first_live_si != SIZE_MAX && first_live_si > 5) return;
   if (!ccord_session_history_has_more(ui->d.session, ch)) {
     ui->scroll_up_pending = false;
     return;
@@ -1704,6 +1887,10 @@ void ui_draw_messages(ccord_ui *ui, ccord_renderer *r)
     return;
   }
   ccord_id ch = ccord_store_selected_channel(ui->d.store);
+  dc_timeline_sync(ui, ch);
+  if (ui->d.contrib && ccord_contrib_local_message_count(ui->d.contrib, ch) > 0) {
+    ui_panels_sync_textures(ui, r);
+  }
   if (ui->vlist.count == 0) {
     draw_empty_state(ui, r, &ma);
     ui_local_messages_draw(ui, r, ch, ma);
@@ -1754,7 +1941,12 @@ void ui_draw_messages(ccord_ui *ui, ccord_renderer *r)
       ccord_pop_alpha(r);
     }
     chat_seen_note(ui, row_msg);
-    if (ui->nvis < UI_VISIBLE_ROWS_MAX) ui->vis[ui->nvis++] = (vis_row){i, y, h, av_rect, au_rect, row_msg, enter, dy};
+    bool row_is_local = false;
+    uint64_t row_local_id = 0;
+    (void)ui_timeline_row_info(ui, ch, i, &row_is_local, nullptr, &row_local_id, nullptr, nullptr, nullptr, nullptr);
+    if (ui->nvis < UI_VISIBLE_ROWS_MAX) {
+      ui->vis[ui->nvis++] = (vis_row){i, y, h, av_rect, au_rect, row_msg, enter, dy, row_is_local, row_local_id};
+    }
     y += h;
     drawn++;
   }

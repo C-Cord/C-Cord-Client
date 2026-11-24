@@ -668,7 +668,7 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
       else if (strcmp(ts, "guild_badge") == 0) dt = CCORD_DECOR_GUILD_BADGE;
       else { pl_reply_err(m, p, id, "invalid_argument", "unknown decorate target"); return true; }
 
-      size_t idl = 0, al = 0, tnl = 0, cll = 0;
+      size_t idl = 0, al = 0, tnl = 0, cll = 0, txl = 0, aul = 0;
       const char *did = pl_str_param(sp, "id", &idl);
       ccord_id tid = pl_parse_id_param(sp, "message_id");
       if (!tid) tid = pl_parse_id_param(sp, "user_id");
@@ -677,9 +677,17 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
       if (!tid) tid = pl_parse_id_param(sp, "target_id");
       const char *acc_s = pl_str_param(sp, "accent_color", &al);
       if (!acc_s) acc_s = pl_str_param(sp, "accent_border", &al);
+      if (!acc_s) acc_s = pl_str_param(sp, "accent", &al);
       const char *tint_s = pl_str_param(sp, "tint_color", &tnl);
       if (!tint_s) tint_s = pl_str_param(sp, "background_tint", &tnl);
+      if (!tint_s) tint_s = pl_str_param(sp, "tint", &tnl);
+      const char *txt_s = pl_str_param(sp, "text_color", &txl);
+      const char *auth_s = pl_str_param(sp, "author_color", &aul);
       const char *clbl = pl_str_param(sp, "collapse_label", &cll);
+      const ccord_json *avop_j = ccord_json_get(sp, "avatar_opacity");
+      const ccord_json *op_j = ccord_json_get(sp, "opacity");
+      bool has_av_op = avop_j && ccord_json_type_of(avop_j) == CCORD_JSON_NUMBER;
+      bool has_op = op_j && ccord_json_type_of(op_j) == CCORD_JSON_NUMBER;
       int64_t prio = 0; (void)ccord_json_int64(ccord_json_get(sp, "priority"), &prio);
       ccord_buf wb; ccord_buf_init(&wb, 0);
       const ccord_json *wj = ccord_json_get(sp, "widget");
@@ -690,6 +698,15 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
         .owner = p->m.id, .decor_id = did ? did : "", .target = dt, .target_id = tid,
         .widget_json = wb.len ? ccord_buf_cstr(&wb) : "",
         .accent_rgba = ext_parse_hex_rgba(acc_s), .tint_rgba = ext_parse_hex_rgba(tint_s),
+        .text_rgba = ext_parse_hex_rgba(txt_s), .author_rgba = ext_parse_hex_rgba(auth_s),
+        .accent_color = acc_s ? acc_s : "", .tint_color = tint_s ? tint_s : "",
+        .text_color = txt_s ? txt_s : "", .author_color = auth_s ? auth_s : "",
+        .avatar_grayscale = ccord_json_bool(ccord_json_get(sp, "avatar_grayscale"), false),
+        .has_avatar_opacity = has_av_op,
+        .avatar_opacity = has_av_op ? (float)ccord_json_number(avop_j, 1.0) : 1.0f,
+        .dim = ccord_json_bool(ccord_json_get(sp, "dim"), false),
+        .has_opacity = has_op,
+        .opacity = has_op ? (float)ccord_json_number(op_j, 1.0) : 1.0f,
         .collapsed = ccord_json_bool(ccord_json_get(sp, "collapsed"), false),
         .collapse_label = clbl ? clbl : "", .priority = (int32_t)prio,
       };
@@ -901,6 +918,26 @@ void plugins_ext_on_decor_event(void *ud, const ccord_decorator_contribution *de
   ccord_jw_end_object(&w);
   ccord_jw_end_object(&w);
   if (ccord_jw_ok(&w)) pl_send_ntf(m, p, "decor.event", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+}
+
+void plugins_ext_on_local_msg_event(void *ud, const ccord_local_message *lm, const char *ev_type, float x, float y)
+{
+  ccord_plugins *m = ud;
+  plugin *p = lm ? pl_find_owner(m, lm->owner) : nullptr;
+  if (!p || p->state != CCORD_PLUGIN_READY || !ev_type || !ev_type[0]) return;
+  char id_fallback[32];
+  snprintf(id_fallback, sizeof id_fallback, "%llu", (unsigned long long)lm->local_id);
+  const char *ev_id = (lm->client_id && lm->client_id[0]) ? lm->client_id : id_fallback;
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "local_id"); ccord_jw_int(&w, (int64_t)lm->local_id);
+  ccord_jw_key(&w, "id"); ccord_jw_cstr(&w, ev_id);
+  ccord_jw_key(&w, "type"); ccord_jw_cstr(&w, ev_type);
+  ccord_jw_key(&w, "x"); ccord_jw_double(&w, (double)x);
+  ccord_jw_key(&w, "y"); ccord_jw_double(&w, (double)y);
+  ccord_jw_end_object(&w);
+  if (ccord_jw_ok(&w)) pl_send_ntf(m, p, "local_msg.event", ccord_buf_cstr(&b));
   ccord_buf_free(&b);
 }
 

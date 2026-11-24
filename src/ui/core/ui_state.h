@@ -32,7 +32,7 @@ struct ccord_ui {
   // caches rebuilt when the store revision or the selected guild changes
   uint64_t built_rev, built_lists_rev, built_contrib_rev;
   uint64_t built_chan_sig, built_member_sig;
-  uint64_t synced_msg_rev, synced_view_key;
+  uint64_t synced_msg_rev, synced_view_key, synced_local_rev;
   ccord_id synced_msg_ch;
   uint64_t dbg_list_rebuilds;                  // how many times the channel and member rows were rebuilt (tests)
   ccord_id built_guild;
@@ -79,6 +79,7 @@ struct ccord_ui {
   bool hover_search, hover_pin, hover_inbox, hover_voice_back;
   int hover_settings_page;
   ccord_id hover_message_id, hover_user_id;
+  uint64_t hover_local_msg_id;
   float guild_anim[CCORD_MAX_GUILDS];
   float pill_h[CCORD_MAX_GUILDS];
   uint64_t last_anim_ms;

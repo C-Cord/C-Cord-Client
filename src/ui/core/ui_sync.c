@@ -521,7 +521,7 @@ bool ui_jump_to_message(ccord_ui *ui, ccord_id target_msg_id)
   size_t count = ui_view_count(ui);
   for (size_t i = 0; i < count; i++) {
     size_t raw = (size_t)ui_view_index(ui, i);
-    if ((raw & (1ULL << 62)) != 0) continue;
+    if (raw == SIZE_MAX || (raw & (1ULL << 62)) != 0) continue;
     const ccord_message *m = ccord_store_message_at(ui->d.store, ch, raw);
     if (m && m->id == target_msg_id) {
       ui_blocked_reveal_for(ui, ch, raw);   // a jump into a collapsed run opens the run
@@ -561,6 +561,7 @@ bool ui_jump_to_message(ccord_ui *ui, ccord_id target_msg_id)
 static struct {
   const ccord_ui *owner;
   ccord_id channel, msg_id;
+  bool is_local;
   size_t index;
 } g_anchor;
 
@@ -570,10 +571,23 @@ void ui_anchor_remember(ccord_ui *ui)
   g_anchor.owner = ui;
   g_anchor.channel = ch;
   g_anchor.msg_id = CCORD_ID_NONE;
+  g_anchor.is_local = false;
   if (ch == CCORD_ID_NONE || ui->vlist.stick_bottom || ui->vlist.count == 0) return;
-  if (ui->vlist.count != ccord_store_message_count(ui->d.store, ch)) return;
-  const ccord_message *m = ccord_store_message_at(ui->d.store, ch, ui->vlist.anchor_index);
+  if (ui->vlist.count != ui_timeline_count(ui, ch)) return;
+  bool is_loc = false;
+  size_t si = SIZE_MAX;
+  uint64_t lid = 0;
+  if (!ui_timeline_row_info(ui, ch, ui->vlist.anchor_index, &is_loc, &si, &lid, nullptr, nullptr, nullptr, nullptr)) return;
+  if (is_loc) {
+    if (lid == 0) return;
+    g_anchor.is_local = true;
+    g_anchor.msg_id = lid;
+    g_anchor.index = ui->vlist.anchor_index;
+    return;
+  }
+  const ccord_message *m = si != SIZE_MAX ? ccord_store_message_at(ui->d.store, ch, si) : nullptr;
   if (!m) return;
+  g_anchor.is_local = false;
   g_anchor.msg_id = m->id;
   g_anchor.index = ui->vlist.anchor_index;
 }
@@ -583,16 +597,8 @@ static size_t ui_anchor_target(const ccord_ui *ui, ccord_id ch)
 {
   if (g_anchor.owner != ui || g_anchor.channel != ch || g_anchor.msg_id == CCORD_ID_NONE) return SIZE_MAX;
   if (ui->vlist.anchor_index != g_anchor.index) return SIZE_MAX;
-  size_t lo = 0, hi = ccord_store_message_count(ui->d.store, ch);
-  while (lo < hi) {
-    size_t mid = lo + (hi - lo) / 2;
-    const ccord_message *m = ccord_store_message_at(ui->d.store, ch, mid);
-    if (!m) return SIZE_MAX;
-    if (m->id == g_anchor.msg_id) return mid;
-    if (m->id < g_anchor.msg_id) lo = mid + 1;
-    else hi = mid;
-  }
-  return SIZE_MAX;
+  if (g_anchor.is_local) return ui_timeline_view_index_for_local_id(ui, ch, g_anchor.msg_id);
+  return ui_timeline_view_index_for_msg_id(ui, ch, g_anchor.msg_id);
 }
 
 // Brings the virtual list in line with the store: channel switch -> jump to bottom; count change -> grow/shrink.
@@ -600,15 +606,17 @@ void ui_sync_messages(ccord_ui *ui)
 {
   ccord_id ch = ccord_store_selected_channel(ui->d.store);
   uint64_t rev = ccord_store_revision(ui->d.store);
+  uint64_t local_rev = ui->d.contrib ? ccord_contrib_local_messages_revision(ui->d.contrib) : 0;
   uint64_t svk = ui->view_key ^ ((uint64_t)ui->nignored_users << 48) ^
                  (ui->discovery_open ? 2ull : 0ull) ^ (ui->dm_friends_view ? 4ull : 0ull) ^
                  (ui->dm_requests_view ? 8ull : 0ull) ^ (ui->new_marker_active ? 16ull : 0ull);
   for (size_t i = 0; i < ui->nignored_users; i++) svk = uc_sig_mix_u64(svk, ui->ignored_users[i]);
-  if (rev == ui->synced_msg_rev && ch == ui->synced_msg_ch && ch == ui->vlist_channel &&
+  if (rev == ui->synced_msg_rev && local_rev == ui->synced_local_rev &&
+      ch == ui->synced_msg_ch && ch == ui->vlist_channel &&
       !ui->search_open && ui->view_key != 0 && svk == ui->synced_view_key &&
       ui->nav_hist_len > 0 &&
       ui->pending_jump_msg_id == CCORD_ID_NONE && ui->stage_channel == CCORD_ID_NONE &&
-      ui->vlist.count == ccord_store_message_count(ui->d.store, ch)) {
+      ui->vlist.count == ui_timeline_count(ui, ch)) {
     return;
   }
   bool switched = ch != ui->vlist_channel;
@@ -710,6 +718,12 @@ void ui_sync_messages(ccord_ui *ui)
   }
   // Search only rebuilds the side panel's vmap; the timeline keeps its content and scroll position.
   ui_rebuild_view(ui, false);
+  bool local_changed = (local_rev != ui->synced_local_rev);
+  dc_timeline_sync(ui, ch);
+  if (local_changed) {
+    ccord_vlist_invalidate_all(&ui->vlist);
+    ui->dirty = true;
+  }
   size_t count = ui_view_count(ui);
   size_t anchor_to = ui_anchor_target(ui, ch);
   if (count != ui->vlist.count) {
@@ -754,6 +768,7 @@ void ui_sync_messages(ccord_ui *ui)
   }
   ui_record_nav_location(ui);
   ui->synced_msg_rev = ccord_store_revision(ui->d.store);
+  ui->synced_local_rev = local_rev;
   ui->synced_msg_ch = ch;
   uint64_t end_svk = ui->view_key ^ ((uint64_t)ui->nignored_users << 48) ^
                      (ui->discovery_open ? 2ull : 0ull) ^ (ui->dm_friends_view ? 4ull : 0ull) ^

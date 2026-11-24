@@ -320,6 +320,58 @@ bool ui_is_compact(const ccord_ui *ui, ccord_id channel_id, size_t i, const ccor
   return dt >= 0 && (float)dt < M(message_merge_ms);
 }
 
+bool ui_view_has_date_divider(const ccord_ui *ui, ccord_id channel_id, size_t view_i)
+{
+  bool is_loc = false;
+  size_t si = SIZE_MAX;
+  int64_t ts = 0;
+  if (!ui_timeline_row_info(ui, channel_id, view_i, &is_loc, &si, nullptr, &ts, nullptr, nullptr, nullptr)) return false;
+  if (ts <= 0) return false;
+  if (view_i == 0) return true;
+  int64_t prev_ts = 0;
+  if (!ui_timeline_row_info(ui, channel_id, view_i - 1u, nullptr, nullptr, nullptr, &prev_ts, nullptr, nullptr, nullptr) || prev_ts <= 0) {
+    return true;
+  }
+  return !ccord_timefmt_same_day(prev_ts, ts, ui->use_utc);
+}
+
+bool ui_view_is_compact(const ccord_ui *ui, ccord_id channel_id, size_t view_i)
+{
+  bool is_loc = false;
+  size_t si = SIZE_MAX;
+  int64_t ts = 0;
+  ccord_id aid = CCORD_ID_NONE;
+  ccord_local_compact cmode = CCORD_LOCAL_COMPACT_AUTO;
+  if (!ui_timeline_row_info(ui, channel_id, view_i, &is_loc, &si, nullptr, &ts, &aid, nullptr, &cmode)) return false;
+
+  if (is_loc) {
+    if (cmode == CCORD_LOCAL_COMPACT_NEVER) return false;
+    if (cmode == CCORD_LOCAL_COMPACT_ALWAYS) return !ui_view_has_date_divider(ui, channel_id, view_i);
+    if (view_i == 0 || aid == CCORD_ID_NONE) return false;
+    if (ui_view_has_date_divider(ui, channel_id, view_i)) return false;
+  } else {
+    const ccord_message *m = si != SIZE_MAX ? ccord_store_message_at(ui->d.store, channel_id, si) : nullptr;
+    if (view_i == 0 || !m || ccord_message_is_ephemeral(m)) return false;
+    if (m->rich && ccord_message_type_is_system(m->rich->type)) return false;
+    if (ui_view_has_date_divider(ui, channel_id, view_i) || ui_row_has_new_divider(ui, channel_id, si, m)) return false;
+  }
+
+  bool prev_loc = false, prev_break = false;
+  size_t prev_si = SIZE_MAX;
+  int64_t prev_ts = 0;
+  ccord_id prev_aid = CCORD_ID_NONE;
+  if (!ui_timeline_row_info(ui, channel_id, view_i - 1u, &prev_loc, &prev_si, nullptr, &prev_ts, &prev_aid, &prev_break, nullptr)) {
+    return false;
+  }
+  if (prev_break || prev_aid == CCORD_ID_NONE || prev_aid != aid) return false;
+  if (!prev_loc) {
+    const ccord_message *pm = prev_si != SIZE_MAX ? ccord_store_message_at(ui->d.store, channel_id, prev_si) : nullptr;
+    if (!pm || ccord_message_is_ephemeral(pm) || (pm->rich && ccord_message_type_is_system(pm->rich->type))) return false;
+  }
+  int64_t dt = ts - prev_ts;
+  return dt >= 0 && (float)dt < M(message_merge_ms);
+}
+
 bool ui_messages_compact(const ccord_ui *ui)
 {
   return ui->settings_display_mode == 0;
@@ -956,12 +1008,17 @@ bool ccord_ui_go_live_share_audio(const ccord_ui *ui)
 
 size_t ui_view_count(const ccord_ui *ui)
 {
-  return ccord_store_message_count(ui->d.store, ccord_store_selected_channel(ui->d.store));
+  return ui_timeline_count(ui, ccord_store_selected_channel(ui->d.store));
 }
 
 ccord_id ui_view_index(const ccord_ui *ui, size_t i)
 {
-  (void)ui;
+  bool is_loc = false;
+  size_t si = SIZE_MAX;
+  ccord_id ch = ccord_store_selected_channel(ui->d.store);
+  if (ui_timeline_row_info(ui, ch, i, &is_loc, &si, nullptr, nullptr, nullptr, nullptr, nullptr)) {
+    return is_loc ? (ccord_id)SIZE_MAX : (ccord_id)si;
+  }
   return (ccord_id)i;
 }
 

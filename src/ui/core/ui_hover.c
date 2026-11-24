@@ -202,9 +202,14 @@ hover_state uc_compute_hover(ccord_ui *ui)
                   ui_in_rect(x, y, ui->hover_bar_rect);
     for (size_t i = 0; i < ui->nvis; i++) {
       if (y >= ui->vis[i].y && y < ui->vis[i].y + ui->vis[i].h) {
-        const ccord_message *m = ccord_store_message_at(ui->d.store, ch, (size_t)ui_view_index(ui, ui->vis[i].index));
-        if (m) {
-          h.msg = m->id;
+        if (ui->vis[i].is_local) {
+          h.local_msg_id = ui->vis[i].local_id;
+        } else {
+          size_t raw = (size_t)ui_view_index(ui, ui->vis[i].index);
+          if (raw != SIZE_MAX) {
+            const ccord_message *m = ccord_store_message_at(ui->d.store, ch, raw);
+            if (m) h.msg = m->id;
+          }
         }
         break;
       }
@@ -284,7 +289,8 @@ bool uc_update_hover(ccord_ui *ui)
   bool changed = h.guild != ui->hover_guild_idx || h.rail_slot != ui->hover_rail_slot ||
                  h.crow != ui->hover_crow || h.mrow != ui->hover_mrow ||
                  h.link != ui->hover_link || h.ts_hit != ui->hover_ts_hit || h.gear != ui->hover_gear ||
-                 h.header != ui->hover_guild_header || h.msg != ui->hover_message_id || h.user != ui->hover_user_id ||
+                 h.header != ui->hover_guild_header || h.msg != ui->hover_message_id ||
+                 h.local_msg_id != ui->hover_local_msg_id || h.user != ui->hover_user_id ||
                  h.sb != ui->hover_scrollbar || h.members != ui->hover_members_btn ||
                  h.mute != ui->hover_mute || h.deafen != ui->hover_deafen || h.camera != ui->hover_camera ||
                  h.screen != ui->hover_screen || h.disconnect != ui->hover_disconnect ||
@@ -300,6 +306,7 @@ bool uc_update_hover(ccord_ui *ui)
   ui->hover_gear = h.gear;
   ui->hover_guild_header = h.header;
   ui->hover_message_id = h.msg;
+  ui->hover_local_msg_id = h.local_msg_id;
   ui->hover_user_id = h.user;
   ui->hover_scrollbar = h.sb;
   ui->hover_members_btn = h.members;

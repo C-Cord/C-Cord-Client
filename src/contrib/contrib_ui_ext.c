@@ -16,6 +16,10 @@ static void free_decor(ccord_decorator_contribution *d)
   contrib_free_str(d->owner);
   contrib_free_str(d->decor_id);
   contrib_free_str(d->widget_json);
+  contrib_free_str(d->accent_color);
+  contrib_free_str(d->tint_color);
+  contrib_free_str(d->text_color);
+  contrib_free_str(d->author_color);
   contrib_free_str(d->collapse_label);
 }
 
@@ -49,10 +53,17 @@ static void free_actbtn(ccord_action_btn_contribution *b)
 static void free_local_msg(ccord_local_message *m)
 {
   contrib_free_str(m->owner);
+  contrib_free_str(m->client_id);
   contrib_free_str(m->author_name);
+  contrib_free_str(m->author_color);
   contrib_free_str(m->author_badge);
+  contrib_free_str(m->badge_color);
   contrib_free_str(m->content);
+  contrib_free_str(m->text_color);
+  contrib_free_str(m->accent_color);
+  contrib_free_str(m->tint_color);
   contrib_free_str(m->embed_json);
+  contrib_free_str(m->attachments_json);
 }
 
 static void free_ac(ccord_autocomplete_provider *a)
@@ -147,6 +158,7 @@ bool contrib_ext_remove_owner(ccord_contrib *c, const char *owner)
       free_local_msg(&c->local_msgs[i - 1]);
       memmove(&c->local_msgs[i - 1], &c->local_msgs[i], (c->nlocal_msgs - i) * sizeof *c->local_msgs);
       c->nlocal_msgs--;
+      c->local_msgs_rev++;
       changed = true;
     }
   }
@@ -172,6 +184,7 @@ bool contrib_ext_remove_owner(ccord_contrib *c, const char *owner)
 }
 
 uint64_t ccord_contrib_decorators_revision(const ccord_contrib *c) { return c ? c->decors_rev : 0; }
+uint64_t ccord_contrib_local_messages_revision(const ccord_contrib *c) { return c ? c->local_msgs_rev : 0; }
 
 // ---- Decorators ----
 ccord_status ccord_contrib_set_decorator(ccord_contrib *c, const ccord_decorator_contribution *spec, ccord_error *err)
@@ -185,6 +198,12 @@ ccord_status ccord_contrib_set_decorator(ccord_contrib *c, const ccord_decorator
   if (strlen(wj) > 65536u || !ccord_utf8_valid(wj, strlen(wj))) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: bad decorator widget JSON");
   }
+  float av_op = spec->has_avatar_opacity ? spec->avatar_opacity : 1.0f;
+  if (av_op < 0.0f) av_op = 0.0f;
+  if (av_op > 1.0f) av_op = 1.0f;
+  float row_op = spec->has_opacity ? spec->opacity : 1.0f;
+  if (row_op < 0.15f) row_op = 0.15f;
+  if (row_op > 1.0f) row_op = 1.0f;
   ccord_decorator_contribution d = {
     .owner = ccord_strdup(spec->owner),
     .decor_id = ccord_strdup(spec->decor_id),
@@ -193,12 +212,25 @@ ccord_status ccord_contrib_set_decorator(ccord_contrib *c, const ccord_decorator
     .widget_json = ccord_strdup(wj),
     .accent_rgba = spec->accent_rgba,
     .tint_rgba = spec->tint_rgba,
+    .text_rgba = spec->text_rgba,
+    .author_rgba = spec->author_rgba,
+    .accent_color = dup_opt(spec->accent_color),
+    .tint_color = dup_opt(spec->tint_color),
+    .text_color = dup_opt(spec->text_color),
+    .author_color = dup_opt(spec->author_color),
+    .avatar_grayscale = spec->avatar_grayscale,
+    .has_avatar_opacity = spec->has_avatar_opacity,
+    .avatar_opacity = av_op,
+    .dim = spec->dim,
+    .has_opacity = spec->has_opacity,
+    .opacity = row_op,
     .collapsed = spec->collapsed,
     .collapse_label = dup_opt(spec->collapse_label),
     .priority = spec->priority,
     .revision = ++c->decors_rev,
   };
-  if (!d.owner || !d.decor_id || !d.widget_json || !d.collapse_label) {
+  if (!d.owner || !d.decor_id || !d.widget_json || !d.accent_color || !d.tint_color ||
+      !d.text_color || !d.author_color || !d.collapse_label) {
     free_decor(&d);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "contrib: out of memory");
   }
@@ -497,7 +529,111 @@ bool ccord_contrib_click_action_btn(ccord_contrib *c, const char *owner, const c
   return false;
 }
 
-// ---- Local Ephemeral Messages ----
+// ---- Local Ephemeral & Positioned Timeline Messages ----
+
+static bool local_client_id_ok(const char *s)
+{
+  if (!s || !s[0]) return true;
+  size_t n = strlen(s);
+  if (n > 64u) return false;
+  for (size_t i = 0; i < n; i++) {
+    char ch = s[i];
+    bool ok = (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||
+              ch == '_' || ch == '.' || ch == ':' || ch == '-';
+    if (!ok) return false;
+  }
+  return true;
+}
+
+static bool local_color_ok(const char *s)
+{
+  return !s || !s[0] || (strlen(s) <= 40u && ccord_utf8_valid(s, strlen(s)));
+}
+
+static float clamp_av_opacity(float v)
+{
+  if (v < 0.0f) return 0.0f;
+  if (v > 1.0f) return 1.0f;
+  return v;
+}
+
+static bool local_msg_build(const ccord_local_message *src, uint64_t lid, uint64_t rev,
+                            ccord_local_message *out, ccord_error *err)
+{
+  const char *cid = src->client_id ? src->client_id : "";
+  const char *ej = src->embed_json ? src->embed_json : "";
+  const char *aj = src->attachments_json ? src->attachments_json : "";
+  const char *cnt = src->content ? src->content : "";
+  if (!local_client_id_ok(cid) ||
+      !local_color_ok(src->author_color) || !local_color_ok(src->badge_color) ||
+      !local_color_ok(src->text_color) || !local_color_ok(src->accent_color) || !local_color_ok(src->tint_color)) {
+    (void)ccord_error_set(err, CCORD_ERR_INVALID, "contrib: invalid local message id or color");
+    return false;
+  }
+  if (strlen(cnt) > 16384u || strlen(ej) > 65536u || strlen(aj) > 16384u ||
+      !ccord_utf8_valid(cnt, strlen(cnt)) || !ccord_utf8_valid(ej, strlen(ej)) || !ccord_utf8_valid(aj, strlen(aj))) {
+    (void)ccord_error_set(err, CCORD_ERR_INVALID, "contrib: local message payload invalid or too large");
+    return false;
+  }
+  const char *def_badge = (src->position == CCORD_LOCAL_POS_TIMELINE) ? "" : "PLUGIN";
+  const char *badge = src->author_badge != nullptr ? src->author_badge : def_badge;
+  const char *aname = (src->author_name && src->author_name[0]) ? src->author_name : src->owner;
+  ccord_local_message m = {
+    .owner = ccord_strdup(src->owner),
+    .local_id = lid,
+    .client_id = ccord_strdup(cid),
+    .channel_id = src->channel_id,
+    .position = src->position,
+    .sort_id = src->sort_id,
+    .after_message_id = src->after_message_id,
+    .before_message_id = src->before_message_id,
+    .author_id = src->author_id,
+    .author_name = dup_opt(aname),
+    .author_color = dup_opt(src->author_color),
+    .author_badge = dup_opt(badge),
+    .badge_color = dup_opt(src->badge_color),
+    .content = ccord_strdup(cnt),
+    .text_color = dup_opt(src->text_color),
+    .accent_color = dup_opt(src->accent_color),
+    .tint_color = dup_opt(src->tint_color),
+    .embed_json = ccord_strdup(ej),
+    .attachments_json = ccord_strdup(aj),
+    .timestamp_ms = src->timestamp_ms,
+    .dismissible = src->dismissible,
+    .avatar_grayscale = src->avatar_grayscale,
+    .has_avatar_opacity = src->has_avatar_opacity,
+    .avatar_opacity = src->has_avatar_opacity ? clamp_av_opacity(src->avatar_opacity) : 1.0f,
+    .compact_mode = src->compact_mode,
+    .break_group = src->break_group,
+    .clip_to_history = src->clip_to_history,
+    .has_on_event = src->has_on_event,
+    .revision = rev,
+  };
+  if (!m.owner || !m.client_id || !m.author_name || !m.author_color || !m.author_badge ||
+      !m.badge_color || !m.content || !m.text_color || !m.accent_color || !m.tint_color ||
+      !m.embed_json || !m.attachments_json) {
+    free_local_msg(&m);
+    (void)ccord_error_set(err, CCORD_ERR_NOMEM, "oom");
+    return false;
+  }
+  *out = m;
+  return true;
+}
+
+static bool evict_oldest_bottom(ccord_contrib *c, const char *owner_filter, ccord_id ch_filter)
+{
+  for (size_t i = 0; i < c->nlocal_msgs; i++) {
+    if (c->local_msgs[i].position != CCORD_LOCAL_POS_BOTTOM) continue;
+    if (owner_filter && strcmp(c->local_msgs[i].owner, owner_filter) != 0) continue;
+    if (ch_filter != CCORD_ID_NONE && c->local_msgs[i].channel_id != ch_filter) continue;
+    free_local_msg(&c->local_msgs[i]);
+    memmove(&c->local_msgs[i], &c->local_msgs[i + 1], (c->nlocal_msgs - i - 1u) * sizeof c->local_msgs[0]);
+    c->nlocal_msgs--;
+    return true;
+  }
+  return false;
+}
+
 ccord_status ccord_contrib_add_local_message(ccord_contrib *c, const ccord_local_message *msg,
                                              uint64_t *out_local_id, ccord_error *err)
 {
@@ -505,10 +641,44 @@ ccord_status ccord_contrib_add_local_message(ccord_contrib *c, const ccord_local
   if (!c || !msg || !contrib_text_ok(msg->owner, CONTRIB_OWNER_MAX, false) || msg->channel_id == CCORD_ID_NONE) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: bad local message");
   }
-  if (c->nlocal_msgs >= 128u) {
-    free_local_msg(&c->local_msgs[0]);
-    memmove(&c->local_msgs[0], &c->local_msgs[1], (c->nlocal_msgs - 1u) * sizeof c->local_msgs[0]);
-    c->nlocal_msgs--;
+  // Upsert when (owner, client_id) already exists.
+  if (msg->client_id && msg->client_id[0]) {
+    for (size_t i = 0; i < c->nlocal_msgs; i++) {
+      if (strcmp(c->local_msgs[i].owner, msg->owner) == 0 &&
+          c->local_msgs[i].client_id && strcmp(c->local_msgs[i].client_id, msg->client_id) == 0) {
+        uint64_t lid = c->local_msgs[i].local_id;
+        ccord_local_message repl = {0};
+        if (!local_msg_build(msg, lid, c->local_msgs_rev + 1u, &repl, err)) return err ? err->code : CCORD_ERR_INVALID;
+        free_local_msg(&c->local_msgs[i]);
+        c->local_msgs[i] = repl;
+        c->local_msgs_rev++;
+        c->revision++;
+        if (out_local_id) *out_local_id = lid;
+        return CCORD_OK;
+      }
+    }
+  }
+  // Enforce capacity: 1024 global, 256 per owner, 256 per channel.
+  enum { MAX_LOCAL_GLOBAL = 1024u, MAX_LOCAL_OWNER = 256u, MAX_LOCAL_CHANNEL = 256u };
+  size_t owner_cnt = 0, ch_cnt = 0;
+  for (size_t i = 0; i < c->nlocal_msgs; i++) {
+    if (strcmp(c->local_msgs[i].owner, msg->owner) == 0) owner_cnt++;
+    if (c->local_msgs[i].channel_id == msg->channel_id) ch_cnt++;
+  }
+  if (owner_cnt >= MAX_LOCAL_OWNER) {
+    if (msg->position != CCORD_LOCAL_POS_BOTTOM || !evict_oldest_bottom(c, msg->owner, CCORD_ID_NONE)) {
+      return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: per-plugin local message limit reached (256)");
+    }
+  }
+  if (ch_cnt >= MAX_LOCAL_CHANNEL) {
+    if (msg->position != CCORD_LOCAL_POS_BOTTOM || !evict_oldest_bottom(c, nullptr, msg->channel_id)) {
+      return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: per-channel local message limit reached (256)");
+    }
+  }
+  if (c->nlocal_msgs >= MAX_LOCAL_GLOBAL) {
+    if (msg->position != CCORD_LOCAL_POS_BOTTOM || !evict_oldest_bottom(c, nullptr, CCORD_ID_NONE)) {
+      return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: global local message limit reached (1024)");
+    }
   }
   if (c->nlocal_msgs == c->caplocal_msgs) {
     size_t nc = c->caplocal_msgs ? c->caplocal_msgs * 2u : 8u;
@@ -517,24 +687,74 @@ ccord_status ccord_contrib_add_local_message(ccord_contrib *c, const ccord_local
     c->local_msgs = g; c->caplocal_msgs = nc;
   }
   uint64_t lid = ++c->next_local_id;
-  ccord_local_message m = {
-    .owner = ccord_strdup(msg->owner),
-    .local_id = lid,
-    .channel_id = msg->channel_id,
-    .author_name = dup_opt(msg->author_name && msg->author_name[0] ? msg->author_name : msg->owner),
-    .author_badge = dup_opt(msg->author_badge && msg->author_badge[0] ? msg->author_badge : "PLUGIN"),
-    .content = dup_opt(msg->content),
-    .embed_json = dup_opt(msg->embed_json),
-    .timestamp_ms = msg->timestamp_ms,
-    .dismissible = msg->dismissible,
-  };
-  if (!m.owner || !m.author_name || !m.author_badge || !m.content || !m.embed_json) {
-    free_local_msg(&m);
-    return ccord_error_set(err, CCORD_ERR_NOMEM, "oom");
-  }
+  ccord_local_message m = {0};
+  if (!local_msg_build(msg, lid, c->local_msgs_rev + 1u, &m, err)) return err ? err->code : CCORD_ERR_INVALID;
   c->local_msgs[c->nlocal_msgs++] = m;
+  c->local_msgs_rev++;
   c->revision++;
   if (out_local_id) *out_local_id = lid;
+  return CCORD_OK;
+}
+
+static size_t find_local_idx_owned(const ccord_contrib *c, const char *owner, uint64_t local_id, const char *client_id)
+{
+  if (!c || !owner) return SIZE_MAX;
+  for (size_t i = 0; i < c->nlocal_msgs; i++) {
+    if (strcmp(c->local_msgs[i].owner, owner) != 0) continue;
+    if (local_id != 0 && c->local_msgs[i].local_id == local_id) return i;
+    if (client_id && client_id[0] && c->local_msgs[i].client_id &&
+        strcmp(c->local_msgs[i].client_id, client_id) == 0) return i;
+  }
+  return SIZE_MAX;
+}
+
+ccord_status ccord_contrib_update_local_message(ccord_contrib *c, const char *owner,
+                                                uint64_t local_id, const char *client_id,
+                                                const ccord_local_message *patch, uint32_t patch_mask,
+                                                uint64_t *out_local_id, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!c || !owner || !patch) return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: bad update_local args");
+  size_t idx = find_local_idx_owned(c, owner, local_id, client_id);
+  if (idx == SIZE_MAX) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "contrib: local message not found");
+  ccord_local_message merged = c->local_msgs[idx];
+  if (patch_mask & CCORD_LPATCH_CHANNEL) merged.channel_id = patch->channel_id;
+  if (patch_mask & CCORD_LPATCH_POSITION) merged.position = patch->position;
+  if (patch_mask & CCORD_LPATCH_SORT_ID) merged.sort_id = patch->sort_id;
+  if (patch_mask & CCORD_LPATCH_AFTER_ID) merged.after_message_id = patch->after_message_id;
+  if (patch_mask & CCORD_LPATCH_BEFORE_ID) merged.before_message_id = patch->before_message_id;
+  if (patch_mask & CCORD_LPATCH_AUTHOR_ID) merged.author_id = patch->author_id;
+  if (patch_mask & CCORD_LPATCH_AUTHOR_NAME) merged.author_name = patch->author_name;
+  if (patch_mask & CCORD_LPATCH_AUTHOR_COLOR) merged.author_color = patch->author_color;
+  if (patch_mask & CCORD_LPATCH_BADGE) merged.author_badge = patch->author_badge ? patch->author_badge : "";
+  if (patch_mask & CCORD_LPATCH_BADGE_COLOR) merged.badge_color = patch->badge_color;
+  if (patch_mask & CCORD_LPATCH_CONTENT) merged.content = patch->content;
+  if (patch_mask & CCORD_LPATCH_TEXT_COLOR) merged.text_color = patch->text_color;
+  if (patch_mask & CCORD_LPATCH_ACCENT_COLOR) merged.accent_color = patch->accent_color;
+  if (patch_mask & CCORD_LPATCH_TINT_COLOR) merged.tint_color = patch->tint_color;
+  if (patch_mask & CCORD_LPATCH_EMBED_JSON) merged.embed_json = patch->embed_json;
+  if (patch_mask & CCORD_LPATCH_ATTACHMENTS_JSON) merged.attachments_json = patch->attachments_json;
+  if (patch_mask & CCORD_LPATCH_TIMESTAMP) merged.timestamp_ms = patch->timestamp_ms;
+  if (patch_mask & CCORD_LPATCH_DISMISSIBLE) merged.dismissible = patch->dismissible;
+  if (patch_mask & CCORD_LPATCH_AVATAR_GRAYSCALE) merged.avatar_grayscale = patch->avatar_grayscale;
+  if (patch_mask & CCORD_LPATCH_AVATAR_OPACITY) {
+    merged.has_avatar_opacity = patch->has_avatar_opacity;
+    merged.avatar_opacity = patch->avatar_opacity;
+  }
+  if (patch_mask & CCORD_LPATCH_COMPACT) merged.compact_mode = patch->compact_mode;
+  if (patch_mask & CCORD_LPATCH_BREAK_GROUP) merged.break_group = patch->break_group;
+  if (patch_mask & CCORD_LPATCH_CLIP_TO_HISTORY) merged.clip_to_history = patch->clip_to_history;
+  if (patch_mask & CCORD_LPATCH_ON_EVENT) merged.has_on_event = patch->has_on_event;
+  if (merged.channel_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: bad channel_id");
+  ccord_local_message repl = {0};
+  if (!local_msg_build(&merged, c->local_msgs[idx].local_id, c->local_msgs_rev + 1u, &repl, err)) {
+    return err ? err->code : CCORD_ERR_INVALID;
+  }
+  free_local_msg(&c->local_msgs[idx]);
+  c->local_msgs[idx] = repl;
+  c->local_msgs_rev++;
+  c->revision++;
+  if (out_local_id) *out_local_id = repl.local_id;
   return CCORD_OK;
 }
 
@@ -546,11 +766,73 @@ bool ccord_contrib_dismiss_local_message(ccord_contrib *c, uint64_t local_id)
       free_local_msg(&c->local_msgs[i]);
       memmove(&c->local_msgs[i], &c->local_msgs[i + 1], (c->nlocal_msgs - i - 1u) * sizeof c->local_msgs[0]);
       c->nlocal_msgs--;
+      c->local_msgs_rev++;
       c->revision++;
       return true;
     }
   }
   return false;
+}
+
+bool ccord_contrib_dismiss_local_message_owned(ccord_contrib *c, const char *owner,
+                                               uint64_t local_id, const char *client_id, uint64_t *out_local_id)
+{
+  size_t idx = find_local_idx_owned(c, owner, local_id, client_id);
+  if (idx == SIZE_MAX) return false;
+  uint64_t lid = c->local_msgs[idx].local_id;
+  free_local_msg(&c->local_msgs[idx]);
+  memmove(&c->local_msgs[idx], &c->local_msgs[idx + 1], (c->nlocal_msgs - idx - 1u) * sizeof c->local_msgs[0]);
+  c->nlocal_msgs--;
+  c->local_msgs_rev++;
+  c->revision++;
+  if (out_local_id) *out_local_id = lid;
+  return true;
+}
+
+size_t ccord_contrib_clear_local_messages(ccord_contrib *c, const char *owner, ccord_id channel_id)
+{
+  if (!c || !owner) return 0;
+  size_t removed = 0;
+  for (size_t i = c->nlocal_msgs; i > 0; i--) {
+    ccord_local_message *m = &c->local_msgs[i - 1u];
+    if (strcmp(m->owner, owner) != 0) continue;
+    if (channel_id != CCORD_ID_NONE && m->channel_id != channel_id) continue;
+    free_local_msg(m);
+    memmove(&c->local_msgs[i - 1u], &c->local_msgs[i], (c->nlocal_msgs - i) * sizeof c->local_msgs[0]);
+    c->nlocal_msgs--;
+    removed++;
+  }
+  if (removed > 0) {
+    c->local_msgs_rev++;
+    c->revision++;
+  }
+  return removed;
+}
+
+const ccord_local_message *ccord_contrib_find_local_message(const ccord_contrib *c, uint64_t local_id)
+{
+  if (!c || !local_id) return nullptr;
+  for (size_t i = 0; i < c->nlocal_msgs; i++) {
+    if (c->local_msgs[i].local_id == local_id) return &c->local_msgs[i];
+  }
+  return nullptr;
+}
+
+const ccord_local_message *ccord_contrib_find_local_message_owned(const ccord_contrib *c, const char *owner,
+                                                                  uint64_t local_id, const char *client_id)
+{
+  size_t idx = find_local_idx_owned(c, owner, local_id, client_id);
+  return idx != SIZE_MAX ? &c->local_msgs[idx] : nullptr;
+}
+
+bool ccord_contrib_dispatch_local_msg_event(ccord_contrib *c, uint64_t local_id,
+                                            const char *ev_type, float x, float y)
+{
+  if (!c || !local_id || !ev_type || !c->handlers.local_msg_event) return false;
+  const ccord_local_message *m = ccord_contrib_find_local_message(c, local_id);
+  if (!m || !m->has_on_event) return false;
+  c->handlers.local_msg_event(c->handlers.ud, m, ev_type, x, y);
+  return true;
 }
 
 size_t ccord_contrib_local_message_count(const ccord_contrib *c, ccord_id channel_id)

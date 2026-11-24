@@ -30,6 +30,7 @@ void ui_nmb_draw(ccord_ui *ui, ccord_renderer *r, const ccord_rect *ma, ccord_id
 {
   bool nb_on = false;
   if (!(ui->search_open && ui->search_edit.len > 0)) {
+    size_t first_new_store = SIZE_MAX;
     size_t first_new_row = SIZE_MAX;
     if (ui->new_marker_active && ui->new_marker_channel == ch) {
       size_t total_m = ccord_store_message_count(ui->d.store, ch);
@@ -38,7 +39,8 @@ void ui_nmb_draw(ccord_ui *ui, ccord_renderer *r, const ccord_rect *ma, ccord_id
         if (!mk) continue;
         if (ui->new_marker_id != CCORD_ID_NONE && mk->id <= ui->new_marker_id) break;
         if (ui_row_has_new_divider(ui, ch, k - 1, mk)) {
-          first_new_row = k - 1;
+          first_new_store = k - 1;
+          first_new_row = ui_timeline_view_index_for_store(ui, ch, first_new_store);
           break;
         }
       }
@@ -73,7 +75,7 @@ void ui_nmb_draw(ccord_ui *ui, ccord_renderer *r, const ccord_rect *ma, ccord_id
       if (first_new_row == SIZE_MAX && shown_n >= NMB_PLUS) snprintf(num, sizeof num, "%u+", (unsigned)NMB_PLUS);
       else snprintf(num, sizeof num, "%u", (unsigned)shown_n);
       if (shown_n > 0) {
-        const ccord_message *fnm = first_new_row != SIZE_MAX ? ccord_store_message_at(ui->d.store, ch, first_new_row) : nullptr;
+        const ccord_message *fnm = first_new_store != SIZE_MAX ? ccord_store_message_at(ui->d.store, ch, first_new_store) : nullptr;
         if (fnm && fnm->timestamp_ms > 0) {
           char since[32];
           ccord_timefmt_clock(since, sizeof since, fnm->timestamp_ms, ui->use_utc);

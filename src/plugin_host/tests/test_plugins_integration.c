@@ -1188,6 +1188,166 @@ static void test_texture_upload_file_integration(void)
   (void)rmdir(d_ok); (void)rmdir(d_nofs); (void)rmdir(plugins_dir); (void)rmdir(data_dir); (void)rmdir(root);
 }
 
+static void test_timeline_local_messages_integration(void)
+{
+  char root[] = "/tmp/ccord-tlmsg-XXXXXX";
+  CT_CHECK(mkdtemp(root) != nullptr);
+  if (!root[0]) return;
+  char plugins_dir[1100], data_dir[1100], d_p1[1200], d_p2[1200], d_nofs[1200], img_path[1200];
+  snprintf(plugins_dir, sizeof plugins_dir, "%s/plugins", root);
+  snprintf(data_dir, sizeof data_dir, "%s/data", root);
+  snprintf(d_p1, sizeof d_p1, "%s/p1", plugins_dir);
+  snprintf(d_p2, sizeof d_p2, "%s/p2", plugins_dir);
+  snprintf(d_nofs, sizeof d_nofs, "%s/nofs", plugins_dir);
+  snprintf(img_path, sizeof img_path, "%s/att.mock", root);
+  CT_CHECK(mkdir(plugins_dir, 0700) == 0);
+  CT_CHECK(mkdir(data_dir, 0700) == 0);
+  CT_CHECK(mkdir(d_p1, 0700) == 0);
+  CT_CHECK(mkdir(d_p2, 0700) == 0);
+  CT_CHECK(mkdir(d_nofs, 0700) == 0);
+
+  FILE *fp = fopen(img_path, "wb");
+  CT_CHECK(fp != nullptr);
+  if (fp) {
+    uint8_t hdr[8] = {'M', 'O', 'C', 'K', 0, 128, 0, 64};
+    CT_CHECK(fwrite(hdr, 1, sizeof hdr, fp) == sizeof hdr);
+    fclose(fp);
+  }
+
+  // P1: ui.decorate (without ui.panel!) + fs.read -> exercises timeline inject, upsert, update, on_event, local_path, message_style.
+  write_file(d_p1, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.tl_p1\",\"name\":\"TlP1\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"ui.decorate\",\"fs.read\",\"commands\",\"clipboard.write\"]}");
+  char lua_p1[4800];
+  snprintf(lua_p1, sizeof lua_p1,
+           "local lid1 = messages.inject_local('200', {\n"
+           "  id = 'del-1', position = 'timeline', sort_id = '550', timestamp_ms = 1700000005000,\n"
+           "  author_id = '7', author = 'Ghost', author_color = '#e5484d', text_color = '#e5484d',\n"
+           "  avatar_grayscale = true, avatar_opacity = 0.45, badge = 'DELETED', badge_color = '#e5484d',\n"
+           "  content = 'deleted body', compact = 'auto', break_group = true, dismissible = true,\n"
+           "  attachments = {{ filename = 'att.mock', local_path = '%s' }},\n"
+           "  on_event = function(ev) clipboard.write('tl_ev:' .. tostring(ev.id) .. ':' .. tostring(ev.type)) end,\n"
+           "})\n"
+           "local lid2 = messages.inject_local('200', {\n"
+           "  id = 'del-1', position = 'timeline', sort_id = '550', timestamp_ms = 1700000005000,\n"
+           "  author_id = '7', author = 'Ghost', author_color = '#e5484d', text_color = '#e5484d',\n"
+           "  avatar_grayscale = true, avatar_opacity = 0.45, badge = 'DELETED', badge_color = '#e5484d',\n"
+           "  content = 'upserted body', compact = 'auto', break_group = true, dismissible = true,\n"
+           "  attachments = {{ filename = 'att.mock', local_path = '%s' }},\n"
+           "  on_event = function(ev) clipboard.write('tl_ev:' .. tostring(ev.id) .. ':' .. tostring(ev.type)) end,\n"
+           "})\n"
+           "local upd_ok = messages.update_local('del-1', { content = 'patched body' })\n"
+           "ui.decorate.message_style({\n"
+           "  id = 'ms1', message_id = '500', text_color = '#e5484d', author_color = 'danger',\n"
+           "  avatar_grayscale = true, avatar_opacity = 0.5, dim = true, accent = '#ff00aa', tint = '#11223344',\n"
+           "})\n"
+           "commands.register('cleartl', 'Clear local', function()\n"
+           "  local ok = messages.clear_local('200')\n"
+           "  clipboard.write('tl_clear:' .. tostring(ok))\n"
+           "end)\n"
+           "clipboard.write('tl_p1:' .. tostring(lid1 == lid2) .. ':' .. tostring(upd_ok) .. ':' .. tostring(lid1))\n",
+           img_path, img_path);
+  write_file(d_p1, "main.lua", lua_p1);
+
+  // P2: tries to hijack P1's local message (update_local / dismiss_local must fail due to owner check).
+  write_file(d_p2, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.tl_p2\",\"name\":\"TlP2\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"ui.panel\",\"commands\",\"clipboard.write\"]}");
+  write_file(d_p2, "main.lua",
+             "commands.register('hijack', 'Try cross-owner local mutation', function(args)\n"
+             "  local lid = tonumber(args) or 1\n"
+             "  local uok = messages.update_local(lid, { content = 'hacked' })\n"
+             "  local dok = messages.dismiss_local(lid)\n"
+             "  clipboard.write('tl_p2:' .. tostring(uok) .. ':' .. tostring(dok))\n"
+             "end)\n");
+
+  // P3: ui.decorate WITHOUT fs.read -> passing attachments[].local_path must terminate plugin as FAILED.
+  write_file(d_nofs, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.tl_nofs\",\"name\":\"TlNoFs\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"ui.decorate\"]}");
+  char lua_nofs[1500];
+  snprintf(lua_nofs, sizeof lua_nofs,
+           "pcall(function() messages.inject_local('200', { position='timeline', content='x', attachments={{filename='a.mock', local_path='%s'}} }) end)\n",
+           img_path);
+  write_file(d_nofs, "main.lua", lua_nofs);
+
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  ccord_contrib *contrib = ccord_contrib_create(&err);
+  v3_clip_log cl = {0};
+  const char *dirs[] = {plugins_dir};
+  ccord_plugins_config cfg = {
+    .store = store, .contrib = contrib, .bus = bus,
+    .search_dirs = dirs, .search_dir_count = 1,
+    .data_dir = data_dir, .host_exe = CCORD_PLUGIN_HOST_BIN,
+    .clipboard_write = v3_on_clip, .clipboard_ud = &cl,
+    .platform_ops = {.decode_image_rgba = mock_decode_image_rgba},
+  };
+  ccord_plugins *pm = ccord_plugins_create(&cfg, &err);
+  CT_CHECK(pm != nullptr);
+  (void)ccord_plugins_load_all(pm);
+
+  const char *ids[] = {"dev.test.tl_p1", "dev.test.tl_p2", "dev.test.tl_nofs"};
+  for (size_t i = 0; i < 3; i++) {
+    CT_CHECK(pump_until(pm, bus, contrib, ids[i], CCORD_PLUGIN_NEEDS_CONSENT));
+    const ccord_plugin_info *pi = find_info(contrib, ids[i]);
+    if (pi) ccord_contrib_plugin_consent_accept_for(contrib, ids[i], pi->perms_mask);
+  }
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.tl_p1", CCORD_PLUGIN_READY));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.tl_p2", CCORD_PLUGIN_READY));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.tl_nofs", CCORD_PLUGIN_FAILED));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "tl_p1:true:true:"));
+
+  // Verify stored timeline local message fields, auto-texture, and extended message_style decorator.
+  CT_CHECK(ccord_contrib_local_message_count(contrib, 200) == 1);
+  const ccord_local_message *lm = ccord_contrib_local_message_at(contrib, 200, 0);
+  CT_CHECK(lm != nullptr && lm->position == CCORD_LOCAL_POS_TIMELINE && lm->sort_id == 550 &&
+           lm->author_id == 7 && lm->avatar_grayscale && lm->break_group && lm->dismissible && lm->has_on_event &&
+           strcmp(lm->client_id, "del-1") == 0 && strcmp(lm->content, "patched body") == 0 &&
+           strstr(lm->attachments_json, "__lmsg__:") != nullptr);
+  CT_CHECK(ccord_contrib_texture_count(contrib) == 1);
+
+  const ccord_decorator_contribution *dc = ccord_contrib_decorator_at(contrib, 0);
+  CT_CHECK(dc != nullptr && dc->target == CCORD_DECOR_MESSAGE_STYLE && dc->accent_rgba == 0xFF00AAFFu &&
+           dc->tint_rgba == 0x11223344u && dc->text_rgba == 0xE5484DFFu &&
+           strcmp(dc->author_color, "danger") == 0 && dc->avatar_grayscale && dc->dim);
+
+  // Verify cross-owner mutation is denied.
+  char argbuf[32];
+  snprintf(argbuf, sizeof argbuf, "%llu", (unsigned long long)(lm ? lm->local_id : 1));
+  CT_CHECK(ccord_contrib_run_command(contrib, "hijack", argbuf, 100, 200, &err) == CCORD_OK);
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "tl_p2:false:false"));
+  CT_CHECK(ccord_contrib_local_message_count(contrib, 200) == 1);
+
+  // Verify on_event click dispatch works.
+  CT_CHECK(lm && ccord_contrib_dispatch_local_msg_event(contrib, lm->local_id, "click", 12.0f, 34.0f));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "tl_ev:del-1:click"));
+
+  // Verify clear_local removes local message AND cleans up its auto-generated thumbnail texture!
+  CT_CHECK(ccord_contrib_run_command(contrib, "cleartl", "", 100, 200, &err) == CCORD_OK);
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "tl_clear:true"));
+  CT_CHECK(ccord_contrib_local_message_count(contrib, 200) == 0);
+  CT_CHECK(ccord_contrib_texture_count(contrib) == 0);
+
+  ccord_plugins_shutdown(pm);
+  ccord_plugins_destroy(pm);
+  ccord_contrib_destroy(contrib);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+
+  char rm[1400];
+  snprintf(rm, sizeof rm, "%s/plugin.json", d_p1); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/main.lua", d_p1); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/plugin.json", d_p2); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/main.lua", d_p2); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/plugin.json", d_nofs); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/main.lua", d_nofs); (void)unlink(rm);
+  (void)unlink(img_path);
+  snprintf(rm, sizeof rm, "%s/plugins.json", data_dir); (void)unlink(rm);
+  (void)rmdir(d_p1); (void)rmdir(d_p2); (void)rmdir(d_nofs); (void)rmdir(plugins_dir); (void)rmdir(data_dir); (void)rmdir(root);
+}
+
 int main(void)
 {
   char root[] = "/tmp/ccord-it-XXXXXX";
@@ -1570,5 +1730,6 @@ int main(void)
   test_account_class3_plugins();
   test_security_regressions();
   test_texture_upload_file_integration();
+  test_timeline_local_messages_integration();
   return CT_RESULT("test_plugins_integration");
 }

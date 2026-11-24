@@ -111,6 +111,8 @@ ccord_sandbox_limit ccord_sandbox_limit_hit(const ccord_sandbox *sb);
                                                           ccord_error *err);
 [[nodiscard]] ccord_status ccord_sandbox_decor_event(ccord_sandbox *sb, const char *decor_id, const char *target_id,
                                                      const ccord_json *ev, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_local_msg_event(ccord_sandbox *sb, uint64_t local_id, const char *client_id,
+                                                         const char *ev_type, float x, float y, ccord_error *err);
 [[nodiscard]] ccord_status ccord_sandbox_setting_changed(ccord_sandbox *sb, const char *key, const ccord_json *value,
                                                          ccord_error *err);
 [[nodiscard]] ccord_status ccord_sandbox_dialog_result(ccord_sandbox *sb, uint64_t req_id, bool accepted,

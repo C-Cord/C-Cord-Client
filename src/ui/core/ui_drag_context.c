@@ -580,6 +580,12 @@ bool uc_handle_right_click(ccord_ui *ui, const ccord_input_event *ev)
         return true;
       }
     }
+    if (h.local_msg_id != 0) {
+      if (ui->d.contrib) {
+        (void)ccord_contrib_dispatch_local_msg_event(ui->d.contrib, h.local_msg_id, "right_click", ev->x, ev->y);
+      }
+      return true;
+    }
     if (h.msg != CCORD_ID_NONE) {
       const ccord_message *m = ccord_store_find_message(ui->d.store, ch, h.msg);
       // M0-3: an unconfirmed local echo has no server message behind it, so its menu actions would all fail.

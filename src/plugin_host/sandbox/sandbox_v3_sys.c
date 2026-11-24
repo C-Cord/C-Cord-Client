@@ -606,6 +606,7 @@ void sb_open_api_v3(lua_State *L)
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_KEYBINDS);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_ACTBTNS);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_DECORS);
+  lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_LOCAL_MSG);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_AUTOCOMPLETE);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_FS_WATCH);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_WS);
@@ -845,6 +846,48 @@ ccord_status ccord_sandbox_decor_event(ccord_sandbox *sb, const char *decor_id, 
   sb->user_gesture_depth++;
   ccord_status st = sb_call_guarded(sb, 2, 0, err);
   sb->user_gesture_depth--;
+  lua_settop(L, top);
+  return st;
+}
+
+ccord_status ccord_sandbox_local_msg_event(ccord_sandbox *sb, uint64_t local_id, const char *client_id,
+                                           const char *ev_type, float x, float y, ccord_error *err)
+{
+  if (!sb || !local_id || !ev_type) return CCORD_OK;
+  lua_State *L = sb->L;
+  int top = lua_gettop(L);
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_LOCAL_MSG);
+  if (lua_rawgeti(L, -1, (lua_Integer)local_id) != LUA_TFUNCTION) {
+    lua_settop(L, top);
+    return CCORD_OK;
+  }
+  lua_createtable(L, 0, 5);
+  if (client_id && client_id[0]) {
+    lua_pushstring(L, client_id);
+  } else {
+    char idbuf[32];
+    snprintf(idbuf, sizeof idbuf, "%llu", (unsigned long long)local_id);
+    lua_pushstring(L, idbuf);
+  }
+  lua_setfield(L, -2, "id");
+  lua_pushinteger(L, (lua_Integer)local_id);
+  lua_setfield(L, -2, "local_id");
+  lua_pushstring(L, ev_type);
+  lua_setfield(L, -2, "type");
+  lua_pushnumber(L, (lua_Number)x);
+  lua_setfield(L, -2, "x");
+  lua_pushnumber(L, (lua_Number)y);
+  lua_setfield(L, -2, "y");
+
+  sb->user_gesture_depth++;
+  ccord_status st = sb_call_guarded(sb, 1, 0, err);
+  sb->user_gesture_depth--;
+
+  if (strcmp(ev_type, "dismiss") == 0) {
+    lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_LOCAL_MSG);
+    lua_pushnil(L);
+    lua_rawseti(L, -2, (lua_Integer)local_id);
+  }
   lua_settop(L, top);
   return st;
 }

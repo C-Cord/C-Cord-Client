@@ -53,6 +53,7 @@ struct ccord_contrib {
   ccord_local_message *local_msgs;
   size_t nlocal_msgs, caplocal_msgs;
   uint64_t next_local_id;
+  uint64_t local_msgs_rev;
   ccord_autocomplete_provider *autocompletes;
   size_t nautocompletes, capautocompletes;
   ccord_earcon_override *earcons;

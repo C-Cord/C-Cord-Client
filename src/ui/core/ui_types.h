@@ -315,6 +315,8 @@ typedef struct vis_row {
   ccord_id msg_id;       // message drawn in this row (CCORD_ID_NONE for a row with no message)
   float enter;           // 0..1 fade-in of a live arrival; 1 for every other row
   float dy;              // the enter offset (px, down) the row was drawn at; 0 once it is in
+  bool is_local;         // true when this row is a positioned plugin local message
+  uint64_t local_id;     // plugin local_id when is_local == true
 } vis_row;
 
 // Chat motion memory (draw_chat.c): messages already drawn and reaction pills already drawn, keyed by message id or pill

@@ -144,6 +144,18 @@ typedef struct ccord_decorator_contribution {
   const char *widget_json;      // Layer-1/2 widget tree JSON (may be empty for pure MESSAGE_STYLE)
   uint32_t accent_rgba;         // 0xRRGGBBAA (0 = none)
   uint32_t tint_rgba;           // 0xRRGGBBAA (0 = none)
+  uint32_t text_rgba;           // 0xRRGGBBAA (0 = none)
+  uint32_t author_rgba;         // 0xRRGGBBAA (0 = none)
+  const char *accent_color;     // optional hex or theme token string
+  const char *tint_color;       // optional hex or theme token string
+  const char *text_color;       // optional hex or theme token string
+  const char *author_color;     // optional hex or theme token string
+  bool avatar_grayscale;
+  bool has_avatar_opacity;
+  float avatar_opacity;         // 0.0..1.0
+  bool dim;
+  bool has_opacity;
+  float opacity;                // 0.15..1.0
   bool collapsed;
   const char *collapse_label;
   int32_t priority;
@@ -236,17 +248,75 @@ typedef struct ccord_action_btn_contribution {
   const char *badge;
 } ccord_action_btn_contribution;
 
-// ---- API v3: Client-local ephemeral messages ----
+// ---- API v3: Client-local ephemeral / positioned timeline messages ----
+typedef enum ccord_local_msg_pos : uint8_t {
+  CCORD_LOCAL_POS_BOTTOM = 0,
+  CCORD_LOCAL_POS_TIMELINE = 1,
+} ccord_local_msg_pos;
+
+typedef enum ccord_local_compact : uint8_t {
+  CCORD_LOCAL_COMPACT_AUTO = 0,
+  CCORD_LOCAL_COMPACT_ALWAYS = 1,
+  CCORD_LOCAL_COMPACT_NEVER = 2,
+} ccord_local_compact;
+
+enum {
+  CCORD_LPATCH_CHANNEL          = 1u << 0,
+  CCORD_LPATCH_POSITION         = 1u << 1,
+  CCORD_LPATCH_SORT_ID          = 1u << 2,
+  CCORD_LPATCH_AFTER_ID         = 1u << 3,
+  CCORD_LPATCH_BEFORE_ID        = 1u << 4,
+  CCORD_LPATCH_AUTHOR_ID        = 1u << 5,
+  CCORD_LPATCH_AUTHOR_NAME      = 1u << 6,
+  CCORD_LPATCH_AUTHOR_COLOR     = 1u << 7,
+  CCORD_LPATCH_BADGE            = 1u << 8,
+  CCORD_LPATCH_BADGE_COLOR      = 1u << 9,
+  CCORD_LPATCH_CONTENT          = 1u << 10,
+  CCORD_LPATCH_TEXT_COLOR       = 1u << 11,
+  CCORD_LPATCH_ACCENT_COLOR     = 1u << 12,
+  CCORD_LPATCH_TINT_COLOR       = 1u << 13,
+  CCORD_LPATCH_EMBED_JSON       = 1u << 14,
+  CCORD_LPATCH_ATTACHMENTS_JSON = 1u << 15,
+  CCORD_LPATCH_TIMESTAMP        = 1u << 16,
+  CCORD_LPATCH_DISMISSIBLE      = 1u << 17,
+  CCORD_LPATCH_AVATAR_GRAYSCALE = 1u << 18,
+  CCORD_LPATCH_AVATAR_OPACITY   = 1u << 19,
+  CCORD_LPATCH_COMPACT          = 1u << 20,
+  CCORD_LPATCH_BREAK_GROUP      = 1u << 21,
+  CCORD_LPATCH_CLIP_TO_HISTORY  = 1u << 22,
+  CCORD_LPATCH_ON_EVENT         = 1u << 23,
+};
+
 typedef struct ccord_local_message {
   const char *owner;
   uint64_t local_id;
+  const char *client_id;          // optional plugin-scoped stable ID ("" if none)
   ccord_id channel_id;
+  ccord_local_msg_pos position;
+  ccord_id sort_id;               // optional Discord snowflake for exact chronological ordering
+  ccord_id after_message_id;      // optional explicit anchor
+  ccord_id before_message_id;     // optional explicit anchor
+  ccord_id author_id;             // optional user id for cached avatar & name fallback
   const char *author_name;
-  const char *author_badge;
+  const char *author_color;       // hex or theme color token ("" = default)
+  const char *author_badge;       // nullptr = default ("PLUGIN" for bottom, "" for timeline); "" = no badge
+  const char *badge_color;        // hex or theme color token ("" = default brand)
   const char *content;
+  const char *text_color;         // hex or theme color token ("" = default)
+  const char *accent_color;       // hex or theme color token ("" = none for timeline, brand for bottom)
+  const char *tint_color;         // hex or theme color token ("" = none)
   const char *embed_json;
+  const char *attachments_json;   // validated JSON array of local attachment specs
   uint64_t timestamp_ms;
   bool dismissible;
+  bool avatar_grayscale;
+  bool has_avatar_opacity;
+  float avatar_opacity;           // 0.0..1.0
+  ccord_local_compact compact_mode;
+  bool break_group;
+  bool clip_to_history;           // timeline only (default true)
+  bool has_on_event;
+  uint64_t revision;
 } ccord_local_message;
 
 // ---- API v3: Composer autocomplete providers ----
@@ -443,6 +513,7 @@ typedef struct ccord_contrib_handlers {
                              ccord_id channel_id, ccord_autocomplete_item *out, size_t max_items);
   void (*panel_event)(void *ud, const ccord_panel_contribution *panel, const ccord_panel_event *ev);
   void (*decor_event)(void *ud, const ccord_decorator_contribution *decor, ccord_id target_id, const ccord_panel_event *ev);
+  void (*local_msg_event)(void *ud, const ccord_local_message *msg, const char *ev_type, float x, float y);
   void (*plugin_setting_changed)(void *ud, const char *owner, const char *key, const char *value_json);
   void (*keybind_triggered)(void *ud, const char *owner, const char *bind_id);
   void (*action_btn_click)(void *ud, const ccord_action_btn_contribution *btn, const ccord_menu_context *ctx);
@@ -512,6 +583,7 @@ uint64_t ccord_contrib_theme_revision(const ccord_contrib *c);    // bumps on th
 uint64_t ccord_contrib_textures_revision(const ccord_contrib *c); // bumps on plugin texture upload/evict
 uint64_t ccord_contrib_earcons_revision(const ccord_contrib *c);  // bumps on earcon override changes
 uint64_t ccord_contrib_decorators_revision(const ccord_contrib *c);
+uint64_t ccord_contrib_local_messages_revision(const ccord_contrib *c);
 // writers (plugins). Strings are copied. (owner,item_id) and command name must be unique -> CCORD_ERR_INVALID with message naming the existing owner.
 [[nodiscard]] ccord_status ccord_contrib_add_menu(ccord_contrib *c, const char *owner, const char *item_id, const char *label, ccord_menu_target t, ccord_error *err);
 [[nodiscard]] ccord_status ccord_contrib_add_menu_ex(ccord_contrib *c, const ccord_menu_contribution *spec, ccord_error *err);
@@ -553,7 +625,19 @@ bool ccord_contrib_rebind_keybind(ccord_contrib *c, const char *owner, const cha
 bool ccord_contrib_remove_action_btn(ccord_contrib *c, const char *owner, const char *btn_id);
 [[nodiscard]] ccord_status ccord_contrib_add_local_message(ccord_contrib *c, const ccord_local_message *msg,
                                                            uint64_t *out_local_id, ccord_error *err);
+[[nodiscard]] ccord_status ccord_contrib_update_local_message(ccord_contrib *c, const char *owner,
+                                                              uint64_t local_id, const char *client_id,
+                                                              const ccord_local_message *patch, uint32_t patch_mask,
+                                                              uint64_t *out_local_id, ccord_error *err);
 bool ccord_contrib_dismiss_local_message(ccord_contrib *c, uint64_t local_id);
+bool ccord_contrib_dismiss_local_message_owned(ccord_contrib *c, const char *owner,
+                                               uint64_t local_id, const char *client_id, uint64_t *out_local_id);
+size_t ccord_contrib_clear_local_messages(ccord_contrib *c, const char *owner, ccord_id channel_id);
+const ccord_local_message *ccord_contrib_find_local_message(const ccord_contrib *c, uint64_t local_id);
+const ccord_local_message *ccord_contrib_find_local_message_owned(const ccord_contrib *c, const char *owner,
+                                                                  uint64_t local_id, const char *client_id);
+bool ccord_contrib_dispatch_local_msg_event(ccord_contrib *c, uint64_t local_id,
+                                            const char *ev_type, float x, float y);
 [[nodiscard]] ccord_status ccord_contrib_add_autocomplete(ccord_contrib *c, const ccord_autocomplete_provider *prov, ccord_error *err);
 bool ccord_contrib_remove_autocomplete(ccord_contrib *c, const char *owner, const char *provider_id);
 [[nodiscard]] ccord_status ccord_contrib_set_earcon_override(ccord_contrib *c, const char *owner, const char *kind_name,

@@ -1018,6 +1018,7 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     .command_complete = plugins_ext_on_command_complete,
     .panel_event = on_panel_event,
     .decor_event = plugins_ext_on_decor_event,
+    .local_msg_event = plugins_ext_on_local_msg_event,
     .plugin_setting_changed = plugins_ext_on_setting_changed,
     .keybind_triggered = plugins_ext_on_keybind_triggered,
     .action_btn_click = plugins_ext_on_action_btn_click,

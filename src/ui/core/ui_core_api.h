@@ -304,6 +304,17 @@ void ui_member_verification_draw(ccord_ui *ui, ccord_renderer *r);
 bool ui_member_verification_handle(ccord_ui *ui, const ccord_input_event *ev);   // consumes every event while open
 bool ui_is_compact(const ccord_ui *ui, ccord_id channel_id, size_t i, const ccord_message *m);
 bool ui_row_has_date_divider(const ccord_ui *ui, ccord_id channel_id, size_t store_i, const ccord_message *m);
+bool ui_view_has_date_divider(const ccord_ui *ui, ccord_id channel_id, size_t view_i);
+bool ui_view_is_compact(const ccord_ui *ui, ccord_id channel_id, size_t view_i);
+void dc_timeline_sync(ccord_ui *ui, ccord_id channel_id);
+size_t ui_timeline_count(const ccord_ui *ui, ccord_id channel_id);
+size_t ui_timeline_view_index_for_store(const ccord_ui *ui, ccord_id channel_id, size_t store_i);
+size_t ui_timeline_view_index_for_msg_id(const ccord_ui *ui, ccord_id channel_id, ccord_id msg_id);
+size_t ui_timeline_view_index_for_local_id(const ccord_ui *ui, ccord_id channel_id, uint64_t local_id);
+bool ui_timeline_row_info(const ccord_ui *ui, ccord_id channel_id, size_t view_i,
+                          bool *out_is_local, size_t *out_store_i, uint64_t *out_local_id,
+                          int64_t *out_ts_ms, ccord_id *out_author_id, bool *out_break_group,
+                          ccord_local_compact *out_compact_mode);
 void ui_nmb_draw(ccord_ui *ui, ccord_renderer *r, const ccord_rect *ma, ccord_id ch, size_t view_first, size_t view_last);
 bool ui_nmb_click(ccord_ui *ui, float x, float y);   // true when the bar was clicked (jump or Mark as Read)
 bool ui_row_has_new_divider(const ccord_ui *ui, ccord_id channel_id, size_t store_i, const ccord_message *m);
