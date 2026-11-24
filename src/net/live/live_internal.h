@@ -161,6 +161,9 @@ typedef struct live {
   bool self_mute, self_deaf;
   bool self_video;
   bool voice_video_synced;
+  bool in_background;
+  bool camera_rx_enabled;
+  bool voice_camera_rx_applied;
   bool streaming;
   bool self_suppressed;
   // PTT state is shared between the dedicated audio pthread (live_push_voice_pcm) and the UI thread

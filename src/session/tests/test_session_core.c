@@ -1474,6 +1474,163 @@ static void test_session_voice_join_permissions(void)
 }
 
 
+typedef struct power_test_hooks {
+  uint32_t pins_calls;
+  ccord_id last_pins_channel;
+  uint32_t bg_calls;
+  bool last_bg;
+  uint32_t cam_rx_calls;
+  bool last_cam_rx;
+  uint8_t *owned_media;
+  uint32_t take_calls;
+} power_test_hooks;
+
+static power_test_hooks g_power;
+
+static ccord_status power_request_pins(ccord_transport *t, ccord_id channel_id, uint32_t limit, ccord_error *err)
+{
+  (void)t;
+  (void)limit;
+  g_power.pins_calls++;
+  g_power.last_pins_channel = channel_id;
+  ccord_error_clear(err);
+  return CCORD_OK;
+}
+
+static void power_set_background(ccord_transport *t, bool bg)
+{
+  (void)t;
+  g_power.bg_calls++;
+  g_power.last_bg = bg;
+}
+
+static void power_set_camera_rx(ccord_transport *t, bool enabled)
+{
+  (void)t;
+  g_power.cam_rx_calls++;
+  g_power.last_cam_rx = enabled;
+}
+
+static uint8_t *power_take_media_data(ccord_transport *t, const uint8_t *expected)
+{
+  (void)t;
+  if (g_power.owned_media && g_power.owned_media == expected) {
+    uint8_t *p = g_power.owned_media;
+    g_power.owned_media = nullptr;
+    g_power.take_calls++;
+    return p;
+  }
+  return nullptr;
+}
+
+// Background sync deferral, CHANNEL_PINS_UPDATE gating, set_camera_rx forwarding, and zero-copy media handoff.
+static void test_background_defer_pins_gate_and_camera_rx(void)
+{
+  memset(&g_power, 0, sizeof g_power);
+  ccord_error err;
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  CT_CHECK(bus && store);
+  if (!bus || !store) return;
+
+  enum { SELF = 1, GUILD = 10, CH_OPEN = 22, CH_OTHER = 23 };
+  ccord_user users[1] = {{.id = SELF, .name = "You", .status_text = ""}};
+  ccord_guild guilds[1] = {{.id = GUILD, .name = "HQ", .owner_id = SELF}};
+  ccord_channel chans[2] = {
+    {.id = CH_OPEN, .guild_id = GUILD, .kind = CCORD_CHANNEL_TEXT, .name = "general", .topic = ""},
+    {.id = CH_OTHER, .guild_id = GUILD, .kind = CCORD_CHANNEL_TEXT, .name = "offtopic", .topic = ""},
+  };
+  ccord_member members[1] = {{.guild_id = GUILD, .user_id = SELF, .role_name = "Owner"}};
+  ccord_snapshot snap = {.self_id = SELF, .users = users, .user_count = 1, .guilds = guilds, .guild_count = 1,
+                         .channels = chans, .channel_count = 2, .members = members, .member_count = 1};
+
+  fake_transport *f = calloc(1, sizeof *f);
+  CT_CHECK(f != nullptr);
+  if (!f) return;
+  static ccord_transport_vtable power_vt;
+  power_vt = fake_vt;
+  power_vt.request_pins = power_request_pins;
+  power_vt.set_background = power_set_background;
+  power_vt.set_camera_rx = power_set_camera_rx;
+  power_vt.take_media_data = power_take_media_data;
+  f->base.vt = &power_vt;
+
+  ccord_session *s = ccord_session_create(bus, store, &f->base, &err);
+  CT_CHECK(s != nullptr);
+  if (!s) return;
+
+  // Enter background before READY arrives: snapshot must defer history/profile REST sync until foreground.
+  ccord_session_set_background(s, true);
+  CT_CHECK(g_power.bg_calls == 1 && g_power.last_bg);
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_store_selected_channel(store) == CH_OPEN);
+  CT_CHECK(f->history_request_count == 0);
+
+  // Mark history loaded on both channels; CHANNEL_PINS_UPDATE while backgrounded must NOT fire REST pins fetch.
+  ccord_message m1 = {.id = 100, .channel_id = CH_OPEN, .author_id = SELF, .timestamp_ms = 1, .content = "hi"};
+  ccord_message m2 = {.id = 101, .channel_id = CH_OTHER, .author_id = SELF, .timestamp_ms = 2, .content = "yo"};
+  CT_CHECK(ccord_store_set_history(store, CH_OPEN, &m1, 1, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_set_history(store, CH_OTHER, &m2, 1, &err) == CCORD_OK);
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_CHANNEL_PINS_UPDATE, .guild_id = GUILD, .channel_id = CH_OPEN};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(g_power.pins_calls == 0);
+
+  // Returning to foreground flushes deferred sync (already loaded here, so test with an unloaded channel too).
+  CT_CHECK(ccord_store_select_channel(store, CH_OTHER, &err) == CCORD_OK);
+  ccord_session_set_background(s, false);
+  CT_CHECK(g_power.bg_calls == 2 && !g_power.last_bg);
+  // Test deferred history sync on an unloaded channel: re-background, drop snapshot on fresh channel, foreground.
+  ccord_session_set_background(s, true);
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(f->history_request_count == 0);
+  ccord_session_set_background(s, false);
+  CT_CHECK(f->history_request_count == 1 && f->last_requested_history_channel == ccord_store_selected_channel(store));
+
+  // In foreground: CHANNEL_PINS_UPDATE only refreshes pins for the currently selected channel.
+  CT_CHECK(ccord_store_select_channel(store, CH_OPEN, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_set_history(store, CH_OPEN, &m1, 1, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_set_history(store, CH_OTHER, &m2, 1, &err) == CCORD_OK);
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_CHANNEL_PINS_UPDATE, .guild_id = GUILD, .channel_id = CH_OTHER};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(g_power.pins_calls == 0);
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_CHANNEL_PINS_UPDATE, .guild_id = GUILD, .channel_id = CH_OPEN};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(g_power.pins_calls == 1 && g_power.last_pins_channel == CH_OPEN);
+
+  // set_camera_rx forwards cleanly to transport.
+  ccord_session_set_camera_rx(s, false);
+  CT_CHECK(g_power.cam_rx_calls == 1 && !g_power.last_cam_rx);
+  ccord_session_set_camera_rx(s, true);
+  CT_CHECK(g_power.cam_rx_calls == 2 && g_power.last_cam_rx);
+
+  // Zero-copy media handoff via take_media_data avoids copying heap-owned bytes.
+  uint8_t *buf = malloc(16);
+  CT_CHECK(buf != nullptr);
+  if (buf) {
+    memcpy(buf, "PNGDATA123456789", 16);
+    g_power.owned_media = buf;
+    f->ev[f->n++] = (ccord_net_event){
+      .type = CCORD_NET_MEDIA_LOADED,
+      .status = CCORD_OK,
+      .media_url = "https://cdn.discordapp.com/attachments/1/2/test.png",
+      .media_path = "/tmp/test.png",
+      .media_data = buf,
+      .media_len = 16,
+    };
+    CT_CHECK(ccord_session_pump(s) == 1);
+    CT_CHECK(g_power.take_calls == 1 && g_power.owned_media == nullptr);
+    const ccord_media_item *item = ccord_session_get_media(s, "https://cdn.discordapp.com/attachments/1/2/test.png");
+    CT_CHECK(item != nullptr && item->data == buf && item->len == 16);
+  }
+
+  ccord_session_destroy(s);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+}
+
+
 int main(void)
 {
   test_flow();
@@ -1490,5 +1647,6 @@ int main(void)
   test_session_permission_data();
   test_session_server_settings();
   test_session_voice_join_permissions();
+  test_background_defer_pins_gate_and_camera_rx();
   return CT_RESULT("test_session_core");
 }

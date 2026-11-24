@@ -23,7 +23,6 @@
 
 #define STREAM_LOG_RING 16u
 #define STREAM_RANGE_STALL_MS 60000u   // an answer that never comes (a dead transport) counts as a failed attempt
-#define STREAM_READ_SLICE_MS 100u
 #define STREAM_URL_MAX 4096u
 
 static_assert(CCORD_STREAM_RANGE_BLOCKS * CCORD_STREAM_BLOCK_BYTES == CCORD_STREAM_RANGE_MAX_BYTES,
@@ -758,11 +757,14 @@ int ccord_media_stream_read_at(void *p, int64_t off, uint8_t *buf, int n)
       break;
     }
     ms->demand = off / (int64_t)CCORD_STREAM_BLOCK_BYTES;
-    if (ccord_clock_ms() - waited_from >= CCORD_STREAM_READ_TIMEOUT_MS) {
+    uint64_t now_ms = ccord_clock_ms();
+    uint64_t elapsed = now_ms >= waited_from ? (now_ms - waited_from) : 0u;
+    if (elapsed >= CCORD_STREAM_READ_TIMEOUT_MS) {
       rc = -(int)CCORD_ERR_TIMEOUT;
       break;
     }
-    (void)ccord_cond_wait_timeout(ms->cv, ms->mtx, STREAM_READ_SLICE_MS);
+    uint32_t rem_ms = (uint32_t)(CCORD_STREAM_READ_TIMEOUT_MS - elapsed);
+    (void)ccord_cond_wait_timeout(ms->cv, ms->mtx, rem_ms);
   }
   ccord_mutex_unlock(ms->mtx);
   return rc;

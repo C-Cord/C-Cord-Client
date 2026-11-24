@@ -321,6 +321,8 @@ struct ccord_session {
   uint64_t rich_op3_retry_ms;   // backoff deadline after a failed rich op 3 push (prevents 0 ms idle spin)
   bool in_background;
   bool suspended;
+  bool bg_deferred_sync;
+  bool camera_rx_enabled;
   // M5 local voice state: the last accepted input-processing config and the per-frame push-to-talk key.
   // Neither is Discord state: they gate the mic path only and never produce traffic.
   ccord_voice_config voice_cfg;

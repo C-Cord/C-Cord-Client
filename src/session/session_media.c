@@ -324,8 +324,15 @@ void sess_store_media_loaded(ccord_session *s, const ccord_net_event *ev)
     ccord_free(em->data);
     em->cache_path = ccord_strndup(ev->media_path ? ev->media_path : "",
                                    ev->media_path ? strlen(ev->media_path) : 0);
-    em->data = ev->media_len ? ccord_alloc_array(ev->media_len, 1) : nullptr;
-    if (em->data && ev->media_data) memcpy(em->data, ev->media_data, ev->media_len);
+    uint8_t *taken = (ev->media_len > 0 && ev->media_data)
+                         ? ccord_transport_take_media_data(s->transport, ev->media_data)
+                         : nullptr;
+    if (taken) {
+      em->data = taken;
+    } else {
+      em->data = ev->media_len ? ccord_alloc_array(ev->media_len, 1) : nullptr;
+      if (em->data && ev->media_data) memcpy(em->data, ev->media_data, ev->media_len);
+    }
     em->len = em->data ? ev->media_len : 0;
     s->mc->media_bytes += em->len;
     em->pub = (ccord_media_item){
@@ -351,16 +358,29 @@ void sess_store_media_loaded(ccord_session *s, const ccord_net_event *ev)
   e->url = ccord_strndup(ev->media_url, strlen(ev->media_url));
   e->cache_path = ccord_strndup(ev->media_path ? ev->media_path : "",
                                 ev->media_path ? strlen(ev->media_path) : 0);
-  e->data = ev->media_len ? ccord_alloc_array(ev->media_len, 1) : nullptr;
-  if (!e->url || !e->cache_path || (ev->media_len > 0 && !e->data)) {
+  if (!e->url || !e->cache_path) {
     ccord_free(e->url);
     ccord_free(e->cache_path);
-    ccord_free(e->data);
     memset(e, 0, sizeof *e);
     media_forget_request(s, ev->media_url);
     return;
   }
-  if (ev->media_len > 0 && ev->media_data) memcpy(e->data, ev->media_data, ev->media_len);
+  uint8_t *taken = (ev->media_len > 0 && ev->media_data)
+                       ? ccord_transport_take_media_data(s->transport, ev->media_data)
+                       : nullptr;
+  if (taken) {
+    e->data = taken;
+  } else {
+    e->data = ev->media_len ? ccord_alloc_array(ev->media_len, 1) : nullptr;
+    if (ev->media_len > 0 && !e->data) {
+      ccord_free(e->url);
+      ccord_free(e->cache_path);
+      memset(e, 0, sizeof *e);
+      media_forget_request(s, ev->media_url);
+      return;
+    }
+    if (ev->media_len > 0 && ev->media_data) memcpy(e->data, ev->media_data, ev->media_len);
+  }
   e->len = ev->media_len;
   e->pub = (ccord_media_item){
     .url = e->url,

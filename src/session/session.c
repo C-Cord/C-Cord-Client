@@ -64,6 +64,7 @@ ccord_session *ccord_session_create(ccord_bus *bus, ccord_store *store, ccord_tr
   s->transport = transport;
   s->audio_mtx = ccord_mutex_create();
   s->state = CCORD_CONN_DISCONNECTED;
+  s->camera_rx_enabled = true;
   s->voice_track_synced = (ccord_store_guild_count(store) == 0u &&
                            ccord_store_channel_count(store, CCORD_DM_GUILD_ID) == 0u);
   return s;
@@ -132,11 +133,31 @@ ccord_status ccord_session_link_event(ccord_session *s, ccord_link_event kind, c
   return ccord_transport_network_event(s->transport, kind, err);
 }
 
+static void sess_sync_selected_channel(ccord_session *s)
+{
+  if (!s || !session_is_authenticated(s)) return;
+  ccord_id sel_ch = ccord_store_selected_channel(s->store);
+  sess_request_history_once(s, sel_ch);
+  sess_maybe_request_dm_profile(s, sel_ch);
+  if (s->reading_known && s->reading_channel != CCORD_ID_NONE) {
+    ccord_id self_id = ccord_store_self_id(s->store);
+    if (self_id != CCORD_ID_NONE && !ccord_store_user_profile(s->store, self_id)) {
+      ccord_error ignored;
+      (void)ccord_session_request_profile(s, self_id, &ignored);
+    }
+  }
+}
+
 void ccord_session_set_background(ccord_session *s, bool background)
 {
   if (!s) return;
+  bool was_bg = s->in_background;
   s->in_background = background;
   ccord_transport_set_background(s->transport, background);
+  if (was_bg && !background && s->bg_deferred_sync) {
+    s->bg_deferred_sync = false;
+    sess_sync_selected_channel(s);
+  }
 }
 
 void ccord_session_set_suspended(ccord_session *s, bool suspended)
@@ -144,6 +165,13 @@ void ccord_session_set_suspended(ccord_session *s, bool suspended)
   if (!s) return;
   s->suspended = suspended;
   ccord_transport_set_suspended(s->transport, suspended);
+}
+
+void ccord_session_set_camera_rx(ccord_session *s, bool enabled)
+{
+  if (!s) return;
+  s->camera_rx_enabled = enabled;
+  ccord_transport_set_camera_rx(s->transport, enabled);
 }
 
 bool ccord_session_is_stale(const ccord_session *s)
@@ -182,6 +210,8 @@ ccord_status ccord_session_set_transport(ccord_session *s, ccord_transport *tran
   ccord_mutex_unlock(s->audio_mtx);
   ccord_stream_hub_set_transport(s->streams, transport);
   ccord_transport_set_background(transport, s->in_background);
+  ccord_transport_set_camera_rx(transport, s->camera_rx_enabled);
+  s->bg_deferred_sync = false;
   s->rich_op3_retry_ms = 0;
   s->nrequested = 0;
   s->nchan_hist = 0;

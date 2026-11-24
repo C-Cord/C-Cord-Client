@@ -215,9 +215,13 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
       s->state = ev->state;
       sess_post_state(s);
       if (session_is_authenticated(s)) {
-        ccord_id sel_ch = ccord_store_selected_channel(s->store);
-        sess_request_history_once(s, sel_ch);
-        sess_maybe_request_dm_profile(s, sel_ch);
+        if (s->in_background) {
+          s->bg_deferred_sync = true;
+        } else {
+          ccord_id sel_ch = ccord_store_selected_channel(s->store);
+          sess_request_history_once(s, sel_ch);
+          sess_maybe_request_dm_profile(s, sel_ch);
+        }
       }
       if (s->state == CCORD_CONN_CONNECTED && s->rich_op3_dirty && !s->stale &&
           ccord_store_self_id(s->store) != CCORD_ID_NONE) {
@@ -328,13 +332,17 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
           ccord_error hook_err;
           (void)ccord_transport_select_channel(s->transport, sel_guild, sel_ch, &hook_err);
         }
-        sess_request_history_once(s, sel_ch);
-        sess_maybe_request_dm_profile(s, sel_ch);
-        if (s->reading_known && s->reading_channel != CCORD_ID_NONE) {
-          ccord_id self_id = ccord_store_self_id(s->store);
-          if (self_id != CCORD_ID_NONE && !ccord_store_user_profile(s->store, self_id)) {
-            ccord_error ignored;
-            (void)ccord_session_request_profile(s, self_id, &ignored);
+        if (s->in_background) {
+          s->bg_deferred_sync = true;
+        } else {
+          sess_request_history_once(s, sel_ch);
+          sess_maybe_request_dm_profile(s, sel_ch);
+          if (s->reading_known && s->reading_channel != CCORD_ID_NONE) {
+            ccord_id self_id = ccord_store_self_id(s->store);
+            if (self_id != CCORD_ID_NONE && !ccord_store_user_profile(s->store, self_id)) {
+              ccord_error ignored;
+              (void)ccord_session_request_profile(s, self_id, &ignored);
+            }
           }
         }
         ccord_os_trim_memory();
@@ -778,7 +786,11 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
             (void)ccord_session_select_guild(s, ev->guild->id, &err);
           }
         }
-        sess_request_history_once(s, ccord_store_selected_channel(s->store));
+        if (s->in_background) {
+          s->bg_deferred_sync = true;
+        } else {
+          sess_request_history_once(s, ccord_store_selected_channel(s->store));
+        }
       }
       break;
     case CCORD_NET_GUILD_DELETE:
@@ -886,7 +898,9 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
       }
       break;
     case CCORD_NET_CHANNEL_PINS_UPDATE:
-      if (session_is_authenticated(s) && ccord_store_history_loaded(s->store, ev->channel_id)) {
+      if (!s->in_background && session_is_authenticated(s) && ev->channel_id != CCORD_ID_NONE &&
+          ev->channel_id == ccord_store_selected_channel(s->store) &&
+          ccord_store_history_loaded(s->store, ev->channel_id)) {
         (void)ccord_transport_request_pins(s->transport, ev->channel_id, 50u, &err);
       }
       break;

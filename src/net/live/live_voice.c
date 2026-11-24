@@ -134,6 +134,7 @@ void live_voice_stop(live *l)
   live_vstream_slot_close_media(l, &l->rx_stream);
   live_voice_detach_and_destroy(l);
   l->voice_video_synced = false;
+  l->voice_camera_rx_applied = false;
   ccord_live_wipe(l->voice_token, sizeof l->voice_token);
   l->voice_endpoint[0] = '\0';
   l->voice_session_id[0] = '\0';
@@ -188,6 +189,7 @@ static void live_voice_gateway_drop(live *l)
 {
   live_voice_detach_and_destroy(l);
   l->voice_video_synced = false;   // the new gateway re-sends OP 12 once ESTABLISHED
+  l->voice_camera_rx_applied = false;
   l->voice_attempted = false;
   l->vlink_gw_reported = false;
 }
@@ -331,7 +333,9 @@ void live_voice_maybe_start(live *l)
     ccord_error derr;
     (void)ccord_voice_gateway_set_video_desc(vg, &k_live_camera_desc, &derr);   // a new gateway starts without it
   }
-  ccord_voice_gateway_set_camera_rx(vg, true);   // main voice gateway only: per-user remote cameras
+  bool cam_rx = l->camera_rx_enabled && !l->in_background;
+  ccord_voice_gateway_set_camera_rx(vg, cam_rx);   // main voice gateway only: per-user remote cameras
+  l->voice_camera_rx_applied = cam_rx;
   live_voice_publish(l, vg);
   l->vlink_gw_reported = false;
   if (l->vlink == LV_WAIT_SERVER) l->vlink = LV_IDLE;   // the new credentials arrived; the gateway takes over

@@ -1072,20 +1072,54 @@ static ccord_status live_network_event(ccord_transport *t, ccord_link_event kind
   static const char *const names[] = {"ignored", "fresh", "coalesced", "accepted"};
   CCORD_LOG_D("live: network event %s -> wake %s", kind == CCORD_LINK_CHANGED ? "changed" : "resumed",
               (unsigned)verdict < 4 ? names[verdict] : "?");
-  if (verdict != CCORD_GWPACE_WAKE_IGNORED) live_voice_link_event(l, kind);
+  if (verdict != CCORD_GWPACE_WAKE_IGNORED &&
+      !(l->in_background && kind == CCORD_LINK_RESUMED && verdict == CCORD_GWPACE_WAKE_FRESH)) {
+    live_voice_link_event(l, kind);
+  }
   return CCORD_OK;
+}
+
+static void live_sync_camera_rx(live *l)
+{
+  if (!l || !l->voice) return;
+  bool want = l->camera_rx_enabled && !l->in_background;
+  if (l->voice_camera_rx_applied == want) return;
+  ccord_voice_gateway_set_camera_rx(l->voice, want);
+  l->voice_camera_rx_applied = want;
+}
+
+static void live_set_camera_rx(ccord_transport *t, bool enabled)
+{
+  live *l = (live *)t;
+  if (!l) return;
+  l->camera_rx_enabled = enabled;
+  live_sync_camera_rx(l);
 }
 
 static void live_set_background(ccord_transport *t, bool background)
 {
   live *l = (live *)t;
-  if (l && l->gw) ccord_gateway_set_background(l->gw, background);
+  if (!l) return;
+  l->in_background = background;
+  if (l->gw) ccord_gateway_set_background(l->gw, background);
+  live_sync_camera_rx(l);
 }
 
 static void live_set_suspended(ccord_transport *t, bool suspended)
 {
   live *l = (live *)t;
   if (l && l->gw) ccord_gateway_set_suspended(l->gw, suspended);
+}
+
+static uint8_t *live_take_media_data(ccord_transport *t, const uint8_t *expected)
+{
+  live *l = (live *)t;
+  if (!l || !expected || !l->have_current || !l->current_media) return nullptr;
+  if ((const uint8_t *)l->current_media != expected) return nullptr;
+  uint8_t *owned = (uint8_t *)l->current_media;
+  l->current_media = nullptr;
+  l->current.ev.media_data = nullptr;
+  return owned;
 }
 
 static void live_drain_voice_speaking(live *l)
@@ -1452,6 +1486,8 @@ static const ccord_transport_vtable k_live_vt = {
   .wait_info = live_wait_info,
   .set_background = live_set_background,
   .set_suspended = live_set_suspended,
+  .set_camera_rx = live_set_camera_rx,
+  .take_media_data = live_take_media_data,
 };
 
 ccord_gov *ccord_live_transport_governor(ccord_transport *t)
@@ -1495,6 +1531,7 @@ ccord_transport *ccord_live_transport_create(const ccord_live_config *cfg, ccord
   }
   l->tx_stream.sender = true;
   l->rx_stream.sender = false;
+  l->camera_rx_enabled = true;
   l->media_mtx = ccord_mutex_create();
   l->voice_mtx = ccord_mutex_create();
   l->voice_cond = ccord_cond_create();

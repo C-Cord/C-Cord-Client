@@ -734,6 +734,12 @@ typedef struct ccord_transport_vtable {
   // Optional. POST /channels/{id}/greet {"sticker_ids":[id], "message_reference":{...}} -> MESSAGE_CREATE.
   ccord_status (*send_greet)(ccord_transport *t, ccord_id channel_id, ccord_id sticker_id,
                              ccord_id reply_to_id, ccord_error *err);
+  // Optional. Enables or pauses remote voice camera receive (OP 15 sink_wants) when the video grid is hidden/visible.
+  void (*set_camera_rx)(ccord_transport *t, bool enabled);
+  // Optional. Zero-copy ownership handoff of the current event's heap-owned media_data buffer when it matches
+  // `expected`. Returns the heap buffer (caller frees with ccord_free) and detaches it from the transport,
+  // or nullptr when the bytes are not separately heap-owned or do not match.
+  uint8_t *(*take_media_data)(ccord_transport *t, const uint8_t *expected);
 } ccord_transport_vtable;
 struct ccord_transport { const ccord_transport_vtable *vt; };           // implementations embed this as first member
 [[nodiscard]] static inline ccord_status ccord_transport_connect(ccord_transport *t, ccord_error *e) { return t->vt->connect(t, e); }
@@ -1233,6 +1239,13 @@ static inline void ccord_transport_set_background(ccord_transport *t, bool backg
 }
 static inline void ccord_transport_set_suspended(ccord_transport *t, bool suspended) {
   if (CCORD_TRANSPORT_OPTIONAL(t, set_suspended)) t->vt->set_suspended(t, suspended);
+}
+static inline void ccord_transport_set_camera_rx(ccord_transport *t, bool enabled) {
+  if (CCORD_TRANSPORT_OPTIONAL(t, set_camera_rx)) t->vt->set_camera_rx(t, enabled);
+}
+static inline uint8_t *ccord_transport_take_media_data(ccord_transport *t, const uint8_t *expected) {
+  if (!expected || !CCORD_TRANSPORT_OPTIONAL(t, take_media_data)) return nullptr;
+  return t->vt->take_media_data(t, expected);
 }
 [[nodiscard]] static inline ccord_status ccord_transport_create_poll(ccord_transport *t, ccord_id c,
                                                                      const ccord_poll_create *poll, ccord_error *e) {

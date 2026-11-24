@@ -31,6 +31,8 @@ void ccord_session_set_stale(ccord_session *s, bool stale);
 // or suspended for power saving (closes socket while preserving session_id/seq for fast RESUME on foreground).
 void ccord_session_set_background(ccord_session *s, bool background);
 void ccord_session_set_suspended(ccord_session *s, bool suspended);
+// Enables or pauses remote voice camera receive (OP 15 sink_wants) when the video grid is hidden/visible.
+void ccord_session_set_camera_rx(ccord_session *s, bool enabled);
 // Releases expendable cached buffers (e.g. search/reaction/discovery/invite/video-resolved caches) under memory pressure.
 void ccord_session_trim_memory(ccord_session *s);
 bool ccord_session_is_stale(const ccord_session *s);
