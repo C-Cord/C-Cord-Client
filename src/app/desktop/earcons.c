@@ -237,19 +237,25 @@ static bool ear_open_out(ccord_earcons *e, int64_t now_ms)
 bool ccord_earcons_play_bytes(ccord_earcons *e, const uint8_t *data, size_t len, int64_t now_ms)
 {
   if (!e || !data || len == 0) return false;
-  enum { MAX_PCM_SAMPLES = EAR_RATE * 10 };   // cap plugin clips at 10 s mono 48 kHz
+  // ccord_sound_decode outputs interleaved stereo 48 kHz S16LE (frames * 2 samples); downmix to
+  // match e->out's mono stream so clips play at 1x speed and release the DAC promptly.
+  enum { MAX_PCM_SAMPLES = EAR_RATE * 2 * 10 };   // cap plugin clips at 10 s stereo 48 kHz
   int16_t *pcm = ccord_malloc(MAX_PCM_SAMPLES * sizeof *pcm);
   if (!pcm) return false;
   size_t n = 0;
   ccord_error err = {0};
   ccord_status st = ccord_sound_decode(data, len, pcm, MAX_PCM_SAMPLES, &n, &err);
-  if (st != CCORD_OK || n == 0) {
+  size_t frames = n / 2u;
+  if (st != CCORD_OK || frames == 0) {
     ccord_free(pcm);
     return false;
   }
+  for (size_t i = 0; i < frames; i++) {
+    pcm[i] = (int16_t)(((int32_t)pcm[i * 2u] + (int32_t)pcm[i * 2u + 1u]) / 2);
+  }
   if (ear_open_out(e, now_ms)) {
-    (void)ccord_audio_write(e->out, pcm, n);
-    int64_t dur_ms = (int64_t)((n * 1000u + (EAR_RATE - 1u)) / EAR_RATE);
+    (void)ccord_audio_write(e->out, pcm, frames);
+    int64_t dur_ms = (int64_t)((frames * 1000u + (EAR_RATE - 1u)) / EAR_RATE);
     int64_t base = e->out_busy_until_ms > now_ms ? e->out_busy_until_ms : now_ms;
     e->out_busy_until_ms = base + dur_ms;
   }
