@@ -13,6 +13,14 @@
 #define CONTRIB_PANEL_JSON_MAX (512u * 1024u)
 #define CONTRIB_LOG_CAP 500u
 #define CONTRIB_LOG_INIT_CAP 16u
+#define CONTRIB_MENU_STATE_MAX_OWNER 2048u
+
+typedef struct contrib_menu_state_entry {
+  char *owner;
+  char *item_id;
+  ccord_id target_id;     // 0 = wildcard/default override for (owner, item_id)
+  ccord_menu_item_state state;
+} contrib_menu_state_entry;
 
 typedef struct plugin_slot {
   ccord_plugin_info info;
@@ -25,6 +33,8 @@ typedef struct plugin_slot {
 struct ccord_contrib {
   ccord_menu_contribution *menus;
   size_t nmenus, capmenus;
+  contrib_menu_state_entry *menu_states;
+  size_t nmenu_states, capmenu_states;
   ccord_command_contribution *cmds;
   size_t ncmds, capcmds;
   ccord_panel_contribution *panels;

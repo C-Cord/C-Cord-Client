@@ -78,6 +78,9 @@ void ccord_sandbox_set_cancel_flag(ccord_sandbox *sb, const _Atomic bool *cancel
 [[nodiscard]] ccord_status ccord_sandbox_emit(ccord_sandbox *sb, const char *event, const ccord_json *data, ccord_error *err);
 // Calls the action of a context menu item registered by this plugin with the context table.
 [[nodiscard]] ccord_status ccord_sandbox_menu_invoke(ccord_sandbox *sb, const char *item_id, const ccord_json *ctx, ccord_error *err);
+// Batched synchronous resolver for context menu items registered with `resolve = function(ctx)`.
+[[nodiscard]] ccord_status ccord_sandbox_menu_resolve(ccord_sandbox *sb, const ccord_json *item_ids,
+                                                      const ccord_json *ctx, char **out_json, ccord_error *err);
 // Calls the on_event handler of a UI panel mounted by this plugin with the event table.
 [[nodiscard]] ccord_status ccord_sandbox_panel_event(ccord_sandbox *sb, const char *panel_id, const ccord_json *ev, ccord_error *err);
 // Calls a registered command. *out_text is a ccord_free-able copy of the returned string, or nullptr when nothing was returned.

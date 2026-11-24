@@ -35,7 +35,27 @@ typedef struct ccord_menu_contribution {
   bool danger;
   bool checked;
   bool divider_before;
+  bool has_resolver;
 } ccord_menu_contribution;
+
+typedef struct ccord_menu_item_state {
+  bool has_label;
+  char label[65];         // 1..64 bytes UTF-8 plain text
+  bool has_checked;
+  bool checked;
+  bool has_hidden;
+  bool hidden;
+  bool has_disabled;
+  bool disabled;
+  bool has_danger;
+  bool danger;
+} ccord_menu_item_state;
+
+typedef struct ccord_menu_resolved_entry {
+  char owner[65];
+  char item_id[65];
+  ccord_menu_item_state state;
+} ccord_menu_resolved_entry;
 typedef struct ccord_command_contribution {
   const char *owner;
   const char *name;
@@ -514,6 +534,9 @@ typedef struct ccord_contrib_handlers {
   void (*panel_event)(void *ud, const ccord_panel_contribution *panel, const ccord_panel_event *ev);
   void (*decor_event)(void *ud, const ccord_decorator_contribution *decor, ccord_id target_id, const ccord_panel_event *ev);
   void (*local_msg_event)(void *ud, const ccord_local_message *msg, const char *ev_type, float x, float y);
+  size_t (*menu_resolve)(void *ud, const char *owner, const char *const *item_ids, size_t item_count,
+                         const ccord_menu_context *ctx, uint32_t timeout_ms,
+                         ccord_menu_resolved_entry *out, size_t max_out);
   void (*plugin_setting_changed)(void *ud, const char *owner, const char *key, const char *value_json);
   void (*keybind_triggered)(void *ud, const char *owner, const char *bind_id);
   void (*action_btn_click)(void *ud, const ccord_action_btn_contribution *btn, const ccord_menu_context *ctx);
@@ -588,6 +611,16 @@ uint64_t ccord_contrib_local_messages_revision(const ccord_contrib *c);
 [[nodiscard]] ccord_status ccord_contrib_add_menu(ccord_contrib *c, const char *owner, const char *item_id, const char *label, ccord_menu_target t, ccord_error *err);
 [[nodiscard]] ccord_status ccord_contrib_add_menu_ex(ccord_contrib *c, const ccord_menu_contribution *spec, ccord_error *err);
 bool ccord_contrib_remove_menu(ccord_contrib *c, const char *owner, const char *item_id);
+[[nodiscard]] ccord_status ccord_contrib_set_menu_state(ccord_contrib *c, const char *owner, const char *item_id,
+                                                        ccord_id target_id, const ccord_menu_item_state *state,
+                                                        ccord_error *err);
+bool ccord_contrib_clear_menu_state(ccord_contrib *c, const char *owner, const char *item_id,
+                                    ccord_id target_id, bool clear_all_targets);
+bool ccord_contrib_find_menu_state(const ccord_contrib *c, const char *owner, const char *item_id,
+                                   ccord_id target_id, ccord_menu_item_state *out);
+size_t ccord_contrib_resolve_menu_items(const ccord_contrib *c, ccord_menu_target target,
+                                        const ccord_menu_context *ctx,
+                                        ccord_menu_resolved_entry *out, size_t max_out);
 [[nodiscard]] ccord_status ccord_contrib_add_command(ccord_contrib *c, const char *owner, const char *name, const char *description, ccord_error *err);
 [[nodiscard]] ccord_status ccord_contrib_add_command_ex(ccord_contrib *c, const char *owner, const char *name,
                                                         const char *description, const char *schema_json,

@@ -217,6 +217,7 @@ void pl_reload_plugin(ccord_plugins *m, const char *id);
 const char *pl_menu_target_str(ccord_menu_target t);
 bool pl_parse_menu_target(const char *s, ccord_menu_target *out);
 bool pl_parse_panel_slot(const char *s, ccord_panel_slot *out);
+void pl_write_menu_ctx_obj(ccord_jw *w, const ccord_menu_context *ctx);
 
 // API v3 handlers & bridges defined in plugin_api_ext.c
 bool plugins_ext_handle_request(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg);
@@ -235,6 +236,9 @@ size_t plugins_ext_on_command_complete(void *ud, const ccord_command_contributio
 void plugins_ext_on_decor_event(void *ud, const ccord_decorator_contribution *decor, ccord_id target_id,
                                 const ccord_panel_event *ev);
 void plugins_ext_on_local_msg_event(void *ud, const ccord_local_message *lm, const char *ev_type, float x, float y);
+size_t plugins_ext_on_menu_resolve(void *ud, const char *owner, const char *const *item_ids, size_t item_count,
+                                   const ccord_menu_context *ctx, uint32_t timeout_ms,
+                                   ccord_menu_resolved_entry *out, size_t max_out);
 void plugins_ext_on_setting_changed(void *ud, const char *owner, const char *key, const char *value_json);
 void plugins_ext_on_keybind_triggered(void *ud, const char *owner, const char *bind_id);
 void plugins_ext_on_action_btn_click(void *ud, const ccord_action_btn_contribution *btn, const ccord_menu_context *ctx);

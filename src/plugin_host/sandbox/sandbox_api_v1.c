@@ -145,15 +145,36 @@ static int api_ui_menu_add(lua_State *L)
   sb_raw_getfield(L, 1, "action");
   if (lua_type(L, -1) != LUA_TFUNCTION) return luaL_error(L, "ui.contextMenu.add: 'action' must be a function");
   // Stack: ..., action
+
+  // Validate optional `resolve` callback before committing to registry tables.
+  bool has_resolver = false;
+  sb_raw_getfield(L, 1, "resolve");
+  if (!lua_isnil(L, -1)) {
+    if (lua_type(L, -1) != LUA_TFUNCTION) {
+      return luaL_error(L, "ui.contextMenu.add: 'resolve' must be a function");
+    }
+    has_resolver = true;
+  }
+  // Stack: ..., action, resolve_or_nil
+
   lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_MENU);
   lua_pushlstring(L, id_buf, id_len);
   lua_rawget(L, -2);
   if (!lua_isnil(L, -1)) return luaL_error(L, "ui.contextMenu.add: id '%s' already registered", id_buf);
   lua_pop(L, 1);
   lua_pushlstring(L, id_buf, id_len);
-  lua_pushvalue(L, -3);
+  lua_pushvalue(L, -4); // action
   lua_rawset(L, -3);
-  lua_pop(L, 2);
+  lua_pop(L, 1); // pop SB_KEY_MENU
+
+  if (has_resolver) {
+    lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_MENU_RESOLVE);
+    lua_pushlstring(L, id_buf, id_len);
+    lua_pushvalue(L, -3); // resolve
+    lua_rawset(L, -3);
+    lua_pop(L, 1);
+  }
+  lua_pop(L, 2); // pop resolve_or_nil and action
 
   ccord_buf b;
   ccord_buf_init(&b, 0);
@@ -178,6 +199,7 @@ static int api_ui_menu_add(lua_State *L)
   sb_raw_getfield(L, 1, "divider_before");
   if (!lua_isnil(L, -1)) { ccord_jw_key(&w, "divider_before"); ccord_jw_bool(&w, lua_toboolean(L, -1) != 0); }
   lua_pop(L, 1);
+  if (has_resolver) { ccord_jw_key(&w, "has_resolver"); ccord_jw_bool(&w, true); }
   sb_raw_getfield(L, 1, "when");
   if (lua_type(L, -1) == LUA_TTABLE) { ccord_jw_key(&w, "when"); (void)sb_encode_lua(L, -1, &w, 0); }
   lua_pop(L, 1);
@@ -199,8 +221,100 @@ static int api_ui_menu_remove(lua_State *L)
   lua_pushnil(L);
   lua_settable(L, -3);
   lua_pop(L, 1);
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_MENU_RESOLVE);
+  lua_pushlstring(L, id, n);
+  lua_pushnil(L);
+  lua_settable(L, -3);
+  lua_pop(L, 1);
   sb_request_pair(sb, "ui.contextMenu.remove", "id", id, n);
   return 0;
+}
+
+static int api_ui_menu_set_state(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  size_t il = 0;
+  const char *id = luaL_checklstring(L, 1, &il);
+  if (!sb_valid_name(id, il, 32, true) || id[0] == '_' || id[0] == '-') {
+    return luaL_error(L, "ui.contextMenu.set_state: id must match ^[a-z0-9][a-z0-9_-]{0,31}$");
+  }
+  const char *target_id = nullptr;
+  size_t tl = 0;
+  if (!lua_isnil(L, 2)) {
+    target_id = luaL_checklstring(L, 2, &tl);
+    if (tl > 32) return luaL_error(L, "ui.contextMenu.set_state: invalid target_id");
+  }
+  luaL_checktype(L, 3, LUA_TTABLE);
+
+  ccord_buf b; ccord_buf_init(&b, 0);
+  ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "id"); ccord_jw_string(&w, id, il);
+  if (target_id && tl > 0) {
+    ccord_jw_key(&w, "target_id"); ccord_jw_string(&w, target_id, tl);
+  }
+  ccord_jw_key(&w, "state");
+  ccord_jw_begin_object(&w);
+  sb_raw_getfield(L, 3, "label");
+  if (!lua_isnil(L, -1)) {
+    if (lua_type(L, -1) != LUA_TSTRING) {
+      ccord_buf_free(&b);
+      return luaL_error(L, "ui.contextMenu.set_state: 'label' must be a string");
+    }
+    size_t ll = 0;
+    const char *ls = lua_tolstring(L, -1, &ll);
+    if (!sb_is_text(ls, ll, 64)) {
+      ccord_buf_free(&b);
+      return luaL_error(L, "ui.contextMenu.set_state: label must be 1-64 bytes of text");
+    }
+    ccord_jw_key(&w, "label"); ccord_jw_string(&w, ls, ll);
+  }
+  lua_pop(L, 1);
+  static const char *const k_bools[] = {"checked", "hidden", "disabled", "danger"};
+  for (size_t i = 0; i < 4u; i++) {
+    sb_raw_getfield(L, 3, k_bools[i]);
+    if (!lua_isnil(L, -1)) {
+      ccord_jw_key(&w, k_bools[i]);
+      ccord_jw_bool(&w, lua_toboolean(L, -1) != 0);
+    }
+    lua_pop(L, 1);
+  }
+  ccord_jw_end_object(&w);
+  ccord_jw_end_object(&w);
+  bool ok = ccord_jw_ok(&w);
+  if (ok) sb_request(sb, "ui.contextMenu.set_state", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  lua_pushboolean(L, ok ? 1 : 0);
+  return 1;
+}
+
+static int api_ui_menu_clear_state(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  size_t il = 0;
+  const char *id = luaL_checklstring(L, 1, &il);
+  if (!sb_valid_name(id, il, 32, true) || id[0] == '_' || id[0] == '-') {
+    return luaL_error(L, "ui.contextMenu.clear_state: id must match ^[a-z0-9][a-z0-9_-]{0,31}$");
+  }
+  const char *target_id = nullptr;
+  size_t tl = 0;
+  if (!lua_isnoneornil(L, 2)) {
+    target_id = luaL_checklstring(L, 2, &tl);
+    if (tl > 32) return luaL_error(L, "ui.contextMenu.clear_state: invalid target_id");
+  }
+  ccord_buf b; ccord_buf_init(&b, 0);
+  ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "id"); ccord_jw_string(&w, id, il);
+  if (target_id && tl > 0) {
+    ccord_jw_key(&w, "target_id"); ccord_jw_string(&w, target_id, tl);
+  }
+  ccord_jw_end_object(&w);
+  bool ok = ccord_jw_ok(&w);
+  if (ok) sb_request(sb, "ui.contextMenu.clear_state", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  lua_pushboolean(L, ok ? 1 : 0);
+  return 1;
 }
 
 static bool valid_panel_slot(const char *s, size_t n)
@@ -1155,7 +1269,13 @@ void sb_open_api_v1(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
   static const luaL_Reg k_events[] = {{"on", api_events_on}, {"off", api_events_off}, {nullptr, nullptr}};
-  static const luaL_Reg k_menu[] = {{"add", api_ui_menu_add}, {"remove", api_ui_menu_remove}, {nullptr, nullptr}};
+  static const luaL_Reg k_menu[] = {
+    {"add", api_ui_menu_add},
+    {"remove", api_ui_menu_remove},
+    {"set_state", api_ui_menu_set_state},
+    {"clear_state", api_ui_menu_clear_state},
+    {nullptr, nullptr},
+  };
   static const luaL_Reg k_panel[] = {
     {"mount", api_ui_panel_mount}, {"update", api_ui_panel_update}, {"unmount", api_ui_panel_unmount}, {nullptr, nullptr}};
   static const luaL_Reg k_toast[] = {{"show", api_ui_toast_show}, {nullptr, nullptr}};

@@ -8,6 +8,7 @@
 
 #include <ccord/core/alloc.h>
 #include <ccord/core/buf.h>
+#include <ccord/core/clock.h>
 #include <ccord/core/json.h>
 #include <ccord/core/utf8.h>
 
@@ -84,6 +85,10 @@ void ccord_contrib_destroy(ccord_contrib *c)
 {
   if (!c) return;
   for (size_t i = 0; i < c->nmenus; i++) free_menu(&c->menus[i]);
+  for (size_t i = 0; i < c->nmenu_states; i++) {
+    ccord_free(c->menu_states[i].owner);
+    ccord_free(c->menu_states[i].item_id);
+  }
   for (size_t i = 0; i < c->ncmds; i++) free_cmd(&c->cmds[i]);
   for (size_t i = 0; i < c->npanels; i++) free_panel(&c->panels[i]);
   contrib_ext_destroy(c);
@@ -92,6 +97,7 @@ void ccord_contrib_destroy(ccord_contrib *c)
   for (size_t i = 0; i < c->ncatalog_updates; i++) contrib_free_catalog_entry(&c->catalog_updates[i]);
   if (c->has_catalog_detail) contrib_free_catalog_entry(&c->catalog_detail);
   ccord_free(c->menus);
+  ccord_free(c->menu_states);
   ccord_free(c->cmds);
   ccord_free(c->panels);
   ccord_free(c->plugins);
@@ -136,6 +142,7 @@ ccord_status ccord_contrib_add_menu_ex(ccord_contrib *c, const ccord_menu_contri
     .danger = spec->danger,
     .checked = spec->checked,
     .divider_before = spec->divider_before,
+    .has_resolver = spec->has_resolver,
   };
   if (!m.owner || !m.item_id || !m.label || !m.icon || !m.submenu || !m.when_json) {
     free_menu(&m);
@@ -161,11 +168,209 @@ bool ccord_contrib_remove_menu(ccord_contrib *c, const char *owner, const char *
       free_menu(&c->menus[i]);
       memmove(&c->menus[i], &c->menus[i + 1], (c->nmenus - i - 1) * sizeof c->menus[0]);
       c->nmenus--;
+      (void)ccord_contrib_clear_menu_state(c, owner, item_id, CCORD_ID_NONE, true);
       c->revision++;
       return true;
     }
   }
   return false;
+}
+
+static int menu_state_cmp_key(const contrib_menu_state_entry *e, const char *owner, const char *item_id, ccord_id tid)
+{
+  int r = strcmp(e->owner, owner);
+  if (r != 0) return r;
+  r = strcmp(e->item_id, item_id);
+  if (r != 0) return r;
+  if (e->target_id < tid) return -1;
+  if (e->target_id > tid) return 1;
+  return 0;
+}
+
+static size_t menu_state_lower_bound(const ccord_contrib *c, const char *owner, const char *item_id, ccord_id tid)
+{
+  size_t lo = 0, hi = c->nmenu_states;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    if (menu_state_cmp_key(&c->menu_states[mid], owner, item_id, tid) < 0) lo = mid + 1u;
+    else hi = mid;
+  }
+  return lo;
+}
+
+ccord_status ccord_contrib_set_menu_state(ccord_contrib *c, const char *owner, const char *item_id,
+                                          ccord_id target_id, const ccord_menu_item_state *state,
+                                          ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!c || !owner || !item_id || !state) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: null menu state argument");
+  }
+  bool owned = false;
+  for (size_t i = 0; i < c->nmenus; i++) {
+    if (strcmp(c->menus[i].owner, owner) == 0 && strcmp(c->menus[i].item_id, item_id) == 0) {
+      owned = true;
+      break;
+    }
+  }
+  if (!owned) {
+    return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "contrib: menu item '%s' not registered by owner", item_id);
+  }
+  if (state->has_label && !text_ok(state->label, 64u, false)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: menu state label must be 1..64 bytes UTF-8 text");
+  }
+
+  size_t pos = menu_state_lower_bound(c, owner, item_id, target_id);
+  if (pos < c->nmenu_states && menu_state_cmp_key(&c->menu_states[pos], owner, item_id, target_id) == 0) {
+    c->menu_states[pos].state = *state;
+    c->revision++;
+    return CCORD_OK;
+  }
+
+  size_t owner_cnt = 0;
+  for (size_t i = 0; i < c->nmenu_states; i++) {
+    if (strcmp(c->menu_states[i].owner, owner) == 0) owner_cnt++;
+  }
+  if (owner_cnt >= CONTRIB_MENU_STATE_MAX_OWNER) {
+    return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: menu state override limit (2048) reached");
+  }
+  if (c->nmenu_states == c->capmenu_states) {
+    size_t ncap = c->capmenu_states ? c->capmenu_states * 2u : 16u;
+    contrib_menu_state_entry *g = ccord_realloc_array(c->menu_states, ncap, sizeof *g);
+    if (!g) return ccord_error_set(err, CCORD_ERR_NOMEM, "contrib: out of memory");
+    c->menu_states = g;
+    c->capmenu_states = ncap;
+  }
+  char *odup = ccord_strdup(owner);
+  char *idup = ccord_strdup(item_id);
+  if (!odup || !idup) {
+    ccord_free(odup);
+    ccord_free(idup);
+    return ccord_error_set(err, CCORD_ERR_NOMEM, "contrib: out of memory");
+  }
+  if (pos < c->nmenu_states) {
+    memmove(&c->menu_states[pos + 1u], &c->menu_states[pos],
+            (c->nmenu_states - pos) * sizeof c->menu_states[0]);
+  }
+  c->menu_states[pos] = (contrib_menu_state_entry){
+    .owner = odup,
+    .item_id = idup,
+    .target_id = target_id,
+    .state = *state,
+  };
+  c->nmenu_states++;
+  c->revision++;
+  return CCORD_OK;
+}
+
+bool ccord_contrib_clear_menu_state(ccord_contrib *c, const char *owner, const char *item_id,
+                                    ccord_id target_id, bool clear_all_targets)
+{
+  if (!c || !owner || !item_id || c->nmenu_states == 0) return false;
+  if (!clear_all_targets) {
+    size_t pos = menu_state_lower_bound(c, owner, item_id, target_id);
+    if (pos < c->nmenu_states && menu_state_cmp_key(&c->menu_states[pos], owner, item_id, target_id) == 0) {
+      ccord_free(c->menu_states[pos].owner);
+      ccord_free(c->menu_states[pos].item_id);
+      memmove(&c->menu_states[pos], &c->menu_states[pos + 1u],
+              (c->nmenu_states - pos - 1u) * sizeof c->menu_states[0]);
+      c->nmenu_states--;
+      c->revision++;
+      return true;
+    }
+    return false;
+  }
+  size_t w = 0;
+  bool removed = false;
+  for (size_t r = 0; r < c->nmenu_states; r++) {
+    if (strcmp(c->menu_states[r].owner, owner) == 0 && strcmp(c->menu_states[r].item_id, item_id) == 0) {
+      ccord_free(c->menu_states[r].owner);
+      ccord_free(c->menu_states[r].item_id);
+      removed = true;
+    } else {
+      c->menu_states[w++] = c->menu_states[r];
+    }
+  }
+  c->nmenu_states = w;
+  if (removed) c->revision++;
+  return removed;
+}
+
+static void merge_menu_state(ccord_menu_item_state *dst, const ccord_menu_item_state *src)
+{
+  if (src->has_label) {
+    dst->has_label = true;
+    snprintf(dst->label, sizeof dst->label, "%s", src->label);
+  }
+  if (src->has_checked) { dst->has_checked = true; dst->checked = src->checked; }
+  if (src->has_hidden) { dst->has_hidden = true; dst->hidden = src->hidden; }
+  if (src->has_disabled) { dst->has_disabled = true; dst->disabled = src->disabled; }
+  if (src->has_danger) { dst->has_danger = true; dst->danger = src->danger; }
+}
+
+bool ccord_contrib_find_menu_state(const ccord_contrib *c, const char *owner, const char *item_id,
+                                   ccord_id target_id, ccord_menu_item_state *out)
+{
+  if (out) memset(out, 0, sizeof *out);
+  if (!c || !owner || !item_id || !out || c->nmenu_states == 0) return false;
+  bool found = false;
+  size_t p0 = menu_state_lower_bound(c, owner, item_id, CCORD_ID_NONE);
+  if (p0 < c->nmenu_states && menu_state_cmp_key(&c->menu_states[p0], owner, item_id, CCORD_ID_NONE) == 0) {
+    merge_menu_state(out, &c->menu_states[p0].state);
+    found = true;
+  }
+  if (target_id != CCORD_ID_NONE) {
+    size_t pt = menu_state_lower_bound(c, owner, item_id, target_id);
+    if (pt < c->nmenu_states && menu_state_cmp_key(&c->menu_states[pt], owner, item_id, target_id) == 0) {
+      merge_menu_state(out, &c->menu_states[pt].state);
+      found = true;
+    }
+  }
+  return found;
+}
+
+size_t ccord_contrib_resolve_menu_items(const ccord_contrib *c, ccord_menu_target target,
+                                        const ccord_menu_context *ctx,
+                                        ccord_menu_resolved_entry *out, size_t max_out)
+{
+  if (!c || !ctx || !out || max_out == 0 || !c->handlers.menu_resolve) return 0;
+  // Collect distinct owners that have >=1 resolver item for `target`.
+  const char *owners[32];
+  size_t nowners = 0;
+  for (size_t i = 0; i < c->nmenus; i++) {
+    const ccord_menu_contribution *m = &c->menus[i];
+    if (m->target != target || !m->has_resolver) continue;
+    bool seen = false;
+    for (size_t k = 0; k < nowners; k++) {
+      if (strcmp(owners[k], m->owner) == 0) { seen = true; break; }
+    }
+    if (!seen && nowners < 32u) owners[nowners++] = m->owner;
+  }
+  if (nowners == 0) return 0;
+
+  uint64_t total_deadline = ccord_clock_ms() + 100u;
+  size_t total = 0;
+  for (size_t oi = 0; oi < nowners && total < max_out; oi++) {
+    uint64_t now = ccord_clock_ms();
+    if (now >= total_deadline) break;
+    uint64_t rem = total_deadline - now;
+    uint32_t per_plugin_ms = rem < 50u ? (uint32_t)rem : 50u;
+
+    const char *ids[64];
+    size_t nid = 0;
+    for (size_t i = 0; i < c->nmenus && nid < 64u; i++) {
+      if (c->menus[i].target == target && c->menus[i].has_resolver &&
+          strcmp(c->menus[i].owner, owners[oi]) == 0) {
+        ids[nid++] = c->menus[i].item_id;
+      }
+    }
+    if (nid == 0) continue;
+    size_t got = c->handlers.menu_resolve(c->handlers.ud, owners[oi], ids, nid, ctx, per_plugin_ms,
+                                          out + total, max_out - total);
+    if (got > max_out - total) got = max_out - total;
+    total += got;
+  }
+  return total;
 }
 
 ccord_status ccord_contrib_add_command_ex(ccord_contrib *c, const char *owner, const char *name,
@@ -343,6 +548,17 @@ void ccord_contrib_remove_owner(ccord_contrib *c, const char *owner)
     }
   }
   c->nmenus = w;
+  w = 0;
+  for (size_t r = 0; r < c->nmenu_states; r++) {
+    if (strcmp(c->menu_states[r].owner, owner) == 0) {
+      ccord_free(c->menu_states[r].owner);
+      ccord_free(c->menu_states[r].item_id);
+      changed = true;
+    } else {
+      c->menu_states[w++] = c->menu_states[r];
+    }
+  }
+  c->nmenu_states = w;
   w = 0;
   for (size_t r = 0; r < c->ncmds; r++) {
     if (strcmp(c->cmds[r].owner, owner) == 0) {

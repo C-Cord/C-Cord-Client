@@ -3197,6 +3197,104 @@ static void test_positioned_timeline_messages_and_style(void)
   CT_CHECK(ui_view_count(F.ui) == base_n);
 }
 
+static size_t test_dyn_menu_resolve_cb(void *ud, const char *owner, const char *const *item_ids, size_t item_count,
+                                       const ccord_menu_context *ctx, uint32_t timeout_ms,
+                                       ccord_menu_resolved_entry *out, size_t max_out)
+{
+  (void)ud; (void)timeout_ms;
+  if (!owner || !item_ids || !ctx || !out || max_out == 0) return 0;
+  size_t got = 0;
+  for (size_t i = 0; i < item_count && got < max_out; i++) {
+    if (strcmp(item_ids[i], "dyn-res") != 0) continue;
+    ccord_menu_resolved_entry ent = {0};
+    snprintf(ent.owner, sizeof ent.owner, "%s", owner);
+    snprintf(ent.item_id, sizeof ent.item_id, "%s", item_ids[i]);
+    if (ctx->channel_id == 9001) {
+      ent.state.has_label = true; snprintf(ent.state.label, sizeof ent.state.label, "Resolved Active");
+      ent.state.has_checked = true; ent.state.checked = true;
+    } else if (ctx->channel_id == 9002) {
+      ent.state.has_label = true; snprintf(ent.state.label, sizeof ent.state.label, "Resolved Disabled");
+      ent.state.has_disabled = true; ent.state.disabled = true;
+      ent.state.has_danger = true; ent.state.danger = true;
+    } else {
+      ent.state.has_hidden = true; ent.state.hidden = true;
+    }
+    out[got++] = ent;
+  }
+  return got;
+}
+
+static void test_dynamic_context_menu_ui(void)
+{
+  ccord_error err = {0};
+  const char *owner = "dev.test.dynmenuui";
+  ccord_contrib_handlers h = {.menu_resolve = test_dyn_menu_resolve_cb};
+  ccord_contrib_set_handlers(F.contrib, &h);
+
+  ccord_menu_contribution m1 = {
+    .owner = owner, .item_id = "dyn-st", .label = "Monitor Channel",
+    .target = CCORD_MENU_CHANNEL, .submenu = "Message Logger",
+  };
+  ccord_menu_contribution m2 = {
+    .owner = owner, .item_id = "dyn-res", .label = "Fallback",
+    .target = CCORD_MENU_CHANNEL, .submenu = "Message Logger", .has_resolver = true,
+  };
+  CT_CHECK(ccord_contrib_add_menu_ex(F.contrib, &m1, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_add_menu_ex(F.contrib, &m2, &err) == CCORD_OK);
+
+  ccord_menu_item_state s_on = {.has_label = true, .label = "Stop Monitoring", .has_checked = true, .checked = true};
+  ccord_menu_item_state s_hid = {.has_hidden = true, .hidden = true};
+  CT_CHECK(ccord_contrib_set_menu_state(F.contrib, owner, "dyn-st", 9001, &s_on, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_set_menu_state(F.contrib, owner, "dyn-st", 9003, &s_hid, &err) == CCORD_OK);
+
+  // Case 1: channel 9001 -> submenu present, both children reflect dynamic checked/labels.
+  ccord_menu_context c1 = {.target = CCORD_MENU_CHANNEL, .guild_id = 100, .channel_id = 9001};
+  ui_menu_open(F.ui, 120.0f, 120.0f, &c1);
+  bool found_parent = false, found_st = false, found_res = false;
+  for (size_t i = 0; i < F.ui->menu.count; i++) {
+    const menu_item *it = &F.ui->menu.items[i];
+    if (it->has_sub && it->label && strcmp(it->label, "Message Logger") == 0) found_parent = true;
+    if (it->item_id && strcmp(it->item_id, "dyn-st") == 0) {
+      found_st = (strcmp(it->label, "Stop Monitoring") == 0 && it->checked && it->parent >= 0);
+    }
+    if (it->item_id && strcmp(it->item_id, "dyn-res") == 0) {
+      found_res = (strcmp(it->label, "Resolved Active") == 0 && it->checked && it->parent >= 0);
+    }
+  }
+  CT_CHECK(found_parent && found_st && found_res);
+
+  // Case 2: channel 9002 -> dyn-st falls back to static label/unchecked; dyn-res is disabled+danger.
+  ccord_menu_context c2 = {.target = CCORD_MENU_CHANNEL, .guild_id = 100, .channel_id = 9002};
+  ui_menu_open(F.ui, 120.0f, 120.0f, &c2);
+  found_st = false; found_res = false;
+  for (size_t i = 0; i < F.ui->menu.count; i++) {
+    const menu_item *it = &F.ui->menu.items[i];
+    if (it->item_id && strcmp(it->item_id, "dyn-st") == 0) {
+      found_st = (strcmp(it->label, "Monitor Channel") == 0 && !it->checked);
+    }
+    if (it->item_id && strcmp(it->item_id, "dyn-res") == 0) {
+      found_res = (strcmp(it->label, "Resolved Disabled") == 0 && it->disabled && it->danger);
+    }
+  }
+  CT_CHECK(found_st && found_res);
+
+  // Case 3: channel 9003 -> BOTH children hidden -> "Message Logger" submenu parent is pruned!
+  ccord_menu_context c3 = {.target = CCORD_MENU_CHANNEL, .guild_id = 100, .channel_id = 9003};
+  ui_menu_open(F.ui, 120.0f, 120.0f, &c3);
+  found_parent = false; found_st = false; found_res = false;
+  for (size_t i = 0; i < F.ui->menu.count; i++) {
+    const menu_item *it = &F.ui->menu.items[i];
+    if (it->has_sub && it->label && strcmp(it->label, "Message Logger") == 0) found_parent = true;
+    if (it->item_id && strcmp(it->item_id, "dyn-st") == 0) found_st = true;
+    if (it->item_id && strcmp(it->item_id, "dyn-res") == 0) found_res = true;
+  }
+  CT_CHECK(!found_parent && !found_st && !found_res);
+
+  ui_menu_close(F.ui);
+  ccord_contrib_remove_owner(F.contrib, owner);
+  ccord_contrib_set_handlers(F.contrib, &(ccord_contrib_handlers){0});
+}
+
 
 int main(int argc, char **argv)
 {
@@ -3232,6 +3330,7 @@ int main(int argc, char **argv)
   test_same_dm_refocus_and_open_latest_message();
   test_power_efficiency_and_wave2_helpers();
   test_positioned_timeline_messages_and_style();
+  test_dynamic_context_menu_ui();
   ui_test_teardown();
   ct_failures += ui_test_harness_failures();
   return CT_RESULT("test_ui_interaction_ext");

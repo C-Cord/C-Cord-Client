@@ -648,14 +648,75 @@ static bool plugin_menu_when_matches(const ccord_ui *ui, const ccord_menu_contex
   return ok;
 }
 
+static ccord_id menu_target_id_of(ccord_menu_target target, const ccord_menu_context *ctx)
+{
+  if (!ctx) return CCORD_ID_NONE;
+  switch (target) {
+    case CCORD_MENU_CHANNEL:
+    case CCORD_MENU_VOICE_CHANNEL:
+    case CCORD_MENU_COMPOSER:
+      return ctx->channel_id;
+    case CCORD_MENU_GUILD:
+      return ctx->guild_id;
+    case CCORD_MENU_MESSAGE:
+    case CCORD_MENU_ATTACHMENT:
+    case CCORD_MENU_EMBED:
+    case CCORD_MENU_LINK:
+    case CCORD_MENU_NAV:
+      return ctx->message_id;
+    case CCORD_MENU_MEMBER:
+    case CCORD_MENU_PROFILE:
+    case CCORD_MENU_VOICE_USER:
+      return ctx->user_id;
+    default:
+      return CCORD_ID_NONE;
+  }
+}
+
 static void append_plugin_menu_items(ccord_ui *ui, const ccord_menu_context *ctx, ccord_menu_target target, bool had_builtin)
 {
   if (!ui || !ui->d.contrib) return;
   size_t n = ccord_contrib_menu_count(ui->d.contrib, target);
+  if (n == 0) return;
+
+  ccord_id tid = menu_target_id_of(target, ctx);
+  ccord_menu_resolved_entry resolved[64];
+  size_t nresolved = ccord_contrib_resolve_menu_items(ui->d.contrib, target, ctx, resolved, 64u);
+
   bool added_any = false;
   for (size_t i = 0; i < n; i++) {
     const ccord_menu_contribution *c = ccord_contrib_menu_at(ui->d.contrib, target, i);
     if (!c || !plugin_menu_when_matches(ui, ctx, c->when_json)) continue;
+
+    // Layer 0 (static defaults) <- Layer 1 (O(1)/O(log N) set_state cache) <- Layer 2 (batched resolve(ctx))
+    const char *eff_label = c->label;
+    bool eff_checked = c->checked;
+    bool eff_hidden = false;
+    bool eff_disabled = false;
+    bool eff_danger = c->danger;
+
+    ccord_menu_item_state cached = {0};
+    if (ccord_contrib_find_menu_state(ui->d.contrib, c->owner, c->item_id, tid, &cached)) {
+      if (cached.has_label && cached.label[0]) eff_label = cached.label;
+      if (cached.has_checked) eff_checked = cached.checked;
+      if (cached.has_hidden) eff_hidden = cached.hidden;
+      if (cached.has_disabled) eff_disabled = cached.disabled;
+      if (cached.has_danger) eff_danger = cached.danger;
+    }
+    for (size_t r = 0; r < nresolved; r++) {
+      if (strcmp(resolved[r].owner, c->owner) == 0 && strcmp(resolved[r].item_id, c->item_id) == 0) {
+        const ccord_menu_item_state *rs = &resolved[r].state;
+        if (rs->has_label && rs->label[0]) eff_label = rs->label;
+        if (rs->has_checked) eff_checked = rs->checked;
+        if (rs->has_hidden) eff_hidden = rs->hidden;
+        if (rs->has_disabled) eff_disabled = rs->disabled;
+        if (rs->has_danger) eff_danger = rs->danger;
+        break;
+      }
+    }
+    // Prune hidden items BEFORE creating any submenu parent so empty submenus never appear.
+    if (eff_hidden) continue;
+
     bool sep = c->divider_before || (had_builtin && !added_any);
     if (c->submenu && c->submenu[0]) {
       int parent = -1;
@@ -668,19 +729,20 @@ static void append_plugin_menu_items(ccord_ui *ui, const ccord_menu_context *ctx
       }
       if (parent < 0) parent = add_parent(ui, c->submenu, sep);
       if (parent < 0) break;
-      if (!add_item_ex(ui, c->label, nullptr, MENU_BUILTIN_NONE, c->owner, c->item_id,
-                       c->divider_before, false, c->danger, 0)) {
+      if (!add_item_ex(ui, eff_label, nullptr, MENU_BUILTIN_NONE, c->owner, c->item_id,
+                       c->divider_before, eff_disabled, eff_danger, 0)) {
         break;
       }
       menu_item *it = &ui->menu.items[ui->menu.count - 1u];
       it->parent = (int8_t)parent;
-      it->checked = c->checked;
+      it->checked = eff_checked;
       added_any = true;
     } else {
-      if (!add_item_ex(ui, c->label, nullptr, MENU_BUILTIN_NONE, c->owner, c->item_id, sep, false, c->danger, 0)) {
+      if (!add_item_ex(ui, eff_label, nullptr, MENU_BUILTIN_NONE, c->owner, c->item_id,
+                       sep, eff_disabled, eff_danger, 0)) {
         break;
       }
-      ui->menu.items[ui->menu.count - 1u].checked = c->checked;
+      ui->menu.items[ui->menu.count - 1u].checked = eff_checked;
       added_any = true;
     }
   }

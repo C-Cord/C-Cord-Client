@@ -941,6 +941,83 @@ void plugins_ext_on_local_msg_event(void *ud, const ccord_local_message *lm, con
   ccord_buf_free(&b);
 }
 
+size_t plugins_ext_on_menu_resolve(void *ud, const char *owner, const char *const *item_ids, size_t item_count,
+                                   const ccord_menu_context *ctx, uint32_t timeout_ms,
+                                   ccord_menu_resolved_entry *out, size_t max_out)
+{
+  ccord_plugins *m = ud;
+  plugin *p = (m && owner) ? pl_find_owner(m, owner) : nullptr;
+  if (!p || p->state != CCORD_PLUGIN_READY || !item_ids || item_count == 0 || !ctx || !out || max_out == 0) {
+    return 0;
+  }
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "items");
+  ccord_jw_begin_array(&w);
+  for (size_t i = 0; i < item_count; i++) {
+    if (item_ids[i]) ccord_jw_cstr(&w, item_ids[i]);
+  }
+  ccord_jw_end_array(&w);
+  ccord_jw_key(&w, "ctx");
+  pl_write_menu_ctx_obj(&w, ctx);
+  ccord_jw_end_object(&w);
+
+  char *res = nullptr;
+  char eb[128] = "";
+  size_t got = 0;
+  if (ccord_jw_ok(&w) &&
+      ext_sync_host_call(m, p, "ui.contextMenu.resolve", ccord_buf_cstr(&b), timeout_ms ? timeout_ms : 50u,
+                         &res, eb, sizeof eb) &&
+      res && res[0]) {
+    ccord_arena ar; ccord_arena_init(&ar, 2048u); ccord_error pe = {0};
+    const ccord_json *root = ccord_json_parse(&ar, res, strlen(res), &k_ext_limits, &pe);
+    if (root && ccord_json_type_of(root) == CCORD_JSON_OBJECT) {
+      for (size_t i = 0; i < item_count && got < max_out; i++) {
+        if (!item_ids[i]) continue;
+        const ccord_json *stj = ccord_json_get(root, item_ids[i]);
+        if (!stj || ccord_json_type_of(stj) != CCORD_JSON_OBJECT) continue;
+        ccord_menu_resolved_entry ent = {0};
+        snprintf(ent.owner, sizeof ent.owner, "%s", owner);
+        snprintf(ent.item_id, sizeof ent.item_id, "%s", item_ids[i]);
+        const ccord_json *lj = ccord_json_get(stj, "label");
+        if (lj && ccord_json_type_of(lj) == CCORD_JSON_STRING) {
+          size_t ll = 0;
+          const char *ls = ccord_json_string(lj, &ll);
+          if (ls && pl_valid_plain_text(ls, ll, 64)) {
+            ent.state.has_label = true;
+            snprintf(ent.state.label, sizeof ent.state.label, "%.*s", (int)ll, ls);
+          }
+        }
+        const ccord_json *cj = ccord_json_get(stj, "checked");
+        if (cj && ccord_json_type_of(cj) == CCORD_JSON_BOOL) {
+          ent.state.has_checked = true;
+          ent.state.checked = ccord_json_bool(cj, false);
+        }
+        const ccord_json *hj = ccord_json_get(stj, "hidden");
+        if (hj && ccord_json_type_of(hj) == CCORD_JSON_BOOL) {
+          ent.state.has_hidden = true;
+          ent.state.hidden = ccord_json_bool(hj, false);
+        }
+        const ccord_json *dj = ccord_json_get(stj, "disabled");
+        if (dj && ccord_json_type_of(dj) == CCORD_JSON_BOOL) {
+          ent.state.has_disabled = true;
+          ent.state.disabled = ccord_json_bool(dj, false);
+        }
+        const ccord_json *rj = ccord_json_get(stj, "danger");
+        if (rj && ccord_json_type_of(rj) == CCORD_JSON_BOOL) {
+          ent.state.has_danger = true;
+          ent.state.danger = ccord_json_bool(rj, false);
+        }
+        out[got++] = ent;
+      }
+    }
+    ccord_arena_free(&ar);
+  }
+  ccord_free(res);
+  ccord_buf_free(&b);
+  return got;
+}
+
 void plugins_ext_on_setting_changed(void *ud, const char *owner, const char *key, const char *value_json)
 {
   ccord_plugins *m = ud;

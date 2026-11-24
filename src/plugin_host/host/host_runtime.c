@@ -483,6 +483,19 @@ static void handle_rpc_call(host *h, const ccord_ipc_msg *msg)
   ccord_free(out_json);
 }
 
+static void handle_menu_resolve(host *h, const ccord_ipc_msg *msg)
+{
+  if (!h->sb) { reply_ok(h, msg->id, "{}"); return; }
+  const ccord_json *items = msg->params ? ccord_json_get(msg->params, "items") : nullptr;
+  const ccord_json *ctx = msg->params ? ccord_json_get(msg->params, "ctx") : nullptr;
+  char *out_json = nullptr;
+  ccord_error err = {0};
+  (void)ccord_sandbox_menu_resolve(h->sb, items, ctx, &out_json, &err);
+  if (limit_stop(h)) { ccord_free(out_json); return; }
+  reply_ok(h, msg->id, out_json ? out_json : "{}");
+  ccord_free(out_json);
+}
+
 static void handle_v3_ntf(host *h, const ccord_ipc_msg *msg)
 {
   if (!h->sb || !msg->params) return;
@@ -567,6 +580,7 @@ static void dispatch(host *h, const ccord_ipc_msg *msg)
       else if (strcmp(msg->method, "hook.call") == 0) handle_hook_call(h, msg);
       else if (strcmp(msg->method, "composer.autocomplete") == 0) handle_autocomplete(h, msg);
       else if (strcmp(msg->method, "plugin.rpc.call") == 0) handle_rpc_call(h, msg);
+      else if (strcmp(msg->method, "ui.contextMenu.resolve") == 0) handle_menu_resolve(h, msg);
       else reply_error(h, msg->id, "unsupported", "unknown method");
       schedule_idle_gc(h);
       return;

@@ -697,6 +697,7 @@ static int open_all(lua_State *L)
 
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_HANDLERS);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_MENU);
+  lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_MENU_RESOLVE);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_COMMANDS);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_STORAGE);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_MODULES);
@@ -896,6 +897,85 @@ ccord_status ccord_sandbox_menu_invoke(ccord_sandbox *sb, const char *item_id, c
   sb->user_gesture_depth--;
   lua_settop(L, top);
   return st;
+}
+
+ccord_status ccord_sandbox_menu_resolve(ccord_sandbox *sb, const ccord_json *item_ids,
+                                        const ccord_json *ctx, char **out_json, ccord_error *err)
+{
+  *out_json = nullptr;
+  if (!sb || !item_ids || ccord_json_type_of(item_ids) != CCORD_JSON_ARRAY) return CCORD_OK;
+  lua_State *L = sb->L;
+  int top = lua_gettop(L);
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_MENU_RESOLVE);
+  int res_tbl = lua_gettop(L);
+
+  ccord_buf b; ccord_buf_init(&b, 0);
+  ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+
+  size_t n = ccord_json_array_len(item_ids);
+  if (n > 64u) n = 64u;
+  for (size_t i = 0; i < n; i++) {
+    size_t il = 0;
+    const char *iid = ccord_json_string(ccord_json_array_at(item_ids, i), &il);
+    if (!iid || il == 0) continue;
+    lua_pushlstring(L, iid, il);
+    if (lua_rawget(L, res_tbl) != LUA_TFUNCTION) {
+      lua_pop(L, 1);
+      continue;
+    }
+    if (!sb_push_json(L, ctx)) {
+      lua_settop(L, res_tbl);
+      continue;
+    }
+    ccord_error call_err = {0};
+    if (sb_call_guarded(sb, 1, 1, &call_err) != CCORD_OK) {
+      sb_log(sb, CCORD_LOG_WARN, "ui.contextMenu.resolve", call_err.message);
+      lua_settop(L, res_tbl);
+      if (sb->limit != CCORD_SB_LIMIT_NONE) break;
+      continue;
+    }
+    if (lua_type(L, -1) == LUA_TTABLE) {
+      int st_idx = lua_gettop(L);
+      ccord_jw_key(&w, iid);
+      ccord_jw_begin_object(&w);
+      sb_raw_getfield(L, st_idx, "label");
+      if (lua_type(L, -1) == LUA_TSTRING) {
+        size_t ll = 0;
+        const char *ls = lua_tolstring(L, -1, &ll);
+        if (ls && sb_is_text(ls, ll, 64)) {
+          ccord_jw_key(&w, "label");
+          ccord_jw_string(&w, ls, ll);
+        }
+      }
+      lua_pop(L, 1);
+      static const char *const k_bools[] = {"checked", "hidden", "disabled", "danger"};
+      for (size_t bi = 0; bi < 4u; bi++) {
+        sb_raw_getfield(L, st_idx, k_bools[bi]);
+        if (lua_type(L, -1) == LUA_TBOOLEAN) {
+          ccord_jw_key(&w, k_bools[bi]);
+          ccord_jw_bool(&w, lua_toboolean(L, -1) != 0);
+        }
+        lua_pop(L, 1);
+      }
+      ccord_jw_end_object(&w);
+    }
+    lua_settop(L, res_tbl);
+    if (sb->limit != CCORD_SB_LIMIT_NONE) break;
+  }
+
+  ccord_jw_end_object(&w);
+  if (ccord_jw_ok(&w)) {
+    *out_json = ccord_strndup(ccord_buf_cstr(&b), b.len);
+    if (!*out_json) {
+      ccord_buf_free(&b);
+      lua_settop(L, top);
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "out of memory");
+    }
+  }
+  ccord_buf_free(&b);
+  lua_settop(L, top);
+  return CCORD_OK;
 }
 
 ccord_status ccord_sandbox_panel_event(ccord_sandbox *sb, const char *panel_id, const ccord_json *ev, ccord_error *err)

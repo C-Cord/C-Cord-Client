@@ -1672,6 +1672,132 @@ static void test_http_binary_download_and_redirects(void)
   (void)rmdir(d_ok); (void)rmdir(d_nofs); (void)rmdir(plugins_dir); (void)rmdir(data_dir); (void)rmdir(root);
 }
 
+static void test_dynamic_context_menu_integration(void)
+{
+  char root[] = "/tmp/ccord-dynmenu-XXXXXX";
+  CT_CHECK(mkdtemp(root) != nullptr);
+  char plugins_dir[1100], data_dir[1100], d_p1[1200];
+  snprintf(plugins_dir, sizeof plugins_dir, "%s/plugins", root);
+  snprintf(data_dir, sizeof data_dir, "%s/data", root);
+  snprintf(d_p1, sizeof d_p1, "%s/dyn_menu", plugins_dir);
+  CT_CHECK(mkdir(plugins_dir, 0700) == 0);
+  CT_CHECK(mkdir(d_p1, 0700) == 0);
+
+  // Class 1 Safe only — no Class 2/3 permissions needed!
+  write_file(d_p1, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.dynmenu\",\"name\":\"DynMenu\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"commands\",\"clipboard.write\"]}");
+  write_file(d_p1, "main.lua",
+             "ui.contextMenu.add({\n"
+             "  id = 'ml-ch-state', label = 'Monitor Static', target = 'channel', submenu = 'Message Logger',\n"
+             "  action = function() end,\n"
+             "})\n"
+             "ui.contextMenu.set_state('ml-ch-state', '*', { label = 'Monitor Channel', checked = false })\n"
+             "ui.contextMenu.set_state('ml-ch-state', '200', { label = 'Stop Monitoring', checked = true })\n"
+             "ui.contextMenu.set_state('ml-ch-state', '300', { hidden = true })\n"
+             "ui.contextMenu.set_state('ml-ch-state', '400', { disabled = true, danger = true })\n"
+             "ui.contextMenu.add({\n"
+             "  id = 'ml-ch-resolve', label = 'Fallback Resolve', target = 'channel', submenu = 'Message Logger',\n"
+             "  resolve = function(ctx)\n"
+             "    if ctx.channel_id == '200' then\n"
+             "      return { label = 'Resolved On 200', checked = true, danger = false }\n"
+             "    elseif ctx.channel_id == '300' then\n"
+             "      return { hidden = true }\n"
+             "    end\n"
+             "    return { label = 'Resolved Off', checked = false, disabled = true }\n"
+             "  end,\n"
+             "  action = function() end,\n"
+             "})\n"
+             "ui.contextMenu.add({\n"
+             "  id = 'ml-ch-throw', label = 'Throw Fallback', target = 'channel',\n"
+             "  resolve = function(ctx) error('intentional resolver error') end,\n"
+             "  action = function() end,\n"
+             "})\n"
+             "commands.register('clear200', 'Clear 200', function()\n"
+             "  ui.contextMenu.clear_state('ml-ch-state', '200')\n"
+             "  clipboard.write('dynmenu_cleared_200')\n"
+             "end)\n"
+             "commands.register('clearall', 'Clear all', function()\n"
+             "  ui.contextMenu.clear_state('ml-ch-state')\n"
+             "  clipboard.write('dynmenu_cleared_all')\n"
+             "end)\n"
+             "clipboard.write('dynmenu_ready')\n");
+
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  ccord_contrib *contrib = ccord_contrib_create(&err);
+  v3_clip_log cl = {0};
+  const char *dirs[] = {plugins_dir};
+  ccord_plugins_config cfg = {
+    .store = store, .contrib = contrib, .bus = bus,
+    .search_dirs = dirs, .search_dir_count = 1,
+    .data_dir = data_dir, .host_exe = CCORD_PLUGIN_HOST_BIN,
+    .clipboard_write = v3_on_clip, .clipboard_ud = &cl,
+  };
+  ccord_plugins *pm = ccord_plugins_create(&cfg, &err);
+  CT_CHECK(pm != nullptr);
+  (void)ccord_plugins_load_all(pm);
+
+  // Class 1 Safe starts READY with zero consent prompt!
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.dynmenu", CCORD_PLUGIN_READY));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "dynmenu_ready"));
+  CT_CHECK(ccord_contrib_menu_count(contrib, CCORD_MENU_CHANNEL) == 3);
+
+  // Layer 1: cached set_state lookup (wildcard + exact merge)
+  ccord_menu_item_state st = {0};
+  CT_CHECK(ccord_contrib_find_menu_state(contrib, "dev.test.dynmenu", "ml-ch-state", 200, &st));
+  CT_CHECK(st.has_label && strcmp(st.label, "Stop Monitoring") == 0 && st.has_checked && st.checked);
+
+  CT_CHECK(ccord_contrib_find_menu_state(contrib, "dev.test.dynmenu", "ml-ch-state", 300, &st));
+  CT_CHECK(st.has_label && strcmp(st.label, "Monitor Channel") == 0 && st.has_hidden && st.hidden);
+
+  CT_CHECK(ccord_contrib_find_menu_state(contrib, "dev.test.dynmenu", "ml-ch-state", 400, &st));
+  CT_CHECK(st.has_disabled && st.disabled && st.has_danger && st.danger);
+
+  CT_CHECK(ccord_contrib_find_menu_state(contrib, "dev.test.dynmenu", "ml-ch-state", 999, &st));
+  CT_CHECK(st.has_label && strcmp(st.label, "Monitor Channel") == 0 && st.has_checked && !st.checked);
+
+  // Layer 2: batched synchronous resolve(ctx); throwing sibling resolver must not break healthy resolver!
+  ccord_menu_context ctx200 = {.target = CCORD_MENU_CHANNEL, .guild_id = 100, .channel_id = 200};
+  ccord_menu_resolved_entry res[16];
+  size_t nr = ccord_contrib_resolve_menu_items(contrib, CCORD_MENU_CHANNEL, &ctx200, res, 16u);
+  CT_CHECK(nr == 1);
+  CT_CHECK(nr >= 1 && strcmp(res[0].item_id, "ml-ch-resolve") == 0 &&
+           res[0].state.has_label && strcmp(res[0].state.label, "Resolved On 200") == 0 &&
+           res[0].state.has_checked && res[0].state.checked);
+
+  ccord_menu_context ctx999 = {.target = CCORD_MENU_CHANNEL, .guild_id = 100, .channel_id = 999};
+  nr = ccord_contrib_resolve_menu_items(contrib, CCORD_MENU_CHANNEL, &ctx999, res, 16u);
+  CT_CHECK(nr == 1 && strcmp(res[0].item_id, "ml-ch-resolve") == 0 &&
+           res[0].state.has_label && strcmp(res[0].state.label, "Resolved Off") == 0 &&
+           res[0].state.has_disabled && res[0].state.disabled);
+
+  // clear_state(id, target_id) clears only 200 -> falls back to wildcard '*'
+  CT_CHECK(ccord_contrib_run_command(contrib, "clear200", "", 100, 200, &err) == CCORD_OK);
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "dynmenu_cleared_200"));
+  CT_CHECK(ccord_contrib_find_menu_state(contrib, "dev.test.dynmenu", "ml-ch-state", 200, &st));
+  CT_CHECK(st.has_label && strcmp(st.label, "Monitor Channel") == 0 && st.has_checked && !st.checked);
+
+  // clear_state(id) clears all overrides including wildcard
+  CT_CHECK(ccord_contrib_run_command(contrib, "clearall", "", 100, 200, &err) == CCORD_OK);
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "dynmenu_cleared_all"));
+  CT_CHECK(!ccord_contrib_find_menu_state(contrib, "dev.test.dynmenu", "ml-ch-state", 200, &st));
+  CT_CHECK(!ccord_contrib_find_menu_state(contrib, "dev.test.dynmenu", "ml-ch-state", 400, &st));
+
+  ccord_plugins_shutdown(pm);
+  ccord_plugins_destroy(pm);
+  ccord_contrib_destroy(contrib);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+
+  char rm[1400];
+  snprintf(rm, sizeof rm, "%s/plugin.json", d_p1); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/main.lua", d_p1); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/plugins.json", data_dir); (void)unlink(rm);
+  (void)rmdir(d_p1); (void)rmdir(plugins_dir); (void)rmdir(data_dir); (void)rmdir(root);
+}
+
 int main(void)
 {
   char root[] = "/tmp/ccord-it-XXXXXX";
@@ -2056,5 +2182,6 @@ int main(void)
   test_texture_upload_file_integration();
   test_timeline_local_messages_integration();
   test_http_binary_download_and_redirects();
+  test_dynamic_context_menu_integration();
   return CT_RESULT("test_plugins_integration");
 }

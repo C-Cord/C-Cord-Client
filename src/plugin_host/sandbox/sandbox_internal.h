@@ -29,6 +29,7 @@
 
 #define SB_KEY_HANDLERS "ccord.handlers"
 #define SB_KEY_MENU "ccord.menu"
+#define SB_KEY_MENU_RESOLVE "ccord.menu_resolve"
 #define SB_KEY_COMMANDS "ccord.commands"
 #define SB_KEY_CMD_COMPLETE "ccord.cmd_complete"
 #define SB_KEY_STORAGE "ccord.storage"

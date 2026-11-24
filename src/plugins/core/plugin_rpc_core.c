@@ -275,12 +275,106 @@ static void req_menu_add(ccord_plugins *m, plugin *p, uint32_t id, const ccord_j
     .danger = params && ccord_json_bool(ccord_json_get(params, "danger"), false),
     .checked = params && ccord_json_bool(ccord_json_get(params, "checked"), false),
     .divider_before = params && ccord_json_bool(ccord_json_get(params, "divider_before"), false),
+    .has_resolver = params && ccord_json_bool(ccord_json_get(params, "has_resolver"), false),
   };
   ccord_error err = {0};
   ccord_status st = ccord_contrib_add_menu_ex(m->contrib, &spec, &err);
   ccord_buf_free(&when_b);
   if (st != CCORD_OK) { pl_reply_err(m, p, id, "invalid_argument", err.message); return; }
   p->menu_count++;
+  pl_reply_ok(m, p, id, nullptr);
+}
+
+static bool parse_menu_state_target_id(const char *s, size_t n, ccord_id *out)
+{
+  *out = CCORD_ID_NONE;
+  if (!s || n == 0 || (n == 1 && s[0] == '*')) return true;
+  if (n == 7 && memcmp(s, "friends", 7) == 0) { *out = CCORD_NAV_VIEW_FRIENDS; return true; }
+  if (n == 8 && memcmp(s, "requests", 8) == 0) { *out = CCORD_NAV_VIEW_REQUESTS; return true; }
+  if (n == 7 && memcmp(s, "dm_home", 7) == 0) { *out = CCORD_NAV_VIEW_GUILD; return true; }
+  return ccord_id_parse(s, n, out);
+}
+
+static void req_menu_set_state(ccord_plugins *m, plugin *p, uint32_t id, const ccord_json *params)
+{
+  size_t il = 0;
+  const char *item = pl_str_param(params, "id", &il);
+  if (!item || !pl_valid_menu_id(item, il)) {
+    pl_reply_err(m, p, id, "invalid_argument", "menu id must match ^[a-z0-9][a-z0-9_-]{0,31}$");
+    return;
+  }
+  char item_id[40];
+  snprintf(item_id, sizeof item_id, "%.*s", (int)il, item);
+
+  ccord_id tid = CCORD_ID_NONE;
+  const ccord_json *tj = params ? ccord_json_get(params, "target_id") : nullptr;
+  if (tj && ccord_json_type_of(tj) != CCORD_JSON_NULL) {
+    size_t tl = 0;
+    const char *ts = ccord_json_string(tj, &tl);
+    if (!ts || !parse_menu_state_target_id(ts, tl, &tid)) {
+      pl_reply_err(m, p, id, "invalid_argument", "invalid target_id");
+      return;
+    }
+  }
+
+  const ccord_json *sj = params ? ccord_json_get(params, "state") : nullptr;
+  if (!sj || ccord_json_type_of(sj) != CCORD_JSON_OBJECT) {
+    pl_reply_err(m, p, id, "invalid_argument", "state must be an object");
+    return;
+  }
+  ccord_menu_item_state st = {0};
+  const ccord_json *lj = ccord_json_get(sj, "label");
+  if (lj && ccord_json_type_of(lj) == CCORD_JSON_STRING) {
+    size_t ll = 0;
+    const char *ls = ccord_json_string(lj, &ll);
+    if (!ls || !pl_valid_plain_text(ls, ll, 64)) {
+      pl_reply_err(m, p, id, "invalid_argument", "label must be 1-64 bytes of text");
+      return;
+    }
+    st.has_label = true;
+    snprintf(st.label, sizeof st.label, "%.*s", (int)ll, ls);
+  }
+  const ccord_json *cj = ccord_json_get(sj, "checked");
+  if (cj && ccord_json_type_of(cj) == CCORD_JSON_BOOL) { st.has_checked = true; st.checked = ccord_json_bool(cj, false); }
+  const ccord_json *hj = ccord_json_get(sj, "hidden");
+  if (hj && ccord_json_type_of(hj) == CCORD_JSON_BOOL) { st.has_hidden = true; st.hidden = ccord_json_bool(hj, false); }
+  const ccord_json *dj = ccord_json_get(sj, "disabled");
+  if (dj && ccord_json_type_of(dj) == CCORD_JSON_BOOL) { st.has_disabled = true; st.disabled = ccord_json_bool(dj, false); }
+  const ccord_json *rj = ccord_json_get(sj, "danger");
+  if (rj && ccord_json_type_of(rj) == CCORD_JSON_BOOL) { st.has_danger = true; st.danger = ccord_json_bool(rj, false); }
+
+  ccord_error err = {0};
+  if (ccord_contrib_set_menu_state(m->contrib, p->m.id, item_id, tid, &st, &err) != CCORD_OK) {
+    pl_reply_err(m, p, id, "invalid_argument", err.message);
+    return;
+  }
+  pl_reply_ok(m, p, id, nullptr);
+}
+
+static void req_menu_clear_state(ccord_plugins *m, plugin *p, uint32_t id, const ccord_json *params)
+{
+  size_t il = 0;
+  const char *item = pl_str_param(params, "id", &il);
+  if (!item || !pl_valid_menu_id(item, il)) {
+    pl_reply_err(m, p, id, "invalid_argument", "menu id must match ^[a-z0-9][a-z0-9_-]{0,31}$");
+    return;
+  }
+  char item_id[40];
+  snprintf(item_id, sizeof item_id, "%.*s", (int)il, item);
+
+  bool clear_all = true;
+  ccord_id tid = CCORD_ID_NONE;
+  const ccord_json *tj = params ? ccord_json_get(params, "target_id") : nullptr;
+  if (tj && ccord_json_type_of(tj) != CCORD_JSON_NULL) {
+    size_t tl = 0;
+    const char *ts = ccord_json_string(tj, &tl);
+    if (!ts || !parse_menu_state_target_id(ts, tl, &tid)) {
+      pl_reply_err(m, p, id, "invalid_argument", "invalid target_id");
+      return;
+    }
+    clear_all = false;
+  }
+  (void)ccord_contrib_clear_menu_state(m->contrib, p->m.id, item_id, tid, clear_all);
   pl_reply_ok(m, p, id, nullptr);
 }
 
@@ -1079,6 +1173,8 @@ static void handle_request(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg
   // Class 1 (Safe) APIs — no manifest permission required
   if (strcmp(method, "ui.contextMenu.add") == 0) { req_menu_add(m, p, id, params); return; }
   if (strcmp(method, "ui.contextMenu.remove") == 0) { req_menu_remove(m, p, id, params); return; }
+  if (strcmp(method, "ui.contextMenu.set_state") == 0) { req_menu_set_state(m, p, id, params); return; }
+  if (strcmp(method, "ui.contextMenu.clear_state") == 0) { req_menu_clear_state(m, p, id, params); return; }
   if (strcmp(method, "clipboard.write") == 0) { req_clipboard(m, p, id, params); return; }
   if (strcmp(method, "commands.register") == 0) { req_commands_register(m, p, id, params); return; }
   if (strcmp(method, "ui.toast.show") == 0) {

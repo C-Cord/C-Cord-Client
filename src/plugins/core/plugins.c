@@ -387,17 +387,39 @@ plugin *pl_find_owner(ccord_plugins *m, const char *owner)
   return nullptr;
 }
 
-static void on_menu_activate(void *ud, const ccord_menu_contribution *item, const ccord_menu_context *ctx)
+void pl_write_menu_ctx_obj(ccord_jw *w, const ccord_menu_context *ctx)
 {
-  ccord_plugins *m = ud;
-  plugin *p = pl_find_owner(m, item->owner);
-  if (!p || p->state != CCORD_PLUGIN_READY) return;
   char g[24] = "", c[24] = "", mid[24] = "", u[24] = "";
   if (ctx->guild_id) ccord_id_format(ctx->guild_id, g);
   if (ctx->channel_id) ccord_id_format(ctx->channel_id, c);
   if (ctx->message_id) ccord_id_format(ctx->message_id, mid);
   if (ctx->user_id) ccord_id_format(ctx->user_id, u);
   const char *kind = pl_menu_target_str(ctx->target);
+  ccord_jw_begin_object(w);
+  ccord_jw_key(w, "kind"); ccord_jw_cstr(w, kind);
+  if (ctx->guild_id) { ccord_jw_key(w, "guild_id"); ccord_jw_cstr(w, g); }
+  if (ctx->channel_id) { ccord_jw_key(w, "channel_id"); ccord_jw_cstr(w, c); }
+  if (ctx->target == CCORD_MENU_NAV) {
+    const char *view = ctx->message_id == CCORD_NAV_VIEW_FRIENDS  ? "friends"
+                     : ctx->message_id == CCORD_NAV_VIEW_REQUESTS ? "requests"
+                     : ctx->message_id == CCORD_NAV_VIEW_GUILD    ? "dm_home" : "nav";
+    ccord_jw_key(w, "view"); ccord_jw_cstr(w, view);
+  } else if (ctx->target == CCORD_MENU_CHANNEL && ctx->message_id) {
+    ccord_jw_key(w, "parent_id"); ccord_jw_cstr(w, mid);
+  } else if (ctx->message_id) {
+    ccord_jw_key(w, "message_id"); ccord_jw_cstr(w, mid);
+  }
+  if (ctx->user_id) { ccord_jw_key(w, "user_id"); ccord_jw_cstr(w, u); }
+  if (ctx->extra_url && ctx->extra_url[0]) { ccord_jw_key(w, "url"); ccord_jw_cstr(w, ctx->extra_url); }
+  if (ctx->extra_text && ctx->extra_text[0]) { ccord_jw_key(w, "text"); ccord_jw_cstr(w, ctx->extra_text); }
+  ccord_jw_end_object(w);
+}
+
+static void on_menu_activate(void *ud, const ccord_menu_contribution *item, const ccord_menu_context *ctx)
+{
+  ccord_plugins *m = ud;
+  plugin *p = pl_find_owner(m, item->owner);
+  if (!p || p->state != CCORD_PLUGIN_READY) return;
   ccord_buf params;
   ccord_buf_init(&params, 0);
   ccord_jw w;
@@ -405,24 +427,7 @@ static void on_menu_activate(void *ud, const ccord_menu_contribution *item, cons
   ccord_jw_begin_object(&w);
   ccord_jw_key(&w, "item_id"); ccord_jw_cstr(&w, item->item_id);
   ccord_jw_key(&w, "ctx");
-  ccord_jw_begin_object(&w);
-  ccord_jw_key(&w, "kind"); ccord_jw_cstr(&w, kind);
-  if (ctx->guild_id) { ccord_jw_key(&w, "guild_id"); ccord_jw_cstr(&w, g); }
-  if (ctx->channel_id) { ccord_jw_key(&w, "channel_id"); ccord_jw_cstr(&w, c); }
-  if (ctx->target == CCORD_MENU_NAV) {
-    const char *view = ctx->message_id == CCORD_NAV_VIEW_FRIENDS  ? "friends"
-                     : ctx->message_id == CCORD_NAV_VIEW_REQUESTS ? "requests"
-                     : ctx->message_id == CCORD_NAV_VIEW_GUILD    ? "dm_home" : "nav";
-    ccord_jw_key(&w, "view"); ccord_jw_cstr(&w, view);
-  } else if (ctx->target == CCORD_MENU_CHANNEL && ctx->message_id) {
-    ccord_jw_key(&w, "parent_id"); ccord_jw_cstr(&w, mid);
-  } else if (ctx->message_id) {
-    ccord_jw_key(&w, "message_id"); ccord_jw_cstr(&w, mid);
-  }
-  if (ctx->user_id) { ccord_jw_key(&w, "user_id"); ccord_jw_cstr(&w, u); }
-  if (ctx->extra_url && ctx->extra_url[0]) { ccord_jw_key(&w, "url"); ccord_jw_cstr(&w, ctx->extra_url); }
-  if (ctx->extra_text && ctx->extra_text[0]) { ccord_jw_key(&w, "text"); ccord_jw_cstr(&w, ctx->extra_text); }
-  ccord_jw_end_object(&w);
+  pl_write_menu_ctx_obj(&w, ctx);
   ccord_jw_end_object(&w);
   if (ccord_jw_ok(&w)) pl_send_ntf(m, p, "menu.invoke", ccord_buf_cstr(&params));
   else CCORD_LOG_W("plugin %s: menu context not encoded", p->m.id);
@@ -1019,6 +1024,7 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     .panel_event = on_panel_event,
     .decor_event = plugins_ext_on_decor_event,
     .local_msg_event = plugins_ext_on_local_msg_event,
+    .menu_resolve = plugins_ext_on_menu_resolve,
     .plugin_setting_changed = plugins_ext_on_setting_changed,
     .keybind_triggered = plugins_ext_on_keybind_triggered,
     .action_btn_click = plugins_ext_on_action_btn_click,
