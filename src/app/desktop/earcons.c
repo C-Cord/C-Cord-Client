@@ -586,12 +586,16 @@ static void pump_streams(ccord_earcons *e, const ccord_session *session, const c
 // ---------------------------------------------------------------- incoming call ring
 
 static void pump_ring(ccord_earcons *e, const ccord_session *session, const ccord_store *store, const ccord_ui *ui,
-                      int64_t now_ms)
+                      ccord_app_desktop *desktop, int64_t now_ms)
 {
   const ccord_call_state *in = ccord_session_incoming_call(session);   // answering or ending the call stops it
   if (in) e->last_incoming = in->channel_id;
   else if (!e->voice_valid) e->last_incoming = CCORD_ID_NONE;
-  if (!in) {
+  // On mobile while backgrounded, native OS notifications alert the user; do not repeatedly open
+  // a 48 kHz SDL audio stream in the background for incoming DM calls.
+  ccord_platform *plat = desktop ? ccord_app_desktop_platform(desktop) : nullptr;
+  bool mobile_bg = plat && ccord_platform_is_mobile(plat) && ccord_platform_in_background(plat);
+  if (!in || mobile_bg) {
     e->ringing = false;
   } else if (!e->ringing || now_ms >= e->next_ring_ms) {
     e->ringing = true;
@@ -631,7 +635,7 @@ void ccord_earcons_pump(ccord_earcons *e, ccord_session *session, const ccord_st
   bool connected = store_unchanged ? e->voice_valid : pump_voice(e, store, ui, now_ms);
   pump_ptt(e, session, store, ui, connected, now_ms);
   pump_streams(e, session, store, ui, store_unchanged, now_ms);
-  pump_ring(e, session, store, ui, now_ms);
+  pump_ring(e, session, store, ui, desktop, now_ms);
   e->last_store = store;
   e->last_store_rev = rev;
   e->store_rev_valid = true;

@@ -42,6 +42,18 @@ static uint64_t app_boottime_ms(const app *a)
 static void pump_voice_and_video(app *a)
 {
   if (!a || !a->media || !a->session || !a->store) return;
+  bool bg = a->in_background;
+  bool stage_vis = !a->ui || ccord_ui_voice_stage_visible(a->ui);
+  bool preview_hidden = a->ui && ccord_ui_stream_preview_hidden(a->ui);
+  ccord_app_media_set_background(a->media, bg);
+  ccord_app_media_set_stage_visible(a->media, stage_vis);
+  ccord_app_media_set_preview_hidden(a->media, preview_hidden);
+  bool want_cam_rx = !bg && stage_vis;
+  if (!a->camera_rx_synced || a->last_camera_rx != want_cam_rx) {
+    a->camera_rx_synced = true;
+    a->last_camera_rx = want_cam_rx;
+    ccord_session_set_camera_rx(a->session, want_cam_rx);
+  }
   ccord_app_media_pump(a->media, a->live, a->virtual_clock);
   ccord_app_desktop_sync_ptt_shortcut(a->desktop);
 }
@@ -95,11 +107,10 @@ void app_pump(app *a)
       ccord_plugins_dispatch_theme_change(a->plugins, a->theme->id);
     }
     if (a->ui) {
-      ccord_ui_settings_debug sd = {0};
-      ccord_ui_get_settings_debug(a->ui, &sd);
-      if (sd.streamer_mode != a->last_streamer_mode) {
-        a->last_streamer_mode = sd.streamer_mode;
-        ccord_plugins_dispatch_streamer_mode(a->plugins, sd.streamer_mode);
+      bool sm = ccord_ui_streamer_mode(a->ui);
+      if (sm != a->last_streamer_mode) {
+        a->last_streamer_mode = sm;
+        ccord_plugins_dispatch_streamer_mode(a->plugins, sm);
       }
     }
   }
@@ -181,94 +192,145 @@ static bool game_detect_pref_enabled(void *ud)
 }
 #endif
 
+static void app_set_background_state(app *a, bool bg)
+{
+  if (!a || a->in_background == bg) return;
+  a->in_background = bg;
+  if (a->session) ccord_session_set_background(a->session, bg);
+  if (a->media) ccord_app_media_set_background(a->media, bg);
+  if (a->rpc) ccord_app_rpc_set_background(a->rpc, bg);
+#if CCORD_WITH_PLUGINS
+  if (a->plugins) ccord_plugins_set_background(a->plugins, bg);
+#endif
+  if (bg && a->renderer) ccord_render_evict_idle_caches(a->renderer);
+}
+
 static void run_interactive(app *a)
 {
   bool redraw = true;
   bool animating = false;
   unsigned fast_draws = 0;   // consecutive sub-2 ms presents -> VSync inactive, fall back to bounded wait
   uint64_t last_input_ms = app_now_ms(a);
-  bool was_visible = true;
+  bool was_visible = ccord_app_desktop_should_draw(a->platform);
+  if (!was_visible) app_set_background_state(a, true);
   ccord_scheduled_messages_init(a->session, a->store);
+  a->last_sched_self_id = a->store ? ccord_store_self_id(a->store) : CCORD_ID_NONE;
   while (!a->quit) {
     ccord_app_media_voice vstate = {0};
     if (a->session && a->store) k_app_media_ops.voice(a, &vstate);
-    // Live voice audio runs on its own dedicated pthread, so an audio-only call does not need 16 ms
-    // UI event waits; only active video/camera/screen capture/decode (or mock inline audio) does.
-    ccord_ui_voice_prefs vp = {0};
-    if (vstate.active && a->ui) ccord_ui_voice_settings(a->ui, &vp);
-    bool video_active = a->session && a->store &&
-                        (k_app_media_ops.stream_active(a) || k_app_media_ops.watch_active(a) ||
-                         (vstate.active && (vstate.camera || ccord_app_media_cam_count(a->media) > 0)));
+    bool stream_active = a->session && a->store && k_app_media_ops.stream_active(a);
+    bool watch_active = a->session && a->store && k_app_media_ops.watch_active(a);
+    // Live voice audio runs on its own dedicated pthread, and desktop PTT wakes immediately on
+    // KEY_DOWN/KEY_UP or GlobalShortcuts D-Bus events, so only active visible/transmitting video
+    // (or mock inline audio) needs 16 ms polling.
+    bool video_fast = a->session && a->store &&
+                      ccord_app_media_needs_fast_pump(a->media, stream_active, watch_active,
+                                                      vstate.active && vstate.camera);
     bool inline_voice = !a->live && a->session && a->store && vstate.active;
-    bool ptt_active = vstate.active && vp.ptt;
-    bool media_fast = video_active || inline_voice || ptt_active;
+    bool media_fast = video_fast || inline_voice;
     bool should_draw = ccord_app_desktop_should_draw(a->platform);
-    uint32_t timeout = 100;
-    if (!should_draw) {
-      // Hidden/minimized in the background: no frames; active video/inline media still pumps at 60 Hz.
-      timeout = media_fast ? 16 : 250;
-    } else if (redraw || animating) {
+    bool vsync_ok = !(a->opt && a->opt->headless) && ccord_render_vsync_enabled(a->renderer) && fast_draws < 4u;
+
+    uint32_t wait_timeout = UINT32_MAX;
+    bool use_wait_idle = true;
+    if (should_draw && (redraw || animating)) {
       // Non-blocking poll while smooth animations/redraws are active so VSync in SDL_RenderPresent paces
-      // full native refresh rate instead of halving FPS via SDL_WaitEventTimeout(16).
-      timeout = (!(a->opt && a->opt->headless) && fast_draws < 4u) ? 0u : 8u;
-    } else {
-      uint32_t ui_wait = a->ui ? ccord_ui_next_wait_ms(a->ui, app_now_ms(a)) : UINT32_MAX;
+      // full native refresh rate; when VSync is unavailable, cap software pacing to ~60 fps (16 ms).
+      wait_timeout = redraw ? 0u : (vsync_ok ? 0u : 16u);
+      use_wait_idle = false;
+    } else if (media_fast) {
+      wait_timeout = 16u;
+      use_wait_idle = false;
+    } else if (should_draw && a->ui) {
+      uint32_t ui_wait = ccord_ui_next_wait_ms(a->ui, app_now_ms(a));
       if (ui_wait == 0u) {
-        timeout = (!(a->opt && a->opt->headless) && fast_draws < 4u) ? 0u : 8u;
-      } else if (ui_wait < timeout) {
-        timeout = ui_wait;
+        wait_timeout = vsync_ok ? 0u : 16u;
+        use_wait_idle = false;
+      } else if (ui_wait < wait_timeout) {
+        wait_timeout = ui_wait;
       }
-      if (media_fast && timeout > 16u) timeout = 16u;
     }
+
     ccord_input_event ev;
     bool got_ev = false;
-    if (!should_draw && !media_fast) {
-      ccord_socket_t wait_fds[24];
+    if (!use_wait_idle || wait_timeout == 0u) {
+      got_ev = ccord_platform_next_event(a->platform, &ev, wait_timeout);
+    } else {
+      ccord_socket_t wait_fds[32];
+      const size_t wait_cap = sizeof wait_fds / sizeof wait_fds[0];
       size_t nfds = 0;
-      uint32_t bg_timeout = ccord_platform_is_mobile(a->platform) ? UINT32_MAX : 250u;
       if (a->resume_needs_draw || a->resume_link_wake || a->resume_link_probe) {
-        bg_timeout = 0u;
+        wait_timeout = 0u;
       } else {
         if (a->session) {
           ccord_wait_info wi;
           bool has_wi = ccord_session_wait_info(a->session, &wi);
-          for (size_t i = 0; i < wi.fd_count && nfds < (sizeof wait_fds / sizeof wait_fds[0]); i++) {
+          for (size_t i = 0; i < wi.fd_count && nfds < wait_cap; i++) {
             wait_fds[nfds++] = wi.fds[i];
           }
           if (wi.immediate) {
-            bg_timeout = 0u;
+            wait_timeout = 0u;
           } else if (has_wi) {
-            if (wi.timeout_ms < bg_timeout) bg_timeout = wi.timeout_ms;
+            if (wi.timeout_ms < wait_timeout) wait_timeout = wi.timeout_ms;
           } else if (a->mock) {
-            if (250u < bg_timeout) bg_timeout = 250u;
+            if (250u < wait_timeout) wait_timeout = 250u;
           }
         }
 #if CCORD_LIVE_ACCOUNT
-        if (a->auth_q && (a->auth_pending || ccord_rest_queue_pending(a->auth_q) > 0)) {
-          if (50u < bg_timeout) bg_timeout = 50u;
+        if (wait_timeout > 0u && a->auth_q && (a->auth_pending || ccord_rest_queue_pending(a->auth_q) > 0)) {
+          uint32_t aq_to = UINT32_MAX;
+          bool aq_pending = false;
+          size_t avail = nfds < wait_cap ? (wait_cap - nfds) : 0u;
+          nfds += ccord_rest_queue_wait_info(a->auth_q, app_now_ms(a),
+                                             avail > 0 ? wait_fds + nfds : nullptr, avail,
+                                             &aq_to, &aq_pending);
+          if (aq_pending) {
+            wait_timeout = 0u;
+          } else if (aq_to < wait_timeout) {
+            wait_timeout = aq_to;
+          }
         }
 #endif
 #if CCORD_WITH_PLUGINS
-        if (a->plugins) {
+        if (wait_timeout > 0u && a->plugins) {
           uint32_t pl_to = UINT32_MAX;
-          nfds += ccord_plugins_wait_info(a->plugins, wait_fds + nfds,
-                                          (sizeof wait_fds / sizeof wait_fds[0]) - nfds, &pl_to);
-          if (pl_to < bg_timeout) bg_timeout = pl_to;
+          size_t avail = nfds < wait_cap ? (wait_cap - nfds) : 0u;
+          nfds += ccord_plugins_wait_info(a->plugins, avail > 0 ? wait_fds + nfds : nullptr, avail, &pl_to);
+          if (pl_to < wait_timeout) wait_timeout = pl_to;
         }
 #endif
-        if (bg_timeout > 0u) {
-          uint32_t sm_to = ccord_scheduled_messages_next_due_ms(ccord_clock_unix_ms());
-          if (sm_to < bg_timeout) bg_timeout = sm_to;
-          int64_t now_i = (int64_t)app_now_ms(a);
+        if (wait_timeout > 0u && a->ipc) {
+          ccord_socket_t ipc_fd = ccord_app_ipc_wait_fd(a->ipc);
+          if (ipc_fd != CCORD_INVALID_SOCKET && nfds < wait_cap) wait_fds[nfds++] = ipc_fd;
+        }
+        if (wait_timeout > 0u && a->rpc) {
+          uint32_t rpc_to = UINT32_MAX;
+          size_t avail = nfds < wait_cap ? (wait_cap - nfds) : 0u;
+          nfds += ccord_app_rpc_wait_info(a->rpc, avail > 0 ? wait_fds + nfds : nullptr, avail, &rpc_to);
+          if (rpc_to < wait_timeout) wait_timeout = rpc_to;
+        }
+        if (wait_timeout > 0u) {
+          if (ccord_scheduled_messages_has_entries()) {
+            uint32_t sm_to = ccord_scheduled_messages_next_due_ms(ccord_clock_unix_ms());
+            if (sm_to < wait_timeout) wait_timeout = sm_to;
+          }
+          uint64_t now_u = app_now_ms(a);
+          int64_t now_i = (int64_t)now_u;
           uint32_t ear_to = ccord_earcons_next_wait_ms(a->earcons, now_i);
-          if (ear_to < bg_timeout) bg_timeout = ear_to;
+          if (ear_to < wait_timeout) wait_timeout = ear_to;
           uint32_t desk_to = ccord_app_desktop_next_wait_ms(a->desktop, now_i);
-          if (desk_to < bg_timeout) bg_timeout = desk_to;
+          if (desk_to < wait_timeout) wait_timeout = desk_to;
+          uint32_t media_to = ccord_app_media_next_wait_ms(a->media, now_u);
+          if (media_to < wait_timeout) wait_timeout = media_to;
+#if !CCORD_OS_ANDROID
+          if (a->updater_deferred && !a->updater) {
+            uint32_t upd_to = now_u >= a->updater_due_ms ? 0u : (uint32_t)(a->updater_due_ms - now_u);
+            if (upd_to < wait_timeout) wait_timeout = upd_to;
+          }
+#endif
         }
       }
-      got_ev = ccord_platform_wait_idle(a->platform, &ev, wait_fds, nfds, bg_timeout);
-    } else {
-      got_ev = ccord_platform_next_event(a->platform, &ev, timeout);
+      got_ev = ccord_platform_wait_idle(a->platform, &ev, wait_fds, nfds, wait_timeout);
     }
     if (got_ev) {
       last_input_ms = app_now_ms(a);
@@ -342,20 +404,19 @@ static void run_interactive(app *a)
           a->resume_needs_draw = false;
           a->resume_link_wake = false;
           a->resume_link_probe = false;
-          if (a->session) {
-            ccord_session_set_background(a->session, true);
-            if (ccord_platform_is_mobile(a->platform) && !a->keep_alive_active && !vstate.active && !video_active) {
-              ccord_session_set_suspended(a->session, true);
-            }
+          app_set_background_state(a, true);
+          if (a->session && ccord_platform_is_mobile(a->platform) && !a->keep_alive_active &&
+              !vstate.active && !stream_active) {
+            a->session_suspended = true;
+            ccord_session_set_suspended(a->session, true);
           }
           if (a->warm && a->session && !ccord_session_is_stale(a->session)) {
             ccord_error werr;
-            (void)ccord_warm_save(a->warm, a->store, true, &werr);
-            was_visible = false;   // avoid duplicate synced warm_save in the visible->!visible check below
+            (void)ccord_warm_save_if_dirty(a->warm, a->store, false, app_now_ms(a), &werr);
           }
+          was_visible = false;   // avoid duplicate background/warm_save handling in the visible transition below
 #if CCORD_WITH_PLUGINS
           if (a->plugins) {
-            ccord_plugins_set_background(a->plugins, true);
             ccord_plugins_dispatch_lifecycle(a->plugins, "background");
           }
 #endif
@@ -367,10 +428,12 @@ static void run_interactive(app *a)
           uint64_t now_fg = app_boottime_ms(a);
           uint64_t bg_dur = (a->bg_since_ms > 0 && now_fg >= a->bg_since_ms) ? (now_fg - a->bg_since_ms) : 0u;
           a->bg_since_ms = 0;
+          app_set_background_state(a, false);
           if (a->session) {
-            ccord_session_set_background(a->session, false);
+            a->session_suspended = false;
             ccord_session_set_suspended(a->session, false);
           }
+          was_visible = true;
           if (a->deferred_lowmem_evict) {
             a->deferred_lowmem_evict = false;
             ccord_render_evict_caches(a->renderer);
@@ -406,7 +469,6 @@ static void run_interactive(app *a)
 #if CCORD_WITH_PLUGINS
           app_plugins_push_platform_state(a);
           if (a->plugins) {
-            ccord_plugins_set_background(a->plugins, false);
             ccord_plugins_dispatch_lifecycle(a->plugins, "foreground");
           }
 #endif
@@ -489,27 +551,6 @@ static void run_interactive(app *a)
         memset(af_text, 0, sizeof af_text);
       }
     }
-    // Sync Android Foreground Service + AudioManager comm mode whenever local voice state changes.
-    if (vstate.active != a->voice_fg_active ||
-        (vstate.active && (vstate.channel_id != a->voice_fg_channel ||
-                           vstate.muted != a->voice_fg_muted ||
-                           vstate.deafened != a->voice_fg_deafened))) {
-#if CCORD_OS_ANDROID
-      if (vstate.active && !a->voice_fg_active) {
-        (void)ccord_platform_request_permission(a->platform, "android.permission.RECORD_AUDIO");
-      }
-#endif
-      const char *vch_name = "Voice Call";
-      if (vstate.active && a->store && vstate.channel_id != CCORD_ID_NONE) {
-        const ccord_channel *vch = ccord_store_channel(a->store, vstate.channel_id);
-        if (vch && vch->name && vch->name[0]) vch_name = vch->name;
-      }
-      ccord_platform_set_voice_call_active(a->platform, vstate.active, vch_name, vstate.muted, vstate.deafened);
-      a->voice_fg_active = vstate.active;
-      a->voice_fg_channel = vstate.channel_id;
-      a->voice_fg_muted = vstate.muted;
-      a->voice_fg_deafened = vstate.deafened;
-    }
     // Single-instance control socket: CLI commands from a second ccord invocation.
     if (a->ipc) {
       char cmd[512];
@@ -569,14 +610,55 @@ static void run_interactive(app *a)
       }
     }
     app_pump(a);
+    // Sync Android Foreground Service + AudioManager comm mode and re-evaluate mobile background suspension
+    // after app_pump() so ending a voice call or stream while backgrounded tears down immediately before sleep.
+    {
+      ccord_app_media_voice vnow = {0};
+      if (a->session && a->store) k_app_media_ops.voice(a, &vnow);
+      if (vnow.active != a->voice_fg_active ||
+          (vnow.active && (vnow.channel_id != a->voice_fg_channel ||
+                           vnow.muted != a->voice_fg_muted ||
+                           vnow.deafened != a->voice_fg_deafened))) {
+#if CCORD_OS_ANDROID
+        if (vnow.active && !a->voice_fg_active) {
+          (void)ccord_platform_request_permission(a->platform, "android.permission.RECORD_AUDIO");
+        }
+#endif
+        const char *vch_name = "Voice Call";
+        if (vnow.active && a->store && vnow.channel_id != CCORD_ID_NONE) {
+          const ccord_channel *vch = ccord_store_channel(a->store, vnow.channel_id);
+          if (vch && vch->name && vch->name[0]) vch_name = vch->name;
+        }
+        ccord_platform_set_voice_call_active(a->platform, vnow.active, vch_name, vnow.muted, vnow.deafened);
+        a->voice_fg_active = vnow.active;
+        a->voice_fg_channel = vnow.channel_id;
+        a->voice_fg_muted = vnow.muted;
+        a->voice_fg_deafened = vnow.deafened;
+      }
+      if (a->session && ccord_platform_is_mobile(a->platform)) {
+        bool snow = a->store && k_app_media_ops.stream_active(a);
+        bool want_suspend = ccord_platform_in_background(a->platform) && !a->keep_alive_active &&
+                            !vnow.active && !snow;
+        if (want_suspend != a->session_suspended) {
+          a->session_suspended = want_suspend;
+          ccord_session_set_suspended(a->session, want_suspend);
+        }
+      }
+    }
     if (a->pending_open_url[0] && ccord_session_state(a->session) == CCORD_CONN_CONNECTED) {
       (void)ccord_ui_open_url(a->ui, a->pending_open_url);
       a->pending_open_url[0] = '\0';
       redraw = true;
     }
-    ccord_scheduled_messages_tick(a->session, ccord_clock_unix_ms());
+    {
+      ccord_id cur_self = a->store ? ccord_store_self_id(a->store) : CCORD_ID_NONE;
+      if (ccord_scheduled_messages_has_entries() || (cur_self != CCORD_ID_NONE && cur_self != a->last_sched_self_id)) {
+        a->last_sched_self_id = cur_self;
+        ccord_scheduled_messages_tick(a->session, ccord_clock_unix_ms());
+      }
+    }
     // Warm-start cache: hydrate deferred channel histories lazily (1 page/idle tick or immediately on channel switch),
-    // log READY latency, save periodically once idle, and synced-save on backgrounding.
+    // log READY latency, save periodically once idle, and dirty-check save on backgrounding/minimizing.
     {
       bool stale = ccord_session_is_stale(a->session);
       if (a->warm_was_stale && !stale) {
@@ -595,14 +677,18 @@ static void run_interactive(app *a)
         }
       }
       bool visible = ccord_app_desktop_should_draw(a->platform);
-      if (was_visible && !visible && !stale) {
-        ccord_error werr;
-        (void)ccord_warm_save(a->warm, a->store, true, &werr);
+      if (visible != was_visible) {
+        app_set_background_state(a, !visible);
+        if (was_visible && !visible && !stale) {
+          ccord_error werr;
+          (void)ccord_warm_save_if_dirty(a->warm, a->store, false, app_now_ms(a), &werr);
+        }
       } else if (visible && app_now_ms(a) >= last_input_ms + 2000u) {
         (void)ccord_warm_maybe_save(a->warm, a->store, a->session, app_now_ms(a));
       }
       was_visible = visible;
     }
+#if !CCORD_OS_ANDROID
     if (a->updater_deferred && !a->updater && app_now_ms(a) >= a->updater_due_ms) {
       a->updater_deferred = false;
       a->updater = ccord_updater_create(CCORD_VERSION_STRING, ccord_paths_data_dir(), a->updater_auto_check);
@@ -615,6 +701,7 @@ static void run_interactive(app *a)
         }
       }
     }
+#endif
     if (ccord_render_poll_font_index(a->renderer)) redraw = true;
     if (ccord_app_desktop_take_redraw(a->desktop)) redraw = true;
     if (a->media_redraw) {
@@ -1039,11 +1126,8 @@ int main(int argc, char **argv)
   if (warm_res.loaded) ccord_ui_set_stale_saved_ms(a.ui, warm_res.saved_ms);
   ccord_app_desktop_attach_ui(a.desktop, a.ui);
   (void)ccord_app_desktop_bind_shortcuts(a.desktop);
-#if CCORD_OS_ANDROID
-  bool auto_upd = false;
-#else
+#if !CCORD_OS_ANDROID
   bool auto_upd = !opt.headless && !opt.mock && !opt.screenshot && !opt.verify_slice;
-#endif
   if (opt.verify_slice || opt.screenshot) {
     a.updater = ccord_updater_create(CCORD_VERSION_STRING, ccord_paths_data_dir(), false);
   } else {
@@ -1052,6 +1136,7 @@ int main(int argc, char **argv)
     a.updater_auto_check = auto_upd;
     a.updater_due_ms = app_now_ms(&a) + 3000u;
   }
+#endif
 
   // M5: runtime media coordinator (voice devices/PTT/DSP, Go Live send/receive, soundboard decode).
   ccord_app_media_config media_cfg = {.ops = &k_app_media_ops, .ud = &a};
@@ -1131,7 +1216,7 @@ int main(int argc, char **argv)
       ccord_game_detect_app_config game_cfg = {.mock = a.mock, .cache_dir = ddir, .enabled = game_detect_pref_enabled};
       a.rpc_lookup = ccord_rpc_app_lookup_create_default(opt.mock);
       if (!a.rpc_lookup) CCORD_LOG_W("rich presence: application lookup unavailable; activities without a name are not shown");
-      ccord_app_rpc_config rpc_cfg = {.session = a.session, .coalesce_ms = CCORD_APP_RPC_COALESCE_MS,
+      ccord_app_rpc_config rpc_cfg = {.session = a.session, .store = a.store, .coalesce_ms = CCORD_APP_RPC_COALESCE_MS,
                                       .game_detect = &game_cfg,
                                       .lookup = a.rpc_lookup};
       a.rpc = ccord_app_rpc_create(&rpc_cfg, &ierr);

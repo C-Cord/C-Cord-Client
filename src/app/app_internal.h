@@ -137,6 +137,11 @@ typedef struct app {
   bool voice_fg_deafened;
   ccord_id voice_fg_channel;
   bool keep_alive_active;                   // last keep-alive state pushed to Android Foreground Service
+  bool in_background;                       // unified hidden/background state (Android background or desktop tray/minimized)
+  bool session_suspended;                   // cached mobile background session suspension state
+  bool camera_rx_synced;                    // true once ccord_session_set_camera_rx has been pushed
+  bool last_camera_rx;                      // cached remote camera RX gate (!bg && voice_stage_visible)
+  ccord_id last_sched_self_id;              // last account id synced into scheduled_messages
   uint64_t bg_since_ms;                     // monotonic ms when app entered background (0 while foreground)
   bool deferred_lowmem_evict;               // defer GPU cache eviction while EGL surface is paused in background
   bool resume_needs_draw;                   // paint resumed UI frame before any blocking network pump
