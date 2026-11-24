@@ -2186,6 +2186,136 @@ static void test_dm_layout_ordering_and_pagination(void)
 }
 
 
+static void test_dm_intro_and_friend_accepted_system_message(void)
+{
+  ccord_error err;
+  // Open a real mock DM channel with user 1002 so ccord_session_send_greet routes through the mock transport too.
+  ccord_id target_uid = 1002u;
+  CT_CHECK(ccord_session_open_dm(F.session, target_uid, &err) == CCORD_OK);
+  frame(4);
+  ccord_id dm_ch = CCORD_ID_NONE;
+  for (size_t ci = 0, cn = ccord_store_channel_count(F.store, CCORD_DM_GUILD_ID); ci < cn; ci++) {
+    const ccord_channel *c = ccord_store_channel_at(F.store, CCORD_DM_GUILD_ID, ci);
+    if (c && !ui_channel_is_group_dm(c) && c->user_id == target_uid) {
+      dm_ch = c->id;
+      break;
+    }
+  }
+  CT_CHECK(dm_ch != CCORD_ID_NONE);
+  if (dm_ch == CCORD_ID_NONE) return;
+
+  // Select the DM first so any delayed mock profile fetch for target_uid settles before we customize the user.
+  CT_CHECK(ccord_store_select_guild(F.store, CCORD_DM_GUILD_ID, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_select_channel(F.store, dm_ch, &err) == CCORD_OK);
+  F.ui->dm_friends_view = false;
+  F.ui->dm_requests_view = false;
+  frame(4);
+
+  // Give the recipient a distinct display name and dot-ending handle ("elmasterin._.") plus 1 mutual server & Friend state.
+  const ccord_guild *g0 = ccord_store_guild_at(F.store, 0);
+  ccord_user u = {
+    .id = target_uid,
+    .name = "DashMastering",
+    .handle = "elmasterin._.",
+    .bio = "",
+    .pronouns = "",
+    .presence = CCORD_PRESENCE_ONLINE,
+    .avatar_palette = 0,
+  };
+  CT_CHECK(ccord_store_upsert_user(F.store, &u, &err) == CCORD_OK);
+  ccord_user_profile prof = {
+    .user_id = target_uid,
+    .display_name = "DashMastering",
+    .handle = "elmasterin._.",
+    .mutual_guild_count = g0 ? 1u : 0u,
+    .mutual_guild_ids = {g0 ? g0->id : CCORD_ID_NONE},
+  };
+  CT_CHECK(ccord_store_upsert_user_profile(F.store, &prof, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_set_relationship(F.store, target_uid, CCORD_RELATIONSHIP_FRIEND, &err) == CCORD_OK);
+
+  // Replace the DM history with a single FRIEND_REQUEST_ACCEPTED (type 67) system message.
+  ccord_message_rich accepted_rich = {.present = CCORD_RICH_ALL, .type = 67u};
+  ccord_message accepted_msg = {
+    .id = 8800001u,
+    .channel_id = dm_ch,
+    .author_id = target_uid,
+    .timestamp_ms = F.ui->now_unix_ms > 0 ? F.ui->now_unix_ms : 1795468080000LL,
+    .content = "",
+    .rich = &accepted_rich,
+    .send_state = CCORD_MSG_SEND_CONFIRMED,
+  };
+  CT_CHECK(ccord_store_set_history(F.store, dm_ch, &accepted_msg, 1u, &err) == CCORD_OK);
+  frame(4);
+
+  // 1. Model/body formatting: reads "<name> accepted your friend request.", never "sent a system message.".
+  const ccord_message *m0 = ccord_store_message_at(F.store, dm_ch, 0);
+  char body[256];
+  CT_CHECK(m0 && ui_message_display_body(F.ui, m0, body, sizeof body) > 0);
+  CT_CHECK(strcmp(body, "DashMastering accepted your friend request.") == 0);
+
+  // 2. Rendered UI: DM intro + compact system row (no author avatar) + Wave CTA + Mutual Servers + Friend/Block buttons.
+  CT_CHECK(F.ui->dbg_dm_intro_drawn >= 1u);
+  CT_CHECK(F.ui->dbg_system_rows == 1u);
+  CT_CHECK(F.ui->dbg_wave_ctas == 1u);
+  CT_CHECK(F.ui->nvis == 1u && F.ui->vis[0].avatar_rect.w == 0.0f && F.ui->vis[0].author_rect.w > 0.0f);
+  CT_CHECK(F.ui->dm_intro_mutual_rect.w > 0.0f && F.ui->dm_intro_user_id == target_uid);
+  CT_CHECK(F.ui->ndm_intro_hits == 2u &&
+           F.ui->dm_intro_hits[0].action == UI_DM_INTRO_ACT_REMOVE_FRIEND &&
+           F.ui->dm_intro_hits[1].action == UI_DM_INTRO_ACT_BLOCK);
+  CT_CHECK(F.ui->nwave_hits == 1u && F.ui->wave_hits[0].rect.w > 0.0f);
+  save_optional_screenshot("dm_friend_accepted.png");
+
+  // 3. Clicking "1 Mutual Server" opens the user profile modal directly on the Mutual Servers tab (tab 1).
+  ccord_rect mut_r = F.ui->dm_intro_mutual_rect;
+  click(mut_r.x + mut_r.w * 0.5f, mut_r.y + mut_r.h * 0.5f);
+  frame(2);
+  CT_CHECK(F.ui->modal_kind == UI_MODAL_USER_PROFILE && F.ui->modal_target_id == target_uid &&
+           F.ui->profile_modal_tab == 1);
+  key(CCORD_KEY_ESCAPE, 0);
+  frame(2);
+  CT_CHECK(F.ui->modal_kind == UI_MODAL_NONE);
+
+  // 4. Clicking "Remove Friend" updates relationship to NONE and swaps button to "Add Friend", then re-adding restores Friend.
+  ccord_rect rm_r = F.ui->dm_intro_hits[0].rect;
+  click(rm_r.x + rm_r.w * 0.5f, rm_r.y + rm_r.h * 0.5f);
+  frame(3);
+  CT_CHECK(ccord_store_relationship(F.store, target_uid) == CCORD_RELATIONSHIP_NONE);
+  CT_CHECK(F.ui->ndm_intro_hits == 2u && F.ui->dm_intro_hits[0].action == UI_DM_INTRO_ACT_ADD_FRIEND);
+  ccord_rect add_r = F.ui->dm_intro_hits[0].rect;
+  click(add_r.x + add_r.w * 0.5f, add_r.y + add_r.h * 0.5f);
+  frame(3);
+  CT_CHECK(ccord_store_relationship(F.store, target_uid) == CCORD_RELATIONSHIP_FRIEND);
+  CT_CHECK(F.ui->ndm_intro_hits == 2u && F.ui->dm_intro_hits[0].action == UI_DM_INTRO_ACT_REMOVE_FRIEND);
+
+  // 5. Clicking "Wave to DashMastering" sends the wave greet sticker, hides the Wave CTA, and never compact-groups.
+  size_t before_wave = ccord_store_message_count(F.store, dm_ch);
+  ccord_rect wave_r = F.ui->wave_hits[0].rect;
+  click(wave_r.x + wave_r.w * 0.5f, wave_r.y + wave_r.h * 0.5f);
+  frame(6);
+  size_t after_wave = ccord_store_message_count(F.store, dm_ch);
+  CT_CHECK(after_wave == before_wave + 1u);
+  const ccord_message *wmsg = after_wave > 1u ? ccord_store_message_at(F.store, dm_ch, after_wave - 1u) : nullptr;
+  CT_CHECK(wmsg && wmsg->rich && wmsg->rich->sticker_count == 1u &&
+           wmsg->rich->stickers[0].id == CCORD_WAVE_STICKER_ID);
+  CT_CHECK(F.ui->dbg_wave_ctas == 0u && F.ui->nwave_hits == 0u);
+  CT_CHECK(!ui_is_compact(F.ui, dm_ch, 1u, wmsg));
+
+  // 6. A follow-up regular message from the same author right after a system message never compact-groups either.
+  ccord_message follow = {
+    .id = 8800002u,
+    .channel_id = dm_ch,
+    .author_id = target_uid,
+    .timestamp_ms = accepted_msg.timestamp_ms + 5000LL,
+    .content = "hey!",
+    .send_state = CCORD_MSG_SEND_CONFIRMED,
+  };
+  ccord_message pair[2] = {accepted_msg, follow};
+  CT_CHECK(ccord_store_set_history(F.store, dm_ch, pair, 2u, &err) == CCORD_OK);
+  frame(2);
+  CT_CHECK(!ui_is_compact(F.ui, dm_ch, 1u, ccord_store_message_at(F.store, dm_ch, 1u)));
+}
+
+
 int main(int argc, char **argv)
 {
   if (!setup(argc > 0 ? argv[0] : "test_ui_interaction_core")) {
@@ -2218,6 +2348,7 @@ int main(int argc, char **argv)
   test_dedicated_login_screen();
   test_category_grouping_and_media_throttling();
   test_dm_layout_ordering_and_pagination();
+  test_dm_intro_and_friend_accepted_system_message();
   ui_test_teardown();
   ct_failures += ui_test_harness_failures();
   return CT_RESULT("test_ui_interaction_core");

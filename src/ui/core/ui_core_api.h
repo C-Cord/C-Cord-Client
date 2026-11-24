@@ -450,3 +450,7 @@ void ui_icon_spoiler_eye(ccord_renderer *r, float cx, float cy, float size, ccor
 void ui_icon_plugin_pkg(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
 void ui_icon_blocked(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
 void ui_icon_alert_circle(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
+void ui_icon_friend_accepted(ccord_renderer *r, float cx, float cy, float size, ccord_color c, ccord_color bg);
+void ui_icon_sys_arrow(ccord_renderer *r, float cx, float cy, float size, bool right, ccord_color c);
+void ui_icon_boost(ccord_renderer *r, float cx, float cy, float size, ccord_color c);
+void ui_icon_phone_call(ccord_renderer *r, float cx, float cy, float size, ccord_color c);

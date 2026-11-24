@@ -307,12 +307,15 @@ bool ui_row_has_new_divider(const ccord_ui *ui, ccord_id channel_id, size_t stor
 }
 
 // A message is a compact continuation of the previous one when the same author wrote within message_merge_ms.
+// System messages never group into an earlier message, nor do later messages group into a system message.
 bool ui_is_compact(const ccord_ui *ui, ccord_id channel_id, size_t i, const ccord_message *m)
 {
   if (i == 0 || !m || ccord_message_is_ephemeral(m)) return false;
+  if (m->rich && ccord_message_type_is_system(m->rich->type)) return false;
   if (ui_row_has_date_divider(ui, channel_id, i, m) || ui_row_has_new_divider(ui, channel_id, i, m)) return false;
   const ccord_message *p = ccord_store_message_at(ui->d.store, channel_id, i - 1);
   if (!p || ccord_message_is_ephemeral(p) || p->author_id != m->author_id) return false;
+  if (p->rich && ccord_message_type_is_system(p->rich->type)) return false;
   int64_t dt = m->timestamp_ms - p->timestamp_ms;
   return dt >= 0 && (float)dt < M(message_merge_ms);
 }

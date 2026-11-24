@@ -2,6 +2,16 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #pragma once
 
+typedef enum ui_dm_intro_act : uint8_t {
+  UI_DM_INTRO_ACT_NONE = 0,
+  UI_DM_INTRO_ACT_ADD_FRIEND,
+  UI_DM_INTRO_ACT_REMOVE_FRIEND,
+  UI_DM_INTRO_ACT_ACCEPT_FRIEND,
+  UI_DM_INTRO_ACT_IGNORE_FRIEND,
+  UI_DM_INTRO_ACT_BLOCK,
+  UI_DM_INTRO_ACT_UNBLOCK,
+} ui_dm_intro_act;
+
 struct ccord_ui {
   ccord_ui_deps d;
   const ccord_theme *theme;
@@ -596,6 +606,25 @@ struct ccord_ui {
   } retry_hits[UI_RETRY_HIT_MAX];
   size_t nretry_hits;
   size_t dbg_pending_echoes, dbg_failed_echoes;
+
+  // DM intro header hits (mutual servers link + Add/Remove Friend / Accept / Ignore / Block buttons)
+  ccord_rect dm_intro_mutual_rect;
+  ccord_id dm_intro_user_id;
+  struct {
+    ccord_rect rect;
+    ccord_id user_id;
+    uint8_t action;
+  } dm_intro_hits[4];
+  size_t ndm_intro_hits;
+
+  // "Wave to <Name>" greeting CTA button hits on friend-request-accepted system messages
+  struct {
+    ccord_rect rect;
+    ccord_id channel_id;
+    ccord_id message_id;
+  } wave_hits[4];
+  size_t nwave_hits;
+  size_t dbg_system_rows, dbg_wave_ctas, dbg_dm_intro_drawn;
 
   // slash command autocomplete debounce & state
   uint64_t slash_auto_due_ms;

@@ -250,6 +250,15 @@ hover_state uc_compute_hover(ccord_ui *ui)
       for (size_t i = 0; !h.rich_ctrl && i < ui->nretry_hits; i++) {
         if (ui_in_rect(x, y, ui->retry_hits[i].rect)) h.rich_ctrl = true;
       }
+      if (!h.rich_ctrl && ui->dm_intro_mutual_rect.w > 0.0f && ui_in_rect(x, y, ui->dm_intro_mutual_rect)) {
+        h.rich_ctrl = true;
+      }
+      for (size_t i = 0; !h.rich_ctrl && i < ui->ndm_intro_hits; i++) {
+        if (ui_in_rect(x, y, ui->dm_intro_hits[i].rect)) h.rich_ctrl = true;
+      }
+      for (size_t i = 0; !h.rich_ctrl && i < ui->nwave_hits; i++) {
+        if (ui_in_rect(x, y, ui->wave_hits[i].rect)) h.rich_ctrl = true;
+      }
       for (size_t i = 0; i < ui->nts_hits; i++) {
         if (ui_in_rect(x, y, ui->ts_hits[i].rect)) {
           h.ts_hit = (int)i;

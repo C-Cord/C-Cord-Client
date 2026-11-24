@@ -283,6 +283,13 @@ const ccord_message * dc_view_message_at(const ccord_ui *ui, ccord_id channel, s
 float dc_content_wrap(const ccord_ui *ui, float width);
 bool dc_friend_matches_tab(const ccord_relationship *rel, const ccord_user *u, int tab);
 bool dc_is_dm_intro_row(const ccord_ui *ui, ccord_id channel_id, size_t store_i);
+size_t dc_dm_intro_mutual_guilds(const ccord_ui *ui, ccord_id user_id, ccord_id *out_ids, size_t max_ids);
+float dc_dm_intro_walk(ccord_ui *ui, ccord_renderer *r, const ccord_channel *ch, float x, float y, float w,
+                       bool has_following_divider, bool draw);
+float dc_system_msg_walk(ccord_ui *ui, ccord_renderer *r, const ccord_message *m, ccord_id guild,
+                         float x, float y, float wrap, bool draw, ccord_rect *out_author_rect);
+bool dc_message_has_wave_cta(const ccord_ui *ui, ccord_id channel_id, size_t store_i, const ccord_message *m);
+float dc_wave_cta_walk(ccord_ui *ui, ccord_renderer *r, const ccord_message *m, float x, float y, float wrap, bool draw);
 bool dc_message_edited(const ccord_message *m);
 bool dc_message_has_reactions(const ccord_message *m);
 float dc_reaction_pills_walk(ccord_ui *ui, ccord_renderer *r, const ccord_message *m, float x, float y, float wrap, bool draw);

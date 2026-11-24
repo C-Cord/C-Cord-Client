@@ -486,7 +486,7 @@ void dc_decor_scan(const ccord_ui *ui, const ccord_message *m, bool compact, dec
       body_put(d, &out, " ", 1);
       const char *words = phrase ? phrase : "sent a system message.";
       body_put(d, &out, words, strlen(words));
-      if (phrase && content[0] != '\0' && (rich->type == 4 || rich->type == 18)) {
+      if (phrase && content[0] != '\0' && ccord_message_type_appends_content(rich->type)) {
         body_put(d, &out, " ", 1);
         body_put(d, &out, content, strlen(content));
       }
@@ -890,20 +890,25 @@ float dc_measure_row(size_t i, float width, void *ud)
   const ccord_message *m = dc_view_message_at(ui, c->channel, i, &store_i);
   if (!m) return 1.0f;
   blocked_run br = dc_blocked_run_at(ui, c->channel, store_i, m);
+  bool has_intro = dc_is_dm_intro_row(ui, c->channel, store_i);
+  bool has_div = store_i != SIZE_MAX &&
+                 (ui_row_has_date_divider(ui, c->channel, store_i, m) ||
+                  ui_row_has_new_divider(ui, c->channel, store_i, m));
+  float intro_w = maxf(width - 2.0f * M(message_pad_x), 40.0f);
   if (br.blocked) {
-    float bintro = dc_is_dm_intro_row(ui, c->channel, store_i) ? UI_DM_INTRO_H : 0.0f;
-    float bdiv = (ui_row_has_date_divider(ui, c->channel, store_i, m) ||
-                  ui_row_has_new_divider(ui, c->channel, store_i, m)) ? UI_CHAT_DIVIDER_H : 0.0f;
+    float bintro = has_intro
+                       ? dc_dm_intro_walk(ui, c->r, ccord_store_channel(ui->d.store, c->channel),
+                                          0.0f, 0.0f, intro_w, has_div, false)
+                       : 0.0f;
+    float bdiv = has_div ? UI_CHAT_DIVIDER_H : 0.0f;
     if (!br.revealed) {
       return bintro + bdiv + (br.first ? UI_BLOCKED_ROW_H : UI_BLOCKED_HIDDEN_H) + dc_tail_pad(ui, i);
     }
     // revealed: the normal row below, plus the Hide strip above the first message of the run
   }
-  bool compact = store_i != SIZE_MAX && ui_is_compact(ui, c->channel, store_i, m);
-  bool has_intro = dc_is_dm_intro_row(ui, c->channel, store_i);
-  bool has_div = store_i != SIZE_MAX &&
-                 (ui_row_has_date_divider(ui, c->channel, store_i, m) ||
-                  ui_row_has_new_divider(ui, c->channel, store_i, m));
+  bool is_system = m->rich && ccord_message_type_is_system(m->rich->type);
+  bool has_wave = dc_message_has_wave_cta(ui, c->channel, store_i, m);
+  bool compact = !is_system && store_i != SIZE_MAX && ui_is_compact(ui, c->channel, store_i, m);
   float tpad = dc_tail_pad(ui, i);
   const char *content = m->content ? m->content : "";
   size_t content_len = strlen(content);
@@ -917,14 +922,29 @@ float dc_measure_row(size_t i, float width, void *ud)
                    (ui->settings_attachments ? 256u : 0u) | (ui_streamer_invites_active(ui) ? 512u : 0u) |
                    (ccord_message_is_ephemeral(m) ? 1024u : 0u) | (((uint32_t)m->send_state & 3u) << 11) |
                    (tpad > 0.0f ? (1u << 13) : 0u) | (m->edited ? (1u << 14) : 0u) |
-                   (m->reply_to_id != CCORD_ID_NONE ? (1u << 15) : 0u) | (m->tts ? (1u << 16) : 0u);
+                   (m->reply_to_id != CCORD_ID_NONE ? (1u << 15) : 0u) | (m->tts ? (1u << 16) : 0u) |
+                   (has_wave ? (1u << 17) : 0u) | (ui->mobile_layout ? (1u << 18) : 0u);
   uint32_t meta_sig = (uint32_t)(m->reaction_kind_count * 31u + m->reaction_count);
   if (ui->d.contrib) meta_sig ^= (uint32_t)(ccord_contrib_decorators_revision(ui->d.contrib) * 2654435761u);
   if (m->rich) {
     meta_sig ^= (uint32_t)((m->rich->attachment_count << 8) ^ (m->rich->embed_count << 12) ^
                            (m->rich->component_row_count << 16) ^ (m->rich->v2_component_count << 20) ^
                            (m->rich->sticker_count << 24) ^ (m->rich->poll.present ? (1u << 28) : 0u) ^
-                           (m->rich->flags));
+                           (m->rich->flags) ^ ((uint32_t)m->rich->type * 2654435761u));
+  }
+  if (has_intro) {
+    const ccord_channel *ich = ccord_store_channel(ui->d.store, c->channel);
+    bool is_grp = ui_channel_is_group_dm(ich);
+    const ccord_user *du = !is_grp ? ui_dm_recipient(ui, ich) : nullptr;
+    ccord_id duid = du ? du->id : (!is_grp && ich ? ich->user_id : CCORD_ID_NONE);
+    uint32_t rk = duid != CCORD_ID_NONE ? (uint32_t)ccord_store_relationship(ui->d.store, duid) : 0u;
+    size_t mg = duid != CCORD_ID_NONE ? dc_dm_intro_mutual_guilds(ui, duid, nullptr, 0u) : 0u;
+    meta_sig ^= (rk << 3) ^ ((uint32_t)mg * 131u) ^ (is_grp ? 1u : 0u) ^
+                (du && du->display_name ? (uint32_t)strlen(du->display_name) * 17u : 0u);
+  }
+  if (is_system) {
+    const ccord_user *au = ccord_store_user(ui->d.store, m->author_id);
+    if (au && au->name) meta_sig ^= (uint32_t)strlen(au->name) * 73u;
   }
   uint64_t chash = hash_bytes_fnv(content, content_len);
   if (cc && m->id != CCORD_ID_NONE) {
@@ -944,27 +964,39 @@ float dc_measure_row(size_t i, float width, void *ud)
   dc_decor_scan(ui, m, compact, &d);
   float lh = ui_line_h(ui, M(font_size_base));
   float wrap = dc_content_wrap(ui, width);
-  bool no_body = d.body_len == 0 && dc_decor_has_body_cards(&d);
-  ui_jumbo_item jumbo_items[UI_JUMBO_EMOJI_MAX];
-  size_t jumbo_n = no_body ? 0u : dc_chat_message_jumbo(ui, m, jumbo_items);
-  float body_h = no_body
-                     ? 0.0f
-                     : (jumbo_n > 0u
-                            ? dc_chat_jumbo_emoji_walk(ui, c->r, jumbo_items, jumbo_n, 0.0f, 0.0f, wrap,
-                                                    COL(text_normal), compact && dc_message_edited(m),
-                                                    compact && m->tts, false)
-                            : maxf(dc_md_body_walk(ui, c->r, d.body, d.body_len, 0.0f, 0.0f, wrap, COL(text_normal), false), lh));
-  float top = compact ? M(message_line_gap)
-                      : (ui_messages_compact(ui)
-                             ? M(message_line_gap) + (M(message_group_gap) - M(message_line_gap)) * 0.35f
-                             : M(message_group_gap));
-  float header = compact ? 0.0f : lh;
+  float body_h = 0.0f;
+  if (is_system) {
+    ccord_id guild = ccord_store_selected_guild(ui->d.store);
+    body_h = dc_system_msg_walk(ui, c->r, m, guild, 0.0f, 0.0f, wrap, false, nullptr);
+  } else {
+    bool no_body = d.body_len == 0 && dc_decor_has_body_cards(&d);
+    ui_jumbo_item jumbo_items[UI_JUMBO_EMOJI_MAX];
+    size_t jumbo_n = no_body ? 0u : dc_chat_message_jumbo(ui, m, jumbo_items);
+    body_h = no_body
+                 ? 0.0f
+                 : (jumbo_n > 0u
+                        ? dc_chat_jumbo_emoji_walk(ui, c->r, jumbo_items, jumbo_n, 0.0f, 0.0f, wrap,
+                                                COL(text_normal), compact && dc_message_edited(m),
+                                                compact && m->tts, false)
+                        : maxf(dc_md_body_walk(ui, c->r, d.body, d.body_len, 0.0f, 0.0f, wrap, COL(text_normal), false), lh));
+  }
+  float top = is_system
+                  ? M(message_group_gap) * 0.65f
+                  : (compact ? M(message_line_gap)
+                             : (ui_messages_compact(ui)
+                                    ? M(message_line_gap) + (M(message_group_gap) - M(message_line_gap)) * 0.35f
+                                    : M(message_group_gap)));
+  float header = (compact || is_system) ? 0.0f : lh;
   float reactions = dc_message_has_reactions(m)
                         ? M(message_line_gap) + dc_reaction_pills_walk(ui, c->r, m, 0.0f, 0.0f, wrap, false)
                         : 0.0f;
   float ephem = ccord_message_is_ephemeral(m) ? UI_EPHEMERAL_FOOTER_H : 0.0f;
   float send_status = dc_send_status_extra_h(ui, m);
-  float intro = has_intro ? UI_DM_INTRO_H : 0.0f;
+  float wave_h = has_wave ? dc_wave_cta_walk(ui, c->r, m, 0.0f, 0.0f, intro_w, false) : 0.0f;
+  float intro = has_intro
+                    ? dc_dm_intro_walk(ui, c->r, ccord_store_channel(ui->d.store, c->channel),
+                                       0.0f, 0.0f, intro_w, has_div, false)
+                    : 0.0f;
   float div_h = has_div ? UI_CHAT_DIVIDER_H : 0.0f;
   float card_w = maxf(width - M(message_text_x) - M(message_pad_x), 40.0f);
   float blocked_strip = (br.blocked && br.first) ? UI_BLOCKED_ROW_H : 0.0f;
@@ -975,7 +1007,7 @@ float dc_measure_row(size_t i, float width, void *ud)
                     ? (intro + div_h + blocked_strip + 28.0f + tpad)
                     : (intro + div_h + blocked_strip + top + dc_decor_reply_h(&d) + header + body_h +
                        decor_total_h(ui, c->r, &d, card_w) + plugin_acc_h + reactions + send_status + ephem +
-                       M(message_line_gap) + tpad);
+                       M(message_line_gap) + wave_h + tpad);
   if (cc && m->id != CCORD_ID_NONE) {
     size_t victim = 0;
     for (size_t k = 0; k < CHAT_ROWH_CACHE_SLOTS; k++) {

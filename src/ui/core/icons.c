@@ -442,3 +442,56 @@ void ui_icon_alert_circle(ccord_renderer *r, float cx, float cy, float size, cco
   ccord_draw_line(r, (ccord_vec2){cx, cy - s * 0.40f}, (ccord_vec2){cx, cy + s * 0.10f}, t, c);
   ccord_draw_circle(r, cx, cy + s * 0.40f, t * 0.62f, c);
 }
+
+// Person silhouette with a bottom-right checkmark (friend request accepted system message).
+void ui_icon_friend_accepted(ccord_renderer *r, float cx, float cy, float size, ccord_color c, ccord_color bg)
+{
+  float s = size * 0.5f;
+  float px = cx - s * 0.18f;
+  // Head + rounded shoulders
+  ccord_draw_circle(r, px, cy - s * 0.36f, s * 0.34f, c);
+  ccord_push_clip(r, (ccord_rect){px - s * 0.78f, cy + s * 0.04f, s * 1.56f, s * 0.72f});
+  ccord_draw_circle(r, px, cy + s * 0.84f, s * 0.74f, c);
+  ccord_pop_clip(r);
+  // Checkmark knocked out from the right shoulder so it stays crisp at 16-18 px.
+  float vx = cx + s * 0.44f;
+  float vy = cy + s * 0.44f;
+  float t = fmaxf(size * 0.11f, 1.7f);
+  ccord_draw_circle(r, vx, vy, s * 0.42f, bg);
+  ccord_draw_line(r, (ccord_vec2){vx - s * 0.26f, vy + s * 0.02f}, (ccord_vec2){vx - s * 0.04f, vy + s * 0.24f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){vx - s * 0.04f, vy + s * 0.24f}, (ccord_vec2){vx + s * 0.34f, vy - s * 0.22f}, t, c);
+}
+
+// Horizontal arrow pointing right (member join / recipient add) or left (recipient remove).
+void ui_icon_sys_arrow(ccord_renderer *r, float cx, float cy, float size, bool right, ccord_color c)
+{
+  float s = size * 0.5f;
+  float t = fmaxf(size * 0.115f, 1.7f);
+  float dir = right ? 1.0f : -1.0f;
+  ccord_draw_line(r, (ccord_vec2){cx - dir * s * 0.70f, cy}, (ccord_vec2){cx + dir * s * 0.60f, cy}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx + dir * s * 0.16f, cy - s * 0.46f}, (ccord_vec2){cx + dir * s * 0.68f, cy}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx + dir * s * 0.16f, cy + s * 0.46f}, (ccord_vec2){cx + dir * s * 0.68f, cy}, t, c);
+}
+
+// Nitro boost diamond gem.
+void ui_icon_boost(ccord_renderer *r, float cx, float cy, float size, ccord_color c)
+{
+  float s = size * 0.5f;
+  ccord_vec2 top = {cx, cy - s * 0.84f};
+  ccord_vec2 right = {cx + s * 0.68f, cy};
+  ccord_vec2 bot = {cx, cy + s * 0.84f};
+  ccord_vec2 left = {cx - s * 0.68f, cy};
+  ccord_draw_triangle(r, top, right, left, c);
+  ccord_draw_triangle(r, bot, left, right, c);
+}
+
+// Curved phone handset for call / voice hangout system messages.
+void ui_icon_phone_call(ccord_renderer *r, float cx, float cy, float size, ccord_color c)
+{
+  float s = size * 0.5f;
+  float t = fmaxf(size * 0.15f, 2.2f);
+  ccord_draw_line(r, (ccord_vec2){cx - s * 0.50f, cy - s * 0.34f}, (ccord_vec2){cx - s * 0.16f, cy + s * 0.16f}, t, c);
+  ccord_draw_line(r, (ccord_vec2){cx - s * 0.16f, cy + s * 0.16f}, (ccord_vec2){cx + s * 0.34f, cy + s * 0.50f}, t, c);
+  ccord_draw_circle(r, cx - s * 0.48f, cy - s * 0.52f, s * 0.24f, c);
+  ccord_draw_circle(r, cx + s * 0.52f, cy + s * 0.48f, s * 0.24f, c);
+}

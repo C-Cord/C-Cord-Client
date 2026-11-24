@@ -485,6 +485,47 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
   }
+  if (ui->dm_intro_mutual_rect.w > 0.0f && ui->dm_intro_user_id != CCORD_ID_NONE &&
+      ui_in_rect(ev->x, ev->y, ui->dm_intro_mutual_rect)) {
+    ui_open_user_profile_modal(ui, ui->dm_intro_user_id, CCORD_ID_NONE);
+    ui->profile_modal_tab = 1;
+    uc_reset_caret_blink(ui);
+    return true;
+  }
+  for (size_t i = 0; i < ui->ndm_intro_hits; i++) {
+    if (ui_in_rect(ev->x, ev->y, ui->dm_intro_hits[i].rect)) {
+      ccord_id target_uid = ui->dm_intro_hits[i].user_id;
+      switch ((ui_dm_intro_act)ui->dm_intro_hits[i].action) {
+        case UI_DM_INTRO_ACT_ADD_FRIEND:
+        case UI_DM_INTRO_ACT_ACCEPT_FRIEND:
+          ui_set_user_relationship(ui, target_uid, CCORD_RELATIONSHIP_FRIEND);
+          break;
+        case UI_DM_INTRO_ACT_REMOVE_FRIEND:
+        case UI_DM_INTRO_ACT_IGNORE_FRIEND:
+        case UI_DM_INTRO_ACT_UNBLOCK:
+          ui_set_user_relationship(ui, target_uid, CCORD_RELATIONSHIP_NONE);
+          break;
+        case UI_DM_INTRO_ACT_BLOCK:
+          ui_set_user_relationship(ui, target_uid, CCORD_RELATIONSHIP_BLOCKED);
+          break;
+        default: break;
+      }
+      return true;
+    }
+  }
+  for (size_t i = 0; i < ui->nwave_hits; i++) {
+    if (ui_in_rect(ev->x, ev->y, ui->wave_hits[i].rect)) {
+      if (ui->d.session) {
+        ccord_error werr;
+        if (ccord_session_send_greet(ui->d.session, ui->wave_hits[i].channel_id,
+                                     CCORD_WAVE_STICKER_ID, CCORD_ID_NONE, &werr) != CCORD_OK) {
+          ui_notice(ui, "Couldn't send wave: %s", werr.message);
+        }
+      }
+      ui->dirty = true;
+      return true;
+    }
+  }
   for (size_t i = 0; i < ui->staged_file_count; i++) {
     if (ui_in_rect(ev->x, ev->y, ui->staged_spoiler_rects[i])) {
       (void)ccord_ui_toggle_attachment_spoiler(ui, i);
