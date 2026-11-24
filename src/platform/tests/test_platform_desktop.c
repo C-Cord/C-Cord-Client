@@ -1848,6 +1848,69 @@ static void test_background_wait_idle_poll(void)
 
   ccord_platform_destroy(p);
 }
+static void wake_click_thread(void *ud)
+{
+  uint32_t *delay = (uint32_t *)ud;
+  ccord_sleep_ms(*delay);
+  SDL_Event ev = {0};
+  ev.type = SDL_EVENT_MOUSE_BUTTON_DOWN;
+  ev.button.button = SDL_BUTTON_LEFT;
+  ev.button.clicks = 1;
+  ev.button.x = 10.0f;
+  ev.button.y = 10.0f;
+  (void)SDL_PushEvent(&ev);
+}
+
+static void test_foreground_wait_idle_fdw(void)
+{
+  ccord_error err;
+  ccord_platform_config cfg = {.title = "C-Cord", .width = 800, .height = 600, .headless = true};
+  ccord_platform *p = ccord_platform_create(&cfg, &err);
+  CT_CHECK(p != nullptr);
+  if (!p) return;
+  drain(p);
+  CT_CHECK(!ccord_platform_in_background(p));
+
+  ccord_socket_t sv[2] = {CCORD_INVALID_SOCKET, CCORD_INVALID_SOCKET};
+  CT_CHECK(ccord_sock_pair(sv));
+
+  // 1. Readable extra_fd wakes foreground SDL wait immediately via the fd-watcher thread (not 250 ms or 3000 ms).
+  ccord_input_event ev;
+  wake_sock_arg arg = {.fd = sv[1], .delay_ms = 30};
+  ccord_thread *th = ccord_thread_create(wake_sock_thread, &arg);
+  CT_CHECK(th != nullptr);
+  uint64_t t0 = SDL_GetTicks();
+  bool got = ccord_platform_wait_idle(p, &ev, &sv[0], 1, 3000);
+  uint64_t elapsed = SDL_GetTicks() - t0;
+  ccord_thread_join(th);
+  CT_CHECK(!got);
+  CT_CHECK(elapsed < 1000u);
+  uint8_t rb = 0;
+  bool wb = false;
+  CT_CHECK(ccord_sock_recv(sv[0], &rb, 1, &wb) == 1 && rb == 0x5Au);
+
+  // 2. Idle sleep with quiet extra_fd honors the requested timeout without stale-wake spinning.
+  t0 = SDL_GetTicks();
+  got = ccord_platform_wait_idle(p, &ev, &sv[0], 1, 120);
+  elapsed = SDL_GetTicks() - t0;
+  CT_CHECK(!got);
+  CT_CHECK(elapsed >= 90u && elapsed < 1000u);
+
+  // 3. SDL input event arriving while extra_fd is quiet wakes immediately and disarms watcher cleanly before close().
+  uint32_t click_delay = 30;
+  ccord_thread *th2 = ccord_thread_create(wake_click_thread, &click_delay);
+  CT_CHECK(th2 != nullptr);
+  t0 = SDL_GetTicks();
+  got = ccord_platform_wait_idle(p, &ev, &sv[0], 1, 3000);
+  elapsed = SDL_GetTicks() - t0;
+  ccord_thread_join(th2);
+  CT_CHECK(got && ev.type == CCORD_IN_MOUSE_DOWN);
+  CT_CHECK(elapsed < 1000u);
+
+  ccord_sock_close(sv[0]);
+  ccord_sock_close(sv[1]);
+  ccord_platform_destroy(p);
+}
 #endif
 
 int main(void)
@@ -1863,6 +1926,7 @@ int main(void)
   test_mobile_background_lifecycle_and_notify();
 #if !defined(_WIN32)
   test_background_wait_idle_poll();
+  test_foreground_wait_idle_fdw();
 #endif
   test_window_lifecycle();
   test_dead_bus();

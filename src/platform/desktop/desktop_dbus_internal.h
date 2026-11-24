@@ -79,6 +79,8 @@ struct ccord_desktop {
 #if CCORD_HAVE_PORTAL
   GDBusConnection *bus;
   GCancellable *cancellable;
+  guint wake_filter_id;
+  struct dbus_wake_box *wake_box;
   bool notifications_available;
   bool notifications_owned;
   bool notifications_activatable;

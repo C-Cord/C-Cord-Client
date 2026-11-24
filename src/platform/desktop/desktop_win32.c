@@ -642,3 +642,10 @@ void ccord_desktop_set_shortcut_state_callback(ccord_desktop *d, ccord_desktop_s
   d->state_fn = fn;
   d->state_ud = ud;
 }
+
+void ccord_desktop_set_wake_callback(ccord_desktop *d, ccord_desktop_wake_fn fn, void *ud)
+{
+  (void)d;
+  (void)fn;
+  (void)ud;
+}

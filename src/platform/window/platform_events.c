@@ -9,6 +9,7 @@
 
 #if !defined(_WIN32)
 #include <errno.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
 #endif
@@ -541,11 +542,19 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
   if (p->drop_mutex) SDL_UnlockMutex(p->drop_mutex);
   if (queued_drop) return true;
 
-  uint64_t deadline = timeout_ms > 0 ? SDL_GetTicks() + timeout_ms : 0;
+  uint64_t deadline = (timeout_ms > 0 && timeout_ms != UINT32_MAX) ? SDL_GetTicks() + (uint64_t)timeout_ms : 0;
   uint32_t wait = timeout_ms;
   for (;;) {
     SDL_Event e;
-    bool got = wait > 0 ? SDL_WaitEventTimeout(&e, (int32_t)wait) : SDL_PollEvent(&e);
+    bool got = false;
+    if (timeout_ms == UINT32_MAX) {
+      got = SDL_WaitEvent(&e);
+    } else if (wait > 0) {
+      Sint32 slice = wait > (uint32_t)INT32_MAX ? INT32_MAX : (Sint32)wait;
+      got = SDL_WaitEventTimeout(&e, slice);
+    } else {
+      got = SDL_PollEvent(&e);
+    }
     if (!got) {
       if (pop_lifecycle_event(p, out)) return true;
       return pop_pending_focus(p, out);
@@ -555,97 +564,386 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
     // from translate(); wake immediately instead of sleeping out the rest of timeout_ms.
     if (pop_lifecycle_event(p, out)) return true;
     if (pop_pending_focus(p, out)) return true;
-    if (wait > 0) {
+    if (wait > 0 && timeout_ms != UINT32_MAX) {
       uint64_t now = SDL_GetTicks();
       wait = now < deadline ? (uint32_t)(deadline - now) : 0;
     }
   }
 }
 
+#if !defined(_WIN32)
+static int SDLCALL platform_fdw_thread_main(void *ud)
+{
+  ccord_platform *p = ud;
+  SDL_LockMutex(p->fdw_mtx);
+  for (;;) {
+    while (!p->fdw_armed && !p->fdw_stop) {
+      SDL_WaitCondition(p->fdw_cond, p->fdw_mtx);
+    }
+    if (p->fdw_stop) break;
+    struct pollfd pfds[1 + PLATFORM_FDW_MAX_FDS];
+    nfds_t nfds = 0;
+    pfds[nfds++] = (struct pollfd){.fd = p->fdw_cancel_pipe[0], .events = POLLIN};
+    size_t n = p->fdw_nfds <= PLATFORM_FDW_MAX_FDS ? p->fdw_nfds : PLATFORM_FDW_MAX_FDS;
+    for (size_t i = 0; i < n; i++) {
+      pfds[nfds++] = (struct pollfd){.fd = p->fdw_fds[i], .events = POLLIN};
+    }
+    uint64_t gen = p->fdw_gen;
+    p->fdw_armed = false;
+    SDL_UnlockMutex(p->fdw_mtx);
+
+    int rc;
+    do {
+      rc = poll(pfds, nfds, -1);
+    } while (rc < 0 && errno == EINTR);
+
+    bool cancelled = (rc > 0 && (pfds[0].revents & POLLIN) != 0);
+    bool fd_ready = false;
+    if (rc > 0 && !cancelled) {
+      for (nfds_t i = 1; i < nfds; i++) {
+        if (pfds[i].revents != 0) {
+          fd_ready = true;
+          break;
+        }
+      }
+    }
+    if (fd_ready && p->wake_sdl_event != 0 &&
+        atomic_load_explicit(&p->wake_sdl_ready, memory_order_acquire)) {
+      SDL_Event wev;
+      SDL_zero(wev);
+      wev.type = p->wake_sdl_event;
+      wev.user.code = (Sint32)(gen & 0x7FFFFFFFu);
+      (void)SDL_PushEvent(&wev);
+    }
+
+    SDL_LockMutex(p->fdw_mtx);
+    p->fdw_active = false;
+    SDL_SignalCondition(p->fdw_cond);
+  }
+  p->fdw_active = false;
+  SDL_SignalCondition(p->fdw_cond);
+  SDL_UnlockMutex(p->fdw_mtx);
+  return 0;
+}
+
+static bool platform_fdw_ensure(ccord_platform *p)
+{
+  if (p->fdw_started) return true;
+  if (p->wake_sdl_event == 0) return false;
+  if (!p->fdw_mtx) p->fdw_mtx = SDL_CreateMutex();
+  if (!p->fdw_cond) p->fdw_cond = SDL_CreateCondition();
+  if (!p->fdw_mtx || !p->fdw_cond) return false;
+  if (p->fdw_cancel_pipe[0] < 0) {
+    if (pipe(p->fdw_cancel_pipe) != 0) {
+      p->fdw_cancel_pipe[0] = -1;
+      p->fdw_cancel_pipe[1] = -1;
+      return false;
+    }
+    for (int i = 0; i < 2; i++) {
+      int fl = fcntl(p->fdw_cancel_pipe[i], F_GETFL, 0);
+      if (fl >= 0) (void)fcntl(p->fdw_cancel_pipe[i], F_SETFL, fl | O_NONBLOCK);
+      int fdfl = fcntl(p->fdw_cancel_pipe[i], F_GETFD, 0);
+      if (fdfl >= 0) (void)fcntl(p->fdw_cancel_pipe[i], F_SETFD, fdfl | FD_CLOEXEC);
+    }
+  }
+  p->fdw_stop = false;
+  p->fdw_armed = false;
+  p->fdw_active = false;
+  p->fdw_thread = SDL_CreateThread(platform_fdw_thread_main, "ccord-fdw", p);
+  if (!p->fdw_thread) return false;
+  p->fdw_started = true;
+  return true;
+}
+
+static uint64_t platform_fdw_arm(ccord_platform *p, const int *fds, size_t count)
+{
+  if (!p || !fds || count == 0 || !platform_fdw_ensure(p)) return 0;
+  if (count > PLATFORM_FDW_MAX_FDS) count = PLATFORM_FDW_MAX_FDS;
+  SDL_LockMutex(p->fdw_mtx);
+  for (size_t i = 0; i < count; i++) p->fdw_fds[i] = fds[i];
+  p->fdw_nfds = count;
+  uint64_t gen = ++p->fdw_gen;
+  if ((gen & 0x7FFFFFFFu) == 0) gen = ++p->fdw_gen;
+  p->fdw_armed = true;
+  p->fdw_active = true;
+  SDL_SignalCondition(p->fdw_cond);
+  SDL_UnlockMutex(p->fdw_mtx);
+  return gen;
+}
+
+static void platform_fdw_disarm(ccord_platform *p)
+{
+  if (!p || !p->fdw_started) return;
+  SDL_LockMutex(p->fdw_mtx);
+  if (p->fdw_armed) {
+    p->fdw_armed = false;
+    p->fdw_active = false;
+    SDL_UnlockMutex(p->fdw_mtx);
+    return;
+  }
+  bool need_wait = p->fdw_active;
+  SDL_UnlockMutex(p->fdw_mtx);
+  if (need_wait) {
+    uint8_t b = 1;
+    ssize_t r;
+    do {
+      r = write(p->fdw_cancel_pipe[1], &b, 1);
+    } while (r < 0 && errno == EINTR);
+    SDL_LockMutex(p->fdw_mtx);
+    while (p->fdw_active) {
+      SDL_WaitCondition(p->fdw_cond, p->fdw_mtx);
+    }
+    SDL_UnlockMutex(p->fdw_mtx);
+    uint8_t drain[64];
+    while (read(p->fdw_cancel_pipe[0], drain, sizeof drain) > 0) {}
+  }
+}
+
+void platform_fdw_destroy(ccord_platform *p)
+{
+  if (!p) return;
+  if (p->fdw_started) {
+    SDL_LockMutex(p->fdw_mtx);
+    p->fdw_armed = false;
+    p->fdw_stop = true;
+    SDL_SignalCondition(p->fdw_cond);
+    SDL_UnlockMutex(p->fdw_mtx);
+    if (p->fdw_cancel_pipe[1] >= 0) {
+      uint8_t b = 1;
+      ssize_t r;
+      do {
+        r = write(p->fdw_cancel_pipe[1], &b, 1);
+      } while (r < 0 && errno == EINTR);
+    }
+    if (p->fdw_thread) {
+      SDL_WaitThread(p->fdw_thread, nullptr);
+      p->fdw_thread = nullptr;
+    }
+    p->fdw_started = false;
+  }
+  if (p->fdw_cancel_pipe[0] >= 0) close(p->fdw_cancel_pipe[0]);
+  if (p->fdw_cancel_pipe[1] >= 0) close(p->fdw_cancel_pipe[1]);
+  p->fdw_cancel_pipe[0] = -1;
+  p->fdw_cancel_pipe[1] = -1;
+  if (p->fdw_cond) {
+    SDL_DestroyCondition(p->fdw_cond);
+    p->fdw_cond = nullptr;
+  }
+  if (p->fdw_mtx) {
+    SDL_DestroyMutex(p->fdw_mtx);
+    p->fdw_mtx = nullptr;
+  }
+}
+
+static void watch_fd_add(int *dst, size_t *count, int fd)
+{
+  if (fd < 0 || *count >= PLATFORM_FDW_MAX_FDS) return;
+  for (size_t i = 0; i < *count; i++) {
+    if (dst[i] == fd) return;
+  }
+  dst[(*count)++] = fd;
+}
+#else
+void platform_fdw_destroy(ccord_platform *p)
+{
+  (void)p;
+}
+#endif
+
 bool ccord_platform_wait_idle(ccord_platform *p, ccord_input_event *out, const ccord_socket_t *extra_fds,
                               size_t extra_fd_count, uint32_t timeout_ms)
 {
   if (!p || !out) return false;
+  if (timeout_ms == 0) return ccord_platform_next_event(p, out, 0);
 #if !defined(_WIN32)
 #if defined(__ANDROID__)
   bool use_poll = !p->headless && atomic_load(&p->in_background) && !ccord_android_is_activity_active();
 #else
   bool use_poll = p->headless && atomic_load(&p->in_background);
 #endif
-  if (use_poll && p->wake_pipe[0] >= 0 && timeout_ms > 0) {
+  if (use_poll && p->wake_pipe[0] >= 0) {
     // Drain stale wake bytes BEFORE checking queued events and lifecycle state so any signal posted
     // concurrently after this point remains unread in wake_pipe[0] and unblocks poll() immediately.
     uint8_t drain[64];
     while (read(p->wake_pipe[0], drain, sizeof drain) > 0) {}
 
     p->bg_pumped_once = false;
+    p->non_input_activity = false;
     atomic_store_explicit(&p->suppress_main_wake, true, memory_order_relaxed);
     bool prep_ev = ccord_platform_next_event(p, out, 0);
     atomic_store_explicit(&p->suppress_main_wake, false, memory_order_relaxed);
     if (prep_ev) return true;
+    if (p->non_input_activity) return false;
 
 #if defined(__ANDROID__)
-    if (!atomic_load(&p->in_background) || ccord_android_is_activity_active()) {
-      uint32_t sdl_timeout = (extra_fd_count > 0 && timeout_ms > 250u) ? 250u : timeout_ms;
-      return ccord_platform_next_event(p, out, sdl_timeout);
-    }
+    bool still_poll = atomic_load(&p->in_background) && !ccord_android_is_activity_active();
 #else
-    if (!atomic_load(&p->in_background)) {
-      uint32_t sdl_timeout = (extra_fd_count > 0 && timeout_ms > 250u) ? 250u : timeout_ms;
-      return ccord_platform_next_event(p, out, sdl_timeout);
+    bool still_poll = atomic_load(&p->in_background);
+#endif
+    if (still_poll) {
+      struct pollfd pfds[2 + PLATFORM_FDW_MAX_FDS];
+      nfds_t nfds = 0;
+      pfds[nfds++] = (struct pollfd){.fd = p->wake_pipe[0], .events = POLLIN};
+      int timer_idx = -1;
+      int wait_ms = timeout_ms == UINT32_MAX ? -1 : (timeout_ms > (uint32_t)INT_MAX ? INT_MAX : (int)timeout_ms);
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+      if (p->wake_timer_fd >= 0) {
+        struct itimerspec its = {0};
+        if (timeout_ms != UINT32_MAX) {
+          its.it_value.tv_sec = (time_t)(timeout_ms / 1000u);
+          its.it_value.tv_nsec = (long)((timeout_ms % 1000u) * 1000000u);
+          if (its.it_value.tv_sec == 0 && its.it_value.tv_nsec == 0) its.it_value.tv_nsec = 1;
+          if (timerfd_settime(p->wake_timer_fd, 0, &its, nullptr) == 0) {
+            timer_idx = (int)nfds;
+            pfds[nfds++] = (struct pollfd){.fd = p->wake_timer_fd, .events = POLLIN};
+            wait_ms = -1;   // CLOCK_BOOTTIME timerfd controls expiry across SoC naps
+          }
+        } else {
+          (void)timerfd_settime(p->wake_timer_fd, 0, &its, nullptr);
+        }
+      }
+#endif
+      for (size_t i = 0; i < extra_fd_count && nfds < (nfds_t)(sizeof pfds / sizeof pfds[0]); i++) {
+        if (extra_fds && extra_fds[i] >= 0) {
+          pfds[nfds++] = (struct pollfd){.fd = extra_fds[i], .events = POLLIN};
+        }
+      }
+      int rc = poll(pfds, nfds, wait_ms);
+      if (rc > 0 && (pfds[0].revents & POLLIN) != 0) {
+        while (read(p->wake_pipe[0], drain, sizeof drain) > 0) {}
+      }
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+      if (timer_idx >= 0) {
+        if (rc > 0 && (pfds[timer_idx].revents & POLLIN) != 0) {
+          uint64_t exp = 0;
+          while (read(p->wake_timer_fd, &exp, sizeof exp) > 0) {}
+        }
+        struct itimerspec disarm = {0};
+        (void)timerfd_settime(p->wake_timer_fd, 0, &disarm, nullptr);
+      }
+#else
+      (void)timer_idx;
+#endif
+      p->bg_pumped_once = false;
+      return ccord_platform_next_event(p, out, 0);
     }
+  }
+
+  // Event-driven SDL wait (desktop foreground, desktop minimized/tray, Android foreground):
+  // sleep in SDL_WaitEvent/SDL_WaitEventTimeout for the exact deadline while the reusable fd-watcher
+  // thread monitors extra_fds + netlink + Android wake_pipe + CLOCK_BOOTTIME timerfd and pushes an
+  // internal SDL user event the microsecond any descriptor becomes readable.
+  atomic_store_explicit(&p->sdl_wake_pending, false, memory_order_release);
+  p->non_input_activity = false;
+#if defined(__ANDROID__)
+  bool watch_wake_pipe = !p->headless && p->wake_pipe[0] >= 0;
+  if (watch_wake_pipe) {
+    uint8_t drain[64];
+    while (read(p->wake_pipe[0], drain, sizeof drain) > 0) {}
+  }
+  p->bg_pumped_once = false;
+  atomic_store_explicit(&p->suppress_main_wake, true, memory_order_relaxed);
+  bool prep_ev = ccord_platform_next_event(p, out, 0);
+  atomic_store_explicit(&p->suppress_main_wake, false, memory_order_relaxed);
+#else
+  p->bg_pumped_once = false;
+  bool prep_ev = ccord_platform_next_event(p, out, 0);
+#endif
+  if (prep_ev) return true;
+  if (p->non_input_activity) return false;
+
+  int watch_fds[PLATFORM_FDW_MAX_FDS];
+  size_t watch_count = 0;
+#if defined(__ANDROID__)
+  if (watch_wake_pipe) watch_fd_add(watch_fds, &watch_count, p->wake_pipe[0]);
+#endif
+  for (size_t i = 0; i < extra_fd_count; i++) {
+    if (extra_fds && extra_fds[i] >= 0) watch_fd_add(watch_fds, &watch_count, (int)extra_fds[i]);
+  }
+  ccord_socket_t lw_fd = ccord_linkwatch_fd(p->link);
+  if (lw_fd != CCORD_INVALID_SOCKET) watch_fd_add(watch_fds, &watch_count, (int)lw_fd);
+
+  bool armed_timer = false;
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+  if (watch_count > 0 && !p->headless && p->wake_timer_fd >= 0 && timeout_ms != UINT32_MAX && timeout_ms >= 1000u) {
+    struct itimerspec its = {0};
+    its.it_value.tv_sec = (time_t)(timeout_ms / 1000u);
+    its.it_value.tv_nsec = (long)((timeout_ms % 1000u) * 1000000u);
+    if (timerfd_settime(p->wake_timer_fd, 0, &its, nullptr) == 0) {
+      watch_fd_add(watch_fds, &watch_count, p->wake_timer_fd);
+      armed_timer = true;
+    }
+  }
 #endif
 
-    struct pollfd pfds[2 + 24];
-    nfds_t nfds = 0;
-    pfds[nfds++] = (struct pollfd){.fd = p->wake_pipe[0], .events = POLLIN};
-    int timer_idx = -1;
-    int wait_ms = timeout_ms == UINT32_MAX ? -1 : (timeout_ms > (uint32_t)INT_MAX ? INT_MAX : (int)timeout_ms);
+  uint64_t fdw_gen = 0;
+  uint32_t sdl_timeout = timeout_ms;
+  if (watch_count > 0) {
+    fdw_gen = platform_fdw_arm(p, watch_fds, watch_count);
+    if (fdw_gen == 0 && sdl_timeout > 250u) {
+      sdl_timeout = 250u;   // fallback only if watcher thread could not start
+    }
+  }
+
+  bool got_input = false;
+  bool infinite = (sdl_timeout == UINT32_MAX);
+  uint64_t deadline = infinite ? 0u : (SDL_GetTicks() + (uint64_t)sdl_timeout);
+  for (;;) {
+    SDL_Event e;
+    bool got = false;
+    if (infinite) {
+      got = SDL_WaitEvent(&e);
+    } else {
+      uint64_t now = SDL_GetTicks();
+      if (now >= deadline) break;
+      uint64_t rem = deadline - now;
+      Sint32 slice = rem > (uint64_t)INT32_MAX ? INT32_MAX : (Sint32)rem;
+      got = SDL_WaitEventTimeout(&e, slice);
+    }
+    if (!got) break;
+    if (p->wake_sdl_event != 0 && e.type == p->wake_sdl_event) {
+      if (e.user.code == -1 || (fdw_gen != 0 && (uint32_t)e.user.code == (uint32_t)(fdw_gen & 0x7FFFFFFFu))) {
+        break;
+      }
+      continue;   // stale wake from a previous wait_idle() call
+    }
+    if (translate(p, &e, out)) {
+      got_input = true;
+      break;
+    }
+    if (pop_lifecycle_event(p, out) || pop_pending_focus(p, out)) {
+      got_input = true;
+      break;
+    }
+    if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP) {
+      break;   // unmapped key press or key release: wake immediately so PTT updates without polling
+    }
+  }
+
+  if (fdw_gen != 0) platform_fdw_disarm(p);
 #if defined(__linux__) && defined(CLOCK_BOOTTIME)
-    if (p->wake_timer_fd >= 0) {
-      struct itimerspec its = {0};
-      if (timeout_ms != UINT32_MAX) {
-        its.it_value.tv_sec = (time_t)(timeout_ms / 1000u);
-        its.it_value.tv_nsec = (long)((timeout_ms % 1000u) * 1000000u);
-        if (its.it_value.tv_sec == 0 && its.it_value.tv_nsec == 0) its.it_value.tv_nsec = 1;
-        if (timerfd_settime(p->wake_timer_fd, 0, &its, nullptr) == 0) {
-          timer_idx = (int)nfds;
-          pfds[nfds++] = (struct pollfd){.fd = p->wake_timer_fd, .events = POLLIN};
-          wait_ms = -1;   // CLOCK_BOOTTIME timerfd controls expiry across SoC naps
-        }
-      } else {
-        (void)timerfd_settime(p->wake_timer_fd, 0, &its, nullptr);
-      }
-    }
-#endif
-    for (size_t i = 0; i < extra_fd_count && nfds < (nfds_t)(sizeof pfds / sizeof pfds[0]); i++) {
-      if (extra_fds && extra_fds[i] >= 0) {
-        pfds[nfds++] = (struct pollfd){.fd = extra_fds[i], .events = POLLIN};
-      }
-    }
-    int rc = poll(pfds, nfds, wait_ms);
-    if (rc > 0 && (pfds[0].revents & POLLIN) != 0) {
-      while (read(p->wake_pipe[0], drain, sizeof drain) > 0) {}
-    }
-#if defined(__linux__) && defined(CLOCK_BOOTTIME)
-    if (timer_idx >= 0) {
-      if (rc > 0 && (pfds[timer_idx].revents & POLLIN) != 0) {
-        uint64_t exp = 0;
-        while (read(p->wake_timer_fd, &exp, sizeof exp) > 0) {}
-      }
-      struct itimerspec disarm = {0};
-      (void)timerfd_settime(p->wake_timer_fd, 0, &disarm, nullptr);
-    }
-#else
-    (void)timer_idx;
-#endif
-    p->bg_pumped_once = false;
-    return ccord_platform_next_event(p, out, 0);
+  if (armed_timer) {
+    uint64_t exp = 0;
+    while (read(p->wake_timer_fd, &exp, sizeof exp) > 0) {}
+    struct itimerspec disarm = {0};
+    (void)timerfd_settime(p->wake_timer_fd, 0, &disarm, nullptr);
   }
 #else
-  (void)extra_fds;
+  (void)armed_timer;
 #endif
+#if defined(__ANDROID__)
+  if (watch_wake_pipe) {
+    uint8_t drain[64];
+    while (read(p->wake_pipe[0], drain, sizeof drain) > 0) {}
+  }
+#endif
+  if (got_input) return true;
+  p->bg_pumped_once = false;
+  return ccord_platform_next_event(p, out, 0);
+#else
+  (void)extra_fds;
   uint32_t sdl_timeout = (extra_fd_count > 0 && timeout_ms > 250u) ? 250u : timeout_ms;
   return ccord_platform_next_event(p, out, sdl_timeout);
+#endif
 }
 

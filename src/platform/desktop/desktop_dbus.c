@@ -359,6 +359,37 @@ static void notify_token_signal(GDBusConnection *connection, const gchar *sender
 
 
 
+#if CCORD_HAVE_PORTAL
+typedef struct dbus_wake_box {
+  GMutex mtx;
+  ccord_desktop_wake_fn fn;
+  void *ud;
+} dbus_wake_box;
+
+static void dbus_wake_box_free(gpointer data)
+{
+  dbus_wake_box *box = data;
+  if (!box) return;
+  g_mutex_clear(&box->mtx);
+  ccord_free(box);
+}
+
+static GDBusMessage *dbus_wake_filter(GDBusConnection *connection, GDBusMessage *message, gboolean incoming,
+                                      gpointer user_data)
+{
+  (void)connection;
+  if (incoming) {
+    dbus_wake_box *box = user_data;
+    g_mutex_lock(&box->mtx);
+    ccord_desktop_wake_fn fn = box->fn;
+    void *ud = box->ud;
+    if (fn) fn(ud);
+    g_mutex_unlock(&box->mtx);
+  }
+  return message;
+}
+#endif
+
 ccord_desktop *ccord_desktop_create(const char *app_id, bool offline)
 {
   ccord_desktop *d = ccord_calloc(1, sizeof *d);
@@ -372,6 +403,15 @@ ccord_desktop *ccord_desktop_create(const char *app_id, bool offline)
   d->cancellable = g_cancellable_new();
   d->bus = open_bus();
   if (!d->bus) return d;  // offline mode: sink + honest false capabilities
+  d->wake_box = ccord_calloc(1, sizeof *d->wake_box);
+  if (d->wake_box) {
+    g_mutex_init(&d->wake_box->mtx);
+    d->wake_filter_id = g_dbus_connection_add_filter(d->bus, dbus_wake_filter, d->wake_box, dbus_wake_box_free);
+    if (d->wake_filter_id == 0) {
+      dbus_wake_box_free(d->wake_box);
+      d->wake_box = nullptr;
+    }
+  }
   probe_capabilities(d);  // async; capabilities settle during ccord_desktop_pump()
   d->notify_action_sub_id = g_dbus_connection_signal_subscribe(d->bus, NOTIFY_NAME, NOTIFY_NAME, "ActionInvoked",
                                                                NOTIFY_PATH, nullptr, G_DBUS_SIGNAL_FLAGS_NONE,
@@ -398,6 +438,17 @@ void ccord_desktop_destroy(ccord_desktop *d)
   if (!d) return;
   d->dead = true;
 #if CCORD_HAVE_PORTAL
+  if (d->wake_box) {
+    g_mutex_lock(&d->wake_box->mtx);
+    d->wake_box->fn = nullptr;
+    d->wake_box->ud = nullptr;
+    g_mutex_unlock(&d->wake_box->mtx);
+    if (d->bus && d->wake_filter_id) {
+      g_dbus_connection_remove_filter(d->bus, d->wake_filter_id);
+      d->wake_filter_id = 0;
+    }
+    d->wake_box = nullptr;   // freed by GLib's GDestroyNotify once filter removal finishes
+  }
   if (d->cancellable) g_cancellable_cancel(d->cancellable);
   if (d->bus) {
     if (d->watcher_watch_id) g_bus_unwatch_name(d->watcher_watch_id);
@@ -427,6 +478,21 @@ void ccord_desktop_pump(ccord_desktop *d)
   }
 #else
   (void)d;
+#endif
+}
+
+void ccord_desktop_set_wake_callback(ccord_desktop *d, ccord_desktop_wake_fn fn, void *ud)
+{
+#if CCORD_HAVE_PORTAL
+  if (!d || !d->wake_box) return;
+  g_mutex_lock(&d->wake_box->mtx);
+  d->wake_box->fn = fn;
+  d->wake_box->ud = ud;
+  g_mutex_unlock(&d->wake_box->mtx);
+#else
+  (void)d;
+  (void)fn;
+  (void)ud;
 #endif
 }
 

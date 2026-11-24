@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include <ccord/core/link_event.h>
+#include <ccord/core/os.h>
 
 typedef struct ccord_linkwatch ccord_linkwatch;
 #if defined(__ANDROID__)
@@ -38,3 +39,5 @@ void ccord_linkwatch_inject(ccord_linkwatch *w, ccord_link_event ev);
 void ccord_linkwatch_begin_seed(ccord_linkwatch *w);
 // True when a netlink socket is open (false: offline, or the socket could not be created).
 [[nodiscard]] bool ccord_linkwatch_has_netlink(const ccord_linkwatch *w);
+// Underlying non-blocking netlink socket for kernel poll() (CCORD_INVALID_SOCKET when absent/offline).
+[[nodiscard]] ccord_socket_t ccord_linkwatch_fd(const ccord_linkwatch *w);

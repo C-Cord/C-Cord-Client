@@ -19,6 +19,7 @@
 #define HOTKEY_ID_MAX sizeof((ccord_input_event){0}.text)
 #define BASE_TITLE_MAX 256u
 #define PLATFORM_PENDING_TEXT_MAX 65536u
+#define PLATFORM_FDW_MAX_FDS 48u
 
 typedef struct platform_drop_buf {
   char queue[DROP_QUEUE_CAP][DROP_PATH_MAX];
@@ -85,6 +86,23 @@ struct ccord_platform {
   int wake_pipe[2];               // POSIX/Android self-pipe to wake background poll() immediately
   _Atomic int wake_wr_fd;         // mirror of wake_pipe[1] for thread-safe wakeups (-1 when closed)
   int wake_timer_fd;              // Linux/Android CLOCK_BOOTTIME timerfd so poll() never oversleeps across SoC naps
+  Uint32 wake_sdl_event;          // SDL_RegisterEvents(1) internal wake event for SDL_WaitEventTimeout()
+  atomic_bool wake_sdl_ready;     // true while wake_sdl_event may safely be pushed via SDL_PushEvent
+  atomic_bool sdl_wake_pending;   // coalesces bursts of async wake_sdl_event pushes from D-Bus / worker threads
+  bool non_input_activity;        // set when tray/notify/shortcut/link callbacks fired during a pump
+#if !defined(_WIN32)
+  SDL_Mutex *fdw_mtx;             // guards reusable on-demand fd-watcher thread for SDL_WaitEventTimeout()
+  SDL_Condition *fdw_cond;
+  SDL_Thread *fdw_thread;
+  int fdw_cancel_pipe[2];
+  bool fdw_started;
+  bool fdw_stop;
+  bool fdw_armed;
+  bool fdw_active;
+  uint64_t fdw_gen;
+  int fdw_fds[PLATFORM_FDW_MAX_FDS];
+  size_t fdw_nfds;
+#endif
   SDL_ThreadID main_thread_id;    // thread owning ccord_platform_wait_idle()
   atomic_bool suppress_main_wake; // suppresses main-thread self-wakes during wait_idle poll-prep drain
   bool pending_safe_area_ev;
@@ -108,3 +126,5 @@ void platform_copy_utf8_prefix(char *dst, size_t cap, const char *src, size_t le
 platform_drop_buf *platform_drop_buf_ensure(ccord_platform *p);
 void platform_pump_link(ccord_platform *p);
 void platform_wake(ccord_platform *p);
+void platform_wake_sdl(ccord_platform *p);
+void platform_fdw_destroy(ccord_platform *p);

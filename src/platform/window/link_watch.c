@@ -225,6 +225,11 @@ bool ccord_linkwatch_has_netlink(const ccord_linkwatch *w)
   return w && w->fd >= 0;
 }
 
+ccord_socket_t ccord_linkwatch_fd(const ccord_linkwatch *w)
+{
+  return (w && w->fd >= 0) ? (ccord_socket_t)w->fd : CCORD_INVALID_SOCKET;
+}
+
 ccord_linkwatch *ccord_linkwatch_create(bool offline)
 {
   ccord_linkwatch *w = ccord_calloc(1, sizeof *w);

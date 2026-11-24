@@ -107,6 +107,7 @@ static void platform_shortcut_state_cb(void *ud, const char *shortcut_id, bool a
 {
   ccord_platform *p = ud;
   if (!p) return;
+  p->non_input_activity = true;
   if (!shortcut_id) {
     atomic_store(&p->global_ptt_held, false);
     return;
@@ -130,6 +131,7 @@ static void platform_tray_cb(void *ud, ccord_tray_action action)
 {
   ccord_platform *p = ud;
   if (!p) return;
+  p->non_input_activity = true;
   if (action == CCORD_TRAY_ACTIVATE) {
     if (!p->window_visible || p->minimized) {
       ccord_platform_show_window(p);
@@ -146,7 +148,10 @@ static void platform_tray_cb(void *ud, ccord_tray_action action)
 static void platform_notify_action_cb(void *ud, const ccord_notify_target *target)
 {
   ccord_platform *p = ud;
-  if (p && target && p->notify_click_fn) p->notify_click_fn(p->notify_click_ud, target);
+  if (p && target && p->notify_click_fn) {
+    p->non_input_activity = true;
+    p->notify_click_fn(p->notify_click_ud, target);
+  }
 }
 
 static void apply_title_badge(ccord_platform *p)
@@ -232,10 +237,29 @@ void platform_wake(ccord_platform *p)
 #endif
 }
 
+void platform_wake_sdl(ccord_platform *p)
+{
+  if (!p || p->wake_sdl_event == 0) return;
+  if (!atomic_load_explicit(&p->wake_sdl_ready, memory_order_acquire)) return;
+  if (!atomic_exchange_explicit(&p->sdl_wake_pending, true, memory_order_acq_rel)) {
+    SDL_Event wev;
+    SDL_zero(wev);
+    wev.type = p->wake_sdl_event;
+    wev.user.code = -1;
+    (void)SDL_PushEvent(&wev);
+  }
+}
+
+static void platform_desktop_wake_cb(void *ud)
+{
+  platform_wake_sdl((ccord_platform *)ud);
+}
+
 static bool SDLCALL platform_lifecycle_watch(void *userdata, SDL_Event *event)
 {
   ccord_platform *p = (ccord_platform *)userdata;
   if (!p || !event) return true;
+  if (p->wake_sdl_event != 0 && event->type == p->wake_sdl_event) return true;
   bool wake = false;
   switch (event->type) {
     case SDL_EVENT_WILL_ENTER_BACKGROUND:
@@ -349,6 +373,13 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
   p->wake_pipe[0] = -1;
   p->wake_pipe[1] = -1;
   p->wake_timer_fd = -1;
+#if !defined(_WIN32)
+  p->fdw_cancel_pipe[0] = -1;
+  p->fdw_cancel_pipe[1] = -1;
+#endif
+  p->wake_sdl_event = SDL_RegisterEvents(1);
+  atomic_init(&p->wake_sdl_ready, p->wake_sdl_event != 0);
+  atomic_init(&p->sdl_wake_pending, false);
   p->main_thread_id = SDL_GetCurrentThreadID();
   atomic_init(&p->wake_wr_fd, -1);
   atomic_init(&p->suppress_main_wake, false);
@@ -428,6 +459,7 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
   platform_copy_utf8_prefix(p->base_title, sizeof p->base_title, c.title, strlen(c.title));
   p->hotkey_mutex = SDL_CreateMutex();
   p->desktop = ccord_desktop_create(CCORD_PLATFORM_APP_ID, c.headless);
+  ccord_desktop_set_wake_callback(p->desktop, platform_desktop_wake_cb, p);
   ccord_desktop_set_hotkey_callback(p->desktop, platform_hotkey_cb, p);
   ccord_desktop_set_shortcut_state_callback(p->desktop, platform_shortcut_state_cb, p);
   ccord_desktop_set_tray_callback(p->desktop, platform_tray_cb, p);
@@ -440,6 +472,11 @@ void ccord_platform_destroy(ccord_platform *p)
 {
   if (!p) return;
   SDL_RemoveEventWatch(platform_lifecycle_watch, p);
+  // Stop background wake sources (D-Bus filter + fd-watcher thread) before disabling SDL wake pushes or closing pipes.
+  ccord_desktop_destroy(p->desktop);
+  p->desktop = nullptr;
+  platform_fdw_destroy(p);
+  atomic_store_explicit(&p->wake_sdl_ready, false, memory_order_release);
 #if defined(__ANDROID__)
   if (p->voice_service_active) {
     ccord_android_set_voice_service(false, "", false, false);
@@ -462,7 +499,6 @@ void ccord_platform_destroy(ccord_platform *p)
 #endif
   if (p->text_input_on) SDL_StopTextInput(p->window);
   platform_pending_text_clear(p);
-  ccord_desktop_destroy(p->desktop);
   ccord_linkwatch_destroy(p->link);
   SDL_SetCursor(nullptr);
   for (size_t i = 0; i < (size_t)CCORD_CURSOR_COUNT; i++) {
@@ -756,6 +792,7 @@ ccord_status ccord_platform_inject_drop_file(ccord_platform *p, const char *path
   }
   if (p->drop_mutex) SDL_UnlockMutex(p->drop_mutex);
   platform_wake(p);
+  platform_wake_sdl(p);
   return CCORD_OK;
 }
 
@@ -1081,6 +1118,7 @@ void platform_pump_link(ccord_platform *p)
   if (!p->link) return;
   ccord_linkwatch_sample(p->link);
   for (ccord_link_event ev = ccord_linkwatch_take(p->link); ev != CCORD_LINK_NONE; ev = ccord_linkwatch_take(p->link)) {
+    p->non_input_activity = true;
     if (p->link_fn) p->link_fn(p->link_ud, ev);
   }
 }

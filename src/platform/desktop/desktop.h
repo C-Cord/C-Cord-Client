@@ -21,6 +21,10 @@ ccord_desktop *ccord_desktop_create(const char *app_id, bool offline);
 void ccord_desktop_destroy(ccord_desktop *d);
 // Dispatches pending DBus replies/signals without blocking; call from the event loop.
 void ccord_desktop_pump(ccord_desktop *d);
+// Registers a thread-safe wake callback invoked from background desktop IPC threads (e.g. GDBus worker)
+// whenever an incoming message arrives so an idle SDL_WaitEventTimeout() wakes immediately without polling.
+typedef void (*ccord_desktop_wake_fn)(void *ud);
+void ccord_desktop_set_wake_callback(ccord_desktop *d, ccord_desktop_wake_fn fn, void *ud);
 
 bool ccord_desktop_notifications_available(const ccord_desktop *d);
 // Records title/body in the sink and sends Notify asynchronously when available.
