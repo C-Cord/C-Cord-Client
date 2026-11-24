@@ -377,6 +377,8 @@ static ccord_status upsert_member(ccord_store *s, const ccord_member *member, cc
     store_members_index_add(&s->d, s->d.nmembers - 1);
   }
   s->revision++;
+  s->warm_rev++;
+  if (member->user_id == s->d.self_id) s->badge_rev++;
   return CCORD_OK;
 }
 
@@ -560,6 +562,8 @@ ccord_status ccord_store_upsert_guild(ccord_store *s, const ccord_guild *guild, 
       s->d.guilds[gi].dms_disabled_until_ms = guild->dms_disabled_until_ms;
     }
     s->revision++;
+    s->warm_rev++;
+    s->badge_rev++;
   } else {
     size_t cap = dm_channels_present(&s->d) ? CCORD_MAX_REAL_GUILDS : CCORD_MAX_GUILDS;
     if (s->d.nguilds >= cap) {
@@ -579,6 +583,8 @@ ccord_status ccord_store_upsert_guild(ccord_store *s, const ccord_guild *guild, 
     s->d.guild_last[gi] = CCORD_ID_NONE;
     s->d.nguilds++;
     s->revision++;
+    s->warm_rev++;
+    s->badge_rev++;
     store_post(s, CCORD_EVT_GUILDS_LOADED, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE,
          (int64_t)s->d.nguilds);
   }
@@ -649,6 +655,7 @@ ccord_status ccord_store_upsert_guild(ccord_store *s, const ccord_guild *guild, 
       s->sel_channel = ch;
       s->d.guild_last[gi] = s->sel_channel;
       s->revision++;
+      s->warm_rev++;
       if (guild_changed) {
         store_post(s, CCORD_EVT_GUILD_SELECT, guild->id, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, 0);
       }
@@ -732,6 +739,8 @@ ccord_status ccord_store_delete_guild(ccord_store *s, ccord_id guild_id, ccord_e
           (s->d.nguilds - (size_t)gi - 1) * sizeof *s->d.guild_last);
   s->d.nguilds--;
   s->revision++;
+  s->warm_rev++;
+  s->badge_rev++;
   store_post(s, CCORD_EVT_GUILDS_LOADED, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE,
        (int64_t)s->d.nguilds);
 
@@ -995,11 +1004,15 @@ static ccord_status upsert_channel_ex(ccord_store *s, const ccord_channel *chann
     s->d.chan_ix_ok = false;   // evicted slot's id disappeared from chan_by_id: force full reindex
   }
   if (ci >= 0) {
+    if (store_dm_is_placeholder_name(&s->d.channels[ci]) && s->d.dm_placeholder_count > 0) s->d.dm_placeholder_count--;
+    if (store_dm_is_missing_icon(&s->d.channels[ci]) && s->d.dm_missing_icon_count > 0) s->d.dm_missing_icon_count--;
     ccord_id old_guild_id = s->d.channels[ci].guild_id;
     store_free_cstr(&s->d.channels[ci].name);
     store_free_cstr(&s->d.channels[ci].topic);
     store_free_cstr(&s->d.channels[ci].icon_url);
     s->d.channels[ci] = copy;
+    if (store_dm_is_placeholder_name(&s->d.channels[ci])) s->d.dm_placeholder_count++;
+    if (store_dm_is_missing_icon(&s->d.channels[ci])) s->d.dm_missing_icon_count++;
     if (old_guild_id != copy.guild_id) s->d.chan_ix_ok = false;
   } else {
     if (!store_ensure_channels(&s->d, s->d.nchannels + 1u)) {
@@ -1010,6 +1023,8 @@ static ccord_status upsert_channel_ex(ccord_store *s, const ccord_channel *chann
     }
     size_t idx = s->d.nchannels++;
     s->d.channels[idx] = copy;
+    if (store_dm_is_placeholder_name(&s->d.channels[idx])) s->d.dm_placeholder_count++;
+    if (store_dm_is_missing_icon(&s->d.channels[idx])) s->d.dm_missing_icon_count++;
     if (s->d.chan_ix_ok) {
       if (!ccord_idmap_put(&s->d.chan_by_id, copy.id, idx) ||
           !store_index_add(&s->d.chan_ix, copy.guild_id, CCORD_ID_NONE, idx)) {
@@ -1019,6 +1034,8 @@ static ccord_status upsert_channel_ex(ccord_store *s, const ccord_channel *chann
   }
   if (!defer_sort) store_resort_channels(&s->d, copy.guild_id);
   s->revision++;
+  if (!ccord_discord_type_is_thread(copy.discord_type)) s->warm_rev++;
+  s->badge_rev++;
   store_post(s, CCORD_EVT_CHANNEL_UPSERT, copy.guild_id, copy.id, CCORD_ID_NONE, CCORD_ID_NONE, 0);
   return CCORD_OK;
 }
@@ -1035,6 +1052,9 @@ ccord_status ccord_store_delete_channel(ccord_store *s, ccord_id channel_id, cco
   long ci = store_find_channel(&s->d, channel_id);
   if (ci < 0) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown channel");
   ccord_id guild_id = s->d.channels[ci].guild_id;
+  bool was_thread = ccord_discord_type_is_thread(s->d.channels[ci].discord_type);
+  if (store_dm_is_placeholder_name(&s->d.channels[ci]) && s->d.dm_placeholder_count > 0) s->d.dm_placeholder_count--;
+  if (store_dm_is_missing_icon(&s->d.channels[ci]) && s->d.dm_missing_icon_count > 0) s->d.dm_missing_icon_count--;
   ccord_store_roles_forget_channel(s, channel_id);
   ccord_store_notify_forget_channel(s, channel_id);
   ccord_store_forget_channel_invites(s, guild_id, channel_id);
@@ -1064,6 +1084,8 @@ ccord_status ccord_store_delete_channel(ccord_store *s, ccord_id channel_id, cco
     }
   }
   s->revision++;
+  if (!was_thread || sel_changed) s->warm_rev++;
+  s->badge_rev++;
   store_post(s, CCORD_EVT_CHANNEL_DELETE, guild_id, channel_id, CCORD_ID_NONE, CCORD_ID_NONE, 0);
   if (sel_changed && selected != CCORD_ID_NONE && selected != channel_id) {
     store_post(s, CCORD_EVT_CHANNEL_SELECT, guild_id, selected, CCORD_ID_NONE, CCORD_ID_NONE, 0);
@@ -1149,6 +1171,8 @@ ccord_status ccord_store_remove_member(ccord_store *s, ccord_id guild_id, ccord_
   s->d.nmembers--;
   store_members_reindex(&s->d);
   s->revision++;
+  s->warm_rev++;
+  if (user_id == s->d.self_id) s->badge_rev++;
   return CCORD_OK;
 }
 
@@ -1218,6 +1242,7 @@ ccord_status ccord_store_set_guild_layout(ccord_store *s, const ccord_guild_fold
   ccord_free(next_last);
   ccord_free(placed);
   s->revision++;
+  s->warm_rev++;
   store_post(s, CCORD_EVT_GUILDS_LOADED, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, (int64_t)s->d.nguilds);
   return CCORD_OK;
 }
@@ -1273,6 +1298,7 @@ ccord_status ccord_store_reorder_channels(ccord_store *s, ccord_id guild_id, con
 
   store_resort_channels(&s->d, guild_id);
   s->revision++;
+  s->warm_rev++;
   store_post(s, CCORD_EVT_CHANNEL_UPSERT, guild_id, channel_ids[0], CCORD_ID_NONE, CCORD_ID_NONE, (int64_t)count);
   return CCORD_OK;
 }
@@ -1361,12 +1387,17 @@ ccord_status ccord_store_change_dm_recipient(ccord_store *s, ccord_id channel_id
     const char *target_name = new_default[0] != '\0' ? new_default : "Group DM";
     const char *dup = store_dup_cstr(target_name);
     if (dup) {
+      bool was_ph = store_dm_is_placeholder_name(ch);
       store_free_cstr(&ch->name);
       ch->name = dup;
+      bool is_ph = store_dm_is_placeholder_name(ch);
+      if (was_ph && !is_ph && s->d.dm_placeholder_count > 0) s->d.dm_placeholder_count--;
+      else if (!was_ph && is_ph) s->d.dm_placeholder_count++;
     }
   }
 
   s->revision++;
+  s->warm_rev++;
   store_post(s, CCORD_EVT_CHANNEL_UPSERT, CCORD_DM_GUILD_ID, channel_id, CCORD_ID_NONE, user_id, added ? 1 : 0);
   return CCORD_OK;
 }
@@ -1388,6 +1419,8 @@ ccord_status ccord_store_accept_message_request(ccord_store *s, ccord_id channel
     s->d.dm_last = channel_id;
   }
   s->revision++;
+  s->warm_rev++;
+  s->badge_rev++;
   store_post(s, CCORD_EVT_CHANNEL_UPSERT, CCORD_DM_GUILD_ID, channel_id, CCORD_ID_NONE, CCORD_ID_NONE, 1);
   return CCORD_OK;
 }
@@ -1413,6 +1446,7 @@ ccord_status ccord_store_set_guild_incidents(ccord_store *s, ccord_id guild_id, 
   g->invites_disabled_until_ms = invites_until_ms;
   g->dms_disabled_until_ms = dms_until_ms;
   s->revision++;
+  s->warm_rev++;
   return CCORD_OK;
 }
 
@@ -1435,6 +1469,7 @@ ccord_status ccord_store_set_guild_vanity(ccord_store *s, ccord_id guild_id, con
   memset(g->vanity_url_code, 0, sizeof g->vanity_url_code);
   memcpy(g->vanity_url_code, c, clen);
   s->revision++;
+  s->warm_rev++;
   return CCORD_OK;
 }
 

@@ -698,32 +698,64 @@ static uint64_t guild_level(const ccord_store *s, const ccord_guild *g, ccord_id
   return (perms & CCORD_PERM_ADMINISTRATOR) != 0 ? CCORD_PERM_ALL : perms;
 }
 
+bool ccord_store_guild_base_permissions(const ccord_store *s, ccord_id guild_id, ccord_id user_id,
+                                        int64_t now_unix_ms, ccord_store_guild_perm_base *out)
+{
+  if (out) *out = (ccord_store_guild_perm_base){0};
+  if (!s || !out || user_id == CCORD_ID_NONE || guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) return false;
+  const ccord_guild *g = ccord_store_guild(s, guild_id);
+  if (!g) return false;
+  bool exact = false;
+  uint64_t base = guild_level(s, g, user_id, &exact);
+  const ccord_id *ids = nullptr;
+  size_t nids = 0;
+  if (exact) (void)ccord_store_member_roles(s, guild_id, user_id, &ids, &nids);
+  bool timed_out = false;
+  if (now_unix_ms != 0) {
+    const ccord_member *m = ccord_store_find_member(s, guild_id, user_id);
+    timed_out = m && m->timeout_until_ms > now_unix_ms;
+  }
+  *out = (ccord_store_guild_perm_base){
+    .guild_id = guild_id,
+    .user_id = user_id,
+    .base_perms = base,
+    .role_ids = ids,
+    .role_count = nids,
+    .exact = exact,
+    .timed_out = timed_out,
+  };
+  return true;
+}
+
+uint64_t ccord_store_channel_permissions_with_base(const ccord_store *s, const ccord_store_guild_perm_base *base,
+                                                   const ccord_channel *ch)
+{
+  if (!s || !base) return 0;
+  uint64_t perms = base->base_perms;
+  if (ch && base->exact && ch->guild_id == base->guild_id) {
+    if ((perms & CCORD_PERM_ADMINISTRATOR) != 0) {
+      perms = CCORD_PERM_ALL;
+    } else {
+      ccord_id source = ch->id;   // a thread is governed by its parent channel's overwrites
+      bool in_thread = ccord_discord_type_is_thread(ch->discord_type);
+      if (in_thread && ch->parent_id != CCORD_ID_NONE) source = ch->parent_id;
+      size_t now = 0;
+      const ccord_overwrite *ow = ccord_store_channel_overwrites(s, source, &now);
+      perms = ccord_perm_channel_ex(perms, base->guild_id, base->user_id, base->role_ids, base->role_count, ow, now,
+                                    in_thread);
+    }
+  }
+  if (base->timed_out) perms = ccord_perm_apply_timeout(perms, true);
+  return perms;
+}
+
 uint64_t ccord_store_permissions(const ccord_store *s, ccord_id guild_id, ccord_id channel_id, ccord_id user_id,
                                  int64_t now_unix_ms)
 {
-  if (!s || user_id == CCORD_ID_NONE || guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) return 0;
-  const ccord_guild *g = ccord_store_guild(s, guild_id);
-  if (!g) return 0;
-  bool exact = false;
-  uint64_t perms = guild_level(s, g, user_id, &exact);
-  if (channel_id != CCORD_ID_NONE && exact) {
-    const ccord_channel *c = ccord_store_channel(s, channel_id);
-    if (c && c->guild_id == guild_id) {
-      ccord_id source = channel_id;   // a thread is governed by its parent channel's overwrites
-      bool in_thread = ccord_discord_type_is_thread(c->discord_type);
-      if (in_thread && c->parent_id != CCORD_ID_NONE) source = c->parent_id;
-      size_t now = 0, nids = 0;
-      const ccord_overwrite *ow = ccord_store_channel_overwrites(s, source, &now);
-      const ccord_id *ids = nullptr;
-      (void)ccord_store_member_roles(s, guild_id, user_id, &ids, &nids);
-      perms = ccord_perm_channel_ex(perms, guild_id, user_id, ids, nids, ow, now, in_thread);
-    }
-  }
-  if (now_unix_ms != 0) {
-    const ccord_member *m = ccord_store_find_member(s, guild_id, user_id);
-    perms = ccord_perm_apply_timeout(perms, m && m->timeout_until_ms > now_unix_ms);
-  }
-  return perms;
+  ccord_store_guild_perm_base base;
+  if (!ccord_store_guild_base_permissions(s, guild_id, user_id, now_unix_ms, &base)) return 0;
+  const ccord_channel *c = (channel_id != CCORD_ID_NONE && base.exact) ? ccord_store_channel(s, channel_id) : nullptr;
+  return ccord_store_channel_permissions_with_base(s, &base, c);
 }
 
 bool ccord_store_permissions_exact(const ccord_store *s, ccord_id guild_id, ccord_id user_id)

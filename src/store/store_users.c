@@ -57,6 +57,28 @@ static bool dup_profile_extra_cstrs(ccord_user_profile *dst, const ccord_user_pr
 }
 
 
+static bool user_in_selected_scope(const ccord_store *s, ccord_id user_id)
+{
+  if (s->sel_guild == CCORD_ID_NONE) return false;
+  if (s->sel_guild != CCORD_DM_GUILD_ID) {
+    return store_find_member(&s->d, s->sel_guild, user_id) >= 0;
+  }
+  if (user_id == s->d.self_id) return true;
+  size_t dm_count = s->d.chan_ix_ok ? store_index_count(&s->d.chan_ix, CCORD_DM_GUILD_ID) : s->d.nchannels;
+  for (size_t di = 0; di < dm_count; di++) {
+    size_t k = di;
+    if (s->d.chan_ix_ok && !store_index_at(&s->d.chan_ix, CCORD_DM_GUILD_ID, di, &k)) continue;
+    const ccord_channel *ch = &s->d.channels[k];
+    if (ch->guild_id != CCORD_DM_GUILD_ID) continue;
+    if (ch->user_id == user_id) return true;
+    size_t nrec = ch->recipient_count <= CCORD_MAX_DM_RECIPIENTS ? ch->recipient_count : CCORD_MAX_DM_RECIPIENTS;
+    for (size_t r = 0; r < nrec; r++) {
+      if (ch->recipient_ids[r] == user_id) return true;
+    }
+  }
+  return false;
+}
+
 ccord_status ccord_store_update_presence(ccord_store *s, ccord_id user_id, ccord_presence presence,
                                          const char *status_text, ccord_error *err)
 {
@@ -64,9 +86,11 @@ ccord_status ccord_store_update_presence(ccord_store *s, ccord_id user_id, ccord
   if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "store: null");
   if (user_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "store: user id");
   if (presence > CCORD_PRESENCE_DND) return ccord_error_set(err, CCORD_ERR_INVALID, "store: presence");
+  if (status_text && !store_text_ok(status_text, CCORD_STORE_STATUS_MAX_BYTES)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "store: status text");
+  }
   long found = store_find_user(&s->d, user_id);
-  size_t ui = found >= 0 ? (size_t)found : s->d.nusers;
-  if (ui == s->d.nusers) {
+  if (found < 0) {
     // Live PRESENCE_UPDATE can arrive before the user is cached: insert a stub.
     char idbuf[21];
     ccord_id_format(user_id, idbuf);
@@ -82,26 +106,24 @@ ccord_status ccord_store_update_presence(ccord_store *s, ccord_id user_id, ccord
       .is_bot = false,
       .avatar_palette = (uint8_t)(user_id % 6u),
     };
-    ccord_status ust = ccord_store_upsert_user(s, &stub, err);
-    if (ust != CCORD_OK) return ust;
-    found = store_find_user(&s->d, user_id);
-    if (found >= 0) ui = (size_t)found;
-    if (ui == s->d.nusers) return ccord_error_set(err, CCORD_ERR_INTERNAL, "store: stub user missing");
+    return ccord_store_upsert_user(s, &stub, err);
   }
-  const char *copy = nullptr;
-  if (status_text) {
-    if (!store_text_ok(status_text, CCORD_STORE_STATUS_MAX_BYTES)) {
-      return ccord_error_set(err, CCORD_ERR_INVALID, "store: status text");
-    }
-    copy = store_dup_cstr(status_text);
+  size_t ui = (size_t)found;
+  ccord_user *cur = &s->d.users[ui];
+  const char *cur_status = cur->status_text ? cur->status_text : "";
+  bool status_same = !status_text || strcmp(cur_status, status_text) == 0;
+  if (cur->presence == presence && status_same) return CCORD_OK;
+  if (!status_same) {
+    const char *copy = store_dup_cstr(status_text);
     if (!copy) return ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
+    store_free_cstr(&cur->status_text);
+    cur->status_text = copy;
   }
-  if (copy) {
-    store_free_cstr(&s->d.users[ui].status_text);
-    s->d.users[ui].status_text = copy;
-  }
-  s->d.users[ui].presence = presence;
-  s->revision++;
+  ccord_presence old_presence = cur->presence;
+  cur->presence = presence;
+  bool bucket_changed = (old_presence == CCORD_PRESENCE_OFFLINE) != (presence == CCORD_PRESENCE_OFFLINE);
+  if (bucket_changed && user_in_selected_scope(s, user_id)) s->revision++;
+  else store_bump_traffic(s);
   store_post(s, CCORD_EVT_PRESENCE_UPDATE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, user_id, (int64_t)presence);
   return CCORD_OK;
 }
@@ -208,6 +230,7 @@ ccord_status ccord_store_upsert_user(ccord_store *s, const ccord_user *user, cco
       strncmp(user->name, "User ", 5) == 0 && strncmp(s->d.users[ui].name, "User ", 5) != 0) {
     name_src = s->d.users[ui].name;
   }
+  bool warm_changed = (ui < 0);
   if (ui >= 0) {
     // Seen again, nothing new (every message re-introduces its author): no change, no new revision, no event.
     const ccord_user *o = &s->d.users[ui];
@@ -240,15 +263,17 @@ ccord_status ccord_store_upsert_user(ccord_store *s, const ccord_user *user, cco
                           strcmp(user->activity_state, o->activity_state) == 0 &&
                           user->activity_start_ms == o->activity_start_ms &&
                           user->activity_end_ms == o->activity_end_ms));
-    if (strcmp(name_src, o->name) == 0 && strcmp(handle_src ? handle_src : "", o->handle) == 0 &&
-        strcmp(status_src ? status_src : "", o->status_text) == 0 &&
-        strcmp(avatar_src ? avatar_src : "", o->avatar_url) == 0 &&
-        strcmp(deco_src ? deco_src : "", o->avatar_decoration_url ? o->avatar_decoration_url : "") == 0 &&
-        strcmp(banner_src ? banner_src : "", o->banner_url) == 0 &&
-        strcmp(bio_src ? bio_src : "", o->bio) == 0 && strcmp(pronouns_src ? pronouns_src : "", o->pronouns) == 0 &&
-        accent == o->accent_color && has_accent == o->has_accent_color && pres == o->presence &&
-        user->is_bot == o->is_bot && user->avatar_palette == o->avatar_palette &&
-        clan_same && nameplate_same && custom_same && act_same) {
+    bool warm_same = strcmp(name_src, o->name) == 0 && strcmp(handle_src ? handle_src : "", o->handle) == 0 &&
+                     strcmp(avatar_src ? avatar_src : "", o->avatar_url) == 0 &&
+                     strcmp(deco_src ? deco_src : "", o->avatar_decoration_url ? o->avatar_decoration_url : "") == 0 &&
+                     strcmp(banner_src ? banner_src : "", o->banner_url) == 0 &&
+                     strcmp(bio_src ? bio_src : "", o->bio) == 0 &&
+                     strcmp(pronouns_src ? pronouns_src : "", o->pronouns) == 0 &&
+                     accent == o->accent_color && has_accent == o->has_accent_color &&
+                     user->is_bot == o->is_bot && user->avatar_palette == o->avatar_palette &&
+                     clan_same && nameplate_same && custom_same;
+    warm_changed = !warm_same;
+    if (warm_same && strcmp(status_src ? status_src : "", o->status_text) == 0 && pres == o->presence && act_same) {
       return CCORD_OK;
     }
   }
@@ -350,7 +375,9 @@ ccord_status ccord_store_upsert_user(ccord_store *s, const ccord_user *user, cco
     s->d.users[s->d.nusers++] = copy;
     store_users_index_add(&s->d, s->d.nusers - 1);
   }
-  if (copy.name && copy.name[0] != '\0' && strncmp(copy.name, "User ", 5) != 0) {
+  bool need_dm_fill = s->d.dm_placeholder_count > 0 ||
+                      (s->d.dm_missing_icon_count > 0 && copy.avatar_url && copy.avatar_url[0] != '\0');
+  if (need_dm_fill && copy.name && copy.name[0] != '\0' && strncmp(copy.name, "User ", 5) != 0) {
     size_t dm_count = s->d.chan_ix_ok ? store_index_count(&s->d.chan_ix, CCORD_DM_GUILD_ID) : s->d.nchannels;
     for (size_t di = 0; di < dm_count; di++) {
       size_t k = di;
@@ -358,7 +385,7 @@ ccord_status ccord_store_upsert_user(ccord_store *s, const ccord_user *user, cco
       ccord_channel *ch = &s->d.channels[k];
       if (ch->guild_id != CCORD_DM_GUILD_ID) continue;
       if (ch->discord_type == CCORD_DISCORD_CHANNEL_GROUP_DM) {
-        if (!ch->name || strcmp(ch->name, "Direct Message") == 0 || strncmp(ch->name, "User ", 5) == 0) {
+        if (store_dm_is_placeholder_name(ch)) {
           bool has_recipient = false;
           size_t nrec = ch->recipient_count <= CCORD_MAX_DM_RECIPIENTS ? ch->recipient_count : CCORD_MAX_DM_RECIPIENTS;
           for (size_t r = 0; r < nrec; r++) {
@@ -393,6 +420,8 @@ ccord_status ccord_store_upsert_user(ccord_store *s, const ccord_user *user, cco
               if (dup_gname) {
                 store_free_cstr(&ch->name);
                 ch->name = dup_gname;
+                if (!store_dm_is_placeholder_name(ch) && s->d.dm_placeholder_count > 0) s->d.dm_placeholder_count--;
+                warm_changed = true;
               }
             }
           }
@@ -400,23 +429,28 @@ ccord_status ccord_store_upsert_user(ccord_store *s, const ccord_user *user, cco
         continue;
       }
       if (ch->user_id != copy.id) continue;
-      if (!ch->name || strcmp(ch->name, "Direct Message") == 0 || strncmp(ch->name, "User ", 5) == 0) {
+      if (store_dm_is_placeholder_name(ch)) {
         const char *dup_name = store_dup_cstr(copy.name);
         if (dup_name) {
           store_free_cstr(&ch->name);
           ch->name = dup_name;
+          if (!store_dm_is_placeholder_name(ch) && s->d.dm_placeholder_count > 0) s->d.dm_placeholder_count--;
+          warm_changed = true;
         }
       }
-      if ((!ch->icon_url || ch->icon_url[0] == '\0') && copy.avatar_url && copy.avatar_url[0] != '\0') {
+      if (store_dm_is_missing_icon(ch) && copy.avatar_url && copy.avatar_url[0] != '\0') {
         const char *dup_icon = store_dup_cstr(copy.avatar_url);
         if (dup_icon) {
           store_free_cstr(&ch->icon_url);
           ch->icon_url = dup_icon;
+          if (!store_dm_is_missing_icon(ch) && s->d.dm_missing_icon_count > 0) s->d.dm_missing_icon_count--;
+          warm_changed = true;
         }
       }
     }
   }
   s->revision++;
+  if (warm_changed) s->warm_rev++;
   store_post(s, CCORD_EVT_PRESENCE_UPDATE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, user->id,
        (int64_t)copy.presence);
   return CCORD_OK;
@@ -630,6 +664,7 @@ ccord_status ccord_store_set_relationship(ccord_store *s, ccord_id user_id,
             (s->d.nrelationships - (size_t)ri - 1) * sizeof *s->d.relationships);
     s->d.nrelationships--;
     s->revision++;
+    s->warm_rev++;
     store_post(s, CCORD_EVT_PRESENCE_UPDATE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, user_id, 0);
     return CCORD_OK;
   }
@@ -663,6 +698,7 @@ ccord_status ccord_store_set_relationship(ccord_store *s, ccord_id user_id,
     s->d.relationships[s->d.nrelationships++] = (ccord_relationship){.user_id = user_id, .kind = kind};
   }
   s->revision++;
+  s->warm_rev++;
   store_post(s, CCORD_EVT_PRESENCE_UPDATE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, user_id, (int64_t)kind);
   return CCORD_OK;
 }
@@ -790,29 +826,61 @@ ccord_status ccord_store_update_presence_detail(
     return ccord_error_set(err, CCORD_ERR_INVALID, "store: presence detail text");
   }
 
+  uint64_t rev_before = s->revision;
   ccord_status base_st = ccord_store_update_presence(s, user_id, presence, st_src, err);
   if (base_st != CCORD_OK) return base_st;
   long ui = store_find_user(&s->d, user_id);
   if (ui < 0) return ccord_error_set(err, CCORD_ERR_INTERNAL, "store: user missing after presence update");
   ccord_user *u = &s->d.users[ui];
-  copy_capped_str(u->custom_status_emoji, sizeof u->custom_status_emoji, ce_src);
-  copy_capped_str(u->custom_status_text, sizeof u->custom_status_text, ct_src);
-  u->custom_status_expires_ms = (ce_src[0] != '\0' || ct_src[0] != '\0') ? custom_expires_ms : 0;
-  u->has_activity = has_activity && an_src[0] != '\0';
-  if (u->has_activity) {
-    u->activity_type = activity_type;
-    copy_capped_str(u->activity_name, sizeof u->activity_name, an_src);
-    copy_capped_str(u->activity_details, sizeof u->activity_details, ad_src);
-    copy_capped_str(u->activity_state, sizeof u->activity_state, as_src);
-    u->activity_start_ms = activity_start_ms;
-    u->activity_end_ms = activity_end_ms;
+  int64_t new_exp = (ce_src[0] != '\0' || ct_src[0] != '\0') ? custom_expires_ms : 0;
+  bool new_has_act = has_activity && an_src[0] != '\0';
+  char new_ce[sizeof u->custom_status_emoji];
+  char new_ct[sizeof u->custom_status_text];
+  char new_an[sizeof u->activity_name];
+  char new_ad[sizeof u->activity_details];
+  char new_as[sizeof u->activity_state];
+  copy_capped_str(new_ce, sizeof new_ce, ce_src);
+  copy_capped_str(new_ct, sizeof new_ct, ct_src);
+  if (new_has_act) {
+    copy_capped_str(new_an, sizeof new_an, an_src);
+    copy_capped_str(new_ad, sizeof new_ad, ad_src);
+    copy_capped_str(new_as, sizeof new_as, as_src);
   } else {
-    u->activity_type = CCORD_ACTIVITY_PLAYING;
-    memset(u->activity_name, 0, sizeof u->activity_name);
-    memset(u->activity_details, 0, sizeof u->activity_details);
-    memset(u->activity_state, 0, sizeof u->activity_state);
-    u->activity_start_ms = 0;
-    u->activity_end_ms = 0;
+    memset(new_an, 0, sizeof new_an);
+    memset(new_ad, 0, sizeof new_ad);
+    memset(new_as, 0, sizeof new_as);
+  }
+  bool detail_changed =
+    strcmp(u->custom_status_emoji, new_ce) != 0 || strcmp(u->custom_status_text, new_ct) != 0 ||
+    u->custom_status_expires_ms != new_exp || u->has_activity != new_has_act ||
+    (new_has_act && (u->activity_type != activity_type || strcmp(u->activity_name, new_an) != 0 ||
+                     strcmp(u->activity_details, new_ad) != 0 || strcmp(u->activity_state, new_as) != 0 ||
+                     u->activity_start_ms != activity_start_ms || u->activity_end_ms != activity_end_ms));
+  if (detail_changed) {
+    memcpy(u->custom_status_emoji, new_ce, sizeof u->custom_status_emoji);
+    memcpy(u->custom_status_text, new_ct, sizeof u->custom_status_text);
+    u->custom_status_expires_ms = new_exp;
+    u->has_activity = new_has_act;
+    if (new_has_act) {
+      u->activity_type = activity_type;
+      memcpy(u->activity_name, new_an, sizeof u->activity_name);
+      memcpy(u->activity_details, new_ad, sizeof u->activity_details);
+      memcpy(u->activity_state, new_as, sizeof u->activity_state);
+      u->activity_start_ms = activity_start_ms;
+      u->activity_end_ms = activity_end_ms;
+    } else {
+      u->activity_type = CCORD_ACTIVITY_PLAYING;
+      memset(u->activity_name, 0, sizeof u->activity_name);
+      memset(u->activity_details, 0, sizeof u->activity_details);
+      memset(u->activity_state, 0, sizeof u->activity_state);
+      u->activity_start_ms = 0;
+      u->activity_end_ms = 0;
+    }
+    if (s->revision == rev_before) {
+      store_bump_traffic(s);
+      store_post(s, CCORD_EVT_PRESENCE_UPDATE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, user_id,
+                 (int64_t)presence);
+    }
   }
   return CCORD_OK;
 }
@@ -842,6 +910,7 @@ ccord_status ccord_store_set_self_custom_status(ccord_store *s, const char *emoj
   copy_capped_str(u->custom_status_text, sizeof u->custom_status_text, ct_src);
   u->custom_status_expires_ms = (ce_src[0] != '\0' || ct_src[0] != '\0') ? expires_ms : 0;
   s->revision++;
+  s->warm_rev++;
   store_post(s, CCORD_EVT_PRESENCE_UPDATE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, s->d.self_id, (int64_t)u->presence);
   return CCORD_OK;
 }
@@ -1044,6 +1113,7 @@ ccord_status ccord_store_set_self_profile(ccord_store *s, const ccord_self_profi
     }
   }
   s->revision++;
+  s->warm_rev++;
   store_post(s, CCORD_EVT_PRESENCE_UPDATE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, s->d.self_id, (int64_t)usr->presence);
   return ok ? CCORD_OK : ccord_error_set(err, CCORD_ERR_NOMEM, "store: out of memory");
 }

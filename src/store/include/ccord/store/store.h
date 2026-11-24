@@ -16,6 +16,14 @@ uint64_t ccord_store_revision(const ccord_store *s);                    // bumps
 // was edited, read, reacted to): the lists of channels and members cannot have changed then. A view that only depends on
 // those lists compares this one and skips its rebuild. Anything else (and a conversation moving up the list) moves it.
 uint64_t ccord_store_lists_revision(const ccord_store *s);
+// Revision of state actually persisted by the warm-start disk cache (snapshot, users, guilds, channels, members,
+// relationships, roles, overwrites, notify settings, selection). Does not move on typing, presence/activities,
+// messages, reactions, pins, voice states, speaking, or RTC stats.
+uint64_t ccord_store_warm_revision(const ccord_store *s);
+// Revision of state that can affect unread/mention badge counts (unread/mention counters, read acks, mute/notify
+// overrides, channel/guild/role/overwrite/self-member changes, snapshots). Does not move on typing, presence,
+// speaking, RTC stats, message edits, or reactions.
+uint64_t ccord_store_badge_revision(const ccord_store *s);
 // Whether the lookup indexes (users, channels, members) are all in use. They are only missing after running out of memory,
 // when every lookup falls back to scanning: still correct, only slower. A diagnostic for tests.
 bool ccord_store_indexes_ready(const ccord_store *s);

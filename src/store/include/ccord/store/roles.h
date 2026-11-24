@@ -65,6 +65,23 @@ bool ccord_store_remove_channel_overwrite(ccord_store *s, ccord_id channel_id, c
 [[nodiscard]] const ccord_overwrite *ccord_store_channel_overwrites(const ccord_store *s, ccord_id channel_id, size_t *count);
 
 // ---- computed answers ----
+// Precomputed guild-level permissions for one (guild, user) pair. Reuse across multiple channels in that guild via
+// ccord_store_channel_permissions_with_base() to avoid recomputing ccord_perm_guild() over every role per channel.
+typedef struct ccord_store_guild_perm_base {
+  ccord_id guild_id;
+  ccord_id user_id;
+  uint64_t base_perms;
+  const ccord_id *role_ids;   // borrowed from store; valid until the next role mutation
+  size_t role_count;
+  bool exact;
+  bool timed_out;
+} ccord_store_guild_perm_base;
+
+[[nodiscard]] bool ccord_store_guild_base_permissions(const ccord_store *s, ccord_id guild_id, ccord_id user_id,
+                                                      int64_t now_unix_ms, ccord_store_guild_perm_base *out);
+[[nodiscard]] uint64_t ccord_store_channel_permissions_with_base(const ccord_store *s,
+                                                                 const ccord_store_guild_perm_base *base,
+                                                                 const ccord_channel *ch);
 // Guild-wide (channel_id == 0) or in-channel permissions of `user_id`, with a timeout applied when `now_unix_ms` is
 // non-zero. The owner and administrators get CCORD_PERM_ALL. When the guild's roles are not known the store falls
 // back to the permissions Discord reported for the member (self_permissions / member.permissions).

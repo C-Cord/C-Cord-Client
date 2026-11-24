@@ -424,8 +424,11 @@ ccord_status ccord_store_set_history(ccord_store *s, ccord_id channel_id, const 
     if (ci >= 0 && newest_persisted > s->d.channels[ci].last_message_id) {
       s->d.channels[ci].last_message_id = newest_persisted;
       if (s->d.channels[ci].guild_id == CCORD_DM_GUILD_ID) {
-        store_resort_channels(&s->d, CCORD_DM_GUILD_ID);
-        reorders = true;
+        const ccord_channel *first_dm = ccord_store_channel_at(s, CCORD_DM_GUILD_ID, 0);
+        if (!first_dm || first_dm->id != channel_id) {
+          store_resort_channels(&s->d, CCORD_DM_GUILD_ID);
+          reorders = true;
+        }
       }
     }
   }
@@ -480,8 +483,11 @@ ccord_status ccord_store_append_message(ccord_store *s, const ccord_message *m, 
     if (m->id > s->d.channels[ci].last_message_id) {
       s->d.channels[ci].last_message_id = m->id;
       if (guild_id == CCORD_DM_GUILD_ID) {
-        store_resort_channels(&s->d, CCORD_DM_GUILD_ID);
-        reorders = true;
+        const ccord_channel *first_dm = ccord_store_channel_at(s, CCORD_DM_GUILD_ID, 0);
+        if (!first_dm || first_dm->id != m->channel_id) {
+          store_resort_channels(&s->d, CCORD_DM_GUILD_ID);
+          reorders = true;
+        }
       }
     }
     if (ccord_discord_type_is_thread(s->d.channels[ci].discord_type)) {
@@ -700,6 +706,8 @@ ccord_status ccord_store_delete_message(ccord_store *s, ccord_id channel_id, cco
   history *h = store_find_history(s, channel_id);
   long mi = store_find_msg_index(h, message_id);
   if (mi < 0) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown message");
+  uint32_t old_unread = s->d.channels[ci].unread_count;
+  uint32_t old_mentions = s->d.channels[ci].mention_count;
   unread_forget_message(s, &s->d.channels[ci], &h->msgs[mi]);
   pins_remove_msg(s, channel_id, message_id);
   store_msg_free(&h->msgs[mi]);
@@ -708,6 +716,7 @@ ccord_status ccord_store_delete_message(ccord_store *s, ccord_id channel_id, cco
   if (s->total_msgs > 0) s->total_msgs--;
   ccord_id newest_before = s->d.channels[ci].last_message_id;
   unread_settle_after_delete(&s->d.channels[ci], h, message_id);
+  if (s->d.channels[ci].unread_count != old_unread || s->d.channels[ci].mention_count != old_mentions) s->badge_rev++;
   if (s->d.channels[ci].guild_id == CCORD_DM_GUILD_ID && s->d.channels[ci].last_message_id != newest_before) s->revision++;
   else store_bump_traffic(s);
   store_post(s, CCORD_EVT_MESSAGE_DELETE, s->d.channels[ci].guild_id, channel_id, message_id, CCORD_ID_NONE, 0);
@@ -742,6 +751,8 @@ ccord_status ccord_store_delete_messages_bulk(ccord_store *s, ccord_id channel_i
       if (message_id == CCORD_ID_NONE) continue;
       long mi = store_find_msg_index(h, message_id);
       if (mi < 0) continue;
+      uint32_t old_unread = s->d.channels[ci].unread_count;
+      uint32_t old_mentions = s->d.channels[ci].mention_count;
       unread_forget_message(s, &s->d.channels[ci], &h->msgs[mi]);
       pins_remove_msg(s, channel_id, message_id);
       store_msg_free(&h->msgs[mi]);
@@ -750,6 +761,7 @@ ccord_status ccord_store_delete_messages_bulk(ccord_store *s, ccord_id channel_i
       if (s->total_msgs > 0) s->total_msgs--;
       ccord_id newest_before = s->d.channels[ci].last_message_id;
       unread_settle_after_delete(&s->d.channels[ci], h, message_id);
+      if (s->d.channels[ci].unread_count != old_unread || s->d.channels[ci].mention_count != old_mentions) s->badge_rev++;
       if (s->d.channels[ci].guild_id == CCORD_DM_GUILD_ID && s->d.channels[ci].last_message_id != newest_before) {
         s->revision++;
       } else {
@@ -762,6 +774,8 @@ ccord_status ccord_store_delete_messages_bulk(ccord_store *s, ccord_id channel_i
 
   ccord_id guild_id = s->d.channels[ci].guild_id;
   ccord_id newest_before = s->d.channels[ci].last_message_id;
+  uint32_t old_unread = s->d.channels[ci].unread_count;
+  uint32_t old_mentions = s->d.channels[ci].mention_count;
   bool any_deleted = false;
   bool deleted_newest = false;
   for (size_t i = 0; i < count; i++) {
@@ -787,6 +801,7 @@ ccord_status ccord_store_delete_messages_bulk(ccord_store *s, ccord_id channel_i
     size_t removed = old_n - w;
     s->total_msgs -= removed <= s->total_msgs ? removed : s->total_msgs;
     unread_settle_after_delete(&s->d.channels[ci], h, deleted_newest ? newest_before : CCORD_ID_NONE);
+    if (s->d.channels[ci].unread_count != old_unread || s->d.channels[ci].mention_count != old_mentions) s->badge_rev++;
     if (guild_id == CCORD_DM_GUILD_ID && s->d.channels[ci].last_message_id != newest_before) s->revision++;
     else store_bump_traffic(s);
   }
@@ -1091,6 +1106,7 @@ static void read_recount(ccord_store *s, ccord_channel *c, ccord_id channel_id, 
   c->unread_count = unread;
   c->mention_count = mention_out;
   store_bump_traffic(s);
+  s->badge_rev++;
   store_post(s, CCORD_EVT_CHANNEL_UPSERT, c->guild_id, channel_id, CCORD_ID_NONE, CCORD_ID_NONE, (int64_t)unread);
 }
 
@@ -1117,6 +1133,7 @@ ccord_status ccord_store_set_channel_counts(ccord_store *s, ccord_id channel_id,
   s->d.channels[ci].unread_count = unread;
   s->d.channels[ci].mention_count = mentions;
   store_bump_traffic(s);
+  s->badge_rev++;
   store_post(s, CCORD_EVT_CHANNEL_UPSERT, s->d.channels[ci].guild_id, channel_id, CCORD_ID_NONE, CCORD_ID_NONE,
        (int64_t)unread);
   return CCORD_OK;

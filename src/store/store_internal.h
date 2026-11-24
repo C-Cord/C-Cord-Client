@@ -3,6 +3,7 @@
 #pragma once
 // Unified internal state & cross-TU helpers for ccord_store.
 #include <stdatomic.h>
+#include <string.h>
 #include <ccord/core/idmap.h>
 #include <ccord/core/os.h>
 #include <ccord/model/rich.h>
@@ -145,7 +146,23 @@ typedef struct store_data {
   ccord_idmap user_by_id;  bool user_ix_ok;
   ccord_idmap chan_by_id;  store_index chan_ix;  bool chan_ix_ok;   // channels per guild, in array order
   store_index mem_ix;      bool mem_ix_ok;                          // members per guild, by user
+  size_t dm_placeholder_count;                                      // DM channels with placeholder names
+  size_t dm_missing_icon_count;                                     // 1:1 DM channels without an icon_url yet
 } store_data;
+
+static inline bool store_dm_is_placeholder_name(const ccord_channel *ch)
+{
+  return ch && ch->guild_id == CCORD_DM_GUILD_ID &&
+         (!ch->name || ch->name[0] == '\0' || strcmp(ch->name, "Direct Message") == 0 ||
+          strncmp(ch->name, "User ", 5) == 0);
+}
+
+static inline bool store_dm_is_missing_icon(const ccord_channel *ch)
+{
+  return ch && ch->guild_id == CCORD_DM_GUILD_ID &&
+         ch->discord_type != CCORD_DISCORD_CHANNEL_GROUP_DM &&
+         (!ch->icon_url || ch->icon_url[0] == '\0');
+}
 
 typedef struct history {
   ccord_id channel_id;
@@ -189,6 +206,8 @@ struct ccord_store {
   ccord_bus *bus;
   uint64_t revision;
   uint64_t traffic_rev;   // how many of those bumps were only message traffic (see ccord_store_lists_revision)
+  uint64_t warm_rev;      // bumps only on mutations to state persisted by warm_build_state()
+  uint64_t badge_rev;     // bumps only on mutations that can affect unread/mention badge totals
   store_data d;
   ccord_id sel_guild, sel_channel;
   history *hist;

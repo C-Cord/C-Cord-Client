@@ -351,6 +351,8 @@ static ccord_status copy_snapshot(store_data *d, const ccord_snapshot *s, ccord_
     d->channels[i].icon_url = store_dup_cstr(s->channels[i].icon_url);
     d->nchannels = i + 1;
     if (!d->channels[i].name || !d->channels[i].topic || !d->channels[i].icon_url) goto oom;
+    if (store_dm_is_placeholder_name(&d->channels[i])) d->dm_placeholder_count++;
+    if (store_dm_is_missing_icon(&d->channels[i])) d->dm_missing_icon_count++;
   }
   for (size_t i = 0; i < s->member_count; i++) {
     d->members[i] = s->members[i];
@@ -419,7 +421,10 @@ void store_post(ccord_store *s, ccord_event_type t, ccord_id g, ccord_id c, ccor
 
 void ccord_store_roles_mutated(ccord_store *s)
 {
-  if (s) s->revision++;
+  if (!s) return;
+  s->revision++;
+  s->warm_rev++;
+  s->badge_rev++;
 }
 
 void ccord_store_voice_mutated(ccord_store *s)
@@ -436,6 +441,8 @@ void ccord_store_notify_mutated(ccord_store *s, ccord_id guild_id, ccord_id chan
 {
   if (!s) return;
   s->revision++;
+  s->warm_rev++;
+  s->badge_rev++;
   store_post(s, CCORD_EVT_NOTIFY_UPDATE, guild_id, channel_id, CCORD_ID_NONE, CCORD_ID_NONE, 0);
 }
 
@@ -542,6 +549,8 @@ void ccord_store_reset(ccord_store *s)
   s->nspeaking = 0;
   s->d.user_ix_ok = s->d.chan_ix_ok = s->d.mem_ix_ok = true;
   s->revision++;
+  s->warm_rev++;
+  s->badge_rev++;
 }
 
 uint64_t ccord_store_revision(const ccord_store *s)
@@ -575,6 +584,16 @@ void ccord_store_expr_mutated_(ccord_store *s)
 uint64_t ccord_store_lists_revision(const ccord_store *s)
 {
   return s ? s->revision - s->traffic_rev : 0;
+}
+
+uint64_t ccord_store_warm_revision(const ccord_store *s)
+{
+  return s ? s->warm_rev : 0;
+}
+
+uint64_t ccord_store_badge_revision(const ccord_store *s)
+{
+  return s ? s->badge_rev : 0;
 }
 
 bool ccord_store_indexes_ready(const ccord_store *s)
@@ -611,12 +630,13 @@ ccord_id store_default_channel(const store_data *d, ccord_id guild)
   return CCORD_ID_NONE;
 }
 
-static bool is_viewable_text(const ccord_store *s, ccord_id guild, const ccord_channel *c, bool exact, ccord_id self)
+static bool is_viewable_text(const ccord_store *s, ccord_id guild, const ccord_channel *c,
+                             const ccord_store_guild_perm_base *base)
 {
   if (!c || c->guild_id != guild || c->kind != CCORD_CHANNEL_TEXT) return false;
   if (guild == CCORD_DM_GUILD_ID) return !c->is_message_request;
-  if (!exact) return true;
-  return (ccord_store_permissions(s, guild, c->id, self, 0) & CCORD_PERM_VIEW_CHANNEL) != 0;
+  if (!base || !base->exact) return true;
+  return (ccord_store_channel_permissions_with_base(s, base, c) & CCORD_PERM_VIEW_CHANNEL) != 0;
 }
 
 ccord_id store_default_channel_for(const ccord_store *s, ccord_id guild)
@@ -624,15 +644,15 @@ ccord_id store_default_channel_for(const ccord_store *s, ccord_id guild)
   if (!s) return CCORD_ID_NONE;
   const store_data *d = &s->d;
   if (guild == CCORD_DM_GUILD_ID) return store_default_channel(d, guild);
-  ccord_id self = d->self_id;
-  bool exact = ccord_store_permissions_exact(s, guild, self);
+  ccord_store_guild_perm_base base = {0};
+  bool have_base = ccord_store_guild_base_permissions(s, guild, d->self_id, 0, &base);
   ccord_id fallback_viewable = CCORD_ID_NONE;
   size_t count = d->chan_ix_ok ? store_index_count(&d->chan_ix, guild) : d->nchannels;
   for (size_t i = 0; i < count; i++) {
     size_t k = i;
     if (d->chan_ix_ok && !store_index_at(&d->chan_ix, guild, i, &k)) continue;
     const ccord_channel *c = &d->channels[k];
-    if (!is_viewable_text(s, guild, c, exact, self)) continue;
+    if (!is_viewable_text(s, guild, c, have_base ? &base : nullptr)) continue;
     if (!ccord_discord_type_is_thread(c->discord_type) && !ccord_discord_type_is_forum(c->discord_type)) {
       return c->id;
     }
@@ -774,6 +794,8 @@ ccord_status ccord_store_set_snapshot_ex(ccord_store *s, const ccord_snapshot *s
   }
   store_evict_lru_histories(s, channel, CCORD_STORE_MAX_TOTAL_MESSAGES);
   s->revision++;
+  s->warm_rev++;
+  s->badge_rev++;
 
   store_post(s, CCORD_EVT_GUILDS_LOADED, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, (int64_t)s->d.nguilds);
   if (guild != old_guild) store_post(s, CCORD_EVT_GUILD_SELECT, guild, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, 0);
@@ -799,6 +821,7 @@ ccord_status ccord_store_select_guild(ccord_store *s, ccord_id guild_id, ccord_e
       if (sh) sh->last_access_tick = ++s->hist_tick;
     }
     s->revision++;
+    s->warm_rev++;
     store_post(s, CCORD_EVT_GUILD_SELECT, CCORD_DM_GUILD_ID, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, 0);
     if (channel != CCORD_ID_NONE) {
       store_post(s, CCORD_EVT_CHANNEL_SELECT, CCORD_DM_GUILD_ID, channel, CCORD_ID_NONE, CCORD_ID_NONE, 0);
@@ -819,6 +842,7 @@ ccord_status ccord_store_select_guild(ccord_store *s, ccord_id guild_id, ccord_e
     if (sh) sh->last_access_tick = ++s->hist_tick;
   }
   s->revision++;
+  s->warm_rev++;
   store_post(s, CCORD_EVT_GUILD_SELECT, guild_id, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, 0);
   if (channel != CCORD_ID_NONE) {
     store_post(s, CCORD_EVT_CHANNEL_SELECT, guild_id, channel, CCORD_ID_NONE, CCORD_ID_NONE, 0);
@@ -844,6 +868,7 @@ ccord_status ccord_store_select_channel(ccord_store *s, ccord_id channel_id, cco
   if (guild_changed) {
     s->sel_guild = c->guild_id;
     s->revision++;
+    s->warm_rev++;
     store_post(s, CCORD_EVT_GUILD_SELECT, c->guild_id, CCORD_ID_NONE, CCORD_ID_NONE, CCORD_ID_NONE, 0);
   }
   s->sel_channel = channel_id;
@@ -858,6 +883,7 @@ ccord_status ccord_store_select_channel(ccord_store *s, ccord_id channel_id, cco
     if (gi >= 0) s->d.guild_last[gi] = channel_id;
   }
   s->revision++;
+  s->warm_rev++;
   store_post(s, CCORD_EVT_CHANNEL_SELECT, c->guild_id, channel_id, CCORD_ID_NONE, CCORD_ID_NONE, 0);
   return CCORD_OK;
 }

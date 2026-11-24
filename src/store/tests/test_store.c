@@ -2350,7 +2350,8 @@ static void test_lists_revision(void)
   // Deleting the newest message of a conversation changes what it is sorted by.
   STRUCTURE(ccord_store_delete_message(s, 602, 90, &err));
   ccord_message dm_extra = {.id = 91, .channel_id = 602, .author_id = RADA, .timestamp_ms = 3, .content = "x"};
-  STRUCTURE(ccord_store_append_message(s, &dm_extra, &err));
+  // Channel 602 is already at index 0 of CCORD_DM_GUILD_ID, so a newer message skips re-sorting the DM list.
+  TRAFFIC(ccord_store_append_message(s, &dm_extra, &err));
   ccord_message dm_mid = {.id = 56, .channel_id = 602, .author_id = RADA, .timestamp_ms = 1, .content = "mid"};
   TRAFFIC(ccord_store_append_message(s, &dm_mid, &err));
   TRAFFIC(ccord_store_delete_message(s, 602, 55, &err));             // an older message: the newest is still the newest
@@ -4366,6 +4367,88 @@ static void test_audit_regressions(void)
   ccord_bus_destroy(bus);
 }
 
+static void test_power_efficiency_revisions_and_perms(void)
+{
+  ccord_error err = {0};
+  ccord_bus *bus = nullptr;
+  ccord_store *s = roles_fixture(&bus);
+  CT_CHECK(s != nullptr);
+  if (!s) return;
+
+  // 1. warm_revision & badge_revision stay flat across high-frequency ephemeral/traffic mutations.
+  uint64_t w0 = ccord_store_warm_revision(s);
+  uint64_t b0 = ccord_store_badge_revision(s);
+  uint64_t l0 = ccord_store_lists_revision(s);
+  CT_CHECK(ccord_store_set_typing(s, RCH_TEXT, RBOB, 5000, &err) == CCORD_OK);
+  ccord_store_set_speaking(s, RADA, true);
+  ccord_store_set_speaking(s, RADA, false);
+  ccord_message msg = {.id = 9101, .channel_id = RCH_TEXT, .author_id = RADA, .timestamp_ms = 1, .content = "hi"};
+  CT_CHECK(ccord_store_append_message(s, &msg, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_set_reactions(s, RCH_TEXT, 9101, 2, true, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_warm_revision(s) == w0);
+  CT_CHECK(ccord_store_badge_revision(s) == b0);
+  CT_CHECK(ccord_store_lists_revision(s) == l0);
+
+  // 2. Presence equality fast-path, same-bucket traffic, and selected-guild online/offline bucket transitions.
+  uint64_t r0 = ccord_store_revision(s);
+  // RADA starts OFFLINE in selected guild RG -> ONLINE crosses online/offline bucket in selected scope.
+  CT_CHECK(ccord_store_update_presence(s, RADA, CCORD_PRESENCE_ONLINE, "here", &err) == CCORD_OK);
+  CT_CHECK(ccord_store_revision(s) > r0 && ccord_store_lists_revision(s) > l0);
+  CT_CHECK(ccord_store_warm_revision(s) == w0 && ccord_store_badge_revision(s) == b0);
+  // Identical presence + status_text is a zero-work no-op.
+  r0 = ccord_store_revision(s);
+  l0 = ccord_store_lists_revision(s);
+  CT_CHECK(ccord_store_update_presence(s, RADA, CCORD_PRESENCE_ONLINE, "here", &err) == CCORD_OK);
+  CT_CHECK(ccord_store_revision(s) == r0 && ccord_store_lists_revision(s) == l0);
+  // Same online bucket (ONLINE -> DND) is traffic only (lists_revision stays flat).
+  CT_CHECK(ccord_store_update_presence(s, RADA, CCORD_PRESENCE_DND, "busy", &err) == CCORD_OK);
+  CT_CHECK(ccord_store_revision(s) > r0 && ccord_store_lists_revision(s) == l0);
+  CT_CHECK(ccord_store_warm_revision(s) == w0 && ccord_store_badge_revision(s) == b0);
+  // Unrelated user outside selected guild going ONLINE -> traffic only (lists_revision stays flat).
+  ccord_user outsider = {.id = 888, .name = "Outsider", .status_text = "", .presence = CCORD_PRESENCE_OFFLINE};
+  CT_CHECK(ccord_store_upsert_user(s, &outsider, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_warm_revision(s) > w0);
+  w0 = ccord_store_warm_revision(s);
+  l0 = ccord_store_lists_revision(s);
+  r0 = ccord_store_revision(s);
+  CT_CHECK(ccord_store_update_presence(s, 888, CCORD_PRESENCE_ONLINE, "", &err) == CCORD_OK);
+  CT_CHECK(ccord_store_revision(s) > r0 && ccord_store_lists_revision(s) == l0);
+
+  // 3. Badge revision bumps on unread counts and mute/notify overrides; warm_revision bumps on notify + selection.
+  b0 = ccord_store_badge_revision(s);
+  w0 = ccord_store_warm_revision(s);
+  CT_CHECK(ccord_store_set_channel_counts(s, RCH_TEXT, 4, 1, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_badge_revision(s) > b0);
+  CT_CHECK(ccord_store_warm_revision(s) == w0);
+  b0 = ccord_store_badge_revision(s);
+  ccord_notify_scope ns = {.guild_id = RG, .channel_id = RCH_TEXT, .level = CCORD_NOTIFY_INHERIT, .muted = true};
+  CT_CHECK(ccord_store_set_notify(s, RG, &ns, 1, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_badge_revision(s) > b0 && ccord_store_warm_revision(s) > w0);
+
+  // 4. Precomputed guild base permissions match ccord_store_permissions() on every channel.
+  ccord_store_guild_perm_base base = {0};
+  CT_CHECK(ccord_store_guild_base_permissions(s, RG, RSELF, 0, &base));
+  size_t nch = ccord_store_channel_count(s, RG);
+  for (size_t i = 0; i < nch; i++) {
+    const ccord_channel *ch = ccord_store_channel_at(s, RG, i);
+    CT_CHECK(ch != nullptr);
+    if (!ch) continue;
+    uint64_t direct = ccord_store_permissions(s, RG, ch->id, RSELF, 0);
+    uint64_t fast = ccord_store_channel_permissions_with_base(s, &base, ch);
+    CT_CHECK(fast == direct);
+  }
+  CT_CHECK(ccord_store_guild_base_permissions(s, RG, ROWNER, 0, &base));
+  for (size_t i = 0; i < nch; i++) {
+    const ccord_channel *ch = ccord_store_channel_at(s, RG, i);
+    if (!ch) continue;
+    CT_CHECK(ccord_store_channel_permissions_with_base(s, &base, ch) ==
+             ccord_store_permissions(s, RG, ch->id, ROWNER, 0));
+  }
+
+  ccord_store_destroy(s);
+  ccord_bus_destroy(bus);
+}
+
 int main(void)
 {
   test_member_list_sizes();
@@ -4413,5 +4496,6 @@ int main(void)
   test_activity_instances_store();
   test_presence_authoritative_clearing_and_delete_mentions();
   test_audit_regressions();
+  test_power_efficiency_revisions_and_perms();
   return CT_RESULT("test_store");
 }

@@ -12,7 +12,9 @@ size_t ccord_store_read_targets(const ccord_store *s, ccord_id guild_id, ccord_i
   const ccord_channel *scope = scope_channel != CCORD_ID_NONE ? ccord_store_channel(s, scope_channel) : nullptr;
   if (scope_channel != CCORD_ID_NONE && (!scope || scope->guild_id != guild_id)) return 0;
   ccord_id self = ccord_store_self_id(s);
-  bool exact = guild_id != CCORD_DM_GUILD_ID && ccord_store_permissions_exact(s, guild_id, self);
+  bool base_computed = false;
+  bool have_base = false;
+  ccord_store_guild_perm_base perm_base = {0};
   size_t found = 0;
   size_t n = ccord_store_channel_count(s, guild_id);
   for (size_t i = 0; i < n; i++) {
@@ -35,7 +37,16 @@ size_t ccord_store_read_targets(const ccord_store *s, ccord_id guild_id, ccord_i
       }
     }
     if (newest == CCORD_ID_NONE) continue;   // nothing confirmed to acknowledge
-    if (exact && (ccord_store_permissions(s, guild_id, c->id, self, now_unix_ms) & CCORD_PERM_VIEW_CHANNEL) == 0) continue;
+    if (guild_id != CCORD_DM_GUILD_ID) {
+      if (!base_computed) {
+        base_computed = true;
+        have_base = ccord_store_guild_base_permissions(s, guild_id, self, now_unix_ms, &perm_base);
+      }
+      if (have_base && perm_base.exact &&
+          (ccord_store_channel_permissions_with_base(s, &perm_base, c) & CCORD_PERM_VIEW_CHANNEL) == 0) {
+        continue;
+      }
+    }
     if (out && found < cap) out[found] = (ccord_read_target){.channel_id = c->id, .message_id = newest};
     found++;
   }
