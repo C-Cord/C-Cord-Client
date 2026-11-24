@@ -323,7 +323,7 @@ const char *ccord_warm_dir(const ccord_warm *w)
 
 // ------------------------------------------------------------------------------------------------ save
 
-ccord_status ccord_warm_save(ccord_warm *w, const ccord_store *store, bool sync, ccord_error *err)
+static ccord_status warm_save_impl(ccord_warm *w, const ccord_store *store, bool sync, uint64_t now_ms, ccord_error *err)
 {
   ccord_error_clear(err);
   if (!w || !store || !w->enabled || w->forgotten) return CCORD_OK;   // disabled: nothing to do
@@ -377,11 +377,26 @@ ccord_status ccord_warm_save(ccord_warm *w, const ccord_store *store, bool sync,
     CCORD_LOG_W("warm: meta.json write failed: %s", me.message);
   }
   w->bound_self = self;
-  w->saved_rev = ccord_store_revision(store);
+  w->saved_warm_rev = ccord_store_warm_revision(store);
   w->saved_once = true;
+  uint64_t stamp = now_ms ? now_ms : t0;
+  w->last_save_mono = stamp ? stamp : 1u;
   CCORD_LOG_I("warm: saved %zu bytes in %u ms%s", flen, (unsigned)(ccord_clock_ms() - t0), sync ? " (synced)" : "");
   ccord_os_trim_memory();
   return CCORD_OK;
+}
+
+ccord_status ccord_warm_save(ccord_warm *w, const ccord_store *store, bool sync, ccord_error *err)
+{
+  return warm_save_impl(w, store, sync, 0, err);
+}
+
+bool ccord_warm_save_if_dirty(ccord_warm *w, const ccord_store *store, bool sync, uint64_t now_ms, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!w || !store || !w->enabled || w->forgotten) return false;
+  if (w->saved_once && ccord_store_warm_revision(store) == w->saved_warm_rev) return false;
+  return warm_save_impl(w, store, sync, now_ms, err) == CCORD_OK;
 }
 
 bool ccord_warm_maybe_save(ccord_warm *w, const ccord_store *store, const ccord_session *session, uint64_t now_ms)
@@ -393,11 +408,14 @@ bool ccord_warm_maybe_save(ccord_warm *w, const ccord_store *store, const ccord_
   }
   if (w->connected_since == 0) w->connected_since = now_ms ? now_ms : 1;
   if (now_ms < w->connected_since + CCORD_WARM_FIRST_SAVE_DELAY_MS) return false;
-  if (w->saved_once && ccord_store_revision(store) == w->saved_rev) return false;
-  if (w->saved_once && w->last_save_mono != 0 && now_ms < w->last_save_mono + CCORD_WARM_SAVE_INTERVAL_MS) return false;
+  if (w->saved_once && ccord_store_warm_revision(store) == w->saved_warm_rev) return false;
+  if (w->saved_once && w->last_save_mono != 0 && now_ms >= w->last_save_mono &&
+      now_ms - w->last_save_mono < CCORD_WARM_SAVE_INTERVAL_MS) {
+    return false;
+  }
   ccord_error e;
   w->last_save_mono = now_ms ? now_ms : 1;
-  if (ccord_warm_save(w, store, false, &e) != CCORD_OK) {
+  if (warm_save_impl(w, store, false, now_ms, &e) != CCORD_OK) {
     CCORD_LOG_W("warm: save failed: %s", e.message);
     return false;
   }

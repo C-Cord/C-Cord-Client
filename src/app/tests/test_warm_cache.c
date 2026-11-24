@@ -504,6 +504,62 @@ static void test_two_phase_deferred_history(void)
   env_done(&a);
 }
 
+static void test_warm_revision_and_save_if_dirty(void)
+{
+  fresh_root("warmrev");
+  env a;
+  CT_CHECK(env_init(&a, true));
+  ccord_error err = {0};
+  ccord_warm *w = open_warm(g_root, "tok-warmrev", 0);
+  CT_CHECK(w != nullptr);
+
+  // First save via save_if_dirty succeeds and records saved_warm_rev + last_save_mono.
+  uint64_t t0 = 100000u;
+  CT_CHECK(ccord_warm_save_if_dirty(w, a.store, false, t0, &err));
+  // Unchanged store: zero-work false return.
+  CT_CHECK(!ccord_warm_save_if_dirty(w, a.store, false, t0 + 1000u, &err));
+
+  // Ephemeral/traffic mutations (typing, presence, message append) must NOT dirty warm_revision.
+  ccord_id ch = ccord_store_selected_channel(a.store);
+  ccord_id self = ccord_store_self_id(a.store);
+  CT_CHECK(ch != CCORD_ID_NONE && self != CCORD_ID_NONE);
+  uint64_t wrev0 = ccord_store_warm_revision(a.store);
+  CT_CHECK(ccord_store_set_typing(a.store, ch, self, 5000, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_update_presence(a.store, self, CCORD_PRESENCE_DND, "testing", &err) == CCORD_OK);
+  ccord_message msg = {.id = 999001, .channel_id = ch, .author_id = self, .timestamp_ms = 1, .content = "hi"};
+  CT_CHECK(ccord_store_append_message(a.store, &msg, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_warm_revision(a.store) == wrev0);
+  CT_CHECK(!ccord_warm_save_if_dirty(w, a.store, false, t0 + 120000u, &err));
+  CT_CHECK(!ccord_warm_maybe_save(w, a.store, a.s, t0 + CCORD_WARM_SAVE_INTERVAL_MS * 2u));
+
+  // Persisted state mutation (channel rename) DOES dirty warm_revision.
+  const ccord_channel *cur = ccord_store_channel(a.store, ch);
+  CT_CHECK(cur != nullptr);
+  if (cur) {
+    ccord_channel upd = *cur;
+    upd.name = "renamed-warm";
+    CT_CHECK(ccord_store_upsert_channel(a.store, &upd, &err) == CCORD_OK);
+  }
+  CT_CHECK(ccord_store_warm_revision(a.store) > wrev0);
+  // save_if_dirty writes AND updates last_save_mono to t1 so maybe_save does not immediately re-write.
+  uint64_t t1 = t0 + 200000u;
+  CT_CHECK(ccord_warm_save_if_dirty(w, a.store, false, t1, &err));
+  CT_CHECK(!ccord_warm_save_if_dirty(w, a.store, false, t1 + 10u, &err));
+  if (cur) {
+    const ccord_channel *cur2 = ccord_store_channel(a.store, ch);
+    ccord_channel upd2 = *cur2;
+    upd2.name = "renamed-warm-2";
+    CT_CHECK(ccord_store_upsert_channel(a.store, &upd2, &err) == CCORD_OK);
+  }
+  // Still inside CCORD_WARM_SAVE_INTERVAL_MS since t1 -> throttled.
+  CT_CHECK(!ccord_warm_maybe_save(w, a.store, a.s, t1 + 1000u));
+  // Past CCORD_WARM_SAVE_INTERVAL_MS since t1 -> saves.
+  CT_CHECK(ccord_warm_maybe_save(w, a.store, a.s, t1 + CCORD_WARM_SAVE_INTERVAL_MS));
+
+  ccord_warm_close(w);
+  env_done(&a);
+}
+
 int main(void)
 {
   test_roundtrip_and_modes();
@@ -512,6 +568,7 @@ int main(void)
   test_fingerprint_forget_prune_cap();
   test_legacy_state_missing_user_fields();
   test_two_phase_deferred_history();
+  test_warm_revision_and_save_if_dirty();
   ccord_error err;
   (void)ccord_rmtree(g_root, &err);
   return CT_RESULT("test_warm_cache");

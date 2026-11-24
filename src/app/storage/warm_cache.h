@@ -80,9 +80,13 @@ bool ccord_warm_load_channel_history(ccord_warm *w, ccord_store *store, ccord_id
 // Serialises the store (never while the caller knows it is stale). `sync` fsyncs the file and its directory.
 [[nodiscard]] ccord_status ccord_warm_save(ccord_warm *w, const ccord_store *store, bool sync, ccord_error *err);
 
+// Saves only if never saved yet or ccord_store_warm_revision(store) moved since the last save. Returns false with zero
+// work when already clean (or disabled/failed); on write also refreshes the periodic save throttle clock (`now_ms`).
+bool ccord_warm_save_if_dirty(ccord_warm *w, const ccord_store *store, bool sync, uint64_t now_ms, ccord_error *err);
+
 // Rate-limited save for the main loop: false (nothing written) while the session is stale or not connected, when the
-// store did not change, within CCORD_WARM_SAVE_INTERVAL_MS of the last save, or before CCORD_WARM_FIRST_SAVE_DELAY_MS
-// after the connection came up. `now_ms` is any monotonic millisecond clock. Returns true when a file was written.
+// persisted warm-cache revision did not change, within CCORD_WARM_SAVE_INTERVAL_MS of the last save, or before
+// CCORD_WARM_FIRST_SAVE_DELAY_MS after the connection came up. `now_ms` is any monotonic millisecond clock.
 bool ccord_warm_maybe_save(ccord_warm *w, const ccord_store *store, const ccord_session *session, uint64_t now_ms);
 
 // Fixture/test writer for a channel's history page (raw REST body); 0600, atomic.

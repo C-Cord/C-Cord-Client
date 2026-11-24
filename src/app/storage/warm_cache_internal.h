@@ -44,7 +44,7 @@ struct ccord_warm {
   bool forgotten;
   size_t max_bytes;
   ccord_id bound_self;       // the account this directory belongs to once known; saves for another one are refused
-  uint64_t saved_rev;        // store revision of the last save
+  uint64_t saved_warm_rev;   // ccord_store_warm_revision of the last save
   bool saved_once;
   uint64_t last_save_mono;   // monotonic ms of the last save
   uint64_t connected_since;  // monotonic ms the session was first seen connected and fresh (0 = not yet)

@@ -1024,7 +1024,7 @@ ccord_status ccord_warm_load_ex(ccord_warm *w, ccord_store *store, ccord_session
   for (size_t gi = 0, gn = scope_count(store); gi < gn; gi++) res.channels += ccord_store_channel_count(store, scope_id(store, gi));
   res.users = ccord_store_user_count(store);
   w->bound_self = res.self_id;
-  w->saved_rev = 0;   // the first fresh state after READY must be written even if the revision happens to match
+  w->saved_warm_rev = 0;   // the first fresh state after READY must be written even if the revision happens to match
   if (session) ccord_session_set_stale(session, true);
   res.loaded = true;
   res.load_ms = (uint32_t)(ccord_clock_ms() - t0);
