@@ -459,11 +459,16 @@ void ui_expr_draw_sticker_art(ccord_ui *ui, ccord_renderer *r, ccord_id id, cons
 {
   if (!ui || !r || rect.w <= 0.0f || rect.h <= 0.0f) return;
   bool real_tex = false;
-  bool animated_sticker = format_type == CCORD_STICKER_APNG || format_type == CCORD_STICKER_GIF;
-  if (id != CCORD_ID_NONE && format_type != CCORD_STICKER_LOTTIE) {
+  bool animated_sticker = format_type == CCORD_STICKER_APNG || format_type == CCORD_STICKER_GIF ||
+                          format_type == CCORD_STICKER_LOTTIE;
+  if (id != CCORD_ID_NONE) {
     char url[160];
-    const char *ext = format_type == CCORD_STICKER_GIF ? "gif" : "png";   // APNG bytes are served from the .png URL
-    snprintf(url, sizeof url, "https://media.discordapp.net/stickers/%llu.%s?size=160", (unsigned long long)id, ext);
+    if (format_type == CCORD_STICKER_LOTTIE) {
+      snprintf(url, sizeof url, "https://cdn.discordapp.com/stickers/%llu.json", (unsigned long long)id);
+    } else {
+      const char *ext = format_type == CCORD_STICKER_GIF ? "gif" : "png";   // APNG bytes are served from the .png URL
+      snprintf(url, sizeof url, "https://media.discordapp.net/stickers/%llu.%s?size=160", (unsigned long long)id, ext);
+    }
     bool ready = ui_ensure_media(ui, r, url);
     int tw = 0, th = 0;
     real_tex = ready && ccord_render_has_texture(r, url, &tw, &th) && tw > 1 && th > 1;

@@ -4,6 +4,7 @@
 // The input is read through a memory AVIO context (no temp files, no protocols); only image demuxers are
 // allowed so arbitrary media containers in untrusted attachments are never parsed.
 #include <ccord/render/anim.h>
+#include "lottie.h"
 
 #include <string.h>
 
@@ -77,6 +78,7 @@ bool ccord_anim_sniff(const uint8_t *data, size_t len)
     }
     return false;
   }
+  if (ccord_lottie_sniff(data, len)) return true;
   return false;
 }
 
@@ -293,6 +295,63 @@ ccord_status ccord_anim_decode(const uint8_t *data, size_t len, int max_dim, siz
   memset(out, 0, sizeof *out);
   if (!data || len < 4) return ccord_error_set(err, CCORD_ERR_INVALID, "anim: invalid argument");
   if (len > ANIM_MAX_INPUT) return ccord_error_set(err, CCORD_ERR_RANGE, "anim: input too large");
+
+  if (ccord_lottie_sniff(data, len)) {
+    ccord_lottie_stream *ls = ccord_lottie_open(data, len, max_dim, err);
+    if (!ls) return err && err->code != CCORD_OK ? err->code : CCORD_ERR_PARSE;
+    int lw = 0, lh = 0;
+    ccord_lottie_info(ls, &lw, &lh, nullptr);
+    out->w = lw;
+    out->h = lh;
+    size_t fbytes = (size_t)lw * (size_t)lh * 4u;
+    size_t cap = 0, used = 0;
+    const uint8_t *px = nullptr;
+    uint32_t pts = 0, dur = 0;
+    while ((!max_frames || out->frame_count < max_frames) && ccord_lottie_next_frame(ls, &px, &pts, &dur)) {
+      if (used + fbytes > ANIM_MAX_BYTES) {
+        if (out->frame_count == 0) {
+          ccord_lottie_close(ls);
+          ccord_anim_free(out);
+          return ccord_error_set(err, CCORD_ERR_RANGE, "anim: lottie frame too large");
+        }
+        break;
+      }
+      if (out->frame_count == cap) {
+        size_t ncap = cap ? cap * 2u : 16u;
+        uint8_t **nf = ccord_realloc_array(out->frames, ncap, sizeof *nf);
+        uint32_t *nd = nf ? ccord_realloc_array(out->delay_ms, ncap, sizeof *nd) : nullptr;
+        if (!nf || !nd) {
+          if (nf) out->frames = nf;
+          ccord_lottie_close(ls);
+          ccord_anim_free(out);
+          return ccord_error_set(err, CCORD_ERR_NOMEM, "anim: out of memory");
+        }
+        out->frames = nf;
+        out->delay_ms = nd;
+        cap = ncap;
+      }
+      uint8_t *copy = ccord_malloc(fbytes);
+      if (!copy) {
+        ccord_lottie_close(ls);
+        ccord_anim_free(out);
+        return ccord_error_set(err, CCORD_ERR_NOMEM, "anim: out of memory");
+      }
+      memcpy(copy, px, fbytes);
+      uint32_t d = norm_delay(dur);
+      out->frames[out->frame_count] = copy;
+      out->delay_ms[out->frame_count] = d;
+      out->frame_count++;
+      uint64_t tot = (uint64_t)out->total_ms + d;
+      out->total_ms = tot > UINT32_MAX ? UINT32_MAX : (uint32_t)tot;
+      used += fbytes;
+    }
+    ccord_lottie_close(ls);
+    if (out->frame_count == 0) {
+      ccord_anim_free(out);
+      return ccord_error_set(err, CCORD_ERR_PARSE, "anim: lottie produced no frames");
+    }
+    return CCORD_OK;
+  }
 
   if (av_log_get_level() > AV_LOG_ERROR) av_log_set_level(AV_LOG_ERROR);   // same level the platform uses
   membuf mb = {.p = data, .len = len, .pos = 0};

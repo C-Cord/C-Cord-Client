@@ -3,6 +3,7 @@
 #include <ccord/render/render.h>
 #include <ccord/render/anim.h>
 #include <ccord/render/av_stream.h>
+#include "lottie.h"
 
 #include <setjmp.h>
 #include <stdio.h>
@@ -304,6 +305,9 @@ ccord_status ccord_image_decode_rgba_max(const uint8_t *data, size_t len, int ma
     // libwebp's simple decoder rejects animated WebP; the ffmpeg path yields its first frame.
     if (decode_webp_rgba(data, len, max_dim, out_rgba, out_w, out_h, err) == CCORD_OK) return CCORD_OK;
     return decode_ffmpeg_first_frame(data, len, max_dim, out_rgba, out_w, out_h, err);
+  }
+  if (ccord_lottie_sniff(data, len)) {
+    return ccord_lottie_render_first_frame(data, len, max_dim, out_rgba, out_w, out_h, err);
   }
   return decode_ffmpeg_first_frame(data, len, max_dim, out_rgba, out_w, out_h, err);
 }

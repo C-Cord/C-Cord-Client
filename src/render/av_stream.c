@@ -14,6 +14,7 @@
 //     never dereferences fmt, io or an AVStream once the thread runs (nothing outside the demux-side helpers
 //     avs_setup, avs_read_one, avs_seek_demuxer and avs_teardown touches them).
 #include "render_internal.h"
+#include "lottie.h"
 
 #include <math.h>
 #include <ccord/core/os.h>
@@ -71,6 +72,7 @@ typedef struct avs_meta {
 } avs_meta;
 
 struct ccord_av_stream {
+  ccord_lottie_stream *lottie;
   uint8_t *data;
   avs_membuf mb;
   unsigned flags;
@@ -464,6 +466,29 @@ ccord_av_stream *ccord_av_stream_open(const uint8_t *data, size_t len, int max_d
     ccord_error_set(err, CCORD_ERR_RANGE, "av_stream: input too large");
     return nullptr;
   }
+  if ((flags & CCORD_AV_IMAGES) && ccord_lottie_sniff(data, len)) {
+    ccord_lottie_stream *ls = ccord_lottie_open(data, len, max_dim, err);
+    if (!ls) return nullptr;
+    ccord_av_stream *s = ccord_calloc(1, sizeof *s);
+    if (!s) {
+      ccord_lottie_close(ls);
+      ccord_error_set(err, CCORD_ERR_NOMEM, "av_stream: out of memory");
+      return nullptr;
+    }
+    s->self = s;
+    s->lottie = ls;
+    s->flags = flags;
+    s->max_dim = max_dim > 0 ? max_dim : 0;
+    s->vsi = s->asi = -1;
+    ccord_lottie_info(ls, &s->info.w, &s->info.h, &s->info.duration_ms);
+    s->info.has_video = true;
+    s->sw = s->info.w;
+    s->sh = s->info.h;
+    s->size_known = true;
+    s->state = CCORD_AV_READY;
+    s->last_used_ms = ccord_clock_ms();
+    return s;
+  }
   if (av_log_get_level() > AV_LOG_ERROR) av_log_set_level(AV_LOG_ERROR);
   ccord_av_stream *s = ccord_calloc(1, sizeof *s);
   uint8_t *copy = s ? ccord_malloc(len) : nullptr;
@@ -670,6 +695,11 @@ bool ccord_av_stream_starved(const ccord_av_stream *s) { return s && s->starved;
 void ccord_av_stream_close(ccord_av_stream *s)
 {
   if (!s) return;
+  if (s->lottie) {
+    ccord_lottie_close(s->lottie);
+    ccord_free(s);
+    return;
+  }
   if (s->thr_started) {
     // Wake a read_at that is blocked for good, tell the thread to stop, and wait for it: only then is nothing
     // using fmt/io/the source any more and the teardown below race-free.
@@ -895,6 +925,7 @@ bool ccord_av_stream_next_frame(ccord_av_stream *s, const uint8_t **rgba, uint32
   if (rgba) *rgba = nullptr;
   if (!s || !rgba) return false;
   s->last_used_ms = ccord_clock_ms();
+  if (s->lottie) return ccord_lottie_next_frame(s->lottie, rgba, pts_ms, dur_ms);
   if (avs_observe(s, nullptr) != CCORD_AV_READY) return false;
   if (!avs_decode(s, s->vdec, &s->vq, &s->v_flushed, &s->v_done)) return false;
   uint32_t pts = 0, dur = 0;
@@ -1119,6 +1150,10 @@ void ccord_av_stream_seek(ccord_av_stream *s, uint32_t pos_ms)
 {
   if (!s) return;
   s->last_used_ms = ccord_clock_ms();
+  if (s->lottie) {
+    ccord_lottie_seek(s->lottie, pos_ms);
+    return;
+  }
   if (s->src_mode) {
     ccord_av_state st = avs_observe(s, nullptr);
     if (st == CCORD_AV_OPENING) {   // the decoders are not ours yet: apply the seek once READY is seen
@@ -1197,6 +1232,7 @@ void av_stream_touch(ccord_av_stream *s, uint64_t now_ms)
 size_t av_stream_mem_bytes(const ccord_av_stream *s)
 {
   if (!s) return 0;
+  if (s->lottie) return ccord_lottie_mem_bytes(s->lottie);
   size_t total = s->mb.len;
   size_t fbytes = (s->sw > 0 && s->sh > 0) ? (size_t)s->sw * (size_t)s->sh * 4u : 0;
   if (s->cur) total += fbytes;

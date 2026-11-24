@@ -533,6 +533,72 @@ static void test_av_stream(void)
   }
 }
 
+static void test_lottie(void)
+{
+  static const char k_plain_json[] = "{\"hello\":\"world\",\"count\":3}";
+  CT_CHECK(!ccord_anim_sniff((const uint8_t *)k_plain_json, sizeof k_plain_json - 1u));
+
+  // Minimal 32x16 2-frame Lottie: a red filled + stroked circle moves from x=8 (t=0) to x=24 (t=1).
+  static const char k_lottie[] =
+    "{\"v\":\"5.6.2\",\"fr\":10,\"ip\":0,\"op\":2,\"w\":32,\"h\":16,\"layers\":[{"
+    "\"ty\":4,\"ind\":1,\"ip\":0,\"op\":2,\"st\":0,"
+    "\"ks\":{\"o\":{\"a\":0,\"k\":100},\"r\":{\"a\":0,\"k\":0},"
+    "\"p\":{\"a\":1,\"k\":[{\"t\":0,\"s\":[8,8,0],\"o\":{\"x\":0,\"y\":0},\"i\":{\"x\":1,\"y\":1}},"
+    "{\"t\":1,\"s\":[24,8,0]}]},\"a\":{\"a\":0,\"k\":[0,0,0]},\"s\":{\"a\":0,\"k\":[100,100,100]}},"
+    "\"shapes\":[{\"ty\":\"gr\",\"it\":["
+    "{\"ty\":\"el\",\"p\":{\"a\":0,\"k\":[0,0]},\"s\":{\"a\":0,\"k\":[10,10]}},"
+    "{\"ty\":\"st\",\"c\":{\"a\":0,\"k\":[0,0,1,1]},\"o\":{\"a\":0,\"k\":100},\"w\":{\"a\":0,\"k\":2},\"lc\":2,\"lj\":2},"
+    "{\"ty\":\"fl\",\"c\":{\"a\":0,\"k\":[1,0,0,1]},\"o\":{\"a\":0,\"k\":100},\"r\":1},"
+    "{\"ty\":\"tr\",\"p\":{\"a\":0,\"k\":[0,0]},\"a\":{\"a\":0,\"k\":[0,0]},\"s\":{\"a\":0,\"k\":[100,100]},\"r\":{\"a\":0,\"k\":0},\"o\":{\"a\":0,\"k\":100}}"
+    "]}]}]}";
+  const uint8_t *bytes = (const uint8_t *)k_lottie;
+  size_t len = sizeof k_lottie - 1u;
+
+  CT_CHECK(ccord_anim_sniff(bytes, len));
+
+  ccord_anim anim = {0};
+  ccord_error err = {0};
+  CT_CHECK(ccord_anim_decode(bytes, len, 64, 0, &anim, &err) == CCORD_OK);
+  CT_CHECK(anim.w == 32 && anim.h == 16 && anim.frame_count == 2u && anim.total_ms >= 100u);
+  if (anim.frame_count == 2u && anim.w == 32 && anim.h == 16) {
+    // Frame 0: center (8,8) is opaque red, right side (24,8) is transparent.
+    CT_CHECK(near_px(anim.frames[0], anim.w, 8, 8, 255, 0, 0, 255));
+    CT_CHECK(near_px(anim.frames[0], anim.w, 24, 8, 0, 0, 0, 0));
+    // Frame 1: center (24,8) is opaque red, left side (8,8) is transparent.
+    CT_CHECK(near_px(anim.frames[1], anim.w, 24, 8, 255, 0, 0, 255));
+    CT_CHECK(near_px(anim.frames[1], anim.w, 8, 8, 0, 0, 0, 0));
+  }
+  ccord_anim_free(&anim);
+
+  // Static first-frame decode through ccord_image_decode_rgba.
+  uint8_t *rgba = nullptr;
+  int rw = 0, rh = 0;
+  CT_CHECK(ccord_image_decode_rgba(bytes, len, &rgba, &rw, &rh, &err) == CCORD_OK);
+  CT_CHECK(rgba && rw == 32 && rh == 16 && near_px(rgba, rw, 8, 8, 255, 0, 0, 255));
+  ccord_free(rgba);
+
+  // Streaming interface (used by texture_cache.c for incremental sticker decode).
+  ccord_av_stream *s = ccord_av_stream_open(bytes, len, 64, CCORD_AV_IMAGES, &err);
+  CT_CHECK(s != nullptr);
+  if (s) {
+    const ccord_av_info *inf = ccord_av_stream_info(s);
+    CT_CHECK(inf && inf->w == 32 && inf->h == 16 && inf->has_video);
+    const uint8_t *px = nullptr;
+    uint32_t pts = 0, dur = 0;
+    CT_CHECK(ccord_av_stream_next_frame(s, &px, &pts, &dur) && px && near_px(px, 32, 8, 8, 255, 0, 0, 255));
+    CT_CHECK(ccord_av_stream_next_frame(s, &px, &pts, &dur) && px && near_px(px, 32, 24, 8, 255, 0, 0, 255));
+    CT_CHECK(!ccord_av_stream_next_frame(s, &px, &pts, &dur));
+    ccord_av_stream_seek(s, 0);
+    CT_CHECK(ccord_av_stream_next_frame(s, &px, &pts, &dur) && px && near_px(px, 32, 8, 8, 255, 0, 0, 255));
+    ccord_av_stream_close(s);
+  }
+
+  // Malformed Lottie JSON fails cleanly.
+  static const char k_bad_lottie[] = "{\"fr\":60,\"ip\":0,\"op\":10,\"w\":-5,\"h\":0,\"layers\":[]}";
+  CT_CHECK(ccord_anim_decode((const uint8_t *)k_bad_lottie, sizeof k_bad_lottie - 1u, 64, 0, &anim, &err) != CCORD_OK);
+  ccord_anim_free(&anim);
+}
+
 int main(void)
 {
   test_sniff();
@@ -541,5 +607,6 @@ int main(void)
   test_robustness();
   test_decode_rgba();
   test_av_stream();
+  test_lottie();
   return CT_RESULT("test_anim");
 }

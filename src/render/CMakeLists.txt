@@ -19,7 +19,7 @@ if(CCORD_FONTCONFIG AND NOT ANDROID)
   endif()
 endif()
 
-add_library(ccord_render STATIC render.c image_decode.c texture_cache.c text.c anim.c av_stream.c)
+add_library(ccord_render STATIC render.c image_decode.c texture_cache.c text.c anim.c av_stream.c lottie.c)
 add_library(ccord::render ALIAS ccord_render)
 target_include_directories(ccord_render PUBLIC include)
 target_include_directories(ccord_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
