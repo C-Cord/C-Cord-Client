@@ -136,6 +136,34 @@ static int api_http_patch(lua_State *L) { return http_do(L, "PATCH", false); }
 static int api_http_delete(lua_State *L) { return http_do(L, "DELETE", false); }
 static int api_local_req(lua_State *L) { return http_do(L, nullptr, true); }
 
+static int api_http_download(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  luaL_checktype(L, 1, LUA_TTABLE);
+  char url_check[512] = "";
+  sb_raw_getfield(L, 1, "url");
+  if (lua_type(L, -1) == LUA_TSTRING) {
+    size_t ul = 0;
+    const char *url = lua_tolstring(L, -1, &ul);
+    snprintf(url_check, sizeof url_check, "%.*s", (int)(ul < sizeof url_check - 1 ? ul : sizeof url_check - 1), url);
+  }
+  lua_pop(L, 1);
+
+  if (!sb_check_perm(L, sb, CCORD_PERM_FS_WRITE, "net.http.download")) return sb_push_undeclared(L);
+  bool allow_via_local = url_is_localhost(url_check) && (sb->perms & (ccord_perm_set)CCORD_PERM_NETWORK_LOCAL);
+  if (!allow_via_local) {
+    if (!sb_check_perm(L, sb, CCORD_PERM_NETWORK_HTTP, "net.http.download")) return sb_push_undeclared(L);
+  }
+
+  int cb_idx = lua_type(L, 2) == LUA_TFUNCTION ? 2 : 0;
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "opts");
+  if (!sb_encode_lua(L, 1, &w, 0)) { ccord_buf_free(&b); return luaL_error(L, "net.http.download: invalid opts"); }
+  ccord_jw_end_object(&w);
+  return sb_async_dispatch(L, sb, "net.http.download", &b, cb_idx);
+}
+
 static int api_local_unix_send(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
@@ -620,7 +648,8 @@ void sb_open_api_v3(lua_State *L)
   // net.* (net.http, net.ws, net.local)
   static const luaL_Reg k_http[] = {
     {"request", api_http_req}, {"get", api_http_get}, {"post", api_http_post},
-    {"put", api_http_put}, {"patch", api_http_patch}, {"delete", api_http_delete}, {nullptr, nullptr},
+    {"put", api_http_put}, {"patch", api_http_patch}, {"delete", api_http_delete},
+    {"download", api_http_download}, {nullptr, nullptr},
   };
   static const luaL_Reg k_ws[] = {{"connect", api_ws_connect}, {nullptr, nullptr}};
   static const luaL_Reg k_local[] = {

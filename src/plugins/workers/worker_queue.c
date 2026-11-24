@@ -14,6 +14,17 @@ void pw_b64_encode(const uint8_t *in, size_t n, ccord_buf *out)
   }
 }
 
+static void pw_event_free_fields(pw_event *ev)
+{
+  if (!ev) return;
+  ccord_free(ev->json);
+  ccord_free(ev->raw_body);
+  ccord_free(ev->final_url);
+  ev->json = nullptr;
+  ev->raw_body = nullptr;
+  ev->final_url = nullptr;
+}
+
 void pw_push_ev(plugin_workers *w, const pw_event *ev)
 {
   if (!w || !ev) return;
@@ -28,10 +39,12 @@ void pw_push_ev(plugin_workers *w, const pw_event *ev)
       w->events[w->nevents++] = *ev;
       atomic_store_explicit(&w->ev_pending, true, memory_order_release);
     } else {
-      ccord_free(ev->json);
+      pw_event tmp = *ev;
+      pw_event_free_fields(&tmp);
     }
   } else {
-    ccord_free(ev->json);
+    pw_event tmp = *ev;
+    pw_event_free_fields(&tmp);
   }
   pthread_mutex_unlock(&w->ev_mu);
 }
@@ -336,7 +349,7 @@ void pw_destroy(plugin_workers *w)
   w->watch_count = 0;
   w->fallback_watch_count = 0;
   pthread_mutex_lock(&w->ev_mu);
-  for (size_t i = 0; i < w->nevents; i++) ccord_free(w->events[i].json);
+  for (size_t i = 0; i < w->nevents; i++) pw_event_free_fields(&w->events[i]);
   ccord_free(w->events);
   pthread_mutex_unlock(&w->ev_mu);
   pthread_mutex_destroy(&w->ev_mu);
@@ -365,7 +378,7 @@ void pw_pump(plugin_workers *w, void (*on_event)(void *ud, const pw_event *ev), 
   pthread_mutex_unlock(&w->ev_mu);
   for (size_t i = 0; i < n; i++) {
     if (on_event) on_event(ud, &batch[i]);
-    ccord_free(batch[i].json);
+    pw_event_free_fields(&batch[i]);
   }
   ccord_free(batch);
 }

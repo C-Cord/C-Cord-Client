@@ -41,7 +41,15 @@
 #define PW_MAX_WATCHES 64u
 #define PW_MAX_WS 32u
 #define PW_MAX_PROCS 32u
-#define PW_MAX_HTTP_BODY (4u * 1024u * 1024u)
+#define PW_DEFAULT_HTTP_BODY (4u * 1024u * 1024u)
+#if CCORD_OS_ANDROID
+#define PW_MAX_HTTP_BODY_CAP (4u * 1024u * 1024u)
+#else
+#define PW_MAX_HTTP_BODY_CAP (8u * 1024u * 1024u)
+#endif
+#define PW_DEFAULT_DL_BYTES (64u * 1024u * 1024u)
+#define PW_MAX_DL_BYTES (256u * 1024u * 1024u)
+#define PW_MAX_REDIRECTS 5u
 
 typedef struct pw_watch {
   bool active;

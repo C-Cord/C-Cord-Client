@@ -166,6 +166,10 @@ static bool plugin_op_http_request(void *ud, const ccord_plugin_http_req *req, c
     .timeout_ms = req->timeout_ms,
     .max_bytes = req->max_bytes,
     .allow_localhost_http = req->allow_localhost_http,
+    .follow_redirects = req->follow_redirects,
+    .max_redirects = req->max_redirects,
+    .allow_url = req->allow_url,
+    .allow_url_ud = req->allow_url_ud,
   };
   ccord_http_response hr = {0};
   bool ok = ccord_http_request(&opts, &hr);
@@ -173,7 +177,34 @@ static bool plugin_op_http_request(void *ud, const ccord_plugin_http_req *req, c
   resp->body = hr.body;
   resp->body_len = hr.body_len;
   resp->headers_json = hr.headers_json;
+  snprintf(resp->final_url, sizeof resp->final_url, "%s", hr.final_url);
   snprintf(resp->error, sizeof resp->error, "%s", hr.error);
+  return ok;
+}
+
+static bool plugin_op_http_download(void *ud, const ccord_plugin_http_dl_req *req, ccord_plugin_http_dl_resp *resp)
+{
+  (void)ud;
+  if (!req || !resp) return false;
+  ccord_http_download_opts opts = {
+    .url = req->url,
+    .dest_path = req->dest_path,
+    .headers_json = req->headers_json,
+    .timeout_ms = req->timeout_ms,
+    .max_bytes = req->max_bytes,
+    .allow_localhost_http = req->allow_localhost_http,
+    .follow_redirects = req->follow_redirects,
+    .max_redirects = req->max_redirects,
+    .allow_url = req->allow_url,
+    .allow_url_ud = req->allow_url_ud,
+  };
+  ccord_http_download_resp dr = {0};
+  bool ok = ccord_http_download(&opts, &dr);
+  resp->status_code = dr.status_code;
+  resp->bytes_written = dr.bytes_written;
+  snprintf(resp->content_type, sizeof resp->content_type, "%s", dr.content_type);
+  snprintf(resp->final_url, sizeof resp->final_url, "%s", dr.final_url);
+  snprintf(resp->error, sizeof resp->error, "%s", dr.error);
   return ok;
 }
 
@@ -574,6 +605,7 @@ void app_plugins_start(app *a)
       .clipboard_read_image = plugin_op_clipboard_read_image,
       .clipboard_write_image = plugin_op_clipboard_write_image,
       .http_request = plugin_op_http_request,
+      .http_download = plugin_op_http_download,
       .ws_open = plugin_op_ws_open,
       .ws_send = plugin_op_ws_send,
       .ws_recv = plugin_op_ws_recv,

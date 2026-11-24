@@ -22,6 +22,8 @@ typedef struct ccord_catalog_http {
                         char *err_buf, size_t err_cap);
 } ccord_catalog_http;
 
+typedef bool (*ccord_plugin_http_url_check_fn)(void *ud, const char *url, char *err_buf, size_t err_cap);
+
 // Generalized plugin HTTP request/response (strict TLS 1.2/1.3 for external URLs; plain HTTP allowed only for localhost).
 typedef struct ccord_plugin_http_req {
   const char *url;
@@ -32,6 +34,10 @@ typedef struct ccord_plugin_http_req {
   uint32_t timeout_ms;
   size_t max_bytes;
   bool allow_localhost_http;
+  bool follow_redirects;
+  uint8_t max_redirects;
+  ccord_plugin_http_url_check_fn allow_url;
+  void *allow_url_ud;
 } ccord_plugin_http_req;
 
 typedef struct ccord_plugin_http_resp {
@@ -39,8 +45,30 @@ typedef struct ccord_plugin_http_resp {
   uint8_t *body;                  // ccord_malloc'd, NUL-terminated
   size_t body_len;
   char *headers_json;             // ccord_malloc'd JSON object of response headers (optional)
+  char final_url[2048];           // populated if redirected
   char error[256];
 } ccord_plugin_http_resp;
+
+typedef struct ccord_plugin_http_dl_req {
+  const char *url;
+  const char *dest_path;
+  const char *headers_json;       // optional JSON object of request headers
+  uint32_t timeout_ms;
+  size_t max_bytes;
+  bool allow_localhost_http;
+  bool follow_redirects;
+  uint8_t max_redirects;
+  ccord_plugin_http_url_check_fn allow_url;
+  void *allow_url_ud;
+} ccord_plugin_http_dl_req;
+
+typedef struct ccord_plugin_http_dl_resp {
+  long status_code;
+  size_t bytes_written;
+  char content_type[128];
+  char final_url[2048];
+  char error[256];
+} ccord_plugin_http_dl_resp;
 
 // Static OS/platform descriptors handed to plugins at init for Class 1 `platform.*`.
 typedef struct ccord_plugin_platform_info {
@@ -79,6 +107,7 @@ typedef struct ccord_plugin_platform_ops {
   bool (*clipboard_read_image)(void *ud, uint8_t **out_png, size_t *out_len);
   bool (*clipboard_write_image)(void *ud, const uint8_t *png, size_t len);
   bool (*http_request)(void *ud, const ccord_plugin_http_req *req, ccord_plugin_http_resp *resp);
+  bool (*http_download)(void *ud, const ccord_plugin_http_dl_req *req, ccord_plugin_http_dl_resp *resp);
   // External WSS transport (nullable: loopback ws:// works natively without this)
   void *(*ws_open)(void *ud, const char *url, const char *headers_json, char *err_buf, size_t err_cap);
   bool (*ws_send)(void *ud, void *handle, const uint8_t *data, size_t len, bool binary);

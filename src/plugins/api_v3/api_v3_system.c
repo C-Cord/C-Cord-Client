@@ -3,6 +3,8 @@
 #define _GNU_SOURCE
 #include "api_v3_internal.h"
 
+#include <ccord/core/base64.h>
+
 const ccord_json_limits k_ext_limits = {16, 8192, (size_t)2u << 20};
 
 // ---------------------------------------------------------------- helpers
@@ -160,6 +162,141 @@ static bool env_var_is_blocked(const char *name)
 
 // ---------------------------------------------------------------- Worker event pump
 
+static bool ext_send_ntf_flushed(ccord_plugins *m, plugin *p, const char *method, const char *params)
+{
+  if (!p || !p->ipc) return false;
+  ccord_error err = {0};
+  if (ccord_ipc_flush(p->ipc, 500, &err) != CCORD_OK) {
+    char why[256];
+    snprintf(why, sizeof why, "could not flush host ipc: %s", err.message);
+    pl_fail_plugin(m, p, why);
+    return false;
+  }
+  if (ccord_ipc_send_notify(p->ipc, method, params, &err) != CCORD_OK) {
+    char why[256];
+    snprintf(why, sizeof why, "could not send to host: %s", err.message);
+    pl_fail_plugin(m, p, why);
+    return false;
+  }
+  if (ccord_ipc_flush(p->ipc, 500, &err) != CCORD_OK) {
+    char why[256];
+    snprintf(why, sizeof why, "could not flush host ipc: %s", err.message);
+    pl_fail_plugin(m, p, why);
+    return false;
+  }
+  return true;
+}
+
+static void ext_send_http_reply(ccord_plugins *m, plugin *p, const pw_event *ev)
+{
+  if (!p || !p->ipc || (p->state != CCORD_PLUGIN_READY && p->state != CCORD_PLUGIN_STARTING)) return;
+  if (!ev->ok) {
+    ext_send_async_reply(m, p, ev->id, false, nullptr, ev->error);
+    return;
+  }
+  if (!ev->http_binary && ev->raw_body_len > 0 &&
+      !ccord_utf8_valid((const char *)ev->raw_body, ev->raw_body_len)) {
+    ext_send_async_reply(m, p, ev->id, false, nullptr,
+                         "response body is not valid UTF-8 (pass binary = true)");
+    return;
+  }
+
+  const size_t inline_limit = 512u * 1024u;
+  const size_t chunk_raw = 384u * 1024u;
+  size_t hdr_len = ev->json ? strlen(ev->json) : 0u;
+  bool use_chunked = (ev->raw_body_len > inline_limit) ||
+                     (ev->http_binary && ev->raw_body_len > 0 && hdr_len > 128u * 1024u);
+
+  if (use_chunked) {
+    size_t off = 0;
+    uint64_t seq = 0;
+    while (off < ev->raw_body_len) {
+      size_t n = ev->raw_body_len - off;
+      if (n > chunk_raw) n = chunk_raw;
+      size_t b64_len = 0;
+      char *b64 = ccord_base64_encode_alloc(ev->raw_body + off, n, &b64_len);
+      if (!b64) {
+        ext_send_async_reply(m, p, ev->id, false, nullptr, "out of memory encoding chunk");
+        return;
+      }
+      ccord_buf cb; ccord_buf_init(&cb, b64_len + 96u);
+      ccord_jw cw; ccord_jw_init(&cw, &cb);
+      ccord_jw_begin_object(&cw);
+      ccord_jw_key(&cw, "req_id"); ccord_jw_int(&cw, (int64_t)ev->id);
+      ccord_jw_key(&cw, "seq"); ccord_jw_int(&cw, (int64_t)seq);
+      ccord_jw_key(&cw, "b64"); ccord_jw_string(&cw, b64, b64_len);
+      ccord_jw_end_object(&cw);
+      ccord_free(b64);
+      bool ok = ccord_jw_ok(&cw) && ext_send_ntf_flushed(m, p, "async.reply_chunk", ccord_buf_cstr(&cb));
+      ccord_buf_free(&cb);
+      if (!ok) return;
+      off += n;
+      seq++;
+    }
+    ccord_buf b; ccord_buf_init(&b, hdr_len + 256u);
+    ccord_jw w; ccord_jw_init(&w, &b);
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "req_id"); ccord_jw_int(&w, (int64_t)ev->id);
+    ccord_jw_key(&w, "ok"); ccord_jw_bool(&w, true);
+    ccord_jw_key(&w, "result");
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "status"); ccord_jw_int(&w, (int64_t)ev->http_status);
+    ccord_jw_key(&w, "ok"); ccord_jw_bool(&w, ev->http_status >= 200 && ev->http_status < 300);
+    ccord_jw_key(&w, "chunked"); ccord_jw_bool(&w, true);
+    if (ev->json && ev->json[0]) {
+      ccord_jw_key(&w, "headers_json"); ccord_jw_cstr(&w, ev->json);
+    }
+    if (ev->final_url && ev->final_url[0]) {
+      ccord_jw_key(&w, "final_url"); ccord_jw_cstr(&w, ev->final_url);
+    }
+    ccord_jw_end_object(&w);
+    ccord_jw_end_object(&w);
+    if (ccord_jw_ok(&w)) (void)ext_send_ntf_flushed(m, p, "async.reply", ccord_buf_cstr(&b));
+    ccord_buf_free(&b);
+    return;
+  }
+
+  // Inline single-frame reply (<= 512 KiB)
+  ccord_buf b; ccord_buf_init(&b, ev->raw_body_len + hdr_len + 256u);
+  ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "req_id"); ccord_jw_int(&w, (int64_t)ev->id);
+  ccord_jw_key(&w, "ok"); ccord_jw_bool(&w, true);
+  ccord_jw_key(&w, "result");
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "status"); ccord_jw_int(&w, (int64_t)ev->http_status);
+  ccord_jw_key(&w, "ok"); ccord_jw_bool(&w, ev->http_status >= 200 && ev->http_status < 300);
+  if (ev->http_binary) {
+    ccord_jw_key(&w, "binary"); ccord_jw_bool(&w, true);
+    if (ev->raw_body_len > 0) {
+      size_t b64_len = 0;
+      char *b64 = ccord_base64_encode_alloc(ev->raw_body, ev->raw_body_len, &b64_len);
+      if (!b64) {
+        ccord_buf_free(&b);
+        ext_send_async_reply(m, p, ev->id, false, nullptr, "out of memory encoding body");
+        return;
+      }
+      ccord_jw_key(&w, "body_b64"); ccord_jw_string(&w, b64, b64_len);
+      ccord_free(b64);
+    } else {
+      ccord_jw_key(&w, "body_b64"); ccord_jw_cstr(&w, "");
+    }
+  } else {
+    ccord_jw_key(&w, "body");
+    ccord_jw_string(&w, ev->raw_body ? (const char *)ev->raw_body : "", ev->raw_body_len);
+  }
+  if (ev->json && ev->json[0]) {
+    ccord_jw_key(&w, "headers_json"); ccord_jw_cstr(&w, ev->json);
+  }
+  if (ev->final_url && ev->final_url[0]) {
+    ccord_jw_key(&w, "final_url"); ccord_jw_cstr(&w, ev->final_url);
+  }
+  ccord_jw_end_object(&w);
+  ccord_jw_end_object(&w);
+  if (ccord_jw_ok(&w)) (void)ext_send_ntf_flushed(m, p, "async.reply", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+}
+
 void plugins_ext_on_worker_event(void *ud, const pw_event *ev)
 {
   ccord_plugins *m = ud;
@@ -169,6 +306,10 @@ void plugins_ext_on_worker_event(void *ud, const pw_event *ev)
 
   if (ev->kind == PW_EV_ASYNC_REPLY) {
     ext_send_async_reply(m, p, ev->id, ev->ok, ev->json, ev->error);
+    return;
+  }
+  if (ev->kind == PW_EV_HTTP_REPLY) {
+    ext_send_http_reply(m, p, ev);
     return;
   }
   ccord_buf b;
@@ -267,6 +408,10 @@ bool ext_handle_class3_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *
     if (!body && opts) body = pl_str_param(opts, "body", &bl);
     int64_t tmo = 15000;
     if (opts && ccord_json_get(opts, "timeout_ms")) (void)ccord_json_int64(ccord_json_get(opts, "timeout_ms"), &tmo);
+    int64_t max_b = 0;
+    if (opts && ccord_json_get(opts, "max_bytes")) (void)ccord_json_int64(ccord_json_get(opts, "max_bytes"), &max_b);
+    bool binary = opts ? ccord_json_bool(ccord_json_get(opts, "binary"), false) : false;
+    bool follow_redir = opts ? ccord_json_bool(ccord_json_get(opts, "follow_redirects"), false) : false;
 
     bool is_loc = ext_is_localhost_url(url);
     bool allow_local = pl_has_perm(p, CCORD_PERM_NETWORK_LOCAL);
@@ -293,8 +438,70 @@ bool ext_handle_class3_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *
     if (!m->workers || !url ||
         !pw_start_http(m->workers, p->m.id, (uint64_t)req_id, &p->m, url, hmeth ? hmeth : "GET",
                        hb.len ? ccord_buf_cstr(&hb) : nullptr, (const uint8_t *)body, bl,
-                       (uint32_t)(tmo > 0 ? tmo : 15000), local_only, allow_local)) {
+                       (uint32_t)(tmo > 0 ? tmo : 15000), max_b > 0 ? (size_t)max_b : 0u,
+                       binary, follow_redir, local_only, allow_local)) {
       ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "http worker unavailable");
+    }
+    ccord_buf_free(&hb);
+    return true;
+  }
+  if (strcmp(method, "net.http.download") == 0) {
+    int64_t req_id = 0; (void)ccord_json_int64(ccord_json_get(params, "req_id"), &req_id);
+    const ccord_json *opts = ccord_json_get(params, "opts");
+    size_t ul = 0, dl = 0;
+    const char *url = pl_str_param(params, "url", &ul);
+    if (!url && opts) url = pl_str_param(opts, "url", &ul);
+    const char *dest_path = pl_str_param(params, "dest_path", &dl);
+    if (!dest_path && opts) dest_path = pl_str_param(opts, "dest_path", &dl);
+    int64_t tmo = 30000;
+    if (opts && ccord_json_get(opts, "timeout_ms")) (void)ccord_json_int64(ccord_json_get(opts, "timeout_ms"), &tmo);
+    int64_t max_b = 0;
+    if (opts && ccord_json_get(opts, "max_bytes")) (void)ccord_json_int64(ccord_json_get(opts, "max_bytes"), &max_b);
+    bool follow_redir = opts ? ccord_json_bool(ccord_json_get(opts, "follow_redirects"), false) : false;
+
+    bool is_loc = ext_is_localhost_url(url);
+    bool allow_local = pl_has_perm(p, CCORD_PERM_NETWORK_LOCAL);
+    if (!pl_has_perm(p, CCORD_PERM_FS_WRITE)) {
+      pl_fail_plugin(m, p, "undeclared restricted API called: fs.write");
+      return true;
+    }
+    if (is_loc) {
+      if (!allow_local) {
+        if (!pl_has_perm(p, CCORD_PERM_NETWORK_HTTP)) {
+          pl_fail_plugin(m, p, "undeclared restricted API called: network.local");
+          return true;
+        }
+        pl_reply_ok(m, p, id, nullptr);
+        ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr,
+                             "localhost access requires network.local permission");
+        return true;
+      }
+    } else if (!pl_has_perm(p, CCORD_PERM_NETWORK_HTTP)) {
+      pl_fail_plugin(m, p, "undeclared restricted API called: network.http");
+      return true;
+    }
+
+    if (!dest_path || dl == 0 || dl >= CCORD_PATH_MAX || !ccord_utf8_valid(dest_path, dl)) {
+      pl_reply_ok(m, p, id, nullptr);
+      ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "invalid destination path");
+      return true;
+    }
+    if (pl_fs_path_is_protected(m, dest_path)) {
+      pl_reply_ok(m, p, id, nullptr);
+      ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr,
+                           "permission denied: destination path is protected");
+      return true;
+    }
+
+    ccord_buf hb; ccord_buf_init(&hb, 0);
+    if (opts && ccord_json_get(opts, "headers")) ext_encode_json_str(ccord_json_get(opts, "headers"), &hb);
+    pl_reply_ok(m, p, id, nullptr);
+    if (!m->workers || !url ||
+        !pw_start_http_download(m->workers, p->m.id, (uint64_t)req_id, &p->m, url, dest_path,
+                                hb.len ? ccord_buf_cstr(&hb) : nullptr,
+                                (uint32_t)(tmo > 0 ? tmo : 30000), max_b > 0 ? (size_t)max_b : 0u,
+                                follow_redir, false, allow_local)) {
+      ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "http download worker unavailable");
     }
     ccord_buf_free(&hb);
     return true;

@@ -12,6 +12,7 @@ typedef struct plugin_workers plugin_workers;
 
 typedef enum pw_event_kind : uint8_t {
   PW_EV_ASYNC_REPLY = 0,
+  PW_EV_HTTP_REPLY,
   PW_EV_FS_WATCH,
   PW_EV_WS,
   PW_EV_PROC,
@@ -23,7 +24,12 @@ typedef struct pw_event {
   uint64_t id;          // req_id / watch_id / ws_id / proc_id
   bool ok;
   char sub_kind[24];    // "open"|"message"|"close"|"error" or "stdout"|"stderr"|"exit"
-  char *json;           // owned JSON payload (ccord_free)
+  char *json;           // owned JSON payload (ccord_free); for PW_EV_HTTP_REPLY holds headers_json
+  uint8_t *raw_body;    // owned raw HTTP body (ccord_free) for PW_EV_HTTP_REPLY
+  size_t raw_body_len;
+  long http_status;
+  bool http_binary;
+  char *final_url;      // owned (ccord_free) if redirected
   char error[256];
 } pw_event;
 
@@ -44,7 +50,13 @@ bool pw_unix_socket_path_is_blocked(const char *sock_path);
 // Async HTTP / localhost HTTP
 bool pw_start_http(plugin_workers *w, const char *owner, uint64_t req_id, const ccord_manifest *manifest,
                    const char *url, const char *method, const char *headers_json,
-                   const uint8_t *body, size_t body_len, uint32_t timeout_ms, bool local_only, bool allow_local);
+                   const uint8_t *body, size_t body_len, uint32_t timeout_ms, size_t max_bytes,
+                   bool binary, bool follow_redirects, bool local_only, bool allow_local);
+// Async streaming HTTP download to disk
+bool pw_start_http_download(plugin_workers *w, const char *owner, uint64_t req_id, const ccord_manifest *manifest,
+                            const char *url, const char *dest_path, const char *headers_json,
+                            uint32_t timeout_ms, size_t max_bytes, bool follow_redirects,
+                            bool local_only, bool allow_local);
 // Async local Unix socket send/recv
 bool pw_start_unix_send(plugin_workers *w, const char *owner, uint64_t req_id, const char *sock_path,
                         const uint8_t *data, size_t len);

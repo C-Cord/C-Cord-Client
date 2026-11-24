@@ -749,12 +749,158 @@ int sb_async_dispatch(lua_State *L, ccord_sandbox *sb, const char *method, ccord
   return 1;
 }
 
+void sb_async_chunks_free_all(ccord_sandbox *sb)
+{
+  if (!sb) return;
+  for (size_t i = 0; i < sb->nasync_chunks; i++) {
+    ccord_buf_free(&sb->async_chunks[i].buf);
+  }
+  ccord_free(sb->async_chunks);
+  sb->async_chunks = nullptr;
+  sb->nasync_chunks = 0;
+  sb->capasync_chunks = 0;
+}
+
+static bool async_chunks_pop(ccord_sandbox *sb, uint64_t req_id, sb_async_chunk_buf *out)
+{
+  if (!sb || !out) return false;
+  for (size_t i = 0; i < sb->nasync_chunks; i++) {
+    if (sb->async_chunks[i].req_id == req_id) {
+      *out = sb->async_chunks[i];
+      sb->nasync_chunks--;
+      if (i < sb->nasync_chunks) sb->async_chunks[i] = sb->async_chunks[sb->nasync_chunks];
+      return true;
+    }
+  }
+  return false;
+}
+
+ccord_status ccord_sandbox_async_reply_chunk(ccord_sandbox *sb, uint64_t req_id, uint64_t seq,
+                                             const char *b64, size_t b64_len, ccord_error *err)
+{
+  (void)err;
+  if (!sb || req_id == 0 || !b64) return CCORD_ERR_INVALID;
+  sb_async_chunk_buf *slot = nullptr;
+  for (size_t i = 0; i < sb->nasync_chunks; i++) {
+    if (sb->async_chunks[i].req_id == req_id) {
+      slot = &sb->async_chunks[i];
+      break;
+    }
+  }
+  if (!slot) {
+    if (sb->nasync_chunks >= SB_MAX_ASYNC_CHUNKS) return CCORD_OK;
+    if (sb->nasync_chunks == sb->capasync_chunks) {
+      size_t nc = sb->capasync_chunks ? sb->capasync_chunks * 2u : 4u;
+      if (nc > SB_MAX_ASYNC_CHUNKS) nc = SB_MAX_ASYNC_CHUNKS;
+      sb_async_chunk_buf *g = ccord_realloc_array(sb->async_chunks, nc, sizeof *g);
+      if (!g) return CCORD_ERR_NOMEM;
+      sb->async_chunks = g;
+      sb->capasync_chunks = nc;
+    }
+    slot = &sb->async_chunks[sb->nasync_chunks++];
+    memset(slot, 0, sizeof *slot);
+    slot->req_id = req_id;
+    ccord_buf_init(&slot->buf, SB_MAX_HTTP_BODY_BYTES);
+  }
+  if (slot->failed || seq != slot->next_seq) {
+    slot->failed = true;
+    return CCORD_OK;
+  }
+  size_t est = (b64_len / 4u) * 3u;
+  if (est > SB_MAX_HTTP_BODY_BYTES || slot->buf.len > SB_MAX_HTTP_BODY_BYTES - est) {
+    slot->failed = true;
+    ccord_buf_free(&slot->buf);
+    return CCORD_OK;
+  }
+  if (b64_len > 0 && !sb_b64_decode_buf(b64, b64_len, &slot->buf)) {
+    slot->failed = true;
+    ccord_buf_free(&slot->buf);
+    return CCORD_OK;
+  }
+  slot->next_seq++;
+  return CCORD_OK;
+}
+
+static bool push_async_result_value(lua_State *L, const ccord_json *result,
+                                    const sb_async_chunk_buf *chunk, bool has_chunk,
+                                    char *err_out, size_t err_cap)
+{
+  if (!result) {
+    lua_pushboolean(L, 1);
+    return true;
+  }
+  if (ccord_json_type_of(result) == CCORD_JSON_OBJECT) {
+    bool is_chunked = ccord_json_bool(ccord_json_get(result, "chunked"), false);
+    bool is_binary = ccord_json_bool(ccord_json_get(result, "binary"), false);
+    if (is_chunked) {
+      if (!has_chunk || chunk->failed) {
+        snprintf(err_out, err_cap, "chunked response assembly failed");
+        return false;
+      }
+      size_t n = ccord_json_object_len(result);
+      lua_createtable(L, 0, (int)n + 1);
+      for (size_t i = 0; i < n; i++) {
+        const ccord_json *v = nullptr;
+        const char *k = ccord_json_object_key(result, i, &v);
+        if (!k || strcmp(k, "chunked") == 0) continue;
+        if (!sb_push_json(L, v)) {
+          lua_pop(L, 1);
+          snprintf(err_out, err_cap, "failed to push response field");
+          return false;
+        }
+        lua_setfield(L, -2, k);
+      }
+      lua_pushlstring(L, chunk->buf.data ? chunk->buf.data : "", chunk->buf.len);
+      lua_setfield(L, -2, "body");
+      return true;
+    }
+    if (is_binary && ccord_json_get(result, "body_b64")) {
+      size_t b64l = 0;
+      const char *b64 = ccord_json_string(ccord_json_get(result, "body_b64"), &b64l);
+      ccord_buf dec;
+      ccord_buf_init(&dec, (b64l / 4u) * 3u + 8u);
+      if (b64 && b64l > 0 && !sb_b64_decode_buf(b64, b64l, &dec)) {
+        ccord_buf_free(&dec);
+        snprintf(err_out, err_cap, "failed to decode binary response");
+        return false;
+      }
+      size_t n = ccord_json_object_len(result);
+      lua_createtable(L, 0, (int)n);
+      for (size_t i = 0; i < n; i++) {
+        const ccord_json *v = nullptr;
+        const char *k = ccord_json_object_key(result, i, &v);
+        if (!k || strcmp(k, "binary") == 0 || strcmp(k, "body_b64") == 0) continue;
+        if (!sb_push_json(L, v)) {
+          lua_pop(L, 1);
+          ccord_buf_free(&dec);
+          snprintf(err_out, err_cap, "failed to push response field");
+          return false;
+        }
+        lua_setfield(L, -2, k);
+      }
+      lua_pushlstring(L, dec.data ? dec.data : "", dec.len);
+      lua_setfield(L, -2, "body");
+      ccord_buf_free(&dec);
+      return true;
+    }
+  }
+  if (!sb_push_json(L, result)) {
+    snprintf(err_out, err_cap, "response exceeded stack depth");
+    return false;
+  }
+  return true;
+}
+
 void sb_async_resolve_entry(ccord_sandbox *sb, uint64_t req_id, bool ok, const ccord_json *result, const char *err_msg)
 {
+  sb_async_chunk_buf chunk = {0};
+  bool has_chunk = async_chunks_pop(sb, req_id, &chunk);
+
   lua_State *L = sb->L;
   int top = lua_gettop(L);
   lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_ASYNC);
   if (lua_rawgeti(L, -1, (lua_Integer)req_id) != LUA_TTABLE) {
+    if (has_chunk) ccord_buf_free(&chunk.buf);
     lua_settop(L, top);
     return;
   }
@@ -764,14 +910,19 @@ void sb_async_resolve_entry(ccord_sandbox *sb, uint64_t req_id, bool ok, const c
 
   lua_getfield(L, -1, "cb");
   if (lua_isfunction(L, -1)) {
+    char dec_err[128] = "";
     if (ok) {
-      if (result) (void)sb_push_json(L, result);
-      else lua_pushboolean(L, 1);
-      lua_pushnil(L);
+      if (push_async_result_value(L, result, &chunk, has_chunk, dec_err, sizeof dec_err)) {
+        lua_pushnil(L);
+      } else {
+        lua_pushnil(L);
+        lua_pushstring(L, dec_err[0] ? dec_err : "response decode failed");
+      }
     } else {
       lua_pushnil(L);
       lua_pushstring(L, err_msg && err_msg[0] ? err_msg : "request failed");
     }
+    if (has_chunk) { ccord_buf_free(&chunk.buf); has_chunk = false; }
     ccord_error e = {0};
     if (sb_call_guarded(sb, 2, 0, &e) != CCORD_OK) {
       sb_log(sb, CCORD_LOG_WARN, "async.callback", e.message);
@@ -784,16 +935,22 @@ void sb_async_resolve_entry(ccord_sandbox *sb, uint64_t req_id, bool ok, const c
   lua_getfield(L, -1, "co");
   if (lua_isthread(L, -1)) {
     lua_State *co = lua_tothread(L, -1);
+    char dec_err[128] = "";
     if (ok) {
-      if (result) (void)sb_push_json(co, result);
-      else lua_pushboolean(co, 1);
-      lua_pushnil(co);
+      if (push_async_result_value(co, result, &chunk, has_chunk, dec_err, sizeof dec_err)) {
+        lua_pushnil(co);
+      } else {
+        lua_pushnil(co);
+        lua_pushstring(co, dec_err[0] ? dec_err : "response decode failed");
+      }
     } else {
       lua_pushnil(co);
       lua_pushstring(co, err_msg && err_msg[0] ? err_msg : "request failed");
     }
+    if (has_chunk) { ccord_buf_free(&chunk.buf); has_chunk = false; }
     (void)resume_coro_guarded(sb, co, 2);
   }
+  if (has_chunk) ccord_buf_free(&chunk.buf);
   lua_settop(L, top);
 }
 

@@ -9,16 +9,24 @@
 #include <ccord/core/buf.h>
 #include <ccord/core/json.h>
 #include <ccord/core/os.h>
+#include <ccord/core/random.h>
 
 #include <ctype.h>
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #if !defined(_WIN32)
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <poll.h>
 #include <strings.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#else
+#include <io.h>
+#include <windows.h>
 #endif
 
 #if defined(CCORD_HTTP_FETCH_LIVE)
@@ -611,7 +619,7 @@ static size_t resp_hdr_cb(char *buf, size_t size, size_t nitems, void *ud)
   return n;
 }
 
-static struct curl_slist *append_json_headers(struct curl_slist *hdrs, const char *headers_json)
+static struct curl_slist *append_json_headers(struct curl_slist *hdrs, const char *headers_json, bool strip_creds)
 {
   if (!headers_json || !headers_json[0]) return hdrs;
   ccord_arena arena = {0};
@@ -627,6 +635,12 @@ static struct curl_slist *append_json_headers(struct curl_slist *hdrs, const cha
       if (!k || !k[0] || !v) continue;
       // Reject CR/LF header injection
       if (strpbrk(k, "\r\n:") || strpbrk(v, "\r\n")) continue;
+      if (strip_creds &&
+          (ccord_strcasecmp(k, "authorization") == 0 ||
+           ccord_strcasecmp(k, "proxy-authorization") == 0 ||
+           ccord_strcasecmp(k, "cookie") == 0)) {
+        continue;
+      }
       char line[1024];
       if (snprintf(line, sizeof line, "%s: %s", k, v) < (int)sizeof line) {
         hdrs = curl_slist_append(hdrs, line);
@@ -637,6 +651,100 @@ static struct curl_slist *append_json_headers(struct curl_slist *hdrs, const cha
   return hdrs;
 }
 
+static bool url_extract_origin(const char *url, char *scheme_out, size_t scap, char *host_out, size_t hcap, int *port_out)
+{
+  if (!url || !scheme_out || !host_out || !port_out) return false;
+  const char *auth = nullptr;
+  int def_port = 443;
+  if (strncmp(url, "https://", 8) == 0) {
+    if (scap < 6u) return false;
+    memcpy(scheme_out, "https", 6);
+    auth = url + 8;
+    def_port = 443;
+  } else if (strncmp(url, "http://", 7) == 0) {
+    if (scap < 5u) return false;
+    memcpy(scheme_out, "http", 5);
+    auth = url + 7;
+    def_port = 80;
+  } else {
+    return false;
+  }
+  const char *end = auth;
+  while (*end && *end != '/' && *end != '?' && *end != '#') end++;
+  const char *hs = auth, *he = end, *pstart = nullptr;
+  if (hs < end && *hs == '[') {
+    const char *rb = memchr(hs, ']', (size_t)(end - hs));
+    if (!rb) return false;
+    hs++;
+    he = rb;
+    if (rb + 1 < end && rb[1] == ':') pstart = rb + 2;
+  } else {
+    const char *col = memchr(hs, ':', (size_t)(end - hs));
+    if (col) {
+      he = col;
+      pstart = col + 1;
+    }
+  }
+  size_t hl = (size_t)(he - hs);
+  if (hl == 0 || hl >= hcap) return false;
+  for (size_t i = 0; i < hl; i++) host_out[i] = (char)tolower((unsigned char)hs[i]);
+  host_out[hl] = '\0';
+  int port = def_port;
+  if (pstart && pstart < end) {
+    unsigned long pv = 0;
+    for (const char *q = pstart; q < end; q++) {
+      if (*q < '0' || *q > '9') return false;
+      pv = pv * 10ul + (unsigned long)(*q - '0');
+      if (pv > 65535ul) return false;
+    }
+    if (pv == 0) return false;
+    port = (int)pv;
+  }
+  *port_out = port;
+  return true;
+}
+
+static bool urls_same_origin(const char *a, const char *b)
+{
+  char sa[16], ha[256], sb[16], hb[256];
+  int pa = 0, pb = 0;
+  if (!url_extract_origin(a, sa, sizeof sa, ha, sizeof ha, &pa)) return false;
+  if (!url_extract_origin(b, sb, sizeof sb, hb, sizeof hb, &pb)) return false;
+  return strcmp(sa, sb) == 0 && strcmp(ha, hb) == 0 && pa == pb;
+}
+
+static bool validate_redirect_hop(bool initial_https, bool initial_loopback, bool allow_localhost_http,
+                                  ccord_http_url_check_fn allow_url, void *allow_url_ud, const char *next_url,
+                                  bool *out_plain, bool *out_loopback, char *err_buf, size_t err_cap)
+{
+  bool next_plain = false, next_loopback = false;
+  if (!parse_general_url(next_url, allow_localhost_http, false, &next_plain, &next_loopback)) {
+    set_err(err_buf, err_cap, "redirect target blocked: invalid URL or disallowed scheme");
+    return false;
+  }
+  if (initial_https && next_plain) {
+    set_err(err_buf, err_cap, "redirect blocked: HTTPS to HTTP downgrade");
+    return false;
+  }
+  if (!initial_loopback && next_loopback) {
+    set_err(err_buf, err_cap, "redirect blocked: public request cannot redirect to loopback");
+    return false;
+  }
+  if (initial_loopback && !next_loopback) {
+    set_err(err_buf, err_cap, "redirect blocked: loopback request cannot redirect to external host");
+    return false;
+  }
+  if (allow_url && !allow_url(allow_url_ud, next_url, err_buf, err_cap)) {
+    if (err_buf && err_cap && !err_buf[0]) {
+      set_err(err_buf, err_cap, "redirect target blocked by host policy");
+    }
+    return false;
+  }
+  if (out_plain) *out_plain = next_plain;
+  if (out_loopback) *out_loopback = next_loopback;
+  return true;
+}
+
 bool ccord_http_request(const ccord_http_request_opts *req, ccord_http_response *out)
 {
   if (!out) return false;
@@ -645,12 +753,15 @@ bool ccord_http_request(const ccord_http_request_opts *req, ccord_http_response 
     set_err(out->error, sizeof out->error, "missing URL");
     return false;
   }
-  bool plain = false;
-  bool is_loopback = false;
-  if (!parse_general_url(req->url, req->allow_localhost_http, false, &plain, &is_loopback)) {
+  bool cur_plain = false;
+  bool cur_loopback = false;
+  if (!parse_general_url(req->url, req->allow_localhost_http, false, &cur_plain, &cur_loopback)) {
     set_err(out->error, sizeof out->error, "URL must use HTTPS (plain HTTP allowed only for localhost)");
     return false;
   }
+  const bool initial_https = !cur_plain;
+  const bool initial_loopback = cur_loopback;
+
   const char *meth = (req->method && req->method[0]) ? req->method : "GET";
   {
     size_t mlen = 0;
@@ -661,79 +772,474 @@ bool ccord_http_request(const ccord_http_request_opts *req, ccord_http_response 
       }
     }
   }
+  char cur_url[2048];
+  if (snprintf(cur_url, sizeof cur_url, "%s", req->url) >= (int)sizeof cur_url) {
+    set_err(out->error, sizeof out->error, "URL too long");
+    return false;
+  }
+  if (req->allow_url && !req->allow_url(req->allow_url_ud, cur_url, out->error, sizeof out->error)) {
+    if (!out->error[0]) set_err(out->error, sizeof out->error, "URL blocked by host policy");
+    return false;
+  }
+  char cur_method[16];
+  snprintf(cur_method, sizeof cur_method, "%s", meth);
+  const uint8_t *cur_body = req->body;
+  size_t cur_body_len = req->body_len;
+  bool strip_creds = false;
+
+  uint8_t max_hops = 0;
+  if (req->follow_redirects) {
+    max_hops = req->max_redirects ? (req->max_redirects > 5u ? 5u : req->max_redirects) : 5u;
+  }
+
   ccord_curl_global_init_once();
-  CURL *curl = curl_easy_init();
-  if (!curl) {
-    set_err(out->error, sizeof out->error, "libcurl initialization failed");
+
+  for (uint8_t hop = 0; hop <= max_hops; hop++) {
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+      set_err(out->error, sizeof out->error, "libcurl initialization failed");
+      return false;
+    }
+
+    mem_sink ms = {.max_bytes = req->max_bytes ? req->max_bytes : (16u * 1024u * 1024u)};
+    resp_hdr_sink hs = {0};
+    struct curl_slist *hdrs = append_json_headers(nullptr, req->headers_json, strip_creds);
+
+    curl_easy_setopt(curl, CURLOPT_URL, cur_url);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "C-Cord-Plugin/3.0");
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    long timeout_ms = req->timeout_ms ? (long)req->timeout_ms : 15000L;
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, timeout_ms < 10000L ? timeout_ms : 10000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
+    curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
+    if (!cur_plain) {
+      ccord_curl_apply_tls(curl);
+      curl_easy_setopt(curl, CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
+      curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+      curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+      if (!req->allow_localhost_http || !cur_loopback) {
+        ccord_curl_apply_public_opensocket(curl);
+      }
+    } else {
+      curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http");
+    }
+
+    if (strcasecmp(cur_method, "HEAD") == 0) {
+      curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+    } else if (strcasecmp(cur_method, "GET") != 0) {
+      curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, cur_method);
+    }
+    if (cur_body && cur_body_len > 0) {
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDS, cur_body);
+      curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)cur_body_len);
+    }
+    if (hdrs) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_mem_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ms);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, resp_hdr_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hs);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long code = 0;
+    char *redir = nullptr;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    if (rc == CURLE_OK && req->follow_redirects && is_redirect_status(code)) {
+      curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &redir);
+    }
+    char next_url[2048] = "";
+    bool has_redir = false;
+    if (redir && redir[0]) {
+      if (snprintf(next_url, sizeof next_url, "%s", redir) < (int)sizeof next_url) has_redir = true;
+    }
+
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+
+    if (rc != CURLE_OK) {
+      ccord_free(ms.data);
+      ccord_buf_free(&hs.buf);
+      if (ms.overflow) set_err(out->error, sizeof out->error, "response exceeded maximum size");
+      else snprintf(out->error, sizeof out->error, "network error: %s", curl_easy_strerror(rc));
+      return false;
+    }
+
+    if (req->follow_redirects && is_redirect_status(code) && has_redir) {
+      ccord_free(ms.data);
+      ccord_buf_free(&hs.buf);
+      if (hop == max_hops) {
+        set_err(out->error, sizeof out->error, "too many redirects");
+        return false;
+      }
+      if (!validate_redirect_hop(initial_https, initial_loopback, req->allow_localhost_http,
+                                 req->allow_url, req->allow_url_ud, next_url,
+                                 &cur_plain, &cur_loopback, out->error, sizeof out->error)) {
+        return false;
+      }
+      if (!urls_same_origin(cur_url, next_url)) strip_creds = true;
+      if (code == 303 || ((code == 301 || code == 302) && strcasecmp(cur_method, "POST") == 0)) {
+        snprintf(cur_method, sizeof cur_method, "GET");
+        cur_body = nullptr;
+        cur_body_len = 0;
+      }
+      snprintf(cur_url, sizeof cur_url, "%s", next_url);
+      continue;
+    }
+
+    out->status_code = code;
+    if (hop > 0) snprintf(out->final_url, sizeof out->final_url, "%s", cur_url);
+    if (hs.started) {
+      ccord_jw_end_object(&hs.jw);
+      if (hs.buf.data && ccord_jw_ok(&hs.jw)) {
+        out->headers_json = ccord_strdup((const char *)hs.buf.data);
+      }
+      ccord_buf_free(&hs.buf);
+    } else {
+      out->headers_json = ccord_strdup("{}");
+    }
+    out->body = (uint8_t *)ms.data;
+    out->body_len = ms.len;
+    return true;
+  }
+
+  set_err(out->error, sizeof out->error, "too many redirects");
+  return false;
+}
+
+// ---------------------------------------------------------------- Streaming download (atomic temp file + rename)
+
+typedef struct dl_hdr_sink {
+  char content_type[128];
+} dl_hdr_sink;
+
+static size_t dl_hdr_cb(char *buf, size_t size, size_t nitems, void *ud)
+{
+  dl_hdr_sink *h = ud;
+  if (size != 0 && nitems > SIZE_MAX / size) return 0;
+  size_t n = size * nitems;
+  if (n > 13u && strncasecmp(buf, "content-type:", 13) == 0) {
+    const char *v = buf + 13;
+    size_t rem = n - 13u;
+    while (rem && (*v == ' ' || *v == '\t')) { v++; rem--; }
+    while (rem && (v[rem - 1] == '\r' || v[rem - 1] == '\n' || v[rem - 1] == ' ' || v[rem - 1] == '\t')) rem--;
+    if (rem >= sizeof h->content_type) rem = sizeof h->content_type - 1u;
+    for (size_t i = 0; i < rem; i++) h->content_type[i] = (char)tolower((unsigned char)v[i]);
+    h->content_type[rem] = '\0';
+  }
+  return n;
+}
+
+static bool dl_path_is_symlink(const char *path)
+{
+  if (!path || !path[0]) return false;
+#if !defined(_WIN32)
+  struct stat st;
+  return lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
+#else
+  int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
+  if (wlen <= 0 || wlen > 4096) return false;
+  wchar_t wbuf[4096];
+  if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wbuf, wlen) <= 0) return false;
+  DWORD attr = GetFileAttributesW(wbuf);
+  return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+#endif
+}
+
+static void dl_unlink_file(const char *path)
+{
+  if (!path || !path[0]) return;
+#if !defined(_WIN32)
+  (void)unlink(path);
+#else
+  int wlen = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
+  if (wlen > 0 && wlen <= 4096) {
+    wchar_t wbuf[4096];
+    if (MultiByteToWideChar(CP_UTF8, 0, path, -1, wbuf, wlen) > 0) (void)DeleteFileW(wbuf);
+  }
+#endif
+}
+
+static bool dl_open_sibling_tmp(const char *dest_path, char *tmp_path, size_t tmp_cap, FILE **out_fp,
+                                char *err_buf, size_t err_cap)
+{
+  *out_fp = nullptr;
+  tmp_path[0] = '\0';
+  const char *slash = strrchr(dest_path, '/');
+#if defined(_WIN32)
+  const char *bslash = strrchr(dest_path, '\\');
+  if (bslash && (!slash || bslash > slash)) slash = bslash;
+#endif
+  size_t dir_len = slash ? (size_t)(slash - dest_path) : 0u;
+  static const char k_hex[] = "0123456789abcdef";
+
+  for (int attempt = 0; attempt < 4; attempt++) {
+    uint8_t rnd[8] = {0};
+    if (ccord_random_bytes(rnd, sizeof rnd) != CCORD_OK) {
+      set_err(err_buf, err_cap, "failed to generate temporary filename");
+      return false;
+    }
+    char hex[17];
+    for (int i = 0; i < 8; i++) {
+      hex[i * 2] = k_hex[(rnd[i] >> 4) & 0x0Fu];
+      hex[i * 2 + 1] = k_hex[rnd[i] & 0x0Fu];
+    }
+    hex[16] = '\0';
+    int n = 0;
+    if (slash) {
+      n = snprintf(tmp_path, tmp_cap, "%.*s/.ccord-dl-%s.tmp", (int)dir_len, dest_path, hex);
+    } else {
+      n = snprintf(tmp_path, tmp_cap, ".ccord-dl-%s.tmp", hex);
+    }
+    if (n <= 0 || (size_t)n >= tmp_cap) {
+      set_err(err_buf, err_cap, "destination path too long");
+      return false;
+    }
+#if !defined(_WIN32)
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd < 0) {
+      if (errno == EEXIST) continue;
+      snprintf(err_buf, err_cap, "cannot create download file: %s", strerror(errno));
+      tmp_path[0] = '\0';
+      return false;
+    }
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) {
+      close(fd);
+      (void)unlink(tmp_path);
+      tmp_path[0] = '\0';
+      set_err(err_buf, err_cap, "fdopen failed");
+      return false;
+    }
+    *out_fp = fp;
+    return true;
+#else
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, tmp_path, -1, nullptr, 0);
+    if (wlen <= 0 || wlen > 4096) {
+      set_err(err_buf, err_cap, "destination path invalid");
+      tmp_path[0] = '\0';
+      return false;
+    }
+    wchar_t wtmp[4096];
+    if (MultiByteToWideChar(CP_UTF8, 0, tmp_path, -1, wtmp, wlen) <= 0) {
+      set_err(err_buf, err_cap, "destination path invalid");
+      tmp_path[0] = '\0';
+      return false;
+    }
+    HANDLE h = CreateFileW(wtmp, GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (h == INVALID_HANDLE_VALUE) {
+      if (GetLastError() == ERROR_FILE_EXISTS) continue;
+      set_err(err_buf, err_cap, "cannot create download file");
+      tmp_path[0] = '\0';
+      return false;
+    }
+    int fd = _open_osfhandle((intptr_t)h, 0);
+    if (fd < 0) {
+      CloseHandle(h);
+      (void)DeleteFileW(wtmp);
+      tmp_path[0] = '\0';
+      set_err(err_buf, err_cap, "failed to open download file descriptor");
+      return false;
+    }
+    FILE *fp = _fdopen(fd, "wb");
+    if (!fp) {
+      _close(fd);
+      (void)DeleteFileW(wtmp);
+      tmp_path[0] = '\0';
+      set_err(err_buf, err_cap, "fdopen failed");
+      return false;
+    }
+    *out_fp = fp;
+    return true;
+#endif
+  }
+  tmp_path[0] = '\0';
+  set_err(err_buf, err_cap, "could not allocate unique temporary download file");
+  return false;
+}
+
+static bool dl_finalize_rename(const char *tmp_path, const char *dest_path, char *err_buf, size_t err_cap)
+{
+  if (dl_path_is_symlink(dest_path)) {
+    dl_unlink_file(tmp_path);
+    set_err(err_buf, err_cap, "destination path is a symbolic link");
     return false;
   }
-
-  mem_sink ms = {.max_bytes = req->max_bytes ? req->max_bytes : (16u * 1024u * 1024u)};
-  resp_hdr_sink hs = {0};
-  struct curl_slist *hdrs = append_json_headers(nullptr, req->headers_json);
-
-  curl_easy_setopt(curl, CURLOPT_URL, req->url);
-  curl_easy_setopt(curl, CURLOPT_USERAGENT, "C-Cord-Plugin/3.0");
-  curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
-  curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
-  long timeout_ms = req->timeout_ms ? (long)req->timeout_ms : 15000L;
-  curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, timeout_ms < 10000L ? timeout_ms : 10000L);
-  curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
-  curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
-  if (!plain) {
-    ccord_curl_apply_tls(curl);
-    curl_easy_setopt(curl, CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
-    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
-    curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
-    if (!req->allow_localhost_http || !is_loopback) {
-      ccord_curl_apply_public_opensocket(curl);
-    }
-  } else {
-    curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http");
-  }
-
-  if (strcasecmp(meth, "HEAD") == 0) {
-    curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
-  } else if (strcasecmp(meth, "GET") != 0) {
-    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, meth);
-  }
-  if (req->body && req->body_len > 0) {
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, req->body);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (curl_off_t)req->body_len);
-  }
-  if (hdrs) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
-  curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_mem_cb);
-  curl_easy_setopt(curl, CURLOPT_WRITEDATA, &ms);
-  curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, resp_hdr_cb);
-  curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hs);
-
-  CURLcode rc = curl_easy_perform(curl);
-  long code = 0;
-  curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
-  out->status_code = code;
-
-  curl_slist_free_all(hdrs);
-  curl_easy_cleanup(curl);
-
-  if (rc != CURLE_OK) {
-    ccord_free(ms.data);
-    ccord_buf_free(&hs.buf);
-    if (ms.overflow) set_err(out->error, sizeof out->error, "response exceeded maximum size");
-    else snprintf(out->error, sizeof out->error, "network error: %s", curl_easy_strerror(rc));
+#if !defined(_WIN32)
+  if (rename(tmp_path, dest_path) != 0) {
+    int e = errno;
+    dl_unlink_file(tmp_path);
+    snprintf(err_buf, err_cap, "cannot move downloaded file to destination: %s", strerror(e));
     return false;
   }
-  if (hs.started) {
-    ccord_jw_end_object(&hs.jw);
-    if (hs.buf.data && ccord_jw_ok(&hs.jw)) {
-      out->headers_json = ccord_strdup((const char *)hs.buf.data);
-    }
-    ccord_buf_free(&hs.buf);
-  } else {
-    out->headers_json = ccord_strdup("{}");
-  }
-  out->body = (uint8_t *)ms.data;
-  out->body_len = ms.len;
   return true;
+#else
+  int wt = MultiByteToWideChar(CP_UTF8, 0, tmp_path, -1, nullptr, 0);
+  int wd = MultiByteToWideChar(CP_UTF8, 0, dest_path, -1, nullptr, 0);
+  if (wt <= 0 || wt > 4096 || wd <= 0 || wd > 4096) {
+    dl_unlink_file(tmp_path);
+    set_err(err_buf, err_cap, "destination path invalid");
+    return false;
+  }
+  wchar_t wtmp[4096], wdest[4096];
+  MultiByteToWideChar(CP_UTF8, 0, tmp_path, -1, wtmp, wt);
+  MultiByteToWideChar(CP_UTF8, 0, dest_path, -1, wdest, wd);
+  if (!MoveFileExW(wtmp, wdest, MOVEFILE_REPLACE_EXISTING)) {
+    dl_unlink_file(tmp_path);
+    set_err(err_buf, err_cap, "cannot move downloaded file to destination");
+    return false;
+  }
+  return true;
+#endif
+}
+
+bool ccord_http_download(const ccord_http_download_opts *req, ccord_http_download_resp *out)
+{
+  if (!out) return false;
+  memset(out, 0, sizeof *out);
+  if (!req || !req->url || !req->url[0] || !req->dest_path || !req->dest_path[0]) {
+    set_err(out->error, sizeof out->error, "missing URL or destination path");
+    return false;
+  }
+  if (dl_path_is_symlink(req->dest_path)) {
+    set_err(out->error, sizeof out->error, "destination path is a symbolic link");
+    return false;
+  }
+  bool cur_plain = false;
+  bool cur_loopback = false;
+  if (!parse_general_url(req->url, req->allow_localhost_http, false, &cur_plain, &cur_loopback)) {
+    set_err(out->error, sizeof out->error, "URL must use HTTPS (plain HTTP allowed only for localhost)");
+    return false;
+  }
+  const bool initial_https = !cur_plain;
+  const bool initial_loopback = cur_loopback;
+
+  char cur_url[2048];
+  if (snprintf(cur_url, sizeof cur_url, "%s", req->url) >= (int)sizeof cur_url) {
+    set_err(out->error, sizeof out->error, "URL too long");
+    return false;
+  }
+  if (req->allow_url && !req->allow_url(req->allow_url_ud, cur_url, out->error, sizeof out->error)) {
+    if (!out->error[0]) set_err(out->error, sizeof out->error, "URL blocked by host policy");
+    return false;
+  }
+
+  uint8_t max_hops = 0;
+  if (req->follow_redirects) {
+    max_hops = req->max_redirects ? (req->max_redirects > 5u ? 5u : req->max_redirects) : 5u;
+  }
+  size_t max_bytes = req->max_bytes ? req->max_bytes : (64u * 1024u * 1024u);
+  bool strip_creds = false;
+
+  ccord_curl_global_init_once();
+
+  for (uint8_t hop = 0; hop <= max_hops; hop++) {
+    char tmp_path[CCORD_PATH_MAX + 64];
+    FILE *fp = nullptr;
+    if (!dl_open_sibling_tmp(req->dest_path, tmp_path, sizeof tmp_path, &fp, out->error, sizeof out->error)) {
+      return false;
+    }
+    CURL *curl = curl_easy_init();
+    if (!curl) {
+      fclose(fp);
+      dl_unlink_file(tmp_path);
+      set_err(out->error, sizeof out->error, "libcurl initialization failed");
+      return false;
+    }
+
+    file_sink fs = {.fp = fp, .max_bytes = max_bytes};
+    dl_hdr_sink hs = {0};
+    struct curl_slist *hdrs = append_json_headers(nullptr, req->headers_json, strip_creds);
+
+    curl_easy_setopt(curl, CURLOPT_URL, cur_url);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "C-Cord-Plugin/3.0");
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    long timeout_ms = req->timeout_ms ? (long)req->timeout_ms : 30000L;
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, timeout_ms < 15000L ? timeout_ms : 15000L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeout_ms);
+    // Leave CURLOPT_ACCEPT_ENCODING unset so downloaded media bytes are preserved verbatim unless caller passes Accept-Encoding.
+    if (!cur_plain) {
+      ccord_curl_apply_tls(curl);
+      curl_easy_setopt(curl, CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
+      curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "https");
+      curl_easy_setopt(curl, CURLOPT_REDIR_PROTOCOLS_STR, "https");
+      if (!req->allow_localhost_http || !cur_loopback) {
+        ccord_curl_apply_public_opensocket(curl);
+      }
+    } else {
+      curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http");
+    }
+    if (hdrs) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_file_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &fs);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, dl_hdr_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, &hs);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long code = 0;
+    char *redir = nullptr;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    if (rc == CURLE_OK && req->follow_redirects && is_redirect_status(code)) {
+      curl_easy_getinfo(curl, CURLINFO_REDIRECT_URL, &redir);
+    }
+    char next_url[2048] = "";
+    bool has_redir = false;
+    if (redir && redir[0]) {
+      if (snprintf(next_url, sizeof next_url, "%s", redir) < (int)sizeof next_url) has_redir = true;
+    }
+
+    bool write_ok = (fflush(fp) == 0) && !ferror(fp);
+    if (fclose(fp) != 0) write_ok = false;
+    curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+
+    if (rc != CURLE_OK) {
+      dl_unlink_file(tmp_path);
+      if (fs.overflow) set_err(out->error, sizeof out->error, "download exceeded maximum size");
+      else snprintf(out->error, sizeof out->error, "network error: %s", curl_easy_strerror(rc));
+      return false;
+    }
+
+    if (req->follow_redirects && is_redirect_status(code) && has_redir) {
+      dl_unlink_file(tmp_path);
+      if (hop == max_hops) {
+        set_err(out->error, sizeof out->error, "too many redirects");
+        return false;
+      }
+      if (!validate_redirect_hop(initial_https, initial_loopback, req->allow_localhost_http,
+                                 req->allow_url, req->allow_url_ud, next_url,
+                                 &cur_plain, &cur_loopback, out->error, sizeof out->error)) {
+        return false;
+      }
+      if (!urls_same_origin(cur_url, next_url)) strip_creds = true;
+      snprintf(cur_url, sizeof cur_url, "%s", next_url);
+      continue;
+    }
+
+    out->status_code = code;
+    if (hs.content_type[0]) snprintf(out->content_type, sizeof out->content_type, "%s", hs.content_type);
+    if (hop > 0) snprintf(out->final_url, sizeof out->final_url, "%s", cur_url);
+
+    if (code < 200 || code >= 300) {
+      dl_unlink_file(tmp_path);
+      out->bytes_written = 0;
+      return true;
+    }
+    if (!write_ok) {
+      dl_unlink_file(tmp_path);
+      set_err(out->error, sizeof out->error, "failed writing downloaded file to disk");
+      return false;
+    }
+    if (!dl_finalize_rename(tmp_path, req->dest_path, out->error, sizeof out->error)) {
+      return false;
+    }
+    out->bytes_written = fs.written;
+    return true;
+  }
+
+  set_err(out->error, sizeof out->error, "too many redirects");
+  return false;
 }
 
 struct ccord_ws_client {
@@ -755,7 +1261,7 @@ ccord_ws_client *ccord_ws_client_open(const char *url, const char *headers_json,
     set_err(err_buf, err_cap, "libcurl initialization failed");
     return nullptr;
   }
-  struct curl_slist *hdrs = append_json_headers(nullptr, headers_json);
+  struct curl_slist *hdrs = append_json_headers(nullptr, headers_json, false);
   curl_easy_setopt(curl, CURLOPT_URL, url);
   curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 2L);
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
@@ -893,6 +1399,15 @@ bool ccord_http_request(const ccord_http_request_opts *req, ccord_http_response 
   if (!out) return false;
   memset(out, 0, sizeof *out);
   set_err(out->error, sizeof out->error, "offline build: HTTP client unavailable");
+  return false;
+}
+
+bool ccord_http_download(const ccord_http_download_opts *req, ccord_http_download_resp *out)
+{
+  (void)req;
+  if (!out) return false;
+  memset(out, 0, sizeof *out);
+  set_err(out->error, sizeof out->error, "offline build: HTTP download unavailable");
   return false;
 }
 

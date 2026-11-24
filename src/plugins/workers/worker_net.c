@@ -89,33 +89,116 @@ static int tcp_connect_timeout(const char *host, int port, uint32_t timeout_ms)
   freeaddrinfo(res);
   return fd;
 }
+#endif
 
-static bool loopback_http_do(const char *host, int port, const char *path, const char *method,
-                             const char *headers_json, const uint8_t *body, size_t body_len,
-                             uint32_t timeout_ms, ccord_plugin_http_resp *resp)
+typedef struct http_job {
+  plugin_workers *w;
+  char owner[65];
+  uint64_t req_id;
+  char url[2048];
+  char method[16];
+  char dest_path[CCORD_PATH_MAX]; // non-empty => streaming download mode
+  char *headers_json;
+  uint8_t *body;
+  size_t body_len;
+  uint32_t timeout_ms;
+  size_t max_bytes;
+  bool binary;
+  bool follow_redirects;
+  bool local_only;
+  bool allow_local;
+  bool initial_https;
+  bool initial_loopback;
+  bool has_host_policy;
+  ccord_manifest host_policy; // thread-safe deep copy of allowed_hosts + allowed_host_count
+} http_job;
+
+static bool http_job_allow_url_const(const http_job *j, const char *next_url, char *err_buf, size_t err_cap)
 {
-  const char *eff_method = (method && method[0]) ? method : "GET";
-  if (!valid_http_method(eff_method)) {
-    snprintf(resp->error, sizeof resp->error, "invalid HTTP method");
+  if (!j || !next_url || !next_url[0]) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "invalid redirect URL");
     return false;
   }
-  if (!valid_http_path(path)) {
-    snprintf(resp->error, sizeof resp->error, "invalid HTTP request path");
+  char scheme[16] = "", host[256] = "", path[1024] = "";
+  int port = 80;
+  if (!pw_extract_url_host_port(next_url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path)) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "redirect target has invalid URL");
     return false;
   }
-  int fd = tcp_connect_timeout(host, port, timeout_ms ? timeout_ms : 5000u);
-  if (fd < 0) { snprintf(resp->error, sizeof resp->error, "connect failed"); return false; }
-  struct timeval tv = {.tv_sec = (time_t)((timeout_ms ? timeout_ms : 5000u) / 1000u),
-                       .tv_usec = (suseconds_t)(((timeout_ms ? timeout_ms : 5000u) % 1000u) * 1000u)};
-  (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-  (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+  bool is_loc = pw_is_localhost_host(host);
+  if (j->initial_https && strcmp(scheme, "https") != 0) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "redirect blocked: HTTPS to HTTP downgrade");
+    return false;
+  }
+  if (strcmp(scheme, "https") != 0 && !(strcmp(scheme, "http") == 0 && is_loc && j->allow_local)) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "redirect target has disallowed scheme");
+    return false;
+  }
+  if (!j->initial_loopback && is_loc) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "redirect blocked: public request cannot redirect to loopback");
+    return false;
+  }
+  if (j->initial_loopback && !is_loc) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "redirect blocked: loopback request cannot redirect to external host");
+    return false;
+  }
+  if (j->local_only && !is_loc) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "network.local only allows localhost/127.0.0.1");
+    return false;
+  }
+  if (!is_loc && j->has_host_policy && !ccord_manifest_host_allowed(&j->host_policy, host)) {
+    if (err_buf && err_cap) {
+      snprintf(err_buf, err_cap, "redirect host '%.160s' not permitted by plugin.json allowed_hosts", host);
+    }
+    return false;
+  }
+  return true;
+}
 
+static bool http_job_allow_url(void *ud, const char *next_url, char *err_buf, size_t err_cap)
+{
+  return http_job_allow_url_const((const http_job *)ud, next_url, err_buf, err_cap);
+}
+
+#if !CCORD_OS_WINDOWS
+static bool lb_is_redirect_status(long code)
+{
+  return code == 301 || code == 302 || code == 303 || code == 307 || code == 308;
+}
+
+static bool lb_resolve_redirect_url(const char *cur_scheme, const char *cur_host, int cur_port,
+                                    const char *cur_path, const char *loc, char *out, size_t cap)
+{
+  if (!loc || !loc[0] || !out || cap == 0) return false;
+  if (strstr(loc, "://") != nullptr) {
+    return snprintf(out, cap, "%s", loc) < (int)cap;
+  }
+  if (loc[0] == '/' && loc[1] == '/') {
+    return snprintf(out, cap, "%s:%s", cur_scheme, loc) < (int)cap;
+  }
+  bool is_v6 = strchr(cur_host, ':') != nullptr;
+  char host_fmt[270];
+  if (is_v6) snprintf(host_fmt, sizeof host_fmt, "[%s]", cur_host);
+  else snprintf(host_fmt, sizeof host_fmt, "%s", cur_host);
+  if (loc[0] == '/') {
+    return snprintf(out, cap, "%s://%s:%d%s", cur_scheme, host_fmt, cur_port, loc) < (int)cap;
+  }
+  const char *slash = strrchr(cur_path ? cur_path : "/", '/');
+  size_t base_len = slash ? (size_t)(slash - cur_path + 1) : 1u;
+  return snprintf(out, cap, "%s://%s:%d%.*s%s", cur_scheme, host_fmt, cur_port,
+                  (int)base_len, cur_path ? cur_path : "/", loc) < (int)cap;
+}
+
+static bool lb_send_http_request(int fd, const char *host, int port, const char *path, const char *method,
+                                 const char *headers_json, bool strip_creds, const uint8_t *body, size_t body_len,
+                                 char *err_buf, size_t err_cap)
+{
   ccord_buf req; ccord_buf_init(&req, 256u);
   char port_s[16], clen_s[32];
   snprintf(port_s, sizeof port_s, "%d", port);
   snprintf(clen_s, sizeof clen_s, "%zu", body_len);
   bool is_v6 = strchr(host, ':') != nullptr;
-  (void)ccord_buf_append_str(&req, eff_method);
+  (void)ccord_buf_append_str(&req, method);
   (void)ccord_buf_append(&req, " ", 1);
   (void)ccord_buf_append_str(&req, path);
   (void)ccord_buf_append_str(&req, " HTTP/1.1\r\nHost: ");
@@ -139,6 +222,12 @@ static bool loopback_http_do(const char *host, int port, const char *path, const
         size_t vl = 0;
         const char *vs = v ? ccord_json_string(v, &vl) : nullptr;
         if (k && vs && valid_hdr_name(k) && valid_hdr_val(vs, vl)) {
+          if (strip_creds &&
+              (ccord_strcasecmp(k, "authorization") == 0 ||
+               ccord_strcasecmp(k, "proxy-authorization") == 0 ||
+               ccord_strcasecmp(k, "cookie") == 0)) {
+            continue;
+          }
           (void)ccord_buf_append_str(&req, k);
           (void)ccord_buf_append(&req, ": ", 2);
           (void)ccord_buf_append(&req, vs, vl);
@@ -152,37 +241,94 @@ static bool loopback_http_do(const char *host, int port, const char *path, const
   if (body && body_len > 0) (void)ccord_buf_append(&req, (const char *)body, body_len);
   if (req.failed) {
     ccord_buf_free(&req);
-    close(fd);
-    snprintf(resp->error, sizeof resp->error, "out of memory");
+    snprintf(err_buf, err_cap, "out of memory");
     return false;
   }
 
   size_t sent = 0;
   while (sent < req.len) {
     ssize_t n = send(fd, req.data + sent, req.len - sent, PW_SEND_FLAGS);
-    if (n <= 0) { ccord_buf_free(&req); close(fd); snprintf(resp->error, sizeof resp->error, "send failed"); return false; }
+    if (n <= 0) {
+      ccord_buf_free(&req);
+      snprintf(err_buf, err_cap, "send failed");
+      return false;
+    }
     sent += (size_t)n;
   }
   ccord_buf_free(&req);
+  return true;
+}
 
+static bool loopback_http_once(const char *host, int port, const char *path, const char *method,
+                               const char *headers_json, bool strip_creds, const uint8_t *body, size_t body_len,
+                               uint32_t timeout_ms, size_t max_bytes, ccord_plugin_http_resp *resp,
+                               char *loc_out, size_t loc_cap)
+{
+  if (loc_out && loc_cap) loc_out[0] = '\0';
+  const char *eff_method = (method && method[0]) ? method : "GET";
+  if (!valid_http_method(eff_method)) {
+    snprintf(resp->error, sizeof resp->error, "invalid HTTP method");
+    return false;
+  }
+  if (!valid_http_path(path)) {
+    snprintf(resp->error, sizeof resp->error, "invalid HTTP request path");
+    return false;
+  }
+  uint32_t tmo = timeout_ms ? timeout_ms : 5000u;
+  int fd = tcp_connect_timeout(host, port, tmo);
+  if (fd < 0) { snprintf(resp->error, sizeof resp->error, "connect failed"); return false; }
+  struct timeval tv = {.tv_sec = (time_t)(tmo / 1000u), .tv_usec = (suseconds_t)((tmo % 1000u) * 1000u)};
+  (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+
+  if (!lb_send_http_request(fd, host, port, path, eff_method, headers_json, strip_creds, body, body_len,
+                            resp->error, sizeof resp->error)) {
+    close(fd);
+    return false;
+  }
+
+  size_t lim = max_bytes ? max_bytes : PW_DEFAULT_HTTP_BODY;
   ccord_buf raw; ccord_buf_init(&raw, 0);
-  char tmp[4096];
+  char tmp[16384];
+  bool overflow = false;
+  size_t hdr_end = 0;
+  bool found_hdr = false;
   for (;;) {
     ssize_t n = recv(fd, tmp, sizeof tmp, 0);
     if (n <= 0) break;
-    if (raw.len + (size_t)n > PW_MAX_HTTP_BODY) break;
-    (void)ccord_buf_append(&raw, tmp, (size_t)n);
+    if (!found_hdr) {
+      if (raw.len + (size_t)n > lim + 65536u) { overflow = true; break; }
+      if (ccord_buf_append(&raw, tmp, (size_t)n) != CCORD_OK) { overflow = true; break; }
+      for (size_t i = 0; i + 3 < raw.len; i++) {
+        if (raw.data[i] == '\r' && raw.data[i + 1] == '\n' && raw.data[i + 2] == '\r' && raw.data[i + 3] == '\n') {
+          hdr_end = i;
+          found_hdr = true;
+          break;
+        }
+      }
+      if (!found_hdr && raw.len > 65536u) { overflow = true; break; }
+      if (found_hdr && raw.len - (hdr_end + 4u) > lim) { overflow = true; break; }
+    } else {
+      size_t cur_body = raw.len - (hdr_end + 4u);
+      if ((size_t)n > lim || cur_body > lim - (size_t)n) { overflow = true; break; }
+      if (ccord_buf_append(&raw, tmp, (size_t)n) != CCORD_OK) { overflow = true; break; }
+    }
   }
   close(fd);
+  if (overflow) {
+    ccord_buf_free(&raw);
+    snprintf(resp->error, sizeof resp->error, "response exceeded maximum size");
+    return false;
+  }
   if (raw.len == 0) { ccord_buf_free(&raw); snprintf(resp->error, sizeof resp->error, "empty response"); return false; }
-  const char *sep = strstr(ccord_buf_cstr(&raw), "\r\n\r\n");
-  if (!sep) { ccord_buf_free(&raw); snprintf(resp->error, sizeof resp->error, "malformed HTTP response"); return false; }
+  if (!found_hdr) { ccord_buf_free(&raw); snprintf(resp->error, sizeof resp->error, "malformed HTTP response"); return false; }
+
   int status = 0;
   (void)sscanf(ccord_buf_cstr(&raw), "HTTP/%*d.%*d %d", &status);
   resp->status_code = status;
-  size_t hlen = (size_t)(sep - raw.data);
+  const char *sep = raw.data + hdr_end;
   const char *bstart = sep + 4;
-  size_t blen = raw.len - (hlen + 4u);
+  size_t blen = raw.len - (hdr_end + 4u);
   resp->body = ccord_malloc(blen + 1u);
   if (resp->body) {
     if (blen) memcpy(resp->body, bstart, blen);
@@ -194,8 +340,9 @@ static bool loopback_http_do(const char *host, int port, const char *path, const
   ccord_jw hw; ccord_jw_init(&hw, &hbuf);
   ccord_jw_begin_object(&hw);
   const char *line = strstr(raw.data, "\r\n");
-  if (line) line += 2;
-  while (line && line < sep) {
+  if (line && line < sep) line += 2;
+  else line = sep;
+  while (line < sep) {
     const char *eol = strstr(line, "\r\n");
     if (!eol || eol > sep) eol = sep;
     const char *col = memchr(line, ':', (size_t)(eol - line));
@@ -207,8 +354,14 @@ static bool loopback_http_do(const char *host, int port, const char *path, const
       kbuf[kl] = '\0';
       const char *vs = col + 1;
       while (vs < eol && (*vs == ' ' || *vs == '\t')) vs++;
+      size_t vl = (size_t)(eol - vs);
+      while (vl > 0 && (vs[vl - 1] == ' ' || vs[vl - 1] == '\t')) vl--;
+      if (loc_out && loc_cap && strcmp(kbuf, "location") == 0 && vl > 0 && vl < loc_cap) {
+        memcpy(loc_out, vs, vl);
+        loc_out[vl] = '\0';
+      }
       ccord_jw_key(&hw, kbuf);
-      ccord_jw_string(&hw, vs, (size_t)(eol - vs));
+      ccord_jw_string(&hw, vs, vl);
     }
     line = eol < sep ? eol + 2 : sep;
   }
@@ -218,81 +371,434 @@ static bool loopback_http_do(const char *host, int port, const char *path, const
   ccord_buf_free(&raw);
   return true;
 }
+
+static bool loopback_http_do(const http_job *j, ccord_plugin_http_resp *resp)
+{
+  char cur_url[2048];
+  snprintf(cur_url, sizeof cur_url, "%s", j->url);
+  char cur_method[16];
+  snprintf(cur_method, sizeof cur_method, "%s", j->method);
+  const uint8_t *cur_body = j->body;
+  size_t cur_body_len = j->body_len;
+  bool strip_creds = false;
+  uint8_t max_hops = j->follow_redirects ? PW_MAX_REDIRECTS : 0u;
+
+  for (uint8_t hop = 0; hop <= max_hops; hop++) {
+    char scheme[16] = "", host[256] = "", path[1024] = "";
+    int port = 80;
+    if (!pw_extract_url_host_port(cur_url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path)) {
+      snprintf(resp->error, sizeof resp->error, "invalid URL");
+      return false;
+    }
+    char loc[2048] = "";
+    ccord_plugin_http_resp hop_resp = {0};
+    if (!loopback_http_once(host, port, path, cur_method, j->headers_json, strip_creds,
+                            cur_body, cur_body_len, j->timeout_ms, j->max_bytes, &hop_resp, loc, sizeof loc)) {
+      snprintf(resp->error, sizeof resp->error, "%s", hop_resp.error);
+      ccord_free(hop_resp.body);
+      ccord_free(hop_resp.headers_json);
+      return false;
+    }
+    if (j->follow_redirects && lb_is_redirect_status(hop_resp.status_code) && loc[0]) {
+      ccord_free(hop_resp.body);
+      ccord_free(hop_resp.headers_json);
+      if (hop == max_hops) {
+        snprintf(resp->error, sizeof resp->error, "too many redirects");
+        return false;
+      }
+      char next_url[2048] = "";
+      if (!lb_resolve_redirect_url(scheme, host, port, path, loc, next_url, sizeof next_url)) {
+        snprintf(resp->error, sizeof resp->error, "redirect URL too long");
+        return false;
+      }
+      if (!http_job_allow_url_const(j, next_url, resp->error, sizeof resp->error)) {
+        return false;
+      }
+      char nscheme[16] = "", nhost[256] = "", npath[1024] = "";
+      int nport = 80;
+      if (!pw_extract_url_host_port(next_url, nscheme, sizeof nscheme, nhost, sizeof nhost, &nport, npath, sizeof npath) ||
+          strcmp(nscheme, "http") != 0) {
+        snprintf(resp->error, sizeof resp->error, "redirect target unsupported in loopback mode");
+        return false;
+      }
+      if (ccord_strcasecmp(host, nhost) != 0 || port != nport) strip_creds = true;
+      if (hop_resp.status_code == 303 ||
+          ((hop_resp.status_code == 301 || hop_resp.status_code == 302) && ccord_strcasecmp(cur_method, "POST") == 0)) {
+        snprintf(cur_method, sizeof cur_method, "GET");
+        cur_body = nullptr;
+        cur_body_len = 0;
+      }
+      snprintf(cur_url, sizeof cur_url, "%s", next_url);
+      continue;
+    }
+    *resp = hop_resp;
+    if (hop > 0) snprintf(resp->final_url, sizeof resp->final_url, "%s", cur_url);
+    return true;
+  }
+  snprintf(resp->error, sizeof resp->error, "too many redirects");
+  return false;
+}
+
+static bool lb_dl_open_sibling_tmp(const char *dest_path, char *tmp_path, size_t tmp_cap, FILE **out_fp,
+                                   char *err_buf, size_t err_cap)
+{
+  *out_fp = nullptr;
+  tmp_path[0] = '\0';
+  const char *slash = strrchr(dest_path, '/');
+  size_t dir_len = slash ? (size_t)(slash - dest_path) : 0u;
+  static const char k_hex[] = "0123456789abcdef";
+  for (int attempt = 0; attempt < 4; attempt++) {
+    uint8_t rnd[8] = {0};
+    if (ccord_random_bytes(rnd, sizeof rnd) != CCORD_OK) {
+      snprintf(err_buf, err_cap, "failed to generate temporary filename");
+      return false;
+    }
+    char hex[17];
+    for (int i = 0; i < 8; i++) {
+      hex[i * 2] = k_hex[(rnd[i] >> 4) & 0x0Fu];
+      hex[i * 2 + 1] = k_hex[rnd[i] & 0x0Fu];
+    }
+    hex[16] = '\0';
+    int n = slash
+      ? snprintf(tmp_path, tmp_cap, "%.*s/.ccord-dl-%s.tmp", (int)dir_len, dest_path, hex)
+      : snprintf(tmp_path, tmp_cap, ".ccord-dl-%s.tmp", hex);
+    if (n <= 0 || (size_t)n >= tmp_cap) {
+      snprintf(err_buf, err_cap, "destination path too long");
+      return false;
+    }
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd < 0) {
+      if (errno == EEXIST) continue;
+      snprintf(err_buf, err_cap, "cannot create download file: %s", strerror(errno));
+      tmp_path[0] = '\0';
+      return false;
+    }
+    FILE *fp = fdopen(fd, "wb");
+    if (!fp) {
+      close(fd);
+      (void)unlink(tmp_path);
+      tmp_path[0] = '\0';
+      snprintf(err_buf, err_cap, "fdopen failed");
+      return false;
+    }
+    *out_fp = fp;
+    return true;
+  }
+  tmp_path[0] = '\0';
+  snprintf(err_buf, err_cap, "could not allocate unique temporary download file");
+  return false;
+}
+
+static bool loopback_http_download(const http_job *j, ccord_plugin_http_dl_resp *out)
+{
+  memset(out, 0, sizeof *out);
+  struct stat dst_st;
+  if (lstat(j->dest_path, &dst_st) == 0 && S_ISLNK(dst_st.st_mode)) {
+    snprintf(out->error, sizeof out->error, "destination path is a symbolic link");
+    return false;
+  }
+
+  char cur_url[2048];
+  snprintf(cur_url, sizeof cur_url, "%s", j->url);
+  bool strip_creds = false;
+  uint8_t max_hops = j->follow_redirects ? PW_MAX_REDIRECTS : 0u;
+  size_t lim = j->max_bytes ? j->max_bytes : PW_DEFAULT_DL_BYTES;
+  uint32_t tmo = j->timeout_ms ? j->timeout_ms : 30000u;
+
+  for (uint8_t hop = 0; hop <= max_hops; hop++) {
+    char scheme[16] = "", host[256] = "", path[1024] = "";
+    int port = 80;
+    if (!pw_extract_url_host_port(cur_url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path) ||
+        !valid_http_path(path)) {
+      snprintf(out->error, sizeof out->error, "invalid URL");
+      return false;
+    }
+    char tmp_path[CCORD_PATH_MAX + 64];
+    FILE *fp = nullptr;
+    if (!lb_dl_open_sibling_tmp(j->dest_path, tmp_path, sizeof tmp_path, &fp, out->error, sizeof out->error)) {
+      return false;
+    }
+    int fd = tcp_connect_timeout(host, port, tmo);
+    if (fd < 0) {
+      fclose(fp);
+      (void)unlink(tmp_path);
+      snprintf(out->error, sizeof out->error, "connect failed");
+      return false;
+    }
+    struct timeval tv = {.tv_sec = (time_t)(tmo / 1000u), .tv_usec = (suseconds_t)((tmo % 1000u) * 1000u)};
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+
+    if (!lb_send_http_request(fd, host, port, path, "GET", j->headers_json, strip_creds, nullptr, 0,
+                              out->error, sizeof out->error)) {
+      close(fd);
+      fclose(fp);
+      (void)unlink(tmp_path);
+      return false;
+    }
+
+    ccord_buf hbuf; ccord_buf_init(&hbuf, 0);
+    bool found_hdr = false, overflow = false, write_err = false;
+    size_t written = 0;
+    long status = 0;
+    char ctype[128] = "", loc[2048] = "";
+    char rbuf[16384];
+    for (;;) {
+      ssize_t n = recv(fd, rbuf, sizeof rbuf, 0);
+      if (n <= 0) break;
+      if (!found_hdr) {
+        if (hbuf.len + (size_t)n > 65536u + 16384u) { overflow = true; break; }
+        if (ccord_buf_append(&hbuf, rbuf, (size_t)n) != CCORD_OK) { write_err = true; break; }
+        size_t hend = 0;
+        for (size_t i = 0; i + 3 < hbuf.len; i++) {
+          if (hbuf.data[i] == '\r' && hbuf.data[i + 1] == '\n' &&
+              hbuf.data[i + 2] == '\r' && hbuf.data[i + 3] == '\n') {
+            hend = i;
+            found_hdr = true;
+            break;
+          }
+        }
+        if (!found_hdr) {
+          if (hbuf.len > 65536u) { overflow = true; break; }
+          continue;
+        }
+        int st_i = 0;
+        (void)sscanf(ccord_buf_cstr(&hbuf), "HTTP/%*d.%*d %d", &st_i);
+        status = st_i;
+        const char *sep = hbuf.data + hend;
+        const char *line = strstr(hbuf.data, "\r\n");
+        if (line && line < sep) line += 2;
+        else line = sep;
+        while (line < sep) {
+          const char *eol = strstr(line, "\r\n");
+          if (!eol || eol > sep) eol = sep;
+          const char *col = memchr(line, ':', (size_t)(eol - line));
+          if (col && col > line) {
+            size_t kl = (size_t)(col - line);
+            const char *vs = col + 1;
+            while (vs < eol && (*vs == ' ' || *vs == '\t')) vs++;
+            size_t vl = (size_t)(eol - vs);
+            while (vl > 0 && (vs[vl - 1] == ' ' || vs[vl - 1] == '\t')) vl--;
+            if (kl == 12u && strncasecmp(line, "content-type", 12) == 0 && vl > 0) {
+              size_t cl = vl < sizeof ctype - 1u ? vl : sizeof ctype - 1u;
+              for (size_t i = 0; i < cl; i++) ctype[i] = (char)tolower((unsigned char)vs[i]);
+              ctype[cl] = '\0';
+            } else if (kl == 8u && strncasecmp(line, "location", 8) == 0 && vl > 0 && vl < sizeof loc) {
+              memcpy(loc, vs, vl);
+              loc[vl] = '\0';
+            }
+          }
+          line = eol < sep ? eol + 2 : sep;
+        }
+        size_t rem = hbuf.len - (hend + 4u);
+        if (rem > 0) {
+          if (rem > lim) { overflow = true; break; }
+          if (fwrite(hbuf.data + hend + 4u, 1, rem, fp) != rem) { write_err = true; break; }
+          written += rem;
+        }
+        ccord_buf_free(&hbuf);
+      } else {
+        if ((size_t)n > lim || written > lim - (size_t)n) { overflow = true; break; }
+        if (fwrite(rbuf, 1, (size_t)n, fp) != (size_t)n) { write_err = true; break; }
+        written += (size_t)n;
+      }
+    }
+    ccord_buf_free(&hbuf);
+    close(fd);
+    if (fflush(fp) != 0 || ferror(fp)) write_err = true;
+    if (fclose(fp) != 0) write_err = true;
+
+    if (overflow) {
+      (void)unlink(tmp_path);
+      snprintf(out->error, sizeof out->error, "download exceeded maximum size");
+      return false;
+    }
+    if (!found_hdr) {
+      (void)unlink(tmp_path);
+      snprintf(out->error, sizeof out->error, "malformed or empty HTTP response");
+      return false;
+    }
+    if (j->follow_redirects && lb_is_redirect_status(status) && loc[0]) {
+      (void)unlink(tmp_path);
+      if (hop == max_hops) {
+        snprintf(out->error, sizeof out->error, "too many redirects");
+        return false;
+      }
+      char next_url[2048] = "";
+      if (!lb_resolve_redirect_url(scheme, host, port, path, loc, next_url, sizeof next_url)) {
+        snprintf(out->error, sizeof out->error, "redirect URL too long");
+        return false;
+      }
+      if (!http_job_allow_url_const(j, next_url, out->error, sizeof out->error)) {
+        return false;
+      }
+      char nscheme[16] = "", nhost[256] = "", npath[1024] = "";
+      int nport = 80;
+      if (!pw_extract_url_host_port(next_url, nscheme, sizeof nscheme, nhost, sizeof nhost, &nport, npath, sizeof npath) ||
+          strcmp(nscheme, "http") != 0) {
+        snprintf(out->error, sizeof out->error, "redirect target unsupported in loopback mode");
+        return false;
+      }
+      if (ccord_strcasecmp(host, nhost) != 0 || port != nport) strip_creds = true;
+      snprintf(cur_url, sizeof cur_url, "%s", next_url);
+      continue;
+    }
+
+    out->status_code = status;
+    if (ctype[0]) snprintf(out->content_type, sizeof out->content_type, "%s", ctype);
+    if (hop > 0) snprintf(out->final_url, sizeof out->final_url, "%s", cur_url);
+    if (status < 200 || status >= 300) {
+      (void)unlink(tmp_path);
+      out->bytes_written = 0;
+      return true;
+    }
+    if (write_err) {
+      (void)unlink(tmp_path);
+      snprintf(out->error, sizeof out->error, "failed writing downloaded file to disk");
+      return false;
+    }
+    if (lstat(j->dest_path, &dst_st) == 0 && S_ISLNK(dst_st.st_mode)) {
+      (void)unlink(tmp_path);
+      snprintf(out->error, sizeof out->error, "destination path is a symbolic link");
+      return false;
+    }
+    if (rename(tmp_path, j->dest_path) != 0) {
+      int e = errno;
+      (void)unlink(tmp_path);
+      snprintf(out->error, sizeof out->error, "cannot move downloaded file to destination: %s", strerror(e));
+      return false;
+    }
+    out->bytes_written = written;
+    return true;
+  }
+  snprintf(out->error, sizeof out->error, "too many redirects");
+  return false;
+}
 #endif
 
 // ---------------------------------------------------------------- Async HTTP job
-
-typedef struct http_job {
-  plugin_workers *w;
-  char owner[65];
-  uint64_t req_id;
-  char url[2048];
-  char method[16];
-  char *headers_json;
-  uint8_t *body;
-  size_t body_len;
-  uint32_t timeout_ms;
-  bool local_only;
-  bool allow_local;
-} http_job;
 
 static void *http_worker_fn(void *arg)
 {
   http_job *j = arg;
   plugin_workers *w = j->w;
-  ccord_plugin_http_resp resp = {0};
   char scheme[16] = "", host[256] = "", path[1024] = "";
   int port = 80;
-  bool ok = false;
-  if (!pw_extract_url_host_port(j->url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path)) {
-    snprintf(resp.error, sizeof resp.error, "invalid URL");
-  } else {
-    bool is_loc = pw_is_localhost_host(host);
-    if (is_loc && !j->allow_local) {
-      snprintf(resp.error, sizeof resp.error, "localhost access requires network.local permission");
+  bool url_ok = pw_extract_url_host_port(j->url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path);
+  bool is_loc = url_ok && pw_is_localhost_host(host);
+
+  if (j->dest_path[0]) {
+    // Streaming file download mode
+    ccord_plugin_http_dl_resp dl = {0};
+    bool ok = false;
+    if (!url_ok) {
+      snprintf(dl.error, sizeof dl.error, "invalid URL");
+    } else if (is_loc && !j->allow_local) {
+      snprintf(dl.error, sizeof dl.error, "localhost access requires network.local permission");
+    } else if (w->ops.http_download) {
+      ccord_plugin_http_dl_req req = {
+        .url = j->url,
+        .dest_path = j->dest_path,
+        .headers_json = j->headers_json,
+        .timeout_ms = j->timeout_ms ? j->timeout_ms : 30000u,
+        .max_bytes = j->max_bytes ? j->max_bytes : PW_DEFAULT_DL_BYTES,
+        .allow_localhost_http = (j->allow_local && is_loc),
+        .follow_redirects = j->follow_redirects,
+        .max_redirects = j->follow_redirects ? PW_MAX_REDIRECTS : 0u,
+        .allow_url = http_job_allow_url,
+        .allow_url_ud = j,
+      };
+      ok = w->ops.http_download(w->ops.ud, &req, &dl);
     } else if (is_loc && strcmp(scheme, "http") == 0) {
 #if !CCORD_OS_WINDOWS
-      ok = loopback_http_do(host, port, path, j->method, j->headers_json, j->body, j->body_len, j->timeout_ms, &resp);
+      ok = loopback_http_download(j, &dl);
 #else
-      snprintf(resp.error, sizeof resp.error, "loopback HTTP unsupported on this build");
+      snprintf(dl.error, sizeof dl.error, "loopback HTTP download unsupported on this build");
 #endif
+    } else {
+      snprintf(dl.error, sizeof dl.error, "HTTP download unavailable in offline build");
+    }
+
+    if (!atomic_load(&w->shutting_down)) {
+      pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = j->req_id, .ok = ok};
+      snprintf(ev.owner, sizeof ev.owner, "%s", j->owner);
+      if (ok) {
+        ccord_buf out; ccord_buf_init(&out, 0);
+        ccord_jw jw; ccord_jw_init(&jw, &out);
+        ccord_jw_begin_object(&jw);
+        ccord_jw_key(&jw, "status"); ccord_jw_int(&jw, (int64_t)dl.status_code);
+        ccord_jw_key(&jw, "ok"); ccord_jw_bool(&jw, dl.status_code >= 200 && dl.status_code < 300);
+        ccord_jw_key(&jw, "bytes"); ccord_jw_int(&jw, (int64_t)dl.bytes_written);
+        if (dl.content_type[0]) {
+          ccord_jw_key(&jw, "content_type"); ccord_jw_cstr(&jw, dl.content_type);
+        }
+        if (dl.final_url[0]) {
+          ccord_jw_key(&jw, "final_url"); ccord_jw_cstr(&jw, dl.final_url);
+        }
+        ccord_jw_end_object(&jw);
+        if (ccord_jw_ok(&jw)) ev.json = ccord_strndup(ccord_buf_cstr(&out), out.len);
+        ccord_buf_free(&out);
+      } else {
+        snprintf(ev.error, sizeof ev.error, "%s", dl.error[0] ? dl.error : "http download error");
+      }
+      pw_push_ev(w, &ev);
+    }
+  } else {
+    // In-memory HTTP request mode (text or binary-safe, chunked on main thread if > 512 KiB)
+    ccord_plugin_http_resp resp = {0};
+    bool ok = false;
+    if (!url_ok) {
+      snprintf(resp.error, sizeof resp.error, "invalid URL");
+    } else if (is_loc && !j->allow_local) {
+      snprintf(resp.error, sizeof resp.error, "localhost access requires network.local permission");
     } else if (w->ops.http_request) {
       ccord_plugin_http_req req = {
         .url = j->url, .method = j->method, .headers_json = j->headers_json,
         .body = j->body, .body_len = j->body_len,
         .timeout_ms = j->timeout_ms ? j->timeout_ms : 15000u,
-        .max_bytes = PW_MAX_HTTP_BODY,
+        .max_bytes = j->max_bytes ? j->max_bytes : PW_DEFAULT_HTTP_BODY,
         .allow_localhost_http = (j->allow_local && is_loc),
+        .follow_redirects = j->follow_redirects,
+        .max_redirects = j->follow_redirects ? PW_MAX_REDIRECTS : 0u,
+        .allow_url = http_job_allow_url,
+        .allow_url_ud = j,
       };
       ok = w->ops.http_request(w->ops.ud, &req, &resp);
+    } else if (is_loc && strcmp(scheme, "http") == 0) {
+#if !CCORD_OS_WINDOWS
+      ok = loopback_http_do(j, &resp);
+#else
+      snprintf(resp.error, sizeof resp.error, "loopback HTTP unsupported on this build");
+#endif
     } else {
       snprintf(resp.error, sizeof resp.error, "HTTP client unavailable in offline build");
     }
+
+    if (!atomic_load(&w->shutting_down)) {
+      pw_event ev = {
+        .kind = PW_EV_HTTP_REPLY,
+        .id = j->req_id,
+        .ok = ok,
+        .http_status = resp.status_code,
+        .http_binary = j->binary,
+      };
+      snprintf(ev.owner, sizeof ev.owner, "%s", j->owner);
+      if (ok) {
+        ev.raw_body = resp.body;
+        ev.raw_body_len = resp.body_len;
+        resp.body = nullptr;
+        ev.json = resp.headers_json;
+        resp.headers_json = nullptr;
+        if (resp.final_url[0]) ev.final_url = ccord_strdup(resp.final_url);
+      } else {
+        snprintf(ev.error, sizeof ev.error, "%s", resp.error[0] ? resp.error : "http error");
+      }
+      pw_push_ev(w, &ev);
+    }
+    ccord_free(resp.body);
+    ccord_free(resp.headers_json);
   }
 
-  if (!atomic_load(&w->shutting_down)) {
-    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = j->req_id, .ok = ok};
-    snprintf(ev.owner, sizeof ev.owner, "%s", j->owner);
-    if (ok) {
-      ccord_buf out; ccord_buf_init(&out, 0);
-      ccord_jw jw; ccord_jw_init(&jw, &out);
-      ccord_jw_begin_object(&jw);
-      ccord_jw_key(&jw, "status"); ccord_jw_int(&jw, (int64_t)resp.status_code);
-      ccord_jw_key(&jw, "ok"); ccord_jw_bool(&jw, resp.status_code >= 200 && resp.status_code < 300);
-      ccord_jw_key(&jw, "body"); ccord_jw_string(&jw, resp.body ? (const char *)resp.body : "", resp.body_len);
-      if (resp.headers_json && resp.headers_json[0]) {
-        ccord_jw_key(&jw, "headers_json"); ccord_jw_cstr(&jw, resp.headers_json);
-      }
-      ccord_jw_end_object(&jw);
-      if (ccord_jw_ok(&jw)) ev.json = ccord_strndup(ccord_buf_cstr(&out), out.len);
-      ccord_buf_free(&out);
-    } else {
-      snprintf(ev.error, sizeof ev.error, "%s", resp.error[0] ? resp.error : "http error");
-    }
-    pw_push_ev(w, &ev);
-  }
-  ccord_free(resp.body);
-  ccord_free(resp.headers_json);
   ccord_free(j->headers_json);
   ccord_free(j->body);
   ccord_free(j);
@@ -300,9 +806,72 @@ static void *http_worker_fn(void *arg)
   return nullptr;
 }
 
+static bool http_job_validate_initial(plugin_workers *w, const char *owner, uint64_t req_id,
+                                      const ccord_manifest *manifest, const char *url,
+                                      bool local_only, bool allow_local,
+                                      bool *out_https, bool *out_loopback)
+{
+  char scheme[16] = "", host[256] = "", path[1024] = "";
+  int port = 80;
+  if (!pw_extract_url_host_port(url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path)) {
+    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
+    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
+    snprintf(ev.error, sizeof ev.error, "invalid URL");
+    pw_push_ev(w, &ev);
+    return false;
+  }
+  bool is_loc = pw_is_localhost_host(host);
+  if (is_loc && !allow_local) {
+    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
+    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
+    snprintf(ev.error, sizeof ev.error, "localhost access requires network.local permission");
+    pw_push_ev(w, &ev);
+    return false;
+  }
+  if (strcmp(scheme, "https") != 0 && !(strcmp(scheme, "http") == 0 && is_loc)) {
+    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
+    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
+    snprintf(ev.error, sizeof ev.error, "only https:// (or localhost http://) is allowed");
+    pw_push_ev(w, &ev);
+    return false;
+  }
+  if (local_only && !is_loc) {
+    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
+    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
+    snprintf(ev.error, sizeof ev.error, "network.local only allows localhost/127.0.0.1");
+    pw_push_ev(w, &ev);
+    return false;
+  }
+  if (!is_loc && manifest && !ccord_manifest_host_allowed(manifest, host)) {
+    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
+    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
+    snprintf(ev.error, sizeof ev.error, "host '%.180s' not permitted by plugin.json allowed_hosts", host);
+    pw_push_ev(w, &ev);
+    return false;
+  }
+  *out_https = strcmp(scheme, "https") == 0;
+  *out_loopback = is_loc;
+  return true;
+}
+
+static void http_job_copy_host_policy(http_job *j, const ccord_manifest *manifest)
+{
+  if (!manifest) return;
+  j->has_host_policy = true;
+  j->host_policy.allowed_host_count = manifest->allowed_host_count;
+  if (j->host_policy.allowed_host_count > CCORD_MANIFEST_MAX_HOSTS) {
+    j->host_policy.allowed_host_count = CCORD_MANIFEST_MAX_HOSTS;
+  }
+  for (size_t i = 0; i < j->host_policy.allowed_host_count; i++) {
+    snprintf(j->host_policy.allowed_hosts[i], sizeof j->host_policy.allowed_hosts[i], "%s",
+             manifest->allowed_hosts[i]);
+  }
+}
+
 bool pw_start_http(plugin_workers *w, const char *owner, uint64_t req_id, const ccord_manifest *manifest,
                    const char *url, const char *method, const char *headers_json,
-                   const uint8_t *body, size_t body_len, uint32_t timeout_ms, bool local_only, bool allow_local)
+                   const uint8_t *body, size_t body_len, uint32_t timeout_ms, size_t max_bytes,
+                   bool binary, bool follow_redirects, bool local_only, bool allow_local)
 {
   if (!w || !owner || !url) return false;
   if (strlen(url) >= 2048u) return false;
@@ -314,36 +883,8 @@ bool pw_start_http(plugin_workers *w, const char *owner, uint64_t req_id, const 
     pw_push_ev(w, &ev);
     return true;
   }
-  char scheme[16] = "", host[256] = "", path[1024] = "";
-  int port = 80;
-  if (!pw_extract_url_host_port(url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path)) return false;
-  bool is_loc = pw_is_localhost_host(host);
-  if (is_loc && !allow_local) {
-    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
-    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
-    snprintf(ev.error, sizeof ev.error, "localhost access requires network.local permission");
-    pw_push_ev(w, &ev);
-    return true;
-  }
-  if (strcmp(scheme, "https") != 0 && !(strcmp(scheme, "http") == 0 && is_loc)) {
-    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
-    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
-    snprintf(ev.error, sizeof ev.error, "only https:// (or localhost http://) is allowed");
-    pw_push_ev(w, &ev);
-    return true;
-  }
-  if (local_only && !is_loc) {
-    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
-    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
-    snprintf(ev.error, sizeof ev.error, "network.local only allows localhost/127.0.0.1");
-    pw_push_ev(w, &ev);
-    return true;
-  }
-  if (!is_loc && manifest && !ccord_manifest_host_allowed(manifest, host)) {
-    pw_event ev = {.kind = PW_EV_ASYNC_REPLY, .id = req_id, .ok = false};
-    snprintf(ev.owner, sizeof ev.owner, "%s", owner);
-    snprintf(ev.error, sizeof ev.error, "host '%.180s' not permitted by plugin.json allowed_hosts", host);
-    pw_push_ev(w, &ev);
+  bool init_https = false, init_lb = false;
+  if (!http_job_validate_initial(w, owner, req_id, manifest, url, local_only, allow_local, &init_https, &init_lb)) {
     return true;
   }
   http_job *j = ccord_calloc(1, sizeof *j);
@@ -359,13 +900,67 @@ bool pw_start_http(plugin_workers *w, const char *owner, uint64_t req_id, const 
     if (j->body) { memcpy(j->body, body, body_len); j->body_len = body_len; }
   }
   j->timeout_ms = timeout_ms;
+  size_t lim = max_bytes ? max_bytes : PW_DEFAULT_HTTP_BODY;
+  if (lim > PW_MAX_HTTP_BODY_CAP) lim = PW_MAX_HTTP_BODY_CAP;
+  j->max_bytes = lim;
+  j->binary = binary;
+  j->follow_redirects = follow_redirects;
   j->local_only = local_only;
   j->allow_local = allow_local;
+  j->initial_https = init_https;
+  j->initial_loopback = init_lb;
+  http_job_copy_host_policy(j, manifest);
+
   atomic_fetch_add(&w->active_jobs, 1);
   pthread_t t;
   if (pthread_create(&t, nullptr, http_worker_fn, j) != 0) {
     atomic_fetch_sub(&w->active_jobs, 1);
     ccord_free(j->headers_json); ccord_free(j->body); ccord_free(j);
+    return false;
+  }
+  pthread_detach(t);
+  return true;
+}
+
+bool pw_start_http_download(plugin_workers *w, const char *owner, uint64_t req_id, const ccord_manifest *manifest,
+                            const char *url, const char *dest_path, const char *headers_json,
+                            uint32_t timeout_ms, size_t max_bytes, bool follow_redirects,
+                            bool local_only, bool allow_local)
+{
+  if (!w || !owner || !url || !dest_path || !dest_path[0]) return false;
+  if (strlen(url) >= 2048u || strlen(dest_path) >= CCORD_PATH_MAX) return false;
+  bool init_https = false, init_lb = false;
+  if (!http_job_validate_initial(w, owner, req_id, manifest, url, local_only, allow_local, &init_https, &init_lb)) {
+    return true;
+  }
+  http_job *j = ccord_calloc(1, sizeof *j);
+  if (!j) return false;
+  j->w = w;
+  snprintf(j->owner, sizeof j->owner, "%s", owner);
+  j->req_id = req_id;
+  snprintf(j->url, sizeof j->url, "%s", url);
+  snprintf(j->method, sizeof j->method, "GET");
+  snprintf(j->dest_path, sizeof j->dest_path, "%s", dest_path);
+  if (headers_json && headers_json[0]) j->headers_json = ccord_strdup(headers_json);
+  uint32_t tmo = timeout_ms ? timeout_ms : 30000u;
+  if (tmo < 1000u) tmo = 1000u;
+  if (tmo > 300000u) tmo = 300000u;
+  j->timeout_ms = tmo;
+  size_t lim = max_bytes ? max_bytes : PW_DEFAULT_DL_BYTES;
+  if (lim > PW_MAX_DL_BYTES) lim = PW_MAX_DL_BYTES;
+  j->max_bytes = lim;
+  j->follow_redirects = follow_redirects;
+  j->local_only = local_only;
+  j->allow_local = allow_local;
+  j->initial_https = init_https;
+  j->initial_loopback = init_lb;
+  http_job_copy_host_policy(j, manifest);
+
+  atomic_fetch_add(&w->active_jobs, 1);
+  pthread_t t;
+  if (pthread_create(&t, nullptr, http_worker_fn, j) != 0) {
+    atomic_fetch_sub(&w->active_jobs, 1);
+    ccord_free(j->headers_json); ccord_free(j);
     return false;
   }
   pthread_detach(t);

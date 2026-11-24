@@ -17,6 +17,12 @@
 #define SB_MAX_TEXT 65536u
 #define SB_MAX_FS_READ_BYTES (16u * 1024u * 1024u)
 #define SB_FS_CHUNK_BYTES (384u * 1024u)
+#if CCORD_OS_ANDROID
+#define SB_MAX_HTTP_BODY_BYTES (4u * 1024u * 1024u)
+#else
+#define SB_MAX_HTTP_BODY_BYTES (8u * 1024u * 1024u)
+#endif
+#define SB_MAX_ASYNC_CHUNKS 64u
 #define SB_MAX_TIMERS 256u
 #define SB_MIN_EVERY_INTERVAL_MS 50u
 #define SB_MAX_REQUIRE_DEPTH 32
@@ -52,6 +58,13 @@ typedef struct sb_timer {
   bool cancelled;
 } sb_timer;
 
+typedef struct sb_async_chunk_buf {
+  uint64_t req_id;
+  uint64_t next_seq;
+  ccord_buf buf;
+  bool failed;
+} sb_async_chunk_buf;
+
 struct ccord_sandbox {
   lua_State *L;
   ccord_sandbox_services svc;
@@ -66,6 +79,8 @@ struct ccord_sandbox {
   size_t ntimers, captimers;
   uint64_t next_timer_id;
   uint64_t next_async_id;
+  sb_async_chunk_buf *async_chunks;
+  size_t nasync_chunks, capasync_chunks;
   int user_gesture_depth;         // >0 while inside command/menu/action_btn/keybind/panel callback
   ccord_sandbox_platform_info plat_info;
   ccord_sandbox_platform_state plat_state;
@@ -108,6 +123,7 @@ int sb_api_markdown_parse(lua_State *L);
 // else if running inside a Lua coroutine yields and auto-resumes on async.reply!
 int sb_async_dispatch(lua_State *L, ccord_sandbox *sb, const char *method, ccord_buf *params_buf, int cb_idx);
 void sb_async_resolve_entry(ccord_sandbox *sb, uint64_t req_id, bool ok, const ccord_json *result, const char *err_msg);
+void sb_async_chunks_free_all(ccord_sandbox *sb);
 
 // API v3 Lua bindings (sandbox_v3.c)
 void sb_open_api_v3(lua_State *L);

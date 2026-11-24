@@ -659,7 +659,7 @@ bool sb_b64_decode_buf(const char *in, size_t n, ccord_buf *out)
   if (!tmp) return false;
   size_t got = 0;
   bool ok = sb_b64_decode_raw((const unsigned char *)in, n, tmp, &got);
-  if (ok && got > 0) ok = ccord_buf_append(out, tmp, got);
+  if (ok && got > 0) ok = (ccord_buf_append(out, tmp, got) == CCORD_OK);
   ccord_free(tmp);
   return ok;
 }
@@ -790,6 +790,7 @@ ccord_sandbox *ccord_sandbox_create(const ccord_sandbox_config *cfg, const ccord
 void ccord_sandbox_destroy(ccord_sandbox *sb)
 {
   if (!sb) return;
+  sb_async_chunks_free_all(sb);
   if (sb->L) lua_close(sb->L);
   ccord_free(sb->timers);
   ccord_free(sb);

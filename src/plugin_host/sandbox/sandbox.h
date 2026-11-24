@@ -98,6 +98,8 @@ ccord_sandbox_limit ccord_sandbox_limit_hit(const ccord_sandbox *sb);
 // ---- API v3 dispatchers (main -> plugin host) ----
 [[nodiscard]] ccord_status ccord_sandbox_async_reply(ccord_sandbox *sb, uint64_t req_id, bool ok,
                                                      const ccord_json *result, const char *err_msg, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_async_reply_chunk(ccord_sandbox *sb, uint64_t req_id, uint64_t seq,
+                                                           const char *b64, size_t b64_len, ccord_error *err);
 [[nodiscard]] ccord_status ccord_sandbox_hook_call(ccord_sandbox *sb, const char *hook_name, const ccord_json *data,
                                                    char **out_json, ccord_error *err);
 [[nodiscard]] ccord_status ccord_sandbox_raw_gateway(ccord_sandbox *sb, const char *event_name, const ccord_json *payload,

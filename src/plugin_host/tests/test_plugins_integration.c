@@ -11,6 +11,7 @@
 #include <ccord/core/event_bus.h>
 #include <ccord/model/contrib.h>
 #include <ccord/net/account_edit.h>
+#include <ccord/net/http_fetch.h>
 #include <ccord/net/mock_transport.h>
 #include <ccord/net/profile_edit.h>
 #include <ccord/plugins/manifest.h>
@@ -1348,6 +1349,329 @@ static void test_timeline_local_messages_integration(void)
   (void)rmdir(d_p1); (void)rmdir(d_p2); (void)rmdir(d_nofs); (void)rmdir(plugins_dir); (void)rmdir(data_dir); (void)rmdir(root);
 }
 
+typedef struct dl_mock_srv {
+  int listen_fd;
+  uint16_t port;
+  _Atomic bool stop;
+  uint8_t *big_payload;
+  size_t big_len;
+} dl_mock_srv;
+
+static void send_all_fd(int fd, const void *buf, size_t len)
+{
+  const uint8_t *p = buf;
+  size_t off = 0;
+  while (off < len) {
+    ssize_t n = send(fd, p + off, len - off, MSG_NOSIGNAL);
+    if (n <= 0) break;
+    off += (size_t)n;
+  }
+}
+
+static void *dl_mock_srv_thread(void *arg)
+{
+  dl_mock_srv *s = arg;
+  while (!atomic_load(&s->stop)) {
+    int c = accept(s->listen_fd, nullptr, nullptr);
+    if (c < 0) continue;
+    struct timeval tv = {.tv_sec = 2, .tv_usec = 0};
+    (void)setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    (void)setsockopt(c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    char req[4096];
+    ssize_t n = recv(c, req, sizeof req - 1u, 0);
+    if (n <= 0) { close(c); continue; }
+    req[n] = '\0';
+    char path[256] = "/";
+    (void)sscanf(req, "%*15s %255s", path);
+
+    if (strcmp(path, "/bin256") == 0) {
+      uint8_t body[256];
+      for (int i = 0; i < 256; i++) body[i] = (uint8_t)i;
+      const char *hdr = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 256\r\nConnection: close\r\n\r\n";
+      send_all_fd(c, hdr, strlen(hdr));
+      send_all_fd(c, body, sizeof body);
+    } else if (strcmp(path, "/big") == 0) {
+      char hdr[256];
+      int hl = snprintf(hdr, sizeof hdr,
+                        "HTTP/1.1 200 OK\r\nContent-Type: IMAGE/PNG\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n",
+                        s->big_len);
+      if (hl > 0) send_all_fd(c, hdr, (size_t)hl);
+      send_all_fd(c, s->big_payload, s->big_len);
+    } else if (strcmp(path, "/notfound") == 0) {
+      const char *resp = "HTTP/1.1 404 Not Found\r\nContent-Type: text/html\r\nContent-Length: 18\r\nConnection: close\r\n\r\n<html>error!</html>";
+      send_all_fd(c, resp, strlen(resp) - 1u);
+    } else if (strcmp(path, "/redir") == 0) {
+      const char *resp = "HTTP/1.1 302 Found\r\nLocation: /bin256\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+      send_all_fd(c, resp, strlen(resp));
+    } else if (strcmp(path, "/redir-loop") == 0) {
+      const char *resp = "HTTP/1.1 302 Found\r\nLocation: /redir-loop\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+      send_all_fd(c, resp, strlen(resp));
+    } else if (strcmp(path, "/redir-ext") == 0) {
+      const char *resp = "HTTP/1.1 302 Found\r\nLocation: https://evil.example/payload\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+      send_all_fd(c, resp, strlen(resp));
+    } else if (strcmp(path, "/redir-cred") == 0) {
+      char resp[256];
+      int rl = snprintf(resp, sizeof resp,
+                        "HTTP/1.1 302 Found\r\nLocation: http://localhost:%u/echo-auth\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        (unsigned)s->port);
+      if (rl > 0) send_all_fd(c, resp, (size_t)rl);
+    } else if (strcmp(path, "/echo-auth") == 0) {
+      bool has_auth = (strstr(req, "Authorization:") != nullptr || strstr(req, "authorization:") != nullptr);
+      const char *body = has_auth ? "AUTH" : "NOAUTH";
+      char resp[256];
+      int rl = snprintf(resp, sizeof resp,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n%s",
+                        strlen(body), body);
+      if (rl > 0) send_all_fd(c, resp, (size_t)rl);
+    } else {
+      const char *resp = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+      send_all_fd(c, resp, strlen(resp));
+    }
+    close(c);
+  }
+  return nullptr;
+}
+
+static bool verify_file_matches(const char *path, const uint8_t *expected, size_t expected_len)
+{
+  FILE *f = fopen(path, "rb");
+  if (!f) return false;
+  uint8_t *buf = ccord_malloc(expected_len + 1u);
+  if (!buf) { fclose(f); return false; }
+  size_t got = fread(buf, 1, expected_len + 1u, f);
+  fclose(f);
+  bool eq = (got == expected_len && memcmp(buf, expected, expected_len) == 0);
+  ccord_free(buf);
+  return eq;
+}
+
+static void test_http_binary_download_and_redirects(void)
+{
+  char root[] = "/tmp/ccord-httpdl-XXXXXX";
+  CT_CHECK(mkdtemp(root) != nullptr);
+  char plugins_dir[1100], data_dir[1100], d_ok[1200], d_nofs[1200];
+  char dl_curl[1200], dl_curl_404[1200], dl_lua[1200], dl_lua_404[1200], sym_path[1200], sym_target[1200], prot_path[1200];
+  snprintf(plugins_dir, sizeof plugins_dir, "%s/plugins", root);
+  snprintf(data_dir, sizeof data_dir, "%s/data", root);
+  snprintf(d_ok, sizeof d_ok, "%s/http_ok", plugins_dir);
+  snprintf(d_nofs, sizeof d_nofs, "%s/http_nofs", plugins_dir);
+  snprintf(dl_curl, sizeof dl_curl, "%s/curl_big.bin", root);
+  snprintf(dl_curl_404, sizeof dl_curl_404, "%s/curl_404.bin", root);
+  snprintf(dl_lua, sizeof dl_lua, "%s/lua_big.bin", root);
+  snprintf(dl_lua_404, sizeof dl_lua_404, "%s/lua_404.bin", root);
+  snprintf(sym_target, sizeof sym_target, "%s/sym_target.txt", root);
+  snprintf(sym_path, sizeof sym_path, "%s/sym_link.bin", root);
+  snprintf(prot_path, sizeof prot_path, "%s/protected.bin", data_dir);
+  CT_CHECK(mkdir(plugins_dir, 0700) == 0);
+  CT_CHECK(mkdir(data_dir, 0700) == 0);
+  CT_CHECK(mkdir(d_ok, 0700) == 0);
+  CT_CHECK(mkdir(d_nofs, 0700) == 0);
+  write_file(root, "sym_target.txt", "keep");
+  CT_CHECK(symlink(sym_target, sym_path) == 0);
+
+  const size_t big_len = 1200000u; // ~1.14 MiB (> 1 MiB IPC frame limit -> exercises chunking!)
+  uint8_t *big_buf = ccord_malloc(big_len);
+  CT_CHECK(big_buf != nullptr);
+  for (size_t i = 0; i < big_len; i++) big_buf[i] = (uint8_t)((i * 31u + 7u) & 0xFFu);
+
+  dl_mock_srv srv = {.listen_fd = -1, .big_payload = big_buf, .big_len = big_len};
+  srv.listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+  CT_CHECK(srv.listen_fd >= 0);
+  int one = 1;
+  (void)setsockopt(srv.listen_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  struct sockaddr_in addr = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = 0};
+  CT_CHECK(bind(srv.listen_fd, (struct sockaddr *)&addr, sizeof addr) == 0);
+  socklen_t alen = sizeof addr;
+  CT_CHECK(getsockname(srv.listen_fd, (struct sockaddr *)&addr, &alen) == 0);
+  srv.port = ntohs(addr.sin_port);
+  CT_CHECK(listen(srv.listen_fd, 16) == 0);
+  pthread_t srv_tid;
+  CT_CHECK(pthread_create(&srv_tid, nullptr, dl_mock_srv_thread, &srv) == 0);
+
+  // Part 1: Direct libcurl ccord_http_request & ccord_http_download tests (when live libcurl is linked)
+  {
+    char u[256];
+    snprintf(u, sizeof u, "http://127.0.0.1:%u/redir", (unsigned)srv.port);
+    ccord_http_request_opts ro = {.url = u, .allow_localhost_http = true, .follow_redirects = false};
+    ccord_http_response rr = {0};
+    bool live_ok = ccord_http_request(&ro, &rr);
+    if (live_ok) {
+      CT_CHECK(rr.status_code == 302 && rr.final_url[0] == '\0');
+      ccord_http_response_free(&rr);
+
+      ro.follow_redirects = true;
+      CT_CHECK(ccord_http_request(&ro, &rr));
+      CT_CHECK(rr.status_code == 200 && rr.body_len == 256u && strstr(rr.final_url, "/bin256") != nullptr);
+      bool bytes_ok = true;
+      for (size_t i = 0; i < 256u; i++) if (rr.body[i] != (uint8_t)i) { bytes_ok = false; break; }
+      CT_CHECK(bytes_ok);
+      ccord_http_response_free(&rr);
+
+      // Origin change strips Authorization header across redirect
+      snprintf(u, sizeof u, "http://127.0.0.1:%u/redir-cred", (unsigned)srv.port);
+      ccord_http_request_opts cro = {
+        .url = u, .headers_json = "{\"Authorization\":\"Bearer secret\"}",
+        .allow_localhost_http = true, .follow_redirects = true,
+      };
+      CT_CHECK(ccord_http_request(&cro, &rr));
+      CT_CHECK(rr.status_code == 200 && rr.body && strcmp((const char *)rr.body, "NOAUTH") == 0);
+      ccord_http_response_free(&rr);
+
+      // Loopback -> external redirect blocked
+      snprintf(u, sizeof u, "http://127.0.0.1:%u/redir-ext", (unsigned)srv.port);
+      ccord_http_request_opts ero = {.url = u, .allow_localhost_http = true, .follow_redirects = true};
+      CT_CHECK(!ccord_http_request(&ero, &rr));
+      ccord_http_response_free(&rr);
+
+      // Redirect loop (>5 hops) blocked
+      snprintf(u, sizeof u, "http://127.0.0.1:%u/redir-loop", (unsigned)srv.port);
+      ccord_http_request_opts lro = {.url = u, .allow_localhost_http = true, .follow_redirects = true};
+      CT_CHECK(!ccord_http_request(&lro, &rr));
+      ccord_http_response_free(&rr);
+
+      // Streaming download 1.14 MiB binary file
+      snprintf(u, sizeof u, "http://127.0.0.1:%u/big", (unsigned)srv.port);
+      ccord_http_download_opts dlo = {.url = u, .dest_path = dl_curl, .allow_localhost_http = true};
+      ccord_http_download_resp dlr = {0};
+      CT_CHECK(ccord_http_download(&dlo, &dlr));
+      CT_CHECK(dlr.status_code == 200 && dlr.bytes_written == big_len && strcmp(dlr.content_type, "image/png") == 0);
+      CT_CHECK(verify_file_matches(dl_curl, big_buf, big_len));
+
+      // Non-2xx download returns ok=true with status=404, bytes=0, and leaves NO file on disk
+      snprintf(u, sizeof u, "http://127.0.0.1:%u/notfound", (unsigned)srv.port);
+      ccord_http_download_opts dlo404 = {.url = u, .dest_path = dl_curl_404, .allow_localhost_http = true};
+      ccord_http_download_resp dlr404 = {0};
+      CT_CHECK(ccord_http_download(&dlo404, &dlr404));
+      CT_CHECK(dlr404.status_code == 404 && dlr404.bytes_written == 0);
+      struct stat st404;
+      CT_CHECK(lstat(dl_curl_404, &st404) != 0);
+
+      // Symlink destination rejected
+      snprintf(u, sizeof u, "http://127.0.0.1:%u/bin256", (unsigned)srv.port);
+      ccord_http_download_opts dlosym = {.url = u, .dest_path = sym_path, .allow_localhost_http = true};
+      ccord_http_download_resp dlrsym = {0};
+      CT_CHECK(!ccord_http_download(&dlosym, &dlrsym));
+    } else {
+      ccord_http_response_free(&rr);
+    }
+  }
+
+  // Part 2: End-to-end plugin sandbox + IPC chunking + loopback worker + permission enforcement
+  write_file(d_ok, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.http_ok\",\"name\":\"HttpOk\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"network.local\",\"fs.write\",\"clipboard.write\"]}");
+  char lua_ok[8192];
+  snprintf(lua_ok, sizeof lua_ok,
+           "local base = 'http://127.0.0.1:%u'\n"
+           "net.http.request({ url = base .. '/bin256', binary = true }, function(r, e)\n"
+           "  local ok = r and r.ok and #r.body == 256\n"
+           "  if ok then for i = 1, 256 do if string.byte(r.body, i) ~= (i - 1) then ok = false break end end end\n"
+           "  clipboard.write('http_bin256:' .. tostring(ok))\n"
+           "end)\n"
+           "net.http.request({ url = base .. '/big', binary = true, max_bytes = 2097152 }, function(r, e)\n"
+           "  local ok = r and r.ok and #r.body == 1200000 and string.byte(r.body, 1) == 7 and string.byte(r.body, 1200000) == ((1199999 * 31 + 7) %% 256)\n"
+           "  clipboard.write('http_chunked:' .. tostring(ok) .. ':' .. tostring(r and #r.body or e))\n"
+           "end)\n"
+           "net.http.download({ url = base .. '/big', dest_path = '%s' }, function(r, e)\n"
+           "  clipboard.write('dl_big:' .. tostring(r and r.ok) .. ':' .. tostring(r and r.bytes) .. ':' .. tostring(r and r.content_type or e))\n"
+           "end)\n"
+           "net.http.download({ url = base .. '/notfound', dest_path = '%s' }, function(r, e)\n"
+           "  clipboard.write('dl_404:' .. tostring(r and r.status) .. ':' .. tostring(r and r.ok) .. ':' .. tostring(r and r.bytes))\n"
+           "end)\n"
+           "net.http.download({ url = base .. '/bin256', dest_path = '%s' }, function(r, e)\n"
+           "  clipboard.write('dl_prot:' .. tostring(r == nil) .. ':' .. tostring(e ~= nil))\n"
+           "end)\n"
+           "net.http.download({ url = base .. '/bin256', dest_path = '%s' }, function(r, e)\n"
+           "  clipboard.write('dl_sym:' .. tostring(r == nil) .. ':' .. tostring(e ~= nil))\n"
+           "end)\n"
+           "net.http.request({ url = base .. '/redir', follow_redirects = false }, function(r, e)\n"
+           "  clipboard.write('redir_off:' .. tostring(r and r.status))\n"
+           "end)\n"
+           "net.http.request({ url = base .. '/redir', binary = true, follow_redirects = true }, function(r, e)\n"
+           "  clipboard.write('redir_on:' .. tostring(r and r.status) .. ':' .. tostring(r and #r.body) .. ':' .. tostring(r and r.final_url ~= nil))\n"
+           "end)\n"
+           "net.http.request({ url = base .. '/redir-ext', binary = true, follow_redirects = true }, function(r, e)\n"
+           "  clipboard.write('redir_ext:' .. tostring(r == nil) .. ':' .. tostring(e ~= nil))\n"
+           "end)\n"
+           "net.http.request({ url = base .. '/redir-loop', binary = true, follow_redirects = true }, function(r, e)\n"
+           "  clipboard.write('redir_loop:' .. tostring(r == nil) .. ':' .. tostring(e ~= nil))\n"
+           "end)\n",
+           (unsigned)srv.port, dl_lua, dl_lua_404, prot_path, sym_path);
+  write_file(d_ok, "main.lua", lua_ok);
+
+  // Plugin with network.local WITHOUT fs.write -> calling net.http.download must terminate as FAILED
+  write_file(d_nofs, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.http_nofs\",\"name\":\"HttpNoFs\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"network.local\"]}");
+  char lua_nofs[1600];
+  snprintf(lua_nofs, sizeof lua_nofs,
+           "pcall(function() net.http.download({ url = 'http://127.0.0.1:%u/bin256', dest_path = '%s' }) end)\n",
+           (unsigned)srv.port, dl_lua_404);
+  write_file(d_nofs, "main.lua", lua_nofs);
+
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  ccord_contrib *contrib = ccord_contrib_create(&err);
+  v3_clip_log cl = {0};
+  const char *dirs[] = {plugins_dir};
+  ccord_plugins_config cfg = {
+    .store = store, .contrib = contrib, .bus = bus,
+    .search_dirs = dirs, .search_dir_count = 1,
+    .data_dir = data_dir, .host_exe = CCORD_PLUGIN_HOST_BIN,
+    .clipboard_write = v3_on_clip, .clipboard_ud = &cl,
+  };
+  ccord_plugins *pm = ccord_plugins_create(&cfg, &err);
+  CT_CHECK(pm != nullptr);
+  (void)ccord_plugins_load_all(pm);
+
+  const char *ids[] = {"dev.test.http_ok", "dev.test.http_nofs"};
+  for (size_t i = 0; i < 2; i++) {
+    CT_CHECK(pump_until(pm, bus, contrib, ids[i], CCORD_PLUGIN_NEEDS_CONSENT));
+    const ccord_plugin_info *pi = find_info(contrib, ids[i]);
+    if (pi) ccord_contrib_plugin_consent_accept_for(contrib, ids[i], pi->perms_mask);
+  }
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.http_ok", CCORD_PLUGIN_READY));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.http_nofs", CCORD_PLUGIN_FAILED));
+
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "http_bin256:true"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "http_chunked:true:1200000"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "dl_big:true:1200000:image/png"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "dl_404:404:false:0"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "dl_prot:true:true"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "dl_sym:true:true"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "redir_off:302"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "redir_on:200:256:true"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "redir_ext:true:true"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "redir_loop:true:true"));
+
+  CT_CHECK(verify_file_matches(dl_lua, big_buf, big_len));
+  struct stat st_lua404;
+  CT_CHECK(lstat(dl_lua_404, &st_lua404) != 0);
+
+  ccord_plugins_shutdown(pm);
+  ccord_plugins_destroy(pm);
+  ccord_contrib_destroy(contrib);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+
+  atomic_store(&srv.stop, true);
+  shutdown(srv.listen_fd, SHUT_RDWR);
+  close(srv.listen_fd);
+  pthread_join(srv_tid, nullptr);
+  ccord_free(big_buf);
+
+  char rm[1400];
+  snprintf(rm, sizeof rm, "%s/plugin.json", d_ok); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/main.lua", d_ok); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/plugin.json", d_nofs); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/main.lua", d_nofs); (void)unlink(rm);
+  (void)unlink(dl_curl); (void)unlink(dl_curl_404); (void)unlink(dl_lua); (void)unlink(dl_lua_404);
+  (void)unlink(sym_path); (void)unlink(sym_target); (void)unlink(prot_path);
+  snprintf(rm, sizeof rm, "%s/plugins.json", data_dir); (void)unlink(rm);
+  (void)rmdir(d_ok); (void)rmdir(d_nofs); (void)rmdir(plugins_dir); (void)rmdir(data_dir); (void)rmdir(root);
+}
+
 int main(void)
 {
   char root[] = "/tmp/ccord-it-XXXXXX";
@@ -1731,5 +2055,6 @@ int main(void)
   test_security_regressions();
   test_texture_upload_file_integration();
   test_timeline_local_messages_integration();
+  test_http_binary_download_and_redirects();
   return CT_RESULT("test_plugins_integration");
 }

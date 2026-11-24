@@ -493,6 +493,15 @@ static void handle_v3_ntf(host *h, const ccord_ipc_msg *msg)
     const ccord_json *res = ccord_json_get(msg->params, "result");
     size_t el = 0; const char *em = str_of(msg->params, "error", &el);
     (void)ccord_sandbox_async_reply(h->sb, (uint64_t)rid, ok, res, em, &err);
+  } else if (strcmp(msg->method, "async.reply_chunk") == 0) {
+    int64_t rid = 0, seq = 0;
+    (void)ccord_json_int64(ccord_json_get(msg->params, "req_id"), &rid);
+    (void)ccord_json_int64(ccord_json_get(msg->params, "seq"), &seq);
+    size_t bl = 0;
+    const char *b64 = str_of(msg->params, "b64", &bl);
+    if (rid > 0 && seq >= 0 && b64) {
+      (void)ccord_sandbox_async_reply_chunk(h->sb, (uint64_t)rid, (uint64_t)seq, b64, bl, &err);
+    }
   } else if (strcmp(msg->method, "gateway.raw") == 0) {
     size_t el = 0; const char *ev = str_of(msg->params, "event", &el);
     (void)ccord_sandbox_raw_gateway(h->sb, ev ? ev : "", ccord_json_get(msg->params, "payload"), &err);
