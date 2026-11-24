@@ -76,6 +76,7 @@ static void media_op_voice(void *ud, ccord_app_media_voice *out)
   out->channel_id = vch;
   out->deafened = (vs && vs->self_deaf) || ses_deaf;
   out->muted = (vs && (vs->self_mute || vs->self_deaf)) || ses_mute || out->deafened;
+  out->suppressed = vs && vs->suppress;
   out->camera = vs && vs->self_video;
 }
 
@@ -234,6 +235,13 @@ static void media_op_thread_controls(void *ud, ccord_voice_audio_thread *t, bool
   ccord_voice_audio_thread_set_controls(t, muted, deafened, in_vol, out_vol);
 }
 
+static void media_op_thread_controls_ex(void *ud, ccord_voice_audio_thread *t, bool muted, bool deafened,
+                                        bool cap_suppressed, bool ptt_idle, int in_vol, int out_vol)
+{
+  (void)ud;
+  ccord_voice_audio_thread_set_controls_ex(t, muted, deafened, cap_suppressed, ptt_idle, in_vol, out_vol);
+}
+
 static void media_op_thread_stop(void *ud, ccord_voice_audio_thread *t)
 {
   (void)ud;
@@ -345,6 +353,12 @@ static bool media_op_loopback_failed(void *ud, const ccord_loopback_audio *l)
 {
   (void)ud;
   return ccord_loopback_audio_failed(l);
+}
+
+static void media_op_loopback_set_paused(void *ud, ccord_loopback_audio *l, bool paused)
+{
+  (void)ud;
+  ccord_loopback_audio_set_paused(l, paused);
 }
 
 static void media_op_loopback_close(void *ud, ccord_loopback_audio *l)
@@ -505,6 +519,7 @@ const ccord_app_media_ops k_app_media_ops = {
   .pop_soundboard = media_op_pop_soundboard,
   .thread_start = media_op_thread_start,
   .thread_controls = media_op_thread_controls,
+  .thread_controls_ex = media_op_thread_controls_ex,
   .thread_stop = media_op_thread_stop,
   .audio_open = media_op_audio_open,
   .audio_close = media_op_audio_close,
@@ -522,6 +537,7 @@ const ccord_app_media_ops k_app_media_ops = {
   .loopback_open = media_op_loopback_open,
   .loopback_read = media_op_loopback_read,
   .loopback_failed = media_op_loopback_failed,
+  .loopback_set_paused = media_op_loopback_set_paused,
   .loopback_close = media_op_loopback_close,
   .resolve_dims = media_op_resolve_dims,
   .video_open = media_op_video_open,

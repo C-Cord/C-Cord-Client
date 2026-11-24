@@ -12,8 +12,7 @@
 #include <ccord/platform/platform.h>
 
 #define AUDIO_FRAME_SAMPLES 960u          // 20 ms at 48 kHz, matches the gateway frame size
-#define AUDIO_SLEEP_MS 10u                // ~10 ms active poll cadence
-#define AUDIO_IDLE_SLEEP_MS 50u           // reduced wakeup rate while both capture and playback are gated
+#define AUDIO_SLEEP_MS 20u                // 50 Hz active cadence matching 960-sample Opus frames
 #define AUDIO_MAX_DRAIN_FRAMES 3          // cap frames drained per wakeup to absorb scheduling jitter
 
 struct ccord_voice_audio_thread {
@@ -24,6 +23,8 @@ struct ccord_voice_audio_thread {
   atomic_bool stop;
   atomic_bool muted;
   atomic_bool deafened;
+  atomic_bool cap_suppressed;
+  atomic_bool ptt_idle;
   atomic_int in_vol;
   atomic_int out_vol;
   _Atomic uint64_t ctrl_seq;
@@ -78,16 +79,20 @@ static void audio_thread_main(void *arg)
     uint64_t seq = atomic_load_explicit(&t->ctrl_seq, memory_order_acquire);
     bool muted = atomic_load_explicit(&t->muted, memory_order_relaxed);
     bool deafened = atomic_load_explicit(&t->deafened, memory_order_relaxed);
+    bool cap_suppressed = atomic_load_explicit(&t->cap_suppressed, memory_order_relaxed);
+    bool ptt_idle = atomic_load_explicit(&t->ptt_idle, memory_order_relaxed);
     int in_vol = atomic_load_explicit(&t->in_vol, memory_order_relaxed);
     int out_vol = atomic_load_explicit(&t->out_vol, memory_order_relaxed);
 
-    // Mic: while muted or input gain is zero, clear buffered capture samples so the SDL capture
-    // stream cannot accumulate unbounded unread PCM (+691 MiB/hr at 48 kHz stereo S16). Clear once
-    // more on unmute before reading so stale muted samples are never transmitted.
-    bool cap_gated = (muted || in_vol <= 0);
+    // Mic: while muted, suppressed, PTT-idle, or input gain is zero, pause the hardware capture
+    // device (shutting down Android mic ADC / AudioFlinger capture) and discard buffered samples
+    // so unread PCM cannot accumulate (+691 MiB/hr at 48 kHz stereo S16). Clear once more on
+    // unpause before reading so stale samples are never transmitted.
+    bool cap_gated = (muted || in_vol <= 0 || cap_suppressed || ptt_idle);
     if (cap && !cap_gated) {
       if (was_cap_gated) {
         ccord_audio_clear(cap);
+        ccord_audio_set_paused(cap, false);
         was_cap_gated = false;
       }
       for (int f = 0; f < AUDIO_MAX_DRAIN_FRAMES && !atomic_load_explicit(&t->stop, memory_order_acquire); f++) {
@@ -97,17 +102,20 @@ static void audio_thread_main(void *arg)
         (void)t->io.push(t->io.ud, pcm, rframes, &err);
         if (rframes < AUDIO_FRAME_SAMPLES) break;
       }
-    } else if (cap && cap_gated) {
+    } else if (cap && cap_gated && !was_cap_gated) {
+      ccord_audio_set_paused(cap, true);
       ccord_audio_clear(cap);
       was_cap_gated = true;
     }
 
-    // Playback: mirror the original inline loop — only pull (and write) when not deafened and
-    // output gain is non-zero, so deafen/volume are observable and no stale audio is queued.
-    // Clear already-queued SDL playback samples on the transition so deafen silences at once.
+    // Playback: pause the hardware output device and clear already-queued SDL playback samples on
+    // the transition to deafened/zero-volume so audio silences at once and the DAC goes idle.
     bool play_gated = (deafened || out_vol <= 0);
     if (play && !play_gated) {
-      was_play_gated = false;
+      if (was_play_gated) {
+        ccord_audio_set_paused(play, false);
+        was_play_gated = false;
+      }
       for (int f = 0; f < AUDIO_MAX_DRAIN_FRAMES && !atomic_load_explicit(&t->stop, memory_order_acquire); f++) {
         size_t pframes = t->io.pull(t->io.ud, pcm, AUDIO_FRAME_SAMPLES);
         if (pframes == 0) break;
@@ -116,15 +124,22 @@ static void audio_thread_main(void *arg)
         if (pframes < AUDIO_FRAME_SAMPLES) break;
       }
     } else if (play && play_gated && !was_play_gated) {
+      ccord_audio_set_paused(play, true);
       ccord_audio_clear(play);
       was_play_gated = true;
     }
 
-    uint32_t wait_ms = (cap_gated && play_gated) ? AUDIO_IDLE_SLEEP_MS : AUDIO_SLEEP_MS;
     ccord_mutex_lock(t->mtx);
-    if (!atomic_load_explicit(&t->stop, memory_order_acquire) &&
-        atomic_load_explicit(&t->ctrl_seq, memory_order_acquire) == seq) {
-      (void)ccord_cond_wait_timeout(t->cv, t->mtx, wait_ms);
+    if (cap_gated && play_gated) {
+      // Both capture and playback are paused: block indefinitely at 0 Hz until a control change
+      // or stop request signals t->cv.
+      while (!atomic_load_explicit(&t->stop, memory_order_acquire) &&
+             atomic_load_explicit(&t->ctrl_seq, memory_order_acquire) == seq) {
+        ccord_cond_wait(t->cv, t->mtx);
+      }
+    } else if (!atomic_load_explicit(&t->stop, memory_order_acquire) &&
+               atomic_load_explicit(&t->ctrl_seq, memory_order_acquire) == seq) {
+      (void)ccord_cond_wait_timeout(t->cv, t->mtx, AUDIO_SLEEP_MS);
     }
     ccord_mutex_unlock(t->mtx);
   }
@@ -159,6 +174,8 @@ ccord_voice_audio_thread *ccord_voice_audio_thread_start(const ccord_voice_audio
   atomic_init(&t->stop, false);
   atomic_init(&t->muted, false);
   atomic_init(&t->deafened, false);
+  atomic_init(&t->cap_suppressed, false);
+  atomic_init(&t->ptt_idle, false);
   atomic_init(&t->in_vol, 100);
   atomic_init(&t->out_vol, 100);
   atomic_init(&t->ctrl_seq, 0u);
@@ -173,8 +190,8 @@ ccord_voice_audio_thread *ccord_voice_audio_thread_start(const ccord_voice_audio
   return t;
 }
 
-void ccord_voice_audio_thread_set_controls(ccord_voice_audio_thread *t, bool muted, bool deafened, int in_vol,
-                                           int out_vol)
+void ccord_voice_audio_thread_set_controls_ex(ccord_voice_audio_thread *t, bool muted, bool deafened,
+                                              bool cap_suppressed, bool ptt_idle, int in_vol, int out_vol)
 {
   if (!t) return;
   int iv = clamp_vol(in_vol);
@@ -182,6 +199,8 @@ void ccord_voice_audio_thread_set_controls(ccord_voice_audio_thread *t, bool mut
   ccord_mutex_lock(t->mtx);
   if (atomic_load_explicit(&t->muted, memory_order_relaxed) == muted &&
       atomic_load_explicit(&t->deafened, memory_order_relaxed) == deafened &&
+      atomic_load_explicit(&t->cap_suppressed, memory_order_relaxed) == cap_suppressed &&
+      atomic_load_explicit(&t->ptt_idle, memory_order_relaxed) == ptt_idle &&
       atomic_load_explicit(&t->in_vol, memory_order_relaxed) == iv &&
       atomic_load_explicit(&t->out_vol, memory_order_relaxed) == ov) {
     ccord_mutex_unlock(t->mtx);
@@ -189,11 +208,19 @@ void ccord_voice_audio_thread_set_controls(ccord_voice_audio_thread *t, bool mut
   }
   atomic_store_explicit(&t->muted, muted, memory_order_relaxed);
   atomic_store_explicit(&t->deafened, deafened, memory_order_relaxed);
+  atomic_store_explicit(&t->cap_suppressed, cap_suppressed, memory_order_relaxed);
+  atomic_store_explicit(&t->ptt_idle, ptt_idle, memory_order_relaxed);
   atomic_store_explicit(&t->in_vol, iv, memory_order_relaxed);
   atomic_store_explicit(&t->out_vol, ov, memory_order_relaxed);
   atomic_fetch_add_explicit(&t->ctrl_seq, 1u, memory_order_release);
   ccord_cond_signal(t->cv);
   ccord_mutex_unlock(t->mtx);
+}
+
+void ccord_voice_audio_thread_set_controls(ccord_voice_audio_thread *t, bool muted, bool deafened, int in_vol,
+                                           int out_vol)
+{
+  ccord_voice_audio_thread_set_controls_ex(t, muted, deafened, false, false, in_vol, out_vol);
 }
 
 void ccord_voice_audio_thread_stop(ccord_voice_audio_thread *t)

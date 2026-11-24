@@ -117,6 +117,7 @@ static void reset_sync(ccord_app_media *m)
 {
   m->have_cfg = false;
   m->have_ptt = false;
+  m->ptt_active_until_ms = 0;
   m->resolved = false;
   m->audio_cap_retry_ms = 0;
   m->audio_play_retry_ms = 0;
@@ -258,9 +259,27 @@ void ccord_app_media_pump(ccord_app_media *m, bool live, bool virtual_clock)
   if (v.active) {
     int in_vol = app_media_clamp_vol(m->prefs.input_volume);
     int out_vol = app_media_clamp_vol(m->prefs.output_volume);
+    bool was_ptt_held = m->have_ptt && m->last_ptt_held;
     sync_config(m);
     sync_ptt(m);
     sync_volumes(m);
+    // Go Live stream audio falls back to mic capture when active, unpaused, and not using desktop loopback.
+    bool stream_needs_mic = stream_on && !paused && !loop_on && m->ops->stream_send_pcm != nullptr;
+    bool ptt_idle = false;
+    if (m->prefs.ptt) {
+      bool ptt_held = ccord_app_media_ptt_open(m->ops, m->ud, &m->prefs);
+      if (ptt_held || was_ptt_held) {
+        // Keep mic capture open while held and across the 300 ms PTT hangover + 5-frame silence tail after release.
+        m->ptt_active_until_ms = now + 450u;
+      } else if (m->ptt_active_until_ms != 0 && now >= m->ptt_active_until_ms) {
+        m->ptt_active_until_ms = 0;
+      }
+      bool ptt_tail = m->ptt_active_until_ms != 0 && now < m->ptt_active_until_ms;
+      ptt_idle = !ptt_held && !ptt_tail && !stream_needs_mic;
+    } else {
+      m->ptt_active_until_ms = 0;
+    }
+    bool cap_suppressed = v.suppressed && !stream_needs_mic;
     if (!virtual_clock) {
       if (v.deafened || out_vol <= 0) {
         app_media_discard_pending_soundboard(m);
@@ -270,11 +289,11 @@ void ccord_app_media_pump(ccord_app_media *m, bool live, bool virtual_clock)
       }
       if (live) {
         app_media_close_inline(m);   // mode switch: the pthread owns the devices now
-        app_media_sync_live_thread(m, &v, in_vol, out_vol, now);
+        app_media_sync_live_thread(m, &v, cap_suppressed, ptt_idle, in_vol, out_vol, now);
       } else {
         app_media_stop_thread(m);    // mode switch: inline devices own the PCM now
         app_media_sync_devices(m, now);
-        app_media_pump_inline(m, v.muted, v.deafened, in_vol, out_vol);
+        app_media_pump_inline(m, v.muted, v.deafened, cap_suppressed, ptt_idle, in_vol, out_vol);
       }
     } else {
       app_media_stop_thread(m);
@@ -300,4 +319,14 @@ void ccord_app_media_pump(ccord_app_media *m, bool live, bool virtual_clock)
   app_media_pump_stream_loopback(m, now, loop_on, paused);
   app_media_pump_receive(m, now);
   app_media_pump_cameras(m, &v, now);
+}
+
+uint32_t ccord_app_media_next_wait_ms(const ccord_app_media *m, uint64_t now_ms)
+{
+  if (!m || !m->prefs.ptt || m->ptt_active_until_ms == 0) return UINT32_MAX;
+  // While the PTT key is still held, wait for KEY_UP / portal Deactivated instead of waking every 450 ms.
+  if (m->have_ptt && m->last_ptt_held) return UINT32_MAX;
+  if (now_ms >= m->ptt_active_until_ms) return 0u;
+  uint64_t rem = m->ptt_active_until_ms - now_ms;
+  return rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
 }

@@ -76,6 +76,8 @@ void app_media_close_send(ccord_app_media *m)
     m->ops->loopback_close(m->ud, m->loopback);
     m->loopback = nullptr;
   }
+  m->loopback_paused = false;
+  m->loopback_unsupported = false;
   m->loopback_retry_ms = 0;
   m->loopback_next_ms = 0;
   if (m->camera) {

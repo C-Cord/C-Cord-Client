@@ -83,8 +83,11 @@ struct ccord_app_media {
   bool have_thread_ctrl;
   bool last_th_muted;
   bool last_th_deafened;
+  bool last_th_cap_suppressed;
+  bool last_th_ptt_idle;
   int last_th_in_vol;
   int last_th_out_vol;
+  uint64_t ptt_active_until_ms;   // keeps mic open across PTT release hangover + silence tail
 
   // local soundboard playback ring (shared between main thread decode and live/inline speaker pull)
   ccord_mutex *sb_mtx;
@@ -115,6 +118,8 @@ struct ccord_app_media {
   ccord_loopback_audio *loopback;
   uint64_t loopback_retry_ms;
   uint64_t loopback_next_ms;
+  bool loopback_paused;
+  bool loopback_unsupported;
   _Atomic bool loopback_enabled;   // coordinator-level switch (ccord_app_media_set_loopback_audio)
   _Atomic bool loopback_flag;      // effective this pump: stream_on && (setter || host read seam)
 
@@ -179,9 +184,11 @@ void app_media_pump_soundboard(ccord_app_media *m, uint64_t now);
 void app_media_hotplug(void *ud, bool capture, bool added);
 void app_media_close_inline(ccord_app_media *m);
 void app_media_stop_thread(ccord_app_media *m);
-void app_media_sync_live_thread(ccord_app_media *m, const ccord_app_media_voice *v, int in_vol, int out_vol, uint64_t now);
+void app_media_sync_live_thread(ccord_app_media *m, const ccord_app_media_voice *v, bool cap_suppressed,
+                                bool ptt_idle, int in_vol, int out_vol, uint64_t now);
 void app_media_sync_devices(ccord_app_media *m, uint64_t now);
-void app_media_pump_inline(ccord_app_media *m, bool muted, bool deafened, int in_vol, int out_vol);
+void app_media_pump_inline(ccord_app_media *m, bool muted, bool deafened, bool cap_suppressed, bool ptt_idle,
+                           int in_vol, int out_vol);
 
 // app_media_video.c
 void app_media_close_cam_tx(ccord_app_media *m, bool close_cam);

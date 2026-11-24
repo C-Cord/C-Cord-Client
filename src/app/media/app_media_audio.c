@@ -83,19 +83,40 @@ void app_media_pump_stream_loopback(ccord_app_media *m, uint64_t now, bool loop_
       m->ops->loopback_close(m->ud, m->loopback);
       m->loopback = nullptr;
     }
+    m->loopback_paused = false;
+    m->loopback_unsupported = false;
     m->loopback_retry_ms = 0;
     m->loopback_next_ms = 0;
     return;
   }
   if (paused || !m->ops->stream_send_pcm) {
+    if (m->loopback && !m->loopback_paused) {
+      if (m->ops->loopback_set_paused) m->ops->loopback_set_paused(m->ud, m->loopback, true);
+      m->loopback_paused = true;
+    }
     m->loopback_next_ms = 0;
-    return;   // keep the handle across a pause; send immediately on resume
+    return;   // pause stream while keeping the handle open; resume immediately on unpause
+  }
+  if (m->loopback && m->loopback_paused) {
+    if (m->ops->loopback_set_paused) m->ops->loopback_set_paused(m->ud, m->loopback, false);
+    m->loopback_paused = false;
   }
   if (!m->ops->loopback_open || !m->ops->loopback_read || !m->ops->loopback_close) return;
+  if (!m->loopback && m->loopback_unsupported) return;
   if (!m->loopback && app_media_open_retry_due(now, m->loopback_retry_ms)) {
     ccord_error err;
     m->loopback = m->ops->loopback_open(m->ud, &err);
     if (!m->loopback) {
+#if CCORD_OS_ANDROID
+      if (err.code == CCORD_ERR_UNSUPPORTED) {
+        m->loopback_unsupported = true;
+        if (!m->warn_loopback) {
+          m->warn_loopback = true;
+          CCORD_LOG_W("media: loopback audio unsupported on Android: %s", err.message);
+        }
+        return;
+      }
+#endif
       m->loopback_retry_ms = now + MEDIA_OPEN_RETRY_MS;
       if (!m->warn_loopback) {
         m->warn_loopback = true;
@@ -104,12 +125,14 @@ void app_media_pump_stream_loopback(ccord_app_media *m, uint64_t now, bool loop_
       }
       return;
     }
+    m->loopback_paused = false;
     m->loopback_retry_ms = 0;
   }
   if (!m->loopback) return;
   if (m->ops->loopback_failed && m->ops->loopback_failed(m->ud, m->loopback)) {
     m->ops->loopback_close(m->ud, m->loopback);
     m->loopback = nullptr;
+    m->loopback_paused = false;
     m->loopback_retry_ms = now + MEDIA_OPEN_RETRY_MS;
     m->loopback_next_ms = 0;
     if (!m->warn_loopback) {
@@ -371,8 +394,8 @@ static void maybe_resolve_devices(ccord_app_media *m)
 }
 
 // Start/restart the live audio pthread when effective device ids change, with retry backoff.
-void app_media_sync_live_thread(ccord_app_media *m, const ccord_app_media_voice *v, int in_vol, int out_vol,
-                             uint64_t now)
+void app_media_sync_live_thread(ccord_app_media *m, const ccord_app_media_voice *v, bool cap_suppressed,
+                                bool ptt_idle, int in_vol, int out_vol, uint64_t now)
 {
   maybe_resolve_devices(m);
   bool changed = strcmp(m->eff_in, m->thread_in) != 0 || strcmp(m->eff_out, m->thread_out) != 0;
@@ -398,11 +421,19 @@ void app_media_sync_live_thread(ccord_app_media *m, const ccord_app_media_voice 
   }
   if (m->thread) {
     if (!m->have_thread_ctrl || v->muted != m->last_th_muted || v->deafened != m->last_th_deafened ||
+        cap_suppressed != m->last_th_cap_suppressed || ptt_idle != m->last_th_ptt_idle ||
         in_vol != m->last_th_in_vol || out_vol != m->last_th_out_vol) {
-      m->ops->thread_controls(m->ud, m->thread, v->muted, v->deafened, in_vol, out_vol);
+      if (m->ops->thread_controls_ex) {
+        m->ops->thread_controls_ex(m->ud, m->thread, v->muted, v->deafened, cap_suppressed, ptt_idle, in_vol,
+                                   out_vol);
+      } else {
+        m->ops->thread_controls(m->ud, m->thread, v->muted, v->deafened, in_vol, out_vol);
+      }
       m->have_thread_ctrl = true;
       m->last_th_muted = v->muted;
       m->last_th_deafened = v->deafened;
+      m->last_th_cap_suppressed = cap_suppressed;
+      m->last_th_ptt_idle = ptt_idle;
       m->last_th_in_vol = in_vol;
       m->last_th_out_vol = out_vol;
     }
@@ -446,11 +477,12 @@ void app_media_sync_devices(ccord_app_media *m, uint64_t now)
   }
 }
 
-void app_media_pump_inline(ccord_app_media *m, bool muted, bool deafened, int in_vol, int out_vol)
+void app_media_pump_inline(ccord_app_media *m, bool muted, bool deafened, bool cap_suppressed, bool ptt_idle,
+                           int in_vol, int out_vol)
 {
   ccord_error err;
   int16_t pcm[MEDIA_FRAME * 2];
-  bool cap_gated = (muted || in_vol <= 0);
+  bool cap_gated = (muted || in_vol <= 0 || cap_suppressed || ptt_idle);
   if (m->audio_cap && !cap_gated) {
     if (m->inline_cap_gated) {
       // Discard any stale PCM queued right before unmuting.

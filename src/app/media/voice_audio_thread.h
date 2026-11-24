@@ -33,6 +33,11 @@ typedef struct ccord_voice_audio_thread ccord_voice_audio_thread;
 // Safe to call from any thread at any time; null is a no-op.
 void ccord_voice_audio_thread_set_controls(ccord_voice_audio_thread *t, bool muted, bool deafened, int in_vol,
                                            int out_vol);
+// Extended control publish: adds stage-audience capture suppression and idle PTT gating so the
+// audio thread can pause the hardware capture device when no microphone input is needed.
+// Safe to call from any thread at any time; null is a no-op.
+void ccord_voice_audio_thread_set_controls_ex(ccord_voice_audio_thread *t, bool muted, bool deafened,
+                                              bool cap_suppressed, bool ptt_idle, int in_vol, int out_vol);
 // Signals stop, joins the pthread (devices are closed on the audio thread before it exits),
 // then frees. Null-safe.
 void ccord_voice_audio_thread_stop(ccord_voice_audio_thread *t);

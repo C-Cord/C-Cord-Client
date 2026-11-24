@@ -34,6 +34,7 @@ typedef struct ccord_app_media_voice {
   bool active;          // self is connected to a voice channel
   bool muted;           // mic gate: self_mute || self_deaf
   bool deafened;        // self_deaf
+  bool suppressed;      // stage audience suppress (mic TX gated)
   bool camera;          // self_video (camera on while in voice)
   ccord_id guild_id;
   ccord_id channel_id;
@@ -82,6 +83,8 @@ typedef struct ccord_app_media_ops {
   ccord_voice_audio_thread *(*thread_start)(void *ud, const ccord_voice_audio_io *io, ccord_error *err);
   void (*thread_controls)(void *ud, ccord_voice_audio_thread *t, bool muted, bool deafened, int in_vol,
                           int out_vol);
+  void (*thread_controls_ex)(void *ud, ccord_voice_audio_thread *t, bool muted, bool deafened, bool cap_suppressed,
+                             bool ptt_idle, int in_vol, int out_vol);   // optional: extended controls with mic pause gating
   void (*thread_stop)(void *ud, ccord_voice_audio_thread *t);
 
   // ---- inline audio devices (mock mode) + enumeration / hot-plug ----
@@ -110,6 +113,7 @@ typedef struct ccord_app_media_ops {
   ccord_loopback_audio *(*loopback_open)(void *ud, ccord_error *err);
   size_t (*loopback_read)(void *ud, ccord_loopback_audio *l, int16_t *pcm, size_t max_samples);
   bool (*loopback_failed)(void *ud, const ccord_loopback_audio *l);   // optional: source died
+  void (*loopback_set_paused)(void *ud, ccord_loopback_audio *l, bool paused);   // optional: pause/resume without closing
   void (*loopback_close)(void *ud, ccord_loopback_audio *l);
 
   // ---- H.264 encoder (Go Live send) ----
@@ -194,3 +198,7 @@ typedef struct ccord_app_media_cam_debug {
 size_t ccord_app_media_cam_count(const ccord_app_media *m);
 // Fills `out` for one user's slot; false when that user has none. Null-safe.
 bool ccord_app_media_cam_debug_of(const ccord_app_media *m, ccord_id user_id, ccord_app_media_cam_debug *out);
+
+// Max ms before ccord_app_media_pump() needs to run again (e.g. closing the PTT mic tail after key release);
+// returns UINT32_MAX when no pending media timer is armed. Null-safe.
+uint32_t ccord_app_media_next_wait_ms(const ccord_app_media *m, uint64_t now_ms);

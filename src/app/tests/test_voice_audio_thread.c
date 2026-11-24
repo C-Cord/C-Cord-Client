@@ -99,6 +99,8 @@ static bool frozen_i32(atomic_int *v, unsigned ms)
 // playback records the running max |sample| per channel parity plus the last written block.
 static struct {
   atomic_int created, closed, cap_reads, play_writes, play_clears;
+  atomic_bool cap_paused, play_paused;
+  atomic_int cap_pause_calls, play_pause_calls;
   atomic_long play_frames;
   atomic_int cap_amp;
   pthread_mutex_t mtx;          // protects play_maxabs*, last[], and device id records
@@ -112,6 +114,7 @@ static struct {
 
 struct ccord_audio {
   bool capture;
+  bool paused;
 };
 
 ccord_audio *ccord_audio_create(const ccord_audio_config *cfg, ccord_error *err)
@@ -152,7 +155,7 @@ void ccord_audio_destroy(ccord_audio *a)
 
 size_t ccord_audio_read(ccord_audio *a, int16_t *pcm, size_t frames)
 {
-  if (!a || !a->capture || !pcm) return 0;
+  if (!a || !a->capture || a->paused || !pcm) return 0;
   size_t n = frames < FRAME ? frames : FRAME;
   int amp = atomic_load(&g_fake.cap_amp);
   for (size_t i = 0; i < n; i++) {
@@ -165,7 +168,7 @@ size_t ccord_audio_read(ccord_audio *a, int16_t *pcm, size_t frames)
 
 size_t ccord_audio_write(ccord_audio *a, const int16_t *pcm, size_t frames)
 {
-  if (!a || a->capture || !pcm) return 0;
+  if (!a || a->capture || a->paused || !pcm) return 0;
   int maxabs = 0, maxodd = 0;
   for (size_t i = 0; i < frames; i++) {
     int v0 = abs(pcm[i * CH]);
@@ -191,6 +194,19 @@ void ccord_audio_clear(ccord_audio *a)
   atomic_fetch_add(&g_fake.play_clears, 1);
 }
 
+void ccord_audio_set_paused(ccord_audio *a, bool paused)
+{
+  if (!a || a->paused == paused) return;
+  a->paused = paused;
+  if (a->capture) {
+    atomic_store(&g_fake.cap_paused, paused);
+    if (paused) atomic_fetch_add(&g_fake.cap_pause_calls, 1);
+  } else {
+    atomic_store(&g_fake.play_paused, paused);
+    if (paused) atomic_fetch_add(&g_fake.play_pause_calls, 1);
+  }
+}
+
 static void fake_reset(void)
 {
   atomic_store(&g_fake.created, 0);
@@ -198,6 +214,10 @@ static void fake_reset(void)
   atomic_store(&g_fake.cap_reads, 0);
   atomic_store(&g_fake.play_writes, 0);
   atomic_store(&g_fake.play_clears, 0);
+  atomic_store(&g_fake.cap_paused, false);
+  atomic_store(&g_fake.play_paused, false);
+  atomic_store(&g_fake.cap_pause_calls, 0);
+  atomic_store(&g_fake.play_pause_calls, 0);
   atomic_store(&g_fake.play_frames, 0);
   atomic_store(&g_fake.cap_amp, 10000);
   pthread_mutex_lock(&g_fake.mtx);
@@ -420,6 +440,63 @@ static void test_thread_device_selection_and_fallback(void)
   pthread_mutex_unlock(&g_fake.mtx);
   CT_CHECK(cap_ok && play_ok);
   ccord_voice_audio_thread_stop(t);
+}
+
+static void test_thread_pause_and_idle_controls(void)
+{
+  fake_reset();
+  audio_probe p = {0};
+  ccord_voice_audio_io io = {.push = probe_push, .pull = probe_pull, .ud = &p};
+  ccord_error err;
+  ccord_voice_audio_thread *t = ccord_voice_audio_thread_start(&io, &err);
+  CT_CHECK(t != nullptr);
+  if (!t) return;
+
+  CT_CHECK(wait_i32(&p.push_count, 2, 2000));
+  CT_CHECK(wait_i32(&p.pull_count, 2, 2000));
+  CT_CHECK(!atomic_load(&g_fake.cap_paused) && !atomic_load(&g_fake.play_paused));
+
+  // Stage audience suppress pauses capture hardware while playback stays active.
+  ccord_voice_audio_thread_set_controls_ex(t, false, false, true, false, 100, 100);
+  sleep_ms(40);
+  CT_CHECK(atomic_load(&g_fake.cap_paused));
+  CT_CHECK(!atomic_load(&g_fake.play_paused));
+  CT_CHECK(frozen_i32(&p.push_count, 60));
+  CT_CHECK(resumes_i32(&p.pull_count, 2000));
+
+  // Un-suppress resumes capture hardware immediately.
+  ccord_voice_audio_thread_set_controls_ex(t, false, false, false, false, 100, 100);
+  CT_CHECK(resumes_i32(&p.push_count, 2000));
+  CT_CHECK(!atomic_load(&g_fake.cap_paused));
+
+  // Idle PTT pauses capture hardware while playback stays active.
+  ccord_voice_audio_thread_set_controls_ex(t, false, false, false, true, 100, 100);
+  sleep_ms(40);
+  CT_CHECK(atomic_load(&g_fake.cap_paused));
+  CT_CHECK(frozen_i32(&p.push_count, 60));
+  CT_CHECK(resumes_i32(&p.pull_count, 2000));
+
+  // Both capture and playback gated: pauses both streams and enters 0 Hz indefinite wait,
+  // waking promptly on undeafen/unmute or stop.
+  ccord_voice_audio_thread_set_controls_ex(t, true, true, false, false, 100, 100);
+  sleep_ms(40);
+  CT_CHECK(atomic_load(&g_fake.cap_paused) && atomic_load(&g_fake.play_paused));
+  CT_CHECK(frozen_i32(&p.push_count, 80));
+  CT_CHECK(frozen_i32(&p.pull_count, 80));
+
+  // Wake promptly from indefinite wait via control change.
+  ccord_voice_audio_thread_set_controls_ex(t, false, false, false, false, 100, 100);
+  CT_CHECK(resumes_i32(&p.push_count, 2000));
+  CT_CHECK(resumes_i32(&p.pull_count, 2000));
+  CT_CHECK(!atomic_load(&g_fake.cap_paused) && !atomic_load(&g_fake.play_paused));
+
+  // Enter indefinite wait again and verify stop wakes and joins promptly.
+  ccord_voice_audio_thread_set_controls_ex(t, true, true, false, false, 100, 100);
+  sleep_ms(40);
+  uint64_t t0 = mono_ms();
+  ccord_voice_audio_thread_stop(t);
+  CT_CHECK(mono_ms() - t0 < 500);
+  CT_CHECK(atomic_load(&g_fake.closed) == 2);
 }
 
 // ---- captured WebSocket frames + injectable clock (harness from test_voice_core) ------------------------------
@@ -917,6 +994,7 @@ int main(void)
   test_thread_lifecycle_and_controls();
   test_thread_invalid_io();
   test_thread_device_selection_and_fallback();
+  test_thread_pause_and_idle_controls();
   test_gateway_roundtrip();
   test_gateway_stress();
   return CT_RESULT("test_voice_audio_thread");
