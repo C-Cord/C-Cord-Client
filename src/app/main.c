@@ -340,6 +340,7 @@ static void run_interactive(app *a)
     if (a->ui) ccord_ui_set_now_ms(a->ui, wake_ms);
     if (ccord_platform_consume_file_dialog_cancelled(a->platform)) {
       a->file_dialog_pending = false;
+      if (a->ui) (void)ccord_ui_consume_picked_path(a->ui, nullptr);
     }
     if (got_ev) {
       last_input_ms = wake_ms;
@@ -365,6 +366,10 @@ static void run_interactive(app *a)
             if (from_os_drop) a->file_dialog_pending = false;
             bool from_picker = !from_os_drop && a->file_dialog_pending;
             if (from_picker) saw_picker_drop = true;
+            if (from_picker && a->ui && ccord_ui_consume_picked_path(a->ui, dpath)) {
+              a->file_dialog_pending = false;
+              continue;
+            }
             size_t dl = strlen(dpath);
             bool is_pkg = !from_picker && (dl > 4 && ccord_strcasecmp(dpath + dl - 4, ".cce") == 0);
             if (is_pkg && a->contrib) {

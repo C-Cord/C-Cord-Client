@@ -31,6 +31,12 @@ static void plugin_clipboard(void *ud, const char *utf8)
   app_host_clipboard_set(ud, utf8);
 }
 
+static void plugin_toast_show(void *ud, const char *utf8, uint8_t level)
+{
+  app *a = ud;
+  if (a && a->ui && utf8 && utf8[0]) ccord_ui_show_toast(a->ui, utf8, level);
+}
+
 // Starts the plugin manager: discovers extensions, spawns one host process each. Failures are logged and shown in Settings.
 static bool catalog_http_get_adapter(void *ud, const char *url, const char *if_none_match, size_t max_bytes,
                                      char **out_body, size_t *out_len, char *out_etag, size_t etag_cap,
@@ -502,6 +508,18 @@ static bool plugin_op_decode_image_rgba(void *ud, const uint8_t *encoded, size_t
   return true;
 }
 
+static bool plugin_op_reencode_image(void *ud, const uint8_t *src, size_t src_len, const char *format, int quality,
+                                     int max_dim, uint8_t **out_bytes, size_t *out_len, char *err_buf, size_t err_cap)
+{
+  (void)ud;
+  ccord_error err = {0};
+  if (ccord_image_reencode(src, src_len, format, quality, max_dim, out_bytes, out_len, &err) != CCORD_OK) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "%s", err.message[0] ? err.message : "image reencode failed");
+    return false;
+  }
+  return true;
+}
+
 static void plugin_raw_gateway_cb(void *ud, const char *event_name, const char *payload_json)
 {
   app *a = ud;
@@ -580,6 +598,7 @@ void app_plugins_start(app *a)
     .search_dirs = dirs, .search_dir_count = nd, .data_dir = ccord_paths_data_dir(),
     .bus = a->bus, .store = a->store, .session = a->session, .contrib = a->contrib,
     .clipboard_write = plugin_clipboard, .clipboard_ud = a,
+    .toast_show = plugin_toast_show, .toast_ud = a,
     .has_platform_info = true,
     .platform_info = {
       .os = ccord_os_name(),
@@ -625,6 +644,7 @@ void app_plugins_start(app *a)
       .active_window_json = plugin_op_active_window_json,
       .global_shortcuts_sync = plugin_op_global_shortcuts_sync,
       .decode_image_rgba = plugin_op_decode_image_rgba,
+      .reencode_image = plugin_op_reencode_image,
     },
     .dev_auto_reload = a->opt->plugin_dev,
   };

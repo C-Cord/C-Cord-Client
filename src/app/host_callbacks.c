@@ -385,6 +385,20 @@ static bool host_open_file_dialog(void *ud, char *out_path, size_t cap)
   return false;
 }
 
+static bool host_open_dir_dialog(void *ud, char *out_path, size_t cap)
+{
+  app *a = ud;
+  if (!a || !a->platform) return false;
+  if (out_path && cap > 0) out_path[0] = '\0';
+  a->file_dialog_pending = true;
+  ccord_platform_open_folder_dialog(a->platform);
+  if (out_path && cap > 0 && ccord_platform_pop_drop_file(a->platform, out_path, cap)) {
+    a->file_dialog_pending = false;
+    return true;
+  }
+  return false;
+}
+
 // Upload a File (+ menu): starts the multi-select picker and returns at once. It must not pop the drop queue:
 // every chosen path arrives as CCORD_EV_DROP_FILE and run_interactive attaches each one, so none is attached twice.
 static void host_open_file_dialog_async(void *ud)
@@ -491,6 +505,7 @@ void app_fill_ui_host(app *a, ccord_ui_host *out)
     .account_action = app_host_account_action,
     .open_url = host_open_url,
     .open_file_dialog = host_open_file_dialog,
+    .open_dir_dialog = host_open_dir_dialog,
     .open_file_dialog_async = host_open_file_dialog_async,
     .scheduled_add = app_host_scheduled_add,
     .scheduled_list = host_scheduled_list,
