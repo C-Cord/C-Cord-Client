@@ -1498,6 +1498,9 @@ static void handle_response(ccord_plugins *m, plugin *p, const ccord_ipc_msg *ms
     p->last_ping_sent_ms = m->now_ms;
     CCORD_LOG_I("plugin %s ready", p->m.id);
     pl_publish_state(m, p);
+    if (m->in_background && p->ipc) {
+      pl_send_ntf(m, p, "host.background", "{\"background\":true}");
+    }
   } else if (kind == PEND_CMD) {
     if (!msg->ok) {
       CCORD_LOG_W("plugin %s: command failed: %s", p->m.id, msg->err_message ? msg->err_message : "");

@@ -7,6 +7,7 @@
 #include <ccord/core/arena.h>
 #include <ccord/core/clock.h>
 #include <ccord/core/json.h>
+#include <ccord/core/os.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -522,6 +523,35 @@ int main(void)
       CT_CHECK(f.nreq == 0);
       ccord_sandbox_destroy(sb);
     }
+  }
+
+  // 5. Background mode suspends periodic time.every() timers and enforces a >= 50 ms interval floor.
+  {
+    ccord_sandbox *sb = make(&f, 0, 0, 0);
+    CT_CHECK(run(sb, "hits = 0; time.every(1, function() hits = hits + 1 end)", &err) == CCORD_OK);
+    uint64_t t0 = ccord_clock_ms();
+    // 1 ms request is floored to >= 50 ms, so ticking at +10 ms does not fire, while +100 ms does.
+    CT_CHECK(ccord_sandbox_tick(sb, t0 + 10u, &err) == CCORD_OK);
+    CT_CHECK(run(sb, "assert(hits == 0)", &err) == CCORD_OK);
+    CT_CHECK(ccord_sandbox_tick(sb, t0 + 100u, &err) == CCORD_OK);
+    CT_CHECK(run(sb, "assert(hits == 1)", &err) == CCORD_OK);
+    // Backgrounding suspends periodic timers completely (no wakeup timer, no firing).
+    ccord_sandbox_set_background(sb, true);
+    CT_CHECK(ccord_sandbox_next_timer_ms(sb) == -1);
+    CT_CHECK(ccord_sandbox_tick(sb, t0 + 5000u, &err) == CCORD_OK);
+    CT_CHECK(run(sb, "assert(hits == 1)", &err) == CCORD_OK);
+    ccord_sandbox_destroy(sb);
+
+    // Overdue periodic timer while backgrounded is re-armed cleanly on resume without an immediate burst.
+    sb = make(&f, 0, 0, 0);
+    CT_CHECK(run(sb, "hits = 0; time.every(1, function() hits = hits + 1 end)", &err) == CCORD_OK);
+    ccord_sandbox_set_background(sb, true);
+    ccord_sleep_ms(60);
+    CT_CHECK(ccord_sandbox_next_timer_ms(sb) == -1);
+    ccord_sandbox_set_background(sb, false);
+    int next_ms = ccord_sandbox_next_timer_ms(sb);
+    CT_CHECK(next_ms > 0 && next_ms <= 50);
+    ccord_sandbox_destroy(sb);
   }
 
   return CT_RESULT("test_host_sandbox");

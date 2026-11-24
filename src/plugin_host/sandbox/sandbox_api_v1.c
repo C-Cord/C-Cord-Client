@@ -699,6 +699,7 @@ static int add_timer(lua_State *L, bool repeat)
   ccord_sandbox *sb = sb_of(L);
   lua_Integer ms = luaL_checkinteger(L, 1);
   if (ms < 0) ms = 0;
+  if (repeat && ms < (lua_Integer)SB_MIN_EVERY_INTERVAL_MS) ms = (lua_Integer)SB_MIN_EVERY_INTERVAL_MS;
   luaL_checktype(L, 2, LUA_TFUNCTION);
   if (sb->ntimers >= SB_MAX_TIMERS) return luaL_error(L, "time: timer limit exceeded");
   if (sb->ntimers == sb->captimers) {

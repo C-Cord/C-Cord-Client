@@ -32,9 +32,6 @@
 #define EXIT_MEMORY 74
 #define EXIT_UNDECLARED 75
 
-// Defined in sandbox.c: returns ms until earliest active Lua timer, or -1 if none.
-extern int ccord_sandbox_next_timer_ms(const ccord_sandbox *sb);
-
 #define MAX_DEFERRED 32
 
 typedef struct deferred_msg {
@@ -559,6 +556,12 @@ static void dispatch(host *h, const ccord_ipc_msg *msg)
     case CCORD_IPC_NTF:
       if (strcmp(msg->method, "shutdown") == 0) { h->stop = true; return; }
       if (strcmp(msg->method, "platform.state") == 0) { handle_platform_state(h, msg); return; }
+      if (strcmp(msg->method, "host.background") == 0) {
+        if (h->sb && msg->params) {
+          ccord_sandbox_set_background(h->sb, ccord_json_bool(ccord_json_get(msg->params, "background"), false));
+        }
+        return;
+      }
       if (strcmp(msg->method, "event") == 0) handle_event(h, msg);
       else if (strcmp(msg->method, "menu.invoke") == 0) handle_menu(h, msg);
       else if (strcmp(msg->method, "panel.event") == 0) handle_panel_event(h, msg);

@@ -18,6 +18,7 @@
 #define SB_MAX_FS_READ_BYTES (16u * 1024u * 1024u)
 #define SB_FS_CHUNK_BYTES (384u * 1024u)
 #define SB_MAX_TIMERS 256u
+#define SB_MIN_EVERY_INTERVAL_MS 50u
 #define SB_MAX_REQUIRE_DEPTH 32
 
 #define SB_KEY_HANDLERS "ccord.handlers"
@@ -69,6 +70,7 @@ struct ccord_sandbox {
   ccord_sandbox_platform_state plat_state;
   const _Atomic bool *cancel;
   int require_depth;
+  bool background;                // true while app is backgrounded/minimized: suspends periodic time.every() timers
 };
 
 // Shared internal helpers implemented in sandbox.c

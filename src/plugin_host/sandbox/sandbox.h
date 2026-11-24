@@ -88,6 +88,10 @@ void ccord_sandbox_set_cancel_flag(ccord_sandbox *sb, const _Atomic bool *cancel
                                                         const ccord_json *ctx, char **out_json, ccord_error *err);
 // Fires any due time.after / time.every callbacks.
 [[nodiscard]] ccord_status ccord_sandbox_tick(ccord_sandbox *sb, uint64_t now_ms, ccord_error *err);
+// Milliseconds until the earliest active Lua timer fires, or -1 if no timers are pending.
+int ccord_sandbox_next_timer_ms(const ccord_sandbox *sb);
+// Suspends periodic time.every() timers while backgrounded and re-arms overdue intervals on resume.
+void ccord_sandbox_set_background(ccord_sandbox *sb, bool background);
 // Sticky: only set if an explicit non-zero limit was configured and hit.
 ccord_sandbox_limit ccord_sandbox_limit_hit(const ccord_sandbox *sb);
 

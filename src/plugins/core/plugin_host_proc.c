@@ -256,10 +256,14 @@ void ccord_plugins_set_background(ccord_plugins *m, bool background)
 {
   if (!m || m->in_background == background) return;
   m->in_background = background;
-  if (!background) {
-    uint64_t now = m->now_ms ? m->now_ms : ccord_clock_ms();
-    for (size_t i = 0; i < m->nplugins; i++) {
-      if (m->plugins[i]) m->plugins[i]->last_ping_sent_ms = now;
+  uint64_t now = !background ? (m->now_ms ? m->now_ms : ccord_clock_ms()) : 0;
+  const char *params = background ? "{\"background\":true}" : "{\"background\":false}";
+  for (size_t i = 0; i < m->nplugins; i++) {
+    plugin *p = m->plugins[i];
+    if (!p) continue;
+    if (!background) p->last_ping_sent_ms = now;
+    if (p->ipc && p->state == CCORD_PLUGIN_READY) {
+      pl_send_ntf(m, p, "host.background", params);
     }
   }
 }

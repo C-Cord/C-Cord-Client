@@ -947,6 +947,7 @@ ccord_status ccord_sandbox_tick(ccord_sandbox *sb, uint64_t now_ms, ccord_error 
   size_t count = sb->ntimers;
   for (size_t i = 0; i < count; i++) {
     if (sb->timers[i].cancelled) continue;
+    if (sb->background && sb->timers[i].interval_ms > 0) continue;
     if (now_ms < sb->timers[i].fire_at_ms) continue;
     lua_rawgeti(L, t_idx, sb->timers[i].fn_ref);
     if (lua_isfunction(L, -1)) {
@@ -979,7 +980,6 @@ ccord_status ccord_sandbox_tick(ccord_sandbox *sb, uint64_t now_ms, ccord_error 
 }
 
 // Milliseconds until the earliest active Lua timer fires, or -1 if no timers are pending.
-int ccord_sandbox_next_timer_ms(const ccord_sandbox *sb);
 int ccord_sandbox_next_timer_ms(const ccord_sandbox *sb)
 {
   if (!sb || sb->ntimers == 0) return -1;
@@ -988,6 +988,7 @@ int ccord_sandbox_next_timer_ms(const ccord_sandbox *sb)
   uint64_t earliest = 0;
   for (size_t i = 0; i < sb->ntimers; i++) {
     if (sb->timers[i].cancelled) continue;
+    if (sb->background && sb->timers[i].interval_ms > 0) continue;
     if (!found || sb->timers[i].fire_at_ms < earliest) {
       earliest = sb->timers[i].fire_at_ms;
       found = true;
@@ -997,6 +998,20 @@ int ccord_sandbox_next_timer_ms(const ccord_sandbox *sb)
   if (earliest <= now_ms) return 0;
   uint64_t delta = earliest - now_ms;
   return delta > (uint64_t)INT_MAX ? INT_MAX : (int)delta;
+}
+
+void ccord_sandbox_set_background(ccord_sandbox *sb, bool background)
+{
+  if (!sb || sb->background == background) return;
+  sb->background = background;
+  if (!background && sb->ntimers > 0) {
+    uint64_t now = ccord_clock_ms();
+    for (size_t i = 0; i < sb->ntimers; i++) {
+      if (!sb->timers[i].cancelled && sb->timers[i].interval_ms > 0 && sb->timers[i].fire_at_ms <= now) {
+        sb->timers[i].fire_at_ms = now + sb->timers[i].interval_ms;
+      }
+    }
+  }
 }
 
 bool sb_read_plugin_asset_bytes(ccord_sandbox *sb, const char *rel_path, size_t rel_len, uint8_t **out_data,
