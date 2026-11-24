@@ -43,6 +43,10 @@ struct ccord_contrib {
   // API v3 collections
   ccord_decorator_contribution *decors;
   size_t ndecors, capdecors;
+  int32_t *decor_buckets;       // O(1) chained hash table keyed by (target, target_id); -1 = empty
+  size_t decor_bucket_cap;
+  int32_t *decor_next;          // next index chain parallel to decors[capdecors]; -1 = end
+  uint64_t next_decor_seq;
   uint64_t decors_rev;
   ccord_plugin_settings_schema *settings;
   size_t nsettings, capsettings;

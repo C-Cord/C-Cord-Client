@@ -384,9 +384,15 @@ ccord_status ccord_contrib_set_texture(ccord_contrib *c, const char *owner, cons
       return CCORD_OK;
     }
   }
-  if (c->ntextures >= 256u) {
+  if (c->ntextures >= 4096u) {
     ccord_free(copy);
     return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: texture limit reached");
+  }
+  size_t total_tex_bytes = len;
+  for (size_t i = 0; i < c->ntextures; i++) total_tex_bytes += c->textures[i].len;
+  if (total_tex_bytes > (128u * 1024u * 1024u)) {
+    ccord_free(copy);
+    return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: texture memory budget exceeded (128 MiB)");
   }
   if (c->ntextures == c->captextures) {
     size_t nc = c->captextures ? c->captextures * 2u : 8u;

@@ -21,6 +21,45 @@ static void free_decor(ccord_decorator_contribution *d)
   contrib_free_str(d->text_color);
   contrib_free_str(d->author_color);
   contrib_free_str(d->collapse_label);
+  contrib_free_str(d->content_override);
+  contrib_free_str(d->embeds_append_json);
+}
+
+static size_t decor_bucket_idx(ccord_decor_target target, ccord_id target_id, size_t cap)
+{
+  uint64_t h = ((uint64_t)target * 0x9E3779B97F4A7C15ULL) ^ (uint64_t)target_id;
+  h ^= h >> 30;
+  h *= 0xBF58476D1CE4E5B9ULL;
+  h ^= h >> 27;
+  h *= 0x94D049BB133111EBULL;
+  h ^= h >> 31;
+  return (size_t)(h & (uint64_t)(cap - 1u));
+}
+
+static void decor_index_rebuild(ccord_contrib *c)
+{
+  if (!c) return;
+  if (c->ndecors == 0) {
+    for (size_t i = 0; i < c->decor_bucket_cap; i++) c->decor_buckets[i] = -1;
+    return;
+  }
+  size_t need = 64u;
+  while (need < c->ndecors * 2u + 16u) need <<= 1;
+  if (need != c->decor_bucket_cap) {
+    int32_t *nb = ccord_malloc(need * sizeof *nb);
+    if (nb) {
+      ccord_free(c->decor_buckets);
+      c->decor_buckets = nb;
+      c->decor_bucket_cap = need;
+    }
+  }
+  if (!c->decor_buckets || c->decor_bucket_cap == 0) return;
+  for (size_t i = 0; i < c->decor_bucket_cap; i++) c->decor_buckets[i] = -1;
+  for (size_t i = 0; i < c->ndecors; i++) {
+    size_t b = decor_bucket_idx(c->decors[i].target, c->decors[i].target_id, c->decor_bucket_cap);
+    c->decor_next[i] = c->decor_buckets[b];
+    c->decor_buckets[b] = (int32_t)i;
+  }
 }
 
 static void free_settings(ccord_plugin_settings_schema *s)
@@ -102,6 +141,8 @@ void contrib_ext_destroy(ccord_contrib *c)
 {
   for (size_t i = 0; i < c->ndecors; i++) free_decor(&c->decors[i]);
   ccord_free(c->decors);
+  ccord_free(c->decor_buckets);
+  ccord_free(c->decor_next);
   for (size_t i = 0; i < c->nsettings; i++) free_settings(&c->settings[i]);
   ccord_free(c->settings);
   contrib_assets_destroy(c);
@@ -120,15 +161,18 @@ void contrib_ext_destroy(ccord_contrib *c)
 bool contrib_ext_remove_owner(ccord_contrib *c, const char *owner)
 {
   bool changed = contrib_assets_remove_owner(c, owner);
+  bool decors_removed = false;
   for (size_t i = c->ndecors; i > 0; i--) {
     if (strcmp(c->decors[i - 1].owner, owner) == 0) {
       free_decor(&c->decors[i - 1]);
       memmove(&c->decors[i - 1], &c->decors[i], (c->ndecors - i) * sizeof *c->decors);
       c->ndecors--;
       c->decors_rev++;
+      decors_removed = true;
       changed = true;
     }
   }
+  if (decors_removed) decor_index_rebuild(c);
   for (size_t i = c->nsettings; i > 0; i--) {
     if (strcmp(c->settings[i - 1].owner, owner) == 0) {
       free_settings(&c->settings[i - 1]);
@@ -191,12 +235,21 @@ ccord_status ccord_contrib_set_decorator(ccord_contrib *c, const ccord_decorator
 {
   ccord_error_clear(err);
   if (!c || !spec || !contrib_text_ok(spec->owner, CONTRIB_OWNER_MAX, false) ||
-      !contrib_text_ok(spec->decor_id, CONTRIB_ITEM_MAX, false) || spec->target >= CCORD_DECOR__COUNT) {
+      !contrib_text_ok(spec->decor_id, CONTRIB_ITEM_MAX, false) || spec->target >= CCORD_DECOR__COUNT ||
+      spec->position > CCORD_DECOR_POS_ABOVE_BODY) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: bad decorator");
   }
   const char *wj = spec->widget_json ? spec->widget_json : "";
-  if (strlen(wj) > 65536u || !ccord_utf8_valid(wj, strlen(wj))) {
+  if (strlen(wj) > CONTRIB_PANEL_JSON_MAX || !ccord_utf8_valid(wj, strlen(wj))) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: bad decorator widget JSON");
+  }
+  const char *co = spec->content_override ? spec->content_override : "";
+  if (strlen(co) > 65536u || !ccord_utf8_valid(co, strlen(co))) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: bad content_override");
+  }
+  const char *ej = spec->embeds_append_json ? spec->embeds_append_json : "";
+  if (strlen(ej) > 131072u || !ccord_utf8_valid(ej, strlen(ej))) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "contrib: bad embeds_append JSON");
   }
   float av_op = spec->has_avatar_opacity ? spec->avatar_opacity : 1.0f;
   if (av_op < 0.0f) av_op = 0.0f;
@@ -208,6 +261,7 @@ ccord_status ccord_contrib_set_decorator(ccord_contrib *c, const ccord_decorator
     .owner = ccord_strdup(spec->owner),
     .decor_id = ccord_strdup(spec->decor_id),
     .target = spec->target,
+    .position = spec->position,
     .target_id = spec->target_id,
     .widget_json = ccord_strdup(wj),
     .accent_rgba = spec->accent_rgba,
@@ -225,24 +279,32 @@ ccord_status ccord_contrib_set_decorator(ccord_contrib *c, const ccord_decorator
     .has_opacity = spec->has_opacity,
     .opacity = row_op,
     .collapsed = spec->collapsed,
+    .hidden = spec->hidden,
     .collapse_label = dup_opt(spec->collapse_label),
+    .content_override = spec->content_override ? ccord_strdup(spec->content_override) : nullptr,
+    .embeds_append_json = dup_opt(spec->embeds_append_json),
     .priority = spec->priority,
     .revision = ++c->decors_rev,
   };
   if (!d.owner || !d.decor_id || !d.widget_json || !d.accent_color || !d.tint_color ||
-      !d.text_color || !d.author_color || !d.collapse_label) {
+      !d.text_color || !d.author_color || !d.collapse_label || !d.embeds_append_json ||
+      (spec->content_override && !d.content_override)) {
     free_decor(&d);
     return ccord_error_set(err, CCORD_ERR_NOMEM, "contrib: out of memory");
   }
   for (size_t i = 0; i < c->ndecors; i++) {
     if (strcmp(c->decors[i].owner, d.owner) == 0 && strcmp(c->decors[i].decor_id, d.decor_id) == 0) {
+      bool key_changed = (c->decors[i].target != d.target || c->decors[i].target_id != d.target_id);
+      d.reg_seq = c->decors[i].reg_seq;
       free_decor(&c->decors[i]);
       c->decors[i] = d;
+      if (key_changed) decor_index_rebuild(c);
       c->revision++;
       return CCORD_OK;
     }
   }
-  if (c->ndecors >= 256u) {
+  enum { MAX_DECORS_SAFETY = 65536u };
+  if (c->ndecors >= MAX_DECORS_SAFETY) {
     free_decor(&d);
     return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: decorator limit reached");
   }
@@ -250,9 +312,22 @@ ccord_status ccord_contrib_set_decorator(ccord_contrib *c, const ccord_decorator
     size_t nc = c->capdecors ? c->capdecors * 2u : 16u;
     ccord_decorator_contribution *g = ccord_realloc_array(c->decors, nc, sizeof *g);
     if (!g) { free_decor(&d); return ccord_error_set(err, CCORD_ERR_NOMEM, "contrib: out of memory"); }
-    c->decors = g; c->capdecors = nc;
+    c->decors = g;
+    int32_t *ng = ccord_realloc_array(c->decor_next, nc, sizeof *ng);
+    if (!ng) { free_decor(&d); return ccord_error_set(err, CCORD_ERR_NOMEM, "contrib: out of memory"); }
+    c->decor_next = ng;
+    c->capdecors = nc;
   }
-  c->decors[c->ndecors++] = d;
+  d.reg_seq = ++c->next_decor_seq;
+  size_t idx = c->ndecors++;
+  c->decors[idx] = d;
+  if (!c->decor_buckets || c->decor_bucket_cap == 0 || c->ndecors * 2u >= c->decor_bucket_cap) {
+    decor_index_rebuild(c);
+  } else {
+    size_t b = decor_bucket_idx(d.target, d.target_id, c->decor_bucket_cap);
+    c->decor_next[idx] = c->decor_buckets[b];
+    c->decor_buckets[b] = (int32_t)idx;
+  }
   c->revision++;
   return CCORD_OK;
 }
@@ -265,6 +340,7 @@ bool ccord_contrib_remove_decorator(ccord_contrib *c, const char *owner, const c
       free_decor(&c->decors[i]);
       memmove(&c->decors[i], &c->decors[i + 1], (c->ndecors - i - 1u) * sizeof c->decors[0]);
       c->ndecors--;
+      decor_index_rebuild(c);
       c->decors_rev++;
       c->revision++;
       return true;
@@ -283,13 +359,39 @@ void ccord_contrib_clear_decorators(ccord_contrib *c, const char *owner)
     else c->decors[w++] = c->decors[r];
   }
   c->ndecors = w;
-  if (ch) { c->decors_rev++; c->revision++; }
+  if (ch) { decor_index_rebuild(c); c->decors_rev++; c->revision++; }
 }
 
 size_t ccord_contrib_decorator_count(const ccord_contrib *c) { return c ? c->ndecors : 0; }
 const ccord_decorator_contribution *ccord_contrib_decorator_at(const ccord_contrib *c, size_t i)
 {
   return (c && i < c->ndecors) ? &c->decors[i] : nullptr;
+}
+
+size_t ccord_contrib_query_decorators(const ccord_contrib *c, ccord_decor_target target, ccord_id target_id,
+                                      const ccord_decorator_contribution **out, size_t cap)
+{
+  if (!c || c->ndecors == 0 || !c->decor_buckets || c->decor_bucket_cap == 0 || target >= CCORD_DECOR__COUNT) return 0;
+  size_t found = 0;
+  size_t b = decor_bucket_idx(target, target_id, c->decor_bucket_cap);
+  for (int32_t idx = c->decor_buckets[b]; idx >= 0; idx = c->decor_next[idx]) {
+    const ccord_decorator_contribution *d = &c->decors[idx];
+    if (d->target == target && d->target_id == target_id) {
+      if (out && found < cap) out[found] = d;
+      found++;
+    }
+  }
+  if (target_id != 0) {
+    size_t wb = decor_bucket_idx(target, 0, c->decor_bucket_cap);
+    for (int32_t idx = c->decor_buckets[wb]; idx >= 0; idx = c->decor_next[idx]) {
+      const ccord_decorator_contribution *d = &c->decors[idx];
+      if (d->target == target && d->target_id == 0) {
+        if (out && found < cap) out[found] = d;
+        found++;
+      }
+    }
+  }
+  return found;
 }
 
 // ---- Settings Schemas ----
@@ -344,6 +446,14 @@ void ccord_contrib_notify_setting_changed(ccord_contrib *c, const char *owner, c
   if (!c || !owner || !key || !value_json) return;
   if (c->handlers.plugin_setting_changed) {
     c->handlers.plugin_setting_changed(c->handlers.ud, owner, key, value_json);
+  }
+}
+
+void ccord_contrib_notify_setting_action(ccord_contrib *c, const char *owner, const char *key)
+{
+  if (!c || !owner || !key) return;
+  if (c->handlers.plugin_setting_action) {
+    c->handlers.plugin_setting_action(c->handlers.ud, owner, key);
   }
 }
 
@@ -658,8 +768,8 @@ ccord_status ccord_contrib_add_local_message(ccord_contrib *c, const ccord_local
       }
     }
   }
-  // Enforce capacity: 1024 global, 256 per owner, 256 per channel.
-  enum { MAX_LOCAL_GLOBAL = 1024u, MAX_LOCAL_OWNER = 256u, MAX_LOCAL_CHANNEL = 256u };
+  // Generous runaway-bug safety ceilings (4096 per owner/channel, 16384 global).
+  enum { MAX_LOCAL_GLOBAL = 16384u, MAX_LOCAL_OWNER = 4096u, MAX_LOCAL_CHANNEL = 4096u };
   size_t owner_cnt = 0, ch_cnt = 0;
   for (size_t i = 0; i < c->nlocal_msgs; i++) {
     if (strcmp(c->local_msgs[i].owner, msg->owner) == 0) owner_cnt++;
@@ -667,17 +777,17 @@ ccord_status ccord_contrib_add_local_message(ccord_contrib *c, const ccord_local
   }
   if (owner_cnt >= MAX_LOCAL_OWNER) {
     if (msg->position != CCORD_LOCAL_POS_BOTTOM || !evict_oldest_bottom(c, msg->owner, CCORD_ID_NONE)) {
-      return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: per-plugin local message limit reached (256)");
+      return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: per-plugin local message limit reached (4096)");
     }
   }
   if (ch_cnt >= MAX_LOCAL_CHANNEL) {
     if (msg->position != CCORD_LOCAL_POS_BOTTOM || !evict_oldest_bottom(c, nullptr, msg->channel_id)) {
-      return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: per-channel local message limit reached (256)");
+      return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: per-channel local message limit reached (4096)");
     }
   }
   if (c->nlocal_msgs >= MAX_LOCAL_GLOBAL) {
     if (msg->position != CCORD_LOCAL_POS_BOTTOM || !evict_oldest_bottom(c, nullptr, CCORD_ID_NONE)) {
-      return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: global local message limit reached (1024)");
+      return ccord_error_set(err, CCORD_ERR_RANGE, "contrib: global local message limit reached (16384)");
     }
   }
   if (c->nlocal_msgs == c->caplocal_msgs) {
@@ -1184,4 +1294,64 @@ bool ccord_contrib_ui_select_theme_preset(ccord_contrib *c, const char *owner, c
 {
   if (!c || !c->ui_hooks.select_theme_preset) return false;
   return c->ui_hooks.select_theme_preset(c->ui_hooks.ud, owner ? owner : "", preset_id ? preset_id : "");
+}
+
+bool ccord_contrib_ui_open_media(ccord_contrib *c, const char *items_json, size_t index)
+{
+  if (!c || !items_json || !c->ui_hooks.open_media) return false;
+  return c->ui_hooks.open_media(c->ui_hooks.ud, items_json, index);
+}
+
+bool ccord_contrib_ui_open_user_profile(ccord_contrib *c, ccord_id user_id, ccord_id guild_id)
+{
+  if (!c || user_id == CCORD_ID_NONE || !c->ui_hooks.open_user_profile) return false;
+  return c->ui_hooks.open_user_profile(c->ui_hooks.ud, user_id, guild_id);
+}
+
+bool ccord_contrib_ui_open_popup_menu(ccord_contrib *c, const char *owner, uint64_t req_id, float x, float y,
+                                      bool has_pos, const char *items_json)
+{
+  if (!c || !owner || !items_json || !c->ui_hooks.open_popup_menu) return false;
+  return c->ui_hooks.open_popup_menu(c->ui_hooks.ud, owner, req_id, x, y, has_pos, items_json);
+}
+
+bool ccord_contrib_ui_toast_show(ccord_contrib *c, const char *owner, uint64_t toast_id, const char *text,
+                                 uint8_t level, uint32_t duration_ms, const char *action_label)
+{
+  if (!c || !text || !c->ui_hooks.toast_show) return false;
+  return c->ui_hooks.toast_show(c->ui_hooks.ud, owner ? owner : "", toast_id, text, level, duration_ms,
+                                action_label ? action_label : "");
+}
+
+void ccord_contrib_resolve_popup_menu(ccord_contrib *c, const char *owner, uint64_t req_id, const char *item_id)
+{
+  if (!c || !owner || !c->handlers.popup_menu_result) return;
+  c->handlers.popup_menu_result(c->handlers.ud, owner, req_id, item_id);
+}
+
+void ccord_contrib_dispatch_toast_action(ccord_contrib *c, const char *owner, uint64_t toast_id)
+{
+  if (!c || !owner || !c->handlers.toast_action) return;
+  c->handlers.toast_action(c->handlers.ud, owner, toast_id);
+}
+
+void ccord_contrib_run_before_upload(ccord_contrib *c, ccord_id guild_id, ccord_id channel_id, const char *content,
+                                     ccord_upload_hook_file *files, size_t count, ccord_upload_hook_result *out)
+{
+  if (out) *out = (ccord_upload_hook_result){0};
+  if (!c || !files || count == 0u || !c->handlers.before_upload_hook) return;
+  c->handlers.before_upload_hook(c->handlers.ud, guild_id, channel_id, content ? content : "", files, count, out);
+}
+
+void ccord_contrib_cancel_upload_transform(ccord_contrib *c, uint64_t job_id)
+{
+  if (!c || job_id == 0u || !c->handlers.cancel_upload_transform) return;
+  c->handlers.cancel_upload_transform(c->handlers.ud, job_id);
+}
+
+void ccord_contrib_ui_upload_transform_complete(ccord_contrib *c, uint64_t job_id, bool cancelled, const char *notice,
+                                                ccord_upload_hook_file *files, size_t count)
+{
+  if (!c || !c->ui_hooks.upload_transform_complete) return;
+  c->ui_hooks.upload_transform_complete(c->ui_hooks.ud, job_id, cancelled, notice ? notice : "", files, count);
 }

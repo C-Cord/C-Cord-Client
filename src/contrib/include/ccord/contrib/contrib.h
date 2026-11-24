@@ -136,6 +136,7 @@ typedef struct ccord_panel_event {
   float x, y;
   float wheel;
   const char *text_value;
+  const char *values_json;      // optional pre-encoded JSON array string for multi-select events
   double num_value;
   bool bool_value;
   bool has_num;
@@ -153,15 +154,23 @@ typedef enum ccord_decor_target : uint8_t {
   CCORD_DECOR_PROFILE_SECTION,
   CCORD_DECOR_CHANNEL_BADGE,
   CCORD_DECOR_GUILD_BADGE,
+  CCORD_DECOR_CHANNEL_STYLE,
+  CCORD_DECOR_MEMBER_STYLE,
   CCORD_DECOR__COUNT
 } ccord_decor_target;
+
+typedef enum ccord_decor_position : uint8_t {
+  CCORD_DECOR_POS_BELOW_BODY = 0,
+  CCORD_DECOR_POS_ABOVE_BODY = 1,
+} ccord_decor_position;
 
 typedef struct ccord_decorator_contribution {
   const char *owner;
   const char *decor_id;
   ccord_decor_target target;
+  ccord_decor_position position; // CCORD_DECOR_MESSAGE_ACCESSORY: below_body (default) or above_body
   ccord_id target_id;           // 0 = wildcard (applies to all rows of target kind)
-  const char *widget_json;      // Layer-1/2 widget tree JSON (may be empty for pure MESSAGE_STYLE)
+  const char *widget_json;      // Layer-1/2 widget tree JSON (may be empty for pure *_STYLE)
   uint32_t accent_rgba;         // 0xRRGGBBAA (0 = none)
   uint32_t tint_rgba;           // 0xRRGGBBAA (0 = none)
   uint32_t text_rgba;           // 0xRRGGBBAA (0 = none)
@@ -177,8 +186,12 @@ typedef struct ccord_decorator_contribution {
   bool has_opacity;
   float opacity;                // 0.15..1.0
   bool collapsed;
+  bool hidden;                  // CCORD_DECOR_CHANNEL_STYLE / CCORD_DECOR_MEMBER_STYLE
   const char *collapse_label;
+  const char *content_override; // optional non-destructive markdown override (MESSAGE_STYLE)
+  const char *embeds_append_json; // optional JSON array of extra embeds (MESSAGE_STYLE)
   int32_t priority;
+  uint64_t reg_seq;             // monotonic registration order for deterministic tie-breaking
   uint64_t revision;
 } ccord_decorator_contribution;
 
@@ -523,6 +536,23 @@ typedef struct ccord_account_hitl_req {
   const char *summary;            // C-Cord-generated human-readable summary (never plugin-supplied)
 } ccord_account_hitl_req;
 
+// Outgoing attachment hook payload (hooks.on_before_upload, Phase 4D).
+typedef struct ccord_upload_hook_file {
+  char filename[128];
+  uint8_t *data;      // ccord_malloc'd buffer owned by caller; hook may replace (freeing old)
+  size_t size;
+  bool spoiler;
+  bool dropped;       // true -> omit attachment from send
+  bool async_transform;
+} ccord_upload_hook_file;
+
+typedef struct ccord_upload_hook_result {
+  bool cancelled;
+  bool async_pending;
+  uint64_t async_job_id;
+  char notice[160];
+} ccord_upload_hook_result;
+
 typedef struct ccord_contrib ccord_contrib;
 typedef struct ccord_contrib_handlers {
   void *ud;
@@ -538,6 +568,7 @@ typedef struct ccord_contrib_handlers {
                          const ccord_menu_context *ctx, uint32_t timeout_ms,
                          ccord_menu_resolved_entry *out, size_t max_out);
   void (*plugin_setting_changed)(void *ud, const char *owner, const char *key, const char *value_json);
+  void (*plugin_setting_action)(void *ud, const char *owner, const char *key);
   void (*keybind_triggered)(void *ud, const char *owner, const char *bind_id);
   void (*action_btn_click)(void *ud, const ccord_action_btn_contribution *btn, const ccord_menu_context *ctx);
   void (*dialog_result)(void *ud, const char *owner, uint64_t req_id, bool accepted, const char *result_json);
@@ -571,11 +602,19 @@ typedef struct ccord_contrib_handlers {
   void (*catalog_set_prefs)(void *ud, const ccord_catalog_prefs *prefs);
   void (*catalog_set_plugin_auto_update)(void *ud, const char *id, bool enabled);
   void (*catalog_run_auto_updates)(void *ud);
+  // Phase 4B/4C: popup menu selection & interactive toast action dispatch (ui -> plugins).
+  void (*popup_menu_result)(void *ud, const char *owner, uint64_t req_id, const char *item_id);
+  void (*toast_action)(void *ud, const char *owner, uint64_t toast_id);
+  // Phase 4D: handle-based outgoing attachment hook (sync Stage 1 + opt-in async Stage 2).
+  void (*before_upload_hook)(void *ud, ccord_id guild_id, ccord_id channel_id, const char *content,
+                             ccord_upload_hook_file *files, size_t count, ccord_upload_hook_result *out);
+  void (*cancel_upload_transform)(void *ud, uint64_t job_id);
 } ccord_contrib_handlers;
 // Optional UI hooks registered by ccord_ui when attached; allows plugins to drive client views without linking ui.
 typedef struct ccord_contrib_ui_hooks {
   void *ud;
   bool (*navigate)(void *ud, ccord_id guild_id, ccord_id channel_id, ccord_id parent_id, const char *name, const char *view);
+  bool (*jump_to_message)(void *ud, ccord_id channel_id, ccord_id message_id);
   bool (*ui_action)(void *ud, const char *action);
   const char *(*get_view)(void *ud);
   // Populates the composer as an unsent draft (used when a Class 1 slash command lacks messages.send).
@@ -597,6 +636,14 @@ typedef struct ccord_contrib_ui_hooks {
   bool (*file_pick)(void *ud, const char *title, const char *filters_json, bool multiple, char *out_paths_json, size_t cap);
   bool (*file_save)(void *ud, const char *suggested_name, const uint8_t *data, size_t len, char *out_path, size_t cap);
   bool (*select_theme_preset)(void *ud, const char *owner, const char *preset_id);
+  // Phase 4B/4C: Class 1 media lightbox, user profile popout, custom popup menu, and interactive toast stack.
+  bool (*open_media)(void *ud, const char *items_json, size_t index);
+  bool (*open_user_profile)(void *ud, ccord_id user_id, ccord_id guild_id);
+  bool (*open_popup_menu)(void *ud, const char *owner, uint64_t req_id, float x, float y, bool has_pos, const char *items_json);
+  bool (*toast_show)(void *ud, const char *owner, uint64_t toast_id, const char *text, uint8_t level,
+                     uint32_t duration_ms, const char *action_label);
+  void (*upload_transform_complete)(void *ud, uint64_t job_id, bool cancelled, const char *notice,
+                                    ccord_upload_hook_file *files, size_t count);
 } ccord_contrib_ui_hooks;
 
 ccord_contrib *ccord_contrib_create(ccord_error *err);
@@ -639,6 +686,7 @@ void ccord_contrib_clear_decorators(ccord_contrib *c, const char *owner);
 [[nodiscard]] ccord_status ccord_contrib_set_settings_schema(ccord_contrib *c, const char *owner, const char *schema_json,
                                                              const char *values_json, ccord_error *err);
 void ccord_contrib_notify_setting_changed(ccord_contrib *c, const char *owner, const char *key, const char *value_json);
+void ccord_contrib_notify_setting_action(ccord_contrib *c, const char *owner, const char *key);
 [[nodiscard]] ccord_status ccord_contrib_add_theme_preset(ccord_contrib *c, const ccord_theme_preset *preset, ccord_error *err);
 bool ccord_contrib_remove_theme_preset(ccord_contrib *c, const char *owner, const char *preset_id);
 [[nodiscard]] ccord_status ccord_contrib_set_theme_layer(ccord_contrib *c, const ccord_theme_layer *layer, ccord_error *err);
@@ -705,6 +753,9 @@ const ccord_panel_contribution *ccord_contrib_panel_at(const ccord_contrib *c, s
 const ccord_panel_contribution *ccord_contrib_find_panel(const ccord_contrib *c, const char *owner, const char *panel_id);
 size_t ccord_contrib_decorator_count(const ccord_contrib *c);
 const ccord_decorator_contribution *ccord_contrib_decorator_at(const ccord_contrib *c, size_t i);
+// O(1) indexed query returning decorators matching (target, target_id) plus wildcard (target, 0).
+size_t ccord_contrib_query_decorators(const ccord_contrib *c, ccord_decor_target target, ccord_id target_id,
+                                      const ccord_decorator_contribution **out, size_t cap);
 const ccord_plugin_settings_schema *ccord_contrib_plugin_settings(const ccord_contrib *c, const char *owner);
 size_t ccord_contrib_theme_preset_count(const ccord_contrib *c);
 const ccord_theme_preset *ccord_contrib_theme_preset_at(const ccord_contrib *c, size_t i);
@@ -783,6 +834,7 @@ void ccord_contrib_catalog_set_plugin_auto_update(ccord_contrib *c, const char *
 void ccord_contrib_catalog_run_auto_updates(ccord_contrib *c);
 // client hooks (plugins -> ui)
 bool ccord_contrib_ui_navigate(ccord_contrib *c, ccord_id guild_id, ccord_id channel_id, ccord_id parent_id, const char *name, const char *view);
+bool ccord_contrib_ui_jump_to_message(ccord_contrib *c, ccord_id channel_id, ccord_id message_id);
 bool ccord_contrib_ui_action(ccord_contrib *c, const char *action);
 const char *ccord_contrib_ui_view(const ccord_contrib *c);
 bool ccord_contrib_ui_insert_draft(ccord_contrib *c, ccord_id channel_id, const char *text);
@@ -804,3 +856,16 @@ bool ccord_contrib_ui_file_pick(ccord_contrib *c, const char *title, const char 
 bool ccord_contrib_ui_file_save(ccord_contrib *c, const char *suggested_name, const uint8_t *data, size_t len,
                                 char *out_path, size_t cap);
 bool ccord_contrib_ui_select_theme_preset(ccord_contrib *c, const char *owner, const char *preset_id);
+bool ccord_contrib_ui_open_media(ccord_contrib *c, const char *items_json, size_t index);
+bool ccord_contrib_ui_open_user_profile(ccord_contrib *c, ccord_id user_id, ccord_id guild_id);
+bool ccord_contrib_ui_open_popup_menu(ccord_contrib *c, const char *owner, uint64_t req_id, float x, float y,
+                                      bool has_pos, const char *items_json);
+bool ccord_contrib_ui_toast_show(ccord_contrib *c, const char *owner, uint64_t toast_id, const char *text,
+                                 uint8_t level, uint32_t duration_ms, const char *action_label);
+void ccord_contrib_resolve_popup_menu(ccord_contrib *c, const char *owner, uint64_t req_id, const char *item_id);
+void ccord_contrib_dispatch_toast_action(ccord_contrib *c, const char *owner, uint64_t toast_id);
+void ccord_contrib_run_before_upload(ccord_contrib *c, ccord_id guild_id, ccord_id channel_id, const char *content,
+                                     ccord_upload_hook_file *files, size_t count, ccord_upload_hook_result *out);
+void ccord_contrib_cancel_upload_transform(ccord_contrib *c, uint64_t job_id);
+void ccord_contrib_ui_upload_transform_complete(ccord_contrib *c, uint64_t job_id, bool cancelled, const char *notice,
+                                                ccord_upload_hook_file *files, size_t count);

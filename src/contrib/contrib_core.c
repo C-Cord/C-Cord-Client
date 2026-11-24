@@ -728,6 +728,12 @@ bool ccord_contrib_ui_navigate(ccord_contrib *c, ccord_id guild_id, ccord_id cha
   return c->ui_hooks.navigate(c->ui_hooks.ud, guild_id, channel_id, parent_id, name ? name : "", view ? view : "");
 }
 
+bool ccord_contrib_ui_jump_to_message(ccord_contrib *c, ccord_id channel_id, ccord_id message_id)
+{
+  if (!c || !c->ui_hooks.jump_to_message || channel_id == CCORD_ID_NONE || message_id == CCORD_ID_NONE) return false;
+  return c->ui_hooks.jump_to_message(c->ui_hooks.ud, channel_id, message_id);
+}
+
 bool ccord_contrib_ui_action(ccord_contrib *c, const char *action)
 {
   if (!c || !action || !c->ui_hooks.ui_action) return false;
