@@ -12,6 +12,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaScannerConnection
 import android.os.Build
@@ -64,6 +66,11 @@ object CCordBridge {
     @Volatile
     var nativeReady: Boolean = false
         private set
+
+    private val audioFocusLock = Any()
+    private var audioFocusRequest: AudioFocusRequest? = null
+    private var audioFocusHeld: Boolean = false
+    private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { _ -> }
 
     fun attach(activity: CCordActivity) {
         activityRef = WeakReference(activity)
@@ -563,12 +570,57 @@ object CCordBridge {
     @JvmStatic
     fun setAudioCommMode(inCall: Boolean) {
         val ctx = activityRef?.get() ?: appContext ?: return
-        try {
-            val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
-            am.mode = if (inCall) AudioManager.MODE_IN_COMMUNICATION else AudioManager.MODE_NORMAL
-        } catch (t: Throwable) {
-            Log.w(TAG, "setAudioCommMode failed", t)
+        synchronized(audioFocusLock) {
+            try {
+                val am = ctx.getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: return
+                if (inCall) {
+                    if (!audioFocusHeld) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            val attrs = AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                                .build()
+                            val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+                                .setAudioAttributes(attrs)
+                                .setAcceptsDelayedFocusGain(false)
+                                .setWillPauseWhenDucked(false)
+                                .setOnAudioFocusChangeListener(audioFocusChangeListener)
+                                .build()
+                            am.requestAudioFocus(req)
+                            audioFocusRequest = req
+                        } else {
+                            @Suppress("DEPRECATION")
+                            am.requestAudioFocus(
+                                audioFocusChangeListener,
+                                AudioManager.STREAM_VOICE_CALL,
+                                AudioManager.AUDIOFOCUS_GAIN_TRANSIENT
+                            )
+                        }
+                        audioFocusHeld = true
+                    }
+                    am.mode = AudioManager.MODE_IN_COMMUNICATION
+                } else {
+                    am.mode = AudioManager.MODE_NORMAL
+                    if (audioFocusHeld) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            audioFocusRequest?.let { am.abandonAudioFocusRequest(it) }
+                            audioFocusRequest = null
+                        } else {
+                            @Suppress("DEPRECATION")
+                            am.abandonAudioFocus(audioFocusChangeListener)
+                        }
+                        audioFocusHeld = false
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "setAudioCommMode failed", t)
+            }
         }
+    }
+
+    @JvmStatic
+    fun setScreenCaptureFps(fps: Int) {
+        activityRef?.get()?.setScreenCaptureFps(fps)
     }
 
     @JvmStatic

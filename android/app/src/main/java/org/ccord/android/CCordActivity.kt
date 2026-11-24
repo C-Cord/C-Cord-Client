@@ -101,6 +101,16 @@ class CCordActivity : SDLActivity() {
     private var captureThread: HandlerThread? = null
     private var captureHandler: Handler? = null
     private var captureDirectBuf: ByteBuffer? = null
+    private var captureRowBuf: ByteArray? = null
+    private var captureOutRowBuf: ByteArray? = null
+    @Volatile
+    private var captureMinIntervalNs: Long = 33_333_333L // default ~30 fps capture cap
+    private var captureLastFrameNs: Long = 0L
+
+    fun setScreenCaptureFps(fps: Int) {
+        val clamped = fps.coerceIn(5, 60)
+        captureMinIntervalNs = 1_000_000_000L / clamped.toLong()
+    }
 
     override fun getLibraries(): Array<String> = arrayOf(
         "c++_shared",
@@ -1069,6 +1079,7 @@ class CCordActivity : SDLActivity() {
 
             val reader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2)
             imageReader = reader
+            captureLastFrameNs = 0L
             reader.setOnImageAvailableListener({ r ->
                 val img = try {
                     r.acquireLatestImage()
@@ -1076,6 +1087,13 @@ class CCordActivity : SDLActivity() {
                     null
                 } ?: return@setOnImageAvailableListener
                 try {
+                    val nowNs = SystemClock.elapsedRealtimeNanos()
+                    val minIntervalNs = captureMinIntervalNs
+                    if (captureLastFrameNs != 0L && nowNs - captureLastFrameNs < minIntervalNs) {
+                        return@setOnImageAvailableListener
+                    }
+                    captureLastFrameNs = nowNs
+
                     val plane = img.planes[0]
                     val srcBuf = plane.buffer
                     val pixelStride = plane.pixelStride
@@ -1116,15 +1134,31 @@ class CCordActivity : SDLActivity() {
                         dst.clear()
                         val needSrc = (h - 1) * rowStride + (w - 1) * pixelStride + 4
                         if (srcBuf.remaining() < needSrc) return@setOnImageAvailableListener
+                        val rowNeed = (w - 1) * pixelStride + 4
+                        var inRow = captureRowBuf
+                        if (inRow == null || inRow.size < rowNeed) {
+                            inRow = ByteArray(rowNeed)
+                            captureRowBuf = inRow
+                        }
+                        var outRow = captureOutRowBuf
+                        if (outRow == null || outRow.size < tightStride) {
+                            outRow = ByteArray(tightStride)
+                            captureOutRowBuf = outRow
+                        }
                         for (y in 0 until h) {
-                            val rowBase = y * rowStride
+                            srcBuf.position(y * rowStride)
+                            srcBuf.get(inRow, 0, rowNeed)
+                            var srcOff = 0
+                            var dstOff = 0
                             for (x in 0 until w) {
-                                val off = rowBase + x * pixelStride
-                                dst.put(srcBuf.get(off))
-                                dst.put(srcBuf.get(off + 1))
-                                dst.put(srcBuf.get(off + 2))
-                                dst.put(srcBuf.get(off + 3))
+                                outRow[dstOff] = inRow[srcOff]
+                                outRow[dstOff + 1] = inRow[srcOff + 1]
+                                outRow[dstOff + 2] = inRow[srcOff + 2]
+                                outRow[dstOff + 3] = inRow[srcOff + 3]
+                                srcOff += pixelStride
+                                dstOff += 4
                             }
+                            dst.put(outRow, 0, tightStride)
                         }
                         dst.flip()
                         if (CCordBridge.nativeReady) {
@@ -1178,6 +1212,9 @@ class CCordActivity : SDLActivity() {
         captureThread = null
         captureHandler = null
         captureDirectBuf = null
+        captureRowBuf = null
+        captureOutRowBuf = null
+        captureLastFrameNs = 0L
 
         CCordVoiceService.updateScreenShareState(this, false)
         if (notifyNative && CCordBridge.nativeReady) {

@@ -5,6 +5,7 @@
 #include <ccord/platform/capture.h>
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/clock.h>
 #include <ccord/core/os.h>
 
 #include <limits.h>
@@ -26,6 +27,7 @@ static size_t g_shared_cap = 0;
 static int g_shared_w = 0;
 static int g_shared_h = 0;
 static uint64_t g_shared_seq = 0;
+static uint64_t g_last_push_ms = 0;
 static bool g_shared_stopped = false;
 static bool g_shared_active = false;
 // Recycled back-buffers checked out/returned under g_cap_lock so swizzle & malloc run unlocked
@@ -40,12 +42,21 @@ static void swizzle_rgba_to_bgra(uint8_t *restrict dst, const uint8_t *restrict 
   for (int y = 0; y < height; y++) {
     const uint8_t *restrict src = rgba + (size_t)y * (size_t)stride;
     uint8_t *restrict out = dst + (size_t)y * row_bytes;
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    for (int x = 0; x < width; x++, src += 4, out += 4) {
+      uint32_t px;
+      memcpy(&px, src, sizeof px);
+      uint32_t bgra = (px & 0x0000FF00u) | ((px & 0x00FF0000u) >> 16) | ((px & 0x000000FFu) << 16) | 0xFF000000u;
+      memcpy(out, &bgra, sizeof bgra);
+    }
+#else
     for (int x = 0; x < width; x++, src += 4, out += 4) {
       out[0] = src[2];  // B
       out[1] = src[1];  // G
       out[2] = src[0];  // R
       out[3] = 255u;    // A
     }
+#endif
   }
 }
 
@@ -53,13 +64,19 @@ void ccord_capture_android_push_frame(const uint8_t *rgba, int width, int height
 {
   if (!rgba || width <= 0 || height <= 0 || width > 8192 || height > 8192 || stride < width * 4) return;
   size_t need = (size_t)width * (size_t)height * 4u;
+  uint64_t now_ms = ccord_clock_ms();
 
   // Check out a spare buffer (if any) under the spinlock; never hold the spinlock across malloc/swizzle.
+  // If an unconsumed frame is already queued within <16 ms, drop the excess frame before swizzling.
   uint8_t *buf = nullptr;
   size_t cap = 0;
+  bool skip = false;
   ccord_spin_lock_acquire(&g_cap_lock);
   bool active = g_shared_active;
-  if (active && g_spare_n > 0) {
+  if (active && g_shared_bgra != nullptr && g_last_push_ms != 0 &&
+      now_ms >= g_last_push_ms && now_ms - g_last_push_ms < 16u) {
+    skip = true;
+  } else if (active && g_spare_n > 0) {
     g_spare_n--;
     buf = g_spare_buf[g_spare_n];
     cap = g_spare_cap[g_spare_n];
@@ -67,7 +84,7 @@ void ccord_capture_android_push_frame(const uint8_t *rgba, int width, int height
     g_spare_cap[g_spare_n] = 0;
   }
   ccord_spin_lock_release(&g_cap_lock);
-  if (!active) return;
+  if (!active || skip) return;
 
   if (need > cap) {
     uint8_t *nb = ccord_malloc(need);
@@ -93,6 +110,7 @@ void ccord_capture_android_push_frame(const uint8_t *rgba, int width, int height
     g_shared_w = width;
     g_shared_h = height;
     g_shared_seq++;
+    g_last_push_ms = now_ms ? now_ms : 1u;
     g_shared_stopped = false;
     if (old) {
       if (g_spare_n < 2u) {
@@ -201,6 +219,7 @@ static void android_cap_close(ccord_capture *base)
   ccord_spin_lock_acquire(&g_cap_lock);
   g_shared_active = false;
   g_shared_stopped = false;
+  g_last_push_ms = 0;
   p_shared = g_shared_bgra;
   g_shared_bgra = nullptr;
   g_shared_cap = 0;
@@ -243,6 +262,7 @@ static ccord_capture *android_cap_open(const ccord_capture_source *src, ccord_er
   g_shared_active = true;
   g_shared_stopped = false;
   g_shared_seq = 0;
+  g_last_push_ms = 0;
   ccord_spin_lock_release(&g_cap_lock);
 
   if (!ccord_android_request_screen_capture()) {
