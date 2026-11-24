@@ -787,8 +787,6 @@ bool ui_touch_update(ccord_ui *ui, uint64_t now_ms, float dt_ms)
       ui->touch.pending_single_tap = false;
       ui_lightbox_toggle_hud(ui);
       animating = true;
-    } else {
-      animating = true;
     }
   }
 

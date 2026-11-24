@@ -168,22 +168,32 @@ static void compute_picker_rect(ccord_ui *ui)
   ui->emoji_picker_rect = (ccord_rect){px, py, pw, ph};
 }
 
-static bool expr_flush_gif_search(ccord_ui *ui, struct ui_expr_picker *ep)
+static void expr_flush_gif_search(ccord_ui *ui, struct ui_expr_picker *ep)
 {
-  if (!ui || !ep || !ep->body) return false;
+  if (!ui || !ep || !ep->body) {
+    if (ui) ui->expr_gif_search_due_ms = 0;
+    return;
+  }
   ui_expr_body *b = ep->body;
-  if (!b->gif_search_pending) return false;
+  if (!b->gif_search_pending) {
+    ui->expr_gif_search_due_ms = 0;
+    return;
+  }
   if (!ui->emoji_picker_open || ep->tab != EXPR_TAB_GIFS || b->search_edit.len < 2 || !ui->d.session) {
     b->gif_search_pending = false;
-    return false;
+    ui->expr_gif_search_due_ms = 0;
+    return;
   }
-  if (ui->now_ms < b->gif_search_due_ms) return true;
+  if (ui->now_ms < b->gif_search_due_ms) {
+    ui->expr_gif_search_due_ms = b->gif_search_due_ms;
+    return;
+  }
   b->gif_search_pending = false;
+  ui->expr_gif_search_due_ms = 0;
   ccord_error err;
   (void)ccord_session_request_expression_data(ui->d.session, CCORD_EXPR_GIF_SEARCH,
                                               ccord_text_edit_cstr(&b->search_edit), true, &err);
   ui->dirty = true;
-  return false;
 }
 
 void ui_expr_picker_open(ccord_ui *ui, int tab, ccord_id channel_id, ccord_id reaction_msg_id)
@@ -208,6 +218,7 @@ void ui_expr_picker_open(ccord_ui *ui, int tab, ccord_id channel_id, ccord_id re
   b->hovered_hit = -1;
   b->last_hover_key = -1;
   b->gif_search_pending = false;
+  ui->expr_gif_search_due_ms = 0;
   if (tab == EXPR_TAB_GIFS && b->search_edit.len == 0) {
     b->gif_subview = 0;
     b->gif_category_label[0] = '\0';
@@ -240,6 +251,7 @@ void ui_expr_picker_open_query(ccord_ui *ui, int tab, ccord_id channel_id, const
     if (tab == EXPR_TAB_GIFS && ui->d.session) {
       b->gif_search_due_ms = ui->now_ms;
       b->gif_search_pending = true;
+      ui->expr_gif_search_due_ms = ui->now_ms ? ui->now_ms : 1u;
     }
   }
   ui->dirty = true;
@@ -272,7 +284,7 @@ bool ui_expr_scroll_tick(ccord_ui *ui, float fdt_ms, bool reduced)
       ui->dirty = true;
     }
   }
-  if (expr_flush_gif_search(ui, ep)) moving = true;
+  expr_flush_gif_search(ui, ep);
   return moving;
 }
 
@@ -298,6 +310,7 @@ void ui_expr_picker_close(ccord_ui *ui)
   ui->emoji_picker_open = false;
   ui->emoji_picker_msg_id = CCORD_ID_NONE;
   ui->emoji_picker_for_status = false;
+  ui->expr_gif_search_due_ms = 0;
   if (ui->touch_mode) ui->touch_text_focused = false;
   // Defer freeing ep->body until the close fade-out finishes so draw_overlay_popup doesn't re-allocate it
   // every animation frame; free immediately under reduced motion or when no overlay presence is active.
@@ -968,8 +981,10 @@ bool ui_expr_handle_event(ccord_ui *ui, const ccord_input_event *ev)
           if (t == EXPR_TAB_GIFS && b->search_edit.len >= 2) {
             b->gif_search_pending = true;
             b->gif_search_due_ms = 0;
+            ui->expr_gif_search_due_ms = ui->now_ms ? ui->now_ms : 1u;
           } else {
             b->gif_search_pending = false;
+            ui->expr_gif_search_due_ms = 0;
           }
           b->last_hover_key = -1;
           ui->dirty = true;
@@ -980,6 +995,7 @@ bool ui_expr_handle_event(ccord_ui *ui, const ccord_input_event *ev)
         ccord_text_edit_clear(&b->search_edit);
         b->gif_subview = 0;
         b->gif_search_pending = false;
+        ui->expr_gif_search_due_ms = 0;
         b->last_hover_key = -1;
         ui->dirty = true;
         return true;
@@ -1060,6 +1076,7 @@ bool ui_expr_handle_event(ccord_ui *ui, const ccord_input_event *ev)
         const char *term = h->sub[0] ? h->sub : h->name;
         (void)ccord_text_edit_insert(&b->search_edit, term, strlen(term), &err);
         b->gif_search_pending = false;
+        ui->expr_gif_search_due_ms = 0;
         if (ui->d.session) {
           (void)ccord_session_request_expression_data(ui->d.session, CCORD_EXPR_GIF_SEARCH, term, true, &err);
         }
@@ -1146,6 +1163,7 @@ bool ui_expr_handle_event(ccord_ui *ui, const ccord_input_event *ev)
         break;
       case CCORD_KEY_RETURN:
         b->gif_search_pending = false;
+        ui->expr_gif_search_due_ms = 0;
         if (ep->tab == EXPR_TAB_GIFS && b->search_edit.len > 0 && ui->d.session) {
           ccord_error err;
           (void)ccord_session_request_expression_data(ui->d.session, CCORD_EXPR_GIF_SEARCH,
@@ -1165,8 +1183,10 @@ bool ui_expr_handle_event(ccord_ui *ui, const ccord_input_event *ev)
       if (b->search_edit.len >= 2) {
         b->gif_search_pending = true;
         b->gif_search_due_ms = ui->now_ms + EXPR_GIF_SEARCH_DEBOUNCE_MS;
+        ui->expr_gif_search_due_ms = b->gif_search_due_ms;
       } else {
         b->gif_search_pending = false;
+        ui->expr_gif_search_due_ms = 0;
       }
     }
     if (text_edited) {
@@ -1185,8 +1205,10 @@ bool ui_expr_handle_event(ccord_ui *ui, const ccord_input_event *ev)
       if (b->search_edit.len >= 2) {
         b->gif_search_pending = true;
         b->gif_search_due_ms = ui->now_ms + EXPR_GIF_SEARCH_DEBOUNCE_MS;
+        ui->expr_gif_search_due_ms = b->gif_search_due_ms;
       } else {
         b->gif_search_pending = false;
+        ui->expr_gif_search_due_ms = 0;
       }
     }
     ep->scroll_y[ep->tab] = 0.0f;

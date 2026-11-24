@@ -905,27 +905,32 @@ static bool ui_caret_wants_blink(const ccord_ui *ui)
   if (!ui || !ui->window_focused) return false;
   if (ui_is_loading_screen(ui) || ui->stream_fullscreen) return false;
   if (ui->settings_open) {
-    if (ui->account_mfa_required) return ui->account_focus_field == 4;
-    if (ui_is_login_screen(ui) || ui->settings_page == 0) return ui->account_focus_field != 0 || ui_settings_account_wants_text(ui);
-    if (ui->settings_page == 2 && ui->account_focus_field == 6) return true;
-    return ui_settings_profile_wants_text(ui) || ui_settings_plugins_wants_text(ui);
+    bool field = false;
+    if (ui->account_mfa_required) field = ui->account_focus_field == 4;
+    else if (ui_is_login_screen(ui) || ui->settings_page == 0) field = ui->account_focus_field != 0 || ui_settings_account_wants_text(ui);
+    else if (ui->settings_page == 2 && ui->account_focus_field == 6) field = true;
+    else field = ui_settings_profile_wants_text(ui) || ui_settings_plugins_wants_text(ui);
+    return ui->touch_mode ? (ui->touch_text_focused && field) : field;
   }
   if (ui_server_settings_is_open(ui)) return ui_server_settings_wants_caret(ui);
   if (ui_channel_settings_is_open(ui)) return ui_channel_settings_wants_caret(ui);
-  if (ui->report_open || ui->schedule_open || ui->poll_open || ui->sc.open) return true;
-  if (ui->quick_switcher_open) return true;
+  if (ui->report_open || ui->schedule_open || ui->poll_open || ui->sc.open) {
+    return !ui->touch_mode || ui->touch_text_focused;
+  }
+  if (ui->quick_switcher_open) return !ui->touch_mode || ui->touch_text_focused;
   if (ui->modal_kind != UI_MODAL_NONE) {
-    switch (ui->modal_kind) {
-      case UI_MODAL_CONFIRM:
-      case UI_MODAL_SCHEDULED_EVENTS:
-      case UI_MODAL_MEMBER_VERIFICATION:
-      case UI_MODAL_ACTIVITY_SHELF:
-        return false;
-      case UI_MODAL_USER_PROFILE:
-        return ui->profile_modal_tab == 0 && (!ui->touch_mode || ui->touch_text_focused);
-      default:
-        return true;
+    if (ui_dave_modal_active(ui) || ui_activity_shelf_active(ui) ||
+        ui->modal_kind == UI_MODAL_MEMBER_VERIFICATION || ui->modal_kind == UI_MODAL_CONFIRM ||
+        ui->modal_kind == UI_MODAL_FOLLOW_CHANNEL) {
+      return false;
     }
+    if (ui_scheduled_events_active(ui)) {
+      return ui_scheduled_events_wants_text(ui) && (!ui->touch_mode || ui->touch_text_focused);
+    }
+    if (ui->modal_kind == UI_MODAL_USER_PROFILE) {
+      return ui->profile_modal_tab == 0 && (!ui->touch_mode || ui->touch_text_focused);
+    }
+    return !ui->touch_mode || ui->touch_text_focused;
   }
   if (ui->lightbox_open || ui->select_open || ui->menu.open || ui->go_live_open ||
       ui->pins_open || ui->reactions_open || ui->inbox_open || ui->shortcuts_open ||
@@ -934,8 +939,9 @@ static bool ui_caret_wants_blink(const ccord_ui *ui)
   }
   if (ui->touch_mode) {
     bool drawer_open = ui->mobile_layout && (ui->left_drawer_open || ui->right_drawer_open);
-    return !drawer_open && (ui->search_open || ui->discovery_open ||
-                            (ui->touch_text_focused && (ui_forum_is_active(ui) || uc_composer_accepts_text(ui))));
+    return !drawer_open && ui->touch_text_focused &&
+           (ui->search_open || ui->discovery_open || (ui->emoji_picker_open && ui_expr_wants_text(ui)) ||
+            ui_forum_is_active(ui) || uc_composer_accepts_text(ui));
   }
   return ui->emoji_picker_open || ui->discovery_open || ui->search_open ||
          ui_forum_is_active(ui) || uc_composer_accepts_text(ui);
@@ -1120,10 +1126,13 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
     if (ui->loading_progress < 0.15f) ui->loading_progress = 0.15f;
     float target_prog = (ui->d.session && ccord_session_state(ui->d.session) == CCORD_CONN_CONNECTED) ? 0.96f : 0.90f;
     ui->loading_progress += (target_prog - ui->loading_progress) * (1.0f - expf(-fdt / 450.0f));
-    anim = true;
-    ui->dirty = true;
+    if (ui->loading_next_ms == 0 || now_ms >= ui->loading_next_ms) {
+      ui->dirty = true;
+      ui->loading_next_ms = now_ms + (ui->anim.reduced_motion ? 100u : 33u);
+    }
   } else {
     ui->loading_progress = 1.0f;
+    ui->loading_next_ms = 0;
   }
   if (uc_media_player_tick(ui, dt)) {
     anim = true;
@@ -1134,12 +1143,24 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
     ui->last_slowmode_rem_s = srem;
     ui->dirty = true;
   }
-  bool up_active = ui->d.session && ccord_session_active_uploads(ui->d.session, CCORD_ID_NONE, nullptr, 0) > 0;
+  bool composer_visible = ui->d.session && ui->d.store &&
+                          !ui_is_loading_screen(ui) && !ui_is_login_screen(ui) &&
+                          !ui->settings_open && !ui_server_settings_is_open(ui) && !ui_channel_settings_is_open(ui) &&
+                          !ui->discovery_open && !ui->stream_fullscreen &&
+                          !ui_is_dm_friends_view(ui) && !ui_is_dm_requests_view(ui) &&
+                          !ui_guild_view_active(ui) && !ui_forum_is_active(ui) &&
+                          (ui->stage_channel == CCORD_ID_NONE || ui_stage_chat_active(ui));
+  ccord_id up_ch = composer_visible ? ccord_store_selected_channel(ui->d.store) : CCORD_ID_NONE;
+  bool up_active = up_ch != CCORD_ID_NONE &&
+                   ccord_session_active_uploads(ui->d.session, up_ch, nullptr, 0) > 0;
   if (up_active) {
-    anim = true;
-    ui->dirty = true;
-  } else if (ui->had_active_uploads) {
-    ui->dirty = true;
+    if (!ui->had_active_uploads || ui->upload_next_ms == 0 || now_ms >= ui->upload_next_ms) {
+      ui->dirty = true;
+      ui->upload_next_ms = now_ms + 100u;
+    }
+  } else {
+    ui->upload_next_ms = 0;
+    if (ui->had_active_uploads) ui->dirty = true;
   }
   ui->had_active_uploads = up_active;
   if (ui->stream_fullscreen) {
@@ -1177,14 +1198,18 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
     smooth = true;
   }
   if (ui->jump_highlight_msg_id != CCORD_ID_NONE) {
-    if (now_ms < ui->jump_highlight_until_ms) {
-      ui->animating = true;
-      smooth = true;
-      ui->dirty = true;
-    } else {
+    if (now_ms >= ui->jump_highlight_until_ms) {
       ui->jump_highlight_msg_id = CCORD_ID_NONE;
       ui->jump_highlight_until_ms = 0;
       ui->dirty = true;
+    } else {
+      uint64_t fade_span = UI_JUMP_FLASH_MS - UI_JUMP_HOLD_MS;
+      uint64_t fade_start = ui->jump_highlight_until_ms > fade_span ? (ui->jump_highlight_until_ms - fade_span) : 0;
+      if (!ui->anim.reduced_motion && now_ms >= fade_start) {
+        ui->animating = true;
+        smooth = true;
+        ui->dirty = true;
+      }
     }
   }
   if (ui->vlist.count > 0 && ui->last_scroll_ms && now_ms >= ui->last_scroll_ms + 1200 && now_ms < ui->last_scroll_ms + 1200 + 64) {
@@ -1201,6 +1226,18 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
   return redraw;
 }
 
+static void wait_min_deadline(uint32_t *wait, uint64_t now_ms, uint64_t due_ms)
+{
+  if (due_ms == 0) return;
+  if (now_ms >= due_ms) {
+    *wait = 0u;
+    return;
+  }
+  uint64_t rem = due_ms - now_ms;
+  uint32_t w = rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
+  if (w < *wait) *wait = w;
+}
+
 uint32_t ccord_ui_next_wait_ms(const ccord_ui *ui, uint64_t now_ms)
 {
   if (!ui) return UINT32_MAX;
@@ -1209,15 +1246,41 @@ uint32_t ccord_ui_next_wait_ms(const ccord_ui *ui, uint64_t now_ms)
   uint32_t wait = UINT32_MAX;
   if (ui->media_animating) {
     if (!ui->has_media_anim_next || now_ms >= ui->media_anim_next_ms) return 0u;
-    uint64_t rem = ui->media_anim_next_ms - now_ms;
-    uint32_t w = rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
-    if (w < wait) wait = w;
+    wait_min_deadline(&wait, now_ms, ui->media_anim_next_ms);
   }
   if (ui->typing_anim_only && ui->typing_next_ms != 0) {
-    if (now_ms >= ui->typing_next_ms) return 0u;
-    uint64_t rem = ui->typing_next_ms - now_ms;
-    uint32_t w = rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
-    if (w < wait) wait = w;
+    wait_min_deadline(&wait, now_ms, ui->typing_next_ms);
+  }
+  wait_min_deadline(&wait, now_ms, ui->media_audio_next_ms);
+  if (ui->vm.recording) wait_min_deadline(&wait, now_ms, ui->vm_ui_next_ms);
+  wait_min_deadline(&wait, now_ms, ui->loading_next_ms);
+  wait_min_deadline(&wait, now_ms, ui->upload_next_ms);
+  if (ui->lightbox_open) wait_min_deadline(&wait, now_ms, ui->lightbox_hold_until_ms);
+  if (ui->emoji_picker_open) wait_min_deadline(&wait, now_ms, ui->expr_gif_search_due_ms);
+  if (ui->sc.open) wait_min_deadline(&wait, now_ms, ui->sc.confirm_until_ms);
+  if (ui->touch.pending_single_tap && ui->lightbox_open) {
+    wait_min_deadline(&wait, now_ms, ui->touch.pending_tap_ms);
+  }
+  if (ui->touch.active && ui->touch.mode == 1u && !ui->lightbox_open) {
+    wait_min_deadline(&wait, now_ms, ui->touch.down_ms + UI_TOUCH_LONG_PRESS_MS);
+  }
+  if (ui->jump_highlight_msg_id != CCORD_ID_NONE) {
+    if (now_ms >= ui->jump_highlight_until_ms) return 0u;
+    uint64_t fade_span = UI_JUMP_FLASH_MS - UI_JUMP_HOLD_MS;
+    uint64_t fade_start = ui->jump_highlight_until_ms > fade_span ? (ui->jump_highlight_until_ms - fade_span) : 0;
+    if (ui->anim.reduced_motion) {
+      wait_min_deadline(&wait, now_ms, ui->jump_highlight_until_ms);
+    } else if (now_ms < fade_start) {
+      wait_min_deadline(&wait, now_ms, fade_start);
+    } else {
+      return 0u;
+    }
+  }
+  if (ui->discovery_open) wait_min_deadline(&wait, now_ms, ui->discovery_due_ms);
+  wait_min_deadline(&wait, now_ms, ui->slash_auto_due_ms);
+  if (ui->notice[0] && ui->notice_until_ms != 0) {
+    uint64_t fade_at = ui->notice_until_ms > 250u ? (ui->notice_until_ms - 250u) : ui->notice_until_ms;
+    wait_min_deadline(&wait, now_ms, fade_at);
   }
   return wait;
 }
@@ -1225,5 +1288,26 @@ uint32_t ccord_ui_next_wait_ms(const ccord_ui *ui, uint64_t now_ms)
 bool ccord_ui_notify_desktop_enabled(const ccord_ui *ui)
 {
   return !ui || ui->settings_notify_desktop;
+}
+
+bool ccord_ui_voice_stage_visible(const ccord_ui *ui)
+{
+  if (!ui || ui->stage_channel == CCORD_ID_NONE) return false;
+  if (ui_is_loading_screen(ui) || ui_is_login_screen(ui) || ui->stream_fullscreen) return false;
+  if (ui->settings_open || ui_server_settings_is_open(ui) || ui_channel_settings_is_open(ui)) return false;
+  if (ui->lightbox_open && ui->mobile_layout && fabsf(ui->lightbox_dismiss_y) < 0.5f) return false;
+  if (ui->discovery_open || ui_panels_has_active_full_view(ui)) return false;
+  if (ui_stage_mobile_chat_active(ui)) return false;
+  return true;
+}
+
+bool ccord_ui_stream_preview_hidden(const ccord_ui *ui)
+{
+  return ui && ui->stream_hide_preview;
+}
+
+bool ccord_ui_streamer_mode(const ccord_ui *ui)
+{
+  return ui && ui->settings_streamer_mode;
 }
 

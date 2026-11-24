@@ -1676,7 +1676,8 @@ static void test_composer_upload_progress_indicator(void)
   CT_CHECK(up.banner_rect.w > 120.0f && up.banner_rect.h > 30.0f);
   CT_CHECK(up.bar_rects[0].w > 80.0f && up.bar_rects[0].h > 2.0f);
   CT_CHECK(strstr(up.label[0], "render.png") != nullptr && strstr(up.label[0], "(1/2)") != nullptr);
-  CT_CHECK(ccord_ui_update(F.ui, F.now + 16u));   // keeps frame pacing active while uploading
+  CT_CHECK(ccord_ui_next_wait_ms(F.ui, F.now) <= 100u);   // paces upload progress at 10 Hz instead of spinning VSync
+  CT_CHECK(ccord_ui_update(F.ui, F.now + 100u));          // wakes on the 10 Hz upload cadence
 
   // Advance mid-upload (+100ms -> 166ms / 240ms): file 2/2 is actively uploading with mid-range percentage.
   F.now += 100u;
@@ -2985,6 +2986,85 @@ static void test_same_dm_refocus_and_open_latest_message(void)
 }
 
 
+static void test_power_efficiency_and_wave2_helpers(void)
+{
+  // Wave 2 state accessors.
+  CT_CHECK(!ccord_ui_voice_stage_visible(nullptr));
+  CT_CHECK(!ccord_ui_stream_preview_hidden(nullptr));
+  CT_CHECK(!ccord_ui_streamer_mode(nullptr));
+
+  bool prev_sm = F.ui->settings_streamer_mode;
+  F.ui->settings_streamer_mode = true;
+  CT_CHECK(ccord_ui_streamer_mode(F.ui));
+  F.ui->settings_streamer_mode = false;
+  CT_CHECK(!ccord_ui_streamer_mode(F.ui));
+  F.ui->settings_streamer_mode = prev_sm;
+
+  bool prev_hp = F.ui->stream_hide_preview;
+  F.ui->stream_hide_preview = true;
+  CT_CHECK(ccord_ui_stream_preview_hidden(F.ui));
+  F.ui->stream_hide_preview = false;
+  CT_CHECK(!ccord_ui_stream_preview_hidden(F.ui));
+  F.ui->stream_hide_preview = prev_hp;
+
+  ccord_id prev_stage = F.ui->stage_channel;
+  bool prev_set = F.ui->settings_open;
+  bool prev_fs = F.ui->stream_fullscreen;
+  bool prev_disc = F.ui->discovery_open;
+  F.ui->stage_channel = CCORD_ID_NONE;
+  CT_CHECK(!ccord_ui_voice_stage_visible(F.ui));
+  F.ui->stage_channel = 123456u;
+  F.ui->settings_open = false;
+  F.ui->stream_fullscreen = false;
+  F.ui->discovery_open = false;
+  CT_CHECK(ccord_ui_voice_stage_visible(F.ui));
+  F.ui->settings_open = true;
+  CT_CHECK(!ccord_ui_voice_stage_visible(F.ui));
+  F.ui->settings_open = false;
+  F.ui->stream_fullscreen = true;
+  CT_CHECK(!ccord_ui_voice_stage_visible(F.ui));
+  F.ui->stream_fullscreen = prev_fs;
+  F.ui->settings_open = prev_set;
+  F.ui->discovery_open = prev_disc;
+  F.ui->stage_channel = prev_stage;
+
+  // Jump highlight 700 ms static hold sleeps instead of spinning at VSync.
+  frame(10);   // settle transitions
+  F.ui->jump_highlight_msg_id = 424242u;
+  F.ui->jump_highlight_until_ms = F.now + UI_JUMP_FLASH_MS;
+  (void)ccord_ui_update(F.ui, F.now);
+  uint32_t jw = ccord_ui_next_wait_ms(F.ui, F.now);
+  CT_CHECK(jw >= 600u && jw <= UI_JUMP_HOLD_MS);
+  // Once past the static hold, fade animates smoothly (0 ms wait).
+  (void)ccord_ui_update(F.ui, F.now + UI_JUMP_HOLD_MS + 10u);
+  CT_CHECK(ccord_ui_next_wait_ms(F.ui, F.now + UI_JUMP_HOLD_MS + 10u) == 0u);
+  // After UI_JUMP_FLASH_MS, highlight clears cleanly.
+  (void)ccord_ui_update(F.ui, F.now + UI_JUMP_FLASH_MS + 10u);
+  CT_CHECK(F.ui->jump_highlight_msg_id == CCORD_ID_NONE);
+
+  // Status card 1.5 s confirm hold reports exact remaining deadline instead of 0 ms spin.
+  F.now += UI_JUMP_FLASH_MS + 50u;
+  F.ui->sc.open = true;
+  F.ui->sc.confirm_until_ms = F.now + 1500u;
+  (void)ccord_ui_update(F.ui, F.now);
+  uint32_t scw = ccord_ui_next_wait_ms(F.ui, F.now);
+  CT_CHECK(scw > 1000u && scw <= 1500u);
+  CT_CHECK(ccord_ui_update(F.ui, F.now + 1500u));
+  CT_CHECK(F.ui->sc.confirm_until_ms == 0u);
+  F.ui->sc.open = false;
+
+  // Loading screen paces updates at ~33 ms instead of uncapped VSync spin.
+  F.now += 1600u;
+  ccord_ui_set_loading_screen(F.ui, true);
+  (void)ccord_ui_update(F.ui, F.now);
+  uint32_t lw = ccord_ui_next_wait_ms(F.ui, F.now);
+  CT_CHECK(lw > 0u && lw <= 33u);
+  ccord_ui_set_loading_screen(F.ui, false);
+  (void)ccord_ui_update(F.ui, F.now + 50u);
+  F.now += 50u;
+}
+
+
 int main(int argc, char **argv)
 {
   if (!setup(argc > 0 ? argv[0] : "test_ui_interaction_ext")) {
@@ -3017,6 +3097,7 @@ int main(int argc, char **argv)
   test_plugin_api_v3_ui();
   test_nameplate_visibility_and_animation();
   test_same_dm_refocus_and_open_latest_message();
+  test_power_efficiency_and_wave2_helpers();
   ui_test_teardown();
   ct_failures += ui_test_harness_failures();
   return CT_RESULT("test_ui_interaction_ext");

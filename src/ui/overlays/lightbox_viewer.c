@@ -19,6 +19,7 @@
 #define LB_DOUBLE_TAP_ZOOM 2.5f
 #define LB_GUTTER_PX       16.0f
 #define LB_CROSSFADE_MS    140u
+#define LB_HD_FADE_MS      320u
 #define LB_HD_DONE_HOLD_MS 950u
 
 static float lb_clampf(float v, float lo, float hi) { return v < lo ? lo : (v > hi ? hi : v); }
@@ -404,7 +405,11 @@ static void lb_action_copy(ccord_ui *ui)
 
 bool ui_lightbox_update(ccord_ui *ui, uint64_t now_ms, float dt_ms)
 {
-  if (!ui || !ui->lightbox_open) return false;
+  if (!ui) return false;
+  if (!ui->lightbox_open) {
+    ui->lightbox_hold_until_ms = 0;
+    return false;
+  }
   bool anim = false;
   bool reduced = ui->anim.reduced_motion;
   float k_fast = (reduced || dt_ms <= 0.0f) ? (reduced ? 1.0f : 0.0f) : (1.0f - expf(-dt_ms / 48.0f));
@@ -513,13 +518,25 @@ bool ui_lightbox_update(ccord_ui *ui, uint64_t now_ms, float dt_ms)
     } else if (ui->lightbox_prog_smooth < 0.01f) {
       ui->lightbox_prog_smooth = target_p;
     }
+    ui->lightbox_hold_until_ms = 0;
     anim = true;
   } else if (hd_ready) {
     ui->lightbox_prog_smooth = 1.0f;
     ui->lightbox_prog_indeterminate = false;
-    if (ui->lightbox_hd_ready_ms > 0 && now_ms < ui->lightbox_hd_ready_ms + LB_HD_DONE_HOLD_MS) {
+    uint64_t fade_end = ui->lightbox_hd_ready_ms + (reduced ? 0u : LB_HD_FADE_MS);
+    uint64_t hold_end = ui->lightbox_hd_ready_ms + LB_HD_DONE_HOLD_MS;
+    if (ui->lightbox_hd_ready_ms > 0 && now_ms < fade_end) {
+      ui->lightbox_hold_until_ms = 0;
       anim = true;
+    } else if (ui->lightbox_hd_ready_ms > 0 && now_ms < hold_end) {
+      // 630 ms static "HD" pill hold: sleep until hold_end instead of VSync spinning.
+      ui->lightbox_hold_until_ms = hold_end;
+    } else if (ui->lightbox_hold_until_ms != 0) {
+      ui->lightbox_hold_until_ms = 0;
+      ui->dirty = true;
     }
+  } else {
+    ui->lightbox_hold_until_ms = 0;
   }
 
   return anim;

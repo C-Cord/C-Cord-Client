@@ -19,6 +19,7 @@
 #define COL(name) (ui->theme->c.name)
 
 #define UI_VM_TICK_FRAMES 4800u   // at most 100 ms of mic audio is read per UI tick
+#define UI_VM_UI_PACE_MS 66u      // ~15 Hz waveform/elapsed-time redraw cadence while recording
 
 static void vm_free_peaks(ccord_ui *ui)
 {
@@ -169,6 +170,7 @@ static bool vm_begin(ccord_ui *ui, ccord_id channel)
   ui->vm.blk_peak = 0;
   ui->vm.channel = channel;
   ui->vm.recording = true;
+  ui->vm_ui_next_ms = ui->now_ms + UI_VM_UI_PACE_MS;
   ui->dirty = true;
   return true;
 }
@@ -192,7 +194,6 @@ static size_t vm_push(ccord_ui *ui, const int16_t *pcm, size_t frames)
   }
   ui->vm.frames += frames;
   vm_note_samples(ui, pcm, frames);
-  ui->dirty = true;
   if (ui->vm.frames >= UI_VM_MAX_FRAMES) ui_vm_finish(ui);
   return frames;
 }
@@ -239,17 +240,35 @@ bool ui_vm_test_begin(ccord_ui *ui)
 
 size_t ui_vm_feed_test_pcm(ccord_ui *ui, const int16_t *pcm, size_t frames)
 {
-  return vm_push(ui, pcm, frames);
+  size_t got = vm_push(ui, pcm, frames);
+  if (got > 0) ui->dirty = true;
+  return got;
 }
 
 void ui_vm_tick(ccord_ui *ui)
 {
-  if (!ui->vm.recording) return;
-  ui->dirty = true;   // the elapsed time and the live bars move every frame
-  if (!ui->vm.mic) return;
-  int16_t buf[UI_VM_TICK_FRAMES];
-  size_t n = ccord_audio_read(ui->vm.mic, buf, UI_VM_TICK_FRAMES);
-  if (n > 0) (void)vm_push(ui, buf, n);
+  if (!ui->vm.recording) {
+    ui->vm_ui_next_ms = 0;
+    return;
+  }
+  if (ui->vm.mic) {
+    int16_t buf[UI_VM_TICK_FRAMES];
+    for (int i = 0; i < 4 && ui->vm.recording; i++) {
+      size_t n = ccord_audio_read(ui->vm.mic, buf, UI_VM_TICK_FRAMES);
+      if (n == 0) break;
+      (void)vm_push(ui, buf, n);
+      if (n < UI_VM_TICK_FRAMES) break;
+    }
+  }
+  if (!ui->vm.recording) {
+    ui->vm_ui_next_ms = 0;
+    return;
+  }
+  // Pace waveform & elapsed-time UI redraws to ~15 Hz (66 ms) instead of VSync spinning at 60-120 Hz.
+  if (ui->vm_ui_next_ms == 0 || ui->now_ms >= ui->vm_ui_next_ms) {
+    ui->dirty = true;
+    ui->vm_ui_next_ms = ui->now_ms + UI_VM_UI_PACE_MS;
+  }
 }
 
 bool ui_vm_send_clip(ccord_ui *ui)
@@ -273,6 +292,7 @@ void ui_vm_finish(ccord_ui *ui)
 {
   if (!ui->vm.recording) return;
   ui->vm.recording = false;
+  ui->vm_ui_next_ms = 0;
   vm_close_mic(ui);
   if (ui->vm.blk_fill > 0) {
     vm_peak_add(ui, ui->vm.blk_peak);
@@ -313,6 +333,7 @@ void ui_vm_cancel(ccord_ui *ui)
 {
   if (!ui->vm.recording) return;
   ui->vm.recording = false;
+  ui->vm_ui_next_ms = 0;
   vm_close_mic(ui);
   vm_drop_encoder(ui);
   vm_free_peaks(ui);

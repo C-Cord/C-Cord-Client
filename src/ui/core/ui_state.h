@@ -1001,6 +1001,14 @@ struct ccord_ui {
     float pending_tap_x, pending_tap_y;
   } touch;
 
+  // Paced UI redraw deadlines (ms in ui->now_ms domain; 0 = inactive) so discrete/low-rate
+  // updates and static holds sleep in ccord_ui_next_wait_ms() instead of spinning at VSync.
+  uint64_t media_audio_next_ms;       // ~100 ms progress ticks for audio-only playback (and ~33 ms open poll)
+  uint64_t vm_ui_next_ms;             // ~66 ms (~15 Hz) waveform/elapsed updates while recording voice message
+  uint64_t loading_next_ms;           // ~33 ms (30 fps) loading-screen progress/spinner updates
+  uint64_t upload_next_ms;            // ~100 ms visible-channel upload progress bar updates
+  uint64_t lightbox_hold_until_ms;    // static HD-ready pill hold deadline (after 320 ms crossfade/fade)
+  uint64_t expr_gif_search_due_ms;    // mirrored from ui_expr_body.gif_search_due_ms while debounce pending
 };
 
 #define UI_TOUCH_LONG_PRESS_MS 420u

@@ -249,6 +249,9 @@ static void test_short_take_send_from_bar(void)
   CT_CHECK(ui_vm_test_begin(F.ui));
   for (int i = 0; i < 20; i++) CT_CHECK(ui_vm_feed_test_pcm(F.ui, pcm, CHUNK) == CHUNK);
   frame(2);
+  // While recording, UI redraws are paced (~66 ms / 15 Hz) rather than VSync-spinning every frame.
+  uint32_t rec_wait = ccord_ui_next_wait_ms(F.ui, F.now);
+  CT_CHECK(rec_wait > 0u && rec_wait <= 66u);
   CT_CHECK(F.ui->vm.bar_rect.w > 0.0f && F.ui->vm.send_rect.w > 0.0f);
   uint32_t sent_before = F.ui->vm.sent_count;
   click_rect(F.ui->vm.send_rect);

@@ -244,13 +244,15 @@ void ui_status_card_tick(ccord_ui *ui)
   if (sc->presence_until_ms && ui->now_ms >= sc->presence_until_ms) sc->presence_until_ms = 0;
   if (sc->custom_until_ms && ui->now_ms >= sc->custom_until_ms) sc->custom_until_ms = 0;
   if (!sc->open) return;
-  if (sc->confirm_until_ms) {
-    ui->dirty = true;   // the checkmark leaves (and the Set button returns) on a redraw
-    if (ui->now_ms >= sc->confirm_until_ms) sc->confirm_until_ms = 0;
+  if (sc->confirm_until_ms && ui->now_ms >= sc->confirm_until_ms) {
+    sc->confirm_until_ms = 0;
+    ui->dirty = true;   // single redraw when the 1.5 s confirm checkmark expires (no VSync spin during hold)
   }
   if (ui->caret_on != sc->last_caret_on) {
     sc->last_caret_on = ui->caret_on;
-    ui->dirty = true;
+    if (ui->window_focused && (!ui->touch_mode || ui->touch_text_focused)) {
+      ui->dirty = true;
+    }
   }
 }
 

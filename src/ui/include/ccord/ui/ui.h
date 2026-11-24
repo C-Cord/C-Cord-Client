@@ -537,6 +537,13 @@ bool ccord_ui_handle_back(ccord_ui *ui);
 bool ccord_ui_sound_kind_enabled(const ccord_ui *ui, unsigned kind);
 bool ccord_ui_is_reading(const ccord_ui *ui);
 ccord_id ccord_ui_stage_channel(const ccord_ui *ui);
+// True when the voice stage / camera tiles are actually visible on screen (false when reading text chat,
+// covered by settings/login/loading/discovery/fullscreen-stream/opaque mobile lightbox, or on mobile voice-chat view).
+bool ccord_ui_voice_stage_visible(const ccord_ui *ui);
+// True when the user chose "Hide Preview" on their own Go Live stream broadcast.
+bool ccord_ui_stream_preview_hidden(const ccord_ui *ui);
+// Cheap 1-bool accessor for Streamer Mode (avoids copying ccord_ui_settings_debug every app_pump()).
+bool ccord_ui_streamer_mode(const ccord_ui *ui);
 bool ccord_ui_pref_game_detection(void);
 bool ccord_ui_pref_close_to_background(void);
 bool ccord_ui_notify_desktop_enabled(const ccord_ui *ui);

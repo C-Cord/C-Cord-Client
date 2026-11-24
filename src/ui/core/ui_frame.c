@@ -274,10 +274,18 @@ void ccord_ui_draw(ccord_ui *ui, ccord_renderer *r)
   bool anim_act = ccord_render_take_anim_activity(r);
   uint64_t anim_due = 0;
   bool has_due = ccord_render_take_anim_next_ms(r, &anim_due);
-  ui->media_animating = anim_act || decoding;
-  if (decoding) {
+  bool vis_decoding = decoding && anim_act;
+  ui->media_animating = anim_act;
+  if (vis_decoding) {
     ui->has_media_anim_next = true;
-    ui->media_anim_next_ms = ui->now_ms;
+    // If decoded frames are already buffered ahead of playback, decode progressively on the animation's own
+    // cadence (capped at 33 ms) instead of VSync-spinning at 120 Hz; decode immediately only when starved.
+    if (has_due && ui->now_ms != 0 && anim_due > ui->now_ms) {
+      uint64_t cap_ms = ui->now_ms + 33u;
+      ui->media_anim_next_ms = anim_due < cap_ms ? anim_due : cap_ms;
+    } else {
+      ui->media_anim_next_ms = ui->now_ms;
+    }
   } else if (anim_act && has_due && ui->now_ms != 0) {
     ui->has_media_anim_next = true;
     ui->media_anim_next_ms = anim_due;
@@ -380,10 +388,12 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   bool full_settings = ui->settings_open && !ui_is_login_screen(ui);
   bool full_ss = ui_server_settings_is_open(ui);
   bool full_cs = ui_channel_settings_is_open(ui);
-  bool opaque_full_ovl = !ui->go_live_open &&
-                         ((full_settings && overlay_enter_opaque(ui, "settings")) ||
-                          (full_ss && overlay_enter_opaque(ui, "ssettings")) ||
-                          (full_cs && overlay_enter_opaque(ui, "csettings")));
+  bool full_lightbox = ui->lightbox_open && ui->mobile_layout && fabsf(ui->lightbox_dismiss_y) < 0.5f;
+  bool opaque_full_ovl = full_lightbox ||
+                         (!ui->go_live_open &&
+                          ((full_settings && overlay_enter_opaque(ui, "settings")) ||
+                           (full_ss && overlay_enter_opaque(ui, "ssettings")) ||
+                           (full_cs && overlay_enter_opaque(ui, "csettings"))));
 
   const ccord_theme_colors *c = &ui->theme->c;
   if (!opaque_full_ovl) {
@@ -573,7 +583,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   draw_popup(ui, r, ui->go_live_open, "golive", UI_MODAL_MS, 10.0f, ui_draw_go_live);
   draw_popup(ui, r, full_ss, "ssettings", UI_MODAL_MS, 0.0f, ui_server_settings_draw);
   draw_popup(ui, r, full_cs, "csettings", UI_MODAL_MS, 0.0f, ui_channel_settings_draw);
-  if (opaque_full_ovl) {
+  if (opaque_full_ovl && !full_lightbox) {
     ui_draw_notice(ui, r);
     if (!ui->settings_open && !ui_server_settings_is_open(ui) && !ui_channel_settings_is_open(ui)) {
       ui->dirty = true;   // overlay self-closed during draw (e.g. guild/channel deleted): paint workspace next frame
@@ -586,6 +596,7 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui_report_flow_draw(ui, r);
   ui_panels_draw_overlays(ui, r);
   ui_draw_overlays(ui, r);
+  if (full_lightbox) ui_draw_notice(ui, r);
   ui_plugin_settings_draw(ui, r);
   ui_plugin_dialog_draw(ui, r);
   ui_profile_roles_draw(ui, r);   // above the popout / profile that anchors it

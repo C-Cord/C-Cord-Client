@@ -6,7 +6,9 @@
 
 #define UI_PLAYER_MAX_DIM 960         // inline video is decoded no larger than this
 #define UI_PLAYER_SYNC_BUDGET_MS 12u  // decode time per frame of the app; behind that, the clock waits
-#define UI_PLAYER_AUDIO_LEAD_MS 80u   // audio queued ahead of the clock
+#define UI_PLAYER_AUDIO_LEAD_MS 240u  // audio queued ahead of the clock (absorbs 100 ms audio-only UI pacing)
+#define UI_PLAYER_AUDIO_UI_PACE_MS 100u
+#define UI_PLAYER_OPEN_POLL_MS 33u
 #define UI_MEDIA_RELEASE_THRESHOLD ((size_t)128u * 1024u)
 
 // The host of a media URL for the log: no scheme, userinfo, port, path or query string (signed CDN URLs carry
@@ -70,6 +72,7 @@ void uc_media_player_close(ccord_ui *ui)
   ui->media_loaded = false;
   ui->media_buffering = false;
   ui->media_frame_serial = 0;
+  ui->media_audio_next_ms = 0;
   ui->media_fail_hint[0] = '\0';
 }
 
@@ -351,7 +354,10 @@ static void media_player_stream_poll(ccord_ui *ui)
 
 bool uc_media_player_tick(ccord_ui *ui, uint64_t dt)
 {
-  if (!ui || !ui->media_url[0]) return false;
+  if (!ui || !ui->media_url[0]) {
+    if (ui) ui->media_audio_next_ms = 0;
+    return false;
+  }
   if (ui->d.session) {
     ccord_video_resolved vr;
     while (ccord_session_pop_video_resolved(ui->d.session, &vr)) {
@@ -379,7 +385,14 @@ bool uc_media_player_tick(ccord_ui *ui, uint64_t dt)
   }
   if (ui->media_resolving) {
     ui->media_buffering = ui->media_playing;
-    return true;
+    if (ui->media_playing) {
+      if (ui->media_audio_next_ms == 0 || ui->now_ms >= ui->media_audio_next_ms) {
+        ui->media_audio_next_ms = ui->now_ms + UI_PLAYER_OPEN_POLL_MS;
+      }
+    } else {
+      ui->media_audio_next_ms = 0;
+    }
+    return false;
   }
   if (ui->media_net && !ui->media_failed) media_player_stream_poll(ui);
   if (!ui->media_loaded && !ui->media_failed && ui->d.session && !ui->media_net) {
@@ -409,24 +422,33 @@ bool uc_media_player_tick(ccord_ui *ui, uint64_t dt)
   }
   if (!ui->media_loaded) {
     ui->media_buffering = ui->media_playing;
-    // Waiting for the download (or the stream's first frames) with the clock held. A streamed clip keeps the loop
-    // ticking even when paused: nothing else wakes the UI when the stream becomes ready.
-    return ui->media_playing || (ui->media_net && !ui->media_failed);
+    // Waiting for the download (or the stream's first frames) with the clock held: poll at ~30 Hz while playing,
+    // and never spin when paused.
+    if (ui->media_playing && !ui->media_failed) {
+      if (ui->media_audio_next_ms == 0 || ui->now_ms >= ui->media_audio_next_ms) {
+        ui->media_audio_next_ms = ui->now_ms + UI_PLAYER_OPEN_POLL_MS;
+      }
+    } else {
+      ui->media_audio_next_ms = 0;
+    }
+    return false;
   }
   ccord_av_stream *st = ui->media_stream;
   ccord_av_stream *ast = ui->media_audio_stream ? ui->media_audio_stream : st;
   const ccord_av_info *inf = ccord_av_stream_info(st);
   const ccord_av_info *ainf = ccord_av_stream_info(ast);
+  bool audio_only = !inf->has_video;
   if (ui->media_playing && !ui->media_buffering) {
     uint32_t step_ms = dt > 500u ? 500u : (uint32_t)dt;
     ui->media_pos_ms += step_ms;
     if (ui->media_duration_known && ui->media_pos_ms >= ui->media_duration_ms) {
       ui->media_pos_ms = ui->media_duration_ms;
       ui->media_playing = false;
+      ui->dirty = true;
     } else if (!ui->media_duration_known && ui->media_pos_ms >= ui->media_duration_ms) {
       ui->media_duration_ms = ui->media_pos_ms + 1u;   // length unknown: the bar stays just short of full
     }
-    if (step_ms > 0) ui->dirty = true;
+    if (!audio_only && step_ms > 0) ui->dirty = true;
   }
   // The clock only runs while the decoder(s) keep up; paused, this still brings up the frame at the playhead.
   bool caught_up = ccord_av_stream_sync(st, ui->media_pos_ms, UI_PLAYER_SYNC_BUDGET_MS);
@@ -443,9 +465,12 @@ bool uc_media_player_tick(ccord_ui *ui, uint64_t dt)
   if (!ui->media_playing) {
     media_player_close_audio(ui);
     ui->media_buffering = false;
-    return !caught_up;
+    ui->media_audio_next_ms = 0;
+    return false;
   }
+  bool prev_buf = ui->media_buffering;
   ui->media_buffering = !caught_up;
+  if (ui->media_buffering != prev_buf) ui->dirty = true;
   if (ainf->has_audio) media_player_feed_audio(ui, ast);
   // Decoded to the end is not played to the end: the sound queued ahead of the clock still has to be heard.
   bool tail_heard = !ainf->has_audio || ui->media_pos_ms >= ccord_av_stream_pcm_pos_ms(ast);
@@ -458,8 +483,19 @@ bool uc_media_player_tick(ccord_ui *ui, uint64_t dt)
       ui->media_duration_known = true;
     }
     ui->media_pos_ms = ui->media_duration_ms;
+    ui->media_audio_next_ms = 0;
     ui->dirty = true;
+    return false;
   }
+  if (audio_only) {
+    // Pace audio-only progress bar redraws at ~10 Hz (100 ms) instead of 60-120 Hz VSync spin.
+    if (ui->media_audio_next_ms == 0 || ui->now_ms >= ui->media_audio_next_ms) {
+      ui->dirty = true;
+      ui->media_audio_next_ms = ui->now_ms + UI_PLAYER_AUDIO_UI_PACE_MS;
+    }
+    return false;
+  }
+  ui->media_audio_next_ms = 0;
   return ui->media_playing;
 }
 
