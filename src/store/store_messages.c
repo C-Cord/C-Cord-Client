@@ -345,6 +345,10 @@ ccord_status ccord_store_set_history(ccord_store *s, ccord_id channel_id, const 
   nin = w;
 
   size_t old_n = h->n;
+  ccord_id prev_oldest = old_n > 0 ? h->msgs[0].id : CCORD_ID_NONE;
+  ccord_id batch_oldest = nin > 0 ? in[0].id : CCORD_ID_NONE;
+  ccord_id batch_newest = nin > 0 ? in[nin - 1].id : CCORD_ID_NONE;
+  bool is_prepend = (old_n > 0 && nin > 0 && batch_newest < prev_oldest);
   if (h->stale) {
     history_reconcile(h, in, nin);
     s->total_msgs = (s->total_msgs >= old_n ? s->total_msgs - old_n : 0u) + h->n;
@@ -435,6 +439,21 @@ ccord_status ccord_store_set_history(ccord_store *s, ccord_id channel_id, const 
   store_evict_lru_histories(s, channel_id, CCORD_STORE_MAX_TOTAL_MESSAGES);
   if (reorders) s->revision++; else store_bump_traffic(s);
   store_post(s, CCORD_EVT_MESSAGES_LOADED, CCORD_ID_NONE, channel_id, CCORD_ID_NONE, CCORD_ID_NONE, (int64_t)n);
+  if (s->rich_obs) {
+    long ci_obs = store_find_channel(&s->d, channel_id);
+    ccord_store_rich_evt rev = {
+      .kind = CCORD_RICH_EVT_MESSAGES_LOADED,
+      .guild_id = ci_obs >= 0 ? s->d.channels[ci_obs].guild_id : CCORD_ID_NONE,
+      .channel_id = channel_id,
+      .loaded = {
+        .count = (uint32_t)nin,
+        .is_prepend = is_prepend,
+        .oldest_id = batch_oldest,
+        .newest_id = batch_newest,
+      },
+    };
+    s->rich_obs(&rev, s->rich_obs_ud);
+  }
   return CCORD_OK;
 }
 
@@ -731,8 +750,21 @@ ccord_status ccord_store_delete_messages_bulk(ccord_store *s, ccord_id channel_i
   if (count > 0 && !message_ids) return ccord_error_set(err, CCORD_ERR_INVALID, "store: null message_ids");
   long ci = store_find_channel(&s->d, channel_id);
   if (ci < 0) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "store: unknown channel");
+  ccord_id bulk_guild_id = s->d.channels[ci].guild_id;
   history *h = store_find_history(s, channel_id);
-  if (!h || h->n == 0 || count == 0) return CCORD_OK;
+  if (count == 0) return CCORD_OK;
+  if (!h || h->n == 0) {
+    if (s->rich_obs) {
+      ccord_store_rich_evt rev = {
+        .kind = CCORD_RICH_EVT_MESSAGE_DELETE_BULK,
+        .guild_id = bulk_guild_id,
+        .channel_id = channel_id,
+        .del_bulk = {.ids = message_ids, .count = count},
+      };
+      s->rich_obs(&rev, s->rich_obs_ud);
+    }
+    return CCORD_OK;
+  }
 
   bool dead_stack[256];
   bool *dead = nullptr;
@@ -806,6 +838,15 @@ ccord_status ccord_store_delete_messages_bulk(ccord_store *s, ccord_id channel_i
     else store_bump_traffic(s);
   }
   ccord_free(dead_heap);
+  if (s->rich_obs) {
+    ccord_store_rich_evt rev = {
+      .kind = CCORD_RICH_EVT_MESSAGE_DELETE_BULK,
+      .guild_id = guild_id,
+      .channel_id = channel_id,
+      .del_bulk = {.ids = message_ids, .count = count},
+    };
+    s->rich_obs(&rev, s->rich_obs_ud);
+  }
   return CCORD_OK;
 }
 
@@ -871,8 +912,29 @@ ccord_status ccord_store_set_reactions(ccord_store *s, ccord_id channel_id, ccor
   h->msgs[mi].reaction_count = count;
   h->msgs[mi].self_reacted = self_reacted;
   store_bump_traffic(s);
+  ccord_id actor = s->reaction_actor_id != CCORD_ID_NONE ? s->reaction_actor_id : (self_reacted ? s->d.self_id : CCORD_ID_NONE);
+  if (s->rich_obs) {
+    ccord_store_rich_evt rev = {
+      .kind = CCORD_RICH_EVT_REACTION_DELTA,
+      .guild_id = s->d.channels[ci].guild_id,
+      .channel_id = channel_id,
+      .reaction = {
+        .message_id = message_id,
+        .user_id = actor,
+        .emoji_id = CCORD_ID_NONE,
+        .emoji_name = "",
+        .added = false,
+        .burst = false,
+        .remove_all = (count == 0),
+        .remove_emoji = false,
+        .emoji_count = count,
+        .total_count = count,
+      },
+    };
+    s->rich_obs(&rev, s->rich_obs_ud);
+  }
   store_post(s, CCORD_EVT_REACTION_UPDATE, s->d.channels[ci].guild_id, channel_id, message_id,
-       self_reacted ? s->d.self_id : CCORD_ID_NONE, (int64_t)count);
+       actor, (int64_t)count);
   return CCORD_OK;
 }
 
@@ -910,9 +972,13 @@ ccord_status ccord_store_set_reaction_ex(ccord_store *s, ccord_id channel_id, cc
   union { const ccord_reaction *c; ccord_reaction *v; } ru = {.c = m->reactions};
   ccord_reaction *rs = ru.v;
   size_t found_i = SIZE_MAX;
+  uint32_t prev_emoji_count = 0;
+  uint32_t prev_burst_count = 0;
   for (size_t i = 0; i < m->reaction_kind_count; i++) {
     if (reaction_emoji_eq(rs[i].emoji, emoji)) {
       found_i = i;
+      prev_emoji_count = rs[i].count;
+      prev_burst_count = rs[i].burst_count;
       break;
     }
   }
@@ -987,9 +1053,61 @@ ccord_status ccord_store_set_reaction_ex(ccord_store *s, ccord_id channel_id, cc
   m->reaction_count = total;
   m->self_reacted = me;
   store_bump_traffic(s);
+  ccord_id actor = s->reaction_actor_id != CCORD_ID_NONE ? s->reaction_actor_id : (me ? s->d.self_id : CCORD_ID_NONE);
+  if (s->rich_obs) {
+    ccord_id eid = CCORD_ID_NONE;
+    bool eanim = false;
+    parse_reaction_emoji_meta(emoji, &eid, &eanim);
+    (void)eanim;
+    char ename[CCORD_EMOJI_MAX_BYTES + 1];
+    const char *src_name = emoji;
+    if (eid != CCORD_ID_NONE) {
+      if (src_name[0] == 'a' && src_name[1] == ':') src_name += 2;
+      const char *colon = strchr(src_name, ':');
+      size_t nlen = colon ? (size_t)(colon - src_name) : strlen(src_name);
+      if (nlen > CCORD_EMOJI_MAX_BYTES) nlen = CCORD_EMOJI_MAX_BYTES;
+      memcpy(ename, src_name, nlen);
+      ename[nlen] = '\0';
+    } else {
+      snprintf(ename, sizeof ename, "%s", emoji);
+    }
+    bool added = count > prev_emoji_count;
+    bool is_burst = burst_count != prev_burst_count;
+    ccord_store_rich_evt rev = {
+      .kind = CCORD_RICH_EVT_REACTION_DELTA,
+      .guild_id = s->d.channels[ci].guild_id,
+      .channel_id = channel_id,
+      .reaction = {
+        .message_id = message_id,
+        .user_id = actor,
+        .emoji_id = eid,
+        .emoji_name = ename,
+        .added = added,
+        .burst = is_burst,
+        .remove_all = false,
+        .remove_emoji = (count == 0 && prev_emoji_count > 1),
+        .emoji_count = count,
+        .total_count = total,
+      },
+    };
+    s->rich_obs(&rev, s->rich_obs_ud);
+  }
   store_post(s, CCORD_EVT_REACTION_UPDATE, s->d.channels[ci].guild_id, channel_id, message_id,
-       me ? s->d.self_id : CCORD_ID_NONE, (int64_t)total);
+       actor, (int64_t)total);
   return CCORD_OK;
+}
+
+void ccord_store_set_rich_observer(ccord_store *s, ccord_store_rich_observer_fn fn, void *ud)
+{
+  if (!s) return;
+  s->rich_obs = fn;
+  s->rich_obs_ud = ud;
+}
+
+void ccord_store_set_reaction_actor(ccord_store *s, ccord_id user_id)
+{
+  if (!s) return;
+  s->reaction_actor_id = user_id;
 }
 
 ccord_status ccord_store_set_reaction(ccord_store *s, ccord_id channel_id, ccord_id message_id,

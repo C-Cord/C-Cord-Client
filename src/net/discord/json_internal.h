@@ -102,6 +102,7 @@ typedef struct perm_lists {
 } perm_lists;
 
 typedef struct parsed_presence_detail {
+  uint8_t client_status_bits;
   char custom_status_emoji[65];
   char custom_status_text[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
   int64_t custom_status_expires_ms;
@@ -112,6 +113,7 @@ typedef struct parsed_presence_detail {
   char activity_state[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
   int64_t activity_start_ms;
   int64_t activity_end_ms;
+  ccord_user_activities *activities_ext;
 } parsed_presence_detail;
 
 typedef struct cached_role_entry {
@@ -201,7 +203,7 @@ void dj_extract_nameplate_info(const ccord_json *obj, char out_asset[128], char 
 ccord_id dj_extract_nameplate_sku(const ccord_json *obj);
 bool dj_nameplate_asset_ok(const char *s);
 int64_t dj_json_ts_ms(const ccord_json *obj, const char *key);
-void dj_extract_presence_detail(const ccord_json *obj, parsed_presence_detail *out);
+void dj_extract_presence_detail(ccord_arena *a, const ccord_json *obj, parsed_presence_detail *out);
 void dj_apply_presence_detail_to_user(ccord_user *u, const parsed_presence_detail *pd);
 const char *dj_extract_activity_status(ccord_arena *a, const ccord_json *obj);
 bool dj_map_member_with_pres(snapshot_builder *b, const role_table *rt, const id_index *pres_map, const ccord_json *mj, ccord_id gid);

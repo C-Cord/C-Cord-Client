@@ -241,6 +241,9 @@ struct ccord_store {
   size_t nsaved, capsaved;
   event_bucket *events;   // guild scheduled events, written from transport answers only
   size_t nevents, capevents;
+  ccord_store_rich_observer_fn rich_obs;
+  void *rich_obs_ud;
+  ccord_id reaction_actor_id;
 };
 
 extern const char store_k_empty_str[];
@@ -259,6 +262,9 @@ bool store_ensure_members(store_data *d, size_t need);
 bool store_ensure_voices(store_data *d, size_t need);
 bool store_ensure_relationships(store_data *d, size_t need);
 void store_profile_free(ccord_user_profile *p);
+ccord_user_activities *store_dup_activities(const ccord_user_activities *src, bool *out_oom);
+void store_free_activities(ccord_user_activities **p);
+bool store_activities_equal(const ccord_user_activities *a, const ccord_user_activities *b);
 void store_voice_server_free(ccord_voice_server *srv);
 void store_users_index_add(store_data *d, size_t i);
 void store_members_index_add(store_data *d, size_t i);

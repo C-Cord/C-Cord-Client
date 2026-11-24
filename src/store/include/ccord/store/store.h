@@ -8,7 +8,50 @@
 // Single source of truth for UI state. The store never talks to the network and never draws.
 // Mutators deep-copy their inputs, then post events to the bus (if non-null). Events are delivered on ccord_bus_drain.
 typedef struct ccord_store ccord_store;
+
+// Typed rich store observer for variable-length / structured event metadata (messages.loaded, bulk deletes,
+// reaction emoji/delta) without bloating fixed-size ccord_event on ccord_bus.
+typedef enum ccord_store_rich_evt_kind : uint8_t {
+  CCORD_RICH_EVT_MESSAGES_LOADED = 0,
+  CCORD_RICH_EVT_MESSAGE_DELETE_BULK = 1,
+  CCORD_RICH_EVT_REACTION_DELTA = 2,
+} ccord_store_rich_evt_kind;
+
+typedef struct ccord_store_rich_evt {
+  ccord_store_rich_evt_kind kind;
+  ccord_id guild_id;
+  ccord_id channel_id;
+  union {
+    struct {
+      uint32_t count;
+      bool is_prepend;
+      ccord_id oldest_id;
+      ccord_id newest_id;
+    } loaded;
+    struct {
+      const ccord_id *ids;
+      size_t count;
+    } del_bulk;
+    struct {
+      ccord_id message_id;
+      ccord_id user_id;
+      ccord_id emoji_id;
+      const char *emoji_name;
+      bool added;
+      bool burst;
+      bool remove_all;
+      bool remove_emoji;
+      uint32_t emoji_count;
+      uint32_t total_count;
+    } reaction;
+  };
+} ccord_store_rich_evt;
+
+typedef void (*ccord_store_rich_observer_fn)(const ccord_store_rich_evt *ev, void *ud);
+
 ccord_store *ccord_store_create(ccord_bus *bus, ccord_error *err);     // bus may be nullptr (tests)
+void ccord_store_set_rich_observer(ccord_store *s, ccord_store_rich_observer_fn fn, void *ud);
+void ccord_store_set_reaction_actor(ccord_store *s, ccord_id user_id);
 void ccord_store_destroy(ccord_store *s);
 void ccord_store_reset(ccord_store *s);
 uint64_t ccord_store_revision(const ccord_store *s);                    // bumps on every successful mutation
@@ -325,6 +368,14 @@ const char *ccord_store_user_note(const ccord_store *s, ccord_id user_id);
   const char *custom_text, int64_t custom_expires_ms, bool has_activity, ccord_activity_type activity_type,
   const char *activity_name, const char *activity_details, const char *activity_state, int64_t activity_start_ms,
   int64_t activity_end_ms, ccord_error *err);
+// Extended presence detail update carrying per-platform client_status_bits and full multi-activities array.
+// Posts CCORD_EVT_PRESENCE_UPDATE only after all extended fields are stored.
+[[nodiscard]] ccord_status ccord_store_update_presence_detail_ex(
+  ccord_store *s, ccord_id user_id, ccord_presence presence, const char *status_text, const char *custom_emoji,
+  const char *custom_text, int64_t custom_expires_ms, bool has_activity, ccord_activity_type activity_type,
+  const char *activity_name, const char *activity_details, const char *activity_state, int64_t activity_start_ms,
+  int64_t activity_end_ms, bool has_ext, uint8_t client_status_bits,
+  const ccord_user_activities *activities_ext, ccord_error *err);
 // Own profile after a successful edit (REST answer of PATCH /users/@me[/profile]). Unlike ccord_store_upsert_user,
 // "" really clears: only the fields flagged set_* change. display_name "" falls back to the username.
 typedef struct ccord_self_profile_update {

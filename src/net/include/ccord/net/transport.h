@@ -466,6 +466,7 @@ typedef struct ccord_net_event {
     };
     struct {
       bool has_presence_detail;                 // PRESENCE_UPDATE / SESSIONS_REPLACE: activity & custom_status fields below are authoritative
+      uint8_t client_status_bits;               // PRESENCE_UPDATE / SESSIONS_REPLACE: packed desktop/mobile/web ccord_presence
       char custom_status_emoji[65];             // PRESENCE_UPDATE / CUSTOM_STATUS_UPDATE
       char custom_status_text[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
       int64_t custom_status_expires_ms;         // PRESENCE_UPDATE / CUSTOM_STATUS_UPDATE (0 = none)
@@ -477,6 +478,7 @@ typedef struct ccord_net_event {
       char activity_state[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
       int64_t activity_start_ms;
       int64_t activity_end_ms;
+      const ccord_user_activities *activities_ext; // PRESENCE_UPDATE / SESSIONS_REPLACE: full activities array (arena-backed, nullable)
     };
     struct {
       uint64_t range_id;         // MEDIA_RANGE: the id from ccord_media_range_req

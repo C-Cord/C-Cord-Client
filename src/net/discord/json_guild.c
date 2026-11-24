@@ -1023,7 +1023,7 @@ static bool map_member_with_pres_ex(snapshot_builder *b, const role_table *rt, c
   if (mpres && ccord_json_type_of(mpres) == CCORD_JSON_OBJECT) {
     pres = dj_presence_from(dj_jstr(mpres, "status"));
     stext = dj_extract_activity_status(b->arena, mpres);
-    dj_extract_presence_detail(mpres, &pd);
+    dj_extract_presence_detail(b->arena, mpres, &pd);
     have_pd = true;
   } else {
     size_t pval = 0;

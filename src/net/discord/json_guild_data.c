@@ -590,7 +590,7 @@ bool dj_map_guild_ex(snapshot_builder *b, const ccord_json *gj, const ccord_json
         const char *stext = dj_extract_activity_status(b->arena, pj);
         b->users[uidx].status_text = stext;
         parsed_presence_detail pd;
-        dj_extract_presence_detail(pj, &pd);
+        dj_extract_presence_detail(b->arena, pj, &pd);
         dj_apply_presence_detail_to_user(&b->users[uidx], &pd);
       }
     }

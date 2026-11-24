@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include <string.h>
 
+#include <ccord/core/alloc.h>
 #include <ccord/core/event_bus.h>
 #include <ccord/store/admin.h>
 #include <ccord/store/expressions.h>
@@ -4449,6 +4450,77 @@ static void test_power_efficiency_revisions_and_perms(void)
   ccord_bus_destroy(bus);
 }
 
+static void test_phase3_extended_presence_and_activities(void)
+{
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *s = ccord_store_create(bus, &err);
+  CT_CHECK(bus && s);
+
+  ccord_user me = {.id = 1, .name = "Me", .status_text = "", .presence = CCORD_PRESENCE_ONLINE};
+  ccord_user peer = {.id = 2, .name = "Peer", .status_text = "", .presence = CCORD_PRESENCE_OFFLINE};
+  ccord_guild g = {.id = 10, .name = "Guild"};
+  ccord_channel ch = {.id = 20, .guild_id = 10, .kind = CCORD_CHANNEL_TEXT, .name = "general", .topic = ""};
+  ccord_user users[2] = {me, peer};
+  ccord_snapshot snap = {.self_id = 1, .users = users, .user_count = 2, .guilds = &g, .guild_count = 1,
+                         .channels = &ch, .channel_count = 1};
+  CT_CHECK(ccord_store_set_snapshot(s, &snap, &err) == CCORD_OK);
+
+  size_t sz = sizeof(ccord_user_activities) + 2u * sizeof(ccord_user_activity);
+  ccord_user_activities *acts = ccord_calloc(1, sz);
+  CT_CHECK(acts != nullptr);
+  acts->count = 2;
+  acts->items[0].type = CCORD_ACTIVITY_LISTENING;
+  snprintf(acts->items[0].name, sizeof acts->items[0].name, "Spotify");
+  snprintf(acts->items[0].details, sizeof acts->items[0].details, "Midnight City");
+  snprintf(acts->items[0].state, sizeof acts->items[0].state, "M83");
+  snprintf(acts->items[0].sync_id, sizeof acts->items[0].sync_id, "trk_12345");
+  acts->items[0].start_ms = 1700000000000LL;
+  acts->items[0].end_ms = 1700000240000LL;
+  snprintf(acts->items[0].large_image, sizeof acts->items[0].large_image, "spotify:ab67616d0000");
+  acts->items[1].type = CCORD_ACTIVITY_PLAYING;
+  snprintf(acts->items[1].name, sizeof acts->items[1].name, "Neovim");
+  acts->items[1].application_id = 998877ULL;
+  acts->items[1].party_size = 2;
+  acts->items[1].party_max = 4;
+
+  uint8_t cs_bits = ccord_client_status_pack(CCORD_PRESENCE_ONLINE, CCORD_PRESENCE_IDLE, CCORD_PRESENCE_OFFLINE);
+  CT_CHECK(ccord_store_update_presence_detail_ex(
+             s, 2, CCORD_PRESENCE_ONLINE, "Listening to Spotify", "", "", 0,
+             true, CCORD_ACTIVITY_LISTENING, "Spotify", "Midnight City", "M83",
+             1700000000000LL, 1700000240000LL, true, cs_bits, acts, &err) == CCORD_OK);
+  ccord_free(acts);
+
+  const ccord_user *u2 = ccord_store_user(s, 2);
+  CT_CHECK(u2 != nullptr);
+  CT_CHECK(ccord_client_status_desktop(u2->client_status_bits) == CCORD_PRESENCE_ONLINE);
+  CT_CHECK(ccord_client_status_mobile(u2->client_status_bits) == CCORD_PRESENCE_IDLE);
+  CT_CHECK(ccord_client_status_web(u2->client_status_bits) == CCORD_PRESENCE_OFFLINE);
+  CT_CHECK(u2->activities_ext != nullptr && u2->activities_ext->count == 2);
+  CT_CHECK(strcmp(u2->activities_ext->items[0].sync_id, "trk_12345") == 0);
+  CT_CHECK(strcmp(u2->activities_ext->items[1].name, "Neovim") == 0 && u2->activities_ext->items[1].party_max == 4);
+
+  // Bare author sighting preserves client_status_bits and activities_ext.
+  ccord_user bare = {.id = 2, .name = "Peer", .status_text = ""};
+  CT_CHECK(ccord_store_upsert_user(s, &bare, &err) == CCORD_OK);
+  u2 = ccord_store_user(s, 2);
+  CT_CHECK(u2 && u2->client_status_bits == cs_bits && u2->activities_ext && u2->activities_ext->count == 2);
+
+  // Authoritative extended update with empty activities clears activities_ext cleanly.
+  CT_CHECK(ccord_store_update_presence_detail_ex(
+             s, 2, CCORD_PRESENCE_DND, "", "", "", 0,
+             false, CCORD_ACTIVITY_PLAYING, "", "", "", 0, 0,
+             true, ccord_client_status_pack(CCORD_PRESENCE_DND, CCORD_PRESENCE_OFFLINE, CCORD_PRESENCE_OFFLINE),
+             nullptr, &err) == CCORD_OK);
+  u2 = ccord_store_user(s, 2);
+  CT_CHECK(u2 && u2->presence == CCORD_PRESENCE_DND && u2->activities_ext == nullptr &&
+           ccord_client_status_desktop(u2->client_status_bits) == CCORD_PRESENCE_DND &&
+           ccord_client_status_mobile(u2->client_status_bits) == CCORD_PRESENCE_OFFLINE);
+
+  ccord_store_destroy(s);
+  ccord_bus_destroy(bus);
+}
+
 int main(void)
 {
   test_member_list_sizes();
@@ -4497,5 +4569,6 @@ int main(void)
   test_presence_authoritative_clearing_and_delete_mentions();
   test_audit_regressions();
   test_power_efficiency_revisions_and_perms();
+  test_phase3_extended_presence_and_activities();
   return CT_RESULT("test_store");
 }

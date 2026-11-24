@@ -689,17 +689,75 @@ int64_t dj_json_ts_ms(const ccord_json *obj, const char *key)
   return t > 0 ? t : 0;
 }
 
-void dj_extract_presence_detail(const ccord_json *obj, parsed_presence_detail *out)
+void dj_extract_presence_detail(ccord_arena *a, const ccord_json *obj, parsed_presence_detail *out)
 {
   memset(out, 0, sizeof *out);
   if (!obj) return;
+  const ccord_json *cs = ccord_json_get(obj, "client_status");
+  if (cs && ccord_json_type_of(cs) == CCORD_JSON_OBJECT) {
+    ccord_presence dp = dj_presence_from(dj_jstr(cs, "desktop"));
+    ccord_presence mp = dj_presence_from(dj_jstr(cs, "mobile"));
+    ccord_presence wp = dj_presence_from(dj_jstr(cs, "web"));
+    out->client_status_bits = ccord_client_status_pack(dp, mp, wp);
+  }
   const ccord_json *acts = ccord_json_get(obj, "activities");
   size_t na = acts ? ccord_json_array_len(acts) : 0;
   bool saw_custom = false;
+  ccord_user_activity collected[CCORD_USER_MAX_ACTIVITIES];
+  size_t ncoll = 0;
   for (size_t i = 0; i < na; i++) {
     const ccord_json *act = ccord_json_array_at(acts, i);
     if (!act || ccord_json_type_of(act) != CCORD_JSON_OBJECT) continue;
     int64_t type = dj_json_i64(act, "type", -1);
+    if (a && ncoll < CCORD_USER_MAX_ACTIVITIES && type >= 0 && type <= 5) {
+      ccord_user_activity *ua = &collected[ncoll];
+      memset(ua, 0, sizeof *ua);
+      ua->type = (uint8_t)type;
+      dj_copy_trunc_utf8(ua->name, sizeof ua->name, dj_jstr(act, "name"));
+      dj_copy_trunc_utf8(ua->details, sizeof ua->details, dj_jstr(act, "details"));
+      dj_copy_trunc_utf8(ua->state, sizeof ua->state, dj_jstr(act, "state"));
+      dj_copy_trunc_utf8(ua->url, sizeof ua->url, dj_jstr(act, "url"));
+      (void)dj_json_id_key(act, "application_id", &ua->application_id);
+      dj_copy_trunc_utf8(ua->sync_id, sizeof ua->sync_id, dj_jstr(act, "sync_id"));
+      dj_copy_trunc_utf8(ua->session_id, sizeof ua->session_id, dj_jstr(act, "session_id"));
+      int64_t fl = dj_json_i64(act, "flags", 0);
+      if (fl > 0) ua->flags = dj_clamp_u32(fl);
+      ua->created_at_ms = dj_json_ts_ms(act, "created_at");
+      const ccord_json *tsj = ccord_json_get(act, "timestamps");
+      if (tsj && ccord_json_type_of(tsj) == CCORD_JSON_OBJECT) {
+        ua->start_ms = dj_json_ts_ms(tsj, "start");
+        ua->end_ms = dj_json_ts_ms(tsj, "end");
+      }
+      const ccord_json *pj = ccord_json_get(act, "party");
+      if (pj && ccord_json_type_of(pj) == CCORD_JSON_OBJECT) {
+        dj_copy_trunc_utf8(ua->party_id, sizeof ua->party_id, dj_jstr(pj, "id"));
+        const ccord_json *sz = ccord_json_get(pj, "size");
+        if (sz && ccord_json_type_of(sz) == CCORD_JSON_ARRAY) {
+          size_t sl = ccord_json_array_len(sz);
+          int64_t v0 = 0, v1 = 0;
+          if (sl >= 1 && ccord_json_int64(ccord_json_array_at(sz, 0), &v0) && v0 > 0 && v0 <= INT32_MAX) {
+            ua->party_size = (int32_t)v0;
+          }
+          if (sl >= 2 && ccord_json_int64(ccord_json_array_at(sz, 1), &v1) && v1 > 0 && v1 <= INT32_MAX) {
+            ua->party_max = (int32_t)v1;
+          }
+        }
+      }
+      const ccord_json *aj = ccord_json_get(act, "assets");
+      if (aj && ccord_json_type_of(aj) == CCORD_JSON_OBJECT) {
+        dj_copy_trunc_utf8(ua->large_image, sizeof ua->large_image, dj_jstr(aj, "large_image"));
+        dj_copy_trunc_utf8(ua->large_text, sizeof ua->large_text, dj_jstr(aj, "large_text"));
+        dj_copy_trunc_utf8(ua->small_image, sizeof ua->small_image, dj_jstr(aj, "small_image"));
+        dj_copy_trunc_utf8(ua->small_text, sizeof ua->small_text, dj_jstr(aj, "small_text"));
+      }
+      const ccord_json *ej = ccord_json_get(act, "emoji");
+      if (ej && ccord_json_type_of(ej) == CCORD_JSON_OBJECT) {
+        (void)dj_json_id_key(ej, "id", &ua->emoji_id);
+        dj_copy_trunc_utf8(ua->emoji_name, sizeof ua->emoji_name, dj_jstr(ej, "name"));
+        ua->emoji_animated = dj_json_bool_key(ej, "animated", false);
+      }
+      ncoll++;
+    }
     if (type == 4 && !saw_custom) {
       saw_custom = true;
       dj_copy_trunc_utf8(out->custom_status_text, sizeof out->custom_status_text, dj_jstr(act, "state"));
@@ -743,12 +801,22 @@ void dj_extract_presence_detail(const ccord_json *obj, parsed_presence_detail *o
       }
     }
   }
+  if (a && ncoll > 0) {
+    size_t sz = sizeof(ccord_user_activities) + ncoll * sizeof(ccord_user_activity);
+    ccord_user_activities *ext = ccord_arena_alloc(a, sz, _Alignof(ccord_user_activities));
+    if (ext) {
+      ext->count = ncoll;
+      memcpy(ext->items, collected, ncoll * sizeof(ccord_user_activity));
+      out->activities_ext = ext;
+    }
+  }
 }
 
 void dj_apply_presence_detail_to_user(ccord_user *u, const parsed_presence_detail *pd)
 {
   if (!u || !pd) return;
   u->has_presence = true;
+  u->client_status_bits = pd->client_status_bits;
   memcpy(u->custom_status_emoji, pd->custom_status_emoji, sizeof u->custom_status_emoji);
   memcpy(u->custom_status_text, pd->custom_status_text, sizeof u->custom_status_text);
   u->custom_status_expires_ms = pd->custom_status_expires_ms;
@@ -759,6 +827,7 @@ void dj_apply_presence_detail_to_user(ccord_user *u, const parsed_presence_detai
   memcpy(u->activity_state, pd->activity_state, sizeof u->activity_state);
   u->activity_start_ms = pd->activity_start_ms;
   u->activity_end_ms = pd->activity_end_ms;
+  u->activities_ext = pd->activities_ext;
 }
 
 const char *dj_extract_activity_status(ccord_arena *a, const ccord_json *obj)

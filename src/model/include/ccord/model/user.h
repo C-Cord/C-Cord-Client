@@ -15,6 +15,49 @@ typedef enum ccord_activity_type : uint8_t {
   CCORD_ACTIVITY_CUSTOM = 4,
   CCORD_ACTIVITY_COMPETING = 5,
 } ccord_activity_type;
+
+// Full parsed Discord activity entry (up to CCORD_USER_MAX_ACTIVITIES per user; lazily heap-allocated on ccord_user).
+#define CCORD_USER_MAX_ACTIVITIES 16u
+typedef struct ccord_user_activity {
+  uint8_t type;                                // ccord_activity_type (0..5)
+  char name[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
+  char details[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
+  char state[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
+  char url[256];                               // streaming URL (type 1), empty if none
+  ccord_id application_id;
+  char sync_id[65];                            // Spotify track id / ListenAlong sync id
+  char session_id[65];
+  uint32_t flags;
+  int64_t created_at_ms;
+  int64_t start_ms;                            // timestamps.start (unix ms, 0 = unset)
+  int64_t end_ms;                              // timestamps.end (unix ms, 0 = unset)
+  char party_id[65];
+  int32_t party_size;                          // party.size[0] (0 = unset)
+  int32_t party_max;                           // party.size[1] (0 = unset)
+  char large_image[256];                       // assets.large_image
+  char large_text[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
+  char small_image[256];                       // assets.small_image
+  char small_text[CCORD_ACTIVITY_TEXT_MAX_BYTES + 1];
+  ccord_id emoji_id;
+  char emoji_name[65];
+  bool emoji_animated;
+} ccord_user_activity;
+
+typedef struct ccord_user_activities {
+  size_t count;
+  ccord_user_activity items[];
+} ccord_user_activities;
+
+// Packed 2-bit per-platform status fields for ccord_user.client_status_bits:
+// bits 0..1 = desktop, bits 2..3 = mobile, bits 4..5 = web (values match ccord_presence: 0=absent/offline, 1=online, 2=idle, 3=dnd).
+static inline uint8_t ccord_client_status_pack(ccord_presence desktop, ccord_presence mobile, ccord_presence web)
+{
+  return (uint8_t)(((uint8_t)(desktop & 3u)) | (((uint8_t)(mobile & 3u)) << 2) | (((uint8_t)(web & 3u)) << 4));
+}
+static inline ccord_presence ccord_client_status_desktop(uint8_t bits) { return (ccord_presence)(bits & 3u); }
+static inline ccord_presence ccord_client_status_mobile(uint8_t bits)  { return (ccord_presence)((bits >> 2) & 3u); }
+static inline ccord_presence ccord_client_status_web(uint8_t bits)     { return (ccord_presence)((bits >> 4) & 3u); }
+
 typedef struct ccord_user {
   ccord_id id;
   union {
@@ -39,12 +82,14 @@ typedef struct ccord_user {
   int64_t activity_end_ms;                     // unix ms (0 = unset)
   uint32_t accent_color;                       // 0xRRGGBB (0 if none)
   ccord_presence presence;
+  uint8_t client_status_bits;                  // packed desktop/mobile/web ccord_presence (0 when absent)
   bool has_accent_color;
   bool has_presence;
   bool is_bot;
   uint8_t avatar_palette;                      // index into theme avatar_0..5 (taken mod 6)
   bool has_activity;
   uint8_t activity_type;                       // ccord_activity_type (0, 1, 2, 3, 5)
+  ccord_user_activities *activities_ext;       // optional full activities array (nullptr when absent/empty)
   char clan_tag[16];                           // server identity / clan tag badge (empty when none)
   char clan_badge[64];
   char nameplate_asset[128];                   // collectibles.nameplate asset path or CDN URL (empty when none)

@@ -226,6 +226,7 @@ static void data_free(store_data *d)
     store_free_cstr(&d->users[i].banner_url);
     store_free_cstr(&d->users[i].bio);
     store_free_cstr(&d->users[i].pronouns);
+    store_free_activities(&d->users[i].activities_ext);
   }
   for (size_t i = 0; i < d->nprofiles; i++) store_profile_free(&d->profiles[i]);
   for (size_t i = 0; i < d->nguilds; i++) {
@@ -331,11 +332,13 @@ static ccord_status copy_snapshot(store_data *d, const ccord_snapshot *s, ccord_
     u.banner_url = store_dup_cstr(s->users[i].banner_url);
     u.bio = store_dup_cstr(s->users[i].bio);
     u.pronouns = store_dup_cstr(s->users[i].pronouns);
+    bool act_oom = false;
+    u.activities_ext = store_dup_activities(s->users[i].activities_ext, &act_oom);
     d->users[i] = u;
     d->nusers = i + 1;
     store_users_index_add(d, i);
     if (!u.name || !u.handle || !u.status_text || !u.avatar_url || !u.avatar_decoration_url ||
-        !u.banner_url || !u.bio || !u.pronouns) goto oom;
+        !u.banner_url || !u.bio || !u.pronouns || act_oom) goto oom;
   }
   for (size_t i = 0; i < s->guild_count; i++) {
     d->guilds[i] = s->guilds[i];

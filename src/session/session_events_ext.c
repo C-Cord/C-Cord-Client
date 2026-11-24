@@ -208,6 +208,23 @@ void sess_apply_event_ext(ccord_session *s, const ccord_net_event *ev)
         if (!ev->has_activity) s->self_activity_from_rich = false;
         session_set_self_activity(s, ev->has_activity, ev->activity_type, ev->activity_name, ev->activity_details,
                                   ev->activity_state, ev->activity_start_ms, ev->activity_end_ms);
+        me = self != CCORD_ID_NONE ? ccord_store_user(s->store, self) : nullptr;
+        if (me && (ev->client_status_bits != me->client_status_bits || ev->activities_ext != nullptr ||
+                   me->activities_ext != nullptr)) {
+          char st_copy[CCORD_ACTIVITY_TEXT_MAX_BYTES + 32];
+          snprintf(st_copy, sizeof st_copy, "%.128s", me->status_text ? me->status_text : "");
+          char ce[sizeof me->custom_status_emoji], ct[sizeof me->custom_status_text];
+          char an[sizeof me->activity_name], ad[sizeof me->activity_details], as[sizeof me->activity_state];
+          memcpy(ce, me->custom_status_emoji, sizeof ce);
+          memcpy(ct, me->custom_status_text, sizeof ct);
+          memcpy(an, me->activity_name, sizeof an);
+          memcpy(ad, me->activity_details, sizeof ad);
+          memcpy(as, me->activity_state, sizeof as);
+          (void)ccord_store_update_presence_detail_ex(
+            s->store, self, me->presence, st_copy, ce, ct, me->custom_status_expires_ms,
+            me->has_activity, (ccord_activity_type)me->activity_type, an, ad, as,
+            me->activity_start_ms, me->activity_end_ms, true, ev->client_status_bits, ev->activities_ext, &err);
+        }
       }
       break;
     }

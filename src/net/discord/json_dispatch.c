@@ -38,12 +38,13 @@ static bool map_presence(ccord_live_event *ev, const ccord_json *d)
   ccord_presence p = dj_presence_from(status);
   const char *text = dj_extract_activity_status(&ev->arena, d);
   parsed_presence_detail pd;
-  dj_extract_presence_detail(d, &pd);
+  dj_extract_presence_detail(&ev->arena, d, &pd);
   ev->ev.type = CCORD_NET_PRESENCE_UPDATE;
   ev->ev.user_id = uid;
   ev->ev.presence = p;
   ev->ev.status_text = text;
   ev->ev.has_presence_detail = true;
+  ev->ev.client_status_bits = pd.client_status_bits;
   memcpy(ev->ev.custom_status_emoji, pd.custom_status_emoji, sizeof ev->ev.custom_status_emoji);
   memcpy(ev->ev.custom_status_text, pd.custom_status_text, sizeof ev->ev.custom_status_text);
   ev->ev.custom_status_expires_ms = pd.custom_status_expires_ms;
@@ -54,6 +55,7 @@ static bool map_presence(ccord_live_event *ev, const ccord_json *d)
   memcpy(ev->ev.activity_state, pd.activity_state, sizeof ev->ev.activity_state);
   ev->ev.activity_start_ms = pd.activity_start_ms;
   ev->ev.activity_end_ms = pd.activity_end_ms;
+  ev->ev.activities_ext = pd.activities_ext;
   return true;
 }
 
@@ -474,7 +476,7 @@ static bool map_guild_members(ccord_live_event *ev, const ccord_json *d)
         const char *stext = dj_extract_activity_status(&ev->arena, pj);
         b.users[uidx].status_text = stext;
         parsed_presence_detail pd;
-        dj_extract_presence_detail(pj, &pd);
+        dj_extract_presence_detail(&ev->arena, pj, &pd);
         dj_apply_presence_detail_to_user(&b.users[uidx], &pd);
       }
     }

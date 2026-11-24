@@ -522,10 +522,11 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
         s->has_pending_presence = false;
       }
       if (ev->has_presence_detail) {
-        if (ccord_store_update_presence_detail(
+        if (ccord_store_update_presence_detail_ex(
               s->store, ev->user_id, ev->presence, ev->status_text, ev->custom_status_emoji, ev->custom_status_text,
               ev->custom_status_expires_ms, ev->has_activity, ev->activity_type, ev->activity_name,
-              ev->activity_details, ev->activity_state, ev->activity_start_ms, ev->activity_end_ms, &err) !=
+              ev->activity_details, ev->activity_state, ev->activity_start_ms, ev->activity_end_ms,
+              true, ev->client_status_bits, ev->activities_ext, &err) !=
             CCORD_OK) {
           CCORD_LOG_W("session: presence detail rejected: %s", err.message);
         }
@@ -605,6 +606,7 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
       // Ignore reactions for messages that have not reached the cache yet.
       const ccord_message *rmsg = ccord_store_find_message(s->store, ev->channel_id, ev->message_id);
       if (!rmsg) break;
+      ccord_store_set_reaction_actor(s->store, ev->user_id);
       if (ev->message_count > 0 && ev->messages) {
         const ccord_message *authoritative = &ev->messages[0];
         if (authoritative->reaction_kind_count == 0) {
@@ -706,6 +708,7 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
                                            ev->self_reacted, &err) != CCORD_OK) {
         CCORD_LOG_W("session: reaction rejected: %s", err.message);
       }
+      ccord_store_set_reaction_actor(s->store, CCORD_ID_NONE);
       break;
     }
     case CCORD_NET_VOICE_STATE_UPDATE:

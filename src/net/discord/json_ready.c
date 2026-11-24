@@ -695,10 +695,25 @@ void dj_map_sessions_replace(ccord_live_event *ev, const ccord_json *d)
     if (session_status_rank(status) < 0) return;
     ev->ev.type = CCORD_NET_SESSIONS_REPLACE;
     ev->ev.presence = dj_presence_from(status);
+    // Collect per-platform client_status across all non-"all" sessions.
+    ccord_presence cs_d = CCORD_PRESENCE_OFFLINE, cs_m = CCORD_PRESENCE_OFFLINE, cs_w = CCORD_PRESENCE_OFFLINE;
+    for (size_t i = 0; i < n; i++) {
+      const ccord_json *sj = ccord_json_array_at(d, i);
+      if (!sj || sj == pick) continue;
+      ccord_presence sp = dj_presence_from(dj_jstr(sj, "status"));
+      const ccord_json *ci = ccord_json_get(sj, "client_info");
+      const char *cl = ci ? dj_jstr(ci, "client") : nullptr;
+      if (!cl) continue;
+      if (strcmp(cl, "desktop") == 0) cs_d = sp;
+      else if (strcmp(cl, "mobile") == 0) cs_m = sp;
+      else if (strcmp(cl, "web") == 0) cs_w = sp;
+    }
+    ev->ev.client_status_bits = ccord_client_status_pack(cs_d, cs_m, cs_w);
     const ccord_json *acts = ccord_json_get(pick, "activities");
     if (acts && ccord_json_type_of(acts) == CCORD_JSON_ARRAY) {
       parsed_presence_detail pd;
-      dj_extract_presence_detail(pick, &pd);
+      dj_extract_presence_detail(&ev->arena, pick, &pd);
+      if (pd.client_status_bits) ev->ev.client_status_bits = pd.client_status_bits;
       ev->ev.has_presence_detail = true;
       ev->ev.has_activity = pd.has_activity;
       ev->ev.activity_type = pd.activity_type;
@@ -707,6 +722,7 @@ void dj_map_sessions_replace(ccord_live_event *ev, const ccord_json *d)
       memcpy(ev->ev.activity_state, pd.activity_state, sizeof ev->ev.activity_state);
       ev->ev.activity_start_ms = pd.activity_start_ms;
       ev->ev.activity_end_ms = pd.activity_end_ms;
+      ev->ev.activities_ext = pd.activities_ext;
     }
     return;
   }
@@ -717,6 +733,7 @@ void dj_map_sessions_replace(ccord_live_event *ev, const ccord_json *d)
   bool any_acts = false;
   const ccord_json *act_pick = nullptr;
   parsed_presence_detail best_pd = {0};
+  ccord_presence cs_d = CCORD_PRESENCE_OFFLINE, cs_m = CCORD_PRESENCE_OFFLINE, cs_w = CCORD_PRESENCE_OFFLINE;
   for (size_t i = 0; i < n; i++) {
     const ccord_json *sj = ccord_json_array_at(d, i);
     if (!sj) continue;
@@ -726,12 +743,20 @@ void dj_map_sessions_replace(ccord_live_event *ev, const ccord_json *d)
       best_rank = rk;
       best_status_sj = sj;
     }
+    const ccord_json *ci = ccord_json_get(sj, "client_info");
+    const char *cl = ci ? dj_jstr(ci, "client") : nullptr;
+    if (cl) {
+      ccord_presence sp = dj_presence_from(st);
+      if (strcmp(cl, "desktop") == 0) cs_d = sp;
+      else if (strcmp(cl, "mobile") == 0) cs_m = sp;
+      else if (strcmp(cl, "web") == 0) cs_w = sp;
+    }
     const ccord_json *acts = ccord_json_get(sj, "activities");
     if (acts && ccord_json_type_of(acts) == CCORD_JSON_ARRAY) {
       any_acts = true;
       if (ccord_json_array_len(acts) > 0) {
         parsed_presence_detail cand;
-        dj_extract_presence_detail(sj, &cand);
+        dj_extract_presence_detail(&ev->arena, sj, &cand);
         if (!act_pick || (!best_pd.has_activity && cand.has_activity)) {
           act_pick = sj;
           best_pd = cand;
@@ -742,6 +767,7 @@ void dj_map_sessions_replace(ccord_live_event *ev, const ccord_json *d)
   if (!best_status_sj) return;
   ev->ev.type = CCORD_NET_SESSIONS_REPLACE;
   ev->ev.presence = dj_presence_from(dj_jstr(best_status_sj, "status"));
+  ev->ev.client_status_bits = ccord_client_status_pack(cs_d, cs_m, cs_w);
   if (act_pick) {
     ev->ev.has_presence_detail = true;
     ev->ev.has_activity = best_pd.has_activity;
@@ -751,6 +777,7 @@ void dj_map_sessions_replace(ccord_live_event *ev, const ccord_json *d)
     memcpy(ev->ev.activity_state, best_pd.activity_state, sizeof ev->ev.activity_state);
     ev->ev.activity_start_ms = best_pd.activity_start_ms;
     ev->ev.activity_end_ms = best_pd.activity_end_ms;
+    ev->ev.activities_ext = best_pd.activities_ext;
   } else if (any_acts) {
     ev->ev.has_presence_detail = true;
     ev->ev.has_activity = false;
@@ -991,7 +1018,7 @@ bool dj_parse_ready(ccord_live_event *ev, const ccord_json *d, ccord_error *err)
       b.users[uidx].presence = pres;
       b.users[uidx].status_text = stext;
       parsed_presence_detail pd;
-      dj_extract_presence_detail(pj, &pd);
+      dj_extract_presence_detail(&ev->arena, pj, &pd);
       dj_apply_presence_detail_to_user(&b.users[uidx], &pd);
     }
   }
