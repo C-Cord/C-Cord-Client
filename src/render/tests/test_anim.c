@@ -463,6 +463,45 @@ static void test_av_stream(void)
     ccord_av_stream_close(s);
   }
 
+  // Native 48 kHz stereo S16 WAV fast path (zero resampling memcpy): preserves L/R channel values exactly.
+  {
+    uint8_t wav48[44 + 4800 * 4];
+    uint32_t r48 = 48000u, n48 = 4800u, db48 = n48 * 4u, rsz48 = 36u + db48, fsz48 = 16u, br48 = r48 * 4u;
+    uint16_t af48 = 1u, ch48 = 2u, ba48 = 4u, bi48 = 16u;
+    memcpy(wav48 + 0, "RIFF", 4);
+    memcpy(wav48 + 4, &rsz48, 4);
+    memcpy(wav48 + 8, "WAVEfmt ", 8);
+    memcpy(wav48 + 16, &fsz48, 4);
+    memcpy(wav48 + 20, &af48, 2);
+    memcpy(wav48 + 22, &ch48, 2);
+    memcpy(wav48 + 24, &r48, 4);
+    memcpy(wav48 + 28, &br48, 4);
+    memcpy(wav48 + 32, &ba48, 2);
+    memcpy(wav48 + 34, &bi48, 2);
+    memcpy(wav48 + 36, "data", 4);
+    memcpy(wav48 + 40, &db48, 4);
+    for (uint32_t i = 0; i < n48; i++) {
+      int16_t l = (int16_t)(i < 2400u ? 11000 : -9000);
+      int16_t r = (int16_t)(i < 2400u ? -7000 : 13000);
+      memcpy(wav48 + 44u + i * 4u, &l, 2);
+      memcpy(wav48 + 44u + i * 4u + 2u, &r, 2);
+    }
+    s = ccord_av_stream_open(wav48, sizeof wav48, 0, CCORD_AV_MEDIA, &err);
+    CT_CHECK(s != nullptr);
+    if (s) {
+      static int16_t pcm48[8192 * 2];
+      size_t tot48 = 0;
+      for (uint32_t pos = 0; pos <= 300u && tot48 < 8192u; pos += 20u) {
+        (void)ccord_av_stream_sync(s, pos, 0);
+        tot48 += ccord_av_stream_read_pcm(s, pcm48 + tot48 * 2u, 8192u - tot48);
+      }
+      CT_CHECK(tot48 == 4800u && ccord_av_stream_ended(s));
+      CT_CHECK(pcm48[0] == 11000 && pcm48[1] == -7000);
+      CT_CHECK(pcm48[(tot48 - 1u) * 2u] == -9000 && pcm48[(tot48 - 1u) * 2u + 1u] == 13000);
+      ccord_av_stream_close(s);
+    }
+  }
+
   // VP9 WebM with Matroska alpha_mode=1 (16x8, 2 frames @ 10 fps): left half transparent (A=0), right half opaque
   // red (frame 0) then blue (frame 1). Verifies libvpx-vp9 is chosen so WebM alpha survives into RGBA.
   static const uint8_t alpha_vp9_webm[] = {

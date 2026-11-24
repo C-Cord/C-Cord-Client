@@ -7,6 +7,7 @@ pkg_check_modules(CCORD_AVFORMAT REQUIRED IMPORTED_TARGET libavformat)
 pkg_check_modules(CCORD_AVCODEC_R REQUIRED IMPORTED_TARGET libavcodec)
 pkg_check_modules(CCORD_AVUTIL_R REQUIRED IMPORTED_TARGET libavutil)
 pkg_check_modules(CCORD_SWSCALE_R REQUIRED IMPORTED_TARGET libswscale)
+pkg_check_modules(CCORD_SWRESAMPLE_R REQUIRED IMPORTED_TARGET libswresample)
 
 # fontconfig finds the installed font for a code point the bundled fonts lack. Optional: without it (or with
 # -DCCORD_FONTCONFIG=OFF) text.c scans the standard font directories instead.
@@ -26,7 +27,8 @@ target_include_directories(ccord_render PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(ccord_render
   PUBLIC ccord_core ccord_platform ccord_theme ${CCORD_MATH_LIB}
   PRIVATE Threads::Threads SDL3::SDL3 SDL3_ttf::SDL3_ttf PkgConfig::CCORD_PNG PkgConfig::CCORD_JPEG PkgConfig::CCORD_WEBP
-  PkgConfig::CCORD_AVFORMAT PkgConfig::CCORD_AVCODEC_R PkgConfig::CCORD_AVUTIL_R PkgConfig::CCORD_SWSCALE_R)
+  PkgConfig::CCORD_AVFORMAT PkgConfig::CCORD_AVCODEC_R PkgConfig::CCORD_AVUTIL_R PkgConfig::CCORD_SWSCALE_R
+  PkgConfig::CCORD_SWRESAMPLE_R)
 target_compile_definitions(ccord_render PRIVATE CCORD_HAVE_FONTCONFIG=${CCORD_RENDER_HAVE_FONTCONFIG})
 if(CCORD_RENDER_HAVE_FONTCONFIG)
   target_link_libraries(ccord_render PRIVATE PkgConfig::CCORD_FONTCONFIG_PKG)

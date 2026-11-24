@@ -24,10 +24,12 @@
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/avutil.h>
+#include <libavutil/channel_layout.h>
 #include <libavutil/cpu.h>
 #include <libavutil/dict.h>
 #include <libavutil/display.h>
 #include <libavutil/samplefmt.h>
+#include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 
 #include <ccord/core/alloc.h>
@@ -85,6 +87,13 @@ struct ccord_av_stream {
   AVPacket *pkt;
   avs_pktq vq, aq;
   struct SwsContext *sws;
+  SwrContext *swr;
+  int swr_fmt, swr_rate, swr_ch;
+  enum AVChannelOrder swr_order;
+  uint64_t swr_mask;
+  int16_t *swr_tmp;
+  size_t swr_tmp_cap;      // capacity of swr_tmp in stereo frames
+  uint64_t swr_skip_frames;
   bool demux_eof, v_flushed, a_flushed, v_done, a_done;
   ccord_av_info info;
   int rot;                 // clockwise quarter turns to apply for display (0..3)
@@ -261,6 +270,7 @@ static void avs_teardown(ccord_av_stream *s)
   pktq_clear(&s->aq);
   sws_freeContext(s->sws);
   s->sws = nullptr;
+  swr_free(&s->swr);
   av_packet_free(&s->pkt);
   av_frame_free(&s->frame);
   avcodec_free_context(&s->vdec);
@@ -446,6 +456,8 @@ static ccord_status avs_setup(ccord_av_stream *s, ccord_error *err)
 
 static void avs_reset_playhead(ccord_av_stream *s, uint32_t pos_ms)
 {
+  swr_free(&s->swr);
+  s->swr_skip_frames = 0;
   s->have_next = false;
   s->fallback_pts = 0;
   s->skip_before_ms = pos_ms;
@@ -724,6 +736,7 @@ void ccord_av_stream_close(ccord_av_stream *s)
   ccord_free(s->cur);
   ccord_free(s->next);
   ccord_free(s->pcm);
+  ccord_free(s->swr_tmp);
   ccord_free(s->data);
   ccord_free(s);
 }
@@ -944,49 +957,6 @@ bool ccord_av_stream_next_frame(ccord_av_stream *s, const uint8_t **rgba, uint32
 
 // ---- audio ----
 
-static float avs_sample(const AVFrame *f, int ch, int idx)
-{
-  enum AVSampleFormat fmt = (enum AVSampleFormat)f->format;
-  int nb_ch = f->ch_layout.nb_channels > 0 ? f->ch_layout.nb_channels : 1;
-  if (ch >= nb_ch) ch = 0;
-  bool planar = av_sample_fmt_is_planar(fmt) != 0;
-  const uint8_t *plane = planar ? f->extended_data[ch] : f->extended_data[0];
-  if (!plane) return 0.0f;
-  size_t off = planar ? (size_t)idx : ((size_t)idx * (size_t)nb_ch + (size_t)ch);
-  switch (av_get_packed_sample_fmt(fmt)) {
-    case AV_SAMPLE_FMT_U8: return ((float)plane[off] - 128.0f) / 128.0f;
-    case AV_SAMPLE_FMT_S16: {
-      int16_t v = 0;
-      memcpy(&v, plane + off * sizeof v, sizeof v);
-      return (float)v / 32768.0f;
-    }
-    case AV_SAMPLE_FMT_S32: {
-      int32_t v = 0;
-      memcpy(&v, plane + off * sizeof v, sizeof v);
-      return (float)((double)v / 2147483648.0);
-    }
-    case AV_SAMPLE_FMT_FLT: {
-      float v = 0.0f;
-      memcpy(&v, plane + off * sizeof v, sizeof v);
-      return isfinite(v) ? v : 0.0f;
-    }
-    case AV_SAMPLE_FMT_DBL: {
-      double v = 0.0;
-      memcpy(&v, plane + off * sizeof v, sizeof v);
-      return isfinite(v) ? (float)v : 0.0f;
-    }
-    default: return 0.0f;
-  }
-}
-
-static int16_t avs_s16(float x)
-{
-  if (x >= 1.0f) return 32767;
-  if (x <= -1.0f) return -32768;
-  float v = x * 32767.0f;
-  return (int16_t)(v >= 0.0f ? v + 0.5f : v - 0.5f);
-}
-
 static bool avs_pcm_reserve(ccord_av_stream *s, size_t extra)
 {
   if (s->pcm_head > 0 && s->pcm_len == 0) s->pcm_head = 0;
@@ -1005,44 +975,20 @@ static bool avs_pcm_reserve(ccord_av_stream *s, size_t extra)
   return true;
 }
 
-// Resamples s->frame to 48 kHz stereo S16 and appends it to the FIFO, dropping anything before skip_before_ms.
-static void avs_append_audio(ccord_av_stream *s)
+static bool avs_swr_tmp_reserve(ccord_av_stream *s, size_t frames)
 {
-  const AVFrame *f = s->frame;
-  if (f->nb_samples <= 0 || f->sample_rate <= 0 || f->sample_rate > 384000 || f->ch_layout.nb_channels <= 0) return;
-  int nb_ch = f->ch_layout.nb_channels;
-  uint32_t pts = s->a_tail_ms;
-  if (f->best_effort_timestamp != AV_NOPTS_VALUE && s->meta.has_audio) {
-    int64_t start = s->meta.a_start != AV_NOPTS_VALUE ? s->meta.a_start : 0;
-    pts = avs_ms(av_rescale_q(f->best_effort_timestamp - start, s->meta.a_tb, (AVRational){1, 1000}));
-  }
-  uint64_t out_n = ((uint64_t)f->nb_samples * (uint64_t)CCORD_AV_SAMPLE_RATE + (uint64_t)f->sample_rate - 1u) /
-                   (uint64_t)f->sample_rate;
-  uint64_t dur_ms = (out_n * 1000u) / (uint64_t)CCORD_AV_SAMPLE_RATE;
-  uint64_t skip = 0;
-  if ((uint64_t)pts + dur_ms <= (uint64_t)s->skip_before_ms) return;
-  if (pts < s->skip_before_ms) {
-    skip = ((uint64_t)(s->skip_before_ms - pts) * (uint64_t)CCORD_AV_SAMPLE_RATE) / 1000u;
-    if (skip >= out_n) return;
-  }
-  uint64_t take64 = out_n - skip;
-  if (take64 > (uint64_t)AVS_MAX_PCM_FRAMES || s->pcm_len > AVS_MAX_PCM_FRAMES - (size_t)take64) return;   // nobody is reading: drop instead of growing forever
-  size_t take = (size_t)take64;
-  if (!avs_pcm_reserve(s, take)) return;
-  double step = (double)f->sample_rate / (double)CCORD_AV_SAMPLE_RATE;
-  int16_t *dst = s->pcm + (s->pcm_head + s->pcm_len) * 2u;
-  for (size_t i = 0; i < take; i++) {
-    double src_pos = (double)((uint64_t)i + skip) * step;
-    int i0 = (int)src_pos;
-    if (i0 >= f->nb_samples) i0 = f->nb_samples - 1;
-    int i1 = i0 + 1 < f->nb_samples ? i0 + 1 : i0;
-    float frac = (float)(src_pos - (double)i0);
-    float l0 = avs_sample(f, 0, i0), l1 = avs_sample(f, 0, i1);
-    float r0 = nb_ch > 1 ? avs_sample(f, 1, i0) : l0;
-    float r1 = nb_ch > 1 ? avs_sample(f, 1, i1) : l1;
-    dst[i * 2u] = avs_s16(l0 + (l1 - l0) * frac);
-    dst[i * 2u + 1u] = avs_s16(r0 + (r1 - r0) * frac);
-  }
+  if (frames <= s->swr_tmp_cap) return true;
+  size_t ncap = s->swr_tmp_cap ? s->swr_tmp_cap : 4096u;
+  while (ncap < frames) ncap *= 2u;
+  int16_t *np = ccord_realloc_array(s->swr_tmp, ncap * 2u, sizeof *np);
+  if (!np) return false;
+  s->swr_tmp = np;
+  s->swr_tmp_cap = ncap;
+  return true;
+}
+
+static void avs_pcm_commit(ccord_av_stream *s, size_t take, uint32_t pts, uint64_t skip)
+{
   s->pcm_len += take;
   if (s->pcm_len == take) {   // FIFO was empty: its head sits where this frame (after any skip) starts
     uint32_t head_ms = pts + (uint32_t)(((uint64_t)skip * 1000u) / (uint64_t)CCORD_AV_SAMPLE_RATE);
@@ -1053,6 +999,147 @@ static void avs_append_audio(ccord_av_stream *s)
   }
   s->a_tail_ms = s->pcm_pos_ms + (uint32_t)((((uint64_t)s->pcm_len + s->pcm_pos_rem) * 1000u) /
                                             (uint64_t)CCORD_AV_SAMPLE_RATE);
+}
+
+// Resamples s->frame to 48 kHz stereo S16 (via fast-path memcpy or SIMD libswresample) and appends to FIFO,
+// dropping anything before skip_before_ms.
+static void avs_append_audio(ccord_av_stream *s)
+{
+  const AVFrame *f = s->frame;
+  if (f->nb_samples <= 0 || f->sample_rate <= 0 || f->sample_rate > 384000) return;
+  AVChannelLayout in_layout = f->ch_layout;
+  bool owns_layout = false;
+  if (in_layout.nb_channels <= 0 && s->adec && s->adec->ch_layout.nb_channels > 0) {
+    in_layout = s->adec->ch_layout;
+  }
+  if (in_layout.nb_channels <= 0 || in_layout.nb_channels > 16) return;
+  if (in_layout.order == AV_CHANNEL_ORDER_UNSPEC) {
+    int nch = in_layout.nb_channels;
+    memset(&in_layout, 0, sizeof in_layout);
+    av_channel_layout_default(&in_layout, nch);
+    owns_layout = true;
+  }
+  int nb_ch = in_layout.nb_channels;
+  uint32_t pts = s->a_tail_ms;
+  if (f->best_effort_timestamp != AV_NOPTS_VALUE && s->meta.has_audio) {
+    int64_t start = s->meta.a_start != AV_NOPTS_VALUE ? s->meta.a_start : 0;
+    pts = avs_ms(av_rescale_q(f->best_effort_timestamp - start, s->meta.a_tb, (AVRational){1, 1000}));
+  }
+
+  // Zero-resample memcpy fast path when source is already 48 kHz stereo packed S16.
+  if ((enum AVSampleFormat)f->format == AV_SAMPLE_FMT_S16 && f->sample_rate == CCORD_AV_SAMPLE_RATE && nb_ch == 2 &&
+      f->extended_data && f->extended_data[0]) {
+    if (s->swr) swr_free(&s->swr);
+    s->swr_skip_frames = 0;
+    uint64_t out_n = (uint64_t)f->nb_samples;
+    uint64_t dur_ms = (out_n * 1000u) / (uint64_t)CCORD_AV_SAMPLE_RATE;
+    uint64_t skip = 0;
+    if ((uint64_t)pts + dur_ms <= (uint64_t)s->skip_before_ms) goto done;
+    if (pts < s->skip_before_ms) {
+      skip = ((uint64_t)(s->skip_before_ms - pts) * (uint64_t)CCORD_AV_SAMPLE_RATE) / 1000u;
+      if (skip >= out_n) goto done;
+    }
+    uint64_t take64 = out_n - skip;
+    if (take64 > (uint64_t)AVS_MAX_PCM_FRAMES || s->pcm_len > AVS_MAX_PCM_FRAMES - (size_t)take64) goto done;
+    size_t take = (size_t)take64;
+    if (!avs_pcm_reserve(s, take)) goto done;
+    const int16_t *src_pcm = (const int16_t *)(const void *)f->extended_data[0];
+    memcpy(s->pcm + (s->pcm_head + s->pcm_len) * 2u, src_pcm + skip * 2u, take * 2u * sizeof(int16_t));
+    avs_pcm_commit(s, take, pts, skip);
+    goto done;
+  }
+
+  uint64_t est_out = ((uint64_t)f->nb_samples * (uint64_t)CCORD_AV_SAMPLE_RATE + (uint64_t)f->sample_rate - 1u) /
+                     (uint64_t)f->sample_rate;
+  uint64_t est_dur_ms = (est_out * 1000u) / (uint64_t)CCORD_AV_SAMPLE_RATE;
+  if (!s->swr && (uint64_t)pts + est_dur_ms <= (uint64_t)s->skip_before_ms) goto done;
+
+  uint64_t in_mask = in_layout.order == AV_CHANNEL_ORDER_NATIVE ? in_layout.u.mask : 0u;
+  if (s->swr && (f->format != s->swr_fmt || f->sample_rate != s->swr_rate || nb_ch != s->swr_ch ||
+                 in_layout.order != s->swr_order || in_mask != s->swr_mask)) {
+    swr_free(&s->swr);
+  }
+  if (!s->swr) {
+    AVChannelLayout out_layout = AV_CHANNEL_LAYOUT_STEREO;
+    int rc = swr_alloc_set_opts2(&s->swr, &out_layout, AV_SAMPLE_FMT_S16, CCORD_AV_SAMPLE_RATE, &in_layout,
+                                 (enum AVSampleFormat)f->format, f->sample_rate, 0, nullptr);
+    if (rc < 0 || !s->swr) goto done;
+    if (nb_ch == 1) {
+      // Preserve unity gain on mono -> stereo duplication (matches voice messages & WAV tests).
+      const double mono_mat[2] = {1.0, 1.0};
+      (void)swr_set_matrix(s->swr, mono_mat, 1);
+    }
+    if (swr_init(s->swr) < 0) {
+      swr_free(&s->swr);
+      goto done;
+    }
+    s->swr_fmt = f->format;
+    s->swr_rate = f->sample_rate;
+    s->swr_ch = nb_ch;
+    s->swr_order = in_layout.order;
+    s->swr_mask = in_mask;
+    if (pts < s->skip_before_ms) {
+      s->swr_skip_frames = ((uint64_t)(s->skip_before_ms - pts) * (uint64_t)CCORD_AV_SAMPLE_RATE) / 1000u;
+    }
+  }
+
+  int64_t delay = swr_get_delay(s->swr, f->sample_rate);
+  int64_t max_out = av_rescale_rnd(delay + f->nb_samples, CCORD_AV_SAMPLE_RATE, f->sample_rate, AV_ROUND_UP);
+  if (max_out <= 0 || max_out > (int64_t)AVS_MAX_PCM_FRAMES) goto done;
+
+  if (s->swr_skip_frames == 0) {
+    if ((uint64_t)max_out > (uint64_t)AVS_MAX_PCM_FRAMES || s->pcm_len > AVS_MAX_PCM_FRAMES - (size_t)max_out) goto done;
+    if (!avs_pcm_reserve(s, (size_t)max_out)) goto done;
+    uint8_t *dst[1] = {(uint8_t *)(s->pcm + (s->pcm_head + s->pcm_len) * 2u)};
+    int got = swr_convert(s->swr, dst, (int)max_out, (const uint8_t *const *)f->extended_data, f->nb_samples);
+    if (got > 0) avs_pcm_commit(s, (size_t)got, pts, 0u);
+  } else {
+    if (!avs_swr_tmp_reserve(s, (size_t)max_out)) goto done;
+    uint8_t *dst[1] = {(uint8_t *)s->swr_tmp};
+    int got = swr_convert(s->swr, dst, (int)max_out, (const uint8_t *const *)f->extended_data, f->nb_samples);
+    if (got > 0) {
+      uint64_t drop = (uint64_t)got < s->swr_skip_frames ? (uint64_t)got : s->swr_skip_frames;
+      s->swr_skip_frames -= drop;
+      size_t take = (size_t)((uint64_t)got - drop);
+      if (take > 0 && take <= AVS_MAX_PCM_FRAMES && s->pcm_len <= AVS_MAX_PCM_FRAMES - take && avs_pcm_reserve(s, take)) {
+        memcpy(s->pcm + (s->pcm_head + s->pcm_len) * 2u, s->swr_tmp + drop * 2u, take * 2u * sizeof(int16_t));
+        avs_pcm_commit(s, take, pts, drop);
+      }
+    }
+  }
+done:
+  if (owns_layout) av_channel_layout_uninit(&in_layout);
+}
+
+// Drains any tail samples buffered inside libswresample's FIR filter when the audio decoder reaches EOF.
+static void avs_flush_swr(ccord_av_stream *s)
+{
+  if (!s->swr) return;
+  for (;;) {
+    int64_t rem = swr_get_out_samples(s->swr, 0);
+    int chunk = rem > 0 ? (rem > 4096 ? 4096 : (int)rem) : 256;
+    if (s->swr_skip_frames == 0) {
+      if ((size_t)chunk > AVS_MAX_PCM_FRAMES || s->pcm_len > AVS_MAX_PCM_FRAMES - (size_t)chunk) break;
+      if (!avs_pcm_reserve(s, (size_t)chunk)) break;
+      uint8_t *dst[1] = {(uint8_t *)(s->pcm + (s->pcm_head + s->pcm_len) * 2u)};
+      int got = swr_convert(s->swr, dst, chunk, nullptr, 0);
+      if (got <= 0) break;
+      avs_pcm_commit(s, (size_t)got, s->a_tail_ms, 0u);
+    } else {
+      if (!avs_swr_tmp_reserve(s, (size_t)chunk)) break;
+      uint8_t *dst[1] = {(uint8_t *)s->swr_tmp};
+      int got = swr_convert(s->swr, dst, chunk, nullptr, 0);
+      if (got <= 0) break;
+      uint64_t drop = (uint64_t)got < s->swr_skip_frames ? (uint64_t)got : s->swr_skip_frames;
+      s->swr_skip_frames -= drop;
+      size_t take = (size_t)((uint64_t)got - drop);
+      if (take > 0 && take <= AVS_MAX_PCM_FRAMES && s->pcm_len <= AVS_MAX_PCM_FRAMES - take && avs_pcm_reserve(s, take)) {
+        memcpy(s->pcm + (s->pcm_head + s->pcm_len) * 2u, s->swr_tmp + drop * 2u, take * 2u * sizeof(int16_t));
+        avs_pcm_commit(s, take, s->a_tail_ms, drop);
+      }
+    }
+  }
+  swr_free(&s->swr);
 }
 
 uint32_t ccord_av_stream_pcm_pos_ms(const ccord_av_stream *s)
@@ -1125,6 +1212,8 @@ bool ccord_av_stream_sync(ccord_av_stream *s, uint32_t pos_ms, uint32_t budget_m
       if (avs_decode(s, s->adec, &s->aq, &s->a_flushed, &s->a_done)) {
         avs_append_audio(s);
         av_frame_unref(s->frame);
+      } else if (s->a_done) {
+        avs_flush_swr(s);
       }
       progressed = true;
     }
@@ -1239,6 +1328,7 @@ size_t av_stream_mem_bytes(const ccord_av_stream *s)
   if (s->next) total += fbytes;
   if (s->scratch) total += fbytes;
   total += s->pcm_cap * 2u * sizeof(int16_t);
+  total += s->swr_tmp_cap * 2u * sizeof(int16_t);
   if (s->src_mode && s->mx) {
     ccord_mutex_lock(s->mx);
     total += s->vq.bytes + s->aq.bytes;
