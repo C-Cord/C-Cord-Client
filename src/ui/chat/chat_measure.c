@@ -23,16 +23,18 @@ void ui_chat_caches_free(ccord_ui *ui)
   ui->chat_caches = nullptr;
 }
 
-// Discord plays animated chat media only while gif_auto_play is on (default when the
-// settings object has not arrived yet); with it off, hovering one tile still plays it.
+// Discord plays animated chat media only while gif_auto_play is on (and reduced motion is off);
+// with gif_auto_play off, hovering one tile still plays it unless reduced motion is enabled.
 static bool ui_gif_auto_play(const ccord_ui *ui)
 {
+  if (ui->anim.reduced_motion || ui->settings_reduced_motion) return false;
   const ccord_user_settings *us = ui->d.store ? ccord_store_user_settings(ui->d.store) : nullptr;
-  return us ? us->gif_auto_play : true;
+  return us ? us->gif_auto_play : ui->settings_gif_auto_play;
 }
 
 bool ui_media_animate(const ccord_ui *ui, ccord_rect rect)
 {
+  if (ui->anim.reduced_motion || ui->settings_reduced_motion) return false;
   return ui_gif_auto_play(ui) || (ui->mouse_in && ui_in_rect(ui->mx, ui->my, rect));
 }
 

@@ -381,19 +381,26 @@ static uint64_t str_hash(const char *s, size_t len)
 }
 
 // Account playback preferences. Discord owns these; until the first settings object
-// arrives the UI uses Discord's defaults: animated emoji on and stickers always playing.
+// arrives the UI uses its mirrored settings defaults (animated emoji on, stickers always playing).
+static bool expr_reduced_motion(const ccord_ui *ui)
+{
+  return ui && (ui->anim.reduced_motion || ui->settings_reduced_motion);
+}
+
 static bool expr_animate_emoji(const ccord_ui *ui)
 {
+  if (expr_reduced_motion(ui)) return false;
   const ccord_user_settings *settings =
     ui->d.store ? ccord_store_user_settings(ui->d.store) : nullptr;
-  return settings ? settings->animate_emoji : true;
+  return settings ? settings->animate_emoji : ui->settings_animate_emoji;
 }
 
 static uint8_t expr_animate_stickers_mode(const ccord_ui *ui)
 {
+  if (expr_reduced_motion(ui)) return 2;
   const ccord_user_settings *settings =
     ui->d.store ? ccord_store_user_settings(ui->d.store) : nullptr;
-  return settings ? settings->animate_stickers : 0;
+  return settings ? settings->animate_stickers : ui->settings_animate_stickers;
 }
 
 static bool expr_pointer_over(const ccord_ui *ui, ccord_rect rect)
@@ -412,7 +419,7 @@ void ui_expr_draw_custom_emoji(ccord_ui *ui, ccord_renderer *r, ccord_id id, con
   int tw = 0, th = 0;
   bool real_tex = ready && ccord_render_has_texture(r, url, &tw, &th) && tw > 1 && th > 1;
   if (ready) {
-    bool animate = animated && (expr_animate_emoji(ui) || expr_pointer_over(ui, rect));
+    bool animate = animated && !expr_reduced_motion(ui) && (expr_animate_emoji(ui) || expr_pointer_over(ui, rect));
     ccord_rect draw_r = rect;
     if (tw > 1 && th > 1 && tw != th) {
       if (tw > th) {
@@ -425,7 +432,7 @@ void ui_expr_draw_custom_emoji(ccord_ui *ui, ccord_renderer *r, ccord_id id, con
         draw_r.w = dw;
       }
     }
-    ccord_draw_texture_rounded_anim(r, url, draw_r, 0.0f, 255, animate || !animated);
+    ccord_draw_texture_rounded_anim(r, url, draw_r, 0.0f, 255, animate);
   }
   if (real_tex) return;
 
@@ -475,7 +482,7 @@ void ui_expr_draw_sticker_art(ccord_ui *ui, ccord_renderer *r, ccord_id id, cons
     if (ready) {
       uint8_t mode = expr_animate_stickers_mode(ui);
       bool animate = animated_sticker && (mode == 0 || (mode == 1 && expr_pointer_over(ui, rect)));
-      ccord_draw_texture_rounded_anim(r, url, rect, 8.0f, 255, animate || !animated_sticker);
+      ccord_draw_texture_rounded_anim(r, url, rect, 8.0f, 255, animate);
       if (inline_chat) ui->dbg_attachment_textures_drawn++;
     }
   }

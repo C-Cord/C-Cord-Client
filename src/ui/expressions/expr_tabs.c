@@ -158,7 +158,9 @@ static void draw_rail_guild_icon(ccord_ui *ui, ccord_renderer *r, const expr_rai
     bool ready = ui_ensure_media(ui, r, icon_url);
     int tw = 0, th = 0;
     if (ready && ccord_render_has_texture(r, icon_url, &tw, &th) && tw > 1 && th > 1) {
-      ccord_draw_texture_rounded(r, icon_url, ri->rect, ri->rect.w * 0.5f, 255);
+      bool ri_hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, ri->rect);
+      bool ri_anim = ri_hov && !(ui->anim.reduced_motion || ui->settings_reduced_motion);
+      ccord_draw_texture_rounded_anim(r, icon_url, ri->rect, ri->rect.w * 0.5f, 255, ri_anim);
       ui->dbg_expr_rail_icons_drawn++;
       return;
     }
@@ -575,8 +577,9 @@ static void gif_title_from_url(const char *url, char *out, size_t cap)
 
 static bool gif_auto_play(const ccord_ui *ui)
 {
+  if (ui->anim.reduced_motion || ui->settings_reduced_motion) return false;
   const ccord_user_settings *us = ui->d.store ? ccord_store_user_settings(ui->d.store) : nullptr;
-  return us ? us->gif_auto_play : true;
+  return us ? us->gif_auto_play : ui->settings_gif_auto_play;
 }
 
 static void draw_gif_card(ccord_ui *ui, ccord_renderer *r, ui_expr_body *b, const ccord_gif_item *g,
@@ -625,7 +628,8 @@ static void draw_gif_card(ccord_ui *ui, ccord_renderer *r, ui_expr_body *b, cons
                      ui_alpha(COL(brand), gh));
   }
   if (ui_ensure_media_ex(ui, r, lurl, GIF_PREVIEW_DIM, video)) {
-    ccord_draw_texture_cover(r, lurl, card, 6.0f, 255, gif_auto_play(ui) || hov);
+    bool play = !(ui->anim.reduced_motion || ui->settings_reduced_motion) && (gif_auto_play(ui) || hov);
+    ccord_draw_texture_cover(r, lurl, card, 6.0f, 255, play);
   } else {
     // Still on its way (or lost): a quiet tile that says which.
     ccord_draw_rrect(r, card, 6.0f, COL(bg_tertiary));
@@ -804,7 +808,9 @@ void ep_draw_gifs_tab(ccord_ui *ui, ccord_renderer *r, struct ui_expr_picker *ep
           bool ready = ui_ensure_media_ex(ui, r, cat->src, GIF_PREVIEW_DIM, false);
           int tw = 0, th = 0;
           cover = ready && ccord_render_has_texture(r, cat->src, &tw, &th) && tw > 1 && th > 1;
-          if (ready) ccord_draw_texture_cover(r, cat->src, cr, 6.0f, 255, gif_auto_play(ui));
+          bool cat_hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, body) && ui_in_rect(ui->mx, ui->my, cr);
+          bool cat_play = !(ui->anim.reduced_motion || ui->settings_reduced_motion) && (gif_auto_play(ui) || cat_hov);
+          if (ready) ccord_draw_texture_cover(r, cat->src, cr, 6.0f, 255, cat_play);
         }
         if (cover) {
           // Dark scrim so the white label stays readable over the cover art

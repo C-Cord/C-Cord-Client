@@ -87,6 +87,11 @@ static float squircle_radius(float size)
   return fmaxf(4.0f, roundf(size * 0.26f));
 }
 
+static bool nav_reduced_motion(const ccord_ui *ui)
+{
+  return ui && (ui->anim.reduced_motion || ui->settings_reduced_motion);
+}
+
 void ui_draw_avatar(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float cx, float cy, float size, ccord_color ring, bool dim)
 {
   bool show_deco = (size >= 24.0f && u && u->avatar_decoration_url && u->avatar_decoration_url[0] != '\0');
@@ -94,7 +99,7 @@ void ui_draw_avatar(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float 
   ccord_rect dst = {cx - size * 0.5f, cy - size * 0.5f, size, size};
   char url[256];
   if (u && ui_user_avatar_url(u, url, sizeof url) && ui_ensure_media(ui, r, url)) {
-    ccord_draw_texture_rounded(r, url, dst, av_rad, dim ? 140 : 255);
+    ccord_draw_texture_rounded_anim(r, url, dst, av_rad, dim ? 140 : 255, !nav_reduced_motion(ui));
     ui->dbg_avatar_textures_drawn++;
     if (show_deco) ui_draw_avatar_deco_url(ui, r, u->avatar_decoration_url, cx, cy, size, dim ? 140 : 255);
     if (ring.a != 0) {
@@ -137,7 +142,7 @@ void ui_draw_group_dm_icon(ccord_ui *ui, ccord_renderer *r, const ccord_channel 
   float av_rad = squircle_radius(size);
   ccord_rect dst = {cx - size * 0.5f, cy - size * 0.5f, size, size};
   if (ch && ch->icon_url && ch->icon_url[0] && ui_ensure_media(ui, r, ch->icon_url)) {
-    ccord_draw_texture_rounded(r, ch->icon_url, dst, av_rad, 255);
+    ccord_draw_texture_rounded_anim(r, ch->icon_url, dst, av_rad, 255, !nav_reduced_motion(ui));
     return;
   }
   ccord_color bg = ui_user_color(ui, (uint8_t)(ch ? (ch->id >> 22) % 6u : 0u));
@@ -395,7 +400,7 @@ void ui_draw_server_list(ccord_ui *ui, ccord_renderer *r)
       ccord_draw_rrect(r, ic, radius, icon_bg);
       char icon_url[256];
       if (!is_dm && g && ui_guild_icon_url(g, icon_url, sizeof icon_url) && ui_ensure_media(ui, r, icon_url)) {
-        ccord_draw_texture_rounded_anim(r, icon_url, ic, radius, 255, hovered);
+        ccord_draw_texture_rounded_anim(r, icon_url, ic, radius, 255, hovered && !nav_reduced_motion(ui));
         ui->dbg_guild_icon_textures_drawn++;
       } else if (is_dm) {
         if (ensure_app_logo_texture(r)) {
@@ -459,7 +464,7 @@ void ui_draw_server_list(ccord_ui *ui, ccord_renderer *r)
         ccord_draw_rrect(r, mc, 4.0f, COL(bg_tertiary));
         char icon_url[256];
         if (ui_guild_icon_url(fg, icon_url, sizeof icon_url) && ui_ensure_media(ui, r, icon_url)) {
-          ccord_draw_texture_rounded(r, icon_url, mc, 4.0f, 255);
+          ccord_draw_texture_rounded_anim(r, icon_url, mc, 4.0f, 255, hovered && !nav_reduced_motion(ui));
         } else {
           char init[8];
           ui_initials(fg->name, init);
@@ -575,7 +580,7 @@ static void draw_guild_voice_avatar(ccord_ui *ui, ccord_renderer *r, ccord_id gu
   ccord_rect dst = {cx - rad, cy - rad, size, size};
   char url[256];
   if (ui_user_avatar_url(&resolved, url, sizeof url) && ui_ensure_media(ui, r, url)) {
-    ccord_draw_texture_rounded(r, url, dst, rad, 255);
+    ccord_draw_texture_rounded_anim(r, url, dst, rad, 255, !nav_reduced_motion(ui));
     ui->dbg_avatar_textures_drawn++;
     return;
   }
@@ -1020,7 +1025,7 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
                                   (ui_nameplate_opts){
                                     .hover = hover,
                                     .selected = selected,
-                                    .animate = hover || selected,
+                                    .animate = hover && !nav_reduced_motion(ui),
                                     .reveal_on_active = true,
                                     .anim_ns = "dmnp",
                                     .anim_id = ch->id,
@@ -1214,7 +1219,7 @@ void ui_draw_user_panel(ccord_ui *ui, ccord_renderer *r)
   float us_hv = ui_fade(ui, "ustatus", 1u, us_hover);
   const ccord_user *u = ccord_store_user(ui->d.store, ccord_store_self_id(ui->d.store));
   if (u && u->nameplate_asset[0] != '\0') {
-    bool np_anim = us_hover || ui->sc.open;
+    bool np_anim = (us_hover || ui->sc.open) && !nav_reduced_motion(ui);
     (void)ui_draw_nameplate(ui, r, u->nameplate_asset, u->nameplate_palette,
                             (ccord_rect){p->x, p->y + 1.0f, fmaxf(p->w - 1.0f, 0.0f), fmaxf(p->h - 1.0f, 0.0f)},
                             0.0f,

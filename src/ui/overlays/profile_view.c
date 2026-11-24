@@ -273,6 +273,11 @@ static uint8_t clamp_u8_alpha(float v)
   return (uint8_t)roundf(v);
 }
 
+static bool prof_reduced_motion(const ccord_ui *ui)
+{
+  return ui && (ui->anim.reduced_motion || ui->settings_reduced_motion);
+}
+
 void ui_profile_draw_banner(ccord_ui *ui, ccord_renderer *r, const ui_profile_look *look, const ccord_user *u,
                             ccord_rect banner, float radius)
 {
@@ -285,11 +290,12 @@ void ui_profile_draw_banner(ccord_ui *ui, ccord_renderer *r, const ui_profile_lo
   uint64_t bkey = look->user_id ^ (look->guild_id * 0x9E3779B1ull);
   float img_vis = ui_fade_ms(ui, "pban", bkey, have_img, UI_PROFILE_BANNER_FADE_MS);
   uint8_t img_a = clamp_u8_alpha(255.0f * img_vis);
+  bool anim = !prof_reduced_motion(ui);
   if (look->has_theme) {
     if (!have_img || img_a == 0) return;   // ui_profile_draw_theme_bg already painted the flush vivid themed banner
     ccord_push_clip(r, banner);
     ccord_draw_texture_cover(r, look->banner_url, (ccord_rect){banner.x, banner.y, banner.w, banner.h + radius * 2.0f},
-                             radius, img_a, true);
+                             radius, img_a, anim);
     ccord_pop_clip(r);
     return;
   }
@@ -298,7 +304,7 @@ void ui_profile_draw_banner(ccord_ui *ui, ccord_renderer *r, const ui_profile_lo
                    ui_profile_banner_fill(ui, look, u));
   if (have_img && img_a > 0) {
     ccord_draw_texture_cover(r, look->banner_url, (ccord_rect){banner.x, banner.y, banner.w, banner.h + radius * 2.0f},
-                             radius, img_a, true);
+                             radius, img_a, anim);
   }
   ccord_pop_clip(r);
 }
@@ -445,7 +451,8 @@ void ui_draw_avatar_deco_url(ccord_ui *ui, ccord_renderer *r, const char *deco_u
   if (ui_ensure_media_ex(ui, r, url, 256, false)) {
     int tw = 0, th = 0;
     if (ccord_render_has_texture(r, url, &tw, &th) && tw <= 2 && th <= 2) return;
-    ccord_draw_texture(r, url, (ccord_rect){cx - s * 0.5f, cy - s * 0.5f, s, s}, alpha);
+    ccord_draw_texture_rounded_anim(r, url, (ccord_rect){cx - s * 0.5f, cy - s * 0.5f, s, s}, 0.0f, alpha,
+                                    !prof_reduced_motion(ui));
   }
 }
 
@@ -505,7 +512,7 @@ bool ui_draw_nameplate(ccord_ui *ui, ccord_renderer *r, const char *asset, const
     boost = ui_fade_ms(ui, ns, id * 2u, active, UI_NAMEPLATE_HOVER_MS);
   }
   bool allow_fetch = !opt.reveal_on_active || active;
-  bool play_anim = opt.animate && !ui->anim.reduced_motion;
+  bool play_anim = opt.animate && !prof_reduced_motion(ui);
   char static_url[256] = {0};
   char anim_url[256] = {0};
   bool direct_http = is_http(asset);
@@ -627,28 +634,31 @@ void ui_profile_draw_effect(ccord_ui *ui, ccord_renderer *r, const ui_profile_lo
   int64_t elapsed = (ui->now_ms >= slot->opened_ms) ? (int64_t)(ui->now_ms - slot->opened_ms) : 0;
 
   ccord_push_clip(r, box);
+  bool reduced = prof_reduced_motion(ui);
   bool any_ready = false;
-  for (size_t i = 0; i < cfg->layer_count && i < CCORD_PROFILE_EFFECT_MAX_LAYERS; i++) {
-    const ccord_profile_effect_layer *L = &cfg->layers[i];
-    if (!has_text(L->src)) continue;
-    // Kick off download even before start_ms so intro->loop transitions seamlessly.
-    bool loaded = ui_ensure_media_ex(ui, r, L->src, 512, false);
-    if (L->start_ms > 0 && elapsed < (int64_t)L->start_ms) continue;
-    if (!L->loop && L->duration_ms > 0 && elapsed >= (int64_t)L->start_ms + (int64_t)L->duration_ms) continue;
-    if (L->loop && L->loop_delay_ms > 0 && L->duration_ms > 0) {
-      int64_t t = elapsed - (int64_t)L->start_ms;
-      int64_t period = (int64_t)L->duration_ms + (int64_t)L->loop_delay_ms;
-      if (t >= 0 && period > 0 && (t % period) >= (int64_t)L->duration_ms) continue;
+  if (!reduced) {
+    for (size_t i = 0; i < cfg->layer_count && i < CCORD_PROFILE_EFFECT_MAX_LAYERS; i++) {
+      const ccord_profile_effect_layer *L = &cfg->layers[i];
+      if (!has_text(L->src)) continue;
+      // Kick off download even before start_ms so intro->loop transitions seamlessly.
+      bool loaded = ui_ensure_media_ex(ui, r, L->src, 512, false);
+      if (L->start_ms > 0 && elapsed < (int64_t)L->start_ms) continue;
+      if (!L->loop && L->duration_ms > 0 && elapsed >= (int64_t)L->start_ms + (int64_t)L->duration_ms) continue;
+      if (L->loop && L->loop_delay_ms > 0 && L->duration_ms > 0) {
+        int64_t t = elapsed - (int64_t)L->start_ms;
+        int64_t period = (int64_t)L->duration_ms + (int64_t)L->loop_delay_ms;
+        if (t >= 0 && period > 0 && (t % period) >= (int64_t)L->duration_ms) continue;
+      }
+      if (!loaded) continue;
+      int tw = 0, th = 0;
+      if (!ccord_render_has_texture(r, L->src, &tw, &th) || tw <= 2 || th <= 2) continue;
+      float ref_w = L->width > 0 ? (float)L->width : 450.0f;
+      float ref_h = L->height > 0 ? (float)L->height : ((float)th * ref_w / (float)tw);
+      float scale = box.w / ref_w;
+      ccord_rect dst = {box.x + (float)L->pos_x * scale, box.y + (float)L->pos_y * scale, ref_w * scale, ref_h * scale};
+      ccord_draw_texture_rounded_anim(r, L->src, dst, radius, 255, true);
+      any_ready = true;
     }
-    if (!loaded) continue;
-    int tw = 0, th = 0;
-    if (!ccord_render_has_texture(r, L->src, &tw, &th) || tw <= 2 || th <= 2) continue;
-    float ref_w = L->width > 0 ? (float)L->width : 450.0f;
-    float ref_h = L->height > 0 ? (float)L->height : ((float)th * ref_w / (float)tw);
-    float scale = box.w / ref_w;
-    ccord_rect dst = {box.x + (float)L->pos_x * scale, box.y + (float)L->pos_y * scale, ref_w * scale, ref_h * scale};
-    ccord_draw_texture_rounded(r, L->src, dst, radius, 255);
-    any_ready = true;
   }
   if (!any_ready) {
     const char *fb = has_text(cfg->reduced_motion_url) ? cfg->reduced_motion_url
@@ -658,7 +668,7 @@ void ui_profile_draw_effect(ccord_ui *ui, ccord_renderer *r, const ui_profile_lo
       int tw = 0, th = 0;
       if (ccord_render_has_texture(r, fb, &tw, &th) && tw > 2 && th > 2) {
         float dh = box.w * ((float)th / (float)tw);
-        ccord_draw_texture_rounded(r, fb, (ccord_rect){box.x, box.y, box.w, dh}, radius, 255);
+        ccord_draw_texture_rounded_anim(r, fb, (ccord_rect){box.x, box.y, box.w, dh}, radius, 255, false);
       }
     }
   }
@@ -687,12 +697,18 @@ void ui_profile_draw_frame(ccord_ui *ui, ccord_renderer *r, const ui_profile_loo
   int32_t bot_anchor = (!has_a0 && has_a2) ? 2 : 1;
   int32_t top_anchor = (!has_a0 && has_a2) ? 1 : 0;
 
+  bool reduced = prof_reduced_motion(ui);
   bool drew_layer = false;
   for (size_t i = 0; i < frm->layer_count && i < CCORD_PROFILE_FRAME_MAX_LAYERS; i++) {
     const ccord_profile_frame_layer *L = &frm->layers[i];
     const char *url = nullptr;
-    if (has_text(L->url) && !ui_media_failed(ui, L->url)) url = L->url;
-    else if (has_text(L->static_url) && !ui_media_failed(ui, L->static_url)) url = L->static_url;
+    if (reduced) {
+      if (has_text(L->static_url) && !ui_media_failed(ui, L->static_url)) url = L->static_url;
+      else if (has_text(L->url) && !ui_media_failed(ui, L->url)) url = L->url;
+    } else {
+      if (has_text(L->url) && !ui_media_failed(ui, L->url)) url = L->url;
+      else if (has_text(L->static_url) && !ui_media_failed(ui, L->static_url)) url = L->static_url;
+    }
     if (!url || !ui_ensure_media_ex(ui, r, url, 512, false)) continue;
     int tw = 0, th = 0;
     if (!ccord_render_has_texture(r, url, &tw, &th) || tw <= 2 || th <= 2) continue;
@@ -705,18 +721,23 @@ void ui_profile_draw_frame(ccord_ui *ui, ccord_renderer *r, const ui_profile_loo
     } else {
       dst = (ccord_rect){box.x - ov_h, box.y - ov_t, fw, full_h};
     }
-    ccord_draw_texture(r, url, dst, 255);
+    ccord_draw_texture_rounded_anim(r, url, dst, 0.0f, 255, !reduced);
     drew_layer = true;
   }
   if (!drew_layer && frm->layer_count == 0) {
     const char *fb = nullptr;
-    if (has_text(frm->animated_url) && !ui_media_failed(ui, frm->animated_url)) fb = frm->animated_url;
-    else if (has_text(frm->static_url) && !ui_media_failed(ui, frm->static_url)) fb = frm->static_url;
+    if (reduced) {
+      if (has_text(frm->static_url) && !ui_media_failed(ui, frm->static_url)) fb = frm->static_url;
+      else if (has_text(frm->animated_url) && !ui_media_failed(ui, frm->animated_url)) fb = frm->animated_url;
+    } else {
+      if (has_text(frm->animated_url) && !ui_media_failed(ui, frm->animated_url)) fb = frm->animated_url;
+      else if (has_text(frm->static_url) && !ui_media_failed(ui, frm->static_url)) fb = frm->static_url;
+    }
     if (fb && ui_ensure_media_ex(ui, r, fb, 512, false)) {
       int tw = 0, th = 0;
       if (ccord_render_has_texture(r, fb, &tw, &th) && tw > 2 && th > 2) {
         ccord_rect dst = {box.x - ov_h, box.y - ov_t, fw, full_h};
-        ccord_draw_texture(r, fb, dst, 255);
+        ccord_draw_texture_rounded_anim(r, fb, dst, 0.0f, 255, !reduced);
       }
     }
   }

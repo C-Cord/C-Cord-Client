@@ -2743,7 +2743,8 @@ static void test_nameplate_visibility_and_animation(void)
   CT_CHECK(np_found && np_v <= 0.01f);
   F.ui->anim.reduced_motion = false;
 
-  // Click the DM row to actively view it, then move mouse away: nameplate stays visible and animates.
+  // Click the DM row to actively view it, then move mouse away: nameplate stays visible (static) without
+  // continuously decoding asset.webm while idle; hovering the selected DM row plays the WebM animation.
   click(dm_row_x, dm_row_y);
   mouse(CCORD_IN_MOUSE_MOVE, 0, 5.0f, 5.0f);
   frame(5);
@@ -2752,10 +2753,20 @@ static void test_nameplate_visibility_and_animation(void)
   CT_CHECK(np_found && np_v >= 0.99f);
   ccord_render_set_anim_clock(F.renderer, 1000u);
   draw_only();
+  CT_CHECK(!F.ui->media_animating);
+  mouse(CCORD_IN_MOUSE_MOVE, 0, dm_row_x, dm_row_y);
+  ccord_render_set_anim_clock(F.renderer, 1000u);
+  draw_only();
   CT_CHECK(F.ui->media_animating);
   ccord_render_set_anim_clock(F.renderer, 1120u);
   draw_only();
   CT_CHECK(ccord_render_texture_is_animated(F.renderer, k_dm_anim, &cur_f, &cnt_f) && cur_f == 1u);
+  // Reduced motion stops DM nameplate animation even while hovered.
+  F.ui->anim.reduced_motion = true;
+  draw_only();
+  CT_CHECK(!F.ui->media_animating);
+  F.ui->anim.reduced_motion = false;
+  mouse(CCORD_IN_MOUSE_MOVE, 0, 5.0f, 5.0f);
 
   // Async nameplate arrival on an already-selected DM transitions smoothly in instead of snapping.
   ccord_user dm_u2 = {

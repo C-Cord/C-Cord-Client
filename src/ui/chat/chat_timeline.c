@@ -556,7 +556,7 @@ float dc_dm_intro_walk(ccord_ui *ui, ccord_renderer *r, const ccord_channel *ch,
         if (gi > 0u) ccord_draw_circle(r, gic.x + 10.0f, gic.y + 10.0f, 11.5f, COL(bg_primary));
         char icon_url[256];
         if (gd && ui_guild_icon_url(gd, icon_url, sizeof icon_url) && ui_ensure_media(ui, r, icon_url)) {
-          ccord_draw_texture_rounded(r, icon_url, gic, 10.0f, 255);
+          ccord_draw_texture_rounded_anim(r, icon_url, gic, 10.0f, 255, false);
           ui->dbg_guild_icon_textures_drawn++;
         } else {
           ccord_draw_circle(r, gic.x + 10.0f, gic.y + 10.0f, 10.0f, COL(brand));
@@ -867,7 +867,12 @@ float dc_wave_cta_walk(ccord_ui *ui, ccord_renderer *r, const ccord_message *m, 
                     tw > 1 && th > 1;
     if (wave_tex) {
       ccord_rect art = {x + (btn_w - art_h) * 0.5f, y + top_gap, art_h, art_h};
-      ccord_draw_texture_rounded_anim(r, wave_url, art, 8.0f, 255, true);
+      const ccord_user_settings *us = ui->d.store ? ccord_store_user_settings(ui->d.store) : nullptr;
+      uint8_t smode = us ? us->animate_stickers : ui->settings_animate_stickers;
+      bool reduced = ui->anim.reduced_motion || ui->settings_reduced_motion;
+      bool art_hov = ui->mouse_in && !ui->menu.open && !ui->settings_open && ui_in_rect(ui->mx, ui->my, art);
+      bool wave_anim = !reduced && (smode == 0 || (smode == 1 && art_hov));
+      ccord_draw_texture_rounded_anim(r, wave_url, art, 8.0f, 255, wave_anim);
     } else {
       draw_wave_mascot(r, x + btn_w * 0.5f, y + top_gap);
     }
