@@ -1584,13 +1584,23 @@ static void render_layers(ccord_lottie_stream *s, uint8_t *dst, const ccord_json
   }
 }
 
-static void render_frame_into_out(ccord_lottie_stream *s, float frame)
+static void render_frame_premul(ccord_lottie_stream *s, float frame)
 {
   size_t npix = (size_t)s->out_w * (size_t)s->out_h;
   memset(s->premul, 0, npix * 4u);
   lot_mat root_m = {(float)s->out_w / s->src_w, 0.0f, 0.0f, (float)s->out_h / s->src_h, 0.0f, 0.0f};
   render_layers(s, s->premul, ccord_json_get(s->root, "layers"), frame, root_m, 1.0f, 0);
-  // Convert premultiplied RGBA -> straight RGBA for texture upload.
+}
+
+static bool render_frame_into_out(ccord_lottie_stream *s, float frame)
+{
+  size_t npix = (size_t)s->out_w * (size_t)s->out_h;
+  if (!s->out_rgba) {
+    s->out_rgba = ccord_malloc(npix * 4u);
+    if (!s->out_rgba) return false;
+  }
+  render_frame_premul(s, frame);
+  // Convert premultiplied RGBA -> straight RGBA for straight-alpha callers (CPU/software decode).
   for (size_t i = 0; i < npix; i++) {
     uint8_t a = s->premul[i * 4u + 3u];
     uint8_t *o = s->out_rgba + i * 4u;
@@ -1611,6 +1621,7 @@ static void render_frame_into_out(ccord_lottie_stream *s, float frame)
       o[3] = a;
     }
   }
+  return true;
 }
 
 // ---- public stream API ----
@@ -1675,9 +1686,8 @@ ccord_lottie_stream *ccord_lottie_open(const uint8_t *data, size_t len, int max_
 
   size_t npix = (size_t)s->out_w * (size_t)s->out_h;
   s->premul = ccord_malloc(npix * 4u);
-  s->out_rgba = ccord_malloc(npix * 4u);
   s->cov = ccord_malloc((size_t)s->out_w * sizeof *s->cov);
-  if (!s->premul || !s->out_rgba || !s->cov) {
+  if (!s->premul || !s->cov) {
     ccord_error_set(err, CCORD_ERR_NOMEM, "lottie: out of memory");
     ccord_lottie_close(s);
     return nullptr;
@@ -1711,8 +1721,22 @@ bool ccord_lottie_next_frame(ccord_lottie_stream *s, const uint8_t **rgba, uint3
   if (!s || !rgba || s->cur_idx >= s->frame_count) return false;
   float frac = s->frame_count > 1u ? (float)s->cur_idx / (float)s->frame_count : 0.0f;
   float frame = s->ip + frac * (s->op - s->ip);
-  render_frame_into_out(s, frame);
+  if (!render_frame_into_out(s, frame)) return false;
   *rgba = s->out_rgba;
+  if (pts_ms) *pts_ms = s->cur_idx * s->dur_ms;
+  if (dur_ms) *dur_ms = s->dur_ms;
+  s->cur_idx++;
+  return true;
+}
+
+bool ccord_lottie_next_frame_premul(ccord_lottie_stream *s, const uint8_t **rgba, uint32_t *pts_ms, uint32_t *dur_ms)
+{
+  if (rgba) *rgba = nullptr;
+  if (!s || !rgba || s->cur_idx >= s->frame_count) return false;
+  float frac = s->frame_count > 1u ? (float)s->cur_idx / (float)s->frame_count : 0.0f;
+  float frame = s->ip + frac * (s->op - s->ip);
+  render_frame_premul(s, frame);
+  *rgba = s->premul;
   if (pts_ms) *pts_ms = s->cur_idx * s->dur_ms;
   if (dur_ms) *dur_ms = s->dur_ms;
   s->cur_idx++;
@@ -1730,7 +1754,8 @@ size_t ccord_lottie_mem_bytes(const ccord_lottie_stream *s)
 {
   if (!s) return 0;
   size_t npix = (size_t)s->out_w * (size_t)s->out_h;
-  return npix * 8u + s->cap_edges * sizeof *s->edges + s->cap_cross * sizeof *s->cross;
+  size_t fb_bytes = s->out_rgba ? npix * 8u : npix * 4u;
+  return fb_bytes + s->cap_edges * sizeof *s->edges + s->cap_cross * sizeof *s->cross;
 }
 
 ccord_status ccord_lottie_render_first_frame(const uint8_t *data, size_t len, int max_dim,

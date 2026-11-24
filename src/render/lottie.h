@@ -25,6 +25,10 @@ void ccord_lottie_info(const ccord_lottie_stream *s, int *out_w, int *out_h, uin
 // Returns false once all frames of the loop have been emitted.
 bool ccord_lottie_next_frame(ccord_lottie_stream *s, const uint8_t **rgba, uint32_t *pts_ms, uint32_t *dur_ms);
 
+// Renders the next frame directly in premultiplied RGBA (skipping un-premultiply division for GPU premul uploads).
+// Returns false once all frames of the loop have been emitted.
+bool ccord_lottie_next_frame_premul(ccord_lottie_stream *s, const uint8_t **rgba, uint32_t *pts_ms, uint32_t *dur_ms);
+
 // Repositions the frame cursor to the frame at `pos_ms`.
 void ccord_lottie_seek(ccord_lottie_stream *s, uint32_t pos_ms);
 

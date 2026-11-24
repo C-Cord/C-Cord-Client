@@ -68,6 +68,7 @@ typedef struct tex_entry {
   size_t anim_budget;       // above this the entry streams instead
   uint64_t stream_due_ms;   // streaming: when the next frame replaces the shown one
   uint64_t last_used_ms;    // monotonic wall clock (ccord_clock_ms) of last touch/upload
+  uint64_t anim_drawn_tick; // tex_tick when last drawn with animate == true
 } tex_entry;
 
 typedef struct text_color_op {
@@ -148,6 +149,7 @@ struct ccord_renderer {
   int noff;
   bool ttf_inited;
   bool software;        // true when SDL renderer is the CPU "software" backend
+  bool vsync_enabled;   // true when SDL_SetRenderVSync(1) succeeded
 
   TTF_Font *base[2];    // one open font per style; sized copies come from font_cache
   TTF_Font *mono_base;  // lazily probed monospace base face for CCORD_FONT_MONO / CCORD_FONT_MONO_BOLD
@@ -208,6 +210,8 @@ void fallback_fonts_init(ccord_renderer *r);   // opens the bundled emoji/CJK su
 uint64_t av_stream_last_used_ms(const ccord_av_stream *s);
 void av_stream_touch(ccord_av_stream *s, uint64_t now_ms);
 size_t av_stream_mem_bytes(const ccord_av_stream *s);
+bool av_stream_next_frame_ex(ccord_av_stream *s, bool want_premul, const uint8_t **rgba, uint32_t *pts_ms,
+                             uint32_t *dur_ms, bool *out_already_premul);
 
 // Alpha-scaled colour component (render.c / text.c): what actually reaches the GPU while an alpha is pushed.
 static inline uint8_t ccord_fx_alpha(const ccord_renderer *r, uint8_t a)
@@ -219,6 +223,7 @@ static inline uint8_t ccord_fx_alpha(const ccord_renderer *r, uint8_t a)
 void tex_cache_init(ccord_renderer *r);
 void tex_free_slot(ccord_renderer *r, int slot);
 void tex_cache_evict_idle(ccord_renderer *r);
+void tex_cache_evict_idle_now(ccord_renderer *r);
 
 // Snaps a logical rect to whole physical pixels so neighbours sharing an edge never leave a seam.
 static inline SDL_FRect render_snap(const ccord_renderer *r, ccord_rect rc)

@@ -1009,6 +1009,46 @@ static void test_image_crop_png(void)
   ccord_free(src);
 }
 
+static void test_power_efficiency_apis(ccord_renderer *r)
+{
+  // Headless software renderer never enables hardware VSync.
+  CT_CHECK(!ccord_render_vsync_enabled(nullptr));
+  CT_CHECK(!ccord_render_vsync_enabled(r));
+
+  ccord_error err;
+  // Opaque RGBA upload fast path stores texture cleanly.
+  static uint8_t opaque_px[8 * 8 * 4];
+  for (size_t i = 0; i < 8u * 8u; i++) {
+    opaque_px[i * 4u + 0u] = 40u;
+    opaque_px[i * 4u + 1u] = 180u;
+    opaque_px[i * 4u + 2u] = 90u;
+    opaque_px[i * 4u + 3u] = 255u;
+  }
+  CT_CHECK(ccord_render_upload_rgba_opaque(r, "pwr:static_opaque", opaque_px, 8, 8, &err) == CCORD_OK);
+  CT_CHECK(ccord_render_has_texture(r, "pwr:static_opaque", nullptr, nullptr));
+
+  // Upload a 2-frame animated Lottie alongside the static texture, then evict idle caches (background hook):
+  // animated/decoder entries are evicted immediately while static textures remain cached.
+  static const char k_lot[] =
+    "{\"v\":\"5.6.2\",\"fr\":10,\"ip\":0,\"op\":2,\"w\":16,\"h\":16,\"layers\":[{"
+    "\"ty\":4,\"ind\":1,\"ip\":0,\"op\":2,\"st\":0,"
+    "\"ks\":{\"o\":{\"a\":0,\"k\":100},\"r\":{\"a\":0,\"k\":0},"
+    "\"p\":{\"a\":0,\"k\":[8,8,0]},\"a\":{\"a\":0,\"k\":[0,0,0]},\"s\":{\"a\":0,\"k\":[100,100,100]}},"
+    "\"shapes\":[{\"ty\":\"gr\",\"it\":["
+    "{\"ty\":\"el\",\"p\":{\"a\":0,\"k\":[0,0]},\"s\":{\"a\":0,\"k\":[10,10]}},"
+    "{\"ty\":\"fl\",\"c\":{\"a\":0,\"k\":[1,0,0,1]},\"o\":{\"a\":0,\"k\":100},\"r\":1},"
+    "{\"ty\":\"tr\",\"p\":{\"a\":0,\"k\":[0,0]},\"a\":{\"a\":0,\"k\":[0,0]},\"s\":{\"a\":0,\"k\":[100,100]},\"r\":{\"a\":0,\"k\":0},\"o\":{\"a\":0,\"k\":100}}"
+    "]}]}]}";
+  ccord_media_opts mopts = {.max_dim = 32};
+  CT_CHECK(ccord_render_upload_media(r, "pwr:anim_lottie", (const uint8_t *)k_lot, sizeof k_lot - 1u, &mopts,
+                                     nullptr, nullptr, &err) == CCORD_OK);
+  CT_CHECK(ccord_render_texture_is_animated(r, "pwr:anim_lottie", nullptr, nullptr));
+
+  ccord_render_evict_idle_caches(r);
+  CT_CHECK(!ccord_render_has_texture(r, "pwr:anim_lottie", nullptr, nullptr));
+  CT_CHECK(ccord_render_has_texture(r, "pwr:static_opaque", nullptr, nullptr));
+}
+
 int main(int argc, char **argv)
 {
   ccord_error err;
@@ -1046,6 +1086,7 @@ int main(int argc, char **argv)
   test_v3_primitives(r);
   test_anti_aliasing_and_mips(r);
   test_image_crop_png();
+  test_power_efficiency_apis(r);
   ccord_render_destroy(r);
   ccord_platform_destroy(p);
   return CT_RESULT("test_render");

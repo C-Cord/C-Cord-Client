@@ -24,6 +24,11 @@ ccord_renderer *ccord_render_create(ccord_platform *p, const ccord_theme *theme,
 void ccord_render_destroy(ccord_renderer *r);
 // Flushes GPU texture/disc/text caches (call on Android LOW_MEMORY or RENDER_TARGETS/DEVICE_RESET).
 void ccord_render_evict_caches(ccord_renderer *r);
+// Immediately evicts animated frame buffers and open animation/streaming decoders while keeping static UI textures
+// warm (call on CCORD_IN_APP_BACKGROUND to release idle decoder RAM and stop hidden animation caches).
+void ccord_render_evict_idle_caches(ccord_renderer *r);
+// True when SDL_SetRenderVSync(1) succeeded on this renderer (false in headless/software or when VSync is unavailable).
+bool ccord_render_vsync_enabled(const ccord_renderer *r);
 void ccord_render_begin(ccord_renderer *r, ccord_color clear);   // re-reads window size/scale; reopens fonts if scale changed
 void ccord_render_end(ccord_renderer *r);                         // present
 ccord_vec2 ccord_render_size(const ccord_renderer *r);            // logical px (window size / display scale / zoom)
@@ -133,6 +138,9 @@ bool ccord_render_take_anim_next_ms(ccord_renderer *r, uint64_t *out_due_ms);
 // Uploads raw RGBA32 pixels (width * height * 4 bytes) into the LRU SDL_Texture cache under `key`.
 [[nodiscard]] ccord_status ccord_render_upload_rgba(ccord_renderer *r, const char *key, const uint8_t *rgba,
                                                     int width, int height, ccord_error *err);
+// Like ccord_render_upload_rgba for known-opaque video/camera frames (all alpha bytes == 255): skips alpha scan and premultiply.
+[[nodiscard]] ccord_status ccord_render_upload_rgba_opaque(ccord_renderer *r, const char *key, const uint8_t *rgba,
+                                                           int width, int height, ccord_error *err);
 bool ccord_render_has_texture(ccord_renderer *r, const char *key, int *out_w, int *out_h);
 void ccord_render_evict_texture(ccord_renderer *r, const char *key);
 void ccord_render_set_texture_cache_cap(ccord_renderer *r, int cap);

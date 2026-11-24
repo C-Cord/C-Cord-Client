@@ -28,6 +28,7 @@
 #include <libavutil/cpu.h>
 #include <libavutil/dict.h>
 #include <libavutil/display.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/samplefmt.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
@@ -94,6 +95,7 @@ struct ccord_av_stream {
   int16_t *swr_tmp;
   size_t swr_tmp_cap;      // capacity of swr_tmp in stereo frames
   uint64_t swr_skip_frames;
+  bool last_frame_opaque;  // true when last converted video frame had no alpha channel (A == 255)
   bool demux_eof, v_flushed, a_flushed, v_done, a_done;
   ccord_av_info info;
   int rot;                 // clockwise quarter turns to apply for display (0..3)
@@ -930,15 +932,27 @@ static bool avs_convert(ccord_av_stream *s, uint8_t **dst)
     }
   }
   if (s->rot != 0) avs_rotate(s->scratch, s->sw, s->sh, *dst, s->rot);
+  const AVPixFmtDescriptor *pdesc = av_pix_fmt_desc_get((enum AVPixelFormat)f->format);
+  s->last_frame_opaque = pdesc != nullptr && !(pdesc->flags & AV_PIX_FMT_FLAG_ALPHA) &&
+                         (enum AVPixelFormat)f->format != AV_PIX_FMT_PAL8;
   return true;
 }
 
-bool ccord_av_stream_next_frame(ccord_av_stream *s, const uint8_t **rgba, uint32_t *pts_ms, uint32_t *dur_ms)
+bool av_stream_next_frame_ex(ccord_av_stream *s, bool want_premul, const uint8_t **rgba, uint32_t *pts_ms,
+                             uint32_t *dur_ms, bool *out_already_premul)
 {
   if (rgba) *rgba = nullptr;
+  if (out_already_premul) *out_already_premul = false;
   if (!s || !rgba) return false;
   s->last_used_ms = ccord_clock_ms();
-  if (s->lottie) return ccord_lottie_next_frame(s->lottie, rgba, pts_ms, dur_ms);
+  if (s->lottie) {
+    if (want_premul) {
+      if (!ccord_lottie_next_frame_premul(s->lottie, rgba, pts_ms, dur_ms)) return false;
+      if (out_already_premul) *out_already_premul = true;
+      return true;
+    }
+    return ccord_lottie_next_frame(s->lottie, rgba, pts_ms, dur_ms);
+  }
   if (avs_observe(s, nullptr) != CCORD_AV_READY) return false;
   if (!avs_decode(s, s->vdec, &s->vq, &s->v_flushed, &s->v_done)) return false;
   uint32_t pts = 0, dur = 0;
@@ -952,7 +966,13 @@ bool ccord_av_stream_next_frame(ccord_av_stream *s, const uint8_t **rgba, uint32
   *rgba = s->next;
   if (pts_ms) *pts_ms = pts;
   if (dur_ms) *dur_ms = dur;
+  if (out_already_premul) *out_already_premul = want_premul && s->last_frame_opaque;
   return true;
+}
+
+bool ccord_av_stream_next_frame(ccord_av_stream *s, const uint8_t **rgba, uint32_t *pts_ms, uint32_t *dur_ms)
+{
+  return av_stream_next_frame_ex(s, false, rgba, pts_ms, dur_ms, nullptr);
 }
 
 // ---- audio ----

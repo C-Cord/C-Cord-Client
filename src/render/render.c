@@ -67,8 +67,9 @@ ccord_renderer *ccord_render_create(ccord_platform *p, const ccord_theme *theme,
   }
   const char *rname = SDL_GetRendererName(r->sdl);
   r->software = rname && strcmp(rname, "software") == 0;
-  if (!headless) SDL_SetRenderVSync(r->sdl, 1);   // headless dummy/offscreen skips simulated 60 Hz sleeps
-  CCORD_LOG_I("render: SDL renderer '%s', video driver '%s'", rname ? rname : "?", video ? video : "?");
+  r->vsync_enabled = !headless && SDL_SetRenderVSync(r->sdl, 1);   // headless dummy/offscreen skips simulated 60 Hz sleeps
+  CCORD_LOG_I("render: SDL renderer '%s', video driver '%s', vsync=%d",
+              rname ? rname : "?", video ? video : "?", r->vsync_enabled ? 1 : 0);
   SDL_SetRenderDrawBlendMode(r->sdl, SDL_BLENDMODE_BLEND);
   if (!headless) {
     // Paint the theme backdrop immediately so Android/GLES surfaces never sit solid black while startup finishes.
@@ -136,6 +137,17 @@ void ccord_render_evict_caches(ccord_renderer *r)
   for (int i = 0; i < r->ndiscs; i++) SDL_DestroyTexture(r->discs[i].tex);
   r->ndiscs = 0;
   r->disc_next = 0;
+}
+
+void ccord_render_evict_idle_caches(ccord_renderer *r)
+{
+  if (!r) return;
+  tex_cache_evict_idle_now(r);
+}
+
+bool ccord_render_vsync_enabled(const ccord_renderer *r)
+{
+  return r && r->vsync_enabled;
 }
 
 void ccord_render_destroy(ccord_renderer *r)

@@ -243,7 +243,16 @@ static void tex_enforce_vram_budget(ccord_renderer *r, int protect_slot)
 
 static bool rgba_has_transparency(const uint8_t *rgba, size_t npixels)
 {
-  for (size_t i = 0; i < npixels; i++) {
+  const uint8_t k_a[4] = {0u, 0u, 0u, 255u};
+  uint32_t amask = 0;
+  memcpy(&amask, k_a, sizeof amask);
+  size_t i = 0;
+  for (; i + 4u <= npixels; i += 4u) {
+    uint32_t p[4];
+    memcpy(p, rgba + i * 4u, sizeof p);
+    if (((p[0] & p[1] & p[2] & p[3]) & amask) != amask) return true;
+  }
+  for (; i < npixels; i++) {
     if (rgba[i * 4u + 3u] != 255u) return true;
   }
   return false;
@@ -277,6 +286,9 @@ static bool tex_update_pixels(SDL_Texture *tex, bool streaming, bool premul_on_c
                               int height)
 {
   const int row_bytes = width * 4;
+  if (premul_on_copy && !rgba_has_transparency(rgba, (size_t)width * (size_t)height)) {
+    premul_on_copy = false;
+  }
   if (streaming) {
     void *pixels = nullptr;
     int pitch = 0;
@@ -299,7 +311,7 @@ static bool tex_update_pixels(SDL_Texture *tex, bool streaming, bool premul_on_c
       return true;
     }
   }
-  if (premul_on_copy && rgba_has_transparency(rgba, (size_t)width * (size_t)height)) {
+  if (premul_on_copy) {
     uint8_t *tmp = ccord_malloc((size_t)row_bytes * (size_t)height);
     if (tmp) {
       for (int y = 0; y < height; y++) {
@@ -468,7 +480,8 @@ static bool tex_update_entry_pixels(tex_entry *e, const uint8_t *rgba, bool alre
   }
   const uint8_t *base = rgba;
   uint8_t *premul_buf = nullptr;
-  if (need_premul && rgba_has_transparency(rgba, (size_t)e->w * (size_t)e->h)) {
+  const bool has_alpha = need_premul && rgba_has_transparency(rgba, (size_t)e->w * (size_t)e->h);
+  if (has_alpha) {
     premul_buf = ccord_malloc((size_t)e->w * (size_t)e->h * 4u);
     if (premul_buf) {
       for (int y = 0; y < e->h; y++) {
@@ -477,7 +490,7 @@ static bool tex_update_entry_pixels(tex_entry *e, const uint8_t *rgba, bool alre
       base = premul_buf;
     }
   }
-  bool ok = tex_update_pixels(e->tex, e->tex_streaming, need_premul && !premul_buf, base, e->w, e->h);
+  bool ok = tex_update_pixels(e->tex, e->tex_streaming, has_alpha && !premul_buf, base, e->w, e->h);
   if (ok) {
     int cw = e->w, ch = e->h;
     const uint8_t *cur = base;
@@ -505,7 +518,7 @@ static bool tex_update_entry_pixels(tex_entry *e, const uint8_t *rgba, bool alre
 }
 
 static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const uint8_t *rgba, int width, int height,
-                                    bool streaming, ccord_error *err)
+                                    bool streaming, bool already_premul, ccord_error *err)
 {
   ccord_error_clear(err);
   if (!r || !key || !key[0] || !rgba || width <= 0 || height <= 0 || width > MAX_IMAGE_DIM || height > MAX_IMAGE_DIM) {
@@ -544,7 +557,7 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
         }
       }
     }
-    if (!tex_update_entry_pixels(existing, rgba, false)) {
+    if (!tex_update_entry_pixels(existing, rgba, already_premul)) {
       return ccord_error_set(err, CCORD_ERR_IO, "upload rgba: texture update failed: %s", SDL_GetError());
     }
     return CCORD_OK;
@@ -557,7 +570,8 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
   }
   uint8_t *premul_buf = nullptr;
   const uint8_t *upload_src = rgba;
-  if (premul && rgba_has_transparency(rgba, (size_t)width * (size_t)height)) {
+  const bool need_premul = premul && !already_premul && rgba_has_transparency(rgba, (size_t)width * (size_t)height);
+  if (need_premul) {
     premul_buf = ccord_malloc((size_t)width * (size_t)height * 4u);
     if (premul_buf) {
       for (int y = 0; y < height; y++) {
@@ -566,7 +580,7 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
       upload_src = premul_buf;
     }
   }
-  if (!tex_update_pixels(tex, want_streaming, premul && !premul_buf, upload_src, width, height)) {
+  if (!tex_update_pixels(tex, want_streaming, need_premul && !premul_buf, upload_src, width, height)) {
     ccord_free(premul_buf);
     SDL_DestroyTexture(tex);
     return ccord_error_set(err, CCORD_ERR_IO, "upload rgba: texture update failed: %s", SDL_GetError());
@@ -653,7 +667,13 @@ static ccord_status tex_upload_rgba(ccord_renderer *r, const char *key, const ui
 ccord_status ccord_render_upload_rgba(ccord_renderer *r, const char *key, const uint8_t *rgba, int width, int height,
                                       ccord_error *err)
 {
-  return tex_upload_rgba(r, key, rgba, width, height, false, err);
+  return tex_upload_rgba(r, key, rgba, width, height, false, false, err);
+}
+
+ccord_status ccord_render_upload_rgba_opaque(ccord_renderer *r, const char *key, const uint8_t *rgba, int width,
+                                             int height, ccord_error *err)
+{
+  return tex_upload_rgba(r, key, rgba, width, height, false, true, err);
 }
 
 // ---- progressive animations ----
@@ -708,7 +728,25 @@ void tex_cache_evict_idle(ccord_renderer *r)
   }
 }
 
-static bool tex_anim_append(ccord_renderer *r, tex_entry *e, const uint8_t *rgba, uint32_t delay_ms)
+void tex_cache_evict_idle_now(ccord_renderer *r)
+{
+  if (!r) return;
+  for (int slot = r->tex_lru_tail; slot != -1;) {
+    int prev = r->texs[slot].lru_prev;
+    const tex_entry *e = &r->texs[slot];
+    if (e->anim_bytes > 0 || e->dec != nullptr) {
+      tex_free_slot(r, slot);
+      r->tex_evictions++;
+    }
+    slot = prev;
+  }
+  r->anim_activity = false;
+  r->has_anim_next = false;
+  r->anim_next_ms = 0;
+}
+
+static bool tex_anim_append(ccord_renderer *r, tex_entry *e, const uint8_t *rgba, uint32_t delay_ms,
+                            bool already_premul)
 {
   size_t fbytes = (size_t)e->w * (size_t)e->h * 4u;
   if (e->anim.frame_count == e->anim_cap) {
@@ -723,7 +761,7 @@ static bool tex_anim_append(ccord_renderer *r, tex_entry *e, const uint8_t *rgba
   }
   uint8_t *px = ccord_malloc(fbytes);
   if (!px) return false;
-  if (e->premul) {
+  if (e->premul && !already_premul && rgba_has_transparency(rgba, (size_t)e->w * (size_t)e->h)) {
     for (int y = 0; y < e->h; y++) {
       rgba_premultiply_row(px + (size_t)y * (size_t)e->w * 4u, rgba + (size_t)y * (size_t)e->w * 4u, e->w);
     }
@@ -750,7 +788,8 @@ static void tex_decode_more(ccord_renderer *r, tex_entry *e, uint64_t budget_ms)
   while (e->dec && !e->streaming) {
     const uint8_t *px = nullptr;
     uint32_t pts = 0, dur = 0;
-    if (!ccord_av_stream_next_frame(e->dec, &px, &pts, &dur)) {
+    bool is_premul = false;
+    if (!av_stream_next_frame_ex(e->dec, e->premul, &px, &pts, &dur, &is_premul)) {
       tex_clear_dec(r, e);
       if (e->anim.frame_count <= 1) {
         tex_drop_anim(r, e);   // a single frame is just an image
@@ -767,7 +806,7 @@ static void tex_decode_more(ccord_renderer *r, tex_entry *e, uint64_t budget_ms)
       tex_evict_offscreen_anims(r, limit, self_slot);
       over_budget = r->anim_bytes_total + fbytes > RENDER_ANIM_TOTAL_BUDGET;
     }
-    if (over_budget || !tex_anim_append(r, e, px, delay)) {
+    if (over_budget || !tex_anim_append(r, e, px, delay, is_premul)) {
       // Too long (or global budget saturated) to keep decoded: show frames straight from the decoder from here on.
       ccord_av_stream *dec = e->dec;
       bool was_video = e->dec_video;
@@ -776,7 +815,7 @@ static void tex_decode_more(ccord_renderer *r, tex_entry *e, uint64_t budget_ms)
       tex_drop_anim(r, e);
       e->dec_video = was_video;
       tex_set_dec(r, e, dec, true);
-      tex_update_entry_pixels(e, px, false);
+      tex_update_entry_pixels(e, px, is_premul);
       e->stream_due_ms = tex_clock_ms(r) + delay;
       return;
     }
@@ -802,9 +841,10 @@ ccord_status ccord_render_upload_media(ccord_renderer *r, const char *key, const
     ccord_av_stream *dec = ccord_av_stream_open(data, len, max_dim, flags, err);
     const uint8_t *px = nullptr;
     uint32_t pts = 0, dur = 0;
-    if (dec && ccord_av_stream_next_frame(dec, &px, &pts, &dur)) {
+    bool is_premul = false;
+    if (dec && av_stream_next_frame_ex(dec, !r->software, &px, &pts, &dur, &is_premul)) {
       const ccord_av_info *info = ccord_av_stream_info(dec);
-      ccord_status st = tex_upload_rgba(r, key, px, info->w, info->h, true, err);
+      ccord_status st = tex_upload_rgba(r, key, px, info->w, info->h, true, is_premul, err);
       tex_entry *e = st == CCORD_OK ? tex_find(r, key) : nullptr;
       if (!e) {
         ccord_av_stream_close(dec);
@@ -818,7 +858,7 @@ ccord_status ccord_render_upload_media(ccord_renderer *r, const char *key, const
       e->anim = (ccord_anim){.w = e->w, .h = e->h};
       e->anim_cur_frame = 0;
       e->anim_start_ms = tex_clock_ms(r);
-      if (!tex_anim_append(r, e, px, tex_frame_delay(e, dur))) {
+      if (!tex_anim_append(r, e, px, tex_frame_delay(e, dur), is_premul)) {
         tex_drop_anim(r, e);   // out of memory: keep the first frame as a still
         return CCORD_OK;
       }
@@ -838,7 +878,7 @@ ccord_status ccord_render_upload_media(ccord_renderer *r, const char *key, const
   int static_max_dim = (opts && opts->max_dim > 0) ? opts->max_dim : (CCORD_OS_ANDROID ? 2048 : MAX_IMAGE_DIM);
   ccord_status st = ccord_image_decode_rgba_max(data, len, static_max_dim, &rgba, &w, &h, err);
   if (st != CCORD_OK) return st;
-  st = tex_upload_rgba(r, key, rgba, w, h, false, err);
+  st = tex_upload_rgba(r, key, rgba, w, h, false, false, err);
   ccord_free(rgba);
   if (st == CCORD_OK) {
     if (out_w) *out_w = w;
@@ -865,6 +905,9 @@ bool ccord_render_pump_media(ccord_renderer *r, uint32_t budget_ms)
       int i = (start + k) % n;
       tex_entry *e = &r->texs[i];
       if (!e->key || !e->dec || e->streaming) continue;
+      // Only decode animations that were actively drawn animating in the current frame (or in standalone unit tests
+      // before any ccord_render_begin): scrolled-away or reduced-motion/unhovered entries never spin VSync.
+      if (r->frame_tick > 0 && e->anim_drawn_tick <= r->frame_tick) continue;
       uint64_t used = SDL_GetTicks() - t0;
       if (used >= budget_ms) {
         pending = true;
@@ -1000,6 +1043,7 @@ static void tex_advance_anim(ccord_renderer *r, tex_entry *e, bool animate)
   if (e->streaming) {
     if (e->dec) av_stream_touch(e->dec, ccord_clock_ms());
     if (!animate || !e->dec) return;
+    e->anim_drawn_tick = e->tick;
     r->anim_activity = true;
     if (now < e->stream_due_ms) {
       tex_note_anim_due(r, e->stream_due_ms);
@@ -1007,14 +1051,15 @@ static void tex_advance_anim(ccord_renderer *r, tex_entry *e, bool animate)
     }
     const uint8_t *px = nullptr;
     uint32_t pts = 0, dur = 0;
-    if (!ccord_av_stream_next_frame(e->dec, &px, &pts, &dur)) {
+    bool is_premul = false;
+    if (!av_stream_next_frame_ex(e->dec, e->premul, &px, &pts, &dur, &is_premul)) {
       ccord_av_stream_seek(e->dec, 0);   // loop
-      if (!ccord_av_stream_next_frame(e->dec, &px, &pts, &dur)) {
+      if (!av_stream_next_frame_ex(e->dec, e->premul, &px, &pts, &dur, &is_premul)) {
         tex_drop_anim(r, e);   // cannot restart: the last frame stays as a still
         return;
       }
     }
-    tex_update_entry_pixels(e, px, false);
+    tex_update_entry_pixels(e, px, is_premul);
     // Pace from the schedule, not from "now", so a late frame does not slow the clip; resync after a long gap.
     uint64_t base = now - e->stream_due_ms > 250u ? now : e->stream_due_ms;
     e->stream_due_ms = base + tex_frame_delay(e, dur);
@@ -1024,6 +1069,7 @@ static void tex_advance_anim(ccord_renderer *r, tex_entry *e, bool animate)
   if (!e->has_anim) return;
   if (e->anim.frame_count <= 1) {
     if (e->dec && animate) {
+      e->anim_drawn_tick = e->tick;
       r->anim_activity = true;   // more frames are on their way
       tex_note_anim_due(r, now);
     }
@@ -1037,6 +1083,7 @@ static void tex_advance_anim(ccord_renderer *r, tex_entry *e, bool animate)
     }
     return;
   }
+  e->anim_drawn_tick = e->tick;
   r->anim_activity = true;
   uint64_t elapsed = now >= e->anim_start_ms ? (now - e->anim_start_ms) : 0;
   // While the tail is still decoding, hold the newest frame instead of looping over a partial clip.
@@ -1090,61 +1137,74 @@ static void tex_draw(ccord_renderer *r, tex_entry *e, ccord_rect dst, float radi
   }
 
   // Anti-aliased rounded rect: opaque core triangle fan inset by 0.5 px + 1 px alpha-feathered perimeter ring
-  // whose outer vertices fade to 0. Matches disc_texture() analytic corner coverage while keeping straight edges crisp.
+  // whose outer vertices fade to 0. Corner arc segments scale adaptively with physical pixel radius (6 / 8 / 12)
+  // keeping max radial chord error < 0.25 px while cutting vertex/triangle load ~2-3x on small chat/member avatars.
   enum {
-    CORNER_SEGS = 16,
-    PERIM_VERTS = 4 * (CORNER_SEGS + 1),
-    TOTAL_VERTS = 1 + 2 * PERIM_VERTS,
-    TOTAL_INDICES = PERIM_VERTS * 9,
+    MAX_CORNER_SEGS = 12,
+    MAX_PERIM_VERTS = 4 * (MAX_CORNER_SEGS + 1),
+    MAX_TOTAL_VERTS = 1 + 2 * MAX_PERIM_VERTS,
+    MAX_TOTAL_INDICES = MAX_PERIM_VERTS * 9,
   };
-  static const float k_corner_lut[PERIM_VERTS][2] = {
-    // corner 0: -90..0 deg
-    {0.00000000f, -1.00000000f}, {0.09801714f, -0.99518473f}, {0.19509032f, -0.98078528f}, {0.29028468f, -0.95694034f},
-    {0.38268343f, -0.92387953f}, {0.47139674f, -0.88192126f}, {0.55557023f, -0.83146961f}, {0.63439328f, -0.77301045f},
-    {0.70710678f, -0.70710678f}, {0.77301045f, -0.63439328f}, {0.83146961f, -0.55557023f}, {0.88192126f, -0.47139674f},
-    {0.92387953f, -0.38268343f}, {0.95694034f, -0.29028468f}, {0.98078528f, -0.19509032f}, {0.99518473f, -0.09801714f},
-    {1.00000000f, 0.00000000f},
-    // corner 1: 0..90 deg
-    {1.00000000f, 0.00000000f}, {0.99518473f, 0.09801714f}, {0.98078528f, 0.19509032f}, {0.95694034f, 0.29028468f},
-    {0.92387953f, 0.38268343f}, {0.88192126f, 0.47139674f}, {0.83146961f, 0.55557023f}, {0.77301045f, 0.63439328f},
-    {0.70710678f, 0.70710678f}, {0.63439328f, 0.77301045f}, {0.55557023f, 0.83146961f}, {0.47139674f, 0.88192126f},
-    {0.38268343f, 0.92387953f}, {0.29028468f, 0.95694034f}, {0.19509032f, 0.98078528f}, {0.09801714f, 0.99518473f},
-    {0.00000000f, 1.00000000f},
-    // corner 2: 90..180 deg
-    {0.00000000f, 1.00000000f}, {-0.09801714f, 0.99518473f}, {-0.19509032f, 0.98078528f}, {-0.29028468f, 0.95694034f},
-    {-0.38268343f, 0.92387953f}, {-0.47139674f, 0.88192126f}, {-0.55557023f, 0.83146961f}, {-0.63439328f, 0.77301045f},
-    {-0.70710678f, 0.70710678f}, {-0.77301045f, 0.63439328f}, {-0.83146961f, 0.55557023f}, {-0.88192126f, 0.47139674f},
-    {-0.92387953f, 0.38268343f}, {-0.95694034f, 0.29028468f}, {-0.98078528f, 0.19509032f}, {-0.99518473f, 0.09801714f},
-    {-1.00000000f, 0.00000000f},
-    // corner 3: 180..270 deg
-    {-1.00000000f, 0.00000000f}, {-0.99518473f, -0.09801714f}, {-0.98078528f, -0.19509032f}, {-0.95694034f, -0.29028468f},
-    {-0.92387953f, -0.38268343f}, {-0.88192126f, -0.47139674f}, {-0.83146961f, -0.55557023f}, {-0.77301045f, -0.63439328f},
-    {-0.70710678f, -0.70710678f}, {-0.63439328f, -0.77301045f}, {-0.55557023f, -0.83146961f}, {-0.47139674f, -0.88192126f},
-    {-0.38268343f, -0.92387953f}, {-0.29028468f, -0.95694034f}, {-0.19509032f, -0.98078528f}, {-0.09801714f, -0.99518473f},
-    {0.00000000f, -1.00000000f},
-  };
-  static int k_indices[TOTAL_INDICES];
-  static bool k_indices_ready = false;
-  if (!k_indices_ready) {
-    int n = 0;
-    for (int i = 0; i < PERIM_VERTS; i++) {
-      int ni = (i + 1) % PERIM_VERTS;
-      int in0 = 1 + i, in1 = 1 + ni;
-      int out0 = 1 + PERIM_VERTS + i, out1 = 1 + PERIM_VERTS + ni;
-      k_indices[n++] = 0;
-      k_indices[n++] = in0;
-      k_indices[n++] = in1;
-      k_indices[n++] = in0;
-      k_indices[n++] = out0;
-      k_indices[n++] = out1;
-      k_indices[n++] = in0;
-      k_indices[n++] = out1;
-      k_indices[n++] = in1;
+  typedef struct rrect_mesh_lut {
+    int segs;
+    int perim;
+    int nverts;
+    int nindices;
+    float dir[MAX_PERIM_VERTS][2];
+    int indices[MAX_TOTAL_INDICES];
+  } rrect_mesh_lut;
+  static rrect_mesh_lut k_tiers[3];
+  static bool k_tiers_ready = false;
+  if (!k_tiers_ready) {
+    static const int k_tier_segs[3] = {6, 8, 12};
+    static const float k_cstart[4][2] = {{0.0f, -1.0f}, {1.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f}};
+    static const float k_cend[4][2] = {{1.0f, 0.0f}, {0.0f, 1.0f}, {-1.0f, 0.0f}, {0.0f, -1.0f}};
+    static const float k_half_pi = 1.5707963267948966f;
+    for (int t = 0; t < 3; t++) {
+      rrect_mesh_lut *L = &k_tiers[t];
+      L->segs = k_tier_segs[t];
+      L->perim = 4 * (L->segs + 1);
+      L->nverts = 1 + 2 * L->perim;
+      L->nindices = L->perim * 9;
+      int di = 0;
+      for (int c = 0; c < 4; c++) {
+        float a0 = ((float)c - 1.0f) * k_half_pi;
+        for (int sgi = 0; sgi <= L->segs; sgi++, di++) {
+          if (sgi == 0) {
+            L->dir[di][0] = k_cstart[c][0];
+            L->dir[di][1] = k_cstart[c][1];
+          } else if (sgi == L->segs) {
+            L->dir[di][0] = k_cend[c][0];
+            L->dir[di][1] = k_cend[c][1];
+          } else {
+            float ang = a0 + k_half_pi * ((float)sgi / (float)L->segs);
+            L->dir[di][0] = cosf(ang);
+            L->dir[di][1] = sinf(ang);
+          }
+        }
+      }
+      int n = 0;
+      for (int i = 0; i < L->perim; i++) {
+        int ni = (i + 1) % L->perim;
+        int in0 = 1 + i, in1 = 1 + ni;
+        int out0 = 1 + L->perim + i, out1 = 1 + L->perim + ni;
+        L->indices[n++] = 0;
+        L->indices[n++] = in0;
+        L->indices[n++] = in1;
+        L->indices[n++] = in0;
+        L->indices[n++] = out0;
+        L->indices[n++] = out1;
+        L->indices[n++] = in0;
+        L->indices[n++] = out1;
+        L->indices[n++] = in1;
+      }
     }
-    k_indices_ready = true;
+    k_tiers_ready = true;
   }
+  const int tier = rr <= 24.0f ? 0 : (rr <= 48.0f ? 1 : 2);
+  const rrect_mesh_lut *L = &k_tiers[tier];
 
-  SDL_Vertex verts[TOTAL_VERTS];
+  SDL_Vertex verts[MAX_TOTAL_VERTS];
   float fa = (float)alpha / 255.0f * r->alpha;
   SDL_FColor col_in = e->premul ? (SDL_FColor){fa, fa, fa, fa} : (SDL_FColor){1.0f, 1.0f, 1.0f, fa};
   SDL_FColor col_out = e->premul ? (SDL_FColor){0.0f, 0.0f, 0.0f, 0.0f} : (SDL_FColor){1.0f, 1.0f, 1.0f, 0.0f};
@@ -1165,9 +1225,9 @@ static void tex_draw(ccord_renderer *r, tex_entry *e, ccord_rect dst, float radi
   for (int c = 0; c < 4; c++) {
     const float ccx = corner_cx[c];
     const float ccy = corner_cy[c];
-    for (int sgi = 0; sgi <= CORNER_SEGS; sgi++, li++) {
-      const float nx = k_corner_lut[li][0];
-      const float ny = k_corner_lut[li][1];
+    for (int sgi = 0; sgi <= L->segs; sgi++, li++) {
+      const float nx = L->dir[li][0];
+      const float ny = L->dir[li][1];
       float px_in = ccx + nx * r_in;
       float py_in = ccy + ny * r_in;
       float u_in = (px_in - fr.x) * inv_w;
@@ -1187,14 +1247,14 @@ static void tex_draw(ccord_renderer *r, tex_entry *e, ccord_rect dst, float radi
       if (u_out > 1.0f) u_out = 1.0f;
       if (v_out < 0.0f) v_out = 0.0f;
       if (v_out > 1.0f) v_out = 1.0f;
-      verts[1 + PERIM_VERTS + li] = (SDL_Vertex){
+      verts[1 + L->perim + li] = (SDL_Vertex){
         .position = {px_out, py_out}, .color = col_out, .tex_coord = {uv[0] + u_out * du, uv[1] + v_out * dv}};
     }
   }
 
   SDL_SetTextureColorMod(draw_tex, 255, 255, 255);
   SDL_SetTextureAlphaMod(draw_tex, 255);
-  SDL_RenderGeometry(r->sdl, draw_tex, verts, TOTAL_VERTS, k_indices, TOTAL_INDICES);
+  SDL_RenderGeometry(r->sdl, draw_tex, verts, L->nverts, L->indices, L->nindices);
 }
 
 void ccord_draw_texture(ccord_renderer *r, const char *key, ccord_rect dst, uint8_t alpha)
