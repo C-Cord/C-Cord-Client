@@ -9,6 +9,7 @@
 #include "game_detect_app.h"
 
 #include <ccord/core/alloc.h>
+#include <ccord/core/clock.h>
 #include <ccord/core/log.h>
 #include <ccord/net/live_transport.h>
 #include <ccord/rpc/activity.h>
@@ -25,16 +26,34 @@ typedef struct rpc_slot {
 
 struct ccord_app_rpc {
   ccord_session *session;
+  const ccord_store *store;
   ccord_rpc_server *server;
   ccord_game_detect_app *game; // detected Playing activity merged after the clients' (null = detection off)
   ccord_rpc_app_lookup *lookup;   // not owned; null = publish activities exactly as the clients sent them
   uint32_t coalesce_ms;
   uint64_t now_ms;             // clock of the poll in progress; the hooks read it
+  bool background;
   bool dirty;                  // slots changed since the last successful push
   bool push_failed;            // the last push was rejected (warned once; cleared by the next success)
   uint64_t dirty_ms;           // when the last change landed (trailing edge of the window)
   rpc_slot slots[CCORD_RPC_MAX_CONNECTIONS];
 };
+
+static void app_rpc_sync_game_detect_paused(ccord_app_rpc *r)
+{
+  if (!r || !r->game) return;
+  bool paused = r->background || !r->session || ccord_session_state(r->session) != CCORD_CONN_CONNECTED;
+  if (!paused && r->store) {
+    ccord_id self_id = ccord_store_self_id(r->store);
+    if (self_id == CCORD_ID_NONE) {
+      paused = true;
+    } else {
+      const ccord_user *self_u = ccord_store_user(r->store, self_id);
+      if (self_u && self_u->presence == CCORD_PRESENCE_OFFLINE) paused = true;
+    }
+  }
+  ccord_game_detect_app_set_paused(r->game, paused);
+}
 
 // Finds the connection's slot; with `alloc` a free slot is claimed for a first-time connection.
 static rpc_slot *slot_for(ccord_app_rpc *r, uint32_t conn_id, bool alloc)
@@ -131,6 +150,7 @@ ccord_app_rpc *ccord_app_rpc_create(const ccord_app_rpc_config *cfg, ccord_error
     return nullptr;
   }
   r->session = cfg->session;
+  r->store = cfg->store;
   r->coalesce_ms = cfg->coalesce_ms;
   r->lookup = cfg->lookup;
   ccord_rpc_config rcfg = {
@@ -152,7 +172,40 @@ ccord_app_rpc *ccord_app_rpc_create(const ccord_app_rpc_config *cfg, ccord_error
     ccord_free(r);
     return nullptr;
   }
+  app_rpc_sync_game_detect_paused(r);
   return r;
+}
+
+void ccord_app_rpc_set_background(ccord_app_rpc *r, bool background)
+{
+  if (!r) return;
+  r->background = background;
+  app_rpc_sync_game_detect_paused(r);
+}
+
+size_t ccord_app_rpc_wait_info(const ccord_app_rpc *r, ccord_socket_t *out_fds, size_t cap,
+                               uint32_t *out_timeout_ms)
+{
+  if (out_timeout_ms) *out_timeout_ms = UINT32_MAX;
+  if (!r) return 0;
+  uint32_t timeout = UINT32_MAX;
+  size_t n = ccord_rpc_server_wait_info(r->server, out_fds, cap, &timeout);
+  uint64_t now = r->now_ms ? r->now_ms : ccord_clock_ms();
+  if (r->dirty) {
+    uint64_t due = r->dirty_ms + r->coalesce_ms;
+    uint64_t rem = due > now ? (due - now) : 0u;
+    if (rem < (uint64_t)timeout) timeout = (uint32_t)rem;
+  }
+  if (r->lookup) {
+    uint32_t lto = ccord_rpc_app_lookup_next_wait_ms(r->lookup, now);
+    if (lto < timeout) timeout = lto;
+  }
+  if (r->game) {
+    uint32_t gto = ccord_game_detect_app_next_wait_ms(r->game, now);
+    if (gto < timeout) timeout = gto;
+  }
+  if (out_timeout_ms) *out_timeout_ms = timeout;
+  return n;
 }
 
 void ccord_app_rpc_poll(ccord_app_rpc *r, uint64_t now_ms)
@@ -160,6 +213,7 @@ void ccord_app_rpc_poll(ccord_app_rpc *r, uint64_t now_ms)
   if (!r) return;
   r->now_ms = now_ms;
   (void)ccord_rpc_server_poll(r->server, now_ms);
+  app_rpc_sync_game_detect_paused(r);
   if (ccord_game_detect_app_poll(r->game, now_ms)) {
     r->dirty = true;
     rpc_flush(r);   // a game started, stopped or detection was switched: no coalescing, the change goes out now

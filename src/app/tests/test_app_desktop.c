@@ -1194,10 +1194,12 @@ static void test_ipc(void)
   free(old_tmpdir);
 
   // Listener: 0600 socket node; a second live listener is rejected.
+  CT_CHECK(ccord_app_ipc_wait_fd(nullptr) == CCORD_INVALID_SOCKET);
   ccord_error err;
   ccord_app_ipc *ipc = ccord_app_ipc_listen(sock, &err);
   CT_CHECK(ipc != nullptr);
   if (!ipc) { remove(sock); rmdir(dir); return; }
+  CT_CHECK(ccord_app_ipc_wait_fd(ipc) != CCORD_INVALID_SOCKET);
   CT_CHECK(strcmp(ccord_app_ipc_path(ipc), sock) == 0);
   struct stat st;
   CT_CHECK(stat(sock, &st) == 0);

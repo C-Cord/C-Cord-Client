@@ -164,3 +164,21 @@ unsigned ccord_rpc_app_lookup_started(const ccord_rpc_app_lookup *l)
 {
   return l ? l->started : 0;
 }
+
+uint32_t ccord_rpc_app_lookup_next_wait_ms(const ccord_rpc_app_lookup *l, uint64_t now_ms)
+{
+  if (!l) return UINT32_MAX;
+  if (l->changed) return 0u;
+  uint32_t timeout = UINT32_MAX;
+  if (l->pending_count > 0) timeout = 50u;
+  if (l->failed_count > 0) {
+    for (size_t i = 0; i < ENTRY_MAX; i++) {
+      const entry *e = &l->entries[i];
+      if (e->state != E_FAILED) continue;
+      if (now_ms >= e->last_used && now_ms - e->last_used >= STALE_MS) continue;
+      uint64_t rem = e->retry_at > now_ms ? (e->retry_at - now_ms) : 0u;
+      if (rem < (uint64_t)timeout) timeout = (uint32_t)rem;
+    }
+  }
+  return timeout;
+}

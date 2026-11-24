@@ -37,3 +37,6 @@ bool ccord_rpc_app_lookup_poll(ccord_rpc_app_lookup *l, uint64_t now_ms);
 
 // Number of lookups started so far (including retries); for the verify slice and tests.
 [[nodiscard]] unsigned ccord_rpc_app_lookup_started(const ccord_rpc_app_lookup *l);
+
+// Milliseconds until the next pending poll or failed-lookup retry (UINT32_MAX when idle).
+uint32_t ccord_rpc_app_lookup_next_wait_ms(const ccord_rpc_app_lookup *l, uint64_t now_ms);

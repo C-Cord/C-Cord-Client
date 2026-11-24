@@ -10,6 +10,7 @@
 #include <stdint.h>
 
 #include <ccord/core/error.h>
+#include <ccord/core/os.h>
 #include <ccord/platform/platform.h>
 #include <ccord/render/render.h>
 #include <ccord/session/session.h>
@@ -158,6 +159,8 @@ void ccord_app_ipc_destroy(ccord_app_ipc *ipc);   // closes and unlinks the sock
 // Non-blocking: accepts one pending client, reads its command into `out` and writes the ack.
 // Returns true when a command was read. Call from the main loop.
 bool ccord_app_ipc_poll(ccord_app_ipc *ipc, char *out, size_t cap);
+// Underlying non-blocking listener socket for kernel poll() (CCORD_INVALID_SOCKET on Windows or when closed).
+ccord_socket_t ccord_app_ipc_wait_fd(const ccord_app_ipc *ipc);
 const char *ccord_app_ipc_path(const ccord_app_ipc *ipc);
 
 // Test/introspection seams (no behaviour).

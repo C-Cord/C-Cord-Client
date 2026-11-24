@@ -41,6 +41,13 @@ void ccord_game_detect_app_destroy(ccord_game_detect_app *g);   // nullptr ok; j
 // synchronous mode). Returns true when the detected activity appeared, changed or went away since the last call.
 bool ccord_game_detect_app_poll(ccord_game_detect_app *g, uint64_t now_ms);
 
+// Suspends periodic process scans and detectable-list polls while paused (e.g., signed out, disconnected, invisible,
+// or minimized/backgrounded) without discarding the cached detectable list or currently detected activity.
+void ccord_game_detect_app_set_paused(ccord_game_detect_app *g, bool paused);
+
+// Milliseconds until the next scan or worker/fetch completion poll (UINT32_MAX while paused or disabled).
+uint32_t ccord_game_detect_app_next_wait_ms(const ccord_game_detect_app *g, uint64_t now_ms);
+
 // The currently detected game as an activity (type 0, name, application_id, start_ms); false when none.
 bool ccord_game_detect_app_current(const ccord_game_detect_app *g, ccord_rpc_activity *out);
 

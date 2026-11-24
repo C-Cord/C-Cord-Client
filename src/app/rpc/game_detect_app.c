@@ -38,6 +38,7 @@ struct ccord_game_detect_app {
   // Main-thread state.
   uint32_t epoch;              // bumped whenever detection is switched off: older scan results are dropped
   bool was_enabled;
+  bool paused;                 // temporarily suspended (signed out / disconnected / invisible / background)
   bool cache_started;          // the cache load job was submitted
   bool cache_done;             // ... and answered (or there is no cache): only then is the refresh schedule consulted
   bool list_ready;
@@ -407,6 +408,10 @@ bool ccord_game_detect_app_poll(ccord_game_detect_app *g, uint64_t now_ms)
     g->need_free_list = false;
     g->scan_due = true;   // resume with a scan right away
   }
+  if (g->paused) {
+    if (take_result(g, now_ms)) changed = true;
+    return changed;
+  }
   for (int pass = 0; pass < 4; pass++) {
     if (take_result(g, now_ms)) changed = true;
     // The refresh schedule reads the cache file's age, and a fetched list must not be overwritten by a late cache
@@ -475,4 +480,24 @@ size_t ccord_game_detect_app_request_count(const ccord_game_detect_app *g)
 bool ccord_game_detect_app_list_ready(const ccord_game_detect_app *g)
 {
   return g && g->list_ready;
+}
+
+void ccord_game_detect_app_set_paused(ccord_game_detect_app *g, bool paused)
+{
+  if (!g || g->paused == paused) return;
+  g->paused = paused;
+}
+
+uint32_t ccord_game_detect_app_next_wait_ms(const ccord_game_detect_app *g, uint64_t now_ms)
+{
+  if (!g) return UINT32_MAX;
+  if (atomic_load_explicit(&g->result_ready_atomic, memory_order_acquire)) return 0u;
+  if (g->paused) return worker_busy(g) ? 50u : UINT32_MAX;
+  if (g->cfg.enabled && !g->cfg.enabled(g->cfg.enabled_ud)) return UINT32_MAX;
+  if (worker_busy(g) || ccord_detectable_busy(g->det)) return 50u;
+  if (g->pending_body || !g->cache_started) return 0u;
+  if (!g->list_ready) return UINT32_MAX;
+  if (g->scan_due || now_ms >= g->next_scan_ms) return 0u;
+  uint64_t rem = g->next_scan_ms - now_ms;
+  return rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
 }

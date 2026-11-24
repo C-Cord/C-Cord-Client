@@ -230,6 +230,12 @@ const char *ccord_app_ipc_path(const ccord_app_ipc *ipc)
   return ipc ? ipc->path : "";
 }
 
+ccord_socket_t ccord_app_ipc_wait_fd(const ccord_app_ipc *ipc)
+{
+  (void)ipc;
+  return CCORD_INVALID_SOCKET;
+}
+
 bool ccord_app_ipc_poll(ccord_app_ipc *ipc, char *out, size_t cap)
 {
   if (!ipc || !out || cap == 0) return false;
@@ -484,6 +490,11 @@ void ccord_app_ipc_destroy(ccord_app_ipc *ipc)
 const char *ccord_app_ipc_path(const ccord_app_ipc *ipc)
 {
   return ipc ? ipc->path : "";
+}
+
+ccord_socket_t ccord_app_ipc_wait_fd(const ccord_app_ipc *ipc)
+{
+  return (ipc && ipc->fd >= 0) ? (ccord_socket_t)ipc->fd : CCORD_INVALID_SOCKET;
 }
 
 bool ccord_app_ipc_poll(ccord_app_ipc *ipc, char *out, size_t cap)
