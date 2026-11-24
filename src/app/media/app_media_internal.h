@@ -123,6 +123,11 @@ struct ccord_app_media {
   _Atomic bool loopback_enabled;   // coordinator-level switch (ccord_app_media_set_loopback_audio)
   _Atomic bool loopback_flag;      // effective this pump: stream_on && (setter || host read seam)
 
+  // Lifecycle & visibility hints (power efficiency)
+  bool in_background;
+  bool stage_visible;
+  bool preview_hidden;
+
   // Standalone voice camera TX (self_video while not Go Live streaming)
   ccord_video_stream *cam_video;
   uint64_t cam_start_ms;

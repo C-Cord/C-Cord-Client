@@ -63,16 +63,27 @@ ccord_camera *ccord_camera_open(const char *device_id, ccord_error *err)
     }
     cam_init = true;
   }
-  /* Ask SDL to convert native frames to BGRA32 so grab() can hand the UI a
-   * stable layout; width/height/framerate 0 keeps the device's first spec. */
+  /* Ask SDL to convert native frames to BGRA32 with a bounded capture mode so mobile Camera2
+   * does not open at full sensor resolution (e.g. 4K/60) and desktop defaults to 720p30. */
   SDL_CameraSpec spec = {
     .format = SDL_PIXELFORMAT_BGRA32,
-    .width = 0,
-    .height = 0,
-    .framerate_numerator = 0,
-    .framerate_denominator = 0,
+#if CCORD_OS_ANDROID
+    .width = 640,
+    .height = 480,
+    .framerate_numerator = 24,
+    .framerate_denominator = 1,
+#else
+    .width = 1280,
+    .height = 720,
+    .framerate_numerator = 30,
+    .framerate_denominator = 1,
+#endif
   };
   SDL_Camera *cam = SDL_OpenCamera((SDL_CameraID)id, &spec);
+  if (!cam) {
+    SDL_CameraSpec fallback = {.format = SDL_PIXELFORMAT_BGRA32};
+    cam = SDL_OpenCamera((SDL_CameraID)id, &fallback);
+  }
   if (!cam) {
     if (cam_init) SDL_QuitSubSystem(SDL_INIT_CAMERA);
     ccord_error_set(err, CCORD_ERR_NOT_FOUND, "camera %u unavailable: %s", (unsigned)id, SDL_GetError());

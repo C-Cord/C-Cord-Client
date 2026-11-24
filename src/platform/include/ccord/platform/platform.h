@@ -291,6 +291,9 @@ bool ccord_video_stream_pipewire_available(const ccord_video_stream *v);
 [[nodiscard]] ccord_status ccord_video_stream_step_test_frame(ccord_video_stream *v, ccord_error *err);
 // Returns the most recently decoded RGBA32 frame buffer owned by `v` (valid until next decode or destroy).
 const uint8_t *ccord_video_stream_last_rgba(const ccord_video_stream *v, int *out_w, int *out_h);
+// Controls whether encode_* maintains the scaled RGBA preview buffer returned by last_rgba().
+// Disabling preview avoids per-frame BGRA->RGBA / sws_scale work when hidden or backgrounded. Null-safe.
+void ccord_video_stream_set_preview_wanted(ccord_video_stream *v, bool wanted);
 
 // ---- M5 devices & codecs (implemented by m5-devices / m5-codecs) ------------------------------------------------
 // Audio device enumeration (SDL_GetAudioRecordingDevices / SDL_GetAudioPlaybackDevices). Returns the number

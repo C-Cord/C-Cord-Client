@@ -26,6 +26,17 @@ static void free_cam_buf(ccord_app_media *m)
   m->cam_grab_fails = 0;
 }
 
+static void close_camera_hw(ccord_app_media *m)
+{
+  if (m->camera) {
+    m->ops->camera_close(m->ud, m->camera);
+    m->camera = nullptr;
+  }
+  m->opened_cam[0] = '\0';
+  free_cam_buf(m);
+  m->camera_retry_ms = 0;
+}
+
 static bool ensure_pkt(ccord_app_media *m)
 {
   if (!m->pkt) m->pkt = ccord_malloc(MEDIA_PKT_CAP);
@@ -153,6 +164,9 @@ static void open_encoder(ccord_app_media *m, bool virtual_clock, uint64_t now)
   }
   if (m->video) {
     m->encoder_retry_ms = 0;
+    if (m->ops->video_set_preview_wanted) {
+      m->ops->video_set_preview_wanted(m->ud, m->video, !m->in_background && !m->preview_hidden);
+    }
   } else {
     m->encoder_retry_ms = now + MEDIA_OPEN_RETRY_MS;
     if (!m->warn_encoder) {
@@ -322,6 +336,12 @@ void app_media_pump_send(ccord_app_media *m, const ccord_app_media_voice *v, uin
       m->ops->capture_close(m->ud, m->screen_cap);
       m->screen_cap = nullptr;
     }
+    // Shut down physical camera hardware while backgrounded / screen locked; reopen on foreground.
+    if (m->in_background) {
+      if (m->camera) close_camera_hw(m);
+      m->pending_keyframe = true;
+      return;
+    }
     grab_camera_frame(m, now, &bgra, &w, &h, &stride);
   } else {
     if (m->camera) {
@@ -383,6 +403,10 @@ void app_media_pump_send(ccord_app_media *m, const ccord_app_media_voice *v, uin
     m->pending_keyframe = false;
     if (m->ops->video_force_keyframe) m->ops->video_force_keyframe(m->ud, m->video);
   }
+  bool want_preview = !m->in_background && !m->preview_hidden;
+  if (m->ops->video_set_preview_wanted) {
+    m->ops->video_set_preview_wanted(m->ud, m->video, want_preview);
+  }
   ccord_error err;
   size_t pkt_len = 0;
   if (m->ops->video_encode_bgra(m->ud, m->video, bgra, w, h, stride, m->pkt, MEDIA_PKT_CAP, &pkt_len, &err) !=
@@ -402,11 +426,13 @@ void app_media_pump_send(ccord_app_media *m, const ccord_app_media_voice *v, uin
       CCORD_LOG_W("media: stream send failed: %s", err.message);
     }
   }
-  // Local preview: the encoder keeps a scaled RGBA copy of the frame it just encoded.
-  int pw = 0, ph = 0;
-  const uint8_t *rgba = m->ops->video_rgba(m->ud, m->video, &pw, &ph);
-  if (rgba && pw > 0 && ph > 0) {
-    (void)m->ops->upload_rgba(m->ud, MEDIA_VIDEO_KEY, rgba, pw, ph, &err);
+  // Local preview: skip RGBA conversion and texture upload while backgrounded or preview is hidden.
+  if (want_preview) {
+    int pw = 0, ph = 0;
+    const uint8_t *rgba = m->ops->video_rgba(m->ud, m->video, &pw, &ph);
+    if (rgba && pw > 0 && ph > 0) {
+      (void)m->ops->upload_rgba(m->ud, MEDIA_VIDEO_KEY, rgba, pw, ph, &err);
+    }
   }
 }
 
@@ -417,6 +443,12 @@ void app_media_pump_voice_camera(ccord_app_media *m, const ccord_app_media_voice
     if (m->cam_streaming || m->cam_video || (!stream_on && m->camera)) {
       app_media_close_cam_tx(m, !stream_on);
     }
+    return;
+  }
+  // Shut down physical camera hardware while backgrounded / screen locked; reopen on foreground.
+  if (m->in_background) {
+    if (m->camera) close_camera_hw(m);
+    m->cam_pending_keyframe = true;
     return;
   }
   if (!m->cam_streaming) {
@@ -441,6 +473,9 @@ void app_media_pump_voice_camera(ccord_app_media *m, const ccord_app_media_voice
     }
     if (m->cam_video) {
       m->cam_enc_retry_ms = 0;
+      if (m->ops->video_set_preview_wanted) {
+        m->ops->video_set_preview_wanted(m->ud, m->cam_video, false);
+      }
     } else {
       m->cam_enc_retry_ms = now + MEDIA_OPEN_RETRY_MS;
       if (!m->warn_cam_encoder) {
@@ -613,6 +648,13 @@ void app_media_pump_cameras(ccord_app_media *m, const ccord_app_media_voice *v, 
     app_media_cam_close_all(m);
     return;
   }
+  // Skip H.264 decoding and texture uploads while backgrounded or when the voice stage is hidden.
+  if (m->in_background || !m->stage_visible) {
+    for (size_t i = 0; i < CCORD_CAM_RX_MAX; i++) {
+      if (m->cams[i].used) m->cams[i].need_idr = true;
+    }
+    return;
+  }
   ccord_camera_rx list[CCORD_CAM_RX_MAX];
   size_t n = m->ops->camera_senders(m->ud, list, CCORD_CAM_RX_MAX);
   if (n > CCORD_CAM_RX_MAX) n = CCORD_CAM_RX_MAX;
@@ -704,6 +746,11 @@ void app_media_pump_receive(ccord_app_media *m, uint64_t now)
     m->decoder_retry_ms = 0;
     return;
   }
+  // Skip watched-stream H.264 decode and sws_scale while backgrounded / screen locked.
+  if (m->in_background) {
+    m->recv_need_idr = true;
+    return;
+  }
   if (!m->decoder) {
     if (!app_media_open_retry_due(now, m->decoder_retry_ms)) return;
     ccord_error err;
@@ -747,5 +794,64 @@ void app_media_pump_receive(ccord_app_media *m, uint64_t now)
   if (m->ops->upload_rgba(m->ud, MEDIA_VIDEO_KEY, rgba, w, h, &err) == CCORD_OK) {
     m->recv_fresh = false;
   }
+}
+
+void ccord_app_media_set_background(ccord_app_media *m, bool background)
+{
+  if (!m || m->in_background == background) return;
+  m->in_background = background;
+  if (background) {
+    if (m->camera) {
+      close_camera_hw(m);
+      if (m->streaming) m->pending_keyframe = true;
+      if (m->cam_streaming) m->cam_pending_keyframe = true;
+    }
+    if (m->video && m->ops->video_set_preview_wanted) {
+      m->ops->video_set_preview_wanted(m->ud, m->video, false);
+    }
+    m->recv_need_idr = true;
+    for (size_t i = 0; i < CCORD_CAM_RX_MAX; i++) {
+      if (m->cams[i].used) m->cams[i].need_idr = true;
+    }
+  } else {
+    m->camera_retry_ms = 0;
+    if (m->video && m->ops->video_set_preview_wanted) {
+      m->ops->video_set_preview_wanted(m->ud, m->video, !m->preview_hidden);
+    }
+    if (m->streaming) m->pending_keyframe = true;
+    if (m->cam_streaming) m->cam_pending_keyframe = true;
+  }
+}
+
+void ccord_app_media_set_stage_visible(ccord_app_media *m, bool visible)
+{
+  if (!m || m->stage_visible == visible) return;
+  m->stage_visible = visible;
+  if (!visible) {
+    for (size_t i = 0; i < CCORD_CAM_RX_MAX; i++) {
+      if (m->cams[i].used) m->cams[i].need_idr = true;
+    }
+  }
+}
+
+void ccord_app_media_set_preview_hidden(ccord_app_media *m, bool hidden)
+{
+  if (!m || m->preview_hidden == hidden) return;
+  m->preview_hidden = hidden;
+  if (m->video && m->ops->video_set_preview_wanted) {
+    m->ops->video_set_preview_wanted(m->ud, m->video, !m->in_background && !m->preview_hidden);
+  }
+}
+
+bool ccord_app_media_needs_fast_pump(const ccord_app_media *m, bool stream_active, bool watch_active, bool cam_tx)
+{
+  if (!m) return stream_active || watch_active || cam_tx;
+  // Go Live screen share continues in background (MediaProjection), unless paused or camera-sourced.
+  bool stream_paused = atomic_load(&m->paused_flag);
+  bool stream_fast = stream_active && !stream_paused && !(m->in_background && cam_tx);
+  bool cam_tx_fast = cam_tx && !m->in_background;
+  bool watch_fast = watch_active && !m->in_background;
+  bool remote_cam_fast = !m->in_background && m->stage_visible && ccord_app_media_cam_count(m) > 0;
+  return stream_fast || cam_tx_fast || watch_fast || remote_cam_fast;
 }
 

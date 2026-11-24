@@ -411,6 +411,12 @@ static void media_op_video_force_keyframe(void *ud, ccord_video_stream *v)
   ccord_video_stream_force_keyframe(v);
 }
 
+static void media_op_video_set_preview_wanted(void *ud, ccord_video_stream *v, bool wanted)
+{
+  (void)ud;
+  ccord_video_stream_set_preview_wanted(v, wanted);
+}
+
 static const uint8_t *media_op_video_rgba(void *ud, const ccord_video_stream *v, int *out_w, int *out_h)
 {
   (void)ud;
@@ -454,7 +460,7 @@ static ccord_status media_op_upload_rgba(void *ud, const char *key, const uint8_
   app *a = ud;
   if (!a->renderer) return ccord_error_set(err, CCORD_ERR_INVALID, "media: no renderer");
   if (a->platform && ccord_platform_in_background(a->platform)) return CCORD_OK;
-  ccord_status st = ccord_render_upload_rgba(a->renderer, key, rgba, w, h, err);
+  ccord_status st = ccord_render_upload_rgba_opaque(a->renderer, key, rgba, w, h, err);
   if (st == CCORD_OK) a->media_redraw = true;
   return st;
 }
@@ -546,6 +552,7 @@ const ccord_app_media_ops k_app_media_ops = {
   .video_keyframe = media_op_video_keyframe,
   .video_encode_bgra = media_op_video_encode_bgra,
   .video_force_keyframe = media_op_video_force_keyframe,
+  .video_set_preview_wanted = media_op_video_set_preview_wanted,
   .video_rgba = media_op_video_rgba,
   .decoder_open = media_op_decoder_open,
   .decoder_feed = media_op_decoder_feed,

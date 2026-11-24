@@ -125,6 +125,7 @@ typedef struct ccord_app_media_ops {
   ccord_status (*video_encode_bgra)(void *ud, ccord_video_stream *v, const uint8_t *bgra, int w, int h,
                                     int stride, uint8_t *out_pkt, size_t cap, size_t *out_len, ccord_error *err);
   void (*video_force_keyframe)(void *ud, ccord_video_stream *v);   // optional: force next frame to be IDR
+  void (*video_set_preview_wanted)(void *ud, ccord_video_stream *v, bool wanted);   // optional: toggle BGRA->RGBA preview
   const uint8_t *(*video_rgba)(void *ud, const ccord_video_stream *v, int *out_w, int *out_h);
 
   // ---- H.264 decoder (Go Live receive) ----
@@ -199,6 +200,18 @@ size_t ccord_app_media_cam_count(const ccord_app_media *m);
 // Fills `out` for one user's slot; false when that user has none. Null-safe.
 bool ccord_app_media_cam_debug_of(const ccord_app_media *m, ccord_id user_id, ccord_app_media_cam_debug *out);
 
+// Lifecycle & visibility hints for power efficiency (null-safe).
+// - background=true: closes local camera hardware (automatically reopened on foreground if still enabled),
+//   skips remote camera & watched stream H.264 decode/upload, and disables local Go Live preview conversion
+//   (screen share TX continues while backgrounded).
+// - stage_visible=false: skips remote camera decode/upload while the voice stage is hidden (default true).
+// - preview_hidden=true: disables local Go Live preview RGBA conversion (default false).
+void ccord_app_media_set_background(ccord_app_media *m, bool background);
+void ccord_app_media_set_stage_visible(ccord_app_media *m, bool visible);
+void ccord_app_media_set_preview_hidden(ccord_app_media *m, bool hidden);
+// True only when active visible/transmitting video work requires the 16 ms fast pump cadence; false when
+// video is backgrounded, paused, or off-stage so the host main loop can sleep deeply.
+bool ccord_app_media_needs_fast_pump(const ccord_app_media *m, bool stream_active, bool watch_active, bool cam_tx);
 // Max ms before ccord_app_media_pump() needs to run again (e.g. closing the PTT mic tail after key release);
 // returns UINT32_MAX when no pending media timer is armed. Null-safe.
 uint32_t ccord_app_media_next_wait_ms(const ccord_app_media *m, uint64_t now_ms);

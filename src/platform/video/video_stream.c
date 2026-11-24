@@ -634,3 +634,9 @@ const uint8_t *ccord_video_stream_last_rgba(const ccord_video_stream *v, int *ou
   return lz->last_rgba;
 }
 
+void ccord_video_stream_set_preview_wanted(ccord_video_stream *v, bool wanted)
+{
+  if (!v || !v->lazy) return;
+  v->lazy->preview_wanted = wanted;
+}
+

@@ -212,6 +212,7 @@ ccord_app_media *ccord_app_media_create(const ccord_app_media_config *cfg, ccord
   }
   m->ops = ops;
   m->ud = cfg->ud;
+  m->stage_visible = true;
   atomic_init(&m->sb_active, false);
   m->prefs.input_volume = 100;
   m->prefs.output_volume = 100;
