@@ -526,6 +526,19 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
   }
+  if (ui->upload_hook_pending && ui->upload_hook_cancel_rect.w > 0.0f &&
+      ui_in_rect(ev->x, ev->y, ui->upload_hook_cancel_rect)) {
+    if (ui->d.contrib && ui->upload_hook_job_id != 0u) {
+      ccord_contrib_cancel_upload_transform(ui->d.contrib, ui->upload_hook_job_id);
+    }
+    ui->upload_hook_pending = false;
+    ui->upload_hook_job_id = 0u;
+    ccord_free(ui->upload_hook_text);
+    ui->upload_hook_text = nullptr;
+    ui_notice(ui, "Cancelled attachment processing");
+    ui->dirty = true;
+    return true;
+  }
   for (size_t i = 0; i < ui->staged_file_count; i++) {
     if (ui_in_rect(ev->x, ev->y, ui->staged_spoiler_rects[i])) {
       (void)ccord_ui_toggle_attachment_spoiler(ui, i);

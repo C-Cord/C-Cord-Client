@@ -842,9 +842,26 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
     if (i < UI_TRACK_MAX) ui->dbg_crow_y[i] = row_cy;
     float y = cs->y + row_cy - ui->chan_scroll;
     if (y + row->h < cs->y || y > cs->y + cs->h) continue;
+    bool pushed_row_alpha = false;
     ccord_push_alpha(r, alpha);
     bool hover = (int)i == ui->hover_crow && !ui->menu.open && !ui->settings_open;
     if (row->dm_nav != DM_NAV_NONE) {
+      if (row->dm_nav == DM_NAV_PLUGIN_HIDDEN_CHANNELS) {
+        ccord_rect item = {cs->x + M(channel_item_margin_x), y, cs->w - 2.0f * M(channel_item_margin_x), row->h};
+        ui_row_state hrs = ui_row_state_of(ui, "plhid", 0, hover, false, COL(bg_secondary));
+        ui_row_state_fill(ui, r, &hrs, item, M(channel_item_radius));
+        char lbl[64];
+        snprintf(lbl, sizeof lbl, "%s %zu hidden channel%s",
+                 ui->plugin_show_hidden_channels ? "Hide" : "Show",
+                 ui->plugin_hidden_channel_count,
+                 ui->plugin_hidden_channel_count == 1u ? "" : "s");
+        ccord_text_style hs = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 1.0f,
+                                       ui_mix(COL(text_muted), COL(text_interactive_hover), hrs.h));
+        float ty = item.y + (item.h - ui_line_h(ui, hs.size)) * 0.5f;
+        ccord_text_draw_ellipsis(r, lbl, strlen(lbl), item.x + M(channel_item_pad_x) + 8.0f, ty,
+                                 item.w - M(channel_item_pad_x) * 2.0f - 12.0f, &hs);
+        goto row_done;
+      }
       if (row->dm_nav == DM_NAV_DM_HEADER) {
         ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.5f,
                                        ui_mix(COL(text_muted), COL(text_interactive_hover), ui_fade(ui, "dmhdr", 0, hover)));
@@ -962,8 +979,18 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
     }
     const ccord_channel *ch = ccord_store_channel_at(ui->d.store, g, row->index);
     if (!ch) goto row_done;
+    ui_row_style_ov cst = {0};
+    bool has_cst = !row->is_voice_user && ui_decor_channel_style(ui, ch->id, &cst);
+    if (has_cst && (cst.dim || cst.has_opacity)) {
+      float op = cst.has_opacity ? cst.opacity : 0.48f;
+      if (op < 0.15f) op = 0.15f;
+      if (op > 1.0f) op = 1.0f;
+      ccord_push_alpha(r, op);
+      pushed_row_alpha = true;
+    }
     if (row->is_category) {
       ccord_color cat_rest = ui_channel_muted(ui, ch) ? ui_mix(COL(text_muted), COL(bg_secondary), 0.45f) : COL(text_muted);
+      if (has_cst && cst.has_text_color) cat_rest = cst.text_color;
       ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.5f,
                                      ui_mix(cat_rest, COL(text_interactive_hover), ui_fade(ui, "cat", ch->id, hover)));
       char cat_lbl[128];
@@ -1037,6 +1064,12 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
                        : ui_row_state_text(&rs, rest_tc, COL(text_interactive_hover), COL(text_interactive_active));
     ccord_color item_bg = rs.bg;
     ui_row_state_fill(ui, r, &rs, item, M(channel_item_radius));
+    if (has_cst && cst.tint.a > 0) {
+      ccord_draw_rrect(r, item, M(channel_item_radius), cst.tint);
+    }
+    if (has_cst && cst.accent.a > 0) {
+      ccord_draw_rrect(r, (ccord_rect){item.x + 1.0f, item.y + 4.0f, 3.0f, item.h - 8.0f}, 1.5f, cst.accent);
+    }
     // The unread marker grows in (and out) instead of blinking; text weight cannot ease, but its colour does.
     float unread_t = ui_fade_ms(ui, "unread", ch->id, has_unread && !selected, 160);
     if (g == CCORD_DM_GUILD_ID) {
@@ -1096,6 +1129,7 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
       ccord_color dm_rest = muted ? ui_mix(COL(text_secondary), COL(bg_secondary), 0.45f) : COL(text_normal);
       ccord_color dm_tc = ui_row_state_text(&rs, has_unread ? COL(text_header) : dm_rest,
                                             COL(text_interactive_hover), COL(text_interactive_active));
+      if (has_cst && cst.has_text_color) dm_tc = cst.text_color;
       ccord_text_style st = ui_style(ui, (selected || has_unread) ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR,
                                      M(font_size_base), dm_tc);
       bool dm_pinned = ui_dm_is_pinned(ui, ch->id);
@@ -1147,6 +1181,7 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
                             ? rest_tc
                             : ui_row_state_text(&rs, has_unread ? COL(text_header) : rest_tc,
                                                 COL(text_interactive_hover), COL(text_interactive_active));
+    if (has_cst && cst.has_text_color) name_tc = cst.text_color;
     ccord_text_style st = ui_style(ui, ((selected && !voice_locked) || has_unread) ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR,
                                    row->is_thread ? M(font_size_small) : M(font_size_base) - 0.5f, name_tc);
     float ty = item.y + (item.h - ui_line_h(ui, st.size)) * 0.5f;
@@ -1189,6 +1224,7 @@ void ui_draw_channel_list(ccord_ui *ui, ccord_renderer *r)
                       &lim_st, 0.0f);
     }
   row_done:
+    if (pushed_row_alpha) ccord_pop_alpha(r);
     ccord_pop_alpha(r);
   }
   ui_track_end(&ui->trk_chan);
@@ -1378,44 +1414,157 @@ void ui_draw_voice_bar(ccord_ui *ui, ccord_renderer *r)
   }
 }
 
-// ---------------------------------------------------------------- transient notice
+// ---------------------------------------------------------------- transient notice / stacked toasts
+
+static void toast_slot_look(ccord_ui *ui, const ui_toast_item *t, float *alpha, float *slide)
+{
+  float in = ui_enter(ui, "toast", t->seq, 160);
+  float left = t->until_ms > ui->now_ms ? (float)(t->until_ms - ui->now_ms) / 250.0f : 0.0f;
+  float out = left > 1.0f ? 1.0f : left;
+  *alpha = in < out ? in : out;
+  *slide = (1.0f - in) * 10.0f;
+}
+
+static void toast_remove_at(ccord_ui *ui, size_t idx)
+{
+  if (!ui || idx >= ui->ntoasts) return;
+  if (idx + 1u < ui->ntoasts) {
+    memmove(&ui->toasts[idx], &ui->toasts[idx + 1u], (ui->ntoasts - idx - 1u) * sizeof ui->toasts[0]);
+  }
+  ui->ntoasts--;
+  if (ui->ntoasts > 0u) {
+    const ui_toast_item *top = &ui->toasts[ui->ntoasts - 1u];
+    snprintf(ui->notice, sizeof ui->notice, "%s", top->text);
+    ui->notice_until_ms = top->until_ms;
+  } else {
+    ui->notice[0] = '\0';
+    ui->notice_until_ms = 0;
+  }
+  ui->dirty = true;
+}
+
+bool ui_toasts_handle_click(ccord_ui *ui, const ccord_input_event *ev)
+{
+  if (!ui || !ev || ev->type != CCORD_IN_MOUSE_DOWN || ev->button != 1 || ui->settings_open) return false;
+  if (ui->ntoasts == 1u && !ui->toasts[0].owner[0] && !ui->notice[0]) {
+    ui->ntoasts = 0;
+    return false;
+  }
+  for (size_t i = ui->ntoasts; i-- > 0;) {
+    const ui_toast_item *t = &ui->toasts[i];
+    if (t->action_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, t->action_rect)) {
+      char owner[65] = {0};
+      uint64_t tid = t->toast_id;
+      snprintf(owner, sizeof owner, "%s", t->owner);
+      toast_remove_at(ui, i);
+      if (ui->d.contrib && owner[0] && tid != 0u) {
+        ccord_contrib_dispatch_toast_action(ui->d.contrib, owner, tid);
+      }
+      return true;
+    }
+    if (t->box_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, t->box_rect)) {
+      toast_remove_at(ui, i);
+      return true;
+    }
+  }
+  return false;
+}
 
 void ui_draw_notice(ccord_ui *ui, ccord_renderer *r)
 {
-  if (!ui->notice[0] || ui->settings_open) return;
+  if (!ui || ui->settings_open) return;
+  if (ui->ntoasts == 1u && !ui->toasts[0].owner[0] && !ui->notice[0]) {
+    ui->ntoasts = 0;
+  }
+  for (size_t i = 0; i < ui->ntoasts; i++) {
+    ui->toasts[i].box_rect = (ccord_rect){0};
+    ui->toasts[i].action_rect = (ccord_rect){0};
+  }
+  // Fallback if caller/test wrote directly into ui->notice[] without ui_toast_push/ui_notice.
+  ui_toast_item legacy = {0};
+  ui_toast_item *items = ui->toasts;
+  size_t count = ui->ntoasts;
+  if (count == 0u) {
+    if (!ui->notice[0]) return;
+    snprintf(legacy.text, sizeof legacy.text, "%s", ui->notice);
+    legacy.until_ms = ui->notice_until_ms;
+    legacy.seq = ui->notice_seq;
+    items = &legacy;
+    count = 1u;
+  }
+
   ccord_text_style st = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small), COL(text_normal));
-  ccord_rect box;
-  float wrap;
+  ccord_text_style act_st = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(text_on_brand));
+
+  float base_x = 0.0f;
+  float box_w = 0.0f;
+  float cursor_y = 0.0f;
+  float top_limit = 8.0f;
   if (ui->mobile_layout) {
     float sl = ui->safe_insets.left, sr = ui->safe_insets.right;
     float sb = fmaxf(ui->safe_insets.bottom, ui->keyboard_inset);
     float uw = fmaxf(ui->win_w - sl - sr, 120.0f);
-    float bw = fminf(uw - 24.0f, 360.0f);
-    wrap = fmaxf(bw - 20.0f, 60.0f);
-    ccord_vec2 t = ccord_text_measure(r, ui->notice, strlen(ui->notice), &st, wrap);
-    float h = t.y + 20.0f;
+    box_w = fminf(uw - 24.0f, 360.0f);
+    base_x = sl + (uw - box_w) * 0.5f;
     float base = (ui->layout.composer.h > 0.0f && ui->layout.composer.y > 0.0f &&
                   !ui_server_settings_is_open(ui) && !ui_channel_settings_is_open(ui))
                    ? fminf(ui->layout.composer.y, ui->win_h - sb)
                    : (ui->win_h - sb);
-    float by = fmaxf(ui->safe_insets.top + 8.0f, base - h - 10.0f);
-    box = (ccord_rect){sl + (uw - bw) * 0.5f, by, bw, h};
+    cursor_y = base - 10.0f;
+    top_limit = ui->safe_insets.top + 8.0f;
   } else {
     const ccord_layout_rect *p = &ui->layout.user_panel;
     ccord_rect bar = ui_voice_bar_rect(ui);
     float base = bar.h > 0.0f ? bar.y : p->y;
-    wrap = p->w - 16.0f - 20.0f;
-    ccord_vec2 t = ccord_text_measure(r, ui->notice, strlen(ui->notice), &st, wrap);
-    float h = t.y + 20.0f;
-    box = (ccord_rect){p->x + 8.0f, base - h - 8.0f, p->w - 16.0f, h};
+    box_w = fmaxf(p->w - 16.0f, 160.0f);
+    base_x = p->x + 8.0f;
+    cursor_y = base - 8.0f;
   }
-  float ta, tslide;
-  ui_toast_look(ui, &ta, &tslide);
-  ccord_push_alpha(r, ta);
-  ccord_push_offset(r, 0.0f, tslide);
-  ccord_draw_rrect(r, (ccord_rect){box.x - 1, box.y - 1, box.w + 2, box.h + 2}, 6.0f, COL(border_subtle));
-  ccord_draw_rrect(r, box, 5.0f, COL(bg_floating));
-  ccord_text_draw(r, ui->notice, strlen(ui->notice), box.x + 10.0f, box.y + 10.0f, &st, wrap);
-  ccord_pop_offset(r);
-  ccord_pop_alpha(r);
+
+  // Draw newest at the bottom of the stack, stacking older active toasts upward.
+  for (size_t i = count; i-- > 0;) {
+    ui_toast_item *it = &items[i];
+    if (!it->text[0]) continue;
+    bool has_act = it->action_label[0] != '\0';
+    float left_pad = it->level > 0u ? 14.0f : 10.0f;
+    float act_w = 0.0f;
+    ccord_vec2 am = {0};
+    if (has_act) {
+      am = ccord_text_measure(r, it->action_label, strlen(it->action_label), &act_st, 0.0f);
+      act_w = fminf(am.x + 16.0f, box_w * 0.42f);
+    }
+    float wrap = fmaxf(box_w - left_pad - 10.0f - (has_act ? (act_w + 8.0f) : 0.0f), 60.0f);
+    ccord_vec2 tm = ccord_text_measure(r, it->text, strlen(it->text), &st, wrap);
+    float h = fmaxf(tm.y + 20.0f, has_act ? 38.0f : 32.0f);
+    float by = cursor_y - h;
+    if (by < top_limit) break;
+    ccord_rect box = {base_x, by, box_w, h};
+    it->box_rect = box;
+
+    float ta = 1.0f, tslide = 0.0f;
+    toast_slot_look(ui, it, &ta, &tslide);
+    ccord_push_alpha(r, ta);
+    ccord_push_offset(r, 0.0f, tslide);
+    ccord_draw_rrect(r, (ccord_rect){box.x - 1.0f, box.y - 1.0f, box.w + 2.0f, box.h + 2.0f}, 6.0f, COL(border_subtle));
+    ccord_draw_rrect(r, box, 5.0f, COL(bg_floating));
+    if (it->level == 1u || it->level == 2u) {
+      ccord_color bar_c = it->level == 2u ? COL(danger) : COL(status_idle);
+      ccord_draw_rrect(r, (ccord_rect){box.x + 2.0f, box.y + 4.0f, 3.0f, box.h - 8.0f}, 1.5f, bar_c);
+    }
+    float ty = box.y + (box.h - tm.y) * 0.5f;
+    ccord_text_draw(r, it->text, strlen(it->text), box.x + left_pad, ty, &st, wrap);
+    if (has_act) {
+      float ah = 24.0f;
+      ccord_rect ar = {box.x + box.w - act_w - 8.0f, box.y + (box.h - ah) * 0.5f, act_w, ah};
+      it->action_rect = ar;
+      bool ahov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, ar);
+      ccord_draw_rrect(r, ar, 4.0f, ahov ? COL(brand_hover) : COL(brand));
+      float tx = ar.x + fmaxf((ar.w - am.x) * 0.5f, 4.0f);
+      ccord_text_draw_ellipsis(r, it->action_label, strlen(it->action_label),
+                               tx, ar.y + (ar.h - am.y) * 0.5f, ar.w - 8.0f, &act_st);
+    }
+    ccord_pop_offset(r);
+    ccord_pop_alpha(r);
+    cursor_y = by - 6.0f;
+  }
 }

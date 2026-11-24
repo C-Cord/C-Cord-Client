@@ -49,6 +49,7 @@ typedef struct chat_rowh_entry {
   uint32_t flags;
   uint32_t meta_sig;
   float height;
+  float body_y_offset;
   uint64_t lru_tick;
 } chat_rowh_entry;
 
@@ -77,7 +78,7 @@ typedef struct timeline_row {
 
 #define LOCAL_PARSE_CACHE_SLOTS 16u
 #define LOCAL_MAX_ATTS 10u
-#define LOCAL_MAX_EMBEDS 4u
+#define LOCAL_MAX_EMBEDS 10u
 
 typedef struct local_att_parsed {
   const char *filename;
@@ -338,6 +339,8 @@ const ccord_local_message * dc_view_local_at(const ccord_ui *ui, ccord_id channe
 const local_msg_parsed * dc_local_parsed_get(ccord_ui *ui, const ccord_local_message *lm);
 float dc_local_cards_walk(ccord_ui *ui, ccord_renderer *r, const ccord_local_message *lm,
                           float x, float y, float card_w, bool draw);
+float dc_decor_appended_embeds_walk(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id, const char *embeds_json,
+                                    float x, float y, float card_w, bool draw);
 float dc_content_wrap(const ccord_ui *ui, float width);
 bool dc_friend_matches_tab(const ccord_relationship *rel, const ccord_user *u, int tab);
 bool dc_is_dm_intro_row(const ccord_ui *ui, ccord_id channel_id, size_t store_i);

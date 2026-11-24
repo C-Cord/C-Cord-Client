@@ -382,15 +382,74 @@ void ui_mark_dirty(ccord_ui *ui)
   ui->dirty = true;
 }
 
+void ui_toast_push(ccord_ui *ui, const char *owner, uint64_t toast_id, const char *text, uint8_t level,
+                   uint32_t duration_ms, const char *action_label)
+{
+  if (!ui || !text || !text[0]) return;
+  if (ui->ntoasts == 1u && !ui->toasts[0].owner[0] && !ui->notice[0]) {
+    ui->ntoasts = 0;
+  }
+  uint32_t dur = duration_ms == 0u ? UI_NOTICE_MS : duration_ms;
+  if (dur < 800u) dur = 800u;
+  if (dur > 15000u) dur = 15000u;
+  if (ui->ntoasts >= UI_TOAST_MAX_SLOTS) {
+    memmove(&ui->toasts[0], &ui->toasts[1], (UI_TOAST_MAX_SLOTS - 1u) * sizeof ui->toasts[0]);
+    ui->ntoasts = UI_TOAST_MAX_SLOTS - 1u;
+  }
+  ui_toast_item *t = &ui->toasts[ui->ntoasts++];
+  *t = (ui_toast_item){0};
+  snprintf(t->text, sizeof t->text, "%s", text);
+  t->level = level > 2u ? 0u : level;
+  t->until_ms = ui->now_ms + (uint64_t)dur;
+  ui->notice_seq++;
+  t->seq = ui->notice_seq;
+  if (owner && owner[0]) snprintf(t->owner, sizeof t->owner, "%s", owner);
+  t->toast_id = toast_id;
+  if (action_label && action_label[0]) snprintf(t->action_label, sizeof t->action_label, "%s", action_label);
+
+  snprintf(ui->notice, sizeof ui->notice, "%s", t->text);
+  ui->notice_until_ms = t->until_ms;
+  ui->dirty = true;
+}
+
+void ccord_ui_show_toast(ccord_ui *ui, const char *text, uint8_t level)
+{
+  if (!ui || !text || !text[0]) return;
+  ui_toast_push(ui, nullptr, 0, text, level, 4000u, nullptr);
+}
+
 void ui_notice(ccord_ui *ui, const char *fmt, ...)
 {
+  if (!ui || !fmt) return;
+  char buf[sizeof ui->notice];
   va_list ap;
   va_start(ap, fmt);
-  vsnprintf(ui->notice, sizeof ui->notice, fmt, ap);
+  vsnprintf(buf, sizeof buf, fmt, ap);
   va_end(ap);
-  ui->notice_until_ms = ui->now_ms + UI_NOTICE_MS;
-  ui->notice_seq++;
-  ui->dirty = true;
+  // Built-in client notices occupy at most one transient status slot so repeated client
+  // notices update in place instead of stacking across the channel sidebar.
+  for (size_t i = 0; i < ui->ntoasts; i++) {
+    if (!ui->toasts[i].owner[0] && ui->toasts[i].toast_id == 0u && !ui->toasts[i].action_label[0]) {
+      if (i + 1u < ui->ntoasts) {
+        memmove(&ui->toasts[i], &ui->toasts[i + 1u], (ui->ntoasts - i - 1u) * sizeof ui->toasts[0]);
+      }
+      ui->ntoasts--;
+      break;
+    }
+  }
+  if (!buf[0]) {
+    if (ui->ntoasts > 0u) {
+      const ui_toast_item *top = &ui->toasts[ui->ntoasts - 1u];
+      snprintf(ui->notice, sizeof ui->notice, "%s", top->text);
+      ui->notice_until_ms = top->until_ms;
+    } else {
+      ui->notice[0] = '\0';
+      ui->notice_until_ms = 0;
+    }
+    ui->dirty = true;
+    return;
+  }
+  ui_toast_push(ui, nullptr, 0, buf, 0, UI_NOTICE_MS, nullptr);
 }
 
 void ui_admin_submit(ccord_ui *ui, const ccord_admin_request *req)

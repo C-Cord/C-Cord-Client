@@ -43,9 +43,22 @@ static void item_free(menu_item *it)
   *it = (menu_item){0};
 }
 
+static void resolve_plugin_popup_if_needed(ccord_ui *ui, const char *item_id)
+{
+  if (!ui || !ui->menu.is_plugin_popup || ui->menu.popup_resolved) return;
+  ui->menu.popup_resolved = true;
+  char owner[65] = {0};
+  snprintf(owner, sizeof owner, "%s", ui->menu.popup_owner);
+  uint64_t req_id = ui->menu.popup_req_id;
+  if (ui->d.contrib && owner[0] && req_id != 0u) {
+    ccord_contrib_resolve_popup_menu(ui->d.contrib, owner, req_id, item_id);
+  }
+}
+
 void ui_menu_release(ccord_ui *ui)
 {
   if (!ui) return;
+  resolve_plugin_popup_if_needed(ui, nullptr);
   menu_aux *aux = cm_menu_aux_for(ui);
   for (size_t i = 0; i < ui->menu.count; i++) {
     if (aux && aux->from_arena[i]) {
@@ -71,6 +84,10 @@ void ui_menu_release(ccord_ui *ui)
   ccord_scroller_cancel(&ui->menu_sub_glide);
   ui->menu.scrollbar_rect = (ccord_rect){0};
   ui->menu.sub_scrollbar_rect = (ccord_rect){0};
+  ui->menu.is_plugin_popup = false;
+  ui->menu.popup_resolved = false;
+  ui->menu.popup_owner[0] = '\0';
+  ui->menu.popup_req_id = 0u;
   ui->menu_folder_id = CCORD_ID_NONE;
   ui->menu_text_edit = nullptr;
   ui->menu_text_masked = false;
@@ -85,6 +102,7 @@ void ui_menu_release(ccord_ui *ui)
 void ui_menu_close(ccord_ui *ui)
 {
   if (!ui->menu.open) return;   // already closed (or fading out)
+  resolve_plugin_popup_if_needed(ui, nullptr);
   if (ui->anim.reduced_motion) {
     ui_menu_release(ui);
     return;
@@ -1357,6 +1375,79 @@ void ui_menu_open_text_field(ccord_ui *ui, float x, float y, ccord_text_edit *ed
   if (ui->menu.x < MENU_EDGE) ui->menu.x = MENU_EDGE;
   if (ui->menu.y < MENU_EDGE) ui->menu.y = MENU_EDGE;
   ui->dirty = true;
+}
+
+bool ui_menu_open_plugin_popup(ccord_ui *ui, const char *owner, uint64_t req_id, float x, float y,
+                               bool has_pos, const char *items_json)
+{
+  if (!ui || !owner || !owner[0] || !items_json || !items_json[0]) return false;
+  if (ui_plugin_security_surface_active(ui)) return false;
+
+  ccord_arena arena;
+  ccord_arena_init(&arena, 4096u);
+  ccord_error jerr = {0};
+  const ccord_json *arr = ccord_json_parse(&arena, items_json, strlen(items_json), nullptr, &jerr);
+  if (!arr || ccord_json_type_of(arr) != CCORD_JSON_ARRAY || ccord_json_array_len(arr) == 0u) {
+    ccord_arena_free(&arena);
+    return false;
+  }
+
+  ui_menu_release(ui);
+  ui->menu.seq++;
+  menu_aux_begin(ui);
+  ui->menu.ctx = (ccord_menu_context){0};
+  ui->menu.is_plugin_popup = true;
+  ui->menu.popup_resolved = false;
+  snprintf(ui->menu.popup_owner, sizeof ui->menu.popup_owner, "%s", owner);
+  ui->menu.popup_req_id = req_id;
+
+  size_t alen = ccord_json_array_len(arr);
+  size_t lim = alen < UI_MENU_MAX_ITEMS ? alen : UI_MENU_MAX_ITEMS;
+  for (size_t i = 0; i < lim; i++) {
+    const ccord_json *it = ccord_json_array_at(arr, i);
+    if (!it || ccord_json_type_of(it) != CCORD_JSON_OBJECT) continue;
+    const char *id = ccord_json_string(ccord_json_get(it, "id"), nullptr);
+    const char *label = ccord_json_string(ccord_json_get(it, "label"), nullptr);
+    if (!id || !id[0] || !label || !label[0]) continue;
+    const char *sublabel = ccord_json_string(ccord_json_get(it, "sublabel"), nullptr);
+    bool danger = ccord_json_bool(ccord_json_get(it, "danger"), false);
+    bool checked = ccord_json_bool(ccord_json_get(it, "checked"), false);
+    bool disabled = ccord_json_bool(ccord_json_get(it, "disabled"), false);
+    bool div_before = ccord_json_bool(ccord_json_get(it, "divider_before"), false);
+    if (add_item_ex(ui, label, (sublabel && sublabel[0]) ? sublabel : nullptr, MENU_BUILTIN_NONE,
+                    owner, id, div_before && ui->menu.count > 0u, disabled, danger, 0)) {
+      ui->menu.items[ui->menu.count - 1u].checked = checked;
+    }
+  }
+  ccord_arena_free(&arena);
+
+  if (ui->menu.count == 0u) {
+    ui->menu.popup_resolved = true;   // caller handles false return directly
+    ui_menu_release(ui);
+    return false;
+  }
+
+  ui->menu.open = true;
+  ui->menu.hover = -1;
+  ui->menu.open_sub = -1;
+  ui->menu.sub_w = M(context_menu_min_width);
+  ui->menu.w = M(context_menu_min_width);
+  ui->menu.content_h = cm_menu_height(ui);
+  ui->menu.h = ui->menu.content_h;
+  float max_h = menu_max_h(ui);
+  if (ui->menu.h > max_h) ui->menu.h = max_h;
+  ui->menu.scroll_y = 0.0f;
+  ui->menu.sub_scroll_y = 0.0f;
+  ccord_scroller_cancel(&ui->menu_glide);
+  ccord_scroller_cancel(&ui->menu_sub_glide);
+  ui->menu.x = has_pos ? x : ui->mx;
+  ui->menu.y = has_pos ? y : ui->my;
+  if (ui->menu.x + ui->menu.w > ui->win_w - MENU_EDGE) ui->menu.x = ui->win_w - ui->menu.w - MENU_EDGE;
+  if (ui->menu.y + ui->menu.h > ui->win_h - MENU_EDGE) ui->menu.y = ui->win_h - MENU_EDGE - ui->menu.h;
+  if (ui->menu.x < MENU_EDGE) ui->menu.x = MENU_EDGE;
+  if (ui->menu.y < MENU_EDGE) ui->menu.y = MENU_EDGE;
+  ui->dirty = true;
+  return true;
 }
 
 ccord_rect ui_menu_item_rect(const ccord_ui *ui, size_t idx)

@@ -512,6 +512,29 @@ static bool ui_hook_file_save(void *ud, const char *suggested_name, const uint8_
   return true;
 }
 
+static bool ui_hook_jump_to_message(void *ud, ccord_id channel_id, ccord_id message_id)
+{
+  ccord_ui *ui = ud;
+  if (!ui || !ui->d.store || channel_id == CCORD_ID_NONE || message_id == CCORD_ID_NONE) return false;
+  const ccord_channel *c = ccord_store_channel(ui->d.store, channel_id);
+  if (!c) return false;
+  ui->discovery_open = false;
+  ui->inbox_open = false;
+  ui_panels_set_active_full_view(ui, nullptr, nullptr);
+  ccord_id cur = ccord_store_selected_channel(ui->d.store);
+  if (cur != channel_id) {
+    ui_select_guild_and_channel(ui, c->guild_id, channel_id);
+    ui_ensure_caches(ui);
+    ui_sync_messages(ui);
+  }
+  if (!ui_jump_to_message(ui, message_id)) {
+    ui->pending_jump_msg_id = message_id;
+    ui->pending_jump_channel = channel_id;
+  }
+  ui->dirty = true;
+  return true;
+}
+
 static bool ui_hook_select_theme_preset(void *ud, const char *owner, const char *preset_id)
 {
   ccord_ui *ui = ud;
@@ -519,6 +542,110 @@ static bool ui_hook_select_theme_preset(void *ud, const char *owner, const char 
   ui->d.host.select_theme_preset(ui->d.host.ud, owner ? owner : "", preset_id ? preset_id : "");
   ui->dirty = true;
   return true;
+}
+
+static bool ui_hook_open_media(void *ud, const char *items_json, size_t index)
+{
+  ccord_ui *ui = ud;
+  if (!ui || ui_plugin_security_surface_active(ui)) return false;
+  return ui_open_lightbox_plugin_items(ui, items_json, index);
+}
+
+static bool ui_hook_open_user_profile(void *ud, ccord_id user_id, ccord_id guild_id)
+{
+  ccord_ui *ui = ud;
+  if (!ui || user_id == CCORD_ID_NONE || ui_plugin_security_surface_active(ui)) return false;
+  float ax = ui->mouse_in ? ui->mx : (ui->win_w * 0.5f - 140.0f);
+  float ay = ui->mouse_in ? ui->my : (ui->win_h * 0.5f - 100.0f);
+  ui_open_member_popover(ui, user_id, ax, ay, false);
+  if (ui->d.session && guild_id != CCORD_ID_NONE && guild_id != CCORD_DM_GUILD_ID) {
+    ccord_error perr;
+    (void)ccord_session_request_profile_ex(ui->d.session, user_id, guild_id, ui->now_ms, false, &perr);
+  }
+  return true;
+}
+
+static bool ui_hook_open_popup_menu(void *ud, const char *owner, uint64_t req_id, float x, float y,
+                                    bool has_pos, const char *items_json)
+{
+  ccord_ui *ui = ud;
+  if (!ui || ui_plugin_security_surface_active(ui)) return false;
+  return ui_menu_open_plugin_popup(ui, owner, req_id, x, y, has_pos, items_json);
+}
+
+static bool ui_hook_toast_show(void *ud, const char *owner, uint64_t toast_id, const char *text,
+                               uint8_t level, uint32_t duration_ms, const char *action_label)
+{
+  ccord_ui *ui = ud;
+  if (!ui || !text || !text[0]) return false;
+  ui_toast_push(ui, owner, toast_id, text, level, duration_ms, action_label);
+  return true;
+}
+
+static void ui_hook_upload_transform_complete(void *ud, uint64_t job_id, bool cancelled, const char *notice,
+                                              ccord_upload_hook_file *files, size_t count)
+{
+  ccord_ui *ui = ud;
+  if (!ui || !ui->upload_hook_pending || ui->upload_hook_job_id != job_id) return;
+  ccord_id ch_id = ui->upload_hook_channel_id;
+  ccord_id rep_id = ui->upload_hook_reply_id;
+  bool rep_ping = ui->upload_hook_reply_ping;
+  char *text = ui->upload_hook_text;
+  ui->upload_hook_text = nullptr;
+  ui->upload_hook_pending = false;
+  ui->upload_hook_job_id = 0u;
+  ui->upload_hook_cancel_rect = (ccord_rect){0};
+  ui->dirty = true;
+
+  if (cancelled) {
+    ui_notice(ui, "%s", (notice && notice[0]) ? notice : "Upload cancelled by plugin");
+    ccord_free(text);
+    return;
+  }
+  if (!ui->d.session) {
+    ui_notice(ui, "Not connected");
+    ccord_free(text);
+    return;
+  }
+  ccord_upload_file ufiles[CCORD_RICH_MAX_ATTACHMENTS];
+  size_t nu = 0u;
+  size_t lim = count < CCORD_RICH_MAX_ATTACHMENTS ? count : CCORD_RICH_MAX_ATTACHMENTS;
+  for (size_t i = 0; i < lim; i++) {
+    if (files[i].dropped || !files[i].data || files[i].size == 0u) continue;
+    ufiles[nu++] = (ccord_upload_file){
+      .filename = files[i].filename,
+      .data = files[i].data,
+      .size = files[i].size,
+      .spoiler = files[i].spoiler,
+    };
+  }
+  const char *t = text ? text : "";
+  size_t tlen = strlen(t);
+  ccord_error err = {0};
+  ccord_status st = CCORD_OK;
+  if (nu > 0u) {
+    st = ccord_session_send_message_with_files(ui->d.session, ch_id, rep_id, rep_ping, t, tlen, ufiles, nu, &err);
+  } else if (tlen > 0u) {
+    if (rep_id != CCORD_ID_NONE) st = ccord_session_send_reply_ex(ui->d.session, ch_id, rep_id, rep_ping, t, tlen, &err);
+    else st = ccord_session_send_message(ui->d.session, ch_id, t, tlen, &err);
+  }
+  ccord_free(text);
+  if (st != CCORD_OK) {
+    ui_notice(ui, "Cannot send attachment: %s", err.message);
+    return;
+  }
+  if (notice && notice[0]) ui_notice(ui, "%s", notice);
+  ccord_ui_clear_attachment(ui);
+  if (ui->d.store && ccord_store_selected_channel(ui->d.store) == ch_id) {
+    ui->reply_channel = ui->reply_message = CCORD_ID_NONE;
+    ui->reply_ping = true;
+    ui->reply_ping_rect = (ccord_rect){0};
+    ccord_text_edit_clear(&ui->edit);
+    ui_clear_channel_draft(ui, ch_id);
+    ui->autocomplete_open = false;
+    ui->nautocomplete = 0;
+    ui->composer_scroll = 0.0f;
+  }
 }
 
 // ---------------------------------------------------------------- lifecycle
@@ -616,6 +743,7 @@ ccord_ui *ccord_ui_create(const ccord_ui_deps *deps, ccord_error *err)
     ccord_contrib_ui_hooks uh = {
       .ud = ui,
       .navigate = ui_hook_navigate,
+      .jump_to_message = ui_hook_jump_to_message,
       .ui_action = ui_hook_action,
       .get_view = ui_hook_get_view,
       .insert_draft = ui_hook_insert_draft,
@@ -634,6 +762,11 @@ ccord_ui *ccord_ui_create(const ccord_ui_deps *deps, ccord_error *err)
       .file_pick = ui_hook_file_pick,
       .file_save = ui_hook_file_save,
       .select_theme_preset = ui_hook_select_theme_preset,
+      .open_media = ui_hook_open_media,
+      .open_user_profile = ui_hook_open_user_profile,
+      .open_popup_menu = ui_hook_open_popup_menu,
+      .toast_show = ui_hook_toast_show,
+      .upload_transform_complete = ui_hook_upload_transform_complete,
     };
     ccord_contrib_set_ui_hooks(deps->contrib, &uh);
   }
@@ -674,6 +807,12 @@ void ccord_ui_destroy(ccord_ui *ui)
     if (cur_ch != CCORD_ID_NONE) uc_save_channel_draft(ui, cur_ch);
   }
   if (ui->sub && ui->d.bus) ccord_bus_unsubscribe(ui->d.bus, ui->sub);
+  if (ui->d.contrib && ui->upload_hook_pending && ui->upload_hook_job_id != 0u) {
+    ccord_contrib_cancel_upload_transform(ui->d.contrib, ui->upload_hook_job_id);
+  }
+  ccord_free(ui->upload_hook_text);
+  ui->upload_hook_text = nullptr;
+  ui->upload_hook_pending = false;
   if (ui->d.contrib) ccord_contrib_set_ui_hooks(ui->d.contrib, nullptr);
   ui_panels_destroy(ui);
   ui_plugin_v3_destroy(ui);
@@ -1196,13 +1335,49 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
       ui->dirty = true;
     }
   }
-  if (ui->notice[0] && now_ms >= ui->notice_until_ms) {
-    ui->notice[0] = '\0';
-    ui->dirty = true;
-  }
-  if (ui->notice[0] && now_ms < ui->notice_until_ms && ui->notice_until_ms - now_ms < 250) {
-    ui->animating = true;   // fading out
-    smooth = true;
+  if (ui->ntoasts > 0u) {
+    if (ui->ntoasts == 1u && !ui->toasts[0].owner[0] && !ui->notice[0]) {
+      ui->ntoasts = 0u;
+    } else {
+      bool any_expired = false;
+      size_t keep = 0u;
+      for (size_t i = 0; i < ui->ntoasts; i++) {
+        if (now_ms >= ui->toasts[i].until_ms) {
+          any_expired = true;
+          continue;
+        }
+        if (keep != i) ui->toasts[keep] = ui->toasts[i];
+        keep++;
+      }
+      ui->ntoasts = keep;
+      if (any_expired) {
+        if (ui->ntoasts > 0u) {
+          const ui_toast_item *top = &ui->toasts[ui->ntoasts - 1u];
+          snprintf(ui->notice, sizeof ui->notice, "%s", top->text);
+          ui->notice_until_ms = top->until_ms;
+        } else {
+          ui->notice[0] = '\0';
+          ui->notice_until_ms = 0u;
+        }
+        ui->dirty = true;
+      }
+      for (size_t i = 0; i < ui->ntoasts; i++) {
+        if (now_ms < ui->toasts[i].until_ms && ui->toasts[i].until_ms - now_ms < 250u) {
+          ui->animating = true;
+          smooth = true;
+          break;
+        }
+      }
+    }
+  } else {
+    if (ui->notice[0] && now_ms >= ui->notice_until_ms) {
+      ui->notice[0] = '\0';
+      ui->dirty = true;
+    }
+    if (ui->notice[0] && now_ms < ui->notice_until_ms && ui->notice_until_ms - now_ms < 250u) {
+      ui->animating = true;   // fading out
+      smooth = true;
+    }
   }
   if (ui->jump_highlight_msg_id != CCORD_ID_NONE) {
     if (now_ms >= ui->jump_highlight_until_ms) {
@@ -1285,7 +1460,14 @@ uint32_t ccord_ui_next_wait_ms(const ccord_ui *ui, uint64_t now_ms)
   }
   if (ui->discovery_open) wait_min_deadline(&wait, now_ms, ui->discovery_due_ms);
   wait_min_deadline(&wait, now_ms, ui->slash_auto_due_ms);
-  if (ui->notice[0] && ui->notice_until_ms != 0) {
+  if (ui->ntoasts > 0u) {
+    for (size_t i = 0; i < ui->ntoasts; i++) {
+      if (ui->toasts[i].until_ms != 0u) {
+        uint64_t fade_at = ui->toasts[i].until_ms > 250u ? (ui->toasts[i].until_ms - 250u) : ui->toasts[i].until_ms;
+        wait_min_deadline(&wait, now_ms, fade_at);
+      }
+    }
+  } else if (ui->notice[0] && ui->notice_until_ms != 0) {
     uint64_t fade_at = ui->notice_until_ms > 250u ? (ui->notice_until_ms - 250u) : ui->notice_until_ms;
     wait_min_deadline(&wait, now_ms, fade_at);
   }

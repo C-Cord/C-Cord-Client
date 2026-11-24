@@ -33,6 +33,9 @@ struct ccord_ui {
   uint64_t built_rev, built_lists_rev, built_contrib_rev;
   uint64_t built_chan_sig, built_member_sig;
   uint64_t synced_msg_rev, synced_view_key, synced_local_rev;
+  uint64_t built_decor_rev;
+  bool plugin_show_hidden_channels;
+  size_t plugin_hidden_channel_count;
   ccord_id synced_msg_ch;
   uint64_t dbg_list_rebuilds;                  // how many times the channel and member rows were rebuilt (tests)
   ccord_id built_guild;
@@ -574,6 +577,9 @@ struct ccord_ui {
   char notice[128];
   uint64_t notice_until_ms;
   uint64_t notice_seq;   // bumped by every ui_notice so that each toast plays its own entrance
+  ui_toast_item toasts[UI_TOAST_MAX_SLOTS];
+  size_t ntoasts;
+  uint64_t lightbox_local_seq;
 
   // staged composer file attachments (up to CCORD_RICH_MAX_ATTACHMENTS = 10)
   struct {
@@ -588,6 +594,13 @@ struct ccord_ui {
   ccord_rect staged_spoiler_rects[CCORD_RICH_MAX_ATTACHMENTS];
   ccord_rect staged_remove_rects[CCORD_RICH_MAX_ATTACHMENTS];
   bool had_active_uploads;
+  bool upload_hook_pending;
+  uint64_t upload_hook_job_id;
+  ccord_id upload_hook_channel_id;
+  ccord_id upload_hook_reply_id;
+  bool upload_hook_reply_ping;
+  char *upload_hook_text;
+  ccord_rect upload_hook_cancel_rect;
   struct ui_drop_overlay *drop_ovl;   // lazily heap-allocated only while file drag hover or upload-error modal is active
   ui_upload_debug dbg_uploads;
 

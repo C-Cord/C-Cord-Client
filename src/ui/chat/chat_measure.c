@@ -492,7 +492,10 @@ void dc_decor_scan(const ccord_ui *ui, const ccord_message *m, bool compact, dec
   const ccord_message_rich *rich = m->rich;
   if (decor_reply(ui, m, d)) decor_add(d, DECOR_REPLY, nullptr, nullptr, nullptr, nullptr, d->reply_text, strlen(d->reply_text), 1u);
 
-  const char *content = m->content ? m->content : "";
+  ui_msg_style_ov style_ov;
+  bool has_style_ov = ui_decor_message_style_ex(ui, m->id, &style_ov);
+  bool has_content_ov = has_style_ov && style_ov.has_content_override;
+  const char *content = has_content_ov ? style_ov.content_override : (m->content ? m->content : "");
   size_t out = 0;
   if (rich && ccord_message_type_is_system(rich->type)) {
     // "<name> joined the server." in place of text. Types that carry text (a new channel name, a thread title) append it.
@@ -511,7 +514,7 @@ void dc_decor_scan(const ccord_ui *ui, const ccord_message *m, bool compact, dec
     } else {
       body_put(d, &out, content, strlen(content));
     }
-  } else if (!message_should_hide_bare_link(ui, m)) {
+  } else if (has_content_ov || !message_should_hide_bare_link(ui, m)) {
     body_put(d, &out, content, strlen(content));
   }
   if (rich) {
@@ -1004,16 +1007,46 @@ static void parse_local_embed_obj(ccord_arena *a, const ccord_json *ej, ccord_em
   const ccord_json *tsj = ccord_json_get(ej, "timestamp_ms");
   if (tsj) (void)ccord_json_int64(tsj, &out->timestamp_ms);
 
-  // Local texture_key on embed image/thumbnail (never auto-fetch remote HTTP URLs from plugins!)
+  // Texture key or already-sanitized HTTPS URL on embed image/thumbnail.
   const ccord_json *imj = ccord_json_get(ej, "image");
   if (imj && ccord_json_type_of(imj) == CCORD_JSON_OBJECT) {
     *out_img_key = lp_astr(a, imj, "texture_key");
-  }
-  if (!*out_img_key) {
-    const ccord_json *thj = ccord_json_get(ej, "thumbnail");
-    if (thj && ccord_json_type_of(thj) == CCORD_JSON_OBJECT) {
-      *out_img_key = lp_astr(a, thj, "texture_key");
+    const char *iu = lp_astr(a, imj, "url");
+    if (iu) {
+      out->image.url = iu;
+      out->image.proxy_url = iu;
+      int64_t iw = 0, ih = 0;
+      (void)ccord_json_int64(ccord_json_get(imj, "width"), &iw);
+      (void)ccord_json_int64(ccord_json_get(imj, "height"), &ih);
+      if (iw > 0) out->image.width = (uint32_t)iw;
+      if (ih > 0) out->image.height = (uint32_t)ih;
     }
+  } else {
+    const char *itk = lp_astr(a, ej, "image_texture");
+    if (itk) *out_img_key = itk;
+    const char *iu = lp_astr(a, ej, "image_url");
+    if (iu) { out->image.url = iu; out->image.proxy_url = iu; }
+  }
+  const ccord_json *thj = ccord_json_get(ej, "thumbnail");
+  if (thj && ccord_json_type_of(thj) == CCORD_JSON_OBJECT) {
+    if (!*out_img_key) *out_img_key = lp_astr(a, thj, "texture_key");
+    const char *tu = lp_astr(a, thj, "url");
+    if (tu) {
+      out->thumbnail.url = tu;
+      out->thumbnail.proxy_url = tu;
+      int64_t tw = 0, th = 0;
+      (void)ccord_json_int64(ccord_json_get(thj, "width"), &tw);
+      (void)ccord_json_int64(ccord_json_get(thj, "height"), &th);
+      if (tw > 0) out->thumbnail.width = (uint32_t)tw;
+      if (th > 0) out->thumbnail.height = (uint32_t)th;
+    }
+  } else {
+    if (!*out_img_key) {
+      const char *ttk = lp_astr(a, ej, "thumbnail_texture");
+      if (ttk) *out_img_key = ttk;
+    }
+    const char *tu = lp_astr(a, ej, "thumbnail_url");
+    if (tu) { out->thumbnail.url = tu; out->thumbnail.proxy_url = tu; }
   }
   const ccord_json *flj = ccord_json_get(ej, "fields");
   if (flj && ccord_json_type_of(flj) == CCORD_JSON_ARRAY) {
@@ -1180,7 +1213,84 @@ float dc_local_cards_walk(ccord_ui *ui, ccord_renderer *r, const ccord_local_mes
   return cy;
 }
 
-// Compact rows hide the header line, so an edit marker is appended to the body text there.
+static const local_msg_parsed *dc_decor_embeds_parsed_get(ccord_ui *ui, ccord_id msg_id, const char *embeds_json)
+{
+  if (!ui || !embeds_json || !embeds_json[0]) return nullptr;
+  struct ui_chat_caches *cc = dc_chat_caches_ensure(ui);
+  if (!cc) return nullptr;
+  uint64_t key_id = msg_id | (1ULL << 63);
+  uint64_t rev = ui->d.contrib ? ccord_contrib_decorators_revision(ui->d.contrib) : 1u;
+  size_t victim = 0;
+  for (size_t i = 0; i < LOCAL_PARSE_CACHE_SLOTS; i++) {
+    if (cc->lparse[i].inited && cc->lparse[i].local_id == key_id && cc->lparse[i].revision == rev) {
+      cc->lparse[i].lru_tick = ++cc->lparse_tick;
+      return &cc->lparse[i];
+    }
+    if (!cc->lparse[i].inited) victim = i;
+    else if (cc->lparse[victim].inited && cc->lparse[i].lru_tick < cc->lparse[victim].lru_tick) victim = i;
+  }
+  local_msg_parsed *sl = &cc->lparse[victim];
+  if (!sl->inited) {
+    ccord_arena_init(&sl->arena, 0);
+    sl->inited = true;
+  } else {
+    ccord_arena_reset(&sl->arena);
+  }
+  sl->local_id = key_id;
+  sl->revision = rev;
+  sl->lru_tick = ++cc->lparse_tick;
+  sl->natts = 0;
+  sl->nembeds = 0;
+
+  static const ccord_json_limits k_elim = {12, 4096, 131072};
+  ccord_error err = {0};
+  const ccord_json *ej = ccord_json_parse(&sl->arena, embeds_json, strlen(embeds_json), &k_elim, &err);
+  if (ej && ccord_json_type_of(ej) == CCORD_JSON_ARRAY) {
+    size_t n = ccord_json_array_len(ej);
+    if (n > LOCAL_MAX_EMBEDS) n = LOCAL_MAX_EMBEDS;
+    for (size_t i = 0; i < n; i++) {
+      const ccord_json *it = ccord_json_array_at(ej, i);
+      if (!it || ccord_json_type_of(it) != CCORD_JSON_OBJECT) continue;
+      parse_local_embed_obj(&sl->arena, it, &sl->embeds[sl->nembeds], &sl->embed_img_keys[sl->nembeds]);
+      sl->nembeds++;
+    }
+  } else if (ej && ccord_json_type_of(ej) == CCORD_JSON_OBJECT) {
+    parse_local_embed_obj(&sl->arena, ej, &sl->embeds[0], &sl->embed_img_keys[0]);
+    sl->nembeds = 1;
+  }
+  return sl;
+}
+
+float dc_decor_appended_embeds_walk(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id, const char *embeds_json,
+                                    float x, float y, float card_w, bool draw)
+{
+  const local_msg_parsed *lp = dc_decor_embeds_parsed_get(ui, msg_id, embeds_json);
+  if (!lp || lp->nembeds == 0) return 0.0f;
+  float cy = 0.0f;
+  const float gap = M(message_line_gap) + 4.0f;
+  const float max_img_w = fminf(card_w, 400.0f);
+  const float max_img_h = 300.0f;
+  for (size_t i = 0; i < lp->nembeds; i++) {
+    decor_part ep = {
+      .kind = DECOR_EMBED,
+      .emb = &lp->embeds[i],
+      .count = 1u,
+      .msg_id = msg_id | (1ULL << 63),
+      .edit_rev = (uint32_t)lp->revision,
+    };
+    float eh = dc_embed_card_walk(ui, r, &ep, x, y + cy, card_w, draw);
+    if (eh > 0.0f) cy += eh + gap;
+    const char *ek = lp->embed_img_keys[i];
+    int tw = 0, th = 0;
+    if (r && ek && ek[0] && ccord_render_has_texture(r, ek, &tw, &th)) {
+      float dw = 0.0f, dh = 0.0f;
+      fit_thumb_box(tw, th, max_img_w, max_img_h, &dw, &dh);
+      if (draw) ccord_draw_texture_rounded(r, ek, (ccord_rect){x, y + cy, dw, dh}, 6.0f, 255);
+      cy += dh + gap;
+    }
+  }
+  return cy;
+}
 // ---- Blocked-author runs ----
 
 static bool msg_author_blocked(const ccord_ui *ui, const ccord_message *m)
@@ -1573,6 +1683,9 @@ float dc_measure_row(size_t i, float width, void *ud)
       }
     }
   }
+  ui_msg_style_ov dec_st;
+  bool has_dec_st = ui_decor_message_style_ex(ui, m->id, &dec_st);
+  bool dec_collapsed = has_dec_st && dec_st.collapsed;
   decor_info d;
   dc_decor_scan(ui, m, compact, &d);
   float lh = ui_line_h(ui, M(font_size_base));
@@ -1582,9 +1695,10 @@ float dc_measure_row(size_t i, float width, void *ud)
     ccord_id guild = ccord_store_selected_guild(ui->d.store);
     body_h = dc_system_msg_walk(ui, c->r, m, guild, 0.0f, 0.0f, wrap, false, nullptr);
   } else {
-    bool no_body = d.body_len == 0 && dc_decor_has_body_cards(&d);
+    bool has_app_emb = has_dec_st && dec_st.embeds_append_json && dec_st.embeds_append_json[0];
+    bool no_body = d.body_len == 0 && (dc_decor_has_body_cards(&d) || has_app_emb);
     ui_jumbo_item jumbo_items[UI_JUMBO_EMOJI_MAX];
-    size_t jumbo_n = no_body ? 0u : dc_chat_message_jumbo(ui, m, jumbo_items);
+    size_t jumbo_n = (no_body || (has_dec_st && dec_st.has_content_override)) ? 0u : dc_chat_message_jumbo(ui, m, jumbo_items);
     body_h = no_body
                  ? 0.0f
                  : (jumbo_n > 0u
@@ -1613,13 +1727,22 @@ float dc_measure_row(size_t i, float width, void *ud)
   float div_h = has_div ? UI_CHAT_DIVIDER_H : 0.0f;
   float card_w = maxf(width - M(message_text_x) - M(message_pad_x), 40.0f);
   float blocked_strip = (br.blocked && br.first) ? UI_BLOCKED_ROW_H : 0.0f;
-  bool dec_collapsed = false;
-  (void)ui_decor_message_style(ui, m->id, nullptr, nullptr, &dec_collapsed, nullptr);
-  float plugin_acc_h = dec_collapsed ? 0.0f : ui_decor_measure_message_accessories(ui, c->r, m->id, card_w);
+  float app_emb_h = (!dec_collapsed && has_dec_st && dec_st.embeds_append_json && dec_st.embeds_append_json[0])
+                      ? dc_decor_appended_embeds_walk(ui, c->r, m->id, dec_st.embeds_append_json, 0.0f, 0.0f, card_w, false)
+                      : 0.0f;
+  float acc_above_h = dec_collapsed
+                        ? 0.0f
+                        : ui_decor_measure_message_accessories_pos(ui, c->r, m->id, CCORD_DECOR_POS_ABOVE_BODY, card_w);
+  float acc_below_h = dec_collapsed
+                        ? 0.0f
+                        : ui_decor_measure_message_accessories_pos(ui, c->r, m->id, CCORD_DECOR_POS_BELOW_BODY, card_w);
+  float above_gap_top = (compact || is_system) ? 0.0f : 4.0f;
+  float body_y_offset = acc_above_h > 0.0f ? (above_gap_top + acc_above_h + 4.0f) : 0.0f;
+  float below_total = acc_below_h > 0.0f ? (4.0f + acc_below_h) : 0.0f;
   float total_h = dec_collapsed
                     ? (intro + div_h + blocked_strip + 28.0f + tpad)
-                    : (intro + div_h + blocked_strip + top + dc_decor_reply_h(&d) + header + body_h +
-                       decor_total_h(ui, c->r, &d, card_w) + plugin_acc_h + reactions + send_status + ephem +
+                    : (intro + div_h + blocked_strip + top + dc_decor_reply_h(&d) + header + body_y_offset + body_h +
+                       decor_total_h(ui, c->r, &d, card_w) + app_emb_h + reactions + below_total + send_status + ephem +
                        M(message_line_gap) + wave_h + tpad);
   if (cc && m->id != CCORD_ID_NONE) {
     size_t victim = 0;
@@ -1641,6 +1764,7 @@ float dc_measure_row(size_t i, float width, void *ud)
       .flags = flags,
       .meta_sig = meta_sig,
       .height = total_h,
+      .body_y_offset = body_y_offset,
       .lru_tick = ++cc->rh_tick,
     };
   }

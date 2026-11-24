@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _POSIX_C_SOURCE 200809L
 #include "ui_core_internal.h"
+#include <ccord/core/json.h>
 #include <ccord/render/anim.h>
 
 #define UI_PLAYER_MAX_DIM 960         // inline video is decoded no larger than this
@@ -957,6 +958,104 @@ void ui_open_lightbox(ccord_ui *ui, const char *const *urls, size_t count, size_
   ui_open_lightbox_hit(ui, &synth);
 }
 
+static void lightbox_extract_basename(const char *path, char *out, size_t cap)
+{
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  if (!path || !path[0]) return;
+  const char *s1 = strrchr(path, '/');
+  const char *s2 = strrchr(path, '\\');
+  const char *base = s1 > s2 ? s1 : s2;
+  base = base ? base + 1 : path;
+  snprintf(out, cap, "%s", base);
+}
+
+bool ui_open_lightbox_plugin_items(ccord_ui *ui, const char *items_json, size_t index)
+{
+  if (!ui || !items_json || !items_json[0]) return false;
+  ccord_arena arena;
+  ccord_arena_init(&arena, 4096u);
+  ccord_error jerr = {0};
+  const ccord_json *arr = ccord_json_parse(&arena, items_json, strlen(items_json), nullptr, &jerr);
+  if (!arr || ccord_json_type_of(arr) != CCORD_JSON_ARRAY || ccord_json_array_len(arr) == 0u) {
+    ccord_arena_free(&arena);
+    return false;
+  }
+
+  ui_close_lightbox(ui);
+  size_t alen = ccord_json_array_len(arr);
+  size_t raw_n = alen < CCORD_RICH_MAX_ATTACHMENTS ? alen : CCORD_RICH_MAX_ATTACHMENTS;
+  ui->lightbox_urls = ccord_calloc(CCORD_RICH_MAX_ATTACHMENTS, sizeof *ui->lightbox_urls);
+  ui->lightbox_items = ccord_calloc(CCORD_RICH_MAX_ATTACHMENTS, sizeof *ui->lightbox_items);
+  if (!ui->lightbox_urls || !ui->lightbox_items) {
+    ccord_arena_free(&arena);
+    ui_close_lightbox(ui);
+    return false;
+  }
+
+  size_t out_n = 0u;
+  for (size_t i = 0; i < raw_n; i++) {
+    const ccord_json *o = ccord_json_array_at(arr, i);
+    if (!o || ccord_json_type_of(o) != CCORD_JSON_OBJECT) continue;
+    const char *src = ccord_json_string(ccord_json_get(o, "source"), nullptr);
+    const char *val = ccord_json_string(ccord_json_get(o, "value"), nullptr);
+    if (!src || !val || !val[0]) continue;
+    const char *fname = ccord_json_string(ccord_json_get(o, "filename"), nullptr);
+    const char *kind = ccord_json_string(ccord_json_get(o, "kind"), nullptr);
+    const char *desc = ccord_json_string(ccord_json_get(o, "description"), nullptr);
+
+    ui_lightbox_item *it = &ui->lightbox_items[out_n];
+    *it = (ui_lightbox_item){0};
+    it->is_video = (kind && strcmp(kind, "video") == 0);
+    if (strcmp(src, "texture_key") == 0) {
+      it->source_kind = UI_LB_SRC_TEXTURE_KEY;
+      snprintf(it->texture_key, sizeof it->texture_key, "%s", val);
+      if (!fname || !fname[0]) snprintf(it->filename, sizeof it->filename, "%s", val);
+    } else if (strcmp(src, "local_path") == 0) {
+      it->source_kind = UI_LB_SRC_LOCAL_PATH;
+      ui_url_copy(it->full_url, sizeof it->full_url, val);
+      ui_url_copy(ui->lightbox_urls[out_n], sizeof ui->lightbox_urls[out_n], val);
+      ui->lightbox_local_seq++;
+      snprintf(it->texture_key, sizeof it->texture_key, "__lb_local__:%llu:%zu",
+               (unsigned long long)ui->lightbox_local_seq, out_n);
+      if (!fname || !fname[0]) lightbox_extract_basename(val, it->filename, sizeof it->filename);
+    } else if (strcmp(src, "url") == 0) {
+      it->source_kind = UI_LB_SRC_URL;
+      ui_url_copy(it->full_url, sizeof it->full_url, val);
+      ui_url_copy(it->hd_url, sizeof it->hd_url, val);
+      ui_url_copy(ui->lightbox_urls[out_n], sizeof ui->lightbox_urls[out_n], val);
+      if (!fname || !fname[0]) lightbox_extract_filename_from_url(val, it->filename, sizeof it->filename);
+    } else {
+      continue;
+    }
+    if (fname && fname[0]) snprintf(it->filename, sizeof it->filename, "%s", fname);
+    if (desc && desc[0]) snprintf(it->description, sizeof it->description, "%s", desc);
+    out_n++;
+  }
+  ccord_arena_free(&arena);
+
+  if (out_n == 0u) {
+    ui_close_lightbox(ui);
+    return false;
+  }
+  if (index >= out_n) index = 0u;
+  ui->lightbox_count = out_n;
+  ui->lightbox_index = index;
+  ui_url_copy(ui->lightbox_url, sizeof ui->lightbox_url, ui->lightbox_urls[index]);
+  ui->lightbox_author_id = CCORD_ID_NONE;
+  ui->lightbox_timestamp_ms = 0;
+  ui->lightbox_origin_rect = (ccord_rect){0};
+  lightbox_reset_view_state(ui);
+  ui->lightbox_hud_visible = true;
+  ui->lightbox_hud_alpha = 1.0f;
+  ui->lightbox_details_open = false;
+  ui->lightbox_details_t = 0.0f;
+  ui->lightbox_open_ms = ui->now_ms;
+  ui->lightbox_open = true;
+  ui->dirty = true;
+  return true;
+}
+
 void ui_close_lightbox(ccord_ui *ui)
 {
   if (!ui) return;
@@ -965,6 +1064,13 @@ void ui_close_lightbox(ccord_ui *ui)
     size_t n = ui->lightbox_count < CCORD_RICH_MAX_ATTACHMENTS ? ui->lightbox_count : CCORD_RICH_MAX_ATTACHMENTS;
     for (size_t i = 0; i < n; i++) {
       const ui_lightbox_item *it = &ui->lightbox_items[i];
+      if (it->source_kind == UI_LB_SRC_TEXTURE_KEY) {
+        continue;   // plugin owns texture lifetime
+      }
+      if (it->source_kind == UI_LB_SRC_LOCAL_PATH) {
+        if (it->texture_key[0] && ui->last_renderer) ccord_render_evict_texture(ui->last_renderer, it->texture_key);
+        continue;
+      }
       if (it->hd_url[0]) {
         if (ui->last_renderer) ccord_render_evict_texture(ui->last_renderer, it->hd_url);
         if (ui->d.session) ccord_session_release_media_bytes(ui->d.session, it->hd_url);

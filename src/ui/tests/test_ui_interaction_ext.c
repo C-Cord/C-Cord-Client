@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <unistd.h>
 #include "ui_interaction_harness.h"
+#include "plugin_v3_internal.h"
 
 static void test_expr_picker_fetch_and_emoji_rail(void)
 {
@@ -2524,8 +2525,9 @@ static void test_plugin_api_v3_ui(void)
     ccord_session *lsess = ccord_session_create(lbus, lstore, &lt->base, &err);
     ccord_theme mutated = F.theme;
     mutated.c.bg_tertiary = (ccord_color){255, 0, 255, 255};   // garish magenta plugin mutation
+    ccord_contrib *lcontrib = ccord_contrib_create(&err);
     ccord_ui_deps ldeps = {
-      .bus = lbus, .store = lstore, .session = lsess, .contrib = F.contrib,
+      .bus = lbus, .store = lstore, .session = lsess, .contrib = lcontrib,
       .theme = &mutated, .protected_theme = &F.theme, .fixed_now_unix_ms = 1793536200000LL,
     };
     ccord_ui *lui = ccord_ui_create(&ldeps, &err);
@@ -2547,6 +2549,7 @@ static void test_plugin_api_v3_ui(void)
     }
     remove(pshot);
     ccord_ui_destroy(lui);
+    ccord_contrib_destroy(lcontrib);
     ccord_session_destroy(lsess);
     ccord_store_destroy(lstore);
     ccord_bus_destroy(lbus);
@@ -3296,6 +3299,657 @@ static void test_dynamic_context_menu_ui(void)
 }
 
 
+static char g_p1_decor_last_id[64];
+static char g_p1_decor_last_node[64];
+static ccord_id g_p1_decor_last_target;
+
+static void p1_on_decor_event(void *ud, const ccord_decorator_contribution *d, ccord_id target_id,
+                              const ccord_panel_event *ev)
+{
+  (void)ud;
+  if (d && d->decor_id) snprintf(g_p1_decor_last_id, sizeof g_p1_decor_last_id, "%s", d->decor_id);
+  if (ev && ev->node_id) snprintf(g_p1_decor_last_node, sizeof g_p1_decor_last_node, "%s", ev->node_id);
+  g_p1_decor_last_target = target_id;
+}
+
+static void test_message_accessory_above_body_and_jump(void)
+{
+  ccord_error err = {0};
+  CT_CHECK(ccord_session_select_guild(F.session, 2001, &err) == CCORD_OK);
+  CT_CHECK(ccord_session_select_channel(F.session, 3111, &err) == CCORD_OK);
+  frame(4);
+
+  ccord_id msg_id = send_confirmed(3111, "Current edited text");
+  CT_CHECK(msg_id != CCORD_ID_NONE);
+  frame(2);
+
+  // Verify >256 decorators work (O(1) hash index, no 256 global cap).
+  const char *bulk_owner = "dev.test.p1bulk";
+  for (int i = 0; i < 310; i++) {
+    char did[32];
+    snprintf(did, sizeof did, "bulk-%d", i);
+    ccord_decorator_contribution bd = {
+      .owner = bulk_owner, .decor_id = did, .target = CCORD_DECOR_MESSAGE_STYLE,
+      .target_id = (ccord_id)(900000 + i), .dim = true,
+    };
+    CT_CHECK(ccord_contrib_set_decorator(F.contrib, &bd, &err) == CCORD_OK);
+  }
+  CT_CHECK(ccord_contrib_decorator_count(F.contrib) >= 310u);
+
+  const char *owner = "dev.test.p1acc";
+  ccord_contrib_handlers h = {.decor_event = p1_on_decor_event};
+  ccord_contrib_set_handlers(F.contrib, &h);
+
+  // Register two above_body accessories (prio 10, prio 20) and one below_body accessory.
+  // Priority 20 MUST render above priority 10; both MUST render above below_body.
+  ccord_decorator_contribution a_lo = {
+    .owner = owner, .decor_id = "ab-lo", .target = CCORD_DECOR_MESSAGE_ACCESSORY,
+    .position = CCORD_DECOR_POS_ABOVE_BODY, .target_id = msg_id, .priority = 10,
+    .widget_json = "{\"type\":\"button\",\"id\":\"btn-lo\",\"label\":\"Older v1\"}",
+  };
+  ccord_decorator_contribution a_hi = {
+    .owner = owner, .decor_id = "ab-hi", .target = CCORD_DECOR_MESSAGE_ACCESSORY,
+    .position = CCORD_DECOR_POS_ABOVE_BODY, .target_id = msg_id, .priority = 20,
+    .widget_json = "{\"type\":\"button\",\"id\":\"btn-hi\",\"label\":\"Older v2\"}",
+  };
+  ccord_decorator_contribution b_acc = {
+    .owner = owner, .decor_id = "bl-one", .target = CCORD_DECOR_MESSAGE_ACCESSORY,
+    .position = CCORD_DECOR_POS_BELOW_BODY, .target_id = msg_id, .priority = 0,
+    .widget_json = "{\"type\":\"button\",\"id\":\"btn-bl\",\"label\":\"Below btn\"}",
+  };
+  CT_CHECK(ccord_contrib_set_decorator(F.contrib, &a_lo, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_set_decorator(F.contrib, &a_hi, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_set_decorator(F.contrib, &b_acc, &err) == CCORD_OK);
+  frame(3);
+
+  ccord_rect r_hi = {0}, r_lo = {0}, r_bl = {0};
+  bool got_hi = false, got_lo = false, got_bl = false;
+  if (F.ui->plugin_v3) {
+    for (size_t k = 0; k < F.ui->plugin_v3->ndecor_hits; k++) {
+      const v3_decor_hit *dh = &F.ui->plugin_v3->decor_hits[k];
+      if (dh->target_id != msg_id) continue;
+      if (strcmp(dh->node_id, "btn-hi") == 0) { r_hi = dh->rect; got_hi = true; }
+      if (strcmp(dh->node_id, "btn-lo") == 0) { r_lo = dh->rect; got_lo = true; }
+      if (strcmp(dh->node_id, "btn-bl") == 0) { r_bl = dh->rect; got_bl = true; }
+    }
+  }
+  CT_CHECK(got_hi && got_lo && got_bl);
+  CT_CHECK(r_hi.y < r_lo.y);
+  CT_CHECK(r_lo.y + r_lo.h < r_bl.y);
+
+  // Clicking above_body button dispatches on_event with target_id.
+  g_p1_decor_last_id[0] = g_p1_decor_last_node[0] = '\0';
+  g_p1_decor_last_target = CCORD_ID_NONE;
+  click(r_hi.x + r_hi.w * 0.5f, r_hi.y + r_hi.h * 0.5f);
+  frame(1);
+  CT_CHECK(strcmp(g_p1_decor_last_id, "ab-hi") == 0 && strcmp(g_p1_decor_last_node, "btn-hi") == 0 &&
+           g_p1_decor_last_target == msg_id);
+
+  // Setting collapsed = true hides BOTH above_body and below_body accessories.
+  ccord_decorator_contribution st_col = {
+    .owner = owner, .decor_id = "col-msg", .target = CCORD_DECOR_MESSAGE_STYLE,
+    .target_id = msg_id, .collapsed = true, .collapse_label = "Hidden",
+  };
+  CT_CHECK(ccord_contrib_set_decorator(F.contrib, &st_col, &err) == CCORD_OK);
+  frame(2);
+  bool any_acc_hit = false;
+  if (F.ui->plugin_v3) {
+    for (size_t k = 0; k < F.ui->plugin_v3->ndecor_hits; k++) {
+      if (F.ui->plugin_v3->decor_hits[k].target_id == msg_id &&
+          F.ui->plugin_v3->decor_hits[k].target == CCORD_DECOR_MESSAGE_ACCESSORY) {
+        any_acc_hit = true;
+      }
+    }
+  }
+  CT_CHECK(!any_acc_hit);
+
+  // Cross-channel jump_to_message navigates back to 3111 and highlights msg_id.
+  ccord_id other_ch = find_channel(2001, "off-topic", CCORD_CHANNEL_TEXT);
+  CT_CHECK(other_ch != CCORD_ID_NONE && other_ch != 3111);
+  CT_CHECK(ccord_session_select_channel(F.session, other_ch, &err) == CCORD_OK);
+  frame(3);
+  CT_CHECK(ccord_store_selected_channel(F.store) == other_ch);
+  CT_CHECK(ccord_contrib_ui_jump_to_message(F.contrib, 3111, msg_id));
+  frame(3);
+  CT_CHECK(ccord_store_selected_channel(F.store) == 3111);
+  CT_CHECK(F.ui->jump_highlight_msg_id == msg_id);
+
+  ccord_contrib_remove_owner(F.contrib, owner);
+  ccord_contrib_remove_owner(F.contrib, bulk_owner);
+  ccord_contrib_set_handlers(F.contrib, &(ccord_contrib_handlers){0});
+  frame(1);
+}
+
+static char g_p2_last_action[64];
+static char g_p2_last_chg_key[64];
+static char g_p2_last_chg_val[128];
+static char g_p2_mock_dir[128];
+
+static void p2_on_setting_action(void *ud, const char *owner, const char *key)
+{
+  (void)ud;
+  (void)owner;
+  snprintf(g_p2_last_action, sizeof g_p2_last_action, "%s", key ? key : "");
+}
+
+static void p2_on_setting_changed(void *ud, const char *owner, const char *key, const char *val_json)
+{
+  (void)ud;
+  (void)owner;
+  snprintf(g_p2_last_chg_key, sizeof g_p2_last_chg_key, "%s", key ? key : "");
+  snprintf(g_p2_last_chg_val, sizeof g_p2_last_chg_val, "%s", val_json ? val_json : "");
+}
+
+static bool p2_mock_open_dir(void *ud, char *out_path, size_t cap)
+{
+  (void)ud;
+  if (!g_p2_mock_dir[0]) return false;
+  snprintf(out_path, cap, "%s", g_p2_mock_dir);
+  return true;
+}
+
+static void test_phase2_settings_schema_polish(void)
+{
+  const char *owner = "dev.test.p2set";
+  ccord_error err = {0};
+  ccord_contrib_handlers h = {
+    .plugin_setting_changed = p2_on_setting_changed,
+    .plugin_setting_action = p2_on_setting_action,
+  };
+  ccord_contrib_set_handlers(F.contrib, &h);
+  F.ui->d.host.open_dir_dialog = p2_mock_open_dir;
+
+  const char *schema =
+    "["
+    "  {\"type\":\"select\",\"key\":\"mode\",\"label\":\"Storage Mode\",\"options\":[\"memory\",\"disk\"],\"default\":\"memory\"},"
+    "  {\"type\":\"path\",\"key\":\"log_dir\",\"label\":\"Log Folder\",\"mode\":\"dir\","
+    "   \"visible_when\":{\"key\":\"mode\",\"equals\":\"disk\"}},"
+    "  {\"type\":\"button\",\"key\":\"clear_logs\",\"label\":\"Reset\",\"button_label\":\"Clear Logs\",\"variant\":\"danger\"}"
+    "]";
+  CT_CHECK(ccord_contrib_set_settings_schema(F.contrib, owner, schema, "{\"mode\":\"memory\"}", &err) == CCORD_OK);
+  ui_plugin_settings_open(F.ui, owner);
+  CT_CHECK(ui_plugin_settings_is_open(F.ui));
+  frame(2);
+
+  // While mode == "memory", log_dir path field is hidden (zero hit/browse rects).
+  CT_CHECK(F.ui->plugin_v3 != nullptr && F.ui->plugin_v3->set.nfields == 3);
+  CT_CHECK(F.ui->plugin_v3->set.fields[0].hit_rect.w > 0.0f);
+  CT_CHECK(F.ui->plugin_v3->set.fields[1].hit_rect.w == 0.0f);
+  CT_CHECK(F.ui->plugin_v3->set.fields[1].browse_rect.w == 0.0f);
+  CT_CHECK(F.ui->plugin_v3->set.fields[2].hit_rect.w > 0.0f);
+
+  // Clicking the button dispatches plugin_setting_action("clear_logs").
+  g_p2_last_action[0] = '\0';
+  ccord_rect btn_rc = F.ui->plugin_v3->set.fields[2].hit_rect;
+  click(btn_rc.x + btn_rc.w * 0.5f, btn_rc.y + btn_rc.h * 0.5f);
+  frame(1);
+  CT_CHECK(strcmp(g_p2_last_action, "clear_logs") == 0);
+
+  // Clicking select switches mode -> "disk", making log_dir visible!
+  ccord_rect sel_rc = F.ui->plugin_v3->set.fields[0].hit_rect;
+  click(sel_rc.x + sel_rc.w * 0.5f, sel_rc.y + sel_rc.h * 0.5f);
+  frame(2);
+  CT_CHECK(strcmp(g_p2_last_chg_key, "mode") == 0 && strcmp(g_p2_last_chg_val, "\"disk\"") == 0);
+  CT_CHECK(F.ui->plugin_v3->set.fields[1].hit_rect.w > 0.0f);
+  CT_CHECK(F.ui->plugin_v3->set.fields[1].browse_rect.w > 0.0f);
+
+  // Clicking Browse on log_dir invokes open_dir_dialog and updates the field + emits change.
+  snprintf(g_p2_mock_dir, sizeof g_p2_mock_dir, "/tmp/ccord-logs-dir");
+  ccord_rect br_rc = F.ui->plugin_v3->set.fields[1].browse_rect;
+  click(br_rc.x + br_rc.w * 0.5f, br_rc.y + br_rc.h * 0.5f);
+  frame(2);
+  CT_CHECK(strcmp(g_p2_last_chg_key, "log_dir") == 0 &&
+           strcmp(g_p2_last_chg_val, "\"/tmp/ccord-logs-dir\"") == 0);
+  CT_CHECK(F.ui->plugin_v3->set.fields[1].clear_rect.w > 0.0f);
+
+  // Clicking Clear clears the path and emits empty string.
+  ccord_rect cl_rc = F.ui->plugin_v3->set.fields[1].clear_rect;
+  click(cl_rc.x + cl_rc.w * 0.5f, cl_rc.y + cl_rc.h * 0.5f);
+  frame(1);
+  CT_CHECK(strcmp(g_p2_last_chg_key, "log_dir") == 0 && strcmp(g_p2_last_chg_val, "\"\"") == 0);
+
+  // Async picker delivery via ccord_ui_consume_picked_path also works.
+  g_p2_mock_dir[0] = '\0';
+  br_rc = F.ui->plugin_v3->set.fields[1].browse_rect;
+  click(br_rc.x + br_rc.w * 0.5f, br_rc.y + br_rc.h * 0.5f);
+  CT_CHECK(ccord_ui_consume_picked_path(F.ui, "/tmp/async-picked-folder"));
+  CT_CHECK(strcmp(g_p2_last_chg_key, "log_dir") == 0 &&
+           strcmp(g_p2_last_chg_val, "\"/tmp/async-picked-folder\"") == 0);
+
+  key(CCORD_KEY_ESCAPE, 0);
+  frame(1);
+  CT_CHECK(!ui_plugin_settings_is_open(F.ui));
+  F.ui->d.host.open_dir_dialog = nullptr;
+  ccord_contrib_remove_owner(F.contrib, owner);
+  ccord_contrib_set_handlers(F.contrib, &(ccord_contrib_handlers){0});
+  frame(1);
+}
+
+
+static void test_phase3_content_override_and_row_styles(void)
+{
+  ccord_error err = {0};
+  const char *owner = "dev.test.p3ui";
+  // Select the first non-DM guild with at least 2 text channels and 2 members.
+  ccord_id gid = CCORD_ID_NONE, ch1 = CCORD_ID_NONE, ch2 = CCORD_ID_NONE;
+  for (size_t gi = 0; gi < ccord_store_guild_count(F.store); gi++) {
+    const ccord_guild *g = ccord_store_guild_at(F.store, gi);
+    if (!g || g->id == CCORD_DM_GUILD_ID) continue;
+    size_t nc = ccord_store_channel_count(F.store, g->id);
+    ccord_id a = CCORD_ID_NONE, b = CCORD_ID_NONE;
+    for (size_t ci = 0; ci < nc; ci++) {
+      const ccord_channel *c = ccord_store_channel_at(F.store, g->id, ci);
+      if (c && c->kind == CCORD_CHANNEL_TEXT) {
+        if (a == CCORD_ID_NONE) a = c->id;
+        else if (b == CCORD_ID_NONE) { b = c->id; break; }
+      }
+    }
+    if (a != CCORD_ID_NONE && b != CCORD_ID_NONE && ccord_store_member_count(F.store, g->id) >= 2) {
+      gid = g->id; ch1 = a; ch2 = b; break;
+    }
+  }
+  CT_CHECK(gid != CCORD_ID_NONE && ch1 != CCORD_ID_NONE && ch2 != CCORD_ID_NONE);
+  if (gid == CCORD_ID_NONE) return;
+  CT_CHECK(ccord_store_select_guild(F.store, gid, &err) == CCORD_OK);
+  CT_CHECK(ccord_store_select_channel(F.store, ch1, &err) == CCORD_OK);
+  frame(3);
+
+  // 1. Non-destructive content_override + embeds_append increases row height while store msg->content stays untouched.
+  size_t nm = ccord_store_message_count(F.store, ch1);
+  CT_CHECK(nm > 0);
+  const ccord_message *m0 = ccord_store_message_at(F.store, ch1, nm - 1u);
+  CT_CHECK(m0 != nullptr);
+  ccord_id mid = m0->id;
+  char orig_content[256];
+  snprintf(orig_content, sizeof orig_content, "%.255s", m0->content ? m0->content : "");
+  float base_h = 0.0f;
+  for (size_t i = 0; i < F.ui->nvis; i++) {
+    if (!F.ui->vis[i].is_local && F.ui->vis[i].msg_id == mid) base_h = F.ui->vis[i].h;
+  }
+  CT_CHECK(base_h > 0.0f);
+
+  ccord_decorator_contribution ov = {
+    .owner = owner, .decor_id = "p3-ov", .target = CCORD_DECOR_MESSAGE_STYLE, .target_id = mid,
+    .content_override = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5",
+    .embeds_append_json = "[{\"title\":\"Appended Card\",\"description\":\"Extra preview details\",\"color\":5793266}]",
+  };
+  CT_CHECK(ccord_contrib_set_decorator(F.contrib, &ov, &err) == CCORD_OK);
+  frame(3);
+  float ov_h = 0.0f;
+  for (size_t i = 0; i < F.ui->nvis; i++) {
+    if (!F.ui->vis[i].is_local && F.ui->vis[i].msg_id == mid) ov_h = F.ui->vis[i].h;
+  }
+  CT_CHECK(ov_h > base_h + 40.0f);
+  // Store message content must NEVER be mutated!
+  const ccord_message *m_after = ccord_store_find_message(F.store, ch1, mid);
+  CT_CHECK(m_after && strcmp(m_after->content ? m_after->content : "", orig_content) == 0);
+
+  // 2. channel_style hidden=true hides unselected ch2, NEVER hides selected ch1 (anti-lockout), and shows toggle row!
+  ccord_decorator_contribution hide_sel = {
+    .owner = owner, .decor_id = "cs-sel", .target = CCORD_DECOR_CHANNEL_STYLE, .target_id = ch1,
+    .hidden = true, .tint_color = "#22446640", .accent_color = "#ffaa00",
+  };
+  ccord_decorator_contribution hide_other = {
+    .owner = owner, .decor_id = "cs-other", .target = CCORD_DECOR_CHANNEL_STYLE, .target_id = ch2,
+    .hidden = true,
+  };
+  CT_CHECK(ccord_contrib_set_decorator(F.contrib, &hide_sel, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_set_decorator(F.contrib, &hide_other, &err) == CCORD_OK);
+  frame(2);
+
+  bool saw_ch1 = false, saw_ch2 = false;
+  size_t toggle_idx = SIZE_MAX;
+  for (size_t i = 0; i < F.ui->ncrow; i++) {
+    if (F.ui->crow[i].dm_nav == DM_NAV_PLUGIN_HIDDEN_CHANNELS) { toggle_idx = i; continue; }
+    if (F.ui->crow[i].dm_nav != DM_NAV_NONE || F.ui->crow[i].is_category || F.ui->crow[i].is_voice_user ||
+        F.ui->crow[i].is_relationship) continue;
+    const ccord_channel *c = ccord_store_channel_at(F.store, gid, F.ui->crow[i].index);
+    if (c && c->id == ch1) saw_ch1 = true;
+    if (c && c->id == ch2) saw_ch2 = true;
+  }
+  CT_CHECK(saw_ch1);
+  CT_CHECK(!saw_ch2);
+  CT_CHECK(toggle_idx != SIZE_MAX && F.ui->plugin_hidden_channel_count == 1u);
+
+  // Clicking the "Show 1 hidden channel" toggle row reveals ch2!
+  if (toggle_idx != SIZE_MAX) {
+    float ty = F.ui->layout.channel_scroll.y + F.ui->crow[toggle_idx].y - F.ui->chan_scroll + F.ui->crow[toggle_idx].h * 0.5f;
+    float tx = F.ui->layout.channel_scroll.x + F.ui->layout.channel_scroll.w * 0.5f;
+    click(tx, ty);
+    frame(2);
+    CT_CHECK(F.ui->plugin_show_hidden_channels);
+    saw_ch2 = false;
+    for (size_t i = 0; i < F.ui->ncrow; i++) {
+      if (F.ui->crow[i].dm_nav != DM_NAV_NONE || F.ui->crow[i].is_category || F.ui->crow[i].is_voice_user ||
+          F.ui->crow[i].is_relationship) continue;
+      const ccord_channel *c = ccord_store_channel_at(F.store, gid, F.ui->crow[i].index);
+      if (c && c->id == ch2) saw_ch2 = true;
+    }
+    CT_CHECK(saw_ch2);
+    F.ui->plugin_show_hidden_channels = false;
+  }
+
+  // 3. member_style hidden=true hides non-self member row and NEVER hides self!
+  ccord_id self_id = ccord_store_self_id(F.store);
+  ccord_id peer_id = CCORD_ID_NONE;
+  for (size_t mi = 0; mi < ccord_store_member_count(F.store, gid); mi++) {
+    const ccord_member *mb = ccord_store_member_at(F.store, gid, mi);
+    if (mb && mb->user_id != self_id) { peer_id = mb->user_id; break; }
+  }
+  CT_CHECK(peer_id != CCORD_ID_NONE);
+  if (peer_id != CCORD_ID_NONE) {
+    ccord_decorator_contribution hide_self = {
+      .owner = owner, .decor_id = "ms-self", .target = CCORD_DECOR_MEMBER_STYLE, .target_id = self_id,
+      .hidden = true, .text_color = "#00ff88",
+    };
+    ccord_decorator_contribution hide_peer = {
+      .owner = owner, .decor_id = "ms-peer", .target = CCORD_DECOR_MEMBER_STYLE, .target_id = peer_id,
+      .hidden = true,
+    };
+    CT_CHECK(ccord_contrib_set_decorator(F.contrib, &hide_self, &err) == CCORD_OK);
+    CT_CHECK(ccord_contrib_set_decorator(F.contrib, &hide_peer, &err) == CCORD_OK);
+    frame(2);
+    bool saw_self = false, saw_peer = false;
+    for (size_t i = 0; i < F.ui->nmrow; i++) {
+      if (F.ui->mrow[i].is_header) continue;
+      const ccord_member *mb = ccord_store_member_at(F.store, gid, F.ui->mrow[i].index);
+      if (mb && mb->user_id == self_id) saw_self = true;
+      if (mb && mb->user_id == peer_id) saw_peer = true;
+    }
+    CT_CHECK(saw_self);
+    CT_CHECK(!saw_peer);
+  }
+
+  ccord_contrib_remove_owner(F.contrib, owner);
+  frame(2);
+}
+
+typedef struct p4_ui_ev_log {
+  int panel_evs;
+  char last_node[64];
+  ccord_panel_event_kind last_kind;
+  char last_val[256];
+  char last_values_json[256];
+  int toast_acts;
+  uint64_t last_toast_id;
+  int popup_res;
+  uint64_t last_popup_req;
+  char last_popup_item[64];
+  int upload_hooks;
+  int upload_cancels;
+  bool hook_cancel_next;
+  bool hook_async_next;
+} p4_ui_ev_log;
+
+static void p4_panel_ev_cb(void *ud, const ccord_panel_contribution *p, const ccord_panel_event *ev)
+{
+  (void)p;
+  p4_ui_ev_log *l = ud;
+  l->panel_evs++;
+  snprintf(l->last_node, sizeof l->last_node, "%s", ev->node_id ? ev->node_id : "");
+  l->last_kind = ev->kind;
+  snprintf(l->last_val, sizeof l->last_val, "%s", ev->text_value ? ev->text_value : "");
+  snprintf(l->last_values_json, sizeof l->last_values_json, "%s", ev->values_json ? ev->values_json : "");
+}
+
+static void p4_toast_act_cb(void *ud, const char *owner, uint64_t toast_id)
+{
+  (void)owner;
+  p4_ui_ev_log *l = ud;
+  l->toast_acts++;
+  l->last_toast_id = toast_id;
+}
+
+static void p4_popup_res_cb(void *ud, const char *owner, uint64_t req_id, const char *item_id)
+{
+  (void)owner;
+  p4_ui_ev_log *l = ud;
+  l->popup_res++;
+  l->last_popup_req = req_id;
+  snprintf(l->last_popup_item, sizeof l->last_popup_item, "%s", item_id ? item_id : "<nil>");
+}
+
+static void p4_before_upload_cb(void *ud, ccord_id gid, ccord_id cid, const char *content,
+                                ccord_upload_hook_file *files, size_t count, ccord_upload_hook_result *out)
+{
+  (void)gid; (void)cid; (void)content; (void)files; (void)count;
+  p4_ui_ev_log *l = ud;
+  l->upload_hooks++;
+  if (l->hook_cancel_next) {
+    out->cancelled = true;
+    snprintf(out->notice, sizeof out->notice, "Hook refused file");
+    return;
+  }
+  if (l->hook_async_next) {
+    out->async_pending = true;
+    out->async_job_id = 77u;
+    return;
+  }
+}
+
+static void p4_cancel_upload_cb(void *ud, uint64_t job_id)
+{
+  (void)job_id;
+  p4_ui_ev_log *l = ud;
+  l->upload_cancels++;
+}
+
+static void test_phase4_panels_overlays_toasts_and_uploads(void)
+{
+  ccord_error err = {0};
+  const char *owner = "dev.test.p4ui";
+  p4_ui_ev_log log = {0};
+  ccord_contrib_set_handlers(F.contrib, &(ccord_contrib_handlers){
+    .ud = &log,
+    .panel_event = p4_panel_ev_cb,
+    .toast_action = p4_toast_act_cb,
+    .popup_menu_result = p4_popup_res_cb,
+    .before_upload_hook = p4_before_upload_cb,
+    .cancel_upload_transform = p4_cancel_upload_cb,
+  });
+
+  // 1. Phase 4A: Panel textarea (multiline + Ctrl+Enter submit), link, searchable multi-select popover,
+  //    max_lines clamping, tooltip-only hit not swallowing parent click, and >128 dynamic children in scroll!
+  ccord_buf dyn_json; ccord_buf_init(&dyn_json, 0);
+  ccord_jw jw; ccord_jw_init(&jw, &dyn_json);
+  ccord_jw_begin_object(&jw);
+  ccord_jw_key(&jw, "type"); ccord_jw_cstr(&jw, "column");
+  ccord_jw_key(&jw, "padding"); ccord_jw_begin_array(&jw); ccord_jw_int(&jw, 8); ccord_jw_int(&jw, 8); ccord_jw_end_array(&jw);
+  ccord_jw_key(&jw, "gap"); ccord_jw_int(&jw, 6);
+  ccord_jw_key(&jw, "children"); ccord_jw_begin_array(&jw);
+  // textarea
+  ccord_jw_begin_object(&jw);
+  ccord_jw_key(&jw, "type"); ccord_jw_cstr(&jw, "textarea");
+  ccord_jw_key(&jw, "id"); ccord_jw_cstr(&jw, "ta1");
+  ccord_jw_key(&jw, "rows"); ccord_jw_int(&jw, 3);
+  ccord_jw_key(&jw, "value"); ccord_jw_cstr(&jw, "L1");
+  ccord_jw_end_object(&jw);
+  // link
+  ccord_jw_begin_object(&jw);
+  ccord_jw_key(&jw, "type"); ccord_jw_cstr(&jw, "link");
+  ccord_jw_key(&jw, "id"); ccord_jw_cstr(&jw, "lnk1");
+  ccord_jw_key(&jw, "text"); ccord_jw_cstr(&jw, "Docs");
+  ccord_jw_key(&jw, "url"); ccord_jw_cstr(&jw, "https://example.com/docs");
+  ccord_jw_end_object(&jw);
+  // searchable multi-select
+  ccord_jw_begin_object(&jw);
+  ccord_jw_key(&jw, "type"); ccord_jw_cstr(&jw, "select");
+  ccord_jw_key(&jw, "id"); ccord_jw_cstr(&jw, "sel1");
+  ccord_jw_key(&jw, "searchable"); ccord_jw_bool(&jw, true);
+  ccord_jw_key(&jw, "multiple"); ccord_jw_bool(&jw, true);
+  ccord_jw_key(&jw, "options"); ccord_jw_begin_array(&jw);
+  static const char *const k_opts[] = {"Alpha", "Beta", "Gamma"};
+  for (size_t oi = 0; oi < 3u; oi++) {
+    ccord_jw_begin_object(&jw);
+    ccord_jw_key(&jw, "label"); ccord_jw_cstr(&jw, k_opts[oi]);
+    ccord_jw_key(&jw, "value"); ccord_jw_cstr(&jw, k_opts[oi]);
+    ccord_jw_end_object(&jw);
+  }
+  ccord_jw_end_array(&jw);
+  ccord_jw_end_object(&jw);
+  // clamped text with tooltip inside clickable button
+  ccord_jw_begin_object(&jw);
+  ccord_jw_key(&jw, "type"); ccord_jw_cstr(&jw, "button");
+  ccord_jw_key(&jw, "id"); ccord_jw_cstr(&jw, "btn_tip");
+  ccord_jw_key(&jw, "label"); ccord_jw_cstr(&jw, "TipBtn");
+  ccord_jw_key(&jw, "tooltip"); ccord_jw_cstr(&jw, "Btn tip");
+  ccord_jw_end_object(&jw);
+  ccord_jw_begin_object(&jw);
+  ccord_jw_key(&jw, "type"); ccord_jw_cstr(&jw, "text");
+  ccord_jw_key(&jw, "text"); ccord_jw_cstr(&jw, "Line one\nLine two\nLine three\nLine four");
+  ccord_jw_key(&jw, "max_lines"); ccord_jw_int(&jw, 2);
+  ccord_jw_key(&jw, "tooltip"); ccord_jw_cstr(&jw, "Text tip");
+  ccord_jw_end_object(&jw);
+  // scroll with 160 children (exceeds old 128 cap!)
+  ccord_jw_begin_object(&jw);
+  ccord_jw_key(&jw, "type"); ccord_jw_cstr(&jw, "scroll");
+  ccord_jw_key(&jw, "id"); ccord_jw_cstr(&jw, "scr160");
+  ccord_jw_key(&jw, "h"); ccord_jw_int(&jw, 80);
+  ccord_jw_key(&jw, "children"); ccord_jw_begin_array(&jw);
+  for (int ci = 0; ci < 160; ci++) {
+    char tbuf[24];
+    snprintf(tbuf, sizeof tbuf, "Row %d", ci);
+    ccord_jw_begin_object(&jw);
+    ccord_jw_key(&jw, "type"); ccord_jw_cstr(&jw, "text");
+    ccord_jw_key(&jw, "text"); ccord_jw_cstr(&jw, tbuf);
+    ccord_jw_end_object(&jw);
+  }
+  ccord_jw_end_array(&jw);
+  ccord_jw_end_object(&jw);
+  ccord_jw_end_array(&jw);
+  ccord_jw_end_object(&jw);
+
+  ccord_panel_spec pspec = {
+    .slot = CCORD_PANEL_MODAL, .width = 400.0f, .height = 360.0f,
+    .title = "Phase 4 Panel", .visible = true, .root_json = ccord_buf_cstr(&dyn_json),
+  };
+  CT_CHECK(ccord_contrib_set_panel_ex(F.contrib, owner, "p4m", &pspec, &err) == CCORD_OK);
+  ccord_buf_free(&dyn_json);
+  frame(2);
+
+  ccord_rect ta_r = {0}, sel_r = {0}, btn_r = {0};
+  CT_CHECK(ui_panels_find_hit_rect(F.ui, owner, "p4m", "ta1", &ta_r) && ta_r.h >= 40.0f);
+  CT_CHECK(ui_panels_find_hit_rect(F.ui, owner, "p4m", "sel1", &sel_r) && sel_r.w > 20.0f);
+  CT_CHECK(ui_panels_find_hit_rect(F.ui, owner, "p4m", "btn_tip", &btn_r) && btn_r.w > 20.0f);
+
+  // Focus textarea, insert newline via Enter, type "L2", submit with Ctrl+Enter!
+  click(ta_r.x + 8.0f, ta_r.y + 8.0f);
+  key(CCORD_KEY_RETURN, 0);
+  ui_send((ccord_input_event){.type = CCORD_IN_TEXT, .text = "L2"});
+  key(CCORD_KEY_RETURN, CCORD_MOD_CTRL);
+  frame(1);
+  CT_CHECK(strcmp(log.last_node, "ta1") == 0 && log.last_kind == CCORD_PANEL_EV_SUBMIT &&
+           strcmp(log.last_val, "L1\nL2") == 0);
+
+  // Open searchable multi-select popover, toggle Alpha, then type filter "gam" & toggle Gamma -> emits values JSON array!
+  click(sel_r.x + 12.0f, sel_r.y + sel_r.h * 0.5f);
+  frame(2);
+  // Popover geometry: +4 gap + 6 pad + 32 filter = +42 -> row 0 ("Alpha") center is +56.
+  click(sel_r.x + 20.0f, sel_r.y + sel_r.h + 56.0f);
+  frame(1);
+  CT_CHECK(strcmp(log.last_node, "sel1") == 0 && log.last_kind == CCORD_PANEL_EV_CHANGE &&
+           strstr(log.last_values_json, "\"Alpha\"") != nullptr);
+  // Type filter "gam" -> narrows list so "Gamma" becomes row 0 (+56)!
+  ui_send((ccord_input_event){.type = CCORD_IN_TEXT, .text = "gam"});
+  frame(1);
+  click(sel_r.x + 20.0f, sel_r.y + sel_r.h + 56.0f);
+  frame(1);
+  CT_CHECK(strstr(log.last_values_json, "\"Alpha\"") != nullptr &&
+           strstr(log.last_values_json, "\"Gamma\"") != nullptr);
+  // Close modal panel cleanly
+  CT_CHECK(ccord_contrib_remove_panel(F.contrib, owner, "p4m"));
+  frame(2);
+
+  // 2. Phase 4C: 4-slot stacked interactive toasts (push 5 -> oldest evicted; click action pill dispatches toast_action)
+  F.ui->ntoasts = 0;
+  F.ui->notice[0] = '\0';
+  for (uint64_t i = 1; i <= 5u; i++) {
+    char msg[32];
+    snprintf(msg, sizeof msg, "Toast #%llu", (unsigned long long)i);
+    CT_CHECK(ccord_contrib_ui_toast_show(F.contrib, owner, i, msg, (uint8_t)(i % 3u), 5000u, i == 5u ? "Jump" : nullptr));
+  }
+  CT_CHECK(F.ui->ntoasts == UI_TOAST_MAX_SLOTS && F.ui->toasts[0].toast_id == 2u &&
+           F.ui->toasts[UI_TOAST_MAX_SLOTS - 1u].toast_id == 5u);
+  frame(2);
+  ccord_rect ar = F.ui->toasts[UI_TOAST_MAX_SLOTS - 1u].action_rect;
+  CT_CHECK(ar.w > 10.0f && ar.h > 10.0f);
+  click(ar.x + ar.w * 0.5f, ar.y + ar.h * 0.5f);
+  frame(1);
+  CT_CHECK(log.toast_acts == 1 && log.last_toast_id == 5u && F.ui->ntoasts == UI_TOAST_MAX_SLOTS - 1u);
+  F.ui->ntoasts = 0;
+  F.ui->notice[0] = '\0';
+
+  // 3. Phase 4B: ui.media.open with texture_key preserves plugin texture across close; ui.open_user_profile opens popover;
+  //    and ui.menu.popup handles selection & outside-click dismiss!
+  static const uint8_t k_1x1_gif[] = {
+    'G','I','F','8','9','a', 1,0, 1,0, 0x80, 0, 0,
+    0xff,0x00,0x00, 0x00,0x00,0x00,
+    0x2c, 0,0,0,0, 1,0, 1,0, 0,
+    0x02, 0x02, 0x44, 0x01, 0x00, 0x3b
+  };
+  CT_CHECK(ccord_render_upload_image(F.renderer, "plugin:p4tex", k_1x1_gif, sizeof k_1x1_gif, nullptr, nullptr, &err) == CCORD_OK);
+  CT_CHECK(ccord_contrib_ui_open_media(F.contrib, "[{\"source\":\"texture_key\",\"value\":\"plugin:p4tex\",\"filename\":\"p4.png\"}]", 0u));
+  frame(2);
+  CT_CHECK(F.ui->lightbox_open && F.ui->lightbox_open_btn.w == 0.0f);
+  ui_close_lightbox(F.ui);
+  frame(1);
+  // Plugin-owned texture_key MUST still exist in renderer after lightbox closes!
+  CT_CHECK(ccord_render_has_texture(F.renderer, "plugin:p4tex", nullptr, nullptr));
+  ccord_render_evict_texture(F.renderer, "plugin:p4tex");
+
+  // ui.open_user_profile opens member popover cleanly (and is suppressed on protected security surfaces).
+  ccord_id uid = ccord_store_self_id(F.store);
+  F.ui->member_popover_open = false;
+  CT_CHECK(ccord_contrib_ui_open_user_profile(F.contrib, uid, ccord_store_selected_guild(F.store)));
+  CT_CHECK(F.ui->member_popover_open && F.ui->member_popover_user_id == uid);
+  F.ui->member_popover_open = false;
+  F.ui->account_mfa_required = true;
+  CT_CHECK(!ccord_contrib_ui_open_user_profile(F.contrib, uid, CCORD_ID_NONE));
+  F.ui->account_mfa_required = false;
+
+  // ui.menu.popup opens, selects item on click, and sends nil on outside-click dismiss!
+  CT_CHECK(ccord_contrib_ui_open_popup_menu(F.contrib, owner, 11u, 200.0f, 200.0f, true,
+                                            "[{\"id\":\"opt1\",\"label\":\"Option One\"},{\"id\":\"opt2\",\"label\":\"Option Two\",\"danger\":true}]"));
+  frame(2);
+  CT_CHECK(F.ui->menu.open && F.ui->menu.is_plugin_popup);
+  ccord_rect r_opt2 = {0};
+  CT_CHECK(ccord_ui_context_menu_find(F.ui, "Option Two", &r_opt2));
+  click(r_opt2.x + 12.0f, r_opt2.y + r_opt2.h * 0.5f);
+  frame(1);
+  CT_CHECK(log.popup_res == 1 && log.last_popup_req == 11u && strcmp(log.last_popup_item, "opt2") == 0);
+
+  CT_CHECK(ccord_contrib_ui_open_popup_menu(F.contrib, owner, 12u, 200.0f, 200.0f, true,
+                                            "[{\"id\":\"opt1\",\"label\":\"Dismiss Me\"}]"));
+  frame(2);
+  click(10.0f, 10.0f);   // outside click dismisses popup
+  frame(1);
+  CT_CHECK(log.popup_res == 2 && log.last_popup_req == 12u && strcmp(log.last_popup_item, "<nil>") == 0);
+
+  // 4. Phase 4D: Composer before_upload hook cancel + async processing strip with Cancel button!
+  static const uint8_t k_sample_up[] = {'H', 'E', 'L', 'L', 'O'};
+  ccord_ui_clear_attachment(F.ui);
+  CT_CHECK(ccord_ui_attach_bytes(F.ui, "sample.txt", k_sample_up, sizeof k_sample_up));
+  log.hook_cancel_next = true;
+  F.ui->notice[0] = '\0';
+  ui_send_composer(F.ui);
+  frame(1);
+  CT_CHECK(log.upload_hooks == 1 && strstr(F.ui->notice, "Hook refused file") != nullptr && F.ui->staged_file_count == 1u);
+
+  log.hook_cancel_next = false;
+  log.hook_async_next = true;
+  ui_send_composer(F.ui);
+  frame(2);
+  CT_CHECK(F.ui->upload_hook_pending && F.ui->upload_hook_job_id == 77u && F.ui->upload_hook_cancel_rect.w > 20.0f);
+  click(F.ui->upload_hook_cancel_rect.x + 8.0f, F.ui->upload_hook_cancel_rect.y + 8.0f);
+  frame(1);
+  CT_CHECK(!F.ui->upload_hook_pending && log.upload_cancels == 1);
+  ccord_ui_clear_attachment(F.ui);
+
+  ccord_contrib_set_handlers(F.contrib, nullptr);
+  ccord_contrib_remove_owner(F.contrib, owner);
+  frame(2);
+}
+
 int main(int argc, char **argv)
 {
   if (!setup(argc > 0 ? argv[0] : "test_ui_interaction_ext")) {
@@ -3331,6 +3985,10 @@ int main(int argc, char **argv)
   test_power_efficiency_and_wave2_helpers();
   test_positioned_timeline_messages_and_style();
   test_dynamic_context_menu_ui();
+  test_message_accessory_above_body_and_jump();
+  test_phase2_settings_schema_polish();
+  test_phase3_content_override_and_row_styles();
+  test_phase4_panels_overlays_toasts_and_uploads();
   ui_test_teardown();
   ct_failures += ui_test_harness_failures();
   return CT_RESULT("test_ui_interaction_ext");

@@ -758,10 +758,26 @@ void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r)
     if (!u) continue;
     bool offline = u->presence == CCORD_PRESENCE_OFFLINE;
     bool hover = (int)i == ui->hover_mrow && !ui->menu.open && !ui->settings_open;
+    ui_row_style_ov mst = {0};
+    bool has_mst = ui_decor_member_style(ui, m->user_id, &mst);
+    bool pushed_m_alpha = false;
+    if (has_mst && (mst.dim || mst.has_opacity)) {
+      float op = mst.has_opacity ? mst.opacity : 0.48f;
+      if (op < 0.15f) op = 0.15f;
+      if (op > 1.0f) op = 1.0f;
+      ccord_push_alpha(r, op);
+      pushed_m_alpha = true;
+    }
     ccord_rect item = {l->x + 8.0f, y, l->w - 16.0f, row->h};
     ui_row_state mrs = ui_row_state_of(ui, "member", m->user_id, hover, false, COL(bg_secondary));
     ccord_color item_bg = mrs.bg;
     ui_row_state_fill(ui, r, &mrs, item, M(channel_item_radius));
+    if (has_mst && mst.tint.a > 0) {
+      ccord_draw_rrect(r, item, M(channel_item_radius), mst.tint);
+    }
+    if (has_mst && mst.accent.a > 0) {
+      ccord_draw_rrect(r, (ccord_rect){item.x + 1.0f, item.y + 4.0f, 3.0f, item.h - 8.0f}, 1.5f, mst.accent);
+    }
     bool profile_open = (ui->member_popover_open && ui->member_popover_user_id == m->user_id) ||
                         (ui->modal_kind == UI_MODAL_USER_PROFILE && ui->modal_target_id == m->user_id);
     const char *np_asset = m->nameplate_asset[0] ? m->nameplate_asset : u->nameplate_asset;
@@ -786,6 +802,7 @@ void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r)
     bool has_status = ui_format_user_activity_line(ui, u, act_line, sizeof act_line);
     ccord_color role_c = row->name_color != 0 ? ui_rgb_color(row->name_color) : COL(text_normal);
     ccord_color nc = (row->name_color != 0 && ui->settings_role_color_mode == 0) ? role_c : COL(text_normal);
+    if (has_mst && mst.has_text_color) nc = mst.text_color;
     if (offline) nc = ui_mix(nc, item_bg, 0.55f);
     ccord_text_style ns = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_base), nc);
     float nh = ui_line_h(ui, ns.size);
@@ -828,6 +845,7 @@ void ui_draw_member_list(ccord_ui *ui, ccord_renderer *r)
       bx += ui_decor_draw_inline_badges(ui, r, CCORD_DECOR_MEMBER_BADGE, m->user_id, bx, ny, nh, item_bg);
     }
     if (has_status) ccord_text_draw_ellipsis(r, act_line, strlen(act_line), tx, ny + nh - 1.0f, maxw, &ss);
+    if (pushed_m_alpha) ccord_pop_alpha(r);
   }
   ui_track_end(&ui->trk_member);
   ccord_pop_clip(r);

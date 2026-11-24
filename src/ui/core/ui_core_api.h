@@ -147,6 +147,12 @@ bool ui_open_url(ccord_ui *ui, const char *url, const char *label);
 bool ui_activate_link(ccord_ui *ui, const char *url);
 void ui_open_lightbox(ccord_ui *ui, const char *const *urls, size_t count, size_t index);
 void ui_open_lightbox_hit(ccord_ui *ui, const ui_img_hit *hit);
+bool ui_open_lightbox_plugin_items(ccord_ui *ui, const char *items_json, size_t index);
+bool ui_menu_open_plugin_popup(ccord_ui *ui, const char *owner, uint64_t req_id, float x, float y,
+                               bool has_pos, const char *items_json);
+void ui_toast_push(ccord_ui *ui, const char *owner, uint64_t toast_id, const char *text, uint8_t level,
+                   uint32_t duration_ms, const char *action_label);
+bool ui_toasts_handle_click(ccord_ui *ui, const ccord_input_event *ev);
 void ui_lightbox_select_index(ccord_ui *ui, size_t index);
 void ui_close_lightbox(ccord_ui *ui);
 void ui_lightbox_draw(ccord_ui *ui, ccord_renderer *r);

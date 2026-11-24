@@ -49,13 +49,33 @@ typedef struct ui_msg_style_ov {
   float opacity;
   bool collapsed;
   const char *collapse_label;
+  bool has_content_override;
+  const char *content_override;
+  const char *embeds_append_json;
 } ui_msg_style_ov;
+
+typedef struct ui_row_style_ov {
+  ccord_color accent;
+  ccord_color tint;
+  ccord_color text_color;
+  bool has_text_color;
+  bool dim;
+  bool has_opacity;
+  float opacity;
+  bool hidden;
+} ui_row_style_ov;
 
 bool ui_resolve_color_spec(const ccord_ui *ui, const char *spec, ccord_color *out);
 bool ui_decor_message_style_ex(const ccord_ui *ui, ccord_id msg_id, ui_msg_style_ov *out);
+bool ui_decor_channel_style(const ccord_ui *ui, ccord_id channel_id, ui_row_style_ov *out);
+bool ui_decor_member_style(const ccord_ui *ui, ccord_id user_id, ui_row_style_ov *out);
 bool ui_decor_message_style(const ccord_ui *ui, ccord_id msg_id, ccord_color *out_accent, ccord_color *out_tint,
                             bool *out_collapsed, const char **out_collapse_label);
 float ui_decor_draw_message_badges(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id, float x, float y, float line_h, ccord_color bg);
+float ui_decor_measure_message_accessories_pos(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id,
+                                               ccord_decor_position pos, float max_w);
+float ui_decor_draw_message_accessories_pos(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id,
+                                            ccord_decor_position pos, float x, float y, float max_w, ccord_color bg);
 float ui_decor_measure_message_accessories(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id, float max_w);
 float ui_decor_draw_message_accessories(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id, float x, float y, float max_w, ccord_color bg);
 float ui_decor_draw_inline_badges(ccord_ui *ui, ccord_renderer *r, ccord_decor_target target, ccord_id id,

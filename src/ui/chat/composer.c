@@ -287,6 +287,27 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
   }
   memset(ui->staged_spoiler_rects, 0, sizeof ui->staged_spoiler_rects);
   memset(ui->staged_remove_rects, 0, sizeof ui->staged_remove_rects);
+  ui->upload_hook_cancel_rect = (ccord_rect){0};
+  if (ui->upload_hook_pending) {
+    float ph = 28.0f;
+    ccord_rect pbar = {box.x, box.y, box.w, ph};
+    ccord_draw_rrect(r, pbar, 4.0f, COL(bg_secondary));
+    ccord_text_style pst = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(text_header));
+    const char *plbl = "Processing attachments...";
+    ccord_text_draw(r, plbl, strlen(plbl), pbar.x + 10.0f, pbar.y + (ph - ui_line_h(ui, pst.size)) * 0.5f, &pst, 0.0f);
+    float cw = 64.0f, ch_btn = 20.0f;
+    ccord_rect crc = {pbar.x + pbar.w - cw - 6.0f, pbar.y + (ph - ch_btn) * 0.5f, cw, ch_btn};
+    ui->upload_hook_cancel_rect = crc;
+    bool chov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, crc);
+    ccord_draw_rrect(r, crc, 4.0f, chov ? COL(danger) : COL(bg_tertiary));
+    ccord_text_style cst = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 2.0f,
+                                    chov ? COL(text_on_brand) : COL(text_normal));
+    ccord_vec2 cm = ccord_text_measure(r, "Cancel", 6, &cst, 0.0f);
+    ccord_text_draw(r, "Cancel", 6, crc.x + (crc.w - cm.x) * 0.5f, crc.y + (crc.h - cm.y) * 0.5f, &cst, 0.0f);
+    box.y += ph + 2.0f;
+    box.h -= ph + 2.0f;
+    if (box.h < 10.0f) return;
+  }
   {
     ccord_upload_progress ups[UI_UPLOADS_SHOW_MAX];
     size_t nup_total = ui_channel_active_uploads(ui, ups, UI_UPLOADS_SHOW_MAX);
@@ -928,38 +949,95 @@ void ui_send_composer(ccord_ui *ui)
     return;
   }
   if (has_files) {
-    ccord_upload_file ufiles[CCORD_RICH_MAX_ATTACHMENTS];
-    for (size_t i = 0; i < ui->staged_file_count; i++) {
-      ufiles[i] = (ccord_upload_file){
-        .filename = ui->staged_files[i].filename,
-        .data = ui->staged_files[i].data,
-        .size = ui->staged_files[i].size,
-        .spoiler = ui->staged_files[i].spoiler,
-      };
+    if (ui->upload_hook_pending) {
+      ui_notice(ui, "Attachments are still being processed");
+      return;
     }
     ccord_id rep_id = (ui->reply_message != CCORD_ID_NONE && ui->reply_channel == ch->id)
                         ? ui->reply_message
                         : CCORD_ID_NONE;
-    if (ccord_session_send_message_with_files(ui->d.session, ch->id, rep_id, ui->reply_ping,
-                                              t, len, ufiles, ui->staged_file_count, &err) != CCORD_OK) {
-      ui_notice(ui, "Cannot send attachment: %s", err.message);
+    ccord_upload_hook_file hfiles[CCORD_RICH_MAX_ATTACHMENTS];
+    size_t hcount = ui->staged_file_count;
+    for (size_t i = 0; i < hcount; i++) {
+      hfiles[i] = (ccord_upload_hook_file){
+        .data = ui->staged_files[i].data,
+        .size = ui->staged_files[i].size,
+        .spoiler = ui->staged_files[i].spoiler,
+      };
+      memcpy(hfiles[i].filename, ui->staged_files[i].filename, sizeof hfiles[i].filename);
+      hfiles[i].filename[sizeof hfiles[i].filename - 1u] = '\0';
+    }
+    ccord_upload_hook_result hres = {0};
+    if (ui->d.contrib) {
+      ccord_contrib_run_before_upload(ui->d.contrib, ch->guild_id, ch->id, t, hfiles, hcount, &hres);
+    }
+    // Synchronize potentially replaced buffers back to staged_files to preserve single ownership.
+    for (size_t i = 0; i < hcount; i++) {
+      ui->staged_files[i].data = hfiles[i].data;
+      ui->staged_files[i].size = hfiles[i].size;
+      if (!hres.cancelled) {
+        ui->staged_files[i].spoiler = hfiles[i].spoiler;
+        memcpy(ui->staged_files[i].filename, hfiles[i].filename, sizeof ui->staged_files[i].filename);
+        ui->staged_files[i].filename[sizeof ui->staged_files[i].filename - 1u] = '\0';
+      }
+    }
+    if (hres.cancelled) {
+      ui_notice(ui, "%s", hres.notice[0] ? hres.notice : "Upload cancelled by plugin");
       return;
     }
-    ccord_ui_clear_attachment(ui);
-    ui->reply_channel = ui->reply_message = CCORD_ID_NONE;
-    ui->reply_ping = true;
-    ui->reply_ping_rect = (ccord_rect){0, 0, 0, 0};
-    ccord_text_edit_clear(&ui->edit);
-    ui_clear_channel_draft(ui, ch->id);
-    ui->autocomplete_open = false;
-    ui->nautocomplete = 0;
-    ui_record_slowmode_sent(ui, ch);
-    ui_dismiss_new_marker(ui, false);
-    ui->msg_scroll_vel = 0.0f;
-    ccord_vlist_reset_bottom(&ui->vlist);
-    ui->composer_scroll = 0.0f;
-    ui->dirty = true;
-    return;
+    if (hres.async_pending && hres.async_job_id != 0u) {
+      ui->upload_hook_pending = true;
+      ui->upload_hook_job_id = hres.async_job_id;
+      ui->upload_hook_channel_id = ch->id;
+      ui->upload_hook_reply_id = rep_id;
+      ui->upload_hook_reply_ping = ui->reply_ping;
+      ccord_free(ui->upload_hook_text);
+      ui->upload_hook_text = ccord_strdup(t);
+      ui->dirty = true;
+      return;
+    }
+
+    ccord_upload_file ufiles[CCORD_RICH_MAX_ATTACHMENTS];
+    size_t nu = 0u;
+    for (size_t i = 0; i < hcount; i++) {
+      if (hfiles[i].dropped || !hfiles[i].data || hfiles[i].size == 0u) continue;
+      ufiles[nu++] = (ccord_upload_file){
+        .filename = hfiles[i].filename,
+        .data = hfiles[i].data,
+        .size = hfiles[i].size,
+        .spoiler = hfiles[i].spoiler,
+      };
+    }
+    if (hres.notice[0]) ui_notice(ui, "%s", hres.notice);
+    if (nu == 0u) {
+      ccord_ui_clear_attachment(ui);
+      if (len == 0u) {
+        ui->dirty = true;
+        return;
+      }
+      // All attachments dropped by hook, but text remains: fall through to text send.
+    } else {
+      if (ccord_session_send_message_with_files(ui->d.session, ch->id, rep_id, ui->reply_ping,
+                                                t, len, ufiles, nu, &err) != CCORD_OK) {
+        ui_notice(ui, "Cannot send attachment: %s", err.message);
+        return;
+      }
+      ccord_ui_clear_attachment(ui);
+      ui->reply_channel = ui->reply_message = CCORD_ID_NONE;
+      ui->reply_ping = true;
+      ui->reply_ping_rect = (ccord_rect){0, 0, 0, 0};
+      ccord_text_edit_clear(&ui->edit);
+      ui_clear_channel_draft(ui, ch->id);
+      ui->autocomplete_open = false;
+      ui->nautocomplete = 0;
+      ui_record_slowmode_sent(ui, ch);
+      ui_dismiss_new_marker(ui, false);
+      ui->msg_scroll_vel = 0.0f;
+      ccord_vlist_reset_bottom(&ui->vlist);
+      ui->composer_scroll = 0.0f;
+      ui->dirty = true;
+      return;
+    }
   }
   if (ui->reply_message != CCORD_ID_NONE) {
     if (ccord_session_send_reply_ex(ui->d.session, ui->reply_channel, ui->reply_message, ui->reply_ping,

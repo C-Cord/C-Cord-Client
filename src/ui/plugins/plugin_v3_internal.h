@@ -22,8 +22,9 @@
 #define V3_MAX_ACTBTN_HITS    64u
 #define V3_MAX_LOCAL_HITS     64u
 #define V3_MAX_RAIL_HITS      16u
-#define V3_MAX_FORM_FIELDS    32u
-#define V3_MAX_FIELD_OPTS     24u
+#define V3_MAX_FORM_FIELDS   256u
+#define V3_MAX_FIELD_OPTS    256u
+#define V3_MAX_VIS_IN          8u
 
 typedef struct v3_decor_hit {
   char owner[65];
@@ -62,6 +63,8 @@ typedef enum v3_field_kind : uint8_t {
   V3F_SLIDER,
   V3F_SELECT,
   V3F_COLOR,
+  V3F_BUTTON,
+  V3F_PATH,
 } v3_field_kind;
 
 typedef struct v3_opt {
@@ -69,29 +72,48 @@ typedef struct v3_opt {
   char value[64];
 } v3_opt;
 
+typedef struct v3_vis_cond {
+  bool active;
+  char key[65];
+  bool has_equals;
+  char equals_val[96];
+  bool has_not_equals;
+  char not_equals_val[96];
+  bool has_truthy;
+  bool truthy_want;
+  char in_vals[V3_MAX_VIS_IN][64];
+  size_t nin_vals;
+} v3_vis_cond;
+
 typedef struct v3_field {
   v3_field_kind kind;
   char key[65];
   char label[96];
   char desc[160];
   char placeholder[96];
+  char button_label[64];
+  uint8_t btn_variant;   // 0=secondary, 1=primary, 2=danger
+  bool path_is_dir;      // for V3F_PATH: false="file", true="dir"
+  v3_vis_cond vis;
   bool bool_val;
   double num_val;
   double num_min;
   double num_max;
   double num_step;
-  v3_opt opts[V3_MAX_FIELD_OPTS];
+  v3_opt *opts;
   size_t nopts;
   size_t sel_idx;
   ccord_text_edit edit;
   bool edit_inited;
   ccord_rect hit_rect;
+  ccord_rect browse_rect;
+  ccord_rect clear_rect;
 } v3_field;
 
 typedef struct v3_dialog_state {
   uint64_t active_req_id;
   ccord_dialog_kind kind;
-  v3_field fields[V3_MAX_FORM_FIELDS];
+  v3_field *fields;
   size_t nfields;
   int focused_idx;
   int drag_slider_idx;
@@ -108,7 +130,7 @@ typedef struct v3_settings_state {
   char owner[65];
   char plugin_name[96];
   uint64_t loaded_rev;
-  v3_field fields[V3_MAX_FORM_FIELDS];
+  v3_field *fields;
   size_t nfields;
   int focused_idx;
   int drag_slider_idx;
@@ -157,10 +179,14 @@ struct ui_plugin_v3 {
   v3_dialog_state dlg;
   v3_settings_state set;
   v3_hitl_state hitl;
+
+  // Pending async OS file/folder picker target for V3F_PATH fields
+  int pending_path_field;
+  bool pending_path_in_settings;
 };
 
 
 // Cross-TU internal declarations
-void pv3_v3_clear_fields(v3_field *fields, size_t *nfields);
+void pv3_v3_clear_fields(v3_field **fields, size_t *nfields);
 ui_plugin_v3 * pv3_v3_ensure(ccord_ui *ui);
 bool pv3_v3_parse_hex_color(const char *s, ccord_color *out);

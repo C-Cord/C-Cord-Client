@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _POSIX_C_SOURCE 200809L
 #include "ui_core_internal.h"
+#include "../plugins/ui_plugins_api.h"
 
 // ---------------------------------------------------------------- caches (channel rows, member rows)
 
@@ -307,10 +308,31 @@ static void chan_idx_free(chan_idx_map *cm)
   *cm = (chan_idx_map){0};
 }
 
+static bool channel_plugin_hidden(const ccord_ui *ui, const ccord_channel *ch, ccord_id sel, ccord_id self_vc,
+                                  ccord_id g)
+{
+  if (!ui || !ch) return false;
+  ui_row_style_ov ov = {0};
+  if (!ui_decor_channel_style(ui, ch->id, &ov) || !ov.hidden) return false;
+  // Anti-lockout: never hide the currently selected channel, active voice channel, or parent of a selected thread.
+  if (ch->id == sel || ch->id == self_vc || has_selected_thread(ui->d.store, g, ch->id, sel)) return false;
+  return true;
+}
+
+static bool member_plugin_hidden(const ccord_ui *ui, ccord_id uid)
+{
+  if (!ui || uid == CCORD_ID_NONE) return false;
+  if (uid == ccord_store_self_id(ui->d.store)) return false;
+  if (ui->member_popover_open && ui->member_popover_user_id == uid) return false;
+  ui_row_style_ov ov = {0};
+  return ui_decor_member_style(ui, uid, &ov) && ov.hidden;
+}
+
 static void rebuild_channel_rows(ccord_ui *ui)
 {
   ui->ncrow = 0;
   ui->dbg_relationship_rows = 0;
+  ui->plugin_hidden_channel_count = 0;
   ccord_id g = ccord_store_selected_guild(ui->d.store);
   size_t n = ccord_store_channel_count(ui->d.store, g);
   ccord_id sel = ccord_store_selected_channel(ui->d.store);
@@ -431,7 +453,12 @@ static void rebuild_channel_rows(ccord_ui *ui)
         qsort(dms, ndm, sizeof *dms, cmp_dm_sort);
         for (size_t k = 0; k < ndm; k++) {
           const ccord_channel *ch = cm.chs[dms[k].idx];
-          if (ch && !append_channel_and_children(ui, g, &cm, dms[k].idx, ch, &y)) break;
+          if (!ch) continue;
+          if (channel_plugin_hidden(ui, ch, sel, CCORD_ID_NONE, g)) {
+            ui->plugin_hidden_channel_count++;
+            if (!ui->plugin_show_hidden_channels) continue;
+          }
+          if (!append_channel_and_children(ui, g, &cm, dms[k].idx, ch, &y)) break;
         }
         ccord_free(dms);
       }
@@ -458,12 +485,21 @@ static void rebuild_channel_rows(ccord_ui *ui)
    ((hide_muted && ui_channel_muted(ui, (ch))) || (!show_all_ch && ui_channel_is_hidden(ui, (ch)->id))) && \
    (ch)->id != sel && (ch)->mention_count == 0 && (ch)->id != self_vc && \
    !ui_channel_is_pinned(ui, (ch)->id) && !has_selected_thread(ui->d.store, g, (ch)->id, sel))
+#define CHANNEL_PLUGIN_SKIP(ch) \
+  (!ui->plugin_show_hidden_channels && channel_plugin_hidden(ui, (ch), sel, self_vc, g))
+
+  for (size_t i = 0; i < n; i++) {
+    const ccord_channel *ch = cm.chs[i];
+    if (!ch || ch->kind == CCORD_CHANNEL_CATEGORY || cm_is_thread(&cm, i) || !CHANNEL_SHOWN(i)) continue;
+    if (CHANNEL_MUTED_SKIP(ch)) continue;
+    if (channel_plugin_hidden(ui, ch, sel, self_vc, g)) ui->plugin_hidden_channel_count++;
+  }
 
   // Pinned guild channels appear first at the top of the server's channel list.
   for (size_t i = 0; i < n; i++) {
     const ccord_channel *ch = cm.chs[i];
     if (!ch || ch->kind == CCORD_CHANNEL_CATEGORY || cm_is_thread(&cm, i) || !CHANNEL_SHOWN(i)) continue;
-    if (!ui_channel_is_pinned(ui, ch->id)) continue;
+    if (!ui_channel_is_pinned(ui, ch->id) || CHANNEL_PLUGIN_SKIP(ch)) continue;
     if (!append_channel_and_children(ui, g, &cm, i, ch, &y)) goto done_channels;
   }
 
@@ -471,7 +507,7 @@ static void rebuild_channel_rows(ccord_ui *ui)
   for (size_t i = 0; i < n; i++) {
     const ccord_channel *ch = cm.chs[i];
     if (!ch || cm_is_thread(&cm, i) || !cm_is_cat_child(&cm, i) || !CHANNEL_SHOWN(i)) continue;
-    if (ui_channel_is_pinned(ui, ch->id) || CHANNEL_MUTED_SKIP(ch)) continue;
+    if (ui_channel_is_pinned(ui, ch->id) || CHANNEL_MUTED_SKIP(ch) || CHANNEL_PLUGIN_SKIP(ch)) continue;
     size_t kb = 3u;
     if (ch->kind == CCORD_CHANNEL_TEXT) kb = 0u;
     else if (ch->kind == CCORD_CHANNEL_VOICE) kb = 1u;
@@ -489,7 +525,8 @@ static void rebuild_channel_rows(ccord_ui *ui)
     for (size_t i = 0; i < n; i++) {
       const ccord_channel *ch = cm.chs[i];
       if (!ch || ch->kind != kinds[k] || cm_is_thread(&cm, i) || !CHANNEL_SHOWN(i)) continue;
-      if (cm_is_cat_child(&cm, i) || ui_channel_is_pinned(ui, ch->id) || CHANNEL_MUTED_SKIP(ch)) continue;
+      if (cm_is_cat_child(&cm, i) || ui_channel_is_pinned(ui, ch->id) || CHANNEL_MUTED_SKIP(ch) ||
+          CHANNEL_PLUGIN_SKIP(ch)) continue;
       if (!append_channel_and_children(ui, g, &cm, i, ch, &y)) goto done_channels;
     }
   }
@@ -514,10 +551,17 @@ static void rebuild_channel_rows(ccord_ui *ui)
   }
 
 done_channels:
+#undef CHANNEL_PLUGIN_SKIP
 #undef CHANNEL_MUTED_SKIP
 #undef CHANNEL_SHOWN
   chan_idx_free(&cm);
   ccord_free(vis);
+  if (ui->plugin_hidden_channel_count > 0 && grow_crow(ui, ui->ncrow + 1u)) {
+    float th = ui->mobile_layout ? 36.0f : 30.0f;
+    ui->crow[ui->ncrow++] = (chan_row){false, false, false, false, SIZE_MAX, 0, y + 4.0f, th,
+                                       DM_NAV_PLUGIN_HIDDEN_CHANNELS};
+    y += th + 6.0f;
+  }
   if (g == CCORD_DM_GUILD_ID) {
     size_t nrel = ccord_store_relationship_count(ui->d.store);
     size_t active_rel = 0;
@@ -630,8 +674,10 @@ static void rebuild_member_rows(ccord_ui *ui)
   }
   msort *tmp = ccord_alloc_array(n, sizeof *tmp);
   if (!tmp) return;
+  size_t kept = 0;
   for (size_t i = 0; i < n; i++) {
     const ccord_member *m = ccord_store_member_at(ui->d.store, g, i);
+    if (!m || member_plugin_hidden(ui, m->user_id)) continue;
     const ccord_user *u = ccord_store_user(ui->d.store, m->user_id);
     ui_member_look look;
     ui_member_look_of(ui, g, m, &look);
@@ -639,15 +685,15 @@ static void rebuild_member_rows(ccord_ui *ui)
     const char *rname = plain ? "Online" : look.group;   // Discord: no hoisted role, "Online"
     int32_t rank = plain ? 2000 : 1000 - look.group_position;
     const char *mname = (m->nick[0] != '\0') ? m->nick : (u ? u->name : "");
-    tmp[i] = (msort){i, !u || u->presence == CCORD_PRESENCE_OFFLINE, rank, rname,
-                     plain ? CCORD_ID_NONE : look.group_id, plain, mname, look.color};
+    tmp[kept++] = (msort){i, !u || u->presence == CCORD_PRESENCE_OFFLINE, rank, rname,
+                          plain ? CCORD_ID_NONE : look.group_id, plain, mname, look.color};
   }
-  qsort(tmp, n, sizeof *tmp, cmp_msort);
+  qsort(tmp, kept, sizeof *tmp, cmp_msort);
   float y = 8.0f;
   size_t i = 0;
-  while (i < n) {
+  while (i < kept) {
     size_t j = i;
-    while (j < n && tmp[j].offline == tmp[i].offline && (tmp[i].offline || strcmp(tmp[j].role, tmp[i].role) == 0)) j++;
+    while (j < kept && tmp[j].offline == tmp[i].offline && (tmp[i].offline || strcmp(tmp[j].role, tmp[i].role) == 0)) j++;
     if (!grow_mrow(ui, ui->nmrow + 1 + (j - i))) break;
     member_row *h = &ui->mrow[ui->nmrow++];
     *h = (member_row){.is_header = true, .y = y, .h = M(member_group_height)};
@@ -702,6 +748,7 @@ static uint64_t compute_chan_sig(const ccord_ui *ui, ccord_id g)
   uint32_t zb = 0;
   memcpy(&zb, &ui->settings_zoom, sizeof zb);
   h = uc_sig_mix_u64(h, zb);
+  h = uc_sig_mix_u64(h, ui->plugin_show_hidden_channels ? 1u : 0u);
   if (g == CCORD_DM_GUILD_ID) {
     h = uc_sig_mix_u64(h, ui->dm_requests_view ? 1u : 0u);
     h = uc_sig_mix_u64(h, (uint64_t)ui->npinned_dms);
@@ -711,8 +758,10 @@ static uint64_t compute_chan_sig(const ccord_ui *ui, ccord_id g)
     for (size_t i = 0; i < n; i++) {
       const ccord_channel *ch = ccord_store_channel_at(st, g, i);
       if (!ch) continue;
+      ui_row_style_ov cst = {0};
+      bool phid = ui_decor_channel_style(ui, ch->id, &cst) && cst.hidden;
       h = uc_sig_mix_u64(h, ch->id);
-      h = uc_sig_mix_u64(h, ((uint64_t)ch->kind << 16) ^ (ch->is_message_request ? 1u : 0u) ^ (ch->thread_archived ? 2u : 0u));
+      h = uc_sig_mix_u64(h, ((uint64_t)ch->kind << 16) ^ (ch->is_message_request ? 1u : 0u) ^ (ch->thread_archived ? 2u : 0u) ^ (phid ? 4u : 0u));
       h = uc_sig_mix_u64(h, ch->parent_id);
       h = uc_sig_mix_u64(h, ch->last_message_id);
     }
@@ -767,9 +816,12 @@ static uint64_t compute_chan_sig(const ccord_ui *ui, ccord_id g)
   for (size_t i = 0; i < n; i++) {
     const ccord_channel *ch = ccord_store_channel_at(st, g, i);
     if (!ch) continue;
+    ui_row_style_ov cst = {0};
+    bool phid = ui_decor_channel_style(ui, ch->id, &cst) && cst.hidden;
     h = uc_sig_mix_u64(h, ch->id);
     h = uc_sig_mix_u64(h, ((uint64_t)ch->kind << 24) ^ ((uint64_t)ch->discord_type << 8) ^
-                         (ch->thread_archived ? 1u : 0u) ^ (ccord_store_channel_is_forum(st, ch->id) ? 2u : 0u));
+                         (ch->thread_archived ? 1u : 0u) ^ (ccord_store_channel_is_forum(st, ch->id) ? 2u : 0u) ^
+                         (phid ? 4u : 0u));
     h = uc_sig_mix_u64(h, ch->parent_id);
     if (ch->kind == CCORD_CHANNEL_VOICE || ch->kind == CCORD_CHANNEL_STAGE) {
       size_t nv = ccord_store_voice_count(st, ch->id);
@@ -830,7 +882,8 @@ static uint64_t compute_member_sig(const ccord_ui *ui, ccord_id g)
     if (!m) continue;
     const ccord_user *u = ccord_store_user(st, m->user_id);
     h = uc_sig_mix_u64(h, m->user_id);
-    h = uc_sig_mix_u64(h, ((uint64_t)m->role_color << 16) ^ ((uint64_t)m->role_rank << 8) ^ (u ? (uint64_t)u->presence : 0xFFu));
+    h = uc_sig_mix_u64(h, ((uint64_t)m->role_color << 16) ^ ((uint64_t)m->role_rank << 8) ^ (u ? (uint64_t)u->presence : 0xFFu) ^
+                         (member_plugin_hidden(ui, m->user_id) ? 0x100000000ull : 0ull));
     if (m->nick[0]) h = sig_mix_str(h, m->nick);
     else h = sig_mix_str(h, u ? u->name : nullptr);
     if (m->role_name && m->role_name[0]) h = sig_mix_str(h, m->role_name);
@@ -954,10 +1007,13 @@ void ui_ensure_caches(ccord_ui *ui)
   }
   uint64_t rev = ccord_store_revision(ui->d.store);
   uint64_t lists_rev = ccord_store_lists_revision(ui->d.store);
+  uint64_t decor_rev = ui->d.contrib ? ccord_contrib_decorators_revision(ui->d.contrib) : 0;
+  bool decor_changed = (decor_rev != ui->built_decor_rev);
   ccord_id g = ccord_store_selected_guild(ui->d.store);
-  if (rev == ui->built_rev && g == ui->built_guild) return;
+  if (rev == ui->built_rev && g == ui->built_guild && !decor_changed) return;
   bool had_built_guild = (ui->built_guild != CCORD_ID_NONE);
   ui->built_rev = rev;
+  ui->built_decor_rev = decor_rev;
   bool guild_changed = g != ui->built_guild;
   if (guild_changed) {
     if (had_built_guild && ui->discovery_open) {
@@ -974,7 +1030,7 @@ void ui_ensure_caches(ccord_ui *ui)
   // The lists of channels and members are rebuilt (and the members sorted) only when something other than message traffic
   // changed: a message, a reaction or someone typing needs a redraw, not new lists. Channel and member caches are
   // fingerprinted independently so a presence change skips channel rebuild and a channel edit skips member sort.
-  if (guild_changed || lists_rev != ui->built_lists_rev) {
+  if (guild_changed || lists_rev != ui->built_lists_rev || decor_changed) {
     ui->built_lists_rev = lists_rev;
     if ((ui_self_voice(ui) != nullptr) != ui->built_voice_bar) ui_compute_layout(ui);
     uint64_t csig = compute_chan_sig(ui, g);

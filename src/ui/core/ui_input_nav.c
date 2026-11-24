@@ -116,6 +116,11 @@ void uc_click_channel_row(ccord_ui *ui, size_t row)
       case DM_NAV_CHANNELS_ROLES:
         ui_guild_view_open(ui, UI_GUILD_VIEW_CHANNELS_ROLES);
         break;
+      case DM_NAV_PLUGIN_HIDDEN_CHANNELS:
+        ui->plugin_show_hidden_channels = !ui->plugin_show_hidden_channels;
+        ui_invalidate_rows(ui);
+        ui->dirty = true;
+        break;
       case DM_NAV_DM_HEADER:
       case DM_NAV_NONE:
         break;

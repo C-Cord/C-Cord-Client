@@ -90,6 +90,7 @@ typedef enum dm_nav_kind : uint8_t {
   DM_NAV_DM_HEADER,
   DM_NAV_SERVER_GUIDE,
   DM_NAV_CHANNELS_ROLES,
+  DM_NAV_PLUGIN_HIDDEN_CHANNELS,
 } dm_nav_kind;
 
 typedef enum ui_guild_view : uint8_t {
@@ -182,15 +183,39 @@ typedef struct ui_img_hit {
   size_t index;
 } ui_img_hit;
 
+typedef enum ui_lb_source : uint8_t {
+  UI_LB_SRC_URL = 0,
+  UI_LB_SRC_TEXTURE_KEY = 1,
+  UI_LB_SRC_LOCAL_PATH = 2,
+} ui_lb_source;
+
 typedef struct ui_lightbox_item {
+  ui_lb_source source_kind;
+  bool is_video;
+  bool local_uploaded;
+  bool local_failed;
   char full_url[UI_URL_MAX];
   char preview_url[UI_URL_MAX];
   char hd_url[UI_URL_MAX];
+  char texture_key[160];
   char filename[160];
   char description[256];
   uint32_t orig_w, orig_h;
   uint64_t file_size;
 } ui_lightbox_item;
+
+#define UI_TOAST_MAX_SLOTS 4u
+typedef struct ui_toast_item {
+  char text[256];
+  uint8_t level;           // 0 = info, 1 = warn, 2 = error
+  uint64_t until_ms;
+  uint64_t seq;
+  char owner[65];
+  uint64_t toast_id;
+  char action_label[48];
+  ccord_rect box_rect;
+  ccord_rect action_rect;
+} ui_toast_item;
 
 typedef struct ui_media_hit {
   ccord_rect play_rect;
@@ -450,6 +475,11 @@ typedef struct ui_menu {
   ccord_menu_context ctx;
   menu_item items[UI_MENU_MAX_ITEMS];
   size_t count;
+  // Ad-hoc plugin popup menu (ui.menu.popup)
+  bool is_plugin_popup;
+  bool popup_resolved;
+  char popup_owner[65];
+  uint64_t popup_req_id;
 } ui_menu;
 
 typedef enum drag_kind : uint8_t {

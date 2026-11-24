@@ -1339,9 +1339,17 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
     dc_chat_sel_line_end(ui, r, header_end, y + top, ts.size * 0.4f, lh, true);
     content_y += lh;
   }
-  bool no_body = d.body_len == 0 && dc_decor_has_body_cards(&d);
+  float card_w = maxf(ma->w - M(message_text_x) - M(message_pad_x), 40.0f);
+  {
+    float above_gap_top = (compact || is_system) ? 0.0f : 4.0f;
+    float above_h = ui_decor_draw_message_accessories_pos(ui, r, m->id, CCORD_DECOR_POS_ABOVE_BODY,
+                                                          text_x, content_y + above_gap_top, card_w, COL(bg_primary));
+    if (above_h > 0.0f) content_y += above_gap_top + above_h + 4.0f;
+  }
+  bool has_app_emb = has_dec_style && dec_st.embeds_append_json && dec_st.embeds_append_json[0];
+  bool no_body = d.body_len == 0 && (dc_decor_has_body_cards(&d) || has_app_emb);
   ui_jumbo_item jumbo_items[UI_JUMBO_EMOJI_MAX];
-  size_t jumbo_n = no_body ? 0u : dc_chat_message_jumbo(ui, m, jumbo_items);
+  size_t jumbo_n = (no_body || (has_dec_style && dec_st.has_content_override)) ? 0u : dc_chat_message_jumbo(ui, m, jumbo_items);
   if (compact && hover) {
     char clock[24];
     size_t cl = ccord_timefmt_clock(clock, sizeof clock, m->timestamp_ms, ui->use_utc);
@@ -1378,12 +1386,18 @@ static void draw_row(msg_ctx *c, size_t i, float y, float h, const ccord_rect *m
   }
   ui->current_drawing_msg_id = CCORD_ID_NONE;
   float card_y = content_y + body_h + M(message_line_gap) * 0.5f;
-  float card_w = maxf(ma->w - M(message_text_x) - M(message_pad_x), 40.0f);
   float after_cards_y = card_y + dc_draw_decor_cards(ui, r, &d, text_x, card_y, card_w);
-  after_cards_y += ui_decor_draw_message_accessories(ui, r, m->id, text_x, after_cards_y, card_w, COL(bg_primary));
+  if (has_app_emb) {
+    after_cards_y += dc_decor_appended_embeds_walk(ui, r, m->id, dec_st.embeds_append_json, text_x, after_cards_y, card_w, true);
+  }
   if (dc_message_has_reactions(m)) {
     float by = after_cards_y + M(message_line_gap) * 0.5f;
     after_cards_y = by + dc_reaction_pills_walk(ui, r, m, text_x, by, wrap, true);
+  }
+  {
+    float below_h = ui_decor_draw_message_accessories_pos(ui, r, m->id, CCORD_DECOR_POS_BELOW_BODY,
+                                                          text_x, after_cards_y + 4.0f, card_w, COL(bg_primary));
+    if (below_h > 0.0f) after_cards_y += 4.0f + below_h;
   }
   if (message_send_unconfirmed(m)) {
     float sy = after_cards_y + M(message_line_gap) * 0.5f;

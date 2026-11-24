@@ -103,6 +103,10 @@ static ccord_rect lb_base_fit_rect(const ccord_ui *ui, ccord_renderer *r, size_t
     tw = (int)it->orig_w;
     th = (int)it->orig_h;
     have_dim = true;
+  } else if (it && it->source_kind != UI_LB_SRC_URL) {
+    if (r && it->texture_key[0] && ccord_render_has_texture(r, it->texture_key, &tw, &th) && tw > 4 && th > 4) {
+      have_dim = true;
+    }
   } else if (r && hd[0] && ccord_render_has_texture(r, hd, &tw, &th) && tw > 4 && th > 4) {
     have_dim = true;
   } else if (r && full[0] && strcmp(full, hd) != 0 && ccord_render_has_texture(r, full, &tw, &th) && tw > 4 && th > 4) {
@@ -485,6 +489,11 @@ bool ui_lightbox_update(ccord_ui *ui, uint64_t now_ms, float dt_ms)
   }
 
   // 6. Keep animating while HD is downloading, decoding, crossfading, or briefly displaying "HD Ready"
+  const ui_lightbox_item *cur_meta = lb_item_at(ui, ui->lightbox_index);
+  if (cur_meta && cur_meta->source_kind != UI_LB_SRC_URL) {
+    ui->lightbox_hold_until_ms = 0;
+    return anim;
+  }
   const char *hd = lb_hd_url(ui, ui->lightbox_index);
   const char *full = lb_full_url(ui, ui->lightbox_index);
   const char *active_hd = hd;
@@ -544,9 +553,56 @@ bool ui_lightbox_update(ccord_ui *ui, uint64_t now_ms, float dt_ms)
 
 // ---- Drawing: progressive item, live loading bar, mobile OLED UI & desktop continuity ----
 
+static bool lb_ensure_local_texture(ccord_ui *ui, ccord_renderer *r, ui_lightbox_item *it)
+{
+  if (!ui || !r || !it || it->source_kind != UI_LB_SRC_LOCAL_PATH || !it->texture_key[0]) return false;
+  if (ccord_render_has_texture(r, it->texture_key, nullptr, nullptr)) return true;
+  if (it->local_uploaded || it->local_failed || !it->full_url[0]) return false;
+  ccord_error err = {0};
+  size_t flen = 0;
+  char *buf = ccord_file_read_max(it->full_url, 32u * 1024u * 1024u, &flen, &err);
+  if (!buf || flen == 0u) {
+    ccord_free(buf);
+    it->local_failed = true;
+    return false;
+  }
+  int w = 0, h = 0;
+  int max_dim = (CCORD_OS_ANDROID || ui->mobile_layout) ? 2048 : 4096;
+  ccord_media_opts opts = {.max_dim = max_dim, .allow_video = it->is_video};
+  ccord_status st = ccord_render_upload_media(r, it->texture_key, (const uint8_t *)buf, flen, &opts, &w, &h, &err);
+  ccord_free(buf);
+  if (st != CCORD_OK) {
+    it->local_failed = true;
+    return false;
+  }
+  it->local_uploaded = true;
+  if (w > 0 && h > 0) {
+    it->orig_w = (uint32_t)w;
+    it->orig_h = (uint32_t)h;
+  }
+  it->file_size = (uint64_t)flen;
+  return true;
+}
+
 static void lb_draw_photo_slot(ccord_ui *ui, ccord_renderer *r, size_t idx, ccord_rect dst, bool is_active,
                                float corner_rad, bool *out_hd_ready, bool *out_has_any)
 {
+  ui_lightbox_item *mut_it = (ui->lightbox_items && idx < ui->lightbox_count) ? &ui->lightbox_items[idx] : nullptr;
+  if (mut_it && mut_it->source_kind != UI_LB_SRC_URL) {
+    if (mut_it->source_kind == UI_LB_SRC_LOCAL_PATH) (void)lb_ensure_local_texture(ui, r, mut_it);
+    bool has_tex = mut_it->texture_key[0] && ccord_render_has_texture(r, mut_it->texture_key, nullptr, nullptr);
+    if (out_hd_ready) *out_hd_ready = has_tex;
+    if (out_has_any) *out_has_any = has_tex;
+    if (has_tex) {
+      if (corner_rad > 0.5f) ccord_draw_texture_rounded(r, mut_it->texture_key, dst, corner_rad, 255);
+      else ccord_draw_texture(r, mut_it->texture_key, dst, 255);
+    } else {
+      ccord_color ph = ui->mobile_layout ? (ccord_color){20, 21, 26, 255} : COL(bg_secondary);
+      ccord_draw_rrect(r, dst, corner_rad > 0.5f ? corner_rad : 6.0f, ph);
+      ui_icon_attachment(r, dst.x + dst.w * 0.5f, dst.y + dst.h * 0.5f, 30.0f, COL(text_secondary));
+    }
+    return;
+  }
   const char *full = lb_full_url(ui, idx);
   const char *hd = lb_hd_url(ui, idx);
   const char *prev = lb_preview_url(ui, idx);
@@ -952,14 +1008,21 @@ static void lb_draw_mobile(ccord_ui *ui, ccord_renderer *r)
         ui->lightbox_thumb_rects[i] = tr;
         bool active = (i == ui->lightbox_index);
         ccord_draw_rrect(r, tr, 7.0f, (ccord_color){30, 32, 38, 220});
-        const char *tp = lb_preview_url(ui, i);
-        const char *th_u = lb_hd_url(ui, i);
-        const char *tf = lb_full_url(ui, i);
+        const ui_lightbox_item *tit = lb_item_at(ui, i);
         const char *draw_k = nullptr;
-        if (tp[0] && ccord_render_has_texture(r, tp, nullptr, nullptr)) draw_k = tp;
-        else if (th_u[0] && ccord_render_has_texture(r, th_u, nullptr, nullptr)) draw_k = th_u;
-        else if (tf[0] && ccord_render_has_texture(r, tf, nullptr, nullptr)) draw_k = tf;
-        else if (tp[0]) (void)ui_ensure_media(ui, r, tp);
+        if (tit && tit->source_kind != UI_LB_SRC_URL) {
+          if (tit->texture_key[0] && ccord_render_has_texture(r, tit->texture_key, nullptr, nullptr)) {
+            draw_k = tit->texture_key;
+          }
+        } else {
+          const char *tp = lb_preview_url(ui, i);
+          const char *th_u = lb_hd_url(ui, i);
+          const char *tf = lb_full_url(ui, i);
+          if (tp[0] && ccord_render_has_texture(r, tp, nullptr, nullptr)) draw_k = tp;
+          else if (th_u[0] && ccord_render_has_texture(r, th_u, nullptr, nullptr)) draw_k = th_u;
+          else if (tf[0] && ccord_render_has_texture(r, tf, nullptr, nullptr)) draw_k = tf;
+          else if (tp[0]) (void)ui_ensure_media(ui, r, tp);
+        }
         if (draw_k) {
           ccord_draw_texture_cover(r, draw_k, tr, 7.0f, active ? 255 : 175, false);
         }
@@ -974,7 +1037,6 @@ static void lb_draw_mobile(ccord_ui *ui, ccord_renderer *r)
     float dock_y = ui->win_h - safe_b - dock_h + 4.0f;
     float dock_w = lb_minf(ui->win_w - safe_l - safe_r - 16.0f, 380.0f);
     float dock_x = (ui->win_w - dock_w) * 0.5f;
-    float cell_w = dock_w * 0.25f;
     float btn_h = 52.0f;
     ccord_color ic_col = {242, 244, 248, 255};
     ccord_text_style dlst = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_small) - 2.0f, (ccord_color){210, 214, 224, 235});
@@ -986,7 +1048,11 @@ static void lb_draw_mobile(ccord_ui *ui, ccord_renderer *r)
       &ui->lightbox_copy_btn,
       &ui->lightbox_open_btn,
     };
-    for (int i = 0; i < 4; i++) {
+    const ui_lightbox_item *cur_it = lb_item_at(ui, ui->lightbox_index);
+    bool show_browser_btn = !cur_it || cur_it->source_kind == UI_LB_SRC_URL;
+    int btn_count = show_browser_btn ? 4 : 3;
+    float cell_w = dock_w / (float)btn_count;
+    for (int i = 0; i < btn_count; i++) {
       ccord_rect br = {dock_x + (float)i * cell_w + 4.0f, dock_y, cell_w - 8.0f, btn_h};
       *btn_ptrs[i] = br;
       float bcx = br.x + br.w * 0.5f;
@@ -1049,21 +1115,26 @@ static void lb_draw_desktop(ccord_ui *ui, ccord_renderer *r)
   // Slim live HD loading progress bar along the top edge of the image frame on desktop too!
   lb_draw_progress_bar(ui, r, (ccord_rect){img_r.x, img_r.y, img_r.w, 3.0f}, has_hd, hd_failed);
 
+  const ui_lightbox_item *cur_meta = lb_item_at(ui, ui->lightbox_index);
+  bool is_url_src = !cur_meta || cur_meta->source_kind == UI_LB_SRC_URL;
   float bar_y = lb_clampf(img_r.y + img_r.h + 10.0f, lb_t + 16.0f, lb_maxf(ui->win_h - lb_b - 42.0f, lb_t + 16.0f));
   float bar_x = lb_clampf(img_r.x, lb_l + 16.0f, lb_maxf(ui->win_w - lb_r - 280.0f, lb_l + 16.0f));
-  ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_link));
-  const char *open_lbl = "Open in Browser";
-  ccord_vec2 ot = ccord_text_measure(r, open_lbl, strlen(open_lbl), &ls, 0.0f);
-  ui->lightbox_open_btn = (ccord_rect){bar_x, bar_y, ot.x + 20.0f, 28.0f};
-  ccord_draw_rrect(r, ui->lightbox_open_btn, 5.0f, COL(bg_secondary));
-  ccord_text_draw(r, open_lbl, strlen(open_lbl), bar_x + 10.0f, bar_y + (28.0f - ot.y) * 0.5f, &ls, 0.0f);
+  float zoom_x = bar_x;
+  if (is_url_src) {
+    ccord_text_style ls = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small), COL(text_link));
+    const char *open_lbl = "Open in Browser";
+    ccord_vec2 ot = ccord_text_measure(r, open_lbl, strlen(open_lbl), &ls, 0.0f);
+    ui->lightbox_open_btn = (ccord_rect){bar_x, bar_y, ot.x + 20.0f, 28.0f};
+    ccord_draw_rrect(r, ui->lightbox_open_btn, 5.0f, COL(bg_secondary));
+    ccord_text_draw(r, open_lbl, strlen(open_lbl), bar_x + 10.0f, bar_y + (28.0f - ot.y) * 0.5f, &ls, 0.0f);
+    zoom_x = ui->lightbox_open_btn.x + ui->lightbox_open_btn.w + 8.0f;
+  }
 
   char zbuf[24];
   snprintf(zbuf, sizeof zbuf, "%d%%", (int)lroundf(ui->lightbox_zoom * 100.0f));
   ccord_text_style zs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 1.0f, COL(text_header));
   ccord_vec2 zt = ccord_text_measure(r, zbuf, strlen(zbuf), &zs, 0.0f);
-  ui->lightbox_zoom_btn = (ccord_rect){ui->lightbox_open_btn.x + ui->lightbox_open_btn.w + 8.0f, bar_y,
-                                       zt.x + 18.0f, 28.0f};
+  ui->lightbox_zoom_btn = (ccord_rect){zoom_x, bar_y, zt.x + 18.0f, 28.0f};
   ccord_draw_rrect(r, ui->lightbox_zoom_btn, 5.0f, COL(bg_secondary));
   ccord_text_draw(r, zbuf, strlen(zbuf), ui->lightbox_zoom_btn.x + 9.0f, bar_y + (28.0f - zt.y) * 0.5f, &zs, 0.0f);
 
@@ -1093,7 +1164,7 @@ static void lb_draw_desktop(ccord_ui *ui, ccord_renderer *r)
   }
 
   // Show subtle HD upgrade status chip on desktop while loading or if failed
-  if (!has_hd && hd[0]) {
+  if (is_url_src && !has_hd && hd[0]) {
     char pbuf[32];
     if (hd_failed) snprintf(pbuf, sizeof pbuf, "Retry HD");
     else if (!ui->lightbox_prog_indeterminate && ui->lightbox_prog_smooth > 0.05f) {
@@ -1267,8 +1338,11 @@ bool ui_lightbox_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       return true;
     }
     if (ui->lightbox_open_btn.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->lightbox_open_btn)) {
-      const char *full = lb_full_url(ui, ui->lightbox_index);
-      (void)ui_activate_link(ui, full[0] ? full : ui->lightbox_url);
+      const ui_lightbox_item *cur_meta = lb_item_at(ui, ui->lightbox_index);
+      if (!cur_meta || cur_meta->source_kind == UI_LB_SRC_URL) {
+        const char *full = lb_full_url(ui, ui->lightbox_index);
+        (void)ui_activate_link(ui, full[0] ? full : ui->lightbox_url);
+      }
       return true;
     }
     if (ui->lightbox_zoom_btn.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->lightbox_zoom_btn)) {

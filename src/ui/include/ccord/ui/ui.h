@@ -45,6 +45,7 @@ typedef struct ccord_ui_host {      // everything the UI needs from the OS; test
   void (*account_action)(void *ud, ccord_account_action action);   // nullable: Account page buttons
   bool (*open_url)(void *ud, const char *url);               // nullable: external browser redirect (Billing/Nitro/Shop/links)
   bool (*open_file_dialog)(void *ud, char *out_path, size_t cap);   // nullable: native file picker for attachments
+  bool (*open_dir_dialog)(void *ud, char *out_path, size_t cap);    // nullable: native folder picker for path settings/forms
   // nullable: starts the native multi-file picker and returns at once. Every chosen path arrives later as a
   // drop-file event and is attached through ccord_ui_attach_file (so the 25 MB cap applies per file). Preferred by
   // the + menu's Upload a File row; open_file_dialog above is the one-path fallback when this is null.
@@ -477,6 +478,9 @@ void ccord_ui_set_login_error(ccord_ui *ui, const char *status_msg, bool keep_mf
 // loads; one that is gone leaves the channel at the present, with no notice. An unknown channel does nothing.
 void ccord_ui_open_message(ccord_ui *ui, ccord_id guild_id, ccord_id channel_id, ccord_id message_id);
 bool ccord_ui_attach_file(ccord_ui *ui, const char *path);
+// Consumes an asynchronous native file/folder picker result if a plugin settings or form path field is awaiting one.
+// Passing path == nullptr clears any pending picker target (e.g. when the OS dialog is cancelled).
+bool ccord_ui_consume_picked_path(ccord_ui *ui, const char *path);
 bool ccord_ui_attach_bytes(ccord_ui *ui, const char *filename, const void *data, size_t size);
 void ccord_ui_clear_attachment(ccord_ui *ui);
 size_t ccord_ui_staged_attachment_count(const ccord_ui *ui);
@@ -484,6 +488,8 @@ bool ccord_ui_toggle_attachment_spoiler(ccord_ui *ui, size_t index);
 bool ccord_ui_remove_staged_attachment(ccord_ui *ui, size_t index);
 // Shows the topmost drag-and-drop error modal (renders above Settings, modals, and chat).
 void ccord_ui_show_drop_error(ccord_ui *ui, const char *title, const char *body, const char *pill);
+// Shows a transient toast notification (level: 0=info, 1=warn, 2=error).
+void ccord_ui_show_toast(ccord_ui *ui, const char *text, uint8_t level);
 // Presents a newly imported .cce extension in Settings -> Plugins (opening consent review if required).
 void ccord_ui_on_plugin_imported(ccord_ui *ui, const char *plugin_id, const char *pkg_path);
 size_t ccord_ui_serialize_mentions(const ccord_store *store, ccord_id guild_id,

@@ -12,17 +12,25 @@ ui_plugin_v3 *pv3_v3_ensure(ccord_ui *ui)
     ui->plugin_v3->dlg.drag_slider_idx = -1;
     ui->plugin_v3->set.focused_idx = -1;
     ui->plugin_v3->set.drag_slider_idx = -1;
+    ui->plugin_v3->pending_path_field = -1;
   }
   return ui->plugin_v3;
 }
 
-void pv3_v3_clear_fields(v3_field *fields, size_t *nfields)
+void pv3_v3_clear_fields(v3_field **fields, size_t *nfields)
 {
-  for (size_t i = 0; i < *nfields; i++) {
-    if (fields[i].edit_inited) {
-      ccord_text_edit_free(&fields[i].edit);
-      fields[i].edit_inited = false;
+  if (*fields) {
+    for (size_t i = 0; i < *nfields; i++) {
+      if ((*fields)[i].edit_inited) {
+        ccord_text_edit_free(&(*fields)[i].edit);
+        (*fields)[i].edit_inited = false;
+      }
+      ccord_free((*fields)[i].opts);
+      (*fields)[i].opts = nullptr;
+      (*fields)[i].nopts = 0;
     }
+    ccord_free(*fields);
+    *fields = nullptr;
   }
   *nfields = 0;
 }
@@ -40,8 +48,8 @@ static void pv3_wipe_edit(ccord_text_edit *ed)
 void ui_plugin_v3_destroy(ccord_ui *ui)
 {
   if (!ui || !ui->plugin_v3) return;
-  pv3_v3_clear_fields(ui->plugin_v3->dlg.fields, &ui->plugin_v3->dlg.nfields);
-  pv3_v3_clear_fields(ui->plugin_v3->set.fields, &ui->plugin_v3->set.nfields);
+  pv3_v3_clear_fields(&ui->plugin_v3->dlg.fields, &ui->plugin_v3->dlg.nfields);
+  pv3_v3_clear_fields(&ui->plugin_v3->set.fields, &ui->plugin_v3->set.nfields);
   if (ui->plugin_v3->hitl.pw_inited) {
     pv3_wipe_edit(&ui->plugin_v3->hitl.pw_edit);
     ccord_text_edit_free(&ui->plugin_v3->hitl.pw_edit);
@@ -242,10 +250,41 @@ void ui_theme_bg_draw(ccord_ui *ui, ccord_renderer *r, const char *slot, ccord_r
 
 // ---- UI Decorators ----
 
-static bool decor_matches(const ccord_decorator_contribution *d, ccord_decor_target target, ccord_id id)
+// Collects all matching decorators for (target, id) via O(1) contrib index, filtered by optional position
+// (`pos_filter < 0` matches any position), sorted by `priority DESC` then `reg_seq ASC` (or `reg_seq DESC` when
+// `latest_wins_tie` is true, used for scalar style overrides).
+static size_t decor_collect_sorted(const ccord_contrib *c, ccord_decor_target target, ccord_id id, int pos_filter,
+                                   bool latest_wins_tie, const ccord_decorator_contribution **out, size_t cap)
 {
-  if (!d || d->target != target) return false;
-  return d->target_id == 0 || d->target_id == id;
+  if (!c || !out || cap == 0) return 0;
+  const ccord_decorator_contribution *raw[64];
+  size_t raw_cap = cap < 64u ? cap : 64u;
+  size_t n = ccord_contrib_query_decorators(c, target, id, raw, raw_cap);
+  if (n > raw_cap) n = raw_cap;
+  size_t cnt = 0;
+  for (size_t i = 0; i < n; i++) {
+    const ccord_decorator_contribution *d = raw[i];
+    if (!d) continue;
+    if (pos_filter >= 0 && (int)d->position != pos_filter) continue;
+    out[cnt++] = d;
+  }
+  for (size_t i = 1; i < cnt; i++) {
+    const ccord_decorator_contribution *key = out[i];
+    size_t j = i;
+    while (j > 0) {
+      const ccord_decorator_contribution *prev = out[j - 1u];
+      bool swap = false;
+      if (prev->priority < key->priority) swap = true;
+      else if (prev->priority == key->priority) {
+        swap = latest_wins_tie ? (prev->reg_seq < key->reg_seq) : (prev->reg_seq > key->reg_seq);
+      }
+      if (!swap) break;
+      out[j] = prev;
+      j--;
+    }
+    out[j] = key;
+  }
+  return cnt;
 }
 
 bool ui_decor_message_style_ex(const ccord_ui *ui, ccord_id msg_id, ui_msg_style_ov *out)
@@ -258,16 +297,15 @@ bool ui_decor_message_style_ex(const ccord_ui *ui, ccord_id msg_id, ui_msg_style
   if (!ui || !ui->d.contrib || msg_id == CCORD_ID_NONE) return false;
   if (ui_plugin_security_surface_active(ui)) return false;
 
-  bool any = false;
-  int32_t best_prio = INT32_MIN;
-  size_t n = ccord_contrib_decorator_count(ui->d.contrib);
-  for (size_t i = 0; i < n; i++) {
-    const ccord_decorator_contribution *d = ccord_contrib_decorator_at(ui->d.contrib, i);
-    if (!decor_matches(d, CCORD_DECOR_MESSAGE_STYLE, msg_id)) continue;
-    if (any && d->priority < best_prio) continue;
-    best_prio = d->priority;
-    any = true;
-    if (!out) continue;
+  const ccord_decorator_contribution *items[64];
+  size_t cnt = decor_collect_sorted(ui->d.contrib, CCORD_DECOR_MESSAGE_STYLE, msg_id, -1, true, items, 64u);
+  if (cnt == 0) return false;
+  if (!out) return true;
+
+  // Apply lowest-to-highest priority so highest priority (items[0]) wins on overlapping fields while
+  // orthogonal fields from lower-priority decorators still compose cleanly.
+  for (size_t k = cnt; k > 0; k--) {
+    const ccord_decorator_contribution *d = items[k - 1u];
     if (d->accent_rgba) out->accent = v3_rgba_u32(d->accent_rgba);
     else if (d->accent_color && d->accent_color[0]) (void)ui_resolve_color_spec(ui, d->accent_color, &out->accent);
     if (d->tint_rgba) out->tint = v3_rgba_u32(d->tint_rgba);
@@ -284,8 +322,54 @@ bool ui_decor_message_style_ex(const ccord_ui *ui, ccord_id msg_id, ui_msg_style
       out->collapsed = true;
       if (d->collapse_label && d->collapse_label[0]) out->collapse_label = d->collapse_label;
     }
+    if (d->content_override != nullptr) {
+      out->has_content_override = true;
+      out->content_override = d->content_override;
+    }
+    if (d->embeds_append_json && d->embeds_append_json[0]) {
+      out->embeds_append_json = d->embeds_append_json;
+    }
   }
-  return any;
+  return true;
+}
+
+static bool decor_row_style(const ccord_ui *ui, ccord_decor_target target, ccord_id id, ui_row_style_ov *out)
+{
+  if (out) {
+    memset(out, 0, sizeof *out);
+    out->opacity = 1.0f;
+  }
+  if (!ui || !ui->d.contrib || id == CCORD_ID_NONE) return false;
+  if (ui_plugin_security_surface_active(ui)) return false;
+
+  const ccord_decorator_contribution *items[64];
+  size_t cnt = decor_collect_sorted(ui->d.contrib, target, id, -1, true, items, 64u);
+  if (cnt == 0) return false;
+  if (!out) return true;
+
+  for (size_t k = cnt; k > 0; k--) {
+    const ccord_decorator_contribution *d = items[k - 1u];
+    if (d->accent_rgba) out->accent = v3_rgba_u32(d->accent_rgba);
+    else if (d->accent_color && d->accent_color[0]) (void)ui_resolve_color_spec(ui, d->accent_color, &out->accent);
+    if (d->tint_rgba) out->tint = v3_rgba_u32(d->tint_rgba);
+    else if (d->tint_color && d->tint_color[0]) (void)ui_resolve_color_spec(ui, d->tint_color, &out->tint);
+    if (d->text_rgba) { out->text_color = v3_rgba_u32(d->text_rgba); out->has_text_color = true; }
+    else if (d->text_color && d->text_color[0] && ui_resolve_color_spec(ui, d->text_color, &out->text_color)) out->has_text_color = true;
+    if (d->dim) out->dim = true;
+    if (d->has_opacity) { out->has_opacity = true; out->opacity = d->opacity; }
+    if (d->hidden) out->hidden = true;
+  }
+  return true;
+}
+
+bool ui_decor_channel_style(const ccord_ui *ui, ccord_id channel_id, ui_row_style_ov *out)
+{
+  return decor_row_style(ui, CCORD_DECOR_CHANNEL_STYLE, channel_id, out);
+}
+
+bool ui_decor_member_style(const ccord_ui *ui, ccord_id user_id, ui_row_style_ov *out)
+{
+  return decor_row_style(ui, CCORD_DECOR_MEMBER_STYLE, user_id, out);
 }
 
 bool ui_decor_message_style(const ccord_ui *ui, ccord_id msg_id, ccord_color *out_accent, ccord_color *out_tint,
@@ -305,13 +389,13 @@ float ui_decor_draw_message_badges(ccord_ui *ui, ccord_renderer *r, ccord_id msg
 {
   if (!ui || !r || !ui->d.contrib) return 0.0f;
   if (ui_plugin_security_surface_active(ui)) return 0.0f;
-  size_t n = ccord_contrib_decorator_count(ui->d.contrib);
-  if (n == 0) return 0.0f;
+  const ccord_decorator_contribution *items[64];
+  size_t cnt = decor_collect_sorted(ui->d.contrib, CCORD_DECOR_MESSAGE_BADGE, msg_id, -1, false, items, 64u);
+  if (cnt == 0) return 0.0f;
 
   float cur_x = x;
-  for (size_t i = 0; i < n; i++) {
-    const ccord_decorator_contribution *d = ccord_contrib_decorator_at(ui->d.contrib, i);
-    if (!decor_matches(d, CCORD_DECOR_MESSAGE_BADGE, msg_id)) continue;
+  for (size_t i = 0; i < cnt; i++) {
+    const ccord_decorator_contribution *d = items[i];
     if (!d->widget_json || !d->widget_json[0]) continue;
     ccord_vec2 sz = ui_panels_measure_widget_json(ui, r, d->widget_json, 240.0f);
     if (sz.x <= 0.0f) continue;
@@ -323,45 +407,65 @@ float ui_decor_draw_message_badges(ccord_ui *ui, ccord_renderer *r, ccord_id msg
   return cur_x - x;
 }
 
-float ui_decor_measure_message_accessories(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id, float max_w)
+float ui_decor_measure_message_accessories_pos(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id,
+                                               ccord_decor_position pos, float max_w)
 {
   if (!ui || !r || !ui->d.contrib || max_w <= 0.0f) return 0.0f;
   if (ui_plugin_security_surface_active(ui)) return 0.0f;
-  size_t n = ccord_contrib_decorator_count(ui->d.contrib);
-  if (n == 0) return 0.0f;
+  const ccord_decorator_contribution *items[64];
+  size_t cnt = decor_collect_sorted(ui->d.contrib, CCORD_DECOR_MESSAGE_ACCESSORY, msg_id, (int)pos, false, items, 64u);
+  if (cnt == 0) return 0.0f;
 
   float total_h = 0.0f;
-  for (size_t i = 0; i < n; i++) {
-    const ccord_decorator_contribution *d = ccord_contrib_decorator_at(ui->d.contrib, i);
-    if (!decor_matches(d, CCORD_DECOR_MESSAGE_ACCESSORY, msg_id)) continue;
+  size_t drawn = 0;
+  for (size_t i = 0; i < cnt; i++) {
+    const ccord_decorator_contribution *d = items[i];
     if (!d->widget_json || !d->widget_json[0]) continue;
     ccord_vec2 sz = ui_panels_measure_widget_json(ui, r, d->widget_json, max_w);
-    if (sz.y > 0.0f) total_h += sz.y + UIS_SP_1;
+    if (sz.y > 0.0f) {
+      if (drawn > 0) total_h += UIS_SP_1;
+      total_h += sz.y;
+      drawn++;
+    }
   }
   return total_h;
+}
+
+float ui_decor_draw_message_accessories_pos(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id,
+                                            ccord_decor_position pos, float x, float y, float max_w, ccord_color bg)
+{
+  if (!ui || !r || !ui->d.contrib || max_w <= 0.0f) return 0.0f;
+  if (ui_plugin_security_surface_active(ui)) return 0.0f;
+  const ccord_decorator_contribution *items[64];
+  size_t cnt = decor_collect_sorted(ui->d.contrib, CCORD_DECOR_MESSAGE_ACCESSORY, msg_id, (int)pos, false, items, 64u);
+  if (cnt == 0) return 0.0f;
+
+  float cur_y = y;
+  size_t drawn = 0;
+  for (size_t i = 0; i < cnt; i++) {
+    const ccord_decorator_contribution *d = items[i];
+    if (!d->widget_json || !d->widget_json[0]) continue;
+    ccord_vec2 sz = ui_panels_measure_widget_json(ui, r, d->widget_json, max_w);
+    if (sz.y <= 0.0f) continue;
+    if (drawn > 0) cur_y += UIS_SP_1;
+    float w = sz.x > 0.0f && sz.x < max_w ? sz.x : max_w;
+    ccord_rect rc = {x, cur_y, w, sz.y};
+    ui_panels_draw_widget_json(ui, r, d->owner, d->decor_id, CCORD_DECOR_MESSAGE_ACCESSORY, msg_id, d->widget_json, rc, bg);
+    cur_y += sz.y;
+    drawn++;
+  }
+  return cur_y - y;
+}
+
+float ui_decor_measure_message_accessories(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id, float max_w)
+{
+  return ui_decor_measure_message_accessories_pos(ui, r, msg_id, CCORD_DECOR_POS_BELOW_BODY, max_w);
 }
 
 float ui_decor_draw_message_accessories(ccord_ui *ui, ccord_renderer *r, ccord_id msg_id,
                                         float x, float y, float max_w, ccord_color bg)
 {
-  if (!ui || !r || !ui->d.contrib || max_w <= 0.0f) return 0.0f;
-  if (ui_plugin_security_surface_active(ui)) return 0.0f;
-  size_t n = ccord_contrib_decorator_count(ui->d.contrib);
-  if (n == 0) return 0.0f;
-
-  float cur_y = y;
-  for (size_t i = 0; i < n; i++) {
-    const ccord_decorator_contribution *d = ccord_contrib_decorator_at(ui->d.contrib, i);
-    if (!decor_matches(d, CCORD_DECOR_MESSAGE_ACCESSORY, msg_id)) continue;
-    if (!d->widget_json || !d->widget_json[0]) continue;
-    ccord_vec2 sz = ui_panels_measure_widget_json(ui, r, d->widget_json, max_w);
-    if (sz.y <= 0.0f) continue;
-    float w = sz.x > 0.0f && sz.x < max_w ? sz.x : max_w;
-    ccord_rect rc = {x, cur_y, w, sz.y};
-    ui_panels_draw_widget_json(ui, r, d->owner, d->decor_id, CCORD_DECOR_MESSAGE_ACCESSORY, msg_id, d->widget_json, rc, bg);
-    cur_y += sz.y + UIS_SP_1;
-  }
-  return cur_y - y;
+  return ui_decor_draw_message_accessories_pos(ui, r, msg_id, CCORD_DECOR_POS_BELOW_BODY, x, y, max_w, bg);
 }
 
 float ui_decor_draw_inline_badges(ccord_ui *ui, ccord_renderer *r, ccord_decor_target target, ccord_id id,
@@ -369,13 +473,13 @@ float ui_decor_draw_inline_badges(ccord_ui *ui, ccord_renderer *r, ccord_decor_t
 {
   if (!ui || !r || !ui->d.contrib) return 0.0f;
   if (ui_plugin_security_surface_active(ui)) return 0.0f;
-  size_t n = ccord_contrib_decorator_count(ui->d.contrib);
-  if (n == 0) return 0.0f;
+  const ccord_decorator_contribution *items[64];
+  size_t cnt = decor_collect_sorted(ui->d.contrib, target, id, -1, false, items, 64u);
+  if (cnt == 0) return 0.0f;
 
   float cur_x = x;
-  for (size_t i = 0; i < n; i++) {
-    const ccord_decorator_contribution *d = ccord_contrib_decorator_at(ui->d.contrib, i);
-    if (!decor_matches(d, target, id)) continue;
+  for (size_t i = 0; i < cnt; i++) {
+    const ccord_decorator_contribution *d = items[i];
     if (!d->widget_json || !d->widget_json[0]) continue;
     ccord_vec2 sz = ui_panels_measure_widget_json(ui, r, d->widget_json, 160.0f);
     if (sz.x <= 0.0f) continue;
@@ -392,13 +496,13 @@ float ui_decor_draw_profile_sections(ccord_ui *ui, ccord_renderer *r, ccord_id u
 {
   if (!ui || !r || !ui->d.contrib || w <= 0.0f) return 0.0f;
   if (ui_plugin_security_surface_active(ui)) return 0.0f;
-  size_t n = ccord_contrib_decorator_count(ui->d.contrib);
-  if (n == 0) return 0.0f;
+  const ccord_decorator_contribution *items[64];
+  size_t cnt = decor_collect_sorted(ui->d.contrib, CCORD_DECOR_PROFILE_SECTION, user_id, -1, false, items, 64u);
+  if (cnt == 0) return 0.0f;
 
   float cur_y = y;
-  for (size_t i = 0; i < n; i++) {
-    const ccord_decorator_contribution *d = ccord_contrib_decorator_at(ui->d.contrib, i);
-    if (!decor_matches(d, CCORD_DECOR_PROFILE_SECTION, user_id)) continue;
+  for (size_t i = 0; i < cnt; i++) {
+    const ccord_decorator_contribution *d = items[i];
     if (!d->widget_json || !d->widget_json[0]) continue;
     ccord_vec2 sz = ui_panels_measure_widget_json(ui, r, d->widget_json, w - UIS_SP_2 * 2.0f);
     if (sz.y <= 0.0f) continue;
@@ -421,8 +525,10 @@ static bool v3_decor_target_interactive(const ccord_ui *ui, ccord_decor_target t
       return ui->member_popover_open;
     case CCORD_DECOR_GUILD_BADGE:
     case CCORD_DECOR_CHANNEL_BADGE:
+    case CCORD_DECOR_CHANNEL_STYLE:
       return ui->layout.left_drawer_visible && x <= ui->layout.channel_list.x + ui->layout.channel_list.w;
     case CCORD_DECOR_MEMBER_BADGE:
+    case CCORD_DECOR_MEMBER_STYLE:
       return ui->layout.right_drawer_visible && x >= ui->layout.member_list.x;
     case CCORD_DECOR_MESSAGE_BADGE:
     case CCORD_DECOR_MESSAGE_ACCESSORY:

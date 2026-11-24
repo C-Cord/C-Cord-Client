@@ -1021,6 +1021,11 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         ui->dirty = true;
         return r;
       }
+      if (ev->button == 1 && ui_toasts_handle_click(ui, ev)) {
+        uc_update_hover(ui);
+        ui->dirty = true;
+        return true;
+      }
       if ((ev->button == 1 || ev->button == 2 || ev->button == 3) && ui_panels_handle_input(ui, ev)) {
         uc_update_hover(ui);
         ui->dirty = true;

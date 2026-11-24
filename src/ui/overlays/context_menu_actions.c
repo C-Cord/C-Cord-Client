@@ -916,6 +916,20 @@ static void activate(ccord_ui *ui, size_t idx)
     }
     return;
   }
+  if (ui->menu.is_plugin_popup) {
+    if (!ui->menu.popup_resolved) {
+      ui->menu.popup_resolved = true;
+      char p_owner[65] = {0};
+      snprintf(p_owner, sizeof p_owner, "%s", ui->menu.popup_owner);
+      uint64_t p_req = ui->menu.popup_req_id;
+      char p_item[128] = {0};
+      if (it.item_id) snprintf(p_item, sizeof p_item, "%s", it.item_id);
+      if (ui->d.contrib && p_owner[0] && p_req != 0u) {
+        ccord_contrib_resolve_popup_menu(ui->d.contrib, p_owner, p_req, p_item[0] ? p_item : nullptr);
+      }
+    }
+    return;
+  }
   if (!ui->d.contrib || !it.owner || !it.item_id) return;
   ccord_error err;
   if (ccord_contrib_activate_menu(ui->d.contrib, it.owner, it.item_id, &ctx, &err) != CCORD_OK) {

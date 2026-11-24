@@ -97,10 +97,84 @@ static bool v3_handle_text_edit_event(ccord_ui *ui, ccord_text_edit *ed, bool ma
   return false;
 }
 
-static void v3_parse_field_list(const char *schema_json, const char *values_json,
-                                v3_field *fields, size_t *nfields)
+static void v3_json_scalar_to_str(const ccord_json *j, char *out, size_t cap)
 {
-  pv3_v3_clear_fields(fields, nfields);
+  if (!out || cap == 0) return;
+  out[0] = '\0';
+  if (!j) return;
+  switch (ccord_json_type_of(j)) {
+    case CCORD_JSON_STRING: {
+      const char *s = ccord_json_string(j, nullptr);
+      snprintf(out, cap, "%s", s ? s : "");
+      break;
+    }
+    case CCORD_JSON_BOOL:
+      snprintf(out, cap, "%s", ccord_json_bool(j, false) ? "true" : "false");
+      break;
+    case CCORD_JSON_NUMBER: {
+      double d = ccord_json_number(j, 0.0);
+      if (fabs(d - round(d)) < 1e-6) snprintf(out, cap, "%.0f", d);
+      else snprintf(out, cap, "%.4g", d);
+      break;
+    }
+    default:
+      break;
+  }
+}
+
+static bool v3_field_is_text_like(v3_field_kind k)
+{
+  return k == V3F_TEXT || k == V3F_SECRET || k == V3F_COLOR || k == V3F_PATH;
+}
+
+static bool v3_field_is_visible(const v3_field *fields, size_t nfields, size_t idx)
+{
+  if (!fields || idx >= nfields) return false;
+  const v3_vis_cond *vc = &fields[idx].vis;
+  if (!vc->active || !vc->key[0]) return true;
+  const v3_field *ref = nullptr;
+  for (size_t i = 0; i < nfields; i++) {
+    if (fields[i].key[0] && strcmp(fields[i].key, vc->key) == 0) {
+      ref = &fields[i];
+      break;
+    }
+  }
+  if (!ref) return true;
+  char val[128] = "";
+  bool truthy = false;
+  if (ref->kind == V3F_TOGGLE) {
+    snprintf(val, sizeof val, "%s", ref->bool_val ? "true" : "false");
+    truthy = ref->bool_val;
+  } else if (ref->kind == V3F_SLIDER) {
+    if (fabs(ref->num_val - round(ref->num_val)) < 1e-6) snprintf(val, sizeof val, "%.0f", ref->num_val);
+    else snprintf(val, sizeof val, "%.4g", ref->num_val);
+    truthy = fabs(ref->num_val) > 1e-9;
+  } else if (ref->kind == V3F_SELECT) {
+    const char *sv = (ref->opts && ref->nopts > 0 && ref->sel_idx < ref->nopts) ? ref->opts[ref->sel_idx].value : "";
+    snprintf(val, sizeof val, "%s", sv);
+    truthy = sv[0] != '\0';
+  } else if (ref->edit_inited) {
+    const char *sv = ccord_text_edit_cstr(&ref->edit);
+    snprintf(val, sizeof val, "%s", sv ? sv : "");
+    truthy = sv && sv[0] != '\0';
+  }
+  if (vc->has_equals && strcmp(val, vc->equals_val) != 0) return false;
+  if (vc->has_not_equals && strcmp(val, vc->not_equals_val) == 0) return false;
+  if (vc->has_truthy && truthy != vc->truthy_want) return false;
+  if (vc->nin_vals > 0) {
+    bool hit = false;
+    for (size_t k = 0; k < vc->nin_vals; k++) {
+      if (strcmp(val, vc->in_vals[k]) == 0) { hit = true; break; }
+    }
+    if (!hit) return false;
+  }
+  return true;
+}
+
+static void v3_parse_field_list(const char *schema_json, const char *values_json,
+                                v3_field **fields_ptr, size_t *nfields)
+{
+  pv3_v3_clear_fields(fields_ptr, nfields);
   if (!schema_json || !schema_json[0]) return;
 
   ccord_arena arena = {0};
@@ -120,82 +194,140 @@ static void v3_parse_field_list(const char *schema_json, const char *values_json
 
   if (arr && ccord_json_type_of(arr) == CCORD_JSON_ARRAY) {
     size_t n = ccord_json_array_len(arr);
-    for (size_t i = 0; i < n && *nfields < V3_MAX_FORM_FIELDS; i++) {
-      const ccord_json *it = ccord_json_array_at(arr, i);
-      if (!it || ccord_json_type_of(it) != CCORD_JSON_OBJECT) continue;
-      v3_field *f = &fields[*nfields];
-      memset(f, 0, sizeof *f);
+    if (n > V3_MAX_FORM_FIELDS) n = V3_MAX_FORM_FIELDS;
+    v3_field *fields = n > 0 ? ccord_calloc(n, sizeof *fields) : nullptr;
+    if (fields) {
+      *fields_ptr = fields;
+      for (size_t i = 0; i < n; i++) {
+        const ccord_json *it = ccord_json_array_at(arr, i);
+        if (!it || ccord_json_type_of(it) != CCORD_JSON_OBJECT) continue;
+        v3_field *f = &fields[*nfields];
+        memset(f, 0, sizeof *f);
 
-      const char *type = ccord_json_string(ccord_json_get(it, "type"), nullptr);
-      const char *key = ccord_json_string(ccord_json_get(it, "key"), nullptr);
-      const char *label = ccord_json_string(ccord_json_get(it, "label"), nullptr);
-      const char *desc = ccord_json_string(ccord_json_get(it, "description"), nullptr);
-      const char *ph = ccord_json_string(ccord_json_get(it, "placeholder"), nullptr);
+        const char *type = ccord_json_string(ccord_json_get(it, "type"), nullptr);
+        const char *key = ccord_json_string(ccord_json_get(it, "key"), nullptr);
+        const char *label = ccord_json_string(ccord_json_get(it, "label"), nullptr);
+        const char *desc = ccord_json_string(ccord_json_get(it, "description"), nullptr);
+        const char *ph = ccord_json_string(ccord_json_get(it, "placeholder"), nullptr);
 
-      if (!type) type = "text";
-      if (strcmp(type, "section") == 0) f->kind = V3F_SECTION;
-      else if (strcmp(type, "toggle") == 0 || strcmp(type, "bool") == 0 || strcmp(type, "boolean") == 0) f->kind = V3F_TOGGLE;
-      else if (strcmp(type, "slider") == 0 || strcmp(type, "number") == 0) f->kind = V3F_SLIDER;
-      else if (strcmp(type, "select") == 0) f->kind = V3F_SELECT;
-      else if (strcmp(type, "color") == 0) f->kind = V3F_COLOR;
-      else if (strcmp(type, "secret") == 0 || strcmp(type, "password") == 0) f->kind = V3F_SECRET;
-      else f->kind = V3F_TEXT;
+        if (!type) type = "text";
+        if (strcmp(type, "section") == 0) f->kind = V3F_SECTION;
+        else if (strcmp(type, "toggle") == 0 || strcmp(type, "bool") == 0 || strcmp(type, "boolean") == 0) f->kind = V3F_TOGGLE;
+        else if (strcmp(type, "slider") == 0 || strcmp(type, "number") == 0) f->kind = V3F_SLIDER;
+        else if (strcmp(type, "select") == 0) f->kind = V3F_SELECT;
+        else if (strcmp(type, "color") == 0) f->kind = V3F_COLOR;
+        else if (strcmp(type, "secret") == 0 || strcmp(type, "password") == 0) f->kind = V3F_SECRET;
+        else if (strcmp(type, "button") == 0) f->kind = V3F_BUTTON;
+        else if (strcmp(type, "path") == 0) f->kind = V3F_PATH;
+        else f->kind = V3F_TEXT;
 
-      snprintf(f->key, sizeof f->key, "%s", key ? key : "");
-      snprintf(f->label, sizeof f->label, "%s", label ? label : (key ? key : ""));
-      snprintf(f->desc, sizeof f->desc, "%s", desc ? desc : "");
-      snprintf(f->placeholder, sizeof f->placeholder, "%s", ph ? ph : "");
+        snprintf(f->key, sizeof f->key, "%s", key ? key : "");
+        snprintf(f->label, sizeof f->label, "%s", label ? label : (key ? key : ""));
+        snprintf(f->desc, sizeof f->desc, "%s", desc ? desc : "");
+        snprintf(f->placeholder, sizeof f->placeholder, "%s", ph ? ph : "");
 
-      const ccord_json *def = ccord_json_get(it, "default");
-      const ccord_json *cur = (vals && f->key[0]) ? ccord_json_get(vals, f->key) : nullptr;
-      const ccord_json *val = cur ? cur : def;
-
-      if (f->kind == V3F_TOGGLE) {
-        f->bool_val = ccord_json_bool(val, false);
-      } else if (f->kind == V3F_SLIDER) {
-        f->num_min = ccord_json_number(ccord_json_get(it, "min"), 0.0);
-        f->num_max = ccord_json_number(ccord_json_get(it, "max"), 100.0);
-        if (f->num_max <= f->num_min) f->num_max = f->num_min + 100.0;
-        f->num_step = ccord_json_number(ccord_json_get(it, "step"), 1.0);
-        f->num_val = ccord_json_number(val, f->num_min);
-        if (f->num_val < f->num_min) f->num_val = f->num_min;
-        if (f->num_val > f->num_max) f->num_val = f->num_max;
-      } else if (f->kind == V3F_SELECT) {
-        const ccord_json *opts = ccord_json_get(it, "options");
-        if (opts && ccord_json_type_of(opts) == CCORD_JSON_ARRAY) {
-          size_t no = ccord_json_array_len(opts);
-          for (size_t oi = 0; oi < no && f->nopts < V3_MAX_FIELD_OPTS; oi++) {
-            const ccord_json *o = ccord_json_array_at(opts, oi);
-            if (ccord_json_type_of(o) == CCORD_JSON_STRING) {
-              const char *os = ccord_json_string(o, nullptr);
-              snprintf(f->opts[f->nopts].label, sizeof f->opts[0].label, "%s", os ? os : "");
-              snprintf(f->opts[f->nopts].value, sizeof f->opts[0].value, "%s", os ? os : "");
-              f->nopts++;
-            } else if (ccord_json_type_of(o) == CCORD_JSON_OBJECT) {
-              const char *ol = ccord_json_string(ccord_json_get(o, "label"), nullptr);
-              const char *ov = ccord_json_string(ccord_json_get(o, "value"), nullptr);
-              snprintf(f->opts[f->nopts].label, sizeof f->opts[0].label, "%s", ol ? ol : (ov ? ov : ""));
-              snprintf(f->opts[f->nopts].value, sizeof f->opts[0].value, "%s", ov ? ov : (ol ? ol : ""));
-              f->nopts++;
+        // Optional conditional visibility predicate: visible_when = { key, equals?, not_equals?, in?, truthy? }
+        const ccord_json *vw = ccord_json_get(it, "visible_when");
+        if (vw && ccord_json_type_of(vw) == CCORD_JSON_OBJECT) {
+          const char *vk = ccord_json_string(ccord_json_get(vw, "key"), nullptr);
+          if (vk && vk[0]) {
+            f->vis.active = true;
+            snprintf(f->vis.key, sizeof f->vis.key, "%s", vk);
+            const ccord_json *eqj = ccord_json_get(vw, "equals");
+            if (eqj) {
+              f->vis.has_equals = true;
+              v3_json_scalar_to_str(eqj, f->vis.equals_val, sizeof f->vis.equals_val);
+            }
+            const ccord_json *neqj = ccord_json_get(vw, "not_equals");
+            if (neqj) {
+              f->vis.has_not_equals = true;
+              v3_json_scalar_to_str(neqj, f->vis.not_equals_val, sizeof f->vis.not_equals_val);
+            }
+            const ccord_json *tj = ccord_json_get(vw, "truthy");
+            if (tj && ccord_json_type_of(tj) == CCORD_JSON_BOOL) {
+              f->vis.has_truthy = true;
+              f->vis.truthy_want = ccord_json_bool(tj, true);
+            }
+            const ccord_json *inj = ccord_json_get(vw, "in");
+            if (inj && ccord_json_type_of(inj) == CCORD_JSON_ARRAY) {
+              size_t in_n = ccord_json_array_len(inj);
+              for (size_t ik = 0; ik < in_n && f->vis.nin_vals < V3_MAX_VIS_IN; ik++) {
+                v3_json_scalar_to_str(ccord_json_array_at(inj, ik),
+                                      f->vis.in_vals[f->vis.nin_vals], sizeof f->vis.in_vals[0]);
+                f->vis.nin_vals++;
+              }
             }
           }
         }
-        const char *vs = ccord_json_string(val, nullptr);
-        f->sel_idx = 0;
-        if (vs) {
-          for (size_t oi = 0; oi < f->nopts; oi++) {
-            if (strcmp(f->opts[oi].value, vs) == 0 || strcmp(f->opts[oi].label, vs) == 0) {
-              f->sel_idx = oi;
-              break;
+
+        const ccord_json *def = ccord_json_get(it, "default");
+        const ccord_json *cur = (vals && f->key[0]) ? ccord_json_get(vals, f->key) : nullptr;
+        const ccord_json *val = cur ? cur : def;
+
+        if (f->kind == V3F_TOGGLE) {
+          f->bool_val = ccord_json_bool(val, false);
+        } else if (f->kind == V3F_SLIDER) {
+          f->num_min = ccord_json_number(ccord_json_get(it, "min"), 0.0);
+          f->num_max = ccord_json_number(ccord_json_get(it, "max"), 100.0);
+          if (f->num_max <= f->num_min) f->num_max = f->num_min + 100.0;
+          f->num_step = ccord_json_number(ccord_json_get(it, "step"), 1.0);
+          f->num_val = ccord_json_number(val, f->num_min);
+          if (f->num_val < f->num_min) f->num_val = f->num_min;
+          if (f->num_val > f->num_max) f->num_val = f->num_max;
+        } else if (f->kind == V3F_SELECT) {
+          const ccord_json *opts = ccord_json_get(it, "options");
+          if (opts && ccord_json_type_of(opts) == CCORD_JSON_ARRAY) {
+            size_t no = ccord_json_array_len(opts);
+            if (no > V3_MAX_FIELD_OPTS) no = V3_MAX_FIELD_OPTS;
+            if (no > 0) f->opts = ccord_calloc(no, sizeof *f->opts);
+            for (size_t oi = 0; oi < no && f->opts; oi++) {
+              const ccord_json *o = ccord_json_array_at(opts, oi);
+              if (ccord_json_type_of(o) == CCORD_JSON_STRING) {
+                const char *os = ccord_json_string(o, nullptr);
+                snprintf(f->opts[f->nopts].label, sizeof f->opts[0].label, "%s", os ? os : "");
+                snprintf(f->opts[f->nopts].value, sizeof f->opts[0].value, "%s", os ? os : "");
+                f->nopts++;
+              } else if (ccord_json_type_of(o) == CCORD_JSON_OBJECT) {
+                const char *ol = ccord_json_string(ccord_json_get(o, "label"), nullptr);
+                const char *ov = ccord_json_string(ccord_json_get(o, "value"), nullptr);
+                snprintf(f->opts[f->nopts].label, sizeof f->opts[0].label, "%s", ol ? ol : (ov ? ov : ""));
+                snprintf(f->opts[f->nopts].value, sizeof f->opts[0].value, "%s", ov ? ov : (ol ? ol : ""));
+                f->nopts++;
+              }
             }
           }
+          const char *vs = ccord_json_string(val, nullptr);
+          f->sel_idx = 0;
+          if (vs && f->opts) {
+            for (size_t oi = 0; oi < f->nopts; oi++) {
+              if (strcmp(f->opts[oi].value, vs) == 0 || strcmp(f->opts[oi].label, vs) == 0) {
+                f->sel_idx = oi;
+                break;
+              }
+            }
+          }
+        } else if (f->kind == V3F_BUTTON) {
+          const char *blbl = ccord_json_string(ccord_json_get(it, "button_label"), nullptr);
+          snprintf(f->button_label, sizeof f->button_label, "%.63s", (blbl && blbl[0]) ? blbl : (f->label[0] ? f->label : "Run"));
+          const char *var = ccord_json_string(ccord_json_get(it, "variant"), nullptr);
+          if (var && strcmp(var, "primary") == 0) f->btn_variant = 1;
+          else if (var && strcmp(var, "danger") == 0) f->btn_variant = 2;
+          else f->btn_variant = 0;
+        } else if (f->kind == V3F_PATH) {
+          const char *mode = ccord_json_string(ccord_json_get(it, "mode"), nullptr);
+          f->path_is_dir = (mode && strcmp(mode, "dir") == 0);
+          if (!f->placeholder[0]) {
+            snprintf(f->placeholder, sizeof f->placeholder, "%s", f->path_is_dir ? "Select folder..." : "Select file...");
+          }
+          const char *vs = ccord_json_string(val, nullptr);
+          v3_init_edit_str(f, vs ? vs : "");
+        } else if (f->kind == V3F_TEXT || f->kind == V3F_SECRET || f->kind == V3F_COLOR) {
+          const char *vs = ccord_json_string(val, nullptr);
+          if (!vs && f->kind == V3F_COLOR) vs = "#5865f2";
+          v3_init_edit_str(f, vs ? vs : "");
         }
-      } else if (f->kind == V3F_TEXT || f->kind == V3F_SECRET || f->kind == V3F_COLOR) {
-        const char *vs = ccord_json_string(val, nullptr);
-        if (!vs && f->kind == V3F_COLOR) vs = "#5865f2";
-        v3_init_edit_str(f, vs ? vs : "");
+        (*nfields)++;
       }
-      (*nfields)++;
     }
   }
   ccord_arena_free(&arena);
@@ -205,6 +337,7 @@ static float v3_field_height(const v3_field *f)
 {
   if (f->kind == V3F_SECTION) return 28.0f;
   if (f->kind == V3F_TOGGLE) return f->desc[0] ? 48.0f : 36.0f;
+  if (f->kind == V3F_BUTTON) return f->desc[0] ? 52.0f : 38.0f;
   if (f->kind == V3F_SLIDER) return 54.0f;
   return f->desc[0] ? 74.0f : 60.0f;
 }
@@ -214,6 +347,8 @@ static void v3_draw_field(ccord_ui *ui, ccord_renderer *r, v3_field *f, size_t i
 {
   uis_tokens tk = uis_tokens_of(ui);
   uint64_t aid = ui_name_id(f->key[0] ? f->key : f->label) ^ (uint64_t)(idx + 1u);
+  f->browse_rect = (ccord_rect){0, 0, 0, 0};
+  f->clear_rect = (ccord_rect){0, 0, 0, 0};
 
   if (f->kind == V3F_SECTION) {
     ccord_text_style sst = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, ui->theme->c.text_muted);
@@ -234,6 +369,20 @@ static void v3_draw_field(ccord_ui *ui, ccord_renderer *r, v3_field *f, size_t i
     uis_toggle(ui, r, row, f->bool_val, (uis_state){.hover = hov}, ns, aid);
     if (f->desc[0]) ccord_text_draw(r, f->desc, strlen(f->desc), x, y + 26.0f, &dst, w - UIS_TOGGLE_W - UIS_SP_2);
     f->hit_rect = trc;
+    return;
+  }
+
+  if (f->kind == V3F_BUTTON) {
+    float bw = fmaxf(uis_label_width(ui, r, f->button_label), 84.0f);
+    if (bw > w * 0.55f) bw = w * 0.55f;
+    ccord_rect brc = {x + w - bw, y + 2.0f, bw, UIS_H_BTN_SM};
+    uis_btn_kind bv = f->btn_variant == 1 ? UIS_BTN_PRIMARY
+                    : f->btn_variant == 2 ? UIS_BTN_DANGER : UIS_BTN_SECONDARY;
+    ccord_text_draw(r, f->label, strlen(f->label), x, y + 6.0f, &lst, w - bw - UIS_SP_2);
+    if (f->desc[0]) ccord_text_draw(r, f->desc, strlen(f->desc), x, y + 26.0f, &dst, w - bw - UIS_SP_2);
+    uis_button(ui, r, brc, f->button_label, bv, UIS_BTN_S_SM,
+               (uis_state){.hover = ui_in_rect(ui->mx, ui->my, brc)}, ns, aid);
+    f->hit_rect = brc;
     return;
   }
 
@@ -258,7 +407,7 @@ static void v3_draw_field(ccord_ui *ui, ccord_renderer *r, v3_field *f, size_t i
 
   if (f->kind == V3F_SELECT) {
     ccord_rect box = {x, cy, w, UIS_H_INPUT};
-    const char *cur = (f->nopts > 0 && f->sel_idx < f->nopts) ? f->opts[f->sel_idx].label : "";
+    const char *cur = (f->opts && f->nopts > 0 && f->sel_idx < f->nopts) ? f->opts[f->sel_idx].label : "";
     bool hov = ui_in_rect(ui->mx, ui->my, box);
     uis_select(ui, r, box, cur, (uis_state){.hover = hov, .focused = focused}, ns, aid);
     f->hit_rect = box;
@@ -275,6 +424,32 @@ static void v3_draw_field(ccord_ui *ui, ccord_renderer *r, v3_field *f, size_t i
     bool hov = ui_in_rect(ui->mx, ui->my, box);
     (void)uis_input(ui, r, box, &f->edit, "#RRGGBB", (uis_state){.hover = hov, .focused = focused}, false, ns, aid ^ 1u);
     f->hit_rect = box;
+    if (f->desc[0]) ccord_text_draw(r, f->desc, strlen(f->desc), x, cy + UIS_H_INPUT + 2.0f, &dst, w);
+    return;
+  }
+
+  if (f->kind == V3F_PATH) {
+    const char *cur = ccord_text_edit_cstr(&f->edit);
+    bool has_val = cur && cur[0] != '\0';
+    float br_w = fmaxf(uis_label_width(ui, r, "Browse"), 72.0f);
+    float cl_w = has_val ? fmaxf(uis_label_width(ui, r, "Clear"), 56.0f) : 0.0f;
+    float right_w = br_w + UIS_SP_1 + (has_val ? (cl_w + UIS_SP_1) : 0.0f);
+    float box_w = fmaxf(w - right_w, 60.0f);
+    ccord_rect box = {x, cy, box_w, UIS_H_INPUT};
+    bool hov = ui_in_rect(ui->mx, ui->my, box);
+    (void)uis_input(ui, r, box, &f->edit, f->placeholder,
+                    (uis_state){.hover = hov, .focused = focused}, false, ns, aid);
+    f->hit_rect = box;
+    ccord_rect br_rc = {box.x + box.w + UIS_SP_1, cy, br_w, UIS_H_INPUT};
+    uis_button(ui, r, br_rc, "Browse", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+               (uis_state){.hover = ui_in_rect(ui->mx, ui->my, br_rc)}, ns, aid ^ 2u);
+    f->browse_rect = br_rc;
+    if (has_val) {
+      ccord_rect cl_rc = {br_rc.x + br_rc.w + UIS_SP_1, cy, cl_w, UIS_H_INPUT};
+      uis_button(ui, r, cl_rc, "Clear", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+                 (uis_state){.hover = ui_in_rect(ui->mx, ui->my, cl_rc)}, ns, aid ^ 3u);
+      f->clear_rect = cl_rc;
+    }
     if (f->desc[0]) ccord_text_draw(r, f->desc, strlen(f->desc), x, cy + UIS_H_INPUT + 2.0f, &dst, w);
     return;
   }
@@ -308,7 +483,7 @@ static void v3_dialog_sync(ccord_ui *ui, const ccord_plugin_dialog *dlg)
   if (!v || !dlg) return;
   if (v->dlg.active_req_id == dlg->req_id) return;
 
-  pv3_v3_clear_fields(v->dlg.fields, &v->dlg.nfields);
+  pv3_v3_clear_fields(&v->dlg.fields, &v->dlg.nfields);
   v->dlg.active_req_id = dlg->req_id;
   v->dlg.kind = dlg->kind;
   v->dlg.focused_idx = -1;
@@ -316,20 +491,23 @@ static void v3_dialog_sync(ccord_ui *ui, const ccord_plugin_dialog *dlg)
   v->dlg.scroll_y = 0.0f;
   v->dlg.content_h = 0.0f;
   v->dlg.body_rect = (ccord_rect){0};
+  if (!v->pending_path_in_settings) v->pending_path_field = -1;
 
   if (dlg->kind == CCORD_DIALOG_PROMPT) {
-    v3_field *f = &v->dlg.fields[0];
-    memset(f, 0, sizeof *f);
-    f->kind = V3F_TEXT;
-    snprintf(f->key, sizeof f->key, "value");
-    snprintf(f->label, sizeof f->label, "Value");
-    v3_init_edit_str(f, dlg->default_value ? dlg->default_value : "");
-    v->dlg.nfields = 1;
-    v->dlg.focused_idx = 0;
+    v->dlg.fields = ccord_calloc(1, sizeof *v->dlg.fields);
+    if (v->dlg.fields) {
+      v3_field *f = &v->dlg.fields[0];
+      f->kind = V3F_TEXT;
+      snprintf(f->key, sizeof f->key, "value");
+      snprintf(f->label, sizeof f->label, "Value");
+      v3_init_edit_str(f, dlg->default_value ? dlg->default_value : "");
+      v->dlg.nfields = 1;
+      v->dlg.focused_idx = 0;
+    }
   } else if (dlg->kind == CCORD_DIALOG_FORM) {
-    v3_parse_field_list(dlg->fields_json, nullptr, v->dlg.fields, &v->dlg.nfields);
+    v3_parse_field_list(dlg->fields_json, nullptr, &v->dlg.fields, &v->dlg.nfields);
     for (size_t i = 0; i < v->dlg.nfields; i++) {
-      if (v->dlg.fields[i].kind == V3F_TEXT || v->dlg.fields[i].kind == V3F_SECRET || v->dlg.fields[i].kind == V3F_COLOR) {
+      if (v3_field_is_visible(v->dlg.fields, v->dlg.nfields, i) && v3_field_is_text_like(v->dlg.fields[i].kind)) {
         v->dlg.focused_idx = (int)i;
         break;
       }
@@ -362,12 +540,12 @@ static void v3_dialog_submit(ccord_ui *ui, const ccord_plugin_dialog *dlg, bool 
     ccord_jw_begin_object(&w);
     for (size_t i = 0; i < v->dlg.nfields; i++) {
       const v3_field *f = &v->dlg.fields[i];
-      if (f->kind == V3F_SECTION || !f->key[0]) continue;
+      if (f->kind == V3F_SECTION || f->kind == V3F_BUTTON || !f->key[0]) continue;
       ccord_jw_key(&w, f->key);
       if (f->kind == V3F_TOGGLE) ccord_jw_bool(&w, f->bool_val);
       else if (f->kind == V3F_SLIDER) ccord_jw_double(&w, f->num_val);
       else if (f->kind == V3F_SELECT) {
-        const char *sv = (f->nopts > 0 && f->sel_idx < f->nopts) ? f->opts[f->sel_idx].value : "";
+        const char *sv = (f->opts && f->nopts > 0 && f->sel_idx < f->nopts) ? f->opts[f->sel_idx].value : "";
         ccord_jw_cstr(&w, sv);
       } else {
         ccord_jw_cstr(&w, ccord_text_edit_cstr(&f->edit));
@@ -846,9 +1024,8 @@ bool ui_plugin_dialog_wants_text(const ccord_ui *ui)
     return h->mfa_required ? h->mfa_focused : h->pw_focused;
   }
   const v3_dialog_state *d = &ui->plugin_v3->dlg;
-  if (d->focused_idx < 0 || (size_t)d->focused_idx >= d->nfields) return false;
-  v3_field_kind k = d->fields[d->focused_idx].kind;
-  return k == V3F_TEXT || k == V3F_SECRET || k == V3F_COLOR;
+  if (!d->fields || d->focused_idx < 0 || (size_t)d->focused_idx >= d->nfields) return false;
+  return v3_field_is_text_like(d->fields[d->focused_idx].kind);
 }
 
 void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r)
@@ -877,7 +1054,11 @@ void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r)
     msg_h = mm.y + UIS_SP_3;
   }
   float fields_h = 0.0f;
-  for (size_t i = 0; i < v->dlg.nfields; i++) fields_h += v3_field_height(&v->dlg.fields[i]) + UIS_SP_2;
+  for (size_t i = 0; i < v->dlg.nfields; i++) {
+    if (v3_field_is_visible(v->dlg.fields, v->dlg.nfields, i)) {
+      fields_h += v3_field_height(&v->dlg.fields[i]) + UIS_SP_2;
+    }
+  }
 
   float mh = 76.0f + UIS_H_CHIP + UIS_SP_3 + msg_h + fields_h + UIS_H_BTN + UIS_SP_5;
   if (mh < 180.0f) mh = 180.0f;
@@ -912,6 +1093,12 @@ void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r)
   }
 
   for (size_t i = 0; i < v->dlg.nfields; i++) {
+    if (!v3_field_is_visible(v->dlg.fields, v->dlg.nfields, i)) {
+      v->dlg.fields[i].hit_rect = (ccord_rect){0};
+      v->dlg.fields[i].browse_rect = (ccord_rect){0};
+      v->dlg.fields[i].clear_rect = (ccord_rect){0};
+      continue;
+    }
     v3_draw_field(ui, r, &v->dlg.fields[i], i, box.x + UIS_SP_5, cy, inner_w, v->dlg.focused_idx == (int)i, "pdlg_f");
     cy += v3_field_height(&v->dlg.fields[i]) + UIS_SP_2;
   }
@@ -937,6 +1124,34 @@ void ui_plugin_dialog_draw(ccord_ui *ui, ccord_renderer *r)
              (uis_state){.hover = ui_in_rect(ui->mx, ui->my, v->dlg.cancel_rect)}, "pdlg_btn", 1);
   uis_button(ui, r, v->dlg.confirm_rect, ok_lbl, UIS_BTN_PRIMARY, UIS_BTN_S_MD,
              (uis_state){.hover = ui_in_rect(ui->mx, ui->my, v->dlg.confirm_rect)}, "pdlg_btn", 2);
+}
+
+static bool v3_trigger_path_browse(ccord_ui *ui, ui_plugin_v3 *v, v3_field *f, size_t idx, bool in_settings)
+{
+  if (!ui || !v || !f) return false;
+  char picked[1024] = "";
+  bool sync_ok = false;
+  if (f->path_is_dir) {
+    if (ui->d.host.open_dir_dialog) {
+      sync_ok = ui->d.host.open_dir_dialog(ui->d.host.ud, picked, sizeof picked) && picked[0] != '\0';
+    } else if (ui->d.host.open_file_dialog) {
+      sync_ok = ui->d.host.open_file_dialog(ui->d.host.ud, picked, sizeof picked) && picked[0] != '\0';
+    }
+  } else {
+    if (ui->d.host.open_file_dialog) {
+      sync_ok = ui->d.host.open_file_dialog(ui->d.host.ud, picked, sizeof picked) && picked[0] != '\0';
+    }
+  }
+  if (sync_ok) {
+    v3_init_edit_str(f, picked);
+    v->pending_path_field = -1;
+    return true;
+  }
+  if ((f->path_is_dir && ui->d.host.open_dir_dialog) || ui->d.host.open_file_dialog) {
+    v->pending_path_field = (int)idx;
+    v->pending_path_in_settings = in_settings;
+  }
+  return false;
 }
 
 bool ui_plugin_dialog_handle_input(ccord_ui *ui, const ccord_input_event *ev)
@@ -981,7 +1196,20 @@ bool ui_plugin_dialog_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     if (ui->touch_mode) ui->touch_text_focused = false;
     if (ui_in_rect(ev->x, ev->y, v->dlg.body_rect)) {
       for (size_t i = 0; i < v->dlg.nfields; i++) {
+        if (!v3_field_is_visible(v->dlg.fields, v->dlg.nfields, i)) continue;
         v3_field *f = &v->dlg.fields[i];
+        if (f->kind == V3F_PATH) {
+          if (f->browse_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, f->browse_rect)) {
+            (void)v3_trigger_path_browse(ui, v, f, i, false);
+            ui->dirty = true;
+            return true;
+          }
+          if (f->clear_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, f->clear_rect)) {
+            v3_init_edit_str(f, "");
+            ui->dirty = true;
+            return true;
+          }
+        }
         if (!ui_in_rect(ev->x, ev->y, f->hit_rect)) continue;
         if (f->kind == V3F_TOGGLE) {
           f->bool_val = !f->bool_val;
@@ -990,7 +1218,9 @@ bool ui_plugin_dialog_handle_input(ccord_ui *ui, const ccord_input_event *ev)
           v->dlg.drag_slider_idx = (int)i;
         } else if (f->kind == V3F_SELECT && f->nopts > 0) {
           f->sel_idx = (f->sel_idx + 1u) % f->nopts;
-        } else if (f->kind == V3F_TEXT || f->kind == V3F_SECRET || f->kind == V3F_COLOR) {
+        } else if (f->kind == V3F_BUTTON) {
+          if (dlg->owner && f->key[0]) ccord_contrib_notify_setting_action(ui->d.contrib, dlg->owner, f->key);
+        } else if (v3_field_is_text_like(f->kind)) {
           v->dlg.focused_idx = (int)i;
           if (ui->touch_mode) ui->touch_text_focused = true;
         }
@@ -1014,8 +1244,8 @@ bool ui_plugin_dialog_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       int start = v->dlg.focused_idx >= 0 ? v->dlg.focused_idx : 0;
       for (size_t step = 1; step <= v->dlg.nfields; step++) {
         size_t idx = ((size_t)start + step) % v->dlg.nfields;
-        v3_field_kind k = v->dlg.fields[idx].kind;
-        if (k == V3F_TEXT || k == V3F_SECRET || k == V3F_COLOR) {
+        if (v3_field_is_visible(v->dlg.fields, v->dlg.nfields, idx) &&
+            v3_field_is_text_like(v->dlg.fields[idx].kind)) {
           v->dlg.focused_idx = (int)idx;
           ui->dirty = true;
           break;
@@ -1039,7 +1269,7 @@ bool ui_plugin_dialog_handle_input(ccord_ui *ui, const ccord_input_event *ev)
 
 static void v3_settings_emit(ccord_ui *ui, const char *owner, const v3_field *f)
 {
-  if (!ui || !ui->d.contrib || !owner || !f || !f->key[0]) return;
+  if (!ui || !ui->d.contrib || !owner || !f || !f->key[0] || f->kind == V3F_SECTION || f->kind == V3F_BUTTON) return;
   ccord_buf b;
   ccord_buf_init(&b, 0);
   ccord_jw w;
@@ -1047,7 +1277,7 @@ static void v3_settings_emit(ccord_ui *ui, const char *owner, const v3_field *f)
   if (f->kind == V3F_TOGGLE) ccord_jw_bool(&w, f->bool_val);
   else if (f->kind == V3F_SLIDER) ccord_jw_double(&w, f->num_val);
   else if (f->kind == V3F_SELECT) {
-    const char *sv = (f->nopts > 0 && f->sel_idx < f->nopts) ? f->opts[f->sel_idx].value : "";
+    const char *sv = (f->opts && f->nopts > 0 && f->sel_idx < f->nopts) ? f->opts[f->sel_idx].value : "";
     ccord_jw_cstr(&w, sv);
   } else {
     ccord_jw_cstr(&w, ccord_text_edit_cstr(&f->edit));
@@ -1056,6 +1286,31 @@ static void v3_settings_emit(ccord_ui *ui, const char *owner, const v3_field *f)
     ccord_contrib_notify_setting_changed(ui->d.contrib, owner, f->key, (const char *)b.data);
   }
   ccord_buf_free(&b);
+}
+
+bool ccord_ui_consume_picked_path(ccord_ui *ui, const char *path)
+{
+  if (!ui || !ui->plugin_v3) return false;
+  ui_plugin_v3 *v = ui->plugin_v3;
+  if (v->pending_path_field < 0) return false;
+  int idx = v->pending_path_field;
+  bool in_set = v->pending_path_in_settings;
+  v->pending_path_field = -1;
+  if (!path || !path[0]) return false;
+  if (in_set && v->set.open && v->set.fields && (size_t)idx < v->set.nfields &&
+      v->set.fields[idx].kind == V3F_PATH) {
+    v3_init_edit_str(&v->set.fields[idx], path);
+    v3_settings_emit(ui, v->set.owner, &v->set.fields[idx]);
+    ui->dirty = true;
+    return true;
+  }
+  if (!in_set && v->dlg.active_req_id != 0 && v->dlg.fields && (size_t)idx < v->dlg.nfields &&
+      v->dlg.fields[idx].kind == V3F_PATH) {
+    v3_init_edit_str(&v->dlg.fields[idx], path);
+    ui->dirty = true;
+    return true;
+  }
+  return false;
 }
 
 static void v3_settings_sync(ccord_ui *ui)
@@ -1068,7 +1323,7 @@ static void v3_settings_sync(ccord_ui *ui)
     return;
   }
   if (s->loaded_rev == sc->revision && s->nfields > 0) return;
-  v3_parse_field_list(sc->schema_json, sc->values_json, s->fields, &s->nfields);
+  v3_parse_field_list(sc->schema_json, sc->values_json, &s->fields, &s->nfields);
   s->loaded_rev = sc->revision;
 }
 
@@ -1106,9 +1361,8 @@ bool ui_plugin_settings_wants_text(const ccord_ui *ui)
 {
   if (!ui_plugin_settings_is_open(ui)) return false;
   const v3_settings_state *s = &ui->plugin_v3->set;
-  if (s->focused_idx < 0 || (size_t)s->focused_idx >= s->nfields) return false;
-  v3_field_kind k = s->fields[s->focused_idx].kind;
-  return k == V3F_TEXT || k == V3F_SECRET || k == V3F_COLOR;
+  if (!s->fields || s->focused_idx < 0 || (size_t)s->focused_idx >= s->nfields) return false;
+  return v3_field_is_text_like(s->fields[s->focused_idx].kind);
 }
 
 void ui_plugin_settings_draw(ccord_ui *ui, ccord_renderer *r)
@@ -1119,7 +1373,11 @@ void ui_plugin_settings_draw(ccord_ui *ui, ccord_renderer *r)
   if (!s->open) return;
 
   float content_h = 0.0f;
-  for (size_t i = 0; i < s->nfields; i++) content_h += v3_field_height(&s->fields[i]) + UIS_SP_2;
+  for (size_t i = 0; i < s->nfields; i++) {
+    if (v3_field_is_visible(s->fields, s->nfields, i)) {
+      content_h += v3_field_height(&s->fields[i]) + UIS_SP_2;
+    }
+  }
   s->content_h = content_h;
 
   float desired_body = content_h < 80.0f ? 80.0f : content_h;
@@ -1149,6 +1407,12 @@ void ui_plugin_settings_draw(ccord_ui *ui, ccord_renderer *r)
   ccord_push_clip(r, body);
   float fy = body.y - s->scroll_y;
   for (size_t i = 0; i < s->nfields; i++) {
+    if (!v3_field_is_visible(s->fields, s->nfields, i)) {
+      s->fields[i].hit_rect = (ccord_rect){0};
+      s->fields[i].browse_rect = (ccord_rect){0};
+      s->fields[i].clear_rect = (ccord_rect){0};
+      continue;
+    }
     v3_draw_field(ui, r, &s->fields[i], i, body.x, fy, inner_w, s->focused_idx == (int)i, "pset_f");
     fy += v3_field_height(&s->fields[i]) + UIS_SP_2;
   }
@@ -1200,7 +1464,21 @@ bool ui_plugin_settings_handle_input(ccord_ui *ui, const ccord_input_event *ev)
     if (ui->touch_mode) ui->touch_text_focused = false;
     if (ui_in_rect(ev->x, ev->y, s->body_rect)) {
       for (size_t i = 0; i < s->nfields; i++) {
+        if (!v3_field_is_visible(s->fields, s->nfields, i)) continue;
         v3_field *f = &s->fields[i];
+        if (f->kind == V3F_PATH) {
+          if (f->browse_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, f->browse_rect)) {
+            if (v3_trigger_path_browse(ui, ui->plugin_v3, f, i, true)) {
+              v3_settings_emit(ui, s->owner, f);
+            }
+            break;
+          }
+          if (f->clear_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, f->clear_rect)) {
+            v3_init_edit_str(f, "");
+            v3_settings_emit(ui, s->owner, f);
+            break;
+          }
+        }
         if (!ui_in_rect(ev->x, ev->y, f->hit_rect)) continue;
         if (f->kind == V3F_TOGGLE) {
           f->bool_val = !f->bool_val;
@@ -1212,7 +1490,9 @@ bool ui_plugin_settings_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         } else if (f->kind == V3F_SELECT && f->nopts > 0) {
           f->sel_idx = (f->sel_idx + 1u) % f->nopts;
           v3_settings_emit(ui, s->owner, f);
-        } else if (f->kind == V3F_TEXT || f->kind == V3F_SECRET || f->kind == V3F_COLOR) {
+        } else if (f->kind == V3F_BUTTON) {
+          if (f->key[0]) ccord_contrib_notify_setting_action(ui->d.contrib, s->owner, f->key);
+        } else if (v3_field_is_text_like(f->kind)) {
           s->focused_idx = (int)i;
           if (ui->touch_mode) ui->touch_text_focused = true;
         }
@@ -1223,6 +1503,21 @@ bool ui_plugin_settings_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       v3_settings_emit(ui, s->owner, &s->fields[prev_focus]);
     }
     ui->dirty = true;
+    return true;
+  }
+  if (ev->type == CCORD_IN_KEY_DOWN && ev->key == CCORD_KEY_TAB && s->nfields > 0) {
+    int start = s->focused_idx >= 0 ? s->focused_idx : 0;
+    for (size_t step = 1; step <= s->nfields; step++) {
+      size_t idx = ((size_t)start + step) % s->nfields;
+      if (v3_field_is_visible(s->fields, s->nfields, idx) && v3_field_is_text_like(s->fields[idx].kind)) {
+        if (s->focused_idx >= 0 && (size_t)s->focused_idx < s->nfields) {
+          v3_settings_emit(ui, s->owner, &s->fields[s->focused_idx]);
+        }
+        s->focused_idx = (int)idx;
+        ui->dirty = true;
+        break;
+      }
+    }
     return true;
   }
   if (ev->type == CCORD_IN_KEY_DOWN && ev->key == CCORD_KEY_ESCAPE) {
