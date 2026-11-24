@@ -117,6 +117,11 @@ void ccord_rgba_to_grayscale_inplace(uint8_t *rgba, size_t npixels);
 [[nodiscard]] ccord_status ccord_image_crop_png(const uint8_t *src, size_t src_len, float zoom, float pan_x,
                                                 float pan_y, int out_w, int out_h, uint8_t **out_png,
                                                 size_t *out_len, ccord_error *err);
+// Decodes an image (optionally downscaling so neither side exceeds max_dim) and re-encodes as "png", "jpeg", or "webp"
+// with quality 1..100 (default 85). Strips EXIF/XMP/IPTC metadata as a byproduct of re-encoding.
+[[nodiscard]] ccord_status ccord_image_reencode(const uint8_t *src, size_t src_len, const char *format,
+                                                int quality, int max_dim, uint8_t **out_bytes,
+                                                size_t *out_len, ccord_error *err);
 // Decodes an image and uploads it into the renderer's LRU SDL_Texture cache under `key`.
 [[nodiscard]] ccord_status ccord_render_upload_image(ccord_renderer *r, const char *key, const uint8_t *data,
                                                      size_t len, int *out_w, int *out_h, ccord_error *err);

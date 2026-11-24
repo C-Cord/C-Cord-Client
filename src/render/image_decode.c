@@ -7,11 +7,13 @@
 
 #include <setjmp.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <jpeglib.h>
 #include <png.h>
 #include <webp/decode.h>
+#include <webp/encode.h>
 
 #include <ccord/core/alloc.h>
 
@@ -503,5 +505,143 @@ ccord_status ccord_image_crop_png(const uint8_t *src, size_t src_len, float zoom
   *out_png = buf;
   *out_len = (size_t)png_sz;
   return CCORD_OK;
+}
+
+ccord_status ccord_image_reencode(const uint8_t *src, size_t src_len, const char *format,
+                                  int quality, int max_dim, uint8_t **out_bytes,
+                                  size_t *out_len, ccord_error *err)
+{
+  if (out_bytes) *out_bytes = nullptr;
+  if (out_len) *out_len = 0;
+  if (!src || src_len == 0u || !format || !out_bytes || !out_len) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "image reencode: invalid argument");
+  }
+  if (quality <= 0) quality = 85;
+  if (quality > 100) quality = 100;
+  int lim = (max_dim > 0 && max_dim <= MAX_IMAGE_DIM) ? max_dim : MAX_IMAGE_DIM;
+
+  uint8_t *rgba = nullptr;
+  int w = 0, h = 0;
+  ccord_status st = ccord_image_decode_rgba_max(src, src_len, lim, &rgba, &w, &h, err);
+  if (st != CCORD_OK) return st;
+
+  if (strcmp(format, "png") == 0) {
+    png_image pimg;
+    memset(&pimg, 0, sizeof pimg);
+    pimg.version = PNG_IMAGE_VERSION;
+    pimg.width = (png_uint_32)w;
+    pimg.height = (png_uint_32)h;
+    pimg.format = PNG_FORMAT_RGBA;
+    png_alloc_size_t psz = 0;
+    if (!png_image_write_to_memory(&pimg, nullptr, &psz, 0, rgba, 0, nullptr) || psz == 0) {
+      ccord_free(rgba);
+      png_image_free(&pimg);
+      return ccord_error_set(err, CCORD_ERR_IO, "image reencode: png size failed");
+    }
+    uint8_t *buf = ccord_malloc((size_t)psz);
+    if (!buf) {
+      ccord_free(rgba);
+      png_image_free(&pimg);
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "image reencode: out of memory");
+    }
+    if (!png_image_write_to_memory(&pimg, buf, &psz, 0, rgba, 0, nullptr) || PNG_IMAGE_FAILED(pimg)) {
+      ccord_free(buf);
+      ccord_free(rgba);
+      png_image_free(&pimg);
+      return ccord_error_set(err, CCORD_ERR_IO, "image reencode: png encode failed");
+    }
+    ccord_free(rgba);
+    png_image_free(&pimg);
+    *out_bytes = buf;
+    *out_len = (size_t)psz;
+    return CCORD_OK;
+  }
+
+  if (strcmp(format, "webp") == 0) {
+    uint8_t *webp = nullptr;
+    size_t wsz = WebPEncodeRGBA(rgba, w, h, w * 4, (float)quality, &webp);
+    ccord_free(rgba);
+    if (!webp || wsz == 0u) {
+      if (webp) WebPFree(webp);
+      return ccord_error_set(err, CCORD_ERR_IO, "image reencode: webp encode failed");
+    }
+    uint8_t *buf = ccord_malloc(wsz);
+    if (!buf) {
+      WebPFree(webp);
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "image reencode: out of memory");
+    }
+    memcpy(buf, webp, wsz);
+    WebPFree(webp);
+    *out_bytes = buf;
+    *out_len = wsz;
+    return CCORD_OK;
+  }
+
+  if (strcmp(format, "jpeg") == 0 || strcmp(format, "jpg") == 0) {
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_decode_ctx jctx;
+    memset(&jctx, 0, sizeof jctx);
+    cinfo.err = jpeg_std_error(&jctx.pub);
+    jctx.pub.error_exit = jpeg_error_exit_fn;
+    jctx.pub.output_message = jpeg_output_message_fn;
+    unsigned char *jmem = nullptr;
+    unsigned long jsz = 0;
+    uint8_t *rgb_row = ccord_malloc((size_t)w * 3u);
+    if (!rgb_row) {
+      ccord_free(rgba);
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "image reencode: out of memory");
+    }
+    jctx.row = rgb_row;
+    jctx.rgba = rgba;
+    if (setjmp(jctx.jb) != 0) {
+      jpeg_destroy_compress(&cinfo);
+      free(jmem);
+      ccord_free(jctx.row);
+      ccord_free(jctx.rgba);
+      return ccord_error_set(err, CCORD_ERR_IO, "image reencode: jpeg encode failed");
+    }
+    jpeg_create_compress(&cinfo);
+    jpeg_mem_dest(&cinfo, &jmem, &jsz);
+    cinfo.image_width = (JDIMENSION)w;
+    cinfo.image_height = (JDIMENSION)h;
+    cinfo.input_components = 3;
+    cinfo.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, quality, TRUE);
+    jpeg_start_compress(&cinfo, TRUE);
+    for (int y = 0; y < h; y++) {
+      const uint8_t *src_row = rgba + (size_t)y * (size_t)w * 4u;
+      for (int x = 0; x < w; x++) {
+        uint8_t a = src_row[x * 4 + 3];
+        // Composite transparent pixels over white for JPEG output.
+        rgb_row[x * 3 + 0] = (uint8_t)((src_row[x * 4 + 0] * a + 255u * (255u - a)) / 255u);
+        rgb_row[x * 3 + 1] = (uint8_t)((src_row[x * 4 + 1] * a + 255u * (255u - a)) / 255u);
+        rgb_row[x * 3 + 2] = (uint8_t)((src_row[x * 4 + 2] * a + 255u * (255u - a)) / 255u);
+      }
+      JSAMPROW rp[1] = {rgb_row};
+      (void)jpeg_write_scanlines(&cinfo, rp, 1);
+    }
+    jpeg_finish_compress(&cinfo);
+    jpeg_destroy_compress(&cinfo);
+    ccord_free(rgb_row);
+    ccord_free(rgba);
+    if (!jmem || jsz == 0u) {
+      free(jmem);
+      return ccord_error_set(err, CCORD_ERR_IO, "image reencode: empty jpeg output");
+    }
+    uint8_t *buf = ccord_malloc((size_t)jsz);
+    if (!buf) {
+      free(jmem);
+      return ccord_error_set(err, CCORD_ERR_NOMEM, "image reencode: out of memory");
+    }
+    memcpy(buf, jmem, (size_t)jsz);
+    free(jmem);
+    *out_bytes = buf;
+    *out_len = (size_t)jsz;
+    return CCORD_OK;
+  }
+
+  ccord_free(rgba);
+  return ccord_error_set(err, CCORD_ERR_INVALID, "image reencode: unsupported format");
 }
 

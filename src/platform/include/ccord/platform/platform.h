@@ -79,6 +79,7 @@ uint8_t *ccord_platform_get_clipboard_image(ccord_platform *p, size_t *out_len);
 
 // Opens the native asynchronous file dialog (SDL_ShowOpenFileDialog); chosen paths arrive as CCORD_EV_DROP_FILE.
 void ccord_platform_open_file_dialog(ccord_platform *p);
+void ccord_platform_open_folder_dialog(ccord_platform *p);
 // Queues a file path to be delivered as a CCORD_EV_DROP_FILE input event (and sets last_drop_file).
 [[nodiscard]] ccord_status ccord_platform_inject_drop_file(ccord_platform *p, const char *path, ccord_error *err);
 // Returns the full UTF-8 path of the most recently delivered/injected CCORD_EV_DROP_FILE event (or nullptr).

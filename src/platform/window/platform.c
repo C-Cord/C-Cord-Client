@@ -830,6 +830,17 @@ void ccord_platform_open_file_dialog(ccord_platform *p)
 #endif
 }
 
+void ccord_platform_open_folder_dialog(ccord_platform *p)
+{
+  if (!p || p->headless) return;
+  atomic_store_explicit(&p->file_dialog_cancelled, false, memory_order_release);
+#if defined(__ANDROID__)
+  (void)ccord_android_open_file_picker();
+#else
+  SDL_ShowOpenFolderDialog(on_file_dialog, p, p->window, nullptr, false);
+#endif
+}
+
 const char *ccord_platform_last_drop_file(const ccord_platform *p)
 {
   if (!p) return nullptr;

@@ -25,7 +25,7 @@ static const struct {
   {CCORD_PERM_STORE_READ,        CCORD_PERM_CLASS_UNSAFE, "store.read",        "Read cached guilds, channels, DMs, members, and messages"},
   {CCORD_PERM_MESSAGES_SEND,     CCORD_PERM_CLASS_UNSAFE, "messages.send",     "Send messages as your account"},
   {CCORD_PERM_MESSAGES_MANAGE,   CCORD_PERM_CLASS_UNSAFE, "messages.manage",   "Edit, delete, and react to messages"},
-  {CCORD_PERM_MESSAGES_HOOK,     CCORD_PERM_CLASS_UNSAFE, "messages.hook",     "Intercept and modify outgoing messages before send"},
+  {CCORD_PERM_MESSAGES_HOOK,     CCORD_PERM_CLASS_UNSAFE, "messages.hook",     "Intercept and modify outgoing messages, edits, and file uploads"},
   {CCORD_PERM_PRESENCE_WRITE,    CCORD_PERM_CLASS_UNSAFE, "presence.write",    "Change your online status and Rich Presence"},
   {CCORD_PERM_NAVIGATION_WRITE,  CCORD_PERM_CLASS_UNSAFE, "navigation.write",  "Switch active guilds and channels"},
   {CCORD_PERM_VOICE_CONTROL,     CCORD_PERM_CLASS_UNSAFE, "voice.control",     "Join/leave voice channels and toggle mute/deafen"},
@@ -41,6 +41,7 @@ static const struct {
   {CCORD_PERM_UI_WINDOW,         CCORD_PERM_CLASS_UNSAFE, "ui.window",         "Modify window title, badge, attention flash, and tray menu items"},
   {CCORD_PERM_VOICE_LEVELS,      CCORD_PERM_CLASS_UNSAFE, "voice.levels",      "Read live voice speaking and audio level meters"},
   {CCORD_PERM_VOICE_PCM,         CCORD_PERM_CLASS_UNSAFE, "voice.pcm",         "Tap or inject raw voice call PCM audio"},
+  {CCORD_PERM_STORAGE_FILES,     CCORD_PERM_CLASS_UNSAFE, "storage.files",     "Store and read local files inside this plugin's sandboxed data folder"},
 
   // Class 3 (System) — OS filesystem, network, notifications, processes
   {CCORD_PERM_FS_READ,           CCORD_PERM_CLASS_SYSTEM, "fs.read",           "Read files and directories on your computer"},

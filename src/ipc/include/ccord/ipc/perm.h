@@ -43,6 +43,7 @@ typedef enum ccord_perm : uint64_t {
   CCORD_PERM_UI_WINDOW         = 1ull << 33,  // "ui.window"
   CCORD_PERM_VOICE_LEVELS      = 1ull << 34,  // "voice.levels"
   CCORD_PERM_VOICE_PCM         = 1ull << 35,  // "voice.pcm"
+  CCORD_PERM_STORAGE_FILES     = 1ull << 36,  // "storage.files"
 
   // Class 3: System-level APIs (OS filesystem, network, notifications, processes)
   CCORD_PERM_FS_READ           = 1ull << 24,  // "fs.read"
