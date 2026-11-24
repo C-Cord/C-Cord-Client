@@ -371,14 +371,14 @@ static void test_member_list_grows_on_request(void)
   finish(&c);
   fg_event ev[FG_MAX_EVENTS];
   size_t n = fg_stop(&srv, ev, FG_MAX_EVENTS);
-  CT_CHECK(fg_count(ev, n, 0, "LAZY ") == 8);
+  CT_CHECK(fg_count(ev, n, 0, "LAZY ") == 9);   // includes unsubscribing guild 777 before subscribing guild 778
   CT_CHECK(fg_count(ev, n, 0, "LAZY {\"888\":[[0,99]]}") == 1);
   CT_CHECK(fg_count(ev, n, 0, "LAZY {\"888\":[[0,99],[100,199]]}") == 1);
   CT_CHECK(fg_count(ev, n, 0, "LAZY {\"888\":[[0,99],[300,399],[400,499]]}") == 1);
   CT_CHECK(fg_count(ev, n, 0, "LAZY {\"888\":[[0,99],[4800,4899],[4900,4999]]}") == 1);   // 50 hundreds at most
   CT_CHECK(fg_count(ev, n, 0, "LAZY {\"999\":[[0,99]]}") == 2);                            // 777/999 and 778/999
   CT_CHECK(fg_count(ev, n, 0, "LAZY {\"999\":[[0,99],[100,199],[200,299]]}") == 1);
-  CT_CHECK(fg_count(ev, n, 0, "LAZY {}") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "LAZY {}") == 2);   // guild 777 unsubscribe + guild 778 with channel NONE
 }
 
 // ---- 8. the network drops and stays down for a while: keep trying, with backoff, and do not give up ------------------
@@ -774,6 +774,114 @@ static void test_probe_keeps_healthy_socket_and_catches_zombie(void)
   CT_CHECK(fg_count(ev, n, 1, "RESUME seq=1 session=sess-1") == 1);
 }
 
+// ---- 17. multi-guild switch, DM switch, OP 37 bulk unsubscribe on background, and bg RESUMED probe -----------------
+
+static void script_record_subs(void *ud, fg_conn *c)
+{
+  (void)ud;
+  if (!fg_open_session(c, 60000)) return;
+  uint64_t until = fg_now_ms() + 6000;
+  char buf[2048];
+  while (fg_now_ms() < until) {
+    int r = fg_recv(c, buf, sizeof buf, 25);
+    if (r == FG_TIMEOUT) continue;
+    if (r != FG_GOT_TEXT) return;
+    if (strstr(buf, "\"op\":1,") || strstr(buf, "\"op\":1}")) {
+      const char *d = strstr(buf, "\"d\":");
+      fg_log(c, "HEARTBEAT d=%.12s", d ? d + 4 : "?");
+      (void)fg_send(c, "{\"op\":11}");
+    } else if (strcmp(buf, "{\"op\":37,\"d\":{\"subscriptions\":{}}}") == 0) {
+      fg_log(c, "BULK_UNSUB");
+    } else if (strstr(buf, "\"op\":14")) {
+      const char *gid = strstr(buf, "\"guild_id\":\"");
+      char gbuf[32] = "?";
+      if (gid) {
+        gid += 12;
+        size_t n = strcspn(gid, "\"");
+        if (n < sizeof gbuf) {
+          memcpy(gbuf, gid, n);
+          gbuf[n] = '\0';
+        }
+      }
+      if (strstr(buf, "\"channels\":{}")) fg_log(c, "UNSUB %s", gbuf);
+      else fg_log(c, "SUB %s", gbuf);
+    } else {
+      fg_log(c, "OTHER %.60s", buf);
+    }
+  }
+}
+
+static void test_multi_guild_dm_unsubscribe_and_bg_wake_probe(void)
+{
+  // Wire format check for OP 37 bulk unsubscribe.
+  ccord_buf bb;
+  ccord_buf_init(&bb, 64);
+  ccord_error err;
+  CT_CHECK(ccord_gateway_build_bulk_unsubscribe(&bb, &err) == CCORD_OK);
+  CT_CHECK(strcmp(ccord_buf_cstr(&bb), "{\"op\":37,\"d\":{\"subscriptions\":{}}}") == 0);
+  ccord_buf_free(&bb);
+  CT_CHECK(ccord_gateway_build_bulk_unsubscribe(nullptr, &err) == CCORD_ERR_INVALID);
+
+  fg_server srv;
+  CT_CHECK(fg_start(&srv, script_record_subs, nullptr));
+  client c;
+  CT_CHECK(client_start(&c, srv.url));
+  CT_CHECK(wait_connected(&c, 1, 4000));
+  // Drain initial jittered heartbeat so background probe test below starts cleanly.
+  pump(&c, 100);
+  uint32_t to = 0;
+  bool pend = false;
+  (void)ccord_gateway_wait_info(c.g, &to, &pend);
+  if (to < 60000) advance(&c, to, 150);
+
+  // Switch Guild 777 -> Guild 778 -> DM -> Guild 779 -> Background -> Foreground (Guild 780).
+  CT_CHECK(ccord_gateway_select_channel(c.g, 777, 888, &err) == CCORD_OK);
+  CT_CHECK(ccord_gateway_select_channel(c.g, 778, 999, &err) == CCORD_OK);
+  CT_CHECK(ccord_gateway_select_channel(c.g, CCORD_DM_GUILD_ID, 555, &err) == CCORD_OK);
+  CT_CHECK(ccord_gateway_select_channel(c.g, 779, 1001, &err) == CCORD_OK);
+  pump(&c, 100);
+
+  // Entering background unsubscribes guild 779 and emits OP 37 bulk clear; selections while backgrounded stay quiet.
+  ccord_gateway_set_background(c.g, true);
+  CT_CHECK(ccord_gateway_select_channel(c.g, 780, 1002, &err) == CCORD_OK);
+  pump(&c, 100);
+
+  // Background CCORD_LINK_RESUMED probes the live socket via OP 1 instead of tearing it down.
+  advance(&c, CCORD_GWPACE_WAKE_FRESH_MS + 1000, 100);
+  CT_CHECK(ccord_gateway_wake(c.g, CCORD_LINK_RESUMED) == CCORD_GWPACE_WAKE_FRESH);
+  pump(&c, 150);
+  CT_CHECK(c.connected == 1);
+
+  // Returning to foreground re-subscribes guild 780 cleanly.
+  ccord_gateway_set_background(c.g, false);
+  pump(&c, 150);
+
+  // Background CCORD_LINK_CHANGED still tears down and reconnects because the interface changed.
+  ccord_gateway_set_background(c.g, true);
+  pump(&c, 100);
+  advance(&c, CCORD_GWPACE_WAKE_FRESH_MS + 1000, 100);
+  CT_CHECK(ccord_gateway_wake(c.g, CCORD_LINK_CHANGED) == CCORD_GWPACE_WAKE_ACCEPTED);
+  CT_CHECK(wait_connected(&c, 2, 4000));
+  pump(&c, 150);
+
+  finish(&c);
+  fg_event ev[FG_MAX_EVENTS];
+  size_t n = fg_stop(&srv, ev, FG_MAX_EVENTS);
+  CT_CHECK(fg_connections(ev, n) == 2);
+  CT_CHECK(fg_count(ev, n, 0, "SUB 777") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "UNSUB 777") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "SUB 778") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "UNSUB 778") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "SUB 779") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "UNSUB 779") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "SUB 780") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "UNSUB 780") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "BULK_UNSUB") == 2);
+  CT_CHECK(fg_count(ev, n, 0, "HEARTBEAT d=1") >= 2);   // initial beat + background RESUMED probe
+  CT_CHECK(fg_count(ev, n, 1, "RESUME seq=1 session=sess-1") == 1);
+  CT_CHECK(fg_count(ev, n, 1, "BULK_UNSUB") == 1);      // RESUMED while backgrounded also clears subscriptions
+}
+
 int main(void)
 {
   test_heartbeats_follow_the_interval();
@@ -794,5 +902,6 @@ int main(void)
   test_background_lazy_unsubscribe_and_resubscribe();
   test_offline_and_suspend_pause_reconnects();
   test_probe_keeps_healthy_socket_and_catches_zombie();
+  test_multi_guild_dm_unsubscribe_and_bg_wake_probe();
   return CT_RESULT("test_live_gateway");
 }

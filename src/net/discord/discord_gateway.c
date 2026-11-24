@@ -27,9 +27,11 @@
 #define GW_QUEUE_INIT_CAP 16u
 #define GW_QUEUE_SIZE 512u
 #define GW_DRAIN_BUDGET_MS 8u
-#define GW_SEND_AGAIN_MAX 500
-#define GW_BUF_SHRINK_THRESHOLD 65536u
-#define GW_BUF_SHRINK_KEEP 32768u
+#define GW_SEND_TIMEOUT_MS 500u
+#define GW_BUF_SHRINK_THRESHOLD (256u * 1024u)
+#define GW_BUF_SHRINK_KEEP (64u * 1024u)
+#define GW_BUF_BG_SHRINK_KEEP (64u * 1024u)
+#define GW_MAX_SUBSCRIBED_GUILDS 32u
 
 struct ccord_gateway {
   char token[CCORD_LIVE_TOKEN_MAX + 1];
@@ -57,6 +59,9 @@ struct ccord_gateway {
   ccord_id subscribed_guild;
   ccord_id subscribed_channel;
   uint32_t subscribed_chunks;
+  ccord_id subscribed_guilds[GW_MAX_SUBSCRIBED_GUILDS];   // all guilds with active OP 14 subscriptions
+  size_t subscribed_guild_count;
+  bool bulk_unsub_pending;  // OP 37 bulk unsubscribe could not be sent yet; retry when outbound window opens
   uint32_t connect_timeout_ms;
   uint64_t last_heavy_ms;
   uint64_t lazy_retry_ms;   // the subscription could not be sent (outbound limit): do not try again before this
@@ -167,9 +172,10 @@ static void gw_push_error(ccord_gateway *g, ccord_status status, const char *tex
   (void)gw_push(g, &ev);
 }
 
-static void gw_buf_release(ccord_buf *b)
+static void gw_buf_release(const ccord_gateway *g, ccord_buf *b)
 {
-  if (b->cap >= GW_BUF_SHRINK_THRESHOLD) {
+  size_t threshold = (g && g->in_background) ? GW_BUF_BG_SHRINK_KEEP : GW_BUF_SHRINK_THRESHOLD;
+  if (b->cap > threshold) {
     ccord_buf_shrink(b, GW_BUF_SHRINK_KEEP);
   } else {
     ccord_buf_clear(b);
@@ -191,9 +197,9 @@ static void gw_close_socket(ccord_gateway *g)
     memset(&g->z_in, 0, sizeof g->z_in);
     g->z_ready = false;
   }
-  gw_buf_release(&g->frame);
-  gw_buf_release(&g->z_buf);
-  gw_buf_release(&g->z_out);
+  gw_buf_release(g, &g->frame);
+  gw_buf_release(g, &g->z_buf);
+  gw_buf_release(g, &g->z_out);
   g->frame_active = false;
   g->frame_is_binary = false;
   if (g->count == 0) {
@@ -219,19 +225,42 @@ static ccord_status gw_send_raw(ccord_gateway *g, const char *data, size_t len, 
 {
   if (!g->curl || !g->open) return CCORD_ERR_IO;
   size_t sent = 0;
-  int waits = 0;
+  uint64_t deadline_ms = 0;
+  uint64_t last_again_ms = 0;
+  unsigned immediate_spins = 0;
   do {
     size_t n = 0;
     const char *ptr = data ? data + sent : "";
     CURLcode rc = curl_ws_send(g->curl, ptr, len - sent, &n, 0, flags);
     if (rc == CURLE_AGAIN) {
-      if (++waits > GW_SEND_AGAIN_MAX) return CCORD_ERR_TIMEOUT;
-      ccord_sleep_ms(1);
+      uint64_t now_ms = ccord_clock_ms();
+      if (deadline_ms == 0) deadline_ms = now_ms + GW_SEND_TIMEOUT_MS;
+      if (now_ms >= deadline_ms) return CCORD_ERR_TIMEOUT;
+      int rem = (int)(deadline_ms - now_ms);
+      if (now_ms == last_again_ms) {
+        immediate_spins++;
+      } else {
+        last_again_ms = now_ms;
+        immediate_spins = 0;
+      }
+      if (g->sock != CCORD_INVALID_SOCKET) {
+        // Normal TCP backpressure waits for POLL_OUT; if POLL_OUT returns immediately with CURLE_AGAIN
+        // (TLS WANT_READ during renegotiation), poll POLL_IN briefly to avoid a tight spin.
+        unsigned ev_mask = immediate_spins >= 2u ? CCORD_POLL_IN : CCORD_POLL_OUT;
+        int wait_ms = (ev_mask == CCORD_POLL_IN && rem > 50) ? 50 : rem;
+        int rev = ccord_sock_poll1(g->sock, ev_mask, wait_ms);
+        if (rev < 0) return CCORD_ERR_IO;
+        if (rev == 0 && ev_mask == CCORD_POLL_OUT) return CCORD_ERR_TIMEOUT;
+        if ((rev & (CCORD_POLL_ERR | CCORD_POLL_HUP)) != 0) return CCORD_ERR_IO;
+      } else {
+        ccord_sleep_ms(rem < 10 ? (uint32_t)rem : 10u);
+      }
       continue;
     }
     if (rc != CURLE_OK) return CCORD_ERR_IO;
     if (len > 0 && n == 0) return CCORD_ERR_IO;
     sent += n;
+    immediate_spins = 0;
   } while (sent < len);
   return CCORD_OK;
 }
@@ -311,10 +340,122 @@ static ccord_status gw_resume(ccord_gateway *g)
   return gw_send_paced(g, &b, true);
 }
 
+static void gw_sub_track_add(ccord_gateway *g, ccord_id guild_id)
+{
+  if (!g || guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) return;
+  for (size_t i = 0; i < g->subscribed_guild_count; i++) {
+    if (g->subscribed_guilds[i] == guild_id) return;
+  }
+  if (g->subscribed_guild_count < GW_MAX_SUBSCRIBED_GUILDS) {
+    g->subscribed_guilds[g->subscribed_guild_count++] = guild_id;
+  } else {
+    memmove(&g->subscribed_guilds[0], &g->subscribed_guilds[1],
+            (GW_MAX_SUBSCRIBED_GUILDS - 1u) * sizeof g->subscribed_guilds[0]);
+    g->subscribed_guilds[GW_MAX_SUBSCRIBED_GUILDS - 1u] = guild_id;
+  }
+}
+
+static void gw_sub_track_remove(ccord_gateway *g, ccord_id guild_id)
+{
+  if (!g) return;
+  for (size_t i = 0; i < g->subscribed_guild_count; i++) {
+    if (g->subscribed_guilds[i] == guild_id) {
+      if (i + 1u < g->subscribed_guild_count) {
+        memmove(&g->subscribed_guilds[i], &g->subscribed_guilds[i + 1u],
+                (g->subscribed_guild_count - i - 1u) * sizeof g->subscribed_guilds[0]);
+      }
+      g->subscribed_guild_count--;
+      return;
+    }
+  }
+}
+
+static void gw_sub_track_clear(ccord_gateway *g)
+{
+  if (!g) return;
+  g->subscribed_guild_count = 0;
+  g->subscribed_guild = CCORD_ID_NONE;
+  g->subscribed_channel = CCORD_ID_NONE;
+  g->subscribed_chunks = 0;
+  g->bulk_unsub_pending = false;
+}
+
+static bool gw_lazy_unsubscribe_guild(ccord_gateway *g, ccord_id guild_id)
+{
+  if (!g || guild_id == CCORD_ID_NONE || guild_id == CCORD_DM_GUILD_ID) return true;
+  if (g->open && g->state == CCORD_CONN_CONNECTED) {
+    ccord_buf b;
+    ccord_buf_init(&b, 256);
+    ccord_error err;
+    if (ccord_gateway_build_lazy_unsubscribe(guild_id, &b, &err) == CCORD_OK) {
+      CCORD_LOG_D("gateway: tx lazy_unsubscribe: %.*s", (int)b.len, b.data ? b.data : "");
+      if (gw_send_buffered(g, &b) != CCORD_OK) {
+        g->lazy_retry_ms = gw_now(g) + 2000u;
+        return false;
+      }
+    } else {
+      gw_discard_buffered(&b);
+    }
+  }
+  gw_sub_track_remove(g, guild_id);
+  if (g->subscribed_guild == guild_id) {
+    g->subscribed_guild = CCORD_ID_NONE;
+    g->subscribed_channel = CCORD_ID_NONE;
+    g->subscribed_chunks = 0;
+  }
+  return true;
+}
+
+// Unsubscribes every tracked guild other than `keep_guild` (pass CCORD_ID_NONE to unsubscribe all).
+static bool gw_lazy_unsubscribe_others(ccord_gateway *g, ccord_id keep_guild)
+{
+  if (!g) return true;
+  bool all_ok = true;
+  size_t i = g->subscribed_guild_count;
+  while (i > 0) {
+    i--;
+    ccord_id gid = g->subscribed_guilds[i];
+    if (gid == keep_guild) continue;
+    if (!gw_lazy_unsubscribe_guild(g, gid)) all_ok = false;
+  }
+  if (all_ok && keep_guild == CCORD_ID_NONE && !g->bulk_unsub_pending) g->lazy_retry_ms = 0;
+  return all_ok;
+}
+
+static bool gw_bulk_unsubscribe(ccord_gateway *g)
+{
+  if (!g) return true;
+  if (!g->open || g->state != CCORD_CONN_CONNECTED) {
+    gw_sub_track_clear(g);
+    g->lazy_retry_ms = 0;
+    return true;
+  }
+  ccord_buf b;
+  ccord_buf_init(&b, 128);
+  ccord_error err;
+  if (ccord_gateway_build_bulk_unsubscribe(&b, &err) != CCORD_OK) {
+    gw_discard_buffered(&b);
+    return false;
+  }
+  CCORD_LOG_D("gateway: tx bulk_unsubscribe: %.*s", (int)b.len, b.data ? b.data : "");
+  if (gw_send_buffered(g, &b) == CCORD_OK) {
+    gw_sub_track_clear(g);
+    g->lazy_retry_ms = 0;
+    return true;
+  }
+  g->bulk_unsub_pending = true;
+  g->lazy_retry_ms = gw_now(g) + 2000u;
+  return false;
+}
+
 static ccord_status gw_lazy_request(ccord_gateway *g, ccord_id guild_id, ccord_id channel_id)
 {
+  bool unsub_ok = gw_lazy_unsubscribe_others(g, guild_id);
   uint32_t chunks = g->lazy_chunks ? g->lazy_chunks : 1u;
-  if (g->subscribed_guild == guild_id && g->subscribed_channel == channel_id && g->subscribed_chunks == chunks) return CCORD_OK;
+  if (g->subscribed_guild == guild_id && g->subscribed_channel == channel_id && g->subscribed_chunks == chunks) {
+    if (unsub_ok && !g->bulk_unsub_pending) g->lazy_retry_ms = 0;
+    return CCORD_OK;
+  }
   ccord_buf b;
   ccord_buf_init(&b, 512);
   ccord_error err;
@@ -326,10 +467,12 @@ static ccord_status gw_lazy_request(ccord_gateway *g, ccord_id guild_id, ccord_i
   CCORD_LOG_D("gateway: tx lazy_request: %.*s", (int)b.len, b.data ? b.data : "");
   st = gw_send_buffered(g, &b);
   if (st == CCORD_OK) {
+    gw_sub_track_add(g, guild_id);
     g->subscribed_guild = guild_id;
     g->subscribed_channel = channel_id;
     g->subscribed_chunks = chunks;
-    g->lazy_retry_ms = 0;
+    g->bulk_unsub_pending = false;
+    if (unsub_ok) g->lazy_retry_ms = 0;
   } else {
     g->lazy_retry_ms = gw_now(g) + 2000u;   // poll retries it once the outbound window has room
   }
@@ -465,26 +608,6 @@ ccord_status ccord_gateway_send_stream_set_paused(ccord_gateway *g, const char *
 static ccord_status gw_open(ccord_gateway *g, bool retrying, ccord_error *err);
 static void gw_schedule_reconnect(ccord_gateway *g, ccord_gwpace_reason reason, bool resumable);
 
-static void gw_lazy_unsubscribe(ccord_gateway *g)
-{
-  if (!g || g->subscribed_guild == CCORD_ID_NONE || g->subscribed_guild == CCORD_DM_GUILD_ID) return;
-  if (g->open && g->state == CCORD_CONN_CONNECTED) {
-    ccord_buf b;
-    ccord_buf_init(&b, 256);
-    ccord_error err;
-    if (ccord_gateway_build_lazy_unsubscribe(g->subscribed_guild, &b, &err) == CCORD_OK) {
-      CCORD_LOG_D("gateway: tx lazy_unsubscribe: %.*s", (int)b.len, b.data ? b.data : "");
-      (void)gw_send_buffered(g, &b);
-    } else {
-      gw_discard_buffered(&b);
-    }
-  }
-  g->subscribed_guild = CCORD_ID_NONE;
-  g->subscribed_channel = CCORD_ID_NONE;
-  g->subscribed_chunks = 0;
-  g->lazy_retry_ms = 0;
-}
-
 static bool gw_heartbeat(ccord_gateway *g)
 {
   ccord_buf b;
@@ -590,7 +713,12 @@ static bool gw_finish_decoded(ccord_gateway *g, ccord_live_event *ev, size_t pay
     g->state = CCORD_CONN_CONNECTED;
     ccord_gwpace_connected(&g->pace, gw_now(g));
     gw_push_state(g, CCORD_CONN_CONNECTED);
-    if (g->lazy_guild != CCORD_ID_NONE && !g->in_background) (void)gw_lazy_request(g, g->lazy_guild, g->lazy_channel);
+    if (g->in_background) {
+      // A resumed session may retain server-side guild subscriptions from before the drop: clear them in background.
+      (void)gw_bulk_unsubscribe(g);
+    } else if (g->lazy_guild != CCORD_ID_NONE) {
+      (void)gw_lazy_request(g, g->lazy_guild, g->lazy_channel);
+    }
   }
   // Surface guild dispatches as first-class transport events.
   if (ev->guild_op != CCORD_LIVE_GUILD_NONE) {
@@ -819,7 +947,7 @@ static bool gw_dispatch_inflated(ccord_gateway *g)
     char lead = g->z_out.data[off];
     if (lead != '{' && lead != '[') {
       CCORD_LOG_W("gateway: ignoring trailing bytes in inflated payload");
-      gw_buf_release(&g->z_out);
+      gw_buf_release(g, &g->z_out);
       return false;
     }
     ccord_live_event ev;
@@ -828,7 +956,7 @@ static bool gw_dispatch_inflated(ccord_gateway *g)
     if (st == CCORD_OK) {
       gw_maybe_push_raw(g, g->z_out.data + off, g->z_out.len - off);
       heavy = gw_finish_decoded(g, &ev, g->z_out.len - off);
-      gw_buf_release(&g->z_out);
+      gw_buf_release(g, &g->z_out);
       return heavy;
     }
     ccord_live_event_free(&ev);
@@ -837,12 +965,12 @@ static bool gw_dispatch_inflated(ccord_gateway *g)
       size_t first_n = gw_json_value_len(g->z_out.data + off, g->z_out.len - off);
       if (first_n == 0) {
         CCORD_LOG_W("gateway: ignoring trailing bytes in inflated payload");
-        gw_buf_release(&g->z_out);
+        gw_buf_release(g, &g->z_out);
         return false;
       }
       if (off + first_n >= g->z_out.len) {
         CCORD_LOG_W("gateway: bad payload: %s", err.message);
-        gw_buf_release(&g->z_out);
+        gw_buf_release(g, &g->z_out);
         return false;
       }
     }
@@ -856,7 +984,7 @@ static bool gw_dispatch_inflated(ccord_gateway *g)
     if (gw_handle_payload(g, g->z_out.data + off, n)) heavy = true;
     off += n;
   }
-  gw_buf_release(&g->z_out);
+  gw_buf_release(g, &g->z_out);
   return heavy;
 }
 
@@ -897,7 +1025,7 @@ static bool gw_inflate_message(ccord_gateway *g)
     gw_schedule_reconnect(g, CCORD_GWPACE_NETWORK, true);
     return false;
   }
-  gw_buf_release(&g->z_buf);
+  gw_buf_release(g, &g->z_buf);
   return true;
 }
 
@@ -997,7 +1125,7 @@ static void gw_drain(ccord_gateway *g)
         heavy = gw_dispatch_inflated(g);
       } else {
         heavy = gw_handle_payload(g, g->frame.data, g->frame.len);
-        gw_buf_release(&g->frame);
+        gw_buf_release(g, &g->frame);
       }
       if (!g->open) return;
       uint64_t now_ms = ccord_clock_ms();
@@ -1072,14 +1200,13 @@ void ccord_gateway_stop(ccord_gateway *g)
   g->identified = false;
   g->resuming = false;
   g->suspended = false;
-  g->subscribed_guild = CCORD_ID_NONE;
-  g->subscribed_channel = CCORD_ID_NONE;
-  g->subscribed_chunks = 0;
+  gw_sub_track_clear(g);
+  g->lazy_retry_ms = 0;
   g->session_id[0] = '\0';
   g->voice_session_id[0] = '\0';
   g->resume_url[0] = '\0';
   g->state = CCORD_CONN_DISCONNECTED;
-  gw_buf_release(&g->frame);
+  gw_buf_release(g, &g->frame);
 }
 
 void ccord_gateway_destroy(ccord_gateway *g)
@@ -1183,9 +1310,8 @@ static ccord_status gw_open(ccord_gateway *g, bool retrying, ccord_error *err)
   g->drain_eof_eagain = false;
   g->hello = false;
   g->identified = false;
-  g->subscribed_guild = CCORD_ID_NONE;
-  g->subscribed_channel = CCORD_ID_NONE;
-  g->subscribed_chunks = 0;
+  gw_sub_track_clear(g);
+  g->lazy_retry_ms = 0;
   g->state = CCORD_CONN_CONNECTING;
   if (!retrying) gw_push_state(g, CCORD_CONN_CONNECTING);   // a reconnect already announced it when it was planned
   return CCORD_OK;
@@ -1210,7 +1336,7 @@ static bool gw_use_resume_url(ccord_gateway *g)
 static void gw_reconnect_now(ccord_gateway *g, bool resume)
 {
   gw_close_socket(g);
-  gw_buf_release(&g->frame);
+  gw_buf_release(g, &g->frame);
   ccord_gwpace_reconnect_started(&g->pace);
   if (resume && g->session_id[0] != '\0' && gw_use_resume_url(g)) {
     g->resuming = true;
@@ -1238,7 +1364,7 @@ static void gw_reconnect_now(ccord_gateway *g, bool resume)
 static void gw_schedule_reconnect(ccord_gateway *g, ccord_gwpace_reason reason, bool resumable)
 {
   gw_close_socket(g);
-  gw_buf_release(&g->frame);
+  gw_buf_release(g, &g->frame);
   ccord_gwpace_disconnected(&g->pace);
   if (!resumable) {
     g->session_id[0] = '\0';
@@ -1265,11 +1391,18 @@ ccord_gwpace_wake_verdict ccord_gateway_wake(ccord_gateway *g, ccord_link_event 
       (g->state != CCORD_CONN_CONNECTED && g->state != CCORD_CONN_CONNECTING)) {
     return CCORD_GWPACE_WAKE_IGNORED;
   }
+  // In background, a screen-off SoC nap triggers CCORD_LINK_RESUMED even when the TLS socket is still alive.
+  // Probe with a lightweight OP 1 heartbeat instead of tearing down a healthy socket and triggering full
+  // TCP+TLS+RESUME/IDENTIFY + multi-MiB READY in background; CCORD_LINK_CHANGED still reconnects immediately.
+  if (g->in_background && kind == CCORD_LINK_RESUMED && g->open && g->state == CCORD_CONN_CONNECTED &&
+      g->pace.hb_active) {
+    return ccord_gateway_probe(g);
+  }
   ccord_gwpace_wake_verdict verdict =
       ccord_gwpace_plan_wake(&g->pace, gw_now(g), kind == CCORD_LINK_CHANGED, g->session_id[0] != '\0');
   if (verdict != CCORD_GWPACE_WAKE_ACCEPTED) return verdict;
   gw_close_socket(g);
-  gw_buf_release(&g->frame);
+  gw_buf_release(g, &g->frame);
   ccord_gwpace_disconnected(&g->pace);
   if (g->state != CCORD_CONN_CONNECTING) {
     g->state = CCORD_CONN_CONNECTING;
@@ -1304,10 +1437,25 @@ void ccord_gateway_set_background(ccord_gateway *g, bool background)
   g->in_background = background;
   ccord_gwpace_set_background(&g->pace, background);
   if (background) {
-    gw_lazy_unsubscribe(g);
-  } else if (g->open && g->state == CCORD_CONN_CONNECTED && g->lazy_guild != CCORD_ID_NONE &&
-             g->lazy_guild != CCORD_DM_GUILD_ID) {
-    (void)gw_lazy_request(g, g->lazy_guild, g->lazy_channel);
+    if (g->open && g->state == CCORD_CONN_CONNECTED) {
+      // Unsubscribe every tracked guild via OP 14, then emit OP 37 bulk unsubscribe so zero
+      // previously visited guilds continue streaming live typing/presence/member-list events.
+      if (g->subscribed_guild_count > 0) (void)gw_lazy_unsubscribe_others(g, CCORD_ID_NONE);
+      (void)gw_bulk_unsubscribe(g);
+    } else {
+      gw_sub_track_clear(g);
+      g->lazy_retry_ms = 0;
+    }
+    // Release excess capacity on idle frame/inflate buffers while backgrounded without clobbering active partial frames.
+    if (g->frame.len == 0 && g->frame.cap > GW_BUF_BG_SHRINK_KEEP) ccord_buf_shrink(&g->frame, GW_BUF_BG_SHRINK_KEEP);
+    if (g->z_buf.len == 0 && g->z_buf.cap > GW_BUF_BG_SHRINK_KEEP) ccord_buf_shrink(&g->z_buf, GW_BUF_BG_SHRINK_KEEP);
+    if (g->z_out.len == 0 && g->z_out.cap > GW_BUF_BG_SHRINK_KEEP) ccord_buf_shrink(&g->z_out, GW_BUF_BG_SHRINK_KEEP);
+  } else {
+    g->bulk_unsub_pending = false;
+    if (g->open && g->state == CCORD_CONN_CONNECTED && g->lazy_guild != CCORD_ID_NONE &&
+        g->lazy_guild != CCORD_DM_GUILD_ID) {
+      (void)gw_lazy_request(g, g->lazy_guild, g->lazy_channel);
+    }
   }
 }
 
@@ -1318,7 +1466,7 @@ void ccord_gateway_set_network_online(ccord_gateway *g, bool online)
   if (!online) {
     if (g->open && (g->state == CCORD_CONN_CONNECTED || g->state == CCORD_CONN_CONNECTING)) {
       gw_close_socket(g);
-      gw_buf_release(&g->frame);
+      gw_buf_release(g, &g->frame);
       ccord_gwpace_disconnected(&g->pace);
       g->pace.reconnect_pending = true;
       g->pace.reconnect_resume = (g->session_id[0] != '\0');
@@ -1343,7 +1491,7 @@ void ccord_gateway_set_suspended(ccord_gateway *g, bool suspended)
   if (suspended) {
     if (g->open || g->pace.reconnect_pending) {
       gw_close_socket(g);
-      gw_buf_release(&g->frame);
+      gw_buf_release(g, &g->frame);
       ccord_gwpace_disconnected(&g->pace);
       g->pace.reconnect_pending = false;
       if (g->state == CCORD_CONN_CONNECTED) {
@@ -1382,6 +1530,20 @@ ccord_status ccord_gateway_start(ccord_gateway *g, ccord_error *err)
   return gw_open(g, false, err);
 }
 
+static bool gw_needs_lazy_work(const ccord_gateway *g)
+{
+  if (!g || !g->open || g->state != CCORD_CONN_CONNECTED) return false;
+  if (g->in_background) {
+    return g->bulk_unsub_pending || g->subscribed_guild_count > 0;
+  }
+  if (g->lazy_guild == CCORD_ID_NONE || g->lazy_guild == CCORD_DM_GUILD_ID) {
+    return g->subscribed_guild_count > 0;
+  }
+  uint32_t want_chunks = g->lazy_chunks ? g->lazy_chunks : 1u;
+  return g->subscribed_guild != g->lazy_guild || g->subscribed_channel != g->lazy_channel ||
+         g->subscribed_chunks != want_chunks || g->subscribed_guild_count > 1u;
+}
+
 bool ccord_gateway_poll(ccord_gateway *g, ccord_net_event *out)
 {
   if (!g || !out) return false;
@@ -1409,12 +1571,16 @@ bool ccord_gateway_poll(ccord_gateway *g, ccord_net_event *out)
   if (!g->open && !g->suspended && g->network_online && ccord_gwpace_reconnect_due(&g->pace, now, &resume)) {
     gw_reconnect_now(g, resume);
   }
-  // A subscription the outbound window had no room for is sent as soon as there is (skipped while backgrounded).
-  if (g->open && !g->in_background && g->state == CCORD_CONN_CONNECTED && g->lazy_guild != CCORD_ID_NONE &&
-      now >= g->lazy_retry_ms &&
-      (g->subscribed_guild != g->lazy_guild || g->subscribed_channel != g->lazy_channel ||
-       g->subscribed_chunks != (g->lazy_chunks ? g->lazy_chunks : 1u))) {
-    (void)gw_lazy_request(g, g->lazy_guild, g->lazy_channel);
+  // Retry deferred subscription / unsubscribe work once the outbound rate-limit window has room.
+  if (gw_needs_lazy_work(g) && now >= g->lazy_retry_ms) {
+    if (g->in_background) {
+      if (g->subscribed_guild_count > 0) (void)gw_lazy_unsubscribe_others(g, CCORD_ID_NONE);
+      if (g->bulk_unsub_pending || g->subscribed_guild_count > 0) (void)gw_bulk_unsubscribe(g);
+    } else if (g->lazy_guild == CCORD_ID_NONE || g->lazy_guild == CCORD_DM_GUILD_ID) {
+      (void)gw_lazy_unsubscribe_others(g, CCORD_ID_NONE);
+    } else {
+      (void)gw_lazy_request(g, g->lazy_guild, g->lazy_channel);
+    }
   }
   if (g->count == 0) return false;
   g->current = g->queue[g->head];
@@ -1468,9 +1634,7 @@ ccord_socket_t ccord_gateway_wait_info(const ccord_gateway *g, uint32_t *out_tim
     } else if (!g->hello) {
       if (15000u < timeout) timeout = 15000u;
     }
-    if (!g->in_background && g->state == CCORD_CONN_CONNECTED && g->lazy_guild != CCORD_ID_NONE &&
-        (g->subscribed_guild != g->lazy_guild || g->subscribed_channel != g->lazy_channel ||
-         g->subscribed_chunks != (g->lazy_chunks ? g->lazy_chunks : 1u))) {
+    if (gw_needs_lazy_work(g)) {
       if (now >= g->lazy_retry_ms) {
         timeout = 0;
         pending = true;
@@ -1516,9 +1680,11 @@ ccord_status ccord_gateway_select_channel(ccord_gateway *g, ccord_id guild_id, c
     return ccord_error_set(err, CCORD_ERR_INVALID, "gateway: guild id");
   }
   if (guild_id == CCORD_DM_GUILD_ID) {
-    // The synthetic DM guild has no Gateway subscription.
+    // The synthetic DM guild has no Gateway subscription; unsubscribe any previously subscribed guild(s).
     g->lazy_guild = CCORD_ID_NONE;
     g->lazy_channel = CCORD_ID_NONE;
+    g->lazy_chunks = 0;
+    if (g->subscribed_guild_count > 0) (void)gw_lazy_unsubscribe_others(g, CCORD_ID_NONE);
     return CCORD_OK;
   }
   if (g->lazy_guild != guild_id || g->lazy_channel != channel_id) g->lazy_chunks = 1u;   // a new list starts at the top

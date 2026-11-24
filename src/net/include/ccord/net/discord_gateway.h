@@ -55,6 +55,8 @@ const char *ccord_gateway_voice_session_id(const ccord_gateway *g);
                                                       ccord_buf *out, ccord_error *err);
 [[nodiscard]] ccord_status ccord_gateway_build_lazy_request(ccord_id guild_id, ccord_buf *out, ccord_error *err);
 [[nodiscard]] ccord_status ccord_gateway_build_lazy_unsubscribe(ccord_id guild_id, ccord_buf *out, ccord_error *err);
+// Opcode 37 Bulk Guild Subscriptions clear: {"op":37,"d":{"subscriptions":{}}}.
+[[nodiscard]] ccord_status ccord_gateway_build_bulk_unsubscribe(ccord_buf *out, ccord_error *err);
 // Opcode 4 VOICE_STATE_UPDATE. channel_id 0 means "disconnect from voice";
 // guild_id CCORD_DM_GUILD_ID sends guild_id:null (join/leave a DM / group call).
 [[nodiscard]] ccord_status ccord_gateway_build_voice_state(ccord_id guild_id, ccord_id channel_id, bool self_mute,

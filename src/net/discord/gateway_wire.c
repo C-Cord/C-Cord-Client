@@ -209,6 +209,26 @@ ccord_status ccord_gateway_build_lazy_unsubscribe(ccord_id guild_id, ccord_buf *
   return CCORD_OK;
 }
 
+ccord_status ccord_gateway_build_bulk_unsubscribe(ccord_buf *out, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!out) return ccord_error_set(err, CCORD_ERR_INVALID, "gateway: null buffer");
+  ccord_jw w;
+  ccord_jw_init(&w, out);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "op");
+  ccord_jw_int(&w, 37);
+  ccord_jw_key(&w, "d");
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "subscriptions");
+  ccord_jw_begin_object(&w);
+  ccord_jw_end_object(&w);
+  ccord_jw_end_object(&w);
+  ccord_jw_end_object(&w);
+  if (!ccord_jw_ok(&w)) return ccord_error_set(err, CCORD_ERR_RANGE, "gateway: bulk unsubscribe payload too large");
+  return CCORD_OK;
+}
+
 static const char *presence_status_name(ccord_presence p)
 {
   switch (p) {
