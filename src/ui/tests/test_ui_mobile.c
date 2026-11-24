@@ -2119,6 +2119,88 @@ static void test_mobile_zoom_and_touch_targets(void)
   step_frames(4, 25);
 }
 
+static void test_mobile_systemic_button_chip_and_ellipsis(void)
+{
+  ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+
+  // S1: Mobile button height classification must not promote SM (38dp) or MD (40dp) buttons to LG (16px bold).
+  CT_CHECK(uis_btn_size_for_h(F.ui, UIS_MOB_H_BTN_SM) == UIS_BTN_S_SM);
+  CT_CHECK(uis_btn_size_for_h(F.ui, UIS_MOB_H_BTN) == UIS_BTN_S_MD);
+  CT_CHECK(uis_btn_size_for_h(F.ui, UIS_MOB_H_BTN_LG) == UIS_BTN_S_LG);
+  ccord_ui_set_mobile_mode(F.ui, false);
+  ccord_ui_set_viewport(F.ui, 1280.0f, 800.0f);
+  CT_CHECK(uis_btn_size_for_h(F.ui, UIS_H_BTN_SM) == UIS_BTN_S_SM);
+  CT_CHECK(uis_btn_size_for_h(F.ui, UIS_H_BTN) == UIS_BTN_S_MD);
+  CT_CHECK(uis_btn_size_for_h(F.ui, UIS_H_BTN_LG) == UIS_BTN_S_LG);
+  ccord_ui_set_viewport(F.ui, 360.0f, 780.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+
+  // S1 end-to-end: My Account, Privacy, and Notifications buttons on mobile must draw at fs_control (14px), not fs_body (16px).
+  uis_tokens tk = uis_tokens_of(F.ui);
+  ccord_account_view saved_av = F.ui->account_view;
+  F.ui->account_view.signed_in = true;
+  F.ui->account_view.display_name = "Gavin";
+  F.ui->account_view.username = "gavinx";
+  ui_open_settings(F.ui, true);
+  F.ui->mobile_settings_detail = true;
+  static const int k_pages[] = {SP_ACCOUNT, SP_PRIVACY, SP_NOTIFICATIONS};
+  for (size_t pi = 0; pi < sizeof k_pages / sizeof k_pages[0]; pi++) {
+    F.ui->settings_page = k_pages[pi];
+    F.ui->settings_category = st_k_pages[k_pages[pi]].category;
+    uis_audit_reset();
+    ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+    ccord_ui_draw(F.ui, F.renderer);
+    ccord_render_end(F.renderer);
+    const uis_audit *a = uis_audit_get();
+    CT_CHECK(a->kind[UIS_K_BUTTON].count > 0);
+    for (uint32_t i = 0; i < a->kept; i++) {
+      if (a->rec[i].kind == UIS_K_BUTTON && a->rec[i].rect.h < UIS_MOB_H_BTN_LG - 0.5f) {
+        CT_CHECK(fabsf(a->rec[i].font_px - tk.fs_control) < 0.01f);
+      }
+    }
+  }
+  ui_open_settings(F.ui, false);
+  F.ui->account_view = saved_av;
+
+  // S2: uis_label_width / uis_chip_width round-trip cleanly across fractional zoom scales without spurious truncation.
+  static const float k_zooms[] = {1.0f, 1.33f, 1.625f, 1.75f};
+  for (size_t zi = 0; zi < sizeof k_zooms / sizeof k_zooms[0]; zi++) {
+    ccord_render_set_zoom(F.renderer, k_zooms[zi]);
+    ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+    float lw = uis_label_width(F.ui, F.renderer, "Reveal");
+    ccord_text_style bs = ui_style(F.ui, CCORD_FONT_BOLD, tk.fs_control, F.theme.c.text_header);
+    float exact = ccord_text_measure(F.renderer, "Reveal", 6, &bs, 0.0f).x;
+    float drawn = ccord_text_draw_ellipsis(F.renderer, "Reveal", 6, 0.0f, 0.0f, lw - 2.0f * UIS_SP_3, &bs);
+    CT_CHECK(fabsf(drawn - exact) < 0.01f);
+    float lgw = uis_label_width_for(F.ui, F.renderer, "Connect to Discord", UIS_BTN_S_LG);
+    CT_CHECK(lgw > uis_label_width(F.ui, F.renderer, "Connect to Discord"));
+    float cw = uis_chip_width(F.ui, F.renderer, "Security", UIS_MOB_H_CHIP);
+    CT_CHECK(cw >= exact + 2.0f * UIS_SP_2);
+    ccord_render_end(F.renderer);
+  }
+  ccord_render_set_zoom(F.renderer, 1.0f);
+
+  // S3: uis_chip uses fs_caption on compact pills (< UIS_MOB_H_CHIP), fs_control on roomy 36dp pills,
+  // and gracefully steps down to fs_caption on tight 36dp mobile grid chips instead of truncating.
+  uis_audit_reset();
+  ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+  uis_chip(F.ui, F.renderer, (ccord_rect){10, 10, 90, 24.0f}, "Recent Activity", (uis_state){0}, "mchip", 1);
+  uis_chip(F.ui, F.renderer, (ccord_rect){10, 44, 110, UIS_MOB_H_CHIP}, "Security", (uis_state){0}, "mchip", 2);
+  uis_chip(F.ui, F.renderer, (ccord_rect){10, 90, 76.0f, UIS_MOB_H_CHIP}, "Graphite", (uis_state){0}, "mchip", 3);
+  uis_chip(F.ui, F.renderer, (ccord_rect){10, 136, 104.0f, UIS_MOB_H_CHIP}, "Small Servers", (uis_state){0}, "mchip", 4);
+  ccord_render_end(F.renderer);
+  const uis_audit *ca = uis_audit_get();
+  CT_CHECK(ca->kept == 4);
+  CT_CHECK(fabsf(ca->rec[0].font_px - tk.fs_caption) < 0.01f);
+  CT_CHECK(fabsf(ca->rec[1].font_px - tk.fs_control) < 0.01f);
+  CT_CHECK(fabsf(ca->rec[2].font_px - tk.fs_caption) < 0.01f);
+  CT_CHECK(fabsf(ca->rec[3].font_px - tk.fs_caption) < 0.01f);
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -2144,6 +2226,7 @@ int main(void)
   test_plugins_revamp_mobile();
   test_mobile_anim_pacing();
   test_mobile_zoom_and_touch_targets();
+  test_mobile_systemic_button_chip_and_ellipsis();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");
 }

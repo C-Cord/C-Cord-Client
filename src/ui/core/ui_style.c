@@ -173,9 +173,14 @@ static void centered_label(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const
   ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, size, fg);
   float pad = UIS_SP_3;
   float maxw = rc.w - 2.0f * pad;
-  if (maxw < 8.0f) maxw = rc.w;
   ccord_vec2 m = ccord_text_measure(r, label, strlen(label), &st, 0.0f);
-  float x = m.x < maxw ? rc.x + (rc.w - m.x) * 0.5f : rc.x + (rc.w - maxw) * 0.5f;
+  if (m.x > maxw && rc.w > 2.0f * UIS_SP_2 + 8.0f) {
+    // Allow tight buttons to relax horizontal padding down to UIS_SP_2 (8 px) before ellipsizing.
+    pad = UIS_SP_2;
+    maxw = rc.w - 2.0f * pad;
+  }
+  if (maxw < 8.0f) maxw = rc.w;
+  float x = m.x <= maxw ? rc.x + (rc.w - m.x) * 0.5f : rc.x + (rc.w - maxw) * 0.5f;
   ccord_text_draw_ellipsis(r, label, strlen(label), x, rc.y + (rc.h - m.y) * 0.5f, maxw, &st);
 }
 
@@ -395,10 +400,24 @@ void uis_toggle(ccord_ui *ui, ccord_renderer *r, ccord_rect row, bool on, uis_st
 
 // ---------------------------------------------------------------- label width and tab
 
+float uis_label_width_for(ccord_ui *ui, ccord_renderer *r, const char *label, uis_btn_size size)
+{
+  float fs = size == UIS_BTN_S_LG ? TH(font_size_base) : TH(font_size_small);
+  ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, fs, CO(text_header));
+  return ceilf(ccord_text_measure(r, label, strlen(label), &st, 0.0f).x) + 2.0f * UIS_SP_3;
+}
+
 float uis_label_width(ccord_ui *ui, ccord_renderer *r, const char *label)
 {
-  ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, TH(font_size_small), CO(text_header));
-  return ccord_text_measure(r, label, strlen(label), &st, 0.0f).x + 2.0f * UIS_SP_3;
+  return uis_label_width_for(ui, r, label, UIS_BTN_S_MD);
+}
+
+float uis_chip_width(ccord_ui *ui, ccord_renderer *r, const char *label, float chip_h)
+{
+  uis_tokens t = uis_tokens_of(ui);
+  float fs = (ui && ui->mobile_layout && chip_h >= UIS_MOB_H_CHIP) ? t.fs_control : t.fs_caption;
+  ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, fs, CO(text_header));
+  return ceilf(ccord_text_measure(r, label, strlen(label), &st, 0.0f).x) + 2.0f * UIS_SP_2;
 }
 
 void uis_tab(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char *label, uis_state st, const char *ns, uint64_t id)
@@ -414,7 +433,9 @@ void uis_tab(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char *label, 
   if (st.disabled) fg = ui_alpha(fg, UIS_DISABLED_FG);
   ccord_text_style ts = ui_style(ui, st.selected ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR, fs, fg);
   ccord_vec2 m = ccord_text_measure(r, label, strlen(label), &ts, 0.0f);
-  ccord_text_draw_ellipsis(r, label, strlen(label), rc.x + (rc.w - m.x) * 0.5f, rc.y + (rc.h - m.y) * 0.5f, rc.w, &ts);
+  float maxw = rc.w > 2.0f * UIS_SP_1 + 8.0f ? rc.w - 2.0f * UIS_SP_1 : rc.w;
+  float x = m.x <= maxw ? rc.x + (rc.w - m.x) * 0.5f : rc.x + (rc.w - maxw) * 0.5f;
+  ccord_text_draw_ellipsis(r, label, strlen(label), x, rc.y + (rc.h - m.y) * 0.5f, maxw, &ts);
   audit(UIS_K_TAB, rc, rad, fs, fill);
 }
 
@@ -447,11 +468,24 @@ void uis_chip(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char *label,
   ccord_rect pill = {rc.x, rc.y + (rc.h - chip_h) * 0.5f, rc.w, chip_h};
   float rad = chip_h * 0.5f;
   ccord_draw_rrect(r, pill, rad, fill);
-  float fs = (ui && ui->mobile_layout && chip_h > UIS_H_CHIP) ? t.fs_control : t.fs_caption;
+  float pad = UIS_SP_2;
+  float maxw = pill.w - 2.0f * pad;
+  if (maxw < 8.0f) maxw = pill.w;
+  // Use fs_control only on full-height mobile chips when it fits; compact pills and tight mobile grids step down to fs_caption.
+  float fs = (ui && ui->mobile_layout && chip_h >= UIS_MOB_H_CHIP) ? t.fs_control : t.fs_caption;
   ccord_text_style ts = ui_style(ui, CCORD_FONT_BOLD, fs, fg);
   ccord_vec2 m = ccord_text_measure(r, label, strlen(label), &ts, 0.0f);
-  float x = m.x < pill.w ? pill.x + (pill.w - m.x) * 0.5f : pill.x + UIS_SP_2;
-  ccord_text_draw_ellipsis(r, label, strlen(label), x, pill.y + (pill.h - m.y) * 0.5f, pill.w - 2.0f * UIS_SP_2, &ts);
+  if (fs > t.fs_caption && m.x > maxw) {
+    fs = t.fs_caption;
+    ts.size = fs;
+    m = ccord_text_measure(r, label, strlen(label), &ts, 0.0f);
+  }
+  if (m.x > maxw && pill.w > 2.0f * UIS_SP_1 + 8.0f) {
+    pad = UIS_SP_1;
+    maxw = pill.w - 2.0f * pad;
+  }
+  float x = m.x <= maxw ? pill.x + (pill.w - m.x) * 0.5f : pill.x + (pill.w - maxw) * 0.5f;
+  ccord_text_draw_ellipsis(r, label, strlen(label), x, pill.y + (pill.h - m.y) * 0.5f, maxw, &ts);
   audit(UIS_K_CHIP, pill, rad, fs, fill);
 }
 
@@ -565,6 +599,18 @@ float uis_btn_h_for(const ccord_ui *ui, float desktop_h)
   if (desktop_h >= UIS_H_BTN_LG) return desktop_h > UIS_MOB_H_BTN_LG ? desktop_h : UIS_MOB_H_BTN_LG;
   if (desktop_h >= UIS_H_BTN) return UIS_MOB_H_BTN;
   return UIS_MOB_H_BTN_SM;
+}
+
+uis_btn_size uis_btn_size_for_h(const ccord_ui *ui, float h)
+{
+  if (ui && ui->mobile_layout) {
+    if (h <= UIS_MOB_H_BTN_SM) return UIS_BTN_S_SM;
+    if (h >= UIS_MOB_H_BTN_LG) return UIS_BTN_S_LG;
+    return UIS_BTN_S_MD;
+  }
+  if (h <= UIS_H_BTN_SM) return UIS_BTN_S_SM;
+  if (h >= UIS_H_BTN_LG) return UIS_BTN_S_LG;
+  return UIS_BTN_S_MD;
 }
 
 float uis_chip_h_for(const ccord_ui *ui, float desktop_h)

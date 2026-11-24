@@ -441,7 +441,7 @@ void st_account_buttons(const ccord_ui *ui, const sgeom *g, ccord_rect *primary,
 void st_draw_button(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char *label, bool primary)
 {
   if (rc.w <= 0.0f) return;
-  uis_btn_size size = rc.h <= UIS_H_BTN_SM ? UIS_BTN_S_SM : rc.h >= UIS_H_BTN_LG ? UIS_BTN_S_LG : UIS_BTN_S_MD;
+  uis_btn_size size = uis_btn_size_for_h(ui, rc.h);
   uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, rc), .pressed = st_settings_pressed(ui, rc)};
   uint64_t id = (uint64_t)(rc.y * 4096.0f + rc.x);
   uis_button(ui, r, rc, label, primary ? UIS_BTN_PRIMARY : UIS_BTN_SECONDARY, size, st, "sbtn", id);
@@ -450,7 +450,7 @@ void st_draw_button(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char *
 static void draw_danger_btn(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char *label, bool filled, bool disabled)
 {
   if (rc.w <= 0.0f) return;
-  uis_btn_size size = rc.h <= UIS_H_BTN_SM ? UIS_BTN_S_SM : rc.h >= UIS_H_BTN_LG ? UIS_BTN_S_LG : UIS_BTN_S_MD;
+  uis_btn_size size = uis_btn_size_for_h(ui, rc.h);
   uis_state st = {.hover = !disabled && ui_in_rect(ui->mx, ui->my, rc), .disabled = disabled};
   uint64_t id = (uint64_t)(rc.y * 4096.0f + rc.x);
   uis_button(ui, r, rc, label, filled ? UIS_BTN_DANGER : UIS_BTN_SECONDARY, size, st, "sdbtn", id);

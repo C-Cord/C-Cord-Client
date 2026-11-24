@@ -659,7 +659,7 @@ static void m6_chip_row(ccord_ui *ui, ccord_renderer *r, ccord_rect content, int
 static void m6_button(ccord_ui *ui, ccord_renderer *r, ccord_rect rc, const char *label, bool primary, bool dim)
 {
   if (rc.w <= 0.0f) return;
-  uis_btn_size size = rc.h <= UIS_H_BTN_SM ? UIS_BTN_S_SM : rc.h >= UIS_H_BTN_LG ? UIS_BTN_S_LG : UIS_BTN_S_MD;
+  uis_btn_size size = uis_btn_size_for_h(ui, rc.h);
   uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, rc), .disabled = dim};
   uint64_t id = (uint64_t)(rc.y * 4096.0f + rc.x);
   uis_button(ui, r, rc, label, primary ? UIS_BTN_PRIMARY : UIS_BTN_SECONDARY, size, st, "m6btn", id);

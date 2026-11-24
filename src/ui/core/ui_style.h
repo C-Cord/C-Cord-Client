@@ -199,6 +199,10 @@ void uis_radio(ccord_ui *ui, ccord_renderer *r, ccord_rect row, const char *labe
 // ---- label width ----
 // Width a button or tab needs for `label`: the bold control label (fs_control) plus UIS_SP_3 on each side.
 float uis_label_width(ccord_ui *ui, ccord_renderer *r, const char *label);
+// Same as uis_label_width, sized for a specific button size (UIS_BTN_S_LG uses fs_body).
+float uis_label_width_for(ccord_ui *ui, ccord_renderer *r, const char *label, uis_btn_size size);
+// Width a chip needs for `label` at `chip_h`, matching uis_chip's font selection and horizontal padding.
+float uis_chip_width(ccord_ui *ui, ccord_renderer *r, const char *label, float chip_h);
 
 // ---- tab ----
 // One tab of a segmented row (picker GIFs / Stickers / Emoji / Sounds): the caller sets `rc`, normally UIS_H_BTN_SM tall
@@ -241,6 +245,8 @@ void uis_plate(ccord_ui *ui, ccord_renderer *r, ccord_rect box, float radius, cc
 
 // Returns `desktop_h` on desktop, or the scaled mobile height when ui->mobile_layout is true.
 float uis_btn_h_for(const ccord_ui *ui, float desktop_h);
+// Classifies a button's drawn height `h` into SM/MD/LG using mobile height thresholds when ui->mobile_layout is true.
+uis_btn_size uis_btn_size_for_h(const ccord_ui *ui, float h);
 // Returns UIS_H_CHIP on desktop, or at least UIS_MOB_H_CHIP on mobile.
 float uis_chip_h_for(const ccord_ui *ui, float desktop_h);
 // Returns UIS_ICON_BTN on desktop, or UIS_MOB_ICON_BTN on mobile.

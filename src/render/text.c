@@ -1682,7 +1682,9 @@ float ccord_text_draw_ellipsis(ccord_renderer *r, const char *utf8, size_t len, 
   if (!fe) return 0.0f;
   const TTF_Font *font = fe->font;
   float max_w_f = max_w * r->scale;
-  int max_w_px = max_w_f >= 1000000.0f ? 1000000 : (int)floorf(max_w_f);
+  // Tiny sub-pixel epsilon prevents 1-ULP float drift (e.g. (w/scale + pad - pad) * scale)
+  // from flooring an exact measured width down by 1 physical pixel and spuriously ellipsizing.
+  int max_w_px = max_w_f >= 1000000.0f ? 1000000 : (int)floorf(max_w_f + 0.01f);
 
   if (len <= CCORD_ELLIPSIS_MAX_KEY) {
     uint32_t eh = hash_key(font, max_w_px, utf8, len);

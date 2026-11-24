@@ -91,6 +91,25 @@ static void test_text(ccord_renderer *r)
   uint64_t m0 = ccord_text_cache_misses(r);
   (void)ccord_text_measure(r, long_text, strlen(long_text), &st, 120.0f);
   CT_CHECK(ccord_text_cache_misses(r) == m0);
+  // Exact measured widths (including pad add/subtract float drift) must never spuriously ellipsize across fractional zoom scales.
+  static const float k_zooms[] = {1.0f, 1.15f, 1.33f, 1.45f, 1.625f, 1.75f, 1.875f};
+  static const char *const k_labels[] = {"Reveal", "Remove", "Edit User Profile", "Change Password", "Discard"};
+  ccord_text_style bst = {CCORD_FONT_BOLD, 14.0f, {255, 255, 255, 255}};
+  for (size_t zi = 0; zi < sizeof k_zooms / sizeof k_zooms[0]; zi++) {
+    ccord_render_set_zoom(rr, k_zooms[zi]);
+    ccord_render_begin(rr, (ccord_color){0, 0, 0, 255});
+    for (size_t li = 0; li < sizeof k_labels / sizeof k_labels[0]; li++) {
+      const char *lbl = k_labels[li];
+      size_t llen = strlen(lbl);
+      float exact = ccord_text_measure(rr, lbl, llen, &bst, 0.0f).x;
+      float drifted = (exact + 24.0f) - 24.0f;
+      float drawn = ccord_text_draw_ellipsis(rr, lbl, llen, 0.0f, 0.0f, drifted, &bst);
+      CT_CHECK(fabsf(drawn - exact) < 0.01f);
+    }
+    ccord_render_end(rr);
+  }
+  ccord_render_set_zoom(rr, 1.0f);
+  ccord_render_begin(rr, (ccord_color){0, 0, 0, 255});
 }
 
 static void test_screenshot(ccord_renderer *r)
