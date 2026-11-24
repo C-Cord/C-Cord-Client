@@ -3,6 +3,7 @@
 #pragma once
 #include <ccord/core/buf.h>
 #include <ccord/core/error.h>
+#include <ccord/core/os.h>
 #include <ccord/model/model.h>
 #include <ccord/net/voice_reconnect.h>
 
@@ -152,6 +153,11 @@ void ccord_voice_gateway_network_event(ccord_voice_gateway *g);   // ESTABLISHED
 void ccord_voice_gateway_inject_close(ccord_voice_gateway *g, uint16_t close_code);   // test hook, 0 = abnormal drop
 uint32_t ccord_voice_gateway_ssrc(const ccord_voice_gateway *g);
 int ccord_voice_gateway_udp_fd(const ccord_voice_gateway *g);
+// Exports open Voice Gateway sockets (WebSocket fd if open, UDP fd if >= 0) into `out_fds` (up to `cap`)
+// and writes the ms until the earliest pending timer (heartbeat, ACK timeout, reconnect, IP discovery,
+// or UINT32_MAX if none) into `out_timeout_ms`. Returns the number of fds written.
+size_t ccord_voice_gateway_wait_info(const ccord_voice_gateway *g, ccord_socket_t *out_fds, size_t cap,
+                                     uint32_t *out_timeout_ms);
 size_t ccord_voice_gateway_secret(const ccord_voice_gateway *g, uint8_t out[CCORD_VOICE_MAX_SECRET]);
 [[nodiscard]] ccord_status ccord_voice_gateway_set_speaking(ccord_voice_gateway *g, uint8_t speaking,
                                                             uint32_t delay_ms, ccord_error *err);

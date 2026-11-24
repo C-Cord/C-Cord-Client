@@ -113,6 +113,9 @@ void ccord_vstream_register_peers(ccord_vstream *s, ccord_id owner_id, const cco
 // Thread-safe UDP + stream-audio popper for the real-time audio pthread: drains incoming UDP packets when
 // established and pops one decrypted Opus packet (returns 0 when empty).
 size_t ccord_vstream_pop_rx_audio(ccord_vstream *s, uint8_t *opus_out, size_t cap);
+// Exports open Go Live Voice Gateway sockets (WS + UDP) into `out_fds` (up to `cap`) and writes the
+// ms until the earliest pending timer (or UINT32_MAX if none) into `out_timeout_ms`.
+size_t ccord_vstream_wait_info(const ccord_vstream *s, ccord_socket_t *out_fds, size_t cap, uint32_t *out_timeout_ms);
 // Unregisters, closes the socket, wipes keys and frees. Safe on nullptr.
 void ccord_vstream_close(ccord_vstream *s);
 

@@ -246,6 +246,18 @@ ccord_voice_gateway *ccord_vstream_gateway(ccord_vstream *s)
   return s ? s->vg : nullptr;
 }
 
+size_t ccord_vstream_wait_info(const ccord_vstream *s, ccord_socket_t *out_fds, size_t cap, uint32_t *out_timeout_ms)
+{
+  if (out_timeout_ms) *out_timeout_ms = UINT32_MAX;
+  if (!s || !s->vg) return 0;
+  uint32_t to = UINT32_MAX;
+  size_t nfds = ccord_voice_gateway_wait_info(s->vg, out_fds, cap, &to);
+  ccord_vstream_state cur = ccord_vstream_state_of(s);
+  if (cur == CCORD_VSTREAM_CLOSED || cur != s->reported_state) to = 0u;
+  if (out_timeout_ms) *out_timeout_ms = to;
+  return nfds;
+}
+
 ccord_status ccord_vstream_send_frame(ccord_vstream *s, const uint8_t *annexb, size_t len, uint32_t ts90k,
                                       bool keyframe)
 {

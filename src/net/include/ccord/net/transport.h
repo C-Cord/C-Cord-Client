@@ -533,7 +533,7 @@ typedef struct ccord_camera_rx {
   bool decoding;         // false = waiting for one of the CCORD_CAM_DECODE_MAX slots
 } ccord_camera_rx;
 
-#define CCORD_WAIT_MAX_FDS 8u
+#define CCORD_WAIT_MAX_FDS 16u
 typedef struct ccord_wait_info {
   ccord_socket_t fds[CCORD_WAIT_MAX_FDS];   // readable sockets that should wake an idle/background poll()
   size_t fd_count;

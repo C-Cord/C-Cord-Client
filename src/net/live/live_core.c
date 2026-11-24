@@ -1338,6 +1338,7 @@ static bool live_wait_info(const ccord_transport *t, ccord_wait_info *out)
     out->timeout_ms = 0;
     return true;
   }
+  uint64_t now = live_now(l);
   if (l->gw) {
     uint32_t gw_to = UINT32_MAX;
     bool gw_pending = false;
@@ -1352,14 +1353,85 @@ static bool live_wait_info(const ccord_transport *t, ccord_wait_info *out)
     }
     if (gw_to < out->timeout_ms) out->timeout_ms = gw_to;
   }
+  if (l->restq && ccord_rest_queue_pending(l->restq) > 0) {
+    uint32_t rest_to = UINT32_MAX;
+    bool rest_pending = false;
+    size_t avail = out->fd_count < CCORD_WAIT_MAX_FDS ? (CCORD_WAIT_MAX_FDS - out->fd_count) : 0u;
+    size_t added = ccord_rest_queue_wait_info(l->restq, now,
+                                              avail > 0 ? &out->fds[out->fd_count] : nullptr, avail,
+                                              &rest_to, &rest_pending);
+    out->fd_count += added;
+    if (rest_pending) {
+      out->immediate = true;
+      out->timeout_ms = 0;
+      return true;
+    }
+    if (rest_to < out->timeout_ms) out->timeout_ms = rest_to;
+  }
   if (l->sb_pending_pcm != nullptr) {
     if (out->timeout_ms > 20u) out->timeout_ms = 20u;
   }
-  if (l->voice != nullptr || l->vlink != LV_IDLE || l->tx_stream.vs != nullptr || l->rx_stream.vs != nullptr) {
-    if (out->timeout_ms > 50u) out->timeout_ms = 50u;
+  if (l->voice != nullptr) {
+    uint32_t v_to = UINT32_MAX;
+    size_t avail = out->fd_count < CCORD_WAIT_MAX_FDS ? (CCORD_WAIT_MAX_FDS - out->fd_count) : 0u;
+    size_t added = ccord_voice_gateway_wait_info(l->voice,
+                                                 avail > 0 ? &out->fds[out->fd_count] : nullptr, avail, &v_to);
+    out->fd_count += added;
+    if (v_to < out->timeout_ms) out->timeout_ms = v_to;
+    if (atomic_load(&l->ptt_active)) {
+      uint64_t rel = atomic_load(&l->ptt_release_ms);
+      uint32_t rem = now >= rel ? 0u : (rel - now > UINT32_MAX ? UINT32_MAX : (uint32_t)(rel - now));
+      if (rem < out->timeout_ms) out->timeout_ms = rem;
+    }
+    if (l->sb_speaking) {
+      uint32_t rem = now >= l->sb_speaking_until_ms
+                       ? 0u
+                       : (l->sb_speaking_until_ms - now > UINT32_MAX ? UINT32_MAX
+                                                                     : (uint32_t)(l->sb_speaking_until_ms - now));
+      if (rem < out->timeout_ms) out->timeout_ms = rem;
+    }
   }
-  if (l->restq && ccord_rest_queue_pending(l->restq) > 0) {
-    if (out->timeout_ms > 50u) out->timeout_ms = 50u;
+  if (l->voice_guild != CCORD_ID_NONE && l->vlink != LV_IDLE) {
+    if (now >= l->vlink_at_ms) {
+      out->immediate = true;
+      out->timeout_ms = 0;
+      return true;
+    }
+    uint64_t rem = l->vlink_at_ms - now;
+    uint32_t r = rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
+    if (r < out->timeout_ms) out->timeout_ms = r;
+  }
+  if (l->tx_stream.vs != nullptr) {
+    uint32_t vs_to = UINT32_MAX;
+    size_t avail = out->fd_count < CCORD_WAIT_MAX_FDS ? (CCORD_WAIT_MAX_FDS - out->fd_count) : 0u;
+    size_t added = ccord_vstream_wait_info(l->tx_stream.vs,
+                                           avail > 0 ? &out->fds[out->fd_count] : nullptr, avail, &vs_to);
+    out->fd_count += added;
+    if (vs_to < out->timeout_ms) out->timeout_ms = vs_to;
+    if (l->gw && l->streaming && l->tx_stream.stream_key[0] != '\0' &&
+        ccord_vstream_state_of(l->tx_stream.vs) == CCORD_VSTREAM_READY) {
+      uint32_t rem = now >= l->tx_stream.next_ping_ms
+                       ? 0u
+                       : (l->tx_stream.next_ping_ms - now > UINT32_MAX ? UINT32_MAX
+                                                                       : (uint32_t)(l->tx_stream.next_ping_ms - now));
+      if (rem < out->timeout_ms) out->timeout_ms = rem;
+    }
+  }
+  if (l->rx_stream.vs != nullptr) {
+    uint32_t vs_to = UINT32_MAX;
+    size_t avail = out->fd_count < CCORD_WAIT_MAX_FDS ? (CCORD_WAIT_MAX_FDS - out->fd_count) : 0u;
+    size_t added = ccord_vstream_wait_info(l->rx_stream.vs,
+                                           avail > 0 ? &out->fds[out->fd_count] : nullptr, avail, &vs_to);
+    out->fd_count += added;
+    if (vs_to < out->timeout_ms) out->timeout_ms = vs_to;
+    if (l->gw && l->watching_stream && l->rx_stream.stream_key[0] != '\0' &&
+        ccord_vstream_state_of(l->rx_stream.vs) == CCORD_VSTREAM_READY) {
+      uint32_t rem = now >= l->rx_stream.next_ping_ms
+                       ? 0u
+                       : (l->rx_stream.next_ping_ms - now > UINT32_MAX ? UINT32_MAX
+                                                                       : (uint32_t)(l->rx_stream.next_ping_ms - now));
+      if (rem < out->timeout_ms) out->timeout_ms = rem;
+    }
   }
   if (l->vresolve && ccord_video_resolver_busy(l->vresolve)) {
     if (out->timeout_ms > 50u) out->timeout_ms = 50u;

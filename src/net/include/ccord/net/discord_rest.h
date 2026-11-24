@@ -139,6 +139,11 @@ typedef struct ccord_rest_request {
 // transport. The governor is owned by the transport and must not outlive it.
 [[nodiscard]] ccord_gov *ccord_live_transport_governor(ccord_transport *t);
 [[nodiscard]] size_t ccord_rest_queue_pending(const ccord_rest_queue *q);
+// Reports active readable REST socket fds and the exact next timer deadline (curl_multi timeout, rate-limit/retry
+// not_before_ms, or non-user expiry) so an idle/background loop can sleep in kernel poll() without polling.
+// `now_ms` should match the clock passed to ccord_rest_queue_pump() (0 falls back to ccord_clock_ms()).
+size_t ccord_rest_queue_wait_info(const ccord_rest_queue *q, uint64_t now_ms, ccord_socket_t *out_fds, size_t cap,
+                                  uint32_t *out_timeout_ms, bool *out_has_pending);
 // True once a request was answered with HTTP 401 (the token is no longer accepted).
 [[nodiscard]] bool ccord_rest_queue_auth_failed(const ccord_rest_queue *q);
 void ccord_rest_queue_reset_auth(ccord_rest_queue *q);

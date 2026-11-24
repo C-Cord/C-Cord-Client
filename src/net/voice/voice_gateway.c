@@ -1297,6 +1297,66 @@ int ccord_voice_gateway_udp_fd(const ccord_voice_gateway *g)
   return fd;
 }
 
+static void vg_clamp_deadline(uint64_t now, uint64_t deadline, uint32_t *timeout_ms)
+{
+  if (deadline <= now) {
+    *timeout_ms = 0u;
+    return;
+  }
+  uint64_t rem = deadline - now;
+  if (rem < (uint64_t)*timeout_ms) *timeout_ms = (uint32_t)rem;
+}
+
+size_t ccord_voice_gateway_wait_info(const ccord_voice_gateway *g, ccord_socket_t *out_fds, size_t cap,
+                                     uint32_t *out_timeout_ms)
+{
+  if (out_timeout_ms) *out_timeout_ms = UINT32_MAX;
+  if (!g) return 0;
+  ccord_mutex_lock(vg_mtx(g));
+  size_t nfds = 0;
+  if (g->open && g->curl) {
+    curl_socket_t sock = CURL_SOCKET_BAD;
+    if (curl_easy_getinfo(g->curl, CURLINFO_ACTIVESOCKET, &sock) == CURLE_OK && sock != CURL_SOCKET_BAD) {
+      if (out_fds && nfds < cap) out_fds[nfds++] = (ccord_socket_t)sock;
+    }
+  }
+  if (g->udp_fd >= 0 && out_fds && nfds < cap) {
+    out_fds[nfds++] = (ccord_socket_t)g->udp_fd;
+  }
+  uint64_t now = vg_now(g);
+  uint32_t timeout = UINT32_MAX;
+  if (g->state == CCORD_VOICE_RECONNECTING && !g->ws_connecting) {
+    if (!g->open) {
+      vg_clamp_deadline(now, g->resume_at_ms, &timeout);
+    } else {
+      vg_clamp_deadline(now, g->resume_deadline_ms, &timeout);
+    }
+  }
+  if (g->open && g->hello && g->state != CCORD_VOICE_RECONNECTING) {
+    vg_clamp_deadline(now, g->next_heartbeat, &timeout);
+  }
+  if (g->state == CCORD_VOICE_READY && !g->selected && g->ip_discovery_deadline != 0) {
+    vg_clamp_deadline(now, g->ip_discovery_deadline, &timeout);
+  }
+  if (g->state == CCORD_VOICE_ESTABLISHED &&
+      (g->tx_pcm.len >= CCORD_VOICE_FRAME_SAMPLES || g->sb_pcm.len >= CCORD_VOICE_FRAME_SAMPLES ||
+       g->silence_frames_left > 0)) {
+    if (g->next_audio_tx_ms == 0) timeout = 0u;
+    else vg_clamp_deadline(now, g->next_audio_tx_ms, &timeout);
+  }
+  if (g->stream_rx_pli && !g->cam_rx && g->state == CCORD_VOICE_ESTABLISHED && g->remote_video_ssrc != 0 &&
+      g->stream_need_idr) {
+    uint64_t due = g->stream_pli_after_ms;
+    if (g->stream_last_pli_ms != 0 && g->stream_last_pli_ms + 1000u > due) {
+      due = g->stream_last_pli_ms + 1000u;
+    }
+    vg_clamp_deadline(now, due, &timeout);
+  }
+  ccord_mutex_unlock(vg_mtx(g));
+  if (out_timeout_ms) *out_timeout_ms = timeout;
+  return nfds;
+}
+
 size_t ccord_voice_gateway_secret(const ccord_voice_gateway *g, uint8_t out[CCORD_VOICE_MAX_SECRET])
 {
   if (!g || !out) return 0;

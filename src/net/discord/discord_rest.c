@@ -6,6 +6,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #endif
@@ -1080,6 +1081,139 @@ ccord_status ccord_rest_queue_add_raw(ccord_rest_queue *q, ccord_rest_method met
 
 ccord_gov *ccord_rest_queue_governor(ccord_rest_queue *q) { return q ? q->gov : nullptr; }
 size_t ccord_rest_queue_pending(const ccord_rest_queue *q) { return q ? q->njobs : 0; }
+
+static void rest_add_fd(ccord_socket_t *out_fds, size_t cap, size_t *fd_count, size_t *total_readable,
+                        ccord_socket_t s)
+{
+  if (s == CCORD_INVALID_SOCKET) return;
+  for (size_t i = 0; i < *fd_count; i++) {
+    if (out_fds[i] == s) return;
+  }
+  (*total_readable)++;
+  if (out_fds && *fd_count < cap) {
+    out_fds[(*fd_count)++] = s;
+  }
+}
+
+size_t ccord_rest_queue_wait_info(const ccord_rest_queue *q, uint64_t now_ms, ccord_socket_t *out_fds, size_t cap,
+                                  uint32_t *out_timeout_ms, bool *out_has_pending)
+{
+  if (out_timeout_ms) *out_timeout_ms = UINT32_MAX;
+  if (out_has_pending) *out_has_pending = false;
+  if (!q || q->njobs == 0) return 0;
+  if (now_ms == 0) now_ms = ccord_clock_ms();
+
+  size_t fd_count = 0;
+  size_t total_readable = 0;
+  bool need_write = false;
+  uint32_t timeout = UINT32_MAX;
+  bool pending = false;
+
+  if (q->running_jobs > 0 && q->multi) {
+    unsigned int total_curl_fds = 0;
+#if defined(LIBCURL_VERSION_NUM) && LIBCURL_VERSION_NUM >= 0x080700
+    struct curl_waitfd ufds[32];
+    if (curl_multi_waitfds(q->multi, ufds, (unsigned int)(sizeof ufds / sizeof ufds[0]), &total_curl_fds) == CURLM_OK) {
+      unsigned int n = total_curl_fds;
+      if (n > (unsigned int)(sizeof ufds / sizeof ufds[0])) {
+        n = (unsigned int)(sizeof ufds / sizeof ufds[0]);
+        need_write = true;
+      }
+      for (unsigned int i = 0; i < n; i++) {
+        if ((ufds[i].events & CURL_WAIT_POLLOUT) != 0) need_write = true;
+        if ((ufds[i].events & (CURL_WAIT_POLLIN | CURL_WAIT_POLLPRI)) != 0 && ufds[i].fd != CURL_SOCKET_BAD) {
+          rest_add_fd(out_fds, cap, &fd_count, &total_readable, (ccord_socket_t)ufds[i].fd);
+        }
+      }
+    }
+#elif !defined(_WIN32)
+    fd_set rfds, wfds, efds;
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    FD_ZERO(&efds);
+    int maxfd = -1;
+    if (curl_multi_fdset(q->multi, &rfds, &wfds, &efds, &maxfd) == CURLM_OK && maxfd >= 0) {
+      int limit = maxfd < FD_SETSIZE ? maxfd : (FD_SETSIZE - 1);
+      for (int fd = 0; fd <= limit; fd++) {
+        bool r = FD_ISSET(fd, &rfds) || FD_ISSET(fd, &efds);
+        bool w = FD_ISSET(fd, &wfds);
+        if (r || w) total_curl_fds++;
+        if (w) need_write = true;
+        if (r) rest_add_fd(out_fds, cap, &fd_count, &total_readable, (ccord_socket_t)fd);
+      }
+    }
+#else
+    fd_set rfds, wfds, efds;
+    FD_ZERO(&rfds);
+    FD_ZERO(&wfds);
+    FD_ZERO(&efds);
+    int maxfd = -1;
+    if (curl_multi_fdset(q->multi, &rfds, &wfds, &efds, &maxfd) == CURLM_OK) {
+      total_curl_fds = (unsigned int)(rfds.fd_count + wfds.fd_count + efds.fd_count);
+      if (wfds.fd_count > 0) need_write = true;
+      for (u_int i = 0; i < rfds.fd_count; i++) {
+        rest_add_fd(out_fds, cap, &fd_count, &total_readable, (ccord_socket_t)rfds.fd_array[i]);
+      }
+      for (u_int i = 0; i < efds.fd_count; i++) {
+        rest_add_fd(out_fds, cap, &fd_count, &total_readable, (ccord_socket_t)efds.fd_array[i]);
+      }
+    }
+#endif
+    long curl_to = -1;
+    if (curl_multi_timeout(q->multi, &curl_to) == CURLM_OK) {
+      if (curl_to == 0) {
+        timeout = 0;
+        pending = true;
+      } else if (curl_to > 0) {
+        uint32_t c = (unsigned long)curl_to > (unsigned long)UINT32_MAX ? UINT32_MAX : (uint32_t)curl_to;
+        if (c < timeout) timeout = c;
+      } else {
+        // curl reports -1 ("no internal timer") while transfers are running: use a 1 s safety net when
+        // sockets were exported, or 100 ms when curl is waiting on internal work such as async DNS.
+        uint32_t fallback = total_curl_fds > 0 ? 1000u : 100u;
+        if (fallback < timeout) timeout = fallback;
+      }
+    } else if (100u < timeout) {
+      timeout = 100u;
+    }
+    // Callers poll exported fds for readability (POLLIN) only; keep a brief cap while any transfer needs
+    // POLLOUT (connect/upload) or when more readable sockets are active than fit in `out_fds`.
+    if (need_write && timeout > 25u) timeout = 25u;
+    if (total_readable > fd_count && timeout > 50u) timeout = 50u;
+  }
+
+  // Exact wake deadline for queued / rate-limited pending jobs (no blunt 50 ms polling clamp).
+  bool raw_slots_full = q->raw_inflight >= CCORD_REST_MAX_RAW_INFLIGHT;
+  bool gov_running = q->running_jobs > (size_t)q->raw_inflight;
+  for (const ccord_rest_job *j = q->jobs; j; j = j->next) {
+    if (j->state != JOB_PENDING) continue;
+    if (j->prio != CCORD_GOV_USER && j->enqueued_ms != 0 && !(j->raw && raw_slots_full)) {
+      uint64_t exp_at = j->enqueued_ms + (uint64_t)CCORD_REST_MAX_WAIT_MS + 1u;
+      if (now_ms >= exp_at) {
+        timeout = 0;
+        pending = true;
+      } else {
+        uint64_t rem = exp_at - now_ms;
+        uint32_t r = rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
+        if (r < timeout) timeout = r;
+      }
+    }
+    if (j->raw && raw_slots_full) continue;
+    if (!j->raw && j->wait_inflight && gov_running) continue;
+    if (now_ms >= j->not_before_ms) {
+      timeout = 0;
+      pending = true;
+    } else {
+      uint64_t rem = j->not_before_ms - now_ms;
+      uint32_t r = rem > UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
+      if (r < timeout) timeout = r;
+    }
+  }
+
+  if (out_timeout_ms) *out_timeout_ms = timeout;
+  if (out_has_pending) *out_has_pending = pending;
+  return fd_count;
+}
 bool ccord_rest_queue_auth_failed(const ccord_rest_queue *q) { return q && ccord_gov_auth_failed(q->gov); }
 void ccord_rest_queue_reset_auth(ccord_rest_queue *q)
 {

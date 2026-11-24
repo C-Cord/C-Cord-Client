@@ -677,6 +677,72 @@ static void test_blocked_paths_never_queue(void)
   ccord_rest_queue_destroy(q);
 }
 
+// ccord_rest_queue_wait_info reports exact rate-limit and expiry delays rather than clamping to 50 ms.
+static void test_wait_info_rate_limit_and_idle(void)
+{
+  ccord_rest_config cfg = {.base_url = "http://127.0.0.1:1", .token = "REDACTED_TEST_TOKEN", .timeout_ms = 1000};
+  ccord_error err;
+  ccord_rest_queue *q = ccord_rest_queue_create(&cfg, &err);
+  CT_CHECK(q != nullptr);
+  if (!q) return;
+
+  ccord_socket_t fds[8];
+  uint32_t to = 0;
+  bool pend = true;
+  // Idle queue: 0 fds, infinite timeout, not pending.
+  CT_CHECK(ccord_rest_queue_wait_info(q, 1000, fds, 8, &to, &pend) == 0);
+  CT_CHECK(to == UINT32_MAX && !pend);
+
+  // Trigger a 30 s global rate limit at t=1000 (release at t=31000).
+  ccord_gov *g = ccord_rest_queue_governor(q);
+  ccord_gov_ticket t;
+  ccord_gov_decision d = ccord_gov_acquire(g, "POST", "/channels/1/messages", CCORD_GOV_USER, 1000, &t);
+  CT_CHECK(d.verdict == CCORD_GOV_GO);
+  ccord_gov_response resp;
+  ccord_gov_response_init(&resp, 429);
+  resp.global = true;
+  resp.retry_after_ms = 30000;
+  ccord_gov_completion comp = ccord_gov_complete(g, &t, &resp, 1000);
+  uint64_t until = comp.not_before_ms;
+  CT_CHECK(until >= 31000u);
+
+  // Freshly submitted job (not yet pumped): immediate pump needed (timeout == 0, has_pending == true).
+  result user = {0};
+  CT_CHECK(submit(q, CCORD_REST_POST, "/channels/10/messages", CCORD_GOV_USER, false, &user) == CCORD_OK);
+  CT_CHECK(ccord_rest_queue_wait_info(q, 2000, fds, 8, &to, &pend) == 0);
+  CT_CHECK(to == 0 && pend);
+
+  // After pump at t=2000, job is parked until global_until: exact delay (> 50 ms), never clamped to 50 ms.
+  ccord_rest_queue_pump(q, 2000);
+  CT_CHECK(ccord_rest_queue_wait_info(q, 2000, fds, 8, &to, &pend) == 0);
+  CT_CHECK(!pend && to > 50u && to == (uint32_t)(until - 2000u));
+  CT_CHECK(ccord_rest_queue_wait_info(q, until - 500u, fds, 8, &to, &pend) == 0);
+  CT_CHECK(!pend && to == 500u);
+  CT_CHECK(ccord_rest_queue_wait_info(q, until, fds, 8, &to, &pend) == 0);
+  CT_CHECK(pend && to == 0u);
+
+  // Background job under a very long rate limit reports its exact 45 s expiry deadline (> 50 ms).
+  ccord_rest_queue_destroy(q);
+  q = ccord_rest_queue_create(&cfg, &err);
+  CT_CHECK(q != nullptr);
+  if (!q) return;
+  g = ccord_rest_queue_governor(q);
+  d = ccord_gov_acquire(g, "POST", "/channels/1/messages", CCORD_GOV_USER, 1000, &t);
+  CT_CHECK(d.verdict == CCORD_GOV_GO);
+  ccord_gov_response_init(&resp, 429);
+  resp.global = true;
+  resp.retry_after_ms = 3000000;
+  (void)ccord_gov_complete(g, &t, &resp, 1000);
+
+  result bg = {0};
+  CT_CHECK(submit(q, CCORD_REST_GET, "/channels/10/messages", CCORD_GOV_BACKGROUND, false, &bg) == CCORD_OK);
+  ccord_rest_queue_pump(q, 2000);
+  CT_CHECK(ccord_rest_queue_wait_info(q, 2000, fds, 8, &to, &pend) == 0);
+  CT_CHECK(!pend && to == 45001u);
+
+  ccord_rest_queue_destroy(q);
+}
+
 int main(void)
 {
   (void)signal(SIGPIPE, SIG_IGN);
@@ -698,5 +764,6 @@ int main(void)
   test_pending_cap();
   test_expiry();
   test_blocked_paths_never_queue();
+  test_wait_info_rate_limit_and_idle();
   return CT_RESULT("test_rest_queue");
 }

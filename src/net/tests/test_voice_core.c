@@ -904,6 +904,57 @@ static void test_multispeaker_pacing_and_deafen(void)
   sfu_close(&s);
 }
 
+static void test_wait_info_and_muted_plc(void)
+{
+  // Null-safe idle wait_info
+  ccord_socket_t fds[4];
+  uint32_t wait_ms = 0;
+  CT_CHECK(ccord_voice_gateway_wait_info(nullptr, fds, 4, &wait_ms) == 0);
+  CT_CHECK(wait_ms == UINT32_MAX);
+
+  vcap cap;
+  sfu s;
+  ccord_voice_gateway *g = bring_up(&cap, &s);
+  CT_CHECK(g != nullptr);
+  if (!g) return;
+
+  // Established gateway exports its UDP fd and bounded heartbeat timer (<= 1000 ms).
+  size_t nfds = ccord_voice_gateway_wait_info(g, fds, 4, &wait_ms);
+  CT_CHECK(nfds >= 1u);
+  CT_CHECK(fds[0] != CCORD_INVALID_SOCKET);
+  CT_CHECK(wait_ms <= 1000u);
+
+  uint32_t prev_wait = wait_ms;
+  tnow += 200u;
+  (void)ccord_voice_gateway_wait_info(g, fds, 4, &wait_ms);
+  CT_CHECK(wait_ms <= prev_wait);
+
+  // Muted peer (volume 0%) with a 2-packet sequence gap advances jitter playout and counts
+  // packets_lost without mixing any PCM output (PLC decode skipped).
+  map_rx_user(g, "1000");
+  ccord_voice_gateway_set_user_volume(g, 1000, 0);
+  int opus_err = OPUS_OK;
+  OpusEncoder *enc = opus_encoder_create(48000, (int)CH, OPUS_APPLICATION_AUDIO, &opus_err);
+  CT_CHECK(enc != nullptr);
+  if (enc) {
+    int16_t sig[FRAME * CH], out[FRAME * CH * 8];
+    double phase = 0.0;
+    gen_tone(sig, 8000.0, 440.0, &phase);
+    CT_CHECK(send_rx(&s, enc, 10u, sig) > 0);
+    gen_tone(sig, 8000.0, 440.0, &phase);
+    CT_CHECK(send_rx(&s, enc, 13u, sig) > 0);  // seq 11, 12 lost while muted
+    tnow += 20u;
+    CT_CHECK(ccord_voice_gateway_pull_pcm(g, out, FRAME * CH * 8) == 0);
+    ccord_rtc_stats st;
+    ccord_voice_gateway_stats(g, &st);
+    CT_CHECK(st.packets_lost == 2u);
+    opus_encoder_destroy(enc);
+  }
+
+  ccord_voice_gateway_destroy(g);
+  sfu_close(&s);
+}
+
 int main(void)
 {
   test_vad_tx();
@@ -913,5 +964,6 @@ int main(void)
   test_soundboard();
   test_setters();
   test_multispeaker_pacing_and_deafen();
+  test_wait_info_and_muted_plc();
   return CT_RESULT("test_voice_core");
 }
