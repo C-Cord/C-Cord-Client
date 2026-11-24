@@ -150,7 +150,10 @@ static inline void pw_signal_wake(int w_fd)
 {
   if (w_fd < 0) return;
   uint8_t b = 1;
-  (void)write(w_fd, &b, 1);
+  ssize_t r;
+  do {
+    r = write(w_fd, &b, 1);
+  } while (r < 0 && errno == EINTR);
 }
 
 static inline void pw_close_wake_pipe(int *r_fd, int *w_fd)

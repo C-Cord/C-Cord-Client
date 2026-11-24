@@ -960,6 +960,11 @@ static void test_gateway_stress(void)
     return;
   }
 
+  // Let the audio thread consume at least one pre-fed RX frame before the unthrottled stress
+  // pullers compete for the same single-consumer rx_pcm ring (audio_thread_main paces at 20 ms).
+  CT_CHECK(wait_i32(&g_fake.play_writes, 1, 2000));
+  int cap_before = atomic_load(&g_fake.cap_reads);
+
   pthread_t th[6];
   CT_CHECK(pthread_create(&th[0], nullptr, stress_pusher, &c) == 0);
   CT_CHECK(pthread_create(&th[1], nullptr, stress_sb_pusher, &c) == 0);
@@ -980,6 +985,7 @@ static void test_gateway_stress(void)
   CT_CHECK(atomic_load(&c.pull_frames) > 0);
   CT_CHECK(atomic_load(&c.polls) > 0);
   CT_CHECK(atomic_load(&c.feeds) > 0);
+  CT_CHECK(atomic_load(&g_fake.cap_reads) > cap_before);
   CT_CHECK(atomic_load(&g_fake.play_writes) > 0);
   CT_CHECK(ccord_voice_gateway_state(g) == CCORD_VOICE_ESTABLISHED);
 
