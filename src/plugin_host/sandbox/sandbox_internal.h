@@ -78,6 +78,7 @@ ccord_sandbox *sb_of(lua_State *L);
 void sb_request(ccord_sandbox *sb, const char *method, const char *params);
 void sb_log(ccord_sandbox *sb, ccord_log_level lvl, const char *what, const char *msg);
 bool sb_check_perm(lua_State *L, ccord_sandbox *sb, ccord_perm perm, const char *api);
+bool sb_check_any_perm(lua_State *L, ccord_sandbox *sb, ccord_perm p1, ccord_perm p2, const char *api);
 int sb_push_undeclared(lua_State *L);
 bool sb_valid_key(const char *s, size_t n);
 bool sb_valid_name(const char *s, size_t n, size_t max, bool first_digit_ok);

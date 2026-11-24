@@ -92,16 +92,29 @@ static bool nav_reduced_motion(const ccord_ui *ui)
   return ui && (ui->anim.reduced_motion || ui->settings_reduced_motion);
 }
 
-void ui_draw_avatar(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float cx, float cy, float size, ccord_color ring, bool dim)
+void ui_draw_avatar_ex(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float cx, float cy, float size,
+                       ccord_color ring, bool dim, bool grayscale, float opacity)
 {
+  if (opacity < 0.0f) opacity = 0.0f;
+  if (opacity > 1.0f) opacity = 1.0f;
+  uint8_t tex_a = (uint8_t)lroundf((dim ? 140.0f : 255.0f) * opacity);
   bool show_deco = (size >= 24.0f && u && u->avatar_decoration_url && u->avatar_decoration_url[0] != '\0');
   float av_rad = show_deco ? (size * 0.5f) : squircle_radius(size);
   ccord_rect dst = {cx - size * 0.5f, cy - size * 0.5f, size, size};
   char url[256];
   if (u && ui_user_avatar_url(u, url, sizeof url) && ui_ensure_media(ui, r, url)) {
-    ccord_draw_texture_rounded_anim(r, url, dst, av_rad, dim ? 140 : 255, !nav_reduced_motion(ui));
+    const char *draw_key = url;
+    char gkey[272];
+    if (grayscale) {
+      snprintf(gkey, sizeof gkey, "__gray__:%s", url);
+      const ccord_media_item *cm = ui->d.session ? ccord_session_get_media(ui->d.session, url) : nullptr;
+      if (ccord_render_ensure_grayscale_texture(r, url, gkey, cm ? cm->data : nullptr, cm ? cm->len : 0, false, 0, 0)) {
+        draw_key = gkey;
+      }
+    }
+    ccord_draw_texture_rounded_anim(r, draw_key, dst, av_rad, tex_a, !grayscale && !nav_reduced_motion(ui));
     ui->dbg_avatar_textures_drawn++;
-    if (show_deco) ui_draw_avatar_deco_url(ui, r, u->avatar_decoration_url, cx, cy, size, dim ? 140 : 255);
+    if (show_deco) ui_draw_avatar_deco_url_ex(ui, r, u->avatar_decoration_url, cx, cy, size, tex_a, grayscale);
     if (ring.a != 0) {
       float dot = M(status_dot_size) * size / 32.0f;
       if (dot < 8.0f) dot = 8.0f;
@@ -111,7 +124,13 @@ void ui_draw_avatar(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float 
     }
     return;
   }
+  bool pushed_a = opacity < 0.999f;
+  if (pushed_a) ccord_push_alpha(r, opacity);
   ccord_color bg = ui_user_color(ui, u ? u->avatar_palette : 0);
+  if (grayscale) {
+    uint8_t y = (uint8_t)((54u * (uint32_t)bg.r + 183u * (uint32_t)bg.g + 19u * (uint32_t)bg.b + 128u) >> 8);
+    bg = (ccord_color){y, y, y, bg.a};
+  }
   if (dim) bg = ui_mix(bg, ring.a ? ring : COL(bg_secondary), 0.55f);
   ccord_draw_rrect(r, dst, av_rad, bg);
   char init[8] = "?";
@@ -124,7 +143,8 @@ void ui_draw_avatar(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float 
   }
   ccord_text_style st = ui_style(ui, CCORD_FONT_BOLD, size * 0.42f, avatar_text_color(ui, bg));
   text_centered(r, init, dst, &st);
-  if (show_deco) ui_draw_avatar_deco_url(ui, r, u->avatar_decoration_url, cx, cy, size, dim ? 140 : 255);
+  if (pushed_a) ccord_pop_alpha(r);
+  if (show_deco) ui_draw_avatar_deco_url_ex(ui, r, u->avatar_decoration_url, cx, cy, size, tex_a, grayscale);
   if (ring.a != 0 && u) {
     float dot = M(status_dot_size) * size / 32.0f;
     if (dot < 8.0f) dot = 8.0f;
@@ -132,6 +152,11 @@ void ui_draw_avatar(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float 
     ccord_draw_circle(r, dx, dy, dot * 0.5f + 2.2f, ring);
     ccord_draw_circle(r, dx, dy, dot * 0.5f, presence_color(ui, u->presence));
   }
+}
+
+void ui_draw_avatar(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float cx, float cy, float size, ccord_color ring, bool dim)
+{
+  ui_draw_avatar_ex(ui, r, u, cx, cy, size, ring, dim, false, 1.0f);
 }
 
 // ---------------------------------------------------------------- group DM icon

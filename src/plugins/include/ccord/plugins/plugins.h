@@ -102,6 +102,9 @@ typedef struct ccord_plugin_platform_ops {
   char *(*processes_list_json)(void *ud);
   char *(*active_window_json)(void *ud);
   void (*global_shortcuts_sync)(void *ud);
+  // Decode an encoded image buffer and box-downscale to RGBA32 (ccord_malloc'd *out_rgba).
+  bool (*decode_image_rgba)(void *ud, const uint8_t *encoded, size_t len, int max_w, int max_h,
+                            uint8_t **out_rgba, int *out_w, int *out_h, char *err_buf, size_t err_cap);
 } ccord_plugin_platform_ops;
 
 typedef struct ccord_plugins_config {

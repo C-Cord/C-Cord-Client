@@ -242,6 +242,21 @@ static void draw_box_chrome(ccord_renderer *r, const ccord_theme_colors *tc, con
   }
 }
 
+static const char *resolve_panel_image_key(const ccord_ui *ui, ccord_renderer *r, const char *key,
+                                           bool grayscale, char *gbuf, size_t gcap)
+{
+  if (!grayscale || !key || !key[0]) return key;
+  int n = snprintf(gbuf, gcap, "__gray__:%s", key);
+  if (n <= 0 || (size_t)n >= gcap) return key;
+  const ccord_plugin_texture *pt = ui->d.contrib ? ccord_contrib_find_texture(ui->d.contrib, key) : nullptr;
+  if (ccord_render_ensure_grayscale_texture(r, key, gbuf,
+                                            pt ? pt->data : nullptr, pt ? pt->len : 0,
+                                            pt ? pt->is_rgba : false, pt ? pt->width : 0, pt ? pt->height : 0)) {
+    return gbuf;
+  }
+  return key;
+}
+
 static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const draw_ctx *dctx,
                       const pnode *nd, ccord_rect rc, bool parent_is_col, bool ancestor_hovered, ccord_color surface_bg)
 {
@@ -494,9 +509,11 @@ static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const dr
 
     case PN_IMAGE: {
       if (nd->texture_key && nd->texture_key[0] && ccord_render_has_texture(r, nd->texture_key, nullptr, nullptr)) {
-        if (nd->cover) ccord_draw_texture_cover(r, nd->texture_key, rc, nd->radius, 255, true);
-        else if (nd->radius > 0.0f) ccord_draw_texture_rounded(r, nd->texture_key, rc, nd->radius, 255);
-        else ccord_draw_texture(r, nd->texture_key, rc, 255);
+        char gkey[160];
+        const char *draw_key = resolve_panel_image_key(ui, r, nd->texture_key, nd->grayscale, gkey, sizeof gkey);
+        if (nd->cover) ccord_draw_texture_cover(r, draw_key, rc, nd->radius, 255, true);
+        else if (nd->radius > 0.0f) ccord_draw_texture_rounded(r, draw_key, rc, nd->radius, 255);
+        else ccord_draw_texture(r, draw_key, rc, 255);
       }
       break;
     }
@@ -504,7 +521,7 @@ static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const dr
     case PN_AVATAR: {
       const ccord_user *u = (ui->d.store && nd->avatar_uid) ? ccord_store_user(ui->d.store, nd->avatar_uid) : nullptr;
       float sz = pp_p_minf(rc.w, rc.h);
-      ui_draw_avatar(ui, r, u, rc.x + rc.w * 0.5f, rc.y + rc.h * 0.5f, sz, surface_bg, false);
+      ui_draw_avatar_ex(ui, r, u, rc.x + rc.w * 0.5f, rc.y + rc.h * 0.5f, sz, surface_bg, false, nd->grayscale, 1.0f);
       break;
     }
 
@@ -557,11 +574,13 @@ static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const dr
             break;
           case PCMD_IMAGE:
             if (c->text && c->text[0] && ccord_render_has_texture(r, c->text, nullptr, nullptr)) {
+              char gkey[160];
+              const char *draw_key = resolve_panel_image_key(ui, r, c->text, c->grayscale, gkey, sizeof gkey);
               ccord_rect dst = {cx, cy, pp_eval_dim(c->w, rc.w), pp_eval_dim(c->h, rc.h)};
               uint8_t a = (uint8_t)(pp_p_clampf(c->stroke_w, 0.0f, 1.0f) * 255.0f);
-              if (c->cover) ccord_draw_texture_cover(r, c->text, dst, c->r_or_thick, a, true);
-              else if (c->r_or_thick > 0.0f) ccord_draw_texture_rounded(r, c->text, dst, c->r_or_thick, a);
-              else ccord_draw_texture(r, c->text, dst, a);
+              if (c->cover) ccord_draw_texture_cover(r, draw_key, dst, c->r_or_thick, a, true);
+              else if (c->r_or_thick > 0.0f) ccord_draw_texture_rounded(r, draw_key, dst, c->r_or_thick, a);
+              else ccord_draw_texture(r, draw_key, dst, a);
             }
             break;
           case PCMD_TEXT: {

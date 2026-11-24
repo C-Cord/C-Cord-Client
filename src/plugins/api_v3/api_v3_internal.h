@@ -30,6 +30,9 @@ void ext_send_async_reply(ccord_plugins *m, plugin *p, uint64_t req_id, bool ok,
                           const char *result_json, const char *err_msg);
 bool ext_sync_host_call(ccord_plugins *m, plugin *p, const char *method, const char *params_json,
                         uint32_t timeout_ms, char **out_json, char *err_buf, size_t err_cap);
+bool ext_upload_texture_from_file(ccord_plugins *m, plugin *p, const char *key, const char *path,
+                                  int max_w, int max_h, int *out_w, int *out_h,
+                                  const char **out_err_code, char *err_buf, size_t err_cap);
 
 // Sub-dispatchers
 bool ext_handle_settings_and_theme(ccord_plugins *m, plugin *p, uint32_t id, const char *method, const ccord_json *params);

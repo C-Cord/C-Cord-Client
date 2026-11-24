@@ -72,3 +72,4 @@ void ui_draw_voice_bar(ccord_ui *ui, ccord_renderer *r);
 const char *ui_voice_bar_title(const ccord_ui *ui);   // "Reconnecting..." while the voice link is re-establishing
 void ui_draw_notice(ccord_ui *ui, ccord_renderer *r);
 void ui_draw_avatar(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float cx, float cy, float size, ccord_color ring, bool dim);
+void ui_draw_avatar_ex(ccord_ui *ui, ccord_renderer *r, const ccord_user *u, float cx, float cy, float size, ccord_color ring, bool dim, bool grayscale, float opacity);

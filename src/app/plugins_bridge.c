@@ -459,6 +459,18 @@ static void plugin_op_global_shortcuts_sync(void *ud)
   app_host_keybinds_changed(ud);
 }
 
+static bool plugin_op_decode_image_rgba(void *ud, const uint8_t *encoded, size_t len, int max_w, int max_h,
+                                        uint8_t **out_rgba, int *out_w, int *out_h, char *err_buf, size_t err_cap)
+{
+  (void)ud;
+  ccord_error err = {0};
+  if (ccord_image_decode_rgba_box(encoded, len, max_w, max_h, false, out_rgba, out_w, out_h, &err) != CCORD_OK) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "%s", err.message[0] ? err.message : "image decode failed");
+    return false;
+  }
+  return true;
+}
+
 static void plugin_raw_gateway_cb(void *ud, const char *event_name, const char *payload_json)
 {
   app *a = ud;
@@ -580,6 +592,7 @@ void app_plugins_start(app *a)
       .processes_list_json = plugin_op_processes_list_json,
       .active_window_json = plugin_op_active_window_json,
       .global_shortcuts_sync = plugin_op_global_shortcuts_sync,
+      .decode_image_rgba = plugin_op_decode_image_rgba,
     },
     .dev_auto_reload = a->opt->plugin_dev,
   };

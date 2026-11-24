@@ -77,7 +77,7 @@ typedef struct pcmd {
   float r_or_thick;
   float start_deg, end_deg, stroke_w;
   float font_size;
-  bool bold, ellipsis, filled, vertical, cover;
+  bool bold, ellipsis, filled, vertical, cover, grayscale;
   picon icon;
   pcolor color, color2;
   const char *text;      // text, texture key, or custom icon name
@@ -110,7 +110,7 @@ struct pnode {
   pnode_kind kind;
   bool is_col, clip, wrap, pos_abs;
   bool show_on_hover, hide_on_hover;
-  bool bold, ellipsis, selected, disabled, checked, masked, cover;
+  bool bold, ellipsis, selected, disabled, checked, masked, cover, grayscale;
   bool orient_explicit, is_vertical;
   bool draggable, track_move;
   palign align;
@@ -196,6 +196,11 @@ typedef struct decor_cache_entry {
   pnode *root;
 } decor_cache_entry;
 
+typedef struct synced_tex_entry {
+  char key[129];
+  uint64_t rev;
+} synced_tex_entry;
+
 struct ui_panel_mgr {
   compiled_panel *compiled;
   size_t ncompiled, capcompiled;
@@ -218,8 +223,10 @@ struct ui_panel_mgr {
   char hover_node[65];
   bool dragging;
   panel_hit drag_hit;
-  // Texture sync revision
+  // Texture sync revision & per-key uploaded revisions (incremental upload + eviction)
   uint64_t synced_tex_rev;
+  synced_tex_entry synced_texs[256];
+  size_t nsynced_texs;
   // Active full-view plugin tab
   char full_view_owner[65];
   char full_view_id[40];

@@ -440,8 +440,8 @@ void ui_profile_flush_tooltip(ccord_ui *ui, ccord_renderer *r)
   (void)uis_tooltip(ui, r, g_tip_rect, g_tip_text, UIS_TIP_ABOVE, 7);
 }
 
-void ui_draw_avatar_deco_url(ccord_ui *ui, ccord_renderer *r, const char *deco_url, float cx, float cy,
-                             float avatar_size, uint8_t alpha)
+void ui_draw_avatar_deco_url_ex(ccord_ui *ui, ccord_renderer *r, const char *deco_url, float cx, float cy,
+                                float avatar_size, uint8_t alpha, bool grayscale)
 {
   if (!ui || !r || !has_text(deco_url) || alpha == 0 || avatar_size <= 0.0f) return;
   char url[256];
@@ -451,9 +451,24 @@ void ui_draw_avatar_deco_url(ccord_ui *ui, ccord_renderer *r, const char *deco_u
   if (ui_ensure_media_ex(ui, r, url, 256, false)) {
     int tw = 0, th = 0;
     if (ccord_render_has_texture(r, url, &tw, &th) && tw <= 2 && th <= 2) return;
-    ccord_draw_texture_rounded_anim(r, url, (ccord_rect){cx - s * 0.5f, cy - s * 0.5f, s, s}, 0.0f, alpha,
-                                    !prof_reduced_motion(ui));
+    const char *draw_key = url;
+    char gkey[272];
+    if (grayscale) {
+      snprintf(gkey, sizeof gkey, "__gray__:%s", url);
+      const ccord_media_item *cm = ui->d.session ? ccord_session_get_media(ui->d.session, url) : nullptr;
+      if (ccord_render_ensure_grayscale_texture(r, url, gkey, cm ? cm->data : nullptr, cm ? cm->len : 0, false, 0, 0)) {
+        draw_key = gkey;
+      }
+    }
+    ccord_draw_texture_rounded_anim(r, draw_key, (ccord_rect){cx - s * 0.5f, cy - s * 0.5f, s, s}, 0.0f, alpha,
+                                    !grayscale && !prof_reduced_motion(ui));
   }
+}
+
+void ui_draw_avatar_deco_url(ccord_ui *ui, ccord_renderer *r, const char *deco_url, float cx, float cy,
+                             float avatar_size, uint8_t alpha)
+{
+  ui_draw_avatar_deco_url_ex(ui, r, deco_url, cx, cy, avatar_size, alpha, false);
 }
 
 void ui_profile_draw_deco(ccord_ui *ui, ccord_renderer *r, const ui_profile_look *look, float cx, float cy, float avatar_size)

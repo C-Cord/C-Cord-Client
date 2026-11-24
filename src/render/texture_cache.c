@@ -983,6 +983,123 @@ bool ccord_render_has_texture(ccord_renderer *r, const char *key, int *out_w, in
   return true;
 }
 
+bool ccord_render_ensure_grayscale_texture(ccord_renderer *r, const char *src_key, const char *gray_key,
+                                           const uint8_t *opt_src_bytes, size_t opt_src_len, bool opt_is_rgba,
+                                           int opt_w, int opt_h)
+{
+  if (!r || !gray_key || !gray_key[0]) return false;
+  if (tex_find(r, gray_key) != nullptr) return true;
+
+  ccord_error err = {0};
+  if (opt_src_bytes && opt_src_len > 0) {
+    if (opt_is_rgba) {
+      if (opt_w <= 0 || opt_h <= 0 || opt_w > MAX_IMAGE_DIM || opt_h > MAX_IMAGE_DIM ||
+          (size_t)opt_w * (size_t)opt_h * 4u != opt_src_len) {
+        return false;
+      }
+      uint8_t *copy = ccord_malloc(opt_src_len);
+      if (!copy) return false;
+      memcpy(copy, opt_src_bytes, opt_src_len);
+      ccord_rgba_to_grayscale_inplace(copy, (size_t)opt_w * (size_t)opt_h);
+      ccord_status st = tex_upload_rgba(r, gray_key, copy, opt_w, opt_h, false, false, &err);
+      ccord_free(copy);
+      return st == CCORD_OK;
+    }
+    uint8_t *rgba = nullptr;
+    int w = 0, h = 0;
+    int mdim = CCORD_OS_ANDROID ? 1024 : 2048;
+    if (ccord_image_decode_rgba_box(opt_src_bytes, opt_src_len, mdim, mdim, true, &rgba, &w, &h, &err) == CCORD_OK) {
+      ccord_status st = tex_upload_rgba(r, gray_key, rgba, w, h, false, false, &err);
+      ccord_free(rgba);
+      return st == CCORD_OK;
+    }
+  }
+
+  if (!src_key || !src_key[0]) return false;
+  tex_entry *e = tex_find(r, src_key);
+  if (!e || !e->tex || e->w <= 0 || e->h <= 0) return false;
+
+  if (e->has_anim && e->anim.frames && e->anim.frame_count > 0 && e->anim.frames[0]) {
+    size_t nbytes = (size_t)e->w * (size_t)e->h * 4u;
+    uint8_t *copy = ccord_malloc(nbytes);
+    if (!copy) return false;
+    memcpy(copy, e->anim.frames[0], nbytes);
+    ccord_rgba_to_grayscale_inplace(copy, (size_t)e->w * (size_t)e->h);
+    bool was_premul = e->premul;
+    int ew = e->w, eh = e->h;
+    ccord_status st = tex_upload_rgba(r, gray_key, copy, ew, eh, false, was_premul, &err);
+    ccord_free(copy);
+    return st == CCORD_OK;
+  }
+
+  // Fallback for textures whose original source bytes were released: one-time offscreen render target readback.
+  if (!r->sdl) return false;
+  int ew = e->w, eh = e->h;
+  bool was_premul = e->premul;
+  SDL_Texture *src_tex = e->tex;
+  SDL_Texture *rt = SDL_CreateTexture(r->sdl, SDL_PIXELFORMAT_RGBA32, SDL_TEXTUREACCESS_TARGET, ew, eh);
+  if (!rt) return false;
+
+  SDL_Texture *prev_target = SDL_GetRenderTarget(r->sdl);
+  bool had_clip = SDL_RenderClipEnabled(r->sdl);
+  SDL_Rect prev_clip = {0};
+  if (had_clip) (void)SDL_GetRenderClipRect(r->sdl, &prev_clip);
+  SDL_Rect prev_vp = {0};
+  bool had_vp = SDL_RenderViewportSet(r->sdl);
+  if (had_vp) (void)SDL_GetRenderViewport(r->sdl, &prev_vp);
+
+  SDL_BlendMode prev_bm = SDL_BLENDMODE_BLEND;
+  (void)SDL_GetTextureBlendMode(src_tex, &prev_bm);
+  uint8_t prev_r = 255, prev_g = 255, prev_b = 255, prev_a = 255;
+  (void)SDL_GetTextureColorMod(src_tex, &prev_r, &prev_g, &prev_b);
+  (void)SDL_GetTextureAlphaMod(src_tex, &prev_a);
+
+  bool ok = false;
+  if (SDL_SetRenderTarget(r->sdl, rt)) {
+    SDL_SetRenderClipRect(r->sdl, nullptr);
+    SDL_SetRenderViewport(r->sdl, nullptr);
+    SDL_SetRenderDrawBlendMode(r->sdl, SDL_BLENDMODE_NONE);
+    SDL_SetRenderDrawColor(r->sdl, 0, 0, 0, 0);
+    SDL_RenderClear(r->sdl);
+    SDL_SetTextureBlendMode(src_tex, SDL_BLENDMODE_NONE);
+    SDL_SetTextureColorMod(src_tex, 255, 255, 255);
+    SDL_SetTextureAlphaMod(src_tex, 255);
+    SDL_RenderTexture(r->sdl, src_tex, nullptr, nullptr);
+    SDL_Surface *surf = SDL_RenderReadPixels(r->sdl, nullptr);
+    if (surf) {
+      SDL_Surface *rgba_surf = surf->format == SDL_PIXELFORMAT_RGBA32
+                                   ? surf
+                                   : SDL_ConvertSurface(surf, SDL_PIXELFORMAT_RGBA32);
+      if (rgba_surf && rgba_surf->w == ew && rgba_surf->h == eh) {
+        uint8_t *px = ccord_malloc((size_t)ew * (size_t)eh * 4u);
+        if (px) {
+          for (int y = 0; y < eh; y++) {
+            memcpy(px + (size_t)y * (size_t)ew * 4u,
+                   (const uint8_t *)rgba_surf->pixels + (size_t)y * (size_t)rgba_surf->pitch,
+                   (size_t)ew * 4u);
+          }
+          ccord_rgba_to_grayscale_inplace(px, (size_t)ew * (size_t)eh);
+          ok = (tex_upload_rgba(r, gray_key, px, ew, eh, false, was_premul, &err) == CCORD_OK);
+          ccord_free(px);
+        }
+      }
+      if (rgba_surf && rgba_surf != surf) SDL_DestroySurface(rgba_surf);
+      SDL_DestroySurface(surf);
+    }
+  }
+
+  SDL_SetTextureBlendMode(src_tex, prev_bm);
+  SDL_SetTextureColorMod(src_tex, prev_r, prev_g, prev_b);
+  SDL_SetTextureAlphaMod(src_tex, prev_a);
+  (void)SDL_SetRenderTarget(r->sdl, prev_target);
+  if (had_vp) (void)SDL_SetRenderViewport(r->sdl, &prev_vp);
+  else (void)SDL_SetRenderViewport(r->sdl, nullptr);
+  if (had_clip) (void)SDL_SetRenderClipRect(r->sdl, &prev_clip);
+  else (void)SDL_SetRenderClipRect(r->sdl, nullptr);
+  SDL_DestroyTexture(rt);
+  return ok;
+}
+
 void ccord_render_evict_texture(ccord_renderer *r, const char *key)
 {
   int slot = tex_lookup_slot(r, key, nullptr);

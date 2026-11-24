@@ -2,6 +2,12 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _GNU_SOURCE
 #include "api_v3_internal.h"
+#if !CCORD_OS_WINDOWS
+#include <fcntl.h>
+#include <unistd.h>
+#else
+#include <io.h>
+#endif
 
 // ---------------------------------------------------------------- Theme layer upsert helper
 
@@ -271,6 +277,134 @@ bool ext_handle_settings_and_theme(ccord_plugins *m, plugin *p, uint32_t id, con
   return false;
 }
 
+static void set_tex_err(const char **out_code, char *err_buf, size_t err_cap, const char *code, const char *msg)
+{
+  if (out_code) *out_code = code;
+  if (err_buf && err_cap) snprintf(err_buf, err_cap, "%s", msg ? msg : "error");
+}
+
+bool ext_upload_texture_from_file(ccord_plugins *m, plugin *p, const char *key, const char *path,
+                                  int max_w, int max_h, int *out_w, int *out_h,
+                                  const char **out_err_code, char *err_buf, size_t err_cap)
+{
+  enum { MAX_ENCODED_IMAGE_BYTES = 32u * 1024u * 1024u };
+  if (!m || !p || !key || !key[0] || strlen(key) > 128u || !path || !path[0] || strlen(path) >= CCORD_PATH_MAX) {
+    set_tex_err(out_err_code, err_buf, err_cap, "invalid_argument", "ui.texture.upload_file: invalid key or path");
+    return false;
+  }
+  if (pl_fs_path_is_protected(m, path)) {
+    set_tex_err(out_err_code, err_buf, err_cap, "permission_denied", "access to C-Cord internal config/plugin paths is forbidden");
+    return false;
+  }
+  if (!m->plat_ops.decode_image_rgba) {
+    set_tex_err(out_err_code, err_buf, err_cap, "unsupported", "image decoder unavailable");
+    return false;
+  }
+  if (max_w <= 0) max_w = 512;
+  if (max_h <= 0) max_h = 512;
+  if (max_w < 16) max_w = 16;
+  if (max_h < 16) max_h = 16;
+  if (max_w > 1024) max_w = 1024;
+  if (max_h > 1024) max_h = 1024;
+
+  FILE *f = nullptr;
+  uint64_t fsz = 0;
+#if CCORD_OS_WINDOWS
+  int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, nullptr, 0);
+  if (wlen <= 0) {
+    set_tex_err(out_err_code, err_buf, err_cap, "invalid_argument", "invalid UTF-8 path");
+    return false;
+  }
+  wchar_t *wpath = ccord_malloc((size_t)wlen * sizeof(wchar_t));
+  if (!wpath) { set_tex_err(out_err_code, err_buf, err_cap, "internal", "out of memory"); return false; }
+  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, wlen);
+  DWORD attr = GetFileAttributesW(wpath);
+  ccord_free(wpath);
+  if (attr == INVALID_FILE_ATTRIBUTES) {
+    set_tex_err(out_err_code, err_buf, err_cap, "io", "file not found");
+    return false;
+  }
+  if ((attr & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    set_tex_err(out_err_code, err_buf, err_cap, "permission_denied", "refusing to follow symbolic link");
+    return false;
+  }
+  f = fopen(path, "rb");
+  if (!f) { set_tex_err(out_err_code, err_buf, err_cap, "io", strerror(errno)); return false; }
+  struct __stat64 st;
+  if (_fstat64(_fileno(f), &st) != 0 || (st.st_mode & _S_IFREG) == 0 || st.st_size <= 0) {
+    fclose(f);
+    set_tex_err(out_err_code, err_buf, err_cap, "io", "not a regular non-empty file");
+    return false;
+  }
+  fsz = (uint64_t)st.st_size;
+#else
+  int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) {
+    const char *code = (errno == ELOOP) ? "permission_denied" : "io";
+    set_tex_err(out_err_code, err_buf, err_cap, code, strerror(errno));
+    return false;
+  }
+  struct stat st;
+  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
+    close(fd);
+    set_tex_err(out_err_code, err_buf, err_cap, "io", "not a regular non-empty file");
+    return false;
+  }
+  fsz = (uint64_t)st.st_size;
+  int fl = fcntl(fd, F_GETFL, 0);
+  if (fl >= 0) (void)fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+  f = fdopen(fd, "rb");
+  if (!f) {
+    int e = errno;
+    close(fd);
+    set_tex_err(out_err_code, err_buf, err_cap, "io", strerror(e));
+    return false;
+  }
+#endif
+  if (fsz > (uint64_t)MAX_ENCODED_IMAGE_BYTES) {
+    fclose(f);
+    set_tex_err(out_err_code, err_buf, err_cap, "invalid_argument", "image file exceeds 32 MiB limit");
+    return false;
+  }
+  uint8_t *raw = ccord_malloc((size_t)fsz);
+  if (!raw) {
+    fclose(f);
+    set_tex_err(out_err_code, err_buf, err_cap, "internal", "out of memory");
+    return false;
+  }
+  size_t rlen = fread(raw, 1, (size_t)fsz, f);
+  bool had_err = ferror(f) != 0;
+  fclose(f);
+  if (had_err || rlen == 0) {
+    ccord_free(raw);
+    set_tex_err(out_err_code, err_buf, err_cap, "io", "failed to read image file");
+    return false;
+  }
+
+  uint8_t *rgba = nullptr;
+  int w = 0, h = 0;
+  char dec_err[256] = "";
+  bool ok = m->plat_ops.decode_image_rgba(m->plat_ops.ud, raw, rlen, max_w, max_h, &rgba, &w, &h,
+                                          dec_err, sizeof dec_err);
+  ccord_free(raw);
+  if (!ok || !rgba || w <= 0 || h <= 0) {
+    ccord_free(rgba);
+    set_tex_err(out_err_code, err_buf, err_cap, "invalid_argument", dec_err[0] ? dec_err : "image decode failed");
+    return false;
+  }
+  ccord_error cerr = {0};
+  ccord_status st_tex = ccord_contrib_set_texture(m->contrib, p->m.id, key, rgba,
+                                                  (size_t)w * (size_t)h * 4u, w, h, true, &cerr);
+  ccord_free(rgba);
+  if (st_tex != CCORD_OK) {
+    set_tex_err(out_err_code, err_buf, err_cap, "invalid_argument", cerr.message);
+    return false;
+  }
+  if (out_w) *out_w = w;
+  if (out_h) *out_h = h;
+  return true;
+}
+
 bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *method, const ccord_json *params)
 {
   if (strcmp(method, "keybinds.register") == 0) {
@@ -448,7 +582,10 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
     return true;
   }
   if (strncmp(method, "ui.texture.", 11) == 0) {
-    if (!pl_has_perm(p, CCORD_PERM_UI_PANEL)) { pl_fail_plugin(m, p, "undeclared restricted API called: ui.panel"); return true; }
+    if (!pl_has_perm(p, CCORD_PERM_UI_PANEL) && !pl_has_perm(p, CCORD_PERM_UI_DECORATE)) {
+      pl_fail_plugin(m, p, "undeclared restricted API called: ui.panel or ui.decorate");
+      return true;
+    }
     size_t kl = 0; const char *key = pl_str_param(params, "key", &kl);
     if (strcmp(method, "ui.texture.upload") == 0) {
       size_t bl = 0; const char *b64 = pl_str_param(params, "b64", &bl);
@@ -470,6 +607,25 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
       ccord_free(raw);
       if (st != CCORD_OK) pl_reply_err(m, p, id, "invalid_argument", err.message);
       else pl_reply_ok(m, p, id, nullptr);
+    } else if (strcmp(method, "ui.texture.upload_file") == 0) {
+      if (!pl_has_perm(p, CCORD_PERM_FS_READ)) {
+        pl_fail_plugin(m, p, "undeclared restricted API called: fs.read");
+        return true;
+      }
+      size_t pl = 0; const char *path = pl_str_param(params, "path", &pl);
+      int64_t mw = 512, mh = 512;
+      if (ccord_json_get(params, "max_w")) (void)ccord_json_int64(ccord_json_get(params, "max_w"), &mw);
+      if (ccord_json_get(params, "max_h")) (void)ccord_json_int64(ccord_json_get(params, "max_h"), &mh);
+      int ow = 0, oh = 0;
+      const char *ecode = "invalid_argument";
+      char ebuf[256] = "";
+      if (!ext_upload_texture_from_file(m, p, key, path, (int)mw, (int)mh, &ow, &oh, &ecode, ebuf, sizeof ebuf)) {
+        pl_reply_err(m, p, id, ecode, ebuf);
+      } else {
+        char buf[96];
+        snprintf(buf, sizeof buf, "{\"width\":%d,\"height\":%d}", ow, oh);
+        pl_reply_ok(m, p, id, buf);
+      }
     } else if (strcmp(method, "ui.texture.evict") == 0) {
       if (key) (void)ccord_contrib_remove_texture(m->contrib, p->m.id, key);
       pl_reply_ok(m, p, id, nullptr);

@@ -154,6 +154,8 @@ float ui_profile_draw_badges(ccord_ui *ui, ccord_renderer *r, const ui_profile_l
 void ui_profile_flush_tooltip(ccord_ui *ui, ccord_renderer *r);   // call after the last clip pop of the surface
 void ui_draw_avatar_deco_url(ccord_ui *ui, ccord_renderer *r, const char *deco_url, float cx, float cy,
                              float avatar_size, uint8_t alpha);
+void ui_draw_avatar_deco_url_ex(ccord_ui *ui, ccord_renderer *r, const char *deco_url, float cx, float cy,
+                                float avatar_size, uint8_t alpha, bool grayscale);
 void ui_profile_draw_deco(ccord_ui *ui, ccord_renderer *r, const ui_profile_look *look, float cx, float cy, float avatar_size);
 // Collectible nameplate behind a member / DM / user-panel row. Returns true when a nameplate was painted.
 // When `animate` is true (and reduced motion is off), fetches and plays asset.webm (falling back to static.png);

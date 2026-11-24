@@ -863,7 +863,7 @@ int sb_api_ui_panel_patch(lua_State *L)
 static int api_ui_texture_upload(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
-  if (!sb_check_perm(L, sb, CCORD_PERM_UI_PANEL, "ui.texture.upload")) return sb_push_undeclared(L);
+  if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "ui.texture.upload")) return sb_push_undeclared(L);
   size_t kl = 0, dl = 0;
   const char *key = luaL_checklstring(L, 1, &kl);
   const char *src = luaL_checklstring(L, 2, &dl);
@@ -908,7 +908,7 @@ static int api_ui_texture_upload(lua_State *L)
 static int api_ui_texture_upload_rgba(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
-  if (!sb_check_perm(L, sb, CCORD_PERM_UI_PANEL, "ui.texture.upload_rgba")) return sb_push_undeclared(L);
+  if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "ui.texture.upload_rgba")) return sb_push_undeclared(L);
   size_t kl = 0, dl = 0;
   const char *key = luaL_checklstring(L, 1, &kl);
   int width = (int)luaL_checkinteger(L, 2);
@@ -934,10 +934,41 @@ static int api_ui_texture_upload_rgba(lua_State *L)
   return 1;
 }
 
+static int api_ui_texture_upload_file(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "ui.texture.upload_file")) return sb_push_undeclared(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_FS_READ, "ui.texture.upload_file")) return sb_push_undeclared(L);
+  size_t kl = 0, pl = 0;
+  const char *key = luaL_checklstring(L, 1, &kl);
+  const char *path = luaL_checklstring(L, 2, &pl);
+  if (kl == 0 || kl > 128u) return luaL_error(L, "ui.texture.upload_file: key must be 1..128 chars");
+  if (pl == 0 || pl >= CCORD_PATH_MAX) return luaL_error(L, "ui.texture.upload_file: invalid path");
+  int64_t max_w = 512, max_h = 512;
+  if (lua_type(L, 3) == LUA_TTABLE) {
+    sb_raw_getfield(L, 3, "max_w");
+    if (lua_isnumber(L, -1)) max_w = (int64_t)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    sb_raw_getfield(L, 3, "max_h");
+    if (lua_isnumber(L, -1)) max_h = (int64_t)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+  }
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "key"); ccord_jw_string(&w, key, kl);
+  ccord_jw_key(&w, "path"); ccord_jw_string(&w, path, pl);
+  ccord_jw_key(&w, "max_w"); ccord_jw_int(&w, max_w);
+  ccord_jw_key(&w, "max_h"); ccord_jw_int(&w, max_h);
+  ccord_jw_end_object(&w);
+  int rc = sb_sync_call(L, sb, "ui.texture.upload_file", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  return rc;
+}
+
 static int api_ui_texture_evict(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
-  if (!sb_check_perm(L, sb, CCORD_PERM_UI_PANEL, "ui.texture.evict")) return sb_push_undeclared(L);
+  if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "ui.texture.evict")) return sb_push_undeclared(L);
   size_t kl = 0; const char *key = luaL_checklstring(L, 1, &kl);
   sb_request_pair(sb, "ui.texture.evict", "key", key, kl);
   lua_pushboolean(L, 1);
@@ -947,7 +978,7 @@ static int api_ui_texture_evict(lua_State *L)
 static int api_ui_texture_exists(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
-  if (!sb_check_perm(L, sb, CCORD_PERM_UI_PANEL, "ui.texture.exists")) return sb_push_undeclared(L);
+  if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "ui.texture.exists")) return sb_push_undeclared(L);
   size_t kl = 0; const char *key = luaL_checklstring(L, 1, &kl);
   ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w); ccord_jw_key(&w, "key"); ccord_jw_string(&w, key, kl); ccord_jw_end_object(&w);
@@ -1275,6 +1306,7 @@ void sb_extend_v3_ui(lua_State *L)
   static const luaL_Reg k_file[] = {{"pick", api_ui_file_pick}, {"save", api_ui_file_save}, {nullptr, nullptr}};
   static const luaL_Reg k_tex[] = {
     {"upload", api_ui_texture_upload}, {"upload_rgba", api_ui_texture_upload_rgba},
+    {"upload_file", api_ui_texture_upload_file},
     {"evict", api_ui_texture_evict}, {"exists", api_ui_texture_exists}, {nullptr, nullptr},
   };
   static const luaL_Reg k_decor[] = {

@@ -1049,6 +1049,79 @@ static void test_power_efficiency_apis(ccord_renderer *r)
   CT_CHECK(ccord_render_has_texture(r, "pwr:static_opaque", nullptr, nullptr));
 }
 
+static void test_grayscale_and_box_decode(ccord_renderer *r)
+{
+  // 1. Rec.709 luma preserves alpha and collapses R,G,B to matching luminance.
+  uint8_t px[3 * 4] = {
+    255, 0, 0, 200,
+    0, 255, 0, 128,
+    0, 0, 255, 255,
+  };
+  ccord_rgba_to_grayscale_inplace(px, 3);
+  CT_CHECK(px[0] == px[1] && px[1] == px[2] && px[0] >= 53 && px[0] <= 55 && px[3] == 200);
+  CT_CHECK(px[4] == px[5] && px[5] == px[6] && px[4] >= 181 && px[4] <= 183 && px[7] == 128);
+  CT_CHECK(px[8] == px[9] && px[9] == px[10] && px[8] >= 17 && px[8] <= 19 && px[11] == 255);
+
+  // 2. Box downscale of a 120x60 colored PNG -> fits 40x40 as 40x20 with aspect ratio preserved.
+  const int W = 120, H = 60;
+  uint8_t *rgba = ccord_malloc((size_t)W * (size_t)H * 4u);
+  CT_CHECK(rgba != nullptr);
+  if (!rgba) return;
+  for (int i = 0; i < W * H; i++) {
+    rgba[i * 4 + 0] = 240; rgba[i * 4 + 1] = 40; rgba[i * 4 + 2] = 40; rgba[i * 4 + 3] = 255;
+  }
+  png_image img = {.version = PNG_IMAGE_VERSION, .width = (png_uint_32)W, .height = (png_uint_32)H, .format = PNG_FORMAT_RGBA};
+  png_alloc_size_t src_sz = 0;
+  (void)png_image_write_to_memory(&img, nullptr, &src_sz, 0, rgba, 0, nullptr);
+  uint8_t *src = src_sz > 0 ? ccord_malloc(src_sz) : nullptr;
+  CT_CHECK(src != nullptr && png_image_write_to_memory(&img, src, &src_sz, 0, rgba, 0, nullptr) != 0);
+  png_image_free(&img);
+  ccord_free(rgba);
+  if (!src) return;
+
+  ccord_error err = {0};
+  uint8_t *dec = nullptr;
+  int dw = 0, dh = 0;
+  CT_CHECK(ccord_image_decode_rgba_box(src, (size_t)src_sz, 40, 40, true, &dec, &dw, &dh, &err) == CCORD_OK);
+  CT_CHECK(dec != nullptr && dw == 40 && dh == 20);
+  if (dec && dw > 0 && dh > 0) {
+    CT_CHECK(dec[0] == dec[1] && dec[1] == dec[2] && dec[0] > 70 && dec[0] < 95 && dec[3] == 255);
+  }
+  ccord_free(dec);
+  ccord_free(src);
+
+  // 3. Renderer ensure_grayscale_texture via target-readback (no raw bytes passed) produces Rec.709 gray pixels.
+  uint8_t red_px[16 * 16 * 4];
+  for (int i = 0; i < 16 * 16; i++) {
+    red_px[i * 4 + 0] = 220; red_px[i * 4 + 1] = 30; red_px[i * 4 + 2] = 30; red_px[i * 4 + 3] = 255;
+  }
+  CT_CHECK(ccord_render_upload_rgba(r, "gray:src", red_px, 16, 16, &err) == CCORD_OK);
+  CT_CHECK(ccord_render_ensure_grayscale_texture(r, "gray:src", "__gray__:gray:src",
+                                                 nullptr, 0, false, 0, 0));
+  CT_CHECK(ccord_render_has_texture(r, "__gray__:gray:src", nullptr, nullptr));
+
+  ccord_render_begin(r, (ccord_color){0, 0, 0, 255});
+  ccord_draw_texture(r, "gray:src", (ccord_rect){10, 10, 16, 16}, 255);
+  ccord_draw_texture(r, "__gray__:gray:src", (ccord_rect){40, 10, 16, 16}, 255);
+  const char *path = "test_render_gray.png";
+  CT_CHECK(ccord_render_screenshot(r, path, &err) == CCORD_OK);
+  ccord_render_end(r);
+  SDL_Surface *s = SDL_LoadPNG(path);
+  CT_CHECK(s != nullptr);
+  if (s) {
+    uint8_t cr = 0, cg = 0, cb = 0, ca = 0;
+    SDL_ReadSurfacePixel(s, 18, 18, &cr, &cg, &cb, &ca);
+    CT_CHECK(cr > 200 && cg < 50 && cb < 50);
+    uint8_t gr = 0, gg = 0, gb = 0, ga = 0;
+    SDL_ReadSurfacePixel(s, 48, 18, &gr, &gg, &gb, &ga);
+    CT_CHECK(abs((int)gr - (int)gg) <= 2 && abs((int)gg - (int)gb) <= 2 && gr >= 60 && gr <= 80);
+    SDL_DestroySurface(s);
+  }
+  remove(path);
+  ccord_render_evict_texture(r, "gray:src");
+  ccord_render_evict_texture(r, "__gray__:gray:src");
+}
+
 int main(int argc, char **argv)
 {
   ccord_error err;
@@ -1087,6 +1160,7 @@ int main(int argc, char **argv)
   test_anti_aliasing_and_mips(r);
   test_image_crop_png();
   test_power_efficiency_apis(r);
+  test_grayscale_and_box_decode(r);
   ccord_render_destroy(r);
   ccord_platform_destroy(p);
   return CT_RESULT("test_render");

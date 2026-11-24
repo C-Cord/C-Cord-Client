@@ -160,6 +160,28 @@ bool sb_check_perm(lua_State *L, ccord_sandbox *sb, ccord_perm perm, const char 
   return false;
 }
 
+bool sb_check_any_perm(lua_State *L, ccord_sandbox *sb, ccord_perm p1, ccord_perm p2, const char *api)
+{
+  if (sb->limit != CCORD_SB_LIMIT_NONE) {
+    (void)luaL_error(L, "plugin stopped");
+    return false;
+  }
+  if ((sb->perms & ((ccord_perm_set)p1 | (ccord_perm_set)p2)) != 0) return true;
+  lua_Debug ar;
+  char loc[128] = "unknown";
+  if (lua_getstack(L, 1, &ar) && lua_getinfo(L, "Sl", &ar)) {
+    snprintf(loc, sizeof loc, "%s:%d", ar.short_src[0] ? ar.short_src : "lua", ar.currentline);
+  }
+  char msg[512];
+  snprintf(msg, sizeof msg,
+           "[undeclared] %s called without \"%s\" or \"%s\" in plugin.json (at %s) — terminating plugin",
+           api, ccord_perm_name(p1), ccord_perm_name(p2), loc);
+  if (sb->limit == CCORD_SB_LIMIT_NONE) sb->limit = CCORD_SB_LIMIT_UNDECLARED;
+  sb->svc.log(sb->svc.ud, CCORD_LOG_ERROR, msg);
+  (void)luaL_error(L, "%s", msg);
+  return false;
+}
+
 int sb_push_undeclared(lua_State *L)
 {
   lua_pushnil(L);

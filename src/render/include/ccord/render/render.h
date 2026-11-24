@@ -106,6 +106,12 @@ bool ccord_render_poll_font_index(ccord_renderer *r);
 // Like ccord_image_decode_rgba, capping either side to `max_dim` (0 = default MAX_IMAGE_DIM) while decoding.
 [[nodiscard]] ccord_status ccord_image_decode_rgba_max(const uint8_t *data, size_t len, int max_dim,
                                                        uint8_t **out_rgba, int *out_w, int *out_h, ccord_error *err);
+// Decodes an image into RGBA32, aspect-preserving downscaled to fit within max_w x max_h (optional Rec.709 grayscale).
+[[nodiscard]] ccord_status ccord_image_decode_rgba_box(const uint8_t *data, size_t len, int max_w, int max_h,
+                                                       bool grayscale, uint8_t **out_rgba, int *out_w, int *out_h,
+                                                       ccord_error *err);
+// Applies Rec.709 integer luma desaturation in place to `npixels` RGBA32 pixels (preserves alpha).
+void ccord_rgba_to_grayscale_inplace(uint8_t *rgba, size_t npixels);
 // Decodes an image, applies a center-anchored aspect-fit crop at `zoom` (>= 1.0) and normalized pan (`pan_x`/`pan_y`
 // in [-1, 1]), scales to `out_w` x `out_h` (bilinear), and encodes as a ccord_malloc'd PNG buffer.
 [[nodiscard]] ccord_status ccord_image_crop_png(const uint8_t *src, size_t src_len, float zoom, float pan_x,
@@ -142,6 +148,10 @@ bool ccord_render_take_anim_next_ms(ccord_renderer *r, uint64_t *out_due_ms);
 [[nodiscard]] ccord_status ccord_render_upload_rgba_opaque(ccord_renderer *r, const char *key, const uint8_t *rgba,
                                                            int width, int height, ccord_error *err);
 bool ccord_render_has_texture(ccord_renderer *r, const char *key, int *out_w, int *out_h);
+// Ensures a Rec.709 grayscale texture exists under `gray_key`, deriving once from optional source bytes or `src_key`.
+bool ccord_render_ensure_grayscale_texture(ccord_renderer *r, const char *src_key, const char *gray_key,
+                                           const uint8_t *opt_src_bytes, size_t opt_src_len, bool opt_is_rgba,
+                                           int opt_w, int opt_h);
 void ccord_render_evict_texture(ccord_renderer *r, const char *key);
 void ccord_render_set_texture_cache_cap(ccord_renderer *r, int cap);
 int ccord_render_texture_cache_count(const ccord_renderer *r);

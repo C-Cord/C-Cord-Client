@@ -312,6 +312,88 @@ ccord_status ccord_image_decode_rgba_max(const uint8_t *data, size_t len, int ma
   return decode_ffmpeg_first_frame(data, len, max_dim, out_rgba, out_w, out_h, err);
 }
 
+void ccord_rgba_to_grayscale_inplace(uint8_t *rgba, size_t npixels)
+{
+  if (!rgba) return;
+  for (size_t i = 0; i < npixels; i++) {
+    uint8_t *p = rgba + i * 4u;
+    uint8_t y = (uint8_t)((54u * (uint32_t)p[0] + 183u * (uint32_t)p[1] + 19u * (uint32_t)p[2] + 128u) >> 8);
+    p[0] = y;
+    p[1] = y;
+    p[2] = y;
+  }
+}
+
+static ccord_status shrink_rgba_to_box(uint8_t **rgba, int *w, int *h, int max_w, int max_h, ccord_error *err)
+{
+  if (max_w <= 0 || max_w > MAX_IMAGE_DIM) max_w = MAX_IMAGE_DIM;
+  if (max_h <= 0 || max_h > MAX_IMAGE_DIM) max_h = MAX_IMAGE_DIM;
+  int sw = *w, sh = *h;
+  if (sw <= max_w && sh <= max_h) return CCORD_OK;
+  double sx = (double)max_w / (double)sw;
+  double sy = (double)max_h / (double)sh;
+  double sc = sx < sy ? sx : sy;
+  int dw = (int)((double)sw * sc + 0.5);
+  int dh = (int)((double)sh * sc + 0.5);
+  if (dw < 1) dw = 1;
+  if (dh < 1) dh = 1;
+  if (dw > max_w) dw = max_w;
+  if (dh > max_h) dh = max_h;
+  uint8_t *out = ccord_malloc((size_t)dw * (size_t)dh * 4u);
+  if (!out) return ccord_error_set(err, CCORD_ERR_NOMEM, "image: out of memory shrinking");
+  const uint8_t *src = *rgba;
+  for (int y = 0; y < dh; y++) {
+    int y0 = (int)((int64_t)y * sh / dh), y1 = (int)((int64_t)(y + 1) * sh / dh);
+    if (y1 <= y0) y1 = y0 + 1;
+    for (int x = 0; x < dw; x++) {
+      int x0 = (int)((int64_t)x * sw / dw), x1 = (int)((int64_t)(x + 1) * sw / dw);
+      if (x1 <= x0) x1 = x0 + 1;
+      uint64_t acc[4] = {0, 0, 0, 0};
+      for (int yy = y0; yy < y1; yy++) {
+        const uint8_t *p = src + ((size_t)yy * (size_t)sw + (size_t)x0) * 4u;
+        for (int xx = x0; xx < x1; xx++, p += 4) {
+          acc[0] += p[0];
+          acc[1] += p[1];
+          acc[2] += p[2];
+          acc[3] += p[3];
+        }
+      }
+      uint64_t n = (uint64_t)(y1 - y0) * (uint64_t)(x1 - x0);
+      uint8_t *d = out + ((size_t)y * (size_t)dw + (size_t)x) * 4u;
+      for (int k = 0; k < 4; k++) d[k] = (uint8_t)((acc[k] + n / 2u) / n);
+    }
+  }
+  ccord_free(*rgba);
+  *rgba = out;
+  *w = dw;
+  *h = dh;
+  return CCORD_OK;
+}
+
+ccord_status ccord_image_decode_rgba_box(const uint8_t *data, size_t len, int max_w, int max_h, bool grayscale,
+                                         uint8_t **out_rgba, int *out_w, int *out_h, ccord_error *err)
+{
+  if (max_w <= 0 || max_w > MAX_IMAGE_DIM) max_w = MAX_IMAGE_DIM;
+  if (max_h <= 0 || max_h > MAX_IMAGE_DIM) max_h = MAX_IMAGE_DIM;
+  int max_dim = max_w > max_h ? max_w : max_h;
+  uint8_t *rgba = nullptr;
+  int w = 0, h = 0;
+  ccord_status st = ccord_image_decode_rgba_max(data, len, max_dim, &rgba, &w, &h, err);
+  if (st != CCORD_OK) return st;
+  if (w > max_w || h > max_h) {
+    st = shrink_rgba_to_box(&rgba, &w, &h, max_w, max_h, err);
+    if (st != CCORD_OK) {
+      ccord_free(rgba);
+      return st;
+    }
+  }
+  if (grayscale) ccord_rgba_to_grayscale_inplace(rgba, (size_t)w * (size_t)h);
+  *out_rgba = rgba;
+  *out_w = w;
+  *out_h = h;
+  return CCORD_OK;
+}
+
 ccord_status ccord_image_decode_rgba(const uint8_t *data, size_t len, uint8_t **out_rgba, int *out_w, int *out_h,
                                      ccord_error *err)
 {

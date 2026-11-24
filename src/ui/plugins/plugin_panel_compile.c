@@ -231,16 +231,54 @@ void ui_panels_sync_textures(ccord_ui *ui, ccord_renderer *r)
   ui_panel_mgr *m = pp_ensure_mgr(ui);
   if (!m || m->synced_tex_rev == rev) return;
   m->synced_tex_rev = rev;
+
+  // 1. Evict textures removed from contrib (and their derived grayscale counterparts).
+  size_t widx = 0;
+  for (size_t i = 0; i < m->nsynced_texs; i++) {
+    const ccord_plugin_texture *cur = ccord_contrib_find_texture(ui->d.contrib, m->synced_texs[i].key);
+    if (!cur) {
+      ccord_render_evict_texture(r, m->synced_texs[i].key);
+      char gkey[160];
+      snprintf(gkey, sizeof gkey, "__gray__:%s", m->synced_texs[i].key);
+      ccord_render_evict_texture(r, gkey);
+    } else {
+      m->synced_texs[widx++] = m->synced_texs[i];
+    }
+  }
+  m->nsynced_texs = widx;
+
+  // 2. Incrementally upload new or updated textures; evict stale grayscale derivations on update.
   size_t n = ccord_contrib_texture_count(ui->d.contrib);
   for (size_t i = 0; i < n; i++) {
     const ccord_plugin_texture *t = ccord_contrib_texture_at(ui->d.contrib, i);
     if (!t || !t->key || !t->data || t->len == 0) continue;
+    size_t slot = m->nsynced_texs;
+    for (size_t j = 0; j < m->nsynced_texs; j++) {
+      if (strcmp(m->synced_texs[j].key, t->key) == 0) {
+        slot = j;
+        break;
+      }
+    }
+    if (slot < m->nsynced_texs && m->synced_texs[slot].rev == t->revision) continue;
+
     ccord_error err = {0};
+    ccord_status st = CCORD_OK;
     if (t->is_rgba) {
-      (void)ccord_render_upload_rgba(r, t->key, t->data, t->width, t->height, &err);
+      st = ccord_render_upload_rgba(r, t->key, t->data, t->width, t->height, &err);
     } else {
       int w = 0, h = 0;
-      (void)ccord_render_upload_image(r, t->key, t->data, t->len, &w, &h, &err);
+      st = ccord_render_upload_image(r, t->key, t->data, t->len, &w, &h, &err);
+    }
+    char gkey[160];
+    snprintf(gkey, sizeof gkey, "__gray__:%s", t->key);
+    ccord_render_evict_texture(r, gkey);
+
+    if (st == CCORD_OK) {
+      if (slot == m->nsynced_texs && m->nsynced_texs < 256u) {
+        snprintf(m->synced_texs[slot].key, sizeof m->synced_texs[slot].key, "%s", t->key);
+        m->nsynced_texs++;
+      }
+      if (slot < m->nsynced_texs) m->synced_texs[slot].rev = t->revision;
     }
   }
 }
@@ -578,10 +616,12 @@ pnode *pp_compile_node_into(ccord_arena *arena, uint32_t *node_count, const ccor
     nd->radius = pp_p_maxf(j_num(j, "radius", 0.0f), 0.0f);
     size_t fl = 0; const char *fit = ccord_json_string(ccord_json_get(j, "fit"), &fl);
     nd->cover = !(fit && strcmp(fit, "stretch") == 0);
+    nd->grayscale = j_bool(j, "grayscale", false);
   } else if (nd->kind == PN_AVATAR) {
     size_t ul = 0; const char *us = ccord_json_string(ccord_json_get(j, "user_id"), &ul);
     if (us && ul) nd->avatar_uid = (ccord_id)strtoull(us, nullptr, 10);
     nd->icon_size = pp_p_clampf(j_num(j, "size", 28.0f), 14.0f, 128.0f);
+    nd->grayscale = j_bool(j, "grayscale", false);
   } else if (nd->kind == PN_CANVAS) {
     nd->clip = j_bool(j, "clip", true);
     const ccord_json *dr = ccord_json_get(j, "draw");
@@ -681,6 +721,7 @@ pnode *pp_compile_node_into(ccord_arena *arena, uint32_t *node_count, const ccor
               cmd.stroke_w = pp_p_clampf(j_num(cj, "alpha", 1.0f), 0.0f, 1.0f);
               size_t fl = 0; const char *fit = ccord_json_string(ccord_json_get(cj, "fit"), &fl);
               cmd.cover = (fit && strcmp(fit, "cover") == 0);
+              cmd.grayscale = j_bool(cj, "grayscale", false);
               cmd.text = j_astr(arena, cj, "texture");
               if (!cmd.text) cmd.text = j_astr(arena, cj, "key");
               if (!cmd.text) cmd.text = "";

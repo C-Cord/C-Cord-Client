@@ -1055,6 +1055,139 @@ static void test_security_regressions(void)
   (void)rmdir(root);
 }
 
+static bool mock_decode_image_rgba(void *ud, const uint8_t *encoded, size_t len, int max_w, int max_h,
+                                   uint8_t **out_rgba, int *out_w, int *out_h, char *err_buf, size_t err_cap)
+{
+  (void)ud;
+  if (!encoded || len < 8 || memcmp(encoded, "MOCK", 4) != 0) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "bad mock image");
+    return false;
+  }
+  int sw = (int)(((unsigned)encoded[4] << 8) | (unsigned)encoded[5]);
+  int sh = (int)(((unsigned)encoded[6] << 8) | (unsigned)encoded[7]);
+  if (sw <= 0 || sh <= 0) {
+    if (err_buf && err_cap) snprintf(err_buf, err_cap, "bad dims");
+    return false;
+  }
+  int w = sw, h = sh;
+  if (max_w > 0 && w > max_w) { h = (h * max_w) / w; w = max_w; }
+  if (max_h > 0 && h > max_h) { w = (w * max_h) / h; h = max_h; }
+  if (w < 1) w = 1;
+  if (h < 1) h = 1;
+  uint8_t *rgba = ccord_calloc((size_t)w * (size_t)h, 4u);
+  if (!rgba) return false;
+  for (int i = 0; i < w * h; i++) {
+    rgba[i * 4 + 0] = 200; rgba[i * 4 + 1] = 80; rgba[i * 4 + 2] = 40; rgba[i * 4 + 3] = 255;
+  }
+  *out_rgba = rgba;
+  *out_w = w;
+  *out_h = h;
+  return true;
+}
+
+static void test_texture_upload_file_integration(void)
+{
+  char root[] = "/tmp/ccord-texfile-XXXXXX";
+  CT_CHECK(mkdtemp(root) != nullptr);
+  if (!root[0]) return;
+  char plugins_dir[1100], data_dir[1100], d_ok[1200], d_nofs[1200];
+  char img_path[1200], link_path[1200], prot_path[1200];
+  snprintf(plugins_dir, sizeof plugins_dir, "%s/plugins", root);
+  snprintf(data_dir, sizeof data_dir, "%s/data", root);
+  snprintf(d_ok, sizeof d_ok, "%s/ok", plugins_dir);
+  snprintf(d_nofs, sizeof d_nofs, "%s/nofs", plugins_dir);
+  snprintf(img_path, sizeof img_path, "%s/sample.mock", root);
+  snprintf(link_path, sizeof link_path, "%s/sample_link.mock", root);
+  snprintf(prot_path, sizeof prot_path, "%s/plugins.json", data_dir);
+  CT_CHECK(mkdir(plugins_dir, 0700) == 0);
+  CT_CHECK(mkdir(data_dir, 0700) == 0);
+  CT_CHECK(mkdir(d_ok, 0700) == 0);
+  CT_CHECK(mkdir(d_nofs, 0700) == 0);
+
+  // Create mock 800x400 image file and symlink to it.
+  FILE *fp = fopen(img_path, "wb");
+  CT_CHECK(fp != nullptr);
+  if (fp) {
+    uint8_t hdr[8] = {'M', 'O', 'C', 'K', (uint8_t)(800 >> 8), (uint8_t)(800 & 0xff),
+                      (uint8_t)(400 >> 8), (uint8_t)(400 & 0xff)};
+    CT_CHECK(fwrite(hdr, 1, sizeof hdr, fp) == sizeof hdr);
+    fclose(fp);
+  }
+  CT_CHECK(symlink(img_path, link_path) == 0);
+
+  // Plugin 1: ui.decorate (no ui.panel!) + fs.read -> succeeds on normal file, rejects symlink & protected path.
+  write_file(d_ok, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.tex_ok\",\"name\":\"TexOk\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"ui.decorate\",\"fs.read\",\"clipboard.write\"]}");
+  char lua_ok[8192];
+  snprintf(lua_ok, sizeof lua_ok,
+           "local info, err = ui.texture.upload_file('k_thumb', '%s', { max_w = 200, max_h = 200 })\n"
+           "local ex = ui.texture.exists('k_thumb')\n"
+           "local sym, serr = ui.texture.upload_file('k_sym', '%s')\n"
+           "local pro, perr = ui.texture.upload_file('k_pro', '%s')\n"
+           "clipboard.write('tex_ok:' .. tostring(info and info.width) .. 'x' .. tostring(info and info.height) ..\n"
+           "  ':ex=' .. tostring(ex) .. ':sym=' .. tostring(sym == nil and serr ~= nil) ..\n"
+           "  ':pro=' .. tostring(pro == nil and perr ~= nil))\n",
+           img_path, link_path, prot_path);
+  write_file(d_ok, "main.lua", lua_ok);
+
+  // Plugin 2: ui.panel WITHOUT fs.read -> calling upload_file must terminate plugin as FAILED.
+  write_file(d_nofs, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.tex_nofs\",\"name\":\"TexNoFs\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"ui.panel\"]}");
+  char lua_nofs[1400];
+  snprintf(lua_nofs, sizeof lua_nofs, "pcall(function() ui.texture.upload_file('x', '%s') end)\n", img_path);
+  write_file(d_nofs, "main.lua", lua_nofs);
+
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  ccord_contrib *contrib = ccord_contrib_create(&err);
+  v3_clip_log cl = {0};
+  const char *dirs[] = {plugins_dir};
+  ccord_plugins_config cfg = {
+    .store = store, .contrib = contrib, .bus = bus,
+    .search_dirs = dirs, .search_dir_count = 1,
+    .data_dir = data_dir, .host_exe = CCORD_PLUGIN_HOST_BIN,
+    .clipboard_write = v3_on_clip, .clipboard_ud = &cl,
+    .platform_ops = {.decode_image_rgba = mock_decode_image_rgba},
+  };
+  ccord_plugins *pm = ccord_plugins_create(&cfg, &err);
+  CT_CHECK(pm != nullptr);
+  (void)ccord_plugins_load_all(pm);
+
+  const char *ids[] = {"dev.test.tex_ok", "dev.test.tex_nofs"};
+  for (size_t i = 0; i < 2; i++) {
+    CT_CHECK(pump_until(pm, bus, contrib, ids[i], CCORD_PLUGIN_NEEDS_CONSENT));
+    const ccord_plugin_info *pi = find_info(contrib, ids[i]);
+    if (pi) ccord_contrib_plugin_consent_accept_for(contrib, ids[i], pi->perms_mask);
+  }
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.tex_ok", CCORD_PLUGIN_READY));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.tex_nofs", CCORD_PLUGIN_FAILED));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "tex_ok:200x100:ex=true:sym=true:pro=true"));
+
+  const ccord_plugin_texture *tex = ccord_contrib_find_texture(contrib, "k_thumb");
+  CT_CHECK(tex != nullptr && tex->is_rgba && tex->width == 200 && tex->height == 100);
+  CT_CHECK(ccord_contrib_find_texture(contrib, "k_sym") == nullptr);
+  CT_CHECK(ccord_contrib_find_texture(contrib, "k_pro") == nullptr);
+
+  ccord_plugins_shutdown(pm);
+  ccord_plugins_destroy(pm);
+  ccord_contrib_destroy(contrib);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+
+  char rm[1400];
+  snprintf(rm, sizeof rm, "%s/plugin.json", d_ok); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/main.lua", d_ok); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/plugin.json", d_nofs); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/main.lua", d_nofs); (void)unlink(rm);
+  (void)unlink(link_path);
+  (void)unlink(img_path);
+  (void)unlink(prot_path);
+  (void)rmdir(d_ok); (void)rmdir(d_nofs); (void)rmdir(plugins_dir); (void)rmdir(data_dir); (void)rmdir(root);
+}
+
 int main(void)
 {
   char root[] = "/tmp/ccord-it-XXXXXX";
@@ -1436,5 +1569,6 @@ int main(void)
   test_api_v3_integration();
   test_account_class3_plugins();
   test_security_regressions();
+  test_texture_upload_file_integration();
   return CT_RESULT("test_plugins_integration");
 }
