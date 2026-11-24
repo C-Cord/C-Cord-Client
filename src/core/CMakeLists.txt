@@ -6,7 +6,7 @@ else()
 endif()
 
 add_library(ccord_core STATIC
-  error.c log.c alloc.c arena.c base64.c buf.c utf8.c json_parse.c json_write.c ini.c clock.c paths.c
+  error.c log.c alloc.c arena.c base64.c buf.c utf8.c json_parse.c json_write.c ini.c clock.c timefmt.c paths.c
   event_bus.c idmap.c secret.c random.c sha256.c atomic_file.c ${CCORD_CORE_OS_SRC})
 add_library(ccord::core ALIAS ccord_core)
 target_include_directories(ccord_core PUBLIC include)

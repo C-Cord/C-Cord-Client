@@ -203,6 +203,11 @@ time_t ccord_timegm(struct tm *tm)
   return tm ? timegm(tm) : (time_t)-1;
 }
 
+void ccord_tz_init(void)
+{
+  tzset();
+}
+
 int ccord_strcasecmp(const char *a, const char *b)
 {
   if (!a || !b) return (a == b) ? 0 : (a ? 1 : -1);

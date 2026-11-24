@@ -3,7 +3,6 @@ add_library(ccord_ui_logic STATIC
   logic/layout.c
   logic/virtual_list.c
   logic/text_edit.c
-  logic/timefmt.c
   logic/account_view.c
   logic/account_identity.c
   logic/anim.c
