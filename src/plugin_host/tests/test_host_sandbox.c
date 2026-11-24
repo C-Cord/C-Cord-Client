@@ -39,13 +39,32 @@ static void f_log(void *ud, ccord_log_level level, const char *text)
   snprintf(f->log, sizeof f->log, "%s", text);
 }
 
+static bool f_request_sync(void *ud, const char *method, const char *params,
+                           ccord_arena *a, const ccord_json **out, char *out_err, size_t err_cap)
+{
+  fake *f = ud;
+  f->nreq++;
+  snprintf(f->method, sizeof f->method, "%s", method);
+  snprintf(f->params, sizeof f->params, "%s", params);
+  if (out) {
+    if (strcmp(method, "ui.media.open") == 0 || strcmp(method, "ui.open_user_profile") == 0 ||
+        strcmp(method, "ui.menu.popup") == 0) {
+      *out = ccord_json_parse(a, "true", 4, nullptr, nullptr);
+    } else {
+      *out = ccord_json_parse(a, "[]", 2, nullptr, nullptr);
+    }
+  }
+  if (out_err && err_cap > 0) out_err[0] = '\0';
+  return true;
+}
+
 static ccord_sandbox *make(fake *f, ccord_perm_set perms, uint64_t mem, uint64_t ins)
 {
   ccord_sandbox_config cfg = {
     .plugin_id = "dev.test.plugin", .plugin_name = "Test", .plugin_version = "1.0.0",
     .perms = perms, .memory_bytes = mem, .instructions = ins,
   };
-  ccord_sandbox_services svc = {.ud = f, .request = f_request, .log = f_log};
+  ccord_sandbox_services svc = {.ud = f, .request = f_request, .request_sync = f_request_sync, .log = f_log};
   ccord_error err = {0};
   ccord_sandbox *sb = ccord_sandbox_create(&cfg, &svc, &err);
   CT_CHECK(sb != nullptr);
@@ -551,6 +570,195 @@ int main(void)
     ccord_sandbox_set_background(sb, false);
     int next_ms = ccord_sandbox_next_timer_ms(sb);
     CT_CHECK(next_ms > 0 && next_ms <= 50);
+    ccord_sandbox_destroy(sb);
+  }
+
+  // 6. Phase 1: local time/formatting, message_accessory position validation, rich events & jump_to_message.
+  {
+    ccord_sandbox *sb = make(&f, CCORD_PERM_UI_DECORATE | CCORD_PERM_EVENTS_MESSAGES | CCORD_PERM_NAVIGATION_WRITE, 0, 0);
+    CT_CHECK(run(sb,
+                 "local off = time.tz_offset_min()\n"
+                 "assert(type(off) == 'number' and off >= -720 and off <= 840)\n"
+                 "local parts = time.local_parts(1700000000000)\n"
+                 "assert(type(parts) == 'table' and parts.year >= 2023 and parts.month >= 1 and parts.month <= 12)\n"
+                 "assert(parts.wday >= 1 and parts.wday <= 7 and type(parts.tz_offset_min) == 'number')\n"
+                 "assert(time.format_discord(1700000000000, 'D', true) == 'November 14, 2023')\n"
+                 "assert(time.format_discord(1700000000000, 'd', true) == '11/14/2023')\n"
+                 "assert(#time.format_discord(1700000000000, 'T', true) > 0)\n"
+                 "assert(#time.format_discord(1700000000000, 'R', true) > 0)\n"
+                 "local ok_bad = pcall(time.format_discord, 1700000000000, 'bogus')\n"
+                 "assert(not ok_bad)\n"
+                 "assert(ui.decorate.message_accessory({id='acc1', message_id='100', position='above_body', priority=10, root={type='text', text='prev'}}))\n"
+                 "assert(ui.decorate.message_accessory({id='acc2', message_id='100', root={type='text', text='below'}}))\n"
+                 "local ok_pos = pcall(ui.decorate.message_accessory, {id='acc3', message_id='100', position='sideways', root={type='text', text='x'}})\n"
+                 "assert(not ok_pos)\n"
+                 "events.on('messages.loaded', function() end)\n"
+                 "events.on('message.delete_bulk', function() end)\n"
+                 "navigation.jump_to_message('200', '999')\n",
+                 &err) == CCORD_OK);
+    CT_CHECK(strcmp(f.method, "navigation.jump_to_message") == 0 &&
+             strstr(f.params, "\"channel_id\":\"200\"") != nullptr &&
+             strstr(f.params, "\"message_id\":\"999\"") != nullptr);
+    ccord_sandbox_destroy(sb);
+  }
+
+  // 7. Phase 2: plugin.on_unload LIFO + app.quit + bounded wall-clock abort + settings.on_action & inline button action.
+  {
+    ccord_sandbox *sb = make(&f, 0, 0, 0);
+    CT_CHECK(run(sb,
+                 "log_seq = {}\n"
+                 "plugin.on_unload(function(r) log_seq[#log_seq + 1] = 'u1:' .. r end)\n"
+                 "plugin.on_unload(function(r) log_seq[#log_seq + 1] = 'u2:' .. r end)\n"
+                 "events.on('app.quit', function(ev) log_seq[#log_seq + 1] = 'quit:' .. ev.reason end)\n",
+                 &err) == CCORD_OK);
+    // "disable" runs LIFO on_unload only (NOT app.quit).
+    CT_CHECK(ccord_sandbox_unload(sb, "disable", 200u, &err) == CCORD_OK);
+    CT_CHECK(run(sb, "assert(table.concat(log_seq, ',') == 'u2:disable,u1:disable')", &err) == CCORD_OK);
+    // "quit" runs LIFO on_unload AND app.quit.
+    CT_CHECK(run(sb, "log_seq = {}", &err) == CCORD_OK);
+    CT_CHECK(ccord_sandbox_unload(sb, "quit", 200u, &err) == CCORD_OK);
+    CT_CHECK(run(sb, "assert(table.concat(log_seq, ',') == 'u2:quit,u1:quit,quit:quit')", &err) == CCORD_OK);
+    ccord_sandbox_destroy(sb);
+
+    // Runaway infinite loop inside plugin.on_unload must abort cleanly within budget_ms.
+    sb = make(&f, 0, 0, 0);
+    CT_CHECK(run(sb, "plugin.on_unload(function() while true do end end)", &err) == CCORD_OK);
+    uint64_t t0 = ccord_clock_ms();
+    CT_CHECK(ccord_sandbox_unload(sb, "quit", 80u, &err) == CCORD_OK);
+    uint64_t dt = ccord_clock_ms() - t0;
+    CT_CHECK(dt >= 50u && dt < 1000u);
+    ccord_sandbox_destroy(sb);
+
+    // Settings schema inline action + settings.on_action both fire under user-gesture context.
+    sb = make(&f, 0, 0, 0);
+    CT_CHECK(run(sb,
+                 "act_log = {}\n"
+                 "settings.schema({\n"
+                 "  { type = 'button', key = 'clear_cache', label = 'Cache', button_label = 'Clear', variant = 'danger',\n"
+                 "    action = function(k) act_log[#act_log + 1] = 'inline:' .. k end },\n"
+                 "})\n"
+                 "settings.on_action(function(k) act_log[#act_log + 1] = 'global:' .. k end)\n",
+                 &err) == CCORD_OK);
+    CT_CHECK(ccord_sandbox_setting_action(sb, "clear_cache", &err) == CCORD_OK);
+    CT_CHECK(run(sb, "assert(table.concat(act_log, ',') == 'inline:clear_cache,global:clear_cache')", &err) == CCORD_OK);
+    ccord_sandbox_destroy(sb);
+
+    // storage.files.* requires Class 2 storage.files permission.
+    sb = make(&f, 0, 0, 0);
+    f.nreq = 0;
+    CT_CHECK(run(sb, "storage.files.write('a.txt', 'hi')", &err) != CCORD_OK);
+    CT_CHECK(ccord_sandbox_limit_hit(sb) == CCORD_SB_LIMIT_UNDECLARED);
+    ccord_sandbox_destroy(sb);
+  }
+
+  // 8. Phase 3: store.presence / store.activities + ui.decorate.channel_style / member_style + content_override.
+  {
+    ccord_sandbox *sb = make(&f, CCORD_PERM_UI_DECORATE, 0, 0);
+    f.nreq = 0;
+    CT_CHECK(run(sb,
+                 "ui.decorate.channel_style({ id = 'cs1', channel_id = '42', tint = '#22334433', hidden = true })\n"
+                 "ui.decorate.member_style({ id = 'ms1', user_id = '99', accent = '#ff0000', dim = true })\n",
+                 &err) == CCORD_OK);
+    CT_CHECK(strcmp(f.method, "ui.decorate.set") == 0 &&
+             strstr(f.params, "\"target\":\"member_style\"") != nullptr &&
+             strstr(f.params, "\"user_id\":\"99\"") != nullptr);
+    // store.presence / store.activities require store.read.
+    CT_CHECK(run(sb, "store.presence('99')", &err) != CCORD_OK);
+    CT_CHECK(ccord_sandbox_limit_hit(sb) == CCORD_SB_LIMIT_UNDECLARED);
+    ccord_sandbox_destroy(sb);
+
+    sb = make(&f, CCORD_PERM_STORE_READ, 0, 0);
+    f.nreq = 0;
+    CT_CHECK(run(sb, "store.activities('77')", &err) == CCORD_OK);
+    CT_CHECK(strcmp(f.method, "store.activities") == 0 && strstr(f.params, "\"user_id\":\"77\"") != nullptr);
+    ccord_sandbox_destroy(sb);
+  }
+
+  // 9. Phase 4: 2,000 ms gesture window, ui.toast.show opts + action, ui.media.open / open_user_profile / menu.popup,
+  //    and hooks.on_before_upload + hooks.complete_upload_transform permission checks.
+  {
+    ccord_sandbox *sb = make(&f, 0, 0, 0);
+    f.nreq = 0;
+    CT_CHECK(run(sb,
+                 "-- Outside user gesture: Class 1 popups/lightboxes/profiles MUST be refused gracefully.\n"
+                 "local ok1, e1 = ui.media.open({ url = 'https://cdn.discordapp.com/a.png' })\n"
+                 "assert(ok1 == false and e1 and e1:find('user%-gesture'))\n"
+                 "local ok2, e2 = ui.open_user_profile('42')\n"
+                 "assert(ok2 == false and e2 and e2:find('user%-gesture'))\n"
+                 "local ok3, e3 = ui.menu.popup({ items = { { id = 'a', label = 'A' } } })\n"
+                 "assert(ok3 == false and e3 and e3:find('user%-gesture'))\n"
+                 "-- Interactive toast with options + action callback\n"
+                 "toast_clicked = false\n"
+                 "tid = ui.toast.show('Deleted', 'warn', { duration_ms = 6000, action_label = 'View', on_action = function()\n"
+                 "  toast_clicked = true\n"
+                 "  -- Clicking a toast action enters user-gesture context!\n"
+                 "  local pok = ui.open_user_profile('55', '10')\n"
+                 "  assert(pok == true)\n"
+                 "end })\n"
+                 "assert(type(tid) == 'number' and tid > 0)\n",
+                 &err) == CCORD_OK);
+    CT_CHECK(strcmp(f.method, "ui.toast.show") == 0 &&
+             strstr(f.params, "\"action_label\":\"View\"") != nullptr &&
+             strstr(f.params, "\"duration_ms\":6000") != nullptr);
+    CT_CHECK(run(sb,
+                 "picked_item = 'unset'\n"
+                 "commands.register('pop', 'Popup', function()\n"
+                 "  ui.menu.popup({ x = 100, y = 120, items = { { id = 'copy', label = 'Copy' }, { id = 'del', label = 'Delete', danger = true } },\n"
+                 "    on_select = function(id) picked_item = tostring(id) end })\n"
+                 "end)\n",
+                 &err) == CCORD_OK);
+
+    // Trigger toast action -> callback fires AND enters user-gesture so ui.open_user_profile succeeds!
+    CT_CHECK(ccord_sandbox_toast_action(sb, 1u, &err) == CCORD_OK);
+    CT_CHECK(run(sb, "assert(toast_clicked == true)", &err) == CCORD_OK);
+    CT_CHECK(strcmp(f.method, "ui.open_user_profile") == 0 && strstr(f.params, "\"user_id\":\"55\"") != nullptr);
+
+    // Within 2,000 ms post-gesture window, ui.media.open(url) ALSO succeeds even outside the synchronous frame!
+    f.method[0] = '\0';
+    CT_CHECK(run(sb, "assert(ui.media.open({ url = 'https://cdn.discordapp.com/a.png', kind = 'image' }) == true)", &err) == CCORD_OK);
+    CT_CHECK(strcmp(f.method, "ui.media.open") == 0);
+
+    // Command opens popup menu -> popup_menu_result dispatches item id.
+    ccord_arena ar; ccord_arena_init(&ar, 256u);
+    const ccord_json_limits lim = {8, 64, 1024u};
+    const ccord_json *ctx = ccord_json_parse(&ar, "{\"channel_id\":\"10\"}", 19, &lim, &err);
+    char *out_json = nullptr;
+    CT_CHECK(ccord_sandbox_command_run_ex(sb, "pop", "", ctx, &out_json, &err) == CCORD_OK);
+    ccord_free(out_json);
+    CT_CHECK(strcmp(f.method, "ui.menu.popup") == 0 && strstr(f.params, "\"danger\":true") != nullptr);
+    CT_CHECK(ccord_sandbox_popup_menu_result(sb, 1u, "del", &err) == CCORD_OK);
+    CT_CHECK(run(sb, "assert(picked_item == 'del')", &err) == CCORD_OK);
+
+    // Source perm enforcement on ui.media.open: plugin_data:// without storage.files is fatal!
+    CT_CHECK(run(sb, "ui.media.open({ local_path = 'plugin_data://img.png' })", &err) != CCORD_OK);
+    CT_CHECK(ccord_sandbox_limit_hit(sb) == CCORD_SB_LIMIT_UNDECLARED);
+    ccord_arena_free(&ar);
+    ccord_sandbox_destroy(sb);
+
+    // hooks.on_before_upload requires messages.hook permission.
+    sb = make(&f, 0, 0, 0);
+    CT_CHECK(run(sb, "hooks.on_before_upload(function() end)", &err) != CCORD_OK);
+    CT_CHECK(ccord_sandbox_limit_hit(sb) == CCORD_SB_LIMIT_UNDECLARED);
+    ccord_sandbox_destroy(sb);
+
+    // With messages.hook, hooks.on_before_upload + async upload_transform dispatch cleanly!
+    sb = make(&f, CCORD_PERM_MESSAGES_HOOK, 0, 0);
+    f.nreq = 0;
+    CT_CHECK(run(sb,
+                 "hooks.on_before_upload(function(ctx) return { files = { [1] = { spoiler = true } } } end,\n"
+                 "  function(job) return { notice = 'done:' .. job.files[1].handle } end)\n",
+                 &err) == CCORD_OK);
+    CT_CHECK(strcmp(f.method, "hooks.register") == 0 && strstr(f.params, "\"before_upload\"") != nullptr);
+    ccord_arena ar2; ccord_arena_init(&ar2, 512u);
+    const ccord_json_limits lim2 = {8, 64, 1024u};
+    const char *job_str = "{\"job_id\":7,\"files\":[{\"index\":1,\"handle\":\"upload_tmp://abc123\"}]}";
+    const ccord_json *job_j = ccord_json_parse(&ar2, job_str, strlen(job_str), &lim2, &err);
+    f.method[0] = '\0';
+    CT_CHECK(ccord_sandbox_upload_transform(sb, job_j, &err) == CCORD_OK);
+    CT_CHECK(strcmp(f.method, "hooks.complete_upload_transform") == 0 &&
+             strstr(f.params, "\"job_id\":7") != nullptr &&
+             strstr(f.params, "done:upload_tmp://abc123") != nullptr);
+    ccord_arena_free(&ar2);
     ccord_sandbox_destroy(sb);
   }
 

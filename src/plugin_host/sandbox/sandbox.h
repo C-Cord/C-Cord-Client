@@ -95,6 +95,10 @@ void ccord_sandbox_set_cancel_flag(ccord_sandbox *sb, const _Atomic bool *cancel
 int ccord_sandbox_next_timer_ms(const ccord_sandbox *sb);
 // Suspends periodic time.every() timers while backgrounded and re-arms overdue intervals on resume.
 void ccord_sandbox_set_background(ccord_sandbox *sb, bool background);
+// Runs registered plugin.on_unload(reason) handlers LIFO (and app.quit handlers when reason=="quit")
+// under a bounded wall-clock budget_ms. Handler errors or budget overrun are logged, not fatal.
+[[nodiscard]] ccord_status ccord_sandbox_unload(ccord_sandbox *sb, const char *reason, uint32_t budget_ms,
+                                                ccord_error *err);
 // Sticky: only set if an explicit non-zero limit was configured and hit.
 ccord_sandbox_limit ccord_sandbox_limit_hit(const ccord_sandbox *sb);
 
@@ -120,8 +124,13 @@ ccord_sandbox_limit ccord_sandbox_limit_hit(const ccord_sandbox *sb);
                                                          const char *ev_type, float x, float y, ccord_error *err);
 [[nodiscard]] ccord_status ccord_sandbox_setting_changed(ccord_sandbox *sb, const char *key, const ccord_json *value,
                                                          ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_setting_action(ccord_sandbox *sb, const char *key, ccord_error *err);
 [[nodiscard]] ccord_status ccord_sandbox_dialog_result(ccord_sandbox *sb, uint64_t req_id, bool accepted,
                                                        const ccord_json *result, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_popup_menu_result(ccord_sandbox *sb, uint64_t req_id, const char *item_id,
+                                                           ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_toast_action(ccord_sandbox *sb, uint64_t toast_id, ccord_error *err);
+[[nodiscard]] ccord_status ccord_sandbox_upload_transform(ccord_sandbox *sb, const ccord_json *job, ccord_error *err);
 [[nodiscard]] ccord_status ccord_sandbox_fs_watch_event(ccord_sandbox *sb, uint64_t watch_id, const ccord_json *ev,
                                                         ccord_error *err);
 [[nodiscard]] ccord_status ccord_sandbox_ws_event(ccord_sandbox *sb, uint64_t ws_id, const char *kind,

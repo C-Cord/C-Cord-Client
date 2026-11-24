@@ -149,7 +149,18 @@ static int api_http_download(lua_State *L)
   }
   lua_pop(L, 1);
 
-  if (!sb_check_perm(L, sb, CCORD_PERM_FS_WRITE, "net.http.download")) return sb_push_undeclared(L);
+  char dest_check[64] = "";
+  sb_raw_getfield(L, 1, "dest_path");
+  if (lua_type(L, -1) == LUA_TSTRING) {
+    size_t dl = 0;
+    const char *dp = lua_tolstring(L, -1, &dl);
+    snprintf(dest_check, sizeof dest_check, "%.*s", (int)(dl < sizeof dest_check - 1 ? dl : sizeof dest_check - 1), dp);
+  }
+  lua_pop(L, 1);
+
+  ccord_perm dest_perm = (strncmp(dest_check, "plugin_data://", 14) == 0)
+                           ? CCORD_PERM_STORAGE_FILES : CCORD_PERM_FS_WRITE;
+  if (!sb_check_perm(L, sb, dest_perm, "net.http.download")) return sb_push_undeclared(L);
   bool allow_via_local = url_is_localhost(url_check) && (sb->perms & (ccord_perm_set)CCORD_PERM_NETWORK_LOCAL);
   if (!allow_via_local) {
     if (!sb_check_perm(L, sb, CCORD_PERM_NETWORK_HTTP, "net.http.download")) return sb_push_undeclared(L);
@@ -362,6 +373,7 @@ static int api_fs_read_chunk(lua_State *L)
   ccord_jw_key(&w, "path"); ccord_jw_string(&w, path, pl);
   ccord_jw_key(&w, "offset"); ccord_jw_int(&w, offset);
   ccord_jw_key(&w, "length"); ccord_jw_int(&w, len);
+  ccord_jw_key(&w, "chunked"); ccord_jw_bool(&w, true);
   ccord_jw_end_object(&w);
   ccord_arena ar; ccord_arena_init(&ar, 0);
   const ccord_json *res = nullptr; char ebuf[256] = "";
@@ -388,7 +400,7 @@ static int api_fs_write_chunk(lua_State *L)
   const char *path = luaL_checklstring(L, 1, &pl);
   const char *data = luaL_checklstring(L, 2, &dl);
   bool append = lua_toboolean(L, 3) != 0;
-  if (dl > SB_FS_CHUNK_BYTES) return luaL_error(L, "fs.write_chunk: chunk > 384 KiB");
+  if (dl > SB_FS_CHUNK_BYTES) return luaL_error(L, "fs.write_chunk: chunk > 512 KiB");
   ccord_buf b64; ccord_buf_init(&b64, (dl * 4u) / 3u + 8u);
   sb_b64_encode_into((const unsigned char *)data, dl, &b64);
   ccord_buf out; ccord_buf_init(&out, 0); ccord_jw w; ccord_jw_init(&w, &out);
@@ -631,6 +643,8 @@ void sb_open_api_v3(lua_State *L)
 {
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_CMD_COMPLETE);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_SETTINGS_CB);
+  lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_SETTINGS_ACT);
+  lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_SETTINGS_BTN);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_KEYBINDS);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_ACTBTNS);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_DECORS);
@@ -775,9 +789,9 @@ ccord_status ccord_sandbox_command_run_ex(ccord_sandbox *sb, const char *name, c
   }
   lua_pushstring(L, args ? args : "");
   if (!sb_push_json(L, ctx)) { lua_settop(L, top); return ccord_error_set(err, CCORD_ERR_RANGE, "command ctx depth"); }
-  sb->user_gesture_depth++;
+  sb_enter_user_gesture(sb);
   ccord_status st = sb_call_guarded(sb, 2, 1, err);
-  sb->user_gesture_depth--;
+  sb_leave_user_gesture(sb);
   if (st == CCORD_OK) {
     if (lua_type(L, -1) == LUA_TSTRING) {
       size_t n = 0; const char *s = lua_tolstring(L, -1, &n);
@@ -841,9 +855,9 @@ ccord_status ccord_sandbox_keybind_invoke(ccord_sandbox *sb, const char *bind_id
   int top = lua_gettop(L);
   lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_KEYBINDS);
   if (lua_getfield(L, -1, bind_id) != LUA_TFUNCTION) { lua_settop(L, top); return CCORD_OK; }
-  sb->user_gesture_depth++;
+  sb_enter_user_gesture(sb);
   ccord_status st = sb_call_guarded(sb, 0, 0, err);
-  sb->user_gesture_depth--;
+  sb_leave_user_gesture(sb);
   lua_settop(L, top);
   return st;
 }
@@ -856,9 +870,9 @@ ccord_status ccord_sandbox_action_btn_click(ccord_sandbox *sb, const char *btn_i
   lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_ACTBTNS);
   if (lua_getfield(L, -1, btn_id) != LUA_TFUNCTION) { lua_settop(L, top); return CCORD_OK; }
   (void)sb_push_json(L, ctx);
-  sb->user_gesture_depth++;
+  sb_enter_user_gesture(sb);
   ccord_status st = sb_call_guarded(sb, 1, 0, err);
-  sb->user_gesture_depth--;
+  sb_leave_user_gesture(sb);
   lua_settop(L, top);
   return st;
 }
@@ -872,9 +886,9 @@ ccord_status ccord_sandbox_decor_event(ccord_sandbox *sb, const char *decor_id, 
   if (lua_getfield(L, -1, decor_id) != LUA_TFUNCTION) { lua_settop(L, top); return CCORD_OK; }
   (void)sb_push_json(L, ev);
   lua_pushstring(L, target_id ? target_id : "");
-  sb->user_gesture_depth++;
+  sb_enter_user_gesture(sb);
   ccord_status st = sb_call_guarded(sb, 2, 0, err);
-  sb->user_gesture_depth--;
+  sb_leave_user_gesture(sb);
   lua_settop(L, top);
   return st;
 }
@@ -908,9 +922,9 @@ ccord_status ccord_sandbox_local_msg_event(ccord_sandbox *sb, uint64_t local_id,
   lua_pushnumber(L, (lua_Number)y);
   lua_setfield(L, -2, "y");
 
-  sb->user_gesture_depth++;
+  sb_enter_user_gesture(sb);
   ccord_status st = sb_call_guarded(sb, 1, 0, err);
-  sb->user_gesture_depth--;
+  sb_leave_user_gesture(sb);
 
   if (strcmp(ev_type, "dismiss") == 0) {
     lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_LOCAL_MSG);
@@ -951,6 +965,50 @@ ccord_status ccord_sandbox_setting_changed(ccord_sandbox *sb, const char *key, c
   return CCORD_OK;
 }
 
+ccord_status ccord_sandbox_setting_action(ccord_sandbox *sb, const char *key, ccord_error *err)
+{
+  (void)err;
+  if (!sb || !key || !key[0]) return CCORD_OK;
+  lua_State *L = sb->L;
+  int top = lua_gettop(L);
+
+  sb_enter_user_gesture(sb);
+
+  // 1. Inline `action = function()` registered on the button schema entry.
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_SETTINGS_BTN);
+  if (lua_istable(L, -1)) {
+    lua_pushstring(L, key);
+    if (lua_rawget(L, -2) == LUA_TFUNCTION) {
+      lua_pushstring(L, key);
+      ccord_error e = {0};
+      if (sb_call_guarded(sb, 1, 0, &e) != CCORD_OK) sb_log(sb, CCORD_LOG_WARN, "settings.action", e.message);
+    }
+  }
+  lua_settop(L, top);
+
+  // 2. Global `settings.on_action(fn)` listeners.
+  if (sb->limit == CCORD_SB_LIMIT_NONE) {
+    lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_SETTINGS_ACT);
+    if (lua_istable(L, -1)) {
+      int list = lua_gettop(L);
+      lua_Integer n = (lua_Integer)lua_rawlen(L, list);
+      for (lua_Integer i = 1; i <= n; i++) {
+        if (lua_rawgeti(L, list, i) == LUA_TFUNCTION) {
+          lua_pushstring(L, key);
+          ccord_error e = {0};
+          if (sb_call_guarded(sb, 1, 0, &e) != CCORD_OK) sb_log(sb, CCORD_LOG_WARN, "settings.on_action", e.message);
+        }
+        lua_settop(L, list);
+        if (sb->limit != CCORD_SB_LIMIT_NONE) break;
+      }
+    }
+  }
+
+  sb_leave_user_gesture(sb);
+  lua_settop(L, top);
+  return CCORD_OK;
+}
+
 ccord_status ccord_sandbox_dialog_result(ccord_sandbox *sb, uint64_t req_id, bool accepted,
                                          const ccord_json *result, ccord_error *err)
 {
@@ -962,7 +1020,6 @@ ccord_status ccord_sandbox_dialog_result(ccord_sandbox *sb, uint64_t req_id, boo
   ccord_jw_key(&w, "accepted"); ccord_jw_bool(&w, accepted);
   ccord_jw_key(&w, "value");
   if (result) {
-    // Re-encode via Lua push -> encode? Simpler: pass result as top-level or raw object
     lua_State *L = sb->L;
     int top = lua_gettop(L);
     (void)sb_push_json(L, result);
@@ -975,9 +1032,97 @@ ccord_status ccord_sandbox_dialog_result(ccord_sandbox *sb, uint64_t req_id, boo
   ccord_error pe = {0};
   const ccord_json_limits lim = {16, 4096, 65536u};
   const ccord_json *wrapped = ccord_json_parse(&ar, ccord_buf_cstr(&b), b.len, &lim, &pe);
+  sb_enter_user_gesture(sb);
   sb_async_resolve_entry(sb, req_id, true, wrapped, nullptr);
+  sb_leave_user_gesture(sb);
   ccord_buf_free(&b);
   ccord_arena_free(&ar);
+  return CCORD_OK;
+}
+
+ccord_status ccord_sandbox_popup_menu_result(ccord_sandbox *sb, uint64_t req_id, const char *item_id, ccord_error *err)
+{
+  (void)err;
+  if (!sb || req_id == 0u) return CCORD_OK;
+  lua_State *L = sb->L;
+  int top = lua_gettop(L);
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_POPUPS);
+  int tbl = lua_gettop(L);
+  int t = lua_rawgeti(L, tbl, (lua_Integer)req_id);
+  lua_pushnil(L);
+  lua_rawseti(L, tbl, (lua_Integer)req_id);
+  if (t == LUA_TFUNCTION) {
+    if (item_id && item_id[0]) lua_pushstring(L, item_id);
+    else lua_pushnil(L);
+    sb_enter_user_gesture(sb);
+    ccord_error e = {0};
+    if (sb_call_guarded(sb, 1, 0, &e) != CCORD_OK) sb_log(sb, CCORD_LOG_WARN, "ui.menu.popup", e.message);
+    sb_leave_user_gesture(sb);
+  }
+  lua_settop(L, top);
+  return CCORD_OK;
+}
+
+ccord_status ccord_sandbox_toast_action(ccord_sandbox *sb, uint64_t toast_id, ccord_error *err)
+{
+  (void)err;
+  if (!sb || toast_id == 0u) return CCORD_OK;
+  lua_State *L = sb->L;
+  int top = lua_gettop(L);
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_TOASTS);
+  int tbl = lua_gettop(L);
+  int t = lua_rawgeti(L, tbl, (lua_Integer)toast_id);
+  lua_pushnil(L);
+  lua_rawseti(L, tbl, (lua_Integer)toast_id);
+  if (t == LUA_TFUNCTION) {
+    sb_enter_user_gesture(sb);
+    ccord_error e = {0};
+    if (sb_call_guarded(sb, 0, 0, &e) != CCORD_OK) sb_log(sb, CCORD_LOG_WARN, "ui.toast.show", e.message);
+    sb_leave_user_gesture(sb);
+  }
+  lua_settop(L, top);
+  return CCORD_OK;
+}
+
+ccord_status ccord_sandbox_upload_transform(ccord_sandbox *sb, const ccord_json *job, ccord_error *err)
+{
+  (void)err;
+  if (!sb || !job) return CCORD_OK;
+  int64_t job_id = 0;
+  (void)ccord_json_int64(ccord_json_get(job, "job_id"), &job_id);
+  lua_State *L = sb->L;
+  int top = lua_gettop(L);
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_HOOKS);
+  if (lua_getfield(L, -1, "upload_transform") != LUA_TFUNCTION) {
+    lua_settop(L, top);
+    if (job_id > 0) {
+      char buf[64];
+      snprintf(buf, sizeof buf, "{\"job_id\":%lld,\"patch\":{}}", (long long)job_id);
+      sb_request(sb, "hooks.complete_upload_transform", buf);
+    }
+    return CCORD_OK;
+  }
+  (void)sb_push_json(L, job);
+  ccord_error e = {0};
+  ccord_status st = sb_call_guarded(sb, 1, 1, &e);
+  if (st != CCORD_OK) {
+    sb_log(sb, CCORD_LOG_WARN, "hooks.on_upload_transform", e.message);
+    if (job_id > 0) {
+      char buf[64];
+      snprintf(buf, sizeof buf, "{\"job_id\":%lld,\"patch\":{}}", (long long)job_id);
+      sb_request(sb, "hooks.complete_upload_transform", buf);
+    }
+  } else if (job_id > 0 && lua_type(L, -1) == LUA_TTABLE) {
+    ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "job_id"); ccord_jw_int(&w, job_id);
+    ccord_jw_key(&w, "patch");
+    bool ok = sb_encode_lua(L, -1, &w, 0);
+    ccord_jw_end_object(&w);
+    if (ok && ccord_jw_ok(&w)) sb_request(sb, "hooks.complete_upload_transform", ccord_buf_cstr(&b));
+    ccord_buf_free(&b);
+  }
+  lua_settop(L, top);
   return CCORD_OK;
 }
 

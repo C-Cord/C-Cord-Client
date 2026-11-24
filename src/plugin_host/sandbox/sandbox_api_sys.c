@@ -300,6 +300,33 @@ static int api_fs_remove(lua_State *L)
   return 1;
 }
 
+static int api_fs_rename(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_FS_WRITE, "fs.rename")) return sb_push_undeclared(L);
+  size_t sl = 0, dl = 0;
+  const char *src = luaL_checklstring(L, 1, &sl);
+  const char *dst = luaL_checklstring(L, 2, &dl);
+  if (sb->svc.request_sync) {
+    ccord_buf req; ccord_buf_init(&req, 0); ccord_jw w; ccord_jw_init(&w, &req);
+    ccord_jw_begin_object(&w);
+    ccord_jw_key(&w, "src"); ccord_jw_string(&w, src, sl);
+    ccord_jw_key(&w, "dst"); ccord_jw_string(&w, dst, dl);
+    ccord_jw_end_object(&w);
+    int rc = sb_sync_call(L, sb, "fs.rename", ccord_buf_cstr(&req));
+    ccord_buf_free(&req);
+    return rc;
+  }
+  if (!ccord_file_rename_replace(src, dst)) {
+    char eb[128];
+    lua_pushnil(L);
+    lua_pushstring(L, sb_errno_str(errno, eb, sizeof eb));
+    return 2;
+  }
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
 static int api_system_os(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
@@ -381,7 +408,8 @@ void sb_open_api_sys(lua_State *L)
 {
   static const luaL_Reg k_fs[] = {
     {"read", api_fs_read}, {"exists", api_fs_exists}, {"list", api_fs_list},
-    {"write", api_fs_write}, {"append", api_fs_append}, {"mkdir", api_fs_mkdir}, {"remove", api_fs_remove}, {nullptr, nullptr}};
+    {"write", api_fs_write}, {"append", api_fs_append}, {"mkdir", api_fs_mkdir},
+    {"remove", api_fs_remove}, {"rename", api_fs_rename}, {nullptr, nullptr}};
   static const luaL_Reg k_system[] = {
     {"os", api_system_os}, {"arch", api_system_arch}, {"hostname", api_system_hostname},
     {"open_url", api_system_open_url}, {"notify", api_system_notify}, {nullptr, nullptr}};

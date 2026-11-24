@@ -12,6 +12,7 @@
 #include <ccord/core/config.h>
 #include <ccord/core/json.h>
 #include <ccord/core/os.h>
+#include <ccord/core/timefmt.h>
 #include <ccord/core/utf8.h>
 #include <ccord/ipc/ipc.h>
 
@@ -244,6 +245,11 @@ static void parse_platform_state(const ccord_json *obj, ccord_sandbox_platform_s
   if (kv) st->keyboard_visible = ccord_json_bool(kv, st->keyboard_visible);
   const ccord_json *ls = ccord_json_get(obj, "landscape");
   if (ls) st->landscape = ccord_json_bool(ls, st->landscape);
+  int64_t tf = 0;
+  const ccord_json *tfj = ccord_json_get(obj, "time_format");
+  if (tfj && ccord_json_int64(tfj, &tf) && tf >= 0 && tf <= 2) {
+    ccord_timefmt_set_mode((ccord_timefmt_mode)tf);
+  }
 }
 
 static void handle_platform_state(host *h, const ccord_ipc_msg *msg)
@@ -281,11 +287,13 @@ static void handle_init(host *h, const ccord_ipc_msg *msg)
   size_t dl = 0;
   const char *dir = str_of(pl, "dir", &dl);
   (void)dl;
+  // Cache local timezone rules before Landlock/Seccomp/Seatbelt revoke /etc/localtime access.
+  ccord_tz_init();
   if (h->isolate_process) ccord_host_os_sandbox(dir);
 #if CCORD_OS_ANDROID
-  const uint64_t mem_cap = 32u << 20;
+  const uint64_t mem_cap = 64u << 20;
 #else
-  const uint64_t mem_cap = h->cancel ? (32u << 20) : (64u << 20);
+  const uint64_t mem_cap = h->cancel ? (64u << 20) : (256u << 20);
 #endif
   ccord_sandbox_config cfg = {
     .plugin_id = id, .plugin_name = name, .plugin_version = version, .plugin_dir = dir,
@@ -305,7 +313,7 @@ static void handle_init(host *h, const ccord_ipc_msg *msg)
     const ccord_json *ij = ccord_json_get(lim, "instructions");
     if (ij && ccord_json_int64(ij, &ins) && ins > 0) {
       uint64_t u = (uint64_t)ins;
-      if (u > 100000000u) u = 100000000u;
+      if (u > 500000000u) u = 500000000u;
       cfg.instructions = u;
     }
   }
@@ -496,6 +504,24 @@ static void handle_menu_resolve(host *h, const ccord_ipc_msg *msg)
   ccord_free(out_json);
 }
 
+static void handle_unload(host *h, const ccord_ipc_msg *msg)
+{
+  if (!h->sb) { reply_ok(h, msg->id, nullptr); return; }
+  size_t rl = 0;
+  const char *reason = str_of(msg->params, "reason", &rl);
+  int64_t budget = 350;
+  if (msg->params && ccord_json_get(msg->params, "budget_ms")) {
+    (void)ccord_json_int64(ccord_json_get(msg->params, "budget_ms"), &budget);
+  }
+  if (budget < 50) budget = 50;
+  if (budget > 2000) budget = 2000;
+  ccord_error err = {0};
+  (void)ccord_sandbox_unload(h->sb, reason ? reason : "quit", (uint32_t)budget, &err);
+  reply_ok(h, msg->id, nullptr);
+  ccord_error ferr = {0};
+  (void)ccord_ipc_flush(h->ipc, 100, &ferr);
+}
+
 static void handle_v3_ntf(host *h, const ccord_ipc_msg *msg)
 {
   if (!h->sb || !msg->params) return;
@@ -540,10 +566,22 @@ static void handle_v3_ntf(host *h, const ccord_ipc_msg *msg)
   } else if (strcmp(msg->method, "settings.change") == 0) {
     size_t kl = 0; const char *k = str_of(msg->params, "key", &kl);
     if (k) (void)ccord_sandbox_setting_changed(h->sb, k, ccord_json_get(msg->params, "value"), &err);
+  } else if (strcmp(msg->method, "settings.action") == 0) {
+    size_t kl = 0; const char *k = str_of(msg->params, "key", &kl);
+    if (k) (void)ccord_sandbox_setting_action(h->sb, k, &err);
   } else if (strcmp(msg->method, "dialog.result") == 0) {
     int64_t rid = 0; (void)ccord_json_int64(ccord_json_get(msg->params, "req_id"), &rid);
     bool acc = ccord_json_bool(ccord_json_get(msg->params, "accepted"), false);
     (void)ccord_sandbox_dialog_result(h->sb, (uint64_t)rid, acc, ccord_json_get(msg->params, "result"), &err);
+  } else if (strcmp(msg->method, "ui.menu.popup.result") == 0) {
+    int64_t rid = 0; (void)ccord_json_int64(ccord_json_get(msg->params, "req_id"), &rid);
+    size_t il = 0; const char *iid = str_of(msg->params, "item_id", &il);
+    (void)ccord_sandbox_popup_menu_result(h->sb, (uint64_t)rid, (iid && il > 0u) ? iid : nullptr, &err);
+  } else if (strcmp(msg->method, "toast.action") == 0) {
+    int64_t tid = 0; (void)ccord_json_int64(ccord_json_get(msg->params, "toast_id"), &tid);
+    if (tid > 0) (void)ccord_sandbox_toast_action(h->sb, (uint64_t)tid, &err);
+  } else if (strcmp(msg->method, "hook.upload_transform") == 0) {
+    (void)ccord_sandbox_upload_transform(h->sb, msg->params, &err);
   } else if (strcmp(msg->method, "fs.watch.event") == 0) {
     int64_t wid = 0; (void)ccord_json_int64(ccord_json_get(msg->params, "watch_id"), &wid);
     (void)ccord_sandbox_fs_watch_event(h->sb, (uint64_t)wid, ccord_json_get(msg->params, "event"), &err);
@@ -581,6 +619,7 @@ static void dispatch(host *h, const ccord_ipc_msg *msg)
       else if (strcmp(msg->method, "composer.autocomplete") == 0) handle_autocomplete(h, msg);
       else if (strcmp(msg->method, "plugin.rpc.call") == 0) handle_rpc_call(h, msg);
       else if (strcmp(msg->method, "ui.contextMenu.resolve") == 0) handle_menu_resolve(h, msg);
+      else if (strcmp(msg->method, "plugin.unload") == 0) { handle_unload(h, msg); return; }
       else reply_error(h, msg->id, "unsupported", "unknown method");
       schedule_idle_gc(h);
       return;

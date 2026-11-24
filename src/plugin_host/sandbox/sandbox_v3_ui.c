@@ -226,17 +226,64 @@ static int api_settings_schema(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
   luaL_checktype(L, 1, LUA_TTABLE);
+
+  // Reset inline button action callbacks and capture any `action = fn` fields while encoding JSON.
+  lua_newtable(L);
+  lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_SETTINGS_BTN);
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_SETTINGS_BTN);
+  int btn_idx = lua_gettop(L);
+
   ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w);
   ccord_jw_key(&w, "schema");
-  if (!sb_encode_lua(L, 1, &w, 0)) { ccord_buf_free(&b); return luaL_error(L, "settings.schema: invalid schema table"); }
+  ccord_jw_begin_array(&w);
+  lua_Integer n = (lua_Integer)lua_rawlen(L, 1);
+  for (lua_Integer i = 1; i <= n; i++) {
+    if (lua_rawgeti(L, 1, i) == LUA_TTABLE) {
+      int fidx = lua_gettop(L);
+      char key_buf[65] = "";
+      sb_raw_getfield(L, fidx, "key");
+      if (lua_type(L, -1) == LUA_TSTRING) {
+        size_t kl = 0;
+        const char *ks = lua_tolstring(L, -1, &kl);
+        if (kl > 0 && kl < sizeof key_buf) { memcpy(key_buf, ks, kl); key_buf[kl] = '\0'; }
+      }
+      lua_pop(L, 1);
+
+      ccord_jw_begin_object(&w);
+      lua_pushnil(L);
+      while (lua_next(L, fidx) != 0) {
+        if (lua_type(L, -2) == LUA_TSTRING) {
+          const char *fk = lua_tostring(L, -2);
+          if (strcmp(fk, "action") == 0 && lua_type(L, -1) == LUA_TFUNCTION) {
+            if (key_buf[0]) {
+              lua_pushstring(L, key_buf);
+              lua_pushvalue(L, -2);
+              lua_rawset(L, btn_idx);
+            }
+          } else if (lua_type(L, -1) != LUA_TFUNCTION) {
+            ccord_jw_key(&w, fk);
+            if (!sb_encode_lua(L, -1, &w, 0)) {
+              lua_pop(L, 4);
+              ccord_buf_free(&b);
+              return luaL_error(L, "settings.schema: invalid schema value for '%s'", fk);
+            }
+          }
+        }
+        lua_pop(L, 1);
+      }
+      ccord_jw_end_object(&w);
+    }
+    lua_pop(L, 1);
+  }
+  ccord_jw_end_array(&w);
   ccord_jw_end_object(&w);
+  lua_pop(L, 1); // btn_idx
   if (!ccord_jw_ok(&w)) { ccord_buf_free(&b); return luaL_error(L, "settings.schema: encode failed"); }
 
   // Seed default values into storage if unset
   lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_STORAGE);
   int st_idx = lua_gettop(L);
-  lua_Integer n = (lua_Integer)lua_rawlen(L, 1);
   for (lua_Integer i = 1; i <= n; i++) {
     if (lua_rawgeti(L, 1, i) == LUA_TTABLE) {
       sb_raw_getfield(L, -1, "key");
@@ -339,9 +386,21 @@ static int api_settings_on_change(lua_State *L)
   return 0;
 }
 
+static int api_settings_on_action(lua_State *L)
+{
+  luaL_checktype(L, 1, LUA_TFUNCTION);
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_SETTINGS_ACT);
+  lua_Integer n = (lua_Integer)lua_rawlen(L, -1);
+  lua_pushvalue(L, 1);
+  lua_rawseti(L, -2, n + 1);
+  lua_pop(L, 1);
+  return 0;
+}
+
 static const luaL_Reg k_settings[] = {
   {"schema", api_settings_schema}, {"get", api_settings_get}, {"set", api_settings_set},
-  {"all", api_settings_all}, {"on_change", api_settings_on_change}, {nullptr, nullptr},
+  {"all", api_settings_all}, {"on_change", api_settings_on_change}, {"on_action", api_settings_on_action},
+  {nullptr, nullptr},
 };
 
 // ---------------------------------------------------------------- Class 1 & 2: theme.*
@@ -735,7 +794,7 @@ static int dialog_call(lua_State *L, const char *kind)
 {
   ccord_sandbox *sb = sb_of(L);
   // Anti-spoofing guard: Class 1 dialogs require user-gesture context (unless plugin has Class 2 ui.panel).
-  if (sb->user_gesture_depth <= 0 && !(sb->perms & (ccord_perm_set)CCORD_PERM_UI_PANEL)) {
+  if (!sb_in_user_gesture(sb) && !(sb->perms & (ccord_perm_set)CCORD_PERM_UI_PANEL)) {
     lua_pushnil(L);
     lua_pushliteral(L, "ui.dialog requires a user-gesture callback (command, menu, button, or keybind)");
     return 2;
@@ -795,6 +854,270 @@ static int api_ui_file_save(lua_State *L)
   lua_pop(L, 1);
   ccord_jw_end_object(&w);
   return sb_async_dispatch(L, sb, "ui.file.save", &b, cb_idx);
+}
+
+static bool encode_media_item_lua(lua_State *L, ccord_sandbox *sb, int tbl_idx, ccord_jw *w, bool *out_undeclared)
+{
+  int abs_idx = lua_absindex(L, tbl_idx);
+  if (lua_type(L, abs_idx) != LUA_TTABLE) return false;
+  bool has_src = false;
+  ccord_jw_begin_object(w);
+
+  sb_raw_getfield(L, abs_idx, "texture_key");
+  if (lua_type(L, -1) == LUA_TSTRING) {
+    size_t tl = 0; const char *ts = lua_tolstring(L, -1, &tl);
+    if (tl > 0u) {
+      if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "ui.media.open")) {
+        lua_pop(L, 1);
+        *out_undeclared = true;
+        return false;
+      }
+      ccord_jw_key(w, "texture_key"); ccord_jw_string(w, ts, tl);
+      has_src = true;
+    }
+  }
+  lua_pop(L, 1);
+
+  sb_raw_getfield(L, abs_idx, "local_path");
+  if (lua_type(L, -1) == LUA_TSTRING) {
+    size_t ll = 0; const char *ls = lua_tolstring(L, -1, &ll);
+    if (ll > 0u) {
+      ccord_perm path_perm = (strncmp(ls, "plugin_data://", 14) == 0)
+                               ? CCORD_PERM_STORAGE_FILES : CCORD_PERM_FS_READ;
+      if (!sb_check_perm(L, sb, path_perm, "ui.media.open")) {
+        lua_pop(L, 1);
+        *out_undeclared = true;
+        return false;
+      }
+      ccord_jw_key(w, "local_path"); ccord_jw_string(w, ls, ll);
+      has_src = true;
+    }
+  }
+  lua_pop(L, 1);
+
+  sb_raw_getfield(L, abs_idx, "url");
+  if (lua_type(L, -1) == LUA_TSTRING) {
+    size_t ul = 0; const char *us = lua_tolstring(L, -1, &ul);
+    if (ul > 0u) {
+      ccord_jw_key(w, "url"); ccord_jw_string(w, us, ul);
+      has_src = true;
+    }
+  }
+  lua_pop(L, 1);
+
+  static const char *const k_opt_str[] = {"filename", "kind", "description"};
+  for (size_t i = 0; i < 3u; i++) {
+    sb_raw_getfield(L, abs_idx, k_opt_str[i]);
+    if (lua_type(L, -1) == LUA_TSTRING) {
+      size_t sl = 0; const char *s = lua_tolstring(L, -1, &sl);
+      if (sl > 0u) { ccord_jw_key(w, k_opt_str[i]); ccord_jw_string(w, s, sl); }
+    }
+    lua_pop(L, 1);
+  }
+  ccord_jw_end_object(w);
+  return has_src;
+}
+
+static int api_ui_media_open(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_in_user_gesture(sb)) {
+    lua_pushboolean(L, 0);
+    lua_pushliteral(L, "ui.media.open requires a user-gesture callback");
+    return 2;
+  }
+  luaL_checktype(L, 1, LUA_TTABLE);
+  ccord_buf b; ccord_buf_init(&b, 0);
+  ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  bool undeclared = false;
+
+  sb_raw_getfield(L, 1, "items");
+  if (lua_type(L, -1) == LUA_TTABLE) {
+    int items_idx = lua_gettop(L);
+    lua_Integer n = (lua_Integer)lua_rawlen(L, items_idx);
+    if (n <= 0) {
+      lua_pop(L, 1);
+      ccord_buf_free(&b);
+      return luaL_error(L, "ui.media.open: items must not be empty");
+    }
+    if (n > 10) n = 10;
+    ccord_jw_key(&w, "items");
+    ccord_jw_begin_array(&w);
+    size_t valid = 0u;
+    for (lua_Integer i = 1; i <= n; i++) {
+      lua_rawgeti(L, items_idx, i);
+      bool ok = encode_media_item_lua(L, sb, -1, &w, &undeclared);
+      lua_pop(L, 1);
+      if (undeclared) {
+        lua_pop(L, 1);
+        ccord_buf_free(&b);
+        return sb_push_undeclared(L);
+      }
+      if (!ok) {
+        lua_pop(L, 1);
+        ccord_buf_free(&b);
+        return luaL_error(L, "ui.media.open: each item requires url, local_path, or texture_key");
+      }
+      valid++;
+    }
+    ccord_jw_end_array(&w);
+    lua_pop(L, 1);
+    sb_raw_getfield(L, 1, "index");
+    if (lua_type(L, -1) == LUA_TNUMBER) {
+      int64_t idx = (int64_t)lua_tointeger(L, -1) - 1;
+      if (idx < 0) idx = 0;
+      if ((size_t)idx >= valid) idx = (int64_t)(valid - 1u);
+      ccord_jw_key(&w, "index"); ccord_jw_int(&w, idx);
+    }
+    lua_pop(L, 1);
+  } else {
+    lua_pop(L, 1);
+    ccord_jw_key(&w, "items");
+    ccord_jw_begin_array(&w);
+    bool ok = encode_media_item_lua(L, sb, 1, &w, &undeclared);
+    ccord_jw_end_array(&w);
+    if (undeclared) {
+      ccord_buf_free(&b);
+      return sb_push_undeclared(L);
+    }
+    if (!ok) {
+      ccord_buf_free(&b);
+      return luaL_error(L, "ui.media.open: url, local_path, or texture_key required");
+    }
+  }
+  ccord_jw_end_object(&w);
+  if (!ccord_jw_ok(&w)) {
+    ccord_buf_free(&b);
+    return luaL_error(L, "ui.media.open: invalid specification");
+  }
+  int rc = sb_sync_call(L, sb, "ui.media.open", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  return rc;
+}
+
+static int api_ui_open_user_profile(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_in_user_gesture(sb)) {
+    lua_pushboolean(L, 0);
+    lua_pushliteral(L, "ui.open_user_profile requires a user-gesture callback");
+    return 2;
+  }
+  size_t ul = 0, gl = 0;
+  const char *uid = luaL_checklstring(L, 1, &ul);
+  const char *gid = luaL_optlstring(L, 2, "", &gl);
+  if (ul == 0 || ul > 24u) return luaL_error(L, "ui.open_user_profile: invalid user_id");
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "user_id"); ccord_jw_string(&w, uid, ul);
+  if (gl > 0u) { ccord_jw_key(&w, "guild_id"); ccord_jw_string(&w, gid, gl); }
+  ccord_jw_end_object(&w);
+  int rc = sb_sync_call(L, sb, "ui.open_user_profile", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  return rc;
+}
+
+static int api_ui_menu_popup(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_in_user_gesture(sb)) {
+    lua_pushboolean(L, 0);
+    lua_pushliteral(L, "ui.menu.popup requires a user-gesture callback");
+    return 2;
+  }
+  luaL_checktype(L, 1, LUA_TTABLE);
+  sb_raw_getfield(L, 1, "items");
+  if (lua_type(L, -1) != LUA_TTABLE || lua_rawlen(L, -1) == 0u) {
+    lua_pop(L, 1);
+    return luaL_error(L, "ui.menu.popup: non-empty 'items' array required");
+  }
+  int items_idx = lua_gettop(L);
+  lua_Integer n = (lua_Integer)lua_rawlen(L, items_idx);
+  if (n > 96) n = 96;
+
+  uint64_t req_id = ++sb->next_popup_id;
+  bool has_cb = false;
+  sb_raw_getfield(L, 1, "on_select");
+  if (lua_type(L, -1) == LUA_TFUNCTION) {
+    lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_POPUPS);
+    lua_pushvalue(L, -2);
+    lua_rawseti(L, -2, (lua_Integer)req_id);
+    if (req_id > 16u) {
+      lua_pushnil(L);
+      lua_rawseti(L, -2, (lua_Integer)(req_id - 16u));
+    }
+    lua_pop(L, 1);
+    has_cb = true;
+  }
+  lua_pop(L, 1);
+
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "req_id"); ccord_jw_int(&w, (int64_t)req_id);
+  sb_raw_getfield(L, 1, "x");
+  if (lua_type(L, -1) == LUA_TNUMBER) { ccord_jw_key(&w, "x"); ccord_jw_double(&w, (double)lua_tonumber(L, -1)); }
+  lua_pop(L, 1);
+  sb_raw_getfield(L, 1, "y");
+  if (lua_type(L, -1) == LUA_TNUMBER) { ccord_jw_key(&w, "y"); ccord_jw_double(&w, (double)lua_tonumber(L, -1)); }
+  lua_pop(L, 1);
+
+  ccord_jw_key(&w, "items");
+  ccord_jw_begin_array(&w);
+  for (lua_Integer i = 1; i <= n; i++) {
+    lua_rawgeti(L, items_idx, i);
+    if (lua_type(L, -1) == LUA_TTABLE) {
+      int it_idx = lua_gettop(L);
+      sb_raw_getfield(L, it_idx, "id");
+      sb_raw_getfield(L, it_idx, "label");
+      if (lua_type(L, -2) == LUA_TSTRING && lua_type(L, -1) == LUA_TSTRING) {
+        size_t il = 0, ll = 0;
+        const char *iid = lua_tolstring(L, -2, &il);
+        const char *lbl = lua_tolstring(L, -1, &ll);
+        if (il > 0u && ll > 0u) {
+          ccord_jw_begin_object(&w);
+          ccord_jw_key(&w, "id"); ccord_jw_string(&w, iid, il);
+          ccord_jw_key(&w, "label"); ccord_jw_string(&w, lbl, ll);
+          sb_raw_getfield(L, it_idx, "sublabel");
+          if (lua_type(L, -1) == LUA_TSTRING) {
+            size_t sl = 0; const char *sub = lua_tolstring(L, -1, &sl);
+            if (sl > 0u) { ccord_jw_key(&w, "sublabel"); ccord_jw_string(&w, sub, sl); }
+          }
+          lua_pop(L, 1);
+          static const char *const k_bools[] = {"danger", "checked", "disabled", "divider_before"};
+          for (size_t bi = 0; bi < 4u; bi++) {
+            sb_raw_getfield(L, it_idx, k_bools[bi]);
+            if (lua_toboolean(L, -1)) { ccord_jw_key(&w, k_bools[bi]); ccord_jw_bool(&w, true); }
+            lua_pop(L, 1);
+          }
+          ccord_jw_end_object(&w);
+        }
+      }
+      lua_pop(L, 2);
+    }
+    lua_pop(L, 1);
+  }
+  ccord_jw_end_array(&w);
+  ccord_jw_end_object(&w);
+  lua_pop(L, 1);   // items
+
+  if (!ccord_jw_ok(&w)) {
+    ccord_buf_free(&b);
+    if (has_cb) {
+      lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_POPUPS);
+      lua_pushnil(L); lua_rawseti(L, -2, (lua_Integer)req_id);
+      lua_pop(L, 1);
+    }
+    return luaL_error(L, "ui.menu.popup: encode failed");
+  }
+  int rc = sb_sync_call(L, sb, "ui.menu.popup", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  if (has_cb && (rc <= 0 || !lua_toboolean(L, -rc))) {
+    lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_POPUPS);
+    lua_pushnil(L); lua_rawseti(L, -2, (lua_Integer)req_id);
+    lua_pop(L, 1);
+  }
+  return rc;
 }
 
 static int api_ui_measure_text(lua_State *L)
@@ -938,12 +1261,14 @@ static int api_ui_texture_upload_file(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
   if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "ui.texture.upload_file")) return sb_push_undeclared(L);
-  if (!sb_check_perm(L, sb, CCORD_PERM_FS_READ, "ui.texture.upload_file")) return sb_push_undeclared(L);
   size_t kl = 0, pl = 0;
   const char *key = luaL_checklstring(L, 1, &kl);
   const char *path = luaL_checklstring(L, 2, &pl);
   if (kl == 0 || kl > 128u) return luaL_error(L, "ui.texture.upload_file: key must be 1..128 chars");
   if (pl == 0 || pl >= CCORD_PATH_MAX) return luaL_error(L, "ui.texture.upload_file: invalid path");
+  ccord_perm path_perm = (strncmp(path, "plugin_data://", 14) == 0)
+                           ? CCORD_PERM_STORAGE_FILES : CCORD_PERM_FS_READ;
+  if (!sb_check_perm(L, sb, path_perm, "ui.texture.upload_file")) return sb_push_undeclared(L);
   int64_t max_w = 512, max_h = 512;
   if (lua_type(L, 3) == LUA_TTABLE) {
     sb_raw_getfield(L, 3, "max_w");
@@ -1000,6 +1325,27 @@ static int decorate_set(lua_State *L, const char *target_kind)
   memcpy(id_buf, id, il); id_buf[il] = '\0';
   lua_pop(L, 1);
 
+  sb_raw_getfield(L, 1, "position");
+  if (!lua_isnil(L, -1)) {
+    if (lua_type(L, -1) != LUA_TSTRING) {
+      lua_pop(L, 1);
+      return luaL_error(L, "ui.decorate.%s: 'position' must be 'below_body' or 'above_body'", target_kind);
+    }
+    const char *pos = lua_tostring(L, -1);
+    if (strcmp(pos, "below_body") != 0 && strcmp(pos, "above_body") != 0) {
+      lua_pop(L, 1);
+      return luaL_error(L, "ui.decorate.%s: invalid position '%s' (expected 'below_body' or 'above_body')", target_kind, pos);
+    }
+  }
+  lua_pop(L, 1);
+
+  sb_raw_getfield(L, 1, "priority");
+  if (!lua_isnil(L, -1) && lua_type(L, -1) != LUA_TNUMBER) {
+    lua_pop(L, 1);
+    return luaL_error(L, "ui.decorate.%s: 'priority' must be an integer", target_kind);
+  }
+  lua_pop(L, 1);
+
   sb_raw_getfield(L, 1, "on_event");
   if (lua_type(L, -1) == LUA_TFUNCTION) {
     lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_DECORS);
@@ -1039,6 +1385,8 @@ static int api_decor_member_badge(lua_State *L) { return decorate_set(L, "member
 static int api_decor_profile_sec(lua_State *L) { return decorate_set(L, "profile_section"); }
 static int api_decor_chan_badge(lua_State *L) { return decorate_set(L, "channel_badge"); }
 static int api_decor_guild_badge(lua_State *L) { return decorate_set(L, "guild_badge"); }
+static int api_decor_chan_style(lua_State *L) { return decorate_set(L, "channel_style"); }
+static int api_decor_member_style(lua_State *L) { return decorate_set(L, "member_style"); }
 
 static int api_decor_remove(lua_State *L)
 {
@@ -1178,6 +1526,30 @@ static int api_composer_attach_bytes(lua_State *L)
   return 1;
 }
 
+static int api_composer_attach_file(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_UI_COMPOSER, "ui.composer.attach_file")) return sb_push_undeclared(L);
+  size_t pl = 0;
+  const char *path = luaL_checklstring(L, 1, &pl);
+  if (pl == 0 || pl >= CCORD_PATH_MAX) return luaL_error(L, "ui.composer.attach_file: invalid path");
+  ccord_perm path_perm = (strncmp(path, "plugin_data://", 14) == 0)
+                           ? CCORD_PERM_STORAGE_FILES : CCORD_PERM_FS_READ;
+  if (!sb_check_perm(L, sb, path_perm, "ui.composer.attach_file")) return sb_push_undeclared(L);
+  bool spoiler = lua_toboolean(L, 2) != 0;
+  size_t fl = 0;
+  const char *fname = lua_type(L, 3) == LUA_TSTRING ? lua_tolstring(L, 3, &fl) : nullptr;
+  ccord_buf out; ccord_buf_init(&out, 0); ccord_jw w; ccord_jw_init(&w, &out);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "path"); ccord_jw_string(&w, path, pl);
+  ccord_jw_key(&w, "spoiler"); ccord_jw_bool(&w, spoiler);
+  if (fname && fl > 0) { ccord_jw_key(&w, "filename"); ccord_jw_string(&w, fname, fl); }
+  ccord_jw_end_object(&w);
+  int rc = sb_sync_call(L, sb, "ui.composer.attach_file", ccord_buf_cstr(&out));
+  ccord_buf_free(&out);
+  return rc;
+}
+
 static int api_composer_reg_ac(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
@@ -1261,6 +1633,72 @@ static int api_hooks_before_edit(lua_State *L) { return reg_hook_fn(L, CCORD_PER
 static int api_hooks_notification(lua_State *L) { return reg_hook_fn(L, CCORD_PERM_NOTIFICATIONS_HOOK, "hooks.on_notification", "notification"); }
 static int api_hooks_link_open(lua_State *L) { return reg_hook_fn(L, CCORD_PERM_NOTIFICATIONS_HOOK, "hooks.on_link_open", "link_open"); }
 
+static int api_hooks_before_upload(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_MESSAGES_HOOK, "hooks.on_before_upload")) return sb_push_undeclared(L);
+  if (lua_isnil(L, 1)) {
+    lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_HOOKS);
+    lua_pushnil(L); lua_setfield(L, -2, "before_upload");
+    lua_pushnil(L); lua_setfield(L, -2, "upload_transform");
+    lua_pop(L, 1);
+    sb_request_pair(sb, "hooks.unregister", "hook", "before_upload", 13);
+    lua_pushboolean(L, 1);
+    return 1;
+  }
+  luaL_checktype(L, 1, LUA_TFUNCTION);
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_HOOKS);
+  lua_pushvalue(L, 1); lua_setfield(L, -2, "before_upload");
+  if (lua_type(L, 2) == LUA_TFUNCTION) {
+    lua_pushvalue(L, 2); lua_setfield(L, -2, "upload_transform");
+  }
+  lua_pop(L, 1);
+  sb_request_pair(sb, "hooks.register", "hook", "before_upload", 13);
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+static int api_hooks_upload_transform(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_MESSAGES_HOOK, "hooks.on_upload_transform")) return sb_push_undeclared(L);
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_HOOKS);
+  if (lua_isnil(L, 1)) {
+    lua_pushnil(L); lua_setfield(L, -2, "upload_transform");
+  } else {
+    luaL_checktype(L, 1, LUA_TFUNCTION);
+    lua_pushvalue(L, 1); lua_setfield(L, -2, "upload_transform");
+  }
+  lua_pop(L, 1);
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
+static int api_hooks_complete_upload_transform(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_MESSAGES_HOOK, "hooks.complete_upload_transform")) return sb_push_undeclared(L);
+  int64_t job_id = (int64_t)luaL_checkinteger(L, 1);
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "job_id"); ccord_jw_int(&w, job_id);
+  if (lua_type(L, 2) == LUA_TTABLE) {
+    ccord_jw_key(&w, "patch");
+    if (!sb_encode_lua(L, 2, &w, 0)) {
+      ccord_buf_free(&b);
+      return luaL_error(L, "hooks.complete_upload_transform: patch must be JSON-serializable");
+    }
+  }
+  ccord_jw_end_object(&w);
+  if (!ccord_jw_ok(&w)) {
+    ccord_buf_free(&b);
+    return luaL_error(L, "hooks.complete_upload_transform: encode failed");
+  }
+  int rc = sb_sync_call(L, sb, "hooks.complete_upload_transform", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  return rc;
+}
+
 // ---------------------------------------------------------------- Registration helpers
 
 void sb_v3_set_ro_sub(lua_State *L, int parent_idx, const char *name, const luaL_Reg *fns)
@@ -1298,7 +1736,11 @@ void sb_open_v3_ui(lua_State *L)
 
 void sb_extend_v3_ui(lua_State *L)
 {
-  static const luaL_Reg k_ui_extra[] = {{"measure_text", api_ui_measure_text}, {nullptr, nullptr}};
+  static const luaL_Reg k_ui_extra[] = {
+    {"measure_text", api_ui_measure_text}, {"open_user_profile", api_ui_open_user_profile}, {nullptr, nullptr},
+  };
+  static const luaL_Reg k_media[] = {{"open", api_ui_media_open}, {nullptr, nullptr}};
+  static const luaL_Reg k_menu[] = {{"popup", api_ui_menu_popup}, {nullptr, nullptr}};
   static const luaL_Reg k_actbtn[] = {{"add", api_ui_actbtn_add}, {"remove", sb_api_ui_actbtn_remove}, {nullptr, nullptr}};
   static const luaL_Reg k_dialog[] = {
     {"confirm", api_ui_dialog_confirm}, {"prompt", api_ui_dialog_prompt}, {"form", api_ui_dialog_form}, {nullptr, nullptr},
@@ -1314,6 +1756,7 @@ void sb_extend_v3_ui(lua_State *L)
     {"message_toolbar", api_decor_msg_toolbar}, {"message_style", api_decor_msg_style},
     {"member_badge", api_decor_member_badge}, {"profile_section", api_decor_profile_sec},
     {"channel_badge", api_decor_chan_badge}, {"guild_badge", api_decor_guild_badge},
+    {"channel_style", api_decor_chan_style}, {"member_style", api_decor_member_style},
     {"remove", api_decor_remove}, {"clear", api_decor_clear}, {nullptr, nullptr},
   };
   static const luaL_Reg k_comp[] = {
@@ -1321,11 +1764,13 @@ void sb_extend_v3_ui(lua_State *L)
     {"insert", api_composer_insert}, {"clear", api_composer_clear},
     {"get_selection", api_composer_get_selection}, {"set_selection", api_composer_set_selection},
     {"get_reply", api_composer_get_reply}, {"set_reply", api_composer_set_reply},
-    {"attach_bytes", api_composer_attach_bytes},
+    {"attach_bytes", api_composer_attach_bytes}, {"attach_file", api_composer_attach_file},
     {"register_autocomplete", api_composer_reg_ac}, {"unregister_autocomplete", api_composer_unreg_ac},
     {nullptr, nullptr},
   };
   sb_v3_extend_ro_global(L, "ui", k_ui_extra, "actionButton", k_actbtn);
+  sb_v3_extend_ro_global(L, "ui", nullptr, "media", k_media);
+  sb_v3_extend_ro_global(L, "ui", nullptr, "menu", k_menu);
   sb_v3_extend_ro_global(L, "ui", nullptr, "dialog", k_dialog);
   sb_v3_extend_ro_global(L, "ui", nullptr, "file", k_file);
   sb_v3_extend_ro_global(L, "ui", nullptr, "texture", k_tex);
@@ -1366,8 +1811,13 @@ void sb_extend_v3_ui(lua_State *L)
   sb_v3_extend_ro_global(L, "plugin", k_plugin_extra, nullptr, nullptr);
 
   static const luaL_Reg k_hooks_extra[] = {
-    {"on_before_edit", api_hooks_before_edit}, {"on_notification", api_hooks_notification},
-    {"on_link_open", api_hooks_link_open}, {nullptr, nullptr},
+    {"on_before_edit", api_hooks_before_edit},
+    {"on_before_upload", api_hooks_before_upload},
+    {"on_upload_transform", api_hooks_upload_transform},
+    {"complete_upload_transform", api_hooks_complete_upload_transform},
+    {"on_notification", api_hooks_notification},
+    {"on_link_open", api_hooks_link_open},
+    {nullptr, nullptr},
   };
   sb_v3_extend_ro_global(L, "hooks", k_hooks_extra, nullptr, nullptr);
 }

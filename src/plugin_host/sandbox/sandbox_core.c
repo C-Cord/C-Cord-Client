@@ -71,6 +71,9 @@ static void count_hook(lua_State *L, lua_Debug *ar)
   if (sb->limit == CCORD_SB_LIMIT_UNDECLARED) luaL_error(L, "undeclared restricted API called");
   if (sb->limit == CCORD_SB_LIMIT_MEMORY) luaL_error(L, "memory limit exceeded");
   if (sb->limit == CCORD_SB_LIMIT_INSTRUCTIONS) luaL_error(L, "instruction limit exceeded");
+  if (sb->unload_deadline_ms > 0 && ccord_clock_ms() >= sb->unload_deadline_ms) {
+    luaL_error(L, "plugin unload budget exceeded");
+  }
   if (sb->insn_per_call > 0) {
     sb->budget -= SB_HOOK_STEP;
     if (sb->budget < 0) {
@@ -665,6 +668,20 @@ bool sb_b64_decode_buf(const char *in, size_t n, ccord_buf *out)
 }
 
 
+static int api_plugin_on_unload(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  luaL_checktype(L, 1, LUA_TFUNCTION);
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_UNLOADS);
+  lua_Integer count = (lua_Integer)lua_rawlen(L, -1);
+  lua_pushvalue(L, 1);
+  lua_rawseti(L, -2, count + 1);
+  lua_pop(L, 1);
+  if (count == 0) sb_request(sb, "plugin.on_unload.register", "{}");
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
 static int open_all(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
@@ -705,6 +722,9 @@ static int open_all(lua_State *L)
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_HOOKS);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_RAW_GW);
   lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_PANELS);
+  lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_UNLOADS);
+  lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_TOASTS);
+  lua_newtable(L); lua_setfield(L, LUA_REGISTRYINDEX, SB_KEY_POPUPS);
 
   sb_open_api_v1(L);
   sb_open_api_v2(L);
@@ -715,6 +735,7 @@ static int open_all(lua_State *L)
   lua_pushstring(L, sb->name); lua_setfield(L, -2, "name");
   lua_pushstring(L, sb->version); lua_setfield(L, -2, "version");
   lua_pushstring(L, sb->dir); lua_setfield(L, -2, "dir");
+  lua_pushcfunction(L, api_plugin_on_unload); lua_setfield(L, -2, "on_unload");
   sb_make_readonly(L); lua_setglobal(L, "plugin");
   sb_open_libs_v3(L);
   sb_open_api_v3(L);
@@ -879,6 +900,105 @@ ccord_status ccord_sandbox_emit(ccord_sandbox *sb, const char *event, const ccor
   return CCORD_OK;
 }
 
+ccord_status ccord_sandbox_unload(ccord_sandbox *sb, const char *reason, uint32_t budget_ms, ccord_error *err)
+{
+  (void)err;
+  if (!sb || !sb->L || sb->limit != CCORD_SB_LIMIT_NONE) return CCORD_OK;
+  if (!reason || !reason[0]) reason = "quit";
+  if (budget_ms == 0) budget_ms = 350u;
+
+  lua_State *L = sb->L;
+  int top = lua_gettop(L);
+  uint64_t prev_deadline = sb->unload_deadline_ms;
+  sb->unload_deadline_ms = ccord_clock_ms() + (uint64_t)budget_ms;
+  // Ensure tight wall-clock check cadence even if the plugin has no per-call instruction cap.
+  lua_sethook(L, count_hook, LUA_MASKCOUNT, SB_HOOK_STEP);
+
+  // 1. Run plugin.on_unload(reason) callbacks in LIFO order.
+  lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_UNLOADS);
+  if (lua_istable(L, -1)) {
+    int list = lua_gettop(L);
+    lua_Integer count = (lua_Integer)lua_rawlen(L, list);
+    for (lua_Integer i = count; i >= 1; i--) {
+      if (ccord_clock_ms() >= sb->unload_deadline_ms) {
+        sb_log(sb, CCORD_LOG_WARN, "plugin.on_unload", "unload budget exceeded; skipping remaining handlers");
+        break;
+      }
+      if (lua_rawgeti(L, list, i) != LUA_TFUNCTION) {
+        lua_settop(L, list);
+        continue;
+      }
+      lua_pushstring(L, reason);
+      ccord_error e = {0};
+      if (sb_call_guarded(sb, 1, 0, &e) != CCORD_OK) {
+        sb_log(sb, CCORD_LOG_WARN, "plugin.on_unload", e.message);
+      }
+      lua_settop(L, list);
+      if (sb->limit != CCORD_SB_LIMIT_NONE) break;
+    }
+  }
+  lua_settop(L, top);
+
+  // 2. When quitting the application, also fire events.on("app.quit", fn).
+  if (strcmp(reason, "quit") == 0 && sb->limit == CCORD_SB_LIMIT_NONE &&
+      ccord_clock_ms() < sb->unload_deadline_ms) {
+    lua_getfield(L, LUA_REGISTRYINDEX, SB_KEY_HANDLERS);
+    if (lua_getfield(L, -1, "app.quit") == LUA_TTABLE) {
+      int list = lua_gettop(L);
+      lua_Integer count = (lua_Integer)lua_rawlen(L, list);
+      for (lua_Integer i = 1; i <= count; i++) {
+        if (ccord_clock_ms() >= sb->unload_deadline_ms) {
+          sb_log(sb, CCORD_LOG_WARN, "app.quit", "unload budget exceeded; skipping remaining handlers");
+          break;
+        }
+        if (lua_rawgeti(L, list, i) != LUA_TFUNCTION) {
+          lua_settop(L, list);
+          continue;
+        }
+        lua_createtable(L, 0, 1);
+        lua_pushstring(L, reason);
+        lua_setfield(L, -2, "reason");
+        ccord_error e = {0};
+        if (sb_call_guarded(sb, 1, 0, &e) != CCORD_OK) {
+          sb_log(sb, CCORD_LOG_WARN, "app.quit", e.message);
+        }
+        lua_settop(L, list);
+        if (sb->limit != CCORD_SB_LIMIT_NONE) break;
+      }
+    }
+    lua_settop(L, top);
+  }
+
+  sb->unload_deadline_ms = prev_deadline;
+  lua_sethook(L, count_hook, LUA_MASKCOUNT, sb->insn_per_call > 0 ? SB_HOOK_STEP : SB_IDLE_HOOK_STEP);
+  return CCORD_OK;
+}
+
+void sb_enter_user_gesture(ccord_sandbox *sb)
+{
+  if (!sb) return;
+  sb->user_gesture_depth++;
+  uint64_t now = ccord_clock_ms();
+  sb->last_user_gesture_ms = now ? now : 1u;
+}
+
+void sb_leave_user_gesture(ccord_sandbox *sb)
+{
+  if (!sb) return;
+  if (sb->user_gesture_depth > 0) sb->user_gesture_depth--;
+  uint64_t now = ccord_clock_ms();
+  sb->last_user_gesture_ms = now ? now : 1u;
+}
+
+bool sb_in_user_gesture(const ccord_sandbox *sb)
+{
+  if (!sb) return false;
+  if (sb->user_gesture_depth > 0) return true;
+  if (sb->last_user_gesture_ms == 0u) return false;
+  uint64_t now = ccord_clock_ms();
+  return now >= sb->last_user_gesture_ms && (now - sb->last_user_gesture_ms) <= SB_USER_GESTURE_WINDOW_MS;
+}
+
 ccord_status ccord_sandbox_menu_invoke(ccord_sandbox *sb, const char *item_id, const ccord_json *ctx, ccord_error *err)
 {
   lua_State *L = sb->L;
@@ -892,9 +1012,9 @@ ccord_status ccord_sandbox_menu_invoke(ccord_sandbox *sb, const char *item_id, c
     lua_settop(L, top);
     return ccord_error_set(err, CCORD_ERR_RANGE, "menu context exceeded stack depth");
   }
-  sb->user_gesture_depth++;
+  sb_enter_user_gesture(sb);
   ccord_status st = sb_call_guarded(sb, 1, 0, err);
-  sb->user_gesture_depth--;
+  sb_leave_user_gesture(sb);
   lua_settop(L, top);
   return st;
 }
@@ -991,9 +1111,9 @@ ccord_status ccord_sandbox_panel_event(ccord_sandbox *sb, const char *panel_id, 
     lua_settop(L, top);
     return ccord_error_set(err, CCORD_ERR_RANGE, "panel event exceeded stack depth");
   }
-  sb->user_gesture_depth++;
+  sb_enter_user_gesture(sb);
   ccord_status st = sb_call_guarded(sb, 1, 0, err);
-  sb->user_gesture_depth--;
+  sb_leave_user_gesture(sb);
   lua_settop(L, top);
   return st;
 }
@@ -1014,9 +1134,9 @@ ccord_status ccord_sandbox_command_run(ccord_sandbox *sb, const char *name, cons
     lua_settop(L, top);
     return ccord_error_set(err, CCORD_ERR_RANGE, "command context exceeded stack depth");
   }
-  sb->user_gesture_depth++;
+  sb_enter_user_gesture(sb);
   ccord_status st = sb_call_guarded(sb, 2, 1, err);
-  sb->user_gesture_depth--;
+  sb_leave_user_gesture(sb);
   if (st == CCORD_OK) {
     if (lua_isnil(L, -1)) {
       st = CCORD_OK;

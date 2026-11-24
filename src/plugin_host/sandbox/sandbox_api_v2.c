@@ -224,6 +224,25 @@ static int api_navigation_open_quick_switcher(lua_State *L)
   return 1;
 }
 
+static int api_navigation_jump_to_message(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_NAVIGATION_WRITE, "navigation.jump_to_message")) return sb_push_undeclared(L);
+  size_t cl = 0, ml = 0;
+  const char *cid = luaL_checklstring(L, 1, &cl);
+  const char *mid = luaL_checklstring(L, 2, &ml);
+  if (cl == 0 || ml == 0) return luaL_error(L, "navigation.jump_to_message: channel_id and message_id required");
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "channel_id"); ccord_jw_string(&w, cid, cl);
+  ccord_jw_key(&w, "message_id"); ccord_jw_string(&w, mid, ml);
+  ccord_jw_end_object(&w);
+  if (ccord_jw_ok(&w)) sb_request(sb, "navigation.jump_to_message", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+  lua_pushboolean(L, 1);
+  return 1;
+}
+
 static int api_presence_set(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
@@ -349,7 +368,8 @@ void sb_open_api_v2(lua_State *L)
   static const luaL_Reg k_navigation[] = {
     {"select_guild", api_navigation_select_guild}, {"select_channel", api_navigation_select_channel},
     {"select_view", api_navigation_select_view}, {"action", api_navigation_action},
-    {"open_quick_switcher", api_navigation_open_quick_switcher}, {nullptr, nullptr}};
+    {"open_quick_switcher", api_navigation_open_quick_switcher},
+    {"jump_to_message", api_navigation_jump_to_message}, {nullptr, nullptr}};
   static const luaL_Reg k_presence[] = {{"set", api_presence_set}, {nullptr, nullptr}};
   static const luaL_Reg k_voice[] = {
     {"join", api_voice_join}, {"leave", api_voice_leave},

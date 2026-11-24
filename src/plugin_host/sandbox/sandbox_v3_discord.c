@@ -158,6 +158,31 @@ static int api_msg_send_file(lua_State *L)
   return 1;
 }
 
+static int api_msg_send_file_path(lua_State *L)
+{
+  ccord_sandbox *sb = sb_of(L);
+  if (!sb_check_perm(L, sb, CCORD_PERM_MESSAGES_SEND, "messages.send_file_path")) return sb_push_undeclared(L);
+  const char *cid = luaL_checkstring(L, 1);
+  size_t pl = 0, cl = 0, fl = 0;
+  const char *path = luaL_checklstring(L, 2, &pl);
+  if (pl == 0 || pl >= CCORD_PATH_MAX) return luaL_error(L, "messages.send_file_path: invalid path");
+  ccord_perm path_perm = (strncmp(path, "plugin_data://", 14) == 0)
+                           ? CCORD_PERM_STORAGE_FILES : CCORD_PERM_FS_READ;
+  if (!sb_check_perm(L, sb, path_perm, "messages.send_file_path")) return sb_push_undeclared(L);
+  const char *content = luaL_optlstring(L, 3, "", &cl);
+  const char *fname = lua_type(L, 4) == LUA_TSTRING ? lua_tolstring(L, 4, &fl) : nullptr;
+  ccord_buf out; ccord_buf_init(&out, 0); ccord_jw w; ccord_jw_init(&w, &out);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "channel_id"); ccord_jw_cstr(&w, cid);
+  ccord_jw_key(&w, "path"); ccord_jw_string(&w, path, pl);
+  ccord_jw_key(&w, "content"); ccord_jw_string(&w, content, cl);
+  if (fname && fl > 0) { ccord_jw_key(&w, "filename"); ccord_jw_string(&w, fname, fl); }
+  ccord_jw_end_object(&w);
+  int rc = sb_sync_call(L, sb, "messages.send_file_path", ccord_buf_cstr(&out));
+  ccord_buf_free(&out);
+  return rc;
+}
+
 static int api_msg_send_poll(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
@@ -239,18 +264,22 @@ static int api_msg_scheduled_cancel(lua_State *L)
   return rc;
 }
 
-static bool local_spec_has_local_path(lua_State *L, int spec_idx)
+static void local_spec_local_path_perms(lua_State *L, int spec_idx, bool *need_host_fs, bool *need_plugin_data)
 {
+  *need_host_fs = false;
+  *need_plugin_data = false;
   int abs_idx = lua_absindex(L, spec_idx);
-  bool found = false;
   if (sb_raw_getfield(L, abs_idx, "attachments") == LUA_TTABLE) {
     lua_Integer n = (lua_Integer)lua_rawlen(L, -1);
-    for (lua_Integer i = 1; i <= n && !found; i++) {
+    for (lua_Integer i = 1; i <= n; i++) {
       if (lua_rawgeti(L, -1, i) == LUA_TTABLE) {
         if (sb_raw_getfield(L, -1, "local_path") == LUA_TSTRING) {
           size_t l = 0;
           const char *s = lua_tolstring(L, -1, &l);
-          if (s && l > 0) found = true;
+          if (s && l > 0) {
+            if (strncmp(s, "plugin_data://", 14) == 0) *need_plugin_data = true;
+            else *need_host_fs = true;
+          }
         }
         lua_pop(L, 1);
       }
@@ -258,7 +287,6 @@ static bool local_spec_has_local_path(lua_State *L, int spec_idx)
     }
   }
   lua_pop(L, 1);
-  return found;
 }
 
 static bool encode_local_spec_obj(lua_State *L, int tbl_idx, ccord_jw *w, bool *out_has_on_event, bool *out_clear_on_event)
@@ -302,9 +330,10 @@ static int api_msg_inject_local(lua_State *L)
   if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "messages.inject_local")) return sb_push_undeclared(L);
   const char *cid = luaL_checkstring(L, 1);
   luaL_checktype(L, 2, LUA_TTABLE);
-  if (local_spec_has_local_path(L, 2)) {
-    if (!sb_check_perm(L, sb, CCORD_PERM_FS_READ, "messages.inject_local(local_path)")) return sb_push_undeclared(L);
-  }
+  bool need_fs = false, need_pd = false;
+  local_spec_local_path_perms(L, 2, &need_fs, &need_pd);
+  if (need_fs && !sb_check_perm(L, sb, CCORD_PERM_FS_READ, "messages.inject_local(local_path)")) return sb_push_undeclared(L);
+  if (need_pd && !sb_check_perm(L, sb, CCORD_PERM_STORAGE_FILES, "messages.inject_local(local_path)")) return sb_push_undeclared(L);
   bool has_ev = false, clr_ev = false;
   ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w);
@@ -342,9 +371,10 @@ static int api_msg_update_local(lua_State *L)
   bool is_str = lua_type(L, 1) == LUA_TSTRING;
   if (!is_num && !is_str) return luaL_argerror(L, 1, "expected local_id integer or id string");
   luaL_checktype(L, 2, LUA_TTABLE);
-  if (local_spec_has_local_path(L, 2)) {
-    if (!sb_check_perm(L, sb, CCORD_PERM_FS_READ, "messages.update_local(local_path)")) return sb_push_undeclared(L);
-  }
+  bool need_fs = false, need_pd = false;
+  local_spec_local_path_perms(L, 2, &need_fs, &need_pd);
+  if (need_fs && !sb_check_perm(L, sb, CCORD_PERM_FS_READ, "messages.update_local(local_path)")) return sb_push_undeclared(L);
+  if (need_pd && !sb_check_perm(L, sb, CCORD_PERM_STORAGE_FILES, "messages.update_local(local_path)")) return sb_push_undeclared(L);
   bool has_ev = false, clr_ev = false;
   ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
   ccord_jw_begin_object(&w);
@@ -481,6 +511,8 @@ static int api_store_forum_posts(lua_State *L) { return store_sync_1(L, "store.f
 static int api_store_scheduled_events(lua_State *L) { return store_sync_1(L, "store.scheduled_events", "store.scheduled_events", "guild_id"); }
 static int api_store_typing(lua_State *L) { return store_sync_1(L, "store.typing", "store.typing", "channel_id"); }
 static int api_store_active_call(lua_State *L) { return store_sync_1(L, "store.active_call", "store.active_call", nullptr); }
+static int api_store_presence(lua_State *L) { return store_sync_1(L, "store.presence", "store.presence", "user_id"); }
+static int api_store_activities(lua_State *L) { return store_sync_1(L, "store.activities", "store.activities", "user_id"); }
 
 static int api_store_has_permission(lua_State *L)
 {
@@ -1020,7 +1052,7 @@ void sb_extend_v3_discord(lua_State *L)
     {"pin", api_msg_pin}, {"unpin", api_msg_pin},
     {"fetch_pins", api_msg_fetch_pins}, {"fetch_history", api_msg_fetch_history},
     {"search", api_msg_search}, {"forward", api_msg_forward},
-    {"send_file", api_msg_send_file}, {"send_poll", api_msg_send_poll},
+    {"send_file", api_msg_send_file}, {"send_file_path", api_msg_send_file_path}, {"send_poll", api_msg_send_poll},
     {"ack", api_msg_ack}, {"mark_unread", api_msg_mark_unread},
     {"save", api_msg_save}, {"unsave", api_msg_unsave}, {"saved", api_msg_saved},
     {"schedule", api_msg_schedule}, {"scheduled_list", api_msg_scheduled_list},
@@ -1039,6 +1071,7 @@ void sb_extend_v3_discord(lua_State *L)
     {"user_note", api_store_user_note}, {"emojis", api_store_emojis},
     {"forum_posts", api_store_forum_posts}, {"scheduled_events", api_store_scheduled_events},
     {"typing", api_store_typing}, {"active_call", api_store_active_call},
+    {"presence", api_store_presence}, {"activities", api_store_activities},
     {nullptr, nullptr},
   };
   sb_v3_extend_ro_global(L, "store", k_store_extra, nullptr, nullptr);

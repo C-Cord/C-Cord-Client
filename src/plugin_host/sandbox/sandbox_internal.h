@@ -16,7 +16,7 @@
 #define SB_IDLE_HOOK_STEP 10000
 #define SB_MAX_TEXT 65536u
 #define SB_MAX_FS_READ_BYTES (16u * 1024u * 1024u)
-#define SB_FS_CHUNK_BYTES (384u * 1024u)
+#define SB_FS_CHUNK_BYTES (512u * 1024u)
 #if CCORD_OS_ANDROID
 #define SB_MAX_HTTP_BODY_BYTES (4u * 1024u * 1024u)
 #else
@@ -40,6 +40,8 @@
 #define SB_KEY_PANELS "ccord.panels"
 #define SB_KEY_ASYNC "ccord.async"
 #define SB_KEY_SETTINGS_CB "ccord.settings_cb"
+#define SB_KEY_SETTINGS_ACT "ccord.settings_act"
+#define SB_KEY_SETTINGS_BTN "ccord.settings_btn"
 #define SB_KEY_KEYBINDS "ccord.keybinds"
 #define SB_KEY_ACTBTNS "ccord.actbtns"
 #define SB_KEY_DECORS "ccord.decors"
@@ -50,6 +52,10 @@
 #define SB_KEY_PROCS "ccord.procs"
 #define SB_KEY_EXPOSED "ccord.exposed"
 #define SB_KEY_VOICE_PCM "ccord.voice_pcm"
+#define SB_KEY_UNLOADS "ccord.unloads"
+#define SB_KEY_TOASTS "ccord.toasts"
+#define SB_KEY_POPUPS "ccord.popups"
+#define SB_USER_GESTURE_WINDOW_MS 2000u
 
 typedef struct sb_timer {
   uint64_t id;
@@ -80,14 +86,18 @@ struct ccord_sandbox {
   size_t ntimers, captimers;
   uint64_t next_timer_id;
   uint64_t next_async_id;
+  uint64_t next_toast_id;
+  uint64_t next_popup_id;
   sb_async_chunk_buf *async_chunks;
   size_t nasync_chunks, capasync_chunks;
   int user_gesture_depth;         // >0 while inside command/menu/action_btn/keybind/panel callback
+  uint64_t last_user_gesture_ms;  // monotonic clock stamp for 2,000 ms post-gesture window
   ccord_sandbox_platform_info plat_info;
   ccord_sandbox_platform_state plat_state;
   const _Atomic bool *cancel;
   int require_depth;
   bool background;                // true while app is backgrounded/minimized: suspends periodic time.every() timers
+  uint64_t unload_deadline_ms;    // >0 while executing bounded plugin.on_unload / app.quit teardown
 };
 
 // Shared internal helpers implemented in sandbox.c
@@ -116,6 +126,9 @@ bool sb_path_under_dir(const char *real_path, const char *real_dir);
 bool sb_read_plugin_asset_bytes(ccord_sandbox *sb, const char *rel_path, size_t rel_len, uint8_t **out_data,
                                 size_t *out_len, char *err_buf, size_t err_cap);
 void sb_install_hook_on_thread(ccord_sandbox *sb, lua_State *co);
+void sb_enter_user_gesture(ccord_sandbox *sb);
+void sb_leave_user_gesture(ccord_sandbox *sb);
+bool sb_in_user_gesture(const ccord_sandbox *sb);
 
 // Pure Class 1 built-in libs + coroutine async (sandbox_libs.c)
 void sb_open_libs_v3(lua_State *L);
