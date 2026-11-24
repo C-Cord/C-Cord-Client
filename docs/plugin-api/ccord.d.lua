@@ -5,12 +5,13 @@
 -- Sandbox guarantees & limits:
 -- - Stdlibs: base, table, string (minus string.dump), math, utf8, coroutine, plugin-scoped require().
 -- - Removed globals: os, io, package, debug, dofile, loadfile, load, print, warn, collectgarbage.
--- - Heap limit: 64 MiB cap (default 32 MiB, desktop out-of-process host) / 32 MiB cap (default 16 MiB, Android in-process worker).
+-- - Heap limit: 32 MiB default / 256 MiB opt-in ceiling (desktop out-of-process host) / 16 MiB default / 64 MiB opt-in ceiling (Android in-process worker).
 --   Manifest `limits.memory_bytes` (floor 1 MiB) is clamped to these ceilings.
--- - Instruction budget: default 50,000,000 instructions per event/callback (manifest `limits.instructions` up to 100,000,000).
+-- - Instruction budget: default 50,000,000 instructions per event/callback (manifest `limits.instructions` up to 500,000,000).
 -- - OS sandbox (desktop `ccord-plugin-host`): Linux fail-closed PR_SET_NO_NEW_PRIVS + Landlock (ABI v1-v3) + seccomp-BPF denylist;
 --   macOS Seatbelt; Windows Job Object process/UI limits + token privilege stripping.
--- - Storage quota (shared by storage.* and settings.*): max 128 keys, 256 KiB total.
+-- - Storage KV quota (shared by storage.* and settings.*): max 4,096 keys, 4 MiB total.
+--   For larger persistent files, use Class 2 `"storage.files"` (`storage.files.*` & `"plugin_data://"` URIs).
 -- - Frozen API tables are read-only proxy tables without __pairs (do not iterate them with pairs()).
 -- - Calling any Class 2 or Class 3 API without declaring its permission in plugin.json fatally
 --   terminates the plugin host (even inside pcall) and logs [undeclared].
@@ -31,6 +32,12 @@ function require(module_name) end
 ---@field version string Semantic version string (MAJOR.MINOR.PATCH)
 ---@field dir string Absolute path to the plugin's directory
 plugin = {}
+
+---Register a LIFO cleanup callback invoked before the plugin unloads or C-Cord exits (bounded 350 ms Lua budget / 500 ms hard teardown ceiling).
+---Receives `reason`: `"disable" | "reload" | "uninstall" | "quit"`.
+---@param fn fun(reason: "disable"|"reload"|"uninstall"|"quit")
+---@return boolean
+function plugin.on_unload(fn) end
 
 ---Read raw bytes of a bundled file inside `plugin.dir` (path <= 256 bytes, file <= 4 MiB; traversal/symlinks blocked).
 ---@param rel_path string Relative path inside plugin.dir
@@ -124,12 +131,48 @@ function log.error(msg) end
 
 ---@class CcordMessageEvent
 ---@field id string Message snowflake (Note: `message.create` also fires for unconfirmed bit-63 local echoes where `math.tointeger(ev.id) == nil`)
----@field guild_id string
+---@field guild_id? string
 ---@field channel_id string
 ---@field author_id string
 ---@field author_name string
+---@field author_bot boolean
 ---@field content string
 ---@field timestamp_ms integer
+---@field edited boolean
+---@field edited_ms? integer Present when edited
+---@field pinned boolean
+---@field reply_to_id? string
+---@field reactions? { emoji: string, count: integer, me: boolean }[]
+---@field flags? integer
+---@field type? integer
+---@field attachments? { id: string, filename: string, content_type: string, url: string, size: integer, width: integer, height: integer }[]
+---@field embeds? { title: string, description: string, url: string, color?: integer }[]
+
+---@class CcordMessagesLoadedEvent
+---@field guild_id? string
+---@field channel_id string
+---@field count integer Number of messages fetched
+---@field is_prepend boolean True when loading older history via scroll-up / `fetch_history`
+---@field oldest_id? string Oldest message snowflake in the loaded batch
+---@field newest_id? string Newest message snowflake in the loaded batch
+
+---@class CcordMessageDeleteBulkEvent
+---@field guild_id? string
+---@field channel_id string
+---@field message_ids string[]
+
+---@class CcordReactionUpdateEvent
+---@field guild_id? string
+---@field channel_id string
+---@field message_id string
+---@field user_id? string
+---@field value integer Total reaction count across all emojis on this message
+---@field count integer Updated count for this specific emoji
+---@field added boolean True when reaction was added, false when removed
+---@field burst boolean True for super-reaction
+---@field remove_all? boolean True when all reactions were cleared
+---@field remove_emoji? boolean True when all reactions for this emoji were cleared
+---@field emoji? { id?: string, name: string }
 
 ---@class CcordChannelEvent
 ---@field guild_id string
@@ -151,7 +194,8 @@ function log.error(msg) end
 events = {}
 ---Subscribe to a Class 1 safe event or a declared Class 2 event (multiple listeners per event allowed).
 ---Class 1 safe events:
----`"app.ready"` (`{ value }`), `"app.lifecycle"` (`{ state }`),
+---`"app.ready"` (`{ value }`), `"app.quit"` (`{ reason = "quit" }`, runs within bounded teardown budget after `plugin.on_unload`),
+---`"app.lifecycle"` (`{ state }`),
 ---`"connection.state"` (`{ value }` 0=disconnected, 1=connecting, 2=connected, 3=failed),
 ---`"guild.select"` (`{ guild_id, name, is_dm }`),
 ---`"channel.select"` (`CcordChannelEvent`),
@@ -165,13 +209,13 @@ events = {}
 ---`"window.resize"` (`{ width, height }`),
 ---`"streamer_mode.change"` (`{ enabled }`).
 ---Class 2 events (require declaring their permission):
----`"events.messages"`: `"message.create"` / `"message.update"` (`CcordMessageEvent`), `"message.delete"` / `"message.pin"` / `"reaction.update"` / `"typing.start"` (`CcordBusNumericEvent`);
----`"events.presence"`: `"presence.update"` (`{ user_id?, value }` 0=offline, 1=online, 2=idle, 3=dnd);
+---`"events.messages"`: `"message.create"` / `"message.update"` (`CcordMessageEvent`), `"messages.loaded"` (`CcordMessagesLoadedEvent`), `"message.delete_bulk"` (`CcordMessageDeleteBulkEvent`), `"reaction.update"` (`CcordReactionUpdateEvent`), `"message.delete"` / `"message.pin"` / `"typing.start"` (`CcordBusNumericEvent`);
+---`"events.presence"`: `"presence.update"` (`CcordPresenceUpdateEvent`, includes `value` 0..3 compat + `status`, `status_name`, `status_text`, `client_status`, `custom_status?`, `activities`);
 ---`"events.voice"`: `"voice.state"` (`{ guild_id?, channel_id?, user_id?, value }` flag bits 0x1=self_mute, 0x2=self_deaf, 0x4=self_video, 0x8=self_stream, 0x10=mute, 0x20=deaf);
 ---`"events.channels"`: `"channel.upsert"` (`CcordChannelEvent`), `"channel.delete"` / `"guilds.loaded"` (`{ value = count }`) / `"notify.update"` (`CcordBusNumericEvent`);
 ---`"ui.composer"`: `"composer.change"` (`{ channel_id, text }`);
 ---`"voice.levels"`: `"voice.levels"`.
----(Note: `"app.quit"`, `"voice.server"`, `"stream.state"`, and `"settings.change"` are accepted by `events.on` as reserved names but are not currently broadcast; use `settings.on_change(fn)` for setting changes.)
+---(Note: `"voice.server"`, `"stream.state"`, and `"settings.change"` are accepted by `events.on` as reserved names but are not currently broadcast; use `settings.on_change(fn)` for setting changes.)
 ---@param name string
 ---@param fn fun(ev: table)
 ---@return boolean
@@ -180,19 +224,31 @@ function events.on(name, fn) end
 ---@param name string
 function events.off(name) end
 
+---@class CcordSettingsVisibleWhen
+---@field key string Other setting key to test
+---@field equals? any Show when value equals this scalar
+---@field not_equals? any Show when value does not equal this scalar
+---@field in? any[] Show when value matches one of these scalars
+---@field truthy? boolean Show when value truthiness matches this boolean
+
 ---@class CcordSettingsField
----@field key? string Storage key (`^[A-Za-z0-9_.-]{1,128}$`; required for all types except "section")
----@field type "section"|"toggle"|"slider"|"select"|"color"|"text"|"secret"
+---@field key? string Storage/action key (`^[A-Za-z0-9_.-]{1,128}$`; required for all types except "section")
+---@field type "section"|"toggle"|"slider"|"select"|"color"|"text"|"secret"|"button"|"path"
 ---@field label string Display label
 ---@field description? string Optional helper text
 ---@field default? any Default value
----@field placeholder? string Placeholder for text/secret fields
+---@field placeholder? string Placeholder for text/secret/path fields
 ---@field min? number Minimum value for slider (default 0)
 ---@field max? number Maximum value for slider (default 100)
 ---@field step? number Step size for slider (default 1)
 ---@field options? (string|{ label: string, value: string })[] Options for select
+---@field button_label? string Button text for `type = "button"` (defaults to `label` or `"Run"`)
+---@field variant? "primary"|"secondary"|"danger" Button style variant for `type = "button"`
+---@field action? fun() Optional inline click callback for `type = "button"` (also triggers `settings.on_action(key)`)
+---@field mode? "file"|"dir" Native picker mode for `type = "path"` (default `"file"`)
+---@field visible_when? CcordSettingsVisibleWhen Optional conditional visibility predicate
 
----Schema-driven native settings UI (Settings -> Plugins -> Configure). Shares storage's 128-key / 256 KiB quota.
+---Schema-driven native settings UI (Settings -> Plugins -> Configure). Shares storage's 4,096-key / 4 MiB KV quota.
 settings = {}
 ---@param fields CcordSettingsField[]
 ---@return boolean
@@ -209,6 +265,9 @@ function settings.set(key, value) end
 function settings.all() end
 ---@param fn fun(key: string, value: any)
 function settings.on_change(fn) end
+---Register a callback invoked whenever the user clicks a `type = "button"` field in Settings (enters a user-gesture window).
+---@param fn fun(key: string)
+function settings.on_action(fn) end
 
 ---@class CcordThemePreset
 ---@field id string Preset identifier (`^[a-z0-9][a-z0-9_-]{0,31}$`)
@@ -284,8 +343,11 @@ function theme.set_background(slot, opts) end
 ---@return boolean
 function theme.reset() end
 
----Persistent plugin-scoped JSON KV store (max 128 keys, 256 KiB total; key regex `^[A-Za-z0-9_.-]{1,128}$`).
-storage = {}
+---Persistent plugin-scoped JSON KV store (max 4,096 keys, 4 MiB total; key regex `^[A-Za-z0-9_.-]{1,128}$`).
+---For larger files, logs, or media, declare Class 2 `"storage.files"` and use `storage.files.*`.
+storage = {
+  files = {},
+}
 ---@param key string
 ---@return any
 function storage.get(key) end
@@ -298,6 +360,72 @@ function storage.delete(key) end
 ---@return string[]
 function storage.keys() end
 function storage.clear() end
+
+-- Class 2 ("storage.files"): plugin-jailed file storage strictly confined to `<ccord_data>/plugin_data/<plugin_id>/`
+-- (relative paths only; symlink/traversal escapes blocked; 256 MiB host-volume free-space floor).
+-- Note: `read`, `read_chunk`, and `stat` also accept read-only `"upload_tmp://<token>"` handles when holding `"messages.hook"`.
+---Class 2 ("storage.files", or `"messages.hook"` for `"upload_tmp://"`): read regular file (<= 16 MiB).
+---@param rel_path string Relative path inside plugin jail (or `"upload_tmp://<token>"`)
+---@return string|nil data
+---@return string|nil err
+function storage.files.read(rel_path) end
+---Class 2 ("storage.files", or `"messages.hook"` for `"upload_tmp://"`): stream up to 512 KiB (`524288` bytes) at `offset` (no total file-size cap).
+---@param rel_path string
+---@param offset? integer Default 0
+---@param length? integer Default/max 524288 (512 KiB)
+---@return string|nil data
+---@return boolean|string eof_or_err
+function storage.files.read_chunk(rel_path, offset, length) end
+---Class 2 ("storage.files"): atomically write a file inside the plugin jail (auto-creates parent dirs).
+---@param rel_path string
+---@param data string
+---@return boolean|nil ok
+---@return string|nil err
+function storage.files.write(rel_path, data) end
+---Class 2 ("storage.files"): write a single chunk (`#data <= 512 KiB`, throws Lua error if larger).
+---@param rel_path string
+---@param data string
+---@param append? boolean
+---@return boolean|nil ok
+---@return string|nil err
+function storage.files.write_chunk(rel_path, data, append) end
+---Class 2 ("storage.files"): append bytes to a file inside the plugin jail.
+---@param rel_path string
+---@param data string
+---@return boolean|nil ok
+---@return string|nil err
+function storage.files.append(rel_path, data) end
+---Class 2 ("storage.files"): atomically rename/move a file or directory within the plugin jail.
+---@param src_rel string
+---@param dst_rel string
+---@return boolean|nil ok
+---@return string|nil err
+function storage.files.rename(src_rel, dst_rel) end
+---Class 2 ("storage.files"): remove a file or directory inside the plugin jail (pass `true` or `{ recursive = true }` for non-empty dirs).
+---@param rel_path string
+---@param recursive_or_opts? boolean|{ recursive?: boolean }
+---@return boolean|nil ok
+---@return string|nil err
+function storage.files.remove(rel_path, recursive_or_opts) end
+---Class 2 ("storage.files"): list entry names inside the jail root or a relative subdirectory.
+---@param rel_dir? string
+---@return string[]|nil entries
+---@return string|nil err
+function storage.files.list(rel_dir) end
+---Class 2 ("storage.files", or `"messages.hook"` for `"upload_tmp://"`): stat a jailed path or upload handle.
+---@param rel_path? string
+---@return { size: integer, mtime: integer, is_dir: boolean, is_file: boolean }|nil stat
+---@return string|nil err
+function storage.files.stat(rel_path) end
+---Class 2 ("storage.files"): create directory and missing parents inside the plugin jail.
+---@param rel_dir string
+---@return boolean|nil ok
+---@return string|nil err
+function storage.files.mkdir(rel_dir) end
+---Class 2 ("storage.files"): report total disk usage inside this plugin's jail.
+---@return { used_bytes: integer, file_count: integer }|nil usage
+---@return string|nil err
+function storage.files.usage() end
 
 clipboard = {}
 ---Class 1 Safe: copy UTF-8 text (<= 64 KiB) to clipboard.
@@ -396,12 +524,41 @@ function json.encode(value) end
 ---@return string|nil err
 function json.decode(str) end
 
----Wall-clock time and timers (max 256 active timers shared across `time.after`, `time.every`, and `async.sleep`).
+---@class CcordLocalTimeParts
+---@field year integer Full year (e.g. 2026)
+---@field month integer 1..12
+---@field day integer 1..31
+---@field hour integer 0..23
+---@field min integer 0..59
+---@field sec integer 0..59
+---@field wday integer 1=Sunday .. 7=Saturday
+---@field yday integer 1..366
+---@field is_dst boolean True if Daylight Saving Time is active
+---@field tz_offset_min integer Local offset from UTC in minutes (e.g. -360)
+
+---@alias CcordDiscordTimeStyle "message"|"clock"|"t"|"T"|"d"|"D"|"f"|"F"|"R"
+
+---Wall-clock time, local timezone formatting, and timers (max 256 active timers shared across `time.after`, `time.every`, and `async.sleep`).
 time = {}
 ---@return integer
 function time.now_ms() end
 ---@return string
 function time.now_iso() end
+---Return local timezone offset from UTC in minutes (e.g. `-360` for UTC-6) at `ms` (defaults to now).
+---@param ms? integer Optional Unix epoch milliseconds
+---@return integer
+function time.tz_offset_min(ms) end
+---Break `ms` (defaults to now) into local calendar/clock components.
+---@param ms? integer Optional Unix epoch milliseconds
+---@return CcordLocalTimeParts|nil parts
+---@return string|nil err
+function time.local_parts(ms) end
+---Format `ms` using C-Cord's native Discord timestamp formatter (`style` defaults to `"message"`, e.g. `"Today at 5:54 AM"`).
+---@param ms integer Unix epoch milliseconds
+---@param style? CcordDiscordTimeStyle Default `"message"`
+---@param use_utc? boolean Format in UTC instead of local timezone (default false)
+---@return string
+function time.format_discord(ms, style, use_utc) end
 ---@param ms integer
 ---@param fn fun()
 ---@return integer timer_id
@@ -581,6 +738,8 @@ function markdown.parse(str) end
 
 ui = {
   contextMenu = {},
+  menu = {},
+  media = {},
   actionButton = {},
   dialog = {},
   file = {},
@@ -600,6 +759,52 @@ ui = {
 ---@return { width: number, height: number }|nil bounds
 ---@return string|nil err
 function ui.measure_text(text, opts) end
+
+---Class 1 Safe (user-gesture guarded within 2,000 ms; suppressed on protected screens): open C-Cord's native user profile popout.
+---@param user_id string User snowflake
+---@param guild_id? string Optional guild snowflake for guild-scoped profile/roles
+---@return boolean ok
+---@return string|nil err
+function ui.open_user_profile(user_id, guild_id) end
+
+---@class CcordMediaOpenItem
+---@field url? string Discord CDN URL (Class 1) or arbitrary HTTPS URL (requires `"network.http"` + `allowed_hosts`)
+---@field local_path? string `"plugin_data://<rel>"` (requires `"storage.files"`) or host path (requires `"fs.read"`)
+---@field texture_key? string Texture key uploaded via `ui.texture.*` (requires `"ui.panel"` or `"ui.decorate"`)
+---@field filename? string Optional display filename
+---@field kind? "image"|"video" Media kind hint (auto-detected if omitted)
+---@field description? string Optional caption/alt text
+
+---@class CcordMediaOpenGallery
+---@field items CcordMediaOpenItem[] 1..10 media items
+---@field index? integer 1-based initial item index (default 1)
+
+---Class 1 Safe (user-gesture guarded within 2,000 ms; suppressed on protected screens): open C-Cord's native image/video lightbox.
+---@param spec CcordMediaOpenItem|CcordMediaOpenGallery
+---@return boolean ok
+---@return string|nil err
+function ui.media.open(spec) end
+
+---@class CcordPopupMenuItem
+---@field id string Non-empty item identifier passed to `on_select`
+---@field label string Display label
+---@field sublabel? string Optional secondary/shortcut text
+---@field danger? boolean Red danger styling
+---@field checked? boolean Show checkmark
+---@field disabled? boolean Grey out / non-clickable
+---@field divider_before? boolean Draw divider line above item
+
+---@class CcordPopupMenuSpec
+---@field x? number Optional viewport X coordinate (defaults to pointer position)
+---@field y? number Optional viewport Y coordinate (defaults to pointer position)
+---@field items CcordPopupMenuItem[] 1..96 menu items
+---@field on_select? fun(id: string|nil) Invoked with selected item `id` (enters fresh user gesture) or `nil` on dismiss
+
+---Class 1 Safe (user-gesture guarded within 2,000 ms; suppressed on protected screens): open a native popup context menu.
+---@param spec CcordPopupMenuSpec
+---@return boolean ok
+---@return string|nil err
+function ui.menu.popup(spec) end
 
 ---@alias CcordMenuTarget "message"|"channel"|"guild"|"member"|"nav"|"profile"|"attachment"|"embed"|"link"|"voice_channel"|"voice_user"|"composer"
 
@@ -661,7 +866,7 @@ function ui.actionButton.add(spec) end
 ---@return boolean
 function ui.actionButton.remove(id) end
 
----Class 1 user-gesture-guarded native dialogs (callable from command, contextMenu, actionButton, keybind, shortcut, panel/decor event callbacks; plugins with `"ui.panel"` bypass the gesture guard).
+---Class 1 user-gesture-guarded native dialogs (callable during or within 2,000 ms of a user gesture: command, contextMenu, menu.popup on_select, actionButton, toast on_action, settings button, keybind, shortcut, panel/decor/local-message event; plugins with `"ui.panel"` bypass the gesture guard).
 ---@param opts { title: string, message?: string, confirm_label?: string, cancel_label?: string }
 ---@param cb? fun(res: { accepted: boolean, value?: boolean }|nil, err: string|nil)
 ---@return { accepted: boolean, value?: boolean }|integer|nil res_or_req_id
@@ -692,9 +897,18 @@ function ui.file.pick(opts, cb) end
 ---@return string|nil err
 function ui.file.save(opts, cb) end
 
+---@class CcordToastOpts
+---@field level? "info"|"warn"|"error" Default `"info"`
+---@field duration_ms? integer Auto-dismiss duration in ms (clamped 800..15000, default 4000)
+---@field action_label? string Optional clickable action pill label (1..47 bytes)
+---@field on_action? fun() Optional click handler for the action pill (enters a fresh 2,000 ms user gesture)
+
+---Display a stacked native toast notification (up to 4 visible simultaneously; `text` 1..512 bytes UTF-8).
+---@overload fun(text: string, opts: CcordToastOpts)
 ---@param text string
 ---@param level? "info"|"warn"|"error"
-function ui.toast.show(text, level) end
+---@param opts? CcordToastOpts
+function ui.toast.show(text, level, opts) end
 ---@param style? "light"|"medium"|"heavy"|"selection"
 ---@return boolean
 function ui.haptics.impact(style) end
@@ -732,6 +946,7 @@ function ui.mobile.set_orientation(mode) end
 ---@field y number Local Y coordinate relative to the hit widget
 ---@field wheel? number Scroll wheel delta (present on `"wheel"`)
 ---@field value? string|number|boolean Updated value (present on `"change"` / `"submit"`)
+---@field values? string[] Updated selection array (present on multi-select `"change"`)
 ---@field key? string Key name (present on `"key_down"`)
 ---@field mods { shift: boolean, ctrl: boolean, alt: boolean, super: boolean }
 
@@ -744,13 +959,14 @@ function ui.mobile.set_orientation(mode) end
 ---@field props? table<string, any> Property map for `"set_props"`
 ---@field node? table Widget subtree for `"append"` or `"replace"`
 
----Class 2 ("ui.panel"): mount a widget panel (max 16/plugin, 64 global, 512 KiB root JSON).
----Widget types: `row`, `col`, `box` (`direction="col"` for vertical), `scroll`, `spacer`, `divider`,
----`text` (`ellipsis` default true; does not wrap), `markdown` (wraps to container width), `icon`,
+---Class 2 ("ui.panel"): mount a widget panel (max 16/plugin, 64 global, 512 KiB root JSON, dynamic heap arrays up to 16,384 nodes/cmds).
+---Widget types (24): `row`, `col`, `box` (`direction="col"` for vertical), `scroll`, `spacer`, `divider`,
+---`text` (`ellipsis` default true, `max_lines` 1..1000), `markdown` (`max_lines` 1..1000), `link` (`url`/`href`, `text`/`label`), `icon`,
 ---`badge`/`chip` (`label`/`text`, `bg` [fallback `color`], `text_color`), `progress`, `image`, `avatar`,
 ---`button` (`label`, `variant="primary"|"secondary"|"ghost"|"danger"`, `size="xs"|"sm"|"md"`, `icon`),
----`toggle`, `checkbox`, `radio`, `slider`, `input`, `select`, `tabs`, `canvas` (`draw[]`, `hits[]`).
----Node size props are `w`, `h`, `min_w`, `max_w`, `min_h`, `max_h` (not `width`/`height`).
+---`toggle`, `checkbox`, `radio`, `slider`, `input`, `textarea` (`rows` 1..24, `max_height`, `submit_on_ctrl_enter`, 16 KiB),
+---`select` (`options`, `value`, `values?`, `placeholder?`, `searchable?`, `multiple?`), `tabs`, `canvas` (`draw[]`, `hits[]`, up to 512 polygon vertices).
+---Node size props are `w`, `h`, `min_w`, `max_w`, `min_h`, `max_h` (not `width`/`height`; `textarea` also accepts `max_height`).
 ---@param spec { id: string, slot?: CcordPanelSlot, height?: number, width?: number, x?: number, y?: number, title?: string, icon?: string, visible?: boolean, root: table, on_event?: fun(ev: CcordPanelEvent) }
 ---@return boolean
 function ui.panel.mount(spec) end
@@ -789,10 +1005,10 @@ function ui.texture.upload_rgba(key, width, height, rgba_bytes) end
 ---@field max_w? integer Default 512, clamped 16..1024
 ---@field max_h? integer Default 512, clamped 16..1024
 ---@field grayscale? boolean Optional: pre-desaturate pixels on upload (Rec.709 luma)
----Class 2+3 ("ui.panel" or "ui.decorate", PLUS "fs.read"): decode & aspect-preserve downscale a local image file
----directly on the host (up to 32 MiB encoded; blocks protected paths and symlinks).
+---Class 2 ("ui.panel" or "ui.decorate", PLUS "storage.files" for `"plugin_data://"` or Class 3 "fs.read" for host paths):
+---decode & aspect-preserve downscale a local image file directly on the host (up to 32 MiB encoded; pool cap 4,096 textures / 128 MiB; blocks protected paths and symlinks).
 ---@param key string
----@param path string
+---@param path string `"plugin_data://<rel>"` or absolute host path
 ---@param opts? CcordTextureUploadFileOpts
 ---@return { width: integer, height: integer }|nil info
 ---@return string|nil err
@@ -835,15 +1051,22 @@ function ui.texture.exists(key) end
 ---@field avatar_opacity? number Live message author avatar opacity (`0.0..1.0`) for `message_style`
 ---@field dim? boolean Dim entire live message row (`0.55` alpha) for `message_style`
 ---@field opacity? number Custom live message row alpha (`0.15..1.0`, clamped at 0.15 floor) for `message_style`
----@field collapsed? boolean Collapse message body behind `collapse_label` (`message_style`)
+---@field collapsed? boolean Collapse message body behind `collapse_label` (`message_style`; hides both `above_body` and `below_body` accessories)
 ---@field collapse_label? string Label shown when collapsed (`message_style`)
----@field priority? integer Higher priority wins for `message_style`
+---@field content_override? string Non-destructive client-only markdown body override (`message_style`, valid UTF-8 <= 64 KiB; suppressed on protected screens)
+---@field embeds_append? table[] Non-destructive client-only appended embeds (`message_style`, up to 10 embeds; remote image/thumbnail URLs restricted to Discord CDN or `allowed_hosts` with `"network.http"`, plus `texture_key`)
+---@field hidden? boolean Hide sidebar channel or member list row (`channel_style` / `member_style`; anti-lockout guard never hides active selected channel and shows `"Show N hidden channels"` toggle)
+---@field priority? integer Higher renders first / wins; tie-breaks by registration order
 ---@field on_event? fun(ev: CcordDecorEvent, target_id: string) Click handler for widgets with `id`
+
+---@class CcordMessageAccessorySpec : CcordDecorSpec
+---@field position? "below_body"|"above_body" Vertical placement relative to message body (default `"below_body"`)
+---@field priority? integer Default `0`; higher renders first (top-most) within the same position, tie-break by registration order
 
 ---@param spec CcordDecorSpec
 ---@return boolean
 function ui.decorate.message_badge(spec) end
----@param spec CcordDecorSpec
+---@param spec CcordMessageAccessorySpec
 ---@return boolean
 function ui.decorate.message_accessory(spec) end
 ---@param spec CcordDecorSpec
@@ -857,10 +1080,16 @@ function ui.decorate.message_style(spec) end
 function ui.decorate.member_badge(spec) end
 ---@param spec CcordDecorSpec
 ---@return boolean
+function ui.decorate.member_style(spec) end
+---@param spec CcordDecorSpec
+---@return boolean
 function ui.decorate.profile_section(spec) end
 ---@param spec CcordDecorSpec
 ---@return boolean
 function ui.decorate.channel_badge(spec) end
+---@param spec CcordDecorSpec
+---@return boolean
+function ui.decorate.channel_style(spec) end
 ---@param spec CcordDecorSpec
 ---@return boolean
 function ui.decorate.guild_badge(spec) end
@@ -904,6 +1133,13 @@ function ui.composer.set_reply(message_id, ping) end
 ---@param spoiler? boolean
 ---@return boolean
 function ui.composer.attach_bytes(filename, data, spoiler) end
+---Class 2 ("ui.composer", PLUS "storage.files" for `"plugin_data://"` or Class 3 "fs.read" for host paths): stage a file from disk as a pending composer upload.
+---@param path string `"plugin_data://<rel>"` or absolute host path
+---@param spoiler? boolean Default false
+---@param filename? string Optional override display filename
+---@return boolean|nil ok
+---@return string|nil err
+function ui.composer.attach_file(path, spoiler, filename) end
 ---@param spec { id: string, trigger: string, description?: string, complete: fun(query: string, ctx: CcordCommandContext): CcordAutocompleteItem[] }
 ---@return boolean
 function ui.composer.register_autocomplete(spec) end
@@ -950,12 +1186,15 @@ function ui.composer.unregister_autocomplete(id) end
 
 ---@class CcordStoreMessage
 ---@field id string
+---@field guild_id? string
 ---@field channel_id string
 ---@field author_id string
 ---@field author_name string
+---@field author_bot boolean
 ---@field content string
 ---@field timestamp_ms integer
 ---@field edited boolean
+---@field edited_ms? integer
 ---@field pinned boolean
 ---@field reply_to_id? string
 ---@field reactions? { emoji: string, count: integer, me: boolean }[]
@@ -963,6 +1202,34 @@ function ui.composer.unregister_autocomplete(id) end
 ---@field type? integer
 ---@field attachments? { id: string, filename: string, content_type: string, url: string, size: integer, width: integer, height: integer }[]
 ---@field embeds? { title: string, description: string, url: string, color?: integer }[]
+
+---@class CcordUserActivity
+---@field type integer Discord activity type (0=Playing, 1=Streaming, 2=Listening, 3=Watching, 4=Custom, 5=Competing)
+---@field name string
+---@field details? string
+---@field state? string
+---@field url? string
+---@field application_id? string
+---@field sync_id? string Spotify track ID or sync key
+---@field session_id? string
+---@field flags? integer
+---@field created_at? integer Epoch ms
+---@field timestamps? { start_ms?: integer, end_ms?: integer }
+---@field party? { id?: string, size?: integer, max?: integer }
+---@field assets? { large_image?: string, large_text?: string, small_image?: string, small_text?: string }
+---@field emoji? { id?: string, name?: string, animated?: boolean }
+
+---@class CcordUserPresence
+---@field user_id string
+---@field status integer 0=offline, 1=online, 2=idle, 3=dnd
+---@field status_name "offline"|"online"|"idle"|"dnd"
+---@field status_text string
+---@field client_status { desktop?: string, mobile?: string, web?: string }
+---@field custom_status? { emoji?: string, text?: string, expires_ms?: integer }
+---@field activities CcordUserActivity[]
+
+---@class CcordPresenceUpdateEvent : CcordUserPresence
+---@field value integer Backward-compatible status integer (0=offline, 1=online, 2=idle, 3=dnd)
 
 ---@class CcordStoreSelected
 ---@field guild_id string
@@ -1128,6 +1395,16 @@ function store.typing(channel_id) end
 ---@return { channel_id: string, active: boolean, region?: string }|nil call
 ---@return string|nil err
 function store.active_call() end
+---Read cached presence, per-platform `client_status`, custom status, and rich activities for `user_id`.
+---@param user_id string
+---@return CcordUserPresence|nil presence
+---@return string|nil err
+function store.presence(user_id) end
+---Read up to 16 cached rich activities (Spotify, games, custom status, etc.) for `user_id`.
+---@param user_id string
+---@return CcordUserActivity[]|nil activities
+---@return string|nil err
+function store.activities(user_id) end
 
 messages = {}
 ---Class 2 ("messages.send")
@@ -1208,6 +1485,14 @@ function messages.forward(dest_channel_id, src_channel_id, message_id) end
 ---@param content? string
 ---@return boolean
 function messages.send_file(channel_id, filename, data, content) end
+---Class 2 ("messages.send", PLUS "storage.files" for `"plugin_data://"` or Class 3 "fs.read" for host paths): upload a file attachment directly from disk.
+---@param channel_id string
+---@param path string `"plugin_data://<rel>"` or absolute host path
+---@param content? string Optional message text
+---@param filename? string Optional override display filename
+---@return boolean|nil ok
+---@return string|nil err
+function messages.send_file_path(channel_id, path, content, filename) end
 ---Class 2 ("messages.send"): post a Discord poll (note: multi-select key is `allow_multiselect`, NOT `multi`).
 ---@param channel_id string
 ---@param spec { question: string, answers: string[], duration_hours?: integer, allow_multiselect?: boolean }
@@ -1258,7 +1543,7 @@ function messages.scheduled_cancel(sched_id) end
 ---@field content_type? string
 ---@field size? integer
 ---@field texture_key? string Uploaded via `ui.texture.upload*` (renders inline thumbnail)
----@field local_path? string Host-side thumbnail decode (requires Class 3 `"fs.read"`, blocks protected paths & symlinks)
+---@field local_path? string Host-side thumbnail decode (`"plugin_data://<rel>"` requires `"storage.files"`; host path requires Class 3 `"fs.read"`, blocks protected paths & symlinks)
 ---@field width? integer
 ---@field height? integer
 
@@ -1297,7 +1582,7 @@ function messages.scheduled_cancel(sched_id) end
 ---@field on_event? fun(ev: CcordLocalMessageEvent)
 
 ---Class 2 ("ui.panel" or "ui.decorate"): inject or upsert a client-only local message card or positioned timeline row.
----Passing `attachments[].local_path` additionally requires Class 3 `"fs.read"`.
+---Passing `attachments[].local_path` additionally requires `"storage.files"` (for `"plugin_data://"`) or Class 3 `"fs.read"` (for host paths).
 ---@param channel_id string
 ---@param spec CcordLocalMessageSpec
 ---@return integer|nil local_id
@@ -1318,7 +1603,42 @@ function messages.dismiss_local(id_or_local_id) end
 ---@return boolean
 function messages.clear_local(channel_id) end
 
----Bounded-timeout synchronous interception hooks (150 ms for send/edit, 120 ms for notification/link_open). Pass explicit `nil` to clear.
+---@class CcordUploadFileInfo
+---@field index integer 1-based attachment index
+---@field filename string
+---@field size integer File size in bytes
+---@field mime string Sniffed MIME type
+---@field spoiler boolean
+---@field dropped? boolean Present in Stage 1 sync hook
+---@field handle? string Read-only `"upload_tmp://<token>"` handle present in Stage 2 async job for files with `async_transform = true` (readable via `storage.files.{read, read_chunk, stat}` with `"messages.hook"`)
+
+---@class CcordUploadReencodeSpec
+---@field format "webp"|"jpeg"|"jpg"|"png"
+---@field quality? integer 1..100 (default 85)
+---@field max_dimension? integer Optional aspect-preserving max width/height in pixels
+
+---@class CcordUploadFilePatch
+---@field filename? string Sanitized replacement filename
+---@field spoiler? boolean Toggle spoiler flag
+---@field drop? boolean Drop this attachment from the outgoing message
+---@field strip_metadata? boolean Pure-C lossless EXIF/XMP/IPTC/COM/tEXt stripping (JPEG/PNG/WebP)
+---@field reencode? CcordUploadReencodeSpec Optional host-side image re-encode / downscale
+---@field async_transform? boolean Stage 1 only: stage read-only `"upload_tmp://<token>"` handle and defer send to Stage 2 async job (10 s timeout)
+---@field replacement_path? string Stage 2 only: replace file bytes from `"plugin_data://<rel>"` (requires `"storage.files"`) or host path (requires `"fs.read"`)
+
+---@class CcordUploadHookResult
+---@field cancel? boolean Cancel the entire outgoing send
+---@field notice? string Optional user-visible status/reason toast
+---@field files? table<integer|string, CcordUploadFilePatch>|CcordUploadFilePatch[] Per-file patches (array or 1-based string/int keyed table)
+
+---@class CcordUploadTransformJob
+---@field job_id integer Pass to `hooks.complete_upload_transform(job_id, patch?)`
+---@field guild_id string
+---@field channel_id string
+---@field content string
+---@field files CcordUploadFileInfo[]
+
+---Bounded-timeout synchronous interception hooks (150 ms for send/edit/before_upload Stage 1, 120 ms for notification/link_open). Pass explicit `nil` to clear.
 hooks = {}
 ---Class 2 ("messages.hook")
 ---@param fn (fun(data: { channel_id: string, reply_to_id?: string, content: string }): string|boolean|{ content?: string, cancel?: boolean, reason?: string }|nil)|nil
@@ -1328,6 +1648,22 @@ function hooks.on_before_send(fn) end
 ---@param fn (fun(data: { channel_id: string, message_id: string, content: string }): string|boolean|{ content?: string, cancel?: boolean, reason?: string }|nil)|nil
 ---@return boolean
 function hooks.on_before_edit(fn) end
+---Class 2 ("messages.hook"): 2-stage handle-based outgoing attachment hook (Stage 1 sync <= 150 ms; optional Stage 2 async handler for `async_transform = true` files).
+---Pass explicit `nil` to unregister both sync and async upload hooks.
+---@param sync_fn (fun(data: { guild_id: string, channel_id: string, content: string, files: CcordUploadFileInfo[] }): CcordUploadHookResult|nil)|nil
+---@param async_fn? fun(job: CcordUploadTransformJob)
+---@return boolean
+function hooks.on_before_upload(sync_fn, async_fn) end
+---Class 2 ("messages.hook"): register or clear the Stage 2 async upload transform callback independently.
+---@param fn (fun(job: CcordUploadTransformJob))|nil
+---@return boolean
+function hooks.on_upload_transform(fn) end
+---Class 2 ("messages.hook"): complete a pending Stage 2 upload transform job and resume (or cancel) the outgoing send.
+---@param job_id integer
+---@param patch? CcordUploadHookResult
+---@return boolean|nil ok
+---@return string|nil err
+function hooks.complete_upload_transform(job_id, patch) end
 ---Class 2 ("notifications.hook")
 ---@param fn (fun(data: { guild_id: string, channel_id: string, message_id: string, author_id: string, content: string, title: string, body: string, is_mention: boolean, is_dm: boolean }): boolean|{ suppress?: boolean, cancel?: boolean, title?: string, body?: string, silent?: boolean }|nil)|nil
 ---@return boolean
@@ -1347,6 +1683,11 @@ function navigation.select_guild(guild_id) end
 ---@param opts? { guild_id?: string, parent_id?: string, name?: string }
 ---@return boolean
 function navigation.select_channel(channel_id, opts) end
+---Switch to `channel_id` (cross-guild if needed), load history around `message_id`, scroll to it, and flash-highlight the message.
+---@param channel_id string
+---@param message_id string
+---@return boolean
+function navigation.jump_to_message(channel_id, message_id) end
 ---@param view "friends"|"requests"|"discovery"
 ---@return boolean
 function navigation.select_view(view) end
@@ -1563,7 +1904,7 @@ function CcordWsHandle:on_error(fn) end
 
 ---@class CcordHttpDownloadOpts
 ---@field url string
----@field dest_path string Absolute destination path (parent dir must exist; protected paths and symlinks blocked)
+---@field dest_path string `"plugin_data://<rel>"` (requires `"storage.files"`) or absolute host path (requires `"fs.write"`; parent dir must exist; protected paths and symlinks blocked)
 ---@field headers? table<string, string>
 ---@field timeout_ms? integer Default 30000, clamped 1000..300000
 ---@field max_bytes? integer Default 64 MiB, hard cap 256 MiB
@@ -1593,7 +1934,7 @@ net["local"] = net.local_net
 ---@return CcordHttpResponse|integer|nil resp_or_req_id
 ---@return string|nil err
 function net.http.request(opts, cb) end
----Class 3 ("network.http" or "network.local" for loopback, PLUS "fs.write"): stream an HTTP(S) resource directly to disk
+---Class 3 ("network.http" or "network.local" for loopback, PLUS "storage.files" for `"plugin_data://"` or "fs.write" for host paths): stream an HTTP(S) resource directly to disk
 ---via a sibling temp file + atomic rename with zero Lua heap overhead (cross-platform: Linux, macOS, Windows, Android).
 ---Non-2xx responses unlink the temp file and resolve `{ status, ok = false, bytes = 0, content_type? }`.
 ---@param opts CcordHttpDownloadOpts
@@ -1683,10 +2024,10 @@ function fs.list(path) end
 ---@return { size: integer, mtime: integer, is_dir: boolean, is_file: boolean }|nil stat
 ---@return string|nil err
 function fs.stat(path) end
----Class 3 ("fs.read"): read up to 384 KiB (`393216` bytes) from a regular file (<= 16 MiB total size).
+---Class 3 ("fs.read"): stream up to 512 KiB (`524288` bytes) from a regular file at `offset` (no total file-size cap).
 ---@param path string
 ---@param offset? integer Default 0
----@param length? integer Default/max 393216 (384 KiB)
+---@param length? integer Default/max 524288 (512 KiB)
 ---@return string|nil data
 ---@return boolean|string eof_or_err
 function fs.read_chunk(path, offset, length) end
@@ -1702,13 +2043,19 @@ function fs.write(path, data) end
 ---@return boolean|nil ok
 ---@return string|nil err
 function fs.append(path, data) end
----Class 3 ("fs.write"): write a single chunk (`#data <= 384 KiB`, throws Lua error if larger).
+---Class 3 ("fs.write"): write a single chunk (`#data <= 512 KiB`, throws Lua error if larger).
 ---@param path string
 ---@param data string
 ---@param append? boolean
 ---@return boolean|nil ok
 ---@return string|nil err
 function fs.write_chunk(path, data, append) end
+---Class 3 ("fs.write"): atomically rename/move a file or directory (blocks protected paths & symlinks).
+---@param src_path string
+---@param dst_path string
+---@return boolean|nil ok
+---@return string|nil err
+function fs.rename(src_path, dst_path) end
 ---Class 3 ("fs.write"): create directory and missing parents (`mkdir -p`).
 ---@param path string
 ---@return boolean|nil ok

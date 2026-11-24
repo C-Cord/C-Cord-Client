@@ -2,20 +2,20 @@
 """Sync & verify C-Cord Plugin API v1 docs between C-Cord and plugin-catalog.
 
 Automatically audits C-source-vs-docs parity across:
-  - Permissions (43) & API classes: src/ipc/perm.c vs validate.go vs web/docs/index.html
-  - Capabilities (14): src/plugins/package/manifest.c vs validate.go vs index.html vs ccord.d.lua
-  - Platforms (8): src/plugins/package/manifest.c vs validate.go vs index.html
-  - Panel slots (19): src/plugin_host/sandbox/sandbox_v3_ui.c vs index.html vs ccord.d.lua
+  - Permissions (47) & API classes: src/ipc/perm.c vs validate.go vs web/assets/docs.js
+  - Capabilities (14): src/plugins/package/manifest.c vs validate.go vs docs.js vs ccord.d.lua
+  - Platforms (8): src/plugins/package/manifest.c vs validate.go vs docs.js
+  - Panel slots (19): src/plugin_host/sandbox/sandbox_v3_ui.c vs docs.js vs ccord.d.lua
   - Context menu targets (12): src/plugin_host/sandbox/sandbox_v3_ui.c vs ccord.d.lua
-  - Event names (32): sandbox_api_v1.c + sandbox_v3_ui.c vs index.html
-  - Panel event types (17): src/plugins/core/plugins.c vs index.html vs ccord.d.lua
-  - Panel widget types (23 strings / 22 rows): plugin_panel_compile.c vs index.html
-  - Canvas draw commands (23 strings / 19 rows): plugin_panel_compile.c vs index.html
-  - Panel patch ops (6): contrib_panel_patch.c vs index.html
+  - Event names (35): sandbox_api_v1.c + sandbox_v3_ui.c vs docs.js
+  - Panel event types (17): src/plugins/core/plugins.c vs docs.js vs ccord.d.lua
+  - Panel widget types (25 strings / 24 rows): plugin_panel_compile.c vs docs.js
+  - Canvas draw commands (23 strings / 19 rows): plugin_panel_compile.c vs docs.js
+  - Panel patch ops (6): contrib_panel_patch.c vs docs.js
   - Built-in earcons (20): src/app/desktop/earcons.c vs ccord.d.lua
-  - Theme colors (41) & metrics (49) + exact values: assets/themes/c-cord-*.theme vs index.html
-  - Banned stale doc patterns across docs/plugin-api/*, web/docs/index.html, and llms.txt
-  - File sync: docs/plugin-api/ccord.d.lua -> web/docs/ccord.d.lua, index.html -> web/docs/llms.txt
+  - Theme colors (41) & metrics (49) + exact values: assets/themes/c-cord-*.theme vs docs.js
+  - Banned stale doc patterns across docs/plugin-api/*, web/docs/index.html, web/assets/docs.js, and llms.txt
+  - File sync: docs/plugin-api/ccord.d.lua -> web/docs/ccord.d.lua, docs.js -> web/docs/llms.txt
 """
 import argparse
 import json
@@ -45,7 +45,7 @@ BANNED_PATTERNS = [
     (r'\bdefault_value\s*=', "ui.dialog.prompt uses default, not default_value"),
     (r'messages\.schedule\(\s*cid\s*,\s*send_at', "messages.schedule arg order is (cid, content, due_unix_ms)"),
     (r'\bcol\s*/\s*column\b', 'only "col" is compiled in plugin_panel_compile.c, not "column"'),
-    (r'zero artificial memory', "Lua heap is capped at 64 MiB desktop / 32 MiB Android"),
+    (r'zero artificial memory', "Lua heap is capped at 256 MiB opt-in desktop / 64 MiB opt-in Android"),
 ]
 
 
