@@ -493,11 +493,21 @@ static void test_preview_and_system_text(void)
     {7, "joined the server."}, {8, "boosted the server!"}, {9, "boosted the server, which reached Level 1!"},
     {10, "boosted the server, which reached Level 2!"}, {11, "boosted the server, which reached Level 3!"},
     {12, "added a channel to follow."}, {18, "started a thread:"}, {22, "Wondering who to invite? Share the server link!"},
+    {25, "subscribed to a server role."}, {27, "started a Stage:"}, {28, "ended the Stage:"},
+    {29, "is now a speaker."}, {30, "requested to speak."}, {31, "changed the Stage topic:"},
+    {44, "purchased a server product."}, {45, "invited you to a voice hangout."},
+    {63, "added a new emoji."}, {65, "started a voice hangout."},
+    {67, "accepted your friend request."},
   };
   for (size_t i = 0; i < sizeof phrases / sizeof phrases[0]; i++) {
     const char *got = ccord_message_type_phrase(phrases[i].type);
     CT_CHECK(got != nullptr && strcmp(got, phrases[i].text) == 0);
   }
+  CT_CHECK(ccord_message_type_appends_content(4) && ccord_message_type_appends_content(18) &&
+           ccord_message_type_appends_content(27) && ccord_message_type_appends_content(28) &&
+           ccord_message_type_appends_content(31));
+  CT_CHECK(!ccord_message_type_appends_content(0) && !ccord_message_type_appends_content(6) &&
+           !ccord_message_type_appends_content(7) && !ccord_message_type_appends_content(67));
 
   // The cut never lands inside a character: a four-byte one, a three-byte one, and a sequence the text ends in the middle of.
   ccord_message emoji = {.content = "ab\xF0\x9F\x98\x80"};

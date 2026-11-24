@@ -340,6 +340,9 @@ size_t ccord_session_pull_voice_pcm(ccord_session *s, int16_t *pcm, size_t max_s
 // Sends a sticker-only message (POST /channels/{id}/messages with sticker_ids).
 [[nodiscard]] ccord_status ccord_session_send_sticker(ccord_session *s, ccord_id channel_id, ccord_id sticker_id,
                                                       ccord_error *err);
+// Sends a greet sticker (POST /channels/{id}/greet with sticker_ids, e.g. CCORD_WAVE_STICKER_ID).
+[[nodiscard]] ccord_status ccord_session_send_greet(ccord_session *s, ccord_id channel_id, ccord_id sticker_id,
+                                                    ccord_id reply_to_id, ccord_error *err);
 // Toggles `gif` in the store's favorite-GIF list and writes the updated list back to Discord via lossless
 // FrecencyUserSettings re-encoding (PATCH /users/@me/settings-proto/2, preserving every other wire field).
 [[nodiscard]] ccord_status ccord_session_toggle_favorite_gif(ccord_session *s, const ccord_gif_item *gif,

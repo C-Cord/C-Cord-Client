@@ -547,6 +547,7 @@ ccord_status live_request_expression_data(ccord_transport *t, ccord_expr_kind ki
 ccord_status live_patch_settings_proto(ccord_transport *t, const uint8_t *proto, size_t proto_len, ccord_error *err);
 ccord_status live_set_status_proto(ccord_transport *t, const ccord_proto_status *st, ccord_error *err);
 ccord_status live_send_sticker(ccord_transport *t, ccord_id channel_id, ccord_id sticker_id, ccord_error *err);
+ccord_status live_send_greet(ccord_transport *t, ccord_id channel_id, ccord_id sticker_id, ccord_id reply_to_id, ccord_error *err);
 ccord_status live_vote_poll(ccord_transport *t, ccord_id channel_id, ccord_id message_id, const uint32_t *answer_ids, size_t answer_count, ccord_error *err);
 ccord_status live_send_interaction(ccord_transport *t, const ccord_interaction_request *req, ccord_error *err);
 ccord_status live_request_discoverable_guilds(ccord_transport *t, const char *query, uint32_t category_id, uint32_t offset, uint32_t limit, ccord_error *err);

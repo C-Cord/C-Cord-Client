@@ -1413,6 +1413,7 @@ static const ccord_transport_vtable k_live_vt = {
   .create_forum_post = live_create_forum_post,
   .request_expression_data = live_request_expression_data,
   .send_sticker = live_send_sticker,
+  .send_greet = live_send_greet,
   .vote_poll = live_vote_poll,
   .send_interaction = live_send_interaction,
   .send_reply_ex = live_send_reply_ex,

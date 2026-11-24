@@ -572,7 +572,45 @@ const char *ccord_message_type_phrase(uint16_t type)
     case 12: return "added a channel to follow.";
     case 18: return "started a thread:";
     case 22: return "Wondering who to invite? Share the server link!";
+    case 25: return "subscribed to a server role.";
+    case 27: return "started a Stage:";
+    case 28: return "ended the Stage:";
+    case 29: return "is now a speaker.";
+    case 30: return "requested to speak.";
+    case 31: return "changed the Stage topic:";
+    case 32: return "upgraded an app in this server.";
+    case 33: return "added an app to the group.";
+    case 34: return "removed an app from the group.";
+    case 36: return "enabled security actions for this server.";
+    case 37: return "disabled security actions for this server.";
+    case 38: return "reported a raid in this server.";
+    case 39: return "reported a false alarm.";
+    case 44: return "purchased a server product.";
+    case 45: return "invited you to a voice hangout.";
+    case 52: return "approved a join request.";
+    case 53: return "rejected a join request.";
+    case 54: return "withdrew a join request.";
+    case 55: return "upgraded the stream to HD.";
+    case 56: return "set a chat wallpaper.";
+    case 57: return "removed the chat wallpaper.";
+    case 63: return "added a new emoji.";
+    case 64: return "invited you to a Nitro group.";
+    case 65: return "started a voice hangout.";
+    case 67: return "accepted your friend request.";
     default: return nullptr;
+  }
+}
+
+bool ccord_message_type_appends_content(uint16_t type)
+{
+  switch (type) {
+    case 4:    // CHANNEL_NAME_CHANGE
+    case 18:   // THREAD_CREATED
+    case 27:   // STAGE_START
+    case 28:   // STAGE_END
+    case 31:   // STAGE_TOPIC
+      return true;
+    default: return false;
   }
 }
 

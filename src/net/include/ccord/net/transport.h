@@ -731,6 +731,9 @@ typedef struct ccord_transport_vtable {
   void (*set_suspended)(ccord_transport *t, bool suspended);
   // Optional. Live download byte progress for an in-flight fetch_media(url). Returns true while active.
   bool (*media_progress)(const ccord_transport *t, const char *url, uint64_t *out_now, uint64_t *out_total);
+  // Optional. POST /channels/{id}/greet {"sticker_ids":[id], "message_reference":{...}} -> MESSAGE_CREATE.
+  ccord_status (*send_greet)(ccord_transport *t, ccord_id channel_id, ccord_id sticker_id,
+                             ccord_id reply_to_id, ccord_error *err);
 } ccord_transport_vtable;
 struct ccord_transport { const ccord_transport_vtable *vt; };           // implementations embed this as first member
 [[nodiscard]] static inline ccord_status ccord_transport_connect(ccord_transport *t, ccord_error *e) { return t->vt->connect(t, e); }
@@ -982,6 +985,14 @@ static inline size_t ccord_transport_pull_voice_pcm(ccord_transport *t, int16_t 
   if (!CCORD_TRANSPORT_OPTIONAL(t, send_sticker))
     return ccord_error_set(e, CCORD_ERR_UNSUPPORTED, "transport: stickers not supported");
   return t->vt->send_sticker(t, c, sticker, e);
+}
+[[nodiscard]] static inline ccord_status ccord_transport_send_greet(ccord_transport *t, ccord_id c, ccord_id sticker,
+                                                                    ccord_id reply_to, ccord_error *e) {
+  if (CCORD_TRANSPORT_OPTIONAL(t, send_greet))
+    return t->vt->send_greet(t, c, sticker, reply_to, e);
+  if (CCORD_TRANSPORT_OPTIONAL(t, send_sticker))
+    return t->vt->send_sticker(t, c, sticker, e);
+  return ccord_error_set(e, CCORD_ERR_UNSUPPORTED, "transport: greet stickers not supported");
 }
 [[nodiscard]] static inline ccord_status ccord_transport_admin_action(ccord_transport *t, const ccord_admin_request *req,
                                                                       ccord_error *e) {

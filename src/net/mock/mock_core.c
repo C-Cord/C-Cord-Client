@@ -823,6 +823,7 @@ static const ccord_transport_vtable mock_vtable = {
   .request_members = mock_request_members,
   .request_expression_data = mock_request_expression_data,
   .send_sticker = mock_send_sticker,
+  .send_greet = mock_send_greet,
   .request_forum_posts = mock_request_forum_posts,
   .create_forum_post = mock_create_forum_post,
   .vote_poll = mock_vote_poll,

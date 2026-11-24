@@ -726,6 +726,25 @@ ccord_status ccord_session_send_sticker(ccord_session *s, ccord_id channel_id, c
   return ccord_transport_send_sticker(s->transport, channel_id, sticker_id, err);
 }
 
+ccord_status ccord_session_send_greet(ccord_session *s, ccord_id channel_id, ccord_id sticker_id,
+                                      ccord_id reply_to_id, ccord_error *err)
+{
+  SESSION_STALE_GUARD(s, err);
+  if (!s) return ccord_error_set(err, CCORD_ERR_INVALID, "session: null session");
+  if (sticker_id == CCORD_ID_NONE) return ccord_error_set(err, CCORD_ERR_INVALID, "session: sticker id");
+  const ccord_channel *ch = ccord_store_channel(s->store, channel_id);
+  if (!ch) return ccord_error_set(err, CCORD_ERR_NOT_FOUND, "unknown channel");
+  if (!session_channel_has_chat(ch)) return ccord_error_set(err, CCORD_ERR_INVALID, "channel has no chat");
+  if (ch->guild_id == CCORD_DM_GUILD_ID && ch->is_message_request) {
+    return ccord_error_set(err, CCORD_ERR_PERMISSION, "Accept the message request before replying.");
+  }
+  ccord_status gate = session_screening_gate(s, ch, err);
+  if (gate != CCORD_OK) return gate;
+  ccord_status tlock = sess_check_thread_lock(s, ch, err);
+  if (tlock != CCORD_OK) return tlock;
+  return ccord_transport_send_greet(s->transport, channel_id, sticker_id, reply_to_id, err);
+}
+
 ccord_status ccord_session_toggle_favorite_gif(ccord_session *s, const ccord_gif_item *gif, ccord_error *err)
 {
   ccord_error_clear(err);

@@ -411,7 +411,8 @@ ccord_status mock_send_sticker(ccord_transport *t, ccord_id channel_id, ccord_id
     }
   }
   if (!found_custom) {
-    if (sticker_id == 8001) { sname = "WumpusHi"; sfmt = 1; }
+    if (sticker_id == CCORD_WAVE_STICKER_ID) { sname = "Wave"; sfmt = CCORD_STICKER_LOTTIE; }
+    else if (sticker_id == 8001) { sname = "WumpusHi"; sfmt = 1; }
     else if (sticker_id == 8002) { sname = "WumpusHype"; sfmt = 2; }
     else if (sticker_id == 8003) { sname = "WumpusSleep"; sfmt = 1; }
     else if (sticker_id == 8004) { sname = "ClydeBot"; sfmt = 1; }
@@ -424,6 +425,13 @@ ccord_status mock_send_sticker(ccord_transport *t, ccord_id channel_id, ccord_id
   ccord_message msg = mk_store_new_rich(m, ci, m->self_id, "", 0, &rich, err, &st);
   if (st != CCORD_OK) return st;
   return mk_queue_message_create(m, msg, mk_now_of(m) + m->cfg.latency_ms, err);
+}
+
+ccord_status mock_send_greet(ccord_transport *t, ccord_id channel_id, ccord_id sticker_id,
+                             ccord_id reply_to_id, ccord_error *err)
+{
+  (void)reply_to_id;
+  return mock_send_sticker(t, channel_id, sticker_id, err);
 }
 
 static bool mock_post_matches_query(const ccord_forum_post *p, const ccord_forum_query *q)

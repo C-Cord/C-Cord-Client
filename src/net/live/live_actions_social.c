@@ -954,6 +954,37 @@ ccord_status live_send_sticker(ccord_transport *t, ccord_id channel_id, ccord_id
   return st;
 }
 
+ccord_status live_send_greet(ccord_transport *t, ccord_id channel_id, ccord_id sticker_id,
+                             ccord_id reply_to_id, ccord_error *err)
+{
+  live *l = (live *)t;
+  ccord_error_clear(err);
+  if (!live_is_authenticated(l)) return ccord_error_set(err, CCORD_ERR_INVALID, "live: not connected");
+  if (channel_id == CCORD_ID_NONE || sticker_id == CCORD_ID_NONE) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "live: invalid greet message ids");
+  }
+  if (!l->restq) return ccord_error_set(err, CCORD_ERR_IO, "live: REST queue unavailable");
+
+  char path[128], body[256];
+  snprintf(path, sizeof path, "/channels/%llu/greet", (unsigned long long)channel_id);
+  if (reply_to_id != CCORD_ID_NONE) {
+    snprintf(body, sizeof body,
+             "{\"sticker_ids\":[\"%llu\"],\"message_reference\":{\"channel_id\":\"%llu\",\"message_id\":\"%llu\"}}",
+             (unsigned long long)sticker_id, (unsigned long long)channel_id, (unsigned long long)reply_to_id);
+  } else {
+    snprintf(body, sizeof body, "{\"sticker_ids\":[\"%llu\"]}", (unsigned long long)sticker_id);
+  }
+
+  live_rest_op *op = ccord_calloc(1, sizeof *op);
+  if (!op) return ccord_error_set(err, CCORD_ERR_NOMEM, "live: out of memory");
+  op->l = l;
+  op->kind = LIVE_REST_SEND_STICKER;
+  op->channel_id = channel_id;
+  ccord_status st = live_queue_add(l, CCORD_REST_POST, path, body, op, err);
+  if (st != CCORD_OK) live_rest_op_free(op);
+  return st;
+}
+
 
 ccord_status live_request_discoverable_guilds(ccord_transport *t, const char *query, uint32_t category_id,
                                                      uint32_t offset, uint32_t limit, ccord_error *err)

@@ -371,10 +371,15 @@ void ccord_message_rich_free(ccord_message_rich *r);
 [[nodiscard]] bool ccord_attachment_is_video(const ccord_attachment *a);
 [[nodiscard]] bool ccord_attachment_is_audio(const ccord_attachment *a);
 
-// System messages (joins, boosts, pins ...): a type that is not an ordinary message, and the words that follow the
-// author's name for it ("joined the server."; nullptr when there is no standard wording).
+// System messages (joins, boosts, pins, friend accept ...): a type that is not an ordinary message, the words that
+// follow the author's name ("joined the server."; nullptr when there is no standard wording), and whether non-empty
+// message content names the object appended after the phrase (e.g. channel name, thread title, Stage topic).
 [[nodiscard]] bool ccord_message_type_is_system(uint16_t type);
 [[nodiscard]] const char *ccord_message_type_phrase(uint16_t type);
+[[nodiscard]] bool ccord_message_type_appends_content(uint16_t type);
+
+// Discord's built-in standard Wumpus "Wave" greeting sticker (used by "Wave to <user>" prompts).
+#define CCORD_WAVE_STICKER_ID 749054660769218631ULL
 
 // A single line saying what a message is: its text, or for a message without text what it carries ("Image", "Sticker: wave",
 // "Poll: Pizza?" ...). Newlines become spaces; the result is cut to `cap` - 1 bytes. Returns the length.

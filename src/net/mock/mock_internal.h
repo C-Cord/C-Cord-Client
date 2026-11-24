@@ -449,6 +449,7 @@ ccord_status mock_request_expression_data(ccord_transport *t, ccord_expr_kind ki
 ccord_status mock_patch_settings_proto(ccord_transport *t, const uint8_t *proto, size_t proto_len, ccord_error *err);
 ccord_status mock_set_status_proto(ccord_transport *t, const ccord_proto_status *st, ccord_error *err);
 ccord_status mock_send_sticker(ccord_transport *t, ccord_id channel_id, ccord_id sticker_id, ccord_error *err);
+ccord_status mock_send_greet(ccord_transport *t, ccord_id channel_id, ccord_id sticker_id, ccord_id reply_to_id, ccord_error *err);
 size_t mock_find_forum_meta(const mock *m, ccord_id forum_id);
 ccord_status mock_request_forum_posts(ccord_transport *t, const ccord_forum_query *query, ccord_error *err);
 ccord_status mock_create_forum_post(ccord_transport *t, ccord_id forum_id, const char *title, size_t title_len, const char *content, size_t content_len, const ccord_id *tag_ids, size_t tag_count, ccord_error *err);
