@@ -21,6 +21,10 @@
 #define VG_DSP_TAIL 4800       // 100 ms echo tail
 #define VG_DSP_REF_FRAMES 8u   // playback-reference FIFO depth (frames)
 #define VG_DSP_MAX_CH 2u
+#define VG_DSP_AEC_HOLD_FRAMES 10u      // 200 ms tail hold after last non-zero playback reference
+#define VG_DSP_STEREO_DIFF_THRESH 64    // ignore <= 64 LSB L/R noise floor when detecting stereo
+#define VG_DSP_STEREO_MIN_SAMPLES 16u   // samples/frame above threshold required to treat input as stereo
+#define VG_DSP_MONO_RETURN_FRAMES 50u   // 1 s of mono frames returns a 2-channel chain to single-channel DSP
 
 struct ccord_voice_dsp {
   ccord_voice_config cfg;
@@ -31,7 +35,9 @@ struct ccord_voice_dsp {
   int16_t *ref;      // lazily allocated VG_DSP_REF_FRAMES * VG_DSP_FRAME * channels when cfg.aec is true
   size_t ref_head;   // oldest buffered frame
   size_t ref_count;
-  bool stereo_active; // true once a stereo (L != R) frame has been seen on a 2-channel chain
+  uint16_t aec_hold_frames; // remaining 20 ms frames to run AEC after non-zero playback reference
+  uint16_t mono_streak;     // consecutive mono frames seen while stereo_active is true
+  bool stereo_active;       // true while meaningful stereo (L != R) input is active on a 2-channel chain
 #endif
 };
 
@@ -57,6 +63,8 @@ static void dsp_free_states(ccord_voice_dsp *d)
   d->ref = nullptr;
   d->ref_head = 0;
   d->ref_count = 0;
+  d->aec_hold_frames = 0;
+  d->mono_streak = 0;
   d->stereo_active = false;
 }
 
@@ -131,6 +139,20 @@ static void dsp_ref_pop(ccord_voice_dsp *d, int16_t *out)
   d->ref_head = (d->ref_head + 1u) % VG_DSP_REF_FRAMES;
   d->ref_count--;
 }
+// Detects meaningful stereo separation rather than single-sample ADC noise.
+static bool dsp_frame_is_stereo(const int16_t *pcm)
+{
+  size_t diff_count = 0;
+  for (size_t i = 0; i < VG_DSP_FRAME; i++) {
+    int32_t diff = (int32_t)pcm[i * 2u] - (int32_t)pcm[i * 2u + 1u];
+    if (diff < 0) diff = -diff;
+    if (diff > VG_DSP_STEREO_DIFF_THRESH) {
+      diff_count++;
+      if (diff_count >= VG_DSP_STEREO_MIN_SAMPLES) return true;
+    }
+  }
+  return false;
+}
 #endif  // VG_DSP_HAVE_SPEEX
 
 ccord_voice_dsp *ccord_voice_dsp_create(const ccord_voice_config *cfg, unsigned channels)
@@ -169,12 +191,14 @@ bool ccord_voice_dsp_process(ccord_voice_dsp *d, int16_t *pcm, size_t frames)
   if (!d || !pcm || frames != VG_DSP_FRAME) return false;
 #if VG_DSP_HAVE_SPEEX
   if (!d->pre[0]) return true;  // passthrough (unavailable or all toggles off)
-  bool do_aec = d->cfg.aec && d->echo[0] != nullptr;
+  // Skip Speex AEC completely when no non-zero playback reference has arrived in the last 200 ms.
+  bool do_aec = d->cfg.aec && d->echo[0] != nullptr && (d->ref_count > 0 || d->aec_hold_frames > 0);
   if (d->channels == 1u) {
     if (do_aec) {
       int16_t ref_ch[VG_DSP_FRAME];
       int16_t out_ch[VG_DSP_FRAME];
       dsp_ref_pop(d, ref_ch);
+      if (d->aec_hold_frames > 0) d->aec_hold_frames--;
       speex_echo_playback(d->echo[0], ref_ch);
       speex_echo_capture(d->echo[0], pcm, out_ch);
       (void)speex_preprocess_run(d->pre[0], out_ch);
@@ -185,42 +209,52 @@ bool ccord_voice_dsp_process(ccord_voice_dsp *d, int16_t *pcm, size_t frames)
     return true;
   }
 
-  // 2-channel interleaved input: detect dual-mono (L == R) until true stereo is observed.
-  if (!d->stereo_active) {
-    bool is_mono = true;
-    for (size_t i = 0; i < VG_DSP_FRAME; i++) {
-      if (pcm[i * 2u] != pcm[i * 2u + 1u]) {
-        is_mono = false;
-        break;
+  // 2-channel interleaved input: require meaningful stereo separation to engage channel 1,
+  // and drop back to single-channel DSP after 1 s of mono frames.
+  bool is_stereo = dsp_frame_is_stereo(pcm);
+  if (d->stereo_active) {
+    if (is_stereo) {
+      d->mono_streak = 0;
+    } else {
+      d->mono_streak++;
+      if (d->mono_streak >= VG_DSP_MONO_RETURN_FRAMES) {
+        d->stereo_active = false;
+        d->mono_streak = 0;
       }
     }
-    if (is_mono) {
-      int16_t mic_ch[VG_DSP_FRAME];
-      for (size_t i = 0; i < VG_DSP_FRAME; i++) mic_ch[i] = pcm[i * 2u];
-      int16_t *out = mic_ch;
-      int16_t out_ch[VG_DSP_FRAME];
-      if (do_aec) {
-        int16_t ref_frame[VG_DSP_FRAME * VG_DSP_MAX_CH];
-        int16_t ref_ch[VG_DSP_FRAME];
-        dsp_ref_pop(d, ref_frame);
-        for (size_t i = 0; i < VG_DSP_FRAME; i++) {
-          ref_ch[i] = (int16_t)(((int32_t)ref_frame[i * 2u] + (int32_t)ref_frame[i * 2u + 1u]) / 2);
-        }
-        speex_echo_playback(d->echo[0], ref_ch);
-        speex_echo_capture(d->echo[0], mic_ch, out_ch);
-        out = out_ch;
-      }
-      (void)speex_preprocess_run(d->pre[0], out);
-      for (size_t i = 0; i < VG_DSP_FRAME; i++) {
-        int16_t s = out[i];
-        pcm[i * 2u] = s;
-        pcm[i * 2u + 1u] = s;
-      }
-      return true;
-    }
+  } else if (is_stereo) {
     if (dsp_init_channel(d, 1u)) {
       d->stereo_active = true;
+      d->mono_streak = 0;
     }
+  }
+
+  if (!d->stereo_active) {
+    int16_t mic_ch[VG_DSP_FRAME];
+    for (size_t i = 0; i < VG_DSP_FRAME; i++) {
+      mic_ch[i] = (int16_t)(((int32_t)pcm[i * 2u] + (int32_t)pcm[i * 2u + 1u]) / 2);
+    }
+    int16_t *out = mic_ch;
+    int16_t out_ch[VG_DSP_FRAME];
+    if (do_aec) {
+      int16_t ref_frame[VG_DSP_FRAME * VG_DSP_MAX_CH];
+      int16_t ref_ch[VG_DSP_FRAME];
+      dsp_ref_pop(d, ref_frame);
+      if (d->aec_hold_frames > 0) d->aec_hold_frames--;
+      for (size_t i = 0; i < VG_DSP_FRAME; i++) {
+        ref_ch[i] = (int16_t)(((int32_t)ref_frame[i * 2u] + (int32_t)ref_frame[i * 2u + 1u]) / 2);
+      }
+      speex_echo_playback(d->echo[0], ref_ch);
+      speex_echo_capture(d->echo[0], mic_ch, out_ch);
+      out = out_ch;
+    }
+    (void)speex_preprocess_run(d->pre[0], out);
+    for (size_t i = 0; i < VG_DSP_FRAME; i++) {
+      int16_t s = out[i];
+      pcm[i * 2u] = s;
+      pcm[i * 2u + 1u] = s;
+    }
+    return true;
   }
 
   int16_t mic_ch[VG_DSP_FRAME];
@@ -229,6 +263,7 @@ bool ccord_voice_dsp_process(ccord_voice_dsp *d, int16_t *pcm, size_t frames)
     int16_t ref_ch[VG_DSP_FRAME];
     int16_t out_ch[VG_DSP_FRAME];
     dsp_ref_pop(d, ref_frame);
+    if (d->aec_hold_frames > 0) d->aec_hold_frames--;
     for (unsigned ch = 0; ch < d->channels; ch++) {
       if (!d->pre[ch]) continue;
       for (size_t i = 0; i < VG_DSP_FRAME; i++) {
@@ -264,7 +299,21 @@ void ccord_voice_dsp_playback(ccord_voice_dsp *d, const int16_t *pcm, size_t fra
   if (!d || !pcm || frames != VG_DSP_FRAME) return;
 #if VG_DSP_HAVE_SPEEX
   if (!d->cfg.aec || !d->echo[0] || !d->ref) return;
-  dsp_ref_push(d, pcm);
+  bool nonzero = false;
+  size_t total = VG_DSP_FRAME * (size_t)d->channels;
+  for (size_t i = 0; i < total; i++) {
+    if (pcm[i] != 0) {
+      nonzero = true;
+      break;
+    }
+  }
+  if (nonzero) {
+    dsp_ref_push(d, pcm);
+    d->aec_hold_frames = VG_DSP_AEC_HOLD_FRAMES;
+  } else if (d->aec_hold_frames > 0) {
+    // Keep feeding silent reference frames only while the 200 ms echo tail is still draining.
+    dsp_ref_push(d, pcm);
+  }
 #else
   (void)d;
   (void)pcm;

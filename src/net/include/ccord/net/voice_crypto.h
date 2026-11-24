@@ -32,8 +32,9 @@ typedef enum ccord_voice_mode : uint8_t {
 
 const char *ccord_voice_mode_name(ccord_voice_mode m);                 // "aead_aes256_gcm_rtpsize", ...; "" for NONE
 ccord_voice_mode ccord_voice_mode_from_name(const char *name);         // NONE when unknown/removed (e.g. xsalsa20_*)
-// Picks the best supported mode from the server's list: aes256_gcm first (always usable: OpenSSL fallback when
-// libsodium lacks hardware AES), then xchacha20. NONE if neither is offered.
+// Picks the best supported mode from the server's list: aes256_gcm when hardware AES is available
+// (ccord_voice_aes_hw_available()), otherwise xchacha20, falling back to aes256_gcm (OpenSSL) if only
+// AES is offered. NONE if neither is offered.
 ccord_voice_mode ccord_voice_mode_choose(const char *const *names, size_t count);
 bool ccord_voice_aes_hw_available(void);                               // crypto_aead_aes256gcm_is_available()
 

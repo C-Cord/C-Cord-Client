@@ -16,7 +16,12 @@ static void test_mode_negotiation(void)
   CT_CHECK(strcmp(ccord_voice_mode_name(CCORD_VOICE_MODE_XCHACHA20_RTPSIZE), "aead_xchacha20_poly1305_rtpsize") == 0);
 
   const char *both[] = {"aead_xchacha20_poly1305_rtpsize", "aead_aes256_gcm_rtpsize"};
-  CT_CHECK(ccord_voice_mode_choose(both, 2) == CCORD_VOICE_MODE_AES256_GCM_RTPSIZE);
+  ccord_voice_mode expect_both = ccord_voice_aes_hw_available() ? CCORD_VOICE_MODE_AES256_GCM_RTPSIZE
+                                                                : CCORD_VOICE_MODE_XCHACHA20_RTPSIZE;
+  CT_CHECK(ccord_voice_mode_choose(both, 2) == expect_both);
+
+  const char *aes_only[] = {"xsalsa20_poly1305", "aead_aes256_gcm_rtpsize"};
+  CT_CHECK(ccord_voice_mode_choose(aes_only, 2) == CCORD_VOICE_MODE_AES256_GCM_RTPSIZE);
 
   const char *xchacha_only[] = {"xsalsa20_poly1305", "aead_xchacha20_poly1305_rtpsize"};
   CT_CHECK(ccord_voice_mode_choose(xchacha_only, 2) == CCORD_VOICE_MODE_XCHACHA20_RTPSIZE);

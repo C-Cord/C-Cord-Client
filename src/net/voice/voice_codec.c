@@ -43,6 +43,8 @@ ccord_voice_codec *ccord_voice_codec_create(ccord_error *err)
   (void)opus_encoder_ctl(c->enc, OPUS_SET_BITRATE(64000));
   (void)opus_encoder_ctl(c->enc, OPUS_SET_COMPLEXITY(5));
   (void)opus_encoder_ctl(c->enc, OPUS_SET_INBAND_FEC(1));
+  (void)opus_encoder_ctl(c->enc, OPUS_SET_PACKET_LOSS_PERC(5));
+  (void)opus_encoder_ctl(c->enc, OPUS_SET_DTX(1));
   return c;
 }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include "live_transport_harness.h"
+#include <ccord/net/voice_crypto.h>
 
 static void test_gateway_presence_builder(void)
 {
@@ -511,7 +512,9 @@ static void test_voice_gateway_state_machine(void)
   CT_CHECK(cap.count == 2 && strstr(cap.frames[1], "\"op\":1") != nullptr);
   CT_CHECK(strstr(cap.frames[1], "\"address\":\"198.51.100.77\"") != nullptr);
   CT_CHECK(strstr(cap.frames[1], "\"port\":61234") != nullptr);
-  CT_CHECK(strstr(cap.frames[1], "\"mode\":\"aead_aes256_gcm_rtpsize\"") != nullptr);
+  const char *expected_mode = ccord_voice_aes_hw_available() ? "\"mode\":\"aead_aes256_gcm_rtpsize\""
+                                                             : "\"mode\":\"aead_xchacha20_poly1305_rtpsize\"";
+  CT_CHECK(strstr(cap.frames[1], expected_mode) != nullptr);
 
   const char *desc =
     "{\"op\":4,\"s\":8,\"d\":{\"mode\":\"aead_aes256_gcm_rtpsize\",\"dave_protocol_version\":0,\"secret_key\":"

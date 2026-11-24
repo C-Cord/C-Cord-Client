@@ -37,8 +37,9 @@ ccord_voice_mode ccord_voice_mode_choose(const char *const *names, size_t count)
     if (m == CCORD_VOICE_MODE_AES256_GCM_RTPSIZE) aes = true;
     if (m == CCORD_VOICE_MODE_XCHACHA20_RTPSIZE) xchacha = true;
   }
-  if (aes) return CCORD_VOICE_MODE_AES256_GCM_RTPSIZE;
+  if (aes && ccord_voice_aes_hw_available()) return CCORD_VOICE_MODE_AES256_GCM_RTPSIZE;
   if (xchacha) return CCORD_VOICE_MODE_XCHACHA20_RTPSIZE;
+  if (aes) return CCORD_VOICE_MODE_AES256_GCM_RTPSIZE;
   return CCORD_VOICE_MODE_NONE;
 }
 

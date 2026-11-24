@@ -241,6 +241,101 @@ static void test_stereo_and_reconfigure(void)
   ccord_voice_dsp_destroy(d);
 }
 
+static void test_aec_idle_and_stereo_threshold(void)
+{
+  if (!ccord_dsp_available()) return;
+
+  // 1. Small <=64 LSB L/R noise must NOT latch stereo_active: 2-channel chain stays single-channel
+  //    and writes identical L == R output.
+  ccord_voice_config ns_cfg = {.ns = true};
+  ccord_voice_dsp *d = ccord_voice_dsp_create(&ns_cfg, 2);
+  CT_CHECK(d != nullptr);
+  if (!d) return;
+  int16_t frame[FRAME * 2];
+  for (int f = 0; f < 10; f++) {
+    for (size_t i = 0; i < FRAME; i++) {
+      int16_t s = noise_sample();
+      frame[i * 2] = s;
+      frame[i * 2 + 1] = (int16_t)(s + 1);
+    }
+    CT_CHECK(ccord_voice_dsp_process(d, frame, FRAME));
+  }
+  bool eq = true;
+  for (size_t i = 0; i < FRAME; i++) {
+    if (frame[i * 2] != frame[i * 2 + 1]) {
+      eq = false;
+      break;
+    }
+  }
+  CT_CHECK(eq);
+
+  // 2. True stereo (|L - R| > 64) activates channel 1; returning to mono for 50 frames (1 s) drops
+  //    back to single-channel DSP (L == R again).
+  for (int f = 0; f < 5; f++) {
+    for (size_t i = 0; i < FRAME; i++) {
+      int16_t s = noise_sample();
+      frame[i * 2] = s;
+      frame[i * 2 + 1] = (int16_t)(-s);
+    }
+    CT_CHECK(ccord_voice_dsp_process(d, frame, FRAME));
+  }
+  bool saw_diff = false;
+  for (size_t i = 0; i < FRAME; i++) {
+    if (frame[i * 2] != frame[i * 2 + 1]) {
+      saw_diff = true;
+      break;
+    }
+  }
+  CT_CHECK(saw_diff);
+
+  for (int f = 0; f < 55; f++) {
+    for (size_t i = 0; i < FRAME; i++) {
+      int16_t s = noise_sample();
+      frame[i * 2] = s;
+      frame[i * 2 + 1] = (int16_t)(s + 8);
+    }
+    CT_CHECK(ccord_voice_dsp_process(d, frame, FRAME));
+  }
+  eq = true;
+  for (size_t i = 0; i < FRAME; i++) {
+    if (frame[i * 2] != frame[i * 2 + 1]) {
+      eq = false;
+      break;
+    }
+  }
+  CT_CHECK(eq);
+  ccord_voice_dsp_destroy(d);
+
+  // 3. AEC skips while playback is silent/idle (>200 ms) and seamlessly re-engages when non-zero
+  //    playback reference resumes.
+  ccord_voice_config aec_cfg = {.aec = true};
+  ccord_voice_dsp *a = ccord_voice_dsp_create(&aec_cfg, 1);
+  CT_CHECK(a != nullptr);
+  if (!a) return;
+  int16_t zero[FRAME] = {0};
+  int16_t ref[FRAME], prev[FRAME], mic[FRAME];
+  memset(prev, 0, sizeof prev);
+  for (int f = 0; f < 25; f++) {
+    ccord_voice_dsp_playback(a, zero, FRAME);
+    for (size_t i = 0; i < FRAME; i++) mic[i] = noise_sample();
+    CT_CHECK(ccord_voice_dsp_process(a, mic, FRAME));
+  }
+  for (int f = 0; f < 300; f++) {
+    for (size_t i = 0; i < FRAME; i++) ref[i] = noise_sample();
+    for (size_t i = 0; i < FRAME; i++) mic[i] = (int16_t)((int32_t)prev[i] * 6 / 10);
+    ccord_voice_dsp_playback(a, ref, FRAME);
+    CT_CHECK(ccord_voice_dsp_process(a, mic, FRAME));
+    memcpy(prev, ref, sizeof prev);
+  }
+  for (size_t i = 0; i < FRAME; i++) ref[i] = noise_sample();
+  for (size_t i = 0; i < FRAME; i++) mic[i] = (int16_t)((int32_t)prev[i] * 6 / 10);
+  double in_db = rms_db(mic, FRAME);
+  ccord_voice_dsp_playback(a, ref, FRAME);
+  CT_CHECK(ccord_voice_dsp_process(a, mic, FRAME));
+  CT_CHECK(rms_db(mic, FRAME) <= in_db - 6.0);
+  ccord_voice_dsp_destroy(a);
+}
+
 int main(void)
 {
   test_passthrough_and_validation();
@@ -248,5 +343,6 @@ int main(void)
   test_agc();
   test_aec();
   test_stereo_and_reconfigure();
+  test_aec_idle_and_stereo_threshold();
   return CT_RESULT("test_voice_dsp");
 }
