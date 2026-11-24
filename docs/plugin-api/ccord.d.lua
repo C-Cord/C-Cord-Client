@@ -621,10 +621,30 @@ function ui.measure_text(text, opts) end
 ---@field url? string Present on link/attachment/embed targets when URL exists
 ---@field text? string Extra text payload if available
 
----@param spec { id: string, label: string, target: CcordMenuTarget, action: fun(ctx: CcordMenuContext), icon?: string, submenu?: string, when?: CcordMenuWhen, danger?: boolean, checked?: boolean, divider_before?: boolean }
+---@class CcordMenuItemState
+---@field label? string 1..64 bytes UTF-8 plain text (nil keeps default)
+---@field checked? boolean Show/hide native checkmark
+---@field hidden? boolean Hide item for this target (submenus whose children are all hidden are pruned)
+---@field disabled? boolean Grey out / non-clickable
+---@field danger? boolean Red danger styling
+
+---@param spec { id: string, label: string, target: CcordMenuTarget, action: fun(ctx: CcordMenuContext), resolve?: fun(ctx: CcordMenuContext): CcordMenuItemState|nil, icon?: string, submenu?: string, when?: CcordMenuWhen, danger?: boolean, checked?: boolean, divider_before?: boolean }
 function ui.contextMenu.add(spec) end
 ---@param id string
 function ui.contextMenu.remove(id) end
+---Set dynamic cached state for a registered context menu item on a specific target snowflake,
+---or pass `nil` / `"*"` to update the item's default override across all targets (Class 1 Safe; zero IPC latency on right-click).
+---Precedence: `resolve(ctx)` > exact `target_id` override > `"*"` default override > static `add()` fields.
+---@param id string
+---@param target_id string|nil
+---@param state CcordMenuItemState
+---@return boolean
+function ui.contextMenu.set_state(id, target_id, state) end
+---Clear a per-target state override (or all overrides for `id` when `target_id` is omitted/nil).
+---@param id string
+---@param target_id? string
+---@return boolean
+function ui.contextMenu.clear_state(id, target_id) end
 
 ---@class CcordActionButtonContext
 ---@field guild_id? string
@@ -749,15 +769,15 @@ function ui.panel.patch(id, ops) end
 ---@return boolean
 function ui.panel.unmount(id) end
 
--- Class 2: ui.texture ("ui.panel")
----Class 2 ("ui.panel"): upload encoded PNG/JPEG/WebP bytes or bundled asset path (1..640 KiB).
+-- Class 2: ui.texture ("ui.panel" or "ui.decorate")
+---Class 2 ("ui.panel" or "ui.decorate"): upload encoded PNG/JPEG/WebP bytes or bundled asset path (1..640 KiB).
 ---@param key string
 ---@param data_or_asset string
 ---@param opts? boolean|{ asset?: boolean }
 ---@return boolean ok
 ---@return string|nil err
 function ui.texture.upload(key, data_or_asset, opts) end
----Class 2 ("ui.panel"): upload tightly packed 8-bit RGBA pixels (`width * height * 4 == #rgba_bytes`, <= 640 KiB).
+---Class 2 ("ui.panel" or "ui.decorate"): upload tightly packed 8-bit RGBA pixels (`width * height * 4 == #rgba_bytes`, <= 640 KiB).
 ---NOTE: Argument order is `(key, width, height, rgba_bytes)`.
 ---@param key string
 ---@param width integer
@@ -765,11 +785,23 @@ function ui.texture.upload(key, data_or_asset, opts) end
 ---@param rgba_bytes string
 ---@return boolean
 function ui.texture.upload_rgba(key, width, height, rgba_bytes) end
----Class 2 ("ui.panel"): evict a cached texture.
+---@class CcordTextureUploadFileOpts
+---@field max_w? integer Default 512, clamped 16..1024
+---@field max_h? integer Default 512, clamped 16..1024
+---@field grayscale? boolean Optional: pre-desaturate pixels on upload (Rec.709 luma)
+---Class 2+3 ("ui.panel" or "ui.decorate", PLUS "fs.read"): decode & aspect-preserve downscale a local image file
+---directly on the host (up to 32 MiB encoded; blocks protected paths and symlinks).
+---@param key string
+---@param path string
+---@param opts? CcordTextureUploadFileOpts
+---@return { width: integer, height: integer }|nil info
+---@return string|nil err
+function ui.texture.upload_file(key, path, opts) end
+---Class 2 ("ui.panel" or "ui.decorate"): evict a cached texture.
 ---@param key string
 ---@return boolean
 function ui.texture.evict(key) end
----Class 2 ("ui.panel"): check whether a texture key is loaded.
+---Class 2 ("ui.panel" or "ui.decorate"): check whether a texture key is loaded.
 ---@param key string
 ---@return boolean|nil exists
 ---@return string|nil err
@@ -791,10 +823,18 @@ function ui.texture.exists(key) end
 ---@field target_id? string Generic target snowflake fallback (omit/0 to apply to all rows of this target)
 ---@field widget? table Panel Engine widget tree (or use `root`)
 ---@field root? table Alias for `widget`
----@field accent_color? string Left accent border hex color (`#rrggbb` / `#rrggbbaa`) for `message_style`
+---@field accent_color? string Left accent border hex color (`#rrggbb` / `#rrggbbaa`) or theme token for `message_style`
 ---@field accent_border? string Alias for `accent_color`
----@field tint_color? string Row background tint hex color (`#rrggbb` / `#rrggbbaa`) for `message_style`
+---@field accent? string Alias for `accent_color`
+---@field tint_color? string Row background tint hex color (`#rrggbb` / `#rrggbbaa`) or theme token for `message_style`
 ---@field background_tint? string Alias for `tint_color`
+---@field tint? string Alias for `tint_color`
+---@field text_color? string Override live message body text color (hex or theme token) for `message_style`
+---@field author_color? string Override live message author name color (hex or theme token) for `message_style`
+---@field avatar_grayscale? boolean Render live message author avatar in Rec.709 luma grayscale (`message_style`)
+---@field avatar_opacity? number Live message author avatar opacity (`0.0..1.0`) for `message_style`
+---@field dim? boolean Dim entire live message row (`0.55` alpha) for `message_style`
+---@field opacity? number Custom live message row alpha (`0.15..1.0`, clamped at 0.15 floor) for `message_style`
 ---@field collapsed? boolean Collapse message body behind `collapse_label` (`message_style`)
 ---@field collapse_label? string Label shown when collapsed (`message_style`)
 ---@field priority? integer Higher priority wins for `message_style`
@@ -1213,16 +1253,70 @@ function messages.scheduled_list() end
 ---@return boolean|nil ok
 ---@return string|nil err
 function messages.scheduled_cancel(sched_id) end
----Class 2 ("ui.panel"): inject a client-only ephemeral card into a channel timeline.
+---@class CcordLocalAttachmentSpec
+---@field filename string
+---@field content_type? string
+---@field size? integer
+---@field texture_key? string Uploaded via `ui.texture.upload*` (renders inline thumbnail)
+---@field local_path? string Host-side thumbnail decode (requires Class 3 `"fs.read"`, blocks protected paths & symlinks)
+---@field width? integer
+---@field height? integer
+
+---@class CcordLocalMessageEvent
+---@field id string Stable `spec.id` if provided, else `tostring(local_id)`
+---@field local_id integer
+---@field type "click"|"right_click"|"dismiss"
+---@field x? number
+---@field y? number
+
+---@class CcordLocalMessageSpec
+---@field id? string Plugin-scoped stable key (1..64 chars); re-injecting same `id` upserts in place
+---@field position? "bottom"|"timeline" Default `"bottom"` (floating card); `"timeline"` merges into native message stream
+---@field sort_id? string Discord snowflake for exact chronological ordering in timeline
+---@field timestamp_ms? integer Displayed timestamp & fallback sort key (epoch ms)
+---@field after_message_id? string Optional explicit anchor: insert immediately after this snowflake
+---@field before_message_id? string Optional explicit anchor: insert immediately before this snowflake
+---@field clip_to_history? boolean Default `true` for `"timeline"`: hide older local rows until history loads past them
+---@field author_id? string Resolves cached avatar in native avatar gutter
+---@field author? string Display name (1..128 bytes)
+---@field author_color? string Hex (`#rrggbb`/`#rrggbbaa`) or theme token override
+---@field avatar_grayscale? boolean Rec.709 luma grayscale avatar rendering
+---@field avatar_opacity? number Avatar opacity `0.0..1.0`
+---@field badge? string Optional pill badge next to author (e.g. `"DELETED"`)
+---@field badge_color? string Badge accent hex/token
+---@field content? string Markdown body rendered via native `dc_md_body_walk` (<= 8 KiB)
+---@field text_color? string Hex/token override for body text
+---@field accent_color? string Optional left 3px border bar hex/token
+---@field tint_color? string Optional row background tint hex/token
+---@field compact? "auto"|"always"|"never" Default `"auto"` (follows native 420 s same-author merge rule)
+---@field break_group? boolean Prevent the next live message from compact-merging under this row
+---@field attachments? CcordLocalAttachmentSpec[] Up to 8 local attachments
+---@field embeds? table[] Up to 4 Discord-shaped embeds (no remote HTTP auto-fetch; supports `texture_key`)
+---@field embed? table Single embed shorthand
+---@field dismissible? boolean Show subtle dismiss `x` button on hover (default `true` for `"bottom"`, `false` for `"timeline"`)
+---@field on_event? fun(ev: CcordLocalMessageEvent)
+
+---Class 2 ("ui.panel" or "ui.decorate"): inject or upsert a client-only local message card or positioned timeline row.
+---Passing `attachments[].local_path` additionally requires Class 3 `"fs.read"`.
 ---@param channel_id string
----@param spec { author?: string, badge?: string, content?: string, embeds?: table, embed?: table, dismissible?: boolean }
+---@param spec CcordLocalMessageSpec
 ---@return integer|nil local_id
 ---@return string|nil err
 function messages.inject_local(channel_id, spec) end
----Class 2 ("ui.panel"): dismiss an injected local ephemeral card.
----@param local_id integer
+---Class 2 ("ui.panel" or "ui.decorate"): patch an owned local message in place by integer `local_id` or stable string `id`.
+---@param id_or_local_id integer|string
+---@param patch CcordLocalMessageSpec
+---@return boolean ok
+---@return string|nil err
+function messages.update_local(id_or_local_id, patch) end
+---Class 2 ("ui.panel" or "ui.decorate"): dismiss an owned local message by integer `local_id` or stable string `id`.
+---@param id_or_local_id integer|string
 ---@return boolean
-function messages.dismiss_local(local_id) end
+function messages.dismiss_local(id_or_local_id) end
+---Class 2 ("ui.panel" or "ui.decorate"): clear all local messages owned by this plugin (in `channel_id`, or all channels if nil).
+---@param channel_id? string
+---@return boolean
+function messages.clear_local(channel_id) end
 
 ---Bounded-timeout synchronous interception hooks (150 ms for send/edit, 120 ms for notification/link_open). Pass explicit `nil` to clear.
 hooks = {}
@@ -1453,8 +1547,9 @@ function CcordWsHandle:on_error(fn) end
 ---@class CcordHttpResponse
 ---@field status integer HTTP status code
 ---@field ok boolean True when `200 <= status < 300`
----@field body string UTF-8 response body (<= 4 MiB)
+---@field body string Response body (UTF-8 by default, or raw binary bytes when `binary = true`; up to 8 MiB desktop / 4 MiB Android)
 ---@field headers_json? string JSON-encoded map of lowercase response headers (parse with `json.decode(resp.headers_json)`)
+---@field final_url? string Final URL if one or more redirects were followed
 
 ---@class CcordHttpOpts
 ---@field url? string Required for `request()`
@@ -1462,6 +1557,24 @@ function CcordWsHandle:on_error(fn) end
 ---@field headers? table<string, string>
 ---@field body? string
 ---@field timeout_ms? integer Default 15000
+---@field binary? boolean Default `false`; when `true`, preserves arbitrary raw bytes (including NUL) over IPC
+---@field follow_redirects? boolean Default `false`; opt-in hop-by-hop validated redirects (max 5 hops; enforces `allowed_hosts`, SSRF, no HTTPS downgrade, no loopback/public boundary crossing, strips credentials on origin change)
+---@field max_bytes? integer Default 4 MiB, hard cap 8 MiB desktop / 4 MiB Android
+
+---@class CcordHttpDownloadOpts
+---@field url string
+---@field dest_path string Absolute destination path (parent dir must exist; protected paths and symlinks blocked)
+---@field headers? table<string, string>
+---@field timeout_ms? integer Default 30000, clamped 1000..300000
+---@field max_bytes? integer Default 64 MiB, hard cap 256 MiB
+---@field follow_redirects? boolean Default `false`; opt-in hop-by-hop validated redirects (max 5 hops)
+
+---@class CcordHttpDownloadResult
+---@field status integer Final HTTP status code
+---@field ok boolean True when `200 <= status < 300` (destination file written atomically ONLY when `ok == true`)
+---@field bytes integer Bytes written to `dest_path` (`0` when `not ok`)
+---@field content_type? string Lowercased `Content-Type` header if present
+---@field final_url? string Final URL if redirected
 
 net = {
   http = {},
@@ -1470,16 +1583,24 @@ net = {
 }
 net["local"] = net.local_net
 
----Class 3 ("network.http" for public HTTPS; loopback targets strictly require "network.local"): async HTTP(S) request (TLS 1.2/1.3, no redirects, 4 MiB body cap).
+---Class 3 ("network.http" for public HTTPS; loopback targets strictly require "network.local"): async HTTP(S) request (TLS 1.2/1.3).
 ---`network.http` strictly targets public `https://` hosts: enforces manifest `allowed_hosts` (exact domains or `*.example.com`),
 ---blocks loopback (`localhost`, `127.0.0.0/8`, `::1`, `0.0.0.0`), and applies a socket-level SSRF filter blocking RFC 1918 private IPs,
----link-local / cloud metadata (`169.254.169.254`), IPv6 ULA (`fc00::/7`), and NAT64 private ranges.
+---link-local / cloud metadata (`169.254.169.254`), IPv6 ULA (`fc00::/7`), and NAT64 private ranges on every hop.
 ---Returns `req_id` when called with `cb`, or yields `(resp, err)` inside `async.spawn()`.
 ---@param opts CcordHttpOpts
 ---@param cb? fun(resp: CcordHttpResponse|nil, err: string|nil)
 ---@return CcordHttpResponse|integer|nil resp_or_req_id
 ---@return string|nil err
 function net.http.request(opts, cb) end
+---Class 3 ("network.http" or "network.local" for loopback, PLUS "fs.write"): stream an HTTP(S) resource directly to disk
+---via a sibling temp file + atomic rename with zero Lua heap overhead (cross-platform: Linux, macOS, Windows, Android).
+---Non-2xx responses unlink the temp file and resolve `{ status, ok = false, bytes = 0, content_type? }`.
+---@param opts CcordHttpDownloadOpts
+---@param cb? fun(res: CcordHttpDownloadResult|nil, err: string|nil)
+---@return CcordHttpDownloadResult|integer|nil res_or_req_id
+---@return string|nil err
+function net.http.download(opts, cb) end
 ---@param url string
 ---@param opts? CcordHttpOpts|fun(resp: CcordHttpResponse|nil, err: string|nil)
 ---@param cb? fun(resp: CcordHttpResponse|nil, err: string|nil)

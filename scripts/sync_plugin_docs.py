@@ -169,20 +169,28 @@ def parse_lua_alias(ccord_d_lua: pathlib.Path, alias_name: str) -> set[str]:
 
 
 def eval_docs_index(docs_dir: pathlib.Path) -> tuple[str, dict]:
-    html = (docs_dir / "index.html").read_text()
-    scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
-    if len(scripts) != 1:
-        raise RuntimeError(f"Expected 1 <script> in docs/index.html, found {len(scripts)}")
-    driver = (
-        scripts[0].replace("init();", "")
-        + "\nconst __out = {\n"
-        + "  llms: buildLlmsTxt() + '\\n',\n"
-        + "  PERMISSIONS, CAPABILITIES, PLATFORMS, EVENTS_LIST,\n"
-        + "  PANEL_SLOTS, PANEL_WIDGETS, CANVAS_CMDS, PATCH_OPS,\n"
-        + "  PANEL_EVENTS, THEME_COLORS, THEME_METRICS,\n"
-        + "};\n"
-        + "process.stdout.write(JSON.stringify(__out));\n"
+    assets_js = docs_dir.parent / "assets" / "docs.js"
+    if assets_js.is_file():
+        script_src = assets_js.read_text()
+    else:
+        html = (docs_dir / "index.html").read_text()
+        scripts = re.findall(r"<script>(.*?)</script>", html, re.S)
+        if len(scripts) != 1:
+            raise RuntimeError(f"Expected 1 inline <script> in docs/index.html or assets/docs.js, found {len(scripts)}")
+        script_src = scripts[0]
+
+    export_snippet = (
+        "\nconst __out = {\n"
+        "  llms: buildLlmsTxt() + '\\n',\n"
+        "  PERMISSIONS, CAPABILITIES, PLATFORMS, EVENTS_LIST,\n"
+        "  PANEL_SLOTS, PANEL_WIDGETS, CANVAS_CMDS, PATCH_OPS,\n"
+        "  PANEL_EVENTS, THEME_COLORS, THEME_METRICS,\n"
+        "};\n"
+        "process.stdout.write(JSON.stringify(__out));\n"
     )
+    if "init();" not in script_src:
+        raise RuntimeError("Could not locate init(); call in docs script")
+    driver = script_src.replace("init();", export_snippet, 1)
     with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as tf:
         tf.write(driver)
         tmp_js = pathlib.Path(tf.name)
@@ -308,6 +316,9 @@ def main() -> int:
         ("plugin-catalog/web/docs/index.html", (docs_dir / "index.html").read_text()),
         ("generated llms.txt", llms_new),
     ]
+    assets_js = docs_dir.parent / "assets" / "docs.js"
+    if assets_js.is_file():
+        scan_targets.append(("plugin-catalog/web/assets/docs.js", assets_js.read_text()))
     for fname, content in scan_targets:
         for pat, hint in BANNED_PATTERNS:
             if re.search(pat, content):
