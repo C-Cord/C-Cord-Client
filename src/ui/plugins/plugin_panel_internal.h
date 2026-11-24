@@ -13,15 +13,12 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define PANEL_MAX_DEPTH  24
-#define PANEL_MAX_NODES  2048u
-#define PANEL_MAX_HITS   1024u
-#define PANEL_MAX_CMDS   1024u
-#define PANEL_MAX_BOXES  64u
-#define PANEL_MAX_INPUTS 32u
-#define PANEL_MAX_SCROLL 32u
-#define PANEL_MAX_OPTS   32u
-#define PANEL_MAX_POLY   64u
+#define PANEL_MAX_DEPTH  32
+#define PANEL_MAX_NODES  16384u
+#define PANEL_MAX_CMDS   16384u
+#define PANEL_MAX_OPTS   4096u
+#define PANEL_MAX_POLY   512u
+#define PANEL_DECOR_CACHE_SLOTS 256u
 
 typedef enum pcol_kind : uint8_t { PCOL_NONE = 0, PCOL_TOKEN, PCOL_LITERAL } pcol_kind;
 
@@ -103,6 +100,8 @@ typedef enum pnode_kind : uint8_t {
   // v2 Layer-1 widgets
   PN_INPUT, PN_TOGGLE, PN_CHECKBOX, PN_RADIO, PN_SLIDER, PN_SELECT,
   PN_TABS, PN_CHIP, PN_PROGRESS, PN_SCROLL, PN_IMAGE, PN_AVATAR, PN_MARKDOWN,
+  // v3 Phase 4 widgets
+  PN_TEXTAREA, PN_LINK,
 } pnode_kind;
 
 typedef struct pnode pnode;
@@ -113,6 +112,8 @@ struct pnode {
   bool bold, ellipsis, selected, disabled, checked, masked, cover, grayscale;
   bool orient_explicit, is_vertical;
   bool draggable, track_move;
+  bool submit_on_ctrl_enter, searchable, multiple;
+  uint16_t rows, max_lines;
   palign align;
   pjustify justify;
   pborder_sides border_sides;
@@ -131,7 +132,7 @@ struct pnode {
   float num_val, num_min, num_max, num_step;
   ccord_id avatar_uid;
   pcolor bg, hover_bg, border_color, hover_border_color, fg, hover_fg;
-  const char *id, *text, *placeholder, *value_str, *tooltip, *texture_key;
+  const char *id, *text, *placeholder, *value_str, *tooltip, *texture_key, *url;
   pnode **children;
   size_t nchildren;
   pcmd *cmds;
@@ -140,6 +141,8 @@ struct pnode {
   size_t nhits;
   pkv_opt *opts;
   size_t nopts;
+  const char **selected_vals;
+  size_t nselected_vals;
 };
 
 typedef struct compiled_panel {
@@ -152,7 +155,8 @@ typedef struct compiled_panel {
 } compiled_panel;
 
 typedef enum phit_widget_kind : uint8_t {
-  PHIT_GENERIC = 0, PHIT_INPUT, PHIT_TOGGLE, PHIT_CHECKBOX, PHIT_RADIO, PHIT_SLIDER, PHIT_SELECT, PHIT_TAB, PHIT_SCROLL,
+  PHIT_GENERIC = 0, PHIT_INPUT, PHIT_TEXTAREA, PHIT_TOGGLE, PHIT_CHECKBOX, PHIT_RADIO,
+  PHIT_SLIDER, PHIT_SELECT, PHIT_TAB, PHIT_SCROLL, PHIT_LINK, PHIT_TOOLTIP,
 } phit_widget_kind;
 
 typedef struct panel_hit {
@@ -160,14 +164,16 @@ typedef struct panel_hit {
   char panel_id[40];
   char node_id[65];
   char tooltip[128];
-  char value_str[128];
+  char value_str[512];
   ccord_cursor_kind cursor;
   ccord_rect rect;
   phit_widget_kind wkind;
   bool checked;
   bool draggable, track_move;
+  bool submit_on_ctrl_enter;
   float num_min, num_max, num_step;
   size_t opt_idx, opt_count;
+  const pnode *node_ref;
 } panel_hit;
 
 typedef struct panel_box {
@@ -181,7 +187,8 @@ typedef struct panel_box {
 typedef struct panel_input_state {
   uint64_t key;
   ccord_text_edit ed;
-  char last_seed[512];
+  char *last_seed;
+  bool is_multiline;
 } panel_input_state;
 
 typedef struct panel_scroll_state {
@@ -190,8 +197,17 @@ typedef struct panel_scroll_state {
   float max_scroll;
 } panel_scroll_state;
 
+typedef struct panel_select_opt {
+  char label[128];
+  char value[128];
+  bool selected;
+} panel_select_opt;
+
 typedef struct decor_cache_entry {
   uint64_t hash;
+  size_t json_len;
+  char *json_copy;
+  uint64_t lru_tick;
   ccord_arena arena;
   pnode *root;
 } decor_cache_entry;
@@ -204,36 +220,55 @@ typedef struct synced_tex_entry {
 struct ui_panel_mgr {
   compiled_panel *compiled;
   size_t ncompiled, capcompiled;
-  panel_hit hits[PANEL_MAX_HITS];
-  size_t nhits;
-  panel_box boxes[PANEL_MAX_BOXES];
-  size_t nboxes;
-  // Retained interactive widget state
-  panel_input_state inputs[PANEL_MAX_INPUTS];
-  size_t ninputs;
+  panel_hit *hits;
+  size_t nhits, caphits;
+  panel_box *boxes;
+  size_t nboxes, capboxes;
+  // Retained interactive widget state (dynamic)
+  panel_input_state *inputs;
+  size_t ninputs, capinputs;
   uint64_t focused_input_key;
+  bool focused_is_textarea;
+  bool focused_submit_ctrl_enter;
   char focused_owner[65];
   char focused_panel[40];
   char focused_node[65];
-  panel_scroll_state scrolls[PANEL_MAX_SCROLL];
-  size_t nscrolls;
+  panel_scroll_state *scrolls;
+  size_t nscrolls, capscrolls;
+  // Active select dropdown popover state
+  bool select_open;
+  uint64_t select_key;
+  char select_owner[65];
+  char select_panel[40];
+  char select_node[65];
+  ccord_rect select_anchor;
+  ccord_rect select_popup_rect;
+  ccord_rect select_filter_rect;
+  bool select_searchable;
+  bool select_multiple;
+  ccord_text_edit select_filter;
+  bool select_filter_init;
+  float select_scroll;
+  float select_max_scroll;
+  panel_select_opt *select_opts;
+  size_t nselect_opts, capselect_opts;
   // Hover & drag tracking
   char hover_owner[65];
   char hover_panel[40];
   char hover_node[65];
   bool dragging;
   panel_hit drag_hit;
-  // Texture sync revision & per-key uploaded revisions (incremental upload + eviction)
+  // Texture sync revision & per-key uploaded revisions (dynamic)
   uint64_t synced_tex_rev;
-  synced_tex_entry synced_texs[256];
-  size_t nsynced_texs;
+  synced_tex_entry *synced_texs;
+  size_t nsynced_texs, capsynced_texs;
   // Active full-view plugin tab
   char full_view_owner[65];
   char full_view_id[40];
   ccord_rect full_view_back_rect;
-  // Compiled cache for inline decorator widget trees
-  decor_cache_entry decor_cache[32];
-  size_t decor_cursor;
+  // Compiled cache for inline decorator widget trees (LRU)
+  decor_cache_entry decor_cache[PANEL_DECOR_CACHE_SLOTS];
+  uint64_t decor_lru_tick;
 };
 
 
@@ -242,7 +277,7 @@ pnode * pp_compile_node_into(ccord_arena *arena, uint32_t *node_count, const cco
 void pp_draw_picon(ccord_ui *ui, ccord_renderer *r, picon ic, const char *raw_name, float cx, float cy, float size, ccord_color col, ccord_color hole_bg);
 ui_panel_mgr * pp_ensure_mgr(ccord_ui *ui);
 float pp_eval_dim(pdim d, float span);
-panel_input_state * pp_get_input_state(ui_panel_mgr *m, uint64_t key, const char *seed);
+panel_input_state * pp_get_input_state(ui_panel_mgr *m, uint64_t key, const char *seed, bool is_multiline);
 panel_scroll_state * pp_get_scroll_state(ui_panel_mgr *m, uint64_t key);
 uint64_t pp_hash_str(const char *s);
 float pp_p_clampf(float v, float lo, float hi);

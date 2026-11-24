@@ -21,10 +21,14 @@ static bool child_visible(const pnode *c, bool parent_hovered)
   return true;
 }
 
-static ccord_vec2 measure_node(ccord_ui *ui, ccord_renderer *r, const pnode *nd, bool parent_is_col, bool parent_hovered)
+static ccord_vec2 measure_node(ccord_ui *ui, ccord_renderer *r, const pnode *nd, bool parent_is_col,
+                               bool parent_hovered, float avail_w)
 {
   if (!nd) return (ccord_vec2){0.0f, 0.0f};
   float w = nd->w, h = nd->h;
+  float eff_avail_w = avail_w;
+  if (nd->w > 0.0f && (eff_avail_w <= 0.0f || nd->w < eff_avail_w)) eff_avail_w = nd->w;
+  if (nd->max_w > 0.0f && (eff_avail_w <= 0.0f || nd->max_w < eff_avail_w)) eff_avail_w = nd->max_w;
   switch (nd->kind) {
     case PN_SPACER: break;
     case PN_DIVIDER: {
@@ -41,8 +45,20 @@ static ccord_vec2 measure_node(ccord_ui *ui, ccord_renderer *r, const pnode *nd,
     case PN_MARKDOWN: {
       float fs = pp_resolve_font_size(ui, nd->font_size);
       ccord_text_style st = {.font = nd->bold ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR, .size = fs, .color = ui->theme->c.text_normal};
-      float wrap = (nd->kind == PN_MARKDOWN && nd->max_w > 0.0f) ? nd->max_w : 0.0f;
+      float wrap = ((nd->kind == PN_MARKDOWN || nd->max_lines > 1u) && eff_avail_w > 0.0f) ? eff_avail_w : 0.0f;
       ccord_vec2 m = ccord_text_measure(r, nd->text, strlen(nd->text), &st, wrap);
+      if (nd->max_lines > 0u) {
+        float cap_h = (float)nd->max_lines * ui_line_h(ui, fs);
+        if (m.y > cap_h) m.y = cap_h;
+      }
+      if (w <= 0.0f) w = m.x;
+      if (h <= 0.0f) h = m.y;
+      break;
+    }
+    case PN_LINK: {
+      float fs = pp_resolve_font_size(ui, nd->font_size);
+      ccord_text_style st = {.font = nd->bold ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR, .size = fs, .color = ui->theme->c.text_link};
+      ccord_vec2 m = ccord_text_measure(r, nd->text, strlen(nd->text), &st, 0.0f);
       if (w <= 0.0f) w = m.x;
       if (h <= 0.0f) h = m.y;
       break;
@@ -69,6 +85,13 @@ static ccord_vec2 measure_node(ccord_ui *ui, ccord_renderer *r, const pnode *nd,
       if (w <= 0.0f) w = 160.0f;
       if (h <= 0.0f) h = UIS_H_BTN;
       break;
+    case PN_TEXTAREA: {
+      float lh = ui_line_h(ui, ui->theme->m.font_size_small);
+      uint16_t rows = nd->rows ? nd->rows : 3u;
+      if (w <= 0.0f) w = 240.0f;
+      if (h <= 0.0f) h = (float)rows * lh + 16.0f;
+      break;
+    }
     case PN_TOGGLE:
       if (w <= 0.0f) w = (nd->text && nd->text[0]) ? 160.0f : UIS_TOGGLE_W;
       if (h <= 0.0f) h = UIS_TOGGLE_H;
@@ -123,10 +146,11 @@ static ccord_vec2 measure_node(ccord_ui *ui, ccord_renderer *r, const pnode *nd,
     case PN_SCROLL: {
       float sum_main = 0.0f, max_cross = 0.0f;
       size_t vis = 0;
+      float child_avail = eff_avail_w > 0.0f ? pp_p_maxf(eff_avail_w - nd->pad_l - nd->pad_r, 0.0f) : 0.0f;
       for (size_t i = 0; i < nd->nchildren; i++) {
         const pnode *c = nd->children[i];
         if (!child_visible(c, parent_hovered) || c->pos_abs) continue;
-        ccord_vec2 cm = measure_node(ui, r, c, nd->is_col, parent_hovered);
+        ccord_vec2 cm = measure_node(ui, r, c, nd->is_col, parent_hovered, nd->is_col ? child_avail : 0.0f);
         float c_main = nd->is_col ? cm.y : cm.x;
         float c_cross = nd->is_col ? cm.x : cm.y;
         sum_main += c_main;
@@ -163,22 +187,34 @@ typedef struct draw_ctx {
   ccord_id decor_target_id;
 } draw_ctx;
 
-static void record_hit_ex(ccord_ui *ui, ui_panel_mgr *m, const draw_ctx *dctx, const char *node_id, const char *tooltip,
-                          ccord_cursor_kind cursor, ccord_rect rc, phit_widget_kind wk, bool checked,
-                          const char *val_str, bool draggable, bool track_move, float nmin, float nmax, float nstep,
-                          size_t opt_idx, size_t opt_cnt)
+static panel_hit *record_hit_ex(ccord_ui *ui, ui_panel_mgr *m, const draw_ctx *dctx, const char *node_id, const char *tooltip,
+                                ccord_cursor_kind cursor, ccord_rect rc, phit_widget_kind wk, bool checked,
+                                const char *val_str, bool draggable, bool track_move, float nmin, float nmax, float nstep,
+                                size_t opt_idx, size_t opt_cnt)
 {
-  if (!node_id || !node_id[0] || rc.w <= 0.0f || rc.h <= 0.0f) return;
+  if (rc.w <= 0.0f || rc.h <= 0.0f) return nullptr;
+  bool allow_no_id = (wk == PHIT_TOOLTIP && tooltip && tooltip[0]) || (wk == PHIT_LINK && val_str && val_str[0]);
+  if ((!node_id || !node_id[0]) && !allow_no_id) return nullptr;
   if (dctx->is_decor) {
-    ui_decor_record_hit(ui, dctx->owner, dctx->panel_id, dctx->decor_target, dctx->decor_target_id, node_id, rc);
-    return;
+    if (node_id && node_id[0] && wk != PHIT_TOOLTIP) {
+      ui_decor_record_hit(ui, dctx->owner, dctx->panel_id, dctx->decor_target, dctx->decor_target_id, node_id, rc);
+    }
+    return nullptr;
   }
-  if (!m || m->nhits >= PANEL_MAX_HITS) return;
+  if (!m) return nullptr;
+  if (m->nhits == m->caphits) {
+    size_t ncap = m->caphits ? m->caphits * 2u : 64u;
+    if (ncap > 65536u) return nullptr;
+    panel_hit *g = ccord_realloc_array(m->hits, ncap, sizeof *g);
+    if (!g) return nullptr;
+    m->hits = g;
+    m->caphits = ncap;
+  }
   panel_hit *h = &m->hits[m->nhits++];
   memset(h, 0, sizeof *h);
   snprintf(h->owner, sizeof h->owner, "%s", dctx->owner);
   snprintf(h->panel_id, sizeof h->panel_id, "%s", dctx->panel_id);
-  snprintf(h->node_id, sizeof h->node_id, "%s", node_id);
+  snprintf(h->node_id, sizeof h->node_id, "%s", node_id ? node_id : "");
   snprintf(h->tooltip, sizeof h->tooltip, "%s", tooltip ? tooltip : "");
   if (val_str) snprintf(h->value_str, sizeof h->value_str, "%s", val_str);
   h->cursor = cursor;
@@ -192,6 +228,66 @@ static void record_hit_ex(ccord_ui *ui, ui_panel_mgr *m, const draw_ctx *dctx, c
   h->num_step = nstep;
   h->opt_idx = opt_idx;
   h->opt_count = opt_cnt;
+  return h;
+}
+
+static void draw_clamped_text(ccord_renderer *r, const char *txt, size_t len, ccord_rect rc,
+                              const ccord_text_style *st, float lh, uint16_t max_lines)
+{
+  if (!txt || len == 0 || max_lines == 0) return;
+  if (max_lines == 1u) {
+    (void)ccord_text_draw_ellipsis(r, txt, len, rc.x, rc.y, rc.w, st);
+    return;
+  }
+  ccord_push_clip(r, rc);
+  const char *p = txt;
+  const char *end = txt + len;
+  float y = rc.y;
+  for (uint16_t line = 0; line < max_lines && p < end; line++) {
+    const char *nl = memchr(p, '\n', (size_t)(end - p));
+    const char *seg_end = nl ? nl : end;
+    size_t seg_len = (size_t)(seg_end - p);
+    if (line + 1u == max_lines) {
+      // Final visible line: draw with ellipsis if there are more lines or if this line overflows rc.w.
+      ccord_vec2 tm = ccord_text_measure(r, p, seg_len, st, 0.0f);
+      if (nl != nullptr && tm.x <= rc.w - 16.0f) {
+        char buf[512];
+        size_t cp = seg_len < sizeof buf - 4u ? seg_len : sizeof buf - 4u;
+        memcpy(buf, p, cp);
+        memcpy(buf + cp, "...", 4);
+        (void)ccord_text_draw_ellipsis(r, buf, cp + 3u, rc.x, y, rc.w, st);
+      } else {
+        (void)ccord_text_draw_ellipsis(r, p, seg_len, rc.x, y, rc.w, st);
+      }
+      break;
+    }
+    // Find longest prefix that fits rc.w (prefer breaking at ASCII space).
+    ccord_vec2 full_m = ccord_text_measure(r, p, seg_len, st, 0.0f);
+    if (full_m.x <= rc.w || seg_len == 0) {
+      if (seg_len > 0) ccord_text_draw(r, p, seg_len, rc.x, y, st, 0.0f);
+      p = nl ? nl + 1 : end;
+    } else {
+      size_t lo = 1u, hi = seg_len;
+      while (lo < hi) {
+        size_t mid = lo + (hi - lo + 1u) / 2u;
+        while (mid < hi && ((unsigned char)p[mid] & 0xC0u) == 0x80u) mid++;
+        if (mid > hi) mid = hi;
+        if (ccord_text_measure(r, p, mid, st, 0.0f).x <= rc.w) lo = mid;
+        else hi = mid - 1u;
+      }
+      size_t brk = lo;
+      for (size_t k = lo; k > 0; k--) {
+        if (p[k - 1u] == ' ') { brk = k; break; }
+      }
+      while (brk < seg_len && ((unsigned char)p[brk] & 0xC0u) == 0x80u) brk++;
+      if (brk == 0) brk = 1u;
+      ccord_text_draw(r, p, brk, rc.x, y, st, 0.0f);
+      p += brk;
+      while (p < seg_end && *p == ' ') p++;
+    }
+    y += lh;
+  }
+  ccord_pop_clip(r);
 }
 
 static void draw_box_chrome(ccord_renderer *r, const ccord_theme_colors *tc, const pnode *nd, ccord_rect rc,
@@ -270,11 +366,15 @@ static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const dr
 
   // Generic hit recording (specialized widgets record their own rich hits below)
   if (nd->id && !nd->disabled &&
-      nd->kind != PN_INPUT && nd->kind != PN_TOGGLE && nd->kind != PN_CHECKBOX &&
+      nd->kind != PN_INPUT && nd->kind != PN_TEXTAREA && nd->kind != PN_LINK &&
+      nd->kind != PN_TOGGLE && nd->kind != PN_CHECKBOX &&
       nd->kind != PN_RADIO && nd->kind != PN_SLIDER && nd->kind != PN_SELECT &&
       nd->kind != PN_TABS && nd->kind != PN_SCROLL) {
     record_hit_ex(ui, m, dctx, nd->id, nd->tooltip, nd->cursor, rc, PHIT_GENERIC, false, nullptr,
                   nd->draggable, nd->track_move, 0.0f, 0.0f, 0.0f, 0, 0);
+  } else if ((!nd->id || !nd->id[0]) && nd->tooltip && nd->tooltip[0] && nd->kind != PN_LINK) {
+    record_hit_ex(ui, m, dctx, "", nd->tooltip, CCORD_CURSOR_DEFAULT, rc, PHIT_TOOLTIP, false, nullptr,
+                  false, false, 0.0f, 0.0f, 0.0f, 0, 0);
   }
 
   switch (nd->kind) {
@@ -308,7 +408,9 @@ static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const dr
       float fs = pp_resolve_font_size(ui, nd->font_size);
       ccord_text_style st = {.font = nd->bold ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR, .size = fs, .color = col};
       size_t len = strlen(nd->text);
-      if (nd->kind == PN_MARKDOWN) {
+      if (nd->max_lines > 0u) {
+        draw_clamped_text(r, nd->text, len, rc, &st, ui_line_h(ui, fs), nd->max_lines);
+      } else if (nd->kind == PN_MARKDOWN) {
         ccord_text_draw(r, nd->text, len, rc.x, rc.y, &st, rc.w);
       } else {
         ccord_vec2 tm = ccord_text_measure(r, nd->text, len, &st, 0.0f);
@@ -321,6 +423,28 @@ static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const dr
           else if (nd->align == PALIGN_END) tx = rc.x + rc.w - tm.x;
           ccord_text_draw(r, nd->text, len, tx, ty, &st, 0.0f);
         }
+      }
+      break;
+    }
+
+    case PN_LINK: {
+      bool hov = self_hovered && !nd->disabled;
+      ccord_color col = tc->text_link;
+      if (!(hov && pp_resolve_pcolor(tc, nd->hover_fg, &col))) (void)pp_resolve_pcolor(tc, nd->fg, &col);
+      float fs = pp_resolve_font_size(ui, nd->font_size);
+      ccord_text_style st = {.font = nd->bold ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR, .size = fs, .color = col};
+      size_t len = strlen(nd->text);
+      ccord_vec2 tm = ccord_text_measure(r, nd->text, len, &st, 0.0f);
+      float ty = rc.y + (rc.h - tm.y) * 0.5f;
+      float drawn_w = (nd->ellipsis && tm.x > rc.w)
+                        ? ccord_text_draw_ellipsis(r, nd->text, len, rc.x, ty, rc.w, &st)
+                        : (ccord_text_draw(r, nd->text, len, rc.x, ty, &st, 0.0f), pp_p_minf(tm.x, rc.w));
+      if (hov && drawn_w > 1.0f) {
+        ccord_draw_rect(r, (ccord_rect){rc.x, ty + tm.y - 1.0f, drawn_w, 1.0f}, col);
+      }
+      if (!nd->disabled && ((nd->url && nd->url[0]) || (nd->id && nd->id[0]))) {
+        record_hit_ex(ui, m, dctx, nd->id, nd->tooltip, CCORD_CURSOR_POINTER, rc, PHIT_LINK, false,
+                      nd->url ? nd->url : "", false, false, 0, 0, 0, 0, 0);
       }
       break;
     }
@@ -365,7 +489,7 @@ static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const dr
 
     case PN_INPUT: {
       uint64_t k = pp_widget_key(dctx->owner, dctx->panel_id, nd->id ? nd->id : "input");
-      panel_input_state *ist = m ? pp_get_input_state(m, k, nd->value_str) : nullptr;
+      panel_input_state *ist = m ? pp_get_input_state(m, k, nd->value_str, false) : nullptr;
       if (ist) {
         uis_state st = {.hover = self_hovered && !nd->disabled, .focused = (m->focused_input_key == k), .disabled = nd->disabled};
         (void)uis_input(ui, r, rc, &ist->ed, nd->placeholder ? nd->placeholder : "", st, nd->masked, "p_inp", k);
@@ -373,6 +497,47 @@ static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const dr
       if (nd->id && !nd->disabled) {
         record_hit_ex(ui, m, dctx, nd->id, nd->tooltip, CCORD_CURSOR_TEXT, rc, PHIT_INPUT, false, nullptr,
                       false, false, 0, 0, 0, 0, 0);
+      }
+      break;
+    }
+
+    case PN_TEXTAREA: {
+      uint64_t k = pp_widget_key(dctx->owner, dctx->panel_id, nd->id ? nd->id : "textarea");
+      panel_input_state *ist = m ? pp_get_input_state(m, k, nd->value_str, true) : nullptr;
+      bool focused = (m && m->focused_input_key == k);
+      ccord_color bord = focused ? tc->brand : (self_hovered && !nd->disabled ? tc->text_muted : tc->border_subtle);
+      ccord_draw_rrect(r, rc, 4.0f, tc->bg_input);
+      ccord_draw_rrect_stroke(r, rc, 4.0f, 1.0f, bord);
+      ccord_rect inner_rc = {rc.x + 8.0f, rc.y + 6.0f, pp_p_maxf(rc.w - 16.0f, 4.0f), pp_p_maxf(rc.h - 12.0f, 4.0f)};
+      ccord_push_clip(r, inner_rc);
+      float fs = ui->theme->m.font_size_small;
+      const char *txt = ist ? ccord_text_edit_cstr(&ist->ed) : (nd->value_str ? nd->value_str : "");
+      if (txt[0]) {
+        ccord_text_style st = {.font = CCORD_FONT_REGULAR, .size = fs, .color = tc->text_normal};
+        ccord_text_draw(r, txt, strlen(txt), inner_rc.x, inner_rc.y, &st, inner_rc.w);
+      } else if (nd->placeholder && nd->placeholder[0]) {
+        ccord_text_style st = {.font = CCORD_FONT_REGULAR, .size = fs, .color = tc->text_muted};
+        ccord_text_draw(r, nd->placeholder, strlen(nd->placeholder), inner_rc.x, inner_rc.y, &st, inner_rc.w);
+      }
+      if (focused && ist && ((ui->now_ms / UI_CARET_BLINK_MS) % 2u == 0u)) {
+        ccord_text_style st = {.font = CCORD_FONT_REGULAR, .size = fs, .color = tc->text_normal};
+        size_t caret = ist->ed.caret <= ist->ed.len ? ist->ed.caret : ist->ed.len;
+        // Count newlines before caret and measure current line fragment for caret placement.
+        size_t line_start = 0, line_num = 0;
+        for (size_t i = 0; i < caret; i++) {
+          if (txt[i] == '\n') { line_num++; line_start = i + 1u; }
+        }
+        float lh = ui_line_h(ui, fs);
+        float cx = inner_rc.x + ccord_text_measure(r, txt + line_start, caret - line_start, &st, 0.0f).x;
+        float cy = inner_rc.y + (float)line_num * lh;
+        if (cx > inner_rc.x + inner_rc.w - 2.0f) cx = inner_rc.x + inner_rc.w - 2.0f;
+        ccord_draw_rect(r, (ccord_rect){cx, cy, 1.5f, lh}, tc->text_normal);
+      }
+      ccord_pop_clip(r);
+      if (nd->id && !nd->disabled) {
+        panel_hit *h = record_hit_ex(ui, m, dctx, nd->id, nd->tooltip, CCORD_CURSOR_TEXT, rc, PHIT_TEXTAREA, false,
+                                     nullptr, false, false, 0, 0, 0, 0, 0);
+        if (h) h->submit_on_ctrl_enter = nd->submit_on_ctrl_enter;
       }
       break;
     }
@@ -442,22 +607,42 @@ static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const dr
     case PN_SELECT: {
       uint64_t k = pp_widget_key(dctx->owner, dctx->panel_id, nd->id ? nd->id : "select");
       size_t cur_idx = 0;
+      char multi_lbl[128] = "";
       const char *lbl = nd->value_str ? nd->value_str : "";
-      for (size_t i = 0; i < nd->nopts; i++) {
-        if (nd->value_str && strcmp(nd->opts[i].value, nd->value_str) == 0) {
-          cur_idx = i;
-          lbl = nd->opts[i].label;
-          break;
+      if (nd->multiple) {
+        size_t scnt = 0;
+        const char *first_lbl = nullptr;
+        for (size_t i = 0; i < nd->nopts; i++) {
+          for (size_t s = 0; s < nd->nselected_vals; s++) {
+            if (strcmp(nd->opts[i].value, nd->selected_vals[s]) == 0) {
+              if (!first_lbl) first_lbl = nd->opts[i].label;
+              scnt++;
+              break;
+            }
+          }
         }
+        if (scnt == 0) lbl = (nd->placeholder && nd->placeholder[0]) ? nd->placeholder : "Select...";
+        else if (scnt == 1 && first_lbl) lbl = first_lbl;
+        else {
+          snprintf(multi_lbl, sizeof multi_lbl, "%zu selected", scnt);
+          lbl = multi_lbl;
+        }
+      } else {
+        for (size_t i = 0; i < nd->nopts; i++) {
+          if (nd->value_str && strcmp(nd->opts[i].value, nd->value_str) == 0) {
+            cur_idx = i;
+            lbl = nd->opts[i].label;
+            break;
+          }
+        }
+        if (!lbl[0]) lbl = (nd->placeholder && nd->placeholder[0]) ? nd->placeholder : (nd->nopts > 0 ? nd->opts[0].label : "");
       }
-      if (!lbl[0] && nd->nopts > 0) lbl = nd->opts[0].label;
-      uis_state st = {.hover = self_hovered && !nd->disabled, .disabled = nd->disabled};
+      uis_state st = {.hover = self_hovered && !nd->disabled, .focused = (m && m->select_open && m->select_key == k), .disabled = nd->disabled};
       uis_select(ui, r, rc, lbl, st, "p_sel", k);
       if (nd->id && !nd->disabled) {
-        size_t next_idx = nd->nopts > 0 ? (cur_idx + 1u) % nd->nopts : 0;
-        const char *next_val = nd->nopts > 0 ? nd->opts[next_idx].value : "";
-        record_hit_ex(ui, m, dctx, nd->id, nd->tooltip, CCORD_CURSOR_POINTER, rc, PHIT_SELECT, false,
-                      next_val, false, false, 0, 0, 0, cur_idx, nd->nopts);
+        panel_hit *h = record_hit_ex(ui, m, dctx, nd->id, nd->tooltip, CCORD_CURSOR_POINTER, rc, PHIT_SELECT, false,
+                                     nd->value_str ? nd->value_str : "", false, false, 0, 0, 0, cur_idx, nd->nopts);
+        if (h) h->node_ref = nd;
       }
       break;
     }
@@ -650,23 +835,40 @@ static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const dr
         pp_p_maxf(rc.h - nd->pad_t - nd->pad_b, 0.0f),
       };
 
-      // Draw flow children (wrapping or flex) + absolute children.
-      const pnode *vis[128];
-      ccord_vec2 intrinsic[128];
-      float main_sz[128];
-      bool frozen[128];
+      // Draw flow children (wrapping or flex) + absolute children. Dynamic allocation for > 64 children (no 128 cap!).
+      const pnode *s_vis[64];
+      ccord_vec2 s_intr[64];
+      float s_msz[64];
+      bool s_frz[64];
+      const pnode **vis = s_vis;
+      ccord_vec2 *intrinsic = s_intr;
+      float *main_sz = s_msz;
+      bool *frozen = s_frz;
+      bool heap_ch = false;
+      if (nd->nchildren > 64u) {
+        vis = ccord_alloc_array(nd->nchildren, sizeof *vis);
+        intrinsic = ccord_alloc_array(nd->nchildren, sizeof *intrinsic);
+        main_sz = ccord_alloc_array(nd->nchildren, sizeof *main_sz);
+        frozen = ccord_alloc_array(nd->nchildren, sizeof *frozen);
+        if (!vis || !intrinsic || !main_sz || !frozen) {
+          ccord_free(vis); ccord_free(intrinsic); ccord_free(main_sz); ccord_free(frozen);
+          if (nd->clip) ccord_pop_clip(r);
+          break;
+        }
+        heap_ch = true;
+      }
       size_t nvis = 0;
-      for (size_t i = 0; i < nd->nchildren && nvis < 128u; i++) {
+      for (size_t i = 0; i < nd->nchildren; i++) {
         const pnode *c = nd->children[i];
         if (!child_visible(c, eff_hovered)) continue;
         if (c->pos_abs) {
-          ccord_vec2 am = measure_node(ui, r, c, nd->is_col, eff_hovered);
+          ccord_vec2 am = measure_node(ui, r, c, nd->is_col, eff_hovered, inner.w);
           ccord_rect arc = {inner.x + c->left_x, inner.y + c->top_y, am.x > 0.0f ? am.x : inner.w, am.y > 0.0f ? am.y : inner.h};
           draw_node(ui, r, m, dctx, c, arc, nd->is_col, eff_hovered, box_surface);
           continue;
         }
         vis[nvis] = c;
-        intrinsic[nvis] = measure_node(ui, r, c, nd->is_col, eff_hovered);
+        intrinsic[nvis] = measure_node(ui, r, c, nd->is_col, eff_hovered, nd->is_col ? inner.w : 0.0f);
         main_sz[nvis] = nd->is_col ? intrinsic[nvis].y : intrinsic[nvis].x;
         frozen[nvis] = (c->flex <= 0.0f);
         nvis++;
@@ -749,6 +951,12 @@ static void draw_node(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const dr
           cursor_main += m_len + step_gap;
         }
       }
+      if (heap_ch) {
+        ccord_free(vis);
+        ccord_free(intrinsic);
+        ccord_free(main_sz);
+        ccord_free(frozen);
+      }
       if (nd->clip) ccord_pop_clip(r);
       break;
     }
@@ -764,20 +972,39 @@ static pnode *get_cached_decor_node(ccord_ui *ui, const char *json)
   if (!ui || !json || !json[0]) return nullptr;
   ui_panel_mgr *m = pp_ensure_mgr(ui);
   if (!m) return nullptr;
+  size_t jlen = strlen(json);
   uint64_t h = pp_hash_str(json);
   if (h == 0) h = 1;
-  for (size_t i = 0; i < 32u; i++) {
-    if (m->decor_cache[i].hash == h) return m->decor_cache[i].root;
+  size_t victim = 0;
+  for (size_t i = 0; i < PANEL_DECOR_CACHE_SLOTS; i++) {
+    decor_cache_entry *ce = &m->decor_cache[i];
+    if (ce->hash == h && ce->json_len == jlen && ce->json_copy && memcmp(ce->json_copy, json, jlen) == 0) {
+      ce->lru_tick = ++m->decor_lru_tick;
+      return ce->root;
+    }
+    if (ce->hash == 0) {
+      if (m->decor_cache[victim].hash != 0) victim = i;
+    } else if (m->decor_cache[victim].hash != 0 && ce->lru_tick < m->decor_cache[victim].lru_tick) {
+      victim = i;
+    }
   }
-  decor_cache_entry *e = &m->decor_cache[m->decor_cursor % 32u];
-  m->decor_cursor++;
-  if (e->hash) ccord_arena_reset(&e->arena);
-  else ccord_arena_init(&e->arena, 1024u);
+  decor_cache_entry *e = &m->decor_cache[victim];
+  if (e->hash) {
+    ccord_arena_reset(&e->arena);
+    ccord_free(e->json_copy);
+    e->json_copy = nullptr;
+  } else {
+    ccord_arena_init(&e->arena, 1024u);
+  }
+  e->json_copy = ccord_malloc(jlen + 1u);
+  if (e->json_copy) memcpy(e->json_copy, json, jlen + 1u);
   e->hash = h;
+  e->json_len = jlen;
+  e->lru_tick = ++m->decor_lru_tick;
   e->root = nullptr;
-  static const ccord_json_limits k_lim = {16, 2048, 65536u};
+  static const ccord_json_limits k_lim = {PANEL_MAX_DEPTH + 4, 16384, 512u * 1024u};
   ccord_error err = {0};
-  const ccord_json *j = ccord_json_parse(&e->arena, json, strlen(json), &k_lim, &err);
+  const ccord_json *j = ccord_json_parse(&e->arena, json, jlen, &k_lim, &err);
   uint32_t cnt = 0;
   if (j) e->root = pp_compile_node_into(&e->arena, &cnt, j, 0);
   return e->root;
@@ -787,7 +1014,7 @@ ccord_vec2 ui_panels_measure_widget_json(ccord_ui *ui, ccord_renderer *r, const 
 {
   pnode *root = get_cached_decor_node(ui, json);
   if (!root || !r) return (ccord_vec2){0.0f, 0.0f};
-  ccord_vec2 sz = measure_node(ui, r, root, false, false);
+  ccord_vec2 sz = measure_node(ui, r, root, false, false, max_w);
   if (max_w > 0.0f && sz.x > max_w) sz.x = max_w;
   return sz;
 }
@@ -808,7 +1035,14 @@ void ui_panels_draw_widget_json(ccord_ui *ui, ccord_renderer *r, const char *own
 static void draw_one_panel(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m, const ccord_panel_contribution *pc,
                            ccord_rect prc, bool is_overlay, bool draw_default_bg)
 {
-  if (m->nboxes < PANEL_MAX_BOXES) {
+  if (m->nboxes == m->capboxes) {
+    size_t ncap = m->capboxes ? m->capboxes * 2u : 16u;
+    if (ncap <= 4096u) {
+      panel_box *g = ccord_realloc_array(m->boxes, ncap, sizeof *g);
+      if (g) { m->boxes = g; m->capboxes = ncap; }
+    }
+  }
+  if (m->nboxes < m->capboxes) {
     panel_box *bx = &m->boxes[m->nboxes++];
     snprintf(bx->owner, sizeof bx->owner, "%s", pc->owner);
     snprintf(bx->panel_id, sizeof bx->panel_id, "%s", pc->panel_id);
@@ -976,6 +1210,107 @@ void ui_panels_draw_full_view(ccord_ui *ui, ccord_renderer *r, ccord_rect area)
   draw_one_panel(ui, r, m, pc, area, false, true);
 }
 
+static bool select_opt_matches_filter(const panel_select_opt *opt, const char *flt)
+{
+  if (!flt || !flt[0]) return true;
+  // Case-insensitive substring match against label or value.
+  const char *fields[2] = {opt->label, opt->value};
+  size_t flen = strlen(flt);
+  for (int fi = 0; fi < 2; fi++) {
+    const char *s = fields[fi];
+    size_t slen = strlen(s);
+    if (flen > slen) continue;
+    for (size_t i = 0; i + flen <= slen; i++) {
+      bool ok = true;
+      for (size_t k = 0; k < flen; k++) {
+        if (tolower((unsigned char)s[i + k]) != tolower((unsigned char)flt[k])) { ok = false; break; }
+      }
+      if (ok) return true;
+    }
+  }
+  return false;
+}
+
+static void draw_select_popover(ccord_ui *ui, ccord_renderer *r, ui_panel_mgr *m)
+{
+  if (!m || !m->select_open) return;
+  const ccord_theme_colors *tc = &ui->theme->c;
+  const char *flt = (m->select_searchable && m->select_filter_init) ? ccord_text_edit_cstr(&m->select_filter) : "";
+  size_t match_cnt = 0;
+  for (size_t i = 0; i < m->nselect_opts; i++) {
+    if (select_opt_matches_filter(&m->select_opts[i], flt)) match_cnt++;
+  }
+  const float row_h = 28.0f;
+  const float filter_h = m->select_searchable ? 32.0f : 0.0f;
+  float list_h = match_cnt > 0 ? pp_p_minf((float)match_cnt * row_h, 210.0f) : 28.0f;
+  float pop_w = pp_p_maxf(m->select_anchor.w, 180.0f);
+  float pop_h = filter_h + list_h + 12.0f;
+  float px = pp_p_clampf(m->select_anchor.x, 8.0f, pp_p_maxf(8.0f, ui->win_w - pop_w - 8.0f));
+  float py = m->select_anchor.y + m->select_anchor.h + 4.0f;
+  if (py + pop_h > ui->win_h - 8.0f && m->select_anchor.y - pop_h - 4.0f >= 8.0f) {
+    py = m->select_anchor.y - pop_h - 4.0f;
+  }
+  py = pp_p_clampf(py, 8.0f, pp_p_maxf(8.0f, ui->win_h - pop_h - 8.0f));
+  ccord_rect pop = {px, py, pop_w, pop_h};
+  m->select_popup_rect = pop;
+  uis_popover_frame(ui, r, pop);
+
+  float cur_y = pop.y + 6.0f;
+  if (m->select_searchable && m->select_filter_init) {
+    ccord_rect frc = {pop.x + 6.0f, cur_y, pop.w - 12.0f, 26.0f};
+    m->select_filter_rect = frc;
+    uis_state fst = {.hover = ui->mouse_in && ui_in_rect(ui->mx, ui->my, frc), .focused = true};
+    (void)uis_input(ui, r, frc, &m->select_filter, "Filter...", fst, false, "p_selflt", m->select_key);
+    cur_y += filter_h;
+  } else {
+    m->select_filter_rect = (ccord_rect){0};
+  }
+
+  ccord_rect list_rc = {pop.x + 4.0f, cur_y, pop.w - 8.0f, list_h};
+  float total_h = (float)match_cnt * row_h;
+  m->select_max_scroll = pp_p_maxf(total_h - list_h, 0.0f);
+  m->select_scroll = pp_p_clampf(m->select_scroll, 0.0f, m->select_max_scroll);
+
+  ccord_push_clip(r, list_rc);
+  if (match_cnt == 0) {
+    ccord_text_style es = {.font = CCORD_FONT_REGULAR, .size = ui->theme->m.font_size_small, .color = tc->text_muted};
+    ccord_vec2 tm = ccord_text_measure(r, "No matches", 10, &es, 0.0f);
+    ccord_text_draw(r, "No matches", 10, list_rc.x + 8.0f, list_rc.y + (list_h - tm.y) * 0.5f, &es, 0.0f);
+  } else {
+    float ry = list_rc.y - m->select_scroll;
+    for (size_t i = 0; i < m->nselect_opts; i++) {
+      const panel_select_opt *opt = &m->select_opts[i];
+      if (!select_opt_matches_filter(opt, flt)) continue;
+      ccord_rect rrc = {list_rc.x, ry, list_rc.w, row_h};
+      if (rrc.y + rrc.h >= list_rc.y && rrc.y <= list_rc.y + list_rc.h) {
+        bool hov = ui->mouse_in && ui_in_rect(ui->mx, ui->my, rrc);
+        if (hov || opt->selected) {
+          ccord_draw_rrect(r, rrc, 4.0f, hov ? tc->bg_item_hover : tc->bg_item_selected);
+        }
+        float tx = rrc.x + 8.0f;
+        if (m->select_multiple) {
+          ccord_rect cb = {rrc.x + 6.0f, rrc.y + (row_h - 14.0f) * 0.5f, 14.0f, 14.0f};
+          ccord_draw_rrect(r, cb, 3.0f, opt->selected ? tc->brand : tc->bg_input);
+          if (!opt->selected) ccord_draw_rrect_stroke(r, cb, 3.0f, 1.0f, tc->border_subtle);
+          else {
+            ccord_draw_line(r, (ccord_vec2){cb.x + 3.0f, cb.y + 7.5f}, (ccord_vec2){cb.x + 6.0f, cb.y + 10.5f}, 1.8f, tc->text_on_brand);
+            ccord_draw_line(r, (ccord_vec2){cb.x + 6.0f, cb.y + 10.5f}, (ccord_vec2){cb.x + 11.0f, cb.y + 4.0f}, 1.8f, tc->text_on_brand);
+          }
+          tx = cb.x + 20.0f;
+        }
+        ccord_text_style os = {.font = opt->selected ? CCORD_FONT_BOLD : CCORD_FONT_REGULAR,
+                               .size = ui->theme->m.font_size_small,
+                               .color = (hov || opt->selected) ? tc->text_header : tc->text_normal};
+        ccord_vec2 tm = ccord_text_measure(r, opt->label, strlen(opt->label), &os, 0.0f);
+        (void)ccord_text_draw_ellipsis(r, opt->label, strlen(opt->label), tx, rrc.y + (row_h - tm.y) * 0.5f,
+                                       pp_p_maxf(rrc.x + rrc.w - tx - 8.0f, 8.0f), &os);
+      }
+      ry += row_h;
+    }
+  }
+  ccord_pop_clip(r);
+}
+
 void ui_panels_draw_overlays(ccord_ui *ui, ccord_renderer *r)
 {
   if (!ui || !r || !ui->d.contrib || ui->discovery_open) return;
@@ -1022,14 +1357,17 @@ void ui_panels_draw_overlays(ccord_ui *ui, ccord_renderer *r)
       draw_one_panel(ui, r, m, pc, box, true, false);
     }
   }
-  // Tooltip for topmost hovered interactive node across docked + overlay panels.
-  if (panels_can_hover(ui)) {
+  // Draw active select dropdown popover above panels.
+  if (m->select_open) draw_select_popover(ui, r, m);
+  // Tooltip for topmost hovered node (interactive OR tooltip-only) across docked + overlay panels.
+  if (panels_can_hover(ui) && !m->select_open) {
     for (size_t k = m->nhits; k > 0; k--) {
       const panel_hit *h = &m->hits[k - 1u];
       if (ui_in_rect(ui->mx, ui->my, h->rect)) {
         if (h->tooltip[0] != '\0') {
           uis_tip_side side = (h->rect.y < 60.0f) ? UIS_TIP_BELOW : UIS_TIP_ABOVE;
-          (void)uis_tooltip(ui, r, h->rect, h->tooltip, side, pp_hash_str(h->owner) ^ pp_hash_str(h->node_id));
+          (void)uis_tooltip(ui, r, h->rect, h->tooltip, side,
+                            pp_hash_str(h->owner) ^ pp_hash_str(h->node_id[0] ? h->node_id : h->tooltip));
         }
         break;
       }
@@ -1044,6 +1382,7 @@ static const panel_hit *find_top_hit(const ui_panel_mgr *m, float x, float y)
   if (!m) return nullptr;
   for (size_t k = m->nhits; k > 0; k--) {
     const panel_hit *h = &m->hits[k - 1u];
+    if (h->wkind == PHIT_TOOLTIP) continue;
     if (ui_in_rect(x, y, h->rect)) return h;
   }
   return nullptr;
@@ -1077,13 +1416,20 @@ static double slider_val_at(const panel_hit *h, float mx)
 
 bool ui_panels_has_focused_input(const ccord_ui *ui)
 {
-  return ui && ui->panel_mgr && ui->panel_mgr->focused_input_key != 0;
+  return ui && ui->panel_mgr &&
+         (ui->panel_mgr->focused_input_key != 0 ||
+          (ui->panel_mgr->select_open && ui->panel_mgr->select_searchable));
 }
 
 bool ui_panels_handle_back(ccord_ui *ui)
 {
   if (!ui || !ui->panel_mgr || !ui->d.contrib) return false;
   ui_panel_mgr *m = ui->panel_mgr;
+  if (m->select_open) {
+    m->select_open = false;
+    ui->dirty = true;
+    return true;
+  }
   for (size_t i = m->nboxes; i > 0; i--) {
     ccord_panel_slot sl = m->boxes[i - 1u].slot;
     if (sl == CCORD_PANEL_MODAL || sl == CCORD_PANEL_POPOVER) {
@@ -1101,10 +1447,162 @@ bool ui_panels_handle_back(ccord_ui *ui)
   return false;
 }
 
+static void open_select_popover(ccord_ui *ui, ui_panel_mgr *m, const panel_hit *h)
+{
+  if (!m || !h || !h->node_ref) return;
+  const pnode *nd = h->node_ref;
+  uint64_t k = pp_widget_key(h->owner, h->panel_id, h->node_id);
+  if (m->select_open && m->select_key == k) {
+    m->select_open = false;
+    ui->dirty = true;
+    return;
+  }
+  if (nd->nopts > m->capselect_opts) {
+    panel_select_opt *g = ccord_realloc_array(m->select_opts, nd->nopts, sizeof *g);
+    if (!g) return;
+    m->select_opts = g;
+    m->capselect_opts = nd->nopts;
+  }
+  m->nselect_opts = nd->nopts;
+  for (size_t i = 0; i < nd->nopts; i++) {
+    panel_select_opt *o = &m->select_opts[i];
+    memset(o, 0, sizeof *o);
+    snprintf(o->label, sizeof o->label, "%.127s", nd->opts[i].label ? nd->opts[i].label : "");
+    snprintf(o->value, sizeof o->value, "%.127s", nd->opts[i].value ? nd->opts[i].value : "");
+    if (nd->multiple) {
+      for (size_t s = 0; s < nd->nselected_vals; s++) {
+        if (strcmp(o->value, nd->selected_vals[s]) == 0) { o->selected = true; break; }
+      }
+    } else if (nd->value_str && strcmp(o->value, nd->value_str) == 0) {
+      o->selected = true;
+    }
+  }
+  m->select_open = true;
+  m->select_key = k;
+  snprintf(m->select_owner, sizeof m->select_owner, "%s", h->owner);
+  snprintf(m->select_panel, sizeof m->select_panel, "%s", h->panel_id);
+  snprintf(m->select_node, sizeof m->select_node, "%s", h->node_id);
+  m->select_anchor = h->rect;
+  m->select_searchable = nd->searchable;
+  m->select_multiple = nd->multiple;
+  m->select_scroll = 0.0f;
+  m->select_max_scroll = 0.0f;
+  if (!m->select_filter_init) {
+    ccord_text_edit_init(&m->select_filter, 128u);
+    m->select_filter_init = true;
+  }
+  ccord_text_edit_clear(&m->select_filter);
+  ui->dirty = true;
+}
+
+static bool handle_select_popover_input(ccord_ui *ui, ui_panel_mgr *m, const ccord_input_event *ev)
+{
+  if (!m || !m->select_open) return false;
+  if (ev->type == CCORD_IN_KEY_DOWN) {
+    if (ev->key == CCORD_KEY_ESCAPE) {
+      m->select_open = false;
+      ui->dirty = true;
+      return true;
+    }
+    if (m->select_searchable && m->select_filter_init) {
+      bool ctrl = (ev->mods & CCORD_MOD_CTRL) != 0;
+      bool shift = (ev->mods & CCORD_MOD_SHIFT) != 0;
+      if (ev->key == CCORD_KEY_BACKSPACE) { ccord_text_edit_backspace(&m->select_filter); m->select_scroll = 0.0f; }
+      else if (ev->key == CCORD_KEY_DELETE) { ccord_text_edit_delete(&m->select_filter); m->select_scroll = 0.0f; }
+      else if (ev->key == CCORD_KEY_LEFT) ccord_text_edit_move(&m->select_filter, -1, shift);
+      else if (ev->key == CCORD_KEY_RIGHT) ccord_text_edit_move(&m->select_filter, 1, shift);
+      else if (ev->key == CCORD_KEY_HOME) ccord_text_edit_move(&m->select_filter, -2, shift);
+      else if (ev->key == CCORD_KEY_END) ccord_text_edit_move(&m->select_filter, 2, shift);
+      else if (ctrl && ev->key == CCORD_KEY_A) ccord_text_edit_select_all(&m->select_filter);
+      ui->dirty = true;
+      return true;
+    }
+    return false;
+  }
+  if (ev->type == CCORD_IN_TEXT && m->select_searchable && m->select_filter_init) {
+    ccord_error err = {0};
+    (void)ccord_text_edit_insert(&m->select_filter, ev->text, strlen(ev->text), &err);
+    m->select_scroll = 0.0f;
+    ui->dirty = true;
+    return true;
+  }
+  if (ev->type == CCORD_IN_WHEEL) {
+    if (ui_in_rect(ev->x, ev->y, m->select_popup_rect)) {
+      if (m->select_max_scroll > 0.0f) {
+        ui_scroll_offset_by(ui, &m->select_scroll, ui_wheel_delta_px(ui, ev, 28.0f), m->select_max_scroll);
+        ui->dirty = true;
+      }
+      return true;
+    }
+    return false;
+  }
+  if (ev->type == CCORD_IN_MOUSE_MOVE) {
+    if (ui_in_rect(ev->x, ev->y, m->select_popup_rect)) {
+      ui->dirty = true;
+      return true;
+    }
+    return false;
+  }
+  if (ev->type == CCORD_IN_MOUSE_DOWN) {
+    if (!ui_in_rect(ev->x, ev->y, m->select_popup_rect)) {
+      m->select_open = false;
+      ui->dirty = true;
+      return ui_in_rect(ev->x, ev->y, m->select_anchor);
+    }
+    if (m->select_searchable && ui_in_rect(ev->x, ev->y, m->select_filter_rect)) {
+      return true;
+    }
+    const char *flt = (m->select_searchable && m->select_filter_init) ? ccord_text_edit_cstr(&m->select_filter) : "";
+    const float row_h = 28.0f;
+    float list_y = m->select_popup_rect.y + 6.0f + (m->select_searchable ? 32.0f : 0.0f);
+    float ry = list_y - m->select_scroll;
+    for (size_t i = 0; i < m->nselect_opts; i++) {
+      panel_select_opt *opt = &m->select_opts[i];
+      if (!select_opt_matches_filter(opt, flt)) continue;
+      if (ev->y >= ry && ev->y < ry + row_h) {
+        if (m->select_multiple) {
+          opt->selected = !opt->selected;
+          ccord_buf jb; ccord_buf_init(&jb, 0);
+          ccord_jw jw; ccord_jw_init(&jw, &jb);
+          ccord_jw_begin_array(&jw);
+          const char *first_val = "";
+          for (size_t k = 0; k < m->nselect_opts; k++) {
+            if (m->select_opts[k].selected) {
+              if (!first_val[0]) first_val = m->select_opts[k].value;
+              ccord_jw_cstr(&jw, m->select_opts[k].value);
+            }
+          }
+          ccord_jw_end_array(&jw);
+          ccord_panel_event cev = {
+            .kind = CCORD_PANEL_EV_CHANGE, .node_id = m->select_node,
+            .text_value = first_val,
+            .values_json = ccord_jw_ok(&jw) ? ccord_buf_cstr(&jb) : "[]",
+          };
+          dispatch_ev(ui, m->select_owner, m->select_panel, &cev);
+          ccord_buf_free(&jb);
+          ui->dirty = true;
+        } else {
+          for (size_t k = 0; k < m->nselect_opts; k++) m->select_opts[k].selected = (k == i);
+          ccord_panel_event cev = {.kind = CCORD_PANEL_EV_CHANGE, .node_id = m->select_node,
+                                   .text_value = opt->value};
+          dispatch_ev(ui, m->select_owner, m->select_panel, &cev);
+          m->select_open = false;
+          ui->dirty = true;
+        }
+        return true;
+      }
+      ry += row_h;
+    }
+    return true;
+  }
+  return false;
+}
+
 bool ui_panels_handle_input(ccord_ui *ui, const ccord_input_event *ev)
 {
   if (!ui || !ev || !ui->panel_mgr || !ui->d.contrib || ui->discovery_open) return false;
   ui_panel_mgr *m = ui->panel_mgr;
+  if (m->select_open && handle_select_popover_input(ui, m, ev)) return true;
   if (m->nboxes == 0 && m->focused_input_key == 0 && m->full_view_back_rect.w <= 0.0f) return false;
 
   // Check if a modal plugin panel is open (blocks clicks outside and closes on Escape/scrim).
@@ -1136,6 +1634,21 @@ bool ui_panels_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         return true;
       }
       if (ev->key == CCORD_KEY_RETURN) {
+        bool ctrl = (ev->mods & CCORD_MOD_CTRL) != 0;
+        bool shift = (ev->mods & CCORD_MOD_SHIFT) != 0;
+        if (m->focused_is_textarea) {
+          bool do_submit = m->focused_submit_ctrl_enter ? ctrl : !shift;
+          if (!do_submit) {
+            ccord_error err = {0};
+            if (ccord_text_edit_insert(&ist->ed, "\n", 1, &err) == CCORD_OK) {
+              ccord_panel_event pev = {.kind = CCORD_PANEL_EV_CHANGE, .node_id = m->focused_node,
+                                       .text_value = ccord_text_edit_cstr(&ist->ed)};
+              dispatch_ev(ui, m->focused_owner, m->focused_panel, &pev);
+            }
+            ui->dirty = true;
+            return true;
+          }
+        }
         ccord_panel_event pev = {.kind = CCORD_PANEL_EV_SUBMIT, .node_id = m->focused_node,
                                  .text_value = ccord_text_edit_cstr(&ist->ed)};
         dispatch_ev(ui, m->focused_owner, m->focused_panel, &pev);
@@ -1270,16 +1783,19 @@ bool ui_panels_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       return false;
     }
     const panel_hit *h = find_top_hit(m, ev->x, ev->y);
-    if (m->focused_input_key != 0 && (!h || h->wkind != PHIT_INPUT)) {
+    if (m->focused_input_key != 0 && (!h || (h->wkind != PHIT_INPUT && h->wkind != PHIT_TEXTAREA))) {
       ccord_panel_event bev = {.kind = CCORD_PANEL_EV_BLUR, .node_id = m->focused_node};
       dispatch_ev(ui, m->focused_owner, m->focused_panel, &bev);
       m->focused_input_key = 0;
+      m->focused_is_textarea = false;
       if (ui->touch_mode) ui->touch_text_focused = false;
     }
     if (h && (ev->button >= 1 && ev->button <= 3)) {
-      if (ev->button == 1 && h->wkind == PHIT_INPUT) {
+      if (ev->button == 1 && (h->wkind == PHIT_INPUT || h->wkind == PHIT_TEXTAREA)) {
         uint64_t k = pp_widget_key(h->owner, h->panel_id, h->node_id);
         m->focused_input_key = k;
+        m->focused_is_textarea = (h->wkind == PHIT_TEXTAREA);
+        m->focused_submit_ctrl_enter = h->submit_on_ctrl_enter;
         snprintf(m->focused_owner, sizeof m->focused_owner, "%s", h->owner);
         snprintf(m->focused_panel, sizeof m->focused_panel, "%s", h->panel_id);
         snprintf(m->focused_node, sizeof m->focused_node, "%s", h->node_id);
@@ -1288,13 +1804,30 @@ bool ui_panels_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         dispatch_ev(ui, h->owner, h->panel_id, &fev);
         return true;
       }
+      if (ev->button == 1 && h->wkind == PHIT_LINK) {
+        if (h->value_str[0] && (strncmp(h->value_str, "https://", 8) == 0 ||
+                                strncmp(h->value_str, "http://", 7) == 0 ||
+                                strncmp(h->value_str, "ccord://", 8) == 0)) {
+          (void)ui_open_url(ui, h->value_str, "Link");
+        }
+        if (h->node_id[0]) {
+          ccord_panel_event cev = {.kind = CCORD_PANEL_EV_CLICK, .node_id = h->node_id, .button = 1, .mods = ev->mods,
+                                   .x = ev->x - h->rect.x, .y = ev->y - h->rect.y, .text_value = h->value_str};
+          dispatch_ev(ui, h->owner, h->panel_id, &cev);
+        }
+        return true;
+      }
+      if (ev->button == 1 && h->wkind == PHIT_SELECT) {
+        open_select_popover(ui, m, h);
+        return true;
+      }
       if (ev->button == 1 && (h->wkind == PHIT_TOGGLE || h->wkind == PHIT_CHECKBOX)) {
         ccord_panel_event cev = {.kind = CCORD_PANEL_EV_CHANGE, .node_id = h->node_id,
                                  .bool_value = !h->checked, .has_bool = true};
         dispatch_ev(ui, h->owner, h->panel_id, &cev);
         return true;
       }
-      if (ev->button == 1 && (h->wkind == PHIT_RADIO || h->wkind == PHIT_SELECT || h->wkind == PHIT_TAB)) {
+      if (ev->button == 1 && (h->wkind == PHIT_RADIO || h->wkind == PHIT_TAB)) {
         ccord_panel_event cev = {.kind = CCORD_PANEL_EV_CHANGE, .node_id = h->node_id,
                                  .text_value = h->value_str[0] ? h->value_str : nullptr,
                                  .bool_value = true, .has_bool = (h->value_str[0] == '\0')};

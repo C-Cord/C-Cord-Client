@@ -274,9 +274,16 @@ void ui_panels_sync_textures(ccord_ui *ui, ccord_renderer *r)
     ccord_render_evict_texture(r, gkey);
 
     if (st == CCORD_OK) {
-      if (slot == m->nsynced_texs && m->nsynced_texs < 256u) {
-        snprintf(m->synced_texs[slot].key, sizeof m->synced_texs[slot].key, "%s", t->key);
-        m->nsynced_texs++;
+      if (slot == m->nsynced_texs) {
+        if (m->nsynced_texs == m->capsynced_texs) {
+          size_t ncap = m->capsynced_texs ? m->capsynced_texs * 2u : 32u;
+          synced_tex_entry *g = ccord_realloc_array(m->synced_texs, ncap, sizeof *g);
+          if (g) { m->synced_texs = g; m->capsynced_texs = ncap; }
+        }
+        if (m->nsynced_texs < m->capsynced_texs) {
+          snprintf(m->synced_texs[slot].key, sizeof m->synced_texs[slot].key, "%s", t->key);
+          m->nsynced_texs++;
+        }
       }
       if (slot < m->nsynced_texs) m->synced_texs[slot].rev = t->revision;
     }
@@ -418,6 +425,8 @@ pnode *pp_compile_node_into(ccord_arena *arena, uint32_t *node_count, const ccor
   else if (strcmp(tstr, "divider") == 0) nd->kind = PN_DIVIDER;
   else if (strcmp(tstr, "canvas") == 0) nd->kind = PN_CANVAS;
   else if (strcmp(tstr, "input") == 0) nd->kind = PN_INPUT;
+  else if (strcmp(tstr, "textarea") == 0) nd->kind = PN_TEXTAREA;
+  else if (strcmp(tstr, "link") == 0) nd->kind = PN_LINK;
   else if (strcmp(tstr, "toggle") == 0) nd->kind = PN_TOGGLE;
   else if (strcmp(tstr, "checkbox") == 0) nd->kind = PN_CHECKBOX;
   else if (strcmp(tstr, "radio") == 0) nd->kind = PN_RADIO;
@@ -532,10 +541,26 @@ pnode *pp_compile_node_into(ccord_arena *arena, uint32_t *node_count, const ccor
     size_t fnl = 0; const char *fns = ccord_json_string(ccord_json_get(j, "font"), &fnl);
     nd->bold = j_bool(j, "bold", (fns && strcmp(fns, "bold") == 0));
     nd->ellipsis = j_bool(j, "ellipsis", nd->kind == PN_TEXT);
+    float ml = j_num(j, "max_lines", 0.0f);
+    if (ml >= 1.0f) nd->max_lines = (uint16_t)pp_p_clampf(ml, 1.0f, 1000.0f);
     size_t al = 0; const char *as = ccord_json_string(ccord_json_get(j, "align"), &al);
     if (as && strcmp(as, "center") == 0) nd->align = PALIGN_CENTER;
     else if (as && strcmp(as, "right") == 0) nd->align = PALIGN_END;
     else nd->align = PALIGN_START;
+  } else if (nd->kind == PN_LINK) {
+    nd->url = j_astr(arena, j, "url");
+    if (!nd->url) nd->url = j_astr(arena, j, "href");
+    if (!nd->url) nd->url = "";
+    nd->text = j_astr(arena, j, "text");
+    if (!nd->text) nd->text = j_astr(arena, j, "label");
+    if (!nd->text || !nd->text[0]) nd->text = nd->url;
+    if (!nd->tooltip && nd->url[0]) nd->tooltip = nd->url;
+    nd->fg = parse_pcolor(ccord_json_get(j, "color"));
+    nd->hover_fg = parse_pcolor(ccord_json_get(j, "hover_color"));
+    nd->font_size = parse_font_size(j);
+    nd->bold = j_bool(j, "bold", false);
+    nd->ellipsis = j_bool(j, "ellipsis", true);
+    nd->cursor = nd->disabled ? CCORD_CURSOR_DEFAULT : CCORD_CURSOR_POINTER;
   } else if (nd->kind == PN_ICON) {
     const ccord_json *icj = ccord_json_get(j, "name");
     if (!icj) icj = ccord_json_get(j, "icon");
@@ -574,6 +599,14 @@ pnode *pp_compile_node_into(ccord_arena *arena, uint32_t *node_count, const ccor
     nd->placeholder = j_astr(arena, j, "placeholder");
     nd->masked = j_bool(j, "masked", j_bool(j, "password", false));
     nd->cursor = nd->disabled ? CCORD_CURSOR_DEFAULT : CCORD_CURSOR_TEXT;
+  } else if (nd->kind == PN_TEXTAREA) {
+    nd->value_str = j_astr(arena, j, "value");
+    nd->placeholder = j_astr(arena, j, "placeholder");
+    nd->rows = (uint16_t)pp_p_clampf(j_num(j, "rows", 3.0f), 1.0f, 24.0f);
+    nd->submit_on_ctrl_enter = j_bool(j, "submit_on_ctrl_enter", true);
+    float mh = j_num(j, "max_height", 0.0f);
+    if (mh > 0.0f && (nd->max_h <= 0.0f || mh < nd->max_h)) nd->max_h = mh;
+    nd->cursor = nd->disabled ? CCORD_CURSOR_DEFAULT : CCORD_CURSOR_TEXT;
   } else if (nd->kind == PN_TOGGLE || nd->kind == PN_CHECKBOX || nd->kind == PN_RADIO) {
     nd->text = j_astr(arena, j, "label");
     nd->value_str = j_astr(arena, j, "value");
@@ -588,7 +621,28 @@ pnode *pp_compile_node_into(ccord_arena *arena, uint32_t *node_count, const ccor
     nd->cursor = nd->disabled ? CCORD_CURSOR_DEFAULT : CCORD_CURSOR_POINTER;
   } else if (nd->kind == PN_SELECT) {
     nd->value_str = j_astr(arena, j, "value");
+    nd->placeholder = j_astr(arena, j, "placeholder");
+    nd->searchable = j_bool(j, "searchable", false);
+    nd->multiple = j_bool(j, "multiple", false);
     compile_options(arena, ccord_json_get(j, "options"), &nd->opts, &nd->nopts);
+    const ccord_json *vals = ccord_json_get(j, "values");
+    if (vals && ccord_json_type_of(vals) == CCORD_JSON_ARRAY) {
+      size_t vn = ccord_json_array_len(vals);
+      if (vn > PANEL_MAX_OPTS) vn = PANEL_MAX_OPTS;
+      if (vn > 0) {
+        nd->selected_vals = ccord_arena_alloc(arena, vn * sizeof(const char *), _Alignof(const char *));
+        if (nd->selected_vals) {
+          for (size_t i = 0; i < vn; i++) {
+            size_t sl = 0;
+            const char *s = ccord_json_string(ccord_json_array_at(vals, i), &sl);
+            if (s) {
+              const char *cp = ccord_arena_strndup(arena, s, sl);
+              if (cp) nd->selected_vals[nd->nselected_vals++] = cp;
+            }
+          }
+        }
+      }
+    }
     nd->cursor = nd->disabled ? CCORD_CURSOR_DEFAULT : CCORD_CURSOR_POINTER;
   } else if (nd->kind == PN_TABS) {
     nd->value_str = j_astr(arena, j, "active");
@@ -771,7 +825,7 @@ pnode *pp_compile_node_into(ccord_arena *arena, uint32_t *node_count, const ccor
     const ccord_json *ht = ccord_json_get(j, "hits");
     if (ht && ccord_json_type_of(ht) == CCORD_JSON_ARRAY) {
       size_t n = ccord_json_array_len(ht);
-      if (n > 128u) n = 128u;
+      if (n > 4096u) n = 4096u;
       if (n > 0) {
         nd->hits = ccord_arena_alloc(arena, n * sizeof(phit_spec), _Alignof(phit_spec));
         if (nd->hits) {
@@ -799,11 +853,24 @@ void ui_panels_destroy(ccord_ui *ui)
   if (!ui || !ui->panel_mgr) return;
   ui_panel_mgr *m = ui->panel_mgr;
   for (size_t i = 0; i < m->ncompiled; i++) ccord_arena_free(&m->compiled[i].arena);
-  for (size_t i = 0; i < m->ninputs; i++) ccord_text_edit_free(&m->inputs[i].ed);
-  for (size_t i = 0; i < 32u; i++) {
-    if (m->decor_cache[i].hash) ccord_arena_free(&m->decor_cache[i].arena);
+  for (size_t i = 0; i < m->ninputs; i++) {
+    ccord_text_edit_free(&m->inputs[i].ed);
+    ccord_free(m->inputs[i].last_seed);
+  }
+  if (m->select_filter_init) ccord_text_edit_free(&m->select_filter);
+  for (size_t i = 0; i < PANEL_DECOR_CACHE_SLOTS; i++) {
+    if (m->decor_cache[i].hash) {
+      ccord_arena_free(&m->decor_cache[i].arena);
+      ccord_free(m->decor_cache[i].json_copy);
+    }
   }
   ccord_free(m->compiled);
+  ccord_free(m->hits);
+  ccord_free(m->boxes);
+  ccord_free(m->inputs);
+  ccord_free(m->scrolls);
+  ccord_free(m->select_opts);
+  ccord_free(m->synced_texs);
   ccord_free(m);
   ui->panel_mgr = nullptr;
 }
@@ -858,12 +925,17 @@ void pp_prune_stale_compiled(ui_panel_mgr *m, const ccord_contrib *c)
   m->ncompiled = w;
 }
 
-panel_input_state *pp_get_input_state(ui_panel_mgr *m, uint64_t key, const char *seed)
+panel_input_state *pp_get_input_state(ui_panel_mgr *m, uint64_t key, const char *seed, bool is_multiline)
 {
   for (size_t i = 0; i < m->ninputs; i++) {
     if (m->inputs[i].key == key) {
-      if (seed && strcmp(m->inputs[i].last_seed, seed) != 0 && m->focused_input_key != key) {
-        snprintf(m->inputs[i].last_seed, sizeof m->inputs[i].last_seed, "%s", seed);
+      const char *cur_seed = m->inputs[i].last_seed ? m->inputs[i].last_seed : "";
+      if (seed && strcmp(cur_seed, seed) != 0 && m->focused_input_key != key) {
+        char *dup = ccord_strdup(seed);
+        if (dup) {
+          ccord_free(m->inputs[i].last_seed);
+          m->inputs[i].last_seed = dup;
+        }
         ccord_text_edit_clear(&m->inputs[i].ed);
         if (seed[0]) {
           ccord_error err = {0};
@@ -873,13 +945,21 @@ panel_input_state *pp_get_input_state(ui_panel_mgr *m, uint64_t key, const char 
       return &m->inputs[i];
     }
   }
-  if (m->ninputs >= PANEL_MAX_INPUTS) return nullptr;
+  if (m->ninputs == m->capinputs) {
+    size_t ncap = m->capinputs ? m->capinputs * 2u : 16u;
+    if (ncap > 2048u) return nullptr;
+    panel_input_state *g = ccord_realloc_array(m->inputs, ncap, sizeof *g);
+    if (!g) return nullptr;
+    m->inputs = g;
+    m->capinputs = ncap;
+  }
   panel_input_state *st = &m->inputs[m->ninputs++];
   memset(st, 0, sizeof *st);
   st->key = key;
-  ccord_text_edit_init(&st->ed, 512u);
+  st->is_multiline = is_multiline;
+  ccord_text_edit_init(&st->ed, is_multiline ? 16384u : 4096u);
   if (seed && seed[0]) {
-    snprintf(st->last_seed, sizeof st->last_seed, "%s", seed);
+    st->last_seed = ccord_strdup(seed);
     ccord_error err = {0};
     (void)ccord_text_edit_insert(&st->ed, seed, strlen(seed), &err);
   }
@@ -891,7 +971,14 @@ panel_scroll_state *pp_get_scroll_state(ui_panel_mgr *m, uint64_t key)
   for (size_t i = 0; i < m->nscrolls; i++) {
     if (m->scrolls[i].key == key) return &m->scrolls[i];
   }
-  if (m->nscrolls >= PANEL_MAX_SCROLL) return nullptr;
+  if (m->nscrolls == m->capscrolls) {
+    size_t ncap = m->capscrolls ? m->capscrolls * 2u : 16u;
+    if (ncap > 2048u) return nullptr;
+    panel_scroll_state *g = ccord_realloc_array(m->scrolls, ncap, sizeof *g);
+    if (!g) return nullptr;
+    m->scrolls = g;
+    m->capscrolls = ncap;
+  }
   panel_scroll_state *st = &m->scrolls[m->nscrolls++];
   memset(st, 0, sizeof *st);
   st->key = key;
