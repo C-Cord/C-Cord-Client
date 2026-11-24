@@ -188,6 +188,8 @@ struct ccord_plugins {
   bool dev_auto_reload;
   uint64_t last_dev_scan_ms;
   uint64_t last_account_rev;
+  uint64_t import_seq;
+  char last_imported_id[65];
 };
 
 // Shared helpers defined in plugins.c

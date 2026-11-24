@@ -182,6 +182,8 @@ void ccord_plugins_dispatch_voice_levels(ccord_plugins *p, const char *levels_js
 bool ccord_plugins_get_consented_hosts(const ccord_plugins *p, const char *id,
                                        char *hosts_out, size_t hosts_cap, bool *had_consented_out);
 bool ccord_plugins_import_package(ccord_plugins *p, const char *pkg_path, char *err_buf, size_t err_cap);
+// Returns the plugin id from the most recent successful package import, or nullptr if none/failed.
+const char *ccord_plugins_last_imported_id(const ccord_plugins *p);
 bool ccord_plugins_import_package_from_catalog(ccord_plugins *p, const char *pkg_path,
                                                const char *expected_id, const char *expected_version,
                                                uint64_t expected_perms, const char *expected_allowed_hosts,

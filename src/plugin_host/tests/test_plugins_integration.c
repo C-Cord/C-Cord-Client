@@ -21,6 +21,7 @@
 #include "../../plugins/workers/plugin_workers.h"
 
 extern bool pl_fs_path_is_protected(const ccord_plugins *m, const char *raw_path);
+extern bool ccord_zip_pack_dir(const char *src_dir, const char *zip_path, char *err_buf, size_t err_cap);
 
 #include <signal.h>
 #include <stdatomic.h>
@@ -2123,6 +2124,45 @@ int main(void)
     CT_CHECK(find_info(contrib, "dev.test.sec") == nullptr);
     CT_CHECK(ccord_contrib_plugin_import_package(contrib, sec_cce, sebuf, sizeof sebuf));
     CT_CHECK(find_info(contrib, "dev.test.sec") != nullptr);
+    CT_CHECK(ccord_plugins_last_imported_id(pm) != nullptr &&
+             strcmp(ccord_plugins_last_imported_id(pm), "dev.test.sec") == 0);
+
+    // Reserved dev.ccord.* ID and missing main.lua must fail cleanly with descriptive errors.
+    {
+      char bad_dir[1400], bad_cce[1400], berr[256] = "";
+      snprintf(bad_dir, sizeof bad_dir, "%s/bad_reserved_src", data_dir);
+      snprintf(bad_cce, sizeof bad_cce, "%s/bad_reserved.cce", data_dir);
+      mkdir(bad_dir, 0700);
+      write_file(bad_dir, "plugin.json",
+                 "{\"schema\":1,\"id\":\"dev.ccord.fake-logger\",\"name\":\"Fake\",\"version\":\"1.0.0\","
+                 "\"api\":1,\"main\":\"main.lua\"}");
+      write_file(bad_dir, "main.lua", "-- noop\n");
+      CT_CHECK(ccord_zip_pack_dir(bad_dir, bad_cce, berr, sizeof berr));
+      berr[0] = '\0';
+      CT_CHECK(!ccord_contrib_plugin_import_package(contrib, bad_cce, berr, sizeof berr));
+      CT_CHECK(strstr(berr, "dev.ccord.") != nullptr && strstr(berr, "reserved") != nullptr);
+      CT_CHECK(ccord_plugins_last_imported_id(pm) == nullptr);
+      (void)unlink(bad_cce);
+      char bp[1500];
+      snprintf(bp, sizeof bp, "%s/plugin.json", bad_dir); (void)unlink(bp);
+      snprintf(bp, sizeof bp, "%s/main.lua", bad_dir); (void)unlink(bp);
+      (void)rmdir(bad_dir);
+
+      snprintf(bad_dir, sizeof bad_dir, "%s/bad_nomain_src", data_dir);
+      snprintf(bad_cce, sizeof bad_cce, "%s/bad_nomain.cce", data_dir);
+      mkdir(bad_dir, 0700);
+      write_file(bad_dir, "plugin.json",
+                 "{\"schema\":1,\"id\":\"dev.test.nomain\",\"name\":\"NoMain\",\"version\":\"1.0.0\","
+                 "\"api\":1,\"main\":\"missing.lua\"}");
+      CT_CHECK(ccord_zip_pack_dir(bad_dir, bad_cce, berr, sizeof berr));
+      berr[0] = '\0';
+      CT_CHECK(!ccord_contrib_plugin_import_package(contrib, bad_cce, berr, sizeof berr));
+      CT_CHECK(strstr(berr, "missing.lua") != nullptr);
+      CT_CHECK(find_info(contrib, "dev.test.nomain") == nullptr);
+      (void)unlink(bad_cce);
+      snprintf(bp, sizeof bp, "%s/plugin.json", bad_dir); (void)unlink(bp);
+      (void)rmdir(bad_dir);
+    }
     (void)unlink(sec_cce);
     char sp[1400];
     snprintf(sp, sizeof sp, "%s/plugins/dev.test.sec/main.lua", data_dir); (void)unlink(sp);

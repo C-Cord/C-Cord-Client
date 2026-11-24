@@ -380,6 +380,7 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
                                 bool from_catalog, bool preapprove_consent,
                                 char *err_buf, size_t err_cap)
 {
+  if (m) m->last_imported_id[0] = '\0';
   if (!m || !pkg_path || !m->has_data_dir) {
     if (err_buf && err_cap) snprintf(err_buf, err_cap, "plugin data directory unavailable");
     return false;
@@ -399,19 +400,21 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
       return false;
     }
   }
-  char base[PBUF], tmp_dir[PBUF + 32], inst_root[PBUF + 32];
+  char base[PBUF], tmp_dir[PBUF + 64], inst_root[PBUF + 32];
   snprintf(base, sizeof base, "%s/plugins", m->data_dir);
   pl_mkdir_ok(m->data_dir);
   pl_mkdir_ok(base);
   snprintf(inst_root, sizeof inst_root, "%s/installed", base);
   pl_mkdir_ok(inst_root);
-  snprintf(tmp_dir, sizeof tmp_dir, "%s/.import_tmp_%llu", base, (unsigned long long)m->now_ms);
+  snprintf(tmp_dir, sizeof tmp_dir, "%s/.import_tmp_%llu_%llu", base,
+           (unsigned long long)m->now_ms, (unsigned long long)(++m->import_seq));
+  if (ccord_path_exists(tmp_dir)) pl_rm_dir_recursive(tmp_dir);
   if (!ccord_zip_extract(pkg_path, tmp_dir, err_buf, err_cap)) {
     pl_rm_dir_recursive(tmp_dir);
     return false;
   }
 
-  char man_path[PBUF + 64], why[256];
+  char man_path[PBUF + 96], why[256];
   snprintf(man_path, sizeof man_path, "%s/plugin.json", tmp_dir);
   char *mbuf = nullptr; size_t mlen = 0;
   if (!pl_read_file(man_path, 16u << 20, &mbuf, &mlen, why, sizeof why)) {
@@ -430,8 +433,47 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
 
   if (strncmp(man.id, "dev.ccord.", 10) == 0) {
     pl_rm_dir_recursive(tmp_dir);
-    if (err_buf && err_cap) snprintf(err_buf, err_cap, "cannot overwrite bundled extension");
+    if (err_buf && err_cap) {
+      if (pl_find_owner(m, man.id)) {
+        snprintf(err_buf, err_cap, "cannot overwrite bundled extension '%s'", man.id);
+      } else {
+        snprintf(err_buf, err_cap,
+                 "plugin id '%s' uses reserved 'dev.ccord.' prefix (reserved for bundled extensions)", man.id);
+      }
+    }
     return false;
+  }
+  char compat_why[160] = "";
+  if (!ccord_manifest_supports(&man, m->plat_bit, m->plat_capabilities, compat_why, sizeof compat_why)) {
+    pl_rm_dir_recursive(tmp_dir);
+    if (err_buf && err_cap) {
+      snprintf(err_buf, err_cap, "%s", compat_why[0] ? compat_why : "plugin unsupported on this platform");
+    }
+    return false;
+  }
+  {
+    char real_tmp[CCORD_PATH_MAX], main_chk[PBUF + 200], real_main[CCORD_PATH_MAX];
+    if (!pl_resolve_real_path(tmp_dir, real_tmp, sizeof real_tmp)) {
+      pl_rm_dir_recursive(tmp_dir);
+      if (err_buf && err_cap) snprintf(err_buf, err_cap, "extracted package directory cannot be resolved");
+      return false;
+    }
+    int mn = snprintf(main_chk, sizeof main_chk, "%s/%s", tmp_dir, man.main);
+    if (mn < 0 || (size_t)mn >= sizeof main_chk) {
+      pl_rm_dir_recursive(tmp_dir);
+      if (err_buf && err_cap) snprintf(err_buf, err_cap, "main file path too long");
+      return false;
+    }
+    if (!pl_resolve_real_path(main_chk, real_main, sizeof real_main) || !ccord_path_is_file(real_main)) {
+      pl_rm_dir_recursive(tmp_dir);
+      if (err_buf && err_cap) snprintf(err_buf, err_cap, "package is missing main file '%s'", man.main);
+      return false;
+    }
+    if (!pl_path_strictly_under(real_main, real_tmp)) {
+      pl_rm_dir_recursive(tmp_dir);
+      if (err_buf && err_cap) snprintf(err_buf, err_cap, "main file resolves outside the plugin directory");
+      return false;
+    }
   }
   if (m->catalog) {
     char rev_reason[256] = "";
@@ -513,6 +555,7 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
     if (!from_catalog && m->catalog) {
       ccord_catalog_record_local_install(m->catalog, man.id, pkg_sha);
     }
+    pl_set_text(m->last_imported_id, sizeof m->last_imported_id, man.id);
     return true;
   }
   size_t started = 0;
@@ -529,12 +572,19 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
   if (!from_catalog && m->catalog) {
     ccord_catalog_record_local_install(m->catalog, man.id, pkg_sha);
   }
+  pl_set_text(m->last_imported_id, sizeof m->last_imported_id, man.id);
   return true;
 }
 
 bool ccord_plugins_import_package(ccord_plugins *m, const char *pkg_path, char *err_buf, size_t err_cap)
 {
   return pl_import_package_internal(m, pkg_path, nullptr, nullptr, 0, nullptr, false, false, err_buf, err_cap);
+}
+
+const char *ccord_plugins_last_imported_id(const ccord_plugins *m)
+{
+  if (!m || !m->last_imported_id[0]) return nullptr;
+  return m->last_imported_id;
 }
 
 bool ccord_plugins_import_package_from_catalog(ccord_plugins *m, const char *pkg_path,
