@@ -294,7 +294,8 @@ static size_t cf_fit(ccord_renderer *r, const char *t, size_t s, size_t e, const
   while (hi - lo > 1) {
     size_t mid = lo + (hi - lo) / 2;
     while (mid > lo && ((unsigned char)t[s + mid] & 0xC0) == 0x80) mid--;
-    if (mid <= lo) break;
+    if (mid <= lo) mid = ccord_utf8_next(t + s, hi, lo);
+    if (mid <= lo || mid >= hi) break;
     if (ccord_text_measure(r, t + s, mid, st, 0.0f).x <= room) lo = mid;
     else hi = mid;
   }

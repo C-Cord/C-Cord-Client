@@ -14,6 +14,7 @@
 #include <ccord/ui/ui.h>
 
 #include "../ui_internal.h"
+#include "chat_internal.h"
 #include "plugin_panel_internal.h"
 #include "plugin_v3_internal.h"
 #include "settings_internal.h"
@@ -2391,6 +2392,150 @@ static void test_mobile_smooth_kinetic_scrolling(void)
   CT_CHECK(!F.ui->touch.fling_active);
 }
 
+static void test_mobile_text_wrapping_no_overflow(void)
+{
+  ccord_ui_set_viewport(F.ui, 390.0f, 844.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+  F.ui->discovery_open = false;
+  F.ui->dm_friends_view = false;
+  F.ui->dm_requests_view = false;
+  step_frames(6, 25);
+
+  ccord_error err = {0};
+  ccord_id ch = ccord_store_selected_channel(F.store);
+  ccord_id self_id = ccord_store_self_id(F.store);
+  CT_CHECK(ch != CCORD_ID_NONE && self_id != CCORD_ID_NONE);
+  if (ch == CCORD_ID_NONE || self_id == CCORD_ID_NONE) return;
+
+  ccord_layout_rect ma = F.ui->layout.message_area;
+  float wrap = dc_content_wrap(F.ui, ma.w);
+  float lh = ui_line_h(F.ui, F.theme.m.font_size_base);
+  float code_lh = ui_line_h(F.ui, fmaxf(F.theme.m.font_size_small, 10.0f));
+  CT_CHECK(wrap > 150.0f && wrap < 340.0f);
+
+  // 1. Direct measurement vs draw parity & multi-line wrapping for every overflow-prone inline/block form.
+  static const char *const k_wrap_cases[] = {
+    "supercalifragilisticsupercalifragilisticsupercalifragilisticsupercalifragilistic",
+    "https://example.com/a/very/long/mobile/url/that/has/no/spaces/whatsoever/and/keeps/going",
+    "See [Click here to read the complete mobile text wrapping guide and release notes](https://example.com/guide) today",
+    "`this_is_a_very_long_inline_code_identifier_without_any_spaces_for_mobile_layout`",
+    "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E\xE3\x81\xAE\xE9\x95\xB7\xE3\x81\x84\xE3\x83\xA1\xE3\x83\x83\xE3\x82\xBB\xE3\x83\xBC\xE3\x82\xB8\xE3\x81\x8C\xE3\x83\xA2\xE3\x83\x90\xE3\x82\xA4\xE3\x83\xAB\xE7\x94\xBB\xE9\x9D\xA2\xE3\x81\xAE\xE5\xB9\x85\xE3\x82\x92\xE8\xB6\x85\xE3\x81\x88\xE3\x81\x9F\xE3\x81\xA8\xE3\x81\x8D\xE3\x81\xAB\xE6\xAD\xA3\xE3\x81\x97\xE3\x81\x8F\xE6\x8A\x98\xE3\x82\x8A\xE8\xBF\x94\xE3\x81\x95\xE3\x82\x8C\xE3\x82\x8B\xE3\x81\x8B\xE3\x83\x86\xE3\x82\xB9\xE3\x83\x88",
+  };
+  for (size_t i = 0; i < sizeof k_wrap_cases / sizeof k_wrap_cases[0]; i++) {
+    const char *s = k_wrap_cases[i];
+    size_t slen = strlen(s);
+    float hm = dc_md_body_walk(F.ui, F.renderer, s, slen, 0.0f, 0.0f, wrap, F.theme.c.text_normal, false);
+    ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+    F.ui->ntext_hits = 0;
+    F.ui->nlinks = 0;
+    float hd = dc_md_body_walk(F.ui, F.renderer, s, slen, 20.0f, 20.0f, wrap, F.theme.c.text_normal, true);
+    ccord_render_end(F.renderer);
+    CT_CHECK(fabsf(hm - hd) < 0.5f);
+    CT_CHECK(hm >= lh * 2.0f - 0.5f);
+    CT_CHECK(F.ui->ntext_hits >= 2u);
+    for (size_t k = 0; k < F.ui->ntext_hits; k++) {
+      CT_CHECK(F.ui->text_hits[k].x + F.ui->text_hits[k].w <= 20.0f + wrap + 1.0f);
+    }
+    if (i == 1u || i == 2u) {
+      CT_CHECK(F.ui->nlinks >= 2u);
+      bool saw_second_row = false;
+      for (size_t k = 0; k < F.ui->nlinks; k++) {
+        CT_CHECK(F.ui->links[k].rect.x + F.ui->links[k].rect.w <= 20.0f + wrap + 1.0f);
+        if (F.ui->links[k].rect.y > F.ui->links[0].rect.y + lh * 0.5f) saw_second_row = true;
+      }
+      CT_CHECK(saw_second_row);
+    }
+  }
+
+  // 2. Syntax-highlighted (```c) and ANSI (```ansi) fenced code blocks wrap onto multiple rows within cw.
+  static const char *const k_code_cases[] = {
+    "```c\nint very_long_function_name_for_mobile_wrap_test(int first_argument_value, int second_argument_value) { return first_argument_value + second_argument_value; }\n```",
+    "```ansi\n\x1b[1;31mthis_is_a_very_long_red_ansi_code_line_that_must_wrap_cleanly_on_mobile_screens_without_overflow\x1b[0m\n```",
+  };
+  for (size_t i = 0; i < sizeof k_code_cases / sizeof k_code_cases[0]; i++) {
+    const char *s = k_code_cases[i];
+    size_t slen = strlen(s);
+    float hm = dc_md_body_walk(F.ui, F.renderer, s, slen, 0.0f, 0.0f, wrap, F.theme.c.text_normal, false);
+    ccord_render_begin(F.renderer, F.theme.c.bg_primary);
+    F.ui->ntext_hits = 0;
+    float hd = dc_md_body_walk(F.ui, F.renderer, s, slen, 20.0f, 20.0f, wrap, F.theme.c.text_normal, true);
+    ccord_render_end(F.renderer);
+    CT_CHECK(fabsf(hm - hd) < 0.5f);
+    CT_CHECK(hm >= code_lh * 2.0f + 7.5f);
+    CT_CHECK(F.ui->ntext_hits >= 2u);
+    bool saw_second_row = false;
+    for (size_t k = 0; k < F.ui->ntext_hits; k++) {
+      CT_CHECK(F.ui->text_hits[k].x + F.ui->text_hits[k].w <= 20.0f + wrap + 1.0f);
+      if (F.ui->text_hits[k].y > F.ui->text_hits[0].y + code_lh * 0.5f) saw_second_row = true;
+    }
+    CT_CHECK(saw_second_row);
+  }
+
+  // 3. End-to-end timeline draw: appended long URL & highlighted code block stay within message_area bounds.
+  size_t mcount = ccord_store_message_count(F.store, ch);
+  const ccord_message *last = mcount ? ccord_store_message_at(F.store, ch, mcount - 1u) : nullptr;
+  ccord_id next_id = last ? last->id + 1u : 1u;
+  int64_t next_ts = last ? last->timestamp_ms + 1000 : (int64_t)F.now;
+  ccord_message url_msg = {
+    .id = next_id, .channel_id = ch, .author_id = self_id, .timestamp_ms = next_ts,
+    .content = k_wrap_cases[1],
+  };
+  CT_CHECK(ccord_store_append_message(F.store, &url_msg, &err) == CCORD_OK);
+  ccord_message code_msg = {
+    .id = next_id + 1u, .channel_id = ch, .author_id = self_id, .timestamp_ms = next_ts + 1000,
+    .content = k_code_cases[0],
+  };
+  CT_CHECK(ccord_store_append_message(F.store, &code_msg, &err) == CCORD_OK);
+  ccord_vlist_reset_bottom(&F.ui->vlist);
+  step_frames(4, 25);
+  CT_CHECK(F.ui->ntext_hits >= 4u);
+  for (size_t k = 0; k < F.ui->ntext_hits; k++) {
+    CT_CHECK(F.ui->text_hits[k].x + F.ui->text_hits[k].w <= ma.x + ma.w + 1.0f);
+  }
+  size_t url_link_hits = 0;
+  for (size_t k = 0; k < F.ui->nlinks; k++) {
+    if (strcmp(F.ui->links[k].url, k_wrap_cases[1]) == 0) {
+      url_link_hits++;
+      CT_CHECK(F.ui->links[k].rect.x + F.ui->links[k].rect.w <= ma.x + ma.w + 1.0f);
+    }
+  }
+  CT_CHECK(url_link_hits >= 2u);
+
+  // 4. Mobile composer box height with soft keyboard open matches measured lines (no vertical theft/scroll),
+  //    and long IME preedit wraps onto a second line without overflowing horizontally.
+  ccord_text_edit_clear(&F.ui->edit);
+  ui_ime_preedit_set(F.ui, "", 0, 0);
+  ccord_ui_set_keyboard_inset(F.ui, 300.0f);
+  step_frames(3, 25);
+  ccord_rect box1 = ui_composer_box(F.ui);
+  CT_CHECK(box1.h >= 47.5f);
+  CT_CHECK(box1.h - 2.0f * F.theme.m.composer_pad_y >= lh - 0.5f);
+
+  const char *two_lines = "This mobile composer message is long enough to wrap onto a second line cleanly";
+  CT_CHECK(ccord_text_edit_insert(&F.ui->edit, two_lines, strlen(two_lines), &err) == CCORD_OK);
+  step_frames(3, 25);
+  ccord_rect box2 = ui_composer_box(F.ui);
+  CT_CHECK(box2.h > box1.h + lh * 0.5f);
+  CT_CHECK(F.ui->composer_scroll < 1.0f);
+
+  ccord_text_edit_clear(&F.ui->edit);
+  ui_ime_preedit_set(F.ui, "long mobile composition preedit text that wraps onto line two", 0, 0);
+  step_frames(3, 25);
+  float pre_h = ui_composer_measure(F.ui, F.renderer);
+  CT_CHECK(pre_h >= lh * 2.0f + 2.0f * F.theme.m.composer_pad_y - 1.0f);
+  CT_CHECK(ui_composer_box(F.ui).h >= pre_h - 0.5f);
+
+  ui_ime_preedit_set(F.ui, "", 0, 0);
+  ccord_text_edit_clear(&F.ui->edit);
+  ccord_ui_set_keyboard_inset(F.ui, 0.0f);
+  step_frames(2, 25);
+}
+
 static void test_mobile_idle_wake_touch_scroll_and_buttons(void)
 {
   ccord_ui_set_now_ms(nullptr, 123u);
@@ -2549,6 +2694,7 @@ int main(void)
   test_mobile_zoom_and_touch_targets();
   test_mobile_systemic_button_chip_and_ellipsis();
   test_mobile_smooth_kinetic_scrolling();
+  test_mobile_text_wrapping_no_overflow();
   test_mobile_idle_wake_touch_scroll_and_buttons();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");

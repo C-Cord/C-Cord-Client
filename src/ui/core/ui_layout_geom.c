@@ -1147,11 +1147,17 @@ void ui_rebuild_view(ccord_ui *ui, bool force)
 ccord_rect ui_composer_box(const ccord_ui *ui)
 {
   const ccord_layout_rect *c = &ui->layout.composer;
-  float h = c->h - M(composer_margin_bottom);
+  float mb = M(composer_margin_bottom);
+  if (ui->mobile_layout) {
+    float sb = uc_clampf(ui->safe_insets.bottom, 0.0f, ui->win_h * 0.25f);
+    float ime = uc_clampf(ui->keyboard_inset, 0.0f, ui->win_h * 0.70f);
+    mb = ime > sb ? 8.0f : fminf(mb, 12.0f);
+  }
+  float h = c->h - mb;
   if (h < 0.0f) h = 0.0f;
   float w = c->w - 2.0f * M(composer_margin_x);
   if (w < 0.0f) w = 0.0f;
-  return (ccord_rect){c->x + M(composer_margin_x), c->y + c->h - M(composer_margin_bottom) - h, w, h};
+  return (ccord_rect){c->x + M(composer_margin_x), c->y + c->h - mb - h, w, h};
 }
 
 bool ui_panel_is_profile(const ccord_ui *ui)

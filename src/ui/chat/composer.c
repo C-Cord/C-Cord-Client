@@ -50,12 +50,109 @@ static float ui_staged_banner_height(const ccord_ui *ui)
   return row_h * (float)frows;
 }
 
+static size_t composer_preedit_fit(ccord_renderer *r, const char *s, size_t len, const ccord_text_style *st, float max_w)
+{
+  if (len == 0 || max_w <= 0.0f) return 0;
+  size_t lo = 0, hi = len;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    while (mid > lo && (((unsigned char)s[mid] & 0xC0u) == 0x80u)) mid--;
+    if (mid <= lo) mid = ccord_utf8_next(s, hi, lo);
+    if (mid <= lo || mid >= hi) break;
+    if (ccord_text_measure(r, s, mid, st, 0.0f).x <= max_w) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
+
+// Measures or draws the IME composition preedit starting at (start_x, start_y) inside [0, wrap], wrapping across
+// lines so long compositions never overflow the composer or overlap right-hand buttons. Returns bottom y relative to
+// the composer text origin.
+static float composer_preedit_walk(const ccord_ui *ui, ccord_renderer *r, const char *pre, size_t plen, float wrap,
+                                   float ox, float oy, float start_x, float start_y, float lh, float caret_h, bool draw)
+{
+  if (!pre || plen == 0) return start_y + lh;
+  ccord_text_style pst = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_base), COL(brand));
+  float cx = start_x, cy = start_y;
+  size_t pos = 0;
+  while (pos < plen) {
+    if (cx == 0.0f && pos > 0) {
+      while (pos < plen && (pre[pos] == ' ' || pre[pos] == '\t')) pos++;
+      if (pos >= plen) break;
+    }
+    size_t rem = plen - pos;
+    float rw = ccord_text_measure(r, pre + pos, rem, &pst, 0.0f).x;
+    if (cx + rw <= wrap + 0.01f) {
+      if (draw) {
+        ccord_text_draw(r, pre + pos, rem, ox + cx, oy + cy, &pst, 0.0f);
+        ccord_draw_rect(r, (ccord_rect){ox + cx, oy + cy + caret_h - 1.0f, rw, 1.0f}, COL(brand));
+      }
+      cx += rw;
+      break;
+    }
+    float avail = wrap - cx;
+    size_t fit = avail > 0.0f ? composer_preedit_fit(r, pre + pos, rem, &pst, avail) : 0u;
+    size_t take = 0;
+    bool broke_at_space = false;
+    if (fit > 0 && fit < rem) {
+      if (pre[pos + fit] == ' ' || pre[pos + fit] == '\t') {
+        take = fit;
+        while (take > 0 && (pre[pos + take - 1u] == ' ' || pre[pos + take - 1u] == '\t')) take--;
+        broke_at_space = take > 0;
+      } else {
+        size_t sp = fit;
+        while (sp > 0 && pre[pos + sp - 1u] != ' ' && pre[pos + sp - 1u] != '\t') sp--;
+        if (sp > 0) {
+          while (sp > 0 && (pre[pos + sp - 1u] == ' ' || pre[pos + sp - 1u] == '\t')) sp--;
+          if (sp > 0) {
+            take = sp;
+            broke_at_space = true;
+          }
+        }
+      }
+    }
+    if (!broke_at_space) {
+      if (cx > 0.0f) {
+        cx = 0.0f;
+        cy += lh;
+        continue;
+      }
+      take = fit > 0 ? fit : ccord_utf8_next(pre + pos, rem, 0);
+      if (take == 0) take = 1u;
+    }
+    float pw = ccord_text_measure(r, pre + pos, take, &pst, 0.0f).x;
+    if (draw) {
+      ccord_text_draw(r, pre + pos, take, ox + cx, oy + cy, &pst, 0.0f);
+      ccord_draw_rect(r, (ccord_rect){ox + cx, oy + cy + caret_h - 1.0f, pw, 1.0f}, COL(brand));
+    }
+    cx += pw;
+    pos += take;
+    if (broke_at_space) {
+      while (pos < plen && (pre[pos] == ' ' || pre[pos] == '\t')) pos++;
+    }
+    if (pos < plen) {
+      cx = 0.0f;
+      cy += lh;
+    }
+  }
+  return cy + lh;
+}
+
 float ui_composer_measure(ccord_ui *ui, ccord_renderer *r)
 {
   float lh = ui_line_h(ui, M(font_size_base));
+  float wrap = composer_wrap(ui);
   float th = lh;
+  const char *text = ccord_text_edit_cstr(&ui->edit);
   if (ui->edit.len > 0) {
-    th = ui_composer_format_height(ui, r, ccord_text_edit_cstr(&ui->edit), ui->edit.len, composer_wrap(ui));
+    th = ui_composer_format_height(ui, r, text, ui->edit.len, wrap);
+  }
+  size_t plen = strlen(ui->ime_preedit);
+  if (plen > 0) {
+    ccord_rect caret = ui_composer_format_caret(ui, r, text, ui->edit.len, wrap, ui->edit.caret);
+    float pre_bottom = composer_preedit_walk(ui, r, ui->ime_preedit, plen, wrap, 0.0f, 0.0f,
+                                             caret.x, caret.y, lh, caret.h, false);
+    if (pre_bottom > th) th = pre_bottom;
   }
   float banner = (ui->reply_message != CCORD_ID_NONE ? UI_REPLY_BAR_H : 0.0f) +
                  ui_upload_banner_height(ui) + ui_staged_banner_height(ui);
@@ -380,17 +477,26 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
     ui->caret_on = true;
   }
   ccord_rect caret = ui_composer_format_caret(ui, r, text, len, wrap, ui->edit.caret);
+  size_t plen = strlen(ui->ime_preedit);
+  float pre_bottom = caret.y + lh;
+  if (plen > 0) {
+    pre_bottom = composer_preedit_walk(ui, r, ui->ime_preedit, plen, wrap, 0.0f, 0.0f,
+                                       caret.x, caret.y, lh, caret.h, false);
+    if (pre_bottom > total) total = pre_bottom;
+  }
   if (caret.y < ui->composer_scroll) ui->composer_scroll = caret.y;
-  if (caret.y + lh > ui->composer_scroll + area.h) ui->composer_scroll = caret.y + lh - area.h;
+  if (pre_bottom > ui->composer_scroll + area.h) ui->composer_scroll = pre_bottom - area.h;
   ui->composer_scroll = clampf(ui->composer_scroll, 0.0f, maxf(total - area.h, 0.0f));
   // The platform text-input / IME candidate window follows the CARET, not the whole box.
   ui->text_area = (ccord_rect){area.x + caret.x, area.y - ui->composer_scroll + caret.y,
                                maxf(caret.w, 1.0f), caret.h};
 
-  ccord_push_clip(r, (ccord_rect){box.x, box.y, box.w, box.h});
+  float clip_l = maxf(box.x, area.x - 4.0f);
+  float clip_r = fminf(box.x + box.w, area.x + maxf(area.w, 0.0f) + 4.0f);
+  ccord_push_clip(r, (ccord_rect){clip_l, box.y, maxf(clip_r - clip_l, 0.0f), box.h});
   const ccord_channel *ch = ui_selected_channel(ui);
   const char *locked = ui_composer_lock_reason(ui);
-  if (len == 0) {
+  if (len == 0 && plen == 0) {
     char ph[160];
     if (locked) {
       snprintf(ph, sizeof ph, "%s", locked);
@@ -405,21 +511,16 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
     }
     ccord_text_style ps = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_base), COL(text_placeholder));
     ccord_text_draw_ellipsis(r, ph, strlen(ph), area.x, area.y, area.w, &ps);
-  } else {
+  } else if (len > 0) {
     size_t sel_lo = ui->edit.caret < ui->edit.anchor ? ui->edit.caret : ui->edit.anchor;
     size_t sel_hi = ui->edit.caret < ui->edit.anchor ? ui->edit.anchor : ui->edit.caret;
     ui_composer_format_draw(ui, r, text, len, wrap, area.x, area.y - ui->composer_scroll, sel_lo, sel_hi,
                             ui->composer_scroll - lh, ui->composer_scroll + area.h + lh);
   }
-  // IME composition preedit: distinct colour with an underline, drawn at the caret.
-  size_t plen = strlen(ui->ime_preedit);
+  // IME composition preedit: distinct colour with an underline, wrapped from the caret within [0, wrap].
   if (plen > 0) {
-    ccord_text_style pst = ui_style(ui, CCORD_FONT_REGULAR, M(font_size_base), COL(brand));
-    float px = area.x + caret.x;
-    float py = area.y - ui->composer_scroll + caret.y;
-    ccord_vec2 psz = ccord_text_measure(r, ui->ime_preedit, plen, &pst, 0.0f);
-    ccord_text_draw(r, ui->ime_preedit, plen, px, py, &pst, 0.0f);
-    ccord_draw_rect(r, (ccord_rect){px, py + caret.h - 1.0f, psz.x, 1.0f}, COL(brand));
+    (void)composer_preedit_walk(ui, r, ui->ime_preedit, plen, wrap, area.x, area.y - ui->composer_scroll,
+                                caret.x, caret.y, lh, caret.h, true);
   }
   if (ui->caret_on && !ui->settings_open && !ui->menu.open) {
     float cy = area.y - ui->composer_scroll + caret.y;

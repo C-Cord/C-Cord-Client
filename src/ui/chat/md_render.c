@@ -527,6 +527,118 @@ static void md_inline_draw_token(ccord_ui *ui, ccord_renderer *r, const char *s,
   }
 }
 
+// Advances by one indivisible inline unit (a Unicode emoji sequence or one UTF-8 codepoint).
+static size_t md_inline_next_atom(const char *s, size_t len, size_t pos)
+{
+  if (pos >= len) return len;
+  size_t el = ccord_emoji_match_prefix(s + pos, len - pos);
+  if (el > 0 && pos + el <= len) return pos + el;
+  size_t next = ccord_utf8_next(s, len, pos);
+  return next > pos ? next : pos + 1u;
+}
+
+// Largest byte prefix in [0, len) on a UTF-8 / emoji-cluster boundary whose measured width fits in max_w.
+// Caller has checked that the whole s[0..len) exceeds max_w.
+static size_t md_inline_fit_prefix(const ccord_ui *ui, ccord_renderer *r, const char *s, size_t len,
+                                   const ccord_text_style *st, float emoji_px, float max_w)
+{
+  if (len == 0 || max_w <= 0.0f) return 0;
+  size_t em_off = 0, em_len = 0;
+  bool has_emoji = md_inline_find_emoji(s, len, &em_off, &em_len);
+  size_t lo = 0, hi = len;   // lo fits, hi does not
+  while (lo < hi) {
+    size_t target = lo + (hi - lo) / 2u;
+    size_t mid = lo;
+    if (!has_emoji) {
+      mid = target;
+      while (mid > lo && (((unsigned char)s[mid] & 0xC0u) == 0x80u)) mid--;
+      if (mid <= lo) mid = ccord_utf8_next(s, hi, lo);
+    } else {
+      size_t p = lo;
+      while (p < hi) {
+        size_t nx = md_inline_next_atom(s, len, p);
+        if (nx >= hi) break;
+        if (nx > target) {
+          if (mid == lo) mid = nx;
+          break;
+        }
+        mid = nx;
+        p = nx;
+      }
+    }
+    if (mid <= lo || mid >= hi) break;
+    float w = has_emoji ? md_inline_measure_token(ui, r, s, mid, st, emoji_px)
+                        : ccord_text_measure(r, s, mid, st, 0.0f).x;
+    if (w <= max_w) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}
+
+static bool md_has_space(const char *s, size_t len)
+{
+  for (size_t i = 0; i < len; i++) {
+    if (s[i] == ' ' || s[i] == '\t') return true;
+  }
+  return false;
+}
+
+static void md_inline_draw_piece(ccord_ui *ui, ccord_renderer *r, const ui_md_token *tok,
+                                 const char *seg, size_t seg_len, ccord_text_style st,
+                                 float inline_em_sz, float px, float py, float pw, float lh,
+                                 float pad_x, bool bg_pill, bool is_spoiler, bool spoiler_hidden,
+                                 bool invite_masked)
+{
+  if (bg_pill) {
+    ccord_color bg = (tok->style == UI_MD_USER_MENTION || tok->style == UI_MD_CHANNEL_MENTION ||
+                      tok->style == UI_MD_ROLE_MENTION || tok->style == UI_MD_MENTION)
+                       ? ui_alpha(COL(brand), 0.22f)
+                       : (is_spoiler && !spoiler_hidden ? ui_alpha(COL(bg_tertiary), 0.55f) : COL(bg_tertiary));
+    ccord_draw_rrect(r, (ccord_rect){px, py + 1.0f, pw, lh - 2.0f}, 3.0f, bg);
+  }
+  if (is_spoiler && ui && ui->nspoiler_hits < 32 && ui->current_drawing_msg_id != CCORD_ID_NONE) {
+    ui->spoiler_hits[ui->nspoiler_hits].rect = (ccord_rect){px, py, pw, lh};
+    ui->spoiler_hits[ui->nspoiler_hits].msg_id = ui->current_drawing_msg_id;
+    ui->nspoiler_hits++;
+  }
+  if (!spoiler_hidden) {
+    if (is_spoiler) st.color = COL(text_normal);
+    md_inline_draw_token(ui, r, seg, seg_len, &st, inline_em_sz, px, py, pw - pad_x * 2.0f, lh, pad_x);
+  }
+  if (tok->style == UI_MD_USER_MENTION || tok->style == UI_MD_MENTION) {
+    ccord_id muid = resolve_mention_user_id(ui, tok);
+    if (muid != CCORD_ID_NONE) {
+      dc_record_user_hit(ui, (ccord_rect){px, py, pw, lh}, muid);
+    }
+  }
+  if (tok->style == UI_MD_CHANNEL_MENTION && tok->id != CCORD_ID_NONE && ui && ui->nchan_hits < 32) {
+    ui->chan_hits[ui->nchan_hits].rect = (ccord_rect){px, py, pw, lh};
+    ui->chan_hits[ui->nchan_hits].channel_id = tok->id;
+    ui->nchan_hits++;
+  }
+  if (!spoiler_hidden && tok->style == UI_MD_TIMESTAMP) {
+    int64_t ts_ms = 0;
+    if (ckd_mul(&ts_ms, tok->timestamp_sec, 1000LL)) {
+      ts_ms = tok->timestamp_sec < 0 ? INT64_MIN : INT64_MAX;
+    }
+    dc_record_ts_hit(ui, (ccord_rect){px, py, pw, lh}, ts_ms, false);
+  }
+  if (tok->style == UI_MD_LINK && tok->url && tok->url_len > 0 && !invite_masked) {
+    ccord_rect lrc = {px, py, pw, lh};
+    bool lhv = ui && ui->mouse_in && ui_in_rect(ui->mx, ui->my, lrc);
+    if (!ui || ui->settings_underline_links || lhv) {
+      ccord_draw_rect(r, (ccord_rect){px, py + lh - 2.0f, pw, 1.0f}, COL(text_link));
+    }
+    dc_record_link_hit(ui, lrc, tok->url, tok->url_len);
+  }
+  if (!spoiler_hidden && (tok->style == UI_MD_UNDERLINE || tok->underline)) {
+    ccord_draw_rect(r, (ccord_rect){px, py + lh - 2.0f, pw, 1.0f}, st.color);
+  }
+  if (!spoiler_hidden && (tok->style == UI_MD_STRIKETHROUGH || tok->strikethrough)) {
+    ccord_draw_rect(r, (ccord_rect){px, py + lh * 0.52f, pw, 1.0f}, st.color);
+  }
+}
+
 // Lays out one logical line (words with mixed styles), wrapping at the width. Returns its height. When
 // draw is true the runs are painted at (x, y).
 // mask_stars: Streamer Mode pre-masked line (see dc_md_inline_walk_sized). text then carries
@@ -589,15 +701,6 @@ static float md_inline_walk_core(ccord_ui *ui, ccord_renderer *r, const char *te
       tw = md_inline_measure_token(ui, r, draw_str, draw_len, &st, inline_em_sz) + pad_x * 2.0f;
     }
 
-    if (!space && line_has && cx + tw > wrap) {
-      if (draw) {
-        dc_chat_sel_line_end(ui, r, x + cx, y + cy, space_w, lh, false);
-        dc_record_text_hit(ui, (ccord_rect){x, y + cy, cx, lh});
-      }
-      cx = 0.0f;
-      cy += lh;
-      line_has = false;
-    }
     if (space && !line_has) continue;   // no leading spaces on a wrapped line
     if (draw && space) dc_chat_sel_process_gap(ui, r, x + cx, y + cy, tok.len, space_w, lh);
     if (draw && !space && ui && ui->dbg_md_msg != CCORD_ID_NONE && ui->dbg_md_msg == ui->current_drawing_msg_id &&
@@ -618,59 +721,103 @@ static float md_inline_walk_core(ccord_ui *ui, ccord_renderer *r, const char *te
       ui->dbg_md_runs[di].text[dn] = '\0';
       ui->dbg_md_runs[di].flags = fl;
     }
+
+    bool split_multi = !space && !is_custom_emoji && draw_len > 0 && wrap > 0.0f &&
+                       (tw > wrap || (!bg_pill && line_has && cx + tw > wrap && md_has_space(draw_str, draw_len)));
+    if (split_multi) {
+      size_t pos = 0;
+      while (pos < draw_len) {
+        if (!line_has && pos > 0) {
+          while (pos < draw_len && (draw_str[pos] == ' ' || draw_str[pos] == '\t')) pos++;
+          if (pos >= draw_len) break;
+        }
+        float avail = (wrap - cx) - pad_x * 2.0f;
+        size_t rem_len = draw_len - pos;
+        float rem_w = md_inline_measure_token(ui, r, draw_str + pos, rem_len, &st, inline_em_sz);
+        if (avail > 0.0f && rem_w <= avail) {
+          float pw = rem_w + pad_x * 2.0f;
+          if (draw) {
+            md_inline_draw_piece(ui, r, &tok, draw_str + pos, rem_len, st, inline_em_sz, x + cx, y + cy, pw, lh,
+                                 pad_x, bg_pill, is_spoiler, spoiler_hidden, invite_masked);
+          }
+          cx += pw;
+          line_has = true;
+          break;
+        }
+        size_t fit = avail > 0.0f ? md_inline_fit_prefix(ui, r, draw_str + pos, rem_len, &st, inline_em_sz, avail) : 0u;
+        size_t take = 0;
+        bool broke_at_space = false;
+        if (fit > 0 && fit < rem_len) {
+          if (draw_str[pos + fit] == ' ' || draw_str[pos + fit] == '\t') {
+            take = fit;
+            while (take > 0 && (draw_str[pos + take - 1u] == ' ' || draw_str[pos + take - 1u] == '\t')) take--;
+            broke_at_space = take > 0;
+          } else {
+            size_t sp = fit;
+            while (sp > 0 && draw_str[pos + sp - 1u] != ' ' && draw_str[pos + sp - 1u] != '\t') sp--;
+            if (sp > 0) {
+              while (sp > 0 && (draw_str[pos + sp - 1u] == ' ' || draw_str[pos + sp - 1u] == '\t')) sp--;
+              if (sp > 0) {
+                take = sp;
+                broke_at_space = true;
+              }
+            }
+          }
+        }
+        if (!broke_at_space) {
+          if (line_has) {
+            if (draw) {
+              dc_chat_sel_line_end(ui, r, x + cx, y + cy, space_w, lh, false);
+              dc_record_text_hit(ui, (ccord_rect){x, y + cy, cx, lh});
+            }
+            cx = 0.0f;
+            cy += lh;
+            line_has = false;
+            continue;
+          }
+          take = fit > 0 ? fit : md_inline_next_atom(draw_str + pos, rem_len, 0);
+        }
+        float seg_w = md_inline_measure_token(ui, r, draw_str + pos, take, &st, inline_em_sz);
+        float pw = seg_w + pad_x * 2.0f;
+        if (draw) {
+          md_inline_draw_piece(ui, r, &tok, draw_str + pos, take, st, inline_em_sz, x + cx, y + cy, pw, lh,
+                               pad_x, bg_pill, is_spoiler, spoiler_hidden, invite_masked);
+        }
+        cx += pw;
+        line_has = true;
+        pos += take;
+        if (broke_at_space) {
+          while (pos < draw_len && (draw_str[pos] == ' ' || draw_str[pos] == '\t')) pos++;
+        }
+        if (pos < draw_len) {
+          if (draw) {
+            dc_chat_sel_line_end(ui, r, x + cx, y + cy, space_w, lh, false);
+            dc_record_text_hit(ui, (ccord_rect){x, y + cy, cx, lh});
+          }
+          cx = 0.0f;
+          cy += lh;
+          line_has = false;
+        }
+      }
+      continue;
+    }
+
+    if (!space && line_has && cx + tw > wrap) {
+      if (draw) {
+        dc_chat_sel_line_end(ui, r, x + cx, y + cy, space_w, lh, false);
+        dc_record_text_hit(ui, (ccord_rect){x, y + cy, cx, lh});
+      }
+      cx = 0.0f;
+      cy += lh;
+      line_has = false;
+    }
     if (draw && !space) {
       if (is_custom_emoji) {
         ccord_rect er = {x + cx + 1.0f, y + cy + (lh - esz) * 0.5f, esz, esz};
         ui_expr_draw_custom_emoji(ui, r, tok.id, tok.text, tok.len, tok.animated, er);
       } else {
-        if (bg_pill) {
-          ccord_color bg = (tok.style == UI_MD_USER_MENTION || tok.style == UI_MD_CHANNEL_MENTION ||
-                            tok.style == UI_MD_ROLE_MENTION || tok.style == UI_MD_MENTION)
-                             ? ui_alpha(COL(brand), 0.22f)
-                             : (is_spoiler && !spoiler_hidden ? ui_alpha(COL(bg_tertiary), 0.55f) : COL(bg_tertiary));
-          ccord_draw_rrect(r, (ccord_rect){x + cx, y + cy + 1.0f, tw, lh - 2.0f}, 3.0f, bg);
-        }
-        if (is_spoiler && ui && ui->nspoiler_hits < 32 && ui->current_drawing_msg_id != CCORD_ID_NONE) {
-          ui->spoiler_hits[ui->nspoiler_hits].rect = (ccord_rect){x + cx, y + cy, tw, lh};
-          ui->spoiler_hits[ui->nspoiler_hits].msg_id = ui->current_drawing_msg_id;
-          ui->nspoiler_hits++;
-        }
-        if (!spoiler_hidden) {
-          if (is_spoiler) st.color = COL(text_normal);
-          md_inline_draw_token(ui, r, draw_str, draw_len, &st, inline_em_sz, x + cx, y + cy, tw - pad_x * 2.0f, lh, pad_x);
-        }
-        if (tok.style == UI_MD_USER_MENTION || tok.style == UI_MD_MENTION) {
-          ccord_id muid = resolve_mention_user_id(ui, &tok);
-          if (muid != CCORD_ID_NONE) {
-            dc_record_user_hit(ui, (ccord_rect){x + cx, y + cy, tw, lh}, muid);
-          }
-        }
-        if (tok.style == UI_MD_CHANNEL_MENTION && tok.id != CCORD_ID_NONE && ui && ui->nchan_hits < 32) {
-          ui->chan_hits[ui->nchan_hits].rect = (ccord_rect){x + cx, y + cy, tw, lh};
-          ui->chan_hits[ui->nchan_hits].channel_id = tok.id;
-          ui->nchan_hits++;
-        }
-        if (!spoiler_hidden && tok.style == UI_MD_TIMESTAMP) {
-          int64_t ts_ms = 0;
-          if (ckd_mul(&ts_ms, tok.timestamp_sec, 1000LL)) {
-            ts_ms = tok.timestamp_sec < 0 ? INT64_MIN : INT64_MAX;
-          }
-          dc_record_ts_hit(ui, (ccord_rect){x + cx, y + cy, tw, lh}, ts_ms, false);
-        }
-        if (tok.style == UI_MD_LINK && tok.url && tok.url_len > 0 && !invite_masked) {
-          ccord_rect lrc = {x + cx, y + cy, tw, lh};
-          bool lhv = ui && ui->mouse_in && ui_in_rect(ui->mx, ui->my, lrc);
-          if (!ui || ui->settings_underline_links || lhv) {
-            ccord_draw_rect(r, (ccord_rect){x + cx, y + cy + lh - 2.0f, tw, 1.0f}, COL(text_link));
-          }
-          dc_record_link_hit(ui, lrc, tok.url, tok.url_len);
-        }
-        if (!spoiler_hidden && (tok.style == UI_MD_UNDERLINE || tok.underline)) {
-          ccord_draw_rect(r, (ccord_rect){x + cx, y + cy + lh - 2.0f, tw, 1.0f}, st.color);
-        }
-        if (!spoiler_hidden && (tok.style == UI_MD_STRIKETHROUGH || tok.strikethrough)) {
-          ccord_draw_rect(r, (ccord_rect){x + cx, y + cy + lh * 0.52f, tw, 1.0f}, st.color);
-        }
+        md_inline_draw_piece(ui, r, &tok, draw_str, draw_len, st, inline_em_sz, x + cx, y + cy, tw, lh,
+                             pad_x, bg_pill, is_spoiler, spoiler_hidden, invite_masked);
       }
     }
     cx += tw;
@@ -744,40 +891,138 @@ static void md_dbg_code_run(ccord_ui *ui, const char *t, size_t n, ccord_color f
   ui->dbg_code_runs[i].ansi = ansi;
 }
 
-// Draws one ```ansi line as consecutive styled runs on a single row.
-static void md_ansi_draw_runs(ccord_ui *ui, ccord_renderer *r, const char *text, const ccord_ansi_run *runs,
-                              size_t nruns, float x, float y, float size, float lh, const ccord_text_style *base)
+typedef struct md_code_run_item {
+  size_t off, len;
+  ccord_text_style st;
+  ccord_color bg;
+  bool has_bg;
+  bool bold;
+  bool underline;
+} md_code_run_item;
+
+// Largest UTF-8 byte prefix in [0, len) whose single-line width fits in max_w.
+static size_t md_code_fit_prefix(ccord_renderer *r, const char *s, size_t len, const ccord_text_style *st, float max_w)
 {
-  float cx = x;
-  for (size_t i = 0; i < nruns; i++) {
-    const ccord_ansi_state *s = &runs[i].st;
-    ccord_text_style st = ui_style(ui, s->bold ? CCORD_FONT_MONO_BOLD : CCORD_FONT_MONO, size,
-                                   s->has_fg ? md_rgb(s->fg) : base->color);
-    ccord_vec2 m = ccord_text_measure(r, text + runs[i].off, runs[i].len, &st, 0.0f);
-    if (s->has_bg) ccord_draw_rect(r, (ccord_rect){cx, y, m.x, lh}, md_rgb(s->bg));
-    ccord_text_draw(r, text + runs[i].off, runs[i].len, cx, y, &st, 0.0f);
-    if (s->underline) ccord_draw_rect(r, (ccord_rect){cx, y + lh - 2.0f, m.x, 1.0f}, st.color);
-    md_dbg_code_run(ui, text + runs[i].off, runs[i].len, st.color, s->has_bg, s->has_bg ? md_rgb(s->bg) : st.color,
-                    s->bold, s->underline, true);
-    cx += m.x;
+  if (len == 0 || max_w <= 0.0f) return 0;
+  size_t lo = 0, hi = len;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    while (mid > lo && (((unsigned char)s[mid] & 0xC0u) == 0x80u)) mid--;
+    if (mid <= lo) mid = ccord_utf8_next(s, hi, lo);
+    if (mid <= lo || mid >= hi) break;
+    if (ccord_text_measure(r, s, mid, st, 0.0f).x <= max_w) lo = mid;
+    else hi = mid;
   }
+  return lo;
 }
 
-// Draws one syntax-highlighted code line as consecutive monospace token runs on a single row.
-static void md_hl_draw_runs(ccord_ui *ui, ccord_renderer *r, const char *text, const ccord_hl_run *runs, size_t nruns,
-                            float x, float y, float size, const ccord_text_style *base)
+static void md_code_finish_visual_line(ccord_ui *ui, ccord_renderer *r, const char *text, size_t line_start,
+                                       size_t line_end, const ccord_text_style *base, float x, float ly, float w,
+                                       float lh, bool hard)
 {
-  float cx = x;
-  ccord_color bg = COL(bg_tertiary);
-  for (size_t i = 0; i < nruns; i++) {
-    ccord_hl_kind k = runs[i].kind;
-    ccord_font_style font = (k == CCORD_HL_KEYWORD) ? CCORD_FONT_MONO_BOLD : CCORD_FONT_MONO;
-    ccord_color fg = ccord_md_hl_color(k, bg, base->color);
-    ccord_text_style st = ui_style(ui, font, size, fg);
-    ccord_vec2 m = ccord_text_measure(r, text + runs[i].off, runs[i].len, &st, 0.0f);
-    ccord_text_draw(r, text + runs[i].off, runs[i].len, cx, y, &st, 0.0f);
-    cx += m.x;
+  if (line_end > line_start) {
+    dc_chat_sel_process_run(ui, r, text + line_start, line_end - line_start, base, x, ly, w, lh, 0.0f);
   }
+  dc_chat_sel_line_end(ui, r, x + w, ly, base->size * 0.6f, lh, hard);
+  if (w > 0.0f) dc_record_text_hit(ui, (ccord_rect){x, ly, w, lh});
+}
+
+// Measures or draws one ANSI or syntax-highlighted fenced code line, wrapping runs cleanly within `cw`
+// (and `first_cw` on the first visual row so the top-right Copy button does not obscure code text).
+// Returns total text height; sets *out_first_w (if non-null) to the width of the first visual line.
+static float md_code_walk_runs(ccord_ui *ui, ccord_renderer *r, const char *text, const md_code_run_item *items,
+                               size_t nitems, float x, float y, float first_cw, float cw, float lh,
+                               const ccord_text_style *base, bool draw, bool is_ansi, float *out_first_w)
+{
+  float cx = 0.0f, cy = 0.0f, first_w = 0.0f;
+  size_t line_start = nitems > 0 ? items[0].off : 0u;
+  size_t line_end = line_start;
+  for (size_t i = 0; i < nitems; i++) {
+    const md_code_run_item *it = &items[i];
+    if (draw && is_ansi) {
+      md_dbg_code_run(ui, text + it->off, it->len, it->st.color, it->has_bg, it->has_bg ? it->bg : it->st.color,
+                      it->bold, it->underline, true);
+    }
+    size_t pos = 0;
+    while (pos < it->len) {
+      if (cy > 0.0f && cx == 0.0f && !it->has_bg && !it->underline &&
+          (text[it->off + pos] == ' ' || text[it->off + pos] == '\t')) {
+        while (pos < it->len && (text[it->off + pos] == ' ' || text[it->off + pos] == '\t')) pos++;
+        line_start = it->off + pos;
+        line_end = line_start;
+        if (pos >= it->len) break;
+      }
+      float row_w = (cy == 0.0f) ? first_cw : cw;
+      const char *s = text + it->off + pos;
+      size_t rem = it->len - pos;
+      float rw = ccord_text_measure(r, s, rem, &it->st, 0.0f).x;
+      if (cx + rw <= row_w + 0.01f) {
+        if (draw) {
+          if (it->has_bg) ccord_draw_rect(r, (ccord_rect){x + cx, y + cy, rw, lh}, it->bg);
+          ccord_text_draw(r, s, rem, x + cx, y + cy, &it->st, 0.0f);
+          if (it->underline) ccord_draw_rect(r, (ccord_rect){x + cx, y + cy + lh - 2.0f, rw, 1.0f}, it->st.color);
+        }
+        cx += rw;
+        if (cy == 0.0f) first_w = cx;
+        line_end = it->off + it->len;
+        break;
+      }
+      if (cx > 0.0f && rw <= cw + 0.01f) {
+        if (draw) md_code_finish_visual_line(ui, r, text, line_start, line_end, base, x, y + cy, cx, lh, false);
+        cx = 0.0f;
+        cy += lh;
+        line_start = it->off + pos;
+        line_end = line_start;
+        continue;
+      }
+      float avail = row_w - cx;
+      size_t fit = avail > 0.0f ? md_code_fit_prefix(r, s, rem, &it->st, avail) : 0u;
+      if (fit == 0 && cx > 0.0f) {
+        if (draw) md_code_finish_visual_line(ui, r, text, line_start, line_end, base, x, y + cy, cx, lh, false);
+        cx = 0.0f;
+        cy += lh;
+        line_start = it->off + pos;
+        line_end = line_start;
+        continue;
+      }
+      size_t take = fit;
+      if (fit > 0 && fit < rem && s[fit] != ' ' && s[fit] != '\t') {
+        size_t sp = fit;
+        while (sp > 0 && s[sp - 1u] != ' ' && s[sp - 1u] != '\t') sp--;
+        if (sp > 0) {
+          // Only break after a space that follows non-whitespace on this line (avoid blank indented lines).
+          bool has_non_ws = cx > 0.0f;
+          for (size_t k = 0; !has_non_ws && k < sp; k++) {
+            if (s[k] != ' ' && s[k] != '\t') has_non_ws = true;
+          }
+          if (has_non_ws) take = sp;
+        }
+      }
+      if (take == 0) {
+        take = ccord_utf8_next(s, rem, 0);
+        if (take == 0) take = 1u;
+      }
+      float pw = ccord_text_measure(r, s, take, &it->st, 0.0f).x;
+      if (draw) {
+        if (it->has_bg) ccord_draw_rect(r, (ccord_rect){x + cx, y + cy, pw, lh}, it->bg);
+        ccord_text_draw(r, s, take, x + cx, y + cy, &it->st, 0.0f);
+        if (it->underline) ccord_draw_rect(r, (ccord_rect){x + cx, y + cy + lh - 2.0f, pw, 1.0f}, it->st.color);
+      }
+      cx += pw;
+      if (cy == 0.0f) first_w = cx;
+      pos += take;
+      line_end = it->off + pos;
+      if (pos < it->len) {
+        if (draw) md_code_finish_visual_line(ui, r, text, line_start, line_end, base, x, y + cy, cx, lh, false);
+        cx = 0.0f;
+        cy += lh;
+        line_start = line_end;
+      }
+    }
+  }
+  if (draw) md_code_finish_visual_line(ui, r, text, line_start, line_end, base, x, y + cy, cx, lh, true);
+  if (out_first_w) *out_first_w = first_w;
+  return cy + lh;
 }
 
 // Fenced code blocks (``` ... ```), headings (#/##/###/-#), > / >>> blockquotes, lists, and plain paragraphs.
@@ -827,39 +1072,93 @@ float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
       float cw = maxf(wrap - 16.0f, 20.0f);
       // ```ansi: SGR escapes are consumed; the stripped text is measured, selected and drawn in styled runs.
       char ansi_buf[CCORD_MESSAGE_MAX_BYTES + 1];
-      ccord_ansi_run ansi_runs[32];
+      ccord_ansi_run ansi_runs[64];
       size_t ansi_nruns = 0;
       if (fence_ansi) {
-        flen = ccord_md_ansi_parse(fline, flen, ansi_buf, sizeof ansi_buf, ansi_runs, 32, &ansi_nruns, &ansi_st);
+        flen = ccord_md_ansi_parse(fline, flen, ansi_buf, sizeof ansi_buf, ansi_runs, 64, &ansi_nruns, &ansi_st);
         fline = ansi_buf;
       }
-      ccord_hl_run hl_runs[64];
+      ccord_hl_run hl_runs[128];
       size_t hl_nruns = 0;
       if (!fence_ansi && fence_lang != CCORD_HL_NONE && flen > 0) {
-        hl_nruns = ccord_md_hl_tokenize(fence_lang, fline, flen, hl_runs, 64, &hl_st);
+        hl_nruns = ccord_md_hl_tokenize(fence_lang, fline, flen, hl_runs, 128, &hl_st);
       }
-      ccord_vec2 ct = ccord_text_measure(r, fline, flen, &code_st, cw);
+      md_code_run_item run_items[129];
+      size_t nrun_items = 0;
+      if (fence_ansi && flen > 0 && ansi_nruns > 0) {
+        size_t covered = 0;
+        for (size_t ri = 0; ri < ansi_nruns; ri++) {
+          const ccord_ansi_state *s = &ansi_runs[ri].st;
+          run_items[nrun_items++] = (md_code_run_item){
+            .off = ansi_runs[ri].off,
+            .len = ansi_runs[ri].len,
+            .st = ui_style(ui, s->bold ? CCORD_FONT_MONO_BOLD : CCORD_FONT_MONO, code_size,
+                           s->has_fg ? md_rgb(s->fg) : code_st.color),
+            .bg = s->has_bg ? md_rgb(s->bg) : code_st.color,
+            .has_bg = s->has_bg,
+            .bold = s->bold,
+            .underline = s->underline,
+          };
+          covered = ansi_runs[ri].off + ansi_runs[ri].len;
+        }
+        if (covered < flen) {
+          run_items[nrun_items++] = (md_code_run_item){
+            .off = covered, .len = flen - covered, .st = code_st, .bg = code_st.color,
+          };
+        }
+      } else if (!fence_ansi && hl_nruns > 0 && flen > 0) {
+        ccord_color bg = COL(bg_tertiary);
+        size_t covered = 0;
+        for (size_t ri = 0; ri < hl_nruns; ri++) {
+          ccord_hl_kind k = hl_runs[ri].kind;
+          ccord_font_style font = (k == CCORD_HL_KEYWORD) ? CCORD_FONT_MONO_BOLD : CCORD_FONT_MONO;
+          ccord_color fg = ccord_md_hl_color(k, bg, code_st.color);
+          run_items[nrun_items++] = (md_code_run_item){
+            .off = hl_runs[ri].off, .len = hl_runs[ri].len, .st = ui_style(ui, font, code_size, fg), .bg = bg,
+          };
+          covered = hl_runs[ri].off + hl_runs[ri].len;
+        }
+        if (covered < flen) {
+          run_items[nrun_items++] = (md_code_run_item){
+            .off = covered, .len = flen - covered, .st = code_st, .bg = bg,
+          };
+        }
+      }
+      float btn_w = (ui && ui->mobile_layout) ? 56.0f : 44.0f;
       float btn_h = (ui && ui->mobile_layout) ? 26.0f : 18.0f;
-      float h = maxf(ct.y, code_lh) + 8.0f;
+      float first_cw = (fence_first_line && cw > btn_w + 56.0f) ? (cw - btn_w - 6.0f) : cw;
+      float first_line_w = 0.0f;
+      float text_h = code_lh;
+      ccord_vec2 ct = {0.0f, code_lh};
+      if (nrun_items > 0) {
+        text_h = md_code_walk_runs(ui, r, fline, run_items, nrun_items, x + 10.0f, py + 4.0f, first_cw, cw, code_lh,
+                                   &code_st, false, fence_ansi, &first_line_w);
+      } else {
+        ct = ccord_text_measure(r, fline, flen, &code_st, cw);
+        text_h = maxf(ct.y, code_lh);
+        first_line_w = ct.x;
+      }
+      float h = maxf(text_h, code_lh) + 8.0f;
       if (fence_first_line && h < btn_h + 6.0f) h = btn_h + 6.0f;
       if (draw) {
         ccord_draw_rrect(r, (ccord_rect){x, py, wrap, h}, 4.0f, COL(bg_tertiary));
         ccord_draw_rect(r, (ccord_rect){x, py + 4.0f, 3.0f, h - 8.0f}, COL(brand));
-        dc_chat_sel_process_run(ui, r, fline, flen, &code_st, x + 10.0f, py + 4.0f, ct.x, code_lh, 0.0f);
-        dc_chat_sel_line_end(ui, r, x + 10.0f + ct.x, py + 4.0f, code_st.size * 0.6f, code_lh, true);
-        dc_record_text_hit(ui, (ccord_rect){x + 10.0f, py + 4.0f, ct.x, maxf(ct.y, code_lh)});
-        if (fence_ansi && flen && ct.x <= cw + 0.5f) {
-          md_ansi_draw_runs(ui, r, fline, ansi_runs, ansi_nruns, x + 10.0f, py + 4.0f, code_size, code_lh, &code_st);
-        } else if (hl_nruns > 0 && flen && ct.x <= cw + 0.5f) {
-          md_hl_draw_runs(ui, r, fline, hl_runs, hl_nruns, x + 10.0f, py + 4.0f, code_size, &code_st);
-          md_dbg_code_run(ui, fline, flen, code_st.color, false, code_st.color, false, false, false);
-        } else if (flen) {
-          ccord_text_draw(r, fline, flen, x + 10.0f, py + 4.0f, &code_st, cw);
-          md_dbg_code_run(ui, fline, flen, code_st.color, false, code_st.color, false, false, fence_ansi);
+        if (nrun_items > 0) {
+          (void)md_code_walk_runs(ui, r, fline, run_items, nrun_items, x + 10.0f, py + 4.0f, first_cw, cw, code_lh,
+                                  &code_st, true, fence_ansi, &first_line_w);
+          if (!fence_ansi) {
+            md_dbg_code_run(ui, fline, flen, code_st.color, false, code_st.color, false, false, false);
+          }
+        } else {
+          dc_chat_sel_process_run(ui, r, fline, flen, &code_st, x + 10.0f, py + 4.0f, ct.x, code_lh, 0.0f);
+          dc_chat_sel_line_end(ui, r, x + 10.0f + ct.x, py + 4.0f, code_st.size * 0.6f, code_lh, true);
+          dc_record_text_hit(ui, (ccord_rect){x + 10.0f, py + 4.0f, ct.x, maxf(ct.y, code_lh)});
+          if (flen) {
+            ccord_text_draw(r, fline, flen, x + 10.0f, py + 4.0f, &code_st, cw);
+            md_dbg_code_run(ui, fline, flen, code_st.color, false, code_st.color, false, false, fence_ansi);
+          }
         }
         if (fence_first_line && ui && ui->ncode_copy_hits < 16) {
-          fence_first_line = false;
-          float btn_w = ui->mobile_layout ? 56.0f : 44.0f;
           ccord_rect cbtn = {x + wrap - btn_w - 4.0f, py + 3.0f, btn_w, btn_h};
           ccord_draw_rrect(r, cbtn, 3.0f, COL(bg_secondary));
           ccord_text_style cbs = ui_style(ui, CCORD_FONT_BOLD, M(font_size_small) - 4.0f, COL(text_muted));
@@ -869,7 +1168,7 @@ float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
             size_t llen = strlen(fence_label);
             ccord_vec2 lsz = ccord_text_measure(r, fence_label, llen, &cbs, 0.0f);
             float lw = lsz.x + 10.0f;
-            if (x + 10.0f + ct.x + 8.0f < cbtn.x - lw - 4.0f) {
+            if (x + 10.0f + first_line_w + 8.0f < cbtn.x - lw - 4.0f) {
               ccord_rect lpill = {cbtn.x - lw - 4.0f, cbtn.y, lw, btn_h};
               ccord_draw_rrect(r, lpill, 3.0f, COL(bg_secondary));
               ccord_text_draw(r, fence_label, llen, lpill.x + 5.0f, lpill.y + (lpill.h - lsz.y) * 0.5f, &cbs, 0.0f);
@@ -888,6 +1187,7 @@ float dc_md_body_walk(ccord_ui *ui, ccord_renderer *r, const char *text, size_t 
           ui->code_copy_hits[idx].code = ui_hit_dup(ui, text + fence_code_start, clen);
         }
       }
+      fence_first_line = false;
       py += h;
       total += h;
     } else if (multiline_quote || (ll > 0 && line[0] == '>')) {
