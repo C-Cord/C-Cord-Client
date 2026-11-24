@@ -23,10 +23,10 @@
 #define MAX_SEARCH 16
 #define MAX_PENDING 8
 #define MAX_CLIPBOARD_BYTES 65536u
-#define MAX_STORE_KEYS 128u
-#define MAX_STORE_BYTES (256u * 1024u)
+#define MAX_STORE_KEYS 4096u
+#define MAX_STORE_BYTES (4u * 1024u * 1024u)
 #define MAX_FS_READ_BYTES (16u * 1024u * 1024u)
-#define MAX_FS_CHUNK_BYTES (384u * 1024u)
+#define MAX_FS_CHUNK_BYTES (512u * 1024u)
 #define INIT_DEADLINE_MS 5000u
 #define CMD_DEADLINE_MS 2000u
 #define PING_INTERVAL_MS 5000u
@@ -68,11 +68,14 @@
 #define EVB_VOICE_LEVELS     (1ULL << 30)
 #define EVB_SETTINGS_CHANGE  (1ULL << 31)
 #define EVB_ACCOUNT_UPDATE   (1ULL << 32)
+#define EVB_MESSAGES_LOADED  (1ULL << 33)
+#define EVB_MESSAGE_DELETE_BULK (1ULL << 34)
 
 #define HOOK_BEFORE_SEND     (1u << 0)
 #define HOOK_BEFORE_EDIT     (1u << 1)
 #define HOOK_NOTIFICATION    (1u << 2)
 #define HOOK_LINK_OPEN       (1u << 3)
+#define HOOK_BEFORE_UPLOAD   (1u << 4)
 
 typedef enum pend_kind { PEND_NONE = 0, PEND_INIT, PEND_PING, PEND_CMD } pend_kind;
 
@@ -149,11 +152,13 @@ typedef struct plugin {
   size_t nexposed;
   int64_t dev_mtime_sec;
   uint64_t last_profile_write_ms;   // Class 3 account.profile rate limit (10s per plugin)
+  bool has_unload_hook;             // plugin registered plugin.on_unload(fn)
+  bool unloading;                   // true while bounded plugin.unload RPC is in flight
 } plugin;
 
 struct ccord_plugins {
   ccord_bus *bus;
-  const ccord_store *store;
+  ccord_store *store;
   ccord_session *session;
   ccord_contrib *contrib;
   void (*clipboard_write)(void *ud, const char *utf8);
@@ -183,6 +188,7 @@ struct ccord_plugins {
   ccord_sub_id sub;
   uint64_t now_ms;
   bool in_background;
+  bool rich_reaction_emitted;
   // API v3
   plugin_workers *workers;
   bool dev_auto_reload;
@@ -190,6 +196,10 @@ struct ccord_plugins {
   uint64_t last_account_rev;
   uint64_t import_seq;
   char last_imported_id[65];
+  // Phase 4D: active async upload transform jobs (Stage 2 upload_tmp:// handles)
+  struct pl_upload_job **upload_jobs;
+  size_t nupload_jobs;
+  uint64_t next_upload_job_id;
 };
 
 // Shared helpers defined in plugins.c
@@ -228,6 +238,10 @@ void plugins_ext_on_worker_event(void *ud, const pw_event *ev);
 void plugins_ext_reset_plugin(plugin *p);
 void plugins_ext_dev_poll(ccord_plugins *m, uint64_t now_ms);
 void plugins_ext_write_message_obj(ccord_jw *w, const ccord_store *st, const ccord_message *msg);
+void plugins_ext_write_message_obj_ex(ccord_jw *w, const ccord_store *st, const ccord_message *msg,
+                                      ccord_id fallback_guild_id);
+void plugins_ext_write_activities_array(ccord_jw *w, const ccord_user *u);
+void plugins_ext_write_presence_obj(ccord_jw *w, const ccord_user *u, bool include_value_compat);
 void plugins_ext_format_allowed_hosts(const ccord_manifest *man, char *out, size_t cap);
 void plugins_ext_handle_command_result(ccord_plugins *m, plugin *p, ccord_id channel, const ccord_json *result);
 
@@ -242,9 +256,12 @@ size_t plugins_ext_on_menu_resolve(void *ud, const char *owner, const char *cons
                                    const ccord_menu_context *ctx, uint32_t timeout_ms,
                                    ccord_menu_resolved_entry *out, size_t max_out);
 void plugins_ext_on_setting_changed(void *ud, const char *owner, const char *key, const char *value_json);
+void plugins_ext_on_setting_action(void *ud, const char *owner, const char *key);
 void plugins_ext_on_keybind_triggered(void *ud, const char *owner, const char *bind_id);
 void plugins_ext_on_action_btn_click(void *ud, const ccord_action_btn_contribution *btn, const ccord_menu_context *ctx);
 void plugins_ext_on_dialog_result(void *ud, const char *owner, uint64_t req_id, bool accepted, const char *result_json);
+void plugins_ext_on_popup_menu_result(void *ud, const char *owner, uint64_t req_id, const char *item_id);
+void plugins_ext_on_toast_action(void *ud, const char *owner, uint64_t toast_id);
 void plugins_ext_on_account_hitl_result(void *ud, const char *owner, uint64_t req_id, bool approved, const char *err_msg);
 void plugins_ext_poll_account_update(ccord_plugins *m);
 size_t plugins_ext_on_autocomplete_query(void *ud, const char *owner, const char *provider_id, const char *query,
@@ -259,6 +276,16 @@ bool plugins_ext_on_notification_hook(void *ud, ccord_id guild_id, ccord_id chan
                                       char *out_title, size_t title_cap, char *out_body, size_t body_cap,
                                       bool *out_silent);
 bool plugins_ext_on_link_open_hook(void *ud, const char *url, char *out_url, size_t out_cap);
+void plugins_ext_on_before_upload(void *ud, ccord_id guild_id, ccord_id channel_id, const char *content,
+                                  ccord_upload_hook_file *files, size_t count, ccord_upload_hook_result *out);
+void plugins_ext_on_cancel_upload_transform(void *ud, uint64_t job_id);
+bool pl_strip_image_metadata(const uint8_t *in, size_t in_len, uint8_t **out, size_t *out_len);
+const char *pl_sniff_upload_mime(const char *filename, const uint8_t *data, size_t len);
+bool pl_upload_tmp_resolve(const ccord_plugins *m, const plugin *p, const char *token, char *out_abs, size_t cap);
+bool pl_handle_upload_transform_complete(ccord_plugins *m, plugin *p, uint32_t id, const ccord_json *params);
+void pl_upload_jobs_pump(ccord_plugins *m, uint64_t now_ms);
+void pl_upload_jobs_cancel_owner(ccord_plugins *m, const char *owner);
+void pl_upload_jobs_destroy(ccord_plugins *m);
 
 // Additional cross-TU declarations across core/ & package/
 extern const ccord_json_limits pl_json_limits;
@@ -287,6 +314,9 @@ bool pl_consent_apply(const ccord_json *root, const char *id, const ccord_manife
                       bool *out_migrated);
 void pl_consent_save(const ccord_plugins *m);
 ccord_status pl_spawn_host(ccord_plugins *m, plugin *p, ccord_error *err);
+void pl_unload_hosts_batch(ccord_plugins *m, plugin **list, size_t count, const char *reason,
+                           uint32_t budget_ms, uint32_t max_wait_ms);
+void pl_stop_host_reason(ccord_plugins *m, plugin *p, const char *reason);
 void pl_stop_host(ccord_plugins *m, plugin *p);
 void pl_start_plugin_host(ccord_plugins *m, plugin *p);
 bool pl_reload_plugin_source(plugin *p, char *why, size_t why_cap);
@@ -301,3 +331,19 @@ bool pl_import_package_internal(ccord_plugins *m, const char *pkg_path,
 const char *pl_channel_kind_str(const ccord_store *st, const ccord_channel *c);
 void pl_channel_display_name(const ccord_store *st, const ccord_channel *c, char *out, size_t cap);
 bool pl_read_file(const char *path, size_t max, char **out, size_t *len, char *why, size_t why_cap);
+
+typedef enum pl_path_scope {
+  PL_PATH_HOST_FS = 0,
+  PL_PATH_PLUGIN_DATA = 1,
+} pl_path_scope;
+
+bool pl_jail_root_dir(ccord_plugins *m, const plugin *p, bool create, char *out, size_t cap);
+void pl_jail_usage(ccord_plugins *m, const plugin *p, uint64_t *out_bytes, uint64_t *out_files);
+bool pl_jail_clear(ccord_plugins *m, const plugin *p);
+bool pl_resolve_resource_path(ccord_plugins *m, plugin *p, const char *spec, bool for_write,
+                              pl_path_scope *out_scope, char *out_abs, size_t cap,
+                              const char **out_err_code, char *err_buf, size_t err_cap);
+bool pl_read_resolved_file(const char *abs_path, size_t max_bytes, uint8_t **out_data, size_t *out_len,
+                           const char **out_err_code, char *err_buf, size_t err_cap);
+bool pl_handle_storage_files_rpc(ccord_plugins *m, plugin *p, uint32_t id, const char *method,
+                                 const ccord_json *params);

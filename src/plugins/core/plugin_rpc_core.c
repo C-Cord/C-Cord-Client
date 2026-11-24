@@ -16,6 +16,7 @@
 #include <ccord/core/log.h>
 #include <ccord/core/os.h>
 #include <ccord/core/paths.h>
+#include <ccord/core/timefmt.h>
 #include <ccord/core/utf8.h>
 #include <ccord/ipc/ipc.h>
 #include <ccord/store/notify.h>
@@ -101,6 +102,8 @@ static bool event_bit_for(const char *name, uint64_t *bit, ccord_perm *perm)
   if (strcmp(name, "message.create") == 0) { *bit = EVB_MESSAGE; *perm = CCORD_PERM_EVENTS_MESSAGES; return true; }
   if (strcmp(name, "message.update") == 0) { *bit = EVB_MESSAGE_UPDATE; *perm = CCORD_PERM_EVENTS_MESSAGES; return true; }
   if (strcmp(name, "message.delete") == 0) { *bit = EVB_MESSAGE_DELETE; *perm = CCORD_PERM_EVENTS_MESSAGES; return true; }
+  if (strcmp(name, "message.delete_bulk") == 0) { *bit = EVB_MESSAGE_DELETE_BULK; *perm = CCORD_PERM_EVENTS_MESSAGES; return true; }
+  if (strcmp(name, "messages.loaded") == 0) { *bit = EVB_MESSAGES_LOADED; *perm = CCORD_PERM_EVENTS_MESSAGES; return true; }
   if (strcmp(name, "message.pin") == 0) { *bit = EVB_MESSAGE_PIN; *perm = CCORD_PERM_EVENTS_MESSAGES; return true; }
   if (strcmp(name, "reaction.update") == 0) { *bit = EVB_REACTION_UPDATE; *perm = CCORD_PERM_EVENTS_MESSAGES; return true; }
   if (strcmp(name, "typing.start") == 0) { *bit = EVB_TYPING_START; *perm = CCORD_PERM_EVENTS_MESSAGES; return true; }
@@ -959,10 +962,37 @@ bool pl_fs_path_is_protected(const ccord_plugins *m, const char *raw_path)
 
 static void req_fs(ccord_plugins *m, plugin *p, uint32_t id, const char *method, const ccord_json *params)
 {
-  bool is_write = (strcmp(method, "fs.write") == 0 || strcmp(method, "fs.mkdir") == 0 || strcmp(method, "fs.remove") == 0);
+  bool is_write = (strcmp(method, "fs.write") == 0 || strcmp(method, "fs.mkdir") == 0 ||
+                   strcmp(method, "fs.remove") == 0 || strcmp(method, "fs.rename") == 0);
   ccord_perm need = is_write ? CCORD_PERM_FS_WRITE : CCORD_PERM_FS_READ;
   if (!pl_has_perm(p, need)) {
     pl_fail_plugin(m, p, is_write ? "undeclared restricted API called: fs.write" : "undeclared restricted API called: fs.read");
+    return;
+  }
+  if (strcmp(method, "fs.rename") == 0) {
+    size_t sl = 0, dl = 0;
+    const char *src = pl_str_param(params, "src", &sl);
+    const char *dst = pl_str_param(params, "dst", &dl);
+    if (!src || sl == 0 || sl >= CCORD_PATH_MAX || !dst || dl == 0 || dl >= CCORD_PATH_MAX) {
+      pl_reply_err(m, p, id, "invalid_argument", "fs.rename: invalid src or dst path");
+      return;
+    }
+    if (pl_fs_path_is_protected(m, src) || pl_fs_path_is_protected(m, dst)) {
+      pl_reply_err(m, p, id, "permission_denied", "access to C-Cord internal config/plugin paths is forbidden");
+      return;
+    }
+    if (ccord_path_is_symlink(src) || (ccord_path_exists(dst) && ccord_path_is_symlink(dst))) {
+      pl_reply_err(m, p, id, "permission_denied", "refusing to rename symbolic link");
+      return;
+    }
+    errno = 0;
+    if (!ccord_file_rename_replace(src, dst)) {
+      int e = errno;
+      if (e == EXDEV) pl_reply_err(m, p, id, "io", "cannot rename across filesystems (EXDEV)");
+      else pl_reply_err(m, p, id, "io", e ? strerror(e) : "rename failed");
+    } else {
+      pl_reply_ok(m, p, id, nullptr);
+    }
     return;
   }
   size_t plen = 0;
@@ -1096,10 +1126,11 @@ static void req_fs(ccord_plugins *m, plugin *p, uint32_t id, const char *method,
     const ccord_json *oj = ccord_json_get(params, "offset");
     const ccord_json *mj = ccord_json_get(params, "max_bytes");
     if (!mj) mj = ccord_json_get(params, "length");
+    bool chunked = ccord_json_bool(ccord_json_get(params, "chunked"), false);
     if (oj) (void)ccord_json_int64(oj, &off_i);
     if (mj) (void)ccord_json_int64(mj, &max_i);
-    if (off_i < 0 || (uint64_t)off_i > MAX_FS_READ_BYTES) {
-      pl_reply_err(m, p, id, "invalid_argument", "file exceeds 16 MiB limit");
+    if (off_i < 0 || (!chunked && (uint64_t)off_i > MAX_FS_READ_BYTES)) {
+      pl_reply_err(m, p, id, "invalid_argument", off_i < 0 ? "negative offset" : "file exceeds 16 MiB limit");
       return;
     }
     if (max_i <= 0 || (size_t)max_i > MAX_FS_CHUNK_BYTES) max_i = (int64_t)MAX_FS_CHUNK_BYTES;
@@ -1130,12 +1161,17 @@ static void req_fs(ccord_plugins *m, plugin *p, uint32_t id, const char *method,
     if (!f) { close(fd); pl_reply_err(m, p, id, "io", strerror(errno)); return; }
     fsz = (uint64_t)st.st_size;
 #endif
-    if (fsz > MAX_FS_READ_BYTES) {
+    if (!chunked && fsz > MAX_FS_READ_BYTES) {
       fclose(f);
       pl_reply_err(m, p, id, "invalid_argument", "file exceeds 16 MiB limit");
       return;
     }
-    if (off_i > 0 && fseek(f, (long)off_i, SEEK_SET) != 0) {
+#if CCORD_OS_WINDOWS
+    if (off_i > 0 && _fseeki64(f, off_i, SEEK_SET) != 0)
+#else
+    if (off_i > 0 && fseeko(f, (off_t)off_i, SEEK_SET) != 0)
+#endif
+    {
       fclose(f);
       pl_reply_err(m, p, id, "io", "seek failed");
       return;
@@ -1164,13 +1200,36 @@ static void req_fs(ccord_plugins *m, plugin *p, uint32_t id, const char *method,
   pl_reply_err(m, p, id, "unsupported", "unknown fs method");
 }
 
+static bool method_allowed_while_unloading(const char *method)
+{
+  if (strncmp(method, "storage.", 8) == 0) return true;
+  if (strcmp(method, "fs.write") == 0 || strcmp(method, "fs.rename") == 0 ||
+      strcmp(method, "fs.remove") == 0 || strcmp(method, "fs.exists") == 0 ||
+      strcmp(method, "fs.stat") == 0 || strcmp(method, "fs.read") == 0) return true;
+  if (strcmp(method, "net.ws.close") == 0 || strcmp(method, "system.spawn.kill") == 0 ||
+      strcmp(method, "system.spawn.write") == 0 || strcmp(method, "ui.panel.unmount") == 0 ||
+      strcmp(method, "ui.decorate.remove") == 0 || strcmp(method, "ui.decorate.clear") == 0 ||
+      strcmp(method, "plugin.on_unload.register") == 0) return true;
+  return false;
+}
+
 static void handle_request(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg)
 {
   uint32_t id = msg->id;
   const char *method = msg->method;
   const ccord_json *params = msg->params;
 
+  if (p->unloading && !method_allowed_while_unloading(method)) {
+    pl_reply_err(m, p, id, "unloading", "API unavailable while plugin is unloading");
+    return;
+  }
+
   // Class 1 (Safe) APIs — no manifest permission required
+  if (strcmp(method, "plugin.on_unload.register") == 0) {
+    p->has_unload_hook = true;
+    pl_reply_ok(m, p, id, nullptr);
+    return;
+  }
   if (strcmp(method, "ui.contextMenu.add") == 0) { req_menu_add(m, p, id, params); return; }
   if (strcmp(method, "ui.contextMenu.remove") == 0) { req_menu_remove(m, p, id, params); return; }
   if (strcmp(method, "ui.contextMenu.set_state") == 0) { req_menu_set_state(m, p, id, params); return; }
@@ -1178,12 +1237,27 @@ static void handle_request(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg
   if (strcmp(method, "clipboard.write") == 0) { req_clipboard(m, p, id, params); return; }
   if (strcmp(method, "commands.register") == 0) { req_commands_register(m, p, id, params); return; }
   if (strcmp(method, "ui.toast.show") == 0) {
-    size_t tl = 0, ll = 0;
+    size_t tl = 0, ll = 0, al = 0;
     const char *txt = pl_str_param(params, "text", &tl);
     const char *lvl = pl_str_param(params, "level", &ll);
+    const char *act = pl_str_param(params, "action_label", &al);
+    int64_t dur = 4000;
+    (void)ccord_json_int64(ccord_json_get(params, "duration_ms"), &dur);
+    if (dur < 800) dur = 800;
+    if (dur > 15000) dur = 15000;
+    int64_t tid = 0;
+    (void)ccord_json_int64(ccord_json_get(params, "toast_id"), &tid);
     uint8_t lv = (lvl && strcmp(lvl, "error") == 0) ? 2 : (lvl && strcmp(lvl, "warn") == 0) ? 1 : 0;
-    if (txt && m->toast_show) m->toast_show(m->toast_ud, txt, lv);
+    if (txt && tl > 0u) {
+      bool shown = ccord_contrib_ui_toast_show(m->contrib, p->m.id, tid > 0 ? (uint64_t)tid : 0u,
+                                               txt, lv, (uint32_t)dur, (act && al > 0u) ? act : nullptr);
+      if (!shown && m->toast_show) m->toast_show(m->toast_ud, txt, lv);
+    }
     pl_reply_ok(m, p, id, nullptr);
+    return;
+  }
+  if (strncmp(method, "storage.files.", 14) == 0) {
+    (void)pl_handle_storage_files_rpc(m, p, id, method, params);
     return;
   }
   if (strcmp(method, "storage.get") == 0 || strcmp(method, "storage.set") == 0 ||
@@ -1267,10 +1341,21 @@ static void handle_request(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg
     return;
   }
   if (strcmp(method, "navigation.select_guild") == 0 || strcmp(method, "navigation.select_channel") == 0 ||
-      strcmp(method, "navigation.select_view") == 0 || strcmp(method, "navigation.action") == 0) {
+      strcmp(method, "navigation.select_view") == 0 || strcmp(method, "navigation.action") == 0 ||
+      strcmp(method, "navigation.jump_to_message") == 0) {
     if (!pl_has_perm(p, CCORD_PERM_NAVIGATION_WRITE)) { pl_fail_plugin(m, p, "undeclared restricted API called: navigation.write"); return; }
     ccord_error err = {0};
-    if (strcmp(method, "navigation.action") == 0) {
+    if (strcmp(method, "navigation.jump_to_message") == 0) {
+      ccord_id cid = pl_parse_id_param(params, "channel_id");
+      ccord_id mid = pl_parse_id_param(params, "message_id");
+      if (cid == CCORD_ID_NONE || mid == CCORD_ID_NONE) {
+        pl_reply_err(m, p, id, "invalid_argument", "navigation.jump_to_message: channel_id and message_id required");
+        return;
+      }
+      if (!ccord_contrib_ui_jump_to_message(m->contrib, cid, mid) && m->session) {
+        (void)ccord_session_select_channel(m->session, cid, &err);
+      }
+    } else if (strcmp(method, "navigation.action") == 0) {
       size_t al = 0;
       const char *act = pl_str_param(params, "action", &al);
       if (act) (void)ccord_contrib_ui_action(m->contrib, act);
@@ -1513,6 +1598,7 @@ static void handle_hello(ccord_plugins *m, plugin *p, const ccord_ipc_msg *msg)
   ccord_jw_key(&w, "keyboard_height"); ccord_jw_int(&w, (int64_t)m->plat_state.keyboard_height);
   ccord_jw_key(&w, "keyboard_visible"); ccord_jw_bool(&w, m->plat_state.keyboard_visible);
   ccord_jw_key(&w, "landscape"); ccord_jw_bool(&w, m->plat_state.landscape);
+  ccord_jw_key(&w, "time_format"); ccord_jw_int(&w, (int64_t)ccord_timefmt_get_mode());
   ccord_jw_end_object(&w);
   ccord_jw_end_object(&w);
   if (p->nitems > 0) {

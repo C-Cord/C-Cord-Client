@@ -46,17 +46,160 @@ bool plugins_ext_event_bit_for(const char *name, uint64_t *bit, ccord_perm *perm
   return false;
 }
 
-void plugins_ext_write_message_obj(ccord_jw *w, const ccord_store *st, const ccord_message *msg)
+static const char *presence_name_str(ccord_presence p)
+{
+  switch (p) {
+    case CCORD_PRESENCE_ONLINE: return "online";
+    case CCORD_PRESENCE_IDLE:   return "idle";
+    case CCORD_PRESENCE_DND:    return "dnd";
+    default:                    return "offline";
+  }
+}
+
+static void write_one_activity(ccord_jw *w, const ccord_user_activity *a)
+{
+  ccord_jw_begin_object(w);
+  ccord_jw_key(w, "type"); ccord_jw_int(w, (int64_t)a->type);
+  ccord_jw_key(w, "name"); ccord_jw_cstr(w, a->name);
+  if (a->details[0]) { ccord_jw_key(w, "details"); ccord_jw_cstr(w, a->details); }
+  if (a->state[0]) { ccord_jw_key(w, "state"); ccord_jw_cstr(w, a->state); }
+  if (a->url[0]) { ccord_jw_key(w, "url"); ccord_jw_cstr(w, a->url); }
+  if (a->application_id != CCORD_ID_NONE) { ccord_jw_key(w, "application_id"); ccord_jw_id(w, a->application_id); }
+  if (a->sync_id[0]) { ccord_jw_key(w, "sync_id"); ccord_jw_cstr(w, a->sync_id); }
+  if (a->session_id[0]) { ccord_jw_key(w, "session_id"); ccord_jw_cstr(w, a->session_id); }
+  if (a->flags != 0) { ccord_jw_key(w, "flags"); ccord_jw_int(w, (int64_t)a->flags); }
+  if (a->created_at_ms > 0) { ccord_jw_key(w, "created_at"); ccord_jw_int(w, a->created_at_ms); }
+  if (a->start_ms > 0 || a->end_ms > 0) {
+    ccord_jw_key(w, "timestamps");
+    ccord_jw_begin_object(w);
+    if (a->start_ms > 0) { ccord_jw_key(w, "start_ms"); ccord_jw_int(w, a->start_ms); }
+    if (a->end_ms > 0) { ccord_jw_key(w, "end_ms"); ccord_jw_int(w, a->end_ms); }
+    ccord_jw_end_object(w);
+  }
+  if (a->party_id[0] || a->party_size > 0 || a->party_max > 0) {
+    ccord_jw_key(w, "party");
+    ccord_jw_begin_object(w);
+    if (a->party_id[0]) { ccord_jw_key(w, "id"); ccord_jw_cstr(w, a->party_id); }
+    if (a->party_size > 0) { ccord_jw_key(w, "size"); ccord_jw_int(w, (int64_t)a->party_size); }
+    if (a->party_max > 0) { ccord_jw_key(w, "max"); ccord_jw_int(w, (int64_t)a->party_max); }
+    ccord_jw_end_object(w);
+  }
+  if (a->large_image[0] || a->large_text[0] || a->small_image[0] || a->small_text[0]) {
+    ccord_jw_key(w, "assets");
+    ccord_jw_begin_object(w);
+    if (a->large_image[0]) { ccord_jw_key(w, "large_image"); ccord_jw_cstr(w, a->large_image); }
+    if (a->large_text[0]) { ccord_jw_key(w, "large_text"); ccord_jw_cstr(w, a->large_text); }
+    if (a->small_image[0]) { ccord_jw_key(w, "small_image"); ccord_jw_cstr(w, a->small_image); }
+    if (a->small_text[0]) { ccord_jw_key(w, "small_text"); ccord_jw_cstr(w, a->small_text); }
+    ccord_jw_end_object(w);
+  }
+  if (a->emoji_id != CCORD_ID_NONE || a->emoji_name[0]) {
+    ccord_jw_key(w, "emoji");
+    ccord_jw_begin_object(w);
+    if (a->emoji_id != CCORD_ID_NONE) { ccord_jw_key(w, "id"); ccord_jw_id(w, a->emoji_id); }
+    if (a->emoji_name[0]) { ccord_jw_key(w, "name"); ccord_jw_cstr(w, a->emoji_name); }
+    if (a->emoji_animated) { ccord_jw_key(w, "animated"); ccord_jw_bool(w, true); }
+    ccord_jw_end_object(w);
+  }
+  ccord_jw_end_object(w);
+}
+
+void plugins_ext_write_activities_array(ccord_jw *w, const ccord_user *u)
+{
+  ccord_jw_begin_array(w);
+  if (!u) {
+    ccord_jw_end_array(w);
+    return;
+  }
+  if (u->activities_ext && u->activities_ext->count > 0) {
+    for (size_t i = 0; i < u->activities_ext->count; i++) {
+      write_one_activity(w, &u->activities_ext->items[i]);
+    }
+  } else {
+    if (u->custom_status_emoji[0] || u->custom_status_text[0]) {
+      ccord_user_activity ca = {0};
+      ca.type = (uint8_t)CCORD_ACTIVITY_CUSTOM;
+      snprintf(ca.name, sizeof ca.name, "Custom Status");
+      snprintf(ca.state, sizeof ca.state, "%s", u->custom_status_text);
+      ca.end_ms = u->custom_status_expires_ms;
+      if (u->custom_status_emoji[0]) {
+        const char *colon = strrchr(u->custom_status_emoji, ':');
+        uint64_t eid = 0;
+        if (colon && colon > u->custom_status_emoji && ccord_id_parse(colon + 1, strlen(colon + 1), &eid) && eid != 0) {
+          ca.emoji_id = eid;
+          size_t nl = (size_t)(colon - u->custom_status_emoji);
+          if (nl >= sizeof ca.emoji_name) nl = sizeof ca.emoji_name - 1u;
+          memcpy(ca.emoji_name, u->custom_status_emoji, nl);
+          ca.emoji_name[nl] = '\0';
+        } else {
+          snprintf(ca.emoji_name, sizeof ca.emoji_name, "%.64s", u->custom_status_emoji);
+        }
+      }
+      write_one_activity(w, &ca);
+    }
+    if (u->has_activity && u->activity_name[0]) {
+      ccord_user_activity pa = {0};
+      pa.type = u->activity_type;
+      snprintf(pa.name, sizeof pa.name, "%s", u->activity_name);
+      snprintf(pa.details, sizeof pa.details, "%s", u->activity_details);
+      snprintf(pa.state, sizeof pa.state, "%s", u->activity_state);
+      pa.start_ms = u->activity_start_ms;
+      pa.end_ms = u->activity_end_ms;
+      write_one_activity(w, &pa);
+    }
+  }
+  ccord_jw_end_array(w);
+}
+
+void plugins_ext_write_presence_obj(ccord_jw *w, const ccord_user *u, bool include_value_compat)
+{
+  ccord_jw_begin_object(w);
+  ccord_jw_key(w, "user_id"); ccord_jw_id(w, u->id);
+  if (include_value_compat) {
+    ccord_jw_key(w, "value"); ccord_jw_int(w, (int64_t)u->presence);
+  }
+  ccord_jw_key(w, "status"); ccord_jw_int(w, (int64_t)u->presence);
+  ccord_jw_key(w, "status_name"); ccord_jw_cstr(w, presence_name_str(u->presence));
+  ccord_jw_key(w, "status_text"); ccord_jw_cstr(w, u->status_text ? u->status_text : "");
+  ccord_jw_key(w, "client_status");
+  ccord_jw_begin_object(w);
+  ccord_presence dp = ccord_client_status_desktop(u->client_status_bits);
+  ccord_presence mp = ccord_client_status_mobile(u->client_status_bits);
+  ccord_presence wp = ccord_client_status_web(u->client_status_bits);
+  if (dp != CCORD_PRESENCE_OFFLINE) { ccord_jw_key(w, "desktop"); ccord_jw_cstr(w, presence_name_str(dp)); }
+  if (mp != CCORD_PRESENCE_OFFLINE) { ccord_jw_key(w, "mobile"); ccord_jw_cstr(w, presence_name_str(mp)); }
+  if (wp != CCORD_PRESENCE_OFFLINE) { ccord_jw_key(w, "web"); ccord_jw_cstr(w, presence_name_str(wp)); }
+  ccord_jw_end_object(w);
+  if (u->custom_status_emoji[0] || u->custom_status_text[0]) {
+    ccord_jw_key(w, "custom_status");
+    ccord_jw_begin_object(w);
+    if (u->custom_status_emoji[0]) { ccord_jw_key(w, "emoji"); ccord_jw_cstr(w, u->custom_status_emoji); }
+    if (u->custom_status_text[0]) { ccord_jw_key(w, "text"); ccord_jw_cstr(w, u->custom_status_text); }
+    if (u->custom_status_expires_ms > 0) { ccord_jw_key(w, "expires_ms"); ccord_jw_int(w, u->custom_status_expires_ms); }
+    ccord_jw_end_object(w);
+  }
+  ccord_jw_key(w, "activities");
+  plugins_ext_write_activities_array(w, u);
+  ccord_jw_end_object(w);
+}
+
+void plugins_ext_write_message_obj_ex(ccord_jw *w, const ccord_store *st, const ccord_message *msg,
+                                      ccord_id fallback_guild_id)
 {
   const ccord_user *u = st ? ccord_store_user(st, msg->author_id) : nullptr;
+  const ccord_channel *ch = st ? ccord_store_channel(st, msg->channel_id) : nullptr;
+  ccord_id gid = (ch && ch->guild_id != CCORD_ID_NONE) ? ch->guild_id : fallback_guild_id;
   ccord_jw_begin_object(w);
   ccord_jw_key(w, "id"); ccord_jw_id(w, msg->id);
+  if (gid != CCORD_ID_NONE) { ccord_jw_key(w, "guild_id"); ccord_jw_id(w, gid); }
   ccord_jw_key(w, "channel_id"); ccord_jw_id(w, msg->channel_id);
   ccord_jw_key(w, "author_id"); ccord_jw_id(w, msg->author_id);
   ccord_jw_key(w, "author_name"); ccord_jw_cstr(w, u && u->name ? u->name : "");
+  ccord_jw_key(w, "author_bot"); ccord_jw_bool(w, u ? u->is_bot : false);
   ccord_jw_key(w, "content"); ccord_jw_cstr(w, msg->content ? msg->content : "");
   ccord_jw_key(w, "timestamp_ms"); ccord_jw_int(w, msg->timestamp_ms);
   ccord_jw_key(w, "edited"); ccord_jw_bool(w, msg->edited);
+  if (msg->edited_timestamp_ms > 0) { ccord_jw_key(w, "edited_ms"); ccord_jw_int(w, msg->edited_timestamp_ms); }
   ccord_jw_key(w, "pinned"); ccord_jw_bool(w, msg->pinned);
   if (msg->reply_to_id) { ccord_jw_key(w, "reply_to_id"); ccord_jw_id(w, msg->reply_to_id); }
   if (msg->reaction_kind_count > 0 && msg->reactions) {
@@ -65,6 +208,9 @@ void plugins_ext_write_message_obj(ccord_jw *w, const ccord_store *st, const cco
     for (size_t i = 0; i < msg->reaction_kind_count; i++) {
       ccord_jw_begin_object(w);
       ccord_jw_key(w, "emoji"); ccord_jw_cstr(w, msg->reactions[i].emoji ? msg->reactions[i].emoji : "");
+      if (msg->reactions[i].emoji_id != CCORD_ID_NONE) {
+        ccord_jw_key(w, "emoji_id"); ccord_jw_id(w, msg->reactions[i].emoji_id);
+      }
       ccord_jw_key(w, "count"); ccord_jw_int(w, (int64_t)msg->reactions[i].count);
       ccord_jw_key(w, "me"); ccord_jw_bool(w, msg->reactions[i].self_reacted);
       ccord_jw_end_object(w);
@@ -95,17 +241,67 @@ void plugins_ext_write_message_obj(ccord_jw *w, const ccord_store *st, const cco
       ccord_jw_key(w, "embeds");
       ccord_jw_begin_array(w);
       for (size_t i = 0; i < r->embed_count; i++) {
+        const ccord_embed *e = &r->embeds[i];
         ccord_jw_begin_object(w);
-        ccord_jw_key(w, "title"); ccord_jw_cstr(w, r->embeds[i].title ? r->embeds[i].title : "");
-        ccord_jw_key(w, "description"); ccord_jw_cstr(w, r->embeds[i].description ? r->embeds[i].description : "");
-        ccord_jw_key(w, "url"); ccord_jw_cstr(w, r->embeds[i].url ? r->embeds[i].url : "");
-        if (r->embeds[i].has_color) { ccord_jw_key(w, "color"); ccord_jw_int(w, (int64_t)r->embeds[i].color); }
+        ccord_jw_key(w, "title"); ccord_jw_cstr(w, e->title ? e->title : "");
+        ccord_jw_key(w, "description"); ccord_jw_cstr(w, e->description ? e->description : "");
+        ccord_jw_key(w, "url"); ccord_jw_cstr(w, e->url ? e->url : "");
+        if (e->has_color) { ccord_jw_key(w, "color"); ccord_jw_int(w, (int64_t)e->color); }
+        if (e->timestamp_ms > 0) { ccord_jw_key(w, "timestamp_ms"); ccord_jw_int(w, e->timestamp_ms); }
+        if (e->author_name && e->author_name[0]) {
+          ccord_jw_key(w, "author");
+          ccord_jw_begin_object(w);
+          ccord_jw_key(w, "name"); ccord_jw_cstr(w, e->author_name);
+          if (e->author_url && e->author_url[0]) { ccord_jw_key(w, "url"); ccord_jw_cstr(w, e->author_url); }
+          if (e->author_icon && e->author_icon[0]) { ccord_jw_key(w, "icon_url"); ccord_jw_cstr(w, e->author_icon); }
+          ccord_jw_end_object(w);
+        }
+        if (e->footer_text && e->footer_text[0]) {
+          ccord_jw_key(w, "footer");
+          ccord_jw_begin_object(w);
+          ccord_jw_key(w, "text"); ccord_jw_cstr(w, e->footer_text);
+          if (e->footer_icon && e->footer_icon[0]) { ccord_jw_key(w, "icon_url"); ccord_jw_cstr(w, e->footer_icon); }
+          ccord_jw_end_object(w);
+        }
+        if (e->image.url && e->image.url[0]) {
+          ccord_jw_key(w, "image");
+          ccord_jw_begin_object(w);
+          ccord_jw_key(w, "url"); ccord_jw_cstr(w, e->image.url);
+          if (e->image.width) { ccord_jw_key(w, "width"); ccord_jw_int(w, (int64_t)e->image.width); }
+          if (e->image.height) { ccord_jw_key(w, "height"); ccord_jw_int(w, (int64_t)e->image.height); }
+          ccord_jw_end_object(w);
+        }
+        if (e->thumbnail.url && e->thumbnail.url[0]) {
+          ccord_jw_key(w, "thumbnail");
+          ccord_jw_begin_object(w);
+          ccord_jw_key(w, "url"); ccord_jw_cstr(w, e->thumbnail.url);
+          if (e->thumbnail.width) { ccord_jw_key(w, "width"); ccord_jw_int(w, (int64_t)e->thumbnail.width); }
+          if (e->thumbnail.height) { ccord_jw_key(w, "height"); ccord_jw_int(w, (int64_t)e->thumbnail.height); }
+          ccord_jw_end_object(w);
+        }
+        if (e->field_count > 0 && e->fields) {
+          ccord_jw_key(w, "fields");
+          ccord_jw_begin_array(w);
+          for (size_t fi = 0; fi < e->field_count; fi++) {
+            ccord_jw_begin_object(w);
+            ccord_jw_key(w, "name"); ccord_jw_cstr(w, e->fields[fi].name ? e->fields[fi].name : "");
+            ccord_jw_key(w, "value"); ccord_jw_cstr(w, e->fields[fi].value ? e->fields[fi].value : "");
+            ccord_jw_key(w, "inline"); ccord_jw_bool(w, e->fields[fi].inline_);
+            ccord_jw_end_object(w);
+          }
+          ccord_jw_end_array(w);
+        }
         ccord_jw_end_object(w);
       }
       ccord_jw_end_array(w);
     }
   }
   ccord_jw_end_object(w);
+}
+
+void plugins_ext_write_message_obj(ccord_jw *w, const ccord_store *st, const ccord_message *msg)
+{
+  plugins_ext_write_message_obj_ex(w, st, msg, CCORD_ID_NONE);
 }
 
 void plugins_ext_handle_command_result(ccord_plugins *m, plugin *p, ccord_id channel, const ccord_json *result)
@@ -213,6 +409,7 @@ bool ext_handle_audio_hooks_gw_rpc(ccord_plugins *m, plugin *p, uint32_t id, con
     uint8_t bit = 0; ccord_perm need = CCORD_PERM_MESSAGES_HOOK;
     if (hk && strcmp(hk, "before_send") == 0) { bit = HOOK_BEFORE_SEND; need = CCORD_PERM_MESSAGES_HOOK; }
     else if (hk && strcmp(hk, "before_edit") == 0) { bit = HOOK_BEFORE_EDIT; need = CCORD_PERM_MESSAGES_HOOK; }
+    else if (hk && strcmp(hk, "before_upload") == 0) { bit = HOOK_BEFORE_UPLOAD; need = CCORD_PERM_MESSAGES_HOOK; }
     else if (hk && strcmp(hk, "notification") == 0) { bit = HOOK_NOTIFICATION; need = CCORD_PERM_NOTIFICATIONS_HOOK; }
     else if (hk && strcmp(hk, "link_open") == 0) { bit = HOOK_LINK_OPEN; need = CCORD_PERM_NOTIFICATIONS_HOOK; }
     else { pl_reply_err(m, p, id, "invalid_argument", "unknown hook"); return true; }
@@ -220,6 +417,9 @@ bool ext_handle_audio_hooks_gw_rpc(ccord_plugins *m, plugin *p, uint32_t id, con
     if (reg) p->hook_mask |= bit; else p->hook_mask &= (uint8_t)~bit;
     pl_reply_ok(m, p, id, nullptr);
     return true;
+  }
+  if (strcmp(method, "hooks.complete_upload_transform") == 0) {
+    return pl_handle_upload_transform_complete(m, p, id, params);
   }
   if (strcmp(method, "gateway.subscribe") == 0 || strcmp(method, "gateway.unsubscribe") == 0) {
     if (!pl_has_perm(p, CCORD_PERM_GATEWAY_RAW)) { pl_fail_plugin(m, p, "undeclared restricted API called: gateway.raw"); return true; }
@@ -378,12 +578,15 @@ static bool lmsg_attachments_check_perms(ccord_plugins *m, plugin *p, uint32_t r
     size_t lp_len = 0;
     const char *lp = pl_str_param(it, "local_path", &lp_len);
     if (lp && lp_len > 0) {
-      if (!pl_has_perm(p, CCORD_PERM_FS_READ)) {
-        pl_fail_plugin(m, p, "undeclared restricted API called: fs.read");
-        return false;
-      }
-      if (pl_fs_path_is_protected(m, lp)) {
-        pl_reply_err(m, p, req_id, "permission_denied", "access to C-Cord internal config/plugin paths is forbidden");
+      pl_path_scope scope = PL_PATH_HOST_FS;
+      char resolved[CCORD_PATH_MAX];
+      const char *ecode = "invalid_argument";
+      char ebuf[256] = "";
+      if (!pl_resolve_resource_path(m, p, lp, false, &scope, resolved, sizeof resolved,
+                                    &ecode, ebuf, sizeof ebuf)) {
+        if (p->state == CCORD_PLUGIN_READY || p->state == CCORD_PLUGIN_STARTING) {
+          pl_reply_err(m, p, req_id, ecode, ebuf);
+        }
         return false;
       }
     }
@@ -552,6 +755,50 @@ bool ext_handle_messages_store_v3(ccord_plugins *m, plugin *p, uint32_t id, cons
           ccord_session_send_message_with_file(m->session, cid, cnt ? cnt : "", cl, fname, raw, rlen, &err) != CCORD_OK) {
         ccord_free(raw);
         pl_reply_err(m, p, id, "internal", err.message[0] ? err.message : "send_file failed");
+        return true;
+      }
+      ccord_free(raw);
+      pl_reply_ok(m, p, id, nullptr);
+      return true;
+    }
+    if (strcmp(method, "messages.send_file_path") == 0) {
+      if (!pl_has_perm(p, CCORD_PERM_MESSAGES_SEND)) { pl_fail_plugin(m, p, "undeclared restricted API called: messages.send"); return true; }
+      ccord_id cid = pl_parse_id_param(params, "channel_id");
+      size_t pl = 0, cl = 0, fnl = 0;
+      const char *spec_path = pl_str_param(params, "path", &pl);
+      const char *cnt = pl_str_param(params, "content", &cl);
+      const char *fname_ov = pl_str_param(params, "filename", &fnl);
+      pl_path_scope scope = PL_PATH_HOST_FS;
+      char resolved[CCORD_PATH_MAX];
+      const char *ecode = "invalid_argument";
+      char ebuf[256] = "";
+      if (!pl_resolve_resource_path(m, p, spec_path, false, &scope, resolved, sizeof resolved,
+                                    &ecode, ebuf, sizeof ebuf)) {
+        if (p->state == CCORD_PLUGIN_READY || p->state == CCORD_PLUGIN_STARTING) {
+          pl_reply_err(m, p, id, ecode, ebuf);
+        }
+        return true;
+      }
+      uint64_t limit = (m->session && cid) ? ccord_session_upload_limit(m->session, cid, nullptr)
+                                           : (100ull * 1024ull * 1024ull);
+      if (limit == 0 || limit > (500ull * 1024ull * 1024ull)) limit = 100ull * 1024ull * 1024ull;
+      uint8_t *raw = nullptr;
+      size_t rlen = 0;
+      if (!pl_read_resolved_file(resolved, (size_t)limit, &raw, &rlen, &ecode, ebuf, sizeof ebuf)) {
+        pl_reply_err(m, p, id, ecode, ebuf);
+        return true;
+      }
+      const char *fname = (fname_ov && fnl > 0) ? fname_ov : resolved;
+      if (!fname_ov || fnl == 0) {
+        const char *s1 = strrchr(resolved, '/');
+        const char *s2 = strrchr(resolved, '\\');
+        const char *slash = (s1 && s2) ? (s1 > s2 ? s1 : s2) : (s1 ? s1 : s2);
+        if (slash && slash[1]) fname = slash + 1;
+      }
+      if (!m->session || !cid ||
+          ccord_session_send_message_with_file(m->session, cid, cnt ? cnt : "", cl, fname, raw, rlen, &err) != CCORD_OK) {
+        ccord_free(raw);
+        pl_reply_err(m, p, id, "internal", err.message[0] ? err.message : "send_file_path failed");
         return true;
       }
       ccord_free(raw);
@@ -1076,6 +1323,15 @@ bool ext_handle_messages_store_v3(ccord_plugins *m, plugin *p, uint32_t id, cons
         if (call) { ccord_jw_key(&w, "region"); ccord_jw_cstr(&w, call->region); }
         ccord_jw_end_object(&w);
       }
+    } else if (strcmp(method, "store.presence") == 0) {
+      ccord_id uid = pl_parse_id_param(params, "user_id");
+      const ccord_user *u = uid != CCORD_ID_NONE ? ccord_store_user(m->store, uid) : nullptr;
+      if (!u) ccord_jw_null(&w);
+      else plugins_ext_write_presence_obj(&w, u, false);
+    } else if (strcmp(method, "store.activities") == 0) {
+      ccord_id uid = pl_parse_id_param(params, "user_id");
+      const ccord_user *u = uid != CCORD_ID_NONE ? ccord_store_user(m->store, uid) : nullptr;
+      plugins_ext_write_activities_array(&w, u);
     } else {
       ccord_buf_free(&b);
       return false;

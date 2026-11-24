@@ -5,7 +5,9 @@ add_library(ccord_plugins STATIC
   core/plugins.c
   core/plugin_host_proc.c
   core/plugin_storage.c
+  core/plugin_jail_fs.c
   core/plugin_rpc_core.c
+  core/upload_transform.c
   package/plugin_package.c
   package/manifest.c
   package/zip.c

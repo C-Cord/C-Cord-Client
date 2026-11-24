@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #define _POSIX_C_SOURCE 200809L
 #include <ccord/core/alloc.h>
+#include <ccord/core/clock.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -841,15 +842,15 @@ static void test_security_regressions(void)
     CT_CHECK(!pw_is_localhost_host("127.example.com"));
     CT_CHECK(!pw_is_localhost_host("8.8.8.8"));
 
-    // Manifest memory & instruction limit caps (desktop 64 MiB / 100M insns).
+    // Manifest memory & instruction limit caps (desktop 256 MiB / 500M insns).
     const char *big_lim =
       "{\"schema\":1,\"id\":\"dev.test.lim\",\"name\":\"Lim\",\"version\":\"1.0.0\",\"api\":1,"
       "\"main\":\"main.lua\",\"limits\":{\"memory_bytes\":536870912,\"instructions\":999999999}}";
     ccord_manifest lm = {0};
     ccord_error lerr = {0};
     CT_CHECK(ccord_manifest_parse(big_lim, strlen(big_lim), &lm, &lerr) == CCORD_OK);
-    CT_CHECK(lm.memory_bytes == (64u << 20));
-    CT_CHECK(lm.instructions == 100000000u);
+    CT_CHECK(lm.memory_bytes == (256u << 20));
+    CT_CHECK(lm.instructions == 500000000u);
   }
 
   // 2. High-risk Unix socket blocklist & protected filesystem path checks.
@@ -1799,6 +1800,612 @@ static void test_dynamic_context_menu_integration(void)
   (void)rmdir(d_p1); (void)rmdir(plugins_dir); (void)rmdir(data_dir); (void)rmdir(root);
 }
 
+static void test_phase2_storage_files_and_unload(void)
+{
+  char root[] = "/tmp/ccord-p2-XXXXXX";
+  CT_CHECK(mkdtemp(root) != nullptr);
+  if (!root[0]) return;
+  char plugins_dir[1100], data_dir[1100], d_jail[1200], d_hang[1200], d_fs[1200];
+  char outside_file[1200], host_src[1200], host_dst[1200], jail_dir[1300], escape_link[1400];
+  snprintf(plugins_dir, sizeof plugins_dir, "%s/plugins", root);
+  snprintf(data_dir, sizeof data_dir, "%s/data", root);
+  snprintf(d_jail, sizeof d_jail, "%s/jail", plugins_dir);
+  snprintf(d_hang, sizeof d_hang, "%s/hang", plugins_dir);
+  snprintf(d_fs, sizeof d_fs, "%s/fsren", plugins_dir);
+  snprintf(outside_file, sizeof outside_file, "%s/secret.txt", root);
+  snprintf(host_src, sizeof host_src, "%s/ren_src.txt", root);
+  snprintf(host_dst, sizeof host_dst, "%s/ren_dst.txt", root);
+  CT_CHECK(mkdir(plugins_dir, 0700) == 0);
+  CT_CHECK(mkdir(data_dir, 0700) == 0);
+  CT_CHECK(mkdir(d_jail, 0700) == 0);
+  CT_CHECK(mkdir(d_hang, 0700) == 0);
+  CT_CHECK(mkdir(d_fs, 0700) == 0);
+  write_file(root, "secret.txt", "TOP_SECRET");
+  write_file(root, "ren_src.txt", "HOST_RENAME_OK");
+
+  // Pre-plant a symlink inside the jail pointing outside to verify symlink escape is blocked.
+  char pdata_root[1200];
+  snprintf(pdata_root, sizeof pdata_root, "%s/plugin_data", data_dir);
+  snprintf(jail_dir, sizeof jail_dir, "%s/dev.test.jail", pdata_root);
+  snprintf(escape_link, sizeof escape_link, "%s/escape.txt", jail_dir);
+  CT_CHECK(mkdir(pdata_root, 0700) == 0);
+  CT_CHECK(mkdir(jail_dir, 0700) == 0);
+  CT_CHECK(symlink(outside_file, escape_link) == 0);
+
+  // Plugin 1: Class 2 storage.files + ui.panel (NO fs.read/fs.write!).
+  // Tests CRUD, traversal/symlink rejection, plugin_data:// texture upload, and unload flush!
+  write_file(d_jail, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.jail\",\"name\":\"Jail\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"storage.files\",\"ui.panel\",\"clipboard.write\"]}");
+  write_file(d_jail, "main.lua",
+             "assert(storage.files.mkdir('sub/nested'))\n"
+             "assert(storage.files.write('sub/nested/a.txt', 'hello '))\n"
+             "assert(storage.files.append('sub/nested/a.txt', 'world'))\n"
+             "local txt = storage.files.read('sub/nested/a.txt')\n"
+             "assert(txt == 'hello world', 'got: ' .. tostring(txt))\n"
+             "local c1, e1 = storage.files.read_chunk('sub/nested/a.txt', 6, 5)\n"
+             "assert(c1 == 'world' and e1 == true)\n"
+             "assert(storage.files.rename('sub/nested/a.txt', 'sub/nested/b.txt'))\n"
+             "local st = storage.files.stat('sub/nested/b.txt')\n"
+             "assert(st and st.exists and st.is_file and st.size == 11)\n"
+             "local lst = storage.files.list('sub/nested')\n"
+             "assert(lst and #lst == 1 and lst[1].name == 'b.txt')\n"
+             "local trav, terr = storage.files.read('../secret.txt')\n"
+             "local sym, serr = storage.files.read('escape.txt')\n"
+             "local symw, swerr = storage.files.write('escape.txt', 'pwn')\n"
+             "local mock_img = 'MOCK' .. string.char(0, 64, 0, 32)\n"
+             "assert(storage.files.write('thumb.mock', mock_img))\n"
+             "local tinfo = ui.texture.upload_file('pd_tex', 'plugin_data://thumb.mock', { max_w = 64, max_h = 32 })\n"
+             "local usg = storage.files.usage()\n"
+             "assert(storage.files.remove('sub', { recursive = true }))\n"
+             "plugin.on_unload(function(reason)\n"
+             "  storage.set('unload_reason', reason)\n"
+             "  storage.files.write('flushed.txt', 'clean:' .. reason)\n"
+             "end)\n"
+             "clipboard.write('jail_ok:trav=' .. tostring(trav == nil and terr ~= nil) ..\n"
+             "  ':sym=' .. tostring(sym == nil and serr ~= nil) ..\n"
+             "  ':symw=' .. tostring(symw == nil and swerr ~= nil) ..\n"
+             "  ':tex=' .. tostring(tinfo and tinfo.width) .. 'x' .. tostring(tinfo and tinfo.height) ..\n"
+             "  ':used=' .. tostring(usg and usg.used_bytes > 0))\n");
+
+  // Plugin 2: Runaway plugin.on_unload to prove parallel shutdown does not hang!
+  write_file(d_hang, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.hang\",\"name\":\"Hang\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[]}");
+  write_file(d_hang, "main.lua",
+             "plugin.on_unload(function() while true do end end)\n");
+
+  // Plugin 3: Class 3 fs.rename + chunked read.
+  write_file(d_fs, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.fsren\",\"name\":\"FsRen\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"fs.read\",\"fs.write\",\"clipboard.write\"]}");
+  char lua_fs[4096];
+  snprintf(lua_fs, sizeof lua_fs,
+           "assert(fs.rename('%s', '%s'))\n"
+           "local ch, eof = fs.read_chunk('%s', 5, 6)\n"
+           "clipboard.write('fsren:' .. tostring(ch) .. ':' .. tostring(eof))\n",
+           host_src, host_dst, host_dst);
+  write_file(d_fs, "main.lua", lua_fs);
+
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  ccord_contrib *contrib = ccord_contrib_create(&err);
+  v3_clip_log cl = {0};
+  const char *dirs[] = {plugins_dir};
+  ccord_plugins_config cfg = {
+    .store = store, .contrib = contrib, .bus = bus,
+    .search_dirs = dirs, .search_dir_count = 1,
+    .data_dir = data_dir, .host_exe = CCORD_PLUGIN_HOST_BIN,
+    .clipboard_write = v3_on_clip, .clipboard_ud = &cl,
+    .platform_ops = {.decode_image_rgba = mock_decode_image_rgba},
+  };
+  ccord_plugins *pm = ccord_plugins_create(&cfg, &err);
+  CT_CHECK(pm != nullptr);
+  (void)ccord_plugins_load_all(pm);
+
+  const char *consent_ids[] = {"dev.test.jail", "dev.test.fsren"};
+  for (size_t i = 0; i < 2; i++) {
+    CT_CHECK(pump_until(pm, bus, contrib, consent_ids[i], CCORD_PLUGIN_NEEDS_CONSENT));
+    const ccord_plugin_info *pi = find_info(contrib, consent_ids[i]);
+    if (pi) ccord_contrib_plugin_consent_accept_for(contrib, consent_ids[i], pi->perms_mask);
+  }
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.jail", CCORD_PLUGIN_READY));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.hang", CCORD_PLUGIN_READY));
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.fsren", CCORD_PLUGIN_READY));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "jail_ok:trav=true:sym=true:symw=true:tex=64x32:used=true"));
+  CT_CHECK(v3_pump_clip(pm, bus, &cl, "fsren:RENAME:false"));
+  CT_CHECK(ccord_contrib_find_texture(contrib, "pd_tex") != nullptr);
+
+  // Verify parallel shutdown completes cleanly within budget AND flushes both storage.set and storage.files.write!
+  uint64_t t0 = ccord_clock_ms();
+  ccord_plugins_shutdown(pm);
+  uint64_t dt = ccord_clock_ms() - t0;
+  CT_CHECK(dt < 2500u);
+
+  // Check flushed.txt in jail and storage.json persisted unload_reason == "quit".
+  char flushed_path[1400], kv_path[1400], fbuf[128] = "";
+  snprintf(flushed_path, sizeof flushed_path, "%s/flushed.txt", jail_dir);
+  FILE *ff = fopen(flushed_path, "rb");
+  CT_CHECK(ff != nullptr);
+  if (ff) {
+    size_t n = fread(fbuf, 1, sizeof fbuf - 1, ff);
+    fbuf[n] = '\0';
+    fclose(ff);
+  }
+  CT_CHECK(strcmp(fbuf, "clean:quit") == 0);
+
+  snprintf(kv_path, sizeof kv_path, "%s/plugins/dev.test.jail/storage.json", data_dir);
+  FILE *kf = fopen(kv_path, "rb");
+  CT_CHECK(kf != nullptr);
+  char kbuf[512] = "";
+  if (kf) {
+    size_t n = fread(kbuf, 1, sizeof kbuf - 1, kf);
+    kbuf[n] = '\0';
+    fclose(kf);
+  }
+  CT_CHECK(strstr(kbuf, "\"unload_reason\"") != nullptr && strstr(kbuf, "\"quit\"") != nullptr);
+
+  ccord_plugins_destroy(pm);
+  ccord_contrib_destroy(contrib);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+
+  // Clean up test temp dir.
+  char cmd_rm[1200];
+  snprintf(cmd_rm, sizeof cmd_rm, "rm -rf '%s'", root);
+  (void)system(cmd_rm);
+}
+
+static void test_phase3_presence_and_decor_extensions(void)
+{
+  char root[] = "/tmp/ccord-p3-XXXXXX";
+  CT_CHECK(mkdtemp(root) != nullptr);
+  if (!root[0]) return;
+  char plugins_dir[1100], data_dir[1100], d_p3[1200];
+  snprintf(plugins_dir, sizeof plugins_dir, "%s/plugins", root);
+  snprintf(data_dir, sizeof data_dir, "%s/data", root);
+  snprintf(d_p3, sizeof d_p3, "%s/p3", plugins_dir);
+  CT_CHECK(mkdir(plugins_dir, 0700) == 0);
+  CT_CHECK(mkdir(data_dir, 0700) == 0);
+  CT_CHECK(mkdir(d_p3, 0700) == 0);
+
+  write_file(d_p3, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.p3\",\"name\":\"Phase3\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"store.read\",\"events.presence\",\"ui.decorate\","
+             "\"network.http\",\"clipboard.write\"],\"allowed_hosts\":[\"img.example.com\"]}");
+  write_file(d_p3, "main.lua",
+             "events.on('presence.update', function(ev)\n"
+             "  if ev.user_id == '2' and ev.status_name == 'dnd' and ev.client_status and ev.client_status.mobile == 'dnd' then\n"
+             "    local a1 = ev.activities and ev.activities[1] and ev.activities[1].sync_id or ''\n"
+             "    clipboard.write('ev:' .. tostring(ev.value) .. ':' .. a1)\n"
+             "  end\n"
+             "end)\n"
+             "local pr = store.presence('2')\n"
+             "assert(pr and pr.status == 1 and pr.status_name == 'online')\n"
+             "assert(pr.client_status and pr.client_status.desktop == 'online' and pr.client_status.web == 'idle')\n"
+             "local acts = store.activities('2')\n"
+             "assert(acts and #acts == 2 and acts[1].name == 'Spotify' and acts[1].sync_id == 'sp_42')\n"
+             "assert(acts[2].name == 'Rust' and acts[2].party and acts[2].party.max == 5)\n"
+             "ui.decorate.message_style({\n"
+             "  id = 'ov1', message_id = '9001', content_override = 'Translated **hello**',\n"
+             "  embeds_append = {\n"
+             "    { title = 'CDN OK', image_url = 'https://cdn.discordapp.com/attachments/1/2/a.png',\n"
+             "      thumbnail_url = 'https://evil.invalid/steal.png' },\n"
+             "    { title = 'Host OK', image_url = 'https://img.example.com/ok.png' },\n"
+             "  },\n"
+             "})\n"
+             "ui.decorate.channel_style({ id = 'cs1', channel_id = '20', hidden = true, tint = '#11223344' })\n"
+             "ui.decorate.member_style({ id = 'ms1', user_id = '2', dim = true, accent = '#ff8800' })\n"
+             "clipboard.write('p3_init_ok')\n");
+
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  ccord_contrib *contrib = ccord_contrib_create(&err);
+  CT_CHECK(bus && store && contrib);
+
+  ccord_user users[2] = {
+    {.id = 1, .name = "Me", .status_text = "", .presence = CCORD_PRESENCE_ONLINE},
+    {.id = 2, .name = "Alice", .status_text = "", .presence = CCORD_PRESENCE_OFFLINE},
+  };
+  ccord_guild g = {.id = 10, .name = "Guild"};
+  ccord_channel ch = {.id = 20, .guild_id = 10, .kind = CCORD_CHANNEL_TEXT, .name = "general", .topic = ""};
+  ccord_snapshot snap = {.self_id = 1, .users = users, .user_count = 2, .guilds = &g, .guild_count = 1,
+                         .channels = &ch, .channel_count = 1};
+  CT_CHECK(ccord_store_set_snapshot(store, &snap, &err) == CCORD_OK);
+
+  size_t asz = sizeof(ccord_user_activities) + 2u * sizeof(ccord_user_activity);
+  ccord_user_activities *acts = calloc(1, asz);
+  acts->count = 2;
+  acts->items[0].type = CCORD_ACTIVITY_LISTENING;
+  snprintf(acts->items[0].name, sizeof acts->items[0].name, "Spotify");
+  snprintf(acts->items[0].sync_id, sizeof acts->items[0].sync_id, "sp_42");
+  acts->items[1].type = CCORD_ACTIVITY_PLAYING;
+  snprintf(acts->items[1].name, sizeof acts->items[1].name, "Rust");
+  acts->items[1].party_size = 3;
+  acts->items[1].party_max = 5;
+  CT_CHECK(ccord_store_update_presence_detail_ex(
+             store, 2, CCORD_PRESENCE_ONLINE, "Listening to Spotify", "", "", 0,
+             true, CCORD_ACTIVITY_LISTENING, "Spotify", "", "", 0, 0, true,
+             ccord_client_status_pack(CCORD_PRESENCE_ONLINE, CCORD_PRESENCE_OFFLINE, CCORD_PRESENCE_IDLE),
+             acts, &err) == CCORD_OK);
+  free(acts);
+  (void)ccord_bus_drain(bus);
+
+  v3_clip_log clip = {0};
+  const char *dirs[] = {plugins_dir};
+  ccord_plugins_config cfg = {
+    .store = store, .contrib = contrib, .bus = bus,
+    .search_dirs = dirs, .search_dir_count = 1,
+    .data_dir = data_dir, .host_exe = CCORD_PLUGIN_HOST_BIN,
+    .clipboard_write = v3_on_clip, .clipboard_ud = &clip,
+  };
+  ccord_plugins *pm = ccord_plugins_create(&cfg, &err);
+  CT_CHECK(pm != nullptr);
+  (void)ccord_plugins_load_all(pm);
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.p3", CCORD_PLUGIN_NEEDS_CONSENT));
+  const ccord_plugin_info *pi = find_info(contrib, "dev.test.p3");
+  if (pi) ccord_contrib_plugin_consent_accept_for(contrib, "dev.test.p3", pi->perms_mask);
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.p3", CCORD_PLUGIN_READY));
+  CT_CHECK(v3_pump_clip(pm, bus, &clip, "p3_init_ok"));
+
+  // Verify embeds_append URL sanitization: cdn.discordapp.com + allowed_hosts kept; evil.invalid stripped!
+  const ccord_decorator_contribution *decs[8];
+  size_t nd = ccord_contrib_query_decorators(contrib, CCORD_DECOR_MESSAGE_STYLE, 9001, decs, 8);
+  CT_CHECK(nd == 1);
+  CT_CHECK(decs[0]->content_override && strcmp(decs[0]->content_override, "Translated **hello**") == 0);
+  CT_CHECK(decs[0]->embeds_append_json != nullptr);
+  CT_CHECK(strstr(decs[0]->embeds_append_json, "https://cdn.discordapp.com/attachments/1/2/a.png") != nullptr);
+  CT_CHECK(strstr(decs[0]->embeds_append_json, "https://img.example.com/ok.png") != nullptr);
+  CT_CHECK(strstr(decs[0]->embeds_append_json, "evil.invalid") == nullptr);
+
+  // Verify channel_style and member_style decorators registered cleanly.
+  CT_CHECK(ccord_contrib_query_decorators(contrib, CCORD_DECOR_CHANNEL_STYLE, 20, decs, 8) == 1 && decs[0]->hidden);
+  CT_CHECK(ccord_contrib_query_decorators(contrib, CCORD_DECOR_MEMBER_STYLE, 2, decs, 8) == 1 && decs[0]->dim);
+
+  // Live extended presence update fires enriched presence.update event to Lua.
+  size_t asz2 = sizeof(ccord_user_activities) + sizeof(ccord_user_activity);
+  ccord_user_activities *acts2 = calloc(1, asz2);
+  acts2->count = 1;
+  acts2->items[0].type = CCORD_ACTIVITY_LISTENING;
+  snprintf(acts2->items[0].name, sizeof acts2->items[0].name, "Spotify");
+  snprintf(acts2->items[0].sync_id, sizeof acts2->items[0].sync_id, "sp_live_99");
+  CT_CHECK(ccord_store_update_presence_detail_ex(
+             store, 2, CCORD_PRESENCE_DND, "Listening to Spotify", "", "", 0,
+             true, CCORD_ACTIVITY_LISTENING, "Spotify", "", "", 0, 0, true,
+             ccord_client_status_pack(CCORD_PRESENCE_OFFLINE, CCORD_PRESENCE_DND, CCORD_PRESENCE_OFFLINE),
+             acts2, &err) == CCORD_OK);
+  free(acts2);
+  (void)ccord_bus_drain(bus);
+  CT_CHECK(v3_pump_clip(pm, bus, &clip, "ev:3:sp_live_99"));
+
+  ccord_plugins_shutdown(pm);
+  ccord_plugins_destroy(pm);
+  ccord_contrib_destroy(contrib);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+
+  char rm[1400];
+  snprintf(rm, sizeof rm, "%s/plugin.json", d_p3); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/main.lua", d_p3); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/plugins.json", data_dir); (void)unlink(rm);
+  (void)rmdir(d_p3); (void)rmdir(plugins_dir); (void)rmdir(data_dir); (void)rmdir(root);
+}
+
+typedef struct p4_ui_spy {
+  int media_opens;
+  char last_media_json[1024];
+  int profile_opens;
+  ccord_id last_profile_uid;
+  int popup_opens;
+  char last_popup_owner[65];
+  uint64_t last_popup_req;
+  char last_popup_json[512];
+  int toast_shows;
+  char last_toast_owner[65];
+  uint64_t last_toast_id;
+  char last_toast_action[64];
+  int upload_done_calls;
+  uint64_t last_upload_job;
+  bool last_upload_cancelled;
+  char last_upload_notice[160];
+  char last_upload_fname[128];
+  bool last_upload_spoiler;
+  uint8_t last_upload_bytes[256];
+  size_t last_upload_len;
+} p4_ui_spy;
+
+static bool p4_open_media(void *ud, const char *items_json, size_t index)
+{
+  (void)index;
+  p4_ui_spy *s = ud;
+  s->media_opens++;
+  snprintf(s->last_media_json, sizeof s->last_media_json, "%s", items_json ? items_json : "");
+  return true;
+}
+
+static bool p4_open_profile(void *ud, ccord_id uid, ccord_id gid)
+{
+  (void)gid;
+  p4_ui_spy *s = ud;
+  s->profile_opens++;
+  s->last_profile_uid = uid;
+  return true;
+}
+
+static bool p4_open_popup(void *ud, const char *owner, uint64_t req_id, float x, float y, bool has_pos, const char *items_json)
+{
+  (void)x; (void)y; (void)has_pos;
+  p4_ui_spy *s = ud;
+  s->popup_opens++;
+  snprintf(s->last_popup_owner, sizeof s->last_popup_owner, "%s", owner ? owner : "");
+  s->last_popup_req = req_id;
+  snprintf(s->last_popup_json, sizeof s->last_popup_json, "%s", items_json ? items_json : "");
+  return true;
+}
+
+static bool p4_toast_show(void *ud, const char *owner, uint64_t toast_id, const char *text, uint8_t level,
+                          uint32_t duration_ms, const char *action_label)
+{
+  (void)text; (void)level; (void)duration_ms;
+  p4_ui_spy *s = ud;
+  s->toast_shows++;
+  snprintf(s->last_toast_owner, sizeof s->last_toast_owner, "%s", owner ? owner : "");
+  s->last_toast_id = toast_id;
+  snprintf(s->last_toast_action, sizeof s->last_toast_action, "%s", action_label ? action_label : "");
+  return true;
+}
+
+static void p4_upload_complete(void *ud, uint64_t job_id, bool cancelled, const char *notice,
+                               ccord_upload_hook_file *files, size_t count)
+{
+  p4_ui_spy *s = ud;
+  s->upload_done_calls++;
+  s->last_upload_job = job_id;
+  s->last_upload_cancelled = cancelled;
+  snprintf(s->last_upload_notice, sizeof s->last_upload_notice, "%s", notice ? notice : "");
+  if (!cancelled && files && count > 0u) {
+    snprintf(s->last_upload_fname, sizeof s->last_upload_fname, "%s", files[0].filename);
+    s->last_upload_spoiler = files[0].spoiler;
+    size_t cp = files[0].size < sizeof s->last_upload_bytes ? files[0].size : sizeof s->last_upload_bytes;
+    if (cp && files[0].data) memcpy(s->last_upload_bytes, files[0].data, cp);
+    s->last_upload_len = files[0].size;
+  }
+}
+
+static void test_phase4_overlays_toasts_and_upload_hooks(void)
+{
+  char root[] = "/tmp/ccord-p4-XXXXXX";
+  CT_CHECK(mkdtemp(root) != nullptr);
+  if (!root[0]) return;
+  char plugins_dir[1100], data_dir[1100], d_p4[1200];
+  snprintf(plugins_dir, sizeof plugins_dir, "%s/plugins", root);
+  snprintf(data_dir, sizeof data_dir, "%s/data", root);
+  snprintf(d_p4, sizeof d_p4, "%s/p4", plugins_dir);
+  CT_CHECK(mkdir(plugins_dir, 0700) == 0);
+  CT_CHECK(mkdir(data_dir, 0700) == 0);
+  CT_CHECK(mkdir(d_p4, 0700) == 0);
+
+  write_file(d_p4, "plugin.json",
+             "{\"schema\":1,\"id\":\"dev.test.p4\",\"name\":\"Phase4\",\"version\":\"1.0.0\",\"api\":1,"
+             "\"main\":\"main.lua\",\"permissions\":[\"commands\",\"clipboard.write\",\"storage.files\",\"messages.hook\"]}");
+  write_file(d_p4, "main.lua",
+             "storage.files.write('pic.bin', 'IMGDATA')\n"
+             "ui.toast.show('Archive ready', 'info', { duration_ms = 5000, action_label = 'Open', on_action = function()\n"
+             "  local ok_cdn = ui.media.open({ url = 'https://cdn.discordapp.com/attachments/1/2/ok.png' })\n"
+             "  local ok_evil, err_evil = ui.media.open({ url = 'https://evil.example/steal.png' })\n"
+             "  local ok_jail = ui.media.open({ local_path = 'plugin_data://pic.bin', filename = 'pic.bin' })\n"
+             "  local ok_prof = ui.open_user_profile('2', '10')\n"
+             "  clipboard.write('toast_act:' .. tostring(ok_cdn) .. ':' .. tostring(ok_evil == nil and err_evil ~= nil) .. ':' .. tostring(ok_jail) .. ':' .. tostring(ok_prof))\n"
+             "end })\n"
+             "commands.register('pop', 'Popup', function()\n"
+             "  ui.menu.popup({ x = 50, y = 60, items = { { id = 'copy', label = 'Copy' }, { id = 'rm', label = 'Remove', danger = true } },\n"
+             "    on_select = function(id) clipboard.write('popup_sel:' .. tostring(id)) end })\n"
+             "end)\n"
+             "hooks.on_before_upload(function(ctx)\n"
+             "  if ctx.content == 'cancel_me' then return { cancel = true, notice = 'Blocked by policy' } end\n"
+             "  if ctx.content == 'async_me' then\n"
+             "    return { files = { [1] = { async_transform = true } } }\n"
+             "  end\n"
+             "  return {\n"
+             "    notice = 'Sanitized',\n"
+             "    files = {\n"
+             "      [1] = { filename = 'clean.jpg', spoiler = true, strip_metadata = true },\n"
+             "      [2] = { drop = true },\n"
+             "    },\n"
+             "  }\n"
+             "end, function(job)\n"
+             "  local h = job.files[1].handle\n"
+             "  local st = storage.files.stat(h)\n"
+             "  local chunk, eof = storage.files.read_chunk(h, 0, 4096)\n"
+             "  assert(st and st.exists and eof and chunk == 'RAW_UPLOAD_PAYLOAD')\n"
+             "  storage.files.write('transformed.bin', 'TRANSFORMED:' .. chunk)\n"
+             "  last_tmp_handle = h\n"
+             "  return { notice = 'Async OK', files = { [1] = { filename = 'done.bin', spoiler = true, replacement_path = 'plugin_data://transformed.bin' } } }\n"
+             "end)\n"
+             "commands.register('check_tmp', 'Check tmp', function()\n"
+             "  local d, e = storage.files.read_chunk(last_tmp_handle, 0, 64)\n"
+             "  clipboard.write('tmp_gone:' .. tostring(d == nil and e ~= nil))\n"
+             "end)\n"
+             "clipboard.write('p4_init_ok')\n");
+
+  ccord_error err = {0};
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  ccord_contrib *contrib = ccord_contrib_create(&err);
+  p4_ui_spy spy = {0};
+  ccord_contrib_ui_hooks uhooks = {
+    .ud = &spy,
+    .open_media = p4_open_media,
+    .open_user_profile = p4_open_profile,
+    .open_popup_menu = p4_open_popup,
+    .toast_show = p4_toast_show,
+    .upload_transform_complete = p4_upload_complete,
+  };
+  ccord_contrib_set_ui_hooks(contrib, &uhooks);
+
+  v3_clip_log clip = {0};
+  const char *dirs[] = {plugins_dir};
+  ccord_plugins_config cfg = {
+    .store = store, .contrib = contrib, .bus = bus,
+    .search_dirs = dirs, .search_dir_count = 1,
+    .data_dir = data_dir, .host_exe = CCORD_PLUGIN_HOST_BIN,
+    .clipboard_write = v3_on_clip, .clipboard_ud = &clip,
+  };
+  ccord_plugins *pm = ccord_plugins_create(&cfg, &err);
+  CT_CHECK(pm != nullptr);
+  (void)ccord_plugins_load_all(pm);
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.p4", CCORD_PLUGIN_NEEDS_CONSENT));
+  const ccord_plugin_info *pi = find_info(contrib, "dev.test.p4");
+  if (pi) ccord_contrib_plugin_consent_accept_for(contrib, "dev.test.p4", pi->perms_mask);
+  CT_CHECK(pump_until(pm, bus, contrib, "dev.test.p4", CCORD_PLUGIN_READY));
+  CT_CHECK(v3_pump_clip(pm, bus, &clip, "p4_init_ok"));
+
+  // 1. Toast was shown via contrib UI hook -> clicking action dispatches toast.action and exercises ui.media.open & ui.open_user_profile!
+  CT_CHECK(spy.toast_shows == 1 && spy.last_toast_id > 0 && strcmp(spy.last_toast_action, "Open") == 0);
+  ccord_contrib_dispatch_toast_action(contrib, spy.last_toast_owner, spy.last_toast_id);
+  CT_CHECK(v3_pump_clip(pm, bus, &clip, "toast_act:true:true:true:true"));
+  CT_CHECK(spy.media_opens == 2 && strstr(spy.last_media_json, "\"source\":\"local_path\"") != nullptr);
+  CT_CHECK(spy.profile_opens == 1 && spy.last_profile_uid == 2);
+
+  // 2. Popup menu open via command + selection callback via ccord_contrib_resolve_popup_menu.
+  CT_CHECK(ccord_contrib_run_command(contrib, "pop", "", 10, 20, &err) == CCORD_OK);
+  for (int i = 0; i < 40 && spy.popup_opens == 0; i++) {
+    ccord_plugins_pump(pm, ccord_clock_ms());
+    (void)ccord_bus_drain(bus);
+    ccord_sleep_ms(10);
+  }
+  CT_CHECK(spy.popup_opens == 1 && spy.last_popup_req > 0 && strstr(spy.last_popup_json, "\"id\":\"rm\"") != nullptr);
+  ccord_contrib_resolve_popup_menu(contrib, spy.last_popup_owner, spy.last_popup_req, "rm");
+  CT_CHECK(v3_pump_clip(pm, bus, &clip, "popup_sel:rm"));
+
+  // 3. hooks.on_before_upload Stage 1: pure-C JPEG EXIF APP1 + COM strip, PNG eXIf/tEXt strip, WebP EXIF strip,
+  //    rename, spoiler, drop, and cancel!
+  {
+    // Synthetic JPEG: SOI + APP0 (JFIF, keep) + APP1 (EXIF "GPS_SECRET", drop) + COM ("NOTE", drop) + SOS + scan + EOI
+    static const uint8_t k_jpg[] = {
+      0xFF, 0xD8,
+      0xFF, 0xE0, 0x00, 0x06, 'J', 'F', 'I', 'F',
+      0xFF, 0xE1, 0x00, 0x0C, 'G', 'P', 'S', '_', 'S', 'E', 'C', 'R', 'E', 'T',
+      0xFF, 0xFE, 0x00, 0x06, 'N', 'O', 'T', 'E',
+      0xFF, 0xDA, 0x00, 0x04, 0x11, 0x22, 0xFF, 0xD9
+    };
+    static const uint8_t k_drop_file[] = {'X', 'Y', 'Z'};
+    ccord_upload_hook_file hf[2] = {0};
+    snprintf(hf[0].filename, sizeof hf[0].filename, "secret.jpg");
+    hf[0].data = ccord_malloc(sizeof k_jpg);
+    memcpy(hf[0].data, k_jpg, sizeof k_jpg);
+    hf[0].size = sizeof k_jpg;
+    snprintf(hf[1].filename, sizeof hf[1].filename, "junk.txt");
+    hf[1].data = ccord_malloc(sizeof k_drop_file);
+    memcpy(hf[1].data, k_drop_file, sizeof k_drop_file);
+    hf[1].size = sizeof k_drop_file;
+
+    ccord_upload_hook_result hres = {0};
+    ccord_contrib_run_before_upload(contrib, 10, 20, "hello", hf, 2u, &hres);
+    CT_CHECK(!hres.cancelled && !hres.async_pending && strcmp(hres.notice, "Sanitized") == 0);
+    CT_CHECK(strcmp(hf[0].filename, "clean.jpg") == 0 && hf[0].spoiler && !hf[0].dropped);
+    CT_CHECK(hf[1].dropped);
+    // APP1 (14 bytes) + COM (8 bytes) stripped -> exact length check + no "GPS_SECRET", JFIF still intact!
+    CT_CHECK(hf[0].size == sizeof(k_jpg) - 22u);
+    bool has_jfif = false, has_gps = false;
+    for (size_t i = 0; i + 4u <= hf[0].size; i++) {
+      if (memcmp(hf[0].data + i, "JFIF", 4) == 0) has_jfif = true;
+      if (memcmp(hf[0].data + i, "GPS_", 4) == 0) has_gps = true;
+    }
+    CT_CHECK(has_jfif && !has_gps);
+    ccord_free(hf[0].data);
+    ccord_free(hf[1].data);
+
+    // Cancel path
+    ccord_upload_hook_file hfc = {.data = ccord_malloc(4), .size = 4};
+    snprintf(hfc.filename, sizeof hfc.filename, "a.bin");
+    ccord_upload_hook_result cres = {0};
+    ccord_contrib_run_before_upload(contrib, 10, 20, "cancel_me", &hfc, 1u, &cres);
+    CT_CHECK(cres.cancelled && strcmp(cres.notice, "Blocked by policy") == 0);
+    ccord_free(hfc.data);
+
+    // Pure-C PNG eXIf + tEXt stripping via Stage 1 hook
+    static const uint8_t k_png[] = {
+      0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A,
+      0x00, 0x00, 0x00, 0x01, 'I', 'H', 'D', 'R', 0x42, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x04, 'e', 'X', 'I', 'f', 'E', 'X', 'I', 'F', 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x04, 't', 'E', 'X', 't', 'T', 'E', 'X', 'T', 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x01, 'I', 'D', 'A', 'T', 0x99, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 'I', 'E', 'N', 'D', 0x00, 0x00, 0x00, 0x00
+    };
+    ccord_upload_hook_file hfp = {.data = ccord_malloc(sizeof k_png), .size = sizeof k_png};
+    memcpy(hfp.data, k_png, sizeof k_png);
+    snprintf(hfp.filename, sizeof hfp.filename, "p.png");
+    ccord_upload_hook_result pres = {0};
+    ccord_contrib_run_before_upload(contrib, 10, 20, "png", &hfp, 1u, &pres);
+    CT_CHECK(!pres.cancelled && hfp.size == sizeof(k_png) - 32u);
+    ccord_free(hfp.data);
+
+    // Pure-C WebP EXIF stripping + VP8X flag clearing
+    static const uint8_t k_webp[] = {
+      'R', 'I', 'F', 'F', 46, 0, 0, 0, 'W', 'E', 'B', 'P',
+      'V', 'P', '8', 'X', 10, 0, 0, 0, 0x0E, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+      'V', 'P', '8', ' ', 4, 0, 0, 0, 1, 2, 3, 4,
+      'E', 'X', 'I', 'F', 4, 0, 0, 0, 'E', 'X', 'I', 'F'
+    };
+    ccord_upload_hook_file hfw = {.data = ccord_malloc(sizeof k_webp), .size = sizeof k_webp};
+    memcpy(hfw.data, k_webp, sizeof k_webp);
+    snprintf(hfw.filename, sizeof hfw.filename, "w.webp");
+    ccord_upload_hook_result wres = {0};
+    ccord_contrib_run_before_upload(contrib, 10, 20, "webp", &hfw, 1u, &wres);
+    CT_CHECK(!wres.cancelled && hfw.size == sizeof(k_webp) - 12u);
+    CT_CHECK((hfw.data[20] & 0x0Cu) == 0u && (hfw.data[20] & 0x02u) == 0x02u);
+    ccord_free(hfw.data);
+  }
+
+  // 4. hooks.on_before_upload Stage 2: async upload_tmp:// handle -> read_chunk -> plugin_data:// replacement -> cleanup!
+  {
+    const char *raw_s = "RAW_UPLOAD_PAYLOAD";
+    ccord_upload_hook_file hfa = {.data = ccord_malloc(strlen(raw_s)), .size = strlen(raw_s)};
+    memcpy(hfa.data, raw_s, strlen(raw_s));
+    snprintf(hfa.filename, sizeof hfa.filename, "raw.bin");
+    ccord_upload_hook_result ares = {0};
+    ccord_contrib_run_before_upload(contrib, 10, 20, "async_me", &hfa, 1u, &ares);
+    CT_CHECK(!ares.cancelled && ares.async_pending && ares.async_job_id > 0u);
+    ccord_free(hfa.data);
+
+    for (int i = 0; i < 80 && spy.upload_done_calls == 0; i++) {
+      ccord_plugins_pump(pm, ccord_clock_ms());
+      (void)ccord_bus_drain(bus);
+      ccord_sleep_ms(10);
+    }
+    CT_CHECK(spy.upload_done_calls == 1 && !spy.last_upload_cancelled);
+    CT_CHECK(spy.last_upload_job == ares.async_job_id);
+    CT_CHECK(strcmp(spy.last_upload_notice, "Async OK") == 0);
+    CT_CHECK(strcmp(spy.last_upload_fname, "done.bin") == 0 && spy.last_upload_spoiler);
+    CT_CHECK(spy.last_upload_len == strlen("TRANSFORMED:RAW_UPLOAD_PAYLOAD") &&
+             memcmp(spy.last_upload_bytes, "TRANSFORMED:RAW_UPLOAD_PAYLOAD", spy.last_upload_len) == 0);
+
+    // Verify staged upload_tmp:// handle is revoked & cleaned up immediately after completion!
+    CT_CHECK(ccord_contrib_run_command(contrib, "check_tmp", "", 10, 20, &err) == CCORD_OK);
+    CT_CHECK(v3_pump_clip(pm, bus, &clip, "tmp_gone:true"));
+  }
+
+  ccord_plugins_shutdown(pm);
+  ccord_plugins_destroy(pm);
+  ccord_contrib_destroy(contrib);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+
+  char rm[1400];
+  snprintf(rm, sizeof rm, "%s/plugin.json", d_p4); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/main.lua", d_p4); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/plugins.json", data_dir); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/plugin_data/dev.test.p4/pic.bin", data_dir); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/plugin_data/dev.test.p4/transformed.bin", data_dir); (void)unlink(rm);
+  snprintf(rm, sizeof rm, "%s/plugin_data/dev.test.p4", data_dir); (void)rmdir(rm);
+  snprintf(rm, sizeof rm, "%s/plugin_data", data_dir); (void)rmdir(rm);
+  snprintf(rm, sizeof rm, "%s/plugin_upload_tmp", data_dir); (void)rmdir(rm);
+  (void)rmdir(d_p4); (void)rmdir(plugins_dir); (void)rmdir(data_dir); (void)rmdir(root);
+}
+
 int main(void)
 {
   char root[] = "/tmp/ccord-it-XXXXXX";
@@ -2223,5 +2830,8 @@ int main(void)
   test_timeline_local_messages_integration();
   test_http_binary_download_and_redirects();
   test_dynamic_context_menu_integration();
+  test_phase2_storage_files_and_unload();
+  test_phase3_presence_and_decor_extensions();
+  test_phase4_overlays_toasts_and_upload_hooks();
   return CT_RESULT("test_plugins_integration");
 }

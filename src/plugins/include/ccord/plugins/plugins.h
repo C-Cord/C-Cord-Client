@@ -134,6 +134,9 @@ typedef struct ccord_plugin_platform_ops {
   // Decode an encoded image buffer and box-downscale to RGBA32 (ccord_malloc'd *out_rgba).
   bool (*decode_image_rgba)(void *ud, const uint8_t *encoded, size_t len, int max_w, int max_h,
                             uint8_t **out_rgba, int *out_w, int *out_h, char *err_buf, size_t err_cap);
+  // Optional re-encoder for hooks.on_before_upload (`format`: "png"|"jpeg"|"webp", `quality`: 1..100).
+  bool (*reencode_image)(void *ud, const uint8_t *src, size_t src_len, const char *format, int quality,
+                         int max_dim, uint8_t **out_bytes, size_t *out_len, char *err_buf, size_t err_cap);
 } ccord_plugin_platform_ops;
 
 typedef struct ccord_plugins_config {
@@ -142,7 +145,7 @@ typedef struct ccord_plugins_config {
   int (*in_process_host_fn)(ccord_socket_t fd, const _Atomic bool *cancel);   // required when in_process=true
   const char *const *search_dirs; size_t search_dir_count;   // each child dir with plugin.json is a plugin
   const char *data_dir;                          // storage root: <data_dir>/plugins/<id>/storage.json
-  ccord_bus *bus; const ccord_store *store; ccord_session *session; ccord_contrib *contrib;
+  ccord_bus *bus; ccord_store *store; ccord_session *session; ccord_contrib *contrib;
   void (*clipboard_write)(void *ud, const char *utf8);       // called on the main thread after checks
   void *clipboard_ud;
   void (*toast_show)(void *ud, const char *utf8, uint8_t level); // optional UI toast callback

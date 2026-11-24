@@ -461,10 +461,6 @@ bool ext_handle_class3_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *
 
     bool is_loc = ext_is_localhost_url(url);
     bool allow_local = pl_has_perm(p, CCORD_PERM_NETWORK_LOCAL);
-    if (!pl_has_perm(p, CCORD_PERM_FS_WRITE)) {
-      pl_fail_plugin(m, p, "undeclared restricted API called: fs.write");
-      return true;
-    }
     if (is_loc) {
       if (!allow_local) {
         if (!pl_has_perm(p, CCORD_PERM_NETWORK_HTTP)) {
@@ -486,10 +482,17 @@ bool ext_handle_class3_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *
       ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr, "invalid destination path");
       return true;
     }
-    if (pl_fs_path_is_protected(m, dest_path)) {
-      pl_reply_ok(m, p, id, nullptr);
-      ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr,
-                           "permission denied: destination path is protected");
+    pl_path_scope scope = PL_PATH_HOST_FS;
+    char resolved_dest[CCORD_PATH_MAX];
+    const char *rcode = "invalid_argument";
+    char rerr[256] = "";
+    if (!pl_resolve_resource_path(m, p, dest_path, true, &scope, resolved_dest, sizeof resolved_dest,
+                                  &rcode, rerr, sizeof rerr)) {
+      if (p->state == CCORD_PLUGIN_READY || p->state == CCORD_PLUGIN_STARTING) {
+        pl_reply_ok(m, p, id, nullptr);
+        ext_send_async_reply(m, p, (uint64_t)req_id, false, nullptr,
+                             rerr[0] ? rerr : "permission denied: destination path rejected");
+      }
       return true;
     }
 
@@ -497,7 +500,7 @@ bool ext_handle_class3_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *
     if (opts && ccord_json_get(opts, "headers")) ext_encode_json_str(ccord_json_get(opts, "headers"), &hb);
     pl_reply_ok(m, p, id, nullptr);
     if (!m->workers || !url ||
-        !pw_start_http_download(m->workers, p->m.id, (uint64_t)req_id, &p->m, url, dest_path,
+        !pw_start_http_download(m->workers, p->m.id, (uint64_t)req_id, &p->m, url, resolved_dest,
                                 hb.len ? ccord_buf_cstr(&hb) : nullptr,
                                 (uint32_t)(tmo > 0 ? tmo : 30000), max_b > 0 ? (size_t)max_b : 0u,
                                 follow_redir, false, allow_local)) {

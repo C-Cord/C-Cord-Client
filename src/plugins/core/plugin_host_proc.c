@@ -30,6 +30,7 @@
 
 #if !CCORD_OS_WINDOWS
 #include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #if !CCORD_OS_ANDROID
 #include <spawn.h>
@@ -249,6 +250,7 @@ void ccord_plugins_pump(ccord_plugins *m, uint64_t now_ms)
     }
   }
   if (m->workers) pw_pump(m->workers, plugins_ext_on_worker_event, m);
+  pl_upload_jobs_pump(m, now_ms);
   plugins_ext_poll_account_update(m);
   if (m->dev_auto_reload) plugins_ext_dev_poll(m, now_ms);
   if (m->catalog) ccord_catalog_pump(m->catalog, now_ms);
@@ -512,8 +514,150 @@ ccord_status pl_spawn_host(ccord_plugins *m, plugin *p, ccord_error *err)
 
 // ---------------------------------------------------------------- lifecycle
 
+static bool plugin_wants_unload(const plugin *p, const char *reason)
+{
+  if (!p || p->state != CCORD_PLUGIN_READY || !p->ipc || !reason || !reason[0]) return false;
+  if (p->has_unload_hook) return true;
+  if (strcmp(reason, "quit") == 0 && (p->subs & EVB_APP_QUIT) != 0) return true;
+  return false;
+}
+
+void pl_unload_hosts_batch(ccord_plugins *m, plugin **list, size_t count, const char *reason,
+                           uint32_t budget_ms, uint32_t max_wait_ms)
+{
+  if (!m || !list || count == 0 || !reason || !reason[0]) return;
+  if (budget_ms == 0) budget_ms = 350u;
+  if (max_wait_ms == 0) max_wait_ms = 500u;
+
+  typedef struct unload_slot {
+    plugin *p;
+    uint32_t req_id;
+    bool done;
+  } unload_slot;
+
+  unload_slot *slots = ccord_calloc(count, sizeof *slots);
+  if (!slots) return;
+  size_t active = 0;
+
+  char params[128];
+  snprintf(params, sizeof params, "{\"reason\":\"%s\",\"budget_ms\":%u}", reason, (unsigned)budget_ms);
+
+  for (size_t i = 0; i < count; i++) {
+    plugin *p = list[i];
+    if (!plugin_wants_unload(p, reason)) continue;
+    p->unloading = true;
+    uint32_t rid = pl_next_request_id(p);
+    ccord_error err = {0};
+    if (ccord_ipc_send_request(p->ipc, rid, "plugin.unload", params, &err) != CCORD_OK) {
+      p->unloading = false;
+      continue;
+    }
+    (void)ccord_ipc_flush(p->ipc, 0, &err);
+    slots[active++] = (unload_slot){.p = p, .req_id = rid, .done = false};
+  }
+  if (active == 0) {
+    ccord_free(slots);
+    return;
+  }
+
+  uint64_t deadline = ccord_clock_ms() + (uint64_t)max_wait_ms;
+  ccord_arena arena;
+  ccord_arena_init(&arena, 4096u);
+#if !CCORD_OS_WINDOWS
+  struct pollfd *pfds = ccord_calloc(active, sizeof *pfds);
+  size_t *pmap = ccord_calloc(active, sizeof *pmap);
+#endif
+
+  for (;;) {
+    size_t remaining = 0;
+    for (size_t i = 0; i < active; i++) {
+      if (slots[i].done) continue;
+      if (!slots[i].p->ipc) { slots[i].done = true; continue; }
+      remaining++;
+    }
+    if (remaining == 0) break;
+    uint64_t now = ccord_clock_ms();
+    if (now >= deadline) break;
+    int rem_ms = (deadline - now > 25u) ? 25 : (int)(deadline - now);
+
+    // Drain any already-buffered frames and flush pending replies before blocking.
+    bool progress = false;
+    for (size_t i = 0; i < active; i++) {
+      if (slots[i].done || !slots[i].p->ipc) continue;
+      plugin *p = slots[i].p;
+      ccord_error err = {0};
+      (void)ccord_ipc_flush(p->ipc, 0, &err);
+      for (int k = 0; k < 64 && p->ipc && !slots[i].done; k++) {
+        ccord_ipc_msg msg;
+        ccord_arena_reset(&arena);
+        ccord_ipc_read r = ccord_ipc_try_read(p->ipc, &arena, &msg, &err);
+        if (r == CCORD_IPC_READ_EMPTY) break;
+        progress = true;
+        if (r != CCORD_IPC_READ_MSG) {
+          slots[i].done = true;
+          break;
+        }
+        if (msg.kind == CCORD_IPC_RES && msg.id == slots[i].req_id) {
+          slots[i].done = true;
+          break;
+        }
+        pl_handle_frame(m, p, &msg);
+        if (p->ipc) (void)ccord_ipc_flush(p->ipc, 0, &err);
+      }
+    }
+    if (progress) continue;
+
+#if !CCORD_OS_WINDOWS
+    if (pfds && pmap) {
+      nfds_t nf = 0;
+      for (size_t i = 0; i < active; i++) {
+        if (slots[i].done || !slots[i].p->ipc) continue;
+        ccord_socket_t fd = ccord_ipc_fd(slots[i].p->ipc);
+        if (fd == CCORD_INVALID_SOCKET) continue;
+        pfds[nf].fd = fd;
+        pfds[nf].events = POLLIN | (ccord_ipc_has_pending_output(slots[i].p->ipc) ? POLLOUT : 0);
+        pfds[nf].revents = 0;
+        pmap[nf] = i;
+        nf++;
+      }
+      if (nf == 0) break;
+      (void)poll(pfds, nf, rem_ms);
+    }
+#else
+    for (size_t i = 0; i < active; i++) {
+      if (slots[i].done || !slots[i].p->ipc) continue;
+      unsigned ev = CCORD_POLL_IN | (ccord_ipc_has_pending_output(slots[i].p->ipc) ? CCORD_POLL_OUT : 0);
+      int slice = rem_ms > 10 ? 10 : rem_ms;
+      (void)ccord_sock_poll1(ccord_ipc_fd(slots[i].p->ipc), ev, slice);
+      break;
+    }
+#endif
+  }
+
+#if !CCORD_OS_WINDOWS
+  ccord_free(pfds);
+  ccord_free(pmap);
+#endif
+  ccord_arena_free(&arena);
+  for (size_t i = 0; i < active; i++) {
+    slots[i].p->unloading = false;
+  }
+  ccord_free(slots);
+}
+
+void pl_stop_host_reason(ccord_plugins *m, plugin *p, const char *reason)
+{
+  if (!m || !p) return;
+  if (plugin_wants_unload(p, reason)) {
+    plugin *one[1] = {p};
+    pl_unload_hosts_batch(m, one, 1u, reason, 350u, 500u);
+  }
+  pl_stop_host(m, p);
+}
+
 void pl_stop_host(ccord_plugins *m, plugin *p)
 {
+  p->unloading = false;
   if (p->state == CCORD_PLUGIN_STARTING || p->state == CCORD_PLUGIN_READY) {
     if (p->ipc) {
       ccord_error err = {0};
@@ -530,9 +674,11 @@ void pl_stop_host(ccord_plugins *m, plugin *p)
       p->ipc = nullptr;
     }
     p->state = CCORD_PLUGIN_STOPPED;
+    p->has_unload_hook = false;
     memset(p->pend, 0, sizeof p->pend);
     if (m->workers) pw_remove_owner(m->workers, p->m.id);
     plugins_ext_reset_plugin(p);
+    pl_upload_jobs_cancel_owner(m, p->m.id);
     ccord_contrib_remove_owner(m->contrib, p->m.id);
     pl_publish_state(m, p);
   } else if (p->ipc) {
@@ -566,6 +712,8 @@ void pl_start_plugin_host(ccord_plugins *m, plugin *p)
   }
   p->error[0] = '\0';
   p->hello_seen = false;
+  p->has_unload_hook = false;
+  p->unloading = false;
   p->subs = 0;
   p->menu_count = 0;
   memset(p->pend, 0, sizeof p->pend);

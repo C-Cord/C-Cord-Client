@@ -183,9 +183,9 @@ static ccord_status parse_limits(const ccord_json *lim, ccord_manifest *out, cco
   const ccord_json *mb = ccord_json_get(lim, "memory_bytes");
   if (mb && ccord_json_int64(mb, &iv) && iv > 0) {
 #if CCORD_OS_ANDROID
-    const uint64_t mem_cap = 32u << 20;
-#else
     const uint64_t mem_cap = 64u << 20;
+#else
+    const uint64_t mem_cap = 256u << 20;
 #endif
     uint64_t u = (uint64_t)iv;
     if (u > mem_cap) u = mem_cap;
@@ -194,7 +194,7 @@ static ccord_status parse_limits(const ccord_json *lim, ccord_manifest *out, cco
   const ccord_json *ins = ccord_json_get(lim, "instructions");
   if (ins && ccord_json_int64(ins, &iv) && iv > 0) {
     uint64_t u = (uint64_t)iv;
-    if (u > 100000000u) u = 100000000u;
+    if (u > 500000000u) u = 500000000u;
     out->instructions = u;
   }
   return CCORD_OK;

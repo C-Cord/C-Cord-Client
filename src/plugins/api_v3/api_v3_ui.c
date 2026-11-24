@@ -292,8 +292,10 @@ bool ext_upload_texture_from_file(ccord_plugins *m, plugin *p, const char *key, 
     set_tex_err(out_err_code, err_buf, err_cap, "invalid_argument", "ui.texture.upload_file: invalid key or path");
     return false;
   }
-  if (pl_fs_path_is_protected(m, path)) {
-    set_tex_err(out_err_code, err_buf, err_cap, "permission_denied", "access to C-Cord internal config/plugin paths is forbidden");
+  pl_path_scope scope = PL_PATH_HOST_FS;
+  char resolved[CCORD_PATH_MAX];
+  if (!pl_resolve_resource_path(m, p, path, false, &scope, resolved, sizeof resolved,
+                                out_err_code, err_buf, err_cap)) {
     return false;
   }
   if (!m->plat_ops.decode_image_rgba) {
@@ -307,77 +309,10 @@ bool ext_upload_texture_from_file(ccord_plugins *m, plugin *p, const char *key, 
   if (max_w > 1024) max_w = 1024;
   if (max_h > 1024) max_h = 1024;
 
-  FILE *f = nullptr;
-  uint64_t fsz = 0;
-#if CCORD_OS_WINDOWS
-  int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, nullptr, 0);
-  if (wlen <= 0) {
-    set_tex_err(out_err_code, err_buf, err_cap, "invalid_argument", "invalid UTF-8 path");
-    return false;
-  }
-  wchar_t *wpath = ccord_malloc((size_t)wlen * sizeof(wchar_t));
-  if (!wpath) { set_tex_err(out_err_code, err_buf, err_cap, "internal", "out of memory"); return false; }
-  MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wpath, wlen);
-  DWORD attr = GetFileAttributesW(wpath);
-  ccord_free(wpath);
-  if (attr == INVALID_FILE_ATTRIBUTES) {
-    set_tex_err(out_err_code, err_buf, err_cap, "io", "file not found");
-    return false;
-  }
-  if ((attr & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-    set_tex_err(out_err_code, err_buf, err_cap, "permission_denied", "refusing to follow symbolic link");
-    return false;
-  }
-  f = fopen(path, "rb");
-  if (!f) { set_tex_err(out_err_code, err_buf, err_cap, "io", strerror(errno)); return false; }
-  struct __stat64 st;
-  if (_fstat64(_fileno(f), &st) != 0 || (st.st_mode & _S_IFREG) == 0 || st.st_size <= 0) {
-    fclose(f);
-    set_tex_err(out_err_code, err_buf, err_cap, "io", "not a regular non-empty file");
-    return false;
-  }
-  fsz = (uint64_t)st.st_size;
-#else
-  int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-  if (fd < 0) {
-    const char *code = (errno == ELOOP) ? "permission_denied" : "io";
-    set_tex_err(out_err_code, err_buf, err_cap, code, strerror(errno));
-    return false;
-  }
-  struct stat st;
-  if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0) {
-    close(fd);
-    set_tex_err(out_err_code, err_buf, err_cap, "io", "not a regular non-empty file");
-    return false;
-  }
-  fsz = (uint64_t)st.st_size;
-  int fl = fcntl(fd, F_GETFL, 0);
-  if (fl >= 0) (void)fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
-  f = fdopen(fd, "rb");
-  if (!f) {
-    int e = errno;
-    close(fd);
-    set_tex_err(out_err_code, err_buf, err_cap, "io", strerror(e));
-    return false;
-  }
-#endif
-  if (fsz > (uint64_t)MAX_ENCODED_IMAGE_BYTES) {
-    fclose(f);
-    set_tex_err(out_err_code, err_buf, err_cap, "invalid_argument", "image file exceeds 32 MiB limit");
-    return false;
-  }
-  uint8_t *raw = ccord_malloc((size_t)fsz);
-  if (!raw) {
-    fclose(f);
-    set_tex_err(out_err_code, err_buf, err_cap, "internal", "out of memory");
-    return false;
-  }
-  size_t rlen = fread(raw, 1, (size_t)fsz, f);
-  bool had_err = ferror(f) != 0;
-  fclose(f);
-  if (had_err || rlen == 0) {
-    ccord_free(raw);
-    set_tex_err(out_err_code, err_buf, err_cap, "io", "failed to read image file");
+  uint8_t *raw = nullptr;
+  size_t rlen = 0;
+  if (!pl_read_resolved_file(resolved, (size_t)MAX_ENCODED_IMAGE_BYTES, &raw, &rlen,
+                             out_err_code, err_buf, err_cap)) {
     return false;
   }
 
@@ -403,6 +338,67 @@ bool ext_upload_texture_from_file(ccord_plugins *m, plugin *p, const char *key, 
   if (out_w) *out_w = w;
   if (out_h) *out_h = h;
   return true;
+}
+
+static bool embed_url_allowed_for_plugin(const plugin *p, const char *url)
+{
+  if (!url || strncmp(url, "https://", 8) != 0) return false;
+  char scheme[16] = "", host[256] = "", path[1024] = "";
+  int port = 443;
+  if (!pw_extract_url_host_port(url, scheme, sizeof scheme, host, sizeof host, &port, path, sizeof path)) {
+    return false;
+  }
+  if (strcmp(scheme, "https") != 0 || pw_is_localhost_host(host)) return false;
+  // Discord CDN hosts are always permitted for embed images/thumbnails.
+  if (strcmp(host, "cdn.discordapp.com") == 0 || strcmp(host, "media.discordapp.net") == 0 ||
+      strcmp(host, "images-ext-1.discordapp.net") == 0 || strcmp(host, "images-ext-2.discordapp.net") == 0) {
+    return true;
+  }
+  // Otherwise require plugin network.http permission AND explicit allowed_hosts entry.
+  return p && pl_has_perm(p, CCORD_PERM_NETWORK_HTTP) && ccord_manifest_host_allowed(&p->m, host);
+}
+
+static void sanitize_embeds_append_json(const plugin *p, const ccord_json *arr, ccord_buf *out)
+{
+  if (!arr || ccord_json_type_of(arr) != CCORD_JSON_ARRAY) return;
+  size_t n = ccord_json_array_len(arr);
+  if (n > 10u) n = 10u;
+  if (n == 0) return;
+  ccord_jw w;
+  ccord_jw_init(&w, out);
+  ccord_jw_begin_array(&w);
+  for (size_t i = 0; i < n; i++) {
+    const ccord_json *e = ccord_json_array_at(arr, i);
+    if (!e || ccord_json_type_of(e) != CCORD_JSON_OBJECT) continue;
+    ccord_jw_begin_object(&w);
+    size_t nk = ccord_json_object_len(e);
+    for (size_t k = 0; k < nk; k++) {
+      const ccord_json *v = nullptr;
+      const char *key = ccord_json_object_key(e, k, &v);
+      if (!key || !v) continue;
+      if (strcmp(key, "image_url") == 0 || strcmp(key, "thumbnail_url") == 0) {
+        const char *us = ccord_json_string(v, nullptr);
+        if (embed_url_allowed_for_plugin(p, us)) {
+          ccord_jw_key(&w, key);
+          ccord_jw_cstr(&w, us);
+        }
+      } else if ((strcmp(key, "image") == 0 || strcmp(key, "thumbnail") == 0) &&
+                 ccord_json_type_of(v) == CCORD_JSON_OBJECT) {
+        ccord_jw_key(&w, key);
+        ccord_jw_begin_object(&w);
+        const char *tk = ccord_json_string(ccord_json_get(v, "texture_key"), nullptr);
+        const char *us = ccord_json_string(ccord_json_get(v, "url"), nullptr);
+        if (tk && tk[0]) { ccord_jw_key(&w, "texture_key"); ccord_jw_cstr(&w, tk); }
+        if (embed_url_allowed_for_plugin(p, us)) { ccord_jw_key(&w, "url"); ccord_jw_cstr(&w, us); }
+        ccord_jw_end_object(&w);
+      } else {
+        ccord_jw_key(&w, key);
+        pl_jw_copy_json(&w, v);
+      }
+    }
+    ccord_jw_end_object(&w);
+  }
+  ccord_jw_end_array(&w);
 }
 
 bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *method, const ccord_json *params)
@@ -478,6 +474,159 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
     size_t il = 0; const char *bid = pl_str_param(params, "id", &il);
     if (bid) (void)ccord_contrib_remove_action_btn(m->contrib, p->m.id, bid);
     pl_reply_ok(m, p, id, nullptr);
+    return true;
+  }
+  if (strcmp(method, "ui.open_user_profile") == 0) {
+    ccord_id uid = pl_parse_id_param(params, "user_id");
+    ccord_id gid = pl_parse_id_param(params, "guild_id");
+    if (uid == CCORD_ID_NONE) {
+      pl_reply_err(m, p, id, "invalid_argument", "ui.open_user_profile: user_id required");
+      return true;
+    }
+    bool ok = ccord_contrib_ui_open_user_profile(m->contrib, uid, gid);
+    pl_reply_ok(m, p, id, ok ? "true" : "false");
+    return true;
+  }
+  if (strcmp(method, "ui.media.open") == 0) {
+    const ccord_json *items = ccord_json_get(params, "items");
+    int64_t idx = 0;
+    (void)ccord_json_int64(ccord_json_get(params, "index"), &idx);
+    if (idx < 0) idx = 0;
+    size_t count = (items && ccord_json_type_of(items) == CCORD_JSON_ARRAY) ? ccord_json_array_len(items) : 1u;
+    if (count == 0u) {
+      pl_reply_err(m, p, id, "invalid_argument", "ui.media.open: items must not be empty");
+      return true;
+    }
+    if (count > 10u) count = 10u;
+
+    ccord_buf out; ccord_buf_init(&out, 0);
+    ccord_jw w; ccord_jw_init(&w, &out);
+    ccord_jw_begin_array(&w);
+    size_t added = 0u;
+    for (size_t i = 0; i < count; i++) {
+      const ccord_json *it = (items && ccord_json_type_of(items) == CCORD_JSON_ARRAY)
+                               ? ccord_json_array_at(items, i)
+                               : params;
+      if (!it || ccord_json_type_of(it) != CCORD_JSON_OBJECT) continue;
+      size_t tl = 0, ll = 0, ul = 0, fl = 0, kl = 0, dl = 0;
+      const char *tk = pl_str_param(it, "texture_key", &tl);
+      const char *lp = pl_str_param(it, "local_path", &ll);
+      const char *url = pl_str_param(it, "url", &ul);
+      const char *fname = pl_str_param(it, "filename", &fl);
+      const char *kind = pl_str_param(it, "kind", &kl);
+      const char *desc = pl_str_param(it, "description", &dl);
+
+      const char *src_kind = nullptr;
+      const char *src_val = nullptr;
+      char resolved[CCORD_PATH_MAX] = "";
+      if (tk && tl > 0u) {
+        if (!pl_has_perm(p, CCORD_PERM_UI_PANEL) && !pl_has_perm(p, CCORD_PERM_UI_DECORATE)) {
+          ccord_buf_free(&out);
+          pl_reply_err(m, p, id, "permission_denied", "ui.media.open: texture_key requires ui.panel or ui.decorate");
+          return true;
+        }
+        if (!ccord_contrib_find_texture(m->contrib, tk)) {
+          ccord_buf_free(&out);
+          pl_reply_err(m, p, id, "not_found", "ui.media.open: unknown texture_key");
+          return true;
+        }
+        src_kind = "texture_key";
+        src_val = tk;
+      } else if (lp && ll > 0u) {
+        pl_path_scope scope = PL_PATH_HOST_FS;
+        const char *ecode = "invalid_argument";
+        char ebuf[256] = "";
+        if (!pl_resolve_resource_path(m, p, lp, false, &scope, resolved, sizeof resolved, &ecode, ebuf, sizeof ebuf)) {
+          ccord_buf_free(&out);
+          if (p->state == CCORD_PLUGIN_READY || p->state == CCORD_PLUGIN_STARTING) {
+            pl_reply_err(m, p, id, ecode, ebuf);
+          }
+          return true;
+        }
+        src_kind = "local_path";
+        src_val = resolved;
+      } else if (url && ul > 0u) {
+        if (!embed_url_allowed_for_plugin(p, url)) {
+          ccord_buf_free(&out);
+          pl_reply_err(m, p, id, "permission_denied", "ui.media.open: url host not allowed");
+          return true;
+        }
+        src_kind = "url";
+        src_val = url;
+      } else {
+        ccord_buf_free(&out);
+        pl_reply_err(m, p, id, "invalid_argument", "ui.media.open: url, local_path, or texture_key required");
+        return true;
+      }
+
+      ccord_jw_begin_object(&w);
+      ccord_jw_key(&w, "source"); ccord_jw_cstr(&w, src_kind);
+      ccord_jw_key(&w, "value"); ccord_jw_cstr(&w, src_val);
+      if (fname && fl > 0u) { ccord_jw_key(&w, "filename"); ccord_jw_cstr(&w, fname); }
+      if (kind && kl > 0u) { ccord_jw_key(&w, "kind"); ccord_jw_cstr(&w, kind); }
+      if (desc && dl > 0u) { ccord_jw_key(&w, "description"); ccord_jw_cstr(&w, desc); }
+      ccord_jw_end_object(&w);
+      added++;
+    }
+    ccord_jw_end_array(&w);
+    if (added == 0u || !ccord_jw_ok(&w)) {
+      ccord_buf_free(&out);
+      pl_reply_err(m, p, id, "invalid_argument", "ui.media.open: no valid media items");
+      return true;
+    }
+    bool ok = ccord_contrib_ui_open_media(m->contrib, ccord_buf_cstr(&out), (size_t)idx);
+    ccord_buf_free(&out);
+    pl_reply_ok(m, p, id, ok ? "true" : "false");
+    return true;
+  }
+  if (strcmp(method, "ui.menu.popup") == 0) {
+    int64_t req_id = 0;
+    (void)ccord_json_int64(ccord_json_get(params, "req_id"), &req_id);
+    const ccord_json *xj = ccord_json_get(params, "x");
+    const ccord_json *yj = ccord_json_get(params, "y");
+    bool has_pos = xj && yj && ccord_json_type_of(xj) == CCORD_JSON_NUMBER &&
+                   ccord_json_type_of(yj) == CCORD_JSON_NUMBER;
+    float px = has_pos ? (float)ccord_json_number(xj, 0.0) : 0.0f;
+    float py = has_pos ? (float)ccord_json_number(yj, 0.0) : 0.0f;
+    const ccord_json *items = ccord_json_get(params, "items");
+    if (!items || ccord_json_type_of(items) != CCORD_JSON_ARRAY || ccord_json_array_len(items) == 0u) {
+      pl_reply_err(m, p, id, "invalid_argument", "ui.menu.popup: non-empty items array required");
+      return true;
+    }
+    ccord_buf out; ccord_buf_init(&out, 0);
+    ccord_jw w; ccord_jw_init(&w, &out);
+    ccord_jw_begin_array(&w);
+    size_t n = ccord_json_array_len(items);
+    if (n > 96u) n = 96u;
+    size_t added = 0u;
+    for (size_t i = 0; i < n; i++) {
+      const ccord_json *it = ccord_json_array_at(items, i);
+      if (!it || ccord_json_type_of(it) != CCORD_JSON_OBJECT) continue;
+      size_t il = 0, ll = 0, sl = 0;
+      const char *iid = pl_str_param(it, "id", &il);
+      const char *lbl = pl_str_param(it, "label", &ll);
+      const char *sub = pl_str_param(it, "sublabel", &sl);
+      if (!iid || il == 0u || !lbl || ll == 0u) continue;
+      ccord_jw_begin_object(&w);
+      ccord_jw_key(&w, "id"); ccord_jw_cstr(&w, iid);
+      ccord_jw_key(&w, "label"); ccord_jw_cstr(&w, lbl);
+      if (sub && sl > 0u) { ccord_jw_key(&w, "sublabel"); ccord_jw_cstr(&w, sub); }
+      if (ccord_json_bool(ccord_json_get(it, "danger"), false)) { ccord_jw_key(&w, "danger"); ccord_jw_bool(&w, true); }
+      if (ccord_json_bool(ccord_json_get(it, "checked"), false)) { ccord_jw_key(&w, "checked"); ccord_jw_bool(&w, true); }
+      if (ccord_json_bool(ccord_json_get(it, "disabled"), false)) { ccord_jw_key(&w, "disabled"); ccord_jw_bool(&w, true); }
+      if (ccord_json_bool(ccord_json_get(it, "divider_before"), false)) { ccord_jw_key(&w, "divider_before"); ccord_jw_bool(&w, true); }
+      ccord_jw_end_object(&w);
+      added++;
+    }
+    ccord_jw_end_array(&w);
+    if (added == 0u || !ccord_jw_ok(&w)) {
+      ccord_buf_free(&out);
+      pl_reply_err(m, p, id, "invalid_argument", "ui.menu.popup: items must contain id and label");
+      return true;
+    }
+    bool ok = ccord_contrib_ui_open_popup_menu(m->contrib, p->m.id, (uint64_t)req_id, px, py, has_pos, ccord_buf_cstr(&out));
+    ccord_buf_free(&out);
+    pl_reply_ok(m, p, id, ok ? "true" : "false");
     return true;
   }
   if (strcmp(method, "ui.dialog.open") == 0) {
@@ -608,10 +757,6 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
       if (st != CCORD_OK) pl_reply_err(m, p, id, "invalid_argument", err.message);
       else pl_reply_ok(m, p, id, nullptr);
     } else if (strcmp(method, "ui.texture.upload_file") == 0) {
-      if (!pl_has_perm(p, CCORD_PERM_FS_READ)) {
-        pl_fail_plugin(m, p, "undeclared restricted API called: fs.read");
-        return true;
-      }
       size_t pl = 0; const char *path = pl_str_param(params, "path", &pl);
       int64_t mw = 512, mh = 512;
       if (ccord_json_get(params, "max_w")) (void)ccord_json_int64(ccord_json_get(params, "max_w"), &mw);
@@ -620,7 +765,9 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
       const char *ecode = "invalid_argument";
       char ebuf[256] = "";
       if (!ext_upload_texture_from_file(m, p, key, path, (int)mw, (int)mh, &ow, &oh, &ecode, ebuf, sizeof ebuf)) {
-        pl_reply_err(m, p, id, ecode, ebuf);
+        if (p->state == CCORD_PLUGIN_READY || p->state == CCORD_PLUGIN_STARTING) {
+          pl_reply_err(m, p, id, ecode, ebuf);
+        }
       } else {
         char buf[96];
         snprintf(buf, sizeof buf, "{\"width\":%d,\"height\":%d}", ow, oh);
@@ -666,6 +813,8 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
       else if (strcmp(ts, "profile_section") == 0) dt = CCORD_DECOR_PROFILE_SECTION;
       else if (strcmp(ts, "channel_badge") == 0) dt = CCORD_DECOR_CHANNEL_BADGE;
       else if (strcmp(ts, "guild_badge") == 0) dt = CCORD_DECOR_GUILD_BADGE;
+      else if (strcmp(ts, "channel_style") == 0) dt = CCORD_DECOR_CHANNEL_STYLE;
+      else if (strcmp(ts, "member_style") == 0) dt = CCORD_DECOR_MEMBER_STYLE;
       else { pl_reply_err(m, p, id, "invalid_argument", "unknown decorate target"); return true; }
 
       size_t idl = 0, al = 0, tnl = 0, cll = 0, txl = 0, aul = 0;
@@ -688,14 +837,46 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
       const ccord_json *op_j = ccord_json_get(sp, "opacity");
       bool has_av_op = avop_j && ccord_json_type_of(avop_j) == CCORD_JSON_NUMBER;
       bool has_op = op_j && ccord_json_type_of(op_j) == CCORD_JSON_NUMBER;
-      int64_t prio = 0; (void)ccord_json_int64(ccord_json_get(sp, "priority"), &prio);
-      ccord_buf wb; ccord_buf_init(&wb, 0);
+      ccord_decor_position dpos = CCORD_DECOR_POS_BELOW_BODY;
+      const ccord_json *pos_j = ccord_json_get(sp, "position");
+      if (pos_j && ccord_json_type_of(pos_j) != CCORD_JSON_NULL) {
+        size_t psl = 0;
+        const char *ps = ccord_json_string(pos_j, &psl);
+        if (ps && strcmp(ps, "below_body") == 0) dpos = CCORD_DECOR_POS_BELOW_BODY;
+        else if (ps && strcmp(ps, "above_body") == 0) dpos = CCORD_DECOR_POS_ABOVE_BODY;
+        else {
+          pl_reply_err(m, p, id, "invalid_argument", "ui.decorate: invalid position (expected below_body or above_body)");
+          return true;
+        }
+      }
+      int64_t prio = 0;
+      const ccord_json *prio_j = ccord_json_get(sp, "priority");
+      if (prio_j && ccord_json_type_of(prio_j) != CCORD_JSON_NULL) {
+        if (!ccord_json_int64(prio_j, &prio)) prio = (int64_t)ccord_json_number(prio_j, 0.0);
+        if (prio < INT32_MIN) prio = INT32_MIN;
+        if (prio > INT32_MAX) prio = INT32_MAX;
+      }
+      ccord_buf wb, emb_b; ccord_buf_init(&wb, 0); ccord_buf_init(&emb_b, 0);
       const ccord_json *wj = ccord_json_get(sp, "widget");
       if (!wj) wj = ccord_json_get(sp, "root");
       if (wj) ext_encode_json_str(wj, &wb);
 
+      const ccord_json *cov_j = ccord_json_get(sp, "content_override");
+      size_t cov_len = 0;
+      const char *cov_s = (cov_j && ccord_json_type_of(cov_j) == CCORD_JSON_STRING)
+                            ? ccord_json_string(cov_j, &cov_len) : nullptr;
+      if (cov_s && (cov_len > 65536u || !ccord_utf8_valid(cov_s, cov_len))) {
+        ccord_buf_free(&wb); ccord_buf_free(&emb_b);
+        pl_reply_err(m, p, id, "invalid_argument", "ui.decorate: content_override must be valid UTF-8 <= 64 KiB");
+        return true;
+      }
+      const ccord_json *eapp_j = ccord_json_get(sp, "embeds_append");
+      if (eapp_j && ccord_json_type_of(eapp_j) == CCORD_JSON_ARRAY) {
+        sanitize_embeds_append_json(p, eapp_j, &emb_b);
+      }
+
       ccord_decorator_contribution dc = {
-        .owner = p->m.id, .decor_id = did ? did : "", .target = dt, .target_id = tid,
+        .owner = p->m.id, .decor_id = did ? did : "", .target = dt, .position = dpos, .target_id = tid,
         .widget_json = wb.len ? ccord_buf_cstr(&wb) : "",
         .accent_rgba = ext_parse_hex_rgba(acc_s), .tint_rgba = ext_parse_hex_rgba(tint_s),
         .text_rgba = ext_parse_hex_rgba(txt_s), .author_rgba = ext_parse_hex_rgba(auth_s),
@@ -708,11 +889,16 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
         .has_opacity = has_op,
         .opacity = has_op ? (float)ccord_json_number(op_j, 1.0) : 1.0f,
         .collapsed = ccord_json_bool(ccord_json_get(sp, "collapsed"), false),
-        .collapse_label = clbl ? clbl : "", .priority = (int32_t)prio,
+        .hidden = ccord_json_bool(ccord_json_get(sp, "hidden"), false),
+        .collapse_label = clbl ? clbl : "",
+        .content_override = cov_s,
+        .embeds_append_json = emb_b.len ? ccord_buf_cstr(&emb_b) : "",
+        .priority = (int32_t)prio,
       };
       ccord_error err = {0};
       ccord_status st = ccord_contrib_set_decorator(m->contrib, &dc, &err);
       ccord_buf_free(&wb);
+      ccord_buf_free(&emb_b);
       if (st != CCORD_OK) pl_reply_err(m, p, id, "invalid_argument", err.message);
       else pl_reply_ok(m, p, id, nullptr);
       return true;
@@ -787,6 +973,43 @@ bool ext_handle_ui_v3(ccord_plugins *m, plugin *p, uint32_t id, const char *meth
       }
       ccord_free(raw);
       pl_reply_ok(m, p, id, nullptr);
+    } else if (strcmp(method, "ui.composer.attach_file") == 0) {
+      size_t pl = 0, fl = 0;
+      const char *spec_path = pl_str_param(params, "path", &pl);
+      const char *fname_ov = pl_str_param(params, "filename", &fl);
+      bool sp = ccord_json_bool(ccord_json_get(params, "spoiler"), false);
+      pl_path_scope scope = PL_PATH_HOST_FS;
+      char resolved[CCORD_PATH_MAX];
+      const char *ecode = "invalid_argument";
+      char ebuf[256] = "";
+      if (!pl_resolve_resource_path(m, p, spec_path, false, &scope, resolved, sizeof resolved,
+                                    &ecode, ebuf, sizeof ebuf)) {
+        if (p->state == CCORD_PLUGIN_READY || p->state == CCORD_PLUGIN_STARTING) {
+          pl_reply_err(m, p, id, ecode, ebuf);
+        }
+        return true;
+      }
+      ccord_id sel_ch = m->store ? ccord_store_selected_channel(m->store) : CCORD_ID_NONE;
+      uint64_t limit = (m->session && sel_ch) ? ccord_session_upload_limit(m->session, sel_ch, nullptr)
+                                              : (100ull * 1024ull * 1024ull);
+      if (limit == 0 || limit > (500ull * 1024ull * 1024ull)) limit = 100ull * 1024ull * 1024ull;
+      uint8_t *raw = nullptr;
+      size_t rlen = 0;
+      if (!pl_read_resolved_file(resolved, (size_t)limit, &raw, &rlen, &ecode, ebuf, sizeof ebuf)) {
+        pl_reply_err(m, p, id, ecode, ebuf);
+        return true;
+      }
+      const char *fname = (fname_ov && fl > 0) ? fname_ov : resolved;
+      if (!fname_ov || fl == 0) {
+        const char *s1 = strrchr(resolved, '/');
+        const char *s2 = strrchr(resolved, '\\');
+        const char *slash = (s1 && s2) ? (s1 > s2 ? s1 : s2) : (s1 ? s1 : s2);
+        if (slash && slash[1]) fname = slash + 1;
+      }
+      bool ok = ccord_contrib_ui_composer_attach_bytes(m->contrib, fname, raw, rlen, sp);
+      ccord_free(raw);
+      if (!ok) pl_reply_err(m, p, id, "internal", "could not attach file to composer");
+      else pl_reply_ok(m, p, id, nullptr);
     } else if (strcmp(method, "ui.composer.register_autocomplete") == 0) {
       size_t il = 0, tl = 0, dl = 0;
       ccord_autocomplete_provider ap = {
@@ -1040,6 +1263,19 @@ void plugins_ext_on_setting_changed(void *ud, const char *owner, const char *key
   ccord_buf_free(&b);
 }
 
+void plugins_ext_on_setting_action(void *ud, const char *owner, const char *key)
+{
+  ccord_plugins *m = ud;
+  plugin *p = pl_find_owner(m, owner);
+  if (!p || p->state != CCORD_PLUGIN_READY || !key || !key[0]) return;
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "key"); ccord_jw_cstr(&w, key);
+  ccord_jw_end_object(&w);
+  if (ccord_jw_ok(&w)) pl_send_ntf(m, p, "settings.action", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+}
+
 void plugins_ext_on_keybind_triggered(void *ud, const char *owner, const char *bind_id)
 {
   ccord_plugins *m = ud;
@@ -1095,6 +1331,35 @@ void plugins_ext_on_dialog_result(void *ud, const char *owner, uint64_t req_id, 
   ccord_jw_end_object(&w);
   ccord_arena_free(&ar);
   if (ccord_jw_ok(&w)) pl_send_ntf(m, p, "dialog.result", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+}
+
+void plugins_ext_on_popup_menu_result(void *ud, const char *owner, uint64_t req_id, const char *item_id)
+{
+  ccord_plugins *m = ud;
+  plugin *p = pl_find_owner(m, owner);
+  if (!p || p->state != CCORD_PLUGIN_READY) return;
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "req_id"); ccord_jw_int(&w, (int64_t)req_id);
+  ccord_jw_key(&w, "item_id");
+  if (item_id && item_id[0]) ccord_jw_cstr(&w, item_id);
+  else ccord_jw_null(&w);
+  ccord_jw_end_object(&w);
+  if (ccord_jw_ok(&w)) pl_send_ntf(m, p, "ui.menu.popup.result", ccord_buf_cstr(&b));
+  ccord_buf_free(&b);
+}
+
+void plugins_ext_on_toast_action(void *ud, const char *owner, uint64_t toast_id)
+{
+  ccord_plugins *m = ud;
+  plugin *p = pl_find_owner(m, owner);
+  if (!p || p->state != CCORD_PLUGIN_READY) return;
+  ccord_buf b; ccord_buf_init(&b, 0); ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "toast_id"); ccord_jw_int(&w, (int64_t)toast_id);
+  ccord_jw_end_object(&w);
+  if (ccord_jw_ok(&w)) pl_send_ntf(m, p, "toast.action", ccord_buf_cstr(&b));
   ccord_buf_free(&b);
 }
 

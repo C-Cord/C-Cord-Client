@@ -16,6 +16,7 @@
 #include <ccord/core/log.h>
 #include <ccord/core/os.h>
 #include <ccord/core/paths.h>
+#include <ccord/core/timefmt.h>
 #include <ccord/core/utf8.h>
 #include <ccord/ipc/ipc.h>
 #include <ccord/store/notify.h>
@@ -191,6 +192,7 @@ void pl_set_plugin_failed(ccord_plugins *m, plugin *p, const char *reason, bool 
   pl_set_text(p->error, sizeof p->error, reason);
   memset(p->pend, 0, sizeof p->pend);
   if (m->workers) pw_remove_owner(m->workers, p->m.id);
+  pl_upload_jobs_cancel_owner(m, p->m.id);
   plugins_ext_reset_plugin(p);
   ccord_contrib_remove_owner(m->contrib, p->m.id);
   CCORD_LOG_E("plugin %s FAILED: %s", p->m.id, p->error);
@@ -290,6 +292,11 @@ static void on_bus_event(const ccord_event *ev, void *ud)
     default: return;
   }
 
+  if (bit == EVB_REACTION_UPDATE && m->rich_reaction_emitted) {
+    m->rich_reaction_emitted = false;
+    return;
+  }
+
   bool any = false;
   for (size_t i = 0; i < m->nplugins; i++) {
     plugin *p = m->plugins[i];
@@ -303,17 +310,8 @@ static void on_bus_event(const ccord_event *ev, void *ud)
   ccord_jw_init(&w, &data);
   if (bit == EVB_MESSAGE || bit == EVB_MESSAGE_UPDATE) {
     const ccord_message *msg = m->store ? ccord_store_find_message(m->store, ev->channel_id, ev->message_id) : nullptr;
-    const ccord_user *u = msg && m->store ? ccord_store_user(m->store, msg->author_id) : nullptr;
     if (!msg) { ccord_buf_free(&data); return; }
-    ccord_jw_begin_object(&w);
-    ccord_jw_key(&w, "id"); ccord_jw_id(&w, msg->id);
-    ccord_jw_key(&w, "guild_id"); ccord_jw_id(&w, ev->guild_id);
-    ccord_jw_key(&w, "channel_id"); ccord_jw_id(&w, msg->channel_id);
-    ccord_jw_key(&w, "author_id"); ccord_jw_id(&w, msg->author_id);
-    ccord_jw_key(&w, "author_name"); ccord_jw_cstr(&w, u ? u->name : "");
-    ccord_jw_key(&w, "content"); ccord_jw_cstr(&w, msg->content ? msg->content : "");
-    ccord_jw_key(&w, "timestamp_ms"); ccord_jw_int(&w, msg->timestamp_ms);
-    ccord_jw_end_object(&w);
+    plugins_ext_write_message_obj_ex(&w, m->store, msg, ev->guild_id);
   } else if (bit == EVB_CHANNEL || bit == EVB_CHANNEL_UPSERT) {
     const ccord_channel *c = m->store ? ccord_store_channel(m->store, ev->channel_id) : nullptr;
     if (!c) { ccord_buf_free(&data); return; }
@@ -360,6 +358,17 @@ static void on_bus_event(const ccord_event *ev, void *ud)
       ccord_jw_key(&w, "name"); ccord_jw_cstr(&w, dname);
     }
     ccord_jw_end_object(&w);
+  } else if (bit == EVB_PRESENCE_UPDATE) {
+    const ccord_user *u = (m->store && ev->user_id) ? ccord_store_user(m->store, ev->user_id) : nullptr;
+    if (u) {
+      plugins_ext_write_presence_obj(&w, u, true);
+    } else {
+      ccord_jw_begin_object(&w);
+      if (ev->user_id) { ccord_jw_key(&w, "user_id"); ccord_jw_id(&w, ev->user_id); }
+      ccord_jw_key(&w, "value"); ccord_jw_int(&w, ev->value);
+      ccord_jw_key(&w, "status"); ccord_jw_int(&w, ev->value);
+      ccord_jw_end_object(&w);
+    }
   } else {
     ccord_jw_begin_object(&w);
     if (ev->guild_id) { ccord_jw_key(&w, "guild_id"); ccord_jw_id(&w, ev->guild_id); }
@@ -373,6 +382,71 @@ static void on_bus_event(const ccord_event *ev, void *ud)
     for (size_t i = 0; i < m->nplugins; i++) {
       plugin *p = m->plugins[i];
       if (p->state == CCORD_PLUGIN_READY && (p->subs & bit)) bus_send_event(m, p, name, &data);
+    }
+  }
+  ccord_buf_free(&data);
+}
+
+static void on_store_rich_event(const ccord_store_rich_evt *ev, void *ud)
+{
+  ccord_plugins *m = ud;
+  if (!m || !ev) return;
+  uint64_t bit = 0;
+  const char *name = nullptr;
+  switch (ev->kind) {
+    case CCORD_RICH_EVT_MESSAGES_LOADED:    bit = EVB_MESSAGES_LOADED;     name = "messages.loaded"; break;
+    case CCORD_RICH_EVT_MESSAGE_DELETE_BULK: bit = EVB_MESSAGE_DELETE_BULK; name = "message.delete_bulk"; break;
+    case CCORD_RICH_EVT_REACTION_DELTA:     bit = EVB_REACTION_UPDATE;     name = "reaction.update"; break;
+  }
+  if (!name) return;
+  if (ev->kind == CCORD_RICH_EVT_REACTION_DELTA) m->rich_reaction_emitted = true;
+
+  bool any = false;
+  for (size_t i = 0; i < m->nplugins; i++) {
+    plugin *p = m->plugins[i];
+    if (p->used && p->state == CCORD_PLUGIN_READY && (p->subs & bit)) { any = true; break; }
+  }
+  if (!any) return;
+
+  ccord_buf data;
+  ccord_buf_init(&data, 0);
+  ccord_jw w;
+  ccord_jw_init(&w, &data);
+  ccord_jw_begin_object(&w);
+  if (ev->guild_id != CCORD_ID_NONE) { ccord_jw_key(&w, "guild_id"); ccord_jw_id(&w, ev->guild_id); }
+  if (ev->channel_id != CCORD_ID_NONE) { ccord_jw_key(&w, "channel_id"); ccord_jw_id(&w, ev->channel_id); }
+  if (ev->kind == CCORD_RICH_EVT_MESSAGES_LOADED) {
+    ccord_jw_key(&w, "count"); ccord_jw_int(&w, (int64_t)ev->loaded.count);
+    ccord_jw_key(&w, "is_prepend"); ccord_jw_bool(&w, ev->loaded.is_prepend);
+    if (ev->loaded.oldest_id != CCORD_ID_NONE) { ccord_jw_key(&w, "oldest_id"); ccord_jw_id(&w, ev->loaded.oldest_id); }
+    if (ev->loaded.newest_id != CCORD_ID_NONE) { ccord_jw_key(&w, "newest_id"); ccord_jw_id(&w, ev->loaded.newest_id); }
+  } else if (ev->kind == CCORD_RICH_EVT_MESSAGE_DELETE_BULK) {
+    ccord_jw_key(&w, "message_ids");
+    ccord_jw_begin_array(&w);
+    for (size_t i = 0; i < ev->del_bulk.count; i++) ccord_jw_id(&w, ev->del_bulk.ids[i]);
+    ccord_jw_end_array(&w);
+  } else if (ev->kind == CCORD_RICH_EVT_REACTION_DELTA) {
+    if (ev->reaction.message_id != CCORD_ID_NONE) { ccord_jw_key(&w, "message_id"); ccord_jw_id(&w, ev->reaction.message_id); }
+    if (ev->reaction.user_id != CCORD_ID_NONE) { ccord_jw_key(&w, "user_id"); ccord_jw_id(&w, ev->reaction.user_id); }
+    ccord_jw_key(&w, "value"); ccord_jw_int(&w, (int64_t)ev->reaction.total_count);
+    ccord_jw_key(&w, "count"); ccord_jw_int(&w, (int64_t)ev->reaction.emoji_count);
+    ccord_jw_key(&w, "added"); ccord_jw_bool(&w, ev->reaction.added);
+    ccord_jw_key(&w, "burst"); ccord_jw_bool(&w, ev->reaction.burst);
+    if (ev->reaction.remove_all) { ccord_jw_key(&w, "remove_all"); ccord_jw_bool(&w, true); }
+    if (ev->reaction.remove_emoji) { ccord_jw_key(&w, "remove_emoji"); ccord_jw_bool(&w, true); }
+    if (ev->reaction.emoji_name && ev->reaction.emoji_name[0]) {
+      ccord_jw_key(&w, "emoji");
+      ccord_jw_begin_object(&w);
+      if (ev->reaction.emoji_id != CCORD_ID_NONE) { ccord_jw_key(&w, "id"); ccord_jw_id(&w, ev->reaction.emoji_id); }
+      ccord_jw_key(&w, "name"); ccord_jw_cstr(&w, ev->reaction.emoji_name);
+      ccord_jw_end_object(&w);
+    }
+  }
+  ccord_jw_end_object(&w);
+  if (ccord_jw_ok(&w)) {
+    for (size_t i = 0; i < m->nplugins; i++) {
+      plugin *p = m->plugins[i];
+      if (p->used && p->state == CCORD_PLUGIN_READY && (p->subs & bit)) bus_send_event(m, p, name, &data);
     }
   }
   ccord_buf_free(&data);
@@ -484,6 +558,16 @@ static void on_panel_event(void *ud, const ccord_panel_contribution *panel, cons
   if (ev->text_value) { ccord_jw_key(&w, "value"); ccord_jw_cstr(&w, ev->text_value); }
   else if (ev->has_num) { ccord_jw_key(&w, "value"); ccord_jw_double(&w, ev->num_value); }
   else if (ev->has_bool) { ccord_jw_key(&w, "value"); ccord_jw_bool(&w, ev->bool_value); }
+  if (ev->values_json && ev->values_json[0]) {
+    ccord_arena va;
+    ccord_arena_init(&va, 256);
+    const ccord_json *vj = ccord_json_parse(&va, ev->values_json, strlen(ev->values_json), nullptr, nullptr);
+    if (vj && ccord_json_type_of(vj) == CCORD_JSON_ARRAY) {
+      ccord_jw_key(&w, "values");
+      ccord_jw_copy_json(&w, vj);
+    }
+    ccord_arena_free(&va);
+  }
   if (ev->key_name && ev->key_name[0]) { ccord_jw_key(&w, "key"); ccord_jw_cstr(&w, ev->key_name); }
   ccord_jw_key(&w, "mods");
   ccord_jw_begin_object(&w);
@@ -546,14 +630,19 @@ static void on_command_run(void *ud, const ccord_command_contribution *cmd, cons
 void ccord_plugins_shutdown(ccord_plugins *m)
 {
   if (!m) return;
+  if (m->nplugins > 0) {
+    pl_unload_hosts_batch(m, m->plugins, m->nplugins, "quit", 350u, 500u);
+  }
   for (size_t i = 0; i < m->nplugins; i++) pl_stop_host(m, m->plugins[i]);
 }
 
 void ccord_plugins_destroy(ccord_plugins *m)
 {
   if (!m) return;
+  if (m->store) ccord_store_set_rich_observer(m->store, nullptr, nullptr);
   ccord_catalog_destroy(m->catalog);
   m->catalog = nullptr;
+  pl_upload_jobs_destroy(m);
   ccord_plugins_shutdown(m);
   if (m->workers) { pw_destroy(m->workers); m->workers = nullptr; }
   for (size_t i = 0; i < m->nplugins; i++) {
@@ -589,7 +678,7 @@ static void on_plugin_set_enabled(void *ud, const char *id, bool enabled)
   if (!p) return;
   if (!enabled) {
     p->enabled = false;
-    pl_stop_host(m, p);
+    pl_stop_host_reason(m, p, "disable");
     p->state = p->revoked ? CCORD_PLUGIN_FAILED
                           : (p->consent_granted ? CCORD_PLUGIN_STOPPED : CCORD_PLUGIN_NEEDS_CONSENT);
     pl_publish_state(m, p);
@@ -661,7 +750,7 @@ void pl_on_plugin_reload(void *ud, const char *id)
   plugin *p = pl_find_owner(m, id);
   if (!p || !p->dir || !p->dir[0]) return;
   bool was_enabled = p->enabled;
-  pl_stop_host(m, p);
+  pl_stop_host_reason(m, p, "reload");
   char manifest_path[PBUF + 64], main_path[PBUF + 128], why[256];
   snprintf(manifest_path, sizeof manifest_path, "%s/plugin.json", p->dir);
   char *mbuf = nullptr; size_t mlen = 0;
@@ -1026,9 +1115,14 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     .local_msg_event = plugins_ext_on_local_msg_event,
     .menu_resolve = plugins_ext_on_menu_resolve,
     .plugin_setting_changed = plugins_ext_on_setting_changed,
+    .plugin_setting_action = plugins_ext_on_setting_action,
     .keybind_triggered = plugins_ext_on_keybind_triggered,
     .action_btn_click = plugins_ext_on_action_btn_click,
     .dialog_result = plugins_ext_on_dialog_result,
+    .popup_menu_result = plugins_ext_on_popup_menu_result,
+    .toast_action = plugins_ext_on_toast_action,
+    .before_upload_hook = plugins_ext_on_before_upload,
+    .cancel_upload_transform = plugins_ext_on_cancel_upload_transform,
     .account_hitl_result = plugins_ext_on_account_hitl_result,
     .autocomplete_query = plugins_ext_on_autocomplete_query,
     .before_send_hook = plugins_ext_on_before_send,
@@ -1073,6 +1167,7 @@ ccord_plugins *ccord_plugins_create(const ccord_plugins_config *cfg, ccord_error
     ccord_plugins_destroy(m);
     return nullptr;
   }
+  if (m->store) ccord_store_set_rich_observer(m->store, on_store_rich_event, m);
   return m;
 }
 
@@ -1144,6 +1239,7 @@ void ccord_plugins_update_platform_state(ccord_plugins *m, const ccord_plugin_pl
   ccord_jw_key(&w, "keyboard_height"); ccord_jw_int(&w, (int64_t)st->keyboard_height);
   ccord_jw_key(&w, "keyboard_visible"); ccord_jw_bool(&w, st->keyboard_visible);
   ccord_jw_key(&w, "landscape"); ccord_jw_bool(&w, st->landscape);
+  ccord_jw_key(&w, "time_format"); ccord_jw_int(&w, (int64_t)ccord_timefmt_get_mode());
   ccord_jw_end_object(&w);
   if (ccord_jw_ok(&w)) {
     for (size_t i = 0; i < m->nplugins; i++) {

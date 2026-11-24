@@ -613,7 +613,7 @@ bool ccord_plugins_uninstall(ccord_plugins *m, const char *id, char *err_buf, si
     if (err_buf && err_cap) snprintf(err_buf, err_cap, "cannot uninstall bundled extension");
     return false;
   }
-  pl_stop_host(m, p);
+  pl_stop_host_reason(m, p, "uninstall");
   ccord_contrib_remove_owner(m->contrib, id_copy);
   (void)ccord_contrib_remove_plugin(m->contrib, id_copy);
 
