@@ -856,7 +856,40 @@ static int api_ui_file_save(lua_State *L)
   return sb_async_dispatch(L, sb, "ui.file.save", &b, cb_idx);
 }
 
-static bool encode_media_item_lua(lua_State *L, ccord_sandbox *sb, int tbl_idx, ccord_jw *w, bool *out_undeclared)
+static bool check_media_item_perms_lua(lua_State *L, ccord_sandbox *sb, int tbl_idx)
+{
+  int abs_idx = lua_absindex(L, tbl_idx);
+  if (lua_type(L, abs_idx) != LUA_TTABLE) return true;
+
+  sb_raw_getfield(L, abs_idx, "texture_key");
+  if (lua_type(L, -1) == LUA_TSTRING) {
+    size_t tl = 0;
+    (void)lua_tolstring(L, -1, &tl);
+    lua_pop(L, 1);
+    if (tl > 0u && !sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "ui.media.open")) {
+      return false;
+    }
+  } else {
+    lua_pop(L, 1);
+  }
+
+  sb_raw_getfield(L, abs_idx, "local_path");
+  if (lua_type(L, -1) == LUA_TSTRING) {
+    size_t ll = 0;
+    const char *ls = lua_tolstring(L, -1, &ll);
+    bool is_jail = (ll > 0u && strncmp(ls, "plugin_data://", 14) == 0);
+    lua_pop(L, 1);
+    if (ll > 0u) {
+      ccord_perm path_perm = is_jail ? CCORD_PERM_STORAGE_FILES : CCORD_PERM_FS_READ;
+      if (!sb_check_perm(L, sb, path_perm, "ui.media.open")) return false;
+    }
+  } else {
+    lua_pop(L, 1);
+  }
+  return true;
+}
+
+static bool encode_media_item_lua(lua_State *L, int tbl_idx, ccord_jw *w)
 {
   int abs_idx = lua_absindex(L, tbl_idx);
   if (lua_type(L, abs_idx) != LUA_TTABLE) return false;
@@ -867,11 +900,6 @@ static bool encode_media_item_lua(lua_State *L, ccord_sandbox *sb, int tbl_idx, 
   if (lua_type(L, -1) == LUA_TSTRING) {
     size_t tl = 0; const char *ts = lua_tolstring(L, -1, &tl);
     if (tl > 0u) {
-      if (!sb_check_any_perm(L, sb, CCORD_PERM_UI_PANEL, CCORD_PERM_UI_DECORATE, "ui.media.open")) {
-        lua_pop(L, 1);
-        *out_undeclared = true;
-        return false;
-      }
       ccord_jw_key(w, "texture_key"); ccord_jw_string(w, ts, tl);
       has_src = true;
     }
@@ -882,13 +910,6 @@ static bool encode_media_item_lua(lua_State *L, ccord_sandbox *sb, int tbl_idx, 
   if (lua_type(L, -1) == LUA_TSTRING) {
     size_t ll = 0; const char *ls = lua_tolstring(L, -1, &ll);
     if (ll > 0u) {
-      ccord_perm path_perm = (strncmp(ls, "plugin_data://", 14) == 0)
-                               ? CCORD_PERM_STORAGE_FILES : CCORD_PERM_FS_READ;
-      if (!sb_check_perm(L, sb, path_perm, "ui.media.open")) {
-        lua_pop(L, 1);
-        *out_undeclared = true;
-        return false;
-      }
       ccord_jw_key(w, "local_path"); ccord_jw_string(w, ls, ll);
       has_src = true;
     }
@@ -921,39 +942,53 @@ static bool encode_media_item_lua(lua_State *L, ccord_sandbox *sb, int tbl_idx, 
 static int api_ui_media_open(lua_State *L)
 {
   ccord_sandbox *sb = sb_of(L);
+  if (sb->limit != CCORD_SB_LIMIT_NONE) return luaL_error(L, "plugin stopped");
   if (!sb_in_user_gesture(sb)) {
     lua_pushboolean(L, 0);
     lua_pushliteral(L, "ui.media.open requires a user-gesture callback");
     return 2;
   }
   luaL_checktype(L, 1, LUA_TTABLE);
-  ccord_buf b; ccord_buf_init(&b, 0);
-  ccord_jw w; ccord_jw_init(&w, &b);
-  ccord_jw_begin_object(&w);
-  bool undeclared = false;
 
+  // Pre-validate item permissions before allocating any heap buffers: sb_check_perm raises a Lua error (longjmp).
   sb_raw_getfield(L, 1, "items");
-  if (lua_type(L, -1) == LUA_TTABLE) {
-    int items_idx = lua_gettop(L);
-    lua_Integer n = (lua_Integer)lua_rawlen(L, items_idx);
+  bool has_items = (lua_type(L, -1) == LUA_TTABLE);
+  int items_idx = 0;
+  lua_Integer n = 0;
+  if (has_items) {
+    items_idx = lua_gettop(L);
+    n = (lua_Integer)lua_rawlen(L, items_idx);
     if (n <= 0) {
       lua_pop(L, 1);
-      ccord_buf_free(&b);
       return luaL_error(L, "ui.media.open: items must not be empty");
     }
     if (n > 10) n = 10;
+    for (lua_Integer i = 1; i <= n; i++) {
+      lua_rawgeti(L, items_idx, i);
+      bool ok = check_media_item_perms_lua(L, sb, -1);
+      lua_pop(L, 1);
+      if (!ok) {
+        lua_pop(L, 1);
+        return sb_push_undeclared(L);
+      }
+    }
+  } else {
+    lua_pop(L, 1);
+    if (!check_media_item_perms_lua(L, sb, 1)) return sb_push_undeclared(L);
+  }
+
+  ccord_buf b; ccord_buf_init(&b, 0);
+  ccord_jw w; ccord_jw_init(&w, &b);
+  ccord_jw_begin_object(&w);
+
+  if (has_items) {
     ccord_jw_key(&w, "items");
     ccord_jw_begin_array(&w);
     size_t valid = 0u;
     for (lua_Integer i = 1; i <= n; i++) {
       lua_rawgeti(L, items_idx, i);
-      bool ok = encode_media_item_lua(L, sb, -1, &w, &undeclared);
+      bool ok = encode_media_item_lua(L, -1, &w);
       lua_pop(L, 1);
-      if (undeclared) {
-        lua_pop(L, 1);
-        ccord_buf_free(&b);
-        return sb_push_undeclared(L);
-      }
       if (!ok) {
         lua_pop(L, 1);
         ccord_buf_free(&b);
@@ -972,15 +1007,10 @@ static int api_ui_media_open(lua_State *L)
     }
     lua_pop(L, 1);
   } else {
-    lua_pop(L, 1);
     ccord_jw_key(&w, "items");
     ccord_jw_begin_array(&w);
-    bool ok = encode_media_item_lua(L, sb, 1, &w, &undeclared);
+    bool ok = encode_media_item_lua(L, 1, &w);
     ccord_jw_end_array(&w);
-    if (undeclared) {
-      ccord_buf_free(&b);
-      return sb_push_undeclared(L);
-    }
     if (!ok) {
       ccord_buf_free(&b);
       return luaL_error(L, "ui.media.open: url, local_path, or texture_key required");

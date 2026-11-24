@@ -574,7 +574,7 @@ struct ccord_ui {
   int last_system_theme;             // last observed SDL_SystemTheme for "c-cord-system"
   uint64_t system_theme_next_ms;     // throttle SDL_GetSystemTheme polling to 1s
 
-  char notice[128];
+  char notice[256];
   uint64_t notice_until_ms;
   uint64_t notice_seq;   // bumped by every ui_notice so that each toast plays its own entrance
   ui_toast_item toasts[UI_TOAST_MAX_SLOTS];

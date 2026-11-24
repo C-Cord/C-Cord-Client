@@ -973,13 +973,21 @@ bool pl_handle_storage_files_rpc(ccord_plugins *m, plugin *p, uint32_t id, const
     }
     char abs[CCORD_PATH_MAX];
     snprintf(abs, sizeof abs, "%s/%s", root, norm);
-    FILE *f = fopen(abs, append ? "ab" : "wb");
-    if (!f) { ccord_free(raw); pl_reply_err(m, p, id, "io", strerror(errno)); return true; }
-    size_t wr = raw_len ? fwrite(raw, 1, raw_len, f) : 0;
-    fclose(f);
-    ccord_free(raw);
-    if (wr != raw_len) pl_reply_err(m, p, id, "io", "short write");
-    else pl_reply_ok(m, p, id, nullptr);
+    if (atomic) {
+      ccord_error err = {0};
+      ccord_status st = ccord_file_write_atomic(abs, raw, raw_len, 0600u, false, &err);
+      ccord_free(raw);
+      if (st != CCORD_OK) pl_reply_err(m, p, id, "io", err.message[0] ? err.message : "write failed");
+      else pl_reply_ok(m, p, id, nullptr);
+    } else {
+      FILE *f = fopen(abs, append ? "ab" : "wb");
+      if (!f) { ccord_free(raw); pl_reply_err(m, p, id, "io", strerror(errno)); return true; }
+      size_t wr = raw_len ? fwrite(raw, 1, raw_len, f) : 0;
+      fclose(f);
+      ccord_free(raw);
+      if (wr != raw_len) pl_reply_err(m, p, id, "io", "short write");
+      else pl_reply_ok(m, p, id, nullptr);
+    }
 #endif
     return true;
   }
