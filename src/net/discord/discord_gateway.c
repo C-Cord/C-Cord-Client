@@ -887,8 +887,137 @@ static void gw_maybe_push_raw(ccord_gateway *g, const char *data, size_t len)
   gw_push(g, &rev);
 }
 
+// Fast-path pre-filter for OP 0 dispatches whose event name ("t") is not handled by json_dispatch.c.
+// When raw tap is disabled, avoids scratch arena allocation and full JSON AST construction while still
+// advancing g->seq cleanly. Bails out immediately (returning false) on any non-0 op, any handled "t",
+// malformed/truncated envelope, or trailing bytes (concatenated inflated objects).
+static bool gw_fast_skip_unhandled(ccord_gateway *g, const char *data, size_t len)
+{
+  if (ccord_gateway_raw_tap_enabled() || !g || !data || len < 2u) return false;
+  size_t i = 0;
+  while (i < len && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
+  if (i >= len || data[i] != '{') return false;
+  i++;
+
+  int op = -1;
+  int64_t seq = -1;
+  bool saw_t = false;
+  bool saw_d = false;
+  bool need_comma = false;
+  bool closed = false;
+
+  while (i < len) {
+    while (i < len && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
+    if (i >= len) return false;
+    if (data[i] == '}') {
+      i++;
+      closed = true;
+      break;
+    }
+    if (need_comma) {
+      if (data[i] != ',') return false;
+      i++;
+      while (i < len && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
+      if (i >= len) return false;
+    }
+    if (data[i] != '"') return false;
+    size_t ks = ++i;
+    while (i < len && data[i] != '"') {
+      if (data[i] == '\\') return false;   // conservative fallback for escaped keys
+      i++;
+    }
+    if (i >= len) return false;
+    size_t kl = i - ks;
+    i++;
+
+    while (i < len && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
+    if (i >= len || data[i] != ':') return false;
+    i++;
+    while (i < len && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
+    if (i >= len) return false;
+
+    bool key_is_t = (kl == 1u && data[ks] == 't');
+    bool key_is_d = (kl == 1u && data[ks] == 'd');
+    if (key_is_d && !saw_t && len > 65536u) return false;   // never scan multi-MiB "d" before checking "t"
+
+    size_t vs = i;
+    if (data[i] == '{' || data[i] == '[') {
+      int depth = 0;
+      bool in_s = false, esc = false;
+      for (; i < len; i++) {
+        char c = data[i];
+        if (in_s) {
+          if (esc) esc = false;
+          else if (c == '\\') esc = true;
+          else if (c == '"') in_s = false;
+          continue;
+        }
+        if (c == '"') in_s = true;
+        else if (c == '{' || c == '[') depth++;
+        else if (c == '}' || c == ']') {
+          if (--depth == 0) {
+            i++;
+            break;
+          }
+        }
+      }
+      if (depth != 0 || in_s) return false;
+    } else if (data[i] == '"') {
+      i++;
+      while (i < len && data[i] != '"') {
+        if (data[i] == '\\') {
+          if (key_is_t || i + 1u >= len) return false;
+          i += 2u;
+          continue;
+        }
+        i++;
+      }
+      if (i >= len) return false;
+      i++;
+    } else {
+      while (i < len && data[i] != ',' && data[i] != '}' &&
+             data[i] != ' ' && data[i] != '\t' && data[i] != '\r' && data[i] != '\n') {
+        i++;
+      }
+    }
+    size_t vl = i - vs;
+    if (vl == 0) return false;
+
+    if (kl == 2u && memcmp(data + ks, "op", 2u) == 0) {
+      if (vl != 1u || data[vs] != '0') return false;
+      op = 0;
+    } else if (key_is_t) {
+      if (vl < 3u || data[vs] != '"' || data[vs + vl - 1u] != '"') return false;
+      if (ccord_live_gateway_dispatch_handled(data + vs + 1u, vl - 2u)) return false;
+      saw_t = true;
+    } else if (kl == 1u && data[ks] == 's') {
+      if (vl == 4u && memcmp(data + vs, "null", 4u) == 0) {
+        seq = -1;
+      } else {
+        int64_t val = 0;
+        for (size_t k = 0; k < vl; k++) {
+          char c = data[vs + k];
+          if (c < '0' || c > '9' || val > (INT64_MAX - 9) / 10) return false;
+          val = val * 10 + (c - '0');
+        }
+        seq = val;
+      }
+    } else if (key_is_d) {
+      saw_d = true;
+    }
+    need_comma = true;
+  }
+
+  if (!closed || op != 0 || !saw_t || !saw_d) return false;
+  while (i < len && (data[i] == ' ' || data[i] == '\t' || data[i] == '\r' || data[i] == '\n')) i++;
+  if (i != len) return false;
+  if (seq >= 0) g->seq = seq;
+  return true;
+}
+
 static bool gw_handle_payload(ccord_gateway *g, const char *data, size_t len)
 {
+  if (gw_fast_skip_unhandled(g, data, len)) return false;
   ccord_live_event ev;
   ccord_error err;
   ccord_status st = ccord_live_gateway_decode_ex(data, len, g->self_id, &ev, &err);
@@ -947,6 +1076,10 @@ static bool gw_dispatch_inflated(ccord_gateway *g)
     char lead = g->z_out.data[off];
     if (lead != '{' && lead != '[') {
       CCORD_LOG_W("gateway: ignoring trailing bytes in inflated payload");
+      gw_buf_release(g, &g->z_out);
+      return false;
+    }
+    if (gw_fast_skip_unhandled(g, g->z_out.data + off, g->z_out.len - off)) {
       gw_buf_release(g, &g->z_out);
       return false;
     }

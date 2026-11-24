@@ -12,3 +12,7 @@ void ccord_gateway_set_transport_compress(ccord_gateway *g, bool enable);
 
 // Internal rich-activities JSON validator shared between gateway_wire.c and discord_gateway.c.
 ccord_status ccord_gateway_rich_activities_valid_(const char *json, size_t len, ccord_error *err);
+
+// Returns true when `type` (length `len`) matches an OP 0 dispatch event handled by json_dispatch.c.
+// Used by discord_gateway.c to fast-skip unhandled dispatches without allocating a scratch arena or JSON AST.
+bool ccord_live_gateway_dispatch_handled(const char *type, size_t len);

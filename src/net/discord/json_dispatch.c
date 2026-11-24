@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #include "json_internal.h"
+#include "discord_gateway_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1430,6 +1431,115 @@ static ccord_status decode_gateway_root(const ccord_json *root, ccord_id self_id
   }
   return CCORD_OK;
 }
+
+static inline bool dj_type_eq(const char *type, size_t len, const char *lit, size_t lit_len)
+{
+  return len == lit_len && memcmp(type, lit, lit_len) == 0;
+}
+
+#define DJ_TYPE_EQ(t, l, lit) dj_type_eq((t), (l), (lit), sizeof(lit) - 1u)
+
+// Must stay in exact sync with decode_gateway_root() below: every OP 0 dispatch "t" handled there must return true.
+bool ccord_live_gateway_dispatch_handled(const char *type, size_t len)
+{
+  if (!type || len == 0) return false;
+  switch (type[0]) {
+    case 'A':
+      return DJ_TYPE_EQ(type, len, "APPLICATION_COMMAND_AUTOCOMPLETE_RESULT") ||
+             DJ_TYPE_EQ(type, len, "AUTO_MODERATION_RULE_CREATE") ||
+             DJ_TYPE_EQ(type, len, "AUTO_MODERATION_RULE_DELETE") ||
+             DJ_TYPE_EQ(type, len, "AUTO_MODERATION_RULE_UPDATE");
+    case 'C':
+      return DJ_TYPE_EQ(type, len, "CALL_CREATE") ||
+             DJ_TYPE_EQ(type, len, "CALL_DELETE") ||
+             DJ_TYPE_EQ(type, len, "CALL_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "CHANNEL_CREATE") ||
+             DJ_TYPE_EQ(type, len, "CHANNEL_DELETE") ||
+             DJ_TYPE_EQ(type, len, "CHANNEL_PINS_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "CHANNEL_RECIPIENT_ADD") ||
+             DJ_TYPE_EQ(type, len, "CHANNEL_RECIPIENT_REMOVE") ||
+             DJ_TYPE_EQ(type, len, "CHANNEL_UPDATE");
+    case 'E':
+      return DJ_TYPE_EQ(type, len, "EMBEDDED_ACTIVITY_UPDATE_V2");
+    case 'G':
+      return DJ_TYPE_EQ(type, len, "GUILD_CREATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_DELETE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_EMOJIS_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_MEMBERS_CHUNK") ||
+             DJ_TYPE_EQ(type, len, "GUILD_MEMBER_ADD") ||
+             DJ_TYPE_EQ(type, len, "GUILD_MEMBER_LIST_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_MEMBER_REMOVE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_MEMBER_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_ROLE_CREATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_ROLE_DELETE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_ROLE_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_SCHEDULED_EVENT_CREATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_SCHEDULED_EVENT_DELETE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_SCHEDULED_EVENT_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_SCHEDULED_EVENT_USER_ADD") ||
+             DJ_TYPE_EQ(type, len, "GUILD_SCHEDULED_EVENT_USER_REMOVE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_SOUNDBOARD_SOUNDS_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_SOUNDBOARD_SOUND_CREATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_SOUNDBOARD_SOUND_DELETE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_SOUNDBOARD_SOUND_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_STICKERS_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "GUILD_UPDATE");
+    case 'I':
+      return DJ_TYPE_EQ(type, len, "INTERACTION_MODAL_CREATE");
+    case 'M':
+      return (len >= 17u && memcmp(type, "MESSAGE_REACTION_", 17u) == 0) ||
+             DJ_TYPE_EQ(type, len, "MESSAGE_ACK") ||
+             DJ_TYPE_EQ(type, len, "MESSAGE_CREATE") ||
+             DJ_TYPE_EQ(type, len, "MESSAGE_DELETE") ||
+             DJ_TYPE_EQ(type, len, "MESSAGE_DELETE_BULK") ||
+             DJ_TYPE_EQ(type, len, "MESSAGE_POLL_VOTE_ADD") ||
+             DJ_TYPE_EQ(type, len, "MESSAGE_POLL_VOTE_REMOVE") ||
+             DJ_TYPE_EQ(type, len, "MESSAGE_UPDATE");
+    case 'P':
+      return DJ_TYPE_EQ(type, len, "PASSIVE_UPDATE_V1") ||
+             DJ_TYPE_EQ(type, len, "PASSIVE_UPDATE_V2") ||
+             DJ_TYPE_EQ(type, len, "PRESENCE_UPDATE");
+    case 'R':
+      return DJ_TYPE_EQ(type, len, "READY") ||
+             DJ_TYPE_EQ(type, len, "READY_SUPPLEMENTAL") ||
+             DJ_TYPE_EQ(type, len, "RELATIONSHIP_ADD") ||
+             DJ_TYPE_EQ(type, len, "RELATIONSHIP_REMOVE") ||
+             DJ_TYPE_EQ(type, len, "RESUMED");
+    case 'S':
+      return DJ_TYPE_EQ(type, len, "SESSIONS_REPLACE") ||
+             DJ_TYPE_EQ(type, len, "STAGE_INSTANCE_CREATE") ||
+             DJ_TYPE_EQ(type, len, "STAGE_INSTANCE_DELETE") ||
+             DJ_TYPE_EQ(type, len, "STAGE_INSTANCE_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "STREAM_CREATE") ||
+             DJ_TYPE_EQ(type, len, "STREAM_DELETE") ||
+             DJ_TYPE_EQ(type, len, "STREAM_SERVER_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "STREAM_UPDATE");
+    case 'T':
+      return DJ_TYPE_EQ(type, len, "THREAD_CREATE") ||
+             DJ_TYPE_EQ(type, len, "THREAD_DELETE") ||
+             DJ_TYPE_EQ(type, len, "THREAD_LIST_SYNC") ||
+             DJ_TYPE_EQ(type, len, "THREAD_MEMBERS_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "THREAD_MEMBER_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "THREAD_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "TYPING_START");
+    case 'U':
+      return DJ_TYPE_EQ(type, len, "USER_GUILD_SETTINGS_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "USER_NOTE_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "USER_SETTINGS_PROTO_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "USER_SETTINGS_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "USER_UPDATE");
+    case 'V':
+      return DJ_TYPE_EQ(type, len, "VOICE_CHANNEL_STATUS_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "VOICE_SERVER_UPDATE") ||
+             DJ_TYPE_EQ(type, len, "VOICE_STATE_UPDATE");
+    case 'W':
+      return DJ_TYPE_EQ(type, len, "WEBHOOKS_UPDATE");
+    default:
+      return false;
+  }
+}
+
+#undef DJ_TYPE_EQ
 
 ccord_status ccord_live_gateway_decode_ex(const char *json, size_t len, ccord_id self_id, ccord_live_event *out,
                                           ccord_error *err)

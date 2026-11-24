@@ -1964,6 +1964,100 @@ static void test_gateway_wait_info(void)
   (void)fg_stop(&srv, log, FG_MAX_EVENTS);
 }
 
+static void script_fast_path_seq(void *ud, fg_conn *c)
+{
+  (void)ud;
+  if (!fg_handshake(c)) return;
+  z_stream zs;
+  memset(&zs, 0, sizeof zs);
+  if (deflateInit(&zs, Z_DEFAULT_COMPRESSION) != Z_OK) return;
+  if (!zsend(&zs, c, "{\"op\":10,\"d\":{\"heartbeat_interval\":60000}}")) {
+    (void)deflateEnd(&zs);
+    return;
+  }
+  char buf[2048];
+  if (fg_recv(c, buf, sizeof buf, 5000) != FG_GOT_TEXT) {
+    (void)deflateEnd(&zs);
+    return;
+  }
+  char ready[512];
+  (void)snprintf(ready, sizeof ready, FG_READY, c->self_url);
+  if (!zsend(&zs, c, ready)) {
+    (void)deflateEnd(&zs);
+    return;
+  }
+  // 1. Standalone unhandled OP 0 dispatch with seq 7, followed by server heartbeat request (op 1).
+  (void)zsend(&zs, c,
+              "{\"t\":\"CONVERSATION_SUMMARY_UPDATE\",\"s\":7,\"op\":0,"
+              "\"d\":{\"channel_id\":\"10\",\"summaries\":[{\"id\":\"1\",\"topic\":\"chat\"}]}}");
+  (void)zsend(&zs, c, "{\"op\":1,\"d\":null}");
+  // Wait for client's first heartbeat carrying d=7.
+  fg_serve_session(c, true, fg_now_ms() + 2000, 1);
+  // 2. Concatenated inflated payload: unhandled OP 0 (s=42) + handled TYPING_START (s=43), then op 1 request.
+  (void)zsend(&zs, c,
+              "{\"t\":\"CHANNEL_UNREAD_UPDATE\",\"s\":42,\"op\":0,\"d\":{\"guild_id\":\"1\"}}"
+              "{\"t\":\"TYPING_START\",\"s\":43,\"op\":0,\"d\":{\"channel_id\":\"55\",\"user_id\":\"99\",\"timestamp\":1700000000}}");
+  (void)zsend(&zs, c, "{\"op\":1,\"d\":null}");
+  fg_serve_session(c, true, fg_now_ms() + 2000, 1);
+  (void)deflateEnd(&zs);
+}
+
+static void test_fast_path_unhandled_dispatch_advances_seq(void)
+{
+  // Direct unit check of handled vs unhandled dispatch table.
+  CT_CHECK(ccord_live_gateway_dispatch_handled("READY", 5));
+  CT_CHECK(ccord_live_gateway_dispatch_handled("MESSAGE_CREATE", 14));
+  CT_CHECK(ccord_live_gateway_dispatch_handled("TYPING_START", 12));
+  CT_CHECK(ccord_live_gateway_dispatch_handled("MESSAGE_REACTION_ADD", 20));
+  CT_CHECK(ccord_live_gateway_dispatch_handled("MESSAGE_REACTION_REMOVE_ALL", 27));
+  CT_CHECK(ccord_live_gateway_dispatch_handled("VOICE_STATE_UPDATE", 18));
+  CT_CHECK(ccord_live_gateway_dispatch_handled("PASSIVE_UPDATE_V2", 17));
+  CT_CHECK(ccord_live_gateway_dispatch_handled("USER_UPDATE", 11));
+  CT_CHECK(ccord_live_gateway_dispatch_handled("APPLICATION_COMMAND_AUTOCOMPLETE_RESULT", 39));
+  CT_CHECK(!ccord_live_gateway_dispatch_handled("CONVERSATION_SUMMARY_UPDATE", 27));
+  CT_CHECK(!ccord_live_gateway_dispatch_handled("CHANNEL_UNREAD_UPDATE", 21));
+  CT_CHECK(!ccord_live_gateway_dispatch_handled("BURST_CREDIT_BALANCE_UPDATE", 27));
+  CT_CHECK(!ccord_live_gateway_dispatch_handled("", 0));
+  CT_CHECK(!ccord_live_gateway_dispatch_handled(nullptr, 0));
+
+  ccord_gateway_set_raw_tap(false);
+  fg_server srv;
+  CT_CHECK(fg_start(&srv, script_fast_path_seq, nullptr));
+  client c;
+  CT_CHECK(client_start(&c, srv.url, true));
+
+  bool saw_connected = false;
+  bool saw_snapshot = false;
+  bool saw_typing = false;
+  int unexpected_events = 0;
+  uint64_t end = ccord_clock_ms() + 4000;
+  while (ccord_clock_ms() < end && !(saw_connected && saw_snapshot && saw_typing)) {
+    ccord_net_event ev;
+    while (ccord_gateway_poll(c.g, &ev)) {
+      if (ev.type == CCORD_NET_STATE) {
+        if (ev.state == CCORD_CONN_CONNECTED) saw_connected = true;
+      } else if (ev.type == CCORD_NET_SNAPSHOT) {
+        saw_snapshot = true;
+      } else if (ev.type == CCORD_NET_TYPING_START && ev.channel_id == 55 && ev.user_id == 99) {
+        saw_typing = true;
+      } else {
+        unexpected_events++;
+      }
+    }
+    usleep(4000);
+  }
+  // Pump briefly so the second OP 1 heartbeat reply flushes to the fake gateway.
+  pump(&c, 250);
+  CT_CHECK(saw_connected && saw_snapshot && saw_typing);
+  CT_CHECK(unexpected_events == 0);
+
+  finish(&c);
+  fg_event log[FG_MAX_EVENTS];
+  size_t n = fg_stop(&srv, log, FG_MAX_EVENTS);
+  CT_CHECK(fg_count(log, n, 0, "HEARTBEAT d=7}") == 1);
+  CT_CHECK(fg_count(log, n, 0, "HEARTBEAT d=43}") == 1);
+}
+
 int main(void)
 {
   test_compress_negotiation_and_handshake();
@@ -1999,5 +2093,6 @@ int main(void)
   test_voice_session_id_ignores_other_users();
   test_voice_gateway_fragmented_binary_frame();
   test_gateway_wait_info();
+  test_fast_path_unhandled_dispatch_advances_seq();
   return CT_RESULT("test_discord_gateway");
 }
