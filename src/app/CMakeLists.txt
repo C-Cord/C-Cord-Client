@@ -139,6 +139,11 @@ if(CCORD_BUILD_TESTS)
   target_include_directories(test_warm_cache PRIVATE ${CCORD_APP_INCLUDE_DIRS})
   target_compile_definitions(test_warm_cache PRIVATE CCORD_LIVE_ACCOUNT=$<BOOL:${CCORD_LIVE_ACCOUNT}>)
 
+  # Scheduled messages: lazy dir creation, O(1) has_entries fast-path, offline next_due_ms.
+  ccord_add_test(NAME test_scheduled_messages SOURCES tests/test_scheduled_messages.c desktop/scheduled_messages.c
+                 LIBS ccord_session ccord_store ccord_net ccord_ui LABELS unit)
+  target_include_directories(test_scheduled_messages PRIVATE ${CCORD_APP_INCLUDE_DIRS})
+
   ccord_add_test(NAME test_updater SOURCES tests/test_updater.c desktop/updater.c
                  LIBS ccord_core ccord_net ccord_ui LABELS unit)
   target_include_directories(test_updater PRIVATE ${CCORD_APP_INCLUDE_DIRS})

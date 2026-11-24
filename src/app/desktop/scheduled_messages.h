@@ -25,8 +25,10 @@ void ccord_scheduled_messages_init(ccord_session *session, ccord_store *store);
 // Once per main-loop iteration. now_unix_ms = wall-clock time (ms since the Unix epoch). Sends at most one due message
 // per call through session.
 void ccord_scheduled_messages_tick(ccord_session *session, int64_t now_unix_ms);
-// Milliseconds until the next non-missed scheduled message (or retry) becomes due; UINT32_MAX when none pending.
+// Milliseconds until the next non-missed scheduled message (or retry) becomes due; UINT32_MAX when none pending or offline.
 uint32_t ccord_scheduled_messages_next_due_ms(int64_t now_unix_ms);
+// True when at least one scheduled message is currently queued (fast O(1) check before reading the wall clock).
+bool ccord_scheduled_messages_has_entries(void);
 // Once at shutdown, before the session is destroyed. Writes nothing new (every change is saved when made).
 void ccord_scheduled_messages_shutdown(void);
 

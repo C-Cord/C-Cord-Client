@@ -48,7 +48,9 @@ static struct {
   size_t count, cap;
   uint64_t next_id;
   bool loaded;
+  bool dir_ready;
   ccord_id account;
+  char dir[CCORD_PATH_MAX];
   char path[CCORD_PATH_MAX];
   int64_t (*clock)(void *ud);
   void *clock_ud;
@@ -96,7 +98,14 @@ static bool make_dirs(const char *dir)
 // Serializes the queue and replaces the file atomically (write temp 0600, fsync, rename).
 static bool save(void)
 {
-  if (!g.path[0]) return false;
+  if (!g.path[0] || !g.dir[0]) return false;
+  if (!g.dir_ready) {
+    if (!make_dirs(g.dir)) {
+      CCORD_LOG_W("scheduled: cannot create directory %s", g.dir);
+      return false;
+    }
+    g.dir_ready = true;
+  }
   ccord_buf b;
   ccord_buf_init(&b, SM_MAX_FILE * 4u);
   ccord_jw w;
@@ -270,16 +279,19 @@ static bool ensure_loaded(ccord_session *session, int64_t now_ms)
   clear_items();
   g.next_id = 1;
   g.loaded = false;
+  g.dir_ready = false;
+  g.dir[0] = '\0';
   g.path[0] = '\0';
   g.account = self;
   const char *base = ccord_paths_data_dir();
-  char dir[CCORD_PATH_MAX];
-  if (!base || !base[0] || snprintf(dir, sizeof dir, "%s/accounts/%llu", base, (unsigned long long)self) >= (int)sizeof dir ||
-      !make_dirs(dir) || snprintf(g.path, sizeof g.path, "%s/" SM_FILE, dir) >= (int)sizeof g.path) {
+  if (!base || !base[0] || snprintf(g.dir, sizeof g.dir, "%s/accounts/%llu", base, (unsigned long long)self) >= (int)sizeof g.dir ||
+      snprintf(g.path, sizeof g.path, "%s/" SM_FILE, g.dir) >= (int)sizeof g.path) {
+    g.dir[0] = '\0';
     g.path[0] = '\0';
     CCORD_LOG_W("scheduled: no data directory for the queue");
     return false;
   }
+  // Avoid creating the account directory on read-only startup when no queue file exists yet; save() creates it lazily.
   load_file(now_ms);
   g.loaded = true;
   return true;
@@ -293,7 +305,9 @@ void ccord_scheduled_messages_init(ccord_session *session, ccord_store *store)
   g.session = session;
   g.store = store;
   g.loaded = false;
+  g.dir_ready = false;
   g.account = CCORD_ID_NONE;
+  g.dir[0] = '\0';
   g.path[0] = '\0';
   g.next_id = 1;
   (void)ensure_loaded(session, ccord_scheduled_messages_now_ms());
@@ -305,7 +319,9 @@ void ccord_scheduled_messages_shutdown(void)
   g.session = nullptr;
   g.store = nullptr;
   g.loaded = false;
+  g.dir_ready = false;
   g.account = CCORD_ID_NONE;
+  g.dir[0] = '\0';
   g.path[0] = '\0';
 }
 
@@ -546,9 +562,15 @@ void ccord_scheduled_messages_tick(ccord_session *session, int64_t now_unix_ms)
   }
 }
 
+bool ccord_scheduled_messages_has_entries(void)
+{
+  return g.count > 0;
+}
+
 uint32_t ccord_scheduled_messages_next_due_ms(int64_t now_unix_ms)
 {
   if (g.count == 0) return UINT32_MAX;
+  if (g.session == nullptr || ccord_session_state(g.session) != CCORD_CONN_CONNECTED) return UINT32_MAX;
   uint32_t best = UINT32_MAX;
   for (size_t i = 0; i < g.count; i++) {
     const sm_entry *e = &g.items[i];
