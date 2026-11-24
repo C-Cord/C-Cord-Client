@@ -179,8 +179,19 @@ void app_reopen_warm_cache(app *a, const char *token_file)
 #endif
 }
 
+static struct {
+  const app *app_ptr;
+  const ccord_store *store;
+  const ccord_session *session;
+  const ccord_account *account;
+  uint64_t lists_rev;
+  ccord_connection_state conn_state;
+  bool valid;
+} g_account_sync_gate;
+
 void app_reset_account_sync_cache(app *a)
 {
+  g_account_sync_gate.valid = false;
   if (!a) return;
   a->last_synced_self_id = 0;
   a->last_synced_gcount = 0;
@@ -191,6 +202,21 @@ void app_reset_account_sync_cache(app *a)
 void app_sync_live_account(app *a)
 {
   if (!a || !a->account || !a->store) return;
+  uint64_t lists_rev = ccord_store_lists_revision(a->store);
+  ccord_connection_state conn_state = a->session ? ccord_session_state(a->session) : CCORD_CONN_DISCONNECTED;
+  if (g_account_sync_gate.valid && g_account_sync_gate.app_ptr == a && g_account_sync_gate.store == a->store &&
+      g_account_sync_gate.session == a->session && g_account_sync_gate.account == a->account &&
+      g_account_sync_gate.lists_rev == lists_rev && g_account_sync_gate.conn_state == conn_state) {
+    return;
+  }
+  g_account_sync_gate.app_ptr = a;
+  g_account_sync_gate.store = a->store;
+  g_account_sync_gate.session = a->session;
+  g_account_sync_gate.account = a->account;
+  g_account_sync_gate.lists_rev = lists_rev;
+  g_account_sync_gate.conn_state = conn_state;
+  g_account_sync_gate.valid = true;
+
   ccord_id self_id = ccord_store_self_id(a->store);
   const ccord_user *u = self_id != CCORD_ID_NONE ? ccord_store_user(a->store, self_id) : nullptr;
   size_t gcount = ccord_store_guild_count(a->store);
@@ -200,7 +226,7 @@ void app_sync_live_account(app *a)
     if (g && g->id != CCORD_DM_GUILD_ID) real_guilds++;
   }
   const char *name = (u && u->name && u->name[0]) ? u->name : "Discord User";
-  bool connected = ccord_session_state(a->session) == CCORD_CONN_CONNECTED;
+  bool connected = conn_state == CCORD_CONN_CONNECTED;
   if (self_id == a->last_synced_self_id && real_guilds == a->last_synced_gcount &&
       connected == a->last_synced_connected && strcmp(name, a->last_synced_name) == 0) {
     return;

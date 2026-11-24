@@ -233,6 +233,7 @@ struct ccord_app_desktop {
   uint32_t badge_last_mentions;
   uint32_t badge_last_tray;
   bool badge_pushed;
+  uint64_t voice_sync_rev;
   bool voice_sync_valid;          // tray voice state: push only when mute/deafen actually changed
   bool redraw;
   app_tracked_notify tracked_notifs[APP_TRACKED_NOTIFY_MAX];
@@ -622,15 +623,24 @@ static void badge_add_guild(const ccord_store *s, ccord_id guild_id, int64_t now
                             uint32_t *mentions)
 {
   ccord_id self = ccord_store_self_id(s);
-  bool exact = guild_id != CCORD_DM_GUILD_ID && ccord_store_permissions_exact(s, guild_id, self);
+  bool base_computed = false;
+  bool have_base = false;
+  ccord_store_guild_perm_base perm_base = {0};
   bool guild_muted = ccord_store_guild_muted(s, guild_id, now_unix_ms);
   size_t channels = ccord_store_channel_count(s, guild_id);
   for (size_t i = 0; i < channels; i++) {
     const ccord_channel *ch = ccord_store_channel_at(s, guild_id, i);
     if (!ch || ch->is_message_request || ch->is_spam) continue;
     if (ch->unread_count == 0 && ch->mention_count == 0) continue;
-    if (exact && (ccord_store_permissions(s, guild_id, ch->id, self, now_unix_ms) & CCORD_PERM_VIEW_CHANNEL) == 0) {
-      continue;
+    if (guild_id != CCORD_DM_GUILD_ID) {
+      if (!base_computed) {
+        base_computed = true;
+        have_base = ccord_store_guild_base_permissions(s, guild_id, self, now_unix_ms, &perm_base);
+      }
+      if (have_base && perm_base.exact &&
+          (ccord_store_channel_permissions_with_base(s, &perm_base, ch) & CCORD_PERM_VIEW_CHANNEL) == 0) {
+        continue;
+      }
     }
     if (ch->unread_count > 0 && !guild_muted && !ccord_store_channel_is_muted(s, ch, now_unix_ms)) {
       *unread = badge_sum(*unread, ch->unread_count);
@@ -676,7 +686,7 @@ void ccord_app_desktop_sync_badge(ccord_app_desktop *d)
 {
   if (!d || !d->store || !d->platform) return;
   if (ccord_platform_is_mobile(d->platform)) return;   // mobile has no desktop title bar or SNI tray badge
-  uint64_t revision = ccord_store_revision(d->store);
+  uint64_t revision = ccord_store_badge_revision(d->store);
   if (d->badge_valid && revision == d->badge_revision) return;
   d->badge_revision = revision;
   d->badge_valid = true;
@@ -926,6 +936,10 @@ void ccord_app_desktop_notify_click(void *ud, const ccord_notify_target *target)
 static void desktop_sync_voice_state(ccord_app_desktop *d)
 {
   if (!d->platform || !d->store) return;
+  if (ccord_platform_is_mobile(d->platform)) return;   // mobile has no desktop tray voice indicator
+  uint64_t rev = ccord_store_lists_revision(d->store);
+  if (d->voice_sync_valid && rev == d->voice_sync_rev) return;
+  d->voice_sync_rev = rev;
   bool muted = false, deafened = false;
   ccord_id vch = ccord_store_active_voice_channel(d->store);
   ccord_id self_id = ccord_store_self_id(d->store);

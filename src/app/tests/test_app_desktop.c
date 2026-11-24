@@ -450,6 +450,16 @@ static void test_badge_sync(void)
   ccord_app_desktop_sync_badge(F.desktop);
   CT_CHECK(dbg().badge_computations == computed);
 
+  // Ephemeral mutations (typing, presence, speaking) do NOT bump badge_revision -> no badge recompute.
+  if (first_id != CCORD_ID_NONE) {
+    CT_CHECK(ccord_store_set_typing(F.store, first_id, ADA, 5000, &err) == CCORD_OK);
+  }
+  CT_CHECK(ccord_store_update_presence(F.store, ADA, CCORD_PRESENCE_IDLE, "away", &err) == CCORD_OK);
+  ccord_store_set_speaking(F.store, ADA, true);
+  ccord_store_set_speaking(F.store, ADA, false);
+  ccord_app_desktop_sync_badge(F.desktop);
+  CT_CHECK(dbg().badge_computations == computed);
+
   // A store mutation moves the revision and the badge follows.
   CT_CHECK(ccord_store_set_channel_counts(F.store, dm.id, 5, 0, &err) == CCORD_OK);
   ccord_app_desktop_sync_badge(F.desktop);
