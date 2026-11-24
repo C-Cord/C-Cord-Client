@@ -25,8 +25,10 @@ struct ccord_audio {
   SDL_AudioDeviceID opened_id;
   SDL_AudioSpec spec;               // requested format, kept for the fallback reopen
   uint64_t frame_bytes;
+  int frame_samples;                // requested device burst size in frames (e.g. 960 = 20 ms at 48 kHz)
   bool capture;
   bool audio_init;
+  bool paused;
   struct ccord_audio *hotplug_next; // registry link owned by audio_devices.c
 };
 
@@ -37,6 +39,9 @@ bool ccord_devices_parse_id(const char *s, uint32_t *out);
 SDL_AudioDeviceID ccord_audio_parse_device_id(bool capture, const char *id);
 // UTF-8-safe truncating copy; always NUL-terminates when cap > 0 (src may be nullptr).
 void ccord_devices_copy_utf8(char *dst, size_t cap, const char *src);
+
+// Opens an SDL audio device stream with SDL_HINT_AUDIO_DEVICE_SAMPLE_FRAMES applied and restored.
+SDL_AudioStream *ccord_audio_open_device_stream(SDL_AudioDeviceID id, const SDL_AudioSpec *spec, int frame_samples);
 
 // Hot-plug registry of live audio handles.
 void ccord_audio_devices_register(ccord_audio *a);

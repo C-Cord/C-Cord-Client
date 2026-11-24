@@ -240,6 +240,12 @@ size_t ccord_audio_read(ccord_audio *a, int16_t *pcm, size_t frames);
 size_t ccord_audio_write(ccord_audio *a, const int16_t *pcm, size_t frames);
 // Discards any buffered playback/capture samples already queued in the audio stream.
 void ccord_audio_clear(ccord_audio *a);
+// Pauses or resumes the underlying SDL audio device stream (clears queued samples on pause/resume).
+// Repeated calls with the same state are O(1) no-ops. Null-safe.
+void ccord_audio_set_paused(ccord_audio *a, bool paused);
+// Pauses or resumes an open desktop loopback audio stream (PipeWire/SDL/pipe). Null-safe.
+struct ccord_loopback_audio;
+void ccord_loopback_audio_set_paused(struct ccord_loopback_audio *l, bool paused);
 
 // Video streaming codec pipeline (libavcodec / libswscale / libpipewire-0.3) --
 typedef enum ccord_video_codec_id : uint8_t {

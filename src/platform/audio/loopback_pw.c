@@ -63,6 +63,7 @@ bool ccord_loopback_pw_node_allowed(const char *media_class, long pid, long self
 #define LPW_RING_CAP 16384u   // power of two, ~340 ms of mono at 48 kHz
 #define LPW_RING_MASK (LPW_RING_CAP - 1u)
 #define LPW_MAX_CH 8          // output ports we link per node
+#define LPW_SILENCE_TAIL_FRAMES 5u  // emit 5 frames (100 ms) of silence after audio stops, then idle
 
 typedef struct lpw_node {
   bool used;
@@ -124,6 +125,8 @@ struct ccord_loopback_pw {
   _Atomic size_t head;
   _Atomic size_t tail;
   _Atomic bool failed;
+  uint8_t silence_tail_frames;
+  bool paused;
 };
 
 // ---- small lookup helpers (loop thread only) ----------------------------------------------------
@@ -603,20 +606,56 @@ fail:
 size_t ccord_loopback_pw_read(ccord_loopback_pw *p, int16_t *pcm, size_t max_samples)
 {
   if (!p || !pcm || max_samples == 0) return 0;
-  if (atomic_load(&p->failed)) return 0;
+  if (p->paused || atomic_load(&p->failed)) return 0;
   size_t t = atomic_load_explicit(&p->tail, memory_order_relaxed);
   size_t h = atomic_load_explicit(&p->head, memory_order_acquire);
   size_t avail = (h - t) & LPW_RING_MASK;
   size_t n = avail < max_samples ? avail : max_samples;
   for (size_t i = 0; i < n; i++) pcm[i] = p->ring[(t + i) & LPW_RING_MASK];
-  if (n > 0) atomic_store_explicit(&p->tail, (t + n) & LPW_RING_MASK, memory_order_release);
-  if (n == 0) {
-    // Nothing linked / idle: the follower stream is not running. Emit silence so
-    // the outbound Go Live audio keeps ticking instead of stalling.
+  if (n > 0) {
+    atomic_store_explicit(&p->tail, (t + n) & LPW_RING_MASK, memory_order_release);
+    bool nonzero = false;
+    for (size_t i = 0; i < n; i++) {
+      if (pcm[i] != 0) {
+        nonzero = true;
+        break;
+      }
+    }
+    if (nonzero) {
+      p->silence_tail_frames = LPW_SILENCE_TAIL_FRAMES;
+      return n;
+    }
+    if (p->silence_tail_frames > 0) {
+      p->silence_tail_frames--;
+      return n;
+    }
+    return 0;
+  }
+  if (p->silence_tail_frames > 0) {
+    // Emit a short 5-frame silence tail after audio stops so the remote decoder fades cleanly,
+    // then return 0 frames so Opus + crypto + UDP go idle during desktop silence.
+    p->silence_tail_frames--;
     n = max_samples < CCORD_LOOPBACK_FRAME_SAMPLES ? max_samples : CCORD_LOOPBACK_FRAME_SAMPLES;
     memset(pcm, 0, n * sizeof(int16_t));
+    return n;
   }
-  return n;
+  return 0;
+}
+
+void ccord_loopback_pw_set_paused(ccord_loopback_pw *p, bool paused)
+{
+  if (!p || p->paused == paused) return;
+  p->paused = paused;
+  if (p->loop && p->stream) {
+    pw_thread_loop_lock(p->loop);
+    (void)pw_stream_set_active(p->stream, !paused);
+    pw_thread_loop_unlock(p->loop);
+  }
+  if (paused) {
+    size_t h = atomic_load_explicit(&p->head, memory_order_acquire);
+    atomic_store_explicit(&p->tail, h, memory_order_release);
+    p->silence_tail_frames = 0;
+  }
 }
 
 bool ccord_loopback_pw_failed(const ccord_loopback_pw *p)
@@ -640,6 +679,11 @@ size_t ccord_loopback_pw_read(ccord_loopback_pw *p, int16_t *pcm, size_t max_sam
   (void)pcm;
   (void)max_samples;
   return 0;
+}
+void ccord_loopback_pw_set_paused(ccord_loopback_pw *p, bool paused)
+{
+  (void)p;
+  (void)paused;
 }
 bool ccord_loopback_pw_failed(const ccord_loopback_pw *p) { return !p; }
 void ccord_loopback_pw_close(ccord_loopback_pw *p) { (void)p; }

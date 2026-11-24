@@ -48,6 +48,7 @@ typedef enum lb_kind : uint8_t { LB_KIND_FAKE = 0, LB_KIND_PIPE, LB_KIND_SDL, LB
 struct ccord_loopback_audio {
   lb_kind kind;
   bool failed;
+  bool paused;
   uint64_t phase;      // fake: samples generated so far (tone phase, deterministic per open)
   int fd;              // pipe: read end (O_NONBLOCK), -1 when unused
   long child;          // pipe: capture child pid, -1 when none
@@ -348,6 +349,7 @@ static size_t lb_pipe_read(ccord_loopback_audio *l, int16_t *pcm, size_t max_sam
 
 #endif   // __linux__
 
+#if !CCORD_OS_ANDROID
 static bool lb_name_is_monitor(const char *name)
 {
   if (!name) return false;
@@ -416,6 +418,7 @@ static size_t lb_sdl_read(ccord_loopback_audio *l, int16_t *pcm, size_t max_samp
   }
   return (size_t)got / 2u;
 }
+#endif   // !CCORD_OS_ANDROID
 
 #if defined(__linux__) && !defined(__ANDROID__)
 // Backend preference. Default (unset / "auto" / "pipewire") tries the self-excluding
@@ -444,6 +447,11 @@ ccord_loopback_audio *ccord_loopback_audio_open(ccord_error *err)
     l->kind = LB_KIND_FAKE;
     return l;
   }
+#if CCORD_OS_ANDROID
+  ccord_free(l);
+  ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "loopback: desktop monitor capture unsupported on Android");
+  return nullptr;
+#else
 #if defined(__linux__) && !defined(__ANDROID__)
   // Self-excluding PipeWire capture first: it never folds our own playback back out.
   if (lb_pw_preferred()) {
@@ -468,23 +476,61 @@ ccord_loopback_audio *ccord_loopback_audio_open(ccord_error *err)
   ccord_free(l);
   ccord_error_set(err, CCORD_ERR_UNSUPPORTED, "loopback: no desktop monitor capture available");
   return nullptr;
+#endif
 }
 
 size_t ccord_loopback_audio_read(ccord_loopback_audio *l, int16_t *pcm, size_t max_samples)
 {
-  if (!l || !pcm || max_samples == 0) return 0;
+  if (!l || !pcm || max_samples == 0 || l->paused) return 0;
   if (l->kind == LB_KIND_FAKE) return lb_fake_read(l, pcm, max_samples);
 #if defined(__linux__) && !defined(__ANDROID__)
   if (l->kind == LB_KIND_PW) return ccord_loopback_pw_read(l->pw, pcm, max_samples);
 #elif defined(_WIN32)
   if (l->kind == LB_KIND_WIN32) return ccord_loopback_win32_read(l->win32, pcm, max_samples);
 #endif
+#if !CCORD_OS_ANDROID
   if (l->kind == LB_KIND_SDL) return lb_sdl_read(l, pcm, max_samples);
+#endif
 #if defined(__linux__) && !defined(__ANDROID__)
   return lb_pipe_read(l, pcm, max_samples);
 #else
   return 0;
 #endif
+}
+
+void ccord_loopback_audio_set_paused(struct ccord_loopback_audio *l, bool paused)
+{
+  if (!l || l->paused == paused) return;
+  l->paused = paused;
+#if defined(__linux__) && !defined(__ANDROID__)
+  if (l->kind == LB_KIND_PW) {
+    ccord_loopback_pw_set_paused(l->pw, paused);
+    return;
+  }
+  if (l->kind == LB_KIND_PIPE) {
+    if (paused) {
+      lb_stop(l->fd, l->child, l->reaped);
+      l->fd = -1;
+      l->child = -1;
+      l->reaped = true;
+      l->have_pending = false;
+    } else {
+      l->reaped = false;
+      l->have_pending = false;
+      if (!lb_open_pipe(l)) l->failed = true;
+    }
+    return;
+  }
+#endif
+  if (l->kind == LB_KIND_SDL && l->sdl_stream) {
+    if (paused) {
+      (void)SDL_PauseAudioStreamDevice(l->sdl_stream);
+      (void)SDL_ClearAudioStream(l->sdl_stream);
+    } else {
+      (void)SDL_ClearAudioStream(l->sdl_stream);
+      (void)SDL_ResumeAudioStreamDevice(l->sdl_stream);
+    }
+  }
 }
 
 bool ccord_loopback_audio_failed(const ccord_loopback_audio *l)

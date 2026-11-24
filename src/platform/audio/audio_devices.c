@@ -137,13 +137,13 @@ static void reopen_on_default_locked(ccord_audio *a)
   a->device = 0;
   SDL_AudioDeviceID def = a->capture ? SDL_AUDIO_DEVICE_DEFAULT_RECORDING : SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK;
   a->opened_id = def;
-  a->stream = SDL_OpenAudioDeviceStream(def, &a->spec, nullptr, nullptr);
+  a->stream = ccord_audio_open_device_stream(def, &a->spec, a->frame_samples);
   if (!a->stream) {
     CCORD_LOG_D("audio: hot-plug reopen failed: %s", SDL_GetError());
     return;
   }
   a->device = SDL_GetAudioStreamDevice(a->stream);
-  if (!SDL_ResumeAudioStreamDevice(a->stream)) {
+  if (!a->paused && !SDL_ResumeAudioStreamDevice(a->stream)) {
     CCORD_LOG_D("audio: hot-plug resume failed: %s", SDL_GetError());
     SDL_DestroyAudioStream(a->stream);
     a->stream = nullptr;

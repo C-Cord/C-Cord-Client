@@ -35,9 +35,11 @@ typedef struct ccord_loopback_pw ccord_loopback_pw;
 // blocks the caller for long. On success the handle is ready to read().
 [[nodiscard]] ccord_loopback_pw *ccord_loopback_pw_open(void);
 // Non-blocking read of up to max_samples mono S16LE samples at 48 kHz. Returns
-// the number of samples written. When no captured audio is pending (nothing
-// linked / idle) it returns silence so the stream keeps ticking. 0 on bad args.
+// the number of samples written. Emits a short silence tail after audio stops,
+// then returns 0 while silent/idle so downstream Opus/crypto/UDP can go idle.
 size_t ccord_loopback_pw_read(ccord_loopback_pw *pw, int16_t *pcm, size_t max_samples);
+// Pauses or resumes the PipeWire capture stream (deactivates RT callbacks while paused). NULL-safe.
+void ccord_loopback_pw_set_paused(ccord_loopback_pw *pw, bool paused);
 // True when the PipeWire connection / stream died: close and reopen (or fall back).
 bool ccord_loopback_pw_failed(const ccord_loopback_pw *pw);
 // Tears the capture down. NULL-safe.
