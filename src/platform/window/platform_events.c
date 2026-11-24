@@ -378,6 +378,7 @@ static bool translate(ccord_platform *p, const SDL_Event *e, ccord_input_event *
       }
       memcpy(db->last, path, n + 1);
       memcpy(db->queue[p->drop_tail], path, n + 1);
+      db->from_os_drop[p->drop_tail] = true;
       p->drop_tail = (p->drop_tail + 1) % DROP_QUEUE_CAP;
       if (p->drop_pop_count < DROP_QUEUE_CAP) {
         p->drop_pop_count++;

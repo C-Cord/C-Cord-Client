@@ -383,6 +383,7 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
   p->main_thread_id = SDL_GetCurrentThreadID();
   atomic_init(&p->wake_wr_fd, -1);
   atomic_init(&p->suppress_main_wake, false);
+  atomic_init(&p->file_dialog_cancelled, false);
   p->drop_mutex = SDL_CreateMutex();
   SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY;
 #if !defined(__ANDROID__)
@@ -777,6 +778,7 @@ ccord_status ccord_platform_inject_drop_file(ccord_platform *p, const char *path
   }
   memcpy(db->last, path, len + 1);
   memcpy(db->queue[p->drop_tail], path, len + 1);
+  db->from_os_drop[p->drop_tail] = false;
   p->drop_tail = (p->drop_tail + 1) % DROP_QUEUE_CAP;
 
   if (p->drop_ev_count < DROP_QUEUE_CAP) {
@@ -801,7 +803,11 @@ static void SDLCALL on_file_dialog(void *userdata, const char *const *filelist, 
 {
   (void)filter;
   ccord_platform *p = (ccord_platform *)userdata;
-  if (!p || !filelist) return;
+  if (!p) return;
+  if (!filelist || !filelist[0]) {
+    atomic_store_explicit(&p->file_dialog_cancelled, true, memory_order_release);
+    return;
+  }
   for (size_t i = 0; filelist[i] != nullptr; i++) {
     ccord_error err;
     (void)ccord_platform_inject_drop_file(p, filelist[i], &err);
@@ -812,6 +818,7 @@ static void SDLCALL on_file_dialog(void *userdata, const char *const *filelist, 
 void ccord_platform_open_file_dialog(ccord_platform *p)
 {
   if (!p || p->headless) return;
+  atomic_store_explicit(&p->file_dialog_cancelled, false, memory_order_release);
 #if defined(__ANDROID__)
   (void)ccord_android_open_file_picker();
 #else
@@ -832,14 +839,17 @@ const char *ccord_platform_last_drop_file(const ccord_platform *p)
   return res;
 }
 
-bool ccord_platform_pop_drop_file(ccord_platform *p, char *out, size_t cap)
+bool ccord_platform_pop_drop_file_ex(ccord_platform *p, char *out, size_t cap, bool *out_from_os_drop)
 {
+  if (out_from_os_drop) *out_from_os_drop = false;
   if (!p || !out || cap == 0) return false;
   out[0] = '\0';
   bool ok = false;
+  bool from_os = false;
   if (p->drop_mutex) SDL_LockMutex(p->drop_mutex);
   if (p->drop_buf && p->drop_pop_count > 0) {
     const char *src = p->drop_buf->queue[p->drop_pop_head];
+    from_os = p->drop_buf->from_os_drop[p->drop_pop_head];
     size_t len = strlen(src);
     if (len < cap) {
       memcpy(out, src, len + 1);
@@ -855,7 +865,19 @@ bool ccord_platform_pop_drop_file(ccord_platform *p, char *out, size_t cap)
     }
   }
   if (p->drop_mutex) SDL_UnlockMutex(p->drop_mutex);
+  if (ok && out_from_os_drop) *out_from_os_drop = from_os;
   return ok;
+}
+
+bool ccord_platform_pop_drop_file(ccord_platform *p, char *out, size_t cap)
+{
+  return ccord_platform_pop_drop_file_ex(p, out, cap, nullptr);
+}
+
+bool ccord_platform_consume_file_dialog_cancelled(ccord_platform *p)
+{
+  if (!p) return false;
+  return atomic_exchange_explicit(&p->file_dialog_cancelled, false, memory_order_acq_rel);
 }
 
 bool ccord_platform_window_focused(const ccord_platform *p)

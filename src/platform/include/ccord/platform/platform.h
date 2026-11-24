@@ -87,6 +87,11 @@ const char *ccord_platform_last_drop_file(const ccord_platform *p);
 // Pops the next pending dropped/picked file path into `out`. Returns true if a path was copied.
 // Provides the full path for multi-file drops; ccord_input_event.text only holds a 31-byte preview.
 bool ccord_platform_pop_drop_file(ccord_platform *p, char *out, size_t cap);
+// Same as ccord_platform_pop_drop_file(), and optionally reports whether the entry originated from an OS
+// drag-and-drop (SDL_EVENT_DROP_FILE) rather than the file picker / ccord_platform_inject_drop_file().
+bool ccord_platform_pop_drop_file_ex(ccord_platform *p, char *out, size_t cap, bool *out_from_os_drop);
+// Returns true once when the asynchronous native file dialog closed with no files selected (cancelled).
+bool ccord_platform_consume_file_dialog_cancelled(ccord_platform *p);
 
 // Window focus state. C-Cord never flashes the taskbar entry; unread counts go to the tray icon.
 bool ccord_platform_window_focused(const ccord_platform *p);

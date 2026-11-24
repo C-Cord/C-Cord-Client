@@ -23,6 +23,7 @@
 
 typedef struct platform_drop_buf {
   char queue[DROP_QUEUE_CAP][DROP_PATH_MAX];
+  bool from_os_drop[DROP_QUEUE_CAP];
   char last[DROP_PATH_MAX];
 } platform_drop_buf;
 
@@ -58,6 +59,7 @@ struct ccord_platform {
   size_t drop_ev_count;
   size_t drop_pop_head;
   size_t drop_pop_count;
+  atomic_bool file_dialog_cancelled;
   ccord_desktop *desktop;       // DBus notifications / SNI tray / GlobalShortcuts (offline-safe)
   char base_title[BASE_TITLE_MAX];
   uint32_t badge_unread;

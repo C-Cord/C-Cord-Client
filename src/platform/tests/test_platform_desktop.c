@@ -395,8 +395,14 @@ static void test_offline(void)
   CT_CHECK(ccord_platform_next_event(p, &ev, 0) && ev.type == CCORD_EV_HOTKEY);
   CT_CHECK(strcmp(ev.text, "hk-first") == 0);
   CT_CHECK(ccord_platform_next_event(p, &ev, 0) && ev.type == CCORD_EV_DROP_FILE);
+  {
+    char popped[256] = "";
+    bool from_os = true;
+    CT_CHECK(ccord_platform_pop_drop_file_ex(p, popped, sizeof popped, &from_os));
+    CT_CHECK(strcmp(popped, "/tmp/ccord_desktop_test.png") == 0 && !from_os);
+  }
 
-  // SDL3 file drag-and-drop hover lifecycle: BEGIN -> POSITION -> COMPLETE.
+  // SDL3 file drag-and-drop hover lifecycle: BEGIN -> POSITION -> DROP_FILE -> COMPLETE.
   {
     SDL_Event sd = {0};
     sd.type = SDL_EVENT_DROP_BEGIN;
@@ -410,6 +416,16 @@ static void test_offline(void)
     SDL_PushEvent(&sd);
     CT_CHECK(ccord_platform_next_event(p, &ev, 0) && ev.type == CCORD_EV_DROP_POSITION);
     CT_CHECK(ev.x > 0.0f && ev.y > 0.0f);
+
+    memset(&sd, 0, sizeof sd);
+    sd.type = SDL_EVENT_DROP_FILE;
+    sd.drop.data = "/tmp/os_dropped_extension.cce";
+    SDL_PushEvent(&sd);
+    CT_CHECK(ccord_platform_next_event(p, &ev, 0) && ev.type == CCORD_EV_DROP_FILE);
+    char popped[256] = "";
+    bool from_os = false;
+    CT_CHECK(ccord_platform_pop_drop_file_ex(p, popped, sizeof popped, &from_os));
+    CT_CHECK(strcmp(popped, "/tmp/os_dropped_extension.cce") == 0 && from_os);
 
     memset(&sd, 0, sizeof sd);
     sd.type = SDL_EVENT_DROP_COMPLETE;
