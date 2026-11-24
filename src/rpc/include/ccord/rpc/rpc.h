@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 #pragma once
 #include <ccord/core/error.h>
+#include <ccord/core/os.h>
 #include <ccord/rpc/activity.h>
 
 #include <stddef.h>
@@ -80,6 +81,11 @@ void ccord_rpc_server_destroy(ccord_rpc_server *s);
 
 const char *ccord_rpc_server_path(const ccord_rpc_server *s);   // bound socket path; "" for nullptr
 size_t ccord_rpc_server_conn_count(const ccord_rpc_server *s);
+
+// Exports the server listener + active client sockets for poll() and the next handshake/PID-check timer deadline
+// (UINT32_MAX when no timer is armed). Returns the number of descriptors written to out_fds[0..cap).
+size_t ccord_rpc_server_wait_info(const ccord_rpc_server *s, ccord_socket_t *out_fds, size_t cap,
+                                  uint32_t *out_timeout_ms);
 
 uint32_t ccord_rpc_conn_id(const ccord_rpc_conn *conn);          // unique per server, starts at 1
 const char *ccord_rpc_conn_client_id(const ccord_rpc_conn *conn);// the HANDSHAKE client_id; "" before the handshake

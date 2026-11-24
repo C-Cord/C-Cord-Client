@@ -761,7 +761,7 @@ static void test_dead_pid_clears_activity(void)
   close(pfd[1]);
   // Give the child a brief moment to transition to 'Z' in /proc/<pid>/stat.
   for (int i = 0; i < 50; i++) {
-    (void)ccord_rpc_server_poll(s, T0 + 1000u + (uint64_t)i * 1000u);
+    (void)ccord_rpc_server_poll(s, T0 + 5000u + (uint64_t)i * 5000u);
     if (h.cleared == 1) break;
     usleep(2000);
   }
@@ -813,11 +813,13 @@ static void test_dead_pid_clears_activity(void)
   }
   CT_CHECK(h.activity_calls == 1 && h.cleared == 0);
   (void)waitpid(peer, nullptr, 0);
-  (void)ccord_rpc_server_poll(s, T0 + 1000u);
+  (void)ccord_rpc_server_poll(s, T0 + 1000u);   // throttled to 5 s interval
+  CT_CHECK(h.cleared == 0);
+  (void)ccord_rpc_server_poll(s, T0 + 5000u);
   CT_CHECK(h.cleared == 1 && h.activity_calls == 2 && ccord_rpc_server_conn_count(s) == 1);
   close(pfd[1]);
   for (int i = 0; i < 100 && ccord_rpc_server_conn_count(s) > 0; i++) {
-    (void)ccord_rpc_server_poll(s, T0 + 1000u);
+    (void)ccord_rpc_server_poll(s, T0 + 5000u);
     usleep(2000);
   }
   CT_CHECK(ccord_rpc_server_conn_count(s) == 0 && h.disconnects == 1);
@@ -833,8 +835,46 @@ static void test_dead_pid_clears_activity(void)
   client_send(fd, 1,
               "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":99999999,\"activity\":{\"details\":\"Wine\"}},\"nonce\":\"p3\"}");
   CT_CHECK(expect_frame(s, fd, T0) && h.activity_calls == 1 && h.cleared == 0);
-  (void)ccord_rpc_server_poll(s, T0 + 2000u);
+  (void)ccord_rpc_server_poll(s, T0 + 6000u);
   CT_CHECK(h.cleared == 0 && ccord_rpc_server_conn_count(s) == 1);
+  close(fd);
+  ccord_rpc_server_destroy(s);
+}
+
+static void test_wait_info(void)
+{
+  ccord_socket_t fds[16];
+  uint32_t to = 0;
+  CT_CHECK(ccord_rpc_server_wait_info(nullptr, fds, 16, &to) == 0 && to == UINT32_MAX);
+
+  hook_state h = {0};
+  ccord_rpc_server *s = make_server(&h);
+  CT_CHECK(s != nullptr);
+  if (!s) return;
+  (void)ccord_rpc_server_poll(s, T0);
+  size_t nf = ccord_rpc_server_wait_info(s, fds, 16, &to);
+  CT_CHECK(nf == 1 && fds[0] != CCORD_INVALID_SOCKET && to == UINT32_MAX);
+
+  int fd = client_connect(ccord_rpc_server_path(s));
+  CT_CHECK(fd >= 0);
+  (void)ccord_rpc_server_poll(s, T0);
+  nf = ccord_rpc_server_wait_info(s, fds, 16, &to);
+  CT_CHECK(nf == 2 && to <= CCORD_RPC_HANDSHAKE_TIMEOUT_MS);
+
+  client_send(fd, 0, HS);
+  CT_CHECK(expect_frame(s, fd, T0));
+  nf = ccord_rpc_server_wait_info(s, fds, 16, &to);
+  CT_CHECK(nf == 2 && to == UINT32_MAX);
+
+  char req[256];
+  snprintf(req, sizeof req,
+           "{\"cmd\":\"SET_ACTIVITY\",\"args\":{\"pid\":%ld,\"activity\":{\"details\":\"Play\"}},\"nonce\":\"w1\"}",
+           (long)getpid());
+  client_send(fd, 1, req);
+  CT_CHECK(expect_frame(s, fd, T0));
+  nf = ccord_rpc_server_wait_info(s, fds, 16, &to);
+  CT_CHECK(nf == 2 && to <= 5000u);
+
   close(fd);
   ccord_rpc_server_destroy(s);
 }
@@ -860,6 +900,7 @@ int main(void)
   test_connection_limit();
   test_handshake_timeout();
   test_dead_pid_clears_activity();
+  test_wait_info();
 
   ccord_arena_free(&g_arena);
   (void)rmdir(g_dir);

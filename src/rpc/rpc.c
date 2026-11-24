@@ -6,6 +6,7 @@
 #include <ccord/core/alloc.h>
 #include <ccord/core/arena.h>
 #include <ccord/core/buf.h>
+#include <ccord/core/clock.h>
 #include <ccord/core/json.h>
 #include <ccord/core/os.h>
 
@@ -42,13 +43,13 @@ enum { OP_HANDSHAKE = 0, OP_FRAME = 1, OP_CLOSE = 2, OP_PING = 3, OP_PONG = 4 };
 #define RBUF_CAP (8u + CCORD_RPC_FRAME_MAX_PAYLOAD)   // one maximal frame always fits, so a full buffer is never stuck
 #define RBUF_INIT_CAP 4096u                           // start at 4 KiB and grow geometrically up to RBUF_CAP
 #define RBUF_SHRINK_THRESHOLD 8192u                   // shrink back to 4 KiB after large frames drain
-#define ACCEPT_IDLE_INTERVAL_MS 50u                   // throttle idle accept() when no clients are connected
+#define ACCEPT_IDLE_INTERVAL_MS 50u                   // throttle accept() calls between polls
 #define READ_ROUNDS 8u                                // bounded work per connection per poll
 #define ACCEPTS_PER_POLL 16u
 #define CLIENT_ID_MAX 20u                             // a u64 snowflake has at most 20 digits
 #define ECHO_MAX 64u                                  // longest cmd echoed back in an ERROR reply
 #define ACTIVITY_JSON_CAP 32768u                      // 4 activities of 17 fields, worst-case escaped, fit well below this
-#define PID_CHECK_INTERVAL_MS 1000u                   // how often to check tracked PIDs for exit while socket stays open
+#define PID_CHECK_INTERVAL_MS 5000u                   // how often to check tracked PIDs for exit while socket stays open
 
 struct ccord_rpc_conn {
 #if CCORD_OS_WINDOWS
@@ -342,6 +343,41 @@ const char *ccord_rpc_server_path(const ccord_rpc_server *s)
 size_t ccord_rpc_server_conn_count(const ccord_rpc_server *s)
 {
   return s ? s->nconns : 0;
+}
+
+size_t ccord_rpc_server_wait_info(const ccord_rpc_server *s, ccord_socket_t *out_fds, size_t cap,
+                                  uint32_t *out_timeout_ms)
+{
+  if (out_timeout_ms) *out_timeout_ms = UINT32_MAX;
+  if (!s) return 0;
+  size_t n = 0;
+#if !CCORD_OS_WINDOWS
+  if (s->fd != CCORD_INVALID_SOCKET && out_fds && n < cap) out_fds[n++] = s->fd;
+#else
+  (void)out_fds;
+  (void)cap;
+#endif
+  uint64_t now = s->last_poll_ms ? s->last_poll_ms : ccord_clock_ms();
+  uint32_t timeout = UINT32_MAX;
+  for (size_t i = 0; i < s->nconns; i++) {
+    const ccord_rpc_conn *c = s->conns[i];
+    if (!c) continue;
+#if !CCORD_OS_WINDOWS
+    if (c->fd != CCORD_INVALID_SOCKET && out_fds && n < cap) out_fds[n++] = c->fd;
+#endif
+    if (!c->ready) {
+      uint64_t due = c->accepted_ms + CCORD_RPC_HANDSHAKE_TIMEOUT_MS;
+      uint64_t rem = due > now ? (due - now) : 0u;
+      if (rem < (uint64_t)timeout) timeout = (uint32_t)rem;
+    }
+    if (c->has_activity && c->tracked_pid > 0) {
+      uint64_t due = c->last_pid_check_ms + PID_CHECK_INTERVAL_MS;
+      uint64_t rem = due > now ? (due - now) : 0u;
+      if (rem < (uint64_t)timeout) timeout = (uint32_t)rem;
+    }
+  }
+  if (out_timeout_ms) *out_timeout_ms = timeout;
+  return n;
 }
 
 uint32_t ccord_rpc_conn_id(const ccord_rpc_conn *conn)
@@ -945,7 +981,7 @@ size_t ccord_rpc_server_poll(ccord_rpc_server *s, uint64_t now_ms)
   if (!s) return 0;
   s->work = 0;
   s->now_ms = now_ms;
-  bool should_accept = s->nconns > 0 || !s->accept_polled || now_ms == s->last_poll_ms ||
+  bool should_accept = !s->accept_polled || now_ms == s->last_poll_ms ||
                        now_ms < s->last_accept_ms || now_ms - s->last_accept_ms >= ACCEPT_IDLE_INTERVAL_MS;
   if (should_accept) {
     accept_clients(s, now_ms);
