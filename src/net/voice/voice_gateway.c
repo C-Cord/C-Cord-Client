@@ -42,7 +42,7 @@
 
 uint64_t vg_now(const ccord_voice_gateway *g)
 {
-  return g->now_ms ? g->now_ms(g->clock_ud) : ccord_clock_ms();
+  return g->now_ms ? g->now_ms(g->clock_ud) : ccord_clock_boottime_ms();
 }
 
 // Per-user camera receive: defined in the "per-user camera receive" section below (voice_camera.h).
@@ -80,6 +80,7 @@ void vg_close_udp(ccord_voice_gateway *g)
   g->peer_valid = false;
   g->udp_connected = false;
   g->udp_video_buf = false;
+  g->last_udp_empty_ms = 0;
   g->udp_gen++;
 }
 
@@ -93,6 +94,7 @@ static void vg_close(ccord_voice_gateway *g)
   g->open = false;
   g->ws_tx_busy = false;
   g->lifecycle_gen++;
+  if (g->io_cond) ccord_cond_broadcast(g->io_cond);
 }
 
 // Drops only the WebSocket. UDP socket, secret, SSRCs, DAVE and the speaking/ssrc maps are kept so op 7 can resume.
@@ -105,6 +107,7 @@ static void vg_close_ws(ccord_voice_gateway *g)
   g->open = false;
   g->ws_tx_busy = false;
   g->lifecycle_gen++;
+  if (g->io_cond) ccord_cond_broadcast(g->io_cond);
   g->hello = false;
   g->heartbeat_pending = false;
   g->heartbeat_nonce = 0;
@@ -124,18 +127,25 @@ static ccord_status vg_send_ws_locked(ccord_voice_gateway *g, const void *data, 
 {
   if (g->destroying || !g->curl || !g->open) return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
   uint32_t gen = g->lifecycle_gen;
-  int waits = 0;
+  uint64_t busy_deadline = ccord_clock_boottime_ms() + 1000u;
   while (g->ws_tx_busy) {
     if (g->destroying) return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
-    if (++waits > 1000) {
+    uint64_t now = ccord_clock_boottime_ms();
+    if (now >= busy_deadline) {
       return ccord_error_set(err, CCORD_ERR_TIMEOUT,
                              ws_flags == CURLWS_BINARY ? "voice: binary send timed out" : "voice: send timed out");
     }
-    g->inflight_io++;
-    ccord_mutex_unlock(g->mtx);
-    ccord_sleep_ms(1);
-    ccord_mutex_lock(g->mtx);
-    vg_io_leave(g);
+    uint32_t wait_ms = (uint32_t)(busy_deadline - now);
+    if (wait_ms > 20u) wait_ms = 20u;
+    if (g->io_cond) {
+      (void)ccord_cond_wait_timeout(g->io_cond, g->mtx, wait_ms);
+    } else {
+      g->inflight_io++;
+      ccord_mutex_unlock(g->mtx);
+      ccord_sleep_ms(wait_ms);
+      ccord_mutex_lock(g->mtx);
+      vg_io_leave(g);
+    }
     if (g->destroying || g->lifecycle_gen != gen || !g->curl || !g->open) {
       return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
     }
@@ -144,29 +154,48 @@ static ccord_status vg_send_ws_locked(ccord_voice_gateway *g, const void *data, 
   const uint8_t *p = data;
   size_t sent = 0;
   ccord_status st = CCORD_OK;
+  int waits = 0;
+  int fast_out = 0;
+  uint64_t send_deadline = ccord_clock_boottime_ms() + 1000u;
   while (sent < len) {
     size_t n = 0;
     CURLcode rc = curl_ws_send(g->curl, p + sent, len - sent, &n, 0, ws_flags);
     if (rc == CURLE_AGAIN) {
       if (g->destroying) {
         g->ws_tx_busy = false;
+        if (g->io_cond) ccord_cond_broadcast(g->io_cond);
         return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
       }
-      if (++waits > 1000) {
+      uint64_t now = ccord_clock_boottime_ms();
+      if (++waits > 1000 || now >= send_deadline) {
         st = ccord_error_set(err, CCORD_ERR_TIMEOUT,
                              ws_flags == CURLWS_BINARY ? "voice: binary send timed out" : "voice: send timed out");
         break;
       }
+      int poll_ms = (int)(send_deadline - now);
+      if (poll_ms > 20) poll_ms = 20;
+      if (poll_ms < 1) poll_ms = 1;
+      curl_socket_t sock = CURL_SOCKET_BAD;
+      (void)curl_easy_getinfo(g->curl, CURLINFO_ACTIVESOCKET, &sock);
+      unsigned events = (fast_out >= 2) ? CCORD_POLL_IN : CCORD_POLL_OUT;
       g->inflight_io++;
       ccord_mutex_unlock(g->mtx);
-      ccord_sleep_ms(1);
+      if (sock != CURL_SOCKET_BAD) {
+        (void)ccord_sock_poll1((ccord_socket_t)sock, events, poll_ms);
+      } else {
+        ccord_sleep_ms((uint32_t)(poll_ms < 5 ? poll_ms : 5));
+      }
+      uint64_t after = ccord_clock_boottime_ms();
       ccord_mutex_lock(g->mtx);
       vg_io_leave(g);
+      if (events == CCORD_POLL_OUT && after == now) fast_out++;
+      else fast_out = 0;
       if (g->destroying || g->lifecycle_gen != gen) {
         return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
       }
       if (!g->curl || !g->open) {
         g->ws_tx_busy = false;
+        if (g->io_cond) ccord_cond_broadcast(g->io_cond);
         return ccord_error_set(err, CCORD_ERR_IO, "voice: not connected");
       }
       continue;
@@ -177,8 +206,10 @@ static ccord_status vg_send_ws_locked(ccord_voice_gateway *g, const void *data, 
       break;
     }
     sent += n;
+    fast_out = 0;
   }
   g->ws_tx_busy = false;
+  if (g->io_cond) ccord_cond_broadcast(g->io_cond);
   return st;
 }
 
@@ -370,6 +401,9 @@ static void vg_stop_unlocked(ccord_voice_gateway *g, bool destroying)
       g->dave = ccord_dave_create(g->user_id, g->channel_id, vg_dave_send_cb, g, &derr);
     }
   }
+  g->dave_audio_ssrc = 0;
+  g->dave_video_ssrc = 0;
+  g->last_udp_empty_ms = 0;
   ccord_ssrc_map_free(&g->ssrc_map);
   memset(g->ssrc_cache, 0, sizeof g->ssrc_cache);
   vg_bump_vol_gen(g);
@@ -891,7 +925,7 @@ static ccord_status vg_handle_unlocked(ccord_voice_gateway *g, const char *json,
     case CCORD_VOICE_OP_READY:
       g->ready = true;
       g->ssrc = ev.ready_info.ssrc;
-      if (g->dave && g->ssrc != 0) ccord_dave_assign_ssrc(g->dave, g->ssrc, CCORD_DAVE_OPUS);
+      vg_dave_ensure_audio_ssrc(g, g->ssrc);
       vg_copy(g->ip, sizeof g->ip, ev.ready_info.ip);
       g->port = ev.ready_info.port;
       g->mode_count = ev.ready_info.mode_count;
@@ -1307,9 +1341,7 @@ static ccord_status vg_send_video_op(ccord_voice_gateway *g, uint32_t video_ssrc
   if (g->state != CCORD_VOICE_ESTABLISHED && g->state != CCORD_VOICE_READY) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "voice: not established");
   }
-  if (video_ssrc != 0 && g->dave) {
-    ccord_dave_assign_ssrc(g->dave, video_ssrc, CCORD_DAVE_H264);
-  }
+  vg_dave_ensure_video_ssrc(g, video_ssrc);
   ccord_buf b;
   ccord_buf_init(&b, 512);
   ccord_status st = ccord_voice_build_video_ex(g->ssrc, video_ssrc, rtx_ssrc, &g->video_desc, &b, err);
@@ -1466,6 +1498,10 @@ void ccord_voice_gateway_set_suppressed(ccord_voice_gateway *g, bool suppressed)
   if (!g) return;
   ccord_mutex_lock(g->mtx);
   g->suppressed = suppressed;
+  if (suppressed) {
+    g->vad.hangover_left_ms = 0;
+    g->vad.active = false;
+  }
   ccord_mutex_unlock(g->mtx);
 }
 

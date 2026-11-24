@@ -279,7 +279,7 @@ ccord_status ccord_vstream_send_audio(ccord_vstream *s, const uint8_t *opus, siz
     size_t payload_len = len;
     st = CCORD_OK;
     if (g->dave) {
-      ccord_dave_assign_ssrc(g->dave, g->ssrc, CCORD_DAVE_OPUS);
+      vg_dave_ensure_audio_ssrc(g, g->ssrc);
       size_t ct_len = 0;
       if (ccord_dave_encrypt(g->dave, CCORD_DAVE_AUDIO, g->ssrc, opus, len, dave_buf, sizeof dave_buf, &ct_len) !=
           CCORD_DAVE_OK) {
@@ -458,7 +458,7 @@ size_t ccord_vstream_pop_rx_audio(ccord_vstream *s, uint8_t *opus_out, size_t ca
   ccord_voice_gateway *g = s->vg;
   size_t len = 0;
   ccord_mutex_lock(g->mtx);
-  vg_pump_udp_established(g);
+  if (!s->audio_q || s->audio_count == 0) vg_pump_udp_established(g);
   if (s->audio_q && s->audio_count > 0) {
     const vstream_audio_pkt *pkt = &s->audio_q[s->audio_head];
     if (pkt->len <= cap) {
@@ -540,8 +540,17 @@ void ccord_vstream_pump_all(void)
     const uint8_t *au = nullptr;
     size_t au_len = 0;
     bool kf = false;
-    while (ccord_voice_gateway_poll_video(s->vg, &au, &au_len, &kf)) {
+    bool pumped_video = false;
+    for (;;) {
       ccord_mutex_lock(s->vg->mtx);
+      if (s->vg->rx_video_count == 0 && !pumped_video) {
+        pumped_video = true;
+        vg_pump_udp_throttled(s->vg);
+      }
+      if (!vg_pop_video_locked(s->vg, &au, &au_len, &kf)) {
+        ccord_mutex_unlock(s->vg->mtx);
+        break;
+      }
       uint32_t ssrc = s->vg->rx_video_ssrc;
       uint32_t ts = s->vg->rx_video_ts90k;
       ccord_id uid = ccord_ssrc_map_user(&s->vg->ssrc_map, ssrc);

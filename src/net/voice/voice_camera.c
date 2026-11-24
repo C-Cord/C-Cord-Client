@@ -330,11 +330,18 @@ bool ccord_voice_gateway_poll_camera(ccord_voice_gateway *g, ccord_id user_id, u
 {
   if (!g || !buf) return false;
   ccord_mutex_lock(g->mtx);
-  vg_pump_udp(g);
   vg_cam *c = vg_cam_find_user(g, user_id);
-  if (!c || !c->admitted || c->count == 0) {
+  if (!c || !c->admitted) {
     ccord_mutex_unlock(g->mtx);
     return false;
+  }
+  if (c->count == 0) {
+    vg_pump_udp_throttled(g);
+    c = vg_cam_find_user(g, user_id);
+    if (!c || !c->admitted || c->count == 0) {
+      ccord_mutex_unlock(g->mtx);
+      return false;
+    }
   }
   vg_cam_au *au = &c->ring[c->head];
   if (au->len > buf_cap) {  // cannot deliver it: drop it and wait for the next IDR

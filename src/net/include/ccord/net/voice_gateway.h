@@ -115,7 +115,7 @@ typedef struct ccord_voice_gateway_config {
   const char *token;              // VOICE_SERVER_UPDATE token; never logged
   const char *endpoint;           // VOICE_SERVER_UPDATE endpoint host[:port]
   uint32_t connect_timeout_ms;    // 0 -> default
-  uint64_t (*now_ms)(void *ud);   // injectable clock; null -> ccord_clock_ms
+  uint64_t (*now_ms)(void *ud);   // injectable clock; null -> ccord_clock_boottime_ms
   void *clock_ud;
   // Test/embedding hook: when set, frames are delivered here instead of curl.
   ccord_status (*send)(void *ud, const char *data, size_t len, ccord_error *err);

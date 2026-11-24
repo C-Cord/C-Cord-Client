@@ -157,6 +157,9 @@ struct ccord_voice_gateway {
   ccord_voice_aead_ctx aead_ctx;
   ccord_voice_codec *codec;
   ccord_dave *dave;
+  uint32_t dave_audio_ssrc;       // last audio SSRC assigned via ccord_dave_assign_ssrc()
+  uint32_t dave_video_ssrc;       // last video SSRC assigned via ccord_dave_assign_ssrc()
+  uint64_t last_udp_empty_ms;     // last boottime ms when UDP recvfrom() drained to EAGAIN
   ccord_vad vad;
   ccord_ssrc_map ssrc_map;
   vg_ssrc_cache_entry ssrc_cache[VG_SSRC_CACHE_SIZE];
@@ -270,6 +273,24 @@ ccord_status vg_seal_and_send_rtp(ccord_voice_gateway *g,
                                   const uint8_t *payload, size_t payload_len,
                                   ccord_error *err);
 void vg_pump_udp(ccord_voice_gateway *g);
+void vg_pump_udp_throttled(ccord_voice_gateway *g);
+bool vg_pop_video_locked(ccord_voice_gateway *g, const uint8_t **out_annexb, size_t *out_len, bool *out_keyframe);
+
+static inline void vg_dave_ensure_audio_ssrc(ccord_voice_gateway *g, uint32_t ssrc)
+{
+  if (g->dave && ssrc != 0 && g->dave_audio_ssrc != ssrc) {
+    ccord_dave_assign_ssrc(g->dave, ssrc, CCORD_DAVE_OPUS);
+    g->dave_audio_ssrc = ssrc;
+  }
+}
+
+static inline void vg_dave_ensure_video_ssrc(ccord_voice_gateway *g, uint32_t ssrc)
+{
+  if (g->dave && ssrc != 0 && g->dave_video_ssrc != ssrc) {
+    ccord_dave_assign_ssrc(g->dave, ssrc, CCORD_DAVE_H264);
+    g->dave_video_ssrc = ssrc;
+  }
+}
 
 // voice_camera.c
 vg_cam *vg_cam_find_ssrc(ccord_voice_gateway *g, uint32_t ssrc, bool *is_rtx);

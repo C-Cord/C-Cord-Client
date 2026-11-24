@@ -431,7 +431,7 @@ static void vg_send_audio_payload(ccord_voice_gateway *g, const uint8_t *opus, s
   const uint8_t *payload = opus;
   size_t payload_len = opus_len;
   if (g->dave) {
-    ccord_dave_assign_ssrc(g->dave, g->ssrc, CCORD_DAVE_OPUS);
+    vg_dave_ensure_audio_ssrc(g, g->ssrc);
     size_t ct_len = 0;
     if (ccord_dave_encrypt(g->dave, CCORD_DAVE_AUDIO, g->ssrc, opus, opus_len, dave_buf, sizeof dave_buf, &ct_len) !=
         CCORD_DAVE_OK) {
@@ -600,12 +600,14 @@ void vg_pump_udp(ccord_voice_gateway *g)
   }
 
   // 1. Drain incoming UDP packets (IP discovery or encrypted RTP audio/video frames)
+  bool drained_empty = false;
   for (int i = 0; i < 2048; i++) {
     uint8_t pkt[2048];
     struct sockaddr_storage from = {0};
     socklen_t from_len = sizeof from;
     ptrdiff_t n = vg_sock_recvfrom(g->udp_fd, pkt, sizeof pkt, (struct sockaddr *)&from, &from_len);
     if (n < 0) {
+      drained_empty = true;
       break;
     }
     if ((size_t)n == CCORD_VOICE_IP_DISCOVERY_SIZE && pkt[0] == 0x00 && pkt[1] == 0x02) {
@@ -656,6 +658,19 @@ void vg_pump_udp(ccord_voice_gateway *g)
     }
     if ((size_t)n < CCORD_VOICE_RTP_HEADER_SIZE + CCORD_VOICE_TAG_BYTES) continue;
     if ((pkt[0] & 0xC0u) != 0x80u) continue;
+
+    // When locally deafened and no raw-audio tap (Go Live vstream) is attached, drop audio RTP
+    // packets using the unencrypted 12-byte RTP header before AEAD open and DAVE decrypt.
+    if (g->deafened && !g->raw_audio_cb && (pkt[1] & 0x7Fu) == CCORD_VOICE_RTP_PAYLOAD_TYPE) {
+      uint32_t hdr_ssrc = ((uint32_t)pkt[8] << 24) | ((uint32_t)pkt[9] << 16) |
+                          ((uint32_t)pkt[10] << 8) | (uint32_t)pkt[11];
+      bool is_video_ssrc = vg_is_stream_video_ssrc(g, hdr_ssrc) || vg_is_stream_rtx_ssrc(g, hdr_ssrc) ||
+                           (g->cam_rx && vg_cam_find_ssrc(g, hdr_ssrc, nullptr) != nullptr);
+      if (!is_video_ssrc) {
+        g->bitrate_bytes += (uint64_t)n;
+        continue;
+      }
+    }
 
     uint8_t plain[2048];
     size_t plain_len = 0;
@@ -742,6 +757,11 @@ void vg_pump_udp(ccord_voice_gateway *g)
       as->plc_streak = 0;
     }
   }
+  if (drained_empty && !g->send && !g->now_ms) {
+    g->last_udp_empty_ms = now ? now : 1u;
+  } else {
+    g->last_udp_empty_ms = 0;
+  }
 
   // Mix buffered per-SSRC audio frames into rx_pcm on an anchored 20 ms clock beat when 2+ speakers
   // are active so out-of-phase speakers combine smoothly without early bursts or zero-sample clicks.
@@ -782,6 +802,7 @@ void vg_pump_udp(ccord_voice_gateway *g)
     int32_t acc[CCORD_VOICE_FRAME_SAMPLES * CCORD_VOICE_CHANNELS];
     memset(acc, 0, sizeof acc);
     size_t mixed_streams = 0;
+    bool progressed = false;
     for (size_t i = 0; i < VOICE_MAX_STREAMS; i++) {
       vg_audio_stream *as = &g->audio_streams[i];
       if (!as->used || !as->dec || !as->jitter) continue;
@@ -800,19 +821,27 @@ void vg_pump_udp(ccord_voice_gateway *g)
         uint8_t opus_pkt[CCORD_JITTER_MAX_PACKET];
         size_t opus_len = 0;
         ccord_jitter_result jr = ccord_jitter_pop(as->jitter, opus_pkt, sizeof opus_pkt, &opus_len);
-        if (jr == CCORD_JITTER_LOST) g->packets_lost++;
-        if (jr == CCORD_JITTER_PACKET && opus_len > 0 && pct != 0u) {
-          n = opus_decode(as->dec, opus_pkt, (opus_int32)opus_len, decoded, (int)CCORD_VOICE_FRAME_SAMPLES, 0);
+        if (jr == CCORD_JITTER_LOST) {
+          g->packets_lost++;
+          progressed = true;
+        }
+        if (jr == CCORD_JITTER_PACKET && opus_len > 0) {
+          progressed = true;
           as->plc_streak = 0;
-        } else if (jr == CCORD_JITTER_LOST) {
-          // Conceal losses even while muted: a silent PLC frame keeps the playout timeline moving.
+          if (pct != 0u) {
+            n = opus_decode(as->dec, opus_pkt, (opus_int32)opus_len, decoded, (int)CCORD_VOICE_FRAME_SAMPLES, 0);
+          }
+        } else if (jr == CCORD_JITTER_LOST && pct != 0u) {
           n = opus_decode(as->dec, nullptr, 0, decoded, (int)CCORD_VOICE_FRAME_SAMPLES, 0);
         }
       } else if (active_streams >= 2u && as->talking && as->plc_streak < 3u && as->last_rx_ms != 0 &&
                  now >= as->last_rx_ms && now - as->last_rx_ms <= 80u) {
-        // Active co-speaker missed the grace window: conceal 1 frame via Opus PLC instead of a hard zero drop.
-        n = opus_decode(as->dec, nullptr, 0, decoded, (int)CCORD_VOICE_FRAME_SAMPLES, 0);
+        // Active co-speaker missed the grace window: conceal 1 frame via Opus PLC unless locally muted.
+        if (pct != 0u) {
+          n = opus_decode(as->dec, nullptr, 0, decoded, (int)CCORD_VOICE_FRAME_SAMPLES, 0);
+        }
         ccord_jitter_conceal_step(as->jitter);
+        progressed = true;
         as->plc_streak++;
         if (as->plc_streak >= 3u) as->talking = false;
       } else {
@@ -836,7 +865,10 @@ void vg_pump_udp(ccord_voice_gateway *g)
         mixed_streams++;
       }
     }
-    if (mixed_streams == 0) break;
+    if (mixed_streams == 0) {
+      if (progressed) continue;
+      break;
+    }
     if (!vg_pcm_ensure(&g->rx_pcm)) break;
     size_t tail = (g->rx_pcm.head + g->rx_pcm.len) % VOICE_PCM_CAP_SAMPLES;
     bool contiguous = (tail + CCORD_VOICE_FRAME_SAMPLES <= VOICE_PCM_CAP_SAMPLES);
@@ -904,10 +936,9 @@ void vg_pump_udp(ccord_voice_gateway *g)
       memset(frame, 0, sizeof frame);
     }
     bool mic_on = false;
-    if (have_mic) {
+    if (have_mic && !g->suppressed) {
       if (g->dsp) (void)ccord_voice_dsp_process(g->dsp, frame, CCORD_VOICE_FRAME_SAMPLES);
-      mic_on = ccord_vad_process(&g->vad, frame, CCORD_VOICE_FRAME_SAMPLES, CCORD_VOICE_CHANNELS, 20u) &&
-               !g->suppressed;
+      mic_on = ccord_vad_process(&g->vad, frame, CCORD_VOICE_FRAME_SAMPLES, CCORD_VOICE_CHANNELS, 20u);
     }
     bool sb_on = g->sb_pcm.len >= CCORD_VOICE_FRAME_SAMPLES && g->sb_pcm.data != nullptr;
     if (sb_on) {
@@ -971,6 +1002,21 @@ void vg_pump_udp(ccord_voice_gateway *g)
     }
   }
   g->tx_pumping = false;
+}
+
+void vg_pump_udp_throttled(ccord_voice_gateway *g)
+{
+  if (!g || g->udp_fd < 0) return;
+  // Avoid redundant empty recvfrom() syscalls when multiple poll_camera/poll_video callers
+  // invoke UDP pumping back-to-back within <2 ms on live sockets. Never throttle test hooks
+  // (g->send / g->now_ms) or when outgoing audio TX frames are queued.
+  if (!g->send && !g->now_ms && g->last_udp_empty_ms != 0 &&
+      g->tx_pcm.len < CCORD_VOICE_FRAME_SAMPLES && g->sb_pcm.len < CCORD_VOICE_FRAME_SAMPLES &&
+      g->silence_frames_left == 0) {
+    uint64_t now = vg_now(g);
+    if (now >= g->last_udp_empty_ms && now - g->last_udp_empty_ms < 2u) return;
+  }
+  vg_pump_udp(g);
 }
 
 
@@ -1055,7 +1101,7 @@ ccord_status ccord_voice_gateway_send_h264(ccord_voice_gateway *g, const uint8_t
   const uint8_t *frame_to_pkt = annexb;
   size_t frame_to_pkt_len = len;
   if (g->dave) {
-    ccord_dave_assign_ssrc(g->dave, g->video_ssrc, CCORD_DAVE_H264);
+    vg_dave_ensure_video_ssrc(g, g->video_ssrc);
     size_t max_ct = ccord_dave_max_ciphertext(g->dave, CCORD_DAVE_VIDEO, len);
     if (max_ct > g->tx_dave_cap) {
       size_t ncap = max_ct + 4096u;
@@ -1090,15 +1136,10 @@ ccord_status ccord_voice_gateway_send_h264(ccord_voice_gateway *g, const uint8_t
   return st;
 }
 
-bool ccord_voice_gateway_poll_video(ccord_voice_gateway *g, const uint8_t **out_annexb, size_t *out_len,
-                                    bool *out_keyframe)
+bool vg_pop_video_locked(ccord_voice_gateway *g, const uint8_t **out_annexb, size_t *out_len, bool *out_keyframe)
 {
-  if (!g) return false;
-  ccord_mutex_lock(g->mtx);
-  vg_pump_udp(g);
-  if (g->rx_video_count == 0) {
-    g->rx_video_ready = false;
-    ccord_mutex_unlock(g->mtx);
+  if (!g || g->rx_video_count == 0) {
+    if (g) g->rx_video_ready = false;
     return false;
   }
   vg_video_slot *slot = &g->rx_video_ring[g->rx_video_head];
@@ -1120,8 +1161,18 @@ bool ccord_voice_gateway_poll_video(ccord_voice_gateway *g, const uint8_t **out_
   if (out_annexb) *out_annexb = g->rx_video_buf;
   if (out_len) *out_len = g->rx_video_len;
   if (out_keyframe) *out_keyframe = g->rx_video_keyframe;
-  ccord_mutex_unlock(g->mtx);
   return true;
+}
+
+bool ccord_voice_gateway_poll_video(ccord_voice_gateway *g, const uint8_t **out_annexb, size_t *out_len,
+                                    bool *out_keyframe)
+{
+  if (!g) return false;
+  ccord_mutex_lock(g->mtx);
+  if (g->rx_video_count == 0) vg_pump_udp_throttled(g);
+  bool ok = vg_pop_video_locked(g, out_annexb, out_len, out_keyframe);
+  ccord_mutex_unlock(g->mtx);
+  return ok;
 }
 
 
@@ -1210,7 +1261,7 @@ void vg_pump_udp_established(ccord_voice_gateway *g)
 {
   if (!g) return;
   if (g->state == CCORD_VOICE_ESTABLISHED && g->selected) {
-    vg_pump_udp(g);
+    vg_pump_udp_throttled(g);
   }
 }
 
