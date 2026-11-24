@@ -947,6 +947,13 @@ static bool ui_caret_wants_blink(const ccord_ui *ui)
          ui_forum_is_active(ui) || uc_composer_accepts_text(ui);
 }
 
+void ccord_ui_set_now_ms(ccord_ui *ui, uint64_t now_ms)
+{
+  if (!ui) return;
+  ui->now_ms = now_ms;
+  ui->now_unix_ms = ui->d.fixed_now_unix_ms ? ui->d.fixed_now_unix_ms : ccord_clock_unix_ms();
+}
+
 bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
 {
   uint64_t prev_anim_ms = ui->last_anim_ms;

@@ -2391,6 +2391,137 @@ static void test_mobile_smooth_kinetic_scrolling(void)
   CT_CHECK(!F.ui->touch.fling_active);
 }
 
+static void test_mobile_idle_wake_touch_scroll_and_buttons(void)
+{
+  ccord_ui_set_now_ms(nullptr, 123u);
+  ccord_ui_set_viewport(F.ui, 412.0f, 915.0f);
+  ccord_ui_set_mobile_mode(F.ui, true);
+  ccord_ui_set_touch_mode(F.ui, true);
+  ccord_ui_set_safe_insets(F.ui, 44.0f, 0.0f, 34.0f, 0.0f);
+  ccord_ui_set_left_drawer(F.ui, false);
+  ccord_ui_set_right_drawer(F.ui, false);
+  ccord_vlist_reset_bottom(&F.ui->vlist);
+  step_frames(6, 25);
+
+  ccord_layout_rect ma = F.ui->layout.message_area;
+  float cx = ma.x + ma.w * 0.5f;
+  float cy = ma.y + ma.h * 0.4f;
+  float top_before = 0.0f, sz_tmp = 0.0f;
+  ccord_vlist_thumb(&F.ui->vlist, ma.h, &top_before, &sz_tmp);
+  CT_CHECK(F.ui->vlist.stick_bottom);
+
+  // 1. After an idle sleep longer than UI_TOUCH_LONG_PRESS_MS (2000 ms > 420 ms), syncing the UI
+  //    clock on wake prevents TOUCH_DOWN from immediately firing long-press + haptic and lets
+  //    subsequent TOUCH_MOVE drag-scroll and fling normally.
+  int haptics_before = F.haptic_calls;
+  uint64_t anim_before = F.ui->last_anim_ms;
+  F.now += 2000u;
+  ccord_ui_set_now_ms(F.ui, F.now);
+  CT_CHECK(F.ui->last_anim_ms == anim_before);   // does not disturb frame-dt baseline
+
+  uint64_t ts = 90000000000ULL;
+  touch_ev_ts(CCORD_IN_TOUCH_DOWN, 120, cx, cy, ts);
+  (void)ccord_ui_update(F.ui, F.now);
+  CT_CHECK(F.haptic_calls == haptics_before);
+  CT_CHECK(!F.ui->menu.open);
+  CT_CHECK(F.ui->touch.active && F.ui->touch.mode == 1u);   // still TOUCH_PENDING, not LONG_PRESS_FIRED
+  uint32_t lp_wait = ccord_ui_next_wait_ms(F.ui, F.now);
+  CT_CHECK(lp_wait > 300u && lp_wait <= UI_TOUCH_LONG_PRESS_MS);
+
+  for (int i = 1; i <= 5; i++) {
+    F.now += 16u;
+    ts += 16000000ULL;
+    ccord_ui_set_now_ms(F.ui, F.now);
+    touch_ev_ts(CCORD_IN_TOUCH_MOVE, 120, cx, cy + (float)i * 28.0f, ts);
+    (void)ccord_ui_update(F.ui, F.now);
+  }
+  F.now += 16u;
+  ts += 16000000ULL;
+  ccord_ui_set_now_ms(F.ui, F.now);
+  touch_ev_ts(CCORD_IN_TOUCH_UP, 120, cx, cy + 140.0f, ts);
+  (void)ccord_ui_update(F.ui, F.now);
+
+  float top_after = 0.0f;
+  ccord_vlist_thumb(&F.ui->vlist, ma.h, &top_after, &sz_tmp);
+  CT_CHECK(F.haptic_calls == haptics_before);
+  CT_CHECK(!F.ui->menu.open);
+  CT_CHECK(!F.ui->vlist.stick_bottom);
+  CT_CHECK(top_after < top_before - 0.01f);
+  CT_CHECK(F.ui->touch.fling_active);
+  // Let fling finish cleanly before testing button tap.
+  step_frames(40, 30);
+
+  // 2. Button tap after a 2000 ms idle sleep activates the button without premature long-press.
+  CT_CHECK(!ccord_ui_left_drawer_open(F.ui));
+  ccord_rect hb = ui_drawer_btn_rect(F.ui);
+  CT_CHECK(hb.w > 20.0f && hb.h > 20.0f);
+  haptics_before = F.haptic_calls;
+  F.now += 2000u;
+  ccord_ui_set_now_ms(F.ui, F.now);
+  touch_ev(CCORD_IN_TOUCH_DOWN, 121, hb.x + hb.w * 0.5f, hb.y + hb.h * 0.5f);
+  (void)ccord_ui_update(F.ui, F.now);
+  CT_CHECK(F.haptic_calls == haptics_before);
+  CT_CHECK(F.ui->touch.active && F.ui->touch.mode == 1u);
+
+  F.now += 50u;
+  ccord_ui_set_now_ms(F.ui, F.now);
+  touch_ev(CCORD_IN_TOUCH_UP, 121, hb.x + hb.w * 0.5f, hb.y + hb.h * 0.5f);
+  (void)ccord_ui_update(F.ui, F.now);
+  CT_CHECK(ccord_ui_left_drawer_open(F.ui));
+  ccord_ui_set_left_drawer(F.ui, false);
+  step_frames(10, 40);
+  CT_CHECK(!ccord_ui_left_drawer_open(F.ui));
+
+  // 3. Genuine long-press after a 2000 ms idle sleep still triggers cleanly at UI_TOUCH_LONG_PRESS_MS.
+  haptics_before = F.haptic_calls;
+  F.now += 2000u;
+  ccord_ui_set_now_ms(F.ui, F.now);
+  touch_ev(CCORD_IN_TOUCH_DOWN, 122, cx, ma.y + ma.h * 0.5f);
+  (void)ccord_ui_update(F.ui, F.now);
+  CT_CHECK(F.haptic_calls == haptics_before && !F.ui->menu.open);
+  F.now += UI_TOUCH_LONG_PRESS_MS - 20u;
+  (void)ccord_ui_update(F.ui, F.now);
+  CT_CHECK(F.haptic_calls == haptics_before && !F.ui->menu.open);
+  F.now += 30u;
+  (void)ccord_ui_update(F.ui, F.now);
+  CT_CHECK(F.ui->menu.open);
+  CT_CHECK(F.haptic_calls == haptics_before + 1 && F.last_haptic_style == 1);
+  ccord_ui_set_now_ms(F.ui, F.now);
+  touch_ev(CCORD_IN_TOUCH_UP, 122, cx, ma.y + ma.h * 0.5f);
+  CT_CHECK(ccord_ui_handle_back(F.ui));
+  CT_CHECK(!F.ui->menu.open);
+  step_frames(2, 20);
+
+  // 4. Lightbox single-tap after a 2000 ms idle sleep does not falsely trigger double-tap zoom
+  //    or immediately expire the pending single-tap window on frame 0.
+  F.ui->lightbox_open = true;
+  F.ui->lightbox_zoom = 1.0f;
+  F.ui->lightbox_hud_visible = true;
+  F.ui->lightbox_hud_alpha = 1.0f;
+  F.ui->touch.last_tap_ms = 0;
+  F.ui->touch.pending_single_tap = false;
+  step_frames(2, 20);
+
+  touch_ev(CCORD_IN_TOUCH_DOWN, 123, 206.0f, 450.0f);
+  step_frames(1, 20);
+  touch_ev(CCORD_IN_TOUCH_UP, 123, 206.0f, 450.0f);
+  step_frames(12, 30);   // > 280 ms -> single-tap toggled HUD off
+  CT_CHECK(!F.ui->lightbox_hud_visible);
+
+  F.now += 2000u;
+  ccord_ui_set_now_ms(F.ui, F.now);
+  touch_ev(CCORD_IN_TOUCH_DOWN, 124, 206.0f, 450.0f);
+  (void)ccord_ui_update(F.ui, F.now);
+  F.now += 30u;
+  ccord_ui_set_now_ms(F.ui, F.now);
+  touch_ev(CCORD_IN_TOUCH_UP, 124, 206.0f, 450.0f);
+  (void)ccord_ui_update(F.ui, F.now);
+  CT_CHECK(fabsf(F.ui->lightbox_zoom - 1.0f) < 0.05f);   // NOT misclassified as a double-tap
+  CT_CHECK(F.ui->touch.pending_single_tap);              // waiting for double-tap window, not expired
+  F.ui->lightbox_open = false;
+  step_frames(2, 20);
+}
+
 int main(void)
 {
   test_mobile_layout_geometry();
@@ -2418,6 +2549,7 @@ int main(void)
   test_mobile_zoom_and_touch_targets();
   test_mobile_systemic_button_chip_and_ellipsis();
   test_mobile_smooth_kinetic_scrolling();
+  test_mobile_idle_wake_touch_scroll_and_buttons();
   fixture_destroy();
   return CT_RESULT("test_ui_mobile");
 }

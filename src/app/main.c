@@ -136,6 +136,7 @@ void app_draw_frame(app *a)
 // One iteration without waiting: pump, update, draw if needed. Returns whether it drew.
 bool app_step(app *a, bool force_draw)
 {
+  if (a->ui) ccord_ui_set_now_ms(a->ui, app_now_ms(a));
   app_pump(a);
   bool redraw = ccord_ui_update(a->ui, app_now_ms(a)) || force_draw;
   if (ccord_app_desktop_take_redraw(a->desktop)) redraw = true;
@@ -145,6 +146,7 @@ bool app_step(app *a, bool force_draw)
 
 void app_inject(app *a, const ccord_input_event *ev)
 {
+  if (a->ui) ccord_ui_set_now_ms(a->ui, app_now_ms(a));
   (void)ccord_ui_handle_input(a->ui, ev);
 }
 
@@ -332,8 +334,12 @@ static void run_interactive(app *a)
       }
       got_ev = ccord_platform_wait_idle(a->platform, &ev, wait_fds, nfds, wait_timeout);
     }
+    // Refresh UI clock immediately on wake so input handlers (touch long-press/double-tap, notices,
+    // debouncers) and bus callbacks never stamp pre-sleep timestamps from the previous idle frame.
+    uint64_t wake_ms = app_now_ms(a);
+    if (a->ui) ccord_ui_set_now_ms(a->ui, wake_ms);
     if (got_ev) {
-      last_input_ms = app_now_ms(a);
+      last_input_ms = wake_ms;
       bool saw_picker_drop = false;
       do {
         if (ev.type == CCORD_IN_QUIT) {

@@ -105,6 +105,9 @@ typedef struct ccord_ui ccord_ui;
 ccord_ui *ccord_ui_create(const ccord_ui_deps *deps, ccord_error *err);   // subscribes to message.create/channel.select on the bus
 void ccord_ui_destroy(ccord_ui *ui);
 void ccord_ui_set_viewport(ccord_ui *ui, float logical_w, float logical_h);
+// Syncs the UI's monotonic/wall clock before input or bus dispatch after an idle wait without
+// advancing frame animation dt (ccord_ui_update still owns last_anim_ms and frame stepping).
+void ccord_ui_set_now_ms(ccord_ui *ui, uint64_t now_ms);
 bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev);    // true -> redraw needed
 bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms);                      // animations, caret blink, store/contrib revision changes; true -> redraw
 // Milliseconds until the UI next needs a scheduled redraw (0 = smooth 60/120 Hz animation needed now;
