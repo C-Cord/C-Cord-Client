@@ -127,13 +127,14 @@ if(CCORD_LIVE_ACCOUNT)
 endif()
 ccord_strict_warnings(ccord_net_voice)
 
-# 6. Dual-mode auxiliary services (profile_edit, http_fetch, video_resolve, detectable, app_lookup).
+# 6. Dual-mode auxiliary services (profile_edit, http_fetch, ccord_cloud, video_resolve, detectable, app_lookup).
 add_library(ccord_net_services STATIC
   services/profile_edit.c
   services/account_edit.c
   services/app_lookup.c
   services/detectable.c
   services/http_fetch.c
+  services/ccord_cloud.c
   services/video_resolve_parse.c
   services/video_resolve_worker.c)
 add_library(ccord::net_services ALIAS ccord_net_services)
@@ -192,6 +193,7 @@ if(CCORD_BUILD_TESTS)
     target_link_libraries(test_voice_dave PRIVATE ccord::dave)
   endif()
   ccord_add_test(NAME test_video_resolve SOURCES tests/test_video_resolve.c LIBS ccord_net_services LABELS unit)
+  ccord_add_test(NAME test_ccord_cloud SOURCES tests/test_ccord_cloud.c LIBS ccord_net_services LABELS unit)
 
   # Offline mock & session-voice tests
   ccord_add_test(NAME test_mock_core SOURCES tests/test_mock_core.c LIBS ccord_net_mock LABELS unit)

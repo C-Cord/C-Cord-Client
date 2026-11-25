@@ -1313,7 +1313,8 @@ bool ccord_ws_client_send(ccord_ws_client *ws, const uint8_t *data, size_t len, 
 #endif
 }
 
-int ccord_ws_client_recv(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *out_binary, int timeout_ms)
+int ccord_ws_client_recv_wake(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *out_binary,
+                              int wake_fd, int timeout_ms)
 {
 #if defined(CURLWS_TEXT)
   if (!ws || !ws->curl || !buf || cap == 0) return -1;
@@ -1321,13 +1322,22 @@ int ccord_ws_client_recv(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *ou
   if (timeout_ms > 0) {
     curl_socket_t sock = CURL_SOCKET_BAD;
     if (curl_easy_getinfo(ws->curl, CURLINFO_ACTIVESOCKET, &sock) == CURLE_OK && sock != CURL_SOCKET_BAD) {
-      struct pollfd pfd = {.fd = sock, .events = POLLIN};
-      int pr = poll(&pfd, 1, timeout_ms);
-      if (pr == 0) return 0;
-      if (pr < 0) return 0;
+      struct pollfd pfds[2];
+      nfds_t nfds = 1;
+      pfds[0] = (struct pollfd){.fd = sock, .events = POLLIN};
+      if (wake_fd >= 0) {
+        pfds[1] = (struct pollfd){.fd = wake_fd, .events = POLLIN};
+        nfds = 2;
+      }
+      int pr = poll(pfds, nfds, timeout_ms);
+      if (pr <= 0) return 0;
+      if (nfds == 2 && (pfds[1].revents & POLLIN) && !(pfds[0].revents & (POLLIN | POLLERR | POLLHUP))) {
+        return 0;
+      }
     }
   }
 #else
+  (void)wake_fd;
   (void)timeout_ms;
 #endif
   size_t rlen = 0;
@@ -1339,9 +1349,14 @@ int ccord_ws_client_recv(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *ou
   if (out_binary) *out_binary = meta && (meta->flags & CURLWS_BINARY) != 0;
   return (int)rlen;
 #else
-  (void)ws; (void)buf; (void)cap; (void)out_binary; (void)timeout_ms;
+  (void)ws; (void)buf; (void)cap; (void)out_binary; (void)wake_fd; (void)timeout_ms;
   return -1;
 #endif
+}
+
+int ccord_ws_client_recv(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *out_binary, int timeout_ms)
+{
+  return ccord_ws_client_recv_wake(ws, buf, cap, out_binary, -1, timeout_ms);
 }
 
 void ccord_ws_client_close(ccord_ws_client *ws, uint16_t code, const char *reason)
@@ -1422,6 +1437,13 @@ bool ccord_ws_client_send(ccord_ws_client *ws, const uint8_t *data, size_t len, 
 {
   (void)ws; (void)data; (void)len; (void)binary;
   return false;
+}
+
+int ccord_ws_client_recv_wake(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *out_binary,
+                              int wake_fd, int timeout_ms)
+{
+  (void)ws; (void)buf; (void)cap; (void)out_binary; (void)wake_fd; (void)timeout_ms;
+  return -1;
 }
 
 int ccord_ws_client_recv(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *out_binary, int timeout_ms)

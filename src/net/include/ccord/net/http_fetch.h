@@ -91,6 +91,8 @@ bool ccord_http_download(const ccord_http_download_opts *req, ccord_http_downloa
 typedef struct ccord_ws_client ccord_ws_client;
 ccord_ws_client *ccord_ws_client_open(const char *url, const char *headers_json, char *err_buf, size_t err_cap);
 bool ccord_ws_client_send(ccord_ws_client *ws, const uint8_t *data, size_t len, bool binary);
-// Returns >0 bytes received, 0 on timeout, -1 on close/error.
+// Returns >0 bytes received, 0 on timeout or wake_fd signaled, -1 on close/error.
 int ccord_ws_client_recv(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *out_binary, int timeout_ms);
+int ccord_ws_client_recv_wake(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *out_binary,
+                              int wake_fd, int timeout_ms);
 void ccord_ws_client_close(ccord_ws_client *ws, uint16_t code, const char *reason);
