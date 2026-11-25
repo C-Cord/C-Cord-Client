@@ -183,7 +183,7 @@ typedef struct ccord_ui_plugin_reply {
   char author[65];
   char version[33];
   char date[16];
-  char body[320];
+  char body[512];
   bool is_developer;
   bool is_mine;
   bool is_deleted;
@@ -193,7 +193,7 @@ typedef struct ccord_ui_plugin_comment {
   char author[65];
   char version[33];
   char date[16];
-  char body[320];
+  char body[512];
   bool is_developer;
   bool is_mine;
   bool is_deleted;
