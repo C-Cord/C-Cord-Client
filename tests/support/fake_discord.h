@@ -36,6 +36,12 @@ typedef struct fd_hit {
   char audit[160];        // the X-Audit-Log-Reason header exactly as sent on the wire ("" when absent)
   char content_type[96];  // Content-Type header value
   char authorization[160];  // Authorization header value ("" when absent; truncated to fit)
+  char captcha_key[96];     // X-Captcha-Key header value
+  char captcha_rqtoken[64]; // X-Captcha-Rqtoken header value
+  char captcha_session_id[64]; // X-Captcha-Session-Id header value
+  char fingerprint[64];     // X-Fingerprint header value
+  char cookie[96];          // Cookie header value
+  char origin[64];          // Origin header value
   bool super_properties;  // an X-Super-Properties header was present
   size_t body_len;        // exact Content-Length received
   char body[640];         // request body (NUL-terminated; binary-copied up to sizeof body - 1)
@@ -146,10 +152,60 @@ static void fd_serve(int lfd, int wfd, fd_respond_fn fn, void *ud)
         req.authorization[vl] = '\0';
       } else if (strncasecmp(p, "X-Super-Properties:", 19) == 0) {
         req.super_properties = true;
+      } else if (strncasecmp(p, "X-Captcha-Key:", 14) == 0) {
+        char *v = p + 14;
+        while (*v == ' ') v++;
+        size_t vl = (size_t)(nl - v);
+        if (vl >= sizeof req.captcha_key) vl = sizeof req.captcha_key - 1u;
+        memcpy(req.captcha_key, v, vl);
+        req.captcha_key[vl] = '\0';
+      } else if (strncasecmp(p, "X-Captcha-Rqtoken:", 18) == 0) {
+        char *v = p + 18;
+        while (*v == ' ') v++;
+        size_t vl = (size_t)(nl - v);
+        if (vl >= sizeof req.captcha_rqtoken) vl = sizeof req.captcha_rqtoken - 1u;
+        memcpy(req.captcha_rqtoken, v, vl);
+        req.captcha_rqtoken[vl] = '\0';
+      } else if (strncasecmp(p, "X-Captcha-Session-Id:", 21) == 0) {
+        char *v = p + 21;
+        while (*v == ' ') v++;
+        size_t vl = (size_t)(nl - v);
+        if (vl >= sizeof req.captcha_session_id) vl = sizeof req.captcha_session_id - 1u;
+        memcpy(req.captcha_session_id, v, vl);
+        req.captcha_session_id[vl] = '\0';
+      } else if (strncasecmp(p, "X-Fingerprint:", 14) == 0) {
+        char *v = p + 14;
+        while (*v == ' ') v++;
+        size_t vl = (size_t)(nl - v);
+        if (vl >= sizeof req.fingerprint) vl = sizeof req.fingerprint - 1u;
+        memcpy(req.fingerprint, v, vl);
+        req.fingerprint[vl] = '\0';
+      } else if (strncasecmp(p, "Cookie:", 7) == 0) {
+        char *v = p + 7;
+        while (*v == ' ') v++;
+        size_t vl = (size_t)(nl - v);
+        if (vl >= sizeof req.cookie) vl = sizeof req.cookie - 1u;
+        memcpy(req.cookie, v, vl);
+        req.cookie[vl] = '\0';
+      } else if (strncasecmp(p, "Origin:", 7) == 0) {
+        char *v = p + 7;
+        while (*v == ' ') v++;
+        size_t vl = (size_t)(nl - v);
+        if (vl >= sizeof req.origin) vl = sizeof req.origin - 1u;
+        memcpy(req.origin, v, vl);
+        req.origin[vl] = '\0';
       }
       p = nl + 2;
     }
-    (void)!write(wfd, &req, sizeof req);
+    for (size_t off = 0; off < sizeof req;) {
+      ssize_t w = write(wfd, (const char *)&req + off, sizeof req - off);
+      if (w < 0) {
+        if (errno == EINTR) continue;
+        break;
+      }
+      if (w == 0) break;
+      off += (size_t)w;
+    }
     char out[262144];
     size_t n = fn(ud, idx, &req, out, sizeof out);
     for (size_t off = 0; off < n;) {
@@ -184,10 +240,13 @@ static void fd_serve(int lfd, int wfd, fd_respond_fn fn, void *ud)
   }
   s->port = ntohs(sin.sin_port);
   int pfd[2];
-  if (pipe(pfd) != 0) {
+  if (socketpair(AF_UNIX, SOCK_STREAM, 0, pfd) != 0) {
     close(lfd);
     return false;
   }
+  int bufsz = 262144;
+  (void)setsockopt(pfd[1], SOL_SOCKET, SO_SNDBUF, &bufsz, sizeof bufsz);
+  (void)setsockopt(pfd[0], SOL_SOCKET, SO_RCVBUF, &bufsz, sizeof bufsz);
   s->pid = fork();
   if (s->pid == 0) {
     close(pfd[0]);

@@ -23,6 +23,7 @@ typedef enum scenario {
   SC_503_ONCE,       // first hit 503, then 200
   SC_503_ALWAYS,     // every hit 503
   SC_MFA,            // /auth/login -> mfa ticket, /auth/mfa/totp -> token
+  SC_CAPTCHA_FLOW,   // /experiments -> fingerprint+cookie, /auth/login -> 400 captcha, retry w/ headers -> token
 } scenario;
 
 #define MAX_HITS FD_MAX_HITS
@@ -62,6 +63,21 @@ static size_t respond(void *ud, int idx, const fd_hit *req, char *out, size_t ca
         return fd_reply(out, cap, 200, "OK", nullptr, "{\"mfa\":true,\"ticket\":\"tkt-123\"}");
       }
       return fd_reply(out, cap, 200, "OK", nullptr, "{\"token\":\"TOTP_TOKEN\"}");
+    case SC_CAPTCHA_FLOW:
+      if (strncmp(path, "/experiments", 12) == 0) {
+        return fd_reply(out, cap, 200, "OK", "Set-Cookie: __dcfduid=abc123; Path=/\r\n",
+                        "{\"fingerprint\":\"fp-test-999\"}");
+      }
+      if (strncmp(path, "/auth/login", 11) == 0) {
+        if (req->captcha_key[0] == '\0') {
+          return fd_reply(out, cap, 400, "Bad Request", nullptr,
+                          "{\"captcha_key\":[\"captcha-required\"],\"captcha_service\":\"hcaptcha\","
+                          "\"captcha_sitekey\":\"sitekey-test-1\",\"captcha_rqdata\":\"rqdata-blob-xyz\","
+                          "\"captcha_rqtoken\":\"rqtok-123\",\"captcha_session_id\":\"sess-456\"}");
+        }
+        return fd_reply(out, cap, 200, "OK", nullptr, "{\"token\":\"CAPTCHA_SOLVED_TOKEN\"}");
+      }
+      return fd_reply(out, cap, 200, "OK", nullptr, ok);
     case SC_503_ONCE:
       if (idx == 0) return fd_reply(out, cap, 503, "Service Unavailable", nullptr, "{\"message\":\"unavailable\"}");
       return fd_reply(out, cap, 200, "OK", nullptr, ok);
@@ -105,7 +121,7 @@ typedef struct result {
   int calls;
   ccord_status status;
   long http;
-  char body[64];
+  char body[1024];
   uint64_t at_ms;
 } result;
 
@@ -743,6 +759,82 @@ static void test_wait_info_rate_limit_and_idle(void)
   ccord_rest_queue_destroy(q);
 }
 
+// Full pre-auth fingerprint + cookie jar + CAPTCHA 400 parse + X-Captcha-* retry header wire verification.
+static void test_login_captcha_and_fingerprint(void)
+{
+  ccord_gov_config g = roomy();
+  fd_server srv = {0};
+  scenario sc = SC_CAPTCHA_FLOW;
+  CT_CHECK(fd_start(&srv, respond, &sc));
+  ccord_rest_config cfg = {.base_url = srv.base, .token = nullptr, .timeout_ms = 3000,
+                           .governor = &g, .enable_cookies = true};
+  ccord_error err = {0};
+  ccord_rest_queue *q = ccord_rest_queue_create(&cfg, &err);
+  CT_CHECK(q != nullptr);
+  if (!q) return;
+
+  // 1. Pre-auth GET /experiments fetches fingerprint + session cookie
+  result r0 = {0};
+  CT_CHECK(ccord_live_auth_fetch_fingerprint(q, on_result, &r0, &err) == CCORD_OK);
+  CT_CHECK(pump_until(q, result_done, &r0, 3000));
+  CT_CHECK(r0.http == 200);
+  char fp[128] = {0};
+  CT_CHECK(ccord_live_json_parse_fingerprint(r0.body, strlen(r0.body), fp, sizeof fp));
+  CT_CHECK(strcmp(fp, "fp-test-999") == 0);
+  ccord_rest_queue_set_fingerprint(q, fp);
+
+  // 2. First POST /auth/login returns HTTP 400 with CAPTCHA challenge
+  result r1 = {0};
+  CT_CHECK(ccord_live_auth_login(q, "user@example.com", "hunter2", on_result, &r1, &err) == CCORD_OK);
+  CT_CHECK(pump_until(q, result_done, &r1, 3000));
+  CT_CHECK(r1.http == 400);
+  char tok[128] = {0}, tkt[128] = {0};
+  ccord_captcha_challenge cap = {0};
+  CT_CHECK(ccord_live_json_auth_response_ex(r1.body, strlen(r1.body), r1.http, tok, sizeof tok,
+                                            tkt, sizeof tkt, &cap, &err) == CCORD_ERR_PERMISSION);
+  CT_CHECK(cap.required);
+  CT_CHECK(strcmp(cap.service, "hcaptcha") == 0);
+  CT_CHECK(strcmp(cap.sitekey, "sitekey-test-1") == 0);
+  CT_CHECK(strcmp(cap.rqdata, "rqdata-blob-xyz") == 0);
+  CT_CHECK(strcmp(cap.rqtoken, "rqtok-123") == 0);
+  CT_CHECK(strcmp(cap.session_id, "sess-456") == 0);
+
+  // CR/LF header injection in captcha_key is rejected before touching the wire.
+  ccord_captcha_solution bad_sol = {.key = "abc\r\nX-Injected: 1", .rqtoken = cap.rqtoken};
+  CT_CHECK(ccord_live_auth_login_captcha(q, "user@example.com", "hunter2", &bad_sol, on_result, &r1, &err) ==
+           CCORD_ERR_INVALID);
+
+  // 3. Retry with user-solved CAPTCHA headers -> succeeds with token
+  result r2 = {0};
+  ccord_captcha_solution sol = {.key = "synthetic_cap_key_ok", .rqtoken = cap.rqtoken, .session_id = cap.session_id};
+  CT_CHECK(ccord_live_auth_login_captcha(q, "user@example.com", "hunter2", &sol, on_result, &r2, &err) == CCORD_OK);
+  CT_CHECK(pump_until(q, result_done, &r2, 3000));
+  CT_CHECK(r2.http == 200);
+  CT_CHECK(ccord_live_json_auth_response_ex(r2.body, strlen(r2.body), r2.http, tok, sizeof tok,
+                                            tkt, sizeof tkt, &cap, &err) == CCORD_OK);
+  CT_CHECK(strcmp(tok, "CAPTCHA_SOLVED_TOKEN") == 0 && !cap.required);
+
+  ccord_rest_queue_destroy(q);
+  hit hits[MAX_HITS];
+  size_t n = fd_stop(&srv, hits, MAX_HITS);
+  CT_CHECK(n == 3);
+  if (n == 3) {
+    CT_CHECK(strcmp(hits[0].method, "GET") == 0 && strcmp(hits[0].path, "/experiments") == 0);
+    CT_CHECK(strcmp(hits[1].method, "POST") == 0 && strcmp(hits[1].path, "/auth/login") == 0);
+    CT_CHECK(strcmp(hits[1].fingerprint, "fp-test-999") == 0);
+    CT_CHECK(strstr(hits[1].cookie, "__dcfduid=abc123") != nullptr);
+    CT_CHECK(strcmp(hits[1].origin, "https://discord.com") == 0);
+    CT_CHECK(hits[1].captcha_key[0] == '\0');
+    CT_CHECK(strcmp(hits[2].method, "POST") == 0 && strcmp(hits[2].path, "/auth/login") == 0);
+    CT_CHECK(strcmp(hits[2].captcha_key, "synthetic_cap_key_ok") == 0);
+    CT_CHECK(strcmp(hits[2].captcha_rqtoken, "rqtok-123") == 0);
+    CT_CHECK(strcmp(hits[2].captcha_session_id, "sess-456") == 0);
+    CT_CHECK(strcmp(hits[2].fingerprint, "fp-test-999") == 0);
+    CT_CHECK(strstr(hits[2].cookie, "__dcfduid=abc123") != nullptr);
+    CT_CHECK(hits[2].authorization[0] == '\0');
+  }
+}
+
 int main(void)
 {
   (void)signal(SIGPIPE, SIG_IGN);
@@ -758,6 +850,7 @@ int main(void)
   test_preauth_401_no_latch();
   test_set_token_swaps_authorization();
   test_mfa_two_step();
+  test_login_captcha_and_fingerprint();
   test_preauth_429_retry_waits();
   test_auth_submit_validation();
   test_5xx_retry_rules();

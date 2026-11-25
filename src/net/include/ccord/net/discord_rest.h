@@ -34,7 +34,33 @@ typedef struct ccord_rest_config {
   size_t max_response_bytes;     // 0 -> CCORD_LIVE_MAX_RESPONSE
   const ccord_gov_config *governor;  // request-governor policy for the queue; null -> defaults
   bool test_allow_http_streams;  // tests only: stream_range accepts any http/https URL (loopback servers)
+  bool enable_cookies;           // in-memory cookie jar shared across queue requests (used by pre-auth login)
 } ccord_rest_config;
+
+#define CCORD_CAPTCHA_SERVICE_MAX    32u
+#define CCORD_CAPTCHA_SITEKEY_MAX    128u
+#define CCORD_CAPTCHA_RQDATA_MAX     8192u
+#define CCORD_CAPTCHA_RQTOKEN_MAX    2048u
+#define CCORD_CAPTCHA_SESSION_ID_MAX 128u
+#define CCORD_CAPTCHA_KEY_MAX        8192u
+#define CCORD_FINGERPRINT_MAX        256u
+
+// Parsed Discord CAPTCHA challenge payload (HTTP 400 with captcha_key / captcha_sitekey).
+typedef struct ccord_captcha_challenge {
+  bool required;
+  char service[CCORD_CAPTCHA_SERVICE_MAX];       // e.g. "hcaptcha"
+  char sitekey[CCORD_CAPTCHA_SITEKEY_MAX];       // captcha_sitekey
+  char rqdata[CCORD_CAPTCHA_RQDATA_MAX];         // captcha_rqdata (optional hCaptcha Enterprise payload)
+  char rqtoken[CCORD_CAPTCHA_RQTOKEN_MAX];       // captcha_rqtoken (echoed as X-Captcha-Rqtoken)
+  char session_id[CCORD_CAPTCHA_SESSION_ID_MAX]; // captcha_session_id (echoed as X-Captcha-Session-Id)
+} ccord_captcha_challenge;
+
+// User-completed CAPTCHA response headers to attach when retrying a CAPTCHA-gated endpoint.
+typedef struct ccord_captcha_solution {
+  const char *key;         // solved provider token -> X-Captcha-Key
+  const char *rqtoken;     // echoed captcha_rqtoken -> X-Captcha-Rqtoken (optional)
+  const char *session_id;  // echoed captcha_session_id -> X-Captcha-Session-Id (optional)
+} ccord_captcha_solution;
 
 // False for payment, billing, store and subscription paths. Callers must reject
 // those with CCORD_ERR_PERMISSION before any network activity.
@@ -64,10 +90,21 @@ typedef struct ccord_rest_config {
                                                    const char *path, const char *json_body,
                                                    ccord_buf *response, long *http_status, ccord_error *err);
 
+// Parses a Discord CAPTCHA challenge JSON body (captcha_key / captcha_sitekey / captcha_service /
+// captcha_rqdata / captcha_rqtoken / captcha_session_id). Returns true if a CAPTCHA challenge was found.
+[[nodiscard]] bool ccord_live_json_parse_captcha(const char *json, size_t len, ccord_captcha_challenge *out);
+// Parses {"fingerprint":"..."} from GET /experiments. Returns true if a non-empty fingerprint was extracted.
+[[nodiscard]] bool ccord_live_json_parse_fingerprint(const char *json, size_t len, char *out, size_t cap);
+
 // Completes 2FA/TOTP login; see ccord_live_auth_login / ccord_live_auth_mfa_totp below.
 [[nodiscard]] ccord_status ccord_live_json_auth_response(const char *json, size_t len, long http_status,
                                                          char *out_token, size_t token_cap,
                                                          char *out_mfa_ticket, size_t ticket_cap, ccord_error *err);
+// Extended variant that also extracts Discord's CAPTCHA challenge metadata when HTTP 400 demands a CAPTCHA.
+[[nodiscard]] ccord_status ccord_live_json_auth_response_ex(const char *json, size_t len, long http_status,
+                                                            char *out_token, size_t token_cap,
+                                                            char *out_mfa_ticket, size_t ticket_cap,
+                                                            ccord_captcha_challenge *out_captcha, ccord_error *err);
 
 // Non-blocking REST queue driven by curl_multi. Results are delivered from
 // ccord_rest_queue_pump on the caller's thread; HTTP 429 is retried after the
@@ -129,6 +166,9 @@ typedef struct ccord_rest_request {
   const char *if_range;
   ccord_rest_range_info *range_info; // out; filled before cb runs; must outlive the job until cb
   const char *mfa_auth_token;        // optional X-Discord-MFA-Authorization header (wiped on job free); null/"" = none
+  const char *captcha_key;           // optional X-Captcha-Key header (wiped on job free); null/"" = none
+  const char *captcha_rqtoken;       // optional X-Captcha-Rqtoken header (wiped on job free); null/"" = none
+  const char *captcha_session_id;    // optional X-Captcha-Session-Id header (wiped on job free); null/"" = none
 } ccord_rest_request;
 [[nodiscard]] ccord_rest_request ccord_rest_request_make(ccord_rest_method method, const char *path,
                                                          ccord_gov_priority priority);
@@ -150,13 +190,22 @@ void ccord_rest_queue_reset_auth(ccord_rest_queue *q);
 // Replaces the Authorization token (wiping the old one) and clears the 401 latch; call after a successful
 // login. null/"" removes the token. Jobs already prepared keep their old headers until they are resubmitted.
 void ccord_rest_queue_set_token(ccord_rest_queue *q, const char *token);
+// Sets or clears the pre-auth X-Fingerprint header (from GET /experiments) carried on subsequent API requests.
+void ccord_rest_queue_set_fingerprint(ccord_rest_queue *q, const char *fingerprint);
 
+// Fetches pre-auth Discord session fingerprint + cookies (GET /experiments, pre-auth USER priority).
+[[nodiscard]] ccord_status ccord_live_auth_fetch_fingerprint(ccord_rest_queue *q, ccord_rest_callback cb, void *ud,
+                                                             ccord_error *err);
 // Authenticates with Discord through the governed queue (POST /auth/login, USER priority, no Authorization
-// header). The callback receives the raw JSON: parse it with ccord_live_json_auth_response, then hand any
+// header). The callback receives the raw JSON: parse it with ccord_live_json_auth_response_ex, then hand any
 // token to ccord_rest_queue_set_token. On 2FA the response carries a ticket instead; complete it with
-// ccord_live_auth_mfa_totp. The body is copied, so callers may wipe their credentials right after submit.
+// ccord_live_auth_mfa_totp. On CAPTCHA, display the challenge to the user and retry with ccord_live_auth_login_captcha.
+// The body is copied, so callers may wipe their credentials right after submit.
 [[nodiscard]] ccord_status ccord_live_auth_login(ccord_rest_queue *q, const char *login, const char *password,
                                                  ccord_rest_callback cb, void *ud, ccord_error *err);
+[[nodiscard]] ccord_status ccord_live_auth_login_captcha(ccord_rest_queue *q, const char *login, const char *password,
+                                                         const ccord_captcha_solution *captcha,
+                                                         ccord_rest_callback cb, void *ud, ccord_error *err);
 // Completes 2FA/TOTP login (POST /auth/mfa/totp) using the ticket from ccord_live_auth_login.
 [[nodiscard]] ccord_status ccord_live_auth_mfa_totp(ccord_rest_queue *q, const char *ticket, const char *code,
                                                     ccord_rest_callback cb, void *ud, ccord_error *err);

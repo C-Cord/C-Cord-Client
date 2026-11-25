@@ -329,6 +329,9 @@ typedef struct ccord_rest_job {
   char *content_type;
   char *audit_reason;
   char *mfa_auth_token;  // X-Discord-MFA-Authorization JWT; volatile-wiped in rest_job_free
+  char *captcha_key;     // X-Captcha-Key token; volatile-wiped in rest_job_free
+  char *captcha_rqtoken; // X-Captcha-Rqtoken; volatile-wiped in rest_job_free
+  char *captcha_session_id; // X-Captcha-Session-Id; volatile-wiped in rest_job_free
   ccord_gov_priority prio;
   ccord_gov_ticket ticket;
   ccord_gov_response hdrs;
@@ -366,6 +369,8 @@ struct ccord_rest_queue {
   size_t max_response;
   char *base_url;
   char *token;
+  char *fingerprint;     // optional pre-auth X-Fingerprint header (from GET /experiments)
+  CURLSH *cookie_share;  // optional in-memory cookie jar shared across requests (enable_cookies)
   bool test_allow_http_streams;
 };
 
@@ -428,6 +433,18 @@ static void rest_job_free(ccord_rest_job *job)
   if (job->mfa_auth_token) {
     ccord_live_wipe(job->mfa_auth_token, strlen(job->mfa_auth_token));
     ccord_free(job->mfa_auth_token);
+  }
+  if (job->captcha_key) {
+    ccord_live_wipe(job->captcha_key, strlen(job->captcha_key));
+    ccord_free(job->captcha_key);
+  }
+  if (job->captcha_rqtoken) {
+    ccord_live_wipe(job->captcha_rqtoken, strlen(job->captcha_rqtoken));
+    ccord_free(job->captcha_rqtoken);
+  }
+  if (job->captcha_session_id) {
+    ccord_live_wipe(job->captcha_session_id, strlen(job->captcha_session_id));
+    ccord_free(job->captcha_session_id);
   }
   for (rest_follower *f = job->followers; f;) {
     rest_follower *next = f->next;
@@ -586,6 +603,14 @@ ccord_rest_queue *ccord_rest_queue_create(const ccord_rest_config *cfg, ccord_er
   q->timeout_ms = cfg && cfg->timeout_ms ? cfg->timeout_ms : CCORD_LIVE_TIMEOUT_DEFAULT_MS;
   q->max_response = cfg && cfg->max_response_bytes ? cfg->max_response_bytes : CCORD_LIVE_MAX_RESPONSE;
   q->test_allow_http_streams = cfg && cfg->test_allow_http_streams;
+  if (cfg && cfg->enable_cookies) {
+    q->cookie_share = curl_share_init();
+    if (!q->cookie_share || curl_share_setopt(q->cookie_share, CURLSHOPT_SHARE, CURL_LOCK_DATA_COOKIE) != CURLSHE_OK) {
+      ccord_rest_queue_destroy(q);
+      ccord_error_set(err, CCORD_ERR_INTERNAL, "rest: cookie share init failed");
+      return nullptr;
+    }
+  }
   if (!q->base_url || (cfg && cfg->token && !q->token) || bn == 0) {
     ccord_rest_queue_destroy(q);
     ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
@@ -643,10 +668,15 @@ void ccord_rest_queue_destroy(ccord_rest_queue *q)
   }
   q->easy_pool_count = 0;
   if (q->multi) curl_multi_cleanup(q->multi);
+  if (q->cookie_share) curl_share_cleanup(q->cookie_share);
   ccord_gov_destroy(q->gov);
   if (q->token) {
     ccord_live_wipe(q->token, strlen(q->token));
     ccord_free(q->token);
+  }
+  if (q->fingerprint) {
+    ccord_live_wipe(q->fingerprint, strlen(q->fingerprint));
+    ccord_free(q->fingerprint);
   }
   ccord_free(q->base_url);
   ccord_free(q);
@@ -723,6 +753,35 @@ static bool rest_job_prepare_stream(ccord_rest_queue *q, ccord_rest_job *job)
   return true;
 }
 
+static bool rest_header_token_valid(const char *val, size_t max_len)
+{
+  size_t n = strlen(val);
+  if (n == 0 || n > max_len) return false;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)val[i];
+    if (c <= 0x20u || c == 0x7Fu) return false;
+  }
+  return true;
+}
+
+static bool rest_append_header_kv(struct curl_slist **list, const char *name, const char *val, bool wipe_tmp)
+{
+  size_t nlen = strlen(name), vlen = strlen(val);
+  size_t total = nlen + 2u + vlen + 1u;
+  char *line = ccord_malloc(total);
+  if (!line) return false;
+  memcpy(line, name, nlen);
+  line[nlen] = ':';
+  line[nlen + 1u] = ' ';
+  memcpy(line + nlen + 2u, val, vlen + 1u);
+  struct curl_slist *next = curl_slist_append(*list, line);
+  if (wipe_tmp) ccord_live_wipe(line, total);
+  ccord_free(line);
+  if (!next) return false;
+  *list = next;
+  return true;
+}
+
 // Acquires a pooled CURL handle and binds headers/options right as a job transitions to in-flight.
 static bool rest_job_attach(ccord_rest_queue *q, ccord_rest_job *job)
 {
@@ -774,6 +833,17 @@ static bool rest_job_attach(ccord_rest_queue *q, ccord_rest_job *job)
       return false;
     }
     job->headers = curl_slist_append(job->headers, super_header);
+    if (job->pre_auth) {
+      job->headers = curl_slist_append(job->headers, "Origin: https://discord.com");
+      job->headers = curl_slist_append(job->headers, "Referer: https://discord.com/login");
+      job->headers = curl_slist_append(job->headers, "X-Discord-Locale: en-US");
+    }
+    if (q->fingerprint && q->fingerprint[0] != '\0') {
+      if (!rest_append_header_kv(&job->headers, "X-Fingerprint", q->fingerprint, false)) {
+        rest_job_detach_easy(q, job, true);
+        return false;
+      }
+    }
     if (include_auth) {
       if (job->have_auth) job->headers = curl_slist_append(job->headers, job->auth);
       if (job->audit_reason && job->audit_reason[0] != '\0') {
@@ -795,11 +865,34 @@ static bool rest_job_attach(ccord_rest_queue *q, ccord_rest_job *job)
         job->headers = curl_slist_append(job->headers, mfa_hdr);
         ccord_live_wipe(mfa_hdr, sizeof mfa_hdr);
       }
+      if (job->captcha_key && job->captcha_key[0] != '\0') {
+        if (!rest_append_header_kv(&job->headers, "X-Captcha-Key", job->captcha_key, true)) {
+          rest_job_detach_easy(q, job, true);
+          return false;
+        }
+      }
+      if (job->captcha_rqtoken && job->captcha_rqtoken[0] != '\0') {
+        if (!rest_append_header_kv(&job->headers, "X-Captcha-Rqtoken", job->captcha_rqtoken, true)) {
+          rest_job_detach_easy(q, job, true);
+          return false;
+        }
+      }
+      if (job->captcha_session_id && job->captcha_session_id[0] != '\0') {
+        if (!rest_append_header_kv(&job->headers, "X-Captcha-Session-Id", job->captcha_session_id, true)) {
+          rest_job_detach_easy(q, job, true);
+          return false;
+        }
+      }
     }
   }
   if (!job->headers) {
     rest_job_detach_easy(q, job, true);
     return false;
+  }
+
+  if (!job->raw && q->cookie_share) {
+    curl_easy_setopt(job->easy, CURLOPT_COOKIEFILE, "");
+    curl_easy_setopt(job->easy, CURLOPT_SHARE, q->cookie_share);
   }
 
   curl_easy_setopt(job->easy, CURLOPT_URL, ccord_buf_cstr(&job->url));
@@ -945,6 +1038,18 @@ ccord_status ccord_rest_queue_submit(ccord_rest_queue *q, const ccord_rest_reque
       if (c <= 0x20 || c == 0x7f) return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad MFA token");
     }
   }
+  if (!raw && req->captcha_key && req->captcha_key[0] != '\0' &&
+      !rest_header_token_valid(req->captcha_key, CCORD_CAPTCHA_KEY_MAX - 1u)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad captcha key");
+  }
+  if (!raw && req->captcha_rqtoken && req->captcha_rqtoken[0] != '\0' &&
+      !rest_header_token_valid(req->captcha_rqtoken, CCORD_CAPTCHA_RQTOKEN_MAX - 1u)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad captcha rqtoken");
+  }
+  if (!raw && req->captcha_session_id && req->captcha_session_id[0] != '\0' &&
+      !rest_header_token_valid(req->captcha_session_id, CCORD_CAPTCHA_SESSION_ID_MAX - 1u)) {
+    return ccord_error_set(err, CCORD_ERR_INVALID, "rest: bad captcha session id");
+  }
   if (q->njobs >= CCORD_REST_MAX_JOBS && req->priority != CCORD_GOV_USER) {
     return ccord_error_set(err, CCORD_ERR_RANGE, "rest: queue full");
   }
@@ -1041,6 +1146,21 @@ ccord_status ccord_rest_queue_submit(ccord_rest_queue *q, const ccord_rest_reque
   if (st == CCORD_OK && !raw && req->mfa_auth_token && req->mfa_auth_token[0] != '\0') {
     job->mfa_auth_token = ccord_strdup(req->mfa_auth_token);
     if (!job->mfa_auth_token) st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    else job->sensitive = true;
+  }
+  if (st == CCORD_OK && !raw && req->captcha_key && req->captcha_key[0] != '\0') {
+    job->captcha_key = ccord_strdup(req->captcha_key);
+    if (!job->captcha_key) st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    else job->sensitive = true;
+  }
+  if (st == CCORD_OK && !raw && req->captcha_rqtoken && req->captcha_rqtoken[0] != '\0') {
+    job->captcha_rqtoken = ccord_strdup(req->captcha_rqtoken);
+    if (!job->captcha_rqtoken) st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
+    else job->sensitive = true;
+  }
+  if (st == CCORD_OK && !raw && req->captcha_session_id && req->captcha_session_id[0] != '\0') {
+    job->captcha_session_id = ccord_strdup(req->captcha_session_id);
+    if (!job->captcha_session_id) st = ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
     else job->sensitive = true;
   }
   if (st != CCORD_OK) {
@@ -1233,6 +1353,20 @@ void ccord_rest_queue_set_token(ccord_rest_queue *q, const char *token)
   q->token = next;
   ccord_gov_reset_auth(q->gov);
   // Pending jobs do not hold a CURL handle or headers until rest_start(), so they pick up q->token automatically.
+}
+
+void ccord_rest_queue_set_fingerprint(ccord_rest_queue *q, const char *fingerprint)
+{
+  if (!q) return;
+  bool have = fingerprint && fingerprint[0] != '\0';
+  if (have && !rest_header_token_valid(fingerprint, CCORD_FINGERPRINT_MAX - 1u)) return;
+  char *next = have ? ccord_strdup(fingerprint) : nullptr;
+  if (have && !next) return;
+  if (q->fingerprint) {
+    ccord_live_wipe(q->fingerprint, strlen(q->fingerprint));
+    ccord_free(q->fingerprint);
+  }
+  q->fingerprint = next;
 }
 
 static ccord_status rest_result_status(CURLcode rc, const rest_sink *sink)
@@ -1449,12 +1583,18 @@ void ccord_rest_queue_pump(ccord_rest_queue *q, uint64_t now_ms)
 
 // Login/MFA share this path: a governed USER-priority POST with no Authorization header. The body is wiped
 // after submit (the queue copies json_body), so credentials never outlive the call.
-static ccord_status auth_submit(ccord_rest_queue *q, const char *path, ccord_buf *body, ccord_rest_callback cb,
+static ccord_status auth_submit(ccord_rest_queue *q, const char *path, ccord_buf *body,
+                                const ccord_captcha_solution *captcha, ccord_rest_callback cb,
                                 void *ud, ccord_error *err)
 {
   ccord_rest_request r = ccord_rest_request_make(CCORD_REST_POST, path, CCORD_GOV_USER);
   r.pre_auth = true;
   r.json_body = ccord_buf_cstr(body);
+  if (captcha) {
+    r.captcha_key = captcha->key;
+    r.captcha_rqtoken = captcha->rqtoken;
+    r.captcha_session_id = captcha->session_id;
+  }
   r.cb = cb;
   r.ud = ud;
   ccord_status st = ccord_rest_queue_submit(q, &r, err);
@@ -1463,8 +1603,20 @@ static ccord_status auth_submit(ccord_rest_queue *q, const char *path, ccord_buf
   return st;
 }
 
-ccord_status ccord_live_auth_login(ccord_rest_queue *q, const char *login, const char *password,
-                                   ccord_rest_callback cb, void *ud, ccord_error *err)
+ccord_status ccord_live_auth_fetch_fingerprint(ccord_rest_queue *q, ccord_rest_callback cb, void *ud, ccord_error *err)
+{
+  ccord_error_clear(err);
+  if (!q) return ccord_error_set(err, CCORD_ERR_INVALID, "auth: null queue");
+  ccord_rest_request r = ccord_rest_request_make(CCORD_REST_GET, "/experiments", CCORD_GOV_USER);
+  r.pre_auth = true;
+  r.cb = cb;
+  r.ud = ud;
+  return ccord_rest_queue_submit(q, &r, err);
+}
+
+ccord_status ccord_live_auth_login_captcha(ccord_rest_queue *q, const char *login, const char *password,
+                                           const ccord_captcha_solution *captcha,
+                                           ccord_rest_callback cb, void *ud, ccord_error *err)
 {
   ccord_error_clear(err);
   if (!q || !login || login[0] == '\0' || !password || password[0] == '\0') {
@@ -1488,7 +1640,13 @@ ccord_status ccord_live_auth_login(ccord_rest_queue *q, const char *login, const
     ccord_buf_free(&body);
     return ccord_error_set(err, CCORD_ERR_RANGE, "auth: login payload too large");
   }
-  return auth_submit(q, "/auth/login", &body, cb, ud, err);
+  return auth_submit(q, "/auth/login", &body, captcha, cb, ud, err);
+}
+
+ccord_status ccord_live_auth_login(ccord_rest_queue *q, const char *login, const char *password,
+                                   ccord_rest_callback cb, void *ud, ccord_error *err)
+{
+  return ccord_live_auth_login_captcha(q, login, password, nullptr, cb, ud, err);
 }
 
 ccord_status ccord_live_auth_mfa_totp(ccord_rest_queue *q, const char *ticket, const char *code,
@@ -1514,5 +1672,5 @@ ccord_status ccord_live_auth_mfa_totp(ccord_rest_queue *q, const char *ticket, c
     ccord_buf_free(&body);
     return ccord_error_set(err, CCORD_ERR_RANGE, "auth: MFA payload too large");
   }
-  return auth_submit(q, "/auth/mfa/totp", &body, cb, ud, err);
+  return auth_submit(q, "/auth/mfa/totp", &body, nullptr, cb, ud, err);
 }

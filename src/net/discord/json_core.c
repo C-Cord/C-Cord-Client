@@ -1052,11 +1052,77 @@ bool ccord_live_json_error_message(const char *json, size_t len, char *out, size
 }
 
 
-ccord_status ccord_live_json_auth_response(const char *json, size_t len, long http_status,
-                                           char *out_token, size_t token_cap,
-                                           char *out_mfa_ticket, size_t ticket_cap, ccord_error *err)
+static bool dj_copy_exact_token(const ccord_json *root, const char *key, char *dst, size_t cap)
+{
+  if (!dst || cap == 0) return false;
+  dst[0] = '\0';
+  const ccord_json *j = ccord_json_get(root, key);
+  if (!j || ccord_json_type_of(j) != CCORD_JSON_STRING) return false;
+  size_t n = 0;
+  const char *s = ccord_json_string(j, &n);
+  if (!s || n == 0 || n >= cap) return false;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (c < 0x20u || c == 0x7Fu) return false;
+  }
+  memcpy(dst, s, n);
+  dst[n] = '\0';
+  return true;
+}
+
+static bool dj_extract_captcha_obj(const ccord_json *root, ccord_captcha_challenge *out)
+{
+  if (out) memset(out, 0, sizeof *out);
+  if (!root || ccord_json_type_of(root) != CCORD_JSON_OBJECT) return false;
+  bool has_cap = ccord_json_get(root, "captcha_key") != nullptr ||
+                 ccord_json_get(root, "captcha_sitekey") != nullptr;
+  if (!has_cap) return false;
+  if (!out) return true;
+  out->required = true;
+  if (!dj_copy_exact_token(root, "captcha_service", out->service, sizeof out->service)) {
+    snprintf(out->service, sizeof out->service, "hcaptcha");
+  }
+  (void)dj_copy_exact_token(root, "captcha_sitekey", out->sitekey, sizeof out->sitekey);
+  (void)dj_copy_exact_token(root, "captcha_rqdata", out->rqdata, sizeof out->rqdata);
+  (void)dj_copy_exact_token(root, "captcha_rqtoken", out->rqtoken, sizeof out->rqtoken);
+  (void)dj_copy_exact_token(root, "captcha_session_id", out->session_id, sizeof out->session_id);
+  return true;
+}
+
+bool ccord_live_json_parse_captcha(const char *json, size_t len, ccord_captcha_challenge *out)
+{
+  if (out) memset(out, 0, sizeof *out);
+  if (!json || len == 0) return false;
+  ccord_arena arena;
+  ccord_arena_init(&arena, dj_scratch_chunk_size(len));
+  ccord_error err = {0};
+  const ccord_json *root = dj_parse_json(&arena, json, len, &err);
+  bool ok = dj_extract_captcha_obj(root, out);
+  ccord_arena_free(&arena);
+  return ok;
+}
+
+bool ccord_live_json_parse_fingerprint(const char *json, size_t len, char *out, size_t cap)
+{
+  if (out && cap > 0) out[0] = '\0';
+  if (!json || len == 0 || !out || cap < 2) return false;
+  ccord_arena arena;
+  ccord_arena_init(&arena, dj_scratch_chunk_size(len));
+  ccord_error err = {0};
+  const ccord_json *root = dj_parse_json(&arena, json, len, &err);
+  bool ok = root && ccord_json_type_of(root) == CCORD_JSON_OBJECT &&
+            dj_copy_exact_token(root, "fingerprint", out, cap);
+  ccord_arena_free(&arena);
+  return ok;
+}
+
+ccord_status ccord_live_json_auth_response_ex(const char *json, size_t len, long http_status,
+                                              char *out_token, size_t token_cap,
+                                              char *out_mfa_ticket, size_t ticket_cap,
+                                              ccord_captcha_challenge *out_captcha, ccord_error *err)
 {
   ccord_error_clear(err);
+  if (out_captcha) memset(out_captcha, 0, sizeof *out_captcha);
   if (!out_token || token_cap < 2) {
     return ccord_error_set(err, CCORD_ERR_INVALID, "auth: invalid token buffer");
   }
@@ -1073,6 +1139,11 @@ ccord_status ccord_live_json_auth_response(const char *json, size_t len, long ht
     return ccord_error_set(err, CCORD_ERR_PARSE, "auth: invalid response JSON");
   }
   if (http_status < 200 || http_status >= 300) {
+    if (dj_extract_captcha_obj(root, out_captcha)) {
+      ccord_error_set(err, CCORD_ERR_PERMISSION, "auth: CAPTCHA verification required");
+      ccord_arena_free(&arena);
+      return CCORD_ERR_PERMISSION;
+    }
     const char *msg = dj_jstr(root, "message");
     ccord_status st = (http_status == 400 || http_status == 401 || http_status == 403)
                         ? CCORD_ERR_PERMISSION
@@ -1117,6 +1188,14 @@ ccord_status ccord_live_json_auth_response(const char *json, size_t len, long ht
   ccord_error_set(err, CCORD_ERR_PERMISSION, "auth: %s", (msg && msg[0]) ? msg : "missing token in response");
   ccord_arena_free(&arena);
   return CCORD_ERR_PERMISSION;
+}
+
+ccord_status ccord_live_json_auth_response(const char *json, size_t len, long http_status,
+                                           char *out_token, size_t token_cap,
+                                           char *out_mfa_ticket, size_t ticket_cap, ccord_error *err)
+{
+  return ccord_live_json_auth_response_ex(json, len, http_status, out_token, token_cap,
+                                          out_mfa_ticket, ticket_cap, nullptr, err);
 }
 
 void dj_extract_account_private(const ccord_json *u, ccord_account_private *out)
