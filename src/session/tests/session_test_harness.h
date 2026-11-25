@@ -44,6 +44,8 @@ typedef struct fake_transport {
   ccord_channel channel;
   ccord_id last_requested_history_channel;
   uint32_t history_request_count;
+  ccord_id requested_history_channels[16];
+  size_t requested_history_recorded;
   uint32_t history_before_request_count;
   ccord_id last_selected_guild;
   ccord_id last_selected_channel_guild;
@@ -74,6 +76,9 @@ typedef struct fake_transport {
 {
   fake_transport *f = (fake_transport *)t;
   f->last_requested_history_channel = channel_id;
+  if (f->requested_history_recorded < 16u) {
+    f->requested_history_channels[f->requested_history_recorded++] = channel_id;
+  }
   f->history_request_count++;
   (void)limit;
   ccord_error_clear(err);

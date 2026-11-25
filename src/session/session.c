@@ -153,6 +153,7 @@ void ccord_session_set_background(ccord_session *s, bool background)
   if (!s) return;
   bool was_bg = s->in_background;
   s->in_background = background;
+  if (!background) s->nwake_catchup = 0;
   ccord_transport_set_background(s->transport, background);
   if (was_bg && !background && s->bg_deferred_sync) {
     s->bg_deferred_sync = false;
@@ -231,6 +232,8 @@ ccord_status ccord_session_set_transport(ccord_session *s, ccord_transport *tran
   s->collectibles_gen++;
   s->collectibles_error[0] = '\0';
   s->notif_count = 0;
+  s->nwake_catchup = 0;
+  s->nnotified_track = 0;
   s->video_resolved_head = 0;
   s->video_resolved_count = 0;
   sess_clear_search_results(s);
@@ -385,9 +388,10 @@ void sess_maybe_request_dm_profile(ccord_session *s, ccord_id channel_id)
 }
 
 // Asks for the channel history once, if the store does not have it yet.
-void sess_request_history_once(ccord_session *s, ccord_id channel_id)
+// Returns true when a channel message history request was dispatched.
+bool sess_request_history_once(ccord_session *s, ccord_id channel_id)
 {
-  if (channel_id == CCORD_ID_NONE || !session_is_authenticated(s)) return;
+  if (channel_id == CCORD_ID_NONE || !session_is_authenticated(s)) return false;
   if (ccord_store_channel_is_forum(s->store, channel_id)) {
     const ccord_forum_state *fst = ccord_store_forum_state(s->store, channel_id);
     if (!fst || (!fst->loaded && !fst->loading)) {
@@ -401,18 +405,18 @@ void sess_request_history_once(ccord_session *s, ccord_id channel_id)
       ccord_error ferr;
       (void)ccord_session_request_forum_posts(s, &q, &ferr);
     }
-    return;
+    return false;
   }
   if ((ccord_store_history_loaded(s->store, channel_id) && !ccord_store_history_stale(s->store, channel_id)) ||
       was_requested(s, channel_id)) {
-    return;
+    return false;
   }
   if (s->nrequested == s->caprequested) {
     size_t ncap = s->caprequested ? s->caprequested * 2 : 32;
     ccord_id *n = ccord_realloc_array(s->requested, ncap, sizeof *n);
     if (!n) {
       CCORD_LOG_W("session: out of memory while tracking history requests");
-      return;
+      return false;
     }
     s->requested = n;
     s->caprequested = ncap;
@@ -421,9 +425,10 @@ void sess_request_history_once(ccord_session *s, ccord_id channel_id)
   ccord_status st = ccord_transport_request_history(s->transport, channel_id, CCORD_SESSION_HISTORY_LIMIT, &err);
   if (st != CCORD_OK) {
     CCORD_LOG_W("session: history request failed: %s", err.message);
-    return;
+    return false;
   }
   s->requested[s->nrequested++] = channel_id;
+  return true;
 }
 
 void sess_post_state(ccord_session *s)
@@ -447,6 +452,40 @@ bool sess_message_pings_own_role(const ccord_session *s, ccord_id guild_id, cons
   return false;
 }
 
+ccord_id sess_last_notified_id(const ccord_session *s, ccord_id channel_id)
+{
+  if (!s || channel_id == CCORD_ID_NONE) return CCORD_ID_NONE;
+  for (size_t i = 0; i < s->nnotified_track; i++) {
+    if (s->notified_track[i].channel_id == channel_id) return s->notified_track[i].last_msg_id;
+  }
+  return CCORD_ID_NONE;
+}
+
+static void sess_record_notified_id(ccord_session *s, ccord_id channel_id, ccord_id msg_id)
+{
+  if (!s || channel_id == CCORD_ID_NONE || msg_id == CCORD_ID_NONE) return;
+  for (size_t i = 0; i < s->nnotified_track; i++) {
+    if (s->notified_track[i].channel_id == channel_id) {
+      if (msg_id > s->notified_track[i].last_msg_id) s->notified_track[i].last_msg_id = msg_id;
+      s->notified_track[i].tick = ++s->notified_tick;
+      return;
+    }
+  }
+  size_t slot = 0;
+  if (s->nnotified_track < SESSION_NOTIFIED_TRACK_MAX) {
+    slot = s->nnotified_track++;
+  } else {
+    for (size_t i = 1; i < SESSION_NOTIFIED_TRACK_MAX; i++) {
+      if (s->notified_track[i].tick < s->notified_track[slot].tick) slot = i;
+    }
+  }
+  s->notified_track[slot] = (session_notified_entry){
+    .channel_id = channel_id,
+    .last_msg_id = msg_id,
+    .tick = ++s->notified_tick,
+  };
+}
+
 void sess_queue_notification(ccord_session *s, ccord_notification n)
 {
   if (s->notif_count == SESSION_MAX_NOTIFICATIONS) {
@@ -456,6 +495,7 @@ void sess_queue_notification(ccord_session *s, ccord_notification n)
   size_t idx = (s->notif_head + s->notif_count) % SESSION_MAX_NOTIFICATIONS;
   s->notifications[idx] = n;
   s->notif_count++;
+  sess_record_notified_id(s, n.channel_id, n.message_id);
 }
 
 

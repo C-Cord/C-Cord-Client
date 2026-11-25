@@ -29,6 +29,8 @@
 
 #define PUMP_BATCH 64u
 #define SESSION_MAX_NOTIFICATIONS 32u
+#define SESSION_WAKE_CATCHUP_MAX 8u
+#define SESSION_NOTIFIED_TRACK_MAX 64u
 #define SESSION_MAX_FAILURES 8u
 #define SESSION_MAX_REPORT_EVENTS 4u   // report answers wait here for the UI; newest dropped when full
 #define SESSION_MAX_MODALS 4u
@@ -82,6 +84,21 @@ typedef struct session_channel_hist {
   ccord_id in_flight_before_id;
   bool has_more;
 } session_channel_hist;
+
+typedef struct session_wake_catchup {
+  ccord_id channel_id;
+  ccord_id guild_id;
+  ccord_id after_msg_id;   // notify eligible messages with id > after_msg_id
+  ccord_id target_msg_id;  // newest message id observed in READY
+  bool is_dm;
+  bool has_new_mention;
+} session_wake_catchup;
+
+typedef struct session_notified_entry {
+  ccord_id channel_id;
+  ccord_id last_msg_id;
+  uint64_t tick;
+} session_notified_entry;
 
 typedef struct session_slash_cache {
   ccord_id guild_id;
@@ -239,6 +256,11 @@ struct ccord_session {
   ccord_id retried_channel; // channel whose transient history error was auto-retried once
   ccord_notification notifications[SESSION_MAX_NOTIFICATIONS];
   size_t notif_head, notif_count;
+  session_wake_catchup wake_catchup[SESSION_WAKE_CATCHUP_MAX];
+  size_t nwake_catchup;
+  session_notified_entry notified_track[SESSION_NOTIFIED_TRACK_MAX];
+  size_t nnotified_track;
+  uint64_t notified_tick;
   ccord_action_failure failures[SESSION_MAX_FAILURES];
   size_t fail_head, fail_count;
   ccord_report_event report_events[SESSION_MAX_REPORT_EVENTS];
@@ -401,9 +423,10 @@ session_verification_cache *sess_verification_cache_for(ccord_session *s, ccord_
 bool sess_cache_verification_form(session_verification_cache *ent, const ccord_member_verification *form);
 bool session_is_authenticated(const ccord_session *s);
 void sess_maybe_request_dm_profile(ccord_session *s, ccord_id channel_id);
-void sess_request_history_once(ccord_session *s, ccord_id channel_id);
+bool sess_request_history_once(ccord_session *s, ccord_id channel_id);
 void sess_post_state(ccord_session *s);
 bool sess_message_pings_own_role(const ccord_session *s, ccord_id guild_id, const ccord_message_rich *rich);
+ccord_id sess_last_notified_id(const ccord_session *s, ccord_id channel_id);
 void sess_queue_notification(ccord_session *s, ccord_notification n);
 void sess_store_media_loaded(ccord_session *s, const ccord_net_event *ev);
 void sess_trim_media_cache_bytes(ccord_session *s);

@@ -207,6 +207,315 @@ static ccord_notify_effective notify_effective(const ccord_session *s, ccord_id 
 // Fixed-size inline text from a transport is only trusted when a terminator sits inside its buffer: a
 // malformed row must compare unequal rather than read past the array.
 
+typedef struct sess_prev_chan {
+  ccord_id channel_id;
+  ccord_id last_message_id;
+  ccord_id last_read_id;
+  uint32_t mention_count;
+} sess_prev_chan;
+
+static int cmp_prev_chan_id(const void *a, const void *b)
+{
+  const sess_prev_chan *x = a;
+  const sess_prev_chan *y = b;
+  if (x->channel_id < y->channel_id) return -1;
+  if (x->channel_id > y->channel_id) return 1;
+  return 0;
+}
+
+static const sess_prev_chan *find_prev_chan(const sess_prev_chan *arr, size_t n, ccord_id cid)
+{
+  size_t lo = 0, hi = n;
+  while (lo < hi) {
+    size_t mid = lo + (hi - lo) / 2u;
+    if (arr[mid].channel_id < cid) lo = mid + 1u;
+    else if (arr[mid].channel_id > cid) hi = mid;
+    else return &arr[mid];
+  }
+  return nullptr;
+}
+
+static const session_wake_catchup *find_pending_catchup(const ccord_session *s, ccord_id cid)
+{
+  if (!s) return nullptr;
+  for (size_t i = 0; i < s->nwake_catchup; i++) {
+    if (s->wake_catchup[i].channel_id == cid) return &s->wake_catchup[i];
+  }
+  return nullptr;
+}
+
+// Captures every channel's last_message_id / last_read_id / mention_count before a background READY
+// replaces the store, so we can detect messages/mentions that arrived while suspended or offline.
+// If a channel still has an unfinished wake catch-up from an earlier READY, preserve its older
+// after_msg_id watermark so back-to-back READY events cannot drop the pending notification.
+static sess_prev_chan *sess_snapshot_capture_prev(const ccord_session *s, size_t *out_n, ccord_id *out_max_msg)
+{
+  *out_n = 0;
+  *out_max_msg = CCORD_ID_NONE;
+  const ccord_store *store = s ? s->store : nullptr;
+  if (!store) return nullptr;
+  size_t ng = ccord_store_guild_count(store);
+  size_t total = ccord_store_channel_count(store, CCORD_DM_GUILD_ID);
+  for (size_t gi = 0; gi < ng; gi++) {
+    const ccord_guild *g = ccord_store_guild_at(store, gi);
+    if (g) total += ccord_store_channel_count(store, g->id);
+  }
+  if (total == 0) return nullptr;
+  sess_prev_chan *arr = ccord_malloc(total * sizeof *arr);
+  if (!arr) return nullptr;
+  size_t w = 0;
+  ccord_id max_msg = CCORD_ID_NONE;
+  size_t ndm = ccord_store_channel_count(store, CCORD_DM_GUILD_ID);
+  for (size_t ci = 0; ci < ndm && w < total; ci++) {
+    const ccord_channel *c = ccord_store_channel_at(store, CCORD_DM_GUILD_ID, ci);
+    if (!c) continue;
+    ccord_id lmid = c->last_message_id < (UINT64_C(1) << 62) ? c->last_message_id : CCORD_ID_NONE;
+    if (lmid > max_msg) max_msg = lmid;
+    const session_wake_catchup *pend = find_pending_catchup(s, c->id);
+    ccord_id prev_lmid = (pend && pend->after_msg_id < lmid) ? pend->after_msg_id : lmid;
+    uint32_t prev_mc = (pend && pend->has_new_mention) ? 0u : c->mention_count;
+    arr[w++] = (sess_prev_chan){
+      .channel_id = c->id,
+      .last_message_id = prev_lmid,
+      .last_read_id = c->last_read_id,
+      .mention_count = prev_mc,
+    };
+  }
+  for (size_t gi = 0; gi < ng; gi++) {
+    const ccord_guild *g = ccord_store_guild_at(store, gi);
+    if (!g) continue;
+    size_t nc = ccord_store_channel_count(store, g->id);
+    for (size_t ci = 0; ci < nc && w < total; ci++) {
+      const ccord_channel *c = ccord_store_channel_at(store, g->id, ci);
+      if (!c) continue;
+      ccord_id lmid = c->last_message_id < (UINT64_C(1) << 62) ? c->last_message_id : CCORD_ID_NONE;
+      if (lmid > max_msg) max_msg = lmid;
+      const session_wake_catchup *pend = find_pending_catchup(s, c->id);
+      ccord_id prev_lmid = (pend && pend->after_msg_id < lmid) ? pend->after_msg_id : lmid;
+      uint32_t prev_mc = (pend && pend->has_new_mention) ? 0u : c->mention_count;
+      arr[w++] = (sess_prev_chan){
+        .channel_id = c->id,
+        .last_message_id = prev_lmid,
+        .last_read_id = c->last_read_id,
+        .mention_count = prev_mc,
+      };
+    }
+  }
+  if (w > 1u) qsort(arr, w, sizeof *arr, cmp_prev_chan_id);
+  *out_n = w;
+  *out_max_msg = max_msg;
+  return arr;
+}
+
+static bool sess_take_wake_catchup(ccord_session *s, ccord_id channel_id, session_wake_catchup *out)
+{
+  for (size_t i = 0; i < s->nwake_catchup; i++) {
+    if (s->wake_catchup[i].channel_id == channel_id) {
+      if (out) *out = s->wake_catchup[i];
+      if (i + 1u < s->nwake_catchup) {
+        memmove(&s->wake_catchup[i], &s->wake_catchup[i + 1u],
+                (s->nwake_catchup - i - 1u) * sizeof s->wake_catchup[0]);
+      }
+      s->nwake_catchup--;
+      return true;
+    }
+  }
+  return false;
+}
+
+static void sess_wake_catchup_emit_fallback(ccord_session *s, const session_wake_catchup *cu)
+{
+  if (!s || !cu || !s->in_background) return;
+  const ccord_channel *c = ccord_store_channel(s->store, cu->channel_id);
+  if (!c || c->is_spam || c->is_message_request) return;
+  ccord_id floor_id = cu->after_msg_id;
+  if (c->last_read_id != CCORD_ID_NONE && c->last_read_id > floor_id) floor_id = c->last_read_id;
+  ccord_id ln = sess_last_notified_id(s, cu->channel_id);
+  if (cu->target_msg_id == CCORD_ID_NONE || cu->target_msg_id <= floor_id || cu->target_msg_id == ln) return;
+  ccord_id author_id = cu->is_dm ? c->user_id : CCORD_ID_NONE;
+  if (author_id != CCORD_ID_NONE) {
+    ccord_relationship_kind rel = ccord_store_relationship(s->store, author_id);
+    if (rel == CCORD_REL_BLOCKED || rel == CCORD_REL_IGNORED) return;
+  }
+  sess_queue_notification(s, (ccord_notification){
+    .guild_id = c->guild_id,
+    .channel_id = c->id,
+    .message_id = cu->target_msg_id,
+    .author_id = author_id,
+    .is_dm = cu->is_dm,
+    .is_mention = cu->has_new_mention,
+  });
+}
+
+static void sess_wake_catchup_from_store(ccord_session *s, const session_wake_catchup *cu, bool allow_overflow_fallback)
+{
+  if (!s || !cu || !s->in_background) return;
+  const ccord_channel *c = ccord_store_channel(s->store, cu->channel_id);
+  if (!c || c->is_spam || c->is_message_request) return;
+  ccord_id self_id = ccord_store_self_id(s->store);
+  ccord_notify_effective eff = notify_effective(s, cu->channel_id);
+  bool is_dm = (c->guild_id == CCORD_DM_GUILD_ID);
+
+  ccord_id floor_id = cu->after_msg_id;
+  if (c->last_read_id != CCORD_ID_NONE && c->last_read_id > floor_id) floor_id = c->last_read_id;
+  ccord_id ln = sess_last_notified_id(s, cu->channel_id);
+
+  size_t nmsg = ccord_store_message_count(s->store, cu->channel_id);
+  enum { CATCHUP_MAX_PER_CHANNEL = 3u };
+  ccord_notification picked[CATCHUP_MAX_PER_CHANNEL];
+  size_t npicked = 0;
+
+  // Only inspect messages in (floor_id, cu->target_msg_id]: anything newer arrived after READY and is
+  // delivered via live MESSAGE_CREATE, so a newer live message bumping sess_last_notified_id must not
+  // mask the wake-triggering message that arrived before READY.
+  for (size_t i = 0; i < nmsg; i++) {
+    const ccord_message *m = ccord_store_message_at(s->store, cu->channel_id, i);
+    if (!m || m->id <= floor_id || m->id > cu->target_msg_id || m->id >= (UINT64_C(1) << 62)) continue;
+    if (m->id == ln) continue;
+    if (ccord_message_is_ephemeral(m)) continue;
+    if (m->author_id == CCORD_ID_NONE || m->author_id == self_id) continue;
+    ccord_relationship_kind rel = ccord_store_relationship(s->store, m->author_id);
+    if (rel == CCORD_REL_BLOCKED || rel == CCORD_REL_IGNORED) continue;
+    if ((ccord_message_flags(m) & CCORD_MSGFLAG_SUPPRESS_NOTIFICATIONS) != 0) continue;
+
+    bool direct = ccord_message_mentions_user(m, self_id);
+    bool everyone = m->rich && m->rich->mention_everyone;
+    bool role = sess_message_pings_own_role(s, c->guild_id, m->rich);
+    bool is_mention = direct || (everyone && !eff.suppress_everyone) || (role && !eff.suppress_roles);
+    if (!ccord_notify_should_notify(&eff, is_dm || direct, everyone, role)) continue;
+
+    ccord_notification note = {
+      .guild_id = c->guild_id,
+      .channel_id = c->id,
+      .message_id = m->id,
+      .author_id = m->author_id,
+      .is_dm = is_dm,
+      .is_mention = is_mention,
+    };
+    if (npicked < CATCHUP_MAX_PER_CHANNEL) {
+      picked[npicked++] = note;
+    } else {
+      memmove(&picked[0], &picked[1], (CATCHUP_MAX_PER_CHANNEL - 1u) * sizeof picked[0]);
+      picked[CATCHUP_MAX_PER_CHANNEL - 1u] = note;
+    }
+  }
+
+  for (size_t i = 0; i < npicked; i++) {
+    sess_queue_notification(s, picked[i]);
+  }
+  if (npicked == 0 && allow_overflow_fallback && cu->has_new_mention && nmsg >= CCORD_SESSION_HISTORY_LIMIT) {
+    const ccord_message *oldest = ccord_store_message_at(s->store, cu->channel_id, 0);
+    if (oldest && oldest->id > floor_id) {
+      sess_wake_catchup_emit_fallback(s, cu);
+    }
+  }
+}
+
+static void sess_wake_catchup_consider(ccord_session *s, const ccord_channel *c, const sess_prev_chan *prev_chans,
+                                       size_t nprev, ccord_id prev_max_msg_id)
+{
+  if (!c || !session_channel_has_chat(c) || c->is_spam || c->is_message_request) return;
+  if (c->last_message_id == CCORD_ID_NONE || c->last_message_id >= (UINT64_C(1) << 62)) return;
+  if (c->last_read_id != CCORD_ID_NONE && c->last_message_id <= c->last_read_id) return;
+  if (c->last_message_id <= sess_last_notified_id(s, c->id)) return;
+
+  bool is_dm = (c->guild_id == CCORD_DM_GUILD_ID);
+  if (is_dm && c->user_id != CCORD_ID_NONE) {
+    ccord_relationship_kind rel = ccord_store_relationship(s->store, c->user_id);
+    if (rel == CCORD_REL_BLOCKED || rel == CCORD_REL_IGNORED) return;
+  }
+
+  const sess_prev_chan *prev = find_prev_chan(prev_chans, nprev, c->id);
+  bool new_msg = prev ? (c->last_message_id > prev->last_message_id)
+                      : (is_dm && prev_max_msg_id != CCORD_ID_NONE && c->last_message_id > prev_max_msg_id);
+  bool new_mention = prev
+                         ? (c->mention_count > prev->mention_count ||
+                            (c->mention_count > 0 && c->last_message_id > prev->last_message_id &&
+                             c->last_read_id > prev->last_read_id))
+                         : (!is_dm && c->mention_count > 0 && prev_max_msg_id != CCORD_ID_NONE &&
+                            c->last_message_id > prev_max_msg_id);
+  if (!new_msg && !new_mention) return;
+
+  ccord_notify_effective eff = notify_effective(s, c->id);
+  if (eff.muted || eff.level == CCORD_NOTIFY_NOTHING) return;
+  bool eligible = is_dm ? new_msg : (new_mention || (eff.level == CCORD_NOTIFY_ALL && new_msg));
+  if (!eligible) return;
+
+  ccord_id after = prev ? prev->last_message_id : prev_max_msg_id;
+  if (c->last_read_id != CCORD_ID_NONE && c->last_read_id > after) after = c->last_read_id;
+  ccord_id ln = sess_last_notified_id(s, c->id);
+  if (ln > after) after = ln;
+  if (c->last_message_id <= after) return;
+
+  session_wake_catchup cand = {
+    .channel_id = c->id,
+    .guild_id = c->guild_id,
+    .after_msg_id = after,
+    .target_msg_id = c->last_message_id,
+    .is_dm = is_dm,
+    .has_new_mention = new_mention,
+  };
+  if (s->nwake_catchup < SESSION_WAKE_CATCHUP_MAX) {
+    s->wake_catchup[s->nwake_catchup++] = cand;
+  } else {
+    size_t oldest = 0;
+    for (size_t i = 1; i < SESSION_WAKE_CATCHUP_MAX; i++) {
+      if (s->wake_catchup[i].target_msg_id < s->wake_catchup[oldest].target_msg_id) oldest = i;
+    }
+    if (cand.target_msg_id > s->wake_catchup[oldest].target_msg_id) {
+      s->wake_catchup[oldest] = cand;
+    }
+  }
+}
+
+static void sess_snapshot_wake_catchup(ccord_session *s, const sess_prev_chan *prev_chans, size_t nprev,
+                                       ccord_id prev_max_msg_id)
+{
+  if (!s || !s->in_background || !prev_chans || nprev == 0) return;
+  int64_t now_unix_ms = session_now_unix_ms(s);
+  ccord_id self_id = ccord_store_self_id(s->store);
+
+  size_t ndm = ccord_store_channel_count(s->store, CCORD_DM_GUILD_ID);
+  for (size_t ci = 0; ci < ndm; ci++) {
+    const ccord_channel *c = ccord_store_channel_at(s->store, CCORD_DM_GUILD_ID, ci);
+    sess_wake_catchup_consider(s, c, prev_chans, nprev, prev_max_msg_id);
+  }
+
+  size_t ng = ccord_store_guild_count(s->store);
+  for (size_t gi = 0; gi < ng; gi++) {
+    const ccord_guild *g = ccord_store_guild_at(s->store, gi);
+    if (!g || ccord_store_guild_muted(s->store, g->id, now_unix_ms)) continue;
+    ccord_store_guild_perm_base perm_base = {0};
+    bool have_base = ccord_store_guild_base_permissions(s->store, g->id, self_id, now_unix_ms, &perm_base);
+    size_t nc = ccord_store_channel_count(s->store, g->id);
+    for (size_t ci = 0; ci < nc; ci++) {
+      const ccord_channel *c = ccord_store_channel_at(s->store, g->id, ci);
+      if (!c) continue;
+      if (have_base && perm_base.exact &&
+          (ccord_store_channel_permissions_with_base(s->store, &perm_base, c) & CCORD_PERM_VIEW_CHANNEL) == 0) {
+        continue;
+      }
+      sess_wake_catchup_consider(s, c, prev_chans, nprev, prev_max_msg_id);
+    }
+  }
+
+  if (s->nwake_catchup == 0) return;
+  CCORD_LOG_I("session: background READY catch-up fetching %zu newly-unread channel(s)", s->nwake_catchup);
+
+  size_t kept = 0;
+  for (size_t i = 0; i < s->nwake_catchup; i++) {
+    session_wake_catchup cu = s->wake_catchup[i];
+    if (sess_request_history_once(s, cu.channel_id)) {
+      s->wake_catchup[kept++] = cu;
+    } else if (ccord_store_history_loaded(s->store, cu.channel_id)) {
+      sess_wake_catchup_from_store(s, &cu, true);
+    } else {
+      sess_wake_catchup_emit_fallback(s, &cu);
+    }
+  }
+  s->nwake_catchup = kept;
+}
+
 void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
 {
   ccord_error err;
@@ -235,16 +544,25 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
       // READY: the stale flag goes first so everything below (history, presence, profile requests) is live again.
       {
         ccord_id prev_self = ccord_store_self_id(s->store);
+        ccord_id new_self = ev->snapshot ? ev->snapshot->self_id : CCORD_ID_NONE;
         bool was_stale = s->stale;
+        sess_prev_chan *prev_chans = nullptr;
+        size_t nprev_chans = 0;
+        ccord_id prev_max_msg_id = CCORD_ID_NONE;
+        if (s->in_background && !was_stale && prev_self != CCORD_ID_NONE && new_self == prev_self) {
+          prev_chans = sess_snapshot_capture_prev(s, &nprev_chans, &prev_max_msg_id);
+        }
+        s->nwake_catchup = 0;
         s->stale = false;
         if (ccord_store_set_snapshot_ex(s->store, ev->snapshot, was_stale, &err) != CCORD_OK) {
+          ccord_free(prev_chans);
           CCORD_LOG_E("session: snapshot rejected: %s", err.message);
           s->state = CCORD_CONN_FAILED;
           sess_post_state(s);
         } else {
-          ccord_id new_self = ev->snapshot ? ev->snapshot->self_id : CCORD_ID_NONE;
           if (prev_self != CCORD_ID_NONE && new_self != CCORD_ID_NONE && prev_self != new_self) {
             ccord_store_clear_all_expressions(s->store);
+            s->nnotified_track = 0;
           }
           ccord_store_forum_reset(s->store);
         if (ev->forum_meta_count > 0 && ev->forum_metas) {
@@ -334,8 +652,9 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
         }
         if (s->in_background) {
           s->bg_deferred_sync = true;
+          if (prev_chans) sess_snapshot_wake_catchup(s, prev_chans, nprev_chans, prev_max_msg_id);
         } else {
-          sess_request_history_once(s, sel_ch);
+          (void)sess_request_history_once(s, sel_ch);
           sess_maybe_request_dm_profile(s, sel_ch);
           if (s->reading_known && s->reading_channel != CCORD_ID_NONE) {
             ccord_id self_id = ccord_store_self_id(s->store);
@@ -345,6 +664,7 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
             }
           }
         }
+        ccord_free(prev_chans);
         ccord_os_trim_memory();
         }
       }
@@ -361,10 +681,16 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
         chist->in_flight_before_id = CCORD_ID_NONE;
         chist->has_more = (ev->message_count >= CCORD_SESSION_HISTORY_LIMIT);
       }
+      session_wake_catchup cu = {0};
+      bool had_catchup = sess_take_wake_catchup(s, ev->channel_id, &cu);
       if (ccord_store_set_history(s->store, ev->channel_id, ev->messages, ev->message_count, &err) != CCORD_OK) {
         CCORD_LOG_W("session: history rejected: %s", err.message);
-      } else if (s->retried_channel == ev->channel_id) {
-        s->retried_channel = CCORD_ID_NONE;
+        if (had_catchup) sess_wake_catchup_emit_fallback(s, &cu);
+      } else {
+        if (s->retried_channel == ev->channel_id) {
+          s->retried_channel = CCORD_ID_NONE;
+        }
+        if (had_catchup) sess_wake_catchup_from_store(s, &cu, true);
       }
       break;
     }
@@ -373,6 +699,10 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
       session_channel_hist *chist = sess_find_chan_hist(s, ev->channel_id);
       if (chist) {
         chist->in_flight_before_id = CCORD_ID_NONE;
+      }
+      session_wake_catchup cu = {0};
+      if (sess_take_wake_catchup(s, ev->channel_id, &cu)) {
+        sess_wake_catchup_emit_fallback(s, &cu);
       }
       break;
     }

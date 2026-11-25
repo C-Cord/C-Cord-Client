@@ -1372,6 +1372,246 @@ static void test_session_m3c_group_dms_requests_profiles_and_custom_status(void)
 }
 
 
+static bool fake_requested_channel(const fake_transport *f, ccord_id cid)
+{
+  for (size_t i = 0; i < f->requested_history_recorded; i++) {
+    if (f->requested_history_channels[i] == cid) return true;
+  }
+  return false;
+}
+
+// Companion wake reconnects after a long mobile suspend land on READY (CCORD_NET_SNAPSHOT) instead of
+// MESSAGE_CREATE. Verify that background READY diffs newly unread DMs, guild mentions, and All-Messages
+// channels, fetches REST history to emit real notifications, handles live MESSAGE_CREATE racing with
+// in-flight history, preserves pending catch-up across back-to-back READY, falls back on history failure,
+// deduplicates on repeat READY, and cancels on foreground return.
+static void test_session_background_ready_wake_catchup(void)
+{
+  ccord_error err;
+  ccord_bus *bus = ccord_bus_create(&err);
+  ccord_store *store = ccord_store_create(bus, &err);
+  CT_CHECK(bus && store);
+  if (!bus || !store) return;
+
+  enum {
+    SELF = 1, ANN = 2, BOB = 3, BLOCKED = 4,
+    GUILD = 10,
+    CH_LOBBY = 20,
+    CH_MENT = 21,
+    CH_ALL = 22,
+    CH_PLAIN = 23,
+    CH_MUTED = 24,
+    DM_ANN = 40,
+    DM_READ = 41,
+    DM_BLOCKED = 42,
+    DM_NEW = 43,
+  };
+  ccord_user users[4] = {
+    {.id = SELF, .name = "You", .status_text = ""},
+    {.id = ANN, .name = "Ann", .status_text = ""},
+    {.id = BOB, .name = "Bob", .status_text = ""},
+    {.id = BLOCKED, .name = "Spammer", .status_text = ""},
+  };
+  ccord_guild guilds[1] = {{.id = GUILD, .name = "HQ"}};
+  ccord_relationship rels[1] = {{.user_id = BLOCKED, .kind = CCORD_REL_BLOCKED}};
+  ccord_notify_scope rows[3] = {
+    {.guild_id = GUILD, .channel_id = CCORD_ID_NONE, .level = CCORD_NOTIFY_MENTIONS},
+    {.guild_id = GUILD, .channel_id = CH_ALL, .level = CCORD_NOTIFY_ALL},
+    {.guild_id = GUILD, .channel_id = CH_MUTED, .level = CCORD_NOTIFY_MENTIONS, .muted = true},
+  };
+
+  ccord_channel chans0[8] = {
+    {.id = CH_LOBBY, .guild_id = GUILD, .kind = CCORD_CHANNEL_TEXT, .name = "lobby", .topic = "", .position = 0,
+     .last_message_id = 100, .last_read_id = 100},
+    {.id = CH_MENT, .guild_id = GUILD, .kind = CCORD_CHANNEL_TEXT, .name = "ment", .topic = "", .position = 1,
+     .last_message_id = 200, .last_read_id = 200},
+    {.id = CH_ALL, .guild_id = GUILD, .kind = CCORD_CHANNEL_TEXT, .name = "all", .topic = "", .position = 2,
+     .last_message_id = 300, .last_read_id = 300},
+    {.id = CH_PLAIN, .guild_id = GUILD, .kind = CCORD_CHANNEL_TEXT, .name = "plain", .topic = "", .position = 3,
+     .last_message_id = 310, .last_read_id = 310},
+    {.id = CH_MUTED, .guild_id = GUILD, .kind = CCORD_CHANNEL_TEXT, .name = "muted", .topic = "", .position = 4,
+     .last_message_id = 320, .last_read_id = 320},
+    {.id = DM_ANN, .guild_id = CCORD_DM_GUILD_ID, .kind = CCORD_CHANNEL_TEXT, .name = "Ann", .topic = "",
+     .user_id = ANN, .last_message_id = 100, .last_read_id = 100},
+    {.id = DM_READ, .guild_id = CCORD_DM_GUILD_ID, .kind = CCORD_CHANNEL_TEXT, .name = "Bob", .topic = "",
+     .user_id = BOB, .last_message_id = 120, .last_read_id = 120},
+    {.id = DM_BLOCKED, .guild_id = CCORD_DM_GUILD_ID, .kind = CCORD_CHANNEL_TEXT, .name = "Spammer", .topic = "",
+     .user_id = BLOCKED, .last_message_id = 130, .last_read_id = 130},
+  };
+  ccord_snapshot snap0 = {
+    .self_id = SELF, .users = users, .user_count = 4, .guilds = guilds, .guild_count = 1,
+    .channels = chans0, .channel_count = 8, .relationships = rels, .relationship_count = 1,
+  };
+
+  fake_transport *f = calloc(1, sizeof *f);
+  CT_CHECK(f != nullptr);
+  if (!f) {
+    ccord_store_destroy(store);
+    ccord_bus_destroy(bus);
+    return;
+  }
+  f->base.vt = &fake_vt;
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap0, .notify = rows, .notify_count = 3};
+  ccord_session *s = ccord_session_create(bus, store, &f->base, &err);
+  CT_CHECK(s != nullptr);
+  if (!s) {
+    free(f);
+    ccord_store_destroy(store);
+    ccord_bus_destroy(bus);
+    return;
+  }
+  CT_CHECK(ccord_session_pump(s) == 1);
+  // Enter background (mobile sleep); clear history counters from foreground initial sync.
+  ccord_session_set_background(s, true);
+  f->history_request_count = 0;
+  f->requested_history_recorded = 0;
+
+  // 1. Identical background READY must trigger zero REST history requests and zero notifications.
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap0, .notify = rows, .notify_count = 3};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(f->history_request_count == 0);
+  ccord_notification note;
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+
+  // 2. Wake READY with newly arrived unread DM, guild mention, All-Messages channel, and brand-new DM,
+  //    plus ineligible channels (plain non-mention, muted mention, already-read DM, blocked DM).
+  ccord_channel chans1[9] = {
+    chans0[0],
+    {.id = CH_MENT, .guild_id = GUILD, .kind = CCORD_CHANNEL_TEXT, .name = "ment", .topic = "", .position = 1,
+     .last_message_id = 206, .last_read_id = 200, .unread_count = 3, .mention_count = 1},
+    {.id = CH_ALL, .guild_id = GUILD, .kind = CCORD_CHANNEL_TEXT, .name = "all", .topic = "", .position = 2,
+     .last_message_id = 305, .last_read_id = 300, .unread_count = 2},
+    {.id = CH_PLAIN, .guild_id = GUILD, .kind = CCORD_CHANNEL_TEXT, .name = "plain", .topic = "", .position = 3,
+     .last_message_id = 315, .last_read_id = 310, .unread_count = 1, .mention_count = 0},
+    {.id = CH_MUTED, .guild_id = GUILD, .kind = CCORD_CHANNEL_TEXT, .name = "muted", .topic = "", .position = 4,
+     .last_message_id = 325, .last_read_id = 320, .unread_count = 1, .mention_count = 1},
+    {.id = DM_ANN, .guild_id = CCORD_DM_GUILD_ID, .kind = CCORD_CHANNEL_TEXT, .name = "Ann", .topic = "",
+     .user_id = ANN, .last_message_id = 105, .last_read_id = 100, .unread_count = 1, .mention_count = 1},
+    {.id = DM_READ, .guild_id = CCORD_DM_GUILD_ID, .kind = CCORD_CHANNEL_TEXT, .name = "Bob", .topic = "",
+     .user_id = BOB, .last_message_id = 125, .last_read_id = 125, .unread_count = 0},
+    {.id = DM_BLOCKED, .guild_id = CCORD_DM_GUILD_ID, .kind = CCORD_CHANNEL_TEXT, .name = "Spammer", .topic = "",
+     .user_id = BLOCKED, .last_message_id = 135, .last_read_id = 130, .unread_count = 1, .mention_count = 1},
+    {.id = DM_NEW, .guild_id = CCORD_DM_GUILD_ID, .kind = CCORD_CHANNEL_TEXT, .name = "Bob", .topic = "",
+     .user_id = BOB, .last_message_id = 500, .last_read_id = CCORD_ID_NONE, .unread_count = 1, .mention_count = 1},
+  };
+  ccord_snapshot snap1 = {
+    .self_id = SELF, .users = users, .user_count = 4, .guilds = guilds, .guild_count = 1,
+    .channels = chans1, .channel_count = 9, .relationships = rels, .relationship_count = 1,
+  };
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap1, .notify = rows, .notify_count = 3};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(f->history_request_count == 4);
+  CT_CHECK(fake_requested_channel(f, DM_ANN));
+  CT_CHECK(fake_requested_channel(f, DM_NEW));
+  CT_CHECK(fake_requested_channel(f, CH_MENT));
+  CT_CHECK(fake_requested_channel(f, CH_ALL));
+  CT_CHECK(!fake_requested_channel(f, CH_PLAIN));
+  CT_CHECK(!fake_requested_channel(f, CH_MUTED));
+  CT_CHECK(!fake_requested_channel(f, DM_READ));
+  CT_CHECK(!fake_requested_channel(f, DM_BLOCKED));
+
+  // Race test: a live MESSAGE_CREATE (106) arrives for DM_ANN BEFORE REST history returns [100, 105, 106].
+  // Both 106 (live) and 105 (wake-triggering catch-up) must notify, with zero duplication of 106.
+  ccord_message dm_live = {.id = 106, .channel_id = DM_ANN, .author_id = ANN, .timestamp_ms = 106, .content = "second msg"};
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_MESSAGE_CREATE, .guild_id = CCORD_DM_GUILD_ID,
+                                    .channel_id = DM_ANN, .messages = &dm_live, .message_count = 1};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_session_pop_notification(s, &note) && note.channel_id == DM_ANN && note.message_id == 106 && note.is_dm);
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+
+  ccord_message dm_hist[3] = {
+    {.id = 100, .channel_id = DM_ANN, .author_id = ANN, .timestamp_ms = 100, .content = "old"},
+    {.id = 105, .channel_id = DM_ANN, .author_id = ANN, .timestamp_ms = 105, .content = "first wake msg"},
+    {.id = 106, .channel_id = DM_ANN, .author_id = ANN, .timestamp_ms = 106, .content = "second msg"},
+  };
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_HISTORY, .guild_id = CCORD_DM_GUILD_ID,
+                                    .channel_id = DM_ANN, .messages = dm_hist, .message_count = 3};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_session_pop_notification(s, &note) && note.channel_id == DM_ANN && note.message_id == 105 &&
+           note.author_id == ANN && note.is_dm);
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+
+  // Guild mention channel: 205 is a mention, followed by non-mention 206 -> only 205 notifies.
+  ccord_id ping_me[1] = {SELF};
+  ccord_message_rich rich_ping = {.present = CCORD_RICH_ALL, .mention_users = ping_me, .mention_user_count = 1};
+  ccord_message ment_hist[4] = {
+    {.id = 200, .channel_id = CH_MENT, .author_id = ANN, .timestamp_ms = 200, .content = "read"},
+    {.id = 204, .channel_id = CH_MENT, .author_id = ANN, .timestamp_ms = 204, .content = "plain before"},
+    {.id = 205, .channel_id = CH_MENT, .author_id = ANN, .timestamp_ms = 205, .content = "ping!", .rich = &rich_ping},
+    {.id = 206, .channel_id = CH_MENT, .author_id = BOB, .timestamp_ms = 206, .content = "plain after"},
+  };
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_HISTORY, .guild_id = GUILD,
+                                    .channel_id = CH_MENT, .messages = ment_hist, .message_count = 4};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_session_pop_notification(s, &note) && note.channel_id == CH_MENT && note.message_id == 205 &&
+           note.author_id == ANN && note.is_mention && !note.is_dm);
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+
+  // All-Messages channel: own message 304 is ignored; Ann's 305 notifies.
+  ccord_message all_hist[3] = {
+    {.id = 300, .channel_id = CH_ALL, .author_id = ANN, .timestamp_ms = 300, .content = "old"},
+    {.id = 304, .channel_id = CH_ALL, .author_id = SELF, .timestamp_ms = 304, .content = "my own"},
+    {.id = 305, .channel_id = CH_ALL, .author_id = ANN, .timestamp_ms = 305, .content = "chatting"},
+  };
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_HISTORY, .guild_id = GUILD,
+                                    .channel_id = CH_ALL, .messages = all_hist, .message_count = 3};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_session_pop_notification(s, &note) && note.channel_id == CH_ALL && note.message_id == 305 &&
+           note.author_id == ANN && !note.is_mention);
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+
+  // History failure on DM_NEW falls back to a channel summary notification.
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_HISTORY_FAILED, .channel_id = DM_NEW};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_session_pop_notification(s, &note) && note.channel_id == DM_NEW && note.message_id == 500 &&
+           note.author_id == BOB && note.is_dm);
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+
+  // 3. Repeating snap1 must NOT re-request history or duplicate any notifications.
+  f->history_request_count = 0;
+  f->requested_history_recorded = 0;
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap1, .notify = rows, .notify_count = 3};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(f->history_request_count == 0);
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+
+  // 4. Back-to-back READY while history is still pending must preserve the catch-up watermark.
+  chans1[5].last_message_id = 110;
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap1, .notify = rows, .notify_count = 3};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(f->history_request_count == 1 && f->last_requested_history_channel == DM_ANN);
+  // Second READY arrives before history completes:
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap1, .notify = rows, .notify_count = 3};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(f->history_request_count == 2 && f->last_requested_history_channel == DM_ANN);
+  ccord_message dm_hist2[1] = {
+    {.id = 110, .channel_id = DM_ANN, .author_id = ANN, .timestamp_ms = 110, .content = "survived reconnect"},
+  };
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_HISTORY, .guild_id = CCORD_DM_GUILD_ID,
+                                    .channel_id = DM_ANN, .messages = dm_hist2, .message_count = 1};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_session_pop_notification(s, &note) && note.channel_id == DM_ANN && note.message_id == 110);
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+
+  // 5. Returning to foreground cancels pending background wake catch-up.
+  chans1[5].last_message_id = 115;
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap1, .notify = rows, .notify_count = 3};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  ccord_session_set_background(s, false);
+  ccord_message dm_hist3[1] = {
+    {.id = 115, .channel_id = DM_ANN, .author_id = ANN, .timestamp_ms = 115, .content = "now foreground"},
+  };
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_HISTORY, .guild_id = CCORD_DM_GUILD_ID,
+                                    .channel_id = DM_ANN, .messages = dm_hist3, .message_count = 1};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+
+  ccord_session_destroy(s);
+  ccord_store_destroy(store);
+  ccord_bus_destroy(bus);
+}
+
+
 int main(void)
 {
   test_session_notify_settings();
@@ -1386,5 +1626,6 @@ int main(void)
   test_session_search_pins_threads_and_reactions();
   test_session_m3b_folders_reorder_invites_and_discovery();
   test_session_m3c_group_dms_requests_profiles_and_custom_status();
+  test_session_background_ready_wake_catchup();
   return CT_RESULT("test_session_messages");
 }
