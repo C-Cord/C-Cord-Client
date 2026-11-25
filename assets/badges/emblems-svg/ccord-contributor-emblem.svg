@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g transform="translate(504.00, 544.00) scale(1.0300)">
+    <!-- White sticker outline -->
+    <g fill="#FFFFFF" stroke="#FFFFFF" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M -82,-104 L -82,104" fill="none" stroke-width="86"/>
+      <path d="M -82,-104 L -82,-68 A 88,88 0 0,0 6,20 L 88,20" fill="none" stroke-width="86"/>
+      <circle cx="-82" cy="-104" r="72" stroke="none"/>
+      <circle cx="-82" cy="104" r="72" stroke="none"/>
+      <circle cx="88" cy="20" r="72" stroke="none"/>
+    </g>
+    <!-- Main trunk (rich emerald for clean visual hierarchy) -->
+    <path d="M -82,-104 L -82,104" fill="none" stroke="#159A45" stroke-width="42" stroke-linecap="round"/>
+    <!-- Quarter-circle contributor merge branch (vibrant emerald) -->
+    <path d="M -82,-104 L -82,-68 A 88,88 0 0,0 6,20 L 88,20" fill="none" stroke="#22C55E" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+    <!-- Three bold nodes (ring style echoing C-Cord speech bubble) -->
+    <circle cx="-82" cy="104" r="50" fill="#159A45"/>
+    <circle cx="-82" cy="104" r="21" fill="#FFFFFF"/>
+
+    <circle cx="88" cy="20" r="50" fill="#22C55E"/>
+    <circle cx="88" cy="20" r="21" fill="#FFFFFF"/>
+
+    <circle cx="-82" cy="-104" r="50" fill="#22C55E"/>
+    <circle cx="-82" cy="-104" r="21" fill="#FFFFFF"/>
+  </g>
+</svg>

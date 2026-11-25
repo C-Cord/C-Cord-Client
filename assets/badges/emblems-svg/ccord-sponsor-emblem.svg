@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g transform="translate(492.00, 550.00) scale(0.9600)">
+    <defs>
+      <clipPath id="heart-clip">
+        <path d="M 0,-74 C -24,-138 -116,-156 -156,-92 C -194,-32 -164,54 -22,140 C -8,149 8,149 22,140 C 164,54 194,-32 156,-92 C 116,-156 24,-138 0,-74 Z"/>
+      </clipPath>
+    </defs>
+    <!-- Crisp white sticker outline matching C-Cord icon -->
+    <path d="M 0,-74 C -24,-138 -116,-156 -156,-92 C -194,-32 -164,54 -22,140 C -8,149 8,149 22,140 C 164,54 194,-32 156,-92 C 116,-156 24,-138 0,-74 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="46" stroke-linejoin="round" stroke-linecap="round"/>
+    <!-- Main rose-pink heart -->
+    <path d="M 0,-74 C -24,-138 -116,-156 -156,-92 C -194,-32 -164,54 -22,140 C -8,149 8,149 22,140 C 164,54 194,-32 156,-92 C 116,-156 24,-138 0,-74 Z" fill="#F43F7E"/>
+    <!-- Subtle flat shading & gloss -->
+    <g clip-path="url(#heart-clip)">
+      <path d="M 148,-102 C 175,-20 112,68 -36,144 L 190,175 L 215,-125 Z" fill="#D62465"/>
+      <path d="M -118,-50 C -120,-86 -88,-106 -56,-96" fill="none" stroke="#FF9BC0" stroke-width="24" stroke-linecap="round"/>
+    </g>
+  </g>
+</svg>
