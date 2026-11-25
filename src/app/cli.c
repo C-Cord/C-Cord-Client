@@ -279,6 +279,22 @@ int app_parse_args(int argc, char **argv, options *o)
     } else if (strcmp(a, "--open-url") == 0) {
       NEED_VALUE();
       o->open_url = val;
+    } else if (strcmp(a, "--test-captcha") == 0) {
+      o->test_captcha = true;
+    } else if (strcmp(a, "--test-captcha-challenge") == 0 || strcmp(a, "--test-captcha-demo") == 0) {
+      o->test_captcha = true;
+      o->test_captcha_challenge = true;
+    } else if (strcmp(a, "--test-captcha-sitekey") == 0) {
+      NEED_VALUE();
+      o->test_captcha = true;
+      o->test_captcha_sitekey = val;
+    } else if (strcmp(a, "--test-captcha-host") == 0) {
+      NEED_VALUE();
+      o->test_captcha = true;
+      o->test_captcha_host = val;
+    } else if (strcmp(a, "--test-web") == 0) {
+      NEED_VALUE();
+      o->test_web_url = val;
     } else if (a[0] != '-' &&
                (strncmp(a, "https://", 8) == 0 || strncmp(a, "http://", 7) == 0 ||
                 strncmp(a, "discord://", 10) == 0 || strncmp(a, "ccord://", 8) == 0 ||

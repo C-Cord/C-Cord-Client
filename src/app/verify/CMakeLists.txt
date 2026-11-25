@@ -91,5 +91,6 @@ target_link_libraries(ccord_verify PRIVATE
 target_compile_definitions(ccord_verify PRIVATE
   CCORD_BUILD_VERIFY=1
   CCORD_WITH_PLUGINS=1
-  CCORD_LIVE_ACCOUNT=$<BOOL:${CCORD_LIVE_ACCOUNT}>)
+  CCORD_LIVE_ACCOUNT=$<BOOL:${CCORD_LIVE_ACCOUNT}>
+  CCORD_WEB_CAPTCHA=$<BOOL:${CCORD_WEB_CAPTCHA}>)
 ccord_strict_warnings(ccord_verify)

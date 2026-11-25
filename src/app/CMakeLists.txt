@@ -8,6 +8,7 @@ set(CCORD_APP_SOURCES
   cli.c
   host_callbacks.c
   account_bridge.c
+  captcha_modal.c
   plugins_bridge.c
   media_bridge.c
   desktop/app_desktop.c
@@ -65,7 +66,14 @@ ccord_strict_warnings(${CCORD_APP_TARGET})
 target_compile_definitions(${CCORD_APP_TARGET} PRIVATE
   CCORD_BUILD_VERIFY=$<BOOL:${CCORD_BUILD_TESTS}>
   CCORD_LIVE_ACCOUNT=$<BOOL:${CCORD_LIVE_ACCOUNT}>
+  CCORD_WEB_CAPTCHA=$<BOOL:${CCORD_WEB_CAPTCHA}>
   CCORD_WITH_PLUGINS=1)
+if(CCORD_WEB_CAPTCHA)
+  target_link_libraries(${CCORD_APP_TARGET} PRIVATE ccord_web)
+  if(UNIX AND NOT APPLE AND NOT ANDROID)
+    set_target_properties(${CCORD_APP_TARGET} PROPERTIES ENABLE_EXPORTS ON)
+  endif()
+endif()
 
 if(CCORD_BUILD_TESTS)
   add_subdirectory(verify)

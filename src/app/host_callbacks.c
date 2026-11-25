@@ -71,9 +71,10 @@ bool app_ensure_auth_q(app *a, ccord_error *err)
     a->auth_q_retire = false;
     return true;
   }
-  ccord_rest_config auth_cfg = {.timeout_ms = 10000, .max_response_bytes = 65536};
+  ccord_rest_config auth_cfg = {.timeout_ms = 10000, .max_response_bytes = 65536, .enable_cookies = true};
   a->auth_q = ccord_rest_queue_create(&auth_cfg, err);
   a->auth_q_retire = false;
+  a->auth_fp_fetched = false;
   return a->auth_q != nullptr;
 }
 
@@ -84,6 +85,7 @@ void app_destroy_auth_q(app *a)
     a->auth_q = nullptr;
   }
   a->auth_q_retire = false;
+  a->auth_fp_fetched = false;
 }
 #endif
 
@@ -120,6 +122,7 @@ static void host_text_input_kind(void *ud, int kind)
 static void host_text_input(void *ud, bool active, float x, float y, float w, float h)
 {
   app *a = ud;
+  if (app_captcha_active(a)) active = false;
   float z = (a && a->renderer) ? ccord_render_get_zoom(a->renderer) : 1.0f;
   ccord_platform_text_input_ex(a->platform, active, a->ime_kind, x * z, y * z, w * z, h * z);
 }

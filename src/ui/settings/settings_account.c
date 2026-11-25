@@ -1747,8 +1747,8 @@ void st_draw_login_screen(ccord_ui *ui, ccord_renderer *r)
     ccord_text_draw(r, "PASSWORD", 8, pw_box.x, pw_box.y - 16.0f, &ls, 0.0f);
     draw_input_field(ui, r, pw_box, &ui->account_password_edit, ui->account_focus_field == 3, true, "Password");
     st_draw_button(ui, r, lbtn, connecting ? "Connecting to Discord Gateway..." : "Connect to Discord", true);
-    const char *h3 = ui->mobile_layout ? "CAPTCHA required? Switch to Token Sign-In."
-                                       : "If Discord requires a browser CAPTCHA, switch to Token Sign-In.";
+    const char *h3 = ui->mobile_layout ? "In-app CAPTCHA verification enabled (or use Token Sign-In)."
+                                       : "If Discord asks for a CAPTCHA, it will appear right here (or use Token Sign-In).";
     ccord_text_draw_ellipsis(r, h3, strlen(h3), cx, card.y + 372.0f - lsc, cw, &hs);
   }
 

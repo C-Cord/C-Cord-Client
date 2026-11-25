@@ -62,6 +62,11 @@ typedef struct options {
   const char *control_socket;      // --control-socket: single-instance IPC socket path override
   const char *ipc_cmd;             // --toggle-mic/--toggle-deafen/--show/--quit: send to the primary instance
   const char *open_url;            // --open-url / positional Discord URL or invite link
+  bool test_captcha;               // --test-captcha: open native C web CAPTCHA modal over Login screen
+  bool test_captcha_challenge;     // --test-captcha-challenge / --test-captcha-demo: isolated live demo puzzle
+  const char *test_captcha_sitekey; // --test-captcha-sitekey KEY: custom hCaptcha sitekey for testing
+  const char *test_captcha_host;   // --test-captcha-host HOST: custom hCaptcha host for testing (default discord.com)
+  const char *test_web_url;        // --test-web URL: open native C web modal pointing at URL (dev/test)
   const char *plugin_dirs[MAX_PLUGIN_DIRS];
   size_t plugin_dir_count;
   bool no_plugins;
@@ -103,6 +108,34 @@ typedef struct app {
   ccord_rest_queue *auth_q;      // governed queue for login/MFA; created lazily on login and retired once signed in
   bool auth_pending;             // a login/MFA request is in flight; blocks double submission
   bool auth_q_retire;            // destroy auth_q after ccord_rest_queue_pump returns
+  bool auth_fp_fetched;          // pre-auth GET /experiments fingerprint/cookie step completed on auth_q
+  ccord_captcha_challenge captcha_challenge;
+  int captcha_attempts;
+#endif
+#if CCORD_WEB_CAPTCHA
+  struct ccord_web_view *captcha_web;
+  bool captcha_test_mode;
+  bool captcha_is_url_mode;
+  bool captcha_has_solution;
+  bool captcha_is_error;
+  bool captcha_solved_banner;
+  bool captcha_widget_ready;
+  bool captcha_challenge_open;
+  uint64_t captcha_open_ms;
+  uint64_t captcha_last_anim_ms;
+  float captcha_well_h_cur;
+  float captcha_well_h_target;
+  float captcha_mx, captcha_my;
+  int captcha_pressed_btn;
+  bool captcha_touch_btn_active;
+  int64_t captcha_touch_btn_finger;
+  char captcha_service[32];
+  char captcha_sitekey[128];
+  char captcha_host[128];
+  char captcha_rqdata[8192];
+  char captcha_url[512];
+  char captcha_solved_token[8192];
+  char captcha_modal_status[256];
 #endif
   ccord_account_view last_av;    // cached last account_view pushed to UI (avoids dirtying UI every idle tick)
   char last_av_display[128];
@@ -217,6 +250,21 @@ void app_disconnect_live(app *a);
 void app_host_account_switch(void *ud, uint64_t user_id);
 void app_host_account_remove(void *ud, uint64_t user_id);
 void app_host_account_action(void *ud, ccord_account_action action);
+#if CCORD_LIVE_ACCOUNT
+void app_auth_retry_with_captcha(app *a, const char *captcha_key, const char *rqtoken, const char *session_id);
+#endif
+
+// captcha_modal.c — native C23 mini-web CAPTCHA modal overlay
+bool app_captcha_open(app *a, const char *service, const char *sitekey, const char *rqdata, bool test_mode);
+bool app_captcha_open_ex(app *a, const char *service, const char *sitekey, const char *host,
+                         const char *rqdata, bool test_mode);
+bool app_captcha_open_url(app *a, const char *url);
+void app_captcha_close(app *a, bool user_cancelled);
+bool app_captcha_active(const app *a);
+bool app_captcha_pump(app *a);
+uint32_t app_captcha_next_wait_ms(const app *a, uint64_t now_ms);
+void app_captcha_draw(app *a);
+bool app_captcha_handle_input(app *a, const ccord_input_event *ev);
 
 // plugins_bridge.c — plugin lifecycle, catalog HTTP adapter & platform ops
 #if CCORD_WITH_PLUGINS

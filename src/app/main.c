@@ -24,6 +24,11 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__linux__) && !defined(__ANDROID__)
+#include <execinfo.h>
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 #if !defined(CCORD_BUILD_VERIFY) || CCORD_BUILD_VERIFY
 #include "verify/verify_dispatch.h"
@@ -66,6 +71,7 @@ void app_pump(app *a)
     if (a->auth_q_retire && !a->auth_pending) app_destroy_auth_q(a);
   }
 #endif
+  if (app_captcha_pump(a)) a->media_redraw = true;
   (void)ccord_session_pump(a->session);
 #if CCORD_LIVE_ACCOUNT
   if (a->pending_token_reconnect) {
@@ -162,6 +168,7 @@ void app_draw_frame(app *a)
 {
   ccord_render_begin(a->renderer, (ccord_color){0x31, 0x33, 0x38, 255});
   ccord_ui_draw(a->ui, a->renderer);
+  if (app_captcha_active(a)) app_captcha_draw(a);
   ccord_render_end(a->renderer);
 }
 
@@ -409,6 +416,10 @@ static void run_interactive(app *a)
           if (desk_to < wait_timeout) wait_timeout = desk_to;
           uint32_t media_to = ccord_app_media_next_wait_ms(a->media, now_u);
           if (media_to < wait_timeout) wait_timeout = media_to;
+          if (app_captcha_active(a)) {
+            uint32_t cap_to = app_captcha_next_wait_ms(a, now_u);
+            if (cap_to < wait_timeout) wait_timeout = cap_to;
+          }
           if (a->cloud && ccord_cloud_has_pending_wake(a->cloud)) {
             wait_timeout = 0u;
           } else if (a->cloud_wake_until_ms > 0u) {
@@ -661,7 +672,13 @@ static void run_interactive(app *a)
           if (a->plugins) ccord_plugins_dispatch_window_focus(a->plugins, ev.focused);
 #endif
         }
-        bool ui_consumed = ccord_ui_handle_input(a->ui, &ev);
+        bool ui_consumed = false;
+        if (app_captcha_active(a) && app_captcha_handle_input(a, &ev)) {
+          ui_consumed = true;
+          redraw = true;
+        } else {
+          ui_consumed = ccord_ui_handle_input(a->ui, &ev);
+        }
         if (ui_consumed) redraw = true;
 #if CCORD_OS_ANDROID
         if (!ui_consumed && ev.type == CCORD_IN_KEY_DOWN && ev.key == CCORD_KEY_BACK) {
@@ -972,6 +989,37 @@ static void android_init_env(void)
 }
 #endif
 
+#if defined(__linux__) && !defined(__ANDROID__)
+static void test_crash_handler(int sig)
+{
+  const char *sname = sig == SIGSEGV ? "SIGSEGV"
+                    : sig == SIGABRT ? "SIGABRT"
+                    : sig == SIGFPE  ? "SIGFPE"
+                    : sig == SIGBUS  ? "SIGBUS" : "SIGNAL";
+  static const char pfx[] = "\n[ccord crash] fatal ";
+  static const char sfx[] = " caught; stack trace:\n";
+  (void)write(STDERR_FILENO, pfx, sizeof pfx - 1u);
+  (void)write(STDERR_FILENO, sname, strlen(sname));
+  (void)write(STDERR_FILENO, sfx, sizeof sfx - 1u);
+  void *frames[48];
+  int n = backtrace(frames, 48);
+  backtrace_symbols_fd(frames, n, STDERR_FILENO);
+  _exit(128 + sig);
+}
+
+static void install_test_crash_handler(void)
+{
+  struct sigaction sa = {0};
+  sa.sa_handler = test_crash_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = (int)SA_RESETHAND;
+  (void)sigaction(SIGSEGV, &sa, nullptr);
+  (void)sigaction(SIGABRT, &sa, nullptr);
+  (void)sigaction(SIGFPE, &sa, nullptr);
+  (void)sigaction(SIGBUS, &sa, nullptr);
+}
+#endif
+
 int main(int argc, char **argv)
 {
 #if CCORD_OS_ANDROID
@@ -1080,11 +1128,12 @@ int main(int argc, char **argv)
     goto done;
   }
 
+  bool want_login_screen = opt.login_screen || (opt.test_captcha && !opt.mock);
   bool use_live = false;
 #if CCORD_LIVE_ACCOUNT
   if (opt.live) {
     use_live = true;
-  } else if (!opt.mock && !opt.screenshot && !opt.verify_slice && !opt.headless && !opt.login_screen && live_token_available(opt.token_file)) {
+  } else if (!opt.mock && !opt.screenshot && !opt.verify_slice && !opt.headless && !want_login_screen && live_token_available(opt.token_file)) {
     use_live = true;   // interactive: prefer real Discord data when a saved C-Cord token exists
   }
 #endif
@@ -1100,7 +1149,7 @@ int main(int argc, char **argv)
                                           strcmp(opt.verify_slice, "activities") == 0);
   // voice-messages runs the live transport against loopback fakes, like the slices above.
   verify_live = verify_live || (opt.verify_slice && strcmp(opt.verify_slice, "voice-messages") == 0);
-  bool use_mock = !use_live && !verify_live && !opt.login_screen &&
+  bool use_mock = !use_live && !verify_live && !want_login_screen &&
                   (opt.mock || opt.verify_slice != nullptr ||
                    (opt.screenshot != nullptr && (!opt.token_file || live_token_available(opt.token_file))));
   a.live = use_live;
@@ -1325,6 +1374,7 @@ int main(int argc, char **argv)
   app_sync_account_view(&a);
   if (!use_mock && !a.live && !verify_live) {
     ccord_ui_open_account_settings(a.ui);
+    if (opt.test_captcha) ccord_ui_set_login_tab(a.ui, 1);
   }
 
   // Render and present the first UI frame BEFORE starting extensions or network so mobile & desktop show UI immediately.
@@ -1390,6 +1440,29 @@ int main(int argc, char **argv)
       }
     }
 #endif
+    if (opt.test_captcha) {
+#if defined(__linux__) && !defined(__ANDROID__)
+      install_test_crash_handler();
+#endif
+      // Isolated hCaptcha widget only (no external page chrome):
+      //   --test-captcha           -> official auto-pass publisher test sitekey
+      //   --test-captcha-demo      -> hCaptcha's public live demo sitekey (real visual puzzle)
+      //   --test-captcha-sitekey K -> custom sitekey (optionally paired with --test-captcha-host H)
+      const char *sk = opt.test_captcha_sitekey
+                         ? opt.test_captcha_sitekey
+                         : (opt.test_captcha_challenge ? "a5f74b19-9e45-40e0-b45d-47ff91b7a6c2"
+                                                       : "10000000-ffff-ffff-ffff-000000000001");
+      const char *hst = opt.test_captcha_host
+                          ? opt.test_captcha_host
+                          : (opt.test_captcha_challenge && !opt.test_captcha_sitekey ? "accounts.hcaptcha.com"
+                                                                                     : "discord.com");
+      (void)app_captcha_open_ex(&a, "hcaptcha", sk, hst, nullptr, true);
+    } else if (opt.test_web_url) {
+#if defined(__linux__) && !defined(__ANDROID__)
+      install_test_crash_handler();
+#endif
+      (void)app_captcha_open_url(&a, opt.test_web_url);
+    }
     run_interactive(&a);
     result = 0;
   }
@@ -1429,9 +1502,11 @@ done:
   a.rpc = nullptr;
   ccord_rpc_app_lookup_destroy(a.rpc_lookup);   // after the RPC server: its final flush still resolves names
   a.rpc_lookup = nullptr;
+  app_captcha_close(&a, false);
 #if CCORD_LIVE_ACCOUNT
   ccord_rest_queue_destroy(a.auth_q);
   ccord_live_wipe(a.mfa_ticket, sizeof a.mfa_ticket);
+  ccord_live_wipe(&a.captcha_challenge, sizeof a.captcha_challenge);
 #endif
   ccord_account_destroy(a.account);
   ccord_ui_destroy(a.ui);
