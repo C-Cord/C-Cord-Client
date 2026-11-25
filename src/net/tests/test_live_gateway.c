@@ -10,6 +10,7 @@
 
 #include <ccord/core/clock.h>
 #include <ccord/net/gateway_pace.h>
+#include <ccord/net/http_fetch.h>
 #include <ccord/net/live_transport.h>
 
 #include "ccord_test.h"
@@ -913,6 +914,116 @@ static void test_long_suspend_skips_resume_and_identifies(void)
   CT_CHECK(fg_count(ev, n, 1, "RESUME") == 0);
 }
 
+// ---- 19. ccord_ws_client_recv_wake: drains buffered frames before poll, skips PING, reassembles fragments, close ----
+
+static size_t pack_ws_frame(unsigned char *dst, bool fin, unsigned opcode, const char *payload)
+{
+  size_t len = strlen(payload);
+  dst[0] = (unsigned char)((fin ? 0x80u : 0x00u) | (opcode & 0x0Fu));
+  dst[1] = (unsigned char)len;
+  memcpy(dst + 2, payload, len);
+  return len + 2u;
+}
+
+static void script_ws_wake_frames(void *ud, fg_conn *c)
+{
+  (void)ud;
+  if (!fg_handshake(c)) return;
+  fg_log(c, "HANDSHAKE");
+  // Coalesce three frames (text + PING + text) into a single TCP write so libcurl buffers subsequent frames.
+  unsigned char burst[512];
+  size_t n = 0;
+  n += pack_ws_frame(burst + n, true, 1u, "{\"op\":\"ready\",\"companion_online\":true}");
+  n += pack_ws_frame(burst + n, true, 9u, "ping");
+  n += pack_ws_frame(burst + n, true, 1u, "{\"op\":\"wake\",\"kind\":\"msg\"}");
+  (void)fg_write_all(c->fd, burst, n);
+
+  char buf[256];
+  if (fg_recv(c, buf, sizeof buf, 4000) == FG_GOT_TEXT) {
+    fg_log(c, "RX %.60s", buf);
+    // Send a 2-fragment text frame (FIN=0 opcode=1 followed by FIN=1 opcode=0).
+    unsigned char frags[256];
+    size_t fn = 0;
+    fn += pack_ws_frame(frags + fn, false, 1u, "{\"op\":\"ack\",");
+    fn += pack_ws_frame(frags + fn, true, 0u, "\"ok\":true}");
+    (void)fg_write_all(c->fd, frags, fn);
+  }
+  if (fg_recv(c, buf, sizeof buf, 4000) == FG_GOT_TEXT) {
+    fg_log(c, "RX %.60s", buf);
+    fg_close(c, 1000);
+  }
+}
+
+static void test_ws_client_recv_wake_drains_buffered_and_handles_ping_close(void)
+{
+  fg_server srv;
+  CT_CHECK(fg_start(&srv, script_ws_wake_frames, nullptr));
+  char err[256] = "";
+  ccord_ws_client *ws = ccord_ws_client_open(srv.url, nullptr, err, sizeof err);
+  CT_CHECK(ws != nullptr);
+  if (!ws) {
+    fg_event ev[FG_MAX_EVENTS];
+    (void)fg_stop(&srv, ev, FG_MAX_EVENTS);
+    return;
+  }
+
+  int wake_pipe[2] = {-1, -1};
+  CT_CHECK(pipe(wake_pipe) == 0);
+  uint8_t buf[512];
+  bool bin = true;
+
+  // Frame 1: ready
+  int r1 = ccord_ws_client_recv_wake(ws, buf, sizeof buf - 1, &bin, wake_pipe[0], 2000);
+  CT_CHECK(r1 > 0 && !bin);
+  if (r1 > 0) {
+    buf[r1] = '\0';
+    CT_CHECK(strcmp((char *)buf, "{\"op\":\"ready\",\"companion_online\":true}") == 0);
+  }
+
+  // Frame 2 (PING skipped) + Frame 3 (already buffered in libcurl): must return immediately without stalling.
+  uint64_t t0 = ccord_clock_ms();
+  int r2 = ccord_ws_client_recv_wake(ws, buf, sizeof buf - 1, &bin, wake_pipe[0], 2000);
+  uint64_t dt2 = ccord_clock_ms() - t0;
+  CT_CHECK(r2 > 0 && !bin && dt2 < 500u);
+  if (r2 > 0) {
+    buf[r2] = '\0';
+    CT_CHECK(strcmp((char *)buf, "{\"op\":\"wake\",\"kind\":\"msg\"}") == 0);
+  }
+
+  // Wake pipe interrupts idle poll immediately.
+  char b = 1;
+  CT_CHECK(write(wake_pipe[1], &b, 1) == 1);
+  uint64_t t1 = ccord_clock_ms();
+  int r_wake = ccord_ws_client_recv_wake(ws, buf, sizeof buf - 1, &bin, wake_pipe[0], 3000);
+  uint64_t dt_wake = ccord_clock_ms() - t1;
+  CT_CHECK(r_wake == 0 && dt_wake < 500u);
+  (void)!read(wake_pipe[0], &b, 1);
+
+  // Send heartbeat -> receive reassembled 2-fragment text frame.
+  const char *hb = "{\"op\":\"hb\"}";
+  CT_CHECK(ccord_ws_client_send(ws, (const uint8_t *)hb, strlen(hb), false));
+  int r3 = ccord_ws_client_recv_wake(ws, buf, sizeof buf - 1, &bin, wake_pipe[0], 2000);
+  CT_CHECK(r3 > 0 && !bin);
+  if (r3 > 0) {
+    buf[r3] = '\0';
+    CT_CHECK(strcmp((char *)buf, "{\"op\":\"ack\",\"ok\":true}") == 0);
+  }
+
+  // Send bye -> server closes with code 1000 -> recv_wake must report disconnect (-1).
+  const char *bye = "{\"op\":\"bye\"}";
+  CT_CHECK(ccord_ws_client_send(ws, (const uint8_t *)bye, strlen(bye), false));
+  int r4 = ccord_ws_client_recv_wake(ws, buf, sizeof buf - 1, &bin, wake_pipe[0], 2000);
+  CT_CHECK(r4 < 0);
+
+  ccord_ws_client_close(ws, 1000, "done");
+  close(wake_pipe[0]);
+  close(wake_pipe[1]);
+  fg_event ev[FG_MAX_EVENTS];
+  size_t n = fg_stop(&srv, ev, FG_MAX_EVENTS);
+  CT_CHECK(fg_count(ev, n, 0, "RX {\"op\":\"hb\"}") == 1);
+  CT_CHECK(fg_count(ev, n, 0, "RX {\"op\":\"bye\"}") == 1);
+}
+
 int main(void)
 {
   test_heartbeats_follow_the_interval();
@@ -935,5 +1046,6 @@ int main(void)
   test_probe_keeps_healthy_socket_and_catches_zombie();
   test_multi_guild_dm_unsubscribe_and_bg_wake_probe();
   test_long_suspend_skips_resume_and_identifies();
+  test_ws_client_recv_wake_drains_buffered_and_handles_ping_close();
   return CT_RESULT("test_live_gateway");
 }

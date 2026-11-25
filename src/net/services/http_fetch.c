@@ -7,6 +7,7 @@
 #include <ccord/core/alloc.h>
 #include <ccord/core/arena.h>
 #include <ccord/core/buf.h>
+#include <ccord/core/clock.h>
 #include <ccord/core/json.h>
 #include <ccord/core/os.h>
 #include <ccord/core/random.h>
@@ -24,6 +25,10 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/timerfd.h>
+#include <time.h>
+#endif
 #else
 #include <io.h>
 #include <windows.h>
@@ -1244,6 +1249,9 @@ bool ccord_http_download(const ccord_http_download_opts *req, ccord_http_downloa
 
 struct ccord_ws_client {
   CURL *curl;
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+  int timer_fd;
+#endif
 };
 
 ccord_ws_client *ccord_ws_client_open(const char *url, const char *headers_json, char *err_buf, size_t err_cap)
@@ -1266,6 +1274,9 @@ ccord_ws_client *ccord_ws_client_open(const char *url, const char *headers_json,
   curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 2L);
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+  curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+  curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 60L);
+  curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 15L);
   if (!plain) {
     ccord_curl_apply_tls(curl);
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
@@ -1285,12 +1296,19 @@ ccord_ws_client *ccord_ws_client_open(const char *url, const char *headers_json,
     curl_easy_cleanup(curl);
     return nullptr;
   }
+  curl_socket_t sock = CURL_SOCKET_BAD;
+  if (curl_easy_getinfo(curl, CURLINFO_ACTIVESOCKET, &sock) == CURLE_OK && sock != CURL_SOCKET_BAD) {
+    (void)ccord_sock_set_nonblock((ccord_socket_t)sock);
+  }
   ccord_ws_client *ws = ccord_calloc(1, sizeof *ws);
   if (!ws) {
     curl_easy_cleanup(curl);
     return nullptr;
   }
   ws->curl = curl;
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+  ws->timer_fd = timerfd_create(CLOCK_BOOTTIME, TFD_NONBLOCK | TFD_CLOEXEC);
+#endif
   return ws;
 #else
   (void)url; (void)headers_json;
@@ -1303,51 +1321,153 @@ bool ccord_ws_client_send(ccord_ws_client *ws, const uint8_t *data, size_t len, 
 {
 #if defined(CURLWS_TEXT)
   if (!ws || !ws->curl) return false;
-  size_t sent = 0;
-  CURLcode rc = curl_ws_send(ws->curl, data ? data : (const uint8_t *)"", len, &sent, 0,
-                             binary ? CURLWS_BINARY : CURLWS_TEXT);
-  return rc == CURLE_OK;
+  size_t total = 0;
+  uint64_t deadline = 0;
+  do {
+    size_t sent = 0;
+    const uint8_t *ptr = data ? (data + total) : (const uint8_t *)"";
+    CURLcode rc = curl_ws_send(ws->curl, ptr, len - total, &sent, 0,
+                               binary ? CURLWS_BINARY : CURLWS_TEXT);
+    if (rc == CURLE_AGAIN) {
+      uint64_t now = ccord_clock_ms();
+      if (deadline == 0) deadline = now + 500u;
+      if (now >= deadline) return false;
+      curl_socket_t sock = CURL_SOCKET_BAD;
+      if (curl_easy_getinfo(ws->curl, CURLINFO_ACTIVESOCKET, &sock) == CURLE_OK && sock != CURL_SOCKET_BAD) {
+        int rev = ccord_sock_poll1((ccord_socket_t)sock, CCORD_POLL_OUT, (int)(deadline - now));
+        if (rev <= 0 || (rev & (CCORD_POLL_ERR | CCORD_POLL_HUP)) != 0) return false;
+      } else {
+        ccord_sleep_ms(10);
+      }
+      continue;
+    }
+    if (rc != CURLE_OK) return false;
+    if (len > 0 && sent == 0) return false;
+    total += sent;
+  } while (total < len);
+  return true;
 #else
   (void)ws; (void)data; (void)len; (void)binary;
   return false;
 #endif
 }
 
+#if defined(CURLWS_TEXT)
+// Attempts a non-blocking WebSocket frame read from libcurl/TLS buffers.
+// Returns >0 on a complete data frame, 0 when no frame is buffered yet (CURLE_AGAIN),
+// or -1 on close frame, EOF, or transport error.
+static int ws_try_recv_frame(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *out_binary)
+{
+  for (int tries = 0; tries < 16; tries++) {
+    size_t rlen = 0;
+    const struct curl_ws_frame *meta = nullptr;
+    CURLcode rc = curl_ws_recv(ws->curl, buf, cap, &rlen, &meta);
+    if (rc == CURLE_AGAIN) return 0;
+    if (rc != CURLE_OK) return -1;
+    if (!meta) return -1;   // clean TCP EOF without WS CLOSE
+    if (meta->flags & CURLWS_CLOSE) return -1;
+    if (meta->flags & (CURLWS_PING | CURLWS_PONG)) continue;   // libcurl auto-pongs PING; keep draining
+    bool is_bin = (meta->flags & CURLWS_BINARY) != 0;
+    size_t total = rlen;
+    curl_off_t left = meta->bytesleft;
+    bool cont = (meta->flags & CURLWS_CONT) != 0;
+    // Drain remaining chunks of the same WS message if fragmented or larger than one read.
+    while ((left > 0 || cont) && total < cap) {
+      size_t m = 0;
+      const struct curl_ws_frame *m2 = nullptr;
+      CURLcode rc2 = curl_ws_recv(ws->curl, buf + total, cap - total, &m, &m2);
+      if (rc2 == CURLE_AGAIN) {
+        curl_socket_t sock = CURL_SOCKET_BAD;
+        if (curl_easy_getinfo(ws->curl, CURLINFO_ACTIVESOCKET, &sock) != CURLE_OK || sock == CURL_SOCKET_BAD) break;
+        int rev = ccord_sock_poll1((ccord_socket_t)sock, CCORD_POLL_IN, 250);
+        if (rev <= 0) break;
+        continue;
+      }
+      if (rc2 != CURLE_OK || !m2) return -1;
+      if (m2->flags & CURLWS_CLOSE) return -1;
+      if (m2->flags & (CURLWS_PING | CURLWS_PONG)) continue;
+      total += m;
+      left = m2->bytesleft;
+      cont = (m2->flags & CURLWS_CONT) != 0;
+    }
+    if (total == 0) continue;
+    if (out_binary) *out_binary = is_bin;
+    return (int)total;
+  }
+  return 0;
+}
+#endif
+
 int ccord_ws_client_recv_wake(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool *out_binary,
                               int wake_fd, int timeout_ms)
 {
 #if defined(CURLWS_TEXT)
   if (!ws || !ws->curl || !buf || cap == 0) return -1;
+  // Always drain libcurl/TLS buffered bytes BEFORE poll(): a frame coalesced into an earlier TLS record
+  // (e.g. HTTP 101 + hello, or PING/ack + wake) leaves 0 unread bytes in the kernel socket.
+  int first = ws_try_recv_frame(ws, buf, cap, out_binary);
+  if (first != 0) return first;
+  if (timeout_ms <= 0) return 0;
+
 #if !defined(_WIN32)
-  if (timeout_ms > 0) {
-    curl_socket_t sock = CURL_SOCKET_BAD;
-    if (curl_easy_getinfo(ws->curl, CURLINFO_ACTIVESOCKET, &sock) == CURLE_OK && sock != CURL_SOCKET_BAD) {
-      struct pollfd pfds[2];
-      nfds_t nfds = 1;
-      pfds[0] = (struct pollfd){.fd = sock, .events = POLLIN};
-      if (wake_fd >= 0) {
-        pfds[1] = (struct pollfd){.fd = wake_fd, .events = POLLIN};
-        nfds = 2;
-      }
-      int pr = poll(pfds, nfds, timeout_ms);
-      if (pr <= 0) return 0;
-      if (nfds == 2 && (pfds[1].revents & POLLIN) && !(pfds[0].revents & (POLLIN | POLLERR | POLLHUP))) {
-        return 0;
+  curl_socket_t sock = CURL_SOCKET_BAD;
+  if (curl_easy_getinfo(ws->curl, CURLINFO_ACTIVESOCKET, &sock) == CURLE_OK && sock != CURL_SOCKET_BAD) {
+    struct pollfd pfds[3];
+    nfds_t nfds = 0;
+    pfds[nfds++] = (struct pollfd){.fd = sock, .events = POLLIN};
+    int wake_idx = -1;
+    if (wake_fd >= 0) {
+      wake_idx = (int)nfds;
+      pfds[nfds++] = (struct pollfd){.fd = wake_fd, .events = POLLIN};
+    }
+    int timer_idx = -1;
+    int wait_ms = timeout_ms;
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+    if (ws->timer_fd >= 0) {
+      struct itimerspec its = {0};
+      its.it_value.tv_sec = (time_t)(timeout_ms / 1000);
+      its.it_value.tv_nsec = (long)((timeout_ms % 1000) * 1000000L);
+      if (its.it_value.tv_sec == 0 && its.it_value.tv_nsec == 0) its.it_value.tv_nsec = 1;
+      if (timerfd_settime(ws->timer_fd, 0, &its, nullptr) == 0) {
+        timer_idx = (int)nfds;
+        pfds[nfds++] = (struct pollfd){.fd = ws->timer_fd, .events = POLLIN};
+        wait_ms = -1;   // CLOCK_BOOTTIME timerfd advances across Android screen-off SoC naps
       }
     }
+#endif
+    int pr = poll(pfds, nfds, wait_ms);
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+    if (timer_idx >= 0) {
+      if (pr > 0 && (pfds[timer_idx].revents & POLLIN) != 0) {
+        uint64_t exp = 0;
+        while (read(ws->timer_fd, &exp, sizeof exp) > 0) {}
+      }
+      struct itimerspec disarm = {0};
+      (void)timerfd_settime(ws->timer_fd, 0, &disarm, nullptr);
+    }
+#else
+    (void)timer_idx;
+#endif
+    if (pr < 0) return errno == EINTR ? 0 : -1;
+    if (pr == 0) return 0;
+    short srev = pfds[0].revents;
+    if ((srev & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) == 0) {
+      (void)wake_idx;
+      return 0;
+    }
+    if ((srev & (POLLERR | POLLNVAL)) != 0 && (srev & POLLIN) == 0) {
+      return -1;
+    }
+    int got = ws_try_recv_frame(ws, buf, cap, out_binary);
+    if (got != 0) return got;
+    if ((srev & (POLLERR | POLLHUP)) != 0) return -1;
+    return 0;
   }
 #else
   (void)wake_fd;
   (void)timeout_ms;
 #endif
-  size_t rlen = 0;
-  const struct curl_ws_frame *meta = nullptr;
-  CURLcode rc = curl_ws_recv(ws->curl, buf, cap, &rlen, &meta);
-  if (rc == CURLE_AGAIN) return 0;
-  if (rc != CURLE_OK) return -1;
-  if (meta && (meta->flags & CURLWS_CLOSE)) return -1;
-  if (out_binary) *out_binary = meta && (meta->flags & CURLWS_BINARY) != 0;
-  return (int)rlen;
+  return ws_try_recv_frame(ws, buf, cap, out_binary);
 #else
   (void)ws; (void)buf; (void)cap; (void)out_binary; (void)wake_fd; (void)timeout_ms;
   return -1;
@@ -1374,6 +1494,9 @@ void ccord_ws_client_close(ccord_ws_client *ws, uint16_t code, const char *reaso
     (void)curl_ws_send(ws->curl, payload, 2u + rlen, &sent, 0, CURLWS_CLOSE);
     curl_easy_cleanup(ws->curl);
   }
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+  if (ws->timer_fd >= 0) close(ws->timer_fd);
+#endif
 #else
   (void)code; (void)reason;
 #endif
