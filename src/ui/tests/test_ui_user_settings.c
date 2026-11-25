@@ -85,8 +85,11 @@ typedef struct fixture {
   uint32_t caps;
   int theme_calls, zoom_calls;
   int update_check_calls, update_install_calls, open_url_calls;
+  int social_fetch_calls, detail_fetch_calls;
   char last_theme[32];
   char last_url[256];
+  char last_social_id[65];
+  char last_detail_id[65];
   float last_zoom;
 } fixture;
 
@@ -132,6 +135,18 @@ static bool host_open_url(void *ud, const char *url)
   F.open_url_calls++;
   snprintf(F.last_url, sizeof F.last_url, "%s", url ? url : "");
   return true;
+}
+static void host_cloud_fetch_social(void *ud, const char *plugin_id)
+{
+  (void)ud;
+  F.social_fetch_calls++;
+  snprintf(F.last_social_id, sizeof F.last_social_id, "%s", plugin_id ? plugin_id : "");
+}
+static void contrib_catalog_fetch_detail(void *ud, const char *plugin_id)
+{
+  (void)ud;
+  F.detail_fetch_calls++;
+  snprintf(F.last_detail_id, sizeof F.last_detail_id, "%s", plugin_id ? plugin_id : "");
 }
 
 static void frame(int n)
@@ -232,14 +247,19 @@ static bool setup(const char *argv0, bool wipe)
   F.update_check_calls = 0;
   F.update_install_calls = 0;
   F.open_url_calls = 0;
+  F.social_fetch_calls = 0;
+  F.detail_fetch_calls = 0;
   F.last_theme[0] = '\0';
   F.last_url[0] = '\0';
+  F.last_social_id[0] = '\0';
+  F.last_detail_id[0] = '\0';
   F.last_zoom = 0.0f;
   ccord_ui_deps d = {.bus = F.bus, .store = F.store, .session = F.session, .contrib = F.contrib, .theme = &F.theme,
                      .host = {.clipboard_set = host_clip_set, .apply_theme = host_apply_theme,
                               .set_zoom = host_set_zoom, .desktop_capabilities = host_caps,
                               .open_url = host_open_url, .update_check = host_update_check,
-                              .update_install = host_update_install},
+                              .update_install = host_update_install,
+                              .cloud_fetch_social = host_cloud_fetch_social},
                      .fixed_now_unix_ms = 1793534400000LL};
   F.ui = ccord_ui_create(&d, &err);
   if (!F.ui) return false;
@@ -1073,6 +1093,115 @@ static void test_plugins_revamp_desktop(void)
   frame(2);
 }
 
+static void test_plugin_social_store_gating(void)
+{
+  ccord_error err = {0};
+  ccord_contrib_handlers h = {.catalog_fetch_detail = contrib_catalog_fetch_detail};
+  ccord_contrib_set_handlers(F.contrib, &h);
+
+  // Add a bundled extension alongside the local-only (io.community.quick-notes) and catalog (org.ccord.spotify-rpc) plugins.
+  ccord_plugin_info bundled = {
+    .id = "dev.ccord.copy-message-id", .name = "Copy Message ID", .version = "1.0.0",
+    .description = "Bundled helper extension.",
+    .platforms = CCORD_CONTRIB_PLAT_ALL,
+    .risk_class = 0, .tier = CCORD_TIER_OFFICIAL, .is_bundled = true,
+    .enabled = true, .consent_granted = true, .state = CCORD_PLUGIN_READY,
+  };
+  CT_CHECK(ccord_contrib_set_plugin(F.contrib, &bundled, &err) == CCORD_OK);
+
+  ui_open_settings(F.ui, true);
+  F.ui->settings_page = SP_PLUGINS;
+  F.ui->dirty = true;
+  frame(3);
+  ccord_rect r_tab0 = {0};
+  CT_CHECK(st_plugins_debug_find_rect("tab:0", &r_tab0));
+  click_rect(r_tab0);
+  frame(3);
+
+  // 1. Local-only installed plugin (not in catalog): probes catalog detail, does NOT fetch or render ratings/comments!
+  F.social_fetch_calls = 0;
+  F.detail_fetch_calls = 0;
+  F.last_social_id[0] = '\0';
+  F.last_detail_id[0] = '\0';
+  ccord_rect r_det = {0}, r_vote = {0}, r_si = {0}, r_back = {0};
+  CT_CHECK(st_plugins_debug_find_rect("card_details:io.community.quick-notes", &r_det));
+  click_rect(r_det);
+  frame(3);
+  CT_CHECK(F.detail_fetch_calls == 1 && strcmp(F.last_detail_id, "io.community.quick-notes") == 0);
+  CT_CHECK(F.social_fetch_calls == 0);
+  CT_CHECK(!st_plugins_debug_find_rect("social_vote:1", &r_vote));
+  CT_CHECK(!st_plugins_debug_find_rect("social_signin", &r_si));
+
+  // 2. If catalog detail subsequently arrives (confirming it IS on the store), social fetch + UI activate automatically once!
+  ccord_catalog_entry qn_det = {
+    .id = "io.community.quick-notes", .name = "Quick Notes", .version = "1.4.2",
+    .description = "Save timestamped channel notes locally via /qnote.",
+    .author = "mira", .license = "MIT", .platforms = CCORD_CONTRIB_PLAT_ALL,
+    .downloads = 410, .api_class = 1, .tier = CCORD_TIER_VERIFIED, .has_detail = true, .installed = true,
+  };
+  ccord_contrib_set_catalog_detail(F.contrib, &qn_det);
+  frame(3);
+  CT_CHECK(F.social_fetch_calls == 1 && strcmp(F.last_social_id, "io.community.quick-notes") == 0);
+  CT_CHECK(st_plugins_debug_find_rect("social_vote:1", &r_vote));
+  CT_CHECK(st_plugins_debug_find_rect("social_signin", &r_si));
+
+  // 3. Server 404 on /social (not_found=true) hides ratings/comments cleanly.
+  ccord_ui_plugin_social nf = {.not_found = true, .rating_score_x10 = -1};
+  snprintf(nf.plugin_id, sizeof nf.plugin_id, "io.community.quick-notes");
+  ccord_ui_set_plugin_social(F.ui, &nf);
+  frame(2);
+  CT_CHECK(!st_plugins_debug_find_rect("social_vote:1", &r_vote));
+  CT_CHECK(!st_plugins_debug_find_rect("social_signin", &r_si));
+  ccord_ui_set_plugin_social(F.ui, nullptr);
+  ccord_contrib_set_catalog_detail(F.contrib, nullptr);
+
+  CT_CHECK(st_plugins_debug_find_rect("detail_back", &r_back));
+  click_rect(r_back);
+  frame(3);
+
+  // 4. Bundled plugin: skips both catalog detail and social fetches, never draws ratings/comments!
+  F.social_fetch_calls = 0;
+  F.detail_fetch_calls = 0;
+  // Scroll down if needed so the 4th installed card's Details button is visible in the viewport.
+  for (int s = 0; s < 6 && !st_plugins_debug_find_rect("card_details:dev.ccord.copy-message-id", &r_det); s++) {
+    send((ccord_input_event){.type = CCORD_IN_WHEEL, .wheel = -3.0f, .x = 640.0f, .y = 400.0f});
+    frame(2);
+  }
+  CT_CHECK(st_plugins_debug_find_rect("card_details:dev.ccord.copy-message-id", &r_det));
+  click_rect(r_det);
+  frame(3);
+  CT_CHECK(F.detail_fetch_calls == 0);
+  CT_CHECK(F.social_fetch_calls == 0);
+  CT_CHECK(!st_plugins_debug_find_rect("social_vote:1", &r_vote));
+  CT_CHECK(!st_plugins_debug_find_rect("social_signin", &r_si));
+  CT_CHECK(st_plugins_debug_find_rect("detail_back", &r_back));
+  click_rect(r_back);
+  frame(3);
+
+  // 5. Known store plugin (org.ccord.spotify-rpc): fetches social immediately and renders ratings/comments.
+  F.social_fetch_calls = 0;
+  F.detail_fetch_calls = 0;
+  for (int s = 0; s < 6 && !st_plugins_debug_find_rect("card_details:org.ccord.spotify-rpc", &r_det); s++) {
+    send((ccord_input_event){.type = CCORD_IN_WHEEL, .wheel = 3.0f, .x = 640.0f, .y = 400.0f});
+    frame(2);
+  }
+  CT_CHECK(st_plugins_debug_find_rect("card_details:org.ccord.spotify-rpc", &r_det));
+  click_rect(r_det);
+  frame(3);
+  CT_CHECK(F.detail_fetch_calls == 1 && strcmp(F.last_detail_id, "org.ccord.spotify-rpc") == 0);
+  CT_CHECK(F.social_fetch_calls == 1 && strcmp(F.last_social_id, "org.ccord.spotify-rpc") == 0);
+  // Scroll down so the social card below the detail card enters the viewport clip.
+  for (int s = 0; s < 8 && !st_plugins_debug_find_rect("social_vote:1", &r_vote); s++) {
+    send((ccord_input_event){.type = CCORD_IN_WHEEL, .wheel = -3.0f, .x = 640.0f, .y = 400.0f});
+    frame(2);
+  }
+  CT_CHECK(st_plugins_debug_find_rect("social_vote:1", &r_vote));
+  CT_CHECK(st_plugins_debug_find_rect("social_signin", &r_si));
+
+  ui_open_settings(F.ui, false);
+  frame(2);
+}
+
 int main(int argc, char **argv)
 {
   (void)argc;
@@ -1093,6 +1222,7 @@ int main(int argc, char **argv)
   test_overlay_stubs();
   test_update_banner_and_settings();
   test_plugins_revamp_desktop();
+  test_plugin_social_store_gating();
   teardown();
   return CT_RESULT("test_ui_user_settings");
 }

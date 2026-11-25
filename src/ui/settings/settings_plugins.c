@@ -119,6 +119,7 @@ static bool s_policy_expanded;
 
 // Sub-views & transient overlays
 static char s_detail_id[65];
+static char s_social_fetched_id[65];
 static char s_cmt_draft[512];
 static bool s_cmt_focused;
 static int64_t s_cmt_reply_to;
@@ -307,6 +308,7 @@ void ui_settings_plugins_free_scratch(void)
   ccord_free(s_hits_overlay);
   s_hits_overlay = nullptr;
   s_nhits_overlay = 0;
+  s_social_fetched_id[0] = '\0';
 }
 
 static bool is_developer_mode(const ccord_ui *ui)
@@ -344,6 +346,20 @@ static const ccord_catalog_entry *find_catalog_entry(const ccord_contrib *c, con
   const ccord_catalog_entry *det = ccord_contrib_catalog_detail(c);
   if (det && strcmp(det->id, id) == 0) return det;
   return ccord_contrib_catalog_find(c, id);
+}
+
+// True only when plugin `id` is confirmed listed on the plugin store (never bundled or local-only).
+static bool detail_plugin_in_store(const ccord_ui *ui, const char *id)
+{
+  if (!ui || !ui->d.contrib || !id || !id[0]) return false;
+  const ccord_plugin_info *inst = find_plugin_info(ui->d.contrib, id);
+  if (inst && inst->is_bundled) return false;
+  const ccord_catalog_entry *e = find_catalog_entry(ui->d.contrib, id);
+  if (!e || !e->has_detail || e->bundled) return false;
+  if (ui->plugin_social && strcmp(ui->plugin_social->plugin_id, id) == 0 && ui->plugin_social->not_found) {
+    return false;
+  }
+  return true;
 }
 
 static const char *sort_key(int idx)
@@ -1209,7 +1225,7 @@ bool ui_settings_plugins_wants_text(const ccord_ui *ui)
 {
   if (!ui || !ui->settings_open || ui->settings_page != SP_PLUGINS) return false;
   if (st_plugins_has_overlay() || s_log_id[0]) return false;
-  if (s_detail_id[0]) return s_cmt_focused;
+  if (s_detail_id[0]) return s_cmt_focused && detail_plugin_in_store(ui, s_detail_id);
   if (s_subtab == 0 && s_inst_search_focused) return true;
   if (s_subtab == 1 && s_disc_search_focused) return true;
   return false;
@@ -1237,7 +1253,16 @@ bool st_plugins_handle_back(ccord_ui *ui)
   if (!ui || ui->settings_page != SP_PLUGINS) return false;
   if (ui_settings_plugins_dismiss_overlay(ui)) return true;
   if (s_log_id[0]) { s_log_id[0] = '\0'; s_log_scroll = 0.0f; ui->dirty = true; return true; }
-  if (s_detail_id[0]) { s_detail_id[0] = '\0'; st_s_page_scroll = 0.0f; ui->dirty = true; return true; }
+  if (s_detail_id[0]) {
+    s_detail_id[0] = '\0';
+    s_social_fetched_id[0] = '\0';
+    s_cmt_focused = false;
+    s_cmt_reply_to = 0;
+    s_cmt_reply_author[0] = '\0';
+    st_s_page_scroll = 0.0f;
+    ui->dirty = true;
+    return true;
+  }
   return false;
 }
 
@@ -1265,6 +1290,11 @@ bool ui_open_plugin_install_prompt(ccord_ui *ui, const char *plugin_id)
   s_sort_open = false;
   close_security_modal();
   copy_str(s_detail_id, sizeof s_detail_id, plugin_id);
+  s_social_fetched_id[0] = '\0';
+  s_cmt_draft[0] = '\0';
+  s_cmt_focused = false;
+  s_cmt_reply_to = 0;
+  s_cmt_reply_author[0] = '\0';
   st_s_page_scroll = 0.0f;
   if (ui->d.contrib) {
     ccord_contrib_catalog_fetch_detail(ui->d.contrib, plugin_id);
@@ -1293,6 +1323,7 @@ void ui_settings_plugins_on_imported(ccord_ui *ui, const char *plugin_id, const 
   s_inst_search[0] = '\0';
   s_inst_search_focused = false;
   s_detail_id[0] = '\0';
+  s_social_fetched_id[0] = '\0';
   s_log_id[0] = '\0';
   s_overflow_id[0] = '\0';
   s_uninst_id[0] = '\0';
@@ -1759,8 +1790,10 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   const char *plat_lbl = platform_badge_label(d_plats, mob, &plat_warn);
 
   // Pass 1: measure total card height accurately so ZERO overflow or clipping occurs
-  bool has_claimed_dev = (have_cat && e->claimed_dev && e->claimed_dev[0]) ||
-                         (ui->plugin_social && strcmp(ui->plugin_social->plugin_id, d_id) == 0 && ui->plugin_social->claimed_dev[0]);
+  bool in_store = detail_plugin_in_store(ui, d_id);
+  bool has_claimed_dev = in_store &&
+                         ((e->claimed_dev && e->claimed_dev[0]) ||
+                          (ui->plugin_social && strcmp(ui->plugin_social->plugin_id, d_id) == 0 && ui->plugin_social->claimed_dev[0]));
   float icon_sz = w < 440.0f ? 40.0f : 48.0f;
   pill_flow pf;
   pill_flow_init(&pf, x + 16.0f + icon_sz + 12.0f, y + 40.0f, fmaxf(inner_w - icon_sz - 12.0f, 80.0f));
@@ -1905,8 +1938,12 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   }
 
   float bottom_y = box.y + box.h + 12.0f;
-  if (have_cat || ui->d.host.cloud_fetch_social) {
-    float soc_h = draw_detail_social_card(ui, r, x, bottom_y, w, d_id, have_cat ? e : nullptr, body_clip);
+  if (in_store) {
+    if (ui->d.host.cloud_fetch_social && strcmp(s_social_fetched_id, d_id) != 0) {
+      copy_str(s_social_fetched_id, sizeof s_social_fetched_id, d_id);
+      ui->d.host.cloud_fetch_social(ui->d.host.ud, d_id);
+    }
+    float soc_h = draw_detail_social_card(ui, r, x, bottom_y, w, d_id, e, body_clip);
     bottom_y += soc_h + 14.0f;
   }
 
@@ -3212,8 +3249,12 @@ static bool dispatch_action(ccord_ui *ui, const phit_item *it)
       s_subtab = it->arg;
       s_inst_search_focused = false;
       s_disc_search_focused = false;
+      s_cmt_focused = false;
+      s_cmt_reply_to = 0;
+      s_cmt_reply_author[0] = '\0';
       if (ui->touch_mode) ui->touch_text_focused = false;
       s_detail_id[0] = '\0';
+      s_social_fetched_id[0] = '\0';
       s_log_id[0] = '\0';
       s_overflow_id[0] = '\0';
       s_sort_open = false;
@@ -3310,13 +3351,24 @@ static bool dispatch_action(ccord_ui *ui, const phit_item *it)
     case ACT_CAT_DETAILS:
       s_overflow_id[0] = '\0';
       copy_str(s_detail_id, sizeof s_detail_id, it->id);
+      s_social_fetched_id[0] = '\0';
       s_cmt_draft[0] = '\0';
       s_cmt_focused = false;
       s_cmt_reply_to = 0;
       s_cmt_reply_author[0] = '\0';
       st_s_page_scroll = 0.0f;
-      if (c) ccord_contrib_catalog_fetch_detail(c, it->id);
-      if (ui->d.host.cloud_fetch_social) ui->d.host.cloud_fetch_social(ui->d.host.ud, it->id);
+      if (c) {
+        const ccord_plugin_info *inst = find_plugin_info(c, it->id);
+        const ccord_catalog_entry *ce = find_catalog_entry(c, it->id);
+        bool bundled = (inst && inst->is_bundled) || (ce && ce->bundled);
+        if (!bundled) {
+          ccord_contrib_catalog_fetch_detail(c, it->id);
+          if ((it->act == ACT_CAT_DETAILS || ce != nullptr) && ui->d.host.cloud_fetch_social) {
+            copy_str(s_social_fetched_id, sizeof s_social_fetched_id, it->id);
+            ui->d.host.cloud_fetch_social(ui->d.host.ud, it->id);
+          }
+        }
+      }
       return true;
     case ACT_CARD_RELOAD:
     case ACT_OV_RELOAD:
@@ -3375,13 +3427,15 @@ static bool dispatch_action(ccord_ui *ui, const phit_item *it)
     }
     case ACT_DETAIL_BACK:
       s_detail_id[0] = '\0';
+      s_social_fetched_id[0] = '\0';
       s_cmt_focused = false;
       s_cmt_reply_to = 0;
+      s_cmt_reply_author[0] = '\0';
       st_s_page_scroll = 0.0f;
       return true;
     case ACT_DETAIL_RETRY:
+      s_social_fetched_id[0] = '\0';
       if (c && it->id[0]) ccord_contrib_catalog_fetch_detail(c, it->id);
-      if (ui->d.host.cloud_fetch_social && it->id[0]) ui->d.host.cloud_fetch_social(ui->d.host.ud, it->id);
       return true;
     case ACT_LOG_BACK:
       s_log_id[0] = '\0';
@@ -3451,7 +3505,10 @@ static bool dispatch_action(ccord_ui *ui, const phit_item *it)
       if (c && id_copy[0]) {
         if (ccord_contrib_plugin_uninstall(c, id_copy, ebuf, sizeof ebuf)) {
           snprintf(s_status_msg, sizeof s_status_msg, "Uninstalled %s", name_copy[0] ? name_copy : id_copy);
-          if (strcmp(s_detail_id, id_copy) == 0) s_detail_id[0] = '\0';
+          if (strcmp(s_detail_id, id_copy) == 0) {
+            s_detail_id[0] = '\0';
+            s_social_fetched_id[0] = '\0';
+          }
           if (strcmp(s_log_id, id_copy) == 0) s_log_id[0] = '\0';
         } else {
           snprintf(s_status_msg, sizeof s_status_msg, "Uninstall failed: %.150s", ebuf);
@@ -3460,6 +3517,7 @@ static bool dispatch_action(ccord_ui *ui, const phit_item *it)
       return true;
     }
     case ACT_SOCIAL_VOTE: {
+      if (!detail_plugin_in_store(ui, it->id)) return true;
       if (!ui->cloud_info.authenticated) {
         ui->settings_page = SP_CCORD;
         st_s_page_scroll = 0.0f;
@@ -3474,11 +3532,12 @@ static bool dispatch_action(ccord_ui *ui, const phit_item *it)
       return true;
     }
     case ACT_SOCIAL_CMT_FOCUS:
+      if (!detail_plugin_in_store(ui, s_detail_id)) return true;
       s_cmt_focused = true;
       if (ui->touch_mode) ui->touch_text_focused = true;
       return true;
     case ACT_SOCIAL_CMT_POST:
-      if (ui->d.host.cloud_post_comment && it->id[0] && s_cmt_draft[0]) {
+      if (detail_plugin_in_store(ui, it->id) && ui->d.host.cloud_post_comment && it->id[0] && s_cmt_draft[0]) {
         ui->d.host.cloud_post_comment(ui->d.host.ud, it->id, s_cmt_reply_to, s_cmt_draft);
         s_cmt_draft[0] = '\0';
         s_cmt_reply_to = 0;
@@ -3487,6 +3546,7 @@ static bool dispatch_action(ccord_ui *ui, const phit_item *it)
       }
       return true;
     case ACT_SOCIAL_CMT_REPLY:
+      if (!detail_plugin_in_store(ui, s_detail_id)) return true;
       s_cmt_reply_to = it->arg;
       copy_str(s_cmt_reply_author, sizeof s_cmt_reply_author, it->id);
       s_cmt_focused = true;
@@ -3497,7 +3557,7 @@ static bool dispatch_action(ccord_ui *ui, const phit_item *it)
       s_cmt_reply_author[0] = '\0';
       return true;
     case ACT_SOCIAL_CMT_DELETE:
-      if (ui->d.host.cloud_delete_comment && it->arg > 0) {
+      if (detail_plugin_in_store(ui, it->id) && ui->d.host.cloud_delete_comment && it->arg > 0) {
         ui->d.host.cloud_delete_comment(ui->d.host.ud, it->id, (int64_t)it->arg);
       }
       return true;
@@ -3639,7 +3699,7 @@ bool st_plugins_handle_key(ccord_ui *ui, const ccord_input_event *ev)
     }
     if (ev->key == CCORD_KEY_RETURN) {
       if (in_cmt) {
-        if (ui->d.host.cloud_post_comment && s_cmt_draft[0]) {
+        if (detail_plugin_in_store(ui, s_detail_id) && ui->d.host.cloud_post_comment && s_cmt_draft[0]) {
           ui->d.host.cloud_post_comment(ui->d.host.ud, s_detail_id, s_cmt_reply_to, s_cmt_draft);
           s_cmt_draft[0] = '\0';
           s_cmt_reply_to = 0;
@@ -3692,17 +3752,22 @@ static bool match_debug_item(const phit_item *it, const char *key)
     case ACT_SYNC:               snprintf(buf, sizeof buf, "sync"); break;
     case ACT_DISC_SORT_TOGGLE:   snprintf(buf, sizeof buf, "sort"); break;
     case ACT_DISC_SORT_PICK:     snprintf(buf, sizeof buf, "sort:%d", it->arg); break;
+    case ACT_CARD_DETAILS:       snprintf(buf, sizeof buf, "card_details:%s", it->id); break;
     case ACT_CARD_OVERFLOW:      snprintf(buf, sizeof buf, "overflow:%s", it->id); break;
     case ACT_CARD_UPDATE_REVIEW: snprintf(buf, sizeof buf, "update_review:%s", it->id); break;
     case ACT_CARD_REVIEW_CONSENT:snprintf(buf, sizeof buf, "consent:%s", it->id); break;
     case ACT_CAT_INSTALL:        snprintf(buf, sizeof buf, "cat_install:%s", it->id); break;
     case ACT_CAT_DETAILS:        snprintf(buf, sizeof buf, "cat_card:%s", it->id); break;
+    case ACT_DETAIL_BACK:        snprintf(buf, sizeof buf, "detail_back"); break;
     case ACT_OV_UNINSTALL_ASK:   snprintf(buf, sizeof buf, "ov_uninstall:%s", it->id); break;
     case ACT_SEC_APPROVE:        snprintf(buf, sizeof buf, "sec_approve"); break;
     case ACT_SEC_CANCEL:         snprintf(buf, sizeof buf, "sec_cancel"); break;
     case ACT_UNINST_CONFIRM:     snprintf(buf, sizeof buf, "uninst_confirm"); break;
     case ACT_UNINST_CANCEL:      snprintf(buf, sizeof buf, "uninst_cancel"); break;
     case ACT_UPD_POLICY_EXPAND:  snprintf(buf, sizeof buf, "policy_expand"); break;
+    case ACT_SOCIAL_VOTE:        snprintf(buf, sizeof buf, "social_vote:%d", it->arg); break;
+    case ACT_SOCIAL_CMT_FOCUS:   snprintf(buf, sizeof buf, "social_cmt"); break;
+    case ACT_SOCIAL_OPEN_SIGNIN: snprintf(buf, sizeof buf, "social_signin"); break;
     default: return false;
   }
   return strcmp(buf, key) == 0;

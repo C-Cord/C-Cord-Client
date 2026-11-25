@@ -546,6 +546,7 @@ void app_sync_cloud_ui(app *a)
       us->loading = soc->loading;
       us->loaded = soc->loaded;
       us->submitting = soc->submitting;
+      us->not_found = soc->not_found;
       snprintf(us->plugin_id, sizeof us->plugin_id, "%s", soc->plugin_id);
       snprintf(us->claimed_dev, sizeof us->claimed_dev, "%s", soc->claimed_dev);
       snprintf(us->error_text, sizeof us->error_text, "%s", soc->error_text);

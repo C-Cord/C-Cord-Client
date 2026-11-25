@@ -1052,10 +1052,15 @@ static void exec_fetch_social(ccord_cloud *c, const char *plugin_id)
     if (ok && hr.status_code == 200 && hr.body && hr.body_len > 0) {
       if (ccord_cloud_parse_social_json((const char *)hr.body, hr.body_len, &c->social)) {
         copy_str(c->social.plugin_id, sizeof c->social.plugin_id, plugin_id);
+        c->social.not_found = false;
         c->social.error_text[0] = '\0';
       } else {
         copy_str(c->social.error_text, sizeof c->social.error_text, "Malformed social response");
       }
+    } else if (ok && hr.status_code == 404) {
+      c->social.loaded = false;
+      c->social.not_found = true;
+      c->social.error_text[0] = '\0';
     } else {
       extract_api_error(&hr, c->social.error_text, sizeof c->social.error_text);
     }
@@ -1252,6 +1257,9 @@ static void cloud_worker_fn(void *arg)
           }
           ccord_arena_free(&arena);
         } else {
+          if (ok && hr.status_code == 404 && strcmp(c->social.plugin_id, j.id) == 0) {
+            c->social.not_found = true;
+          }
           extract_api_error(&hr, c->social.error_text, sizeof c->social.error_text);
         }
         c->social.revision++;
@@ -1283,6 +1291,9 @@ static void cloud_worker_fn(void *arg)
         ccord_mutex_lock(c->mu);
         c->social.submitting = false;
         if (!posted) {
+          if (ok && hr.status_code == 404 && strcmp(c->social.plugin_id, j.id) == 0) {
+            c->social.not_found = true;
+          }
           extract_api_error(&hr, c->social.error_text, sizeof c->social.error_text);
           c->social.revision++;
         }
@@ -1881,6 +1892,7 @@ void ccord_cloud_fetch_social(ccord_cloud *c, const char *plugin_id)
     c->social.revision = rev;
   } else {
     c->social.loading = !c->disable_network;
+    c->social.not_found = false;
     c->social.revision++;
   }
   if (!c->disable_network) {

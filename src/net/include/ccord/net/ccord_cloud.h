@@ -112,6 +112,7 @@ typedef struct ccord_cloud_social {
   bool loading;
   bool loaded;
   bool submitting;
+  bool not_found;
   char plugin_id[65];
   char claimed_dev[65];
   char error_text[192];
