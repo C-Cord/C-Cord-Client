@@ -1588,3 +1588,21 @@ bool ccord_platform_poll_autofill(ccord_platform *p, ccord_auth_autofill_field *
   return false;
 #endif
 }
+
+bool ccord_platform_pop_open_url(ccord_platform *p, char *out, size_t cap)
+{
+  if (!p || p->headless || !out || cap == 0) return false;
+#if defined(__ANDROID__)
+  return ccord_android_poll_open_url(out, cap);
+#else
+  out[0] = '\0';
+  return false;
+#endif
+}
+
+void ccord_platform_wake(ccord_platform *p)
+{
+  if (!p) return;
+  platform_wake(p);
+  platform_wake_sdl(p);
+}

@@ -156,6 +156,9 @@ object CCordBridge {
     @JvmStatic
     external fun nativeSetActivityActive(active: Boolean)
 
+    @JvmStatic
+    external fun nativeOnOpenUrl(url: String)
+
     // ---- Bridge methods called from C (desktop_android.c) ----
 
     @JvmStatic

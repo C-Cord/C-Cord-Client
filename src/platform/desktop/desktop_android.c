@@ -96,6 +96,12 @@ static char g_file_q[ANDROID_FILE_Q_CAP][ANDROID_FILE_PATH_CAP];
 static size_t g_file_head = 0;
 static size_t g_file_count = 0;
 
+#define ANDROID_OPEN_URL_Q_CAP 8u
+#define ANDROID_OPEN_URL_CAP 1024u
+static char g_open_url_q[ANDROID_OPEN_URL_Q_CAP][ANDROID_OPEN_URL_CAP];
+static size_t g_open_url_head = 0;
+static size_t g_open_url_count = 0;
+
 #define ANDROID_VOICE_ACTION_Q_CAP 16u
 static int g_voice_action_q[ANDROID_VOICE_ACTION_Q_CAP];
 static size_t g_voice_action_head = 0;
@@ -1147,4 +1153,38 @@ void ccord_desktop_set_wake_callback(ccord_desktop *d, ccord_desktop_wake_fn fn,
   (void)d;
   (void)fn;
   (void)ud;
+}
+
+bool ccord_android_poll_open_url(char *out_url, size_t cap)
+{
+  if (!out_url || cap == 0) return false;
+  out_url[0] = '\0';
+  ccord_spin_lock_acquire(&g_jni_lock);
+  bool have = g_open_url_count > 0;
+  if (have) {
+    snprintf(out_url, cap, "%s", g_open_url_q[g_open_url_head]);
+    g_open_url_head = (g_open_url_head + 1u) % ANDROID_OPEN_URL_Q_CAP;
+    g_open_url_count--;
+  }
+  ccord_spin_lock_release(&g_jni_lock);
+  return have;
+}
+
+JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnOpenUrl(
+    JNIEnv *env, jclass cls, jstring jurl)
+{
+  (void)cls;
+  if (!env || !jurl) return;
+  char url[ANDROID_OPEN_URL_CAP];
+  if (!jni_copy_string_utf8(env, jurl, url, sizeof url) || !url[0]) return;
+  ccord_spin_lock_acquire(&g_jni_lock);
+  size_t idx = (g_open_url_head + g_open_url_count) % ANDROID_OPEN_URL_Q_CAP;
+  memcpy(g_open_url_q[idx], url, sizeof g_open_url_q[idx]);
+  if (g_open_url_count < ANDROID_OPEN_URL_Q_CAP) {
+    g_open_url_count++;
+  } else {
+    g_open_url_head = (g_open_url_head + 1u) % ANDROID_OPEN_URL_Q_CAP;
+  }
+  wake_locked();
+  ccord_spin_lock_release(&g_jni_lock);
 }

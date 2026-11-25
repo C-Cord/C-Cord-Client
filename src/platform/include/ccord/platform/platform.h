@@ -444,3 +444,7 @@ void ccord_platform_notify_first_frame(ccord_platform *p);
 void ccord_platform_set_theme_bg(ccord_platform *p, uint32_t argb, bool is_light);
 void ccord_platform_set_auth_autofill(ccord_platform *p, const ccord_auth_autofill_state *st);
 bool ccord_platform_poll_autofill(ccord_platform *p, ccord_auth_autofill_field *out_field, char *out_text, size_t cap);
+// Pops one OS-delivered deep link URL (e.g. Android Intent.ACTION_VIEW ccord://auth/callback or ccord://plugins/install/...).
+bool ccord_platform_pop_open_url(ccord_platform *p, char *out, size_t cap);
+// Thread-safe wakeup for a main thread sleeping in ccord_platform_wait_idle() (foreground or background).
+void ccord_platform_wake(ccord_platform *p);

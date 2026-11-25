@@ -62,6 +62,8 @@ bool ccord_android_get_latest_insets(float *top, float *right, float *bottom, fl
 
 // Consumes one pending password-manager autofill value pushed by CCordActivity's AutofillOverlay.
 bool ccord_android_poll_autofill(int *out_field, char *out_text, size_t cap);
+// Consumes one pending deep-link URL pushed by CCordActivity's Intent.ACTION_VIEW handler.
+bool ccord_android_poll_open_url(char *out_url, size_t cap);
 
 // Called from desktop_android.c JNI entrypoints into capture_android.c.
 void ccord_capture_android_push_frame(const uint8_t *rgba, int width, int height, int stride);
@@ -90,4 +92,6 @@ JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeWakeMainLoop(
     JNIEnv *env, jclass cls);
 JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeSetActivityActive(
     JNIEnv *env, jclass cls, jboolean active);
+JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnOpenUrl(
+    JNIEnv *env, jclass cls, jstring jurl);
 #endif

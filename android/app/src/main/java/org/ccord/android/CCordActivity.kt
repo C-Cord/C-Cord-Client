@@ -945,6 +945,15 @@ class CCordActivity : SDLActivity() {
 
     private fun handleNotificationIntent(intent: Intent?) {
         if (intent == null) return
+        if (intent.action == Intent.ACTION_VIEW) {
+            val dataUrl = intent.dataString
+            if (!dataUrl.isNullOrEmpty()) {
+                intent.data = null
+                if (CCordBridge.nativeReady) {
+                    CCordBridge.nativeOnOpenUrl(dataUrl)
+                }
+            }
+        }
         val id = intent.getIntExtra(CCordBridge.EXTRA_NOTIFY_ID, 0)
         val guildId = intent.getLongExtra(CCordBridge.EXTRA_GUILD_ID, 0L)
         val channelId = intent.getLongExtra(CCordBridge.EXTRA_CHANNEL_ID, 0L)

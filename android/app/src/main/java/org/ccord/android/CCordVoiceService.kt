@@ -10,8 +10,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -114,6 +118,101 @@ class CCordVoiceService : Service() {
         }
     }
 
+    private var callWakeLock: PowerManager.WakeLock? = null
+    private var callWifiLock: WifiManager.WifiLock? = null
+    private var serviceConnMgr: ConnectivityManager? = null
+    private var serviceNetCb: ConnectivityManager.NetworkCallback? = null
+
+    private fun syncVoiceLocks(active: Boolean) {
+        if (active) {
+            if (callWakeLock == null) {
+                try {
+                    val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                    callWakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "C-Cord:VoiceCall")?.apply {
+                        setReferenceCounted(false)
+                        acquire()
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "acquire PARTIAL_WAKE_LOCK failed", t)
+                }
+            }
+            if (callWifiLock == null) {
+                try {
+                    val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+                    val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                    } else {
+                        @Suppress("DEPRECATION")
+                        WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                    }
+                    callWifiLock = wm?.createWifiLock(mode, "C-Cord:VoiceCall")?.apply {
+                        setReferenceCounted(false)
+                        acquire()
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "acquire WifiLock failed", t)
+                }
+            }
+        } else {
+            try {
+                callWakeLock?.let { if (it.isHeld) it.release() }
+            } catch (_: Throwable) {
+            }
+            callWakeLock = null
+            try {
+                callWifiLock?.let { if (it.isHeld) it.release() }
+            } catch (_: Throwable) {
+            }
+            callWifiLock = null
+        }
+    }
+
+    private fun ensureServiceNetworkCallback() {
+        if (serviceNetCb != null) return
+        try {
+            val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+            var seenInitial = false
+            var wasOffline = cm.activeNetwork == null
+            val cb = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    val cameBack = wasOffline
+                    wasOffline = false
+                    if (!seenInitial) {
+                        seenInitial = true
+                        return
+                    }
+                    if (CCordBridge.nativeReady) {
+                        if (cameBack) CCordBridge.nativeOnNetworkAvailable(true)
+                        else CCordBridge.nativeOnNetworkChanged()
+                    }
+                }
+
+                override fun onLost(network: Network) {
+                    val hasActive = try { cm.activeNetwork != null } catch (_: Throwable) { false }
+                    if (!hasActive) {
+                        wasOffline = true
+                        if (CCordBridge.nativeReady) CCordBridge.nativeOnNetworkAvailable(false)
+                    }
+                }
+            }
+            serviceConnMgr = cm
+            serviceNetCb = cb
+            cm.registerDefaultNetworkCallback(cb)
+        } catch (t: Throwable) {
+            Log.w(TAG, "service registerDefaultNetworkCallback failed", t)
+        }
+    }
+
+    private fun releaseServiceNetworkCallback() {
+        val cm = serviceConnMgr
+        val cb = serviceNetCb
+        if (cm != null && cb != null) {
+            try { cm.unregisterNetworkCallback(cb) } catch (_: Throwable) {}
+        }
+        serviceNetCb = null
+        serviceConnMgr = null
+    }
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -151,6 +250,8 @@ class CCordVoiceService : Service() {
                 Log.w(TAG, "startForeground before immediate stop failed", t)
             }
             serviceRunning = false
+            syncVoiceLocks(false)
+            releaseServiceNetworkCallback()
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
@@ -176,10 +277,14 @@ class CCordVoiceService : Service() {
             pendingCaptureReadyCallback = null
             cb.invoke()
         }
-        return START_NOT_STICKY
+        syncVoiceLocks(voiceActive)
+        ensureServiceNetworkCallback()
+        return START_STICKY
     }
 
     override fun onDestroy() {
+        syncVoiceLocks(false)
+        releaseServiceNetworkCallback()
         serviceRunning = false
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()
