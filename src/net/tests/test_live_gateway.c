@@ -28,6 +28,7 @@ typedef struct client {
   int connecting;         // CONNECTING state events seen
   bool failed;            // a FAILED state was reported
   bool snapshot;          // READY was delivered as a snapshot
+  int snapshots;          // number of READY snapshots delivered
   ccord_connection_state last;
 } client;
 
@@ -54,6 +55,7 @@ static void pump(client *c, uint64_t real_ms)
         if (ev.state == CCORD_CONN_FAILED) c->failed = true;
       } else if (ev.type == CCORD_NET_SNAPSHOT) {
         c->snapshot = true;
+        c->snapshots++;
       }
     }
     usleep(4000);
@@ -882,6 +884,35 @@ static void test_multi_guild_dm_unsubscribe_and_bg_wake_probe(void)
   CT_CHECK(fg_count(ev, n, 1, "BULK_UNSUB") == 1);      // RESUMED while backgrounded also clears subscriptions
 }
 
+// ---- 18. long background suspend (>= 3 min) skips doomed RESUME and opens a fresh IDENTIFY -> READY ----------------
+
+static void test_long_suspend_skips_resume_and_identifies(void)
+{
+  fg_server srv;
+  CT_CHECK(fg_start(&srv, script_multi_resume, nullptr));
+  client c;
+  CT_CHECK(client_start(&c, srv.url));
+  CT_CHECK(wait_connected(&c, 1, 4000));
+  CT_CHECK(c.snapshots == 1);
+  advance(&c, 5000, 100);
+
+  ccord_gateway_set_suspended(c.g, true);
+  pump(&c, 100);
+  // Advance past the 3-minute suspend resume threshold (180 s): Discord has already expired the session.
+  advance(&c, 180000, 150);
+  CT_CHECK(c.connected == 1);
+
+  ccord_gateway_set_suspended(c.g, false);
+  CT_CHECK(wait_connected(&c, 2, 4000));
+  CT_CHECK(c.snapshots == 2);
+  finish(&c);
+  fg_event ev[FG_MAX_EVENTS];
+  size_t n = fg_stop(&srv, ev, FG_MAX_EVENTS);
+  CT_CHECK(fg_connections(ev, n) == 2);
+  CT_CHECK(fg_count(ev, n, 1, "IDENTIFY") == 1);
+  CT_CHECK(fg_count(ev, n, 1, "RESUME") == 0);
+}
+
 int main(void)
 {
   test_heartbeats_follow_the_interval();
@@ -903,5 +934,6 @@ int main(void)
   test_offline_and_suspend_pause_reconnects();
   test_probe_keeps_healthy_socket_and_catches_zombie();
   test_multi_guild_dm_unsubscribe_and_bg_wake_probe();
+  test_long_suspend_skips_resume_and_identifies();
   return CT_RESULT("test_live_gateway");
 }

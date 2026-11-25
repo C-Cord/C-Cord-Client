@@ -49,6 +49,7 @@ struct ccord_gateway {
   bool in_background;     // OP 14 suppressed & gentler reconnect backoff while backgrounded
   bool network_online;    // OS network connectivity (false pauses reconnect loops until online)
   bool suspended;         // background power-saving suspend (socket closed, session_id/seq kept for RESUME)
+  uint64_t suspended_since_ms; // gw_now() when suspended (0 = not suspended)
   bool hello;
   bool identified;
   bool resuming;
@@ -1333,6 +1334,7 @@ void ccord_gateway_stop(ccord_gateway *g)
   g->identified = false;
   g->resuming = false;
   g->suspended = false;
+  g->suspended_since_ms = 0;
   gw_sub_track_clear(g);
   g->lazy_retry_ms = 0;
   g->session_id[0] = '\0';
@@ -1617,11 +1619,17 @@ void ccord_gateway_set_network_online(ccord_gateway *g, bool online)
   }
 }
 
+// Discord expires disconnected user gateway sessions well before 3 minutes; after that, trying OP 6 RESUME
+// only wastes a full TLS handshake plus the mandatory 1..5 s OP 9 INVALID_SESSION backoff.
+#define GW_SUSPEND_RESUME_MAX_MS 180000u
+
 void ccord_gateway_set_suspended(ccord_gateway *g, bool suspended)
 {
   if (!g || g->suspended == suspended) return;
   g->suspended = suspended;
+  uint64_t now = gw_now(g);
   if (suspended) {
+    g->suspended_since_ms = now ? now : 1u;
     if (g->open || g->pace.reconnect_pending) {
       gw_close_socket(g);
       gw_buf_release(g, &g->frame);
@@ -1633,17 +1641,21 @@ void ccord_gateway_set_suspended(ccord_gateway *g, bool suspended)
       }
       CCORD_LOG_I("gateway: suspended for background power saving");
     }
-  } else if (!g->open && (g->state == CCORD_CONN_CONNECTING || g->state == CCORD_CONN_CONNECTED)) {
-    g->pace.fail_streak = 0;
-    if (g->network_online) {
-      (void)ccord_gwpace_plan_reconnect(&g->pace, gw_now(g), CCORD_GWPACE_RECONNECT_REQUESTED,
-                                        g->session_id[0] != '\0');
-      CCORD_LOG_I("gateway: resuming from background suspend (%s)",
-                  g->session_id[0] != '\0' ? "resume" : "new session");
-    } else {
-      g->pace.reconnect_pending = true;
-      g->pace.reconnect_resume = (g->session_id[0] != '\0');
-      g->pace.reconnect_at_ms = gw_now(g);
+  } else {
+    uint64_t dur = (g->suspended_since_ms > 0 && now >= g->suspended_since_ms) ? (now - g->suspended_since_ms) : 0u;
+    g->suspended_since_ms = 0;
+    if (!g->open && (g->state == CCORD_CONN_CONNECTING || g->state == CCORD_CONN_CONNECTED)) {
+      bool can_resume = (g->session_id[0] != '\0') && (dur < GW_SUSPEND_RESUME_MAX_MS);
+      g->pace.fail_streak = 0;
+      if (g->network_online) {
+        (void)ccord_gwpace_plan_reconnect(&g->pace, now, CCORD_GWPACE_RECONNECT_REQUESTED, can_resume);
+        CCORD_LOG_I("gateway: resuming from background suspend (%s, idle=%llu ms)",
+                    can_resume ? "resume" : "new session", (unsigned long long)dur);
+      } else {
+        g->pace.reconnect_pending = true;
+        g->pace.reconnect_resume = can_resume;
+        g->pace.reconnect_at_ms = now;
+      }
     }
   }
 }
@@ -1657,6 +1669,7 @@ ccord_status ccord_gateway_start(ccord_gateway *g, ccord_error *err)
   g->resume_url[0] = '\0';
   g->resuming = false;
   g->suspended = false;
+  g->suspended_since_ms = 0;
   g->seq = -1;
   gw_copy_str(g->url, sizeof g->url, g->base_url);
   ccord_gwpace_reset(&g->pace);
