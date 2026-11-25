@@ -82,6 +82,14 @@ if(CCORD_LIVE_ACCOUNT AND CCORD_DAVE)
   add_subdirectory(third_party/libdave)
 endif()
 
+# Native C mini web runtime (QuickJS-ng + Lexbor + wasm3) for in-client CAPTCHA rendering.
+option(CCORD_WEB_CAPTCHA "Build experimental native C web runtime (QuickJS-ng + Lexbor + wasm3) for CAPTCHA display" ON)
+if(CCORD_WEB_CAPTCHA)
+  add_subdirectory(third_party/quickjs)
+  add_subdirectory(third_party/lexbor)
+  add_subdirectory(third_party/wasm3)
+endif()
+
 # Every module is built unconditionally, in dependency order (layering is enforced by target_link_libraries).
 add_subdirectory(src/core)
 add_subdirectory(src/assets)
@@ -98,6 +106,9 @@ add_subdirectory(src/plugins)
 add_subdirectory(src/plugin_host)
 add_subdirectory(src/platform)
 add_subdirectory(src/render)
+if(CCORD_WEB_CAPTCHA)
+  add_subdirectory(src/web)
+endif()
 add_subdirectory(src/ui)
 add_subdirectory(src/app)
 
