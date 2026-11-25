@@ -9,6 +9,7 @@
 #include <ccord/core/input.h>
 #include <ccord/core/log.h>
 #include <ccord/model/contrib.h>
+#include <ccord/net/ccord_cloud.h>
 #include <ccord/net/governor.h>
 #include <ccord/net/transport.h>
 #if CCORD_LIVE_ACCOUNT
@@ -119,6 +120,11 @@ typedef struct app {
   bool last_streamer_mode;                  // tracks streamer mode transitions for plugin dispatch
   ccord_warm *warm;                         // warm-start disk cache of the account (null-safe everywhere)
   ccord_updater *updater;                   // native in-app updater (checks all platforms; self-updates AppImage, Windows, macOS)
+  ccord_cloud *cloud;                       // c-cord.org account, GitHub claiming, plugin ratings/comments & Companion Wake
+  uint64_t cloud_wake_until_ms;             // mobile wake-burst deadline after receiving a Desktop Companion wake ping
+  uint64_t last_cloud_rev;                  // cached ccord_cloud state revision pushed to UI
+  uint64_t last_social_rev;                 // cached ccord_cloud social revision pushed to UI
+  ccord_id last_ring_call_ch;               // tracks incoming call channel to emit one Desktop Companion CALL wake
   bool updater_deferred;                    // defer updater thread creation until post-first-frame idle
   bool updater_auto_check;                  // saved auto_check flag for deferred updater creation
   uint64_t updater_due_ms;                  // monotonic ms when deferred updater initializes
@@ -179,6 +185,8 @@ void app_print_net_stats(const app *a);
 
 // host_callbacks.c — UI -> OS host bridge & auth queue
 void app_sync_account_view(app *a);
+void app_sync_cloud_ui(app *a);
+void app_handle_open_url(app *a, const char *url);
 #if CCORD_LIVE_ACCOUNT
 bool app_ensure_auth_q(app *a, ccord_error *err);
 void app_destroy_auth_q(app *a);

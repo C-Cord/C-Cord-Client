@@ -123,6 +123,32 @@ void app_pump(app *a)
       if (req_quit) a->quit = true;
     }
   }
+  if (a->cloud) {
+    (void)ccord_cloud_pump(a->cloud);
+    app_sync_cloud_ui(a);
+    if (!a->virtual_clock && a->session && a->platform && !ccord_platform_is_mobile(a->platform)) {
+      const ccord_call_state *ring = ccord_session_incoming_call(a->session);
+      ccord_id ring_ch = ring ? ring->channel_id : CCORD_ID_NONE;
+      if (ring_ch != CCORD_ID_NONE && ring_ch != a->last_ring_call_ch &&
+          !ccord_platform_window_focused(a->platform)) {
+        ccord_cloud_emit_wake(a->cloud, CCORD_WAKE_CALL);
+      }
+      a->last_ring_call_ch = ring_ch;
+    }
+    ccord_wake_kind wk = CCORD_WAKE_NONE;
+    while (ccord_cloud_pop_wake(a->cloud, &wk)) {
+      a->cloud_wake_until_ms = app_now_ms(a) + 45000u;
+      bool was_suspended = a->session_suspended;
+      if (a->session && a->session_suspended) {
+        a->session_suspended = false;
+        ccord_session_set_suspended(a->session, false);
+      }
+      if (a->session && !was_suspended && ccord_session_state(a->session) != CCORD_CONN_CONNECTED) {
+        ccord_error lerr;
+        (void)ccord_session_link_event(a->session, CCORD_LINK_RESUMED, &lerr);
+      }
+    }
+  }
   (void)ccord_bus_drain(a->bus);
 }
 
@@ -193,6 +219,30 @@ static bool game_detect_pref_enabled(void *ud)
   return ccord_ui_pref_game_detection();
 }
 #endif
+
+static bool cloud_open_url_cb(void *ud, const char *url)
+{
+  (void)ud;
+  return url && url[0] && ccord_platform_open_url(url);
+}
+
+static void cloud_toast_cb(void *ud, const char *msg, uint8_t level)
+{
+  app *a = ud;
+  if (a && a->ui && msg && msg[0]) ccord_ui_show_toast(a->ui, msg, level);
+}
+
+static void cloud_wake_main_cb(void *ud)
+{
+  app *a = ud;
+  if (a && a->platform) ccord_platform_wake(a->platform);
+}
+
+static void desktop_companion_wake_cb(void *ud, bool is_call)
+{
+  app *a = ud;
+  if (a && a->cloud) ccord_cloud_emit_wake(a->cloud, is_call ? CCORD_WAKE_CALL : CCORD_WAKE_MSG);
+}
 
 static void app_set_background_state(app *a, bool bg)
 {
@@ -324,6 +374,11 @@ static void run_interactive(app *a)
           if (desk_to < wait_timeout) wait_timeout = desk_to;
           uint32_t media_to = ccord_app_media_next_wait_ms(a->media, now_u);
           if (media_to < wait_timeout) wait_timeout = media_to;
+          if (a->cloud_wake_until_ms > now_u) {
+            uint64_t cw_rem = a->cloud_wake_until_ms - now_u;
+            uint32_t cw_to = cw_rem > UINT32_MAX ? UINT32_MAX : (uint32_t)cw_rem;
+            if (cw_to < wait_timeout) wait_timeout = cw_to;
+          }
 #if !CCORD_OS_ANDROID
           if (a->updater_deferred && !a->updater) {
             uint32_t upd_to = now_u >= a->updater_due_ms ? 0u : (uint32_t)(a->updater_due_ms - now_u);
@@ -501,6 +556,7 @@ static void run_interactive(app *a)
               a->resume_link_probe = true;
             }
           }
+          if (a->cloud && bg_dur >= 45000u) ccord_cloud_wake_heartbeat_now(a->cloud);
 #if CCORD_WITH_PLUGINS
           app_plugins_push_platform_state(a);
           if (a->plugins) {
@@ -604,16 +660,19 @@ static void run_interactive(app *a)
           a->quit = true;
         } else if (strncmp(cmd, "open-url ", 9) == 0) {
           ccord_app_desktop_handle_show(a->platform);
-          if (ccord_session_state(a->session) == CCORD_CONN_CONNECTED) {
-            (void)ccord_ui_open_url(a->ui, cmd + 9);
-          } else {
-            snprintf(a->pending_open_url, sizeof a->pending_open_url, "%s", cmd + 9);
-          }
+          app_handle_open_url(a, cmd + 9);
           redraw = true;
         }
       }
     }
     if (a->quit) break;
+    {
+      char os_url[512];
+      while (ccord_platform_pop_open_url(a->platform, os_url, sizeof os_url)) {
+        app_handle_open_url(a, os_url);
+        redraw = true;
+      }
+    }
     // Present the resumed frame BEFORE app_pump() so any network reconnect can never hold a black surface on screen.
     if (a->resume_needs_draw && ccord_app_desktop_should_draw(a->platform)) {
       a->resume_needs_draw = false;
@@ -672,18 +731,26 @@ static void run_interactive(app *a)
       }
       if (a->session && ccord_platform_is_mobile(a->platform)) {
         bool snow = a->store && k_app_media_ops.stream_active(a);
-        bool want_suspend = ccord_platform_in_background(a->platform) && !a->keep_alive_active &&
-                            !vnow.active && !snow;
+        bool companion_guard = a->cloud && ccord_cloud_companion_online(a->cloud) &&
+                               app_now_ms(a) >= a->cloud_wake_until_ms;
+        bool want_suspend = ccord_platform_in_background(a->platform) &&
+                            (!a->keep_alive_active || companion_guard) && !vnow.active && !snow;
         if (want_suspend != a->session_suspended) {
           a->session_suspended = want_suspend;
           ccord_session_set_suspended(a->session, want_suspend);
         }
       }
     }
-    if (a->pending_open_url[0] && ccord_session_state(a->session) == CCORD_CONN_CONNECTED) {
-      (void)ccord_ui_open_url(a->ui, a->pending_open_url);
-      a->pending_open_url[0] = '\0';
-      redraw = true;
+    if (a->pending_open_url[0]) {
+      if (a->cloud && ccord_cloud_handle_callback_url(a->cloud, a->pending_open_url)) {
+        a->pending_open_url[0] = '\0';
+        app_sync_cloud_ui(a);
+        redraw = true;
+      } else if (ccord_session_state(a->session) == CCORD_CONN_CONNECTED) {
+        (void)ccord_ui_open_url(a->ui, a->pending_open_url);
+        a->pending_open_url[0] = '\0';
+        redraw = true;
+      }
     }
     {
       ccord_id cur_self = a->store ? ccord_store_self_id(a->store) : CCORD_ID_NONE;
@@ -1161,6 +1228,22 @@ int main(int argc, char **argv)
   if (warm_res.loaded) ccord_ui_set_stale_saved_ms(a.ui, warm_res.saved_ms);
   ccord_app_desktop_attach_ui(a.desktop, a.ui);
   (void)ccord_app_desktop_bind_shortcuts(a.desktop);
+  {
+    bool disable_cloud_net = opt.headless || opt.mock || opt.screenshot != nullptr || opt.verify_slice != nullptr;
+    ccord_cloud_config ccfg = {
+      .data_dir = disable_cloud_net ? nullptr : ccord_paths_data_dir(),
+      .is_mobile = ccord_platform_is_mobile(a.platform),
+      .disable_network = disable_cloud_net,
+      .cbs = {.ud = &a, .open_url = cloud_open_url_cb, .toast = cloud_toast_cb, .wake_main = cloud_wake_main_cb},
+    };
+    a.cloud = ccord_cloud_create(&ccfg);
+    a.last_cloud_rev = UINT64_MAX;
+    a.last_social_rev = UINT64_MAX;
+    if (a.cloud) {
+      app_sync_cloud_ui(&a);
+      ccord_app_desktop_set_wake_hook(a.desktop, desktop_companion_wake_cb, &a);
+    }
+  }
 #if !CCORD_OS_ANDROID
   bool auto_upd = !opt.headless && !opt.mock && !opt.screenshot && !opt.verify_slice;
   if (opt.verify_slice || opt.screenshot) {
@@ -1290,6 +1373,8 @@ done:
   a.desktop = nullptr;
   ccord_updater_destroy(a.updater);
   a.updater = nullptr;
+  ccord_cloud_destroy(a.cloud);
+  a.cloud = nullptr;
   ccord_earcons_destroy(a.earcons);
   a.earcons = nullptr;
   ccord_app_ipc_destroy(a.ipc);   // closes + unlinks the single-instance control socket

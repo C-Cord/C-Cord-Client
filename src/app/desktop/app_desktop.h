@@ -117,9 +117,12 @@ typedef struct ccord_app_notify_prefs {
 // 880 Hz tone. Return true when the hook handled the sound; false keeps the legacy tone.
 typedef bool (*ccord_app_desktop_sound_fn)(const ccord_notification *n, const ccord_ui *ui, const ccord_store *store,
                                            int64_t now_unix_ms);
+typedef void (*ccord_app_desktop_wake_fn)(void *ud, bool is_call);
 // The platform the desktop glue was created with (verify slices drive window focus through it).
 [[nodiscard]] ccord_platform *ccord_app_desktop_platform(const ccord_app_desktop *d);
 void ccord_app_desktop_set_sound_hook(ccord_app_desktop *d, ccord_app_desktop_sound_fn fn);
+// Optional Companion Wake hook: invoked when an eligible desktop notification arrives while unfocused.
+void ccord_app_desktop_set_wake_hook(ccord_app_desktop *d, ccord_app_desktop_wake_fn fn, void *ud);
 // Prepares title/body (ccord_ui_prepare_notification), sends it to the platform and requests the notification
 // sound (hook, else the legacy beep) when notify_sounds is on. Returns true when a desktop notification was accepted.
 bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n, int64_t now_unix_ms);

@@ -225,6 +225,8 @@ struct ccord_app_desktop {
   bool audio_cap_probed;
   bool audio_cap_avail;
   ccord_app_desktop_sound_fn sound_hook;   // optional notification sound (earcons); null = legacy tone
+  ccord_app_desktop_wake_fn wake_hook;     // optional Desktop Companion Wake emitter (bare ping, zero content)
+  void *wake_ud;
   int16_t *beep_pcm;
   size_t beep_frames;
   uint64_t badge_revision;
@@ -807,6 +809,13 @@ void ccord_app_desktop_set_sound_hook(ccord_app_desktop *d, ccord_app_desktop_so
   if (d) d->sound_hook = fn;
 }
 
+void ccord_app_desktop_set_wake_hook(ccord_app_desktop *d, ccord_app_desktop_wake_fn fn, void *ud)
+{
+  if (!d) return;
+  d->wake_hook = fn;
+  d->wake_ud = ud;
+}
+
 static void desktop_track_notification(ccord_app_desktop *d, ccord_id channel_id, ccord_id message_id)
 {
   if (!d || channel_id == CCORD_ID_NONE) return;
@@ -915,6 +924,9 @@ bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n
   }
   desktop_track_notification(d, n->channel_id, n->message_id);
   d->dbg.notifications_delivered++;
+  if (d->wake_hook && !prefs.focused && d->platform && !ccord_platform_is_mobile(d->platform)) {
+    d->wake_hook(d->wake_ud, false);
+  }
   // On mobile while backgrounded, the OS notification channel plays the native alert sound/vibration
   // and respects system DND/vibrate mode without opening an SDL audio playback stream.
   bool os_handles_sound = d->platform && ccord_platform_is_mobile(d->platform) &&

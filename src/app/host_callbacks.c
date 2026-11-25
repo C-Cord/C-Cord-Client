@@ -487,6 +487,128 @@ static void host_dismiss_keyboard(void *ud)
   if (a && a->platform) ccord_platform_dismiss_keyboard(a->platform);
 }
 
+static void host_cloud_sign_in(void *ud)         { app *a = ud; if (a && a->cloud) ccord_cloud_start_login(a->cloud); }
+static void host_cloud_cancel_login(void *ud)    { app *a = ud; if (a && a->cloud) ccord_cloud_cancel_login(a->cloud); }
+static void host_cloud_sign_out(void *ud)        { app *a = ud; if (a && a->cloud) ccord_cloud_sign_out(a->cloud); }
+static void host_cloud_refresh(void *ud)         { app *a = ud; if (a && a->cloud) ccord_cloud_refresh(a->cloud); }
+static void host_cloud_link_github(void *ud)     { app *a = ud; if (a && a->cloud) ccord_cloud_link_github(a->cloud); }
+static void host_cloud_unlink_github(void *ud)   { app *a = ud; if (a && a->cloud) ccord_cloud_unlink_github(a->cloud); }
+static void host_cloud_rescan_claims(void *ud)   { app *a = ud; if (a && a->cloud) ccord_cloud_rescan_claims(a->cloud); }
+static void host_cloud_set_wake(void *ud, bool e){ app *a = ud; if (a && a->cloud) ccord_cloud_set_wake_enabled(a->cloud, e); }
+static void host_cloud_fetch_social(void *ud, const char *id) { app *a = ud; if (a && a->cloud) ccord_cloud_fetch_social(a->cloud, id); }
+static void host_cloud_rate_plugin(void *ud, const char *id, int v) { app *a = ud; if (a && a->cloud) ccord_cloud_rate_plugin(a->cloud, id, v); }
+static void host_cloud_post_comment(void *ud, const char *id, int64_t pid, const char *body)
+{
+  app *a = ud;
+  if (a && a->cloud) ccord_cloud_post_comment(a->cloud, id, pid, body);
+}
+static void host_cloud_delete_comment(void *ud, const char *id, int64_t cid)
+{
+  app *a = ud;
+  if (a && a->cloud) ccord_cloud_delete_comment(a->cloud, id, cid);
+}
+
+void app_sync_cloud_ui(app *a)
+{
+  if (!a || !a->ui || !a->cloud) return;
+  uint64_t srev = ccord_cloud_revision(a->cloud);
+  if (srev != a->last_cloud_rev) {
+    a->last_cloud_rev = srev;
+    ccord_cloud_state st = {0};
+    ccord_cloud_get_state(a->cloud, &st);
+    ccord_ui_cloud_info ui_ci = {
+      .available = true,
+      .authenticated = st.authenticated,
+      .signing_in = st.signing_in,
+      .busy = st.busy,
+      .wake_enabled = st.wake_enabled,
+      .wake_connected = st.wake_connected,
+      .companion_online = st.companion_online,
+      .is_mobile = a->platform && ccord_platform_is_mobile(a->platform),
+      .claimed_count = st.claimed_count,
+      .device_count = st.device_count,
+    };
+    snprintf(ui_ci.username, sizeof ui_ci.username, "%s", st.username);
+    snprintf(ui_ci.display_name, sizeof ui_ci.display_name, "%s", st.display_name);
+    snprintf(ui_ci.github_login, sizeof ui_ci.github_login, "%s", st.github_login);
+    snprintf(ui_ci.status_text, sizeof ui_ci.status_text, "%s", st.status_text);
+    snprintf(ui_ci.error_text, sizeof ui_ci.error_text, "%s", st.error_text);
+    ccord_ui_set_cloud_info(a->ui, &ui_ci);
+  }
+
+  uint64_t crev = ccord_cloud_social_revision(a->cloud);
+  if (crev != a->last_social_rev) {
+    a->last_social_rev = crev;
+    ccord_cloud_social *soc = ccord_calloc(1, sizeof *soc);
+    ccord_ui_plugin_social *us = ccord_calloc(1, sizeof *us);
+    if (soc && us) {
+      ccord_cloud_get_social(a->cloud, soc);
+      us->loading = soc->loading;
+      us->loaded = soc->loaded;
+      us->submitting = soc->submitting;
+      snprintf(us->plugin_id, sizeof us->plugin_id, "%s", soc->plugin_id);
+      snprintf(us->claimed_dev, sizeof us->claimed_dev, "%s", soc->claimed_dev);
+      snprintf(us->error_text, sizeof us->error_text, "%s", soc->error_text);
+      us->rating_score_x10 = soc->rating.score_x10;
+      us->rating_sentiment = (uint8_t)soc->rating.sentiment;
+      us->rating_pos = soc->rating.pos;
+      us->rating_neu = soc->rating.neu;
+      us->rating_neg = soc->rating.neg;
+      us->rating_total = soc->rating.total;
+      us->has_my_vote = soc->rating.has_my_vote;
+      us->my_vote = soc->rating.my_vote;
+      us->total_comments = soc->total_comments;
+      size_t cn = soc->comment_count;
+      if (cn > CCORD_UI_PLUGIN_COMMENTS_MAX) cn = CCORD_UI_PLUGIN_COMMENTS_MAX;
+      us->comment_count = cn;
+      for (size_t i = 0; i < cn; i++) {
+        const ccord_cloud_comment *sc = &soc->comments[i];
+        ccord_ui_plugin_comment *dc = &us->comments[i];
+        dc->id = sc->id;
+        snprintf(dc->author, sizeof dc->author, "%s", sc->author_display[0] ? sc->author_display : sc->author_username);
+        snprintf(dc->version, sizeof dc->version, "%s", sc->plugin_version);
+        snprintf(dc->date, sizeof dc->date, "%s", sc->created_date);
+        snprintf(dc->body, sizeof dc->body, "%s", sc->body);
+        dc->is_developer = sc->is_developer;
+        dc->is_mine = sc->is_mine;
+        dc->is_deleted = sc->is_deleted;
+        size_t rn = sc->reply_count;
+        if (rn > CCORD_UI_PLUGIN_REPLIES_MAX) rn = CCORD_UI_PLUGIN_REPLIES_MAX;
+        dc->reply_count = rn;
+        for (size_t k = 0; k < rn; k++) {
+          const ccord_cloud_reply *sr = &sc->replies[k];
+          ccord_ui_plugin_reply *dr = &dc->replies[k];
+          dr->id = sr->id;
+          snprintf(dr->author, sizeof dr->author, "%s", sr->author_display[0] ? sr->author_display : sr->author_username);
+          snprintf(dr->version, sizeof dr->version, "%s", sr->plugin_version);
+          snprintf(dr->date, sizeof dr->date, "%s", sr->created_date);
+          snprintf(dr->body, sizeof dr->body, "%s", sr->body);
+          dr->is_developer = sr->is_developer;
+          dr->is_mine = sr->is_mine;
+          dr->is_deleted = sr->is_deleted;
+        }
+      }
+      ccord_ui_set_plugin_social(a->ui, us);
+    }
+    ccord_free(soc);
+    ccord_free(us);
+  }
+}
+
+void app_handle_open_url(app *a, const char *url)
+{
+  if (!a || !url || !url[0]) return;
+  if (a->cloud && ccord_cloud_handle_callback_url(a->cloud, url)) {
+    app_sync_cloud_ui(a);
+    return;
+  }
+  if (a->session && ccord_session_state(a->session) == CCORD_CONN_CONNECTED) {
+    (void)ccord_ui_open_url(a->ui, url);
+  } else {
+    snprintf(a->pending_open_url, sizeof a->pending_open_url, "%s", url);
+  }
+}
+
 uint64_t app_clock(void *ud)
 {
   return ((app *)ud)->virtual_ms;
@@ -541,6 +663,18 @@ void app_fill_ui_host(app *a, ccord_ui_host *out)
     .save_file_dialog = host_save_file_dialog,
     .select_theme_preset = host_select_theme_preset,
     .composer_changed = host_composer_changed,
+    .cloud_sign_in = host_cloud_sign_in,
+    .cloud_cancel_login = host_cloud_cancel_login,
+    .cloud_sign_out = host_cloud_sign_out,
+    .cloud_refresh = host_cloud_refresh,
+    .cloud_link_github = host_cloud_link_github,
+    .cloud_unlink_github = host_cloud_unlink_github,
+    .cloud_rescan_claims = host_cloud_rescan_claims,
+    .cloud_set_wake_enabled = host_cloud_set_wake,
+    .cloud_fetch_social = host_cloud_fetch_social,
+    .cloud_rate_plugin = host_cloud_rate_plugin,
+    .cloud_post_comment = host_cloud_post_comment,
+    .cloud_delete_comment = host_cloud_delete_comment,
   };
 #if CCORD_WITH_PLUGINS
   out->set_extensions_enabled = app_host_set_extensions;
