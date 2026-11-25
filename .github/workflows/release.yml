@@ -116,6 +116,9 @@ jobs:
     name: Linux Debian/Ubuntu (.deb)
     needs: meta
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     container:
       image: debian:bookworm
     steps:
@@ -282,6 +285,9 @@ jobs:
     name: Verify .deb (${{ matrix.image }})
     needs: [meta, build-deb]
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
