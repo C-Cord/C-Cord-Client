@@ -131,6 +131,9 @@ typedef struct ccord_cloud_cbs {
   void (*toast)(void *ud, const char *msg, uint8_t level);
   // Thread-safe wakeup for the UI/app main loop (called when wakes, companion changes, or async jobs complete).
   void (*wake_main)(void *ud);
+  // Optional thread-safe hook invoked immediately on wake_thread when a companion wake frame arrives
+  // (e.g. acquire a timed Android PARTIAL_WAKE_LOCK before waking the main loop).
+  void (*wake_rx)(void *ud, ccord_wake_kind kind);
 } ccord_cloud_cbs;
 
 typedef struct ccord_cloud_config {
@@ -181,8 +184,13 @@ void ccord_cloud_delete_comment(ccord_cloud *c, const char *plugin_id, int64_t c
 // Companion Wake API (bare "msg" / "call" relay — zero Discord tokens, zero message content).
 void ccord_cloud_emit_wake(ccord_cloud *c, ccord_wake_kind kind);
 bool ccord_cloud_pop_wake(ccord_cloud *c, ccord_wake_kind *out_kind);
+bool ccord_cloud_has_pending_wake(const ccord_cloud *c);
 bool ccord_cloud_companion_online(const ccord_cloud *c);
 void ccord_cloud_wake_heartbeat_now(ccord_cloud *c);
+// Notifies the wake WebSocket of OS network / sleep transitions:
+// reconnect == true tears down & reopens immediately (e.g. Wi-Fi <-> Cellular);
+// reconnect == false probes the live socket with an immediate heartbeat + ACK timeout.
+void ccord_cloud_on_link_change(ccord_cloud *c, bool reconnect);
 
 // Exposed pure helpers for unit testing (no network required).
 bool ccord_cloud_pkce_s256(const char *verifier, char challenge_out[64]);

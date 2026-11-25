@@ -94,6 +94,11 @@ static void test_offline_lifecycle(void)
   ccord_cloud_get_state(c, &st);
   CT_CHECK(!st.authenticated);
   CT_CHECK(!ccord_cloud_companion_online(c));
+  CT_CHECK(!ccord_cloud_has_pending_wake(c));
+  ccord_cloud_on_link_change(c, false);
+  ccord_cloud_on_link_change(c, true);
+  ccord_cloud_on_link_change(nullptr, true);
+  CT_CHECK(!ccord_cloud_has_pending_wake(nullptr));
   ccord_wake_kind wk = CCORD_WAKE_MSG;
   CT_CHECK(!ccord_cloud_pop_wake(c, &wk) && wk == CCORD_WAKE_NONE);
   ccord_cloud_destroy(c);
