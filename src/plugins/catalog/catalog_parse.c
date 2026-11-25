@@ -337,6 +337,47 @@ bool cat_resolve_cached_icon_path(const ccord_catalog *cat, const char *icon_url
   return false;
 }
 
+static void parse_rating_and_social_fields(const ccord_json *obj, cat_item *it)
+{
+  if (!obj || !it) return;
+  it->rating_score_x10 = -1;
+  it->rating_sentiment = 0;
+  it->rating_pos = it->rating_neu = it->rating_neg = it->rating_total = 0;
+  it->comment_count = 0;
+  it->claimed_dev[0] = '\0';
+
+  const ccord_json *r = ccord_json_get(obj, "rating");
+  if (r && ccord_json_type_of(r) == CCORD_JSON_OBJECT) {
+    int64_t v = 0;
+    if (ccord_json_int64(ccord_json_get(r, "score_x10"), &v) && v >= -1 && v <= 100) {
+      it->rating_score_x10 = (int16_t)v;
+    } else {
+      const ccord_json *sc = ccord_json_get(r, "score");
+      if (sc && ccord_json_type_of(sc) == CCORD_JSON_NUMBER) {
+        double d = ccord_json_number(sc, -1.0);
+        if (d >= 0.0 && d <= 10.0) it->rating_score_x10 = (int16_t)(d * 10.0 + 0.5);
+      }
+    }
+    char sent[24];
+    cat_json_str_copy(r, "sentiment", sent, sizeof sent);
+    if (strcmp(sent, "positive") == 0) it->rating_sentiment = 3;
+    else if (strcmp(sent, "neutral") == 0) it->rating_sentiment = 2;
+    else if (strcmp(sent, "negative") == 0) it->rating_sentiment = 1;
+    if (ccord_json_int64(ccord_json_get(r, "pos"), &v) && v > 0) it->rating_pos = (uint32_t)v;
+    if (ccord_json_int64(ccord_json_get(r, "neu"), &v) && v > 0) it->rating_neu = (uint32_t)v;
+    if (ccord_json_int64(ccord_json_get(r, "neg"), &v) && v > 0) it->rating_neg = (uint32_t)v;
+    if (ccord_json_int64(ccord_json_get(r, "total"), &v) && v > 0) it->rating_total = (uint32_t)v;
+  }
+  int64_t cc = 0;
+  if (ccord_json_int64(ccord_json_get(obj, "comment_count"), &cc) && cc > 0) {
+    it->comment_count = (uint32_t)cc;
+  }
+  const ccord_json *devs = ccord_json_get(obj, "claimed_developers");
+  if (devs && ccord_json_type_of(devs) == CCORD_JSON_ARRAY && ccord_json_array_len(devs) > 0) {
+    cat_json_str_copy(ccord_json_array_at(devs, 0), "github_login", it->claimed_dev, sizeof it->claimed_dev);
+  }
+}
+
 static void parse_warnings_array(const ccord_json *warns, cat_item *it)
 {
   it->warning_sev = CCORD_WARN_NONE;
@@ -458,6 +499,7 @@ bool cat_parse_discover_page_json(ccord_catalog *cat, const char *json, size_t l
     if (ccord_json_int64(ccord_json_get(o, "size_bytes"), &sz) && sz > 0) it.size_bytes = (uint64_t)sz;
     int64_t dls = 0;
     if (ccord_json_int64(ccord_json_get(o, "downloads"), &dls) && dls > 0) it.downloads = (uint64_t)dls;
+    parse_rating_and_social_fields(o, &it);
     int64_t ws = 0;
     if (ccord_json_int64(ccord_json_get(o, "warning_sev"), &ws) && ws >= 0 && ws <= 3) {
       it.warning_sev = (ccord_catalog_warn_sev)ws;
@@ -548,6 +590,7 @@ bool cat_parse_detail_json(const ccord_catalog *cat, const char *json, size_t le
   if (ccord_json_int64(ccord_json_get(latest, "size_bytes"), &sz) && sz > 0) out->size_bytes = (uint64_t)sz;
   int64_t dls = 0;
   if (ccord_json_int64(ccord_json_get(o, "downloads"), &dls) && dls > 0) out->downloads = (uint64_t)dls;
+  parse_rating_and_social_fields(o, out);
 
   parse_permissions_array(perms_arr, out);
   int64_t ac = 0;
@@ -821,6 +864,14 @@ static void build_contrib_entry(const ccord_catalog *cat, const cat_item *it,
     .platforms = it->platforms ? it->platforms : CCORD_PLAT_ALL,
     .size_bytes = it->size_bytes,
     .downloads = it->downloads,
+    .rating_score_x10 = it->rating_score_x10,
+    .rating_sentiment = it->rating_sentiment,
+    .rating_pos = it->rating_pos,
+    .rating_neu = it->rating_neu,
+    .rating_neg = it->rating_neg,
+    .rating_total = it->rating_total,
+    .comment_count = it->comment_count,
+    .claimed_dev = it->claimed_dev,
     .api_class = it->api_class,
     .tier = it->tier,
     .warning_sev = it->warning_sev,

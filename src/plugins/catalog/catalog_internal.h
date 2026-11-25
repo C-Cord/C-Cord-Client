@@ -53,6 +53,14 @@ typedef struct cat_item {
   char icon_url[256];
   uint64_t size_bytes;
   uint64_t downloads;
+  int16_t rating_score_x10;
+  uint8_t rating_sentiment;
+  uint32_t rating_pos;
+  uint32_t rating_neu;
+  uint32_t rating_neg;
+  uint32_t rating_total;
+  uint32_t comment_count;
+  char claimed_dev[65];
   uint64_t perms_mask;
   uint32_t platforms;
   uint8_t api_class;

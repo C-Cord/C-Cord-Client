@@ -49,6 +49,7 @@ void contrib_free_catalog_entry(ccord_catalog_entry *e)
   contrib_free_str(e->warning_title);
   contrib_free_str(e->warning_message);
   contrib_free_str(e->installed_version);
+  contrib_free_str(e->claimed_dev);
 }
 
 static void free_plugin_logs(plugin_slot *p)
@@ -178,6 +179,14 @@ static bool clone_catalog_entry(const ccord_catalog_entry *s, ccord_catalog_entr
     .platforms = s->platforms,
     .size_bytes = s->size_bytes,
     .downloads = s->downloads,
+    .rating_score_x10 = s->rating_score_x10,
+    .rating_sentiment = s->rating_sentiment,
+    .rating_pos = s->rating_pos,
+    .rating_neu = s->rating_neu,
+    .rating_neg = s->rating_neg,
+    .rating_total = s->rating_total,
+    .comment_count = s->comment_count,
+    .claimed_dev = ccord_strdup(s->claimed_dev ? s->claimed_dev : ""),
     .api_class = s->api_class ? s->api_class : 1,
     .tier = s->tier,
     .warning_sev = s->warning_sev,
@@ -195,7 +204,7 @@ static bool clone_catalog_entry(const ccord_catalog_entry *s, ccord_catalog_entr
   if (!d.id || !d.name || !d.description || !d.license || !d.author || !d.repo ||
       !d.repo_url || !d.version || !d.download_url || !d.sha256 || !d.permissions ||
       !d.allowed_hosts || !d.changelog || !d.icon_url || !d.icon_path ||
-      !d.warning_title || !d.warning_message || !d.installed_version) {
+      !d.warning_title || !d.warning_message || !d.installed_version || !d.claimed_dev) {
     contrib_free_catalog_entry(&d);
     return false;
   }

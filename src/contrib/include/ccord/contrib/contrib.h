@@ -476,6 +476,14 @@ typedef struct ccord_catalog_entry {
   uint32_t platforms;             // CCORD_PLAT_* bitmask (0 = all)
   uint64_t size_bytes;
   uint64_t downloads;
+  int16_t rating_score_x10;       // 0..100 when rating_total > 0 (score = score_x10 / 10.0)
+  uint8_t rating_sentiment;       // 0=unrated, 1=negative, 2=neutral, 3=positive
+  uint32_t rating_pos;
+  uint32_t rating_neu;
+  uint32_t rating_neg;
+  uint32_t rating_total;
+  uint32_t comment_count;
+  const char *claimed_dev;        // verified linked GitHub login ("" if unclaimed)
   uint8_t api_class;              // 1, 2, or 3
   ccord_plugin_tier tier;
   ccord_catalog_warn_sev warning_sev;
