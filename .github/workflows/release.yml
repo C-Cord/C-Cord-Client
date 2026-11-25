@@ -117,46 +117,128 @@ jobs:
     needs: meta
     runs-on: ubuntu-latest
     container:
-      image: debian:trixie
+      image: debian:bookworm
     steps:
       - name: Install build dependencies
         run: |
           apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          # Deliberately omit libcurl4-openssl-dev, libav*-dev, libsw*-dev, and libjpeg*-dev:
+          # those ABI-divergent deps are built statically via packaging/deb/build_static_deps.sh
+          # so one .deb works across Debian 12/13 and Ubuntu 24.04/26.04 (and derivatives).
           DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
             install -y --no-install-recommends \
-            ca-certificates git curl gcc g++ cmake ninja-build pkg-config python3 dpkg-dev \
-            libcurl4-openssl-dev libssl-dev zlib1g-dev \
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
-            libpng-dev libjpeg62-turbo-dev libwebp-dev \
+            ca-certificates git curl bzip2 xz-utils binutils make perl clang-19 cmake ninja-build meson nasm yasm pkg-config python3 dpkg-dev \
+            libssl-dev zlib1g-dev libnghttp2-dev \
+            libpng-dev libwebp-dev \
             libopus-dev libsodium-dev libspeexdsp-dev nlohmann-json3-dev \
             libfreetype-dev libharfbuzz-dev libfontconfig1-dev \
+            libva-dev libdrm-dev libgbm-dev \
             libpipewire-0.3-dev libglib2.0-dev libdbus-1-dev \
             libx11-dev libxext-dev libxcomposite-dev libxrandr-dev libxfixes-dev \
             libxcursor-dev libxinerama-dev libxi-dev libxss-dev libxtst-dev \
-            libwayland-dev libxkbcommon-dev libgl-dev libegl-dev libasound2-dev libpulse-dev libdrm-dev libgbm-dev
+            libwayland-dev libxkbcommon-dev libgl-dev libegl-dev libasound2-dev libpulse-dev
       - uses: actions/checkout@v4
+      - name: Cache static Linux .deb dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccord-deb-deps
+          key: deb-static-deps-bookworm-${{ hashFiles('packaging/deb/build_static_deps.sh') }}
+      - name: Build minimal static FFmpeg, libjpeg-turbo, and libcurl (WebSockets)
+        run: |
+          CC=clang-19 CXX=clang++-19 ./packaging/deb/build_static_deps.sh "${HOME}/.cache/ccord-deb-deps"
       - name: Build & Package Debian (.deb + APT metadata)
         env:
           VER: ${{ needs.meta.outputs.version }}
         run: |
+          ROOT="$PWD"
+          DEPS_PREFIX="${HOME}/.cache/ccord-deb-deps"
+          export PKG_CONFIG_PATH="${DEPS_PREFIX}/lib/pkgconfig${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
           cmake -S . -B build -G Ninja \
+            -DCMAKE_C_COMPILER=clang-19 \
+            -DCMAKE_CXX_COMPILER=clang++-19 \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX=/usr \
             -DCMAKE_INSTALL_RPATH='$ORIGIN/../lib/ccord' \
             -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+            -DCMAKE_PREFIX_PATH="${DEPS_PREFIX}" \
+            -DCMAKE_EXE_LINKER_FLAGS="-Wl,--as-needed" \
             -DCCORD_DEPS=fetch \
             -DCCORD_WERROR=OFF \
             -DCCORD_BUILD_TESTS=OFF \
             -DCCORD_VERSION="${VER}"
           cmake --build build --parallel "$(nproc)"
-          DESTDIR="$PWD/debstage" cmake --install build
+          DESTDIR="$ROOT/debstage" cmake --install build
           ln -sf ccord debstage/usr/bin/c-cord
 
-          # Bundle fetched SDL3 & SDL3_ttf shared libraries so one .deb works across Debian & Ubuntu.
+          # Bundle fetched SDL3 & SDL3_ttf shared libraries alongside the statically linked FFmpeg/libjpeg/libcurl.
           mkdir -p debstage/usr/lib/ccord debstage/DEBIAN
-          cp -av build/_deps/sdl3-build/libSDL3.so* debstage/usr/lib/ccord/
-          cp -av build/_deps/sdl3_ttf-build/libSDL3_ttf.so* debstage/usr/lib/ccord/
+          cp -av build/_deps/sdl3-build/libSDL3.so.* debstage/usr/lib/ccord/
+          cp -av build/_deps/sdl3_ttf-build/libSDL3_ttf.so.* debstage/usr/lib/ccord/
           rm -f debstage/usr/lib/ccord/*.a
+
+          # Assert none of the distro-divergent media/network libraries leaked into DT_NEEDED.
+          echo "=== ccord DT_NEEDED ==="
+          readelf -d debstage/usr/bin/ccord | grep '(NEEDED)' || true
+          if readelf -d debstage/usr/bin/ccord | grep -E 'NEEDED.*lib(avformat|avcodec|avutil|swscale|swresample|jpeg|curl|x264|vpx|dav1d)\.so'; then
+            echo "ERROR: ccord dynamically linked a library that must be statically linked for cross-distro .deb compatibility" >&2
+            exit 1
+          fi
+
+          # Compute exact runtime Depends via dpkg-shlibdeps, then map only the 4 ABI-identical amd64 t64 renames.
+          mkdir -p shlibswork/debian
+          cat <<'EOF' > shlibswork/debian/control
+          Source: c-cord
+
+          Package: c-cord
+          Architecture: amd64
+          EOF
+          : > shlibswork/debian/shlibs.local
+          SHLIB_TARGETS=(
+            "$ROOT/debstage/usr/bin/ccord"
+            "$ROOT/debstage/usr/bin/ccord-plugin-host"
+          )
+          for so in "$ROOT"/debstage/usr/lib/ccord/libSDL3.so.* "$ROOT"/debstage/usr/lib/ccord/libSDL3_ttf.so.*; do
+            [ -f "$so" ] && [ ! -L "$so" ] || continue
+            soname=$(readelf -d "$so" | sed -n 's/.*(SONAME).*Library soname: \[\(.*\)\]/\1/p')
+            if [ -z "$soname" ]; then
+              echo "ERROR: could not extract SONAME from $so" >&2
+              exit 1
+            fi
+            libbase="${soname%.so.*}"
+            libver="${soname#*.so.}"
+            echo "${libbase} ${libver} c-cord" >> shlibswork/debian/shlibs.local
+            SHLIB_TARGETS+=("$so")
+          done
+          test -s shlibswork/debian/shlibs.local
+          SHLIBS_OUT=$(cd shlibswork && dpkg-shlibdeps -O -xc-cord \
+            -l"$ROOT/debstage/usr/lib/ccord" \
+            "${SHLIB_TARGETS[@]}")
+          RAW_DEPS=$(printf '%s\n' "$SHLIBS_OUT" | sed -n 's/^shlibs:Depends=//p')
+          if [ -z "$RAW_DEPS" ]; then
+            echo "ERROR: dpkg-shlibdeps failed to compute Depends (output: ${SHLIBS_OUT})" >&2
+            exit 1
+          fi
+          DEB_DEPS=$(python3 - "$RAW_DEPS" <<'PY'
+          import re, sys
+          t64_map = {
+              "libssl3": "libssl3t64",
+              "libpng16-16": "libpng16-16t64",
+              "libpipewire-0.3-0": "libpipewire-0.3-0t64",
+              "libglib2.0-0": "libglib2.0-0t64",
+          }
+          out = []
+          for item in (x.strip() for x in sys.argv[1].split(",") if x.strip()):
+              m = re.match(r"^([a-z0-9.+-]+)(\s*\([^)]+\))?$", item)
+              if m and m.group(1) in t64_map:
+                  pkg, ver = m.group(1), (m.group(2) or "")
+                  out.append(f"{t64_map[pkg]}{ver} | {pkg}{ver}")
+              else:
+                  out.append(item)
+          out.append("ca-certificates")
+          print(", ".join(out))
+          PY
+          )
+          echo "Computed cross-distro Depends: ${DEB_DEPS}"
 
           ISIZE_KB=$(du -sk debstage/usr | awk '{print $1}')
           cat <<EOF > debstage/DEBIAN/control
@@ -168,7 +250,7 @@ jobs:
           Installed-Size: ${ISIZE_KB}
           Maintainer: C-Cord Contributors <packages@c-cord.org>
           Homepage: https://c-cord.org
-          Depends: libc6 (>= 2.38), libstdc++6, libcurl4t64 | libcurl4, libssl3t64 | libssl3, zlib1g, libopus0, libsodium23, libspeexdsp1, libpng16-16t64 | libpng16-16, libjpeg62-turbo | libjpeg-turbo8, libwebp7, libfreetype6, libharfbuzz0b, libfontconfig1, libavcodec61 | libavcodec60 | libavcodec-extra, libavformat61 | libavformat60, libavutil59 | libavutil58, libswscale8 | libswscale7, libswresample5 | libswresample4
+          Depends: ${DEB_DEPS}
           Recommends: pipewire, xdg-desktop-portal
           Description: Fast, lightweight native C23 Discord client
            Native desktop Discord client written in C23 with built-in themes,
@@ -185,9 +267,9 @@ jobs:
           mkdir -p out/assets out/repo-meta/deb/dists/stable/main/binary-amd64
           DEB="c-cord_${VER}_amd64.deb"
           dpkg-deb --root-owner-group --build debstage "out/assets/${DEB}"
+          ls -lh "out/assets/${DEB}"
 
           # Generate APT Packages index pointing to pool/main/c/c-cord/<deb>
-          ROOT="$PWD"
           mkdir -p aptwork/pool/main/c/c-cord
           cp "out/assets/${DEB}" "aptwork/pool/main/c/c-cord/${DEB}"
           (cd aptwork && dpkg-scanpackages --multiversion pool/ > "$ROOT/out/repo-meta/deb/dists/stable/main/binary-amd64/Packages")
@@ -195,6 +277,48 @@ jobs:
         with:
           name: release-deb
           path: out/
+
+  test-deb:
+    name: Verify .deb (${{ matrix.image }})
+    needs: [meta, build-deb]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - debian:bookworm
+          - ubuntu:24.04
+          - debian:trixie
+          - ubuntu:26.04
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-deb
+          path: deb-art
+      - name: Install & smoke-test .deb on ${{ matrix.image }}
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+        run: |
+          DEB="c-cord_${VER}_amd64.deb"
+          cp "deb-art/assets/${DEB}" "/tmp/${DEB}"
+          chmod 0644 "/tmp/${DEB}"
+          apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
+            install -y "/tmp/${DEB}"
+          for bin in /usr/bin/ccord /usr/bin/ccord-plugin-host; do
+            echo "=== ldd ${bin} (${{ matrix.image }}) ==="
+            LDD_OUT=$(ldd "${bin}" 2>&1)
+            printf '%s\n' "${LDD_OUT}"
+            if printf '%s\n' "${LDD_OUT}" | grep -qiE 'not found'; then
+              echo "ERROR: unresolved shared library or symbol version in ${bin} on ${{ matrix.image }}" >&2
+              exit 1
+            fi
+          done
+          /usr/bin/c-cord --version
+          (cd /tmp && SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy /usr/bin/c-cord --headless --mock --data-dir /tmp/smoke-data --screenshot /tmp/smoke.png)
+          test -s /tmp/smoke.png
 
   build-rpm:
     name: Linux Fedora/RPM (.rpm)
@@ -693,7 +817,7 @@ jobs:
 
   publish:
     name: Publish GitHub Release & Sync c-cord.org Repos
-    needs: [meta, build-arch, build-deb, build-rpm, build-appimage, build-flatpak, build-windows, build-macos, build-android]
+    needs: [meta, build-arch, build-deb, test-deb, build-rpm, build-appimage, build-flatpak, build-windows, build-macos, build-android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
