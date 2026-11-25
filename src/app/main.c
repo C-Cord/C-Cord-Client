@@ -137,15 +137,21 @@ void app_pump(app *a)
     }
     ccord_wake_kind wk = CCORD_WAKE_NONE;
     while (ccord_cloud_pop_wake(a->cloud, &wk)) {
-      a->cloud_wake_until_ms = app_now_ms(a) + 45000u;
+      a->cloud_wake_until_ms = app_boottime_ms(a) + 45000u;
+      if (a->platform && ccord_platform_is_mobile(a->platform)) {
+        ccord_platform_hold_wake_lock(a->platform, 30000u);
+      }
       bool was_suspended = a->session_suspended;
       if (a->session && a->session_suspended) {
         a->session_suspended = false;
         ccord_session_set_suspended(a->session, false);
       }
-      if (a->session && !was_suspended && ccord_session_state(a->session) != CCORD_CONN_CONNECTED) {
+      if (a->session && !was_suspended) {
         ccord_error lerr;
-        (void)ccord_session_link_event(a->session, CCORD_LINK_RESUMED, &lerr);
+        ccord_link_event lev = ccord_session_state(a->session) != CCORD_CONN_CONNECTED
+                                   ? CCORD_LINK_RESUMED
+                                   : CCORD_LINK_PROBE;
+        (void)ccord_session_link_event(a->session, lev, &lerr);
       }
     }
   }
@@ -236,6 +242,35 @@ static void cloud_wake_main_cb(void *ud)
 {
   app *a = ud;
   if (a && a->platform) ccord_platform_wake(a->platform);
+}
+
+static void cloud_wake_rx_cb(void *ud, ccord_wake_kind kind)
+{
+  (void)kind;
+  app *a = ud;
+  if (a && a->platform && ccord_platform_is_mobile(a->platform)) {
+    ccord_platform_hold_wake_lock(a->platform, 30000u);
+  }
+}
+
+static void app_platform_link_cb(void *ud, ccord_link_event ev)
+{
+  app *a = ud;
+  if (!a) return;
+  if (a->session) {
+    ccord_error err;
+    ccord_status st = ccord_session_link_event(a->session, ev, &err);
+    if (st != CCORD_OK && st != CCORD_ERR_UNSUPPORTED) {
+      CCORD_LOG_D("link: session event %d not applied: %s", (int)ev, err.message);
+    }
+  }
+  if (a->cloud) {
+    if (ev == CCORD_LINK_CHANGED || ev == CCORD_LINK_ONLINE) {
+      ccord_cloud_on_link_change(a->cloud, true);
+    } else if (ev == CCORD_LINK_RESUMED || ev == CCORD_LINK_PROBE) {
+      ccord_cloud_on_link_change(a->cloud, false);
+    }
+  }
 }
 
 static void desktop_companion_wake_cb(void *ud, bool is_call)
@@ -374,10 +409,17 @@ static void run_interactive(app *a)
           if (desk_to < wait_timeout) wait_timeout = desk_to;
           uint32_t media_to = ccord_app_media_next_wait_ms(a->media, now_u);
           if (media_to < wait_timeout) wait_timeout = media_to;
-          if (a->cloud_wake_until_ms > now_u) {
-            uint64_t cw_rem = a->cloud_wake_until_ms - now_u;
-            uint32_t cw_to = cw_rem > UINT32_MAX ? UINT32_MAX : (uint32_t)cw_rem;
-            if (cw_to < wait_timeout) wait_timeout = cw_to;
+          if (a->cloud && ccord_cloud_has_pending_wake(a->cloud)) {
+            wait_timeout = 0u;
+          } else if (a->cloud_wake_until_ms > 0u) {
+            uint64_t bt_now = app_boottime_ms(a);
+            if (bt_now < a->cloud_wake_until_ms) {
+              uint64_t cw_rem = a->cloud_wake_until_ms - bt_now;
+              uint32_t cw_to = cw_rem > UINT32_MAX ? UINT32_MAX : (uint32_t)cw_rem;
+              if (cw_to < wait_timeout) wait_timeout = cw_to;
+            } else if (!a->session_suspended) {
+              wait_timeout = 0u;
+            }
           }
 #if !CCORD_OS_ANDROID
           if (a->updater_deferred && !a->updater) {
@@ -518,6 +560,7 @@ static void run_interactive(app *a)
           uint64_t now_fg = app_boottime_ms(a);
           uint64_t bg_dur = (a->bg_since_ms > 0 && now_fg >= a->bg_since_ms) ? (now_fg - a->bg_since_ms) : 0u;
           a->bg_since_ms = 0;
+          a->cloud_wake_until_ms = 0u;
           app_set_background_state(a, false);
           if (a->session) {
             a->session_suspended = false;
@@ -730,9 +773,11 @@ static void run_interactive(app *a)
         a->voice_fg_deafened = vnow.deafened;
       }
       if (a->session && ccord_platform_is_mobile(a->platform)) {
+        uint64_t bt_now = app_boottime_ms(a);
+        if (a->cloud_wake_until_ms > 0u && bt_now >= a->cloud_wake_until_ms) a->cloud_wake_until_ms = 0u;
         bool snow = a->store && k_app_media_ops.stream_active(a);
         bool companion_guard = a->cloud && ccord_cloud_companion_online(a->cloud) &&
-                               app_now_ms(a) >= a->cloud_wake_until_ms;
+                               a->cloud_wake_until_ms == 0u;
         bool want_suspend = ccord_platform_in_background(a->platform) &&
                             (!a->keep_alive_active || companion_guard) && !vnow.active && !snow;
         if (want_suspend != a->session_suspended) {
@@ -1168,7 +1213,7 @@ int main(int argc, char **argv)
   // Tray wiring before the first frame: Close-to-Tray startup pref + SNI menu/click actions.
   ccord_platform_set_close_to_tray(a.platform, startup.close_to_tray);
   ccord_platform_set_tray_callback(a.platform, app_host_tray_action, &a);
-  ccord_app_desktop_bind_link(a.platform, a.session);
+  ccord_platform_set_link_callback(a.platform, app_platform_link_cb, &a);
   a.renderer = ccord_render_create(a.platform, theme, &err);
   if (!a.renderer) {
     fprintf(stderr, "ccord: %s\n", err.message);
@@ -1234,7 +1279,8 @@ int main(int argc, char **argv)
       .data_dir = disable_cloud_net ? nullptr : ccord_paths_data_dir(),
       .is_mobile = ccord_platform_is_mobile(a.platform),
       .disable_network = disable_cloud_net,
-      .cbs = {.ud = &a, .open_url = cloud_open_url_cb, .toast = cloud_toast_cb, .wake_main = cloud_wake_main_cb},
+      .cbs = {.ud = &a, .open_url = cloud_open_url_cb, .toast = cloud_toast_cb,
+              .wake_main = cloud_wake_main_cb, .wake_rx = cloud_wake_rx_cb},
     };
     a.cloud = ccord_cloud_create(&ccfg);
     a.last_cloud_rev = UINT64_MAX;
