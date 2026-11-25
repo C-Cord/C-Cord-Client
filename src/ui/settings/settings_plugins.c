@@ -80,6 +80,13 @@ typedef enum phit_act : uint8_t {
   ACT_SEC_CANCEL,
   ACT_UNINST_CONFIRM,
   ACT_UNINST_CANCEL,
+  ACT_SOCIAL_VOTE,
+  ACT_SOCIAL_CMT_FOCUS,
+  ACT_SOCIAL_CMT_POST,
+  ACT_SOCIAL_CMT_REPLY,
+  ACT_SOCIAL_CMT_CANCEL_REPLY,
+  ACT_SOCIAL_CMT_DELETE,
+  ACT_SOCIAL_OPEN_SIGNIN,
 } phit_act;
 
 typedef struct phit_item {
@@ -112,6 +119,10 @@ static bool s_policy_expanded;
 
 // Sub-views & transient overlays
 static char s_detail_id[65];
+static char s_cmt_draft[512];
+static bool s_cmt_focused;
+static int64_t s_cmt_reply_to;
+static char s_cmt_reply_author[65];
 static char s_log_id[65];
 static int s_log_level_filter;    // 0=All, 1=Info, 2=Warn, 3=Error
 static float s_log_scroll;
@@ -337,20 +348,20 @@ static const ccord_catalog_entry *find_catalog_entry(const ccord_contrib *c, con
 
 static const char *sort_key(int idx)
 {
-  static const char *const k[5] = {"popular", "trending", "updated", "tier", "name"};
-  return (idx >= 0 && idx < 5) ? k[idx] : "popular";
+  static const char *const k[6] = {"popular", "trending", "updated", "tier", "name", "rating"};
+  return (idx >= 0 && idx < 6) ? k[idx] : "popular";
 }
 
 static const char *sort_label(int idx)
 {
-  static const char *const k[5] = {"Popular", "Trending", "Recently Updated", "Trust Tier", "A–Z"};
-  return (idx >= 0 && idx < 5) ? k[idx] : "Popular";
+  static const char *const k[6] = {"Popular", "Trending", "Recently Updated", "Trust Tier", "A–Z", "Highest Rated"};
+  return (idx >= 0 && idx < 6) ? k[idx] : "Popular";
 }
 
 static const char *sort_short_label(int idx)
 {
-  static const char *const k[5] = {"Popular", "Trending", "Updated", "Trust Tier", "A–Z"};
-  return (idx >= 0 && idx < 5) ? k[idx] : "Popular";
+  static const char *const k[6] = {"Popular", "Trending", "Updated", "Trust Tier", "A–Z", "Top Rated"};
+  return (idx >= 0 && idx < 6) ? k[idx] : "Popular";
 }
 
 static const char *plat_filter_query(plat_filter pf)
@@ -1197,7 +1208,8 @@ float st_plugin_body_y(const sgeom *g)
 bool ui_settings_plugins_wants_text(const ccord_ui *ui)
 {
   if (!ui || !ui->settings_open || ui->settings_page != SP_PLUGINS) return false;
-  if (st_plugins_has_overlay() || s_detail_id[0] || s_log_id[0]) return false;
+  if (st_plugins_has_overlay() || s_log_id[0]) return false;
+  if (s_detail_id[0]) return s_cmt_focused;
   if (s_subtab == 0 && s_inst_search_focused) return true;
   if (s_subtab == 1 && s_disc_search_focused) return true;
   return false;
@@ -1451,6 +1463,232 @@ static void draw_debug_log_view(ccord_ui *ui, ccord_renderer *r, float x, float 
                         s_log_scroll, box.h, s_log_content_h, &s_log_sb_track);
 }
 
+static const char *sentiment_label(uint8_t s)
+{
+  if (s == 3) return "Positive";
+  if (s == 2) return "Neutral";
+  if (s == 1) return "Negative";
+  return "Unrated";
+}
+
+static ccord_color sentiment_color(const ccord_ui *ui, uint8_t s)
+{
+  if (s == 3) return COL(status_online);
+  if (s == 2) return COL(status_idle);
+  if (s == 1) return COL(danger);
+  return COL(text_muted);
+}
+
+static float draw_detail_social_card(ccord_ui *ui, ccord_renderer *r, float x, float y, float w,
+                                     const char *plugin_id, const ccord_catalog_entry *cat_e, ccord_rect body_clip)
+{
+  uis_tokens tk = uis_tokens_of(ui);
+  ccord_text_style ovs = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));
+  ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, tk.fs_body, COL(text_header));
+  ccord_text_style ms = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_control, COL(text_normal));
+  ccord_text_style cs = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_caption, COL(text_muted));
+  ccord_text_style devs = ui_style(ui, CCORD_FONT_BOLD, tk.fs_caption, COL(brand));
+  ccord_text_style errs = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_caption, COL(danger));
+
+  const ccord_ui_plugin_social *soc =
+    (ui->plugin_social && strcmp(ui->plugin_social->plugin_id, plugin_id) == 0) ? ui->plugin_social : nullptr;
+  int16_t score_x10 = soc ? soc->rating_score_x10 : (cat_e && cat_e->rating_total > 0 ? cat_e->rating_score_x10 : -1);
+  uint8_t sent = soc ? soc->rating_sentiment : (cat_e ? cat_e->rating_sentiment : 0);
+  uint32_t rpos = soc ? soc->rating_pos : (cat_e ? cat_e->rating_pos : 0);
+  uint32_t rneu = soc ? soc->rating_neu : (cat_e ? cat_e->rating_neu : 0);
+  uint32_t rneg = soc ? soc->rating_neg : (cat_e ? cat_e->rating_neg : 0);
+  uint32_t rtot = soc ? soc->rating_total : (cat_e ? cat_e->rating_total : 0);
+  bool has_my = soc && soc->has_my_vote;
+  int8_t my_v = soc ? soc->my_vote : 0;
+
+  float inner_w = fmaxf(w - 32.0f, 80.0f);
+  float bh_sm = pl_btn_sm(ui);
+  uis_btn_size bsz_sm = pl_sz_sm(ui);
+  bool authed = ui->cloud_info.authenticated;
+
+  // Pass 1: measure height
+  float h = 16.0f + 18.0f + 42.0f + bh_sm + 16.0f; // header + rating summary + 3-thumb row
+  if (soc && soc->error_text[0]) h += 20.0f;
+  if (authed) {
+    if (s_cmt_reply_to > 0) h += 22.0f;
+    h += bh_sm + 14.0f; // comment input + post button
+  } else {
+    h += bh_sm + 12.0f; // sign-in prompt button
+  }
+  h += 22.0f; // "COMMENTS (N)" label
+  size_t ccnt = soc ? soc->comment_count : 0;
+  if (ccnt == 0) {
+    h += 24.0f;
+  } else {
+    for (size_t i = 0; i < ccnt; i++) {
+      const ccord_ui_plugin_comment *cm = &soc->comments[i];
+      float body_h = fmaxf(16.0f, ccord_text_measure(r, cm->body, strlen(cm->body), &ms, fmaxf(inner_w - 20.0f, 60.0f)).y);
+      h += 30.0f + body_h + 14.0f;
+      for (size_t k = 0; k < cm->reply_count; k++) {
+        const ccord_ui_plugin_reply *rp = &cm->replies[k];
+        float rh = fmaxf(16.0f, ccord_text_measure(r, rp->body, strlen(rp->body), &ms, fmaxf(inner_w - 40.0f, 60.0f)).y);
+        h += 26.0f + rh + 10.0f;
+      }
+    }
+  }
+  h += 14.0f;
+
+  // Pass 2: draw card
+  ccord_rect card = {x, y, w, h};
+  uis_card(ui, r, card);
+  float cy = y + 14.0f;
+  ccord_text_draw(r, "COMMUNITY RATING & COMMENTS", 27, x + 16.0f, cy, &ovs, 0.0f);
+  cy += 20.0f;
+
+  char rhead[96];
+  if (rtot > 0 && score_x10 >= 0) {
+    snprintf(rhead, sizeof rhead, "%d.%d / 10  ·  %s", (int)(score_x10 / 10), (int)(score_x10 % 10), sentiment_label(sent));
+  } else {
+    snprintf(rhead, sizeof rhead, "No ratings yet");
+  }
+  ccord_text_style sc_st = ui_style(ui, CCORD_FONT_BOLD, tk.fs_body, sentiment_color(ui, sent));
+  ccord_text_draw_ellipsis(r, rhead, strlen(rhead), x + 16.0f, cy, inner_w, &sc_st);
+  cy += 20.0f;
+
+  char rsub[128];
+  snprintf(rsub, sizeof rsub, "%u rating%s · %u positive · %u neutral · %u negative",
+           rtot, rtot == 1 ? "" : "s", rpos, rneu, rneg);
+  ccord_text_draw_ellipsis(r, rsub, strlen(rsub), x + 16.0f, cy, inner_w, &cs);
+  cy += 20.0f;
+
+  // 3-thumb rating buttons: Positive (+1), Neutral (0), Negative (-1)
+  struct { const char *lbl; int vote; } thumbs[3] = {
+    {"Thumbs Up (Positive)", 1},
+    {"Sideways (Neutral)", 0},
+    {"Thumbs Down (Negative)", -1},
+  };
+  float tx = x + 16.0f;
+  bool busy = soc && soc->submitting;
+  for (int i = 0; i < 3; i++) {
+    bool active = has_my && my_v == thumbs[i].vote;
+    float bw = btn_w_sm(ui, r, thumbs[i].lbl, inner_w);
+    if (tx > x + 16.0f && tx + bw > x + w - 16.0f) { tx = x + 16.0f; cy += bh_sm + 6.0f; }
+    ccord_rect rb = {tx, cy, bw, bh_sm};
+    uis_btn_kind kind = active ? (thumbs[i].vote < 0 ? UIS_BTN_DANGER : UIS_BTN_PRIMARY) : UIS_BTN_SECONDARY;
+    draw_btn(ui, r, rb, thumbs[i].lbl, kind, bsz_sm, busy, "pvote", (uint64_t)(i + 1));
+    if (!busy) hit_main_clipped(rb, body_clip, ACT_SOCIAL_VOTE, thumbs[i].vote, plugin_id);
+    tx += bw + 8.0f;
+  }
+  cy += bh_sm + 12.0f;
+
+  if (soc && soc->error_text[0]) {
+    ccord_text_draw_ellipsis(r, soc->error_text, strlen(soc->error_text), x + 16.0f, cy, inner_w, &errs);
+    cy += 20.0f;
+  }
+
+  // Comment composer (or Sign In CTA)
+  if (authed) {
+    if (s_cmt_reply_to > 0) {
+      char rlbl[112];
+      snprintf(rlbl, sizeof rlbl, "Replying to %s", s_cmt_reply_author[0] ? s_cmt_reply_author : "comment");
+      ccord_text_draw_ellipsis(r, rlbl, strlen(rlbl), x + 16.0f, cy + 2.0f, fmaxf(inner_w - 80.0f, 60.0f), &cs);
+      float cw = btn_w_sm(ui, r, "Cancel", 72.0f);
+      ccord_rect rc = {x + w - 16.0f - cw, cy - 2.0f, cw, 22.0f};
+      draw_btn(ui, r, rc, "Cancel", UIS_BTN_SECONDARY, UIS_BTN_S_SM, false, "pcmtc", 0);
+      hit_main_clipped(rc, body_clip, ACT_SOCIAL_CMT_CANCEL_REPLY, 0, plugin_id);
+      cy += 22.0f;
+    }
+    float post_w = btn_w_sm(ui, r, "Post", 80.0f);
+    ccord_rect r_in = {x + 16.0f, cy, fmaxf(inner_w - post_w - 8.0f, 80.0f), bh_sm};
+    uis_plate(ui, r, r_in, tk.r_control, s_cmt_focused ? COL(bg_floating) : COL(bg_input));
+    const char *shown = s_cmt_draft[0] ? s_cmt_draft : "Write a comment (Enter to post)...";
+    ccord_text_style ins = s_cmt_draft[0] ? ms : cs;
+    ccord_text_draw_ellipsis(r, shown, strlen(shown), r_in.x + 10.0f, r_in.y + 6.0f, fmaxf(r_in.w - 20.0f, 40.0f), &ins);
+    hit_main_clipped(r_in, body_clip, ACT_SOCIAL_CMT_FOCUS, 0, plugin_id);
+
+    ccord_rect r_post = {r_in.x + r_in.w + 8.0f, cy, post_w, bh_sm};
+    bool can_post = !busy && s_cmt_draft[0] != '\0';
+    draw_btn(ui, r, r_post, "Post", UIS_BTN_PRIMARY, bsz_sm, !can_post, "pcmtp", 0);
+    if (can_post) hit_main_clipped(r_post, body_clip, ACT_SOCIAL_CMT_POST, 0, plugin_id);
+    cy += bh_sm + 14.0f;
+  } else {
+    float sw = btn_w_sm(ui, r, "Sign in with Discord (Settings > C-Cord)", inner_w);
+    ccord_rect r_si = {x + 16.0f, cy, sw, bh_sm};
+    draw_btn(ui, r, r_si, "Sign in with Discord (Settings > C-Cord)", UIS_BTN_SECONDARY, bsz_sm, false, "pcmtsi", 0);
+    hit_main_clipped(r_si, body_clip, ACT_SOCIAL_OPEN_SIGNIN, 0, "");
+    cy += bh_sm + 12.0f;
+  }
+
+  // Comments list
+  char clbl[64];
+  uint32_t ctot = soc ? soc->total_comments : (cat_e ? cat_e->comment_count : 0);
+  snprintf(clbl, sizeof clbl, "COMMENTS (%u)", ctot);
+  ccord_text_draw(r, clbl, strlen(clbl), x + 16.0f, cy, &ovs, 0.0f);
+  cy += 20.0f;
+
+  if (ccnt == 0) {
+    const char *empty_msg = (soc && soc->loading) ? "Loading comments..." : "No comments yet.";
+    ccord_text_draw(r, empty_msg, strlen(empty_msg), x + 16.0f, cy, &cs, inner_w);
+  } else {
+    for (size_t i = 0; i < ccnt; i++) {
+      const ccord_ui_plugin_comment *cm = &soc->comments[i];
+      float body_w = fmaxf(inner_w - 20.0f, 60.0f);
+      float body_h = fmaxf(16.0f, ccord_text_measure(r, cm->body, strlen(cm->body), &ms, body_w).y);
+      ccord_rect cbox = {x + 16.0f, cy, inner_w, 26.0f + body_h + 10.0f};
+      uis_plate(ui, r, cbox, tk.r_control, COL(bg_tertiary));
+      char head[140];
+      snprintf(head, sizeof head, "%s%s%s%s%s", cm->author,
+               cm->is_developer ? " [Verified Dev]" : "",
+               cm->version[0] ? " · v" : "", cm->version,
+               cm->date[0] ? " · " : "");
+      if (cm->date[0]) {
+        size_t hl = strlen(head);
+        if (hl + strlen(cm->date) < sizeof head) snprintf(head + hl, sizeof head - hl, "%s", cm->date);
+      }
+      float ax = cbox.x + cbox.w - 8.0f;
+      if (cm->is_mine && !cm->is_deleted) {
+        float dw = btn_w_sm(ui, r, "Del", 52.0f);
+        ax -= dw;
+        ccord_rect rd = {ax, cbox.y + 4.0f, dw, 20.0f};
+        draw_btn(ui, r, rd, "Del", UIS_BTN_DANGER_SOFT, UIS_BTN_S_SM, busy, "pcmtd", (uint64_t)cm->id);
+        if (!busy) hit_main_clipped(rd, body_clip, ACT_SOCIAL_CMT_DELETE, (int)cm->id, plugin_id);
+        ax -= 6.0f;
+      }
+      if (authed && !cm->is_deleted) {
+        float rw = btn_w_sm(ui, r, "Reply", 62.0f);
+        ax -= rw;
+        ccord_rect rr = {ax, cbox.y + 4.0f, rw, 20.0f};
+        draw_btn(ui, r, rr, "Reply", UIS_BTN_SECONDARY, UIS_BTN_S_SM, false, "pcmtr", (uint64_t)cm->id);
+        hit_main_clipped(rr, body_clip, ACT_SOCIAL_CMT_REPLY, (int)cm->id, cm->author);
+        ax -= 6.0f;
+      }
+      ccord_text_draw_ellipsis(r, head, strlen(head), cbox.x + 10.0f, cbox.y + 6.0f,
+                               fmaxf(ax - (cbox.x + 10.0f), 40.0f), cm->is_developer ? &devs : &hs);
+      ccord_text_draw(r, cm->body, strlen(cm->body), cbox.x + 10.0f, cbox.y + 26.0f, &ms, body_w);
+      cy = cbox.y + cbox.h + 8.0f;
+
+      for (size_t k = 0; k < cm->reply_count; k++) {
+        const ccord_ui_plugin_reply *rp = &cm->replies[k];
+        float rbw = fmaxf(inner_w - 40.0f, 60.0f);
+        float rbh = fmaxf(16.0f, ccord_text_measure(r, rp->body, strlen(rp->body), &ms, rbw).y);
+        ccord_rect rbox = {x + 34.0f, cy, fmaxf(inner_w - 18.0f, 80.0f), 24.0f + rbh + 8.0f};
+        uis_plate(ui, r, rbox, tk.r_control, COL(bg_secondary));
+        char rhd[140];
+        snprintf(rhd, sizeof rhd, "%s%s · %s", rp->author, rp->is_developer ? " [Verified Dev]" : "", rp->date);
+        float rax = rbox.x + rbox.w - 8.0f;
+        if (rp->is_mine && !rp->is_deleted) {
+          float dw = btn_w_sm(ui, r, "Del", 52.0f);
+          rax -= dw;
+          ccord_rect rd = {rax, rbox.y + 3.0f, dw, 20.0f};
+          draw_btn(ui, r, rd, "Del", UIS_BTN_DANGER_SOFT, UIS_BTN_S_SM, busy, "pcmtd", (uint64_t)rp->id);
+          if (!busy) hit_main_clipped(rd, body_clip, ACT_SOCIAL_CMT_DELETE, (int)rp->id, plugin_id);
+          rax -= 6.0f;
+        }
+        ccord_text_draw_ellipsis(r, rhd, strlen(rhd), rbox.x + 10.0f, rbox.y + 5.0f,
+                                 fmaxf(rax - (rbox.x + 10.0f), 40.0f), rp->is_developer ? &devs : &cs);
+        ccord_text_draw(r, rp->body, strlen(rp->body), rbox.x + 10.0f, rbox.y + 23.0f, &ms, rbw);
+        cy = rbox.y + rbox.h + 6.0f;
+      }
+    }
+  }
+  return card.h;
+}
+
 static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, float w, ccord_rect body_clip)
 {
   uis_tokens tk = uis_tokens_of(ui);
@@ -1521,12 +1759,15 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   const char *plat_lbl = platform_badge_label(d_plats, mob, &plat_warn);
 
   // Pass 1: measure total card height accurately so ZERO overflow or clipping occurs
+  bool has_claimed_dev = (have_cat && e->claimed_dev && e->claimed_dev[0]) ||
+                         (ui->plugin_social && strcmp(ui->plugin_social->plugin_id, d_id) == 0 && ui->plugin_social->claimed_dev[0]);
   float icon_sz = w < 440.0f ? 40.0f : 48.0f;
   pill_flow pf;
   pill_flow_init(&pf, x + 16.0f + icon_sz + 12.0f, y + 40.0f, fmaxf(inner_w - icon_sz - 12.0f, 80.0f));
   pill_flow_add(ui, r, &pf, tier_label(d_tier, d_bundled), tier_color(ui, d_tier, d_bundled), false);
   pill_flow_add(ui, r, &pf, api_class_label(d_cls), api_class_color(ui, d_cls), false);
   pill_flow_add(ui, r, &pf, plat_lbl, plat_warn ? COL(status_idle) : COL(text_muted), false);
+  if (has_claimed_dev) pill_flow_add(ui, r, &pf, "Claimed Dev", COL(brand), false);
   float hdr_bottom = fmaxf(y + 16.0f + icon_sz, pill_flow_bottom(&pf));
 
   float cur_h = (hdr_bottom - y) + 12.0f;
@@ -1573,6 +1814,7 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
   pill_flow_add(ui, r, &pf, tier_label(d_tier, d_bundled), tier_color(ui, d_tier, d_bundled), true);
   pill_flow_add(ui, r, &pf, api_class_label(d_cls), api_class_color(ui, d_cls), true);
   pill_flow_add(ui, r, &pf, plat_lbl, plat_warn ? COL(status_idle) : COL(text_muted), true);
+  if (has_claimed_dev) pill_flow_add(ui, r, &pf, "Claimed Dev", COL(brand), true);
 
   float cy = fmaxf(box.y + 16.0f + icon_sz, pill_flow_bottom(&pf)) + 12.0f;
   char meta[360];
@@ -1662,7 +1904,13 @@ static void draw_detail_view(ccord_ui *ui, ccord_renderer *r, float x, float y, 
     hit_main_clipped(rb, body_clip, ACT_CARD_UNINSTALL_ASK, 0, inst->id);
   }
 
-  st_s_plugins_content_h = (box.y + box.h + 14.0f) - start_y;
+  float bottom_y = box.y + box.h + 12.0f;
+  if (have_cat || ui->d.host.cloud_fetch_social) {
+    float soc_h = draw_detail_social_card(ui, r, x, bottom_y, w, d_id, have_cat ? e : nullptr, body_clip);
+    bottom_y += soc_h + 14.0f;
+  }
+
+  st_s_plugins_content_h = bottom_y - start_y;
   ccord_pop_clip(r);
 }
 
@@ -2117,9 +2365,15 @@ static float layout_or_draw_discover_card(ccord_ui *ui, ccord_renderer *r, const
   draw_btn(ui, r, r_cta, cta, kind, bsz_sm, cta_disabled, "pdact", (uint64_t)idx);
   if (!cta_disabled) hit_main_clipped(r_cta, body_clip, ACT_CAT_INSTALL, (int)idx, e->id);
 
-  char dls[32];
+  char dls[32], foot_meta[96];
   format_downloads(e->downloads, dls, sizeof dls);
-  ccord_text_draw_ellipsis(r, dls, strlen(dls), x + pad, fy + (ui->mobile_layout ? 10.0f : 6.0f),
+  if (e->rating_total > 0 && e->rating_score_x10 >= 0) {
+    snprintf(foot_meta, sizeof foot_meta, "%s · %d.%d/10 (%u)",
+             dls, (int)(e->rating_score_x10 / 10), (int)(e->rating_score_x10 % 10), e->rating_total);
+  } else {
+    snprintf(foot_meta, sizeof foot_meta, "%s", dls);
+  }
+  ccord_text_draw_ellipsis(r, foot_meta, strlen(foot_meta), x + pad, fy + (ui->mobile_layout ? 10.0f : 6.0f),
                            fmaxf(r_cta.x - (x + pad) - 8.0f, 30.0f), &cs);
   return h;
 }
@@ -2623,7 +2877,7 @@ static void draw_sort_popover(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
   float pw = 188.0f;
   float row_h = tk.menu_row_h;
   float pad = tk.menu_pad;
-  float ph = pad * 2.0f + 5.0f * row_h;
+  float ph = pad * 2.0f + 6.0f * row_h;
   float px = s_sort_anchor.x + s_sort_anchor.w - pw;
   float py = s_sort_anchor.y + s_sort_anchor.h + 4.0f;
   if (px < g->panel.x + 8.0f) px = g->panel.x + 8.0f;
@@ -2632,7 +2886,7 @@ static void draw_sort_popover(ccord_ui *ui, ccord_renderer *r, const sgeom *g)
 
   s_sort_box = (ccord_rect){px, py, pw, ph};
   uis_popover_frame(ui, r, s_sort_box);
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 6; i++) {
     ccord_rect row = {px + pad, py + pad + (float)i * row_h, pw - pad * 2.0f, row_h};
     uis_state st = {.hover = ui_in_rect(ui->mx, ui->my, row)};
     uis_menu_row(ui, r, row, sort_label(i), st, false, s_disc_sort_idx == i, false, "psortm", (uint64_t)i);
@@ -3056,8 +3310,13 @@ static bool dispatch_action(ccord_ui *ui, const phit_item *it)
     case ACT_CAT_DETAILS:
       s_overflow_id[0] = '\0';
       copy_str(s_detail_id, sizeof s_detail_id, it->id);
+      s_cmt_draft[0] = '\0';
+      s_cmt_focused = false;
+      s_cmt_reply_to = 0;
+      s_cmt_reply_author[0] = '\0';
       st_s_page_scroll = 0.0f;
       if (c) ccord_contrib_catalog_fetch_detail(c, it->id);
+      if (ui->d.host.cloud_fetch_social) ui->d.host.cloud_fetch_social(ui->d.host.ud, it->id);
       return true;
     case ACT_CARD_RELOAD:
     case ACT_OV_RELOAD:
@@ -3116,10 +3375,13 @@ static bool dispatch_action(ccord_ui *ui, const phit_item *it)
     }
     case ACT_DETAIL_BACK:
       s_detail_id[0] = '\0';
+      s_cmt_focused = false;
+      s_cmt_reply_to = 0;
       st_s_page_scroll = 0.0f;
       return true;
     case ACT_DETAIL_RETRY:
       if (c && it->id[0]) ccord_contrib_catalog_fetch_detail(c, it->id);
+      if (ui->d.host.cloud_fetch_social && it->id[0]) ui->d.host.cloud_fetch_social(ui->d.host.ud, it->id);
       return true;
     case ACT_LOG_BACK:
       s_log_id[0] = '\0';
@@ -3197,6 +3459,52 @@ static bool dispatch_action(ccord_ui *ui, const phit_item *it)
       }
       return true;
     }
+    case ACT_SOCIAL_VOTE: {
+      if (!ui->cloud_info.authenticated) {
+        ui->settings_page = SP_CCORD;
+        st_s_page_scroll = 0.0f;
+        return true;
+      }
+      int vote = it->arg;
+      if (ui->plugin_social && strcmp(ui->plugin_social->plugin_id, it->id) == 0 &&
+          ui->plugin_social->has_my_vote && ui->plugin_social->my_vote == vote) {
+        vote = 99; // clear active vote
+      }
+      if (ui->d.host.cloud_rate_plugin) ui->d.host.cloud_rate_plugin(ui->d.host.ud, it->id, vote);
+      return true;
+    }
+    case ACT_SOCIAL_CMT_FOCUS:
+      s_cmt_focused = true;
+      if (ui->touch_mode) ui->touch_text_focused = true;
+      return true;
+    case ACT_SOCIAL_CMT_POST:
+      if (ui->d.host.cloud_post_comment && it->id[0] && s_cmt_draft[0]) {
+        ui->d.host.cloud_post_comment(ui->d.host.ud, it->id, s_cmt_reply_to, s_cmt_draft);
+        s_cmt_draft[0] = '\0';
+        s_cmt_reply_to = 0;
+        s_cmt_reply_author[0] = '\0';
+        s_cmt_focused = false;
+      }
+      return true;
+    case ACT_SOCIAL_CMT_REPLY:
+      s_cmt_reply_to = it->arg;
+      copy_str(s_cmt_reply_author, sizeof s_cmt_reply_author, it->id);
+      s_cmt_focused = true;
+      if (ui->touch_mode) ui->touch_text_focused = true;
+      return true;
+    case ACT_SOCIAL_CMT_CANCEL_REPLY:
+      s_cmt_reply_to = 0;
+      s_cmt_reply_author[0] = '\0';
+      return true;
+    case ACT_SOCIAL_CMT_DELETE:
+      if (ui->d.host.cloud_delete_comment && it->arg > 0) {
+        ui->d.host.cloud_delete_comment(ui->d.host.ud, it->id, (int64_t)it->arg);
+      }
+      return true;
+    case ACT_SOCIAL_OPEN_SIGNIN:
+      ui->settings_page = SP_CCORD;
+      st_s_page_scroll = 0.0f;
+      return true;
     default:
       return false;
   }
@@ -3246,9 +3554,10 @@ bool st_plugins_handle_click(ccord_ui *ui, const sgeom *g, float x, float y)
     for (size_t i = s_nhits_main; i > 0; i--) {
       if (ui_in_rect(x, y, s_hits_main[i - 1].rc)) {
         phit_act a = s_hits_main[i - 1].act;
-        if (a != ACT_INST_SEARCH_FOCUS && a != ACT_DISC_SEARCH_FOCUS) {
+        if (a != ACT_INST_SEARCH_FOCUS && a != ACT_DISC_SEARCH_FOCUS && a != ACT_SOCIAL_CMT_FOCUS && a != ACT_SOCIAL_CMT_REPLY) {
           s_inst_search_focused = false;
           s_disc_search_focused = false;
+          s_cmt_focused = false;
           if (ui->touch_mode) ui->touch_text_focused = false;
         }
         return dispatch_action(ui, &s_hits_main[i - 1]);
@@ -3258,6 +3567,7 @@ bool st_plugins_handle_click(ccord_ui *ui, const sgeom *g, float x, float y)
 
   s_inst_search_focused = false;
   s_disc_search_focused = false;
+  s_cmt_focused = false;
   if (ui->touch_mode) ui->touch_text_focused = false;
   return false;
 }
@@ -3305,14 +3615,15 @@ bool st_plugins_handle_key(ccord_ui *ui, const ccord_input_event *ev)
   }
   if (!ui_settings_plugins_wants_text(ui)) return false;
 
-  char *buf = (s_subtab == 0) ? s_inst_search : s_disc_search;
-  size_t cap = sizeof s_inst_search;
+  bool in_cmt = s_detail_id[0] && s_cmt_focused;
+  char *buf = in_cmt ? s_cmt_draft : ((s_subtab == 0) ? s_inst_search : s_disc_search);
+  size_t cap = in_cmt ? sizeof s_cmt_draft : sizeof s_inst_search;
   if (ev->type == CCORD_IN_TEXT && ev->text[0]) {
     size_t cur = strlen(buf);
     size_t add = strlen(ev->text);
     if (cur + add < cap) {
       memcpy(buf + cur, ev->text, add + 1);
-      if (s_subtab == 0) st_s_page_scroll = 0.0f;
+      if (!in_cmt && s_subtab == 0) st_s_page_scroll = 0.0f;
       ui->dirty = true;
     }
     return true;
@@ -3322,18 +3633,29 @@ bool st_plugins_handle_key(ccord_ui *ui, const ccord_input_event *ev)
       size_t cur = strlen(buf);
       while (cur > 0 && ((unsigned char)buf[cur - 1] & 0xC0u) == 0x80u) cur--;
       if (cur > 0) buf[cur - 1] = '\0';
-      if (s_subtab == 0) st_s_page_scroll = 0.0f;
+      if (!in_cmt && s_subtab == 0) st_s_page_scroll = 0.0f;
       ui->dirty = true;
       return true;
     }
     if (ev->key == CCORD_KEY_RETURN) {
-      if (s_subtab == 1) trigger_discover_query(ui, false);
+      if (in_cmt) {
+        if (ui->d.host.cloud_post_comment && s_cmt_draft[0]) {
+          ui->d.host.cloud_post_comment(ui->d.host.ud, s_detail_id, s_cmt_reply_to, s_cmt_draft);
+          s_cmt_draft[0] = '\0';
+          s_cmt_reply_to = 0;
+          s_cmt_reply_author[0] = '\0';
+          s_cmt_focused = false;
+        }
+      } else if (s_subtab == 1) {
+        trigger_discover_query(ui, false);
+      }
       ui->dirty = true;
       return true;
     }
     if (ev->key == CCORD_KEY_ESCAPE) {
       s_inst_search_focused = false;
       s_disc_search_focused = false;
+      s_cmt_focused = false;
       if (ui->touch_mode) ui->touch_text_focused = false;
       ui->dirty = true;
       return true;

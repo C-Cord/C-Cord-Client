@@ -793,6 +793,30 @@ void ccord_ui_set_update_info(ccord_ui *ui, const ccord_ui_update_info *info)
   ui->dirty = true;
 }
 
+void ccord_ui_set_cloud_info(ccord_ui *ui, const ccord_ui_cloud_info *info)
+{
+  if (!ui || !info) return;
+  ui->cloud_info = *info;
+  ui->dirty = true;
+}
+
+void ccord_ui_set_plugin_social(ccord_ui *ui, const ccord_ui_plugin_social *social)
+{
+  if (!ui) return;
+  if (!social) {
+    ccord_free(ui->plugin_social);
+    ui->plugin_social = nullptr;
+    ui->dirty = true;
+    return;
+  }
+  if (!ui->plugin_social) {
+    ui->plugin_social = ccord_calloc(1, sizeof *ui->plugin_social);
+    if (!ui->plugin_social) return;
+  }
+  *ui->plugin_social = *social;
+  ui->dirty = true;
+}
+
 void ccord_ui_destroy(ccord_ui *ui)
 {
   if (!ui) return;
@@ -813,6 +837,8 @@ void ccord_ui_destroy(ccord_ui *ui)
   ccord_free(ui->upload_hook_text);
   ui->upload_hook_text = nullptr;
   ui->upload_hook_pending = false;
+  ccord_free(ui->plugin_social);
+  ui->plugin_social = nullptr;
   if (ui->d.contrib) ccord_contrib_set_ui_hooks(ui->d.contrib, nullptr);
   ui_panels_destroy(ui);
   ui_plugin_v3_destroy(ui);

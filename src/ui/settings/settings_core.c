@@ -1173,7 +1173,7 @@ float st_page_max_scroll(const ccord_ui *ui, const sgeom *g)
       total = 44.0f + 4.0f * rh + 24.0f;
       break;
     case SP_CCORD:
-      total = 44.0f + 6.0f * rh + 64.0f;
+      total = 44.0f + 6.0f * rh + 64.0f + ((ui->cloud_info.available || ui->d.host.cloud_sign_in) ? 260.0f : 0.0f);
       break;
     case SP_KEYBINDS: {
       size_t npk = ui->d.contrib ? ccord_contrib_keybind_count(ui->d.contrib) : 0;

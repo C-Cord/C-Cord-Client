@@ -1244,6 +1244,153 @@ static ccord_rect p_update_notes_btn(const ccord_ui *ui, ccord_rect c)
   return (ccord_rect){c.x + 162.0f, p_row_y(ui, c, 5) + 46.0f, 118.0f, bh};
 }
 
+static float p_cloud_card_y(const ccord_ui *ui, ccord_rect c)
+{
+  float bh = uis_btn_h_for(ui, 30.0f);
+  float extra = (ui && ui->mobile_layout && c.w < 290.0f) ? (bh + 14.0f) : 0.0f;
+  return p_row_y(ui, c, 5) + 46.0f + bh + extra + 20.0f;
+}
+
+static ccord_rect p_cloud_signin_btn(const ccord_ui *ui, ccord_rect c)
+{
+  float y = p_cloud_card_y(ui, c);
+  float bh = uis_btn_h_for(ui, 30.0f);
+  return (ccord_rect){c.x + 14.0f, y + 78.0f, 178.0f, bh};
+}
+
+static ccord_rect p_cloud_signout_btn(const ccord_ui *ui, ccord_rect c)
+{
+  float y = p_cloud_card_y(ui, c);
+  float bh = uis_btn_h_for(ui, 28.0f);
+  return (ccord_rect){c.x + c.w - 14.0f - 86.0f, y + 14.0f, 86.0f, bh};
+}
+
+static ccord_rect p_cloud_refresh_btn(const ccord_ui *ui, ccord_rect c)
+{
+  ccord_rect so = p_cloud_signout_btn(ui, c);
+  return (ccord_rect){so.x - 8.0f - 76.0f, so.y, 76.0f, so.h};
+}
+
+static ccord_rect p_cloud_gh_primary_btn(const ccord_ui *ui, ccord_rect c)
+{
+  float y = p_cloud_card_y(ui, c);
+  float bh = uis_btn_h_for(ui, 28.0f);
+  return (ccord_rect){c.x + 14.0f, y + 90.0f, 188.0f, bh};
+}
+
+static ccord_rect p_cloud_gh_unlink_btn(const ccord_ui *ui, ccord_rect c)
+{
+  ccord_rect b = p_cloud_gh_primary_btn(ui, c);
+  return (ccord_rect){b.x + b.w + 8.0f, b.y, 92.0f, b.h};
+}
+
+static ccord_rect p_cloud_wake_row(const ccord_ui *ui, ccord_rect c)
+{
+  float y = p_cloud_card_y(ui, c);
+  float bh = uis_btn_h_for(ui, 28.0f);
+  return (ccord_rect){c.x + 14.0f, y + 90.0f + bh + 18.0f, fmaxf(c.w - 28.0f, 120.0f), uis_btn_h_for(ui, UIS_H_BTN_SM)};
+}
+
+static ccord_rect p_cloud_wake_toggle_hit(const ccord_ui *ui, ccord_rect c)
+{
+  ccord_rect tr = uis_toggle_rect(p_cloud_wake_row(ui, c));
+  return (ui && ui->mobile_layout) ? uis_hit_padded(tr, 56.0f, UIS_MOB_TOUCH_H) : tr;
+}
+
+static void p_draw_cloud_card(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
+{
+  uis_tokens tk = uis_tokens_of(ui);
+  const ccord_ui_cloud_info *ci = &ui->cloud_info;
+  float y = p_cloud_card_y(ui, c);
+  float bh = uis_btn_h_for(ui, 30.0f);
+  float card_h = ci->authenticated ? (186.0f + bh) : (104.0f + bh);
+  ccord_rect card = {c.x, y, c.w, card_h};
+  uis_card(ui, r, card);
+
+  ccord_text_style ov = ui_style(ui, CCORD_FONT_BOLD, tk.fs_overline, COL(text_muted));
+  ccord_text_style hs = ui_style(ui, CCORD_FONT_BOLD, tk.fs_body, COL(text_header));
+  ccord_text_style ms = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_control, COL(text_secondary));
+  ccord_text_style er = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_caption, COL(danger));
+  float inner_w = fmaxf(c.w - 28.0f, 100.0f);
+
+  ccord_text_draw(r, "C-CORD.ORG ACCOUNT & COMPANION WAKE", 35, c.x + 14.0f, y + 12.0f, &ov, 0.0f);
+
+  if (!ci->authenticated) {
+    const char *desc = ci->signing_in
+                         ? (ci->status_text[0] ? ci->status_text : "Complete Discord sign-in in your browser...")
+                         : "Sign in with Discord (basic identity only — never stores your Discord token) to rate & comment on plugins, claim GitHub plugins, and wake Android via Desktop Companion.";
+    ccord_text_draw(r, desc, strlen(desc), c.x + 14.0f, y + 32.0f, &ms, inner_w);
+    ccord_rect btn = p_cloud_signin_btn(ui, c);
+    const char *lbl = ci->signing_in ? "Cancel Sign-In" : "Sign in with Discord";
+    uis_button(ui, r, btn, lbl, ci->signing_in ? UIS_BTN_SECONDARY : UIS_BTN_PRIMARY, UIS_BTN_S_SM,
+               (uis_state){.hover = ui_in_rect(ui->mx, ui->my, btn), .disabled = !ui->d.host.cloud_sign_in}, "m6cl", 1);
+    if (ci->error_text[0]) {
+      ccord_text_draw_ellipsis(r, ci->error_text, strlen(ci->error_text), btn.x + btn.w + 10.0f, btn.y + 6.0f,
+                               fmaxf(c.x + c.w - 14.0f - (btn.x + btn.w + 10.0f), 40.0f), &er);
+    }
+    return;
+  }
+
+  // Signed-in header
+  char who[160];
+  if (ci->display_name[0] && strcmp(ci->display_name, ci->username) != 0) {
+    snprintf(who, sizeof who, "%s (@%s)", ci->display_name, ci->username);
+  } else {
+    snprintf(who, sizeof who, "@%s", ci->username[0] ? ci->username : "account");
+  }
+  ccord_rect rf = p_cloud_refresh_btn(ui, c);
+  ccord_rect so = p_cloud_signout_btn(ui, c);
+  ccord_text_draw_ellipsis(r, who, strlen(who), c.x + 14.0f, y + 30.0f, fmaxf(rf.x - (c.x + 22.0f), 60.0f), &hs);
+  uis_button(ui, r, rf, ci->busy ? "..." : "Refresh", UIS_BTN_SECONDARY, UIS_BTN_S_SM,
+             (uis_state){.hover = ui_in_rect(ui->mx, ui->my, rf), .disabled = ci->busy}, "m6cl", 2);
+  uis_button(ui, r, so, "Sign Out", UIS_BTN_DANGER_SOFT, UIS_BTN_S_SM,
+             (uis_state){.hover = ui_in_rect(ui->mx, ui->my, so), .disabled = ci->busy}, "m6cl", 3);
+
+  // Developer GitHub section
+  char gh_line[192];
+  if (ci->github_login[0]) {
+    snprintf(gh_line, sizeof gh_line, "Developer GitHub: @%s · %zu claimed plugin%s",
+             ci->github_login, ci->claimed_count, ci->claimed_count == 1 ? "" : "s");
+  } else {
+    snprintf(gh_line, sizeof gh_line, "Developer GitHub: Not linked — link GitHub to claim personal & org plugins.");
+  }
+  ccord_text_draw_ellipsis(r, gh_line, strlen(gh_line), c.x + 14.0f, y + 64.0f, inner_w, &ms);
+  ccord_rect ghb = p_cloud_gh_primary_btn(ui, c);
+  const char *gh_lbl = ci->github_login[0] ? "Rescan Claimed Plugins" : "Link GitHub & Claim";
+  uis_button(ui, r, ghb, gh_lbl, ci->github_login[0] ? UIS_BTN_SECONDARY : UIS_BTN_PRIMARY, UIS_BTN_S_SM,
+             (uis_state){.hover = ui_in_rect(ui->mx, ui->my, ghb), .disabled = ci->busy}, "m6cl", 4);
+  if (ci->github_login[0]) {
+    ccord_rect unl = p_cloud_gh_unlink_btn(ui, c);
+    uis_button(ui, r, unl, "Unlink", UIS_BTN_DANGER_SOFT, UIS_BTN_S_SM,
+               (uis_state){.hover = ui_in_rect(ui->mx, ui->my, unl), .disabled = ci->busy}, "m6cl", 5);
+  }
+
+  // Companion Wake toggle + live status
+  ccord_rect wrow = p_cloud_wake_row(ui, c);
+  ccord_text_draw(r, "COMPANION WAKE RELAY", 20, wrow.x, wrow.y, &ov, 0.0f);
+  char wnote[192];
+  if (ci->is_mobile) {
+    snprintf(wnote, sizeof wnote, "%s · %zu device%s",
+             ci->companion_online ? "Desktop Companion Online (battery-saver wake active)"
+                                  : (ci->wake_connected ? "Connected · No Desktop Companion online" : "Wake socket offline"),
+             ci->device_count, ci->device_count == 1 ? "" : "s");
+  } else {
+    snprintf(wnote, sizeof wnote, "%s · %zu device%s",
+             ci->wake_connected ? "Online as Desktop Companion (relays bare pings to mobile)" : "Wake relay paused/offline",
+             ci->device_count, ci->device_count == 1 ? "" : "s");
+  }
+  ccord_text_draw_ellipsis(r, wnote, strlen(wnote), wrow.x, wrow.y + 18.0f, fmaxf(wrow.w - 60.0f, 60.0f), &ms);
+  uis_state wst = {.hover = ui_in_rect(ui->mx, ui->my, p_cloud_wake_toggle_hit(ui, c))};
+  uis_toggle(ui, r, wrow, ci->wake_enabled, wst, "m6cw", 1);
+
+  if (ci->error_text[0]) {
+    ccord_text_draw_ellipsis(r, ci->error_text, strlen(ci->error_text), c.x + 14.0f, card.y + card.h - 22.0f, inner_w, &er);
+  } else if (ci->status_text[0]) {
+    ccord_text_style cs = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_caption, COL(text_muted));
+    ccord_text_draw_ellipsis(r, ci->status_text, strlen(ci->status_text), c.x + 14.0f, card.y + card.h - 22.0f, inner_w, &cs);
+  }
+}
+
 static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
 {
   uint32_t caps = prefs_caps(ui);
@@ -1299,6 +1446,9 @@ static void p_draw_ccord(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
                  (uis_state){.hover = ui_in_rect(ui->mx, ui->my, nb)}, "m6un", 0);
     }
   }
+  if (ui->cloud_info.available || ui->d.host.cloud_sign_in) {
+    p_draw_cloud_card(ui, r, c);
+  }
 }
 
 static bool p_click_ccord(ccord_ui *ui, ccord_rect c, float x, float y)
@@ -1350,6 +1500,50 @@ static bool p_click_ccord(ccord_ui *ui, ccord_rect c, float x, float y)
              ui_in_rect(x, y, p_update_notes_btn(ui, c))) {
     if (ui->d.host.open_url) (void)ui->d.host.open_url(ui->d.host.ud, ui->update_info.release_url);
     return true;
+  } else if (ui->cloud_info.available || ui->d.host.cloud_sign_in) {
+    const ccord_ui_cloud_info *ci = &ui->cloud_info;
+    if (!ci->authenticated) {
+      if (ui_in_rect(x, y, p_cloud_signin_btn(ui, c))) {
+        if (ci->signing_in) {
+          if (ui->d.host.cloud_cancel_login) ui->d.host.cloud_cancel_login(ui->d.host.ud);
+        } else {
+          if (ui->d.host.cloud_sign_in) ui->d.host.cloud_sign_in(ui->d.host.ud);
+        }
+        ui->dirty = true;
+        return true;
+      }
+      return false;
+    }
+    if (ui_in_rect(x, y, p_cloud_refresh_btn(ui, c)) && !ci->busy) {
+      if (ui->d.host.cloud_refresh) ui->d.host.cloud_refresh(ui->d.host.ud);
+      ui->dirty = true;
+      return true;
+    }
+    if (ui_in_rect(x, y, p_cloud_signout_btn(ui, c)) && !ci->busy) {
+      if (ui->d.host.cloud_sign_out) ui->d.host.cloud_sign_out(ui->d.host.ud);
+      ui->dirty = true;
+      return true;
+    }
+    if (ui_in_rect(x, y, p_cloud_gh_primary_btn(ui, c)) && !ci->busy) {
+      if (ci->github_login[0]) {
+        if (ui->d.host.cloud_rescan_claims) ui->d.host.cloud_rescan_claims(ui->d.host.ud);
+      } else {
+        if (ui->d.host.cloud_link_github) ui->d.host.cloud_link_github(ui->d.host.ud);
+      }
+      ui->dirty = true;
+      return true;
+    }
+    if (ci->github_login[0] && ui_in_rect(x, y, p_cloud_gh_unlink_btn(ui, c)) && !ci->busy) {
+      if (ui->d.host.cloud_unlink_github) ui->d.host.cloud_unlink_github(ui->d.host.ud);
+      ui->dirty = true;
+      return true;
+    }
+    if (ui_in_rect(x, y, p_cloud_wake_toggle_hit(ui, c))) {
+      if (ui->d.host.cloud_set_wake_enabled) ui->d.host.cloud_set_wake_enabled(ui->d.host.ud, !ci->wake_enabled);
+      ui->dirty = true;
+      return true;
+    }
+    return false;
   } else {
     return false;
   }

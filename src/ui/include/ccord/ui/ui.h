@@ -94,6 +94,19 @@ typedef struct ccord_ui_host {      // everything the UI needs from the OS; test
   bool (*save_file_dialog)(void *ud, const char *suggested_name, char *out_path, size_t cap);
   void (*select_theme_preset)(void *ud, const char *owner, const char *preset_id);
   void (*composer_changed)(void *ud, ccord_id channel_id, const char *text);
+  // Optional c-cord.org account, developer GitHub linking, plugin ratings/comments, and Companion Wake hooks.
+  void (*cloud_sign_in)(void *ud);
+  void (*cloud_cancel_login)(void *ud);
+  void (*cloud_sign_out)(void *ud);
+  void (*cloud_refresh)(void *ud);
+  void (*cloud_link_github)(void *ud);
+  void (*cloud_unlink_github)(void *ud);
+  void (*cloud_rescan_claims)(void *ud);
+  void (*cloud_set_wake_enabled)(void *ud, bool enabled);
+  void (*cloud_fetch_social)(void *ud, const char *plugin_id);
+  void (*cloud_rate_plugin)(void *ud, const char *plugin_id, int vote); // -1, 0, 1, or 99 to clear
+  void (*cloud_post_comment)(void *ud, const char *plugin_id, int64_t parent_id, const char *body);
+  void (*cloud_delete_comment)(void *ud, const char *plugin_id, int64_t comment_id);
 } ccord_ui_host;
 typedef struct ccord_ui_deps {
   ccord_bus *bus; ccord_store *store; ccord_session *session; ccord_contrib *contrib;
@@ -141,6 +154,72 @@ typedef struct ccord_ui_update_info {
   char status_text[160];
 } ccord_ui_update_info;
 void ccord_ui_set_update_info(ccord_ui *ui, const ccord_ui_update_info *info);
+
+// c-cord.org account & Companion Wake view model (Settings > C-Cord).
+typedef struct ccord_ui_cloud_info {
+  bool available;
+  bool authenticated;
+  bool signing_in;
+  bool busy;
+  bool wake_enabled;
+  bool wake_connected;
+  bool companion_online;
+  bool is_mobile;
+  char username[65];
+  char display_name[65];
+  char github_login[65];
+  char status_text[192];
+  char error_text[192];
+  size_t claimed_count;
+  size_t device_count;
+} ccord_ui_cloud_info;
+void ccord_ui_set_cloud_info(ccord_ui *ui, const ccord_ui_cloud_info *info);
+
+// Live community rating + comments for the currently open Plugin Detail view.
+#define CCORD_UI_PLUGIN_COMMENTS_MAX 16u
+#define CCORD_UI_PLUGIN_REPLIES_MAX  4u
+typedef struct ccord_ui_plugin_reply {
+  int64_t id;
+  char author[65];
+  char version[33];
+  char date[16];
+  char body[320];
+  bool is_developer;
+  bool is_mine;
+  bool is_deleted;
+} ccord_ui_plugin_reply;
+typedef struct ccord_ui_plugin_comment {
+  int64_t id;
+  char author[65];
+  char version[33];
+  char date[16];
+  char body[320];
+  bool is_developer;
+  bool is_mine;
+  bool is_deleted;
+  size_t reply_count;
+  ccord_ui_plugin_reply replies[CCORD_UI_PLUGIN_REPLIES_MAX];
+} ccord_ui_plugin_comment;
+typedef struct ccord_ui_plugin_social {
+  bool loading;
+  bool loaded;
+  bool submitting;
+  char plugin_id[65];
+  char claimed_dev[65];
+  char error_text[192];
+  int16_t rating_score_x10; // -1 when unrated, else 0..100
+  uint8_t rating_sentiment; // 0=unrated, 1=negative, 2=neutral, 3=positive
+  uint32_t rating_pos;
+  uint32_t rating_neu;
+  uint32_t rating_neg;
+  uint32_t rating_total;
+  bool has_my_vote;
+  int8_t my_vote;           // -1 | 0 | 1
+  uint32_t total_comments;
+  size_t comment_count;
+  ccord_ui_plugin_comment comments[CCORD_UI_PLUGIN_COMMENTS_MAX];
+} ccord_ui_plugin_social;
+void ccord_ui_set_plugin_social(ccord_ui *ui, const ccord_ui_plugin_social *social);
 
 // Multi-account switcher (Settings > My Account). The app owns the keyring roster and pushes it
 // here; Switch/Remove clicks call host.account_switch / host.account_remove with the row's user id.

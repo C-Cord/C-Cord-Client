@@ -1023,6 +1023,10 @@ struct ccord_ui {
   uint64_t upload_next_ms;            // ~100 ms visible-channel upload progress bar updates
   uint64_t lightbox_hold_until_ms;    // static HD-ready pill hold deadline (after 320 ms crossfade/fade)
   uint64_t expr_gif_search_due_ms;    // mirrored from ui_expr_body.gif_search_due_ms while debounce pending
+
+  // c-cord.org account & plugin community ratings/comments (plugin_social lazily heap-allocated on first use)
+  ccord_ui_cloud_info cloud_info;
+  ccord_ui_plugin_social *plugin_social;
 };
 
 #define UI_TOUCH_LONG_PRESS_MS 420u
