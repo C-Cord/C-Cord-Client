@@ -56,6 +56,12 @@ ccord_status ccord_gateway_build_identify(const char *token, ccord_buf *out, cco
   ccord_jw_end_object(&w);
   ccord_jw_key(&w, "compress");
   ccord_jw_bool(&w, false);
+  ccord_jw_key(&w, "client_state");
+  ccord_jw_begin_object(&w);
+  ccord_jw_key(&w, "guild_versions");
+  ccord_jw_begin_object(&w);
+  ccord_jw_end_object(&w);
+  ccord_jw_end_object(&w);
   ccord_jw_end_object(&w);
   ccord_jw_end_object(&w);
   if (!ccord_jw_ok(&w)) return ccord_error_set(err, CCORD_ERR_RANGE, "gateway: identify payload too large");
