@@ -448,3 +448,6 @@ bool ccord_platform_poll_autofill(ccord_platform *p, ccord_auth_autofill_field *
 bool ccord_platform_pop_open_url(ccord_platform *p, char *out, size_t cap);
 // Thread-safe wakeup for a main thread sleeping in ccord_platform_wait_idle() (foreground or background).
 void ccord_platform_wake(ccord_platform *p);
+// Thread-safe timed CPU wake lock (Android PARTIAL_WAKE_LOCK; no-op on desktop) so a background wake burst
+// completes Gateway reconnect + REST notification catch-up before the SoC re-enters deep sleep.
+void ccord_platform_hold_wake_lock(ccord_platform *p, uint32_t duration_ms);

@@ -18,6 +18,7 @@ import android.media.AudioManager
 import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
+import android.os.PowerManager
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
@@ -71,6 +72,9 @@ object CCordBridge {
     private var audioFocusRequest: AudioFocusRequest? = null
     private var audioFocusHeld: Boolean = false
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { _ -> }
+
+    private val wakeBurstLockSync = Any()
+    private var wakeBurstLock: PowerManager.WakeLock? = null
 
     fun attach(activity: CCordActivity) {
         activityRef = WeakReference(activity)
@@ -556,6 +560,27 @@ object CCordBridge {
     fun setKeepAliveService(active: Boolean) {
         val ctx = activityRef?.get() ?: appContext ?: return
         CCordVoiceService.updateKeepAliveState(ctx, active)
+    }
+
+    @JvmStatic
+    fun acquireWakeBurstLock(durationMs: Long) {
+        val ctx = activityRef?.get()?.applicationContext ?: appContext ?: return
+        val clamped = durationMs.coerceIn(1_000L, 45_000L)
+        synchronized(wakeBurstLockSync) {
+            try {
+                var wl = wakeBurstLock
+                if (wl == null) {
+                    val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+                    wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "C-Cord:WakeBurst").apply {
+                        setReferenceCounted(false)
+                    }
+                    wakeBurstLock = wl
+                }
+                wl.acquire(clamped)
+            } catch (t: Throwable) {
+                Log.w(TAG, "acquireWakeBurstLock failed", t)
+            }
+        }
     }
 
     @JvmStatic

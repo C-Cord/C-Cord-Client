@@ -39,6 +39,7 @@ bool ccord_android_notify_message(uint32_t id, const char *title, const char *bo
 void ccord_android_cancel_notification(uint32_t id);
 void ccord_android_set_voice_service(bool active, const char *channel_name, bool muted, bool deafened);
 void ccord_android_set_keep_alive(bool active);
+void ccord_android_hold_wake_lock(uint32_t duration_ms);
 void ccord_android_on_fullscreen_changed(bool fullscreen);
 void ccord_android_set_audio_comm_mode(bool in_call);
 bool ccord_android_request_screen_capture(void);

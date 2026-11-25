@@ -1606,3 +1606,13 @@ void ccord_platform_wake(ccord_platform *p)
   platform_wake(p);
   platform_wake_sdl(p);
 }
+
+void ccord_platform_hold_wake_lock(ccord_platform *p, uint32_t duration_ms)
+{
+  if (!p || p->headless || duration_ms == 0) return;
+#if defined(__ANDROID__)
+  ccord_android_hold_wake_lock(duration_ms);
+#else
+  (void)duration_ms;
+#endif
+}

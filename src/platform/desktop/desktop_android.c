@@ -521,6 +521,20 @@ void ccord_android_set_keep_alive(bool active)
   android_env_release(attached);
 }
 
+void ccord_android_hold_wake_lock(uint32_t duration_ms)
+{
+  if (duration_ms == 0) return;
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls, "acquireWakeBurstLock", "(J)V");
+    if (mid) (*env)->CallStaticVoidMethod(env, cls, mid, (jlong)duration_ms);
+    clear_exception(env);
+  }
+  android_env_release(attached);
+}
+
 void ccord_android_on_fullscreen_changed(bool fullscreen)
 {
   bool attached = false;
