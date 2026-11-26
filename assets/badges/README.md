@@ -9,5 +9,6 @@ Role logos built on top of [`assets/icons/ccord-1024.png`](../icons/ccord-1024.p
 | **Sponsors** | Rose Heart | `#F43F7E`, `#D62465`, `#FF9BC0` | `ccord-sponsor-1024.png` | `emblems-svg/ccord-sponsor-emblem.svg` |
 | **Contributors** | Emerald Git Merge | `#22C55E`, `#159A45`, `#FFFFFF` | `ccord-contributor-1024.png` | `emblems-svg/ccord-contributor-emblem.svg` |
 | **Org Members** | C-Cord Brand Shield | `#3E33A0`, `#2D2382`, `#1FD1C0`, `#14B2A3`, `#FFFFFF` | `ccord-org-member-1024.png` | `emblems-svg/ccord-org-member-emblem.svg` |
+| **Plugin Developers** | Sunset Orange Code Brackets | `#F97316`, `#D9480F`, `#FFFFFF` | `ccord-plugin-dev-1024.png` | `emblems-svg/ccord-plugin-dev-emblem.svg` |
 
 Background is transparent. See `preview.png` for scale and theme contrast previews.

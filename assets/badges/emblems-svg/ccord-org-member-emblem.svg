@@ -1,26 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
   <g transform="translate(492.00, 550.00) scale(0.9500)">
-    <defs>
-      <clipPath id="shield-outer-clip">
-        <path d="M 0,-156 C 46,-156 96,-142 132,-118 C 142,-111 146,-100 146,-88 L 146,-8 C 146,72 86,132 14,158 C 5,161 -5,161 -14,158 C -86,132 -146,72 -146,-8 L -146,-88 C -146,-100 -142,-111 -132,-118 C -96,-142 -46,-156 0,-156 Z"/>
-      </clipPath>
-      <clipPath id="shield-inner-clip">
-        <path d="M 0,-130 C 38,-130 80,-118 110,-98 C 116,-94 120,-86 120,-78 L 120,-10 C 120,56 70,106 10,128 C 4,130 -4,130 -10,128 C -70,106 -120,56 -120,-10 L -120,-78 C -120,-86 -116,-94 -110,-98 C -80,-118 -38,-130 0,-130 Z"/>
-      </clipPath>
-    </defs>
     <!-- White sticker outline -->
     <path d="M 0,-156 C 46,-156 96,-142 132,-118 C 142,-111 146,-100 146,-88 L 146,-8 C 146,72 86,132 14,158 C 5,161 -5,161 -14,158 C -86,132 -146,72 -146,-8 L -146,-88 C -146,-100 -142,-111 -132,-118 C -96,-142 -46,-156 0,-156 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="46" stroke-linejoin="round" stroke-linecap="round"/>
-    <!-- Brand Teal outer shield frame with subtle heraldic split -->
-    <g clip-path="url(#shield-outer-clip)">
-      <rect x="-160" y="-170" width="160" height="350" fill="#1FD1C0"/>
-      <rect x="0" y="-170" width="160" height="350" fill="#14B2A3"/>
-    </g>
-    <!-- Brand Indigo heraldic core -->
-    <g clip-path="url(#shield-inner-clip)">
-      <rect x="-150" y="-170" width="150" height="340" fill="#3E33A0"/>
-      <rect x="0" y="-170" width="150" height="340" fill="#2D2382"/>
-    </g>
+    <!-- Brand Teal outer shield frame with exact right-half heraldic split (no clipPath) -->
+    <path d="M 0,-156 C 46,-156 96,-142 132,-118 C 142,-111 146,-100 146,-88 L 146,-8 C 146,72 86,132 14,158 C 5,161 -5,161 -14,158 C -86,132 -146,72 -146,-8 L -146,-88 C -146,-100 -142,-111 -132,-118 C -96,-142 -46,-156 0,-156 Z" fill="#1FD1C0"/>
+    <path d="M 0,-156 C 46,-156 96,-142 132,-118 C 142,-111 146,-100 146,-88 L 146,-8 C 146,72 86,132 14,158 C 9.5,159.5 4.75,160.25 0,160.25 Z" fill="#14B2A3"/>
+    <!-- Brand Indigo heraldic core with exact right-half split -->
+    <path d="M 0,-130 C 38,-130 80,-118 110,-98 C 116,-94 120,-86 120,-78 L 120,-10 C 120,56 70,106 10,128 C 4,130 -4,130 -10,128 C -70,106 -120,56 -120,-10 L -120,-78 C -120,-86 -116,-94 -110,-98 C -80,-118 -38,-130 0,-130 Z" fill="#3E33A0"/>
+    <path d="M 0,-130 C 38,-130 80,-118 110,-98 C 116,-94 120,-86 120,-78 L 120,-10 C 120,56 70,106 10,128 C 7,129 3.5,129.5 0,129.5 Z" fill="#2D2382"/>
     <!-- Bold crisp White verified checkmark -->
     <path d="M -58,-2 L -14,44 L 66,-44" fill="none" stroke="#FFFFFF" stroke-width="38" stroke-linecap="round" stroke-linejoin="round"/>
   </g>

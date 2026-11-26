@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g transform="translate(498.00, 548.00) scale(0.9800)">
+    <!-- White sticker outline (88px stroke = 42px body + 23px halo each side) -->
+    <g fill="none" stroke="#FFFFFF" stroke-width="88" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M -76,-72 L -138,0 L -76,72"/>
+      <path d="M 76,-72 L 138,0 L 76,72"/>
+      <path d="M 25,-104 L -25,104"/>
+    </g>
+    <!-- Center diagonal slash (deep burnt orange for crisp hierarchy) -->
+    <path d="M 25,-104 L -25,104" fill="none" stroke="#D9480F" stroke-width="42" stroke-linecap="round"/>
+    <!-- Left & Right bold angle brackets (vibrant sunset orange) -->
+    <path d="M -76,-72 L -138,0 L -76,72" fill="none" stroke="#F97316" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M 76,-72 L 138,0 L 76,72" fill="none" stroke="#F97316" stroke-width="42" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>
