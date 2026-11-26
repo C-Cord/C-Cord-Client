@@ -24,6 +24,7 @@ typedef enum scenario {
   SC_503_ALWAYS,     // every hit 503
   SC_MFA,            // /auth/login -> mfa ticket, /auth/mfa/totp -> token
   SC_CAPTCHA_FLOW,   // /experiments -> fingerprint+cookie, /auth/login -> 400 captcha, retry w/ headers -> token
+  SC_GLOBAL_CAPTCHA, // any API route without X-Captcha-Key -> 400 captcha, retry w/ headers -> 200
 } scenario;
 
 #define MAX_HITS FD_MAX_HITS
@@ -78,6 +79,14 @@ static size_t respond(void *ud, int idx, const fd_hit *req, char *out, size_t ca
         return fd_reply(out, cap, 200, "OK", nullptr, "{\"token\":\"CAPTCHA_SOLVED_TOKEN\"}");
       }
       return fd_reply(out, cap, 200, "OK", nullptr, ok);
+    case SC_GLOBAL_CAPTCHA:
+      if (req->captcha_key[0] == '\0') {
+        return fd_reply(out, cap, 400, "Bad Request", nullptr,
+                        "{\"captcha_key\":[\"captcha-required\"],\"captcha_service\":\"hcaptcha\","
+                        "\"captcha_sitekey\":\"sitekey-invite-9\",\"captcha_rqdata\":\"rqdata-inv-1\","
+                        "\"captcha_rqtoken\":\"rqtok-inv-2\",\"captcha_session_id\":\"sess-inv-3\"}");
+      }
+      return fd_reply(out, cap, 200, "OK", nullptr, "{\"guild\":{\"id\":\"12345\"}}");
     case SC_503_ONCE:
       if (idx == 0) return fd_reply(out, cap, 503, "Service Unavailable", nullptr, "{\"message\":\"unavailable\"}");
       return fd_reply(out, cap, 200, "OK", nullptr, ok);
@@ -835,6 +844,146 @@ static void test_login_captcha_and_fingerprint(void)
   }
 }
 
+typedef struct cap_hook_state {
+  int calls;
+  bool accept;
+  uint64_t last_id;
+  ccord_captcha_challenge last_ch;
+  char last_route[128];
+} cap_hook_state;
+
+static bool on_global_cap_hook(void *ud, uint64_t challenge_id, const ccord_captcha_challenge *ch,
+                               const char *route_path)
+{
+  cap_hook_state *s = ud;
+  s->calls++;
+  s->last_id = challenge_id;
+  if (ch) s->last_ch = *ch;
+  snprintf(s->last_route, sizeof s->last_route, "%s", route_path ? route_path : "");
+  return s->accept;
+}
+
+static bool cap_hook_called(void *ud) { return ((cap_hook_state *)ud)->calls > 0; }
+
+// Global CAPTCHA interceptor: transparently pauses/replays authenticated API requests (e.g. invite accept,
+// friend requests, account edits), passes 400 through on cancel or decline, and survives queue teardown safely.
+static void test_global_captcha_intercept(void)
+{
+  ccord_gov_config g = roomy();
+  fd_server srv = {0};
+  scenario sc = SC_GLOBAL_CAPTCHA;
+  CT_CHECK(fd_start(&srv, respond, &sc));
+
+  cap_hook_state hs = {.accept = true};
+  ccord_rest_set_global_captcha_handler(on_global_cap_hook, &hs);
+
+  ccord_rest_config cfg = {.base_url = srv.base, .token = "REDACTED_USER_TOKEN", .timeout_ms = 3000, .governor = &g};
+  ccord_error err = {0};
+  ccord_rest_queue *q = ccord_rest_queue_create(&cfg, &err);
+  CT_CHECK(q != nullptr);
+  if (!q) {
+    ccord_rest_set_global_captcha_handler(nullptr, nullptr);
+    return;
+  }
+
+  // 1. Invite accept gets 400 CAPTCHA -> parked -> resolved -> retried transparently with X-Captcha-* headers
+  result r1 = {0};
+  CT_CHECK(ccord_rest_queue_add(q, CCORD_REST_POST, "/invites/coolserver", "{}", on_result, &r1, &err) == CCORD_OK);
+  CT_CHECK(pump_until(q, cap_hook_called, &hs, 3000));
+  CT_CHECK(r1.calls == 0);
+  CT_CHECK(hs.last_id != 0 && ccord_rest_captcha_pending(hs.last_id));
+  CT_CHECK(strcmp(hs.last_route, "/invites/coolserver") == 0);
+  CT_CHECK(strcmp(hs.last_ch.service, "hcaptcha") == 0);
+  CT_CHECK(strcmp(hs.last_ch.sitekey, "sitekey-invite-9") == 0);
+  CT_CHECK(strcmp(hs.last_ch.rqdata, "rqdata-inv-1") == 0);
+  CT_CHECK(strcmp(hs.last_ch.rqtoken, "rqtok-inv-2") == 0);
+  CT_CHECK(strcmp(hs.last_ch.session_id, "sess-inv-3") == 0);
+
+  // Parked job must not busy-spin wait_info while awaiting human input.
+  uint32_t wto = 0;
+  bool wpending = true;
+  (void)ccord_rest_queue_wait_info(q, now_ms(), nullptr, 0, &wto, &wpending);
+  CT_CHECK(!wpending && wto == UINT32_MAX);
+
+  // Header-injection attempt is rejected and leaves the job parked.
+  ccord_captcha_solution bad = {.key = "bad\r\nEvil: 1"};
+  CT_CHECK(!ccord_rest_captcha_resolve(hs.last_id, &bad));
+  CT_CHECK(ccord_rest_captcha_pending(hs.last_id));
+
+  // Valid solution resumes and replays the exact invite-accept request transparently.
+  ccord_captcha_solution ok_sol = {
+    .key = "solved_invite_token_ok",
+    .rqtoken = hs.last_ch.rqtoken,
+    .session_id = hs.last_ch.session_id,
+  };
+  CT_CHECK(ccord_rest_captcha_resolve(hs.last_id, &ok_sol));
+  CT_CHECK(!ccord_rest_captcha_pending(hs.last_id));
+  CT_CHECK(pump_until(q, result_done, &r1, 3000));
+  CT_CHECK(r1.calls == 1 && r1.status == CCORD_OK && r1.http == 200);
+  CT_CHECK(strstr(r1.body, "\"12345\"") != nullptr);
+
+  // 2. Friend request gets 400 CAPTCHA -> user cancels -> original 400 CAPTCHA JSON delivered to caller
+  hs.calls = 0;
+  hs.last_id = 0;
+  result r2 = {0};
+  CT_CHECK(ccord_rest_queue_add(q, CCORD_REST_PUT, "/users/@me/relationships/42", "{}", on_result, &r2, &err) ==
+           CCORD_OK);
+  CT_CHECK(pump_until(q, cap_hook_called, &hs, 3000));
+  CT_CHECK(r2.calls == 0 && ccord_rest_captcha_pending(hs.last_id));
+  CT_CHECK(strcmp(hs.last_route, "/users/@me/relationships/42") == 0);
+  CT_CHECK(ccord_rest_captcha_cancel(hs.last_id));
+  CT_CHECK(!ccord_rest_captcha_pending(hs.last_id));
+  CT_CHECK(r2.calls == 1 && r2.status == CCORD_OK && r2.http == 400);
+  CT_CHECK(strstr(r2.body, "sitekey-invite-9") != nullptr);
+
+  // 3. Handler declines (returns false) -> 400 passes through immediately without parking
+  hs.calls = 0;
+  hs.last_id = 0;
+  hs.accept = false;
+  result r3 = {0};
+  CT_CHECK(ccord_rest_queue_add(q, CCORD_REST_PATCH, "/users/@me", "{}", on_result, &r3, &err) == CCORD_OK);
+  CT_CHECK(pump_until(q, result_done, &r3, 3000));
+  CT_CHECK(hs.calls == 1 && !ccord_rest_captcha_pending(hs.last_id));
+  CT_CHECK(r3.status == CCORD_OK && r3.http == 400);
+
+  // 4. Queue destroyed while a job is parked -> challenge_id safely invalidates (no UAF)
+  hs.calls = 0;
+  hs.last_id = 0;
+  hs.accept = true;
+  result r4 = {0};
+  CT_CHECK(ccord_rest_queue_add(q, CCORD_REST_POST, "/invites/teardown", "{}", on_result, &r4, &err) == CCORD_OK);
+  CT_CHECK(pump_until(q, cap_hook_called, &hs, 3000));
+  uint64_t stale_id = hs.last_id;
+  CT_CHECK(ccord_rest_captcha_pending(stale_id));
+  ccord_rest_queue_destroy(q);
+  CT_CHECK(!ccord_rest_captcha_pending(stale_id));
+  CT_CHECK(!ccord_rest_captcha_resolve(stale_id, &ok_sol));
+  CT_CHECK(!ccord_rest_captcha_cancel(stale_id));
+
+  ccord_rest_set_global_captcha_handler(nullptr, nullptr);
+
+  hit hits[MAX_HITS];
+  size_t n = fd_stop(&srv, hits, MAX_HITS);
+  CT_CHECK(n == 5);
+  if (n == 5) {
+    // Hit 0: initial POST /invites/coolserver (no captcha header)
+    CT_CHECK(strcmp(hits[0].method, "POST") == 0 && strcmp(hits[0].path, "/invites/coolserver") == 0);
+    CT_CHECK(strcmp(hits[0].authorization, "REDACTED_USER_TOKEN") == 0);
+    CT_CHECK(hits[0].captcha_key[0] == '\0');
+    // Hit 1: transparent retry with user-solved CAPTCHA headers + Origin
+    CT_CHECK(strcmp(hits[1].method, "POST") == 0 && strcmp(hits[1].path, "/invites/coolserver") == 0);
+    CT_CHECK(strcmp(hits[1].authorization, "REDACTED_USER_TOKEN") == 0);
+    CT_CHECK(strcmp(hits[1].captcha_key, "solved_invite_token_ok") == 0);
+    CT_CHECK(strcmp(hits[1].captcha_rqtoken, "rqtok-inv-2") == 0);
+    CT_CHECK(strcmp(hits[1].captcha_session_id, "sess-inv-3") == 0);
+    CT_CHECK(strcmp(hits[1].origin, "https://discord.com") == 0);
+    // Hit 2..4: cancelled relationship, declined patch, torn-down invite (none retried)
+    CT_CHECK(strcmp(hits[2].path, "/users/@me/relationships/42") == 0);
+    CT_CHECK(strcmp(hits[3].path, "/users/@me") == 0);
+    CT_CHECK(strcmp(hits[4].path, "/invites/teardown") == 0);
+  }
+}
+
 int main(void)
 {
   (void)signal(SIGPIPE, SIG_IGN);
@@ -851,6 +1000,7 @@ int main(void)
   test_set_token_swaps_authorization();
   test_mfa_two_step();
   test_login_captcha_and_fingerprint();
+  test_global_captcha_intercept();
   test_preauth_429_retry_waits();
   test_auth_submit_validation();
   test_5xx_retry_rules();

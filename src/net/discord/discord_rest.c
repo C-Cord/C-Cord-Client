@@ -288,6 +288,7 @@ ccord_status ccord_live_rest_request(const ccord_rest_config *cfg, ccord_rest_me
 
 #define CCORD_REST_MAX_RETRIES 6        // rate-limit (429) retries per request
 #define CCORD_REST_MAX_FAIL_RETRIES 2   // 5xx / network retries, GET only (never re-send a possibly applied write)
+#define CCORD_REST_MAX_CAPTCHA_RETRIES 3 // bounded user-solved CAPTCHA retries per request
 #define CCORD_REST_MAX_JOBS 256u
 #define CCORD_REST_REASON_HEADER_MAX 1700u   // "X-Audit-Log-Reason: " + a 512-byte reason, every byte escaped
 #define CCORD_REST_MAX_WAIT_MS 45000u   // non-user work that cannot start within this long is dropped
@@ -297,7 +298,7 @@ ccord_status ccord_live_rest_request(const ccord_rest_config *cfg, ccord_rest_me
 #define CCORD_REST_BULK_TIMEOUT_MS 300000u      // hard ceiling for one media download
 #define CCORD_REST_HANDLE_POOL_MAX 4u           // reusable CURL easy handles kept warm per queue
 
-typedef enum rest_job_state : uint8_t { JOB_PENDING = 0, JOB_RUNNING } rest_job_state;
+typedef enum rest_job_state : uint8_t { JOB_PENDING = 0, JOB_RUNNING, JOB_CAPTCHA_WAIT } rest_job_state;
 
 typedef struct rest_follower {
   ccord_rest_callback cb;
@@ -315,6 +316,8 @@ typedef struct ccord_rest_job {
   long http_status;
   int retries;
   int fail_retries;
+  int captcha_retries;
+  uint64_t captcha_id;   // nonzero while state == JOB_CAPTCHA_WAIT
   uint64_t not_before_ms;
   uint64_t enqueued_ms;  // 0 until the first pump after submission
   rest_job_state state;
@@ -371,8 +374,16 @@ struct ccord_rest_queue {
   char *token;
   char *fingerprint;     // optional pre-auth X-Fingerprint header (from GET /experiments)
   CURLSH *cookie_share;  // optional in-memory cookie jar shared across requests (enable_cookies)
+  ccord_rest_captcha_fn captcha_fn;
+  void *captcha_ud;
+  struct ccord_rest_queue *next_active;
   bool test_allow_http_streams;
 };
+
+static ccord_rest_queue *g_active_queues = nullptr;
+static ccord_rest_captcha_fn g_rest_captcha_fn = nullptr;
+static void *g_rest_captcha_ud = nullptr;
+static uint64_t g_next_captcha_id = 1u;
 
 static CURL *rest_pool_take(ccord_rest_queue *q)
 {
@@ -616,6 +627,8 @@ ccord_rest_queue *ccord_rest_queue_create(const ccord_rest_config *cfg, ccord_er
     ccord_error_set(err, CCORD_ERR_NOMEM, "rest: out of memory");
     return nullptr;
   }
+  q->next_active = g_active_queues;
+  g_active_queues = q;
   return q;
 }
 
@@ -650,6 +663,13 @@ static void rest_notify(ccord_rest_queue *q, ccord_rest_job *job, ccord_status s
 void ccord_rest_queue_destroy(ccord_rest_queue *q)
 {
   if (!q) return;
+  for (ccord_rest_queue **slot = &g_active_queues; *slot; slot = &(*slot)->next_active) {
+    if (*slot == q) {
+      *slot = q->next_active;
+      q->next_active = nullptr;
+      break;
+    }
+  }
   ccord_rest_job *job = q->jobs;
   q->jobs = nullptr;
   q->njobs = 0;
@@ -836,6 +856,9 @@ static bool rest_job_attach(ccord_rest_queue *q, ccord_rest_job *job)
     if (job->pre_auth) {
       job->headers = curl_slist_append(job->headers, "Origin: https://discord.com");
       job->headers = curl_slist_append(job->headers, "Referer: https://discord.com/login");
+      job->headers = curl_slist_append(job->headers, "X-Discord-Locale: en-US");
+    } else if (job->captcha_key && job->captcha_key[0] != '\0') {
+      job->headers = curl_slist_append(job->headers, "Origin: https://discord.com");
       job->headers = curl_slist_append(job->headers, "X-Discord-Locale: en-US");
     }
     if (q->fingerprint && q->fingerprint[0] != '\0') {
@@ -1369,6 +1392,91 @@ void ccord_rest_queue_set_fingerprint(ccord_rest_queue *q, const char *fingerpri
   q->fingerprint = next;
 }
 
+static ccord_rest_job *rest_find_captcha_job(uint64_t challenge_id, ccord_rest_queue **out_q)
+{
+  if (out_q) *out_q = nullptr;
+  if (challenge_id == 0) return nullptr;
+  for (ccord_rest_queue *q = g_active_queues; q; q = q->next_active) {
+    for (ccord_rest_job *j = q->jobs; j; j = j->next) {
+      if (j->state == JOB_CAPTCHA_WAIT && j->captcha_id == challenge_id) {
+        if (out_q) *out_q = q;
+        return j;
+      }
+    }
+  }
+  return nullptr;
+}
+
+void ccord_rest_queue_set_captcha_handler(ccord_rest_queue *q, ccord_rest_captcha_fn fn, void *ud)
+{
+  if (!q) return;
+  q->captcha_fn = fn;
+  q->captcha_ud = fn ? ud : nullptr;
+}
+
+void ccord_rest_set_global_captcha_handler(ccord_rest_captcha_fn fn, void *ud)
+{
+  g_rest_captcha_fn = fn;
+  g_rest_captcha_ud = fn ? ud : nullptr;
+}
+
+bool ccord_rest_captcha_pending(uint64_t challenge_id)
+{
+  return rest_find_captcha_job(challenge_id, nullptr) != nullptr;
+}
+
+bool ccord_rest_captcha_resolve(uint64_t challenge_id, const ccord_captcha_solution *solution)
+{
+  if (!solution || !solution->key || !rest_header_token_valid(solution->key, CCORD_CAPTCHA_KEY_MAX - 1u)) {
+    return false;
+  }
+  bool has_rqt = solution->rqtoken && solution->rqtoken[0] != '\0';
+  bool has_sid = solution->session_id && solution->session_id[0] != '\0';
+  if (has_rqt && !rest_header_token_valid(solution->rqtoken, CCORD_CAPTCHA_RQTOKEN_MAX - 1u)) return false;
+  if (has_sid && !rest_header_token_valid(solution->session_id, CCORD_CAPTCHA_SESSION_ID_MAX - 1u)) return false;
+
+  ccord_rest_queue *q = nullptr;
+  ccord_rest_job *job = rest_find_captcha_job(challenge_id, &q);
+  if (!job || !q) return false;
+
+  char *nk = ccord_strdup(solution->key);
+  char *nr = has_rqt ? ccord_strdup(solution->rqtoken) : nullptr;
+  char *ns = has_sid ? ccord_strdup(solution->session_id) : nullptr;
+  if (!nk || (has_rqt && !nr) || (has_sid && !ns)) {
+    if (nk) { ccord_live_wipe(nk, strlen(nk)); ccord_free(nk); }
+    if (nr) { ccord_live_wipe(nr, strlen(nr)); ccord_free(nr); }
+    if (ns) { ccord_live_wipe(ns, strlen(ns)); ccord_free(ns); }
+    return false;
+  }
+  if (job->captcha_key) { ccord_live_wipe(job->captcha_key, strlen(job->captcha_key)); ccord_free(job->captcha_key); }
+  if (job->captcha_rqtoken) { ccord_live_wipe(job->captcha_rqtoken, strlen(job->captcha_rqtoken)); ccord_free(job->captcha_rqtoken); }
+  if (job->captcha_session_id) { ccord_live_wipe(job->captcha_session_id, strlen(job->captcha_session_id)); ccord_free(job->captcha_session_id); }
+
+  job->captcha_key = nk;
+  job->captcha_rqtoken = nr;
+  job->captcha_session_id = ns;
+  job->sensitive = true;
+  job->captcha_id = 0;
+  job->state = JOB_PENDING;
+  job->not_before_ms = 0;
+  job->enqueued_ms = 0;
+  job->wait_inflight = false;
+  return true;
+}
+
+static void rest_finish(ccord_rest_queue *q, ccord_rest_job *job, ccord_status st, long status);
+
+bool ccord_rest_captcha_cancel(uint64_t challenge_id)
+{
+  ccord_rest_queue *q = nullptr;
+  ccord_rest_job *job = rest_find_captcha_job(challenge_id, &q);
+  if (!job || !q) return false;
+  job->captcha_id = 0;
+  job->state = JOB_PENDING;
+  rest_finish(q, job, CCORD_OK, job->http_status);
+  return true;
+}
+
 static ccord_status rest_result_status(CURLcode rc, const rest_sink *sink)
 {
   if (rc == CURLE_OK) return CCORD_OK;
@@ -1564,6 +1672,37 @@ void ccord_rest_queue_pump(ccord_rest_queue *q, uint64_t now_ms)
         job->wait_inflight = false;
         job->not_before_ms = done.not_before_ms;
         continue;
+      }
+      if (!job->pre_auth && rc == CURLE_OK && status == 400 &&
+          job->captcha_retries < CCORD_REST_MAX_CAPTCHA_RETRIES &&
+          job->resp.data && job->resp.len > 0) {
+        ccord_rest_captcha_fn cfn = q->captcha_fn ? q->captcha_fn : g_rest_captcha_fn;
+        void *cud = q->captcha_fn ? q->captcha_ud : g_rest_captcha_ud;
+        if (cfn) {
+          ccord_captcha_challenge cap = {0};
+          if (ccord_live_json_parse_captcha(job->resp.data, job->resp.len, &cap) &&
+              cap.required && cap.sitekey[0] != '\0') {
+            curl_multi_remove_handle(q->multi, easy);
+            if (q->running_jobs > 0) q->running_jobs--;
+            rest_job_detach_easy(q, job, true);
+            uint64_t cid = g_next_captcha_id++;
+            if (cid == 0) cid = g_next_captcha_id++;
+            job->state = JOB_CAPTCHA_WAIT;
+            job->captcha_id = cid;
+            job->captcha_retries++;
+            job->wait_inflight = false;
+            bool accepted = cfn(cud, cid, &cap, job->route_path);
+            ccord_live_wipe(&cap, sizeof cap);
+            if (accepted) continue;
+            ccord_rest_queue *still_q = nullptr;
+            ccord_rest_job *still_j = rest_find_captcha_job(cid, &still_q);
+            if (still_j != job || still_q != q) continue;
+            job->captcha_id = 0;
+            job->state = JOB_PENDING;
+          } else {
+            ccord_live_wipe(&cap, sizeof cap);
+          }
+        }
       }
     }
     ccord_status st = rest_result_status(rc, &job->sink);

@@ -193,6 +193,25 @@ void ccord_rest_queue_set_token(ccord_rest_queue *q, const char *token);
 // Sets or clears the pre-auth X-Fingerprint header (from GET /experiments) carried on subsequent API requests.
 void ccord_rest_queue_set_fingerprint(ccord_rest_queue *q, const char *fingerprint);
 
+// Intercepts HTTP 400 CAPTCHA challenges on non-raw, non-pre_auth API jobs (invites, friend requests, guild/channel
+// mutations, account/profile edits, etc.). Return true to park the job until ccord_rest_captcha_resolve() or
+// ccord_rest_captcha_cancel() is called with `challenge_id` (synchronous calls from inside the handler are allowed).
+// Return false to pass the original HTTP 400 response through to the caller immediately.
+typedef bool (*ccord_rest_captcha_fn)(void *ud, uint64_t challenge_id,
+                                      const ccord_captcha_challenge *challenge,
+                                      const char *route_path);
+// Sets or clears an optional per-queue CAPTCHA handler (overrides the process-wide default; null falls back).
+void ccord_rest_queue_set_captcha_handler(ccord_rest_queue *q, ccord_rest_captcha_fn fn, void *ud);
+// Sets or clears the process-wide default CAPTCHA handler used by all queues without a per-queue override.
+void ccord_rest_set_global_captcha_handler(ccord_rest_captcha_fn fn, void *ud);
+// Resumes a parked CAPTCHA job with the user's solution headers (X-Captcha-Key / Rqtoken / Session-Id).
+// Returns false if the job or its queue no longer exists or any solution header is invalid.
+bool ccord_rest_captcha_resolve(uint64_t challenge_id, const ccord_captcha_solution *solution);
+// Cancels a parked CAPTCHA job and delivers Discord's original HTTP 400 response to the caller.
+bool ccord_rest_captcha_cancel(uint64_t challenge_id);
+// True while `challenge_id` still refers to a parked job awaiting user resolution.
+[[nodiscard]] bool ccord_rest_captcha_pending(uint64_t challenge_id);
+
 // Fetches pre-auth Discord session fingerprint + cookies (GET /experiments, pre-auth USER priority).
 [[nodiscard]] ccord_status ccord_live_auth_fetch_fingerprint(ccord_rest_queue *q, ccord_rest_callback cb, void *ud,
                                                              ccord_error *err);
