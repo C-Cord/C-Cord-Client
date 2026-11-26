@@ -114,6 +114,10 @@ typedef struct app {
 #endif
 #if CCORD_WEB_CAPTCHA
   struct ccord_web_view *captcha_web;
+  struct app_captcha_queued *captcha_queue_head;
+  struct app_captcha_queued *captcha_queue_tail;
+  size_t captcha_queue_count;
+  uint64_t captcha_rest_id;
   bool captcha_test_mode;
   bool captcha_is_url_mode;
   bool captcha_has_solution;
@@ -133,6 +137,9 @@ typedef struct app {
   char captcha_sitekey[128];
   char captcha_host[128];
   char captcha_rqdata[8192];
+  char captcha_rest_rqtoken[2048];
+  char captcha_rest_session_id[128];
+  char captcha_rest_route[128];
   char captcha_url[512];
   char captcha_solved_token[8192];
   char captcha_modal_status[256];
@@ -255,6 +262,8 @@ void app_auth_retry_with_captcha(app *a, const char *captcha_key, const char *rq
 #endif
 
 // captcha_modal.c — native C23 mini-web CAPTCHA modal overlay
+void app_captcha_register_rest_handler(app *a);
+void app_captcha_unregister_rest_handler(app *a);
 bool app_captcha_open(app *a, const char *service, const char *sitekey, const char *rqdata, bool test_mode);
 bool app_captcha_open_ex(app *a, const char *service, const char *sitekey, const char *host,
                          const char *rqdata, bool test_mode);

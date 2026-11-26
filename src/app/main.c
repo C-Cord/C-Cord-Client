@@ -1463,6 +1463,7 @@ int main(int argc, char **argv)
 #endif
       (void)app_captcha_open_url(&a, opt.test_web_url);
     }
+    app_captcha_register_rest_handler(&a);
     run_interactive(&a);
     result = 0;
   }
@@ -1502,6 +1503,7 @@ done:
   a.rpc = nullptr;
   ccord_rpc_app_lookup_destroy(a.rpc_lookup);   // after the RPC server: its final flush still resolves names
   a.rpc_lookup = nullptr;
+  app_captcha_unregister_rest_handler(&a);
   app_captcha_close(&a, false);
 #if CCORD_LIVE_ACCOUNT
   ccord_rest_queue_destroy(a.auth_q);

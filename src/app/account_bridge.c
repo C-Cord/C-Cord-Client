@@ -635,6 +635,7 @@ void app_host_account_action(void *ud, ccord_account_action action)
     }
     case CCORD_ACCOUNT_ACTION_TOKEN_SIGN_OUT:
       ccord_warm_forget(a->warm);
+      app_captcha_close(a, false);
 #if CCORD_LIVE_ACCOUNT
       a->auth_pending = false;
       app_destroy_auth_q(a);

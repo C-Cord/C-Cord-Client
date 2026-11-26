@@ -20,6 +20,16 @@
 #define CAPTCHA_FOOTER_MOBILE_H   70.0f
 #define CAPTCHA_WELL_COMPACT_H   132.0f
 #define CAPTCHA_WELL_URL_H       520.0f
+#define CAPTCHA_QUEUE_MAX          8u
+
+#if CCORD_LIVE_ACCOUNT
+typedef struct app_captcha_queued {
+  uint64_t challenge_id;
+  ccord_captcha_challenge challenge;
+  char route_path[128];
+  struct app_captcha_queued *next;
+} app_captcha_queued;
+#endif
 
 static bool captcha_is_narrow(const app *a)
 {
@@ -174,7 +184,9 @@ static void on_captcha_web_msg(void *ud, const char *kind, const char *payload)
     a->captcha_solved_banner = true;
     a->captcha_widget_ready = true;
     snprintf(a->captcha_modal_status, sizeof a->captcha_modal_status, "%s",
-             a->captcha_test_mode ? "Verified! Test token received." : "Verified! Signing in to Discord...");
+             a->captcha_test_mode ? "Verified! Test token received."
+                                  : (a->captcha_rest_id != 0 ? "Verified! Completing action..."
+                                                             : "Verified! Signing in to Discord..."));
     CCORD_LOG_I("captcha: solved token received (%zu bytes)", strlen(payload));
   } else if (strcmp(kind, "ready") == 0) {
     a->captcha_is_error = false;
@@ -218,6 +230,132 @@ static void captcha_reset_view_state(app *a, bool is_url_mode)
   a->captcha_solved_token[0] = '\0';
 }
 
+static void captcha_destroy_active(app *a)
+{
+  if (!a) return;
+  if (a->captcha_web) {
+    ccord_web_view_destroy(a->captcha_web);
+    a->captcha_web = nullptr;
+  }
+  a->captcha_rest_id = 0;
+  a->captcha_test_mode = false;
+  a->captcha_has_solution = false;
+  a->captcha_is_error = false;
+  a->captcha_solved_banner = false;
+  a->captcha_widget_ready = false;
+  a->captcha_challenge_open = false;
+  a->captcha_is_url_mode = false;
+  a->captcha_pressed_btn = 0;
+  a->captcha_touch_btn_active = false;
+  a->captcha_touch_btn_finger = 0;
+  ccord_secure_wipe(a->captcha_solved_token, sizeof a->captcha_solved_token);
+  ccord_secure_wipe(a->captcha_rqdata, sizeof a->captcha_rqdata);
+  ccord_secure_wipe(a->captcha_rest_rqtoken, sizeof a->captcha_rest_rqtoken);
+  ccord_secure_wipe(a->captcha_rest_session_id, sizeof a->captcha_rest_session_id);
+  a->captcha_rest_route[0] = '\0';
+  a->captcha_service[0] = '\0';
+  a->captcha_sitekey[0] = '\0';
+  a->captcha_host[0] = '\0';
+  a->captcha_url[0] = '\0';
+  a->captcha_modal_status[0] = '\0';
+}
+
+#if CCORD_LIVE_ACCOUNT
+static void captcha_clear_queue(app *a, bool cancel_rest)
+{
+  if (!a) return;
+  while (a->captcha_queue_head) {
+    app_captcha_queued *item = a->captcha_queue_head;
+    a->captcha_queue_head = item->next;
+    if (a->captcha_queue_count > 0) a->captcha_queue_count--;
+    if (cancel_rest && item->challenge_id != 0) (void)ccord_rest_captcha_cancel(item->challenge_id);
+    ccord_secure_wipe(item, sizeof *item);
+    ccord_free(item);
+  }
+  a->captcha_queue_tail = nullptr;
+  a->captcha_queue_count = 0;
+}
+
+static bool captcha_open_rest(app *a, uint64_t challenge_id, const ccord_captcha_challenge *ch, const char *route_path)
+{
+  if (!a || !ch || !ch->sitekey[0] || challenge_id == 0) return false;
+  if (!app_captcha_open_ex(a, ch->service[0] ? ch->service : "hcaptcha", ch->sitekey, "discord.com",
+                           ch->rqdata[0] ? ch->rqdata : nullptr, false)) {
+    return false;
+  }
+  a->captcha_rest_id = challenge_id;
+  snprintf(a->captcha_rest_rqtoken, sizeof a->captcha_rest_rqtoken, "%s", ch->rqtoken);
+  snprintf(a->captcha_rest_session_id, sizeof a->captcha_rest_session_id, "%s", ch->session_id);
+  snprintf(a->captcha_rest_route, sizeof a->captcha_rest_route, "%s", route_path ? route_path : "");
+  a->media_redraw = true;
+  CCORD_LOG_I("captcha: opened global modal for %s (id=%llu, rqdata=%zu B)",
+              a->captcha_rest_route[0] ? a->captcha_rest_route : "request",
+              (unsigned long long)challenge_id, strlen(a->captcha_rqdata));
+  return true;
+}
+
+static void captcha_open_next_queued(app *a)
+{
+  if (!a) return;
+  while (a->captcha_queue_head) {
+    app_captcha_queued *item = a->captcha_queue_head;
+    a->captcha_queue_head = item->next;
+    if (!a->captcha_queue_head) a->captcha_queue_tail = nullptr;
+    if (a->captcha_queue_count > 0) a->captcha_queue_count--;
+    bool still_live = ccord_rest_captcha_pending(item->challenge_id);
+    bool opened = still_live && captcha_open_rest(a, item->challenge_id, &item->challenge, item->route_path);
+    if (still_live && !opened) (void)ccord_rest_captcha_cancel(item->challenge_id);
+    ccord_secure_wipe(item, sizeof *item);
+    ccord_free(item);
+    if (opened) break;
+  }
+}
+
+static bool on_rest_captcha(void *ud, uint64_t challenge_id, const ccord_captcha_challenge *ch, const char *route_path)
+{
+  app *a = ud;
+  if (!a || !ch || !ch->sitekey[0] || !a->renderer || a->virtual_clock) return false;
+  if (a->opt && (a->opt->headless || a->opt->screenshot || a->opt->verify_slice)) return false;
+  if (ch->service[0] && strcmp(ch->service, "hcaptcha") != 0) {
+    CCORD_LOG_W("captcha: unsupported provider '%s' on %s; passing through",
+                ch->service, route_path ? route_path : "request");
+    return false;
+  }
+  if (!app_captcha_active(a)) {
+    return captcha_open_rest(a, challenge_id, ch, route_path);
+  }
+  if (a->captcha_queue_count >= CAPTCHA_QUEUE_MAX) return false;
+  app_captcha_queued *item = ccord_calloc(1, sizeof *item);
+  if (!item) return false;
+  item->challenge_id = challenge_id;
+  item->challenge = *ch;
+  snprintf(item->route_path, sizeof item->route_path, "%s", route_path ? route_path : "");
+  if (a->captcha_queue_tail) a->captcha_queue_tail->next = item;
+  else a->captcha_queue_head = item;
+  a->captcha_queue_tail = item;
+  a->captcha_queue_count++;
+  CCORD_LOG_I("captcha: queued global challenge for %s (id=%llu, queued=%zu)",
+              item->route_path[0] ? item->route_path : "request",
+              (unsigned long long)challenge_id, a->captcha_queue_count);
+  return true;
+}
+
+void app_captcha_register_rest_handler(app *a)
+{
+  if (!a) return;
+  ccord_rest_set_global_captcha_handler(on_rest_captcha, a);
+}
+
+void app_captcha_unregister_rest_handler(app *a)
+{
+  ccord_rest_set_global_captcha_handler(nullptr, nullptr);
+  captcha_clear_queue(a, true);
+}
+#else
+void app_captcha_register_rest_handler(app *a) { (void)a; }
+void app_captcha_unregister_rest_handler(app *a) { (void)a; }
+#endif
+
 bool app_captcha_open_ex(app *a, const char *service, const char *sitekey, const char *host,
                          const char *rqdata, bool test_mode)
 {
@@ -229,7 +367,7 @@ bool app_captcha_open_ex(app *a, const char *service, const char *sitekey, const
   snprintf(hst, sizeof hst, "%s", (host && host[0]) ? host : "discord.com");
   snprintf(rqd, sizeof rqd, "%s", rqdata ? rqdata : "");
 
-  app_captcha_close(a, false);
+  captcha_destroy_active(a);
   captcha_reset_view_state(a, false);
   if (a->platform) {
     ccord_platform_text_input(a->platform, false, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -275,9 +413,10 @@ bool app_captcha_open_ex(app *a, const char *service, const char *sitekey, const
   ccord_secure_wipe(rqd, sizeof rqd);
   if (st != CCORD_OK) {
     CCORD_LOG_W("captcha: failed to load challenge: %s", err.message);
-    app_captcha_close(a, false);
+    captcha_destroy_active(a);
     return false;
   }
+  a->media_redraw = true;
   return true;
 }
 
@@ -292,7 +431,7 @@ bool app_captcha_open_url(app *a, const char *url)
   char ucopy[512];
   snprintf(ucopy, sizeof ucopy, "%s", url);
 
-  app_captcha_close(a, false);
+  captcha_destroy_active(a);
   captcha_reset_view_state(a, true);
   if (a->platform) {
     ccord_platform_text_input(a->platform, false, 0.0f, 0.0f, 0.0f, 0.0f);
@@ -320,44 +459,45 @@ bool app_captcha_open_url(app *a, const char *url)
   snprintf(a->captcha_modal_status, sizeof a->captcha_modal_status, "Loading %.240s", ucopy);
   if (ccord_web_view_load_url(a->captcha_web, ucopy, &err) != CCORD_OK) {
     CCORD_LOG_W("web: failed to load %s: %s", ucopy, err.message);
-    app_captcha_close(a, false);
+    captcha_destroy_active(a);
     return false;
   }
+  a->media_redraw = true;
   return true;
 }
 
 void app_captcha_close(app *a, bool user_cancelled)
 {
   if (!a) return;
-  if (a->captcha_web) {
-    ccord_web_view_destroy(a->captcha_web);
-    a->captcha_web = nullptr;
+  uint64_t rest_id = a->captcha_rest_id;
+  bool was_test = a->captcha_test_mode;
+  captcha_destroy_active(a);
+  if (rest_id != 0) {
+#if CCORD_LIVE_ACCOUNT
+    (void)ccord_rest_captcha_cancel(rest_id);
+    if (user_cancelled) {
+      captcha_open_next_queued(a);
+    } else {
+      captcha_clear_queue(a, true);
+    }
+#endif
+    return;
   }
-  a->captcha_has_solution = false;
-  a->captcha_is_error = false;
-  a->captcha_solved_banner = false;
-  a->captcha_widget_ready = false;
-  a->captcha_challenge_open = false;
-  a->captcha_is_url_mode = false;
-  a->captcha_pressed_btn = 0;
-  a->captcha_touch_btn_active = false;
-  a->captcha_touch_btn_finger = 0;
-  ccord_secure_wipe(a->captcha_solved_token, sizeof a->captcha_solved_token);
-  ccord_secure_wipe(a->captcha_rqdata, sizeof a->captcha_rqdata);
-  a->captcha_service[0] = '\0';
-  a->captcha_sitekey[0] = '\0';
-  a->captcha_host[0] = '\0';
-  a->captcha_url[0] = '\0';
-  a->captcha_modal_status[0] = '\0';
-  if (user_cancelled && !a->captcha_test_mode) {
+  if (user_cancelled && !was_test) {
 #if CCORD_LIVE_ACCOUNT
     ccord_live_wipe(&a->captcha_challenge, sizeof a->captcha_challenge);
     a->captcha_attempts = 0;
     a->auth_pending = false;
 #endif
     if (a->ui) ccord_ui_set_login_error(a->ui, "Verification cancelled. Try again or use Token Sign-In.", false);
+#if CCORD_LIVE_ACCOUNT
+    captcha_open_next_queued(a);
+#endif
+  } else if (!user_cancelled) {
+#if CCORD_LIVE_ACCOUNT
+    captcha_clear_queue(a, true);
+#endif
   }
-  a->captcha_test_mode = false;
 }
 
 bool app_captcha_active(const app *a)
@@ -376,6 +516,13 @@ static bool captcha_is_animating(const app *a, uint64_t now_ms)
 bool app_captcha_pump(app *a)
 {
   if (!a || !a->captcha_web) return false;
+#if CCORD_LIVE_ACCOUNT
+  if (a->captcha_rest_id != 0 && !ccord_rest_captcha_pending(a->captcha_rest_id)) {
+    captcha_destroy_active(a);
+    captcha_open_next_queued(a);
+    return true;
+  }
+#endif
   uint64_t now = app_now_ms(a);
   ccord_web_view_pump(a->captcha_web, now);
   bool redraw = ccord_web_view_needs_redraw(a->captcha_web);
@@ -446,15 +593,38 @@ bool app_captcha_pump(app *a)
       return true;
     }
 #if CCORD_LIVE_ACCOUNT
+    if (a->captcha_rest_id != 0) {
+      uint64_t rest_id = a->captcha_rest_id;
+      char tok[CCORD_CAPTCHA_KEY_MAX];
+      char rqt[CCORD_CAPTCHA_RQTOKEN_MAX];
+      char sid[CCORD_CAPTCHA_SESSION_ID_MAX];
+      snprintf(tok, sizeof tok, "%s", a->captcha_solved_token);
+      snprintf(rqt, sizeof rqt, "%s", a->captcha_rest_rqtoken);
+      snprintf(sid, sizeof sid, "%s", a->captcha_rest_session_id);
+      captcha_destroy_active(a);
+      ccord_captcha_solution sol = {
+        .key = tok,
+        .rqtoken = rqt[0] ? rqt : nullptr,
+        .session_id = sid[0] ? sid : nullptr,
+      };
+      if (!ccord_rest_captcha_resolve(rest_id, &sol)) {
+        (void)ccord_rest_captcha_cancel(rest_id);
+      }
+      ccord_secure_wipe(tok, sizeof tok);
+      ccord_secure_wipe(rqt, sizeof rqt);
+      ccord_secure_wipe(sid, sizeof sid);
+      captcha_open_next_queued(a);
+      return true;
+    }
     char tok[CCORD_CAPTCHA_KEY_MAX];
     snprintf(tok, sizeof tok, "%s", a->captcha_solved_token);
     ccord_captcha_challenge ch = a->captcha_challenge;
-    app_captcha_close(a, false);
+    captcha_destroy_active(a);
     app_auth_retry_with_captcha(a, tok, ch.rqtoken, ch.session_id);
     ccord_live_wipe(tok, sizeof tok);
     ccord_live_wipe(&ch, sizeof ch);
 #else
-    app_captcha_close(a, false);
+    captcha_destroy_active(a);
 #endif
     return true;
   }
@@ -516,6 +686,21 @@ static void draw_loading_veil(const app *a, ccord_renderer *r, ccord_rect well, 
   ccord_text_style ms = {.font = CCORD_FONT_REGULAR, .size = fs_sm, .color = muted};
   ccord_vec2 mm = ccord_text_measure(r, msg, strlen(msg), &ms, 0.0f);
   ccord_text_draw(r, msg, strlen(msg), floorf(cx - mm.x * 0.5f), floorf(cy + 16.0f), &ms, 0.0f);
+}
+
+static const char *captcha_subtitle(const app *a)
+{
+  if (!a) return "Discord requested a quick security check to continue.";
+  if (a->captcha_is_url_mode) return a->captcha_url;
+  if (a->captcha_rest_id == 0) return "Discord requested a quick security check to finish signing in.";
+  const char *r = a->captcha_rest_route;
+  if (strncmp(r, "/invites/", 9) == 0) return "Discord requested a security check to accept this invite.";
+  if (strstr(r, "/relationships") != nullptr) return "Discord requested a security check to update this friend request.";
+  if (strcmp(r, "/guilds") == 0) return "Discord requested a security check to create this server.";
+  if (strncmp(r, "/users/@me", 10) == 0) return "Discord requested a security check to save your account changes.";
+  if (strstr(r, "/messages") != nullptr) return "Discord requested a security check to send this message.";
+  if (strstr(r, "/channels") != nullptr) return "Discord requested a security check to complete this channel action.";
+  return "Discord requested a quick security check to continue.";
 }
 
 void app_captcha_draw(app *a)
@@ -610,9 +795,7 @@ void app_captcha_draw(app *a)
     ccord_vec2 tt = ccord_text_measure(r, title, strlen(title), &ts, 0.0f);
     ccord_text_draw(r, title, strlen(title), floorf(card.x + (card.w - tt.x) * 0.5f), card.y + 40.0f, &ts, 0.0f);
 
-    const char *sub = a->captcha_is_url_mode
-                        ? a->captcha_url
-                        : "Discord requested a quick security check to finish signing in.";
+    const char *sub = captcha_subtitle(a);
     ccord_text_style ss = {.font = CCORD_FONT_REGULAR, .size = fs_ctrl - 0.5f, .color = text_sec};
     ccord_vec2 st = ccord_text_measure(r, sub, strlen(sub), &ss, 0.0f);
     float sub_max_w = card.w - 2.0f * pad_x;
@@ -656,7 +839,7 @@ void app_captcha_draw(app *a)
 
   ccord_rect cbtn = captcha_cancel_btn_rect(a, card);
   bool c_hov = pt_in_rect(a->captcha_mx, a->captcha_my, cbtn);
-  const char *cancel_lbl = a->captcha_is_url_mode ? "Close" : "Back to Login";
+  const char *cancel_lbl = a->captcha_is_url_mode ? "Close" : (a->captcha_rest_id != 0 ? "Cancel" : "Back to Login");
   draw_native_btn(r, cbtn, cancel_lbl, c_hov, a->captcha_pressed_btn == 3 && c_hov,
                   r_control, fs_ctrl - 0.5f, bg_tertiary, bg_hover, bg_press, border, text_header);
 
@@ -669,9 +852,27 @@ static void captcha_reload(app *a)
   if (a->captcha_is_url_mode && a->captcha_url[0]) {
     (void)app_captcha_open_url(a, a->captcha_url);
   } else if (a->captcha_sitekey[0]) {
-    (void)app_captcha_open_ex(a, a->captcha_service, a->captcha_sitekey,
-                              a->captcha_host[0] ? a->captcha_host : "discord.com",
-                              a->captcha_rqdata[0] ? a->captcha_rqdata : nullptr, a->captcha_test_mode);
+    uint64_t rest_id = a->captcha_rest_id;
+    char rqt[2048], sid[128], route[128];
+    snprintf(rqt, sizeof rqt, "%s", a->captcha_rest_rqtoken);
+    snprintf(sid, sizeof sid, "%s", a->captcha_rest_session_id);
+    snprintf(route, sizeof route, "%s", a->captcha_rest_route);
+    bool ok = app_captcha_open_ex(a, a->captcha_service, a->captcha_sitekey,
+                                  a->captcha_host[0] ? a->captcha_host : "discord.com",
+                                  a->captcha_rqdata[0] ? a->captcha_rqdata : nullptr, a->captcha_test_mode);
+    if (ok && rest_id != 0) {
+      a->captcha_rest_id = rest_id;
+      snprintf(a->captcha_rest_rqtoken, sizeof a->captcha_rest_rqtoken, "%s", rqt);
+      snprintf(a->captcha_rest_session_id, sizeof a->captcha_rest_session_id, "%s", sid);
+      snprintf(a->captcha_rest_route, sizeof a->captcha_rest_route, "%s", route);
+    } else if (!ok && rest_id != 0) {
+#if CCORD_LIVE_ACCOUNT
+      (void)ccord_rest_captcha_cancel(rest_id);
+      captcha_open_next_queued(a);
+#endif
+    }
+    ccord_secure_wipe(rqt, sizeof rqt);
+    ccord_secure_wipe(sid, sizeof sid);
   }
 }
 
@@ -771,6 +972,8 @@ bool app_captcha_handle_input(app *a, const ccord_input_event *ev)
 
 #else
 
+void app_captcha_register_rest_handler(app *a) { (void)a; }
+void app_captcha_unregister_rest_handler(app *a) { (void)a; }
 bool app_captcha_open(app *a, const char *service, const char *sitekey, const char *rqdata, bool test_mode)
 {
   (void)a; (void)service; (void)sitekey; (void)rqdata; (void)test_mode;
