@@ -277,6 +277,10 @@ hover_state uc_compute_hover(ccord_ui *ui)
         }
       }
     }
+  } else if (ui->composer_sb_track.w > 0.0f && ui->composer_sb_thumb.h > 0.0f) {
+    ccord_rect sb_hit = {ui->composer_sb_track.x - 3.0f, ui->composer_sb_track.y - 2.0f,
+                         ui->composer_sb_track.w + 6.0f, ui->composer_sb_track.h + 4.0f};
+    if (ui_in_rect(x, y, sb_hit)) h.composer_sb = true;
   }
   return h;
 }
@@ -291,7 +295,7 @@ bool uc_update_hover(ccord_ui *ui)
                  h.link != ui->hover_link || h.ts_hit != ui->hover_ts_hit || h.gear != ui->hover_gear ||
                  h.header != ui->hover_guild_header || h.msg != ui->hover_message_id ||
                  h.local_msg_id != ui->hover_local_msg_id || h.user != ui->hover_user_id ||
-                 h.sb != ui->hover_scrollbar || h.members != ui->hover_members_btn ||
+                 h.sb != ui->hover_scrollbar || h.composer_sb != ui->hover_composer_sb || h.members != ui->hover_members_btn ||
                  h.mute != ui->hover_mute || h.deafen != ui->hover_deafen || h.camera != ui->hover_camera ||
                  h.screen != ui->hover_screen || h.disconnect != ui->hover_disconnect ||
                  h.search != ui->hover_search || h.pin != ui->hover_pin || h.inbox != ui->hover_inbox ||
@@ -309,6 +313,7 @@ bool uc_update_hover(ccord_ui *ui)
   ui->hover_local_msg_id = h.local_msg_id;
   ui->hover_user_id = h.user;
   ui->hover_scrollbar = h.sb;
+  ui->hover_composer_sb = h.composer_sb;
   ui->hover_members_btn = h.members;
   ui->hover_mute = h.mute;
   ui->hover_deafen = h.deafen;
@@ -326,6 +331,8 @@ bool uc_update_hover(ccord_ui *ui)
   ccord_cursor_kind k = CCORD_CURSOR_DEFAULT;
   if (ui_upload_error_is_open(ui)) {
     k = ui_upload_error_cursor(ui);
+  } else if (ui->drag == DRAG_COMPOSER_SCROLLBAR || ui->drag == DRAG_SCROLLBAR) {
+    k = CCORD_CURSOR_POINTER;
   } else if (ui->drag == DRAG_STREAM_STAGE_H) {
     k = CCORD_CURSOR_NS_RESIZE;
   } else if (ui->drag == DRAG_STAGE_SPLIT || ui->drag == DRAG_THREAD_SPLIT) {
@@ -502,7 +509,7 @@ bool uc_update_hover(ccord_ui *ui)
       for (size_t i = 0; !comp_btn && i < ui->nchan_gear_rects; i++) {
         if (ui_in_rect(ui->mx, ui->my, ui->chan_gear_rects[i].rect)) comp_btn = true;
       }
-      if (h.rail_slot >= 0 || h.guild >= 0 || h.gear || h.sb || h.members || h.mute || h.deafen || h.camera || h.screen ||
+      if (h.rail_slot >= 0 || h.guild >= 0 || h.gear || h.sb || h.composer_sb || h.members || h.mute || h.deafen || h.camera || h.screen ||
           h.disconnect || h.search || h.pin || h.inbox || h.saved || h.voice_back || h.new_bar || h.reply_card || h.rich_ctrl ||
           h.disc_btn || h.user_status || h.msg_req_ctrl || h.gdm_ctrl ||
           h.link >= 0 || h.mrow >= 0 || h.user != CCORD_ID_NONE || comp_btn) {

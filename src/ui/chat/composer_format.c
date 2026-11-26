@@ -609,16 +609,25 @@ void ui_composer_format_draw(ccord_ui *ui, ccord_renderer *r, const char *text, 
     }
     vi = vj;
   }
-  // Selection under the text.
+  // Selection under the text (only visible lines, so selections past line 64 render when scrolled).
   if (sel_from != sel_to) {
-    ui_cf_sel_rect rects[64];
-    size_t n = ui_composer_format_selection(ui, r, text, len, wrap, sel_from, sel_to, rects, 64);
-    for (size_t k = 0; k < n; k++) {
-      ccord_rect rc = rects[k].rc;
-      rc.h = lh;
-      rc.x += x;
-      rc.y += y;
-      ccord_draw_rect(r, rc, COL(selection));
+    size_t s_lo = sel_from < sel_to ? sel_from : sel_to;
+    size_t s_hi = sel_from < sel_to ? sel_to : sel_from;
+    if (s_hi > G.len) s_hi = G.len;
+    for (size_t vi = 0; vi < G.nvl; vi++) {
+      float ly = (float)vi * lh;
+      if (ly + lh < view_top || ly > view_bottom) continue;
+      const cf_vline *v = &G.vl[vi];
+      if (s_hi <= v->start || s_lo > v->end) continue;
+      size_t lo = s_lo > v->start ? s_lo : v->start;
+      size_t hi = s_hi < v->end ? s_hi : v->end;
+      float x0 = cf_x_in_line(r, v, lo);
+      float x1 = hi > lo ? cf_x_in_line(r, v, hi) : x0;
+      if (hi > lo) ccord_draw_rect(r, (ccord_rect){x + x0, y + ly, x1 - x0, lh}, COL(selection));
+      bool hard = v->end < G.len && G.text[v->end] == '\n';
+      if (hard && s_hi > v->end && s_lo <= v->end) {
+        ccord_draw_rect(r, (ccord_rect){x + x1, y + ly, M(font_size_base) * 0.3f, lh}, COL(selection));
+      }
     }
   }
   for (size_t vi = 0; vi < G.nvl; vi++) {

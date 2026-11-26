@@ -1192,6 +1192,24 @@ bool uc_handle_left_down(ccord_ui *ui, const ccord_input_event *ev)
     box.y += fh;
     box.h -= fh;
   }
+  if (ui->composer_sb_track.w > 0.0f && ui->composer_sb_thumb.h > 0.0f) {
+    ccord_rect sb_hit = {ui->composer_sb_track.x - 3.0f, ui->composer_sb_track.y - 2.0f,
+                         ui->composer_sb_track.w + 6.0f, ui->composer_sb_track.h + 4.0f};
+    if (ui_in_rect(ev->x, ev->y, sb_hit)) {
+      ccord_scroller_cancel(&ui->composer_glide);
+      if (ev->y >= ui->composer_sb_thumb.y && ev->y < ui->composer_sb_thumb.y + ui->composer_sb_thumb.h) {
+        ui->drag = DRAG_COMPOSER_SCROLLBAR;
+        ui->drag_grab = ev->y - ui->composer_sb_thumb.y;
+      } else {
+        float step = fmaxf(ui->composer_view_h * 0.85f, ui_line_h(ui, M(font_size_base)));
+        float delta = ev->y < ui->composer_sb_thumb.y ? -step : step;
+        ui->composer_scroll = uc_clampf(ui->composer_scroll + delta, 0.0f, ui->composer_scroll_max);
+      }
+      ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
+      ui->dirty = true;
+      return true;
+    }
+  }
   if (!ui->msg_req_banner_visible && ui->mv.composer_btn.w <= 0.0f && !ui_is_dm_requests_view(ui) &&
       ui_in_rect(ev->x, ev->y, box)) {
     ui->chat_sel_active = false;

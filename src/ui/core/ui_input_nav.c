@@ -386,6 +386,9 @@ void uc_handle_wheel(ccord_ui *ui, const ccord_input_event *ev)
   if (ui_in_rect(ev->x, ev->y, ui_rect(l->message_area))) {
     float now = ccord_scroller_push(&ui->msg_scroller, dy, direct);
     if (now != 0.0f) uc_scroll_messages(ui, now);
+  } else if (ui->composer_scroll_rect.w > 0.0f && ui_in_rect(ev->x, ev->y, ui->composer_scroll_rect)) {
+    ui_scroller_scroll_ui(ui, &ui->composer_glide, &ui->composer_scroll, dy, ui->composer_scroll_max, direct);
+    if (ui->composer_scroll_max > 0.0f) ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
   } else if (ui_in_rect(ev->x, ev->y, ui_rect(l->channel_scroll))) {
     float max = ui->chan_content_h - l->channel_scroll.h;
     ui_scroller_scroll_ui(ui, &ui->chan_scroller, &ui->chan_scroll, dy, max, direct);
@@ -451,6 +454,7 @@ void ui_ime_preedit_set(ccord_ui *ui, const char *text, int32_t start, int32_t l
   ui->ime_preedit[n] = '\0';
   ui->ime_cursor = cursor;
   ui->ime_sel_len = sel;
+  ui->composer_follow_caret = true;
   ui->dirty = true;
   uc_reset_caret_blink(ui);
 }
@@ -489,7 +493,10 @@ void uc_paste(ccord_ui *ui)
   else inserted = w > 0;
   ccord_free(txt);
   ui_update_autocomplete(ui);
-  if (inserted) ui_send_typing(ui);
+  if (inserted) {
+    ui->composer_follow_caret = true;
+    ui_send_typing(ui);
+  }
   uc_reset_caret_blink(ui);
 }
 

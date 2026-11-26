@@ -254,7 +254,7 @@ static void sd_do_schedule(ccord_ui *ui)
   // The composer's text and files are now the scheduled message: clear them (and the saved draft) like a send does.
   ccord_ui_clear_attachment(ui);
   ccord_text_edit_clear(&ui->edit);
-  ui->composer_scroll = 0.0f;
+  ui_composer_reset_scroll(ui);
   ui_clear_channel_draft(ui, sd->channel_id);
   ccord_text_edit_clear(&sd->msg);
   sd->msg_scroll = 0.0f;

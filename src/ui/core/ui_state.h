@@ -77,7 +77,7 @@ struct ccord_ui {
   float mx, my;
   bool mouse_in;
   int hover_guild_idx, hover_crow, hover_mrow, hover_link, hover_ts_hit;
-  bool hover_gear, hover_guild_header, hover_settings_close, hover_scrollbar, hover_members_btn;
+  bool hover_gear, hover_guild_header, hover_settings_close, hover_scrollbar, hover_composer_sb, hover_members_btn;
   bool hover_mute, hover_deafen, hover_camera, hover_screen, hover_disconnect;
   bool hover_search, hover_pin, hover_inbox, hover_voice_back;
   int hover_settings_page;
@@ -143,6 +143,13 @@ struct ccord_ui {
   char ime_preedit[64];
   int32_t ime_cursor, ime_sel_len;
   float composer_scroll;
+  ccord_scroller composer_glide;
+  float composer_scroll_max;
+  float composer_content_h, composer_view_h;
+  ccord_rect composer_scroll_rect;
+  ccord_rect composer_sb_track, composer_sb_thumb;
+  bool composer_follow_caret;
+  size_t composer_seen_caret, composer_seen_len, composer_seen_preedit_len;
   bool caret_on;
   uint64_t caret_epoch_ms;
   ccord_id editing_channel, editing_message;   // != NONE while the composer edits an existing message

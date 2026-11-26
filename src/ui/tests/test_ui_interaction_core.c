@@ -492,6 +492,131 @@ static void test_send(void)
   frame(1);
 }
 
+static void test_composer_scroll(void)
+{
+  // Fill the composer with many Shift+Enter lines so it hits composer_max_height and overflows vertically.
+  ccord_text_edit_clear(&F.ui->edit);
+  ui_composer_reset_scroll(F.ui);
+  frame(2);
+  CT_CHECK(F.ui->composer_scroll_max < 0.5f);
+  CT_CHECK(F.ui->composer_sb_track.w == 0.0f);
+
+  for (int i = 0; i < 36; i++) {
+    char line[32];
+    snprintf(line, sizeof line, "Line %02d", i + 1);
+    type_text(line);
+    if (i < 35) key(CCORD_KEY_RETURN, CCORD_MOD_SHIFT);
+  }
+  frame(3);
+  CT_CHECK(F.ui->composer_scroll_max > 150.0f);
+  // Typing auto-follows the caret to the bottom.
+  CT_CHECK(fabsf(F.ui->composer_scroll - F.ui->composer_scroll_max) < 1.0f);
+  // Overflowing composer exposes a scrollbar track & thumb inside the box without overlapping right buttons.
+  ccord_rect cbox = F.ui->composer_scroll_rect;
+  CT_CHECK(cbox.w > 100.0f && cbox.h > 100.0f);
+  CT_CHECK(F.ui->composer_sb_track.w > 0.0f && F.ui->composer_sb_thumb.h > 0.0f);
+  CT_CHECK(F.ui->composer_sb_track.x >= cbox.x &&
+           F.ui->composer_sb_track.x + F.ui->composer_sb_track.w <= cbox.x + cbox.w - 130.0f);
+
+  // Mouse wheel UP over the composer scrolls up toward line 1 and stays there (does NOT snap back to caret).
+  float cx = cbox.x + cbox.w * 0.4f;
+  float cy = cbox.y + cbox.h * 0.5f;
+  float before_wheel = F.ui->composer_scroll;
+  ui_send((ccord_input_event){.type = CCORD_IN_WHEEL, .wheel = 2.0f, .x = cx, .y = cy});
+  frame(12);
+  CT_CHECK(F.ui->composer_scroll < before_wheel - 50.0f);
+  float mid_scroll = F.ui->composer_scroll;
+  frame(6);
+  CT_CHECK(fabsf(F.ui->composer_scroll - mid_scroll) < 0.1f);   // no snap-back across idle frames
+
+  // Scroll all the way to the top with a large wheel burst.
+  ui_send((ccord_input_event){.type = CCORD_IN_WHEEL, .wheel = 30.0f, .x = cx, .y = cy});
+  frame(4);
+  CT_CHECK(F.ui->composer_scroll < 0.5f);
+  // Verify the first line is actually drawn at the top of the composer viewport.
+  ui_cf_trace_piece tr[128];
+  size_t ntr = ui_composer_format_trace(tr, 128);
+  CT_CHECK(ntr > 0 && tr[0].start == 0);
+
+  // Ctrl+C while scrolled up (with a selection) does NOT snap the scroll back to the bottom.
+  key(CCORD_KEY_A, CCORD_MOD_CTRL);
+  frame(1);
+  ui_send((ccord_input_event){.type = CCORD_IN_WHEEL, .wheel = 30.0f, .x = cx, .y = cy});
+  frame(2);
+  CT_CHECK(F.ui->composer_scroll < 0.5f);
+  key(CCORD_KEY_C, CCORD_MOD_CTRL);
+  frame(2);
+  CT_CHECK(F.ui->composer_scroll < 0.5f);
+  CT_CHECK(strstr(F.clip, "Line 01") != nullptr && strstr(F.clip, "Line 36") != nullptr);
+
+  // Typing a character while scrolled up brings the caret (bottom) back into view.
+  key(CCORD_KEY_RIGHT, 0);   // collapse selection to end
+  frame(2);
+  CT_CHECK(fabsf(F.ui->composer_scroll - F.ui->composer_scroll_max) < 1.0f);
+
+  // Scroll to top, then type a character directly -> snaps back to caret at bottom.
+  ui_send((ccord_input_event){.type = CCORD_IN_WHEEL, .wheel = 30.0f, .x = cx, .y = cy});
+  frame(2);
+  CT_CHECK(F.ui->composer_scroll < 0.5f);
+  type_text("!");
+  frame(2);
+  CT_CHECK(fabsf(F.ui->composer_scroll - F.ui->composer_scroll_max) < 1.0f);
+
+  // Clicking near the top while scrolled to top moves caret to line 1 without jumping scroll.
+  ui_send((ccord_input_event){.type = CCORD_IN_WHEEL, .wheel = 30.0f, .x = cx, .y = cy});
+  frame(2);
+  CT_CHECK(F.ui->composer_scroll < 0.5f);
+  click(cbox.x + 60.0f, cbox.y + F.theme.m.composer_pad_y + 6.0f);
+  frame(2);
+  CT_CHECK(F.ui->edit.caret <= 10u);
+  CT_CHECK(F.ui->composer_scroll < 0.5f);
+
+  // PageDown moves caret down a page and advances composer_scroll; PageUp brings it back up.
+  size_t caret_top = F.ui->edit.caret;
+  key(CCORD_KEY_PAGEDOWN, 0);
+  frame(2);
+  CT_CHECK(F.ui->edit.caret > caret_top);
+  key(CCORD_KEY_PAGEDOWN, 0);
+  frame(2);
+  CT_CHECK(F.ui->composer_scroll > 50.0f);
+  key(CCORD_KEY_PAGEUP, 0);
+  key(CCORD_KEY_PAGEUP, 0);
+  frame(2);
+  CT_CHECK(F.ui->composer_scroll < 1.0f);
+
+  // Hovering and dragging the composer scrollbar thumb sets pointer cursor and scrolls smoothly.
+  ccord_rect thumb = F.ui->composer_sb_thumb;
+  ccord_rect track = F.ui->composer_sb_track;
+  float sbx = thumb.x + thumb.w * 0.5f;
+  float sby = thumb.y + thumb.h * 0.5f;
+  mouse(CCORD_IN_MOUSE_MOVE, 0, sbx, sby);
+  frame(1);
+  CT_CHECK(F.ui->hover_composer_sb);
+  CT_CHECK(F.ui->cursor == CCORD_CURSOR_POINTER);
+  mouse(CCORD_IN_MOUSE_DOWN, 1, sbx, sby);
+  CT_CHECK(F.ui->drag == DRAG_COMPOSER_SCROLLBAR);
+  mouse(CCORD_IN_MOUSE_MOVE, 0, sbx, track.y + track.h);
+  frame(2);
+  CT_CHECK(fabsf(F.ui->composer_scroll - F.ui->composer_scroll_max) < 1.0f);
+  mouse(CCORD_IN_MOUSE_UP, 1, sbx, track.y + track.h);
+  CT_CHECK(F.ui->drag == DRAG_NONE);
+
+  // Clicking on the scrollbar track above the thumb pages upward.
+  float before_track_click = F.ui->composer_scroll;
+  click(sbx, track.y + 4.0f);
+  frame(2);
+  CT_CHECK(F.ui->composer_scroll < before_track_click - 50.0f);
+
+  // Clearing text hides the scrollbar and resets scroll to 0.
+  key(CCORD_KEY_A, CCORD_MOD_CTRL);
+  key(CCORD_KEY_BACKSPACE, 0);
+  frame(2);
+  CT_CHECK(F.ui->edit.len == 0);
+  CT_CHECK(F.ui->composer_scroll == 0.0f);
+  CT_CHECK(F.ui->composer_scroll_max == 0.0f);
+  CT_CHECK(F.ui->composer_sb_track.w == 0.0f);
+}
+
 // Number of context-menu application-command rows of one type the store currently holds for a guild.
 // The fixture runs as an administrator, so every indexed command of the type passes the permission gate.
 static size_t count_app_cmds(ccord_id guild, uint8_t command_type)
@@ -2331,6 +2456,7 @@ int main(int argc, char **argv)
   test_dm_pseudo_guild();
   test_voice_and_stream();
   test_send();
+  test_composer_scroll();
   test_typing_throttle();
   test_context_menu();
   test_context_menu_scroll();

@@ -159,9 +159,19 @@ float ui_composer_measure(ccord_ui *ui, ccord_renderer *r)
   return clampf(th + 2.0f * M(composer_pad_y) + banner, M(composer_min_height), M(composer_max_height));
 }
 
+void ui_composer_reset_scroll(ccord_ui *ui)
+{
+  if (!ui) return;
+  ui->composer_scroll = 0.0f;
+  ccord_scroller_cancel(&ui->composer_glide);
+  ui->composer_follow_caret = true;
+}
+
 void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
 {
   memset(&ui->dbg_uploads, 0, sizeof ui->dbg_uploads);
+  ui->composer_scroll_rect = ui->composer_sb_track = ui->composer_sb_thumb = (ccord_rect){0, 0, 0, 0};
+  ui->composer_scroll_max = ui->composer_content_h = ui->composer_view_h = 0.0f;
   ui->msg_req_banner_visible = false;
   ui->msg_req_banner_accept_rect = (ccord_rect){0, 0, 0, 0};
   ui->msg_req_banner_reject_rect = (ccord_rect){0, 0, 0, 0};
@@ -476,6 +486,7 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
       ccord_text_edit_set_caret(&ui->edit, pos, ui->pending_extend);
     }
     ui->pending_select_mode = 0;
+    ui->composer_follow_caret = true;
     ui->caret_epoch_ms = ui->now_ms;
     ui->caret_on = true;
     ui_update_autocomplete(ui);
@@ -491,26 +502,51 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
       ccord_text_edit_set_caret(&ui->edit, len, ui->pending_extend);
     } else {
       float ty = cur.y + (float)dir * lh + lh * 0.5f;
-      size_t pos = ui_composer_format_hit(ui, r, text, len, wrap, cur.x, ty);
-      ccord_text_edit_set_caret(&ui->edit, pos, ui->pending_extend);
+      if (ty < 0.0f) {
+        ccord_text_edit_set_caret(&ui->edit, 0, ui->pending_extend);
+      } else if (ty >= total) {
+        ccord_text_edit_set_caret(&ui->edit, len, ui->pending_extend);
+      } else {
+        size_t pos = ui_composer_format_hit(ui, r, text, len, wrap, cur.x, ty);
+        ccord_text_edit_set_caret(&ui->edit, pos, ui->pending_extend);
+      }
     }
+    ui->composer_follow_caret = true;
     ui->caret_epoch_ms = ui->now_ms;
     ui->caret_on = true;
   }
   ccord_rect caret = ui_composer_format_caret(ui, r, text, len, wrap, ui->edit.caret);
   size_t plen = strlen(ui->ime_preedit);
-  float pre_bottom = caret.y + lh;
+  float pre_bottom = caret.y + maxf(lh, caret.h);
   if (plen > 0) {
     pre_bottom = composer_preedit_walk(ui, r, ui->ime_preedit, plen, wrap, 0.0f, 0.0f,
                                        caret.x, caret.y, lh, caret.h, false);
     if (pre_bottom > total) total = pre_bottom;
   }
-  if (caret.y < ui->composer_scroll) ui->composer_scroll = caret.y;
-  if (pre_bottom > ui->composer_scroll + area.h) ui->composer_scroll = pre_bottom - area.h;
-  ui->composer_scroll = clampf(ui->composer_scroll, 0.0f, maxf(total - area.h, 0.0f));
-  // The platform text-input / IME candidate window follows the CARET, not the whole box.
-  ui->text_area = (ccord_rect){area.x + caret.x, area.y - ui->composer_scroll + caret.y,
-                               maxf(caret.w, 1.0f), caret.h};
+  float max_s = maxf(total - area.h, 0.0f);
+  // Follow the caret only when the text, caret, or IME preedit moved, so wheel/touch/scrollbar scrolling is not snapped back.
+  bool caret_changed = ui->composer_follow_caret ||
+                       ui->edit.caret != ui->composer_seen_caret ||
+                       ui->edit.len != ui->composer_seen_len ||
+                       plen != ui->composer_seen_preedit_len;
+  if (caret_changed) {
+    ui->composer_follow_caret = false;
+    ui->composer_seen_caret = ui->edit.caret;
+    ui->composer_seen_len = ui->edit.len;
+    ui->composer_seen_preedit_len = plen;
+    ccord_scroller_cancel(&ui->composer_glide);
+    if (caret.y < ui->composer_scroll) ui->composer_scroll = caret.y;
+    if (pre_bottom > ui->composer_scroll + area.h) ui->composer_scroll = pre_bottom - area.h;
+  }
+  ui->composer_scroll = clampf(ui->composer_scroll, 0.0f, max_s);
+  ui->composer_scroll_rect = box;
+  ui->composer_scroll_max = max_s;
+  ui->composer_content_h = total;
+  ui->composer_view_h = area.h;
+  // The platform text-input / IME candidate window follows the CARET, clamped inside the visible box.
+  float ta_y = clampf(area.y - ui->composer_scroll + caret.y, area.y,
+                      area.y + maxf(area.h - caret.h, 0.0f));
+  ui->text_area = (ccord_rect){area.x + caret.x, ta_y, maxf(caret.w, 1.0f), caret.h};
 
   float clip_l = maxf(box.x, area.x - 4.0f);
   float clip_r = fminf(box.x + box.w, area.x + maxf(area.w, 0.0f) + 4.0f);
@@ -548,6 +584,30 @@ void ui_draw_composer(ccord_ui *ui, ccord_renderer *r)
     ccord_draw_rect(r, (ccord_rect){area.x + caret.x, cy + (lh - caret.h) * 0.5f, 1.5f, caret.h}, COL(caret));
   }
   ccord_pop_clip(r);
+  if (max_s > 0.5f && box.h > 20.0f) {
+    float sbw = fminf(M(scrollbar_width), 6.0f);
+    float right_btn_x = ui->mobile_layout ? (box.x + box.w - 86.0f) : (box.x + box.w - 130.0f);
+    float sb_x = maxf(box.x + 2.0f, fminf(area.x + area.w + 5.0f, right_btn_x - sbw - 2.0f));
+    float track_y = box.y + 6.0f;
+    float track_h = maxf(box.h - 12.0f, 0.0f);
+    if (track_h > 12.0f) {
+      float min_thumb = fminf(M(scrollbar_min_thumb), track_h * 0.5f);
+      float thumb_h = clampf(track_h * (area.h / total), min_thumb, track_h);
+      float norm = clampf(ui->composer_scroll / max_s, 0.0f, 1.0f);
+      float thumb_y = track_y + norm * (track_h - thumb_h);
+      ccord_rect track_r = {sb_x, track_y, sbw, track_h};
+      ccord_rect thumb_r = {sb_x, thumb_y, sbw, thumb_h};
+      ui->composer_sb_track = track_r;
+      ui->composer_sb_thumb = thumb_r;
+      bool over_box = ui->mouse_in && !ui->menu.open && !ui->settings_open && ui_in_rect(ui->mx, ui->my, box);
+      bool over_sb = ui->drag == DRAG_COMPOSER_SCROLLBAR || ui->hover_composer_sb;
+      bool recent = ui->last_scroll_ms && ui->now_ms < ui->last_scroll_ms + 1200;
+      float alpha = (over_box || over_sb || recent) ? 1.0f : 0.60f;
+      ccord_draw_rrect(r, track_r, sbw * 0.5f, ui_alpha(COL(scrollbar_track), alpha * 0.85f));
+      ccord_color tcol = ui_mix(COL(scrollbar_thumb), COL(text_muted), over_sb ? 0.70f : 0.35f);
+      ccord_draw_rrect(r, thumb_r, sbw * 0.5f, ui_alpha(tcol, alpha));
+    }
+  }
   ui_expr_draw_composer_buttons(ui, r, box);
   bool mobile_send = ui->mobile_layout && !locked && (ui->edit.len > 0 || ui->staged_file_count > 0);
   if (mobile_send) {
@@ -685,7 +745,7 @@ void ui_send_composer(ccord_ui *ui)
     }
     ui->editing_channel = ui->editing_message = CCORD_ID_NONE;
     ccord_text_edit_clear(&ui->edit);
-    ui->composer_scroll = 0.0f;
+    ui_composer_reset_scroll(ui);
     ui->dirty = true;
     return;
   }
@@ -739,7 +799,7 @@ void ui_send_composer(ccord_ui *ui)
         ui_dismiss_new_marker(ui, false);
         ui->msg_scroll_vel = 0.0f;
         ccord_vlist_reset_bottom(&ui->vlist);
-        ui->composer_scroll = 0.0f;
+        ui_composer_reset_scroll(ui);
         ui->dirty = true;
         return;
       }
@@ -751,7 +811,7 @@ void ui_send_composer(ccord_ui *ui)
         ui_clear_channel_draft(ui, ch->id);
         ui->autocomplete_open = false;
         ui->nautocomplete = 0;
-        ui->composer_scroll = 0.0f;
+        ui_composer_reset_scroll(ui);
         ui_expr_picker_open_query(ui, tab, ch->id, arg, strlen(arg));
         return;
       }
@@ -764,7 +824,7 @@ void ui_send_composer(ccord_ui *ui)
         if (body_copy[0] != '\0') (void)ccord_text_edit_insert(&ui->edit, body_copy, strlen(body_copy), &err);
         ui->autocomplete_open = false;
         ui->nautocomplete = 0;
-        ui->composer_scroll = 0.0f;
+        ui_composer_reset_scroll(ui);
         ui_schedule_dialog_open(ui);
         return;
       }
@@ -786,7 +846,7 @@ void ui_send_composer(ccord_ui *ui)
         ui_clear_channel_draft(ui, ch->id);
         ui->autocomplete_open = false;
         ui->nautocomplete = 0;
-        ui->composer_scroll = 0.0f;
+        ui_composer_reset_scroll(ui);
         ui_notice(ui, arg[0] ? "Nickname updated" : "Nickname cleared");
         ui->dirty = true;
         return;
@@ -891,7 +951,7 @@ void ui_send_composer(ccord_ui *ui)
         ui_dismiss_new_marker(ui, false);
         ui->msg_scroll_vel = 0.0f;
         ccord_vlist_reset_bottom(&ui->vlist);
-        ui->composer_scroll = 0.0f;
+        ui_composer_reset_scroll(ui);
         ui->dirty = true;
         return;
       }
@@ -907,6 +967,7 @@ void ui_send_composer(ccord_ui *ui)
         ui_clear_channel_draft(ui, ch->id);
         ui->autocomplete_open = false;
         ui->nautocomplete = 0;
+        ui_composer_reset_scroll(ui);
         ui->dirty = true;
         return;
       }
@@ -1034,7 +1095,7 @@ void ui_send_composer(ccord_ui *ui)
       ui_dismiss_new_marker(ui, false);
       ui->msg_scroll_vel = 0.0f;
       ccord_vlist_reset_bottom(&ui->vlist);
-      ui->composer_scroll = 0.0f;
+      ui_composer_reset_scroll(ui);
       ui->dirty = true;
       return;
     }
@@ -1056,7 +1117,7 @@ void ui_send_composer(ccord_ui *ui)
     ui_dismiss_new_marker(ui, false);
     ui->msg_scroll_vel = 0.0f;
     ccord_vlist_reset_bottom(&ui->vlist);
-    ui->composer_scroll = 0.0f;
+    ui_composer_reset_scroll(ui);
     ui->dirty = true;
     return;
   }
@@ -1072,7 +1133,7 @@ void ui_send_composer(ccord_ui *ui)
   ui_dismiss_new_marker(ui, false);
   ui->msg_scroll_vel = 0.0f;
   ccord_vlist_reset_bottom(&ui->vlist);   // follow the echoed message when it arrives
-  ui->composer_scroll = 0.0f;
+  ui_composer_reset_scroll(ui);
   ui->dirty = true;
 }
 
@@ -1118,7 +1179,7 @@ void ui_begin_edit(ccord_ui *ui, ccord_id channel_id, ccord_id message_id)
   ui->editing_channel = channel_id;
   ui->editing_message = message_id;
   ui->reply_channel = ui->reply_message = CCORD_ID_NONE;
-  ui->composer_scroll = 0.0f;
+  ui_composer_reset_scroll(ui);
   ui->caret_epoch_ms = ui->now_ms;
   ui->caret_on = true;
   ui->dirty = true;
@@ -1129,7 +1190,7 @@ void ui_cancel_edit(ccord_ui *ui)
   if (ui->editing_message == CCORD_ID_NONE) return;
   ui->editing_channel = ui->editing_message = CCORD_ID_NONE;
   ccord_text_edit_clear(&ui->edit);
-  ui->composer_scroll = 0.0f;
+  ui_composer_reset_scroll(ui);
   ui->dirty = true;
 }
 
@@ -1144,6 +1205,7 @@ void ui_begin_reply(ccord_ui *ui, ccord_id channel_id, ccord_id message_id)
   ui->reply_channel = channel_id;
   ui->reply_message = message_id;
   ui->reply_ping = true;
+  ui->composer_follow_caret = true;
   ui->dirty = true;
 }
 

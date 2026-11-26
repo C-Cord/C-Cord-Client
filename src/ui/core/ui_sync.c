@@ -261,6 +261,7 @@ void uc_restore_channel_draft(ccord_ui *ui, ccord_id ch)
 {
   if (!ui || ui->editing_message != CCORD_ID_NONE) return;
   ccord_text_edit_clear(&ui->edit);
+  ui_composer_reset_scroll(ui);
   if (ch == CCORD_ID_NONE || !ui->drafts) return;
   for (size_t i = 0; i < ui->ndrafts; i++) {
     if (ui->drafts[i].channel_id == ch && ui->drafts[i].text) {
@@ -332,7 +333,7 @@ static bool return_failed_draft(ccord_ui *ui, const ccord_action_failure *f)
     ccord_text_edit_clear(&ui->edit);
     if (ccord_text_edit_insert(&ui->edit, cur, clen, &err) != CCORD_OK) return false;
     ccord_text_edit_set_caret(&ui->edit, ui->edit.len, false);
-    ui->composer_scroll = 0.0f;
+    ui_composer_reset_scroll(ui);
     ui->caret_epoch_ms = ui->now_ms;
     ui->caret_on = true;
     return true;

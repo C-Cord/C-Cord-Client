@@ -140,7 +140,7 @@ static bool ui_hook_insert_draft(void *ud, ccord_id channel_id, const char *text
   ccord_text_edit_clear(&ui->edit);
   ccord_error err;
   (void)ccord_text_edit_insert(&ui->edit, text, strlen(text), &err);
-  ui->composer_scroll = 0.0f;
+  ui_composer_reset_scroll(ui);
   ui->dirty = true;
   return true;
 }
@@ -340,7 +340,7 @@ static bool ui_hook_composer_set(void *ud, const char *text, bool insert_mode, i
   if (!insert_mode) {
     ccord_text_edit_clear(&ui->edit);
     if (text[0]) (void)ccord_text_edit_insert(&ui->edit, text, strlen(text), &err);
-    ui->composer_scroll = 0.0f;
+    ui_composer_reset_scroll(ui);
   } else {
     if (pos >= 0) {
       size_t p = (size_t)pos;
@@ -644,7 +644,7 @@ static void ui_hook_upload_transform_complete(void *ud, uint64_t job_id, bool ca
     ui_clear_channel_draft(ui, ch_id);
     ui->autocomplete_open = false;
     ui->nautocomplete = 0;
-    ui->composer_scroll = 0.0f;
+    ui_composer_reset_scroll(ui);
   }
 }
 
@@ -1270,6 +1270,16 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
     if (ccord_scroller_tick(&ui->server_scroller, &ui->server_scroll, fdt, max, reduced)) anim = true;
     ui->dirty = true;
   }
+  if (ui->composer_glide.pending != 0.0f) {
+    if (ui->composer_scroll_rect.w <= 0.0f || ui->composer_scroll_max <= 0.0f) {
+      ccord_scroller_cancel(&ui->composer_glide);
+    } else {
+      if (ccord_scroller_tick(&ui->composer_glide, &ui->composer_scroll, fdt, ui->composer_scroll_max, reduced)) {
+        anim = true;
+      }
+      ui->dirty = true;
+    }
+  }
   if (uc_glide_tick(ui, &ui->search_panel_glide, &ui->search_panel_scroll, ui_search_panel_active(ui), fdt, reduced)) anim = true;
   if (uc_glide_tick(ui, &ui->stage_glide, &ui->stage_scroll, ui->stage_channel != CCORD_ID_NONE, fdt, reduced)) anim = true;
   if (uc_glide_tick(ui, &ui->dm_friends_glide, &ui->dm_friends_scroll, ui_is_dm_friends_view(ui), fdt, reduced)) anim = true;
@@ -1420,7 +1430,8 @@ bool ccord_ui_update(ccord_ui *ui, uint64_t now_ms)
       }
     }
   }
-  if (ui->vlist.count > 0 && ui->last_scroll_ms && now_ms >= ui->last_scroll_ms + 1200 && now_ms < ui->last_scroll_ms + 1200 + 64) {
+  if ((ui->vlist.count > 0 || ui->composer_scroll_max > 0.0f) && ui->last_scroll_ms &&
+      now_ms >= ui->last_scroll_ms + 1200 && now_ms < ui->last_scroll_ms + 1200 + 64) {
     ui->dirty = true;   // scrollbar fade-out frame
   }
   ui->smooth_animating = smooth;

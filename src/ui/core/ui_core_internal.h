@@ -40,7 +40,7 @@ struct ui_rail_cache {
 };
 typedef struct hover_state {
   int guild, rail_slot, crow, mrow, settings_page, menu, link, ts_hit;
-  bool gear, header, close, sb;
+  bool gear, header, close, sb, composer_sb;
   bool mute, deafen, camera, screen, disconnect, search, pin, inbox, saved, voice_back;
   bool new_bar, reply_card, rich_ctrl, disc_btn, disc_text;
   bool user_status, msg_req_ctrl, gdm_ctrl;
@@ -64,6 +64,7 @@ void uc_finish_server_drag(ccord_ui *ui);
 bool uc_handle_right_click(ccord_ui *ui, const ccord_input_event *ev);
 void uc_open_menu_at(ccord_ui *ui, const ccord_input_event *ev, ccord_menu_context ctx);
 void uc_scrollbar_drag_to(ccord_ui *ui, float my);
+void uc_composer_scrollbar_drag_to(ccord_ui *ui, float my);
 void ui_open_select_dropdown(ccord_ui *ui, const ui_comp_hit *ch);
 void uc_update_channel_drag(ccord_ui *ui, float mx, float my);
 void uc_update_server_drag(ccord_ui *ui, float mx, float my);

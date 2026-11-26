@@ -127,6 +127,7 @@ static void touch_cancel_wheel_glides(ccord_ui *ui)
   ccord_scroller_cancel(&ui->chan_scroller);
   ccord_scroller_cancel(&ui->member_scroller);
   ccord_scroller_cancel(&ui->server_scroller);
+  ccord_scroller_cancel(&ui->composer_glide);
   ccord_scroller_cancel(&ui->search_panel_glide);
   ccord_scroller_cancel(&ui->stage_glide);
   ccord_scroller_cancel(&ui->dm_friends_glide);
@@ -529,8 +530,13 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       if (ui->touch.mode == TOUCH_SCROLL) {
         if (dy != 0.0f) {
           // Finger moving up (dy < 0) scrolls content downward (positive dy_px in list coordinates).
+          // Keep gestures started inside an overflowing composer anchored to the composer even if the finger drifts out.
+          bool in_comp = ui->composer_scroll_rect.w > 0.0f && ui->composer_scroll_max > 0.0f &&
+                         ui_in_rect(ui->touch.down_x, ui->touch.down_y, ui->composer_scroll_rect);
+          float sx = in_comp ? ui->touch.down_x : ev->x;
+          float sy = in_comp ? ui->touch.down_y : ev->y;
           ui->touch.scrolled_this_frame = true;
-          (void)ui_scroll_at_px(ui, ev->x, ev->y, -dy, true);
+          (void)ui_scroll_at_px(ui, sx, sy, -dy, true);
           ui->dirty = true;
           return true;
         }
@@ -692,10 +698,12 @@ bool ui_touch_handle_input(ccord_ui *ui, const ccord_input_event *ev)
 
       if (mode == TOUCH_SCROLL) {
         if (!ui->anim.reduced_motion && fabsf(vy) >= TOUCH_FLING_MIN_V) {
+          bool in_comp = ui->composer_scroll_rect.w > 0.0f && ui->composer_scroll_max > 0.0f &&
+                         ui_in_rect(ui->touch.down_x, ui->touch.down_y, ui->composer_scroll_rect);
           ui->touch.fling_active = true;
           ui->touch.fling_fresh = true;
-          ui->touch.fling_x = ux;
-          ui->touch.fling_y = uy;
+          ui->touch.fling_x = in_comp ? ui->touch.down_x : ux;
+          ui->touch.fling_y = in_comp ? ui->touch.down_y : uy;
           ui->touch.fling_vy = clampf(-vy, -TOUCH_FLING_MAX_V, TOUCH_FLING_MAX_V);
           ui->touch.fling_view_sig = touch_view_sig(ui);
         }

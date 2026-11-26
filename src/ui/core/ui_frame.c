@@ -376,6 +376,12 @@ static void ui_draw_frame(ccord_ui *ui, ccord_renderer *r)
   ui->msg_req_banner_visible = false;
   ui->msg_req_banner_accept_rect = (ccord_rect){0};
   ui->msg_req_banner_reject_rect = (ccord_rect){0};
+  ui->composer_scroll_rect = (ccord_rect){0};
+  ui->composer_sb_track = (ccord_rect){0};
+  ui->composer_sb_thumb = (ccord_rect){0};
+  ui->composer_scroll_max = 0.0f;
+  ui->composer_content_h = 0.0f;
+  ui->composer_view_h = 0.0f;
   ui->mv.composer_btn = (ccord_rect){0};   // ui_draw_composer sets it again while the box is a screening banner
   ui->popover_full_profile_rect = (ccord_rect){0};
   ui->role_preview_cycle_rect = (ccord_rect){0};

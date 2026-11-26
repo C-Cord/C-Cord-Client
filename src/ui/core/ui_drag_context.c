@@ -22,6 +22,17 @@ void uc_scrollbar_drag_to(ccord_ui *ui, float my)
   ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
 }
 
+void uc_composer_scrollbar_drag_to(ccord_ui *ui, float my)
+{
+  float track = ui->composer_sb_track.h - ui->composer_sb_thumb.h;
+  if (track <= 1.0f || ui->composer_scroll_max <= 0.0f) return;
+  ccord_scroller_cancel(&ui->composer_glide);
+  float pos = uc_clampf((my - ui->drag_grab - ui->composer_sb_track.y) / track, 0.0f, 1.0f);
+  ui->composer_scroll = pos * ui->composer_scroll_max;
+  ui->last_scroll_ms = ui->now_ms ? ui->now_ms : 1;
+  ui->dirty = true;
+}
+
 bool uc_can_reorder_guild_channels(const ccord_ui *ui, ccord_id g)
 {
   if (!ui || !ui->d.store || g == CCORD_ID_NONE || g == CCORD_DM_GUILD_ID) return false;

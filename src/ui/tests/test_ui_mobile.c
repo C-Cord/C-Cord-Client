@@ -2532,6 +2532,38 @@ static void test_mobile_text_wrapping_no_overflow(void)
 
   ui_ime_preedit_set(F.ui, "", 0, 0);
   ccord_text_edit_clear(&F.ui->edit);
+
+  // 5. Overflowing multiline mobile composer can be touch-dragged to reveal earlier lines without snapping back.
+  char mlines[640];
+  size_t mpos = 0;
+  for (int i = 0; i < 24 && mpos + 16 < sizeof mlines; i++) {
+    int n = snprintf(mlines + mpos, sizeof mlines - mpos, "Row %02d\n", i + 1);
+    if (n > 0) mpos += (size_t)n;
+  }
+  CT_CHECK(ccord_text_edit_insert(&F.ui->edit, mlines, mpos, &err) == CCORD_OK);
+  step_frames(3, 25);
+  CT_CHECK(F.ui->composer_scroll_max > 60.0f);
+  CT_CHECK(fabsf(F.ui->composer_scroll - F.ui->composer_scroll_max) < 1.0f);
+  ccord_rect mbox = F.ui->composer_scroll_rect;
+  float tx = mbox.x + mbox.w * 0.4f;
+  float ty = mbox.y + mbox.h * 0.5f;
+  float start_scroll = F.ui->composer_scroll;
+  touch_ev(CCORD_IN_TOUCH_DOWN, 77, tx, ty);
+  step_frames(1, 16);
+  // Drag finger downward (scrolling up toward earlier lines), even past the bottom edge of the box.
+  touch_ev(CCORD_IN_TOUCH_MOVE, 77, tx, ty + 20.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_MOVE, 77, tx, ty + 110.0f);
+  step_frames(1, 16);
+  touch_ev(CCORD_IN_TOUCH_UP, 77, tx, ty + 110.0f);
+  step_frames(6, 25);
+  CT_CHECK(F.ui->composer_scroll < start_scroll - 50.0f);
+  float held_scroll = F.ui->composer_scroll;
+  step_frames(4, 25);
+  CT_CHECK(fabsf(F.ui->composer_scroll - held_scroll) < 0.5f);   // stays put, no snap-back
+
+  ccord_text_edit_clear(&F.ui->edit);
+  ui_composer_reset_scroll(F.ui);
   ccord_ui_set_keyboard_inset(F.ui, 0.0f);
   step_frames(2, 25);
 }

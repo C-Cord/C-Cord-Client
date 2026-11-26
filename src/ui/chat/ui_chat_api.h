@@ -16,6 +16,7 @@ void ui_draw_pins_popover(ccord_ui *ui, ccord_renderer *r);
 void ui_draw_go_live(ccord_ui *ui, ccord_renderer *r);
 void ui_draw_composer(ccord_ui *ui, ccord_renderer *r);
 float ui_composer_measure(ccord_ui *ui, ccord_renderer *r);
+void ui_composer_reset_scroll(ccord_ui *ui);
 void ui_upload_debug_get(const ccord_ui *ui, ui_upload_debug *out);
 // ---- composer_format.c: live markdown styling of the composer text (markers stay, dimmed; buffer untouched) ----
 // Every query below shares one cached layout of pieces (a run of one style on one visual line); the same pieces are

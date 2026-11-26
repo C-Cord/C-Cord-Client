@@ -5,6 +5,17 @@
 
 static const ccord_ui *s_suppress_next_text_ui;
 
+static void uc_queue_vert_move(ccord_ui *ui, int delta, bool extend)
+{
+  if (ui->pending_vert_move != 0 && ui->pending_extend == extend) {
+    ui->pending_vert_move += delta;
+  } else {
+    ui->pending_vert_move = delta;
+    ui->pending_extend = extend;
+  }
+  ui->composer_follow_caret = true;
+}
+
 static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
 {
   if (s_suppress_next_text_ui == ui) s_suppress_next_text_ui = nullptr;
@@ -324,6 +335,7 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
         if (!uc_composer_accepts_text(ui) || ui_composer_lock_reason(ui)) break;
         if (ccord_text_edit_insert(&ui->edit, "\n", 1, &err) != CCORD_OK) ui_notice(ui, "%s", err.message);
         else ui_send_typing(ui);
+        ui->composer_follow_caret = true;
         ui_update_autocomplete(ui);
       } else {
         ui_send_composer(ui);
@@ -332,29 +344,35 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
     case CCORD_KEY_BACKSPACE:
       if (ctrl) ccord_text_edit_backspace_word(&ui->edit);
       else ccord_text_edit_backspace(&ui->edit);
+      ui->composer_follow_caret = true;
       ui_update_autocomplete(ui);
       ui_notify_composer_changed(ui);
       break;
     case CCORD_KEY_DELETE:
       if (ctrl) ccord_text_edit_delete_word(&ui->edit);
       else ccord_text_edit_delete(&ui->edit);
+      ui->composer_follow_caret = true;
       ui_update_autocomplete(ui);
       ui_notify_composer_changed(ui);
       break;
     case CCORD_KEY_LEFT:
       ccord_text_edit_move(&ui->edit, ctrl ? -3 : -1, shift);
+      ui->composer_follow_caret = true;
       ui_update_autocomplete(ui);
       break;
     case CCORD_KEY_RIGHT:
       ccord_text_edit_move(&ui->edit, ctrl ? 3 : 1, shift);
+      ui->composer_follow_caret = true;
       ui_update_autocomplete(ui);
       break;
     case CCORD_KEY_HOME:
       ccord_text_edit_move(&ui->edit, ctrl ? -2 : -4, shift);
+      ui->composer_follow_caret = true;
       ui_update_autocomplete(ui);
       break;
     case CCORD_KEY_END:
       ccord_text_edit_move(&ui->edit, ctrl ? 2 : 4, shift);
+      ui->composer_follow_caret = true;
       ui_update_autocomplete(ui);
       break;
     case CCORD_KEY_UP:
@@ -373,15 +391,13 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
         return false;
       }
       if (ui->edit.len > 0) {
-        ui->pending_vert_move = -1;
-        ui->pending_extend = shift;
+        uc_queue_vert_move(ui, -1, shift);
         break;
       }
       return false;
     case CCORD_KEY_DOWN:
       if (ui->edit.len > 0) {
-        ui->pending_vert_move = 1;
-        ui->pending_extend = shift;
+        uc_queue_vert_move(ui, 1, shift);
         break;
       }
       return false;
@@ -392,46 +408,60 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
         uc_scroll_messages(ui, ev->key == CCORD_KEY_PAGEUP ? -uc_page_step(ui) : uc_page_step(ui));
         return true;
       }
+      if (ui->composer_scroll_max > 0.0f) {
+        float lh = ui_line_h(ui, M(font_size_base));
+        int page = (int)(ui->composer_view_h / (lh > 1.0f ? lh : 22.0f));
+        if (page < 1) page = 1;
+        uc_queue_vert_move(ui, ev->key == CCORD_KEY_PAGEUP ? -page : page, shift);
+        break;
+      }
       return false;
     case CCORD_KEY_Z:
       if (!ctrl) return false;
       if (shift) (void)ccord_text_edit_redo(&ui->edit);
       else (void)ccord_text_edit_undo(&ui->edit);
+      ui->composer_follow_caret = true;
       ui_update_autocomplete(ui);
       break;
     case CCORD_KEY_Y:
       if (!ctrl) return false;
       (void)ccord_text_edit_redo(&ui->edit);
+      ui->composer_follow_caret = true;
       ui_update_autocomplete(ui);
       break;
     case CCORD_KEY_B: {
       if (!ctrl) return false;
       ccord_error err;
       (void)ccord_text_edit_wrap_selection(&ui->edit, "**", "**", &err);
+      ui->composer_follow_caret = true;
       break;
     }
     case CCORD_KEY_I: {
       if (!ctrl) return false;
       ccord_error err;
       (void)ccord_text_edit_wrap_selection(&ui->edit, "*", "*", &err);
+      ui->composer_follow_caret = true;
       break;
     }
     case CCORD_KEY_U: {
       if (!ctrl) return false;
       ccord_error err;
       (void)ccord_text_edit_wrap_selection(&ui->edit, "__", "__", &err);
+      ui->composer_follow_caret = true;
       break;
     }
     case CCORD_KEY_S: {
       if (!ctrl || !shift) return false;
       ccord_error err;
       (void)ccord_text_edit_wrap_selection(&ui->edit, "~~", "~~", &err);
+      ui->composer_follow_caret = true;
       break;
     }
     case CCORD_KEY_E: {
       if (!ctrl) return false;
       ccord_error err;
       (void)ccord_text_edit_wrap_selection(&ui->edit, "`", "`", &err);
+      ui->composer_follow_caret = true;
       break;
     }
     case CCORD_KEY_A:
@@ -445,7 +475,10 @@ static bool handle_key(ccord_ui *ui, const ccord_input_event *ev)
         char *sel = ccord_text_edit_copy_selection(&ui->edit);
         if (sel && ui->d.host.clipboard_set) ui->d.host.clipboard_set(ui->d.host.ud, sel);
         ccord_free(sel);
-        if (ev->key == CCORD_KEY_X) ccord_text_edit_delete(&ui->edit);
+        if (ev->key == CCORD_KEY_X) {
+          ccord_text_edit_delete(&ui->edit);
+          ui->composer_follow_caret = true;
+        }
       } else if (ev->key == CCORD_KEY_C && ui->chat_sel_active && ui->chat_sel_len > 0) {
         if (ui->d.host.clipboard_set) ui->d.host.clipboard_set(ui->d.host.ud, ui->chat_sel_buf);
         ui_notice(ui, "Copied selected text");
@@ -843,6 +876,9 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       if (ui->drag == DRAG_SCROLLBAR) {
         uc_scrollbar_drag_to(ui, ev->y);
         changed = true;
+      } else if (ui->drag == DRAG_COMPOSER_SCROLLBAR) {
+        uc_composer_scrollbar_drag_to(ui, ev->y);
+        changed = true;
       } else if (ui->drag == DRAG_COMPOSER) {
         ui->pending_click = true;
         ui->pending_extend = true;
@@ -1164,7 +1200,12 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
         return true;
       }
       if (ui->drag != DRAG_NONE) {
+        bool was_sb = (ui->drag == DRAG_COMPOSER_SCROLLBAR || ui->drag == DRAG_SCROLLBAR);
         ui->drag = DRAG_NONE;
+        if (was_sb) {
+          uc_update_hover(ui);
+          ui->dirty = true;
+        }
         return true;
       }
       if (ui_panels_handle_input(ui, ev)) {
@@ -1278,6 +1319,7 @@ bool ccord_ui_handle_input(ccord_ui *ui, const ccord_input_event *ev)
       if (ccord_text_edit_insert(&ui->edit, ev->text, n, &err) != CCORD_OK) {
         ui_notice(ui, "%s", err.message);
       } else if (n > 0) {
+        ui->composer_follow_caret = true;
         ui_send_typing(ui);
         ui_notify_composer_changed(ui);
       }

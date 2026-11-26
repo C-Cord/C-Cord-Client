@@ -230,6 +230,7 @@ static float ss_read_forum(ss *s)
 }
 static float ss_read_search(ss *s) { return s->c->ui->search_panel_scroll; }
 static float ss_read_quick_switcher(ss *s) { return s->c->ui->quick_switcher_scroll; }
+static float ss_read_composer(ss *s) { return s->c->ui->composer_scroll; }
 
 // ---- surface setup ------------------------------------------------------------------------------------------------
 
@@ -641,8 +642,46 @@ static void ss_close_quick_switcher(ss *s)
   if (s->c->ui->quick_switcher_open) ss_key(s, CCORD_KEY_ESCAPE, 0);
 }
 
+static bool ss_prepare_composer(ss *s, ss_probe *p)
+{
+  ccord_ui *ui = s->c->ui;
+  ccord_error err;
+  if (s->home_guild != CCORD_ID_NONE && ccord_store_select_guild(s->c->store, s->home_guild, &err) != CCORD_OK) {
+    ccord_error_clear(&err);
+  }
+  ss_frames(s, 3);
+  size_t have = ss_select_history(s);
+  if (!ss_check(s, have > 0, "composer: a text channel is selected")) return false;
+  ccord_text_edit_clear(&ui->edit);
+  char buf[1024];
+  size_t pos = 0;
+  for (int i = 0; i < 40 && pos + 20 < sizeof buf; i++) {
+    int n = snprintf(buf + pos, sizeof buf - pos, "Line %02d\n", i + 1);
+    if (n > 0) pos += (size_t)n;
+  }
+  if (!ss_check(s, ccord_text_edit_insert(&ui->edit, buf, pos, &err) == CCORD_OK, "composer: insert multiline text")) {
+    ccord_error_clear(&err);
+    return false;
+  }
+  ss_frames(s, 4);
+  if (!ss_check(s, ui->composer_scroll_rect.w > 0.0f && ui->composer_scroll_max > 0.0f,
+                "composer: multiline text overflows (max %.1f)", (double)ui->composer_scroll_max)) {
+    return false;
+  }
+  ss_probe_at(p, ui->composer_scroll_rect, ss_notch_px(s), ss_read_composer);
+  return ss_check_room(s, ui->composer_scroll_max, p->notch_px, "composer");
+}
+
+static void ss_close_composer(ss *s)
+{
+  ccord_text_edit_clear(&s->c->ui->edit);
+  ui_composer_reset_scroll(s->c->ui);
+  ss_frames(s, 2);
+}
+
 static const ss_surface ss_surfaces[] = {
     {"timeline", ss_prepare_timeline, nullptr, nullptr},
+    {"composer", ss_prepare_composer, ss_close_composer, nullptr},
     {"channels", ss_prepare_channels, nullptr, nullptr},
     {"members", ss_prepare_members, nullptr, nullptr},
     {"servers", ss_prepare_servers, nullptr, nullptr},
