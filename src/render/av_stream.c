@@ -16,6 +16,7 @@
 #include "render_internal.h"
 #include "lottie.h"
 
+#include <limits.h>
 #include <math.h>
 #include <ccord/core/os.h>
 #include <stdatomic.h>
@@ -82,12 +83,17 @@ struct ccord_av_stream {
   int max_dim;
   AVFormatContext *fmt;
   AVIOContext *io;
-  AVCodecContext *vdec, *adec;
+  AVCodecContext *vdec, *vdec_alpha, *adec;
   int vsi, asi;
   AVFrame *frame;
+  AVFrame *alpha_frame;
   AVPacket *pkt;
+  AVPacket *alpha_pkt;
   avs_pktq vq, aq;
   struct SwsContext *sws;
+  struct SwsContext *sws_alpha;
+  uint8_t *alpha_scaled;   // sw*sh + AVS_SWS_DST_PAD, only when alpha plane needs separate scaling
+  bool have_alpha_frame;
   SwrContext *swr;
   int swr_fmt, swr_rate, swr_ch;
   enum AVChannelOrder swr_order;
@@ -272,11 +278,17 @@ static void avs_teardown(ccord_av_stream *s)
   pktq_clear(&s->aq);
   sws_freeContext(s->sws);
   s->sws = nullptr;
+  sws_freeContext(s->sws_alpha);
+  s->sws_alpha = nullptr;
   swr_free(&s->swr);
   av_packet_free(&s->pkt);
+  av_packet_free(&s->alpha_pkt);
   av_frame_free(&s->frame);
+  av_frame_free(&s->alpha_frame);
   avcodec_free_context(&s->vdec);
+  avcodec_free_context(&s->vdec_alpha);
   avcodec_free_context(&s->adec);
+  s->have_alpha_frame = false;
   if (s->fmt) avformat_close_input(&s->fmt);
   if (s->io) {
     av_freep(&s->io->buffer);
@@ -298,6 +310,12 @@ static int avs_rotation_turns(const AVStream *st)
   return cw;
 }
 
+static uint64_t avs_rd_be64(const uint8_t *p)
+{
+  return ((uint64_t)p[0] << 56) | ((uint64_t)p[1] << 48) | ((uint64_t)p[2] << 40) | ((uint64_t)p[3] << 32) |
+         ((uint64_t)p[4] << 24) | ((uint64_t)p[5] << 16) | ((uint64_t)p[6] << 8) | (uint64_t)p[7];
+}
+
 static AVCodecContext *avs_open_codec(const AVCodec *codec, AVStream *st, int threads)
 {
   AVCodecContext *dec = avcodec_alloc_context3(codec);
@@ -308,6 +326,17 @@ static AVCodecContext *avs_open_codec(const AVCodec *codec, AVStream *st, int th
   }
   dec->pkt_timebase = st->time_base;
   dec->thread_count = threads;
+  if (avcodec_open2(dec, codec, nullptr) < 0) avcodec_free_context(&dec);
+  return dec;
+}
+
+static AVCodecContext *avs_open_alpha_codec(const AVCodec *codec, const AVStream *st)
+{
+  if (!codec) return nullptr;
+  AVCodecContext *dec = avcodec_alloc_context3(codec);
+  if (!dec) return nullptr;
+  dec->pkt_timebase = st->time_base;
+  dec->thread_count = 1;
   if (avcodec_open2(dec, codec, nullptr) < 0) avcodec_free_context(&dec);
   return dec;
 }
@@ -383,23 +412,36 @@ static ccord_status avs_setup(ccord_av_stream *s, ccord_error *err)
     if (cw > AVS_MAX_DIM || ch > AVS_MAX_DIM || (int64_t)cw * ch > AVS_MAX_SRC_PIXELS) {
       return ccord_error_set(err, CCORD_ERR_RANGE, "av_stream: video dimensions out of range");
     }
-    // WebM/Matroska VP8/VP9 streams with alpha_mode=1 carry the alpha plane in BlockAdditional side data, which
-    // FFmpeg's built-in vp8/vp9 decoders ignore; libvpx / libvpx-vp9 decode both planes into YUVA420P.
+    // WebM/Matroska VP8/VP9 streams with alpha_mode=1 carry the alpha plane in BlockAdditional side data
+    // (8-byte big-endian BlockAddID == 1 followed by a VP8/VP9 frame whose Y plane is 8-bit alpha).
+    // FFmpeg's built-in vp8/vp9 decoders ignore that side data and Android/minimal FFmpeg builds omit libvpx.
+    // Pair the built-in software vp8/vp9 decoder with a single-threaded companion decoder for the alpha plane
+    // so desktop and Android decode transparent WebM identically without requiring libvpx; fall back to
+    // libvpx / libvpx-vp9 if the built-in software decoder is absent.
     const AVCodec *fallback_vcodec = vcodec;
     const AVDictionaryEntry *alpha_tag = av_dict_get(vs->metadata, "alpha_mode", nullptr, 0);
     bool has_alpha = alpha_tag && alpha_tag->value && strcmp(alpha_tag->value, "1") == 0;
-    if (has_alpha) {
-      const char *vpx_name = nullptr;
-      if (vs->codecpar->codec_id == AV_CODEC_ID_VP9) vpx_name = "libvpx-vp9";
-      else if (vs->codecpar->codec_id == AV_CODEC_ID_VP8) vpx_name = "libvpx";
-      if (vpx_name) {
+    bool is_vpx_alpha = has_alpha &&
+                        (vs->codecpar->codec_id == AV_CODEC_ID_VP9 || vs->codecpar->codec_id == AV_CODEC_ID_VP8);
+    bool want_companion_alpha = false;
+    const AVCodec *alpha_codec = nullptr;
+    if (is_vpx_alpha) {
+      const char *sw_name = vs->codecpar->codec_id == AV_CODEC_ID_VP9 ? "vp9" : "vp8";
+      const char *vpx_name = vs->codecpar->codec_id == AV_CODEC_ID_VP9 ? "libvpx-vp9" : "libvpx";
+      const AVCodec *sw = avcodec_find_decoder_by_name(sw_name);
+      if (sw) {
+        vcodec = sw;
+        alpha_codec = sw;
+        want_companion_alpha = true;
+      } else {
         const AVCodec *vpx = avcodec_find_decoder_by_name(vpx_name);
         if (vpx) vcodec = vpx;
       }
     }
     // Frame threads only for real video: they cost latency and memory that a GIF never earns back.
+    // Companion alpha decoding stays single-threaded so color and alpha frames stay strictly 1:1.
     int threads = 1;
-    if (s->flags & CCORD_AV_MEDIA) {
+    if ((s->flags & CCORD_AV_MEDIA) && !want_companion_alpha) {
       threads = av_cpu_count() / 2;
       if (threads < 1) threads = 1;
       if (threads > 4) threads = 4;
@@ -425,7 +467,21 @@ static ccord_status avs_setup(ccord_av_stream *s, ccord_error *err)
     s->vdec = avs_open_codec(vcodec, vs, threads);
 #endif
     if (!s->vdec && vcodec != fallback_vcodec) {
+      want_companion_alpha = false;
+      alpha_codec = nullptr;
       s->vdec = avs_open_codec(fallback_vcodec, vs, threads);
+    }
+    if (s->vdec && want_companion_alpha && alpha_codec) {
+      s->vdec_alpha = avs_open_alpha_codec(alpha_codec, vs);
+      if (s->vdec_alpha) {
+        s->alpha_frame = av_frame_alloc();
+        s->alpha_pkt = av_packet_alloc();
+        if (!s->alpha_frame || !s->alpha_pkt) {
+          avcodec_free_context(&s->vdec_alpha);
+          av_frame_free(&s->alpha_frame);
+          av_packet_free(&s->alpha_pkt);
+        }
+      }
     }
     if (s->vdec) {
       s->vsi = vsi;
@@ -735,6 +791,7 @@ void ccord_av_stream_close(ccord_av_stream *s)
   ccord_free(s->vq.v);
   ccord_free(s->aq.v);
   ccord_free(s->scratch);
+  ccord_free(s->alpha_scaled);
   ccord_free(s->cur);
   ccord_free(s->next);
   ccord_free(s->pcm);
@@ -790,14 +847,67 @@ static AVPacket *avs_take(ccord_av_stream *s, avs_pktq *q, bool *eof)
   return p;
 }
 
+static void avs_send_alpha_pkt(ccord_av_stream *s, const AVPacket *p)
+{
+  if (!s->vdec_alpha || !s->alpha_pkt || !s->alpha_frame) return;
+  if (!p) {
+    (void)avcodec_send_packet(s->vdec_alpha, nullptr);
+    return;
+  }
+  size_t sd_size = 0;
+  const uint8_t *sd = av_packet_get_side_data(p, AV_PKT_DATA_MATROSKA_BLOCKADDITIONAL, &sd_size);
+  if (!sd || sd_size <= 8u || avs_rd_be64(sd) != 1u) return;
+  size_t alpha_len = sd_size - 8u;
+  if (alpha_len > (size_t)INT_MAX - (size_t)AV_INPUT_BUFFER_PADDING_SIZE) return;
+  av_packet_unref(s->alpha_pkt);
+  if (av_new_packet(s->alpha_pkt, (int)alpha_len) < 0) return;
+  memcpy(s->alpha_pkt->data, sd + 8u, alpha_len);
+  s->alpha_pkt->pts = p->pts;
+  s->alpha_pkt->dts = p->dts;
+  s->alpha_pkt->duration = p->duration;
+  s->alpha_pkt->flags = p->flags;
+  if (avcodec_send_packet(s->vdec_alpha, s->alpha_pkt) == AVERROR(EAGAIN)) {
+    while (avcodec_receive_frame(s->vdec_alpha, s->alpha_frame) == 0) av_frame_unref(s->alpha_frame);
+    (void)avcodec_send_packet(s->vdec_alpha, s->alpha_pkt);
+  }
+  av_packet_unref(s->alpha_pkt);
+}
+
+static void avs_recv_alpha_frame(ccord_av_stream *s)
+{
+  s->have_alpha_frame = false;
+  if (!s->vdec_alpha || !s->alpha_frame) return;
+  av_frame_unref(s->alpha_frame);
+  while (avcodec_receive_frame(s->vdec_alpha, s->alpha_frame) == 0) {
+    if (s->frame->pts != AV_NOPTS_VALUE && s->alpha_frame->pts != AV_NOPTS_VALUE &&
+        s->alpha_frame->pts < s->frame->pts) {
+      av_frame_unref(s->alpha_frame);
+      continue;
+    }
+    s->have_alpha_frame = true;
+    break;
+  }
+}
+
+static void avs_unref_video_frames(ccord_av_stream *s)
+{
+  av_frame_unref(s->frame);
+  if (s->alpha_frame) av_frame_unref(s->alpha_frame);
+  s->have_alpha_frame = false;
+}
+
 // Receives the next frame of one decoder into s->frame. False at end of stream (sets *done), or, in source mode,
 // when the demux thread has not produced the packets yet (sets s->starved; *done and the drain stay untouched).
 static bool avs_decode(ccord_av_stream *s, AVCodecContext *dec, avs_pktq *q, bool *flushed, bool *done)
 {
   if (!dec || *done) return false;
+  const bool with_alpha = (dec == s->vdec && s->vdec_alpha != nullptr);
   for (;;) {
     int r = avcodec_receive_frame(dec, s->frame);
-    if (r == 0) return true;
+    if (r == 0) {
+      if (with_alpha) avs_recv_alpha_frame(s);
+      return true;
+    }
     if (r != AVERROR(EAGAIN)) {
       avs_finish(s, q, done);
       return false;
@@ -824,9 +934,11 @@ static bool avs_decode(ccord_av_stream *s, AVCodecContext *dec, avs_pktq *q, boo
       }
       *flushed = true;
       (void)avcodec_send_packet(dec, nullptr);
+      if (with_alpha) avs_send_alpha_pkt(s, nullptr);
       continue;
     }
     (void)avcodec_send_packet(dec, p);   // a corrupt packet is skipped; the decoder resyncs on the next keyframe
+    if (with_alpha) avs_send_alpha_pkt(s, p);
     av_packet_free(&p);
   }
 }
@@ -910,7 +1022,38 @@ static bool avs_convert(ccord_av_stream *s, uint8_t **dst)
   if (s->rot != 0 && !s->scratch) s->scratch = ccord_malloc(bytes + AVS_SWS_DST_PAD);
   if (!*dst || (s->rot != 0 && !s->scratch)) return false;
   uint8_t *target = s->rot != 0 ? s->scratch : *dst;
-  if ((enum AVPixelFormat)f->format == AV_PIX_FMT_RGBA && f->width == s->sw && f->height == s->sh &&
+  enum AVPixelFormat src_fmt = (enum AVPixelFormat)f->format;
+  const uint8_t *src_data[4] = {f->data[0], f->data[1], f->data[2], f->data[3]};
+  int src_linesize[4] = {f->linesize[0], f->linesize[1], f->linesize[2], f->linesize[3]};
+  bool attached_alpha = false;
+  bool post_apply_alpha = false;
+  const AVFrame *af = (s->have_alpha_frame && s->alpha_frame) ? s->alpha_frame : nullptr;
+  if (af && af->data[0] && af->width > 0 && af->height > 0 && af->linesize[0] >= af->width) {
+    const AVPixFmtDescriptor *adesc = av_pix_fmt_desc_get((enum AVPixelFormat)af->format);
+    bool alpha_u8_planar = adesc != nullptr && adesc->nb_components >= 1 &&
+                           adesc->comp[0].depth == 8 && adesc->comp[0].step == 1 && adesc->comp[0].offset == 0;
+    if (alpha_u8_planar && af->width == f->width && af->height == f->height) {
+      enum AVPixelFormat yuva_fmt = AV_PIX_FMT_NONE;
+      switch (src_fmt) {
+        case AV_PIX_FMT_YUV420P: yuva_fmt = AV_PIX_FMT_YUVA420P; break;
+        case AV_PIX_FMT_YUV422P: yuva_fmt = AV_PIX_FMT_YUVA422P; break;
+        case AV_PIX_FMT_YUV444P: yuva_fmt = AV_PIX_FMT_YUVA444P; break;
+        case AV_PIX_FMT_GBRP:    yuva_fmt = AV_PIX_FMT_GBRAP;    break;
+        default: break;
+      }
+      if (yuva_fmt != AV_PIX_FMT_NONE) {
+        src_fmt = yuva_fmt;
+        src_data[3] = af->data[0];
+        src_linesize[3] = af->linesize[0];
+        attached_alpha = true;
+      } else {
+        post_apply_alpha = true;
+      }
+    } else if (alpha_u8_planar) {
+      post_apply_alpha = true;
+    }
+  }
+  if (!attached_alpha && !post_apply_alpha && src_fmt == AV_PIX_FMT_RGBA && f->width == s->sw && f->height == s->sh &&
       f->data[0] && f->linesize[0] >= s->sw * 4) {
     const int row_bytes = s->sw * 4;
     if (f->linesize[0] == row_bytes) {
@@ -922,19 +1065,49 @@ static bool avs_convert(ccord_av_stream *s, uint8_t **dst)
     }
   } else {
     int sws_flags = (s->sw < f->width || s->sh < f->height) ? SWS_AREA : SWS_BILINEAR;
-    s->sws = sws_getCachedContext(s->sws, f->width, f->height, (enum AVPixelFormat)f->format, s->sw, s->sh,
+    s->sws = sws_getCachedContext(s->sws, f->width, f->height, src_fmt, s->sw, s->sh,
                                   AV_PIX_FMT_RGBA, sws_flags, nullptr, nullptr, nullptr);
     if (!s->sws) return false;
     uint8_t *planes[4] = {target, nullptr, nullptr, nullptr};
     int strides[4] = {s->sw * 4, 0, 0, 0};
-    if (sws_scale(s->sws, (const uint8_t *const *)f->data, f->linesize, 0, f->height, planes, strides) != s->sh) {
+    if (sws_scale(s->sws, src_data, src_linesize, 0, f->height, planes, strides) != s->sh) {
       return false;
     }
   }
+  if (post_apply_alpha && af) {
+    const uint8_t *aplane = af->data[0];
+    int astride = af->linesize[0];
+    if (af->width != s->sw || af->height != s->sh) {
+      size_t abytes = (size_t)s->sw * (size_t)s->sh;
+      if (!s->alpha_scaled) s->alpha_scaled = ccord_malloc(abytes + AVS_SWS_DST_PAD);
+      if (!s->alpha_scaled) return false;
+      int aflags = (s->sw < af->width || s->sh < af->height) ? SWS_AREA : SWS_BILINEAR;
+      s->sws_alpha = sws_getCachedContext(s->sws_alpha, af->width, af->height, AV_PIX_FMT_GRAY8, s->sw, s->sh,
+                                          AV_PIX_FMT_GRAY8, aflags, nullptr, nullptr, nullptr);
+      if (!s->sws_alpha) return false;
+      const uint8_t *asrc[4] = {af->data[0], nullptr, nullptr, nullptr};
+      int asrc_ls[4] = {af->linesize[0], 0, 0, 0};
+      uint8_t *adst[4] = {s->alpha_scaled, nullptr, nullptr, nullptr};
+      int adst_ls[4] = {s->sw, 0, 0, 0};
+      if (sws_scale(s->sws_alpha, asrc, asrc_ls, 0, af->height, adst, adst_ls) != s->sh) {
+        return false;
+      }
+      aplane = s->alpha_scaled;
+      astride = s->sw;
+    }
+    for (int y = 0; y < s->sh; y++) {
+      const uint8_t *arow = aplane + (size_t)y * (size_t)astride;
+      uint8_t *drow = target + (size_t)y * (size_t)s->sw * 4u;
+      for (int x = 0; x < s->sw; x++) {
+        drow[(size_t)x * 4u + 3u] = arow[x];
+      }
+    }
+  }
   if (s->rot != 0) avs_rotate(s->scratch, s->sw, s->sh, *dst, s->rot);
-  const AVPixFmtDescriptor *pdesc = av_pix_fmt_desc_get((enum AVPixelFormat)f->format);
-  s->last_frame_opaque = pdesc != nullptr && !(pdesc->flags & AV_PIX_FMT_FLAG_ALPHA) &&
-                         (enum AVPixelFormat)f->format != AV_PIX_FMT_PAL8;
+  const AVPixFmtDescriptor *pdesc = av_pix_fmt_desc_get(src_fmt);
+  s->last_frame_opaque = !attached_alpha && !post_apply_alpha &&
+                         pdesc != nullptr && !(pdesc->flags & AV_PIX_FMT_FLAG_ALPHA) &&
+                         src_fmt != AV_PIX_FMT_PAL8;
   return true;
 }
 
@@ -958,7 +1131,7 @@ bool av_stream_next_frame_ex(ccord_av_stream *s, bool want_premul, const uint8_t
   uint32_t pts = 0, dur = 0;
   avs_video_times(s, &pts, &dur);
   bool ok = avs_convert(s, &s->next);
-  av_frame_unref(s->frame);
+  avs_unref_video_frames(s);
   if (!ok) {
     avs_finish(s, &s->vq, &s->v_done);
     return false;
@@ -1212,7 +1385,7 @@ bool ccord_av_stream_sync(ccord_av_stream *s, uint32_t pos_ms, uint32_t budget_m
           s->next_pts = pts;
           s->next_dur = dur;
         }
-        av_frame_unref(s->frame);
+        avs_unref_video_frames(s);
         progressed = true;
       }
       if (s->have_next && (s->next_pts <= pos_ms || !s->have_cur)) {
@@ -1285,6 +1458,9 @@ void ccord_av_stream_seek(ccord_av_stream *s, uint32_t pos_ms)
     ccord_cond_broadcast(s->cv);
     ccord_mutex_unlock(s->mx);
     if (s->vdec) avcodec_flush_buffers(s->vdec);
+    if (s->vdec_alpha) avcodec_flush_buffers(s->vdec_alpha);
+    if (s->alpha_frame) av_frame_unref(s->alpha_frame);
+    s->have_alpha_frame = false;
     if (s->adec) avcodec_flush_buffers(s->adec);
     s->v_flushed = s->a_flushed = false;
     s->v_done = s->vsi < 0;
@@ -1299,6 +1475,9 @@ void ccord_av_stream_seek(ccord_av_stream *s, uint32_t pos_ms)
   bool ok = avs_seek_demuxer(s, ts) >= 0;
   if (ok) {
     if (s->vdec) avcodec_flush_buffers(s->vdec);
+    if (s->vdec_alpha) avcodec_flush_buffers(s->vdec_alpha);
+    if (s->alpha_frame) av_frame_unref(s->alpha_frame);
+    s->have_alpha_frame = false;
     if (s->adec) avcodec_flush_buffers(s->adec);
     pktq_clear(&s->vq);
     pktq_clear(&s->aq);
@@ -1347,6 +1526,7 @@ size_t av_stream_mem_bytes(const ccord_av_stream *s)
   if (s->cur) total += fbytes;
   if (s->next) total += fbytes;
   if (s->scratch) total += fbytes;
+  if (s->alpha_scaled && s->sw > 0 && s->sh > 0) total += (size_t)s->sw * (size_t)s->sh;
   total += s->pcm_cap * 2u * sizeof(int16_t);
   total += s->swr_tmp_cap * 2u * sizeof(int16_t);
   if (s->src_mode && s->mx) {
