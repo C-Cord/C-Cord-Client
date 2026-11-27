@@ -895,6 +895,16 @@ bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n
   ccord_app_notify_prefs prefs;
   notify_prefs_now(d, &prefs, now_unix_ms);
   if (!ccord_app_desktop_notify_eligible(n, &prefs, d->store, now_unix_ms)) {
+    // Even if local desktop popups are disabled on the relay PC, still emit Companion Wake
+    // when the desktop window is unfocused and the message is otherwise eligible.
+    if (d->wake_hook && !prefs.notify_desktop && !prefs.focused && d->platform &&
+        !ccord_platform_is_mobile(d->platform)) {
+      ccord_app_notify_prefs wp = prefs;
+      wp.notify_desktop = true;
+      if (ccord_app_desktop_notify_eligible(n, &wp, d->store, now_unix_ms)) {
+        d->wake_hook(d->wake_ud, false);
+      }
+    }
     d->dbg.notifications_gated++;
     d->dbg.notifications_suppressed++;
     return false;
@@ -916,6 +926,11 @@ bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n
     if (htitle[0]) snprintf(title, sizeof title, "%s", htitle);
     if (hbody[0]) snprintf(body, sizeof body, "%s", hbody);
   }
+  // Emit Companion Wake before local OS notification delivery so missing desktop notification daemons
+  // still wake the user's mobile companion.
+  if (d->wake_hook && !prefs.focused && d->platform && !ccord_platform_is_mobile(d->platform)) {
+    d->wake_hook(d->wake_ud, false);
+  }
   // The notification's default action (a click) opens this message, see ccord_app_desktop_notify_click.
   ccord_notify_target target = {.guild_id = n->guild_id, .channel_id = n->channel_id, .message_id = n->message_id};
   if (!d->platform || !ccord_platform_notify_message(d->platform, title, body, &target)) {
@@ -924,9 +939,6 @@ bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n
   }
   desktop_track_notification(d, n->channel_id, n->message_id);
   d->dbg.notifications_delivered++;
-  if (d->wake_hook && !prefs.focused && d->platform && !ccord_platform_is_mobile(d->platform)) {
-    d->wake_hook(d->wake_ud, false);
-  }
   // On mobile while backgrounded, the OS notification channel plays the native alert sound/vibration
   // and respects system DND/vibrate mode without opening an SDL audio playback stream.
   bool os_handles_sound = d->platform && ccord_platform_is_mobile(d->platform) &&

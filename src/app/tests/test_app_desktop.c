@@ -1290,6 +1290,62 @@ static void test_ipc(void)
   rmdir(dir);
 }
 
+static int g_wake_hook_calls;
+static bool g_wake_hook_last_call;
+static void test_wake_hook_cb(void *ud, bool is_call)
+{
+  (void)ud;
+  g_wake_hook_calls++;
+  g_wake_hook_last_call = is_call;
+}
+
+static void test_notify_wake_hook(void)
+{
+  const ccord_channel *ch = ccord_store_channel_at(F.store, HQ, 1);
+  CT_CHECK(ch != nullptr);
+  if (!ch) return;
+
+  g_wake_hook_calls = 0;
+  g_wake_hook_last_call = true;
+  ccord_app_desktop_set_wake_hook(F.desktop, test_wake_hook_cb, nullptr);
+
+  ccord_notification n = {.guild_id = HQ, .channel_id = ch->id, .message_id = 990001u,
+                          .author_id = ADA, .is_dm = false, .is_mention = true};
+
+  // Unfocused with desktop notifications enabled -> delivers notification and fires wake hook.
+  ccord_platform_set_window_focused(F.platform, false);
+  CT_CHECK(ccord_app_desktop_deliver(F.desktop, &n, 1793534400000LL));
+  CT_CHECK(g_wake_hook_calls == 1 && !g_wake_hook_last_call);
+
+  // Focused -> suppressed, wake hook must NOT fire.
+  ccord_platform_set_window_focused(F.platform, true);
+  CT_CHECK(!ccord_app_desktop_deliver(F.desktop, &n, 1793534400000LL));
+  CT_CHECK(g_wake_hook_calls == 1);
+
+  // Unfocused with local Desktop Notifications toggled OFF -> local popup suppressed,
+  // but Companion Wake MUST still fire so the mobile companion wakes up!
+  ccord_platform_set_window_focused(F.platform, false);
+  CT_CHECK(write_text("app_desktop_data/settings.ini", "[ui]\nnotify_desktop = 0\n"));
+  CT_CHECK(recreate_ui());
+  CT_CHECK(!sdbg().notify_desktop);
+
+  CT_CHECK(!ccord_app_desktop_deliver(F.desktop, &n, 1793534400000LL));
+  CT_CHECK(g_wake_hook_calls == 2 && !g_wake_hook_last_call);
+
+  // Self-authored message must still NOT fire wake hook even with desktop notifications off.
+  ccord_notification self_n = n;
+  self_n.author_id = ccord_store_self_id(F.store);
+  CT_CHECK(!ccord_app_desktop_deliver(F.desktop, &self_n, 1793534400000LL));
+  CT_CHECK(g_wake_hook_calls == 2);
+
+  // Restore desktop notifications ON and clear wake hook.
+  remove("app_desktop_data/settings.ini");
+  CT_CHECK(recreate_ui());
+  CT_CHECK(sdbg().notify_desktop);
+  ccord_app_desktop_set_wake_hook(F.desktop, nullptr, nullptr);
+  (void)ccord_platform_close_channel_notifications(F.platform, ch->id, 0);
+}
+
 static void test_zoom_event_scaling(void)
 {
   const float zooms[] = {1.5f, 0.8f, 1.0f, 0.0f, -1.0f};
@@ -1415,6 +1471,7 @@ int main(int argc, char **argv)
   test_notify_delivery();
   test_notify_auto_clear_on_focus_and_read();
   test_notify_sound_hook();
+  test_notify_wake_hook();
   test_hotkeys();
   test_voice_state_sync();
   test_quick_css_desktop();
