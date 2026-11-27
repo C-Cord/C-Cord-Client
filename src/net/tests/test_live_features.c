@@ -1643,6 +1643,90 @@ static void test_ready_supplemental_and_passive_voice_states_json(void)
 }
 
 
+static void test_live_media_cache_rejects_poisoned_stubs(void)
+{
+  ccord_error err = {0};
+  char cache_dir[512];
+  CT_CHECK(make_temp(cache_dir, sizeof cache_dir));
+  const char *prev_xdg = getenv("XDG_CACHE_HOME");
+  char saved_xdg[512] = "";
+  bool had_xdg = prev_xdg != nullptr;
+  if (had_xdg) snprintf(saved_xdg, sizeof saved_xdg, "%s", prev_xdg);
+  (void)setenv("XDG_CACHE_HOME", cache_dir, 1);
+
+  ccord_live_config cfg = {
+    .token = "REDACTED_TEST_TOKEN",
+    .disable_gateway = true,
+    .request_timeout_ms = 200,
+  };
+  ccord_transport *t = ccord_live_transport_create(&cfg, &err);
+  CT_CHECK(t != nullptr);
+  if (t) {
+    ccord_net_event ev;
+    CT_CHECK(ccord_transport_connect(t, &err) == CCORD_OK);
+    CT_CHECK(poll_live_for(t, CCORD_NET_STATE, &ev, 1000));
+
+    // 1. Valid Lottie JSON cached for a .json sticker URL is served synchronously from disk cache.
+    const char *good_url = "https://poison-test.invalid/stickers/749054660769218631.json";
+    char good_path[4096];
+    CT_CHECK(ccord_media_cache_path(good_url, good_path, sizeof good_path, &err) == CCORD_OK);
+    char mdir[4096];
+    snprintf(mdir, sizeof mdir, "%s", good_path);
+    char *sl = strrchr(mdir, '/');
+    if (sl) {
+      *sl = '\0';
+      CT_CHECK(ccord_mkdir_p(mdir, 0700, &err) == CCORD_OK);
+    }
+    const char good_json[] = "{\"fr\":60,\"ip\":0,\"op\":120,\"w\":320,\"h\":320,\"layers\":[]}";
+    CT_CHECK(ccord_file_write_atomic(good_path, good_json, sizeof good_json - 1u, 0600, false, &err) == CCORD_OK);
+    CT_CHECK(ccord_transport_fetch_media_user(t, good_url, &err) == CCORD_OK);
+    CT_CHECK(ccord_transport_poll(t, &ev) && ev.type == CCORD_NET_MEDIA_LOADED && ev.status == CCORD_OK);
+    CT_CHECK(ev.media_len == sizeof good_json - 1u && memcmp(ev.media_data, good_json, ev.media_len) == 0);
+    CT_CHECK(ccord_path_exists(good_path));
+    (void)ccord_file_unlink(good_path);
+
+    // 2. Poisoned 67-byte mock 1x1 PNG stub (under both .json and .png URLs) is rejected and unlinked.
+    static const uint8_t k_mock_png_1x1[67] = {
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+      0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x60, 0x00, 0x00, 0x00,
+      0x02, 0x00, 0x01, 0xE5, 0x27, 0xDE, 0xFC, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+      0x42, 0x60, 0x82
+    };
+    const char *bad_urls[2] = {
+      "https://poison-test.invalid/stickers/wave.json",
+      "https://poison-test.invalid/avatars/1001/a.png",
+    };
+    for (size_t i = 0; i < 2u; i++) {
+      char cpath[4096];
+      CT_CHECK(ccord_media_cache_path(bad_urls[i], cpath, sizeof cpath, &err) == CCORD_OK);
+      CT_CHECK(ccord_file_write_atomic(cpath, k_mock_png_1x1, sizeof k_mock_png_1x1, 0600, false, &err) == CCORD_OK);
+      CT_CHECK(ccord_transport_fetch_media_user(t, bad_urls[i], &err) == CCORD_OK);
+      CT_CHECK(!ccord_path_exists(cpath));
+    }
+
+    // 3. Arbitrary non-JSON bytes cached under a .json sticker URL are also rejected and unlinked.
+    const char *bad_json_url = "https://poison-test.invalid/stickers/notjson.json";
+    char bad_json_path[4096];
+    CT_CHECK(ccord_media_cache_path(bad_json_url, bad_json_path, sizeof bad_json_path, &err) == CCORD_OK);
+    const char html_err[] = "<html>not json</html>";
+    CT_CHECK(ccord_file_write_atomic(bad_json_path, html_err, sizeof html_err - 1u, 0600, false, &err) == CCORD_OK);
+    CT_CHECK(ccord_transport_fetch_media_user(t, bad_json_url, &err) == CCORD_OK);
+    CT_CHECK(!ccord_path_exists(bad_json_path));
+
+    ccord_transport_destroy(t);
+  }
+
+  char sub[640];
+  snprintf(sub, sizeof sub, "%s/ccord/media", cache_dir);
+  (void)rmdir(sub);
+  snprintf(sub, sizeof sub, "%s/ccord", cache_dir);
+  (void)rmdir(sub);
+  (void)rmdir(cache_dir);
+  if (had_xdg) (void)setenv("XDG_CACHE_HOME", saved_xdg, 1);
+  else (void)unsetenv("XDG_CACHE_HOME");
+}
+
 int main(void)
 {
   test_interaction_subcommands_and_context_menus();
@@ -1655,5 +1739,6 @@ int main(void)
   test_guild_load_role_gated_and_self_roles();
   test_guild_profile_and_primary_guild_clan_json();
   test_ready_supplemental_and_passive_voice_states_json();
+  test_live_media_cache_rejects_poisoned_stubs();
   return CT_RESULT("test_live_features");
 }

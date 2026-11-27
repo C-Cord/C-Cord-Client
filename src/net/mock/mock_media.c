@@ -245,13 +245,38 @@ static size_t build_mock_wav(uint8_t *buf, size_t cap)
   return 44u + data_bytes;
 }
 
+// Mock transport must never write synthetic stubs into the live media cache ($XDG_CACHE_HOME/ccord/media/),
+// because real CDN URLs requested during tests or --mock runs (such as Discord's built-in Wumpus Wave
+// sticker) would permanently poison the live cache on disk.
+static ccord_status mock_media_cache_path(const char *url, char *out_path, size_t cap, ccord_error *err)
+{
+  char live_path[4096];
+  ccord_status st = ccord_media_cache_path(url, live_path, sizeof live_path, err);
+  if (st != CCORD_OK) return st;
+  const char *slash = strrchr(live_path, '/');
+  if (!slash || (size_t)(slash - live_path) < 6u || memcmp(slash - 6, "/media", 6) != 0) {
+    return ccord_error_set(err, CCORD_ERR_INTERNAL, "mock: unexpected media cache layout");
+  }
+  size_t prefix_len = (size_t)(slash - 6 - live_path);
+  static const char k_mock_seg[] = "/mock-media";
+  size_t mock_seg_len = sizeof k_mock_seg - 1u;
+  size_t tail_len = strlen(slash);
+  if (prefix_len + mock_seg_len + tail_len + 1u > cap) {
+    return ccord_error_set(err, CCORD_ERR_RANGE, "mock: cache path buffer too small");
+  }
+  memcpy(out_path, live_path, prefix_len);
+  memcpy(out_path + prefix_len, k_mock_seg, mock_seg_len);
+  memcpy(out_path + prefix_len + mock_seg_len, slash, tail_len + 1u);
+  return CCORD_OK;
+}
+
 ccord_status mock_fetch_media(ccord_transport *t, const char *url, ccord_error *err)
 {
   mock *m = (mock *)t;
   if (!m->connected) return ccord_error_set(err, CCORD_ERR_INVALID, "mock: not connected");
   if (!url || url[0] == '\0') return ccord_error_set(err, CCORD_ERR_INVALID, "mock: empty media url");
   char cache_path[4096];
-  ccord_status st = ccord_media_cache_path(url, cache_path, sizeof cache_path, err);
+  ccord_status st = mock_media_cache_path(url, cache_path, sizeof cache_path, err);
   if (st != CCORD_OK) return st;
 
   if (m->fail_media[0] && strstr(url, m->fail_media)) {

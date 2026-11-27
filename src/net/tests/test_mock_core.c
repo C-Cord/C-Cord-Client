@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only WITH C-Cord-Extension-Exception
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
+#define _POSIX_C_SOURCE 200809L
+#include <stdlib.h>
+#include <unistd.h>
+
+#include <ccord/core/atomic_file.h>
+
 #include "mock_transport_harness.h"
 
 static void test_mock_range_files(void)
@@ -1078,6 +1084,56 @@ static void test_upload_media_search_dm_and_voice_pcm(void)
   CT_CHECK(ccord_transport_fetch_media(t, "https://cdn.discordapp.com/avatars/1001/a0.png", &err) == CCORD_OK);
   CT_CHECK(poll_for(t, CCORD_NET_MEDIA_LOADED, &ev));
   CT_CHECK(ev.media_url != nullptr && ev.media_data != nullptr && ev.media_len == 67);
+  CT_CHECK(ev.media_path != nullptr && strstr(ev.media_path, "/mock-media/") != nullptr);
+
+  // Mock fetches must write to mock-media/ and never overwrite a live file at ccord_media_cache_path().
+  {
+    const char *base = getenv("TMPDIR");
+    if (!base || !base[0]) base = "/tmp";
+    char xdg_dir[512];
+    int dn = snprintf(xdg_dir, sizeof xdg_dir, "%s/ccord-mock-cache-XXXXXX", base);
+    CT_CHECK(dn > 0 && (size_t)dn < sizeof xdg_dir && mkdtemp(xdg_dir) != nullptr);
+    const char *prev_xdg = getenv("XDG_CACHE_HOME");
+    char saved_xdg[512] = "";
+    bool had_xdg = prev_xdg != nullptr;
+    if (had_xdg) snprintf(saved_xdg, sizeof saved_xdg, "%s", prev_xdg);
+    (void)setenv("XDG_CACHE_HOME", xdg_dir, 1);
+
+    const char *wave_url = "https://cdn.discordapp.com/stickers/749054660769218631.json";
+    char live_path[4096];
+    CT_CHECK(ccord_media_cache_path(wave_url, live_path, sizeof live_path, &err) == CCORD_OK);
+    char live_dir[4096];
+    snprintf(live_dir, sizeof live_dir, "%s", live_path);
+    char *slash = strrchr(live_dir, '/');
+    if (slash) {
+      *slash = '\0';
+      CT_CHECK(ccord_mkdir_p(live_dir, 0700, &err) == CCORD_OK);
+    }
+    const char sentinel[] = "{\"fr\":60,\"ip\":0,\"op\":120,\"w\":320,\"h\":320,\"layers\":[]}";
+    CT_CHECK(ccord_file_write_atomic(live_path, sentinel, sizeof sentinel - 1u, 0600, false, &err) == CCORD_OK);
+
+    CT_CHECK(ccord_transport_fetch_media(t, wave_url, &err) == CCORD_OK);
+    CT_CHECK(poll_for(t, CCORD_NET_MEDIA_LOADED, &ev));
+    CT_CHECK(ev.media_path != nullptr && strstr(ev.media_path, "/mock-media/") != nullptr &&
+             strcmp(ev.media_path, live_path) != 0);
+    size_t rlen = 0;
+    char *got = ccord_file_read_max(live_path, 4096, &rlen, &err);
+    CT_CHECK(got != nullptr && rlen == sizeof sentinel - 1u && memcmp(got, sentinel, rlen) == 0);
+    ccord_free(got);
+
+    if (ev.media_path && ev.media_path[0]) (void)ccord_file_unlink(ev.media_path);
+    (void)ccord_file_unlink(live_path);
+    char sub[640];
+    snprintf(sub, sizeof sub, "%s/ccord/mock-media", xdg_dir);
+    (void)rmdir(sub);
+    snprintf(sub, sizeof sub, "%s/ccord/media", xdg_dir);
+    (void)rmdir(sub);
+    snprintf(sub, sizeof sub, "%s/ccord", xdg_dir);
+    (void)rmdir(sub);
+    (void)rmdir(xdg_dir);
+    if (had_xdg) (void)setenv("XDG_CACHE_HOME", saved_xdg, 1);
+    else (void)unsetenv("XDG_CACHE_HOME");
+  }
 
   CT_CHECK(ccord_transport_search_messages(t, 2001, 3111, "attached", 8, &err) == CCORD_OK);
   CT_CHECK(poll_for(t, CCORD_NET_SEARCH_RESULTS, &ev));
