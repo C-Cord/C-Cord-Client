@@ -380,6 +380,7 @@ ccord_platform *ccord_platform_create(const ccord_platform_config *cfg, ccord_er
   p->wake_sdl_event = SDL_RegisterEvents(1);
   atomic_init(&p->wake_sdl_ready, p->wake_sdl_event != 0);
   atomic_init(&p->sdl_wake_pending, false);
+  atomic_init(&p->ext_wake_pending, false);
   p->main_thread_id = SDL_GetCurrentThreadID();
   atomic_init(&p->wake_wr_fd, -1);
   atomic_init(&p->suppress_main_wake, false);
@@ -1603,6 +1604,7 @@ bool ccord_platform_pop_open_url(ccord_platform *p, char *out, size_t cap)
 void ccord_platform_wake(ccord_platform *p)
 {
   if (!p) return;
+  atomic_store_explicit(&p->ext_wake_pending, true, memory_order_release);
   platform_wake(p);
   platform_wake_sdl(p);
 }

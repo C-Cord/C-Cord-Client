@@ -91,6 +91,7 @@ struct ccord_platform {
   Uint32 wake_sdl_event;          // SDL_RegisterEvents(1) internal wake event for SDL_WaitEventTimeout()
   atomic_bool wake_sdl_ready;     // true while wake_sdl_event may safely be pushed via SDL_PushEvent
   atomic_bool sdl_wake_pending;   // coalesces bursts of async wake_sdl_event pushes from D-Bus / worker threads
+  atomic_bool ext_wake_pending;   // set by ccord_platform_wake() so wait_idle() never sleeps past an external wake
   bool non_input_activity;        // set when tray/notify/shortcut/link callbacks fired during a pump
 #if !defined(_WIN32)
   SDL_Mutex *fdw_mtx;             // guards reusable on-demand fd-watcher thread for SDL_WaitEventTimeout()

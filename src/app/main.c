@@ -175,6 +175,9 @@ void app_pump(app *a)
       }
       bool was_suspended = a->session_suspended;
       if (a->session && a->session_suspended) {
+        ccord_error lerr;
+        // Receiving a live wake frame proves network connectivity; clear any stale offline flag before resuming.
+        (void)ccord_session_link_event(a->session, CCORD_LINK_ONLINE, &lerr);
         a->session_suspended = false;
         ccord_session_set_suspended(a->session, false);
       }

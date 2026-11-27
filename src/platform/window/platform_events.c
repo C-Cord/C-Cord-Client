@@ -561,6 +561,7 @@ bool ccord_platform_next_event(ccord_platform *p, ccord_input_event *out, uint32
       return pop_pending_focus(p, out);
     }
     if (translate(p, &e, out)) return true;   // unknown or malformed events are dropped
+    if (timeout_ms > 0 && p->wake_sdl_event != 0 && e.type == p->wake_sdl_event) return false;
     // Lifecycle & render-reset events are captured by platform_lifecycle_watch and return false
     // from translate(); wake immediately instead of sleeping out the rest of timeout_ms.
     if (pop_lifecycle_event(p, out)) return true;
@@ -763,8 +764,8 @@ bool ccord_platform_wait_idle(ccord_platform *p, ccord_input_event *out, const c
   bool use_poll = p->headless && atomic_load(&p->in_background);
 #endif
   if (use_poll && p->wake_pipe[0] >= 0) {
-    // Drain stale wake bytes BEFORE checking queued events and lifecycle state so any signal posted
-    // concurrently after this point remains unread in wake_pipe[0] and unblocks poll() immediately.
+    // Drain stale wake bytes BEFORE checking queued events, lifecycle state, and external wakes
+    // so any signal posted concurrently after this point remains unread in wake_pipe[0] and unblocks poll().
     uint8_t drain[64];
     while (read(p->wake_pipe[0], drain, sizeof drain) > 0) {}
 
@@ -775,6 +776,7 @@ bool ccord_platform_wait_idle(ccord_platform *p, ccord_input_event *out, const c
     atomic_store_explicit(&p->suppress_main_wake, false, memory_order_relaxed);
     if (prep_ev) return true;
     if (p->non_input_activity) return false;
+    if (atomic_exchange_explicit(&p->ext_wake_pending, false, memory_order_acq_rel)) return false;
 
 #if defined(__ANDROID__)
     bool still_poll = atomic_load(&p->in_background) && !ccord_android_is_activity_active();
@@ -834,7 +836,6 @@ bool ccord_platform_wait_idle(ccord_platform *p, ccord_input_event *out, const c
   // sleep in SDL_WaitEvent/SDL_WaitEventTimeout for the exact deadline while the reusable fd-watcher
   // thread monitors extra_fds + netlink + Android wake_pipe + CLOCK_BOOTTIME timerfd and pushes an
   // internal SDL user event the microsecond any descriptor becomes readable.
-  atomic_store_explicit(&p->sdl_wake_pending, false, memory_order_release);
   p->non_input_activity = false;
 #if defined(__ANDROID__)
   bool watch_wake_pipe = !p->headless && p->wake_pipe[0] >= 0;
@@ -852,6 +853,10 @@ bool ccord_platform_wait_idle(ccord_platform *p, ccord_input_event *out, const c
 #endif
   if (prep_ev) return true;
   if (p->non_input_activity) return false;
+  // Re-arm sdl_wake_pending AFTER draining the SDL queue and BEFORE consuming ext_wake_pending so any
+  // concurrent ccord_platform_wake() either trips ext_wake_pending here or pushes a fresh wake_sdl_event.
+  atomic_store_explicit(&p->sdl_wake_pending, false, memory_order_release);
+  if (atomic_exchange_explicit(&p->ext_wake_pending, false, memory_order_acq_rel)) return false;
 
   int watch_fds[PLATFORM_FDW_MAX_FDS];
   size_t watch_count = 0;
@@ -943,6 +948,10 @@ bool ccord_platform_wait_idle(ccord_platform *p, ccord_input_event *out, const c
   return ccord_platform_next_event(p, out, 0);
 #else
   (void)extra_fds;
+  atomic_store_explicit(&p->sdl_wake_pending, false, memory_order_release);
+  if (atomic_exchange_explicit(&p->ext_wake_pending, false, memory_order_acq_rel)) {
+    return ccord_platform_next_event(p, out, 0);
+  }
   uint32_t sdl_timeout = (extra_fd_count > 0 && timeout_ms > 250u) ? 250u : timeout_ms;
   return ccord_platform_next_event(p, out, sdl_timeout);
 #endif

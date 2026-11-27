@@ -1850,6 +1850,22 @@ static void test_background_wait_idle_poll(void)
     CT_CHECK(elapsed >= 90u && elapsed < 1000u);
   }
 
+  // 1c. External ccord_platform_wake() called BEFORE entering wait_idle() must not be drained and lost.
+  {
+    ccord_platform_wake(p);
+    t0 = SDL_GetTicks();
+    got = ccord_platform_wait_idle(p, &ev, nullptr, 0, 3000);
+    elapsed = SDL_GetTicks() - t0;
+    CT_CHECK(!got);
+    CT_CHECK(elapsed < 250u);
+    // Subsequent idle sleep with no wake must still honor the requested timeout cleanly.
+    t0 = SDL_GetTicks();
+    got = ccord_platform_wait_idle(p, &ev, nullptr, 0, 120);
+    elapsed = SDL_GetTicks() - t0;
+    CT_CHECK(!got);
+    CT_CHECK(elapsed >= 90u && elapsed < 1000u);
+  }
+
   // 2. Foreground transition from another thread must wake wake_pipe immediately and deliver CCORD_IN_APP_FOREGROUND.
   uint32_t fg_delay = 30;
   ccord_thread *th2 = ccord_thread_create(wake_fg_thread, &fg_delay);
@@ -1906,6 +1922,19 @@ static void test_foreground_wait_idle_fdw(void)
   CT_CHECK(ccord_sock_recv(sv[0], &rb, 1, &wb) == 1 && rb == 0x5Au);
 
   // 2. Idle sleep with quiet extra_fd honors the requested timeout without stale-wake spinning.
+  t0 = SDL_GetTicks();
+  got = ccord_platform_wait_idle(p, &ev, &sv[0], 1, 120);
+  elapsed = SDL_GetTicks() - t0;
+  CT_CHECK(!got);
+  CT_CHECK(elapsed >= 90u && elapsed < 1000u);
+
+  // 2b. External ccord_platform_wake() called BEFORE entering foreground wait_idle() must not be lost.
+  ccord_platform_wake(p);
+  t0 = SDL_GetTicks();
+  got = ccord_platform_wait_idle(p, &ev, &sv[0], 1, 3000);
+  elapsed = SDL_GetTicks() - t0;
+  CT_CHECK(!got);
+  CT_CHECK(elapsed < 250u);
   t0 = SDL_GetTicks();
   got = ccord_platform_wait_idle(p, &ev, &sv[0], 1, 120);
   elapsed = SDL_GetTicks() - t0;
