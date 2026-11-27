@@ -1223,14 +1223,28 @@ static void test_account_scoped_cache_and_history_revalidate(void)
   ccord_free(ca);
   ccord_free(cb);
 
-  // Account A again (a warm start): the fresh cached page (1 message) is delivered first, and the network is still
-  // asked: the second event is the live answer (3 messages). No TTL read-through.
+  // Account A again (a warm start): the cached page (1 message) is delivered first with history_from_cache=true,
+  // and the network is still asked: the second event is the live answer (3 messages) with history_from_cache=false.
   ta = hist_transport(srv.base, dir_a);
   CT_CHECK(ta != nullptr);
   if (ta) {
     CT_CHECK(ccord_transport_request_history(ta, 2222, 50, &err) == CCORD_OK);
-    CT_CHECK(next_history_count(ta, 3000) == 1);
-    CT_CHECK(next_history_count(ta, 3000) == 3);
+    ccord_net_event cev = {0}, lev = {0};
+    CT_CHECK(poll_live_for(ta, CCORD_NET_HISTORY, &cev, 3000) && cev.message_count == 1 && cev.history_from_cache);
+    CT_CHECK(poll_live_for(ta, CCORD_NET_HISTORY, &lev, 3000) && lev.message_count == 3 && !lev.history_from_cache);
+    ccord_transport_destroy(ta);
+  }
+  // Account A while backgrounded (e.g. mobile Companion Wake catch-up): stale disk cache must NOT be pushed ahead
+  // of the live network answer, so only the live answer (4 messages, history_from_cache=false) arrives.
+  ta = hist_transport(srv.base, dir_a);
+  CT_CHECK(ta != nullptr);
+  if (ta) {
+    ccord_transport_set_background(ta, true);
+    CT_CHECK(ccord_transport_request_history(ta, 2222, 50, &err) == CCORD_OK);
+    ccord_net_event bg_ev = {0};
+    CT_CHECK(poll_live_for(ta, CCORD_NET_HISTORY, &bg_ev, 3000) && bg_ev.message_count == 4 && !bg_ev.history_from_cache);
+    ccord_net_event bg_extra = {0};
+    CT_CHECK(!poll_live_for(ta, CCORD_NET_HISTORY, &bg_extra, 150));
     ccord_transport_destroy(ta);
   }
   fd_hit hits[FD_MAX_HITS];
@@ -1239,7 +1253,7 @@ static void test_account_scoped_cache_and_history_revalidate(void)
   for (size_t i = 0; i < nhits; i++) {
     if (strcmp(hits[i].method, "GET") == 0 && strstr(hits[i].path, "/messages?limit=") != nullptr) gets++;
   }
-  CT_CHECK(gets == 3);  // A cold, B cold, A warm: the cache hit still went to the network
+  CT_CHECK(gets == 4);  // A cold, B cold, A warm foreground, A warm background: all hit the network
 
   // Warm history files are pruned to the 8 newest.
   char hdir[700], extra_file[800];
@@ -1258,7 +1272,7 @@ static void test_account_scoped_cache_and_history_revalidate(void)
   CT_CHECK(ta != nullptr);
   if (ta) {
     CT_CHECK(ccord_transport_request_history(ta, 2222, 50, &err) == CCORD_OK);
-    CT_CHECK(next_history_count(ta, 3000) == 3);   // stale page saved by the earlier run
+    CT_CHECK(next_history_count(ta, 3000) == 4);   // stale page saved by the earlier background run
     CT_CHECK(next_history_count(ta, 3000) == 1);   // live answer from the fresh server
     ccord_transport_destroy(ta);
   }

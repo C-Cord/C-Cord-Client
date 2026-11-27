@@ -26,14 +26,16 @@ ccord_status live_request_history(ccord_transport *t, ccord_id channel_id, uint3
     st = ccord_error_set(err, CCORD_ERR_RANGE, "live: path too long");
   } else {
     char cpath[4096] = {0};
-    if (live_api_cache_path(l, ccord_buf_cstr(&path), cpath, sizeof cpath)) {
+    if (live_api_cache_path(l, ccord_buf_cstr(&path), cpath, sizeof cpath) && !l->in_background) {
       // Stale-while-revalidate: deliver the cached page at once (no TTL), then always ask the network too.
+      // Skipped while backgrounded (no UI is rendering, and wake catch-up requires fresh server history).
       size_t clen = 0;
       char *cbody = live_api_cache_read(cpath, 0u, &clen);
       if (cbody) {
         ccord_live_event ev;
         ccord_error cerr;
         if (ccord_live_json_history(cbody, clen, channel_id, &ev, &cerr) == CCORD_OK) {
+          ev.ev.history_from_cache = true;
           (void)live_push(l, &ev);
         } else {
           ccord_live_event_free(&ev);

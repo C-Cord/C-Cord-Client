@@ -506,6 +506,7 @@ typedef struct ccord_net_event {
   size_t voice_state_count;              // VOICE_STATES / GUILD_UPSERT
   bool replace_voice_states;             // VOICE_STATES / GUILD_UPSERT: true = authoritative full list for guild_id
   const ccord_account_private *account_private; // ACCOUNT_PRIVATE: RAM-only self-account metadata
+  bool history_from_cache;               // HISTORY: stale-while-revalidate disk cache hit (live REST fetch still in flight)
 } ccord_net_event;                         // all pointers valid only until the next poll() on that transport
 
 typedef enum ccord_range_flags : uint32_t {

@@ -675,19 +675,21 @@ void sess_apply_event(ccord_session *s, const ccord_net_event *ev)
       }
       seed_channel_message_members(s, ev->channel_id, ev->guild_id, ev->messages, ev->message_count,
                                    ev->guild_members, ev->guild_member_count);
-      sess_clear_requested(s, ev->channel_id);
+      if (!ev->history_from_cache) {
+        sess_clear_requested(s, ev->channel_id);
+      }
       session_channel_hist *chist = sess_chan_hist_for(s, ev->channel_id);
       if (chist) {
-        chist->in_flight_before_id = CCORD_ID_NONE;
+        if (!ev->history_from_cache) chist->in_flight_before_id = CCORD_ID_NONE;
         chist->has_more = (ev->message_count >= CCORD_SESSION_HISTORY_LIMIT);
       }
       session_wake_catchup cu = {0};
-      bool had_catchup = sess_take_wake_catchup(s, ev->channel_id, &cu);
+      bool had_catchup = !ev->history_from_cache && sess_take_wake_catchup(s, ev->channel_id, &cu);
       if (ccord_store_set_history(s->store, ev->channel_id, ev->messages, ev->message_count, &err) != CCORD_OK) {
         CCORD_LOG_W("session: history rejected: %s", err.message);
         if (had_catchup) sess_wake_catchup_emit_fallback(s, &cu);
       } else {
-        if (s->retried_channel == ev->channel_id) {
+        if (!ev->history_from_cache && s->retried_channel == ev->channel_id) {
           s->retried_channel = CCORD_ID_NONE;
         }
         if (had_catchup) sess_wake_catchup_from_store(s, &cu, true);

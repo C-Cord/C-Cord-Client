@@ -1593,6 +1593,30 @@ static void test_session_background_ready_wake_catchup(void)
   CT_CHECK(ccord_session_pop_notification(s, &note) && note.channel_id == DM_ANN && note.message_id == 110);
   CT_CHECK(!ccord_session_pop_notification(s, &note));
 
+  // 4b. Stale disk-cached CCORD_NET_HISTORY (history_from_cache=true) arriving before the live REST response
+  //     must NOT consume wake_catchup; the subsequent live response must still emit the one-off notification.
+  chans1[5].last_message_id = 112;
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap1, .notify = rows, .notify_count = 3};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  ccord_message stale_hist[1] = {
+    {.id = 110, .channel_id = DM_ANN, .author_id = ANN, .timestamp_ms = 110, .content = "pre-sleep cached"},
+  };
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_HISTORY, .guild_id = CCORD_DM_GUILD_ID,
+                                    .channel_id = DM_ANN, .messages = stale_hist, .message_count = 1,
+                                    .history_from_cache = true};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+  ccord_message live_hist[2] = {
+    {.id = 110, .channel_id = DM_ANN, .author_id = ANN, .timestamp_ms = 110, .content = "pre-sleep cached"},
+    {.id = 112, .channel_id = DM_ANN, .author_id = ANN, .timestamp_ms = 112, .content = "one-off wake msg"},
+  };
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_HISTORY, .guild_id = CCORD_DM_GUILD_ID,
+                                    .channel_id = DM_ANN, .messages = live_hist, .message_count = 2};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_session_pop_notification(s, &note) && note.channel_id == DM_ANN && note.message_id == 112 &&
+           note.author_id == ANN && note.is_dm);
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+
   // 5. Returning to foreground cancels pending background wake catch-up.
   chans1[5].last_message_id = 115;
   f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap1, .notify = rows, .notify_count = 3};
