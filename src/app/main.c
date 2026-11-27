@@ -1057,9 +1057,9 @@ static void test_crash_handler(int sig)
                     : sig == SIGBUS  ? "SIGBUS" : "SIGNAL";
   static const char pfx[] = "\n[ccord crash] fatal ";
   static const char sfx[] = " caught; stack trace:\n";
-  (void)write(STDERR_FILENO, pfx, sizeof pfx - 1u);
-  (void)write(STDERR_FILENO, sname, strlen(sname));
-  (void)write(STDERR_FILENO, sfx, sizeof sfx - 1u);
+  if (write(STDERR_FILENO, pfx, sizeof pfx - 1u) < 0) {}
+  if (write(STDERR_FILENO, sname, strlen(sname)) < 0) {}
+  if (write(STDERR_FILENO, sfx, sizeof sfx - 1u) < 0) {}
   void *frames[48];
   int n = backtrace(frames, 48);
   backtrace_symbols_fd(frames, n, STDERR_FILENO);
