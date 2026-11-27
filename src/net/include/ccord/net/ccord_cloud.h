@@ -134,6 +134,13 @@ typedef struct ccord_cloud_cbs {
   // Optional thread-safe hook invoked immediately on wake_thread when a companion wake frame arrives
   // (e.g. acquire a timed Android PARTIAL_WAKE_LOCK before waking the main loop).
   void (*wake_rx)(void *ud, ccord_wake_kind kind);
+  // Optional thread-safe hook to arm/cancel a wakeup-capable OS alarm (Android AlarmManager
+  // ELAPSED_REALTIME_WAKEUP) so wake heartbeats and reconnect backoff fire across SoC suspend.
+  // delay_ms == 0 cancels any pending alarm.
+  void (*wake_alarm)(void *ud, uint32_t delay_ms);
+  // Optional thread-safe hook to acquire/release a short wake lock while the wake WebSocket is
+  // connecting, sending a heartbeat, or awaiting an ACK/hello frame. duration_ms == 0 releases it.
+  void (*wake_lock)(void *ud, uint32_t duration_ms);
 } ccord_cloud_cbs;
 
 typedef struct ccord_cloud_config {
@@ -186,7 +193,11 @@ void ccord_cloud_emit_wake(ccord_cloud *c, ccord_wake_kind kind);
 bool ccord_cloud_pop_wake(ccord_cloud *c, ccord_wake_kind *out_kind);
 bool ccord_cloud_has_pending_wake(const ccord_cloud *c);
 bool ccord_cloud_companion_online(const ccord_cloud *c);
+// True when signed in with Companion Wake enabled (so mobile keeps the foreground service alive).
+bool ccord_cloud_wake_active(const ccord_cloud *c);
 void ccord_cloud_wake_heartbeat_now(ccord_cloud *c);
+// Called by the platform when the scheduled wakeup-capable wake alarm fires.
+void ccord_cloud_on_wake_alarm(ccord_cloud *c);
 // Notifies the wake WebSocket of OS network / sleep transitions:
 // reconnect == true tears down & reopens immediately (e.g. Wi-Fi <-> Cellular);
 // reconnect == false probes the live socket with an immediate heartbeat + ACK timeout.

@@ -194,6 +194,9 @@ if(CCORD_BUILD_TESTS)
   endif()
   ccord_add_test(NAME test_video_resolve SOURCES tests/test_video_resolve.c LIBS ccord_net_services LABELS unit)
   ccord_add_test(NAME test_ccord_cloud SOURCES tests/test_ccord_cloud.c LIBS ccord_net_services LABELS unit)
+  if(CCORD_LIVE_ACCOUNT)
+    target_compile_definitions(test_ccord_cloud PRIVATE CCORD_CLOUD_TEST_LIVE=1)
+  endif()
 
   # Offline mock & session-voice tests
   ccord_add_test(NAME test_mock_core SOURCES tests/test_mock_core.c LIBS ccord_net_mock LABELS unit)

@@ -36,6 +36,10 @@ typedef SOCKET cloud_sock_t;
 #include <netinet/in.h>
 #include <poll.h>
 #include <sys/socket.h>
+#if defined(__linux__)
+#include <sys/timerfd.h>
+#include <time.h>
+#endif
 #include <unistd.h>
 typedef int cloud_sock_t;
 #define CLOUD_INVALID_SOCK (-1)
@@ -120,6 +124,7 @@ struct ccord_cloud {
   ccord_wake_kind tx_wake_pending;
   bool wake_hb_now;
   bool wake_reconnect_now;
+  bool wake_alarm_fired;
 
   // Background job queue
   cloud_job jobs[CLOUD_JOB_CAP];
@@ -131,6 +136,9 @@ struct ccord_cloud {
   bool threads_started;
 #if !CCORD_OS_WINDOWS
   int wake_pipe[2]; // self-pipe so wake_thread sleeps full heartbeat interval with zero 500ms polling
+#endif
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+  int wake_timer_fd; // CLOCK_BOOTTIME timerfd so reconnect backoff never freezes across suspend
 #endif
 };
 
@@ -1333,16 +1341,119 @@ static void cloud_worker_fn(void *arg)
 // ---------------------------------------------------------------- Companion Wake WebSocket loop
 
 #define CLOUD_WAKE_HB_DESKTOP_MS   (45ULL * 1000ULL)
-#define CLOUD_WAKE_HB_MOBILE_MS    (180ULL * 1000ULL)
+// 45 s stays safely inside carrier CGNAT and reverse-proxy idle timeouts while waking Android's SoC
+// for only ~150 ms per heartbeat via AlarmManager ELAPSED_REALTIME_WAKEUP.
+#define CLOUD_WAKE_HB_MOBILE_MS    (45ULL * 1000ULL)
 #define CLOUD_WAKE_ACK_TIMEOUT_MS  (15ULL * 1000ULL)
+#define CLOUD_WAKE_IO_LOCK_MS      20000u
 
 static uint64_t cloud_now_ms(void)
 {
-#if defined(__ANDROID__)
-  // CLOCK_BOOTTIME keeps advancing through Android screen-off SoC naps so heartbeats stay on schedule.
+  // CLOCK_BOOTTIME on Linux/Android keeps advancing across suspend so heartbeats & backoffs stay on schedule.
   return ccord_clock_boottime_ms();
+}
+
+static void cloud_set_wake_alarm(ccord_cloud *c, uint32_t delay_ms)
+{
+  if (c && c->cbs.wake_alarm) c->cbs.wake_alarm(c->cbs.ud, delay_ms);
+}
+
+static void cloud_set_wake_lock(ccord_cloud *c, uint32_t duration_ms)
+{
+  if (c && c->cbs.wake_lock) c->cbs.wake_lock(c->cbs.ud, duration_ms);
+}
+
+static void cloud_wake_wait_backoff(ccord_cloud *c, uint32_t wait_ms, bool *out_fast_reset)
+{
+  if (out_fast_reset) *out_fast_reset = false;
+  if (!c || wait_ms == 0u) return;
+
+  ccord_mutex_lock(c->mu);
+  c->wake_alarm_fired = false;
+  bool abort_now = c->stop || !c->state.authenticated || !c->state.wake_enabled || !c->device_token[0];
+  bool fast_now = c->wake_reconnect_now || c->wake_hb_now;
+  if (fast_now) {
+    c->wake_reconnect_now = false;
+    c->wake_hb_now = false;
+  }
+  ccord_mutex_unlock(c->mu);
+  if (fast_now && out_fast_reset) *out_fast_reset = true;
+  if (abort_now || fast_now) return;
+
+  // Release the short cloud wake lock while sleeping in backoff, and arm the OS wakeup alarm.
+  cloud_set_wake_lock(c, 0);
+  cloud_set_wake_alarm(c, wait_ms);
+
+#if !CCORD_OS_WINDOWS
+  uint64_t deadline = cloud_now_ms() + (uint64_t)wait_ms;
+  for (;;) {
+    cloud_drain_wake_pipe(c);
+    ccord_mutex_lock(c->mu);
+    bool stop_wait = c->stop || !c->state.authenticated || !c->state.wake_enabled || !c->device_token[0];
+    bool fast = c->wake_reconnect_now || c->wake_hb_now;
+    bool alarm = c->wake_alarm_fired;
+    if (fast) {
+      c->wake_reconnect_now = false;
+      c->wake_hb_now = false;
+    }
+    if (alarm) c->wake_alarm_fired = false;
+    ccord_mutex_unlock(c->mu);
+    if (fast && out_fast_reset) *out_fast_reset = true;
+    if (stop_wait || fast || alarm) break;
+
+    uint64_t now = cloud_now_ms();
+    if (now >= deadline) break;
+    uint64_t rem_ms = deadline - now;
+
+    struct pollfd pfds[2];
+    nfds_t nfds = 0;
+    int poll_timeout = rem_ms > 600000u ? 600000 : (int)rem_ms;
+    if (c->wake_pipe[0] >= 0) {
+      pfds[nfds++] = (struct pollfd){.fd = c->wake_pipe[0], .events = POLLIN};
+    }
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+    int tfd = c->wake_timer_fd;
+    nfds_t timer_idx = nfds;
+    if (tfd >= 0) {
+      struct itimerspec its = {0};
+      its.it_value.tv_sec = (time_t)(rem_ms / 1000u);
+      its.it_value.tv_nsec = (long)((rem_ms % 1000u) * 1000000u);
+      if (its.it_value.tv_sec == 0 && its.it_value.tv_nsec == 0) its.it_value.tv_nsec = 1;
+      if (timerfd_settime(tfd, 0, &its, nullptr) == 0) {
+        pfds[nfds++] = (struct pollfd){.fd = tfd, .events = POLLIN};
+        poll_timeout = -1;
+      }
+    }
+#endif
+    if (nfds == 0) {
+      ccord_sleep_ms(poll_timeout > 250 ? 250u : (uint32_t)poll_timeout);
+      continue;
+    }
+    int pr = poll(pfds, nfds, poll_timeout);
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+    if (tfd >= 0) {
+      if (pr > 0 && timer_idx < nfds && (pfds[timer_idx].revents & POLLIN) != 0) {
+        uint64_t exp = 0;
+        while (read(tfd, &exp, sizeof exp) > 0) {}
+      }
+      struct itimerspec disarm = {0};
+      (void)timerfd_settime(tfd, 0, &disarm, nullptr);
+    }
+#endif
+    if (pr < 0 && errno == EINTR) continue;
+  }
 #else
-  return ccord_clock_ms();
+  ccord_mutex_lock(c->mu);
+  if (!c->stop && c->state.authenticated && c->state.wake_enabled && c->device_token[0] &&
+      !c->wake_reconnect_now && !c->wake_hb_now && !c->wake_alarm_fired) {
+    (void)ccord_cond_wait_timeout(c->wake_cv, c->mu, wait_ms);
+  }
+  bool fast = c->wake_reconnect_now || c->wake_hb_now;
+  c->wake_reconnect_now = false;
+  c->wake_hb_now = false;
+  c->wake_alarm_fired = false;
+  ccord_mutex_unlock(c->mu);
+  if (fast && out_fast_reset) *out_fast_reset = true;
 #endif
 }
 
@@ -1385,7 +1496,10 @@ static bool handle_wake_frame(ccord_cloud *c, const char *msg, size_t len)
   ccord_mutex_lock(c->mu);
   if (strcmp(op, "hello") == 0 || strcmp(op, "ack") == 0) {
     valid_op = true;
-    bool online = ccord_json_bool(ccord_json_get(root, "companion_online"), false);
+    const ccord_json *co = ccord_json_get(root, "companion_online");
+    // Preserve current companion_online on "ack" when the server omits the field; "hello" defaults to false.
+    bool online = co ? ccord_json_bool(co, false)
+                     : (strcmp(op, "hello") == 0 ? false : c->state.companion_online);
     if (online != c->state.companion_online) {
       c->state.companion_online = online;
       c->state.revision++;
@@ -1430,9 +1544,24 @@ static void cloud_wake_fn(void *arg)
   for (;;) {
     char tok[160] = "";
     bool want_connect = false;
+    bool notify_disconnected = false;
     ccord_mutex_lock(c->mu);
+    if (!c->stop && (!c->state.authenticated || !c->state.wake_enabled || !c->device_token[0])) {
+      if (c->state.wake_connected || (c->is_mobile && c->state.companion_online)) {
+        c->state.wake_connected = false;
+        if (c->is_mobile) c->state.companion_online = false;
+        c->state.revision++;
+        notify_disconnected = true;
+      }
+      ccord_mutex_unlock(c->mu);
+      cloud_set_wake_alarm(c, 0);
+      cloud_set_wake_lock(c, 0);
+      if (notify_disconnected) cloud_wake_main(c);
+      ccord_mutex_lock(c->mu);
+    }
     while (!c->stop && (!c->state.authenticated || !c->state.wake_enabled || !c->device_token[0])) {
       c->state.wake_connected = false;
+      if (c->is_mobile) c->state.companion_online = false;
       ccord_cond_wait(c->wake_cv, c->mu);
     }
     if (c->stop) {
@@ -1440,10 +1569,15 @@ static void cloud_wake_fn(void *arg)
       break;
     }
     c->wake_reconnect_now = false;
+    c->wake_alarm_fired = false;
     copy_str(tok, sizeof tok, c->device_token);
     want_connect = tok[0] != '\0' && c->state.wake_enabled;
     ccord_mutex_unlock(c->mu);
     if (!want_connect) continue;
+
+    // Hold a short wake lock across WS connect + initial hello so Android cannot suspend mid-handshake.
+    cloud_set_wake_alarm(c, 0);
+    cloud_set_wake_lock(c, CLOUD_WAKE_IO_LOCK_MS);
 
     char ws_url[320], hdrs[320], err_buf[256] = "";
     build_wss_url(c->account_base, ws_url, sizeof ws_url);
@@ -1455,17 +1589,16 @@ static void cloud_wake_fn(void *arg)
     if (!ws) {
       CCORD_LOG_W("cloud: wake ws connect failed (%s); retry in %u ms", err_buf, backoff_ms);
       ccord_mutex_lock(c->mu);
-      if (c->state.wake_connected) {
-        c->state.wake_connected = false;
-        c->state.revision++;
-      }
-      bool fast = c->wake_reconnect_now;
-      if (!fast) {
-        (void)ccord_cond_wait_timeout(c->wake_cv, c->mu, backoff_ms);
-        fast = c->wake_reconnect_now;
-      }
+      bool changed = c->state.wake_connected || (c->is_mobile && c->state.companion_online);
+      c->state.wake_connected = false;
+      if (c->is_mobile) c->state.companion_online = false;
+      if (changed) c->state.revision++;
       ccord_mutex_unlock(c->mu);
-      if (fast) backoff_ms = 1000;
+      if (changed) cloud_wake_main(c);
+
+      bool fast = false;
+      cloud_wake_wait_backoff(c, backoff_ms, &fast);
+      if (fast) backoff_ms = 2000;
       else backoff_ms = backoff_ms < 60000u ? backoff_ms * 2u : 60000u;
       continue;
     }
@@ -1482,18 +1615,21 @@ static void cloud_wake_fn(void *arg)
     const uint64_t connected_at_ms = cloud_now_ms();
     uint64_t last_rx_ms = connected_at_ms;
     uint64_t next_hb = last_rx_ms + hb_interval_ms;
+    bool awaiting_hello = true;
+    uint64_t hello_deadline = connected_at_ms + CLOUD_WAKE_ACK_TIMEOUT_MS;
     bool hb_awaiting_ack = false;
     uint64_t hb_ack_deadline = 0;
     ccord_wake_kind unacked_tx_wake = CCORD_WAKE_NONE;
     bool fast_reconnect = false;
+    bool keep_running = true;
     uint8_t rx_buf[4096];
 
     for (;;) {
       cloud_drain_wake_pipe(c);
       ccord_wake_kind tx_wake = CCORD_WAKE_NONE;
       bool do_hb = false;
-      bool keep_running = false;
       bool want_reconnect = false;
+      bool alarm_fired = false;
       ccord_mutex_lock(c->mu);
       keep_running = !c->stop && c->state.authenticated && c->state.wake_enabled && c->device_token[0] != '\0';
       if (c->wake_reconnect_now) {
@@ -1507,6 +1643,10 @@ static void cloud_wake_fn(void *arg)
       if (c->wake_hb_now) {
         do_hb = true;
         c->wake_hb_now = false;
+      }
+      if (c->wake_alarm_fired) {
+        alarm_fired = true;
+        c->wake_alarm_fired = false;
       }
       ccord_mutex_unlock(c->mu);
       if (!keep_running) {
@@ -1522,7 +1662,21 @@ static void cloud_wake_fn(void *arg)
       }
 
       uint64_t now = cloud_now_ms();
+      if (alarm_fired) {
+        // Tolerate minor AlarmManager early jitter so the CPU doesn't sleep and wake again seconds later.
+        if (!hb_awaiting_ack && !awaiting_hello && now + 5000ULL >= next_hb) {
+          do_hb = true;
+        }
+        if (hb_awaiting_ack && now + 1000ULL >= hb_ack_deadline) {
+          hb_ack_deadline = now;
+        }
+        if (awaiting_hello && now + 1000ULL >= hello_deadline) {
+          hello_deadline = now;
+        }
+      }
+
       if (tx_wake != CCORD_WAKE_NONE && !c->is_mobile) {
+        cloud_set_wake_lock(c, CLOUD_WAKE_IO_LOCK_MS);
         const char *frame = (tx_wake == CCORD_WAKE_CALL) ? "{\"op\":\"wake\",\"k\":\"call\"}" : "{\"op\":\"wake\",\"k\":\"msg\"}";
         if (!ccord_ws_client_send(ws, (const uint8_t *)frame, strlen(frame), false)) {
           CCORD_LOG_W("cloud: wake send failed; re-queuing and reconnecting");
@@ -1540,6 +1694,11 @@ static void cloud_wake_fn(void *arg)
         }
       }
 
+      if (awaiting_hello && now >= hello_deadline) {
+        CCORD_LOG_W("cloud: wake hello timed out; reconnecting");
+        cloud_requeue_tx_wake(c, unacked_tx_wake);
+        break;
+      }
       if (hb_awaiting_ack && now >= hb_ack_deadline) {
         CCORD_LOG_W("cloud: wake heartbeat ACK timed out; reconnecting zombie socket");
         cloud_requeue_tx_wake(c, unacked_tx_wake);
@@ -1547,10 +1706,13 @@ static void cloud_wake_fn(void *arg)
         break;
       }
       if (!hb_awaiting_ack && (do_hb || now >= next_hb)) {
+        // Hold the short wake lock until the server ACKs this heartbeat or the 15 s ACK timeout fires.
+        cloud_set_wake_lock(c, CLOUD_WAKE_IO_LOCK_MS);
         static const char k_hb[] = "{\"op\":\"hb\"}";
         if (!ccord_ws_client_send(ws, (const uint8_t *)k_hb, sizeof k_hb - 1u, false)) {
           CCORD_LOG_W("cloud: wake heartbeat send failed; reconnecting");
           cloud_requeue_tx_wake(c, unacked_tx_wake);
+          if (now >= connected_at_ms + 10000ULL) fast_reconnect = true;
           break;
         }
         hb_awaiting_ack = true;
@@ -1559,9 +1721,19 @@ static void cloud_wake_fn(void *arg)
       }
 
       uint64_t next_due = next_hb;
+      if (awaiting_hello && hello_deadline < next_due) next_due = hello_deadline;
       if (hb_awaiting_ack && hb_ack_deadline < next_due) next_due = hb_ack_deadline;
-      uint64_t rem_ms = next_due > now ? (next_due - now) : 0u;
+      uint64_t rem_ms = next_due > now ? (next_due - now) : 1u;
       int wait_ms = rem_ms > 600000u ? 600000 : (int)rem_ms;
+      if (wait_ms < 1) wait_ms = 1;
+
+      // Release the cloud wake lock when idle between heartbeats, and schedule the OS wakeup alarm
+      // so Android wakes the CPU on time for the next heartbeat even when the SoC is suspended.
+      if (!awaiting_hello && !hb_awaiting_ack) {
+        cloud_set_wake_lock(c, 0);
+      }
+      cloud_set_wake_alarm(c, (uint32_t)wait_ms);
+
 #if CCORD_OS_WINDOWS
       if (wait_ms > 500) wait_ms = 500;
       int wake_fd = -1;
@@ -1577,34 +1749,56 @@ static void cloud_wake_fn(void *arg)
         break;
       }
       if (n > 0 && !is_bin) {
+        // Hold a short lock while handling an incoming frame (modem IRQ may have just woken the SoC).
+        cloud_set_wake_lock(c, 10000u);
         rx_buf[n] = '\0';
         if (handle_wake_frame(c, (const char *)rx_buf, (size_t)n)) {
           last_rx_ms = cloud_now_ms();
+          awaiting_hello = false;
           hb_awaiting_ack = false;
           unacked_tx_wake = CCORD_WAKE_NONE;
+          next_hb = last_rx_ms + hb_interval_ms;
         }
       }
     }
 
     ccord_ws_client_close(ws, 1000, "closing");
+
+    // Clean drop after a stable connection (>10 s): try one immediate reconnect before backoff.
+    if (!fast_reconnect && keep_running && connected_at_ms > 0 &&
+        cloud_now_ms() >= connected_at_ms + 10000ULL) {
+      fast_reconnect = true;
+    }
+
     ccord_mutex_lock(c->mu);
-    bool changed = c->state.wake_connected || (c->is_mobile && c->state.companion_online);
-    c->state.wake_connected = false;
-    if (c->is_mobile) c->state.companion_online = false; // fail safe to standalone if socket drops
-    if (changed) c->state.revision++;
+    if (c->wake_reconnect_now || c->wake_hb_now) {
+      fast_reconnect = true;
+      c->wake_reconnect_now = false;
+      c->wake_hb_now = false;
+    }
+    keep_running = !c->stop && c->state.authenticated && c->state.wake_enabled && c->device_token[0] != '\0';
+    bool changed = false;
+    if (!keep_running || !fast_reconnect) {
+      changed = c->state.wake_connected || (c->is_mobile && c->state.companion_online);
+      c->state.wake_connected = false;
+      if (c->is_mobile) c->state.companion_online = false; // fail safe to standalone if socket drops
+      if (changed) c->state.revision++;
+    }
     ccord_mutex_unlock(c->mu);
     if (changed) cloud_wake_main(c);
 
-    ccord_mutex_lock(c->mu);
-    if (c->wake_reconnect_now) {
-      fast_reconnect = true;
-      c->wake_reconnect_now = false;
+    if (keep_running && !fast_reconnect) {
+      bool fast = false;
+      cloud_wake_wait_backoff(c, backoff_ms, &fast);
+      if (fast) backoff_ms = 2000;
+    } else if (!keep_running) {
+      cloud_set_wake_alarm(c, 0);
+      cloud_set_wake_lock(c, 0);
     }
-    if (!c->stop && c->state.authenticated && c->state.wake_enabled && !fast_reconnect) {
-      (void)ccord_cond_wait_timeout(c->wake_cv, c->mu, backoff_ms);
-    }
-    ccord_mutex_unlock(c->mu);
   }
+
+  cloud_set_wake_alarm(c, 0);
+  cloud_set_wake_lock(c, 0);
 }
 
 // ---------------------------------------------------------------- public API
@@ -1627,6 +1821,9 @@ ccord_cloud *ccord_cloud_create(const ccord_cloud_config *cfg)
     c->wake_pipe[0] = -1;
     c->wake_pipe[1] = -1;
   }
+#endif
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+  c->wake_timer_fd = timerfd_create(CLOCK_BOOTTIME, TFD_NONBLOCK | TFD_CLOEXEC);
 #endif
   c->mu = ccord_mutex_create();
   c->cv = ccord_cond_create();
@@ -1694,6 +1891,9 @@ void ccord_cloud_destroy(ccord_cloud *c)
 #if !CCORD_OS_WINDOWS
   if (c->wake_pipe[0] >= 0) close(c->wake_pipe[0]);
   if (c->wake_pipe[1] >= 0) close(c->wake_pipe[1]);
+#endif
+#if defined(__linux__) && defined(CLOCK_BOOTTIME)
+  if (c->wake_timer_fd >= 0) close(c->wake_timer_fd);
 #endif
   if (c->wake_cv) ccord_cond_destroy(c->wake_cv);
   if (c->cv) ccord_cond_destroy(c->cv);
@@ -2109,11 +2309,30 @@ bool ccord_cloud_companion_online(const ccord_cloud *c)
   return on;
 }
 
+bool ccord_cloud_wake_active(const ccord_cloud *c)
+{
+  if (!c || c->disable_network) return false;
+  ccord_mutex_lock(c->mu);
+  bool on = c->state.authenticated && c->state.wake_enabled && c->device_token[0] != '\0';
+  ccord_mutex_unlock(c->mu);
+  return on;
+}
+
 void ccord_cloud_wake_heartbeat_now(ccord_cloud *c)
 {
   if (!c) return;
   ccord_mutex_lock(c->mu);
   c->wake_hb_now = true;
+  ccord_cond_signal(c->wake_cv);
+  ccord_mutex_unlock(c->mu);
+  cloud_signal_wake_pipe(c);
+}
+
+void ccord_cloud_on_wake_alarm(ccord_cloud *c)
+{
+  if (!c || c->disable_network) return;
+  ccord_mutex_lock(c->mu);
+  c->wake_alarm_fired = true;
   ccord_cond_signal(c->wake_cv);
   ccord_mutex_unlock(c->mu);
   cloud_signal_wake_pipe(c);
