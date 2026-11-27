@@ -6,8 +6,10 @@ import android.Manifest
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
@@ -122,6 +124,12 @@ class CCordVoiceService : Service() {
     private var callWifiLock: WifiManager.WifiLock? = null
     private var serviceConnMgr: ConnectivityManager? = null
     private var serviceNetCb: ConnectivityManager.NetworkCallback? = null
+    private var dozeReceiver: BroadcastReceiver? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        CCordBridge.attachAppContext(applicationContext)
+    }
 
     private fun syncVoiceLocks(active: Boolean) {
         if (active) {
@@ -182,6 +190,7 @@ class CCordVoiceService : Service() {
                         return
                     }
                     if (CCordBridge.nativeReady) {
+                        CCordBridge.setCloudWakeLock(applicationContext, 10_000L)
                         if (cameBack) CCordBridge.nativeOnNetworkAvailable(true)
                         else CCordBridge.nativeOnNetworkChanged()
                     }
@@ -211,6 +220,41 @@ class CCordVoiceService : Service() {
         }
         serviceNetCb = null
         serviceConnMgr = null
+    }
+
+    private fun ensureDozeReceiver() {
+        if (dozeReceiver != null) return
+        try {
+            val r = object : BroadcastReceiver() {
+                override fun onReceive(context: Context, intent: Intent?) {
+                    if (intent?.action != PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED) return
+                    val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+                    if (!pm.isDeviceIdleMode && CCordBridge.nativeReady) {
+                        // Device exited Deep Doze (or entered a maintenance window): probe/reconnect immediately.
+                        CCordBridge.setCloudWakeLock(context, 15_000L)
+                        CCordBridge.nativeOnCloudWakeProbe()
+                    }
+                }
+            }
+            ContextCompat.registerReceiver(
+                this,
+                r,
+                IntentFilter(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            dozeReceiver = r
+        } catch (t: Throwable) {
+            Log.w(TAG, "registerReceiver(ACTION_DEVICE_IDLE_MODE_CHANGED) failed", t)
+        }
+    }
+
+    private fun releaseDozeReceiver() {
+        val r = dozeReceiver ?: return
+        dozeReceiver = null
+        try {
+            unregisterReceiver(r)
+        } catch (_: Throwable) {
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -252,6 +296,7 @@ class CCordVoiceService : Service() {
             serviceRunning = false
             syncVoiceLocks(false)
             releaseServiceNetworkCallback()
+            releaseDozeReceiver()
             ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
@@ -279,12 +324,18 @@ class CCordVoiceService : Service() {
         }
         syncVoiceLocks(voiceActive)
         ensureServiceNetworkCallback()
+        ensureDozeReceiver()
         return START_STICKY
     }
 
     override fun onDestroy() {
         syncVoiceLocks(false)
         releaseServiceNetworkCallback()
+        releaseDozeReceiver()
+        if (!shouldRun()) {
+            CCordBridge.scheduleCloudWakeAlarm(0L)
+            CCordBridge.setCloudWakeLock(this, 0L)
+        }
         serviceRunning = false
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         super.onDestroy()

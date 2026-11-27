@@ -1616,3 +1616,56 @@ void ccord_platform_hold_wake_lock(ccord_platform *p, uint32_t duration_ms)
   (void)duration_ms;
 #endif
 }
+
+void ccord_platform_schedule_cloud_wake_alarm(ccord_platform *p, uint32_t delay_ms)
+{
+  if (!p || p->headless) return;
+#if defined(__ANDROID__)
+  ccord_android_schedule_cloud_wake_alarm(delay_ms);
+#else
+  (void)delay_ms;
+#endif
+}
+
+void ccord_platform_set_cloud_wake_lock(ccord_platform *p, uint32_t duration_ms)
+{
+  if (!p || p->headless) return;
+#if defined(__ANDROID__)
+  ccord_android_set_cloud_wake_lock(duration_ms);
+#else
+  (void)duration_ms;
+#endif
+}
+
+void ccord_platform_set_cloud_wake_callbacks(ccord_platform *p, void (*alarm_fn)(void *),
+                                             void (*probe_fn)(void *), void *ud)
+{
+  if (!p || p->headless) return;
+#if defined(__ANDROID__)
+  ccord_android_set_cloud_wake_callbacks(alarm_fn, probe_fn, ud);
+#else
+  (void)alarm_fn;
+  (void)probe_fn;
+  (void)ud;
+#endif
+}
+
+bool ccord_platform_battery_unrestricted(const ccord_platform *p)
+{
+  if (!p || p->headless) return true;
+#if defined(__ANDROID__)
+  return ccord_android_battery_unrestricted();
+#else
+  return true;
+#endif
+}
+
+bool ccord_platform_request_battery_unrestricted(ccord_platform *p)
+{
+  if (!p || p->headless) return false;
+#if defined(__ANDROID__)
+  return ccord_android_request_battery_unrestricted();
+#else
+  return false;
+#endif
+}

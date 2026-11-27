@@ -40,6 +40,11 @@ void ccord_android_cancel_notification(uint32_t id);
 void ccord_android_set_voice_service(bool active, const char *channel_name, bool muted, bool deafened);
 void ccord_android_set_keep_alive(bool active);
 void ccord_android_hold_wake_lock(uint32_t duration_ms);
+void ccord_android_schedule_cloud_wake_alarm(uint32_t delay_ms);
+void ccord_android_set_cloud_wake_lock(uint32_t duration_ms);
+void ccord_android_set_cloud_wake_callbacks(void (*alarm_fn)(void *), void (*probe_fn)(void *), void *ud);
+bool ccord_android_battery_unrestricted(void);
+bool ccord_android_request_battery_unrestricted(void);
 void ccord_android_on_fullscreen_changed(bool fullscreen);
 void ccord_android_set_audio_comm_mode(bool in_call);
 bool ccord_android_request_screen_capture(void);
@@ -95,4 +100,8 @@ JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeSetActivityActiv
     JNIEnv *env, jclass cls, jboolean active);
 JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnOpenUrl(
     JNIEnv *env, jclass cls, jstring jurl);
+JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnCloudWakeAlarm(
+    JNIEnv *env, jclass cls);
+JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnCloudWakeProbe(
+    JNIEnv *env, jclass cls);
 #endif

@@ -3,6 +3,7 @@
 package org.ccord.android
 
 import android.Manifest
+import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -16,13 +17,16 @@ import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaScannerConnection
+import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.PowerManager
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Log
 import android.view.WindowManager
 import androidx.core.app.NotificationCompat
@@ -73,8 +77,19 @@ object CCordBridge {
     private var audioFocusHeld: Boolean = false
     private val audioFocusChangeListener = AudioManager.OnAudioFocusChangeListener { _ -> }
 
+    private const val WAKE_ALARM_REQ_CODE = 4202
+
     private val wakeBurstLockSync = Any()
     private var wakeBurstLock: PowerManager.WakeLock? = null
+
+    private val cloudWakeLockSync = Any()
+    private var cloudWakeLock: PowerManager.WakeLock? = null
+
+    fun attachAppContext(context: Context) {
+        if (appContext == null) {
+            appContext = context.applicationContext
+        }
+    }
 
     fun attach(activity: CCordActivity) {
         activityRef = WeakReference(activity)
@@ -162,6 +177,12 @@ object CCordBridge {
 
     @JvmStatic
     external fun nativeOnOpenUrl(url: String)
+
+    @JvmStatic
+    external fun nativeOnCloudWakeAlarm()
+
+    @JvmStatic
+    external fun nativeOnCloudWakeProbe()
 
     // ---- Bridge methods called from C (desktop_android.c) ----
 
@@ -581,6 +602,108 @@ object CCordBridge {
                 Log.w(TAG, "acquireWakeBurstLock failed", t)
             }
         }
+    }
+
+    fun setCloudWakeLock(ctx: Context, durationMs: Long) {
+        val appCtx = ctx.applicationContext
+        synchronized(cloudWakeLockSync) {
+            try {
+                if (durationMs <= 0L) {
+                    cloudWakeLock?.let { if (it.isHeld) it.release() }
+                    return
+                }
+                val clamped = durationMs.coerceIn(1_000L, 30_000L)
+                var wl = cloudWakeLock
+                if (wl == null) {
+                    val pm = appCtx.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+                    wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "C-Cord:WakeCloud").apply {
+                        setReferenceCounted(false)
+                    }
+                    cloudWakeLock = wl
+                }
+                wl.acquire(clamped)
+            } catch (t: Throwable) {
+                Log.w(TAG, "setCloudWakeLock failed", t)
+            }
+        }
+    }
+
+    @JvmStatic
+    fun setCloudWakeLock(durationMs: Long) {
+        val ctx = activityRef?.get()?.applicationContext ?: appContext ?: return
+        setCloudWakeLock(ctx, durationMs)
+    }
+
+    @JvmStatic
+    fun scheduleCloudWakeAlarm(delayMs: Long) {
+        val ctx = activityRef?.get()?.applicationContext ?: appContext ?: return
+        try {
+            val am = ctx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
+            val intent = Intent(ctx, CCordWakeAlarmReceiver::class.java).apply {
+                action = CCordWakeAlarmReceiver.ACTION_CLOUD_WAKE_ALARM
+            }
+            val pi = PendingIntent.getBroadcast(
+                ctx,
+                WAKE_ALARM_REQ_CODE,
+                intent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            if (delayMs <= 0L) {
+                am.cancel(pi)
+                return
+            }
+            val clamped = delayMs.coerceIn(1_000L, 600_000L)
+            val triggerAt = SystemClock.elapsedRealtime() + clamped
+            val canExact = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                am.canScheduleExactAlarms()
+            } else {
+                true
+            }
+            if (canExact) {
+                try {
+                    am.setExactAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+                    return
+                } catch (_: SecurityException) {
+                    // Fall through to inexact allow-while-idle alarm if exact alarms were revoked.
+                }
+            }
+            am.setAndAllowWhileIdle(AlarmManager.ELAPSED_REALTIME_WAKEUP, triggerAt, pi)
+        } catch (t: Throwable) {
+            Log.w(TAG, "scheduleCloudWakeAlarm failed", t)
+        }
+    }
+
+    @JvmStatic
+    fun isBatteryOptimizationIgnored(): Boolean {
+        val ctx = activityRef?.get()?.applicationContext ?: appContext ?: return true
+        return try {
+            val pm = ctx.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return true
+            pm.isIgnoringBatteryOptimizations(ctx.packageName)
+        } catch (t: Throwable) {
+            Log.w(TAG, "isBatteryOptimizationIgnored failed", t)
+            true
+        }
+    }
+
+    @JvmStatic
+    fun requestIgnoreBatteryOptimizations(): Boolean {
+        val act = activityRef?.get() ?: return false
+        act.runOnUiThread {
+            try {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:${act.packageName}")
+                }
+                act.startActivity(intent)
+            } catch (t: Throwable) {
+                Log.w(TAG, "ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS failed, falling back", t)
+                try {
+                    act.startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                } catch (t2: Throwable) {
+                    Log.w(TAG, "ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS failed", t2)
+                }
+            }
+        }
+        return true
     }
 
     @JvmStatic

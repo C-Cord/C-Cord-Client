@@ -451,3 +451,16 @@ void ccord_platform_wake(ccord_platform *p);
 // Thread-safe timed CPU wake lock (Android PARTIAL_WAKE_LOCK; no-op on desktop) so a background wake burst
 // completes Gateway reconnect + REST notification catch-up before the SoC re-enters deep sleep.
 void ccord_platform_hold_wake_lock(ccord_platform *p, uint32_t duration_ms);
+// Thread-safe wakeup-capable OS alarm & short I/O wake lock for Companion Wake (Android AlarmManager / PowerManager;
+// no-ops on desktop). delay_ms == 0 cancels the alarm; duration_ms == 0 releases the wake lock.
+void ccord_platform_schedule_cloud_wake_alarm(ccord_platform *p, uint32_t delay_ms);
+void ccord_platform_set_cloud_wake_lock(ccord_platform *p, uint32_t duration_ms);
+// Registers thread-safe callbacks invoked from Android's AlarmManager / Doze exit receivers (no-op on desktop).
+// Call with nullptr callbacks before destroying the target object.
+void ccord_platform_set_cloud_wake_callbacks(ccord_platform *p, void (*alarm_fn)(void *),
+                                             void (*probe_fn)(void *), void *ud);
+// True when the OS will not restrict background network/alarms (always true on desktop; Android checks
+// PowerManager.isIgnoringBatteryOptimizations()).
+bool ccord_platform_battery_unrestricted(const ccord_platform *p);
+// Launches the OS prompt/settings to allow unrestricted background battery usage (Android only; false on desktop).
+bool ccord_platform_request_battery_unrestricted(ccord_platform *p);

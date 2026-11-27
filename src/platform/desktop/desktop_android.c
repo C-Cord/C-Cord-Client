@@ -10,6 +10,7 @@
 #include <libavcodec/jni.h>
 
 #include <errno.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -62,6 +63,12 @@ static JavaVM *g_jvm = nullptr;
 static jclass g_bridge_cls = nullptr;
 static int g_wake_fd = -1;
 static atomic_bool g_activity_active = true;
+
+// Thread-safe callbacks from Android AlarmManager / Doze exit receivers into ccord_cloud.
+static pthread_mutex_t g_cloud_cb_mu = PTHREAD_MUTEX_INITIALIZER;
+static void (*g_cloud_wake_alarm_fn)(void *) = nullptr;
+static void (*g_cloud_wake_probe_fn)(void *) = nullptr;
+static void *g_cloud_wake_ud = nullptr;
 
 // Pending WindowInsets pushed from Kotlin UI thread.
 static bool g_insets_valid = false;
@@ -533,6 +540,71 @@ void ccord_android_hold_wake_lock(uint32_t duration_ms)
     clear_exception(env);
   }
   android_env_release(attached);
+}
+
+void ccord_android_schedule_cloud_wake_alarm(uint32_t delay_ms)
+{
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls, "scheduleCloudWakeAlarm", "(J)V");
+    if (mid) (*env)->CallStaticVoidMethod(env, cls, mid, (jlong)delay_ms);
+    clear_exception(env);
+  }
+  android_env_release(attached);
+}
+
+void ccord_android_set_cloud_wake_lock(uint32_t duration_ms)
+{
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls, "setCloudWakeLock", "(J)V");
+    if (mid) (*env)->CallStaticVoidMethod(env, cls, mid, (jlong)duration_ms);
+    clear_exception(env);
+  }
+  android_env_release(attached);
+}
+
+void ccord_android_set_cloud_wake_callbacks(void (*alarm_fn)(void *), void (*probe_fn)(void *), void *ud)
+{
+  pthread_mutex_lock(&g_cloud_cb_mu);
+  g_cloud_wake_alarm_fn = alarm_fn;
+  g_cloud_wake_probe_fn = probe_fn;
+  g_cloud_wake_ud = ud;
+  pthread_mutex_unlock(&g_cloud_cb_mu);
+}
+
+bool ccord_android_battery_unrestricted(void)
+{
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  bool ok = true;
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls, "isBatteryOptimizationIgnored", "()Z");
+    if (mid) ok = (*env)->CallStaticBooleanMethod(env, cls, mid) == JNI_TRUE;
+    clear_exception(env);
+  }
+  android_env_release(attached);
+  return ok;
+}
+
+bool ccord_android_request_battery_unrestricted(void)
+{
+  bool attached = false;
+  JNIEnv *env = android_env(&attached);
+  jclass cls = bridge_class(env);
+  bool ok = false;
+  if (env && cls) {
+    jmethodID mid = (*env)->GetStaticMethodID(env, cls, "requestIgnoreBatteryOptimizations", "()Z");
+    if (mid) ok = (*env)->CallStaticBooleanMethod(env, cls, mid) == JNI_TRUE;
+    clear_exception(env);
+  }
+  android_env_release(attached);
+  return ok;
 }
 
 void ccord_android_on_fullscreen_changed(bool fullscreen)
@@ -1201,4 +1273,24 @@ JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnOpenUrl(
   }
   wake_locked();
   ccord_spin_lock_release(&g_jni_lock);
+}
+
+JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnCloudWakeAlarm(
+    JNIEnv *env, jclass cls)
+{
+  (void)env;
+  (void)cls;
+  pthread_mutex_lock(&g_cloud_cb_mu);
+  if (g_cloud_wake_alarm_fn) g_cloud_wake_alarm_fn(g_cloud_wake_ud);
+  pthread_mutex_unlock(&g_cloud_cb_mu);
+}
+
+JNIEXPORT void JNICALL Java_org_ccord_android_CCordBridge_nativeOnCloudWakeProbe(
+    JNIEnv *env, jclass cls)
+{
+  (void)env;
+  (void)cls;
+  pthread_mutex_lock(&g_cloud_cb_mu);
+  if (g_cloud_wake_probe_fn) g_cloud_wake_probe_fn(g_cloud_wake_ud);
+  pthread_mutex_unlock(&g_cloud_cb_mu);
 }
