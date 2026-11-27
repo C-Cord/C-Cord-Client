@@ -472,7 +472,7 @@ struct ccord_web_view {
 
 // web_view.c
 bool web_frame_alive(const ccord_web_view *v, uint32_t id);
-void web_diag_append(ccord_web_view *v, const char *level, const char *fmt, ...);
+CCORD_PRINTF(3, 4) void web_diag_append(ccord_web_view *v, const char *level, const char *fmt, ...);
 void web_mark_dirty(ccord_web_view *v);
 web_frame *web_frame_create(ccord_web_view *v, web_frame *parent, web_node *host_iframe,
                             const char *url, float w, float h, bool is_worker);
