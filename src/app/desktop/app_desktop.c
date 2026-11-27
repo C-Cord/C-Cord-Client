@@ -762,16 +762,16 @@ static bool app_beep_tone(ccord_app_desktop *d)
   return true;
 }
 
-static void app_beep(ccord_app_desktop *d, bool sounds_on, const ccord_notification *n, int64_t now_unix_ms)
+static void app_beep(ccord_app_desktop *d, bool sounds_on, const ccord_notification *n, int64_t now_ms)
 {
   if (!d || !sounds_on) return;
   d->dbg.beep_requests++;
-  if (d->sound_hook && d->sound_hook(n, d->ui, d->store, now_unix_ms)) return;   // the message/mention earcon
+  if (d->sound_hook && d->sound_hook(n, d->ui, d->store, now_ms)) return;   // the message/mention earcon
   d->dbg.tone_requests++;
   ccord_audio *a = app_playback(d);
   if (!ccord_audio_available(a) || !app_beep_tone(d)) return;   // honest silent no-op without a device
   (void)ccord_audio_write(a, d->beep_pcm, d->beep_frames);
-  int64_t base = d->playback_busy_until_ms > now_unix_ms ? d->playback_busy_until_ms : now_unix_ms;
+  int64_t base = d->playback_busy_until_ms > now_ms ? d->playback_busy_until_ms : now_ms;
   d->playback_busy_until_ms = base + 150;
 }
 
@@ -889,7 +889,8 @@ void ccord_app_desktop_sync_notifications(ccord_app_desktop *d)
   }
 }
 
-bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n, int64_t now_unix_ms)
+bool ccord_app_desktop_deliver_at(ccord_app_desktop *d, const ccord_notification *n,
+                                  int64_t now_unix_ms, int64_t now_ms)
 {
   if (!d || !n) return false;
   ccord_app_notify_prefs prefs;
@@ -943,8 +944,13 @@ bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n
   // and respects system DND/vibrate mode without opening an SDL audio playback stream.
   bool os_handles_sound = d->platform && ccord_platform_is_mobile(d->platform) &&
                           ccord_platform_in_background(d->platform);
-  app_beep(d, prefs.notify_sounds && !hook_silent && !os_handles_sound, n, now_unix_ms);
+  app_beep(d, prefs.notify_sounds && !hook_silent && !os_handles_sound, n, now_ms);
   return true;
+}
+
+bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n, int64_t now_unix_ms)
+{
+  return ccord_app_desktop_deliver_at(d, n, now_unix_ms, now_unix_ms);
 }
 
 void ccord_app_desktop_notify_click(void *ud, const ccord_notify_target *target)
@@ -984,10 +990,10 @@ static void desktop_sync_voice_state(ccord_app_desktop *d)
   ccord_platform_set_voice_state(d->platform, muted, deafened);
 }
 
-void ccord_app_desktop_pump(ccord_app_desktop *d, bool virtual_clock, int64_t now_unix_ms)
+void ccord_app_desktop_pump(ccord_app_desktop *d, bool virtual_clock, int64_t now_ms, int64_t now_unix_ms)
 {
   if (!d) return;
-  if (d->playback && now_unix_ms >= d->playback_busy_until_ms + APP_PLAYBACK_IDLE_MS) {
+  if (d->playback && now_ms >= d->playback_busy_until_ms + APP_PLAYBACK_IDLE_MS) {
     ccord_audio_destroy(d->playback);
     d->playback = nullptr;
     d->playback_busy_until_ms = 0;
@@ -998,7 +1004,7 @@ void ccord_app_desktop_pump(ccord_app_desktop *d, bool virtual_clock, int64_t no
   if (d->session) {
     ccord_notification notif;
     while (ccord_session_pop_notification(d->session, &notif)) {
-      if (!virtual_clock) (void)ccord_app_desktop_deliver(d, &notif, now_unix_ms);
+      if (!virtual_clock) (void)ccord_app_desktop_deliver_at(d, &notif, now_unix_ms, now_ms);
     }
   }
   ccord_app_desktop_sync_badge(d);
@@ -1006,12 +1012,12 @@ void ccord_app_desktop_pump(ccord_app_desktop *d, bool virtual_clock, int64_t no
   desktop_sync_voice_state(d);
 }
 
-uint32_t ccord_app_desktop_next_wait_ms(const ccord_app_desktop *d, int64_t now_unix_ms)
+uint32_t ccord_app_desktop_next_wait_ms(const ccord_app_desktop *d, int64_t now_ms)
 {
   if (!d || !d->playback) return UINT32_MAX;
   int64_t close_at = d->playback_busy_until_ms + APP_PLAYBACK_IDLE_MS;
-  if (now_unix_ms >= close_at) return 0u;
-  int64_t rem = close_at - now_unix_ms;
+  if (now_ms >= close_at) return 0u;
+  int64_t rem = close_at - now_ms;
   return rem > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)rem;
 }
 

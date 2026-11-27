@@ -65,8 +65,9 @@ bool ccord_earcons_play_bytes(ccord_earcons *e, const uint8_t *data, size_t len,
 // the legacy 880 Hz tone is never written. Nothing plays when Settings > Notifications > Message Sounds is
 // off, when Streamer Mode's Disable Sounds is on, or while the user's status is Do Not Disturb; a kind whose own
 // toggle (Customize under Sounds, ui_sound_kind_enabled) is off is skipped while the others still play.
+// `now_ms` is monotonic ms (for ring timers and audio idle close); `now_unix_ms` is wall-clock Unix ms (for mute expiry).
 void ccord_earcons_pump(ccord_earcons *e, ccord_session *session, const ccord_store *store, const ccord_ui *ui,
-                        ccord_app_desktop *desktop, bool virtual_clock, int64_t now_ms);
+                        ccord_app_desktop *desktop, bool virtual_clock, int64_t now_ms, int64_t now_unix_ms);
 // Max ms before ccord_earcons_pump() needs to run again (e.g. closing an idle playback stream or repeating a ring).
 // Returns UINT32_MAX when idle with no open audio stream and no active call ring.
 uint32_t ccord_earcons_next_wait_ms(const ccord_earcons *e, int64_t now_ms);

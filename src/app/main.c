@@ -86,8 +86,10 @@ void app_pump(app *a)
   // and the SNI/title tray badge, recomputed only when the store revision moves.
   // Earcons pop the notification queue first (they deliver the desktop notification themselves); the desktop pump
   // then only syncs the badge/tray.
-  ccord_earcons_pump(a->earcons, a->session, a->store, a->ui, a->desktop, a->virtual_clock, (int64_t)app_now_ms(a));
-  if (a->desktop) ccord_app_desktop_pump(a->desktop, a->virtual_clock, (int64_t)app_now_ms(a));
+  int64_t mono_ms = (int64_t)app_now_ms(a);
+  int64_t unix_ms = a->virtual_clock ? mono_ms : ccord_clock_unix_ms();
+  ccord_earcons_pump(a->earcons, a->session, a->store, a->ui, a->desktop, a->virtual_clock, mono_ms, unix_ms);
+  if (a->desktop) ccord_app_desktop_pump(a->desktop, a->virtual_clock, mono_ms, unix_ms);
   ccord_app_rpc_poll(a->rpc, app_now_ms(a));   // Rich Presence: local RPC clients -> gateway presence (null-safe)
   pump_voice_and_video(a);
   if (a->account) {

@@ -372,10 +372,10 @@ bool ccord_earcons_play_kind(ccord_earcons *e, const char *kind_name, int64_t no
 
 // The desktop-notification decision without its "window focused" and "desktop notifications" switches: those
 // decide whether the OS popup happens, not whether the sound is wanted.
-static bool notification_wants_sound(const ccord_notification *n, const ccord_store *store, int64_t now_ms)
+static bool notification_wants_sound(const ccord_notification *n, const ccord_store *store, int64_t now_unix_ms)
 {
   ccord_app_notify_prefs prefs = {.notify_desktop = true, .self_id = store ? ccord_store_self_id(store) : CCORD_ID_NONE};
-  return ccord_app_desktop_notify_eligible(n, &prefs, store, now_ms);
+  return ccord_app_desktop_notify_eligible(n, &prefs, store, now_unix_ms);
 }
 
 // ccord_app_desktop's sound hook: a delivered notification plays the message/mention earcon, not the legacy tone.
@@ -390,7 +390,7 @@ static bool notification_sound_hook(const ccord_notification *n, const ccord_ui 
 }
 
 static void pump_notifications(ccord_earcons *e, ccord_session *session, const ccord_store *store, const ccord_ui *ui,
-                               ccord_app_desktop *desktop, bool virtual_clock, int64_t now_ms)
+                               ccord_app_desktop *desktop, bool virtual_clock, int64_t now_ms, int64_t now_unix_ms)
 {
   if (!session) return;
   ccord_notification n;
@@ -409,8 +409,8 @@ static void pump_notifications(ccord_earcons *e, ccord_session *session, const c
     }
     // Delivery requests its sound through notification_sound_hook for a notification the desktop accepted;
     // every other case is ours.
-    bool delivered = !virtual_clock && desktop && ccord_app_desktop_deliver(desktop, &n, now_ms);
-    if (delivered || !notification_wants_sound(&n, store, now_ms)) continue;
+    bool delivered = !virtual_clock && desktop && ccord_app_desktop_deliver_at(desktop, &n, now_unix_ms, now_ms);
+    if (delivered || !notification_wants_sound(&n, store, now_unix_ms)) continue;
     // On mobile while backgrounded, native OS notifications handle sound/vibration; never spin up an
     // SDL audio stream if OS notification delivery was suppressed (e.g. permissions or settings).
     if (mobile_bg) continue;
@@ -616,7 +616,7 @@ static void pump_ring(ccord_earcons *e, const ccord_session *session, const ccor
 }
 
 void ccord_earcons_pump(ccord_earcons *e, ccord_session *session, const ccord_store *store, const ccord_ui *ui,
-                        ccord_app_desktop *desktop, bool virtual_clock, int64_t now_ms)
+                        ccord_app_desktop *desktop, bool virtual_clock, int64_t now_ms, int64_t now_unix_ms)
 {
   if (!e) return;
   e->burst = 0;
@@ -631,7 +631,7 @@ void ccord_earcons_pump(ccord_earcons *e, ccord_session *session, const ccord_st
   if (!store || !session) return;
   uint64_t rev = ccord_store_revision(store);
   bool store_unchanged = e->store_rev_valid && store == e->last_store && rev == e->last_store_rev;
-  pump_notifications(e, session, store, ui, desktop, virtual_clock, now_ms);
+  pump_notifications(e, session, store, ui, desktop, virtual_clock, now_ms, now_unix_ms);
   bool connected = store_unchanged ? e->voice_valid : pump_voice(e, store, ui, now_ms);
   pump_ptt(e, session, store, ui, connected, now_ms);
   pump_streams(e, session, store, ui, store_unchanged, now_ms);

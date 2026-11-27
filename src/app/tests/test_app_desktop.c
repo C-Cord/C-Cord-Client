@@ -603,7 +603,7 @@ static void test_notify_delivery(void)
   ccord_platform_set_window_focused(F.platform, false);
 
   // The pump drains the session queue under a virtual clock without delivering (deterministic shots).
-  ccord_app_desktop_pump(F.desktop, true, 1793534400000LL);
+  ccord_app_desktop_pump(F.desktop, true, 1000, 1793534400000LL);
   CT_CHECK(dbg().notifications_delivered == before.notifications_delivered + 1);
 }
 
@@ -644,7 +644,7 @@ static void test_notify_auto_clear_on_focus_and_read(void)
   frame(4);
   const ccord_channel *dc = ccord_store_channel(F.store, dm_ch);
   CT_CHECK(dc && dc->unread_count >= 1 && dc->mention_count >= 1);
-  ccord_app_desktop_pump(F.desktop, false, 1793534400000LL);
+  ccord_app_desktop_pump(F.desktop, false, 1000, 1793534400000LL);
   uint32_t dm_nid = ccord_platform_last_notify_id(F.platform);
   ccord_notify_target got = {0};
   CT_CHECK(dm_nid != 0 && ccord_platform_notify_target_for(F.platform, dm_nid, &got) && got.channel_id == dm_ch);
@@ -1133,29 +1133,29 @@ static void test_voice_state_sync(void)
   CT_CHECK(ccord_session_join_voice(F.session, HQ, HQ_VOICE, &err) == CCORD_OK);
   frame(3);
   voice_clear_flags();
-  ccord_app_desktop_pump(F.desktop, true, 1793534400000LL);   // sync the clean baseline
+  ccord_app_desktop_pump(F.desktop, true, 1000, 1793534400000LL);   // sync the clean baseline
   uint64_t pushes = dbg().voice_state_pushes;
   CT_CHECK(!dbg().last_voice_muted && !dbg().last_voice_deafened);
-  ccord_app_desktop_pump(F.desktop, true, 1793534400000LL);
+  ccord_app_desktop_pump(F.desktop, true, 1000, 1793534400000LL);
   CT_CHECK(dbg().voice_state_pushes == pushes);   // no change: no platform write
 
   CT_CHECK(ccord_app_desktop_handle_hotkey(F.desktop, "toggle-mute", &err));
   frame(2);
-  ccord_app_desktop_pump(F.desktop, true, 1793534400000LL);
+  ccord_app_desktop_pump(F.desktop, true, 1000, 1793534400000LL);
   CT_CHECK(dbg().voice_state_pushes == pushes + 1);
   CT_CHECK(dbg().last_voice_muted && !dbg().last_voice_deafened);
-  ccord_app_desktop_pump(F.desktop, true, 1793534400000LL);
+  ccord_app_desktop_pump(F.desktop, true, 1000, 1793534400000LL);
   CT_CHECK(dbg().voice_state_pushes == pushes + 1);   // no change: no write
 
   CT_CHECK(ccord_app_desktop_handle_hotkey(F.desktop, "toggle-deafen", &err));
   frame(2);
-  ccord_app_desktop_pump(F.desktop, true, 1793534400000LL);
+  ccord_app_desktop_pump(F.desktop, true, 1000, 1793534400000LL);
   CT_CHECK(dbg().voice_state_pushes == pushes + 2);
   CT_CHECK(dbg().last_voice_muted && dbg().last_voice_deafened);   // deafen implies mute
 
   CT_CHECK(ccord_session_leave_voice(F.session, HQ, &err) == CCORD_OK);
   frame(3);
-  ccord_app_desktop_pump(F.desktop, true, 1793534400000LL);
+  ccord_app_desktop_pump(F.desktop, true, 1000, 1793534400000LL);
   CT_CHECK(dbg().voice_state_pushes == pushes + 3);
   CT_CHECK(!dbg().last_voice_muted && !dbg().last_voice_deafened);
 }
@@ -1338,10 +1338,29 @@ static void test_notify_wake_hook(void)
   CT_CHECK(!ccord_app_desktop_deliver(F.desktop, &self_n, 1793534400000LL));
   CT_CHECK(g_wake_hook_calls == 2);
 
-  // Restore desktop notifications ON and clear wake hook.
+  // Restore desktop notifications ON.
   remove("app_desktop_data/settings.ini");
   CT_CHECK(recreate_ui());
   CT_CHECK(sdbg().notify_desktop);
+
+  // Expired timed mute (mute_until_ms in the past) must NOT suppress delivery or Companion Wake
+  // when ccord_app_desktop_pump() runs with a small monotonic clock alongside real Unix epoch ms.
+  ccord_error err;
+  ccord_notify_scope expired_mute = {.guild_id = HQ, .channel_id = ch->id, .level = CCORD_NOTIFY_INHERIT,
+                                     .muted = true, .mute_until_ms = 1700000000000LL};
+  CT_CHECK(ccord_store_set_notify(F.store, HQ, &expired_mute, 1, &err) == CCORD_OK);
+  ccord_platform_set_window_focused(F.platform, false);
+  CT_CHECK(ccord_app_desktop_deliver_at(F.desktop, &n, 1793534400000LL, 50000));
+  CT_CHECK(g_wake_hook_calls == 3 && !g_wake_hook_last_call);
+
+  // Active future timed mute MUST still suppress both delivery and Companion Wake.
+  ccord_notify_scope active_mute = {.guild_id = HQ, .channel_id = ch->id, .level = CCORD_NOTIFY_INHERIT,
+                                    .muted = true, .mute_until_ms = 1793534460000LL};
+  CT_CHECK(ccord_store_set_notify(F.store, HQ, &active_mute, 1, &err) == CCORD_OK);
+  CT_CHECK(!ccord_app_desktop_deliver_at(F.desktop, &n, 1793534400000LL, 50000));
+  CT_CHECK(g_wake_hook_calls == 3);
+
+  CT_CHECK(ccord_store_set_notify(F.store, HQ, nullptr, 0, &err) == CCORD_OK);
   ccord_app_desktop_set_wake_hook(F.desktop, nullptr, nullptr);
   (void)ccord_platform_close_channel_notifications(F.platform, ch->id, 0);
 }

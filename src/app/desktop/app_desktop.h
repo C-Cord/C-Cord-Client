@@ -125,12 +125,16 @@ void ccord_app_desktop_set_sound_hook(ccord_app_desktop *d, ccord_app_desktop_so
 void ccord_app_desktop_set_wake_hook(ccord_app_desktop *d, ccord_app_desktop_wake_fn fn, void *ud);
 // Prepares title/body (ccord_ui_prepare_notification), sends it to the platform and requests the notification
 // sound (hook, else the legacy beep) when notify_sounds is on. Returns true when a desktop notification was accepted.
+// `now_unix_ms` is wall-clock Unix epoch ms (for timed mute expiry); `now_ms` is monotonic ms (for audio idle timers).
+bool ccord_app_desktop_deliver_at(ccord_app_desktop *d, const ccord_notification *n,
+                                  int64_t now_unix_ms, int64_t now_ms);
 bool ccord_app_desktop_deliver(ccord_app_desktop *d, const ccord_notification *n, int64_t now_unix_ms);
 // Pops the session notification queue (always) and delivers unless `virtual_clock` (deterministic
 // screenshots/tests), then syncs the tray badge. Call from pump().
-void ccord_app_desktop_pump(ccord_app_desktop *d, bool virtual_clock, int64_t now_unix_ms);
+// `now_ms` is monotonic ms (for playback stream idle close); `now_unix_ms` is wall-clock Unix ms (for mute expiry).
+void ccord_app_desktop_pump(ccord_app_desktop *d, bool virtual_clock, int64_t now_ms, int64_t now_unix_ms);
 // Max ms before ccord_app_desktop_pump() needs to close an open notification playback stream (UINT32_MAX when closed).
-uint32_t ccord_app_desktop_next_wait_ms(const ccord_app_desktop *d, int64_t now_unix_ms);
+uint32_t ccord_app_desktop_next_wait_ms(const ccord_app_desktop *d, int64_t now_ms);
 // Recomputes and pushes total unread/mention counts to the SNI tray only when the store revision moved.
 void ccord_app_desktop_sync_badge(ccord_app_desktop *d);
 // Dismisses active OS notifications for channels the user is actively reading (focused window) or whose
