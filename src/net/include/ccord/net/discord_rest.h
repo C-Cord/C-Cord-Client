@@ -44,6 +44,7 @@ typedef struct ccord_rest_config {
 #define CCORD_CAPTCHA_SESSION_ID_MAX 128u
 #define CCORD_CAPTCHA_KEY_MAX        8192u
 #define CCORD_FINGERPRINT_MAX        256u
+#define CCORD_INSTALLATION_ID_MAX    256u
 
 // Parsed Discord CAPTCHA challenge payload (HTTP 400 with captcha_key / captcha_sitekey).
 typedef struct ccord_captcha_challenge {
@@ -82,6 +83,8 @@ typedef struct ccord_captcha_solution {
 [[nodiscard]] bool ccord_live_user_video_url_allowed(const char *url);
 // Base64 JSON sent as X-Super-Properties. Static storage; never contains a token.
 [[nodiscard]] const char *ccord_live_super_properties(void);
+// Resolves the local IANA timezone (e.g. "America/Chicago", falling back to "UTC") for X-Discord-Timezone.
+void ccord_live_timezone(char *out, size_t cap);
 [[nodiscard]] ccord_status ccord_live_rest_build_url(const char *base_url, const char *path, ccord_buf *out,
                                                      ccord_error *err);
 // Blocking HTTPS call with a bounded timeout; used by the transport action hooks.
@@ -95,6 +98,8 @@ typedef struct ccord_captcha_solution {
 [[nodiscard]] bool ccord_live_json_parse_captcha(const char *json, size_t len, ccord_captcha_challenge *out);
 // Parses {"fingerprint":"..."} from GET /experiments. Returns true if a non-empty fingerprint was extracted.
 [[nodiscard]] bool ccord_live_json_parse_fingerprint(const char *json, size_t len, char *out, size_t cap);
+// Parses {"installation":"..."} from GET /experiments. Returns true if a non-empty installation ID was extracted.
+[[nodiscard]] bool ccord_live_json_parse_installation(const char *json, size_t len, char *out, size_t cap);
 
 // Completes 2FA/TOTP login; see ccord_live_auth_login / ccord_live_auth_mfa_totp below.
 [[nodiscard]] ccord_status ccord_live_json_auth_response(const char *json, size_t len, long http_status,
@@ -192,6 +197,8 @@ void ccord_rest_queue_reset_auth(ccord_rest_queue *q);
 void ccord_rest_queue_set_token(ccord_rest_queue *q, const char *token);
 // Sets or clears the pre-auth X-Fingerprint header (from GET /experiments) carried on subsequent API requests.
 void ccord_rest_queue_set_fingerprint(ccord_rest_queue *q, const char *fingerprint);
+// Sets or clears the X-Installation-ID header (from GET /experiments) carried on subsequent API requests.
+void ccord_rest_queue_set_installation_id(ccord_rest_queue *q, const char *installation_id);
 
 // Intercepts HTTP 400 CAPTCHA challenges on non-raw, non-pre_auth API jobs (invites, friend requests, guild/channel
 // mutations, account/profile edits, etc.). Return true to park the job until ccord_rest_captcha_resolve() or

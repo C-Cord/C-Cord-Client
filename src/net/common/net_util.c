@@ -2,6 +2,7 @@
 // Copyright (C) 2026 C-Cord contributors — see LICENSE and LICENSES/C-Cord-Extension-Exception.txt
 // Shared offline-safe network helpers: poll body builder, media cache path, raw gateway tap flag,
 // stream key codec, client identity headers, and secure credential wipe.
+#define _POSIX_C_SOURCE 200809L
 #include <ccord/net/live_transport.h>
 #include <ccord/net/profile_edit.h>
 #include <ccord/net/transport.h>
@@ -17,6 +18,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 // ---- secure wipe ----
 
@@ -48,12 +52,12 @@ const char *ccord_live_super_properties(void)
   if (!ready) {
     static const char json[] =
       "{\"os\":\"Linux\",\"browser\":\"Discord Client\",\"release_channel\":\"stable\","
-      "\"client_version\":\"0.0.72\",\"os_version\":\"6.12.0\",\"os_arch\":\"x64\","
-      "\"app_arch\":\"x64\",\"system_locale\":\"en-US\","
+      "\"client_version\":\"1.0.171\",\"os_version\":\"6.12.0\",\"os_arch\":\"x64\","
+      "\"app_arch\":\"x64\",\"system_locale\":\"en-US\",\"has_client_mods\":false,"
       "\"browser_user_agent\":\"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-      "(KHTML, like Gecko) discord/0.0.72 Chrome/128.0.6613.186 Electron/32.2.2 Safari/537.36\","
-      "\"browser_version\":\"32.2.2\",\"client_build_number\":352419,"
-      "\"native_build_number\":null,\"client_event_source\":null,\"design_id\":0}";
+      "(KHTML, like Gecko) discord/1.0.171 Chrome/138.0.7204.251 Electron/37.6.0 Safari/537.36\","
+      "\"browser_version\":\"37.6.0\",\"os_version_is_release\":true,"
+      "\"client_build_number\":681625,\"client_event_source\":null}";
     (void)ccord_base64_encode((const uint8_t *)json, sizeof json - 1u, encoded, sizeof encoded);
     ready = true;
   }
@@ -62,7 +66,63 @@ const char *ccord_live_super_properties(void)
 
 const char *ccord_live_user_agent(void)
 {
-  return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) discord/0.0.72 Chrome/128.0.6613.186 Electron/32.2.2 Safari/537.36";
+  return "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.171 Chrome/138.0.7204.251 Electron/37.6.0 Safari/537.36";
+}
+
+static bool tz_iana_valid(const char *s, size_t n)
+{
+  if (!s || n == 0 || n > 63u) return false;
+  if (n == 3u && memcmp(s, "UTC", 3) == 0) return true;
+  if (s[0] == '/' || s[n - 1u] == '/') return false;
+  bool has_slash = false;
+  for (size_t i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+              c == '/' || c == '_' || c == '-' || c == '+';
+    if (!ok) return false;
+    if (c == '/') has_slash = true;
+  }
+  return has_slash;
+}
+
+static bool tz_copy_if_valid(const char *src, size_t len, char *out, size_t cap)
+{
+  while (len > 0 && (src[len - 1u] == '\n' || src[len - 1u] == '\r' || src[len - 1u] == ' ' || src[len - 1u] == '\t')) {
+    len--;
+  }
+  if (!tz_iana_valid(src, len) || len >= cap) return false;
+  memcpy(out, src, len);
+  out[len] = '\0';
+  return true;
+}
+
+void ccord_live_timezone(char *out, size_t cap)
+{
+  if (!out || cap == 0) return;
+  const char *env_tz = getenv("TZ");
+  if (env_tz && env_tz[0] != '\0') {
+    const char *p = env_tz[0] == ':' ? env_tz + 1 : env_tz;
+    const char *zi = strstr(p, "zoneinfo/");
+    if (zi) p = zi + 9;
+    if (tz_copy_if_valid(p, strlen(p), out, cap)) return;
+  }
+#if !defined(_WIN32)
+  char linkbuf[256];
+  ssize_t lr = readlink("/etc/localtime", linkbuf, sizeof linkbuf - 1u);
+  if (lr > 0) {
+    linkbuf[(size_t)lr] = '\0';
+    const char *zi = strstr(linkbuf, "zoneinfo/");
+    if (zi && tz_copy_if_valid(zi + 9, strlen(zi + 9), out, cap)) return;
+  }
+  FILE *f = fopen("/etc/timezone", "r");
+  if (f) {
+    char line[128];
+    bool got = fgets(line, (int)sizeof line, f) != nullptr;
+    fclose(f);
+    if (got && tz_copy_if_valid(line, strlen(line), out, cap)) return;
+  }
+#endif
+  (void)snprintf(out, cap, "UTC");
 }
 
 // ---- Go Live stream key format / parse ----

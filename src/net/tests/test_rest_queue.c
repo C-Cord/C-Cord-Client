@@ -67,7 +67,7 @@ static size_t respond(void *ud, int idx, const fd_hit *req, char *out, size_t ca
     case SC_CAPTCHA_FLOW:
       if (strncmp(path, "/experiments", 12) == 0) {
         return fd_reply(out, cap, 200, "OK", "Set-Cookie: __dcfduid=abc123; Path=/\r\n",
-                        "{\"fingerprint\":\"fp-test-999\"}");
+                        "{\"fingerprint\":\"fp-test-999\",\"installation\":\"inst-test-888\"}");
       }
       if (strncmp(path, "/auth/login", 11) == 0) {
         if (req->captcha_key[0] == '\0') {
@@ -782,7 +782,7 @@ static void test_login_captcha_and_fingerprint(void)
   CT_CHECK(q != nullptr);
   if (!q) return;
 
-  // 1. Pre-auth GET /experiments fetches fingerprint + session cookie
+  // 1. Pre-auth GET /experiments fetches fingerprint + installation ID + session cookie
   result r0 = {0};
   CT_CHECK(ccord_live_auth_fetch_fingerprint(q, on_result, &r0, &err) == CCORD_OK);
   CT_CHECK(pump_until(q, result_done, &r0, 3000));
@@ -791,6 +791,12 @@ static void test_login_captcha_and_fingerprint(void)
   CT_CHECK(ccord_live_json_parse_fingerprint(r0.body, strlen(r0.body), fp, sizeof fp));
   CT_CHECK(strcmp(fp, "fp-test-999") == 0);
   ccord_rest_queue_set_fingerprint(q, fp);
+  char inst[128] = {0};
+  CT_CHECK(ccord_live_json_parse_installation(r0.body, strlen(r0.body), inst, sizeof inst));
+  CT_CHECK(strcmp(inst, "inst-test-888") == 0);
+  ccord_rest_queue_set_installation_id(q, inst);
+  // CR/LF injection in installation_id is silently rejected (previous valid value preserved).
+  ccord_rest_queue_set_installation_id(q, "bad\r\nX-Evil: 1");
 
   // 2. First POST /auth/login returns HTTP 400 with CAPTCHA challenge
   result r1 = {0};
@@ -829,16 +835,27 @@ static void test_login_captcha_and_fingerprint(void)
   CT_CHECK(n == 3);
   if (n == 3) {
     CT_CHECK(strcmp(hits[0].method, "GET") == 0 && strcmp(hits[0].path, "/experiments") == 0);
+    CT_CHECK(hits[0].content_type[0] == '\0');
+    CT_CHECK(hits[0].origin[0] == '\0');
+    CT_CHECK(hits[0].timezone[0] != '\0');
+    CT_CHECK(strstr(hits[0].accept_language, "en-US") != nullptr);
     CT_CHECK(strcmp(hits[1].method, "POST") == 0 && strcmp(hits[1].path, "/auth/login") == 0);
+    CT_CHECK(strcmp(hits[1].content_type, "application/json") == 0);
     CT_CHECK(strcmp(hits[1].fingerprint, "fp-test-999") == 0);
+    CT_CHECK(strcmp(hits[1].installation_id, "inst-test-888") == 0);
+    CT_CHECK(hits[1].timezone[0] != '\0');
+    CT_CHECK(strstr(hits[1].accept_language, "en-US") != nullptr);
     CT_CHECK(strstr(hits[1].cookie, "__dcfduid=abc123") != nullptr);
     CT_CHECK(strcmp(hits[1].origin, "https://discord.com") == 0);
+    CT_CHECK(strstr(hits[1].body, "\"login_source\":null") != nullptr);
+    CT_CHECK(strstr(hits[1].body, "\"gift_code_sku_id\":null") != nullptr);
     CT_CHECK(hits[1].captcha_key[0] == '\0');
     CT_CHECK(strcmp(hits[2].method, "POST") == 0 && strcmp(hits[2].path, "/auth/login") == 0);
     CT_CHECK(strcmp(hits[2].captcha_key, "synthetic_cap_key_ok") == 0);
     CT_CHECK(strcmp(hits[2].captcha_rqtoken, "rqtok-123") == 0);
     CT_CHECK(strcmp(hits[2].captcha_session_id, "sess-456") == 0);
     CT_CHECK(strcmp(hits[2].fingerprint, "fp-test-999") == 0);
+    CT_CHECK(strcmp(hits[2].installation_id, "inst-test-888") == 0);
     CT_CHECK(strstr(hits[2].cookie, "__dcfduid=abc123") != nullptr);
     CT_CHECK(hits[2].authorization[0] == '\0');
   }

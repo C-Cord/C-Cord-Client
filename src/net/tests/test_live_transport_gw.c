@@ -1034,6 +1034,20 @@ static void test_json_search_upload_and_dm(void)
   const char *auth_err = "{\"message\":\"Login or password is invalid.\"}";
   CT_CHECK(ccord_live_json_auth_response(auth_err, strlen(auth_err), 400, tok, sizeof tok, ticket, sizeof ticket, &err) ==
            CCORD_ERR_PERMISSION);
+
+  // Nested Discord form-body error (e.g. VPN new-location email check) surfaces the specific field message.
+  const char *auth_nested =
+    "{\"code\":50035,\"message\":\"Invalid Form Body\",\"errors\":{\"login\":{\"_errors\":"
+    "[{\"code\":\"ACCOUNT_LOGIN_VERIFICATION_EMAIL\","
+    "\"message\":\"New login location detected, please check your e-mail.\"}]}}}";
+  CT_CHECK(ccord_live_json_auth_response(auth_nested, strlen(auth_nested), 400, tok, sizeof tok, ticket, sizeof ticket,
+                                         &err) == CCORD_ERR_PERMISSION);
+  CT_CHECK(strstr(err.message, "New login location detected") != nullptr);
+
+  const char *auth_susp = "{\"user_id\":\"42\",\"suspended_user_token\":\"REDACTED_SUSP_TOKEN\"}";
+  CT_CHECK(ccord_live_json_auth_response(auth_susp, strlen(auth_susp), 403, tok, sizeof tok, ticket, sizeof ticket,
+                                         &err) == CCORD_ERR_PERMISSION);
+  CT_CHECK(strstr(err.message, "suspended") != nullptr);
 }
 
 static void test_ready_v2_properties_permissions_sorting_and_dms(void)

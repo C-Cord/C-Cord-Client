@@ -1102,7 +1102,7 @@ bool ccord_live_json_parse_captcha(const char *json, size_t len, ccord_captcha_c
   return ok;
 }
 
-bool ccord_live_json_parse_fingerprint(const char *json, size_t len, char *out, size_t cap)
+static bool dj_parse_top_token(const char *json, size_t len, const char *key, char *out, size_t cap)
 {
   if (out && cap > 0) out[0] = '\0';
   if (!json || len == 0 || !out || cap < 2) return false;
@@ -1111,9 +1111,61 @@ bool ccord_live_json_parse_fingerprint(const char *json, size_t len, char *out, 
   ccord_error err = {0};
   const ccord_json *root = dj_parse_json(&arena, json, len, &err);
   bool ok = root && ccord_json_type_of(root) == CCORD_JSON_OBJECT &&
-            dj_copy_exact_token(root, "fingerprint", out, cap);
+            dj_copy_exact_token(root, key, out, cap);
   ccord_arena_free(&arena);
   return ok;
+}
+
+bool ccord_live_json_parse_fingerprint(const char *json, size_t len, char *out, size_t cap)
+{
+  return dj_parse_top_token(json, len, "fingerprint", out, cap);
+}
+
+bool ccord_live_json_parse_installation(const char *json, size_t len, char *out, size_t cap)
+{
+  return dj_parse_top_token(json, len, "installation", out, cap);
+}
+
+static const char *dj_find_nested_error_msg(const ccord_json *obj, int depth)
+{
+  if (!obj || depth > 4 || ccord_json_type_of(obj) != CCORD_JSON_OBJECT) return nullptr;
+  const ccord_json *errs = ccord_json_get(obj, "_errors");
+  if (errs && ccord_json_type_of(errs) == CCORD_JSON_ARRAY && ccord_json_array_len(errs) > 0) {
+    const ccord_json *first = ccord_json_array_at(errs, 0);
+    if (first && ccord_json_type_of(first) == CCORD_JSON_OBJECT) {
+      const char *m = dj_jstr(first, "message");
+      if (m && m[0] != '\0') return m;
+    }
+  }
+  size_t n = ccord_json_object_len(obj);
+  for (size_t i = 0; i < n; i++) {
+    const ccord_json *val = nullptr;
+    const char *k = ccord_json_object_key(obj, i, &val);
+    if (!k || !val || strcmp(k, "_errors") == 0) continue;
+    const char *m = dj_find_nested_error_msg(val, depth + 1);
+    if (m) return m;
+  }
+  return nullptr;
+}
+
+static const char *dj_find_auth_error_msg(const ccord_json *root)
+{
+  const char *nested = dj_find_nested_error_msg(ccord_json_get(root, "errors"), 0);
+  if (nested && nested[0] != '\0') return nested;
+  const char *msg = dj_jstr(root, "message");
+  if (msg && msg[0] != '\0') return msg;
+  if (dj_jstr(root, "suspended_user_token") != nullptr) {
+    return "Account is suspended; check your standing on Discord.";
+  }
+  static const char *const k_legacy[] = {"login", "password", "code", "ticket", "_misc"};
+  for (size_t i = 0; i < sizeof k_legacy / sizeof k_legacy[0]; i++) {
+    const ccord_json *arr = ccord_json_get(root, k_legacy[i]);
+    if (arr && ccord_json_type_of(arr) == CCORD_JSON_ARRAY && ccord_json_array_len(arr) > 0) {
+      const char *s = ccord_json_string(ccord_json_array_at(arr, 0), nullptr);
+      if (s && s[0] != '\0') return s;
+    }
+  }
+  return nullptr;
 }
 
 ccord_status ccord_live_json_auth_response_ex(const char *json, size_t len, long http_status,
@@ -1144,7 +1196,7 @@ ccord_status ccord_live_json_auth_response_ex(const char *json, size_t len, long
       ccord_arena_free(&arena);
       return CCORD_ERR_PERMISSION;
     }
-    const char *msg = dj_jstr(root, "message");
+    const char *msg = dj_find_auth_error_msg(root);
     ccord_status st = (http_status == 400 || http_status == 401 || http_status == 403)
                         ? CCORD_ERR_PERMISSION
                         : CCORD_ERR_IO;

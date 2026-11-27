@@ -67,11 +67,14 @@ void app_sync_account_view(app *a)
 #if CCORD_LIVE_ACCOUNT
 bool app_ensure_auth_q(app *a, ccord_error *err)
 {
+  if (a->auth_q && a->auth_q_retire && !a->auth_pending) {
+    app_destroy_auth_q(a);
+  }
   if (a->auth_q) {
     a->auth_q_retire = false;
     return true;
   }
-  ccord_rest_config auth_cfg = {.timeout_ms = 10000, .max_response_bytes = 65536, .enable_cookies = true};
+  ccord_rest_config auth_cfg = {.timeout_ms = 15000, .max_response_bytes = 262144, .enable_cookies = true};
   a->auth_q = ccord_rest_queue_create(&auth_cfg, err);
   a->auth_q_retire = false;
   a->auth_fp_fetched = false;

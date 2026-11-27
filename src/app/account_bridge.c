@@ -457,19 +457,34 @@ void app_host_account_remove(void *ud, uint64_t user_id)
 #if CCORD_LIVE_ACCOUNT
 static void host_auth_result(void *ud, ccord_status st, long http_status, const char *body, size_t body_len);
 
-// Pre-auth GET /experiments callback: records X-Fingerprint + Cloudflare/Discord cookies into auth_q,
-// then immediately proceeds to POST /auth/login (even if /experiments failed, never blocks login).
+// Pre-auth GET /experiments callback: records X-Fingerprint + X-Installation-ID + Cloudflare/Discord
+// cookies into auth_q, then immediately proceeds to POST /auth/login (never blocks login on failure).
 static void host_auth_fp_result(void *ud, ccord_status st, long http_status, const char *body, size_t body_len)
 {
   app *a = ud;
   if (!a || !a->account || !a->auth_pending || !a->auth_q) return;
-  a->auth_fp_fetched = true;
+  bool got_fp = false;
+  bool got_inst = false;
   if (st == CCORD_OK && http_status >= 200 && http_status < 300 && body && body_len > 0) {
     char fp[CCORD_FINGERPRINT_MAX];
     if (ccord_live_json_parse_fingerprint(body, body_len, fp, sizeof fp)) {
       ccord_rest_queue_set_fingerprint(a->auth_q, fp);
       ccord_live_wipe(fp, sizeof fp);
+      got_fp = true;
     }
+    char inst[CCORD_INSTALLATION_ID_MAX];
+    if (ccord_live_json_parse_installation(body, body_len, inst, sizeof inst)) {
+      ccord_rest_queue_set_installation_id(a->auth_q, inst);
+      ccord_live_wipe(inst, sizeof inst);
+      got_inst = true;
+    }
+    a->auth_fp_fetched = got_fp;
+  } else {
+    a->auth_fp_fetched = false;
+  }
+  if (!got_fp) {
+    CCORD_LOG_W("auth: GET /experiments yielded no fingerprint (st=%d, http=%ld, len=%zu, inst=%s)",
+                (int)st, http_status, body_len, got_inst ? "yes" : "no");
   }
   const char *email = nullptr, *password = nullptr, *mfa_code = nullptr;
   ccord_ui_account_login_fields(a->ui, &email, &password, &mfa_code);
@@ -477,9 +492,43 @@ static void host_auth_fp_result(void *ud, ccord_status st, long http_status, con
   ccord_status lst = ccord_live_auth_login(a->auth_q, email, password, host_auth_result, a, &err);
   if (lst != CCORD_OK) {
     a->auth_pending = false;
+    a->auth_q_retire = true;
+    a->auth_fp_fetched = false;
+    a->auth_5xx_retries = 0;
     ccord_ui_set_login_error(a->ui, err.message[0] ? err.message : "Login failed", false);
     app_sync_account_view(a);
   }
+}
+
+void app_auth_start_fresh_retry(app *a)
+{
+  if (!a || !a->account || a->auth_pending || a->auth_q) return;
+  a->auth_retry_fresh = false;
+  ccord_error err = {0};
+  const char *email = nullptr, *password = nullptr, *mfa_code = nullptr;
+  ccord_ui_account_login_fields(a->ui, &email, &password, &mfa_code);
+  if (!email || !email[0] || !password || !password[0]) {
+    a->auth_5xx_retries = 0;
+    ccord_ui_set_login_error(a->ui, "auth: login and password are required", false);
+    app_sync_account_view(a);
+    return;
+  }
+  if (!app_ensure_auth_q(a, &err)) {
+    a->auth_5xx_retries = 0;
+    ccord_ui_set_login_error(a->ui, err.message[0] ? err.message : "Login initialization failed", false);
+    app_sync_account_view(a);
+    return;
+  }
+  ccord_status st = ccord_live_auth_fetch_fingerprint(a->auth_q, host_auth_fp_result, a, &err);
+  if (st == CCORD_OK) {
+    a->auth_pending = true;
+    ccord_ui_set_login_busy(a->ui, "Retrying sign-in...");
+  } else {
+    a->auth_5xx_retries = 0;
+    app_destroy_auth_q(a);
+    ccord_ui_set_login_error(a->ui, err.message[0] ? err.message : "Login failed", false);
+  }
+  app_sync_account_view(a);
 }
 
 void app_auth_retry_with_captcha(app *a, const char *captcha_key, const char *rqtoken, const char *session_id)
@@ -520,6 +569,13 @@ static void host_auth_result(void *ud, ccord_status st, long http_status, const 
   a->auth_pending = false;
   if (st != CCORD_OK) {
     bool keep_mfa = a->mfa_ticket[0] != '\0';
+    CCORD_LOG_W("auth: login transport error (st=%d, http=%ld, mfa=%s, fp=%s)",
+                (int)st, http_status, keep_mfa ? "yes" : "no", a->auth_fp_fetched ? "yes" : "no");
+    if (!keep_mfa) {
+      a->auth_q_retire = true;
+      a->auth_fp_fetched = false;
+      a->auth_5xx_retries = 0;
+    }
     ccord_ui_set_login_error(a->ui, st == CCORD_ERR_TIMEOUT ? "Login timed out; try again."
                                                             : "Network error during login; try again.",
                              keep_mfa);
@@ -534,6 +590,8 @@ static void host_auth_result(void *ud, ccord_status st, long http_status, const 
                                                       ticket, sizeof ticket, &cap, &err);
   if (pst == CCORD_OK && token[0] != '\0') {
     a->captcha_attempts = 0;
+    a->auth_5xx_retries = 0;
+    a->auth_retry_fresh = false;
     ccord_live_wipe(&a->captcha_challenge, sizeof a->captcha_challenge);
     ccord_live_wipe(a->mfa_ticket, sizeof a->mfa_ticket);
     if (ccord_live_save_token(a->token_file, token, &err) == CCORD_OK) {
@@ -547,11 +605,24 @@ static void host_auth_result(void *ud, ccord_status st, long http_status, const 
     }
   } else if (pst == CCORD_OK && ticket[0] != '\0') {
     a->captcha_attempts = 0;
+    a->auth_5xx_retries = 0;
+    a->auth_retry_fresh = false;
     ccord_live_wipe(&a->captcha_challenge, sizeof a->captcha_challenge);
     memcpy(a->mfa_ticket, ticket, sizeof ticket);
     ccord_ui_set_login_status(a->ui, "Enter the 6-digit code from your authenticator app.", true);
+  } else if (cap.required && cap.service[0] != '\0' && strcmp(cap.service, "hcaptcha") != 0) {
+    a->captcha_attempts = 0;
+    a->auth_5xx_retries = 0;
+    a->auth_q_retire = true;
+    a->auth_fp_fetched = false;
+    ccord_live_wipe(&a->captcha_challenge, sizeof a->captcha_challenge);
+    CCORD_LOG_W("auth: Discord requested unsupported '%s' CAPTCHA (http=%ld)", cap.service, http_status);
+    char cmsg[192];
+    snprintf(cmsg, sizeof cmsg, "Discord requested unsupported '%s' CAPTCHA; use Token Sign-In.", cap.service);
+    ccord_ui_set_login_error(a->ui, cmsg, false);
   } else if (cap.required && cap.sitekey[0] != '\0' && a->captcha_attempts < 3) {
     a->captcha_attempts++;
+    a->auth_5xx_retries = 0;
     a->captcha_challenge = cap;
     CCORD_LOG_I("auth: Discord requested %s CAPTCHA (attempt %d/3, sitekey=%.16s..., rqdata=%zu B, rqtoken=%s, session=%s)",
                 cap.service[0] ? cap.service : "hcaptcha", a->captcha_attempts, cap.sitekey,
@@ -559,19 +630,37 @@ static void host_auth_result(void *ud, ccord_status st, long http_status, const 
     if (app_captcha_open(a, cap.service, cap.sitekey, cap.rqdata, false)) {
       ccord_ui_set_login_busy(a->ui, "Complete the verification to finish signing in...");
     } else {
-      char cmsg[192];
-      if (cap.service[0] && strcmp(cap.service, "hcaptcha") != 0) {
-        snprintf(cmsg, sizeof cmsg, "Discord requested unsupported '%s' CAPTCHA; use Token Sign-In.", cap.service);
-      } else {
-        snprintf(cmsg, sizeof cmsg, "CAPTCHA required (failed to open native view; try Token Sign-In).");
-      }
-      ccord_ui_set_login_error(a->ui, cmsg, false);
+      a->auth_q_retire = true;
+      a->auth_fp_fetched = false;
+      ccord_ui_set_login_error(a->ui, "CAPTCHA required (failed to open native view; try Token Sign-In).", false);
     }
+  } else if (http_status >= 500 && a->mfa_ticket[0] == '\0' && a->captcha_attempts == 0 && a->auth_5xx_retries < 1) {
+    a->auth_5xx_retries++;
+    a->auth_q_retire = true;
+    a->auth_fp_fetched = false;
+    a->auth_retry_fresh = true;
+    ccord_live_wipe(&a->captcha_challenge, sizeof a->captcha_challenge);
+    CCORD_LOG_W("auth: POST /auth/login returned HTTP %ld (%s); retrying once with a fresh pre-auth session",
+                http_status, err.message[0] ? err.message : "server error");
+    ccord_ui_set_login_busy(a->ui, "Retrying sign-in...");
   } else {
+    bool cap_exhausted = cap.required && a->captcha_attempts >= 3;
     a->captcha_attempts = 0;
+    a->auth_5xx_retries = 0;
+    a->auth_retry_fresh = false;
     ccord_live_wipe(&a->captcha_challenge, sizeof a->captcha_challenge);
     bool keep_mfa = a->mfa_ticket[0] != '\0';
-    ccord_ui_set_login_error(a->ui, err.message[0] ? err.message : "Login failed", keep_mfa);
+    CCORD_LOG_W("auth: login failed (http=%ld, len=%zu, mfa=%s, fp=%s, msg='%s')",
+                http_status, body_len, keep_mfa ? "yes" : "no", a->auth_fp_fetched ? "yes" : "no",
+                err.message[0] ? err.message : "Login failed");
+    if (!keep_mfa) {
+      a->auth_q_retire = true;
+      a->auth_fp_fetched = false;
+    }
+    const char *shown = cap_exhausted
+                            ? "CAPTCHA verification failed after 3 attempts; try again or use Token Sign-In."
+                            : (err.message[0] ? err.message : "Login failed");
+    ccord_ui_set_login_error(a->ui, shown, keep_mfa);
   }
   ccord_live_wipe(&cap, sizeof cap);
   ccord_live_wipe(token, sizeof token);
@@ -597,6 +686,8 @@ void app_host_account_action(void *ud, ccord_account_action action)
       app_captcha_close(a, false);
 #if CCORD_LIVE_ACCOUNT
       a->auth_pending = false;
+      a->auth_retry_fresh = false;
+      a->auth_5xx_retries = 0;
       a->captcha_attempts = 0;
       ccord_live_wipe(&a->captcha_challenge, sizeof a->captcha_challenge);
       app_destroy_auth_q(a);
@@ -616,6 +707,8 @@ void app_host_account_action(void *ud, ccord_account_action action)
       if (ccord_live_save_token(a->token_file, tok, &err) == CCORD_OK) {
         app_captcha_close(a, false);
         a->auth_pending = false;
+        a->auth_retry_fresh = false;
+        a->auth_5xx_retries = 0;
         a->captcha_attempts = 0;
         ccord_live_wipe(&a->captcha_challenge, sizeof a->captcha_challenge);
         app_destroy_auth_q(a);
@@ -638,6 +731,8 @@ void app_host_account_action(void *ud, ccord_account_action action)
       app_captcha_close(a, false);
 #if CCORD_LIVE_ACCOUNT
       a->auth_pending = false;
+      a->auth_retry_fresh = false;
+      a->auth_5xx_retries = 0;
       app_destroy_auth_q(a);
       ccord_live_wipe(a->mfa_ticket, sizeof a->mfa_ticket);
       app_reset_account_sync_cache(a);
@@ -650,7 +745,7 @@ void app_host_account_action(void *ud, ccord_account_action action)
       break;
     case CCORD_ACCOUNT_ACTION_CREDENTIALS_LOGIN: {
 #if CCORD_LIVE_ACCOUNT
-      if (a->auth_pending || app_captcha_active(a)) break;  // wait for active login/MFA/CAPTCHA flow
+      if (a->auth_pending || a->auth_retry_fresh || app_captcha_active(a)) break;  // wait for active login/MFA/CAPTCHA flow
       if (!app_ensure_auth_q(a, &err)) {
         bool keep_mfa = a->mfa_ticket[0] != '\0';
         ccord_ui_set_login_error(a->ui, err.message[0] ? err.message : "Login initialization failed", keep_mfa);
@@ -664,6 +759,8 @@ void app_host_account_action(void *ud, ccord_account_action action)
         if (st == CCORD_OK) ccord_ui_set_login_busy(a->ui, "Verifying 2FA code...");
       } else {
         a->captcha_attempts = 0;
+        a->auth_5xx_retries = 0;
+        a->auth_retry_fresh = false;
         ccord_live_wipe(&a->captcha_challenge, sizeof a->captcha_challenge);
         ccord_live_wipe(a->mfa_ticket, sizeof a->mfa_ticket);
         if (!email || !email[0] || !password || !password[0]) {
@@ -689,6 +786,8 @@ void app_host_account_action(void *ud, ccord_account_action action)
       app_captcha_close(a, false);
 #if CCORD_LIVE_ACCOUNT
       a->auth_pending = false;
+      a->auth_retry_fresh = false;
+      a->auth_5xx_retries = 0;
       a->captcha_attempts = 0;
       ccord_live_wipe(&a->captcha_challenge, sizeof a->captcha_challenge);
       app_destroy_auth_q(a);

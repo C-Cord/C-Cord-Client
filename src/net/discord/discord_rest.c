@@ -373,6 +373,7 @@ struct ccord_rest_queue {
   char *base_url;
   char *token;
   char *fingerprint;     // optional pre-auth X-Fingerprint header (from GET /experiments)
+  char *installation_id; // optional X-Installation-ID header (from GET /experiments)
   CURLSH *cookie_share;  // optional in-memory cookie jar shared across requests (enable_cookies)
   ccord_rest_captcha_fn captcha_fn;
   void *captcha_ud;
@@ -698,6 +699,10 @@ void ccord_rest_queue_destroy(ccord_rest_queue *q)
     ccord_live_wipe(q->fingerprint, strlen(q->fingerprint));
     ccord_free(q->fingerprint);
   }
+  if (q->installation_id) {
+    ccord_live_wipe(q->installation_id, strlen(q->installation_id));
+    ccord_free(q->installation_id);
+  }
   ccord_free(q->base_url);
   ccord_free(q);
 }
@@ -826,9 +831,13 @@ static bool rest_job_attach(ccord_rest_queue *q, ccord_rest_job *job)
     }
     job->have_auth = true;
   }
+  bool preauth_bodyless_get = job->pre_auth && job->method == CCORD_REST_GET && job->body.len == 0 &&
+                              !(job->content_type && job->content_type[0] != '\0');
   const char *content_type =
       job->raw ? job->content_type
-               : (job->content_type && job->content_type[0] != '\0' ? job->content_type : "application/json");
+               : (job->content_type && job->content_type[0] != '\0'
+                      ? job->content_type
+                      : (preauth_bodyless_get ? nullptr : "application/json"));
   if (content_type && content_type[0] != '\0') {
     char ct_hdr[128];
     int cn = snprintf(ct_hdr, sizeof ct_hdr, "Content-Type: %s", content_type);
@@ -854,15 +863,42 @@ static bool rest_job_attach(ccord_rest_queue *q, ccord_rest_job *job)
     }
     job->headers = curl_slist_append(job->headers, super_header);
     if (job->pre_auth) {
-      job->headers = curl_slist_append(job->headers, "Origin: https://discord.com");
+      if (job->method != CCORD_REST_GET) {
+        job->headers = curl_slist_append(job->headers, "Origin: https://discord.com");
+      }
       job->headers = curl_slist_append(job->headers, "Referer: https://discord.com/login");
+      job->headers = curl_slist_append(job->headers, "Accept-Language: en-US,en;q=0.9");
       job->headers = curl_slist_append(job->headers, "X-Discord-Locale: en-US");
+      char tz[64];
+      ccord_live_timezone(tz, sizeof tz);
+      if (!rest_append_header_kv(&job->headers, "X-Discord-Timezone", tz, false)) {
+        rest_job_detach_easy(q, job, true);
+        return false;
+      }
+      job->headers = curl_slist_append(job->headers, "X-Debug-Options: bugReporterEnabled");
+      job->headers = curl_slist_append(job->headers, "Sec-Fetch-Dest: empty");
+      job->headers = curl_slist_append(job->headers, "Sec-Fetch-Mode: cors");
+      job->headers = curl_slist_append(job->headers, "Sec-Fetch-Site: same-origin");
     } else if (job->captcha_key && job->captcha_key[0] != '\0') {
       job->headers = curl_slist_append(job->headers, "Origin: https://discord.com");
+      job->headers = curl_slist_append(job->headers, "Accept-Language: en-US,en;q=0.9");
       job->headers = curl_slist_append(job->headers, "X-Discord-Locale: en-US");
+      char tz[64];
+      ccord_live_timezone(tz, sizeof tz);
+      if (!rest_append_header_kv(&job->headers, "X-Discord-Timezone", tz, false)) {
+        rest_job_detach_easy(q, job, true);
+        return false;
+      }
+      job->headers = curl_slist_append(job->headers, "X-Debug-Options: bugReporterEnabled");
     }
     if (q->fingerprint && q->fingerprint[0] != '\0') {
       if (!rest_append_header_kv(&job->headers, "X-Fingerprint", q->fingerprint, false)) {
+        rest_job_detach_easy(q, job, true);
+        return false;
+      }
+    }
+    if (q->installation_id && q->installation_id[0] != '\0') {
+      if (!rest_append_header_kv(&job->headers, "X-Installation-ID", q->installation_id, false)) {
         rest_job_detach_easy(q, job, true);
         return false;
       }
@@ -1392,6 +1428,20 @@ void ccord_rest_queue_set_fingerprint(ccord_rest_queue *q, const char *fingerpri
   q->fingerprint = next;
 }
 
+void ccord_rest_queue_set_installation_id(ccord_rest_queue *q, const char *installation_id)
+{
+  if (!q) return;
+  bool have = installation_id && installation_id[0] != '\0';
+  if (have && !rest_header_token_valid(installation_id, CCORD_INSTALLATION_ID_MAX - 1u)) return;
+  char *next = have ? ccord_strdup(installation_id) : nullptr;
+  if (have && !next) return;
+  if (q->installation_id) {
+    ccord_live_wipe(q->installation_id, strlen(q->installation_id));
+    ccord_free(q->installation_id);
+  }
+  q->installation_id = next;
+}
+
 static ccord_rest_job *rest_find_captcha_job(uint64_t challenge_id, ccord_rest_queue **out_q)
 {
   if (out_q) *out_q = nullptr;
@@ -1773,6 +1823,10 @@ ccord_status ccord_live_auth_login_captcha(ccord_rest_queue *q, const char *logi
   ccord_jw_cstr(&w, password);
   ccord_jw_key(&w, "undelete");
   ccord_jw_bool(&w, false);
+  ccord_jw_key(&w, "login_source");
+  ccord_jw_null(&w);
+  ccord_jw_key(&w, "gift_code_sku_id");
+  ccord_jw_null(&w);
   ccord_jw_end_object(&w);
   if (!ccord_jw_ok(&w)) {
     if (body.data && body.len > 0) ccord_live_wipe(body.data, body.len);
@@ -1805,6 +1859,10 @@ ccord_status ccord_live_auth_mfa_totp(ccord_rest_queue *q, const char *ticket, c
   ccord_jw_cstr(&w, code);
   ccord_jw_key(&w, "ticket");
   ccord_jw_cstr(&w, ticket);
+  ccord_jw_key(&w, "login_source");
+  ccord_jw_null(&w);
+  ccord_jw_key(&w, "gift_code_sku_id");
+  ccord_jw_null(&w);
   ccord_jw_end_object(&w);
   if (!ccord_jw_ok(&w)) {
     if (body.data && body.len > 0) ccord_live_wipe(body.data, body.len);

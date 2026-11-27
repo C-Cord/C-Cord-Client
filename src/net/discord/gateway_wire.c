@@ -37,7 +37,7 @@ ccord_status ccord_gateway_build_identify(const char *token, ccord_buf *out, cco
   ccord_jw_key(&w, "release_channel");
   ccord_jw_cstr(&w, "stable");
   ccord_jw_key(&w, "client_version");
-  ccord_jw_cstr(&w, "0.0.72");
+  ccord_jw_cstr(&w, "1.0.171");
   ccord_jw_key(&w, "os_version");
   ccord_jw_cstr(&w, "6.12.0");
   ccord_jw_key(&w, "os_arch");
@@ -46,13 +46,15 @@ ccord_status ccord_gateway_build_identify(const char *token, ccord_buf *out, cco
   ccord_jw_cstr(&w, "x64");
   ccord_jw_key(&w, "system_locale");
   ccord_jw_cstr(&w, "en-US");
+  ccord_jw_key(&w, "has_client_mods");
+  ccord_jw_bool(&w, false);
   ccord_jw_key(&w, "browser_user_agent");
   ccord_jw_cstr(&w, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) discord/0.0.72 Chrome/128.0.6613.186 Electron/32.2.2 Safari/537.36");
+                    "(KHTML, like Gecko) discord/1.0.171 Chrome/138.0.7204.251 Electron/37.6.0 Safari/537.36");
   ccord_jw_key(&w, "browser_version");
-  ccord_jw_cstr(&w, "32.2.2");
+  ccord_jw_cstr(&w, "37.6.0");
   ccord_jw_key(&w, "client_build_number");
-  ccord_jw_int(&w, 352419);
+  ccord_jw_int(&w, 681625);
   ccord_jw_end_object(&w);
   ccord_jw_key(&w, "compress");
   ccord_jw_bool(&w, false);

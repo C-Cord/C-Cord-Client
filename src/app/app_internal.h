@@ -109,6 +109,8 @@ typedef struct app {
   bool auth_pending;             // a login/MFA request is in flight; blocks double submission
   bool auth_q_retire;            // destroy auth_q after ccord_rest_queue_pump returns
   bool auth_fp_fetched;          // pre-auth GET /experiments fingerprint/cookie step completed on auth_q
+  bool auth_retry_fresh;         // start one fresh-session retry (new auth_q + /experiments) after retire
+  int auth_5xx_retries;          // bounded automatic retries on transient 5xx during initial password login
   ccord_captcha_challenge captcha_challenge;
   int captcha_attempts;
 #endif
@@ -249,6 +251,7 @@ void app_push_saved_accounts(app *a);
 #if CCORD_LIVE_ACCOUNT
 void app_keyring_sync(app *a);
 void app_on_account_token_rotated(void *ud, const char *new_token);
+void app_auth_start_fresh_retry(app *a);
 #endif
 void app_reopen_warm_cache(app *a, const char *token_file);
 void app_reset_account_sync_cache(app *a);

@@ -40,6 +40,9 @@ typedef struct fd_hit {
   char captcha_rqtoken[64]; // X-Captcha-Rqtoken header value
   char captcha_session_id[64]; // X-Captcha-Session-Id header value
   char fingerprint[64];     // X-Fingerprint header value
+  char installation_id[64]; // X-Installation-ID header value
+  char timezone[64];        // X-Discord-Timezone header value
+  char accept_language[64]; // Accept-Language header value
   char cookie[96];          // Cookie header value
   char origin[64];          // Origin header value
   bool super_properties;  // an X-Super-Properties header was present
@@ -180,6 +183,27 @@ static void fd_serve(int lfd, int wfd, fd_respond_fn fn, void *ud)
         if (vl >= sizeof req.fingerprint) vl = sizeof req.fingerprint - 1u;
         memcpy(req.fingerprint, v, vl);
         req.fingerprint[vl] = '\0';
+      } else if (strncasecmp(p, "X-Installation-ID:", 18) == 0) {
+        char *v = p + 18;
+        while (*v == ' ') v++;
+        size_t vl = (size_t)(nl - v);
+        if (vl >= sizeof req.installation_id) vl = sizeof req.installation_id - 1u;
+        memcpy(req.installation_id, v, vl);
+        req.installation_id[vl] = '\0';
+      } else if (strncasecmp(p, "X-Discord-Timezone:", 19) == 0) {
+        char *v = p + 19;
+        while (*v == ' ') v++;
+        size_t vl = (size_t)(nl - v);
+        if (vl >= sizeof req.timezone) vl = sizeof req.timezone - 1u;
+        memcpy(req.timezone, v, vl);
+        req.timezone[vl] = '\0';
+      } else if (strncasecmp(p, "Accept-Language:", 16) == 0) {
+        char *v = p + 16;
+        while (*v == ' ') v++;
+        size_t vl = (size_t)(nl - v);
+        if (vl >= sizeof req.accept_language) vl = sizeof req.accept_language - 1u;
+        memcpy(req.accept_language, v, vl);
+        req.accept_language[vl] = '\0';
       } else if (strncasecmp(p, "Cookie:", 7) == 0) {
         char *v = p + 7;
         while (*v == ' ') v++;

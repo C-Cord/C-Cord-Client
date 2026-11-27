@@ -70,6 +70,9 @@ void app_pump(app *a)
     ccord_rest_queue_pump(a->auth_q, app_now_ms(a));
     if (a->auth_q_retire && !a->auth_pending) app_destroy_auth_q(a);
   }
+  if (a->auth_retry_fresh && !a->auth_pending && !a->auth_q) {
+    app_auth_start_fresh_retry(a);
+  }
 #endif
   if (app_captcha_pump(a)) a->media_redraw = true;
   (void)ccord_session_pump(a->session);

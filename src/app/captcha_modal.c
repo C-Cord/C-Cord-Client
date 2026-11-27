@@ -488,6 +488,10 @@ void app_captcha_close(app *a, bool user_cancelled)
     ccord_live_wipe(&a->captcha_challenge, sizeof a->captcha_challenge);
     a->captcha_attempts = 0;
     a->auth_pending = false;
+    a->auth_retry_fresh = false;
+    a->auth_5xx_retries = 0;
+    a->auth_q_retire = true;
+    a->auth_fp_fetched = false;
 #endif
     if (a->ui) ccord_ui_set_login_error(a->ui, "Verification cancelled. Try again or use Token Sign-In.", false);
 #if CCORD_LIVE_ACCOUNT
