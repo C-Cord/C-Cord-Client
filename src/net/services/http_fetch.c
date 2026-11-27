@@ -26,6 +26,9 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #if defined(__linux__)
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
 #include <sys/timerfd.h>
 #include <time.h>
 #endif
@@ -1272,11 +1275,17 @@ ccord_ws_client *ccord_ws_client_open(const char *url, const char *headers_json,
   struct curl_slist *hdrs = append_json_headers(nullptr, headers_json, false);
   curl_easy_setopt(curl, CURLOPT_URL, url);
   curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 2L);
+#if defined(CURLWS_NOAUTOPONG)
+  // Handle WebSocket PING explicitly in ws_try_recv_frame(): in CONNECT_ONLY=2 mode, libcurl's
+  // auto-pong can sit buffered in ws->sendbuf until the next curl_ws_send(), starving server pings.
+  curl_easy_setopt(curl, CURLOPT_WS_OPTIONS, (long)CURLWS_NOAUTOPONG);
+#endif
   curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
   curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
   curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
-  curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 60L);
-  curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 15L);
+  curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 45L);
+  curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 10L);
   if (!plain) {
     ccord_curl_apply_tls(curl);
     curl_easy_setopt(curl, CURLOPT_SSLVERSION, (long)CURL_SSLVERSION_TLSv1_2);
@@ -1296,9 +1305,14 @@ ccord_ws_client *ccord_ws_client_open(const char *url, const char *headers_json,
     curl_easy_cleanup(curl);
     return nullptr;
   }
+  curl_easy_setopt(curl, CURLOPT_TIMEOUT, 0L);
   curl_socket_t sock = CURL_SOCKET_BAD;
   if (curl_easy_getinfo(curl, CURLINFO_ACTIVESOCKET, &sock) == CURLE_OK && sock != CURL_SOCKET_BAD) {
     (void)ccord_sock_set_nonblock((ccord_socket_t)sock);
+#if defined(__linux__) && defined(TCP_USER_TIMEOUT)
+    unsigned int user_timeout_ms = 15000u;
+    (void)setsockopt(sock, IPPROTO_TCP, TCP_USER_TIMEOUT, &user_timeout_ms, sizeof user_timeout_ms);
+#endif
   }
   ccord_ws_client *ws = ccord_calloc(1, sizeof *ws);
   if (!ws) {
@@ -1353,6 +1367,35 @@ bool ccord_ws_client_send(ccord_ws_client *ws, const uint8_t *data, size_t len, 
 }
 
 #if defined(CURLWS_TEXT)
+static void ws_send_pong(ccord_ws_client *ws, const uint8_t *data, size_t len)
+{
+  if (!ws || !ws->curl) return;
+  if (len > 125u) len = 125u;   // RFC 6455 control frame payload limit
+  size_t total = 0;
+  uint64_t deadline = 0;
+  do {
+    size_t sent = 0;
+    const uint8_t *ptr = data ? (data + total) : (const uint8_t *)"";
+    CURLcode rc = curl_ws_send(ws->curl, ptr, len - total, &sent, 0, CURLWS_PONG);
+    if (rc == CURLE_AGAIN) {
+      uint64_t now = ccord_clock_ms();
+      if (deadline == 0) deadline = now + 250u;
+      if (now >= deadline) return;
+      curl_socket_t sock = CURL_SOCKET_BAD;
+      if (curl_easy_getinfo(ws->curl, CURLINFO_ACTIVESOCKET, &sock) == CURLE_OK && sock != CURL_SOCKET_BAD) {
+        int rev = ccord_sock_poll1((ccord_socket_t)sock, CCORD_POLL_OUT, (int)(deadline - now));
+        if (rev <= 0 || (rev & (CCORD_POLL_ERR | CCORD_POLL_HUP)) != 0) return;
+      } else {
+        ccord_sleep_ms(5);
+      }
+      continue;
+    }
+    if (rc != CURLE_OK) return;
+    if (len > 0 && sent == 0) return;
+    total += sent;
+  } while (total < len);
+}
+
 // Attempts a non-blocking WebSocket frame read from libcurl/TLS buffers.
 // Returns >0 on a complete data frame, 0 when no frame is buffered yet (CURLE_AGAIN),
 // or -1 on close frame, EOF, or transport error.
@@ -1362,11 +1405,23 @@ static int ws_try_recv_frame(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool
     size_t rlen = 0;
     const struct curl_ws_frame *meta = nullptr;
     CURLcode rc = curl_ws_recv(ws->curl, buf, cap, &rlen, &meta);
-    if (rc == CURLE_AGAIN) return 0;
+    if (rc == CURLE_AGAIN) {
+#if !defined(CURLWS_NOAUTOPONG)
+      // Older libcurl (< 8.14) auto-queues PONG on PING without always flushing sendbuf in
+      // CONNECT_ONLY=2 mode; trigger ws_flush() safely (no-op if sendbuf is empty).
+      size_t flushed = 0;
+      (void)curl_ws_send(ws->curl, "", 0, &flushed, 0, 0);
+#endif
+      return 0;
+    }
     if (rc != CURLE_OK) return -1;
     if (!meta) return -1;   // clean TCP EOF without WS CLOSE
     if (meta->flags & CURLWS_CLOSE) return -1;
-    if (meta->flags & (CURLWS_PING | CURLWS_PONG)) continue;   // libcurl auto-pongs PING; keep draining
+    if (meta->flags & CURLWS_PING) {
+      ws_send_pong(ws, buf, rlen);
+      continue;
+    }
+    if (meta->flags & CURLWS_PONG) continue;
     bool is_bin = (meta->flags & CURLWS_BINARY) != 0;
     size_t total = rlen;
     curl_off_t left = meta->bytesleft;
@@ -1385,7 +1440,11 @@ static int ws_try_recv_frame(ccord_ws_client *ws, uint8_t *buf, size_t cap, bool
       }
       if (rc2 != CURLE_OK || !m2) return -1;
       if (m2->flags & CURLWS_CLOSE) return -1;
-      if (m2->flags & (CURLWS_PING | CURLWS_PONG)) continue;
+      if (m2->flags & CURLWS_PING) {
+        ws_send_pong(ws, buf + total, m);
+        continue;
+      }
+      if (m2->flags & CURLWS_PONG) continue;
       total += m;
       left = m2->bytesleft;
       cont = (m2->flags & CURLWS_CONT) != 0;
