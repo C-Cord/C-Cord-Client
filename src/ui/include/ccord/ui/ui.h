@@ -103,6 +103,7 @@ typedef struct ccord_ui_host {      // everything the UI needs from the OS; test
   void (*cloud_unlink_github)(void *ud);
   void (*cloud_rescan_claims)(void *ud);
   void (*cloud_set_wake_enabled)(void *ud, bool enabled);
+  void (*cloud_request_battery_unrestricted)(void *ud);
   void (*cloud_fetch_social)(void *ud, const char *plugin_id);
   void (*cloud_rate_plugin)(void *ud, const char *plugin_id, int vote); // -1, 0, 1, or 99 to clear
   void (*cloud_post_comment)(void *ud, const char *plugin_id, int64_t parent_id, const char *body);
@@ -165,6 +166,7 @@ typedef struct ccord_ui_cloud_info {
   bool wake_connected;
   bool companion_online;
   bool is_mobile;
+  bool battery_unrestricted;
   char username[65];
   char display_name[65];
   char github_login[65];

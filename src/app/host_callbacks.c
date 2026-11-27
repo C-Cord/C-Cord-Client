@@ -498,6 +498,7 @@ static void host_cloud_link_github(void *ud)     { app *a = ud; if (a && a->clou
 static void host_cloud_unlink_github(void *ud)   { app *a = ud; if (a && a->cloud) ccord_cloud_unlink_github(a->cloud); }
 static void host_cloud_rescan_claims(void *ud)   { app *a = ud; if (a && a->cloud) ccord_cloud_rescan_claims(a->cloud); }
 static void host_cloud_set_wake(void *ud, bool e){ app *a = ud; if (a && a->cloud) ccord_cloud_set_wake_enabled(a->cloud, e); }
+static void host_cloud_request_battery(void *ud) { app *a = ud; if (a && a->platform) (void)ccord_platform_request_battery_unrestricted(a->platform); }
 static void host_cloud_fetch_social(void *ud, const char *id) { app *a = ud; if (a && a->cloud) ccord_cloud_fetch_social(a->cloud, id); }
 static void host_cloud_rate_plugin(void *ud, const char *id, int v) { app *a = ud; if (a && a->cloud) ccord_cloud_rate_plugin(a->cloud, id, v); }
 static void host_cloud_post_comment(void *ud, const char *id, int64_t pid, const char *body)
@@ -528,6 +529,7 @@ void app_sync_cloud_ui(app *a)
       .wake_connected = st.wake_connected,
       .companion_online = st.companion_online,
       .is_mobile = a->platform && ccord_platform_is_mobile(a->platform),
+      .battery_unrestricted = !a->platform || ccord_platform_battery_unrestricted(a->platform),
       .claimed_count = st.claimed_count,
       .device_count = st.device_count,
     };
@@ -675,6 +677,7 @@ void app_fill_ui_host(app *a, ccord_ui_host *out)
     .cloud_unlink_github = host_cloud_unlink_github,
     .cloud_rescan_claims = host_cloud_rescan_claims,
     .cloud_set_wake_enabled = host_cloud_set_wake,
+    .cloud_request_battery_unrestricted = host_cloud_request_battery,
     .cloud_fetch_social = host_cloud_fetch_social,
     .cloud_rate_plugin = host_cloud_rate_plugin,
     .cloud_post_comment = host_cloud_post_comment,

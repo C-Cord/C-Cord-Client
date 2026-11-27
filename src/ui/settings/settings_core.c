@@ -1172,9 +1172,15 @@ float st_page_max_scroll(const ccord_ui *ui, const sgeom *g)
     case SP_ADVANCED:
       total = 44.0f + 4.0f * rh + 24.0f;
       break;
-    case SP_CCORD:
-      total = 44.0f + 6.0f * rh + 64.0f + ((ui->cloud_info.available || ui->d.host.cloud_sign_in) ? 260.0f : 0.0f);
+    case SP_CCORD: {
+      float cloud_extra = (ui->cloud_info.available || ui->d.host.cloud_sign_in) ? 260.0f : 0.0f;
+      if (ui->cloud_info.is_mobile && ui->cloud_info.authenticated &&
+          ui->cloud_info.wake_enabled && !ui->cloud_info.battery_unrestricted) {
+        cloud_extra += 110.0f;
+      }
+      total = 44.0f + 6.0f * rh + 64.0f + cloud_extra;
       break;
+    }
     case SP_KEYBINDS: {
       size_t npk = ui->d.contrib ? ccord_contrib_keybind_count(ui->d.contrib) : 0;
       if (npk > 8u) npk = 8u;

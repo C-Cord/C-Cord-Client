@@ -1297,13 +1297,28 @@ static ccord_rect p_cloud_wake_toggle_hit(const ccord_ui *ui, ccord_rect c)
   return (ui && ui->mobile_layout) ? uis_hit_padded(tr, 56.0f, UIS_MOB_TOUCH_H) : tr;
 }
 
+static bool p_cloud_show_battery_warn(const ccord_ui_cloud_info *ci)
+{
+  return ci && ci->is_mobile && ci->authenticated && ci->wake_enabled && !ci->battery_unrestricted;
+}
+
+static ccord_rect p_cloud_battery_btn(const ccord_ui *ui, ccord_rect c)
+{
+  ccord_rect wrow = p_cloud_wake_row(ui, c);
+  float bh = uis_btn_h_for(ui, 28.0f);
+  float bw = fminf(fmaxf(c.w - 28.0f, 120.0f), 220.0f);
+  return (ccord_rect){c.x + 14.0f, wrow.y + 62.0f, bw, bh};
+}
+
 static void p_draw_cloud_card(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
 {
   uis_tokens tk = uis_tokens_of(ui);
   const ccord_ui_cloud_info *ci = &ui->cloud_info;
   float y = p_cloud_card_y(ui, c);
   float bh = uis_btn_h_for(ui, 30.0f);
-  float card_h = ci->authenticated ? (186.0f + bh) : (104.0f + bh);
+  bool show_batt = p_cloud_show_battery_warn(ci);
+  float batt_extra = show_batt ? (62.0f + uis_btn_h_for(ui, 28.0f)) : 0.0f;
+  float card_h = ci->authenticated ? (186.0f + bh + batt_extra) : (104.0f + bh);
   ccord_rect card = {c.x, y, c.w, card_h};
   uis_card(ui, r, card);
 
@@ -1382,6 +1397,17 @@ static void p_draw_cloud_card(ccord_ui *ui, ccord_renderer *r, ccord_rect c)
   ccord_text_draw_ellipsis(r, wnote, strlen(wnote), wrow.x, wrow.y + 18.0f, fmaxf(wrow.w - 60.0f, 60.0f), &ms);
   uis_state wst = {.hover = ui_in_rect(ui->mx, ui->my, p_cloud_wake_toggle_hit(ui, c))};
   uis_toggle(ui, r, wrow, ci->wake_enabled, wst, "m6cw", 1);
+
+  if (show_batt) {
+    ccord_text_style ws = ui_style(ui, CCORD_FONT_REGULAR, tk.fs_caption, COL(status_idle));
+    const char *wmsg = "Android battery optimization can put Wake offline while asleep.";
+    ccord_text_draw_ellipsis(r, wmsg, strlen(wmsg), c.x + 14.0f, wrow.y + 42.0f, inner_w, &ws);
+    ccord_rect bbtn = p_cloud_battery_btn(ui, c);
+    uis_button(ui, r, bbtn, "Allow Unrestricted Battery", UIS_BTN_PRIMARY, UIS_BTN_S_SM,
+               (uis_state){.hover = ui_in_rect(ui->mx, ui->my, bbtn),
+                           .disabled = !ui->d.host.cloud_request_battery_unrestricted},
+               "m6cl", 6);
+  }
 
   if (ci->error_text[0]) {
     ccord_text_draw_ellipsis(r, ci->error_text, strlen(ci->error_text), c.x + 14.0f, card.y + card.h - 22.0f, inner_w, &er);
@@ -1540,6 +1566,13 @@ static bool p_click_ccord(ccord_ui *ui, ccord_rect c, float x, float y)
     }
     if (ui_in_rect(x, y, p_cloud_wake_toggle_hit(ui, c))) {
       if (ui->d.host.cloud_set_wake_enabled) ui->d.host.cloud_set_wake_enabled(ui->d.host.ud, !ci->wake_enabled);
+      ui->dirty = true;
+      return true;
+    }
+    if (p_cloud_show_battery_warn(ci) && ui_in_rect(x, y, p_cloud_battery_btn(ui, c))) {
+      if (ui->d.host.cloud_request_battery_unrestricted) {
+        ui->d.host.cloud_request_battery_unrestricted(ui->d.host.ud);
+      }
       ui->dirty = true;
       return true;
     }
