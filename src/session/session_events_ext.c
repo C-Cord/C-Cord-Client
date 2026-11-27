@@ -29,6 +29,10 @@ void sess_apply_event_ext(ccord_session *s, const ccord_net_event *ev)
         if (chist) {
           chist->in_flight_before_id = CCORD_ID_NONE;
         }
+        session_wake_catchup cu = {0};
+        if (sess_take_wake_catchup(s, ev->channel_id, &cu)) {
+          sess_wake_catchup_emit_fallback(s, &cu);
+        }
         if (ev->channel_id == ccord_store_selected_channel(s->store) &&
             !ccord_store_history_loaded(s->store, ev->channel_id) &&
             s->retried_channel != ev->channel_id) {

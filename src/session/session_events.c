@@ -307,7 +307,7 @@ static sess_prev_chan *sess_snapshot_capture_prev(const ccord_session *s, size_t
   return arr;
 }
 
-static bool sess_take_wake_catchup(ccord_session *s, ccord_id channel_id, session_wake_catchup *out)
+bool sess_take_wake_catchup(ccord_session *s, ccord_id channel_id, session_wake_catchup *out)
 {
   for (size_t i = 0; i < s->nwake_catchup; i++) {
     if (s->wake_catchup[i].channel_id == channel_id) {
@@ -323,7 +323,7 @@ static bool sess_take_wake_catchup(ccord_session *s, ccord_id channel_id, sessio
   return false;
 }
 
-static void sess_wake_catchup_emit_fallback(ccord_session *s, const session_wake_catchup *cu)
+void sess_wake_catchup_emit_fallback(ccord_session *s, const session_wake_catchup *cu)
 {
   if (!s || !cu || !s->in_background) return;
   const ccord_channel *c = ccord_store_channel(s->store, cu->channel_id);

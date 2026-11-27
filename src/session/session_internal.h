@@ -428,6 +428,8 @@ void sess_post_state(ccord_session *s);
 bool sess_message_pings_own_role(const ccord_session *s, ccord_id guild_id, const ccord_message_rich *rich);
 ccord_id sess_last_notified_id(const ccord_session *s, ccord_id channel_id);
 void sess_queue_notification(ccord_session *s, ccord_notification n);
+bool sess_take_wake_catchup(ccord_session *s, ccord_id channel_id, session_wake_catchup *out);
+void sess_wake_catchup_emit_fallback(ccord_session *s, const session_wake_catchup *cu);
 void sess_store_media_loaded(ccord_session *s, const ccord_net_event *ev);
 void sess_trim_media_cache_bytes(ccord_session *s);
 void sess_clear_media_cache(ccord_session *s);

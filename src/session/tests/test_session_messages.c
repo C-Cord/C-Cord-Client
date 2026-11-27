@@ -1617,6 +1617,17 @@ static void test_session_background_ready_wake_catchup(void)
            note.author_id == ANN && note.is_dm);
   CT_CHECK(!ccord_session_pop_notification(s, &note));
 
+  // 4c. Live REST history failure emits CCORD_NET_ERROR (not CCORD_NET_HISTORY_FAILED): must fall back to summary.
+  chans1[5].last_message_id = 114;
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap1, .notify = rows, .notify_count = 3};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_ERROR, .channel_id = DM_ANN,
+                                    .status = CCORD_ERR_TIMEOUT, .text = "timeout"};
+  CT_CHECK(ccord_session_pump(s) == 1);
+  CT_CHECK(ccord_session_pop_notification(s, &note) && note.channel_id == DM_ANN && note.message_id == 114 &&
+           note.author_id == ANN && note.is_dm);
+  CT_CHECK(!ccord_session_pop_notification(s, &note));
+
   // 5. Returning to foreground cancels pending background wake catch-up.
   chans1[5].last_message_id = 115;
   f->ev[f->n++] = (ccord_net_event){.type = CCORD_NET_SNAPSHOT, .snapshot = &snap1, .notify = rows, .notify_count = 3};
