@@ -129,23 +129,46 @@ void app_pump(app *a)
       if (req_quit) a->quit = true;
     }
   }
+  if (!a->virtual_clock && a->session && a->platform) {
+    const ccord_call_state *ring = ccord_session_incoming_call(a->session);
+    ccord_id ring_ch = ring ? ring->channel_id : CCORD_ID_NONE;
+    if (ring_ch != CCORD_ID_NONE && ring_ch != a->last_ring_call_ch) {
+      if (!ccord_platform_is_mobile(a->platform)) {
+        if (a->cloud && !ccord_platform_window_focused(a->platform)) {
+          ccord_cloud_emit_wake(a->cloud, CCORD_WAKE_CALL);
+        }
+      } else if ((ccord_platform_in_background(a->platform) || !ccord_platform_window_focused(a->platform)) &&
+                 (!a->ui || ccord_ui_notify_desktop_enabled(a->ui))) {
+        const char *who = "Incoming Call";
+        if (a->store) {
+          const ccord_channel *ch = ccord_store_channel(a->store, ring_ch);
+          if (ch) {
+            if (ch->user_id != CCORD_ID_NONE) {
+              const ccord_user *u = ccord_store_user(a->store, ch->user_id);
+              if (u && u->display_name && u->display_name[0]) who = u->display_name;
+              else if (u && u->username && u->username[0]) who = u->username;
+            }
+            if (strcmp(who, "Incoming Call") == 0 && ch->name && ch->name[0]) who = ch->name;
+          }
+        }
+        ccord_notify_target target = {.guild_id = CCORD_DM_GUILD_ID, .channel_id = ring_ch,
+                                      .message_id = CCORD_ID_NONE};
+        (void)ccord_platform_notify_message(a->platform, who, "Incoming voice call", &target);
+      }
+    }
+    a->last_ring_call_ch = ring_ch;
+  }
   if (a->cloud) {
     (void)ccord_cloud_pump(a->cloud);
     app_sync_cloud_ui(a);
-    if (!a->virtual_clock && a->session && a->platform && !ccord_platform_is_mobile(a->platform)) {
-      const ccord_call_state *ring = ccord_session_incoming_call(a->session);
-      ccord_id ring_ch = ring ? ring->channel_id : CCORD_ID_NONE;
-      if (ring_ch != CCORD_ID_NONE && ring_ch != a->last_ring_call_ch &&
-          !ccord_platform_window_focused(a->platform)) {
-        ccord_cloud_emit_wake(a->cloud, CCORD_WAKE_CALL);
-      }
-      a->last_ring_call_ch = ring_ch;
-    }
     ccord_wake_kind wk = CCORD_WAKE_NONE;
     while (ccord_cloud_pop_wake(a->cloud, &wk)) {
-      a->cloud_wake_until_ms = app_boottime_ms(a) + 45000u;
+      uint32_t burst_ms = (wk == CCORD_WAKE_CALL) ? 60000u : 45000u;
+      uint32_t lock_ms = (wk == CCORD_WAKE_CALL) ? 45000u : 30000u;
+      uint64_t until = app_boottime_ms(a) + burst_ms;
+      if (until > a->cloud_wake_until_ms) a->cloud_wake_until_ms = until;
       if (a->platform && ccord_platform_is_mobile(a->platform)) {
-        ccord_platform_hold_wake_lock(a->platform, 30000u);
+        ccord_platform_hold_wake_lock(a->platform, lock_ms);
       }
       bool was_suspended = a->session_suspended;
       if (a->session && a->session_suspended) {
@@ -253,11 +276,34 @@ static void cloud_wake_main_cb(void *ud)
 
 static void cloud_wake_rx_cb(void *ud, ccord_wake_kind kind)
 {
-  (void)kind;
   app *a = ud;
   if (a && a->platform && ccord_platform_is_mobile(a->platform)) {
-    ccord_platform_hold_wake_lock(a->platform, 30000u);
+    ccord_platform_hold_wake_lock(a->platform, kind == CCORD_WAKE_CALL ? 45000u : 30000u);
   }
+}
+
+static void cloud_wake_alarm_cb(void *ud, uint32_t delay_ms)
+{
+  app *a = ud;
+  if (a && a->platform) ccord_platform_schedule_cloud_wake_alarm(a->platform, delay_ms);
+}
+
+static void cloud_wake_lock_cb(void *ud, uint32_t duration_ms)
+{
+  app *a = ud;
+  if (a && a->platform) ccord_platform_set_cloud_wake_lock(a->platform, duration_ms);
+}
+
+static void platform_cloud_alarm_cb(void *ud)
+{
+  app *a = ud;
+  if (a && a->cloud) ccord_cloud_on_wake_alarm(a->cloud);
+}
+
+static void platform_cloud_probe_cb(void *ud)
+{
+  app *a = ud;
+  if (a && a->cloud) ccord_cloud_wake_heartbeat_now(a->cloud);
 }
 
 static void app_platform_link_cb(void *ud, ccord_link_event ev)
@@ -548,8 +594,9 @@ static void run_interactive(app *a)
           a->resume_link_wake = false;
           a->resume_link_probe = false;
           app_set_background_state(a, true);
-          if (a->session && ccord_platform_is_mobile(a->platform) && !a->keep_alive_active &&
-              !vstate.active && !stream_active) {
+          if (a->session && ccord_platform_is_mobile(a->platform) &&
+              (!a->keep_alive_gateway || (a->cloud && ccord_cloud_companion_online(a->cloud))) &&
+              a->cloud_wake_until_ms == 0u && !vstate.active && !stream_active) {
             a->session_suspended = true;
             ccord_session_set_suspended(a->session, true);
           }
@@ -610,7 +657,10 @@ static void run_interactive(app *a)
               a->resume_link_probe = true;
             }
           }
-          if (a->cloud && bg_dur >= 45000u) ccord_cloud_wake_heartbeat_now(a->cloud);
+          if (a->cloud) {
+            if (bg_dur >= 45000u) ccord_cloud_wake_heartbeat_now(a->cloud);
+            a->last_cloud_rev = UINT64_MAX;   // re-sync Android battery optimization state after returning to foreground
+          }
 #if CCORD_WITH_PLUGINS
           app_plugins_push_platform_state(a);
           if (a->plugins) {
@@ -668,6 +718,9 @@ static void run_interactive(app *a)
           if (a->plugins) ccord_plugins_dispatch_window_resize(a->plugins, ev.x, ev.y);
 #endif
         } else if (ev.type == CCORD_IN_FOCUS) {
+          if (ev.focused && a->cloud && a->platform && ccord_platform_is_mobile(a->platform)) {
+            a->last_cloud_rev = UINT64_MAX;   // refresh battery_unrestricted after translucent Android system dialogs
+          }
 #if CCORD_WITH_PLUGINS
           if (a->plugins) ccord_plugins_dispatch_window_focus(a->plugins, ev.focused);
 #endif
@@ -752,12 +805,18 @@ static void run_interactive(app *a)
         (void)ccord_session_link_event(a->session, lev, &lerr);
       }
     }
-    // Sync Android background keep-alive foreground service while signed in and background notifications are enabled.
+    // Sync Android background keep-alive foreground service: keep CCordVoiceService running while
+    // signed in whenever either "Keep connected in the background" OR Companion Wake is active
+    // (so Android's CachedAppOptimizer never freezes the wake WebSocket process).
     {
-      bool bg_pref = ccord_ui_pref_close_to_background() && ccord_ui_notify_desktop_enabled(a->ui);
-      bool want_keep_alive = bg_pref && a->live && a->session && a->store &&
-                             ccord_store_self_id(a->store) != CCORD_ID_NONE &&
-                             ccord_session_state(a->session) != CCORD_CONN_FAILED;
+      bool notify_on = !a->ui || ccord_ui_notify_desktop_enabled(a->ui);
+      bool session_ok = a->live && a->session && a->store &&
+                        ccord_session_state(a->session) != CCORD_CONN_FAILED;
+      bool want_bg_gw = ccord_ui_pref_close_to_background() && notify_on && session_ok &&
+                        ccord_store_self_id(a->store) != CCORD_ID_NONE;
+      bool want_cloud_wake = a->cloud && ccord_cloud_wake_active(a->cloud) && notify_on && session_ok;
+      a->keep_alive_gateway = want_bg_gw;
+      bool want_keep_alive = want_bg_gw || want_cloud_wake;
       if (want_keep_alive != a->keep_alive_active) {
         a->keep_alive_active = want_keep_alive;
         ccord_platform_set_keep_alive(a->platform, want_keep_alive);
@@ -793,10 +852,10 @@ static void run_interactive(app *a)
         uint64_t bt_now = app_boottime_ms(a);
         if (a->cloud_wake_until_ms > 0u && bt_now >= a->cloud_wake_until_ms) a->cloud_wake_until_ms = 0u;
         bool snow = a->store && k_app_media_ops.stream_active(a);
-        bool companion_guard = a->cloud && ccord_cloud_companion_online(a->cloud) &&
-                               a->cloud_wake_until_ms == 0u;
-        bool want_suspend = ccord_platform_in_background(a->platform) &&
-                            (!a->keep_alive_active || companion_guard) && !vnow.active && !snow;
+        bool wake_burst = a->cloud_wake_until_ms > 0u;
+        bool companion_guard = a->cloud && ccord_cloud_companion_online(a->cloud) && !wake_burst;
+        bool want_suspend = ccord_platform_in_background(a->platform) && !wake_burst &&
+                            (!a->keep_alive_gateway || companion_guard) && !vnow.active && !snow;
         if (want_suspend != a->session_suspended) {
           a->session_suspended = want_suspend;
           ccord_session_set_suspended(a->session, want_suspend);
@@ -1329,12 +1388,14 @@ int main(int argc, char **argv)
       .is_mobile = ccord_platform_is_mobile(a.platform),
       .disable_network = disable_cloud_net,
       .cbs = {.ud = &a, .open_url = cloud_open_url_cb, .toast = cloud_toast_cb,
-              .wake_main = cloud_wake_main_cb, .wake_rx = cloud_wake_rx_cb},
+              .wake_main = cloud_wake_main_cb, .wake_rx = cloud_wake_rx_cb,
+              .wake_alarm = cloud_wake_alarm_cb, .wake_lock = cloud_wake_lock_cb},
     };
     a.cloud = ccord_cloud_create(&ccfg);
     a.last_cloud_rev = UINT64_MAX;
     a.last_social_rev = UINT64_MAX;
     if (a.cloud) {
+      ccord_platform_set_cloud_wake_callbacks(a.platform, platform_cloud_alarm_cb, platform_cloud_probe_cb, &a);
       app_sync_cloud_ui(&a);
       ccord_app_desktop_set_wake_hook(a.desktop, desktop_companion_wake_cb, &a);
     }
@@ -1493,6 +1554,7 @@ done:
   a.desktop = nullptr;
   ccord_updater_destroy(a.updater);
   a.updater = nullptr;
+  ccord_platform_set_cloud_wake_callbacks(a.platform, nullptr, nullptr, nullptr);
   ccord_cloud_destroy(a.cloud);
   a.cloud = nullptr;
   ccord_earcons_destroy(a.earcons);

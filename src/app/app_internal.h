@@ -183,6 +183,7 @@ typedef struct app {
   bool voice_fg_deafened;
   ccord_id voice_fg_channel;
   bool keep_alive_active;                   // last keep-alive state pushed to Android Foreground Service
+  bool keep_alive_gateway;                  // true when user wants continuous background Discord Gateway (not wake-only)
   bool in_background;                       // unified hidden/background state (Android background or desktop tray/minimized)
   bool session_suspended;                   // cached mobile background session suspension state
   bool camera_rx_synced;                    // true once ccord_session_set_camera_rx has been pushed
